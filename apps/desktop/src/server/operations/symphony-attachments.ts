@@ -1,0 +1,92 @@
+import { existsSync } from "node:fs";
+import fs from "node:fs/promises";
+import path from "node:path";
+import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import { DirectoryNotAllowedError } from "../security.js";
+import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
+
+const CONTENT_TYPES: Record<string, string> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".svg": "image/svg+xml"
+};
+
+export function registerSymphonyAttachmentsRoutes(
+  dispatcher: OperationDispatcher,
+  getAllowedDirectories: () => string[]
+): void {
+  dispatcher.register(
+    "GET",
+    "/api/engineer/symphony/attachments/:ticketId/*attachmentPath",
+    async (context) => {
+      const ticketId = context.params.ticketId;
+      const repoPath = context.query.get("repo");
+      const attachmentPath = context.params.attachmentPath;
+
+      if (!repoPath) {
+        json(context, 400, { error: "repo parameter is required" });
+        return;
+      }
+
+      if (!attachmentPath) {
+        json(context, 400, { error: "attachment path is required" });
+        return;
+      }
+
+      let expandedRepoPath: string;
+      try {
+        expandedRepoPath = assertRepoAllowed(repoPath, getAllowedDirectories());
+      } catch (error) {
+        if (error instanceof DirectoryNotAllowedError) {
+          json(context, 403, { error: "directory not allowed" });
+          return;
+        }
+        throw error;
+      }
+
+      const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
+      const attachmentsDir = path.join(worktreeDir, ".claude", "work", "attachments");
+      const normalizedAttachmentPath = attachmentPath
+        .split("/")
+        .map((segment) => decodeURIComponent(segment))
+        .join(path.sep);
+      const filePath = path.resolve(attachmentsDir, normalizedAttachmentPath);
+      const resolvedAttachmentsDir = path.resolve(attachmentsDir);
+      const allowedPrefix = resolvedAttachmentsDir.endsWith(path.sep)
+        ? resolvedAttachmentsDir
+        : `${resolvedAttachmentsDir}${path.sep}`;
+      if (!(filePath === resolvedAttachmentsDir || filePath.startsWith(allowedPrefix))) {
+        json(context, 403, { error: "Invalid path" });
+        return;
+      }
+
+      if (!existsSync(filePath)) {
+        json(context, 404, { error: "File not found" });
+        return;
+      }
+
+      try {
+        const fileBuffer = await fs.readFile(filePath);
+        const ext = path.extname(filePath).toLowerCase();
+        const contentType = CONTENT_TYPES[ext] ?? "application/octet-stream";
+
+        context.response.statusCode = 200;
+        context.response.setHeader("Content-Type", contentType);
+        context.response.setHeader("Cache-Control", "public, max-age=3600");
+        context.response.end(fileBuffer);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unknown error";
+        json(context, 500, { error: message });
+      }
+    }
+  );
+}
+
+function json(context: OperationRequestContext, status: number, payload: unknown): void {
+  context.response.statusCode = status;
+  context.response.setHeader("content-type", "application/json");
+  context.response.end(JSON.stringify(payload));
+}

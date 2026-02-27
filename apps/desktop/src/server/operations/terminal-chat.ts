@@ -1,0 +1,352 @@
+import os from "node:os";
+import path from "node:path";
+import fs from "node:fs/promises";
+import type { ServerResponse } from "node:http";
+import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import type { ProcessManager } from "../process-manager.js";
+import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
+import { createStreamState, processStreamEvent } from "./stream-events.js";
+import { withMcpTools } from "./chat-tools.js";
+
+type MessageMode = "claude" | "codex";
+
+type TerminalMessage = {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  timestamp: string;
+  mode?: MessageMode;
+};
+
+type TerminalChatHistory = {
+  messages: TerminalMessage[];
+  claudeSessionId?: string;
+  codexSessionId?: string;
+};
+
+export function registerTerminalChatRoutes(
+  dispatcher: OperationDispatcher,
+  processManager: ProcessManager,
+  getAllowedDirectories: () => string[]
+): void {
+  dispatcher.register("GET", "/api/engineer/terminal-chat", async (context) => {
+    const history = await loadChatHistory();
+    json(context, 200, history);
+  });
+
+  dispatcher.register("DELETE", "/api/engineer/terminal-chat", async (context) => {
+    await saveChatHistory({ messages: [] });
+    json(context, 200, { success: true });
+  });
+
+  dispatcher.register("POST", "/api/engineer/terminal-chat", async (context) => {
+    const body = parseBody(context);
+    if (!body) {
+      json(context, 400, { error: "Invalid JSON body" });
+      return;
+    }
+
+    const message = typeof body.message === "string" ? body.message : null;
+    if (!message) {
+      json(context, 400, { error: "message is required" });
+      return;
+    }
+
+    const { mode, cleanMessage } = parseMessageMode(message);
+    const history = await loadChatHistory();
+    history.messages.push({
+      id: `user-${Date.now()}`,
+      role: "user",
+      content: cleanMessage,
+      timestamp: new Date().toISOString(),
+      mode
+    });
+    await saveChatHistory(history);
+
+    const terminalCwd = await resolveTerminalWorkingDirectory(getAllowedDirectories());
+    if (!terminalCwd) {
+      json(context, 500, {
+        error:
+          "No allowed directory is available for terminal chat execution. Update sandbox settings."
+      });
+      return;
+    }
+
+    setStreamingHeaders(context.response);
+    writeEvent(context.response, {
+      type: "status",
+      status: "spawning",
+      mode
+    });
+
+    if (mode === "claude") {
+      await streamClaude(context.response, processManager, cleanMessage, history, terminalCwd);
+      return;
+    }
+
+    await streamCodex(context.response, processManager, cleanMessage, history, terminalCwd);
+  });
+}
+
+async function streamClaude(
+  response: ServerResponse,
+  processManager: ProcessManager,
+  message: string,
+  history: TerminalChatHistory,
+  terminalCwd: string
+): Promise<void> {
+  const streamState = createStreamState(async (sessionId) => {
+    if (!history.claudeSessionId) {
+      history.claudeSessionId = sessionId;
+      await saveChatHistory(history);
+    }
+  });
+
+  await new Promise<void>((resolve) => {
+    let handled = false;
+
+    const finish = async () => {
+      if (handled) {
+        return;
+      }
+      handled = true;
+
+      if (streamState.assistantContent.trim()) {
+        history.messages.push({
+          id: `assistant-${Date.now()}`,
+          role: "assistant",
+          content: streamState.assistantContent.trim(),
+          timestamp: new Date().toISOString(),
+          mode: "claude"
+        });
+        await saveChatHistory(history);
+      }
+
+      writeEvent(response, { type: "done" });
+      response.end();
+      resolve();
+    };
+
+    void processManager
+      .spawnStreaming({
+        command: "claude",
+        args: [
+          "-p",
+          "--verbose",
+          "--output-format",
+          "stream-json",
+          `--allowedTools=${withMcpTools("WebSearch,WebFetch,Bash")}`,
+          ...(history.claudeSessionId ? ["--resume", history.claudeSessionId] : [])
+        ],
+        cwd: terminalCwd,
+        input: message,
+        onLine: (line) => {
+          try {
+            const parsed = JSON.parse(line) as Record<string, unknown>;
+            processStreamEvent(parsed as never, streamState, (msg) => response.write(`${msg}\n`));
+          } catch {
+            // Ignore malformed JSON lines from CLI output.
+          }
+        },
+        onError: (error) => {
+          writeEvent(response, { type: "error", error: error.message });
+        },
+        onExit: (exitCode) => {
+          writeEvent(response, {
+            type: "result",
+            success: exitCode === 0
+          });
+          void finish();
+        }
+      })
+      .then((handle) => {
+        writeEvent(response, {
+          type: "status",
+          status: "running",
+          mode: "claude",
+          pid: handle.pid
+        });
+      })
+      .catch((error) => {
+        writeEvent(response, { type: "error", error: error.message });
+        void finish();
+      });
+  });
+}
+
+async function streamCodex(
+  response: ServerResponse,
+  processManager: ProcessManager,
+  message: string,
+  history: TerminalChatHistory,
+  terminalCwd: string
+): Promise<void> {
+  let assistantContent = "";
+
+  await new Promise<void>((resolve) => {
+    let handled = false;
+
+    const finish = async () => {
+      if (handled) {
+        return;
+      }
+      handled = true;
+
+      if (assistantContent.trim()) {
+        history.messages.push({
+          id: `assistant-${Date.now()}`,
+          role: "assistant",
+          content: assistantContent.trim(),
+          timestamp: new Date().toISOString(),
+          mode: "codex"
+        });
+        await saveChatHistory(history);
+      }
+
+      writeEvent(response, { type: "done" });
+      response.end();
+      resolve();
+    };
+
+    void processManager
+      .spawnStreaming({
+        command: "codex",
+        args: ["exec", "--full-auto", "--json", "-m", "codex-mini-latest", message],
+        cwd: terminalCwd,
+        isResultEvent: (line) => {
+          try {
+            const parsed = JSON.parse(line) as { type?: string };
+            return parsed.type === "done";
+          } catch {
+            return false;
+          }
+        },
+        onLine: (line) => {
+          const text = extractCodexText(line);
+          if (!text) {
+            return;
+          }
+
+          assistantContent += text;
+          writeEvent(response, { type: "text", content: text });
+        },
+        onError: (error) => {
+          writeEvent(response, { type: "error", error: error.message });
+        },
+        onExit: (exitCode) => {
+          writeEvent(response, {
+            type: "result",
+            success: exitCode === 0
+          });
+          void finish();
+        }
+      })
+      .then((handle) => {
+        writeEvent(response, {
+          type: "status",
+          status: "running",
+          mode: "codex",
+          pid: handle.pid
+        });
+      })
+      .catch((error) => {
+        writeEvent(response, { type: "error", error: error.message });
+        void finish();
+      });
+  });
+}
+
+async function resolveTerminalWorkingDirectory(allowedDirectories: string[]): Promise<string | null> {
+  const unique = [...new Set(allowedDirectories.map((entry) => entry.trim()).filter(Boolean))];
+  for (const candidate of unique) {
+    try {
+      const stat = await fs.stat(candidate);
+      if (stat.isDirectory()) {
+        return candidate;
+      }
+    } catch {
+      // Ignore missing/inaccessible candidates.
+    }
+  }
+  return null;
+}
+
+function extractCodexText(line: string): string {
+  try {
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    if (typeof parsed.output_text === "string") {
+      return parsed.output_text;
+    }
+    if (typeof parsed.text === "string") {
+      return parsed.text;
+    }
+
+    const item = parsed.item as Record<string, unknown> | undefined;
+    if (item && typeof item.text === "string") {
+      return item.text;
+    }
+    return "";
+  } catch {
+    return line;
+  }
+}
+
+function parseMessageMode(message: string): { mode: MessageMode; cleanMessage: string } {
+  const trimmed = message.trim();
+  if (trimmed.startsWith("@codex ")) {
+    return { mode: "codex", cleanMessage: trimmed.slice(7).trim() };
+  }
+  if (trimmed.startsWith("@cl ")) {
+    return { mode: "claude", cleanMessage: trimmed.slice(4).trim() };
+  }
+  return { mode: "claude", cleanMessage: trimmed };
+}
+
+function parseBody(context: OperationRequestContext): Record<string, unknown> | null {
+  if (!context.body.trim()) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(context.body) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function setStreamingHeaders(response: ServerResponse): void {
+  response.statusCode = 200;
+  response.setHeader("Content-Type", "text/event-stream");
+  response.setHeader("Cache-Control", "no-cache");
+  response.setHeader("Connection", "keep-alive");
+}
+
+function writeEvent(response: ServerResponse, payload: Record<string, unknown>): void {
+  response.write(`${JSON.stringify(payload)}\n`);
+}
+
+function json(context: OperationRequestContext, status: number, payload: unknown): void {
+  context.response.statusCode = status;
+  context.response.setHeader("content-type", "application/json");
+  context.response.end(JSON.stringify(payload));
+}
+
+function getChatsRootDir(): string {
+  const override = process.env.SYMPHONY_CHATS_DIR;
+  if (override && override.trim()) {
+    return path.resolve(override);
+  }
+  return path.join(os.homedir(), ".claude", ".symphony", "chats");
+}
+
+function getHistoryPath(): string {
+  return path.join(getChatsRootDir(), "_terminal", "chat-history.json");
+}
+
+async function loadChatHistory(): Promise<TerminalChatHistory> {
+  return loadJsonFile<TerminalChatHistory>(getHistoryPath(), { messages: [] });
+}
+
+async function saveChatHistory(history: TerminalChatHistory): Promise<void> {
+  await saveJsonFile(getHistoryPath(), history);
+}

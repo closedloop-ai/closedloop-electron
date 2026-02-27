@@ -1,0 +1,179 @@
+import { createServer, type Server } from "node:http";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import {
+  DEFAULT_GATEWAY_PORT,
+  FALLBACK_GATEWAY_PORTS,
+  type ComputeTargetCapabilities,
+  type HealthResponse
+} from "../shared/contracts.js";
+import {
+  GatewayRouter,
+  type GatewayActivityEvent,
+  type GatewayApprovalRequest,
+  type GatewayApprovalResult
+} from "./router.js";
+
+export interface DesktopGatewayServerOptions {
+  host: string;
+  preferredPort: number;
+  fallbackPorts: readonly number[];
+  webAppOrigin: string;
+  getGatewayAuthToken?: () => string;
+  getAllowedDirectories: () => string[];
+  fallbackEngineerOrigin?: string;
+  onActivityEvent?: (event: GatewayActivityEvent) => void;
+  evaluateApproval?: (
+    request: GatewayApprovalRequest
+  ) => GatewayApprovalResult | Promise<GatewayApprovalResult>;
+  machineName: string;
+  version: string;
+  capabilities: ComputeTargetCapabilities;
+  discoveryFilePath?: string;
+}
+
+export class DesktopGatewayServer {
+  private readonly options: DesktopGatewayServerOptions;
+  private readonly router: GatewayRouter;
+  private server: Server | null = null;
+  private activePort: number;
+
+  constructor(options: DesktopGatewayServerOptions) {
+    this.options = {
+      ...options,
+      discoveryFilePath:
+        options.discoveryFilePath ?? path.join(os.homedir(), ".closedloop-ai", "electron-port")
+    };
+    this.activePort = this.options.preferredPort;
+    this.router = new GatewayRouter({
+      webAppOrigin: this.options.webAppOrigin,
+      getGatewayAuthToken: this.options.getGatewayAuthToken,
+      machineName: this.options.machineName,
+      version: this.options.version,
+      capabilities: this.options.capabilities,
+      getActivePort: () => this.activePort,
+      getAllowedDirectories: this.options.getAllowedDirectories,
+      fallbackEngineerOrigin: this.options.fallbackEngineerOrigin,
+      onActivityEvent: this.options.onActivityEvent,
+      evaluateApproval: this.options.evaluateApproval
+    });
+  }
+
+  static createDefault(
+    webAppOrigin: string,
+    getGatewayAuthToken: () => string,
+    getAllowedDirectories: () => string[],
+    machineName: string,
+    version: string,
+    capabilities: ComputeTargetCapabilities,
+    onActivityEvent?: (event: GatewayActivityEvent) => void,
+    evaluateApproval?: (
+      request: GatewayApprovalRequest
+    ) => GatewayApprovalResult | Promise<GatewayApprovalResult>
+  ): DesktopGatewayServer {
+    return new DesktopGatewayServer({
+      host: "127.0.0.1",
+      preferredPort: DEFAULT_GATEWAY_PORT,
+      fallbackPorts: FALLBACK_GATEWAY_PORTS,
+      webAppOrigin,
+      getGatewayAuthToken,
+      getAllowedDirectories,
+      fallbackEngineerOrigin: process.env.SYMPHONY_ENGINEER_FALLBACK_ORIGIN,
+      onActivityEvent,
+      evaluateApproval,
+      machineName,
+      version,
+      capabilities
+    });
+  }
+
+  getAddress(): DesktopGatewayServerOptions {
+    return this.options;
+  }
+
+  getActivePort(): number {
+    return this.activePort;
+  }
+
+  getHealthResponse(): HealthResponse {
+    return {
+      status: "ok",
+      machineName: this.options.machineName,
+      capabilities: this.options.capabilities,
+      version: this.options.version,
+      port: this.activePort
+    };
+  }
+
+  async start(): Promise<void> {
+    if (this.server) {
+      return;
+    }
+
+    const candidates = [this.options.preferredPort, ...this.options.fallbackPorts];
+    let lastError: Error | null = null;
+
+    for (const candidate of candidates) {
+      const candidateServer = createServer((request, response) => {
+        void this.router.handle(request, response);
+      });
+
+      try {
+        await this.listen(candidateServer, candidate);
+        this.server = candidateServer;
+        this.activePort = candidate;
+        await this.writeDiscoveryFile();
+        return;
+      } catch (error) {
+        candidateServer.removeAllListeners();
+        candidateServer.close();
+        const boundError = error as NodeJS.ErrnoException;
+        if (boundError.code === "EADDRINUSE") {
+          lastError = boundError;
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    throw new Error(
+      `failed to bind gateway server to any candidate port (${candidates.join(", ")}): ${lastError?.message ?? "unknown error"}`
+    );
+  }
+
+  async stop(): Promise<void> {
+    if (!this.server) {
+      return;
+    }
+
+    const runningServer = this.server;
+    this.server = null;
+    await new Promise<void>((resolve, reject) => {
+      runningServer.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
+  }
+
+  private async listen(server: Server, port: number): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(port, this.options.host, () => resolve());
+    });
+  }
+
+  private async writeDiscoveryFile(): Promise<void> {
+    if (!this.options.discoveryFilePath) {
+      return;
+    }
+
+    const discoveryDirectory = path.dirname(this.options.discoveryFilePath);
+    await fs.mkdir(discoveryDirectory, { recursive: true });
+    await fs.writeFile(this.options.discoveryFilePath, String(this.activePort), "utf-8");
+  }
+}

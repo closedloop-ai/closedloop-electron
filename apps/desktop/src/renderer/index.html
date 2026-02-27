@@ -1,0 +1,1327 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Closedloop Gateway</title>
+    <style>
+      :root {
+        --bg: #f4f1ea;
+        --panel: #fffdf8;
+        --ink: #1f2937;
+        --muted: #6b7280;
+        --accent: #0f766e;
+        --border: #d6d3d1;
+        --surface: #ffffff;
+        --surface-alt: #f8fafc;
+        --accent-ink: #ffffff;
+        --focus: rgba(15, 118, 110, 0.28);
+        color-scheme: light;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #0f1723;
+          --panel: #111c2a;
+          --ink: #e2e8f0;
+          --muted: #94a3b8;
+          --accent: #14b8a6;
+          --border: #334155;
+          --surface: #0b1320;
+          --surface-alt: #1a2637;
+          --accent-ink: #03201f;
+          --focus: rgba(20, 184, 166, 0.35);
+          color-scheme: dark;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Avenir Next", "Segoe UI", sans-serif;
+        background: radial-gradient(circle at 10% 20%, var(--surface-alt), var(--bg) 60%);
+        color: var(--ink);
+      }
+
+      header {
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--border);
+        background: var(--panel);
+      }
+
+      .header-main {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 16px;
+        flex-wrap: wrap;
+      }
+
+      .header-controls {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .header-controls > * {
+        align-self: center;
+      }
+
+      .header-controls button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        height: 36px;
+        padding: 0 12px;
+        line-height: 1;
+        font-size: 12px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--ink);
+        border-radius: 8px;
+        cursor: pointer;
+      }
+
+      .control-group {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        height: 36px;
+        padding: 0 10px;
+        margin-bottom: 0;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+        font-size: 12px;
+        line-height: 1;
+        white-space: nowrap;
+      }
+
+      .control-group input[type="checkbox"] {
+        margin: 0;
+        width: 14px;
+        height: 14px;
+      }
+
+      header h1 {
+        margin: 0;
+        font-size: 20px;
+      }
+
+      .sub {
+        margin-top: 4px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+
+      .runtime-health {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 10px;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        background: var(--surface);
+        font-weight: 600;
+      }
+
+      .runtime-health .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: #dc2626;
+      }
+
+      .runtime-health.healthy .dot {
+        background: #16a34a;
+      }
+
+      .runtime-health.unhealthy .dot {
+        background: #dc2626;
+      }
+
+      nav {
+        display: flex;
+        gap: 8px;
+        padding: 12px 20px;
+      }
+
+      nav button {
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--ink);
+        border-radius: 999px;
+        padding: 8px 12px;
+        cursor: pointer;
+      }
+
+      nav button.active {
+        background: var(--accent);
+        color: var(--accent-ink);
+        border-color: var(--accent);
+      }
+
+      main {
+        padding: 0 20px 20px;
+      }
+
+      .panel {
+        display: none;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 16px;
+      }
+
+      .panel.active {
+        display: block;
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      .status-line {
+        margin-bottom: 12px;
+      }
+
+      .ws-status {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+
+      .dashboard-summary {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 10px;
+        margin-bottom: 12px;
+      }
+
+      .status-card {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--surface);
+        padding: 10px;
+        min-width: 0;
+      }
+
+      .status-label {
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 4px;
+      }
+
+      .status-value {
+        font-size: 15px;
+        font-weight: 600;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .warning-text {
+        color: #d97706;
+      }
+
+      .critical-text {
+        color: #dc2626;
+      }
+
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
+          monospace;
+      }
+
+      .ws-badge {
+        display: inline-flex;
+        align-items: center;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 4px 10px;
+        font-size: 12px;
+        font-weight: 600;
+        background: var(--surface);
+      }
+
+      .ws-badge.connected {
+        border-color: #16a34a;
+        color: #16a34a;
+      }
+
+      .ws-badge.reconnecting {
+        border-color: #d97706;
+        color: #d97706;
+      }
+
+      .ws-badge.disconnected {
+        border-color: #dc2626;
+        color: #dc2626;
+      }
+
+      .row {
+        margin-bottom: 18px;
+      }
+
+      .field-help {
+        margin: 6px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      label {
+        display: block;
+        font-size: 12px;
+        color: var(--muted);
+        margin-bottom: 8px;
+      }
+
+      input,
+      textarea,
+      select {
+        width: 100%;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 8px;
+        background: var(--surface);
+        color: var(--ink);
+      }
+
+      input:focus,
+      textarea:focus,
+      select:focus,
+      button:focus-visible {
+        outline: 2px solid var(--focus);
+        outline-offset: 1px;
+      }
+
+      textarea {
+        min-height: 90px;
+        resize: vertical;
+      }
+
+      .actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .actions button {
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: var(--accent-ink);
+        border-radius: 8px;
+        padding: 8px 12px;
+        cursor: pointer;
+      }
+
+      .actions button.secondary {
+        background: var(--surface);
+        color: var(--ink);
+        border-color: var(--border);
+      }
+
+      .approval-card {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px;
+        margin-bottom: 10px;
+        background: var(--surface);
+      }
+
+      .approval-title {
+        font-weight: 600;
+        margin-bottom: 4px;
+      }
+
+      .approval-meta {
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 8px;
+      }
+
+      .approval-empty {
+        color: var(--muted);
+        border: 1px dashed var(--border);
+        border-radius: 10px;
+        padding: 12px;
+      }
+
+      .activity-list {
+        max-height: 420px;
+        overflow-y: auto;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--surface);
+        padding: 10px;
+      }
+
+      .activity-card {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px;
+        margin-bottom: 10px;
+        background: var(--surface-alt);
+      }
+
+      .activity-card:last-child {
+        margin-bottom: 0;
+      }
+
+      .activity-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 6px;
+      }
+
+      .activity-path {
+        font-weight: 600;
+        overflow-wrap: anywhere;
+      }
+
+      .activity-meta {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .activity-kind {
+        display: inline-flex;
+        align-items: center;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 1px 8px;
+        font-size: 11px;
+        font-weight: 600;
+        margin-left: 8px;
+      }
+
+      .activity-kind.security {
+        border-color: #dc2626;
+        color: #dc2626;
+      }
+
+      .activity-kind.request {
+        border-color: #2563eb;
+        color: #2563eb;
+      }
+
+      .status-pill {
+        display: inline-flex;
+        align-items: center;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 2px 8px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .status-pill.success {
+        border-color: #16a34a;
+        color: #16a34a;
+      }
+
+      .status-pill.redirect {
+        border-color: #2563eb;
+        color: #2563eb;
+      }
+
+      .status-pill.client-error {
+        border-color: #d97706;
+        color: #d97706;
+      }
+
+      .status-pill.server-error {
+        border-color: #dc2626;
+        color: #dc2626;
+      }
+
+      pre {
+        background: var(--surface-alt);
+        border: 1px solid var(--border);
+        padding: 12px;
+        border-radius: 8px;
+        overflow: auto;
+      }
+
+      .tech-details summary {
+        cursor: pointer;
+        color: var(--muted);
+        margin-bottom: 8px;
+      }
+
+      .onboarding-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.72);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 1000;
+        padding: 20px;
+      }
+
+      .onboarding-overlay.hidden {
+        display: none;
+      }
+
+      .onboarding-card {
+        width: min(760px, 100%);
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 22px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="header-main">
+        <div>
+          <h1>Closedloop Gateway</h1>
+          <div class="sub">
+            <span id="runtimeStatus" class="runtime-health unhealthy">
+              <span class="dot"></span>
+              <span class="label">Unhealthy</span>
+            </span>
+          </div>
+        </div>
+        <div class="header-controls">
+          <label class="control-group" for="headerPauseToggle">
+            <input type="checkbox" id="headerPauseToggle" />
+            Pause Incoming Commands
+          </label>
+          <button class="secondary" id="headerConnectionToggle">Disconnect</button>
+        </div>
+      </div>
+    </header>
+    <div id="onboardingOverlay" class="onboarding-overlay hidden">
+      <div class="onboarding-card">
+        <h2 style="margin-top: 0">Setup Required</h2>
+        <p class="muted">Configure your API, web app origin, and sandbox directory before accepting commands.</p>
+        <div class="row">
+          <label for="onboardingApiOrigin">API Origin</label>
+          <input id="onboardingApiOrigin" placeholder="https://api.closedloop.ai" />
+          <p class="field-help">
+            The API server your desktop app connects to for remote commands and status updates.
+          </p>
+        </div>
+        <div class="row">
+          <label for="onboardingWebAppOrigin">Web App Origin (CORS)</label>
+          <input id="onboardingWebAppOrigin" placeholder="https://app.closedloop.ai" />
+          <p class="field-help">
+            The web dashboard origin allowed to call this local gateway from your browser.
+          </p>
+        </div>
+        <div class="row">
+          <label for="onboardingApiKey">Cloud API Key (optional if already stored)</label>
+          <input id="onboardingApiKey" type="password" placeholder="sk_live_..." autocomplete="off" />
+          <p class="field-help">
+            Authenticates this desktop gateway to your API server. It is saved in secure OS storage.
+          </p>
+          <p class="muted" id="onboardingApiKeyHint"></p>
+        </div>
+        <div class="row">
+          <label for="onboardingSandboxDir">Sandbox Base Directory</label>
+          <input id="onboardingSandboxDir" readonly />
+          <p class="field-help">
+            Only files inside this folder can be accessed by gateway operations. Choose a project root like
+            <span class="mono">~/Source</span>, not your full home directory.
+          </p>
+          <div class="actions" style="margin-top: 8px">
+            <button class="secondary" id="pickOnboardingSandbox">Choose Directory</button>
+          </div>
+          <p class="muted warning-text" id="onboardingSandboxWarning"></p>
+        </div>
+        <div class="actions">
+          <button id="completeOnboarding">Complete Setup</button>
+        </div>
+        <p class="muted" id="onboardingMessage"></p>
+      </div>
+    </div>
+    <nav>
+      <button data-tab="dashboard" class="active">Dashboard</button>
+      <button data-tab="approvals">Approvals</button>
+      <button data-tab="activity">Activity Log</button>
+      <button data-tab="settings">Settings</button>
+    </nav>
+    <main>
+      <section id="dashboard" class="panel active">
+        <div class="status-line">
+          Active operations are tracked server-side. This panel reflects gateway readiness.
+        </div>
+        <div class="ws-status">
+          <div class="ws-badge reconnecting" id="wsStatusBadge">WebSocket: Reconnecting</div>
+          <div class="muted" id="wsStatusDetail">Waiting for cloud connection status...</div>
+        </div>
+        <div class="dashboard-summary">
+          <div class="status-card">
+            <div class="status-label">Local Gateway Port</div>
+            <div class="status-value" id="dashboardPort">Loading...</div>
+          </div>
+          <div class="status-card">
+            <div class="status-label">Cloud Connection</div>
+            <div class="status-value" id="dashboardCloud">Loading...</div>
+          </div>
+          <div class="status-card">
+            <div class="status-label">Target ID</div>
+            <div class="status-value mono" id="dashboardTarget">Loading...</div>
+          </div>
+          <div class="status-card">
+            <div class="status-label">API Server</div>
+            <div class="status-value mono" id="dashboardApiOrigin">Loading...</div>
+          </div>
+          <div class="status-card">
+            <div class="status-label">Remote Commands</div>
+            <div class="status-value" id="dashboardCommandsState">Loading...</div>
+          </div>
+        </div>
+        <div id="dashboardApproval"></div>
+        <details class="tech-details">
+          <summary>Technical details</summary>
+          <pre id="dashboardPayload">Loading...</pre>
+        </details>
+      </section>
+      <section id="approvals" class="panel">
+        <p class="muted">Pending requests that need approval (Approve, Decline, or Always Allow).</p>
+        <div class="actions" style="margin-bottom: 12px">
+          <button id="refreshApprovals">Refresh Approvals</button>
+          <button class="secondary" id="clearApprovals">Clear Queue</button>
+        </div>
+        <div id="approvalsList"></div>
+      </section>
+      <section id="activity" class="panel">
+        <p class="muted">Recent gateway requests handled by this desktop app.</p>
+        <div class="actions" style="margin-bottom: 12px">
+          <button id="refreshActivity">Refresh Activity</button>
+          <button class="secondary" id="clearActivity">Clear Activity</button>
+        </div>
+        <div class="actions" style="margin-bottom: 12px">
+          <label class="control-group" for="showRequestEvents">
+            <input type="checkbox" id="showRequestEvents" checked />
+            Show Regular Events
+          </label>
+          <label class="control-group" for="showSecurityEvents">
+            <input type="checkbox" id="showSecurityEvents" checked />
+            Show Security Events
+          </label>
+        </div>
+        <div id="activityList" class="activity-list"></div>
+      </section>
+      <section id="settings" class="panel">
+        <div class="row">
+          <label for="apiOrigin">API Origin</label>
+          <input id="apiOrigin" />
+        </div>
+        <div class="row">
+          <label for="webAppOrigin">Web App Origin (CORS)</label>
+          <input id="webAppOrigin" />
+        </div>
+        <div class="row">
+          <label for="apiKey">Cloud API Key</label>
+          <input id="apiKey" type="password" placeholder="sk_live_..." autocomplete="off" />
+          <div class="actions" style="margin-top: 8px">
+            <button id="saveApiKey">Save API Key</button>
+            <button class="secondary" id="clearApiKey">Clear API Key</button>
+          </div>
+          <p class="muted" id="apiKeyStatus"></p>
+        </div>
+        <div class="row">
+          <label for="allowedDirectories">Allowed Directories (one path per line)</label>
+          <textarea id="allowedDirectories"></textarea>
+          <p class="muted warning-text" id="allowedDirectoriesWarning"></p>
+        </div>
+        <div class="row">
+          <label for="sandboxBaseDirectory">Sandbox Base Directory</label>
+          <input id="sandboxBaseDirectory" readonly />
+          <div class="actions" style="margin-top: 8px">
+            <button class="secondary" id="pickSandboxBaseDirectory">Choose Directory</button>
+          </div>
+          <p class="muted warning-text" id="sandboxBaseWarning"></p>
+        </div>
+        <div class="row">
+          <label for="defaultApprovalTier">Default Approval Tier</label>
+          <select id="defaultApprovalTier">
+            <option value="high">high</option>
+            <option value="medium">medium</option>
+            <option value="low">low</option>
+            <option value="auto">auto</option>
+          </select>
+        </div>
+        <div class="row">
+          <label for="approvalRules">Per-Operation Overrides (JSON)</label>
+          <textarea id="approvalRules"></textarea>
+        </div>
+        <div class="actions">
+          <button id="saveSettings">Save Settings</button>
+          <button class="secondary" id="reloadSettings">Reload</button>
+        </div>
+        <p class="muted" id="settingsMessage"></p>
+      </section>
+    </main>
+    <script>
+      const api = window.desktopApi;
+      const tabs = document.querySelectorAll("nav button");
+      const panels = document.querySelectorAll(".panel");
+
+      tabs.forEach((tab) => {
+        tab.addEventListener("click", () => {
+          tabs.forEach((button) => button.classList.remove("active"));
+          panels.forEach((panel) => panel.classList.remove("active"));
+          tab.classList.add("active");
+          document.getElementById(tab.dataset.tab).classList.add("active");
+        });
+      });
+
+      const apiOrigin = document.getElementById("apiOrigin");
+      const webAppOrigin = document.getElementById("webAppOrigin");
+      const apiKey = document.getElementById("apiKey");
+      const apiKeyStatus = document.getElementById("apiKeyStatus");
+      const allowedDirectories = document.getElementById("allowedDirectories");
+      const sandboxBaseDirectory = document.getElementById("sandboxBaseDirectory");
+      const defaultApprovalTier = document.getElementById("defaultApprovalTier");
+      const approvalRules = document.getElementById("approvalRules");
+      const settingsMessage = document.getElementById("settingsMessage");
+      const dashboardPayload = document.getElementById("dashboardPayload");
+      const dashboardPort = document.getElementById("dashboardPort");
+      const dashboardCloud = document.getElementById("dashboardCloud");
+      const dashboardTarget = document.getElementById("dashboardTarget");
+      const dashboardApiOrigin = document.getElementById("dashboardApiOrigin");
+      const dashboardCommandsState = document.getElementById("dashboardCommandsState");
+      const dashboardApproval = document.getElementById("dashboardApproval");
+      const approvalsList = document.getElementById("approvalsList");
+      const activityList = document.getElementById("activityList");
+      const runtimeStatus = document.getElementById("runtimeStatus");
+      const wsStatusBadge = document.getElementById("wsStatusBadge");
+      const wsStatusDetail = document.getElementById("wsStatusDetail");
+      const allowedDirectoriesWarning = document.getElementById("allowedDirectoriesWarning");
+      const sandboxBaseWarning = document.getElementById("sandboxBaseWarning");
+      const headerPauseToggle = document.getElementById("headerPauseToggle");
+      const headerConnectionToggle = document.getElementById("headerConnectionToggle");
+      const onboardingOverlay = document.getElementById("onboardingOverlay");
+      const onboardingApiOrigin = document.getElementById("onboardingApiOrigin");
+      const onboardingWebAppOrigin = document.getElementById("onboardingWebAppOrigin");
+      const onboardingApiKey = document.getElementById("onboardingApiKey");
+      const onboardingApiKeyHint = document.getElementById("onboardingApiKeyHint");
+      const onboardingSandboxDir = document.getElementById("onboardingSandboxDir");
+      const onboardingSandboxWarning = document.getElementById("onboardingSandboxWarning");
+      const onboardingMessage = document.getElementById("onboardingMessage");
+      const showRequestEvents = document.getElementById("showRequestEvents");
+      const showSecurityEvents = document.getElementById("showSecurityEvents");
+      let cachedPendingApprovals = [];
+      let cachedActivityEvents = [];
+      let cachedCommandsPaused = false;
+      let cachedConnectionEnabled = true;
+
+      async function refreshRuntime() {
+        const status = await api.getRuntimeStatus();
+        const cloudStatus = status.cloudStatus || { state: "idle" };
+        const websocket = describeWebsocketStatus(cloudStatus);
+        cachedCommandsPaused = Boolean(status.commandsPaused);
+        cachedConnectionEnabled = status.connectionEnabled !== false;
+        const runtimeHealth = describeRuntimeHealth(cloudStatus, cachedConnectionEnabled);
+        runtimeStatus.className = `runtime-health ${runtimeHealth.tone}`;
+        runtimeStatus.title = runtimeHealth.detail;
+        const runtimeHealthLabel = runtimeStatus.querySelector(".label");
+        if (runtimeHealthLabel) {
+          runtimeHealthLabel.textContent = runtimeHealth.label;
+        }
+        wsStatusBadge.className = `ws-badge ${websocket.tone}`;
+        wsStatusBadge.textContent = `WebSocket: ${websocket.label}`;
+        wsStatusDetail.textContent = websocket.detail;
+        dashboardPort.textContent = String(status.port ?? "-");
+        dashboardCloud.textContent = describeCloudConnection(cloudStatus);
+        dashboardTarget.textContent = describeTargetId(cloudStatus);
+        dashboardTarget.title = cloudStatus.targetId || "";
+        dashboardApiOrigin.textContent = describeApiOrigin(status.apiOrigin);
+        dashboardApiOrigin.title = status.apiOrigin || "";
+        dashboardCommandsState.textContent = cachedCommandsPaused ? "Paused" : "Running";
+        headerPauseToggle.checked = cachedCommandsPaused;
+        headerConnectionToggle.textContent = cachedConnectionEnabled ? "Disconnect" : "Reconnect";
+        dashboardPayload.textContent = JSON.stringify(status, null, 2);
+      }
+
+      function describeApiOrigin(apiOrigin) {
+        if (typeof apiOrigin !== "string" || !apiOrigin.trim()) {
+          return "Not configured";
+        }
+        return apiOrigin.trim();
+      }
+
+      function describeCloudConnection(cloudStatus) {
+        if (cloudStatus.state === "online") {
+          return "Connected";
+        }
+        if (cloudStatus.state === "degraded") {
+          return "Disconnected";
+        }
+        return "Connecting";
+      }
+
+      function describeTargetId(cloudStatus) {
+        if (cloudStatus.state !== "online" || !cloudStatus.targetId) {
+          return "Not assigned";
+        }
+        return abbreviateId(cloudStatus.targetId);
+      }
+
+      function abbreviateId(value) {
+        if (typeof value !== "string" || value.length <= 20) {
+          return value;
+        }
+        return `${value.slice(0, 8)}...${value.slice(-6)}`;
+      }
+
+      function describeWebsocketStatus(cloudStatus) {
+        if (cloudStatus.state === "online") {
+          return {
+            label: "Connected",
+            tone: "connected",
+            detail: "Socket tunnel to cloud service is active."
+          };
+        }
+
+        if (cloudStatus.state === "degraded") {
+          return {
+            label: "Disconnected",
+            tone: "disconnected",
+            detail: cloudStatus.error ? `Connection issue: ${cloudStatus.error}` : "Cloud connection degraded."
+          };
+        }
+
+        return {
+          label: "Connecting",
+          tone: "reconnecting",
+          detail: "Attempting to connect to cloud service."
+        };
+      }
+
+      function describeRuntimeHealth(cloudStatus, connectionEnabled) {
+        if (connectionEnabled && cloudStatus.state === "online") {
+          return {
+            label: "Healthy",
+            tone: "healthy",
+            detail: "Gateway is connected and ready."
+          };
+        }
+        if (!connectionEnabled) {
+          return {
+            label: "Unhealthy",
+            tone: "unhealthy",
+            detail: "Cloud connection is manually disconnected."
+          };
+        }
+        if (cloudStatus.state === "degraded") {
+          return {
+            label: "Unhealthy",
+            tone: "unhealthy",
+            detail: cloudStatus.error ? `Connection issue: ${cloudStatus.error}` : "Cloud connection is degraded."
+          };
+        }
+        return {
+          label: "Unhealthy",
+          tone: "unhealthy",
+          detail: "Gateway is connecting to cloud service."
+        };
+      }
+
+      async function refreshActivity() {
+        const events = await api.getActivityEvents();
+        cachedActivityEvents = Array.isArray(events) ? events : [];
+        renderActivity();
+      }
+
+      function renderActivity() {
+        const showRequests = Boolean(showRequestEvents.checked);
+        const showSecurity = Boolean(showSecurityEvents.checked);
+        const events = cachedActivityEvents.filter((event) => {
+          const kind = activityKind(event);
+          if (kind === "security") {
+            return showSecurity;
+          }
+          return showRequests;
+        });
+
+        activityList.innerHTML = "";
+        if (!events.length) {
+          const empty = document.createElement("div");
+          empty.className = "approval-empty";
+          empty.textContent = "No activity events for the selected filters.";
+          activityList.appendChild(empty);
+          return;
+        }
+
+        for (const event of events) {
+          activityList.appendChild(renderActivityCard(event));
+        }
+      }
+
+      function renderActivityCard(event) {
+        const card = document.createElement("div");
+        card.className = "activity-card";
+
+        const top = document.createElement("div");
+        top.className = "activity-top";
+
+        const pathLine = document.createElement("div");
+        pathLine.className = "activity-path";
+        pathLine.textContent = `${event.method || "?"} ${event.path || "/"}`;
+        top.appendChild(pathLine);
+
+        const status = document.createElement("span");
+        const statusCode = Number(event.statusCode || 0);
+        status.className = `status-pill ${statusTone(statusCode)}`;
+        status.textContent = String(statusCode || "-");
+        top.appendChild(status);
+        card.appendChild(top);
+
+        const meta = document.createElement("div");
+        meta.className = "activity-meta";
+        const timeText = formatActivityTime(event.timestamp);
+        const duration = Number(event.durationMs || 0);
+        meta.textContent = `${timeText} • ${duration}ms`;
+        const kindBadge = document.createElement("span");
+        const kind = activityKind(event);
+        kindBadge.className = `activity-kind ${kind}`;
+        kindBadge.textContent = kind === "security" ? "SECURITY" : "REQUEST";
+        meta.appendChild(kindBadge);
+        card.appendChild(meta);
+
+        if (event.detail) {
+          const detail = document.createElement("div");
+          detail.className = "activity-meta";
+          detail.style.marginTop = "6px";
+          detail.textContent = String(event.detail);
+          card.appendChild(detail);
+        }
+
+        return card;
+      }
+
+      function activityKind(event) {
+        if (event && typeof event.type === "string" && event.type === "security") {
+          return "security";
+        }
+        if (Number(event?.statusCode || 0) === 401) {
+          return "security";
+        }
+        return "request";
+      }
+
+      function statusTone(code) {
+        if (code >= 500) {
+          return "server-error";
+        }
+        if (code >= 400) {
+          return "client-error";
+        }
+        if (code >= 300) {
+          return "redirect";
+        }
+        return "success";
+      }
+
+      function formatActivityTime(timestamp) {
+        if (!timestamp) {
+          return "Unknown time";
+        }
+        const value = new Date(timestamp);
+        if (Number.isNaN(value.getTime())) {
+          return String(timestamp);
+        }
+        return value.toLocaleString();
+      }
+
+      function renderApprovalCard(approval, compact) {
+        const card = document.createElement("div");
+        card.className = "approval-card";
+
+        const title = document.createElement("div");
+        title.className = "approval-title";
+        title.textContent = `Request needs approval: ${approval.operationId}`;
+        card.appendChild(title);
+
+        const meta = document.createElement("div");
+        meta.className = "approval-meta";
+        const scopeText = approval.scopePath ? ` | scope=${approval.scopePath}` : "";
+        meta.textContent = `${approval.method} ${approval.path}${scopeText} | ${approval.location} | tier=${approval.riskTier}`;
+        card.appendChild(meta);
+
+        const reason = document.createElement("div");
+        reason.className = "muted";
+        reason.style.marginBottom = "8px";
+        reason.textContent = approval.reason;
+        card.appendChild(reason);
+
+        const actions = document.createElement("div");
+        actions.className = "actions";
+
+        const approveBtn = document.createElement("button");
+        approveBtn.textContent = "Approve";
+        approveBtn.addEventListener("click", () => void handleApprovalAction("approve", approval.id));
+        actions.appendChild(approveBtn);
+
+        const denyBtn = document.createElement("button");
+        denyBtn.className = "secondary";
+        denyBtn.textContent = "Decline";
+        denyBtn.addEventListener("click", () => void handleApprovalAction("deny", approval.id));
+        actions.appendChild(denyBtn);
+
+        const alwaysAllowBtn = document.createElement("button");
+        alwaysAllowBtn.className = "secondary";
+        alwaysAllowBtn.textContent = "Always Allow";
+        alwaysAllowBtn.addEventListener("click", () =>
+          void handleApprovalAction("alwaysAllow", approval.id)
+        );
+        actions.appendChild(alwaysAllowBtn);
+
+        card.appendChild(actions);
+
+        if (!compact) {
+          const idLine = document.createElement("div");
+          idLine.className = "approval-meta";
+          idLine.style.marginTop = "8px";
+          idLine.textContent = `id=${approval.id} | created=${approval.createdAt}`;
+          card.appendChild(idLine);
+        }
+
+        return card;
+      }
+
+      function renderApprovals() {
+        approvalsList.innerHTML = "";
+        dashboardApproval.innerHTML = "";
+
+        if (!cachedPendingApprovals.length) {
+          const empty = document.createElement("div");
+          empty.className = "approval-empty";
+          empty.textContent = "No pending approvals.";
+          approvalsList.appendChild(empty);
+          return;
+        }
+
+        const dashboardCard = renderApprovalCard(cachedPendingApprovals[0], true);
+        dashboardApproval.appendChild(dashboardCard);
+
+        for (const approval of cachedPendingApprovals) {
+          approvalsList.appendChild(renderApprovalCard(approval, false));
+        }
+      }
+
+      async function refreshApprovals() {
+        const approvals = await api.getPendingApprovals();
+        cachedPendingApprovals = Array.isArray(approvals) ? approvals : [];
+        renderApprovals();
+      }
+
+      async function loadSettings() {
+        const settings = await api.getSettings();
+        apiOrigin.value = settings.apiOrigin || "";
+        webAppOrigin.value = settings.webAppOrigin || "";
+        allowedDirectories.value = (settings.allowedDirectories || []).join("\n");
+        sandboxBaseDirectory.value = settings.sandboxBaseDirectory || "";
+        defaultApprovalTier.value = settings.defaultApprovalTier || "high";
+        approvalRules.value = JSON.stringify(settings.autoApprovalRules || {}, null, 2);
+        updateAllowedDirectoryWarning();
+        updateSandboxBaseWarning();
+      }
+
+      function updateAllowedDirectoryWarning() {
+        const lines = allowedDirectories.value
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean);
+        const risky = lines.filter(isRiskyAllowedDirectory);
+        const sandbox = normalizeDirectory(sandboxBaseDirectory.value);
+        const outsideSandbox = sandbox
+          ? lines.filter((entry) => !isDirectoryInsideSandbox(entry, sandbox))
+          : [];
+        if (!risky.length) {
+          allowedDirectoriesWarning.textContent = outsideSandbox.length
+            ? `Warning: these directories are outside the sandbox and will be ignored: ${outsideSandbox.join(", ")}`
+            : "";
+        } else {
+          const riskText = `Warning: broad/sensitive allowed directories increase compromise risk: ${risky.join(", ")}`;
+          const outsideText = outsideSandbox.length
+            ? ` Outside sandbox and ignored: ${outsideSandbox.join(", ")}`
+            : "";
+          allowedDirectoriesWarning.textContent = `${riskText}${outsideText}`;
+        }
+      }
+
+      function updateSandboxBaseWarning() {
+        const sandbox = sandboxBaseDirectory.value.trim();
+        if (!sandbox) {
+          sandboxBaseWarning.textContent = "Sandbox base directory is required.";
+          return;
+        }
+        if (isRiskyAllowedDirectory(sandbox)) {
+          sandboxBaseWarning.textContent =
+            "Warning: this sandbox is broad or sensitive. Choose a tighter directory such as ~/Source.";
+          return;
+        }
+        sandboxBaseWarning.textContent = "";
+      }
+
+      function isRiskyAllowedDirectory(input) {
+        const normalized = input.replace(/\/+$/, "");
+        if (!normalized) {
+          return false;
+        }
+        if (normalized === "/" || normalized === "~") {
+          return true;
+        }
+        if (normalized === "/Users" || /^\/Users\/[^/]+$/.test(normalized)) {
+          return true;
+        }
+        if (normalized === "/home" || /^\/home\/[^/]+$/.test(normalized)) {
+          return true;
+        }
+        return ["/etc", "/usr", "/bin", "/sbin", "/var", "/System"].some(
+          (prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`)
+        );
+      }
+
+      function normalizeDirectory(input) {
+        if (typeof input !== "string") {
+          return "";
+        }
+        return input.trim().replace(/\/+$/, "");
+      }
+
+      function isDirectoryInsideSandbox(candidate, sandbox) {
+        const normalizedCandidate = normalizeDirectory(candidate);
+        const normalizedSandbox = normalizeDirectory(sandbox);
+        if (!normalizedCandidate || !normalizedSandbox) {
+          return false;
+        }
+        return (
+          normalizedCandidate === normalizedSandbox ||
+          normalizedCandidate.startsWith(`${normalizedSandbox}/`)
+        );
+      }
+
+      function describeApiKeyStatus(status) {
+        if (!status || status.source === "none" || !status.hasApiKey) {
+          return "Cloud API key: not configured";
+        }
+        if (status.source === "safeStorage") {
+          return "Cloud API key: stored in secure keychain";
+        }
+        if (status.source === "environment") {
+          return `Cloud API key: using ${status.environmentVariable || "environment variable"}`;
+        }
+        return "Cloud API key: configured";
+      }
+
+      async function refreshApiKeyStatus() {
+        const status = await api.getApiKeyStatus();
+        apiKeyStatus.textContent = describeApiKeyStatus(status);
+      }
+
+      async function saveSettings() {
+        settingsMessage.textContent = "";
+        let parsedRules;
+        try {
+          parsedRules = JSON.parse(approvalRules.value || "{}");
+        } catch (error) {
+          settingsMessage.textContent = `Invalid approval JSON: ${error.message}`;
+          return;
+        }
+
+        const payload = {
+          apiOrigin: apiOrigin.value.trim(),
+          webAppOrigin: webAppOrigin.value.trim(),
+          sandboxBaseDirectory: sandboxBaseDirectory.value.trim(),
+          allowedDirectories: allowedDirectories.value
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean),
+          defaultApprovalTier: defaultApprovalTier.value,
+          autoApprovalRules: parsedRules
+        };
+
+        await api.updateSettings(payload);
+        settingsMessage.textContent = "Settings saved.";
+        await Promise.all([refreshRuntime(), refreshApprovals()]);
+      }
+
+      async function saveApiKeyValue() {
+        settingsMessage.textContent = "";
+        const value = apiKey.value.trim();
+        if (!value) {
+          settingsMessage.textContent = "Enter an API key before saving.";
+          return;
+        }
+        if (!value.startsWith("sk_live_")) {
+          settingsMessage.textContent = "API key must start with sk_live_.";
+          return;
+        }
+
+        try {
+          await api.setApiKey(value);
+          apiKey.value = "";
+          await Promise.all([refreshApiKeyStatus(), refreshRuntime()]);
+          settingsMessage.textContent = "API key saved to secure storage.";
+        } catch (error) {
+          settingsMessage.textContent = `Failed to save API key: ${error.message}`;
+        }
+      }
+
+      async function clearApiKeyValue() {
+        settingsMessage.textContent = "";
+        try {
+          await api.clearApiKey();
+          apiKey.value = "";
+          await Promise.all([refreshApiKeyStatus(), refreshRuntime()]);
+          settingsMessage.textContent = "Stored API key cleared.";
+        } catch (error) {
+          settingsMessage.textContent = `Failed to clear API key: ${error.message}`;
+        }
+      }
+
+      async function clearActivity() {
+        await api.clearActivityEvents();
+        await refreshActivity();
+      }
+
+      async function handleApprovalAction(action, approvalId) {
+        try {
+          if (action === "approve") {
+            await api.approveApproval(approvalId);
+            settingsMessage.textContent = "Request approved.";
+          } else if (action === "deny") {
+            await api.denyApproval(approvalId);
+            settingsMessage.textContent = "Request declined.";
+          } else {
+            await api.alwaysAllowApproval(approvalId);
+            await loadSettings();
+            settingsMessage.textContent =
+              "Always Allow saved for this operation and scope (expires in 7 days).";
+          }
+          await refreshApprovals();
+        } catch (error) {
+          settingsMessage.textContent = `Approval action failed: ${error.message}`;
+        }
+      }
+
+      async function clearApprovals() {
+        await api.clearPendingApprovals();
+        await refreshApprovals();
+      }
+
+      async function pickDirectoryForInput(targetInput, warningUpdater) {
+        const selectedPath = await api.pickSandboxDirectory();
+        if (!selectedPath || typeof selectedPath !== "string") {
+          return;
+        }
+        targetInput.value = selectedPath;
+        if (typeof warningUpdater === "function") {
+          warningUpdater();
+        }
+      }
+
+      async function loadOnboardingState() {
+        const state = await api.getOnboardingState();
+        const settings = state?.settings || {};
+        onboardingApiOrigin.value = settings.apiOrigin || apiOrigin.value || "";
+        onboardingWebAppOrigin.value = settings.webAppOrigin || webAppOrigin.value || "";
+        onboardingSandboxDir.value = settings.sandboxBaseDirectory || sandboxBaseDirectory.value || "";
+        onboardingApiKey.value = "";
+        onboardingApiKeyHint.textContent = state?.hasStoredApiKey
+          ? "A cloud API key is already stored. You can leave this blank."
+          : "No stored API key found. Enter one now or later in Settings.";
+        updateOnboardingSandboxWarning();
+
+        if (state?.completed) {
+          onboardingOverlay.classList.add("hidden");
+        } else {
+          onboardingOverlay.classList.remove("hidden");
+        }
+      }
+
+      function updateOnboardingSandboxWarning() {
+        const sandbox = onboardingSandboxDir.value.trim();
+        if (!sandbox) {
+          onboardingSandboxWarning.textContent = "Sandbox base directory is required.";
+          return;
+        }
+        if (isRiskyAllowedDirectory(sandbox)) {
+          onboardingSandboxWarning.textContent =
+            "Warning: this directory is broad/sensitive and may expose personal files or secrets. Choose a scoped directory like ~/Source.";
+          return;
+        }
+        onboardingSandboxWarning.textContent = "";
+      }
+
+      async function completeOnboarding() {
+        onboardingMessage.textContent = "";
+        try {
+          await api.completeOnboarding({
+            apiOrigin: onboardingApiOrigin.value.trim(),
+            webAppOrigin: onboardingWebAppOrigin.value.trim(),
+            sandboxBaseDirectory: onboardingSandboxDir.value.trim(),
+            apiKey: onboardingApiKey.value.trim()
+          });
+          onboardingOverlay.classList.add("hidden");
+          await Promise.all([loadSettings(), refreshRuntime(), refreshApiKeyStatus(), refreshApprovals()]);
+        } catch (error) {
+          onboardingMessage.textContent = `Failed to complete setup: ${error.message}`;
+        }
+      }
+
+      document.getElementById("saveSettings").addEventListener("click", saveSettings);
+      document.getElementById("reloadSettings").addEventListener("click", loadSettings);
+      document.getElementById("saveApiKey").addEventListener("click", saveApiKeyValue);
+      document.getElementById("clearApiKey").addEventListener("click", clearApiKeyValue);
+      headerPauseToggle.addEventListener("change", async () => {
+        await api.setCloudCommandsPaused(headerPauseToggle.checked);
+        await refreshRuntime();
+      });
+      headerConnectionToggle.addEventListener("click", async () => {
+        await api.setCloudConnectionEnabled(!cachedConnectionEnabled);
+        await refreshRuntime();
+      });
+      document
+        .getElementById("pickSandboxBaseDirectory")
+        .addEventListener("click", () => void pickDirectoryForInput(sandboxBaseDirectory, updateSandboxBaseWarning));
+      document
+        .getElementById("pickOnboardingSandbox")
+        .addEventListener("click", () => void pickDirectoryForInput(onboardingSandboxDir, updateOnboardingSandboxWarning));
+      document.getElementById("completeOnboarding").addEventListener("click", () => void completeOnboarding());
+      allowedDirectories.addEventListener("input", updateAllowedDirectoryWarning);
+      sandboxBaseDirectory.addEventListener("input", updateSandboxBaseWarning);
+      onboardingSandboxDir.addEventListener("input", updateOnboardingSandboxWarning);
+      document.getElementById("refreshApprovals").addEventListener("click", refreshApprovals);
+      document.getElementById("clearApprovals").addEventListener("click", clearApprovals);
+      document.getElementById("refreshActivity").addEventListener("click", refreshActivity);
+      document.getElementById("clearActivity").addEventListener("click", clearActivity);
+      showRequestEvents.addEventListener("change", renderActivity);
+      showSecurityEvents.addEventListener("change", renderActivity);
+
+      Promise.all([
+        loadOnboardingState(),
+        loadSettings(),
+        refreshRuntime(),
+        refreshApiKeyStatus(),
+        refreshApprovals(),
+        refreshActivity()
+      ]).catch((error) => {
+        settingsMessage.textContent = `Failed to load desktop state: ${error.message}`;
+      });
+
+      setInterval(() => {
+        void refreshRuntime();
+        void refreshApprovals();
+        void refreshActivity();
+      }, 2000);
+    </script>
+  </body>
+</html>
