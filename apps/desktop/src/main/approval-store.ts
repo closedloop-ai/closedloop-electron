@@ -17,6 +17,11 @@ export type PendingApproval = {
   fingerprint: string;
 };
 
+export type ResolvedApproval = PendingApproval & {
+  decision: ApprovalDecision;
+  resolvedAt: string;
+};
+
 type ApprovalStoreSchema = {
   pending: PendingApproval[];
 };
@@ -26,10 +31,13 @@ export interface ApprovalStoreOptions {
   onNewApproval?: (approval: PendingApproval) => void;
 }
 
+const MAX_RESOLVED = 50;
+
 export class ApprovalStore {
   private readonly pendingById = new Map<string, PendingApproval>();
   private readonly pendingByFingerprint = new Map<string, string>();
   private readonly waitersByApprovalId = new Map<string, Set<(decision: ApprovalDecision) => void>>();
+  private readonly resolved: ResolvedApproval[] = [];
   private readonly store: Store<ApprovalStoreSchema>;
   private readonly onChange?: (pendingCount: number) => void;
   private readonly onNewApproval?: (approval: PendingApproval) => void;
@@ -159,6 +167,14 @@ export class ApprovalStore {
     this.persist();
   }
 
+  listResolved(): ResolvedApproval[] {
+    return [...this.resolved];
+  }
+
+  clearResolved(): void {
+    this.resolved.length = 0;
+  }
+
   private resolveAndRemove(id: string, decision: ApprovalDecision): PendingApproval | null {
     const pending = this.pendingById.get(id);
     if (!pending) {
@@ -167,6 +183,11 @@ export class ApprovalStore {
 
     this.pendingById.delete(id);
     this.pendingByFingerprint.delete(pending.fingerprint);
+
+    this.resolved.unshift({ ...pending, decision, resolvedAt: new Date().toISOString() });
+    if (this.resolved.length > MAX_RESOLVED) {
+      this.resolved.length = MAX_RESOLVED;
+    }
 
     const waiters = this.waitersByApprovalId.get(id);
     if (waiters) {

@@ -34,6 +34,7 @@ export class DesktopApplication {
   private readonly approvalStore: ApprovalStore;
   private readonly gatewayAuthToken: string;
   private shuttingDown = false;
+  private dangerousAutoApprove = false;
   private cloudStatus: CloudSocketStatus = { state: "idle" };
   private cloudCommandsPaused: boolean;
   private cloudConnectionEnabled: boolean;
@@ -339,6 +340,10 @@ export class DesktopApplication {
       };
     }
 
+    if (this.dangerousAutoApprove) {
+      return { allow: true };
+    }
+
     const operationId = resolveOperationId(request.path);
     if (!operationId) {
       return { allow: true };
@@ -527,6 +532,11 @@ export class DesktopApplication {
       return this.activityLog.list();
     });
     ipcMain.handle("desktop:get-pending-approvals", () => this.approvalStore.listPending());
+    ipcMain.handle("desktop:get-resolved-approvals", () => this.approvalStore.listResolved());
+    ipcMain.handle("desktop:clear-resolved-approvals", () => {
+      this.approvalStore.clearResolved();
+      return [];
+    });
     ipcMain.handle("desktop:approve-approval", (_event, approvalId: string) => {
       if (typeof approvalId !== "string" || !approvalId.trim()) {
         throw new Error("approvalId is required");
@@ -640,6 +650,11 @@ export class DesktopApplication {
         return null;
       }
       return result.filePaths[0];
+    });
+    ipcMain.handle("desktop:get-dangerous-auto-approve", () => this.dangerousAutoApprove);
+    ipcMain.handle("desktop:set-dangerous-auto-approve", (_event, enabled: boolean) => {
+      this.dangerousAutoApprove = Boolean(enabled);
+      return this.dangerousAutoApprove;
     });
   }
 }

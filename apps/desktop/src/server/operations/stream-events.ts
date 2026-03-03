@@ -67,6 +67,7 @@ export function processStreamEvent(
   if (event.type === "init" && event.sessionId) {
     state.capturedSessionId = event.sessionId;
     state.onSessionId?.(event.sessionId);
+    enqueue(JSON.stringify({ type: "sessionId", sessionId: event.sessionId }));
     return;
   }
 
@@ -157,6 +158,7 @@ export function processStreamEvent(
     if (!state.capturedSessionId && event.session_id) {
       state.capturedSessionId = event.session_id;
       state.onSessionId?.(event.session_id);
+      enqueue(JSON.stringify({ type: "sessionId", sessionId: event.session_id }));
     }
 
     if (event.is_error) {

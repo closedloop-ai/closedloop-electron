@@ -434,6 +434,7 @@ export function registerGitPrRoutes(
     const replyBody = asString(body.body);
     const prNumber = asNumber(body.prNumber);
     const commentId = asNumber(body.commentId);
+    const requestChanges = body.requestChanges === true;
 
     if (!repoPath) {
       json(context, 400, { error: "Missing 'repoPath' in request body" });
@@ -461,6 +462,21 @@ export function registerGitPrRoutes(
 
     try {
       const repoSlug = await getRepoSlug(cwd);
+
+      // Submit as a "Request Changes" PR review
+      if (requestChanges) {
+        const args = ["pr", "review", String(prNumber), "--request-changes"];
+        if (repoSlug) {
+          args.push("-R", repoSlug);
+        }
+        const result = await ghPrCommentViaStdin(args, replyBody, cwd);
+        json(context, 200, {
+          success: true,
+          message: "Changes requested",
+          output: result.stdout.trim()
+        });
+        return;
+      }
 
       if (commentId && commentId > 0 && repoSlug) {
         const result = await ghApiViaStdin(

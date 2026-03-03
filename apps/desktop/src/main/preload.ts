@@ -18,6 +18,10 @@ const desktopApi = {
     ipcRenderer.invoke("desktop:always-allow-approval", approvalId) as Promise<unknown>,
   clearPendingApprovals: () =>
     ipcRenderer.invoke("desktop:clear-pending-approvals") as Promise<unknown>,
+  getResolvedApprovals: () =>
+    ipcRenderer.invoke("desktop:get-resolved-approvals") as Promise<unknown>,
+  clearResolvedApprovals: () =>
+    ipcRenderer.invoke("desktop:clear-resolved-approvals") as Promise<unknown>,
   getApiKeyStatus: () => ipcRenderer.invoke("desktop:get-api-key-status") as Promise<unknown>,
   setApiKey: (apiKey: string) =>
     ipcRenderer.invoke("desktop:set-api-key", apiKey) as Promise<unknown>,
@@ -33,7 +37,11 @@ const desktopApi = {
   getOnboardingState: () => ipcRenderer.invoke("desktop:get-onboarding-state") as Promise<unknown>,
   completeOnboarding: (payload: unknown) =>
     ipcRenderer.invoke("desktop:complete-onboarding", payload) as Promise<unknown>,
-  pickSandboxDirectory: () => ipcRenderer.invoke("desktop:pick-sandbox-directory") as Promise<unknown>
+  pickSandboxDirectory: () => ipcRenderer.invoke("desktop:pick-sandbox-directory") as Promise<unknown>,
+  getDangerousAutoApprove: () =>
+    ipcRenderer.invoke("desktop:get-dangerous-auto-approve") as Promise<boolean>,
+  setDangerousAutoApprove: (enabled: boolean) =>
+    ipcRenderer.invoke("desktop:set-dangerous-auto-approve", enabled) as Promise<boolean>
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);

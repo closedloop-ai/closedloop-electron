@@ -8,11 +8,24 @@ import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { createStreamState, processStreamEvent, type ContentBlock } from "./stream-events.js";
-import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
+import { assertRepoAllowed, ensureWorktreeForReview, resolveWorktreeDir, resolveWorktreeParentDir } from "./symphony-utils.js";
 
 const CODEX_SESSION_ID_REGEX = /session id:\s*([0-9a-f-]{36})/i;
 const FINDINGS_CODE_BLOCK_REGEX = /```json\s*\n([\s\S]*?)\n\s*```/;
 const FINDINGS_ARRAY_REGEX = /\[[\s\S]*\]/;
+const PR_PREFIX_REGEX = /^pr-/;
+
+const REVIEW_SYSTEM_PROMPT = [
+  "IMPORTANT: Before flagging any change, examine the surrounding context in the file, the PR description, and any linked issues.",
+  "Only report findings where the issue is clearly unintentional. Skip patterns that appear to be deliberate design decisions, intentional trade-offs, or conscious simplifications.",
+  "If a change looks unusual but is consistent with the overall PR intent, do not flag it.",
+  "At the very end of your review, include a ```json fenced code block containing ALL findings as a JSON array.",
+  'Each element must have: {"severity": "critical"|"high"|"medium"|"low",',
+  '"file": "full/repo-relative/path.ts", "line": <number or null>,',
+  '"title": "one-line summary", "description": "detailed explanation",',
+  '"suggestion": "suggested fix or null"}.',
+  'Use FULL repository-relative file paths (e.g. "src/components/Button.tsx"), not abbreviated names.',
+].join(" ");
 
 type ReviewState = {
   status: "running" | "completed" | "failed" | "stopped";
@@ -45,6 +58,8 @@ type FindingsFile = {
   provider: string;
   model: string;
   findings: PersistedFinding[];
+  declined?: boolean;
+  declineReason?: string;
 };
 
 type CodexChatState = {
@@ -459,6 +474,25 @@ export function registerCodexRoutes(
       return;
     }
 
+    if (body.declined === true && typeof body.declineReason === "string" && (body.declineReason as string).trim().length > 0) {
+      if (!existsSync(findingsPath)) {
+        json(context, 404, { error: "No findings file found" });
+        return;
+      }
+
+      try {
+        const data = JSON.parse(await fs.readFile(findingsPath, "utf-8")) as FindingsFile;
+        data.declined = true;
+        data.declineReason = body.declineReason as string;
+        await fs.writeFile(findingsPath, JSON.stringify(data, null, 2), "utf-8");
+        json(context, 200, { success: true });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unknown error";
+        json(context, 500, { error: `Failed to mark declined: ${message}` });
+      }
+      return;
+    }
+
     if (!Array.isArray(body.findings)) {
       json(context, 400, { error: "Invalid request body" });
       return;
@@ -593,6 +627,8 @@ export function registerCodexRoutes(
     const baseBranch = asString(body.baseBranch) ?? "main";
     const instructions = asString(body.instructions) ?? undefined;
     const provider = asProvider(body.provider) ?? "codex";
+    const branchName = asString(body.branchName) ?? undefined;
+    const useBaseRepo = body.useBaseRepo === true;
 
     if (!repoPath) {
       json(context, 400, { error: "repoPath is required" });
@@ -610,11 +646,10 @@ export function registerCodexRoutes(
       throw error;
     }
 
-    const defaultWorktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-    const worktreeDir = existsSync(defaultWorktreeDir) ? defaultWorktreeDir : expandedRepoPath;
-
+    // Validate the worktree parent directory is allowed (worktree may not exist yet)
+    const worktreeParentDir = resolveWorktreeParentDir(expandedRepoPath);
     try {
-      assertPathAllowed(worktreeDir, getAllowedDirectories());
+      assertPathAllowed(worktreeParentDir, getAllowedDirectories());
     } catch (error) {
       if (error instanceof DirectoryNotAllowedError) {
         json(context, 403, { error: "directory not allowed" });
@@ -623,6 +658,18 @@ export function registerCodexRoutes(
       throw error;
     }
 
+    const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
+
+    // Create or update worktree (unless useBaseRepo is set)
+    const worktreeError = ensureWorktreeForReview(expandedRepoPath, worktreeDir, branchName, useBaseRepo);
+    if (worktreeError) {
+      json(context, worktreeError.status, { error: worktreeError.message });
+      return;
+    }
+
+    // Process cwd: use base repo when requested, otherwise use worktree
+    const reviewCwd = useBaseRepo ? expandedRepoPath : worktreeDir;
+
     const { statePath, logPath, pidPath } = getReviewPaths(worktreeDir, provider);
     await fs.mkdir(path.dirname(statePath), { recursive: true });
     await fs.writeFile(logPath, "", "utf-8");
@@ -630,14 +677,24 @@ export function registerCodexRoutes(
     setStreamingHeaders(context.response);
 
     try {
-      const child = spawnReviewProcess(provider, {
-        worktreeDir,
-        model,
-        reasoningEffort,
-        reviewMode,
-        baseBranch,
-        instructions
-      });
+      let child: ChildProcess;
+      if (provider === "claude") {
+        if (!PR_PREFIX_REGEX.test(ticketId)) {
+          json(context, 400, { error: "ticketId must start with 'pr-' for Claude reviews" });
+          return;
+        }
+        const prNum = ticketId.replace(PR_PREFIX_REGEX, "");
+        child = await resolveClaudeReviewProcess(reviewCwd, model, prNum, logPath);
+      } else {
+        child = spawnCodexReviewProcess({
+          cwd: reviewCwd,
+          model,
+          reasoningEffort,
+          reviewMode,
+          baseBranch,
+          instructions
+        });
+      }
 
       if (!child.pid) {
         throw new Error("failed to start review process");
@@ -1302,54 +1359,130 @@ function similarityScore(messageA: string, messageB: string, fileA: string, file
   return Math.min(score, 1);
 }
 
-function spawnReviewProcess(
-  provider: "claude" | "codex",
-  options: {
-    worktreeDir: string;
-    model: string;
-    reasoningEffort: string;
-    reviewMode: "uncommitted" | "base";
-    baseBranch: string;
-    instructions?: string;
-  }
-): ChildProcess {
-  if (provider === "claude") {
-    const prompt = [
-      "Perform a detailed code review of current changes.",
-      "Return a summary and include a JSON array of findings in a ```json fenced block.",
-      options.instructions ?? ""
-    ]
-      .filter(Boolean)
-      .join("\n\n");
+function spawnClaudeReview(cwd: string, model: string): ChildProcess {
+  return spawn(
+    "claude",
+    [
+      "-p",
+      "--verbose",
+      "--output-format",
+      "stream-json",
+      "--model",
+      model,
+      "--allowedTools",
+      withMcpTools("Bash,Read,Glob,Grep,Task,TodoWrite"),
+      "--append-system-prompt",
+      REVIEW_SYSTEM_PROMPT
+    ],
+    {
+      cwd,
+      detached: false,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`
+      }
+    }
+  );
+}
 
-    const child = spawn(
-      "claude",
-      [
-        "-p",
-        "--verbose",
-        "--output-format",
-        "stream-json",
-        "--model",
-        options.model,
-        "--allowedTools",
-        withMcpTools("Bash,Read,Glob,Grep,Task,TodoWrite")
-      ],
-      {
-        cwd: options.worktreeDir,
-        detached: false,
-        stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`
+/**
+ * Try spawning Claude with /experimental:code-review skill first.
+ * If the process exits without producing real model output (only system/init/result
+ * events), fall back to /review <prNum>.
+ */
+async function resolveClaudeReviewProcess(
+  cwd: string,
+  model: string,
+  prNum: string,
+  logPath: string
+): Promise<ChildProcess> {
+  const first = spawnClaudeReview(cwd, model);
+  first.stdin?.write("/experimental:code-review");
+  first.stdin?.end();
+
+  type ProbeResult = { type: "working" } | { type: "exited"; code: number };
+
+  // Collect all stdout chunks during probe so we can replay them for consumers
+  const probeChunks: Buffer[] = [];
+
+  const result = await new Promise<ProbeResult>((resolve) => {
+    let settled = false;
+    let probeBuf = "";
+    const settle = (r: ProbeResult) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      first.stdout?.removeListener("data", onData);
+      resolve(r);
+    };
+
+    // Safety timeout: if 60s pass with no real output and no exit, assume it's working
+    const timer = setTimeout(() => settle({ type: "working" }), 60_000);
+
+    // Ignore system/init/result events (CLI initialization + empty completion).
+    // Only treat real model activity as "working".
+    const INIT_EVENTS = new Set(["system", "init", "result"]);
+
+    const onData = (chunk: Buffer) => {
+      probeChunks.push(chunk);
+      probeBuf += chunk.toString();
+      const lines = probeBuf.split("\n");
+      probeBuf = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          continue;
+        }
+        try {
+          const event = JSON.parse(trimmed);
+          if (!INIT_EVENTS.has(event.type)) {
+            settle({ type: "working" });
+            return;
+          }
+        } catch {
+          // Non-JSON output = real content
+          settle({ type: "working" });
+          return;
         }
       }
-    );
+    };
 
-    child.stdin.write(prompt);
-    child.stdin.end();
-    return child;
+    first.stdout?.on("data", onData);
+
+    first.on("close", (code) => {
+      settle({ type: "exited", code: code ?? 1 });
+    });
+  });
+
+  if (result.type === "working") {
+    // Replay consumed probe data so stream consumers see it
+    for (const chunk of probeChunks.reverse()) {
+      first.stdout?.unshift(chunk);
+    }
+    return first;
   }
 
+  // Skill exited without producing review content — fall back to /review <prNum>
+  await fs.writeFile(logPath, "", "utf-8");
+
+  const fallback = spawnClaudeReview(cwd, model);
+  fallback.stdin?.write(`/review ${prNum}`);
+  fallback.stdin?.end();
+  return fallback;
+}
+
+function spawnCodexReviewProcess(options: {
+  cwd: string;
+  model: string;
+  reasoningEffort: string;
+  reviewMode: "uncommitted" | "base";
+  baseBranch: string;
+  instructions?: string;
+}): ChildProcess {
   const args: string[] = ["review"];
   if (options.reviewMode === "uncommitted") {
     args.push("--uncommitted");
@@ -1360,7 +1493,7 @@ function spawnReviewProcess(
   args.push("-c", `model=${options.model}`, "-c", `model_reasoning_effort=${options.reasoningEffort}`);
 
   return spawn("codex", args, {
-    cwd: options.worktreeDir,
+    cwd: options.cwd,
     detached: false,
     stdio: ["ignore", "pipe", "pipe"],
     env: {
