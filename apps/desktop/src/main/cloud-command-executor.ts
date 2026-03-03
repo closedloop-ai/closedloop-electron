@@ -26,9 +26,17 @@ export class CloudCommandExecutor {
   private readonly inFlightByCommandId = new Map<string, RunningCommand>();
   private readonly lockOwners = new Map<string, string>();
   private readonly trackedByCommandId = new Map<string, TrackedCommand>();
+  private connected = false;
 
   constructor(options: CloudCommandExecutorOptions) {
     this.options = options;
+  }
+
+  setConnected(connected: boolean): void {
+    this.connected = connected;
+    if (connected) {
+      this.schedule();
+    }
   }
 
   enqueue(command: DesktopCommandEvent): void {
@@ -145,6 +153,9 @@ export class CloudCommandExecutor {
   }
 
   private schedule(): void {
+    if (!this.connected) {
+      return;
+    }
     while (this.inFlightByCommandId.size < Math.max(1, this.options.maxInFlightCommands)) {
       const nextIndex = this.queue.findIndex((candidate) => {
         const lockKey = deriveLockKey(candidate);

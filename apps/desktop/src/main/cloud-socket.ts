@@ -141,7 +141,14 @@ export class CloudSocketService {
       this.awaitingHelloAck = false;
       this.clearHelloAckTimer();
       const message = error instanceof Error ? error.message : "connection failed";
-      this.notifyStatus({ state: "degraded", error: `Cloud socket connection failed: ${message}` });
+      if (looksLikeAuthError(error)) {
+        this.notifyStatus({
+          state: "degraded",
+          error: "Authentication failed — verify your API key in Settings"
+        });
+      } else {
+        this.notifyStatus({ state: "degraded", error: `Cloud socket connection failed: ${message}` });
+      }
     });
 
     socket.on("disconnect", (reason) => {
@@ -400,4 +407,31 @@ function asQueryRecord(value: unknown): Record<string, string | string[]> | null
     }
   }
   return out;
+}
+
+const AUTH_ERROR_PATTERNS = /\b(auth|unauthorized|forbidden|credentials?|api[_ ]?key|token|401|403)\b/i;
+
+function looksLikeAuthError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  if (AUTH_ERROR_PATTERNS.test(error.message)) {
+    return true;
+  }
+  const data = (error as Error & { data?: unknown }).data;
+  if (typeof data === "string" && AUTH_ERROR_PATTERNS.test(data)) {
+    return true;
+  }
+  if (data && typeof data === "object") {
+    const record = data as Record<string, unknown>;
+    const status = typeof record.status === "number" ? record.status : 0;
+    if (status === 401 || status === 403) {
+      return true;
+    }
+    const msg = typeof record.message === "string" ? record.message : "";
+    if (AUTH_ERROR_PATTERNS.test(msg)) {
+      return true;
+    }
+  }
+  return false;
 }

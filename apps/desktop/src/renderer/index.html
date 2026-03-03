@@ -738,20 +738,36 @@
         const runtimeHealth = describeRuntimeHealth(cloudStatus, cachedConnectionEnabled);
         runtimeStatus.className = `runtime-health ${runtimeHealth.tone}`;
         runtimeStatus.title = runtimeHealth.detail;
+        runtimeStatus.style.cursor = isAuthError(cloudStatus.error) ? "pointer" : "";
+        runtimeStatus.onclick = isAuthError(cloudStatus.error) ? () => activateTab("settings") : null;
         const runtimeHealthLabel = runtimeStatus.querySelector(".label");
         if (runtimeHealthLabel) {
           runtimeHealthLabel.textContent = runtimeHealth.label;
         }
         wsStatusBadge.className = `ws-badge ${websocket.tone}`;
         wsStatusBadge.textContent = `WebSocket: ${websocket.label}`;
+        wsStatusDetail.innerHTML = "";
         wsStatusDetail.textContent = websocket.detail;
+        if (isAuthError(cloudStatus.error)) {
+          const settingsLink = document.createElement("a");
+          settingsLink.href = "#";
+          settingsLink.textContent = " Open Settings";
+          settingsLink.style.color = "var(--accent)";
+          settingsLink.style.fontWeight = "600";
+          settingsLink.addEventListener("click", (e) => { e.preventDefault(); activateTab("settings"); });
+          wsStatusDetail.appendChild(settingsLink);
+        }
         dashboardPort.textContent = String(status.port ?? "-");
         dashboardCloud.textContent = describeCloudConnection(cloudStatus);
         dashboardTarget.textContent = describeTargetId(cloudStatus);
         dashboardTarget.title = cloudStatus.targetId || "";
         dashboardApiOrigin.textContent = describeApiOrigin(status.apiOrigin);
         dashboardApiOrigin.title = status.apiOrigin || "";
-        dashboardCommandsState.textContent = cachedCommandsPaused ? "Paused" : "Running";
+        dashboardCommandsState.textContent = !cachedConnectionEnabled
+          ? "Disconnected"
+          : cachedCommandsPaused
+            ? "Paused"
+            : "Running";
         headerPauseToggle.checked = cachedCommandsPaused;
         headerConnectionToggle.textContent = cachedConnectionEnabled ? "Disconnect" : "Reconnect";
         dashboardPayload.textContent = JSON.stringify(status, null, 2);
@@ -788,6 +804,11 @@
         return `${value.slice(0, 8)}...${value.slice(-6)}`;
       }
 
+      function isAuthError(errorText) {
+        return typeof errorText === "string" &&
+          /\b(auth|unauthorized|api[_ ]?key|forbidden|401|403)\b/i.test(errorText);
+      }
+
       function describeWebsocketStatus(cloudStatus) {
         if (cloudStatus.state === "online") {
           return {
@@ -798,6 +819,13 @@
         }
 
         if (cloudStatus.state === "degraded") {
+          if (isAuthError(cloudStatus.error)) {
+            return {
+              label: "Auth Failed",
+              tone: "disconnected",
+              detail: cloudStatus.error
+            };
+          }
           return {
             label: "Disconnected",
             tone: "disconnected",
@@ -828,6 +856,13 @@
           };
         }
         if (cloudStatus.state === "degraded") {
+          if (isAuthError(cloudStatus.error)) {
+            return {
+              label: "Auth Error",
+              tone: "unhealthy",
+              detail: "Your API key was rejected. Open Settings to update it."
+            };
+          }
           return {
             label: "Unhealthy",
             tone: "unhealthy",

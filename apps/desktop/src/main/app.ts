@@ -199,6 +199,8 @@ export class DesktopApplication {
     this.cloudStatus = status;
     const stats = this.commandExecutor.getStats();
 
+    this.commandExecutor.setConnected(status.state === "online");
+
     if (status.state === "online") {
       this.cloudSocket.sendPresence({
         state: this.cloudCommandsPaused ? "degraded" : "online",
