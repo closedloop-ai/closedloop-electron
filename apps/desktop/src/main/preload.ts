@@ -37,3 +37,7 @@ const desktopApi = {
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);
+
+ipcRenderer.on("desktop:navigate-tab", (_event, tab: string) => {
+  window.dispatchEvent(new CustomEvent("desktop:navigate-tab", { detail: tab }));
+});

@@ -224,6 +224,9 @@ export class GatewayRouter {
       });
       const resolvedApproval = approval ? await approval : null;
       if (resolvedApproval && !resolvedApproval.allow) {
+        activityDetail = typeof resolvedApproval.payload?.error === "string"
+          ? resolvedApproval.payload.error
+          : "request not approved";
         response.statusCode = resolvedApproval.statusCode;
         response.setHeader("content-type", "application/json");
         response.end(JSON.stringify(resolvedApproval.payload));

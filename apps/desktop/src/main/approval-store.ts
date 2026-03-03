@@ -23,6 +23,7 @@ type ApprovalStoreSchema = {
 
 export interface ApprovalStoreOptions {
   onChange?: (pendingCount: number) => void;
+  onNewApproval?: (approval: PendingApproval) => void;
 }
 
 export class ApprovalStore {
@@ -31,9 +32,11 @@ export class ApprovalStore {
   private readonly waitersByApprovalId = new Map<string, Set<(decision: ApprovalDecision) => void>>();
   private readonly store: Store<ApprovalStoreSchema>;
   private readonly onChange?: (pendingCount: number) => void;
+  private readonly onNewApproval?: (approval: PendingApproval) => void;
 
   constructor(options?: ApprovalStoreOptions) {
     this.onChange = options?.onChange;
+    this.onNewApproval = options?.onNewApproval;
     this.store = new Store<ApprovalStoreSchema>({
       name: "desktop-approvals",
       defaults: {
@@ -95,6 +98,7 @@ export class ApprovalStore {
     this.pendingById.set(pending.id, pending);
     this.pendingByFingerprint.set(fingerprint, pending.id);
     this.persist();
+    this.onNewApproval?.(pending);
     return pending;
   }
 

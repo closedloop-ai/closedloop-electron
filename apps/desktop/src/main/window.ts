@@ -38,6 +38,10 @@ export class DesktopWindow {
     void this.browserWindow.loadFile(htmlPath);
   }
 
+  getWindow(): BrowserWindow | null {
+    return this.browserWindow;
+  }
+
   show(): void {
     this.browserWindow?.show();
     this.browserWindow?.focus();

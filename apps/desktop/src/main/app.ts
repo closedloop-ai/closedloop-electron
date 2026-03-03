@@ -1,7 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
-import { dialog, ipcMain } from "electron";
+import { dialog, ipcMain, Notification } from "electron";
 import {
   type AlwaysAllowRule,
   DESKTOP_GATEWAY_VERSION,
@@ -48,7 +48,18 @@ export class DesktopApplication {
     this.desktopWindow = new DesktopWindow();
     this.activityLog = new ActivityLogStore();
     this.approvalStore = new ApprovalStore({
-      onChange: (pendingCount) => this.tray.setPendingApprovals(pendingCount)
+      onChange: (pendingCount) => this.tray.setPendingApprovals(pendingCount),
+      onNewApproval: (approval) => {
+        const notification = new Notification({
+          title: "Approval Required",
+          body: approval.reason,
+        });
+        notification.on("click", () => {
+          this.desktopWindow.show();
+          this.desktopWindow.getWindow()?.webContents.send("desktop:navigate-tab", "approvals");
+        });
+        notification.show();
+      }
     });
     this.server = DesktopGatewayServer.createDefault(
       this.settingsStore.getWebAppOrigin(),

@@ -671,13 +671,22 @@
       const tabs = document.querySelectorAll("nav button");
       const panels = document.querySelectorAll(".panel");
 
+      function activateTab(tabName) {
+        tabs.forEach((button) => button.classList.remove("active"));
+        panels.forEach((panel) => panel.classList.remove("active"));
+        const tabButton = document.querySelector(`nav button[data-tab="${tabName}"]`);
+        if (tabButton) {
+          tabButton.classList.add("active");
+          document.getElementById(tabName)?.classList.add("active");
+        }
+      }
+
       tabs.forEach((tab) => {
-        tab.addEventListener("click", () => {
-          tabs.forEach((button) => button.classList.remove("active"));
-          panels.forEach((panel) => panel.classList.remove("active"));
-          tab.classList.add("active");
-          document.getElementById(tab.dataset.tab).classList.add("active");
-        });
+        tab.addEventListener("click", () => activateTab(tab.dataset.tab));
+      });
+
+      window.addEventListener("desktop:navigate-tab", (event) => {
+        activateTab(event.detail);
       });
 
       const apiOrigin = document.getElementById("apiOrigin");
