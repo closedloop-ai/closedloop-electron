@@ -54,6 +54,8 @@ export interface GatewayActivityEvent {
   statusCode: number;
   durationMs: number;
   detail?: string;
+  requestBody?: string;
+  responseBody?: string;
 }
 
 export interface GatewayApprovalRequest {
@@ -162,17 +164,61 @@ export class GatewayRouter {
     const startedAt = Date.now();
     let activityType: GatewayActivityEvent["type"] = "request";
     let activityDetail: string | undefined;
+    let capturedRequestBody: string | undefined;
+    let capturedResponseBody = "";
 
     if (isEngineerRoute && method !== "OPTIONS") {
+      const maxCapture = 8192;
+      const origWrite = response.write;
+      const origEnd = response.end;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (response as any).write = function (chunk: any, ...rest: any[]) {
+        if (chunk != null && capturedResponseBody.length < maxCapture) {
+          const s =
+            typeof chunk === "string"
+              ? chunk
+              : Buffer.isBuffer(chunk)
+                ? chunk.toString("utf-8")
+                : "";
+          capturedResponseBody += s.slice(
+            0,
+            maxCapture - capturedResponseBody.length
+          );
+        }
+        return origWrite.apply(response, [chunk, ...rest] as any);
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (response as any).end = function (chunk: any, ...rest: any[]) {
+        if (
+          chunk != null &&
+          typeof chunk !== "function" &&
+          capturedResponseBody.length < maxCapture
+        ) {
+          const s =
+            typeof chunk === "string"
+              ? chunk
+              : Buffer.isBuffer(chunk)
+                ? chunk.toString("utf-8")
+                : "";
+          capturedResponseBody += s.slice(
+            0,
+            maxCapture - capturedResponseBody.length
+          );
+        }
+        return origEnd.apply(response, [chunk, ...rest] as any);
+      };
+
       response.once("finish", () => {
         this.options.onActivityEvent?.({
           type: activityType,
           timestamp: new Date(startedAt).toISOString(),
           method,
-          path: url.pathname,
+          path: url.pathname + url.search,
           statusCode: response.statusCode,
           durationMs: Math.max(0, Date.now() - startedAt),
-          detail: activityDetail
+          detail: activityDetail,
+          requestBody: capturedRequestBody,
+          responseBody: capturedResponseBody || undefined
         });
       });
     }
@@ -209,6 +255,7 @@ export class GatewayRouter {
     if (isEngineerRoute) {
       const rawBody = await this.readBody(request);
       const body = rawBody.toString("utf-8");
+      capturedRequestBody = body || undefined;
 
       const approval = this.options.evaluateApproval?.({
         method,

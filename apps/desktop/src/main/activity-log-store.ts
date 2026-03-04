@@ -10,6 +10,8 @@ export type ActivityEvent = {
   statusCode: number;
   durationMs: number;
   detail?: string;
+  requestBody?: string;
+  responseBody?: string;
 };
 
 type ActivityStoreSchema = {

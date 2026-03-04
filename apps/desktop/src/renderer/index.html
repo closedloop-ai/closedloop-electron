@@ -585,6 +585,105 @@
         margin-top: 4px;
       }
 
+      .activity-card.expandable .activity-top {
+        cursor: pointer;
+      }
+
+      .activity-card.expandable:hover {
+        border-color: var(--accent);
+        transition: border-color 0.15s ease;
+      }
+
+      .activity-chevron {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 16px;
+        height: 16px;
+        color: var(--muted);
+        transition: transform 0.25s ease;
+        flex-shrink: 0;
+        font-size: 10px;
+      }
+
+      .activity-card.expanded .activity-chevron {
+        transform: rotate(180deg);
+      }
+
+      .activity-expand {
+        display: grid;
+        grid-template-rows: 0fr;
+        transition: grid-template-rows 0.3s ease;
+      }
+
+      .activity-card.expanded .activity-expand {
+        grid-template-rows: 1fr;
+      }
+
+      .activity-expand-inner {
+        overflow: hidden;
+      }
+
+      .activity-separator {
+        border: none;
+        border-top: 1px solid var(--border);
+        margin: 10px 0 8px;
+        opacity: 0.5;
+      }
+
+      .activity-method-path {
+        font-family: "Berkeley Mono", "JetBrains Mono", "SF Mono", "Fira Code", monospace;
+        font-size: 11px;
+        color: var(--accent);
+        font-weight: 600;
+        word-break: break-all;
+        line-height: 1.4;
+      }
+
+      .activity-body-section {
+        margin-top: 8px;
+      }
+
+      .activity-body-label {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        font-weight: 600;
+        margin-bottom: 4px;
+      }
+
+      .activity-body-block {
+        font-family: "Berkeley Mono", "JetBrains Mono", "SF Mono", "Fira Code", monospace;
+        font-size: 11px;
+        line-height: 1.5;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--accent);
+        border-radius: 6px;
+        padding: 8px 10px;
+        margin: 0;
+        white-space: pre-wrap;
+        word-break: break-all;
+        max-height: 200px;
+        overflow-y: auto;
+        color: var(--ink);
+      }
+
+      .json-key { color: #0f766e; }
+      .json-str { color: #b45309; }
+      .json-num { color: #7c3aed; }
+      .json-bool { color: #2563eb; }
+      .json-null { color: #9ca3af; font-style: italic; }
+
+      @media (prefers-color-scheme: dark) {
+        .json-key { color: #5eead4; }
+        .json-str { color: #fbbf24; }
+        .json-num { color: #c4b5fd; }
+        .json-bool { color: #60a5fa; }
+        .json-null { color: #6b7280; }
+      }
+
       pre {
         background: var(--surface-alt);
         border: 1px solid var(--border);
@@ -872,6 +971,7 @@
       const showSecurityEvents = document.getElementById("showSecurityEvents");
       let cachedPendingApprovals = [];
       let cachedActivityEvents = [];
+      const expandedActivityIds = new Set();
       let cachedCommandsPaused = false;
       let cachedConnectionEnabled = true;
 
@@ -1022,9 +1122,15 @@
         };
       }
 
+      let lastActivityFingerprint = "";
+
       async function refreshActivity() {
         const events = await api.getActivityEvents();
-        cachedActivityEvents = Array.isArray(events) ? events : [];
+        const incoming = Array.isArray(events) ? events : [];
+        const fingerprint = incoming.map((e) => e.id).join(",");
+        if (fingerprint === lastActivityFingerprint) return;
+        lastActivityFingerprint = fingerprint;
+        cachedActivityEvents = incoming;
         renderActivity();
       }
 
@@ -1099,9 +1205,47 @@
         return String(code);
       }
 
+      function esc(s) {
+        return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      }
+
+      function jsonToHtml(value, indent) {
+        if (indent === undefined) indent = 0;
+        const pad = "  ".repeat(indent);
+        const pad1 = "  ".repeat(indent + 1);
+        if (value === null) return '<span class="json-null">null</span>';
+        if (typeof value === "boolean") return '<span class="json-bool">' + value + "</span>";
+        if (typeof value === "number") return '<span class="json-num">' + value + "</span>";
+        if (typeof value === "string") return '<span class="json-str">"' + esc(value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')).replace(/\n/g, "\\n") + '"</span>';
+        if (Array.isArray(value)) {
+          if (!value.length) return "[]";
+          const items = value.map(function (v) { return pad1 + jsonToHtml(v, indent + 1); });
+          return "[\n" + items.join(",\n") + "\n" + pad + "]";
+        }
+        const keys = Object.keys(value);
+        if (!keys.length) return "{}";
+        const entries = keys.map(function (k) {
+          return pad1 + '<span class="json-key">"' + esc(k) + '"</span>: ' + jsonToHtml(value[k], indent + 1);
+        });
+        return "{\n" + entries.join(",\n") + "\n" + pad + "}";
+      }
+
+      function formatBody(text) {
+        if (!text) return { html: "", isJson: false };
+        try {
+          const parsed = JSON.parse(text);
+          return { html: jsonToHtml(parsed, 0), isJson: true };
+        } catch {
+          return { html: esc(text), isJson: false };
+        }
+      }
+
       function renderActivityCard(event) {
         const card = document.createElement("div");
         card.className = "activity-card";
+
+        const hasExpand = Boolean(event.requestBody || event.responseBody);
+        if (hasExpand) card.classList.add("expandable");
 
         const top = document.createElement("div");
         top.className = "activity-top";
@@ -1124,12 +1268,27 @@
         badge.textContent = kind === "security" ? "Security" : statusLabel(statusCode);
         top.appendChild(badge);
 
+        if (hasExpand) {
+          const chevron = document.createElement("span");
+          chevron.className = "activity-chevron";
+          chevron.textContent = "\u25BE";
+          top.appendChild(chevron);
+        }
+
         card.appendChild(top);
 
         const meta = document.createElement("div");
         meta.className = "activity-meta";
         const duration = Number(event.durationMs || 0);
-        meta.textContent = `${timeAgo(event.timestamp)} \u00b7 ${duration}ms`;
+        const receivedAt = new Date(event.timestamp);
+        const respondedAt = new Date(receivedAt.getTime() + duration);
+        const timeFmt = (d) => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+        const durationFmt = duration >= 60000
+          ? (duration / 60000).toFixed(1) + "m"
+          : duration >= 1000
+            ? (duration / 1000).toFixed(1) + "s"
+            : duration + "ms";
+        meta.textContent = `Received ${timeFmt(receivedAt)} \u2192 Responded ${timeFmt(respondedAt)} (${durationFmt})`;
         card.appendChild(meta);
 
         if (event.detail) {
@@ -1137,6 +1296,70 @@
           detail.className = "activity-detail";
           detail.textContent = String(event.detail);
           card.appendChild(detail);
+        }
+
+        if (hasExpand) {
+          const expand = document.createElement("div");
+          expand.className = "activity-expand";
+          const inner = document.createElement("div");
+          inner.className = "activity-expand-inner";
+
+          const sep = document.createElement("hr");
+          sep.className = "activity-separator";
+          inner.appendChild(sep);
+
+          const methodPath = document.createElement("div");
+          methodPath.className = "activity-method-path";
+          methodPath.textContent = `${event.method} ${event.path}`;
+          inner.appendChild(methodPath);
+
+          if (event.requestBody) {
+            const section = document.createElement("div");
+            section.className = "activity-body-section";
+            const label = document.createElement("div");
+            label.className = "activity-body-label";
+            label.textContent = "Request Body";
+            section.appendChild(label);
+            const block = document.createElement("pre");
+            const reqFmt = formatBody(event.requestBody);
+            block.className = "activity-body-block" + (reqFmt.isJson ? " json" : "");
+            block.innerHTML = reqFmt.html;
+            section.appendChild(block);
+            inner.appendChild(section);
+          }
+
+          if (event.responseBody) {
+            const section = document.createElement("div");
+            section.className = "activity-body-section";
+            const label = document.createElement("div");
+            label.className = "activity-body-label";
+            label.textContent = "Response Body";
+            section.appendChild(label);
+            const block = document.createElement("pre");
+            const resFmt = formatBody(event.responseBody);
+            block.className = "activity-body-block" + (resFmt.isJson ? " json" : "");
+            block.innerHTML = resFmt.html;
+            section.appendChild(block);
+            inner.appendChild(section);
+          }
+
+          expand.appendChild(inner);
+          card.appendChild(expand);
+
+          if (event.id && expandedActivityIds.has(event.id)) {
+            card.classList.add("expanded");
+          }
+
+          top.addEventListener("click", () => {
+            const nowExpanded = card.classList.toggle("expanded");
+            if (event.id) {
+              if (nowExpanded) {
+                expandedActivityIds.add(event.id);
+              } else {
+                expandedActivityIds.delete(event.id);
+              }
+            }
+          });
         }
 
         return card;
