@@ -284,6 +284,42 @@
         color: #dc2626;
       }
 
+      #updateBanner {
+        display: none;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        padding: 10px 20px;
+        background: var(--accent);
+        color: var(--accent-ink);
+        font-size: 13px;
+        font-weight: 500;
+      }
+
+      #updateBanner.visible {
+        display: flex;
+      }
+
+      #updateBanner button {
+        padding: 4px 14px;
+        border: 1px solid var(--accent-ink);
+        border-radius: 4px;
+        background: transparent;
+        color: var(--accent-ink);
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      #updateBanner button:hover {
+        background: rgba(255, 255, 255, 0.15);
+      }
+
+      #updateBanner button:disabled {
+        opacity: 0.6;
+        cursor: default;
+      }
+
       .row {
         margin-bottom: 18px;
       }
@@ -747,6 +783,10 @@
         </div>
       </div>
     </header>
+    <div id="updateBanner">
+      <span id="updateBannerText">A new version is available</span>
+      <button id="updateBannerBtn">Update &amp; Restart</button>
+    </div>
     <div id="onboardingOverlay" class="onboarding-overlay hidden">
       <div class="onboarding-card">
         <h2 style="margin-top: 0">Setup Required</h2>
@@ -1875,6 +1915,37 @@
         void refreshApprovals();
         void refreshActivity();
       }, 2000);
+
+      // --- Auto-update banner ---
+      const updateBanner = document.getElementById("updateBanner");
+      const updateBannerText = document.getElementById("updateBannerText");
+      const updateBannerBtn = document.getElementById("updateBannerBtn");
+
+      function showUpdateBanner(result) {
+        const shortHash = result.remoteHash ? result.remoteHash.slice(0, 7) : "unknown";
+        updateBannerText.textContent = `A new version is available (${shortHash})`;
+        updateBanner.classList.add("visible");
+      }
+
+      async function triggerUpdate() {
+        updateBannerBtn.disabled = true;
+        try {
+          updateBannerText.textContent = "Pulling\u2026";
+          await new Promise((r) => setTimeout(r, 100));
+          updateBannerText.textContent = "Building\u2026";
+          await api.applyUpdate();
+          updateBannerText.textContent = "Restarting\u2026";
+        } catch (error) {
+          updateBannerText.textContent = `Update failed: ${error.message || error}`;
+          updateBannerBtn.disabled = false;
+        }
+      }
+
+      window.addEventListener("desktop:update-available", (event) => {
+        showUpdateBanner(event.detail);
+      });
+
+      updateBannerBtn.addEventListener("click", triggerUpdate);
     </script>
   </body>
 </html>

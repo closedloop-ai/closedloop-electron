@@ -5,3 +5,4 @@ dist
 .vscode
 .claude/.symphony/
 .closedloop-ai/code-review/*
+apps/desktop/src/shared/build-info.ts

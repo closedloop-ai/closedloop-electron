@@ -168,42 +168,31 @@ export class GatewayRouter {
     let capturedResponseBody = "";
 
     if (isEngineerRoute && method !== "OPTIONS") {
-      const maxCapture = 8192;
       const origWrite = response.write;
       const origEnd = response.end;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (response as any).write = function (chunk: any, ...rest: any[]) {
-        if (chunk != null && capturedResponseBody.length < maxCapture) {
+        if (chunk != null) {
           const s =
             typeof chunk === "string"
               ? chunk
               : Buffer.isBuffer(chunk)
                 ? chunk.toString("utf-8")
                 : "";
-          capturedResponseBody += s.slice(
-            0,
-            maxCapture - capturedResponseBody.length
-          );
+          capturedResponseBody += s;
         }
         return origWrite.apply(response, [chunk, ...rest] as any);
       };
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (response as any).end = function (chunk: any, ...rest: any[]) {
-        if (
-          chunk != null &&
-          typeof chunk !== "function" &&
-          capturedResponseBody.length < maxCapture
-        ) {
+        if (chunk != null && typeof chunk !== "function") {
           const s =
             typeof chunk === "string"
               ? chunk
               : Buffer.isBuffer(chunk)
                 ? chunk.toString("utf-8")
                 : "";
-          capturedResponseBody += s.slice(
-            0,
-            maxCapture - capturedResponseBody.length
-          );
+          capturedResponseBody += s;
         }
         return origEnd.apply(response, [chunk, ...rest] as any);
       };

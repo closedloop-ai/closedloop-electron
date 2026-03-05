@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "pnpm build && electron dist/main/index.js",
     "start": "electron dist/main/index.js",
-    "build": "tsc -p tsconfig.json",
+    "prebuild": "node -e \"const{execSync:e}=require('child_process'),{writeFileSync:w}=require('fs');const h=e('git rev-parse HEAD').toString().trim();w('src/shared/build-info.ts','// AUTO-GENERATED — do not edit\\nexport const BUILD_COMMIT_HASH = \\\"'+h+'\\\";\\n');\"",
+    "build": "pnpm prebuild && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "tsx --test test/*.test.ts"
   },

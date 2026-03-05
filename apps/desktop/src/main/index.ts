@@ -13,10 +13,7 @@ app.on("ready", () => {
 });
 
 app.on("activate", () => {
-  void desktopApplication.boot().catch((error) => {
-    const message = error instanceof Error ? error.message : "unknown activation error";
-    console.error(`desktop activation failed: ${message}`);
-  });
+  desktopApplication.showWindow();
 });
 
 app.on("before-quit", () => {

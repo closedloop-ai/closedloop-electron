@@ -1,7 +1,10 @@
 import os from "node:os";
 import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { randomBytes, randomUUID } from "node:crypto";
-import { dialog, ipcMain, Notification } from "electron";
+import { fileURLToPath } from "node:url";
+import { app, dialog, ipcMain, Notification } from "electron";
 import {
   type AlwaysAllowRule,
   DESKTOP_GATEWAY_VERSION,
@@ -21,6 +24,11 @@ import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
 import type { GatewayApprovalRequest, GatewayApprovalResult } from "../server/router.js";
 import { normalizeAndValidateApiOrigin, normalizeWebAppOrigin } from "./origin-policy.js";
+import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const execFileAsync = promisify(execFile);
+const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 
 export class DesktopApplication {
   private readonly settingsStore: SettingsStore;
@@ -38,6 +46,7 @@ export class DesktopApplication {
   private cloudStatus: CloudSocketStatus = { state: "idle" };
   private cloudCommandsPaused: boolean;
   private cloudConnectionEnabled: boolean;
+  private updateCheckTimer: NodeJS.Timeout | null = null;
 
   constructor() {
     this.gatewayAuthToken = randomBytes(24).toString("hex");
@@ -170,11 +179,30 @@ export class DesktopApplication {
       } else {
         this.cloudStatus = { state: "degraded", error: "Cloud connection disabled by user" };
       }
+
+      void this.checkForUpdate().then((result) => {
+        if (result.updateAvailable) {
+          this.desktopWindow.getWindow()?.webContents.send("desktop:update-available", result);
+        }
+      }).catch(() => {});
+      if (this.updateCheckTimer) clearInterval(this.updateCheckTimer);
+      this.updateCheckTimer = setInterval(() => {
+        void this.checkForUpdate().then((result) => {
+          if (result.updateAvailable) {
+            this.desktopWindow.getWindow()?.webContents.send("desktop:update-available", result);
+          }
+        }).catch(() => {});
+      }, UPDATE_CHECK_INTERVAL_MS);
     } catch (error) {
       const message = error instanceof Error ? error.message : "unknown startup error";
       this.tray.setState("error", `Desktop startup failed: ${message}`);
       throw error;
     }
+  }
+
+  showWindow(): void {
+    this.desktopWindow.init();
+    this.desktopWindow.show();
   }
 
   async shutdown(): Promise<void> {
@@ -183,6 +211,10 @@ export class DesktopApplication {
     }
 
     this.shuttingDown = true;
+    if (this.updateCheckTimer) {
+      clearInterval(this.updateCheckTimer);
+      this.updateCheckTimer = null;
+    }
     this.cloudSocket.stop();
     this.commandExecutor.dispose();
     await this.server.stop();
@@ -459,6 +491,26 @@ export class DesktopApplication {
     this.settingsStore.setAlwaysAllowRules(activeRules);
   }
 
+  private async checkForUpdate(): Promise<{ updateAvailable: boolean; currentHash: string; remoteHash: string }> {
+    const repoRoot = path.resolve(__dirname, "../../../..");
+    await execFileAsync("git", ["fetch", "origin", "main"], { cwd: repoRoot });
+    const { stdout } = await execFileAsync("git", ["rev-parse", "origin/main"], { cwd: repoRoot });
+    const remoteHash = stdout.trim();
+    return {
+      updateAvailable: remoteHash !== BUILD_COMMIT_HASH,
+      currentHash: BUILD_COMMIT_HASH,
+      remoteHash
+    };
+  }
+
+  private async applyUpdate(): Promise<void> {
+    const repoRoot = path.resolve(__dirname, "../../../..");
+    await execFileAsync("git", ["pull", "--rebase", "origin", "main"], { cwd: repoRoot });
+    await execFileAsync("pnpm", ["-C", "apps/desktop", "build"], { cwd: repoRoot });
+    app.relaunch();
+    app.exit(0);
+  }
+
   private registerIpcHandlers(): void {
     ipcMain.handle("desktop:get-settings", () => {
       const settings = this.settingsStore.getAll();
@@ -655,6 +707,16 @@ export class DesktopApplication {
     ipcMain.handle("desktop:set-dangerous-auto-approve", (_event, enabled: boolean) => {
       this.dangerousAutoApprove = Boolean(enabled);
       return this.dangerousAutoApprove;
+    });
+    ipcMain.handle("desktop:check-for-update", async () => {
+      try {
+        return await this.checkForUpdate();
+      } catch (error) {
+        return { updateAvailable: false, error: error instanceof Error ? error.message : "unknown error" };
+      }
+    });
+    ipcMain.handle("desktop:apply-update", async () => {
+      await this.applyUpdate();
     });
   }
 }

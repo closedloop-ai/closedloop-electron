@@ -41,11 +41,17 @@ const desktopApi = {
   getDangerousAutoApprove: () =>
     ipcRenderer.invoke("desktop:get-dangerous-auto-approve") as Promise<boolean>,
   setDangerousAutoApprove: (enabled: boolean) =>
-    ipcRenderer.invoke("desktop:set-dangerous-auto-approve", enabled) as Promise<boolean>
+    ipcRenderer.invoke("desktop:set-dangerous-auto-approve", enabled) as Promise<boolean>,
+  checkForUpdate: () => ipcRenderer.invoke("desktop:check-for-update") as Promise<unknown>,
+  applyUpdate: () => ipcRenderer.invoke("desktop:apply-update") as Promise<unknown>
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);
 
 ipcRenderer.on("desktop:navigate-tab", (_event, tab: string) => {
   window.dispatchEvent(new CustomEvent("desktop:navigate-tab", { detail: tab }));
+});
+
+ipcRenderer.on("desktop:update-available", (_event, result) => {
+  window.dispatchEvent(new CustomEvent("desktop:update-available", { detail: result }));
 });
