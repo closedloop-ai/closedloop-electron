@@ -4,5 +4,7 @@ dist
 .idea
 .vscode
 .claude/.symphony/
+.claude/bootstrap/
+.closedloop-ai/
 .closedloop-ai/code-review/*
 apps/desktop/src/shared/build-info.ts
