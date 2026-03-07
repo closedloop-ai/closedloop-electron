@@ -3,8 +3,9 @@ export const FALLBACK_GATEWAY_PORTS = [19433, 19434, 19435] as const;
 export const PORT_PROBE_ORDER = [DEFAULT_GATEWAY_PORT, ...FALLBACK_GATEWAY_PORTS] as const;
 export const DESKTOP_GATEWAY_VERSION = "0.1.0";
 
-export const DEFAULT_API_ORIGIN = "https://api.symphony.com";
-export const DEFAULT_WEB_APP_ORIGIN = "https://app.symphony.com";
+/** WebSocket relay host — the electron app connects here for cloud commands, not the REST API. */
+export const DEFAULT_RELAY_ORIGIN = process.env.CL_RELAY_ORIGIN ?? "https://relay.closedloop.ai";
+export const DEFAULT_WEB_APP_ORIGIN = process.env.CL_WEB_APP_ORIGIN ?? "https://app.closedloop.ai";
 
 export type CapabilityToolName = "claude" | "codex" | "git" | "gh" | "python3";
 
@@ -66,6 +67,6 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   cloudCommandsPaused: false,
   cloudConnectionEnabled: true,
   defaultApprovalTier: "high",
-  apiOrigin: DEFAULT_API_ORIGIN,
+  apiOrigin: DEFAULT_RELAY_ORIGIN,
   webAppOrigin: DEFAULT_WEB_APP_ORIGIN
 };

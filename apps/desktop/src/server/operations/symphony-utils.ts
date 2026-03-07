@@ -1,5 +1,12 @@
 import { execFileSync, execSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  renameSync,
+  rmSync
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
@@ -299,5 +306,14 @@ export function ensureWorktreeForReview(
     }
   }
 
+  return null;
+}
+
+export function findFirstExisting(...paths: string[]): string | null {
+  for (const p of paths) {
+    if (existsSync(p)) {
+      return p;
+    }
+  }
   return null;
 }

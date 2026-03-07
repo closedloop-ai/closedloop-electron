@@ -3,7 +3,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
-import { expandHome, resolveWorktreeDir } from "./symphony-utils.js";
+import { expandHome, findFirstExisting, resolveWorktreeDir } from "./symphony-utils.js";
 
 type TaskProgress = {
   pending: number;
@@ -57,7 +57,10 @@ export function registerSymphonyStatusRoutes(
       }
 
       const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-      const statePath = path.join(worktreeDir, ".claude", "work", "state.json");
+      const statePath = findFirstExisting(
+        path.join(worktreeDir, ticketId, "state.json"),
+        path.join(worktreeDir, ".claude", "work", "state.json")
+      );
 
       if (!existsSync(worktreeDir)) {
         json(context, 200, {
@@ -69,7 +72,7 @@ export function registerSymphonyStatusRoutes(
         return;
       }
 
-      if (!existsSync(statePath)) {
+      if (!statePath) {
         json(context, 200, {
           exists: true,
           stateExists: false,
@@ -84,9 +87,12 @@ export function registerSymphonyStatusRoutes(
       const state = JSON.parse(stateContent) as Record<string, unknown>;
 
       const effective = await resolveEffectiveState(worktreeDir, state);
-      const planPath = path.join(worktreeDir, ".claude", "work", "plan.json");
-      const planExists = existsSync(planPath);
-      const { taskProgress, currentTaskId } = await readPlanProgress(planPath);
+      const resolvedPlanPath = findFirstExisting(
+        path.join(worktreeDir, ticketId, "plan.json"),
+        path.join(worktreeDir, ".claude", "work", "plan.json")
+      );
+      const planExists = resolvedPlanPath !== null;
+      const { taskProgress, currentTaskId } = await readPlanProgress(resolvedPlanPath ?? "");
       const activeAgents = await readActiveAgents(worktreeDir);
 
       json(context, 200, {

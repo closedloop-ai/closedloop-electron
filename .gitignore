@@ -3,8 +3,8 @@ dist
 .DS_Store
 .idea
 .vscode
-.claude/.symphony/
-.claude/bootstrap/
+.claude/
 .closedloop-ai/
 .closedloop-ai/code-review/*
 apps/desktop/src/shared/build-info.ts
+.env.local
