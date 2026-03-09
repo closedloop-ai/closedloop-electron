@@ -729,6 +729,10 @@ const SUPPORTED_OPERATION_IDS = [
   "symphony_comment_chat",
   "symphony_commit_message",
   "symphony_sessions",
+  "symphony_plan",
+  "symphony_judges",
+  "symphony_logs",
+  "symphony_chat_history",
   "terminal_chat",
   "ticket_chat",
   "run_viewer_chat",
@@ -769,6 +773,27 @@ function resolveOperationId(pathname: string): string | null {
   if (pathname === "/api/engineer/symphony/sessions") {
     return "symphony_sessions";
   }
+  if (pathname.startsWith("/api/engineer/symphony/plan/")) {
+    return "symphony_plan";
+  }
+  if (pathname.startsWith("/api/engineer/symphony/judges/")) {
+    return "symphony_judges";
+  }
+  if (pathname.startsWith("/api/engineer/symphony/logs/")) {
+    return "symphony_logs";
+  }
+  if (pathname.startsWith("/api/engineer/symphony/chat-history/")) {
+    return "symphony_chat_history";
+  }
+  if (pathname.startsWith("/api/engineer/symphony/pending-learnings")) {
+    return "learnings";
+  }
+  if (pathname.startsWith("/api/engineer/symphony/process-learnings")) {
+    return "learnings";
+  }
+  if (pathname.startsWith("/api/engineer/symphony/process-all-learnings")) {
+    return "learnings";
+  }
   if (pathname === "/api/engineer/terminal-chat") {
     return "terminal_chat";
   }
@@ -799,7 +824,7 @@ function resolveOperationId(pathname: string): string | null {
   if (pathname.startsWith("/api/engineer/deploy")) {
     return "deploy";
   }
-  if (pathname === "/api/engineer/learnings" || pathname.includes("learnings")) {
+  if (pathname === "/api/engineer/learnings") {
     return "learnings";
   }
   if (

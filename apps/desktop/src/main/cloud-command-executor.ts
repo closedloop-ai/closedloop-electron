@@ -69,6 +69,7 @@ export class CloudCommandExecutor {
     const tracked: TrackedCommand = {
       command,
       state: "queued",
+      lastEmittedSequence: 0,
       buffered: {
         lastAckedSequence: 0,
         events: []
@@ -362,9 +363,8 @@ export class CloudCommandExecutor {
       return;
     }
 
-    const sequence = tracked.buffered.events.length
-      ? tracked.buffered.events[tracked.buffered.events.length - 1].sequence + 1
-      : 1;
+    const sequence = tracked.lastEmittedSequence + 1;
+    tracked.lastEmittedSequence = sequence;
     const record: CommandEventRecord = {
       sequence,
       eventType,
@@ -458,6 +458,7 @@ interface TrackedCommand {
   state: "queued" | "running" | "terminal";
   terminalState?: TerminalCommandState;
   completedAt?: number;
+  lastEmittedSequence: number;
   buffered: BufferedCommandEvents;
 }
 

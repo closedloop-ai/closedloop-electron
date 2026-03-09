@@ -1,5 +1,12 @@
 import { execFileSync, execSync } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  renameSync,
+  rmSync
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
@@ -29,8 +36,12 @@ export function resolveWorktreeParentDir(expandedRepoPath: string): string {
   return path.dirname(expandedRepoPath);
 }
 
+export function sanitizeTicketId(ticketId: string): string {
+  return ticketId.replaceAll(/[^a-zA-Z0-9-_]/g, "_");
+}
+
 export function resolveWorktreeDir(expandedRepoPath: string, ticketId: string): string {
-  const sanitizedTicket = ticketId.replaceAll(/[^a-zA-Z0-9-_]/g, "_");
+  const sanitizedTicket = sanitizeTicketId(ticketId);
   const repoName = path.basename(expandedRepoPath);
   return path.join(resolveWorktreeParentDir(expandedRepoPath), `${repoName}-${sanitizedTicket}`);
 }
@@ -299,5 +310,14 @@ export function ensureWorktreeForReview(
     }
   }
 
+  return null;
+}
+
+export function findFirstExisting(...paths: string[]): string | null {
+  for (const p of paths) {
+    if (existsSync(p)) {
+      return p;
+    }
+  }
   return null;
 }

@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError } from "../security.js";
-import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
+import { assertRepoAllowed, findFirstExisting, resolveWorktreeDir, sanitizeTicketId } from "./symphony-utils.js";
 
 type PlanTask = {
   id: string;
@@ -52,14 +52,18 @@ export function registerSymphonyPlanRoutes(
       }
 
       const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-      const planPath = path.join(worktreeDir, ".claude", "work", "plan.json");
+      const safeTicketId = sanitizeTicketId(ticketId);
+      const planPath = findFirstExisting(
+        path.join(worktreeDir, safeTicketId, "plan.json"),
+        path.join(worktreeDir, ".claude", "work", "plan.json")
+      );
 
       if (!existsSync(worktreeDir)) {
         json(context, 404, { error: "Worktree not found", exists: false });
         return;
       }
 
-      if (!existsSync(planPath)) {
+      if (!planPath) {
         json(context, 404, { error: "Plan not found yet", exists: false, planExists: false });
         return;
       }
@@ -75,8 +79,11 @@ export function registerSymphonyPlanRoutes(
       }
 
       if (!markdownContent) {
-        const planMdPath = path.join(worktreeDir, ".claude", "work", "plan.md");
-        if (existsSync(planMdPath)) {
+        const planMdPath = findFirstExisting(
+          path.join(worktreeDir, safeTicketId, "plan.md"),
+          path.join(worktreeDir, ".claude", "work", "plan.md")
+        );
+        if (planMdPath) {
           const planMd = await readFile(planMdPath, "utf-8");
           const planTitle = String(plan.title ?? "");
           const firstLines = planMd.slice(0, 500);

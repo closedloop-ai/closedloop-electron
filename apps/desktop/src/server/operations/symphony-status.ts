@@ -3,7 +3,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
-import { expandHome, resolveWorktreeDir } from "./symphony-utils.js";
+import { expandHome, findFirstExisting, resolveWorktreeDir, sanitizeTicketId } from "./symphony-utils.js";
 
 type TaskProgress = {
   pending: number;
@@ -57,7 +57,11 @@ export function registerSymphonyStatusRoutes(
       }
 
       const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-      const statePath = path.join(worktreeDir, ".claude", "work", "state.json");
+      const safeTicketId = sanitizeTicketId(ticketId);
+      const statePath = findFirstExisting(
+        path.join(worktreeDir, safeTicketId, "state.json"),
+        path.join(worktreeDir, ".claude", "work", "state.json")
+      );
 
       if (!existsSync(worktreeDir)) {
         json(context, 200, {
@@ -69,7 +73,7 @@ export function registerSymphonyStatusRoutes(
         return;
       }
 
-      if (!existsSync(statePath)) {
+      if (!statePath) {
         json(context, 200, {
           exists: true,
           stateExists: false,
@@ -83,10 +87,13 @@ export function registerSymphonyStatusRoutes(
       const stateContent = await readFile(statePath, "utf-8");
       const state = JSON.parse(stateContent) as Record<string, unknown>;
 
-      const effective = await resolveEffectiveState(worktreeDir, state);
-      const planPath = path.join(worktreeDir, ".claude", "work", "plan.json");
-      const planExists = existsSync(planPath);
-      const { taskProgress, currentTaskId } = await readPlanProgress(planPath);
+      const effective = await resolveEffectiveState(worktreeDir, state, statePath);
+      const resolvedPlanPath = findFirstExisting(
+        path.join(worktreeDir, safeTicketId, "plan.json"),
+        path.join(worktreeDir, ".claude", "work", "plan.json")
+      );
+      const planExists = resolvedPlanPath !== null;
+      const { taskProgress, currentTaskId } = await readPlanProgress(resolvedPlanPath ?? "");
       const activeAgents = await readActiveAgents(worktreeDir);
 
       json(context, 200, {
@@ -163,7 +170,8 @@ async function detectCompletionFromLogs(
 
 async function resolveEffectiveState(
   worktreeDir: string,
-  state: Record<string, unknown>
+  state: Record<string, unknown>,
+  statePath: string
 ): Promise<EffectiveState> {
   const status = typeof state.status === "string" ? state.status : "UNKNOWN";
   const phase = typeof state.phase === "string" ? state.phase : "Unknown";
@@ -189,7 +197,6 @@ async function resolveEffectiveState(
     return { status, phase, fallbackDetected: false, ...base };
   }
 
-  const statePath = path.join(worktreeDir, ".claude", "work", "state.json");
   const stateStats = await stat(statePath);
   const stateAgeMs = Date.now() - stateStats.mtime.getTime();
   if (stateAgeMs <= 2 * 60 * 1000) {
