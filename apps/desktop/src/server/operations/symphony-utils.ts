@@ -36,8 +36,12 @@ export function resolveWorktreeParentDir(expandedRepoPath: string): string {
   return path.dirname(expandedRepoPath);
 }
 
+export function sanitizeTicketId(ticketId: string): string {
+  return ticketId.replaceAll(/[^a-zA-Z0-9-_]/g, "_");
+}
+
 export function resolveWorktreeDir(expandedRepoPath: string, ticketId: string): string {
-  const sanitizedTicket = ticketId.replaceAll(/[^a-zA-Z0-9-_]/g, "_");
+  const sanitizedTicket = sanitizeTicketId(ticketId);
   const repoName = path.basename(expandedRepoPath);
   return path.join(resolveWorktreeParentDir(expandedRepoPath), `${repoName}-${sanitizedTicket}`);
 }

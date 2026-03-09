@@ -729,6 +729,10 @@ const SUPPORTED_OPERATION_IDS = [
   "symphony_comment_chat",
   "symphony_commit_message",
   "symphony_sessions",
+  "symphony_plan",
+  "symphony_judges",
+  "symphony_logs",
+  "symphony_chat_history",
   "terminal_chat",
   "ticket_chat",
   "run_viewer_chat",
@@ -820,7 +824,7 @@ function resolveOperationId(pathname: string): string | null {
   if (pathname.startsWith("/api/engineer/deploy")) {
     return "deploy";
   }
-  if (pathname === "/api/engineer/learnings" || pathname.includes("learnings")) {
+  if (pathname === "/api/engineer/learnings") {
     return "learnings";
   }
   if (

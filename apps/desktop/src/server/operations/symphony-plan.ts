@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError } from "../security.js";
-import { assertRepoAllowed, findFirstExisting, resolveWorktreeDir } from "./symphony-utils.js";
+import { assertRepoAllowed, findFirstExisting, resolveWorktreeDir, sanitizeTicketId } from "./symphony-utils.js";
 
 type PlanTask = {
   id: string;
@@ -52,8 +52,9 @@ export function registerSymphonyPlanRoutes(
       }
 
       const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
+      const safeTicketId = sanitizeTicketId(ticketId);
       const planPath = findFirstExisting(
-        path.join(worktreeDir, ticketId, "plan.json"),
+        path.join(worktreeDir, safeTicketId, "plan.json"),
         path.join(worktreeDir, ".claude", "work", "plan.json")
       );
 
@@ -79,7 +80,7 @@ export function registerSymphonyPlanRoutes(
 
       if (!markdownContent) {
         const planMdPath = findFirstExisting(
-          path.join(worktreeDir, ticketId, "plan.md"),
+          path.join(worktreeDir, safeTicketId, "plan.md"),
           path.join(worktreeDir, ".claude", "work", "plan.md")
         );
         if (planMdPath) {
