@@ -126,10 +126,28 @@ async function readLogTail(logPath: string, maxBytes = 100 * 1024): Promise<{ lo
   if (!existsSync(logPath)) return { log: "", logSize: 0 };
   const logStats = await fs.stat(logPath);
   const content = await fs.readFile(logPath, "utf-8");
+  const raw = logStats.size > maxBytes ? content.slice(-maxBytes) : content;
   return {
-    log: logStats.size > maxBytes ? content.slice(-maxBytes) : content,
+    log: extractTextFromNdjsonLog(raw),
     logSize: logStats.size
   };
+}
+
+function extractTextFromNdjsonLog(raw: string): string {
+  const lines = raw.split("\n");
+  const parts: string[] = [];
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line) as { type?: string; content?: string };
+      if (event.type === "text" && typeof event.content === "string") {
+        parts.push(event.content);
+      }
+    } catch {
+      parts.push(line);
+    }
+  }
+  return parts.join("");
 }
 
 function tryKillRunningReview(state: ReviewState): void {
@@ -1512,12 +1530,16 @@ async function streamClaudeReview(
         continue;
       }
 
-      void fs.appendFile(logPath, `${line}\n`, "utf-8");
       try {
         const event = JSON.parse(line) as Record<string, unknown>;
-        processStreamEvent(event as never, streamState, (message) => response.write(`${message}\n`));
+        processStreamEvent(event as never, streamState, (message) => {
+          response.write(`${message}\n`);
+          void fs.appendFile(logPath, `${message}\n`, "utf-8");
+        });
       } catch {
-        response.write(`${JSON.stringify({ type: "text", content: line })}\n`);
+        const fallback = JSON.stringify({ type: "text", content: line });
+        response.write(`${fallback}\n`);
+        void fs.appendFile(logPath, `${fallback}\n`, "utf-8");
       }
     }
   });
