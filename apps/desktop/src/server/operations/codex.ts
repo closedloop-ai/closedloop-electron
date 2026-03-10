@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { createWriteStream, existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { ServerResponse } from "node:http";
@@ -126,10 +126,35 @@ async function readLogTail(logPath: string, maxBytes = 100 * 1024): Promise<{ lo
   if (!existsSync(logPath)) return { log: "", logSize: 0 };
   const logStats = await fs.stat(logPath);
   const content = await fs.readFile(logPath, "utf-8");
+  const truncated = logStats.size > maxBytes;
+  const raw = truncated ? content.slice(-maxBytes) : content;
   return {
-    log: logStats.size > maxBytes ? content.slice(-maxBytes) : content,
+    log: extractTextFromNdjsonLog(raw, truncated),
     logSize: logStats.size
   };
+}
+
+export function extractTextFromNdjsonLog(raw: string, truncated = false): string {
+  const lines = raw.split("\n");
+  // When truncated, the first line is a partial JSON fragment — skip it
+  if (truncated && lines.length > 1) {
+    lines.shift();
+  }
+  const parts: string[] = [];
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line) as { type?: string; content?: string; error?: string };
+      if (event.type === "text" && typeof event.content === "string") {
+        parts.push(event.content);
+      } else if (event.type === "error" && typeof event.error === "string") {
+        parts.push(event.error);
+      }
+    } catch {
+      parts.push(line);
+    }
+  }
+  return parts.join("");
 }
 
 function tryKillRunningReview(state: ReviewState): void {
@@ -1502,6 +1527,8 @@ async function streamClaudeReview(
   child.stdout?.setEncoding("utf-8");
   let buffer = "";
 
+  const logStream = createWriteStream(logPath, { flags: "a", encoding: "utf-8" });
+
   child.stdout?.on("data", (chunk: string | Buffer) => {
     buffer += typeof chunk === "string" ? chunk : chunk.toString("utf-8");
     const lines = buffer.split("\n");
@@ -1512,12 +1539,16 @@ async function streamClaudeReview(
         continue;
       }
 
-      void fs.appendFile(logPath, `${line}\n`, "utf-8");
       try {
         const event = JSON.parse(line) as Record<string, unknown>;
-        processStreamEvent(event as never, streamState, (message) => response.write(`${message}\n`));
+        processStreamEvent(event as never, streamState, (message) => {
+          response.write(`${message}\n`);
+          logStream.write(`${message}\n`);
+        });
       } catch {
-        response.write(`${JSON.stringify({ type: "text", content: line })}\n`);
+        const fallback = JSON.stringify({ type: "text", content: line });
+        response.write(`${fallback}\n`);
+        logStream.write(`${fallback}\n`);
       }
     }
   });
@@ -1525,8 +1556,12 @@ async function streamClaudeReview(
   child.stderr?.setEncoding("utf-8");
   child.stderr?.on("data", (chunk: string | Buffer) => {
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
-    void fs.appendFile(logPath, text, "utf-8");
+    logStream.write(text);
     stderrHolder.value += text;
+  });
+
+  child.on("close", () => {
+    logStream.end();
   });
 }
 
