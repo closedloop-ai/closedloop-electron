@@ -41,8 +41,18 @@ export function assertPathAllowed(targetPath: string, allowedDirectories: string
   }
 }
 
+function expandTilde(inputPath: string): string {
+  if (inputPath === "~") {
+    return os.homedir();
+  }
+  if (inputPath.startsWith("~/")) {
+    return path.join(os.homedir(), inputPath.slice(2));
+  }
+  return inputPath;
+}
+
 function canonicalizePathForPolicy(inputPath: string): string {
-  const absolutePath = path.resolve(inputPath);
+  const absolutePath = path.resolve(expandTilde(inputPath));
   return resolveWithNearestRealpath(absolutePath);
 }
 
