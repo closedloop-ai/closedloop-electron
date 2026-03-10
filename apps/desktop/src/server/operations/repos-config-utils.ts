@@ -35,17 +35,13 @@ export type ReposConfig = {
   settings: RepoSettings;
 };
 
-const CONFIG_DIR = path.join(os.homedir(), ".claude", "closedloop");
-const REPOS_CONFIG_PATH = path.join(CONFIG_DIR, "repos.json");
-
-export async function loadReposConfig(): Promise<ReposConfig> {
-  const configDir = getConfigDir();
-  const configPath = getReposConfigPath();
+export async function loadReposConfig(configDir: string): Promise<ReposConfig> {
+  const configPath = path.join(configDir, "repos.json");
   await fs.mkdir(configDir, { recursive: true });
 
   if (!existsSync(configPath)) {
     const emptyConfig: ReposConfig = { repos: [], settings: {} };
-    await saveReposConfig(emptyConfig);
+    await saveReposConfig(emptyConfig, configDir);
     return emptyConfig;
   }
 
@@ -58,19 +54,18 @@ export async function loadReposConfig(): Promise<ReposConfig> {
     };
   } catch {
     const emptyConfig: ReposConfig = { repos: [], settings: {} };
-    await saveReposConfig(emptyConfig);
+    await saveReposConfig(emptyConfig, configDir);
     return emptyConfig;
   }
 }
 
-export async function saveReposConfig(config: ReposConfig): Promise<void> {
-  const configDir = getConfigDir();
-  const configPath = getReposConfigPath();
+export async function saveReposConfig(config: ReposConfig, configDir: string): Promise<void> {
+  const configPath = path.join(configDir, "repos.json");
   await fs.mkdir(configDir, { recursive: true });
   await fs.writeFile(configPath, JSON.stringify(config, null, 2), "utf-8");
 }
 
-export async function addRepo(pathInput: string, description?: string): Promise<{
+export async function addRepo(pathInput: string, description: string | undefined, configDir: string): Promise<{
   success: boolean;
   error?: string;
   repo?: ConfiguredRepo;
@@ -87,7 +82,7 @@ export async function addRepo(pathInput: string, description?: string): Promise<
     return { success: false, error: "Path must be a directory" };
   }
 
-  const config = await loadReposConfig();
+  const config = await loadReposConfig(configDir);
   const alreadyExists = config.repos.some((repo) => normalizePath(repo.path) === normalizedPath);
   if (alreadyExists) {
     return { success: false, error: "Repository already configured" };
@@ -101,13 +96,13 @@ export async function addRepo(pathInput: string, description?: string): Promise<
     addedAt: new Date().toISOString()
   };
   config.repos.push(repo);
-  await saveReposConfig(config);
+  await saveReposConfig(config, configDir);
   return { success: true, repo };
 }
 
-export async function removeRepo(pathInput: string): Promise<{ success: boolean; error?: string }> {
+export async function removeRepo(pathInput: string, configDir: string): Promise<{ success: boolean; error?: string }> {
   const normalizedPath = normalizePath(pathInput);
-  const config = await loadReposConfig();
+  const config = await loadReposConfig(configDir);
   const initialLength = config.repos.length;
   config.repos = config.repos.filter((repo) => normalizePath(repo.path) !== normalizedPath);
 
@@ -115,16 +110,17 @@ export async function removeRepo(pathInput: string): Promise<{ success: boolean;
     return { success: false, error: "Repository not found" };
   }
 
-  await saveReposConfig(config);
+  await saveReposConfig(config, configDir);
   return { success: true };
 }
 
 export async function updateSettings(
-  updates: Record<string, string | boolean>
+  updates: Record<string, string | boolean>,
+  configDir: string
 ): Promise<{ success: boolean; error?: string }> {
-  const config = await loadReposConfig();
+  const config = await loadReposConfig(configDir);
   config.settings = { ...config.settings, ...updates };
-  await saveReposConfig(config);
+  await saveReposConfig(config, configDir);
   return { success: true };
 }
 
@@ -187,14 +183,3 @@ function detectFramework(dependencies: Record<string, string>): string | undefin
   return undefined;
 }
 
-function getConfigDir(): string {
-  const override = process.env.CLOSEDLOOP_CONFIG_DIR;
-  if (override && override.trim()) {
-    return path.resolve(expandHome(override));
-  }
-  return CONFIG_DIR;
-}
-
-function getReposConfigPath(): string {
-  return path.join(getConfigDir(), "repos.json");
-}

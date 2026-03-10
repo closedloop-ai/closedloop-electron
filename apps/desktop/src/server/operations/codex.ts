@@ -4,16 +4,15 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { ServerResponse } from "node:http";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
-import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
+import { DirectoryNotAllowedError } from "../security.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { createStreamState, processStreamEvent, type ContentBlock } from "./stream-events.js";
-import { assertRepoAllowed, ensureWorktreeForReview, resolveWorktreeDir, resolveWorktreeParentDir } from "./symphony-utils.js";
+import { assertRepoAllowed, ensureWorktreeForReview, resolveWorktreeDir, resolveWorktreeParentDir, tryAssertRepoAllowed, tryAssertPathAllowed } from "./symphony-utils.js";
 
 const CODEX_SESSION_ID_REGEX = /session id:\s*([0-9a-f-]{36})/i;
 const FINDINGS_CODE_BLOCK_REGEX = /```json\s*\n([\s\S]*?)\n\s*```/;
 const FINDINGS_ARRAY_REGEX = /\[[\s\S]*\]/;
-const PR_PREFIX_REGEX = /^pr-/;
 
 const REVIEW_SYSTEM_PROMPT = [
   "IMPORTANT: Before flagging any change, examine the surrounding context in the file, the PR description, and any linked issues.",
@@ -93,6 +92,160 @@ type FindingChatHistory = {
   contextPercent?: number | null;
 };
 
+function writeErrorAndEnd(response: ServerResponse, error: unknown): void {
+  writeEvent(response, {
+    type: "error",
+    error: error instanceof Error ? error.message : "Unknown error"
+  });
+  writeEvent(response, { type: "done" });
+  response.end();
+}
+
+async function saveCodexChatSession(
+  worktreeDir: string,
+  sessionId: string | undefined,
+  provider: string
+): Promise<void> {
+  if (sessionId && provider === "codex") {
+    const chatStatePath = path.join(worktreeDir, ".claude", "work", "codex-chat.json");
+    await saveJsonFile(chatStatePath, {
+      sessionId,
+      messageCount: 0
+    } satisfies CodexChatState);
+  }
+}
+
+function checkReviewProcess(state: ReviewState): boolean {
+  if (state.status !== "running" || !state.pid) return false;
+  const running = isProcessRunning(state.pid);
+  if (!running) state.status = "stopped";
+  return running;
+}
+
+async function readLogTail(logPath: string, maxBytes = 100 * 1024): Promise<{ log: string; logSize: number }> {
+  if (!existsSync(logPath)) return { log: "", logSize: 0 };
+  const logStats = await fs.stat(logPath);
+  const content = await fs.readFile(logPath, "utf-8");
+  return {
+    log: logStats.size > maxBytes ? content.slice(-maxBytes) : content,
+    logSize: logStats.size
+  };
+}
+
+function tryKillRunningReview(state: ReviewState): void {
+  if (state.status === "running" && state.pid) {
+    try {
+      process.kill(state.pid, "SIGTERM");
+    } catch {
+      // Process already dead.
+    }
+  }
+}
+
+async function stopAndCleanProvider(
+  expandedRepoPath: string,
+  ticketId: string,
+  providerName: string
+): Promise<string[]> {
+  const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
+  const { statePath, logPath, pidPath, findingsPath } = getReviewPaths(worktreeDir, providerName);
+  const deleted: string[] = [];
+
+  if (existsSync(statePath)) {
+    try {
+      const state = JSON.parse(await fs.readFile(statePath, "utf-8")) as ReviewState;
+      tryKillRunningReview(state);
+    } catch {
+      // Ignore corrupted state.
+    }
+  }
+
+  for (const targetPath of [statePath, logPath, pidPath, findingsPath]) {
+    if (existsSync(targetPath)) {
+      await fs.rm(targetPath, { force: true });
+      deleted.push(path.basename(targetPath));
+    }
+  }
+
+  return deleted;
+}
+
+async function handleMarkCommented(
+  context: OperationRequestContext,
+  findingsPath: string,
+  commentedIndex: number
+): Promise<void> {
+  if (!existsSync(findingsPath)) {
+    json(context, 404, { error: "No findings file found" });
+    return;
+  }
+  try {
+    const data = JSON.parse(await fs.readFile(findingsPath, "utf-8")) as FindingsFile;
+    if (commentedIndex < 0 || commentedIndex >= data.findings.length) {
+      json(context, 400, { error: "Index out of range" });
+      return;
+    }
+    data.findings[commentedIndex].commented = true;
+    await fs.writeFile(findingsPath, JSON.stringify(data, null, 2), "utf-8");
+    json(context, 200, { success: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    json(context, 500, { error: `Failed to update findings: ${message}` });
+  }
+}
+
+async function handleDeclineFindings(
+  context: OperationRequestContext,
+  findingsPath: string,
+  declineReason: string
+): Promise<void> {
+  if (!existsSync(findingsPath)) {
+    json(context, 404, { error: "No findings file found" });
+    return;
+  }
+  try {
+    const data = JSON.parse(await fs.readFile(findingsPath, "utf-8")) as FindingsFile;
+    data.declined = true;
+    data.declineReason = declineReason;
+    await fs.writeFile(findingsPath, JSON.stringify(data, null, 2), "utf-8");
+    json(context, 200, { success: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    json(context, 500, { error: `Failed to mark declined: ${message}` });
+  }
+}
+
+async function handleSaveFindings(
+  context: OperationRequestContext,
+  findingsPath: string,
+  body: Record<string, unknown>,
+  provider: string
+): Promise<void> {
+  const findings = (body.findings as Array<Record<string, unknown>>).map((finding) => ({
+    severity: asString(finding.severity) ?? "info",
+    priority: asString(finding.priority) ?? undefined,
+    file: asString(finding.file) ?? undefined,
+    line: asNumber(finding.line) ?? undefined,
+    message: asString(finding.message) ?? "",
+    suggestion: asString(finding.suggestion) ?? undefined,
+    commented: Boolean(finding.commented)
+  }));
+
+  const data: FindingsFile = {
+    provider: asString(body.provider) ?? provider,
+    model: asString(body.model) ?? "unknown",
+    findings
+  };
+
+  await fs.mkdir(path.dirname(findingsPath), { recursive: true });
+  await fs.writeFile(findingsPath, JSON.stringify(data, null, 2), "utf-8");
+
+  json(context, 200, {
+    success: true,
+    count: findings.length
+  });
+}
+
 export function registerCodexRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[]
@@ -124,35 +277,22 @@ export function registerCodexRoutes(
       return;
     }
 
-    let expandedRepoPath: string;
-    try {
-      expandedRepoPath = assertRepoAllowed(repoPath, getAllowedDirectories());
-    } catch (error) {
-      if (error instanceof DirectoryNotAllowedError) {
-        json(context, 403, { error: "directory not allowed" });
-        return;
-      }
-      throw error;
-    }
-
-    const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-    if (!existsSync(worktreeDir)) {
-      json(context, 200, {
-        hasReview: false,
-        worktreeDir,
-        message: "Worktree not found"
-      });
+    const repoResult = tryAssertRepoAllowed(repoPath, getAllowedDirectories());
+    if ("error" in repoResult) {
+      json(context, repoResult.status, { error: repoResult.error });
       return;
     }
 
-    try {
-      assertPathAllowed(worktreeDir, getAllowedDirectories());
-    } catch (error) {
-      if (error instanceof DirectoryNotAllowedError) {
-        json(context, 403, { error: "directory not allowed" });
-        return;
-      }
-      throw error;
+    const worktreeDir = resolveWorktreeDir(repoResult.path, ticketId);
+    if (!existsSync(worktreeDir)) {
+      json(context, 200, { hasReview: false, worktreeDir, message: "Worktree not found" });
+      return;
+    }
+
+    const pathResult = tryAssertPathAllowed(worktreeDir, getAllowedDirectories());
+    if (pathResult !== true) {
+      json(context, pathResult.status, { error: pathResult.error });
+      return;
     }
 
     const workDir = path.join(worktreeDir, ".claude", "work");
@@ -162,46 +302,20 @@ export function registerCodexRoutes(
         : resolveProvider(workDir);
 
     if (!provider) {
-      json(context, 200, {
-        hasReview: false,
-        worktreeDir,
-        message: "No review has been started"
-      });
+      json(context, 200, { hasReview: false, worktreeDir, message: "No review has been started" });
       return;
     }
 
     const { statePath, logPath } = getReviewPaths(worktreeDir, provider);
     if (!existsSync(statePath)) {
-      json(context, 200, {
-        hasReview: false,
-        worktreeDir,
-        message: "No review has been started"
-      });
+      json(context, 200, { hasReview: false, worktreeDir, message: "No review has been started" });
       return;
     }
 
     try {
       const state = JSON.parse(await fs.readFile(statePath, "utf-8")) as ReviewState;
-      let processRunning = false;
-      if (state.status === "running" && state.pid) {
-        processRunning = isProcessRunning(state.pid);
-        if (!processRunning) {
-          state.status = "stopped";
-        }
-      }
-
-      let log = "";
-      let logSize = 0;
-      if (existsSync(logPath)) {
-        const logStats = await fs.stat(logPath);
-        logSize = logStats.size;
-        if (logSize > 100 * 1024) {
-          const content = await fs.readFile(logPath, "utf-8");
-          log = content.slice(-100 * 1024);
-        } else {
-          log = await fs.readFile(logPath, "utf-8");
-        }
-      }
+      const processRunning = checkReviewProcess(state);
+      const { log, logSize } = await readLogTail(logPath);
 
       json(context, 200, {
         hasReview: true,
@@ -343,49 +457,18 @@ export function registerCodexRoutes(
       return;
     }
 
-    let expandedRepoPath: string;
-    try {
-      expandedRepoPath = assertRepoAllowed(repoPath, getAllowedDirectories());
-    } catch (error) {
-      if (error instanceof DirectoryNotAllowedError) {
-        json(context, 403, { error: "directory not allowed" });
-        return;
-      }
-      throw error;
+    const repoResult = tryAssertRepoAllowed(repoPath, getAllowedDirectories());
+    if ("error" in repoResult) {
+      json(context, repoResult.status, { error: repoResult.error });
+      return;
     }
 
     const providers = provider ? [provider] : ["claude", "codex"];
-    const deleted: string[] = [];
+    const results = await Promise.all(
+      providers.map((name) => stopAndCleanProvider(repoResult.path, ticketId, name))
+    );
 
-    for (const name of providers) {
-      const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-      const { statePath, logPath, pidPath, findingsPath } = getReviewPaths(worktreeDir, name);
-
-      if (existsSync(statePath)) {
-        try {
-          const state = JSON.parse(await fs.readFile(statePath, "utf-8")) as ReviewState;
-          if (state.status === "running" && state.pid) {
-            try {
-              process.kill(state.pid, "SIGTERM");
-            } catch {
-              // Process already dead.
-            }
-          }
-        } catch {
-          // Ignore corrupted state.
-        }
-      }
-
-      for (const targetPath of [statePath, logPath, pidPath, findingsPath]) {
-        if (!existsSync(targetPath)) {
-          continue;
-        }
-        await fs.rm(targetPath, { force: true });
-        deleted.push(path.basename(targetPath));
-      }
-    }
-
-    json(context, 200, { deleted });
+    json(context, 200, { deleted: results.flat() });
   });
 
   dispatcher.register("GET", "/api/engineer/codex/review-findings/:ticketId", async (context) => {
@@ -438,58 +521,21 @@ export function registerCodexRoutes(
       return;
     }
 
-    let expandedRepoPath: string;
-    try {
-      expandedRepoPath = assertRepoAllowed(repoPath, getAllowedDirectories());
-    } catch (error) {
-      if (error instanceof DirectoryNotAllowedError) {
-        json(context, 403, { error: "directory not allowed" });
-        return;
-      }
-      throw error;
-    }
-
-    const findingsPath = getReviewPaths(resolveWorktreeDir(expandedRepoPath, ticketId), provider).findingsPath;
-
-    if (typeof body.commentedIndex === "number") {
-      if (!existsSync(findingsPath)) {
-        json(context, 404, { error: "No findings file found" });
-        return;
-      }
-
-      try {
-        const data = JSON.parse(await fs.readFile(findingsPath, "utf-8")) as FindingsFile;
-        if (body.commentedIndex < 0 || body.commentedIndex >= data.findings.length) {
-          json(context, 400, { error: "Index out of range" });
-          return;
-        }
-
-        data.findings[body.commentedIndex].commented = true;
-        await fs.writeFile(findingsPath, JSON.stringify(data, null, 2), "utf-8");
-        json(context, 200, { success: true });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Unknown error";
-        json(context, 500, { error: `Failed to update findings: ${message}` });
-      }
+    const repoResult = tryAssertRepoAllowed(repoPath, getAllowedDirectories());
+    if ("error" in repoResult) {
+      json(context, repoResult.status, { error: repoResult.error });
       return;
     }
 
-    if (body.declined === true && typeof body.declineReason === "string" && (body.declineReason as string).trim().length > 0) {
-      if (!existsSync(findingsPath)) {
-        json(context, 404, { error: "No findings file found" });
-        return;
-      }
+    const findingsPath = getReviewPaths(resolveWorktreeDir(repoResult.path, ticketId), provider).findingsPath;
 
-      try {
-        const data = JSON.parse(await fs.readFile(findingsPath, "utf-8")) as FindingsFile;
-        data.declined = true;
-        data.declineReason = body.declineReason as string;
-        await fs.writeFile(findingsPath, JSON.stringify(data, null, 2), "utf-8");
-        json(context, 200, { success: true });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "Unknown error";
-        json(context, 500, { error: `Failed to mark declined: ${message}` });
-      }
+    if (typeof body.commentedIndex === "number") {
+      await handleMarkCommented(context, findingsPath, body.commentedIndex);
+      return;
+    }
+
+    if (body.declined === true && typeof body.declineReason === "string" && body.declineReason.trim().length > 0) {
+      await handleDeclineFindings(context, findingsPath, body.declineReason);
       return;
     }
 
@@ -498,29 +544,7 @@ export function registerCodexRoutes(
       return;
     }
 
-    const findings = (body.findings as Array<Record<string, unknown>>).map((finding) => ({
-      severity: asString(finding.severity) ?? "info",
-      priority: asString(finding.priority) ?? undefined,
-      file: asString(finding.file) ?? undefined,
-      line: asNumber(finding.line) ?? undefined,
-      message: asString(finding.message) ?? "",
-      suggestion: asString(finding.suggestion) ?? undefined,
-      commented: Boolean(finding.commented)
-    }));
-
-    const data: FindingsFile = {
-      provider: asString(body.provider) ?? provider,
-      model: asString(body.model) ?? "unknown",
-      findings
-    };
-
-    await fs.mkdir(path.dirname(findingsPath), { recursive: true });
-    await fs.writeFile(findingsPath, JSON.stringify(data, null, 2), "utf-8");
-
-    json(context, 200, {
-      success: true,
-      count: findings.length
-    });
+    await handleSaveFindings(context, findingsPath, body, provider);
   });
 
   dispatcher.register("POST", "/api/engineer/codex/review-dedup/:ticketId", async (context) => {
@@ -635,27 +659,18 @@ export function registerCodexRoutes(
       return;
     }
 
-    let expandedRepoPath: string;
-    try {
-      expandedRepoPath = assertRepoAllowed(repoPath, getAllowedDirectories());
-    } catch (error) {
-      if (error instanceof DirectoryNotAllowedError) {
-        json(context, 403, { error: "directory not allowed" });
-        return;
-      }
-      throw error;
+    const repoResult = tryAssertRepoAllowed(repoPath, getAllowedDirectories());
+    if ("error" in repoResult) {
+      json(context, repoResult.status, { error: repoResult.error });
+      return;
     }
+    const expandedRepoPath = repoResult.path;
 
     // Validate the worktree parent directory is allowed (worktree may not exist yet)
-    const worktreeParentDir = resolveWorktreeParentDir(expandedRepoPath);
-    try {
-      assertPathAllowed(worktreeParentDir, getAllowedDirectories());
-    } catch (error) {
-      if (error instanceof DirectoryNotAllowedError) {
-        json(context, 403, { error: "directory not allowed" });
-        return;
-      }
-      throw error;
+    const worktreeParentResult = tryAssertPathAllowed(resolveWorktreeParentDir(expandedRepoPath), getAllowedDirectories());
+    if (worktreeParentResult !== true) {
+      json(context, worktreeParentResult.status, { error: worktreeParentResult.error });
+      return;
     }
 
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
@@ -674,27 +689,17 @@ export function registerCodexRoutes(
     await fs.mkdir(path.dirname(statePath), { recursive: true });
     await fs.writeFile(logPath, "", "utf-8");
 
+    if (provider === "claude" && !ticketId.startsWith("pr-")) {
+      json(context, 400, { error: "ticketId must start with 'pr-' for Claude reviews" });
+      return;
+    }
+
     setStreamingHeaders(context.response);
 
     try {
-      let child: ChildProcess;
-      if (provider === "claude") {
-        if (!PR_PREFIX_REGEX.test(ticketId)) {
-          json(context, 400, { error: "ticketId must start with 'pr-' for Claude reviews" });
-          return;
-        }
-        const prNum = ticketId.replace(PR_PREFIX_REGEX, "");
-        child = await resolveClaudeReviewProcess(reviewCwd, model, prNum, logPath);
-      } else {
-        child = spawnCodexReviewProcess({
-          cwd: reviewCwd,
-          model,
-          reasoningEffort,
-          reviewMode,
-          baseBranch,
-          instructions
-        });
-      }
+      const child = provider === "claude"
+        ? await resolveClaudeReviewProcess(reviewCwd, model, ticketId.slice(3), logPath)
+        : spawnCodexReviewProcess({ cwd: reviewCwd, model, reasoningEffort, reviewMode, baseBranch, instructions });
 
       if (!child.pid) {
         throw new Error("failed to start review process");
@@ -705,13 +710,7 @@ export function registerCodexRoutes(
         pid: child.pid,
         startedAt: new Date().toISOString(),
         provider,
-        config: {
-          model,
-          reasoningEffort,
-          reviewMode,
-          baseBranch,
-          ...(instructions ? { instructions } : {})
-        }
+        config: { model, reasoningEffort, reviewMode, baseBranch, instructions }
       };
 
       await fs.writeFile(statePath, JSON.stringify(state, null, 2), "utf-8");
@@ -725,12 +724,8 @@ export function registerCodexRoutes(
       });
 
       const sessionIdHolder: { value: string | undefined } = { value: undefined };
-
-      if (provider === "claude") {
-        await streamClaudeReview(child, context.response, logPath, sessionIdHolder);
-      } else {
-        await streamCodexReview(child, context.response, logPath, sessionIdHolder);
-      }
+      const streamFn = provider === "claude" ? streamClaudeReview : streamCodexReview;
+      await streamFn(child, context.response, logPath, sessionIdHolder);
 
       const exitCode = await waitForExit(child);
       const finalState: ReviewState = {
@@ -738,29 +733,18 @@ export function registerCodexRoutes(
         status: exitCode === 0 ? "completed" : "failed",
         completedAt: new Date().toISOString(),
         exitCode,
-        ...(sessionIdHolder.value ? { sessionId: sessionIdHolder.value } : {})
+        sessionId: sessionIdHolder.value
       };
       await fs.writeFile(statePath, JSON.stringify(finalState, null, 2), "utf-8");
       await fs.rm(pidPath, { force: true });
 
-      if (sessionIdHolder.value && provider === "codex") {
-        const chatStatePath = path.join(worktreeDir, ".claude", "work", "codex-chat.json");
-        await saveJsonFile(chatStatePath, {
-          sessionId: sessionIdHolder.value,
-          messageCount: 0
-        } satisfies CodexChatState);
-      }
+      await saveCodexChatSession(worktreeDir, sessionIdHolder.value, provider);
 
       writeEvent(context.response, { type: "result", success: exitCode === 0 });
       writeEvent(context.response, { type: "done" });
       context.response.end();
     } catch (error) {
-      writeEvent(context.response, {
-        type: "error",
-        error: error instanceof Error ? error.message : "Unknown error"
-      });
-      writeEvent(context.response, { type: "done" });
-      context.response.end();
+      writeErrorAndEnd(context.response, error);
     }
   });
 
@@ -941,10 +925,11 @@ export function registerCodexRoutes(
 
     const message = asString(body.message);
     const displayMessage = asString(body.displayMessage);
-    const findingContext =
-      body.findingContext && typeof body.findingContext === "object"
-        ? (body.findingContext as FindingChatHistory["findingContext"])
-        : undefined;
+    const findingContext = (
+      body.findingContext instanceof Object
+        ? body.findingContext as FindingChatHistory["findingContext"]
+        : undefined
+    );
 
     if (!message) {
       json(context, 400, { error: "message is required" });
@@ -973,13 +958,10 @@ export function registerCodexRoutes(
       messages: [],
       ticketId,
       repoPath,
-      findingId,
-      ...(findingContext ? { findingContext } : {})
+      findingId
     });
 
-    if (findingContext) {
-      history.findingContext = findingContext;
-    }
+    history.findingContext = findingContext ?? history.findingContext;
 
     const userMessage: FindingChatMessage = {
       id: `user-${Date.now()}`,
@@ -1033,7 +1015,7 @@ export function registerCodexRoutes(
       child.stdout.setEncoding("utf-8");
       let buffer = "";
       child.stdout.on("data", (chunk: string | Buffer) => {
-        buffer += typeof chunk === "string" ? chunk : chunk.toString("utf-8");
+        buffer += String(chunk);
         const lines = buffer.split("\n");
         buffer = lines.pop() ?? "";
 
@@ -1052,7 +1034,7 @@ export function registerCodexRoutes(
 
       child.stderr.setEncoding("utf-8");
       child.stderr.on("data", (chunk: string | Buffer) => {
-        const text = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
+        const text = String(chunk);
         writeEvent(context.response, { type: "error", error: text });
       });
 
@@ -1127,18 +1109,11 @@ export function registerCodexRoutes(
       findingId
     });
 
-    if (messageId) {
-      const target = history.messages.find((message) => message.id === messageId);
-      if (target) {
-        target.responded = responded;
-      }
-    } else {
-      for (let index = history.messages.length - 1; index >= 0; index -= 1) {
-        if (history.messages[index].role === "assistant") {
-          history.messages[index].responded = responded;
-          break;
-        }
-      }
+    const target = messageId
+      ? history.messages.find((message) => message.id === messageId)
+      : [...history.messages].reverse().find((message) => message.role === "assistant");
+    if (target) {
+      target.responded = responded;
     }
 
     await saveJsonFile(historyPath, history);
@@ -1387,7 +1362,7 @@ function spawnClaudeReview(cwd: string, model: string): ChildProcess {
 }
 
 /**
- * Try spawning Claude with /experimental:code-review skill first.
+ * Try spawning Claude with /code-review:start skill first.
  * If the process exits without producing real model output (only system/init/result
  * events), fall back to /review <prNum>.
  */
@@ -1398,7 +1373,7 @@ async function resolveClaudeReviewProcess(
   logPath: string
 ): Promise<ChildProcess> {
   const first = spawnClaudeReview(cwd, model);
-  first.stdin?.write("/experimental:code-review");
+  first.stdin?.write("/code-review:start");
   first.stdin?.end();
 
   type ProbeResult = { type: "working" } | { type: "exited"; code: number };
@@ -1460,7 +1435,7 @@ async function resolveClaudeReviewProcess(
 
   if (result.type === "working") {
     // Replay consumed probe data so stream consumers see it
-    for (const chunk of probeChunks.reverse()) {
+    for (const chunk of [...probeChunks].reverse()) {
       first.stdout?.unshift(chunk);
     }
     return first;
@@ -1707,27 +1682,27 @@ function buildFindingPrompt(
   ];
 
   if (findingContext) {
-    parts.push("Finding context:");
-    parts.push(`Severity: ${findingContext.severity}`);
-    if (findingContext.file) {
-      parts.push(`File: ${findingContext.file}${findingContext.line ? `:${findingContext.line}` : ""}`);
-    }
-    parts.push(`Message: ${findingContext.message}`);
-    if (findingContext.suggestion) {
-      parts.push(`Suggestion: ${findingContext.suggestion}`);
-    }
+    const lineSuffix = findingContext.line ? `:${findingContext.line}` : "";
+    parts.push(
+      "Finding context:",
+      `Severity: ${findingContext.severity}`,
+      ...(findingContext.file ? [`File: ${findingContext.file}${lineSuffix}`] : []),
+      `Message: ${findingContext.message}`,
+      ...(findingContext.suggestion ? [`Suggestion: ${findingContext.suggestion}`] : [])
+    );
   }
 
   if (messages.length > 0) {
-    parts.push("Recent conversation:");
-    for (const message of messages.slice(-8)) {
-      const role = message.role === "user" ? "User" : "Assistant";
-      parts.push(`${role}: ${message.content}`);
-    }
+    parts.push(
+      "Recent conversation:",
+      ...messages.slice(-8).map((message) => {
+        const role = message.role === "user" ? "User" : "Assistant";
+        return `${role}: ${message.content}`;
+      })
+    );
   }
 
-  parts.push("Latest message:");
-  parts.push(userMessage);
+  parts.push("Latest message:", userMessage);
 
   return parts.join("\n\n");
 }

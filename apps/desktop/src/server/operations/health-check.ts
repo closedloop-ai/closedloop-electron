@@ -1,12 +1,10 @@
-import { existsSync, readdirSync } from "node:fs";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import { isPluginInstalled } from "./plugin-cache.js";
 import type { ProcessManager } from "../process-manager.js";
 
 const VERSION_REGEX = /(\d+\.\d+[\w.-]*)/;
-const REPOS_CONFIG_PATH = path.join(os.homedir(), ".claude", "closedloop", "repos.json");
 
 type CheckResult = {
   id: string;
@@ -28,16 +26,23 @@ type ReposConfig = {
 
 export function registerHealthCheckRoutes(
   dispatcher: OperationDispatcher,
-  processManager: ProcessManager
+  processManager: ProcessManager,
+  getSymphonyDir: () => string
 ): void {
+  const configDir = () => path.join(getSymphonyDir(), "config");
+
   dispatcher.register("GET", "/api/engineer/health-check", async (context) => {
     const checks = await Promise.all([
       checkGit(processManager),
       checkClaudeCli(processManager),
       checkGhCli(processManager),
       checkGhAuth(processManager),
-      Promise.resolve(checkSymphonyPlugin()),
-      Promise.resolve(await checkWorktreeDir()),
+      Promise.resolve(checkPlugin("code", "Symphony Plugin", true)),
+      Promise.resolve(checkPlugin("platform", "Platform Plugin", true)),
+      Promise.resolve(checkPlugin("judges", "Judges Plugin", true)),
+      Promise.resolve(checkPlugin("code-review", "Code Review Plugin", true)),
+      Promise.resolve(checkPlugin("self-learning", "Self-Learning Plugin", true)),
+      Promise.resolve(await checkWorktreeDir(configDir)),
       checkCodex(processManager),
       checkPython3(processManager)
     ]);
@@ -136,24 +141,36 @@ async function checkGhAuth(processManager: ProcessManager): Promise<CheckResult>
   }
 }
 
-function checkSymphonyPlugin(): CheckResult {
-  const scriptPath = getSymphonyScriptPath();
-  if (scriptPath) {
-    return { id: "symphony-plugin", label: "Symphony Plugin", required: true, passed: true };
+function checkPlugin(name: string, label: string, required: boolean): CheckResult {
+  if (isPluginInstalled(name)) {
+    return { id: `plugin-${name}`, label, required, passed: true };
   }
 
   return {
-    id: "symphony-plugin",
-    label: "Symphony Plugin",
-    required: true,
+    id: `plugin-${name}`,
+    label,
+    required,
     passed: false,
     error: "Not found",
-    remediation: "Install the closedloop/experimental plugin in Claude Code"
+    remediation: `Install the closedloop-ai/${name} plugin in Claude Code`
   };
 }
 
-async function checkWorktreeDir(): Promise<CheckResult> {
-  const config = await loadReposConfig();
+async function checkWorktreeDir(getConfigDir: () => string): Promise<CheckResult> {
+  let configDir: string;
+  try {
+    configDir = getConfigDir();
+  } catch {
+    return {
+      id: "worktree-dir",
+      label: "Worktree Directory",
+      required: true,
+      passed: false,
+      error: "Not configured",
+      remediation: "Set the parent directory where git worktrees will be created"
+    };
+  }
+  const config = await loadReposConfig(configDir);
   const configuredDir = config.settings?.worktreeParentDir;
   const confirmed = config.settings?.worktreeParentDirConfirmed;
   if (configuredDir && confirmed) {
@@ -208,61 +225,14 @@ async function checkPython3(processManager: ProcessManager): Promise<CheckResult
   }
 }
 
-async function loadReposConfig(): Promise<ReposConfig> {
+async function loadReposConfig(configDir: string): Promise<ReposConfig> {
   try {
-    const content = await fs.readFile(REPOS_CONFIG_PATH, "utf-8");
+    const configPath = path.join(configDir, "repos.json");
+    const content = await fs.readFile(configPath, "utf-8");
     return JSON.parse(content) as ReposConfig;
   } catch {
     return {};
   }
-}
-
-function getSymphonyScriptPath(): string | undefined {
-  const pluginDir = path.join(
-    os.homedir(),
-    ".claude",
-    "plugins",
-    "cache",
-    "closedloop",
-    "experimental"
-  );
-
-  if (!existsSync(pluginDir)) {
-    return undefined;
-  }
-
-  const versions = findPluginVersions(pluginDir);
-  for (const version of versions) {
-    const scriptPath = path.join(pluginDir, version, "scripts", "run-loop.sh");
-    if (existsSync(scriptPath)) {
-      return scriptPath;
-    }
-  }
-
-  return undefined;
-}
-
-function findPluginVersions(pluginDir: string): string[] {
-  try {
-    const entries = readdirSync(pluginDir);
-    return entries
-      .filter((entry) => /^\d+\.\d+\.\d+/.test(entry))
-      .sort((a, b) => compareSemverDescending(a, b));
-  } catch {
-    return [];
-  }
-}
-
-function compareSemverDescending(a: string, b: string): number {
-  const partsA = a.split(".").map(Number);
-  const partsB = b.split(".").map(Number);
-  for (let index = 0; index < 3; index += 1) {
-    const diff = (partsB[index] ?? 0) - (partsA[index] ?? 0);
-    if (diff !== 0) {
-      return diff;
-    }
-  }
-  return 0;
 }
 
 function json(context: OperationRequestContext, status: number, payload: unknown): void {

@@ -1,12 +1,20 @@
+import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { addRepo, loadReposConfig, removeRepo, updateSettings } from "./repos-config-utils.js";
+import { SymphonyDirNotConfiguredError } from "./symphony-utils.js";
 
-export function registerReposConfigRoutes(dispatcher: OperationDispatcher): void {
+export function registerReposConfigRoutes(
+  dispatcher: OperationDispatcher,
+  getSymphonyDir: () => string
+): void {
+  const configDir = () => path.join(getSymphonyDir(), "config");
+
   dispatcher.register("GET", "/api/engineer/repos", async (context) => {
     try {
-      const config = await loadReposConfig();
+      const config = await loadReposConfig(configDir());
       json(context, 200, { repos: config.repos, settings: config.settings });
     } catch (error) {
+      if (error instanceof SymphonyDirNotConfiguredError) throw error;
       const message = error instanceof Error ? error.message : "Unknown error";
       json(context, 500, { error: `Failed to list repos: ${message}` });
     }
@@ -27,7 +35,7 @@ export function registerReposConfigRoutes(dispatcher: OperationDispatcher): void
         return;
       }
 
-      const result = await addRepo(repoPath, description);
+      const result = await addRepo(repoPath, description, configDir());
       if (!result.success) {
         json(context, 400, { error: result.error });
         return;
@@ -35,6 +43,7 @@ export function registerReposConfigRoutes(dispatcher: OperationDispatcher): void
 
       json(context, 200, { success: true, repo: result.repo });
     } catch (error) {
+      if (error instanceof SymphonyDirNotConfiguredError) throw error;
       const message = error instanceof Error ? error.message : "Unknown error";
       json(context, 500, { error: `Failed to add repo: ${message}` });
     }
@@ -48,7 +57,7 @@ export function registerReposConfigRoutes(dispatcher: OperationDispatcher): void
         return;
       }
 
-      const result = await removeRepo(repoPath);
+      const result = await removeRepo(repoPath, configDir());
       if (!result.success) {
         json(context, 400, { error: result.error });
         return;
@@ -56,6 +65,7 @@ export function registerReposConfigRoutes(dispatcher: OperationDispatcher): void
 
       json(context, 200, { success: true });
     } catch (error) {
+      if (error instanceof SymphonyDirNotConfiguredError) throw error;
       const message = error instanceof Error ? error.message : "Unknown error";
       json(context, 500, { error: `Failed to remove repo: ${message}` });
     }
@@ -82,7 +92,7 @@ export function registerReposConfigRoutes(dispatcher: OperationDispatcher): void
         return;
       }
 
-      const result = await updateSettings(updates);
+      const result = await updateSettings(updates, configDir());
       if (!result.success) {
         json(context, 400, { error: result.error });
         return;
@@ -90,6 +100,7 @@ export function registerReposConfigRoutes(dispatcher: OperationDispatcher): void
 
       json(context, 200, { success: true });
     } catch (error) {
+      if (error instanceof SymphonyDirNotConfiguredError) throw error;
       const message = error instanceof Error ? error.message : "Unknown error";
       json(context, 500, { error: `Failed to update settings: ${message}` });
     }

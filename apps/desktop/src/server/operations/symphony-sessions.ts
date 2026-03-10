@@ -1,10 +1,9 @@
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import type { OperationDispatcher } from "../operation-dispatcher.js";
-import type { OperationRequestContext } from "../operation-dispatcher.js";
+import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
+import { expandHome } from "./symphony-utils.js";
 
 type ActiveSession = {
   ticketId: string;
@@ -22,12 +21,75 @@ type SessionsConfig = {
   sessions: ActiveSession[];
 };
 
+function asString(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function parseSessionBody(body: Record<string, unknown>): {
+  ticketId: string | null;
+  repoPath: string | null;
+  worktreePath: string | null;
+  pid: number | undefined;
+  contextRepoPaths: string[] | undefined;
+  baseBranch: string | undefined;
+  parentTicketId: string | undefined;
+} {
+  return {
+    ticketId: asString(body.ticketId),
+    repoPath: asString(body.repoPath),
+    worktreePath: asString(body.worktreePath),
+    pid: typeof body.pid === "number" ? body.pid : undefined,
+    contextRepoPaths:
+      Array.isArray(body.contextRepoPaths) && body.contextRepoPaths.every((item) => typeof item === "string")
+        ? body.contextRepoPaths
+        : undefined,
+    baseBranch: asString(body.baseBranch) ?? undefined,
+    parentTicketId: asString(body.parentTicketId) ?? undefined
+  };
+}
+
+function upsertSession(
+  config: SessionsConfig,
+  fields: { ticketId: string; repoPath: string; worktreePath: string; pid?: number; contextRepoPaths?: string[]; baseBranch?: string; parentTicketId?: string }
+): void {
+  const now = new Date().toISOString();
+  const optionals = {
+    ...(fields.pid !== undefined && { pid: fields.pid }),
+    ...(fields.contextRepoPaths !== undefined && { contextRepoPaths: fields.contextRepoPaths }),
+    ...(fields.baseBranch !== undefined && { baseBranch: fields.baseBranch }),
+    ...(fields.parentTicketId !== undefined && { parentTicketId: fields.parentTicketId })
+  };
+  const existingIndex = config.sessions.findIndex((session) => session.ticketId === fields.ticketId);
+
+  if (existingIndex >= 0) {
+    config.sessions[existingIndex] = {
+      ...config.sessions[existingIndex],
+      repoPath: fields.repoPath,
+      worktreePath: fields.worktreePath,
+      ...optionals,
+      lastAccessedAt: now
+    };
+  } else {
+    config.sessions.push({
+      ticketId: fields.ticketId,
+      repoPath: fields.repoPath,
+      worktreePath: fields.worktreePath,
+      ...optionals,
+      startedAt: now,
+      lastAccessedAt: now
+    });
+  }
+}
+
 export function registerSymphonySessionRoutes(
   dispatcher: OperationDispatcher,
-  getAllowedDirectories: () => string[]
+  getAllowedDirectories: () => string[],
+  getSymphonyDir: () => string
 ): void {
+
   dispatcher.register("GET", "/api/engineer/symphony/sessions", async (context) => {
-    const config = await loadSessions();
+    const dir = getSymphonyDir();
+    const config = await loadSessions(dir);
 
     const validSessions = config.sessions.filter((session) => {
       const expandedWorktreePath = expandHome(session.worktreePath);
@@ -35,7 +97,7 @@ export function registerSymphonySessionRoutes(
     });
 
     if (validSessions.length !== config.sessions.length) {
-      await saveSessions({ sessions: validSessions });
+      await saveSessions(dir, { sessions: validSessions });
     }
 
     json(context, 200, { sessions: validSessions });
@@ -48,69 +110,33 @@ export function registerSymphonySessionRoutes(
       return;
     }
 
-    const ticketId = typeof body.ticketId === "string" ? body.ticketId : null;
-    const repoPath = typeof body.repoPath === "string" ? body.repoPath : null;
-    const worktreePath = typeof body.worktreePath === "string" ? body.worktreePath : null;
-    const pid = typeof body.pid === "number" ? body.pid : undefined;
-    const contextRepoPaths =
-      Array.isArray(body.contextRepoPaths) && body.contextRepoPaths.every((item) => typeof item === "string")
-        ? body.contextRepoPaths
-        : undefined;
-    const baseBranch = typeof body.baseBranch === "string" ? body.baseBranch : undefined;
-    const parentTicketId = typeof body.parentTicketId === "string" ? body.parentTicketId : undefined;
+    const fields = parseSessionBody(body);
 
-    if (!(ticketId && repoPath && worktreePath)) {
+    if (!(fields.ticketId && fields.repoPath && fields.worktreePath)) {
       json(context, 400, { error: "ticketId, repoPath, and worktreePath are required" });
       return;
     }
 
-    try {
-      const allowedDirectories = getAllowedDirectories();
-      assertPathAllowed(expandHome(repoPath), allowedDirectories);
-      assertPathAllowed(expandHome(worktreePath), allowedDirectories);
-      if (Array.isArray(contextRepoPaths)) {
-        for (const contextRepoPath of contextRepoPaths) {
-          assertPathAllowed(expandHome(contextRepoPath), allowedDirectories);
-        }
-      }
-    } catch (error) {
-      if (error instanceof DirectoryNotAllowedError) {
-        json(context, 403, { error: "directory not allowed" });
-        return;
-      }
-      throw error;
+    const pathsToCheck = [fields.repoPath, fields.worktreePath, ...(fields.contextRepoPaths ?? [])];
+    const pathError = assertAllPathsAllowed(pathsToCheck, getAllowedDirectories());
+    if (pathError) {
+      json(context, pathError.status, { error: pathError.error });
+      return;
     }
 
-    const config = await loadSessions();
-    const now = new Date().toISOString();
-    const existingIndex = config.sessions.findIndex((session) => session.ticketId === ticketId);
+    const dir = getSymphonyDir();
+    const config = await loadSessions(dir);
+    upsertSession(config, {
+      ticketId: fields.ticketId,
+      repoPath: fields.repoPath,
+      worktreePath: fields.worktreePath,
+      pid: fields.pid,
+      contextRepoPaths: fields.contextRepoPaths,
+      baseBranch: fields.baseBranch,
+      parentTicketId: fields.parentTicketId
+    });
 
-    if (existingIndex >= 0) {
-      config.sessions[existingIndex] = {
-        ...config.sessions[existingIndex],
-        repoPath,
-        worktreePath,
-        ...(pid !== undefined && { pid }),
-        ...(contextRepoPaths !== undefined && { contextRepoPaths }),
-        ...(baseBranch !== undefined && { baseBranch }),
-        ...(parentTicketId !== undefined && { parentTicketId }),
-        lastAccessedAt: now
-      };
-    } else {
-      config.sessions.push({
-        ticketId,
-        repoPath,
-        worktreePath,
-        ...(pid !== undefined && { pid }),
-        ...(contextRepoPaths !== undefined && { contextRepoPaths }),
-        ...(baseBranch !== undefined && { baseBranch }),
-        ...(parentTicketId !== undefined && { parentTicketId }),
-        startedAt: now,
-        lastAccessedAt: now
-      });
-    }
-
-    await saveSessions(config);
+    await saveSessions(dir, config);
     json(context, 200, { success: true });
   });
 
@@ -121,30 +147,38 @@ export function registerSymphonySessionRoutes(
       return;
     }
 
-    const config = await loadSessions();
+    const dir = getSymphonyDir();
+    const config = await loadSessions(dir);
     config.sessions = config.sessions.filter((session) => session.ticketId !== ticketId);
-    await saveSessions(config);
+    await saveSessions(dir, config);
     json(context, 200, { success: true });
   });
 }
 
-function expandHome(inputPath: string): string {
-  if (inputPath === "~") {
-    return os.homedir();
+function assertAllPathsAllowed(
+  paths: string[],
+  allowedDirectories: string[]
+): { error: string; status: 403 } | null {
+  try {
+    for (const p of paths) {
+      assertPathAllowed(expandHome(p), allowedDirectories);
+    }
+    return null;
+  } catch (error) {
+    if (error instanceof DirectoryNotAllowedError) {
+      return { error: "directory not allowed", status: 403 };
+    }
+    throw error;
   }
-  if (inputPath.startsWith("~/")) {
-    return path.join(os.homedir(), inputPath.slice(2));
-  }
-  return inputPath;
 }
 
-async function ensureDir(): Promise<void> {
-  await fs.mkdir(getSymphonyDir(), { recursive: true });
+async function ensureDir(symphonyDir: string): Promise<void> {
+  await fs.mkdir(symphonyDir, { recursive: true });
 }
 
-async function loadSessions(): Promise<SessionsConfig> {
-  await ensureDir();
-  const sessionsFile = getSessionsFile();
+async function loadSessions(symphonyDir: string): Promise<SessionsConfig> {
+  await ensureDir(symphonyDir);
+  const sessionsFile = getSessionsFile(symphonyDir);
 
   if (!existsSync(sessionsFile)) {
     return { sessions: [] };
@@ -162,9 +196,9 @@ async function loadSessions(): Promise<SessionsConfig> {
   }
 }
 
-async function saveSessions(config: SessionsConfig): Promise<void> {
-  await ensureDir();
-  await fs.writeFile(getSessionsFile(), JSON.stringify(config, null, 2), "utf-8");
+async function saveSessions(symphonyDir: string, config: SessionsConfig): Promise<void> {
+  await ensureDir(symphonyDir);
+  await fs.writeFile(getSessionsFile(symphonyDir), JSON.stringify(config, null, 2), "utf-8");
 }
 
 function parseBody(context: OperationRequestContext): Record<string, unknown> | null {
@@ -185,14 +219,6 @@ function json(context: OperationRequestContext, status: number, payload: unknown
   context.response.end(JSON.stringify(payload));
 }
 
-function getSymphonyDir(): string {
-  const overrideDirectory = process.env.SYMPHONY_HOME_DIR;
-  if (overrideDirectory && overrideDirectory.trim()) {
-    return path.resolve(overrideDirectory);
-  }
-  return path.join(os.homedir(), ".symphony");
-}
-
-function getSessionsFile(): string {
-  return path.join(getSymphonyDir(), "sessions.json");
+function getSessionsFile(symphonyDir: string): string {
+  return path.join(symphonyDir, "sessions.json");
 }

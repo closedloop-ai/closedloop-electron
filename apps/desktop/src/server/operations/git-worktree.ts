@@ -5,13 +5,16 @@ import type { OperationDispatcher, OperationRequestContext } from "../operation-
 import type { ProcessManager } from "../process-manager.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { loadReposConfig } from "./repos-config-utils.js";
-import { expandHome } from "./symphony-utils.js";
+import { expandHome, SymphonyDirNotConfiguredError } from "./symphony-utils.js";
 
 export function registerGitWorktreeRoutes(
   dispatcher: OperationDispatcher,
   processManager: ProcessManager,
-  getAllowedDirectories: () => string[]
+  getAllowedDirectories: () => string[],
+  getSymphonyDir: () => string
 ): void {
+  const configDir = () => path.join(getSymphonyDir(), "config");
+
   dispatcher.register("DELETE", "/api/engineer/git/worktree", async (context) => {
     const body = parseBody(context);
     if (!body) {
@@ -70,7 +73,7 @@ export function registerGitWorktreeRoutes(
 
   dispatcher.register("POST", "/api/engineer/git/worktree", async (context) => {
     try {
-      const worktreeParentDir = await resolveWorktreeParentDir();
+      const worktreeParentDir = await resolveWorktreeParentDir(configDir());
       if (!existsSync(worktreeParentDir)) {
         json(context, 200, { removed: [], kept: [], errors: [] });
         return;
@@ -121,18 +124,19 @@ export function registerGitWorktreeRoutes(
 
       json(context, 200, { removed, kept, errors });
     } catch (error) {
+      if (error instanceof SymphonyDirNotConfiguredError) throw error;
       const message = error instanceof Error ? error.message : "Unknown error";
       json(context, 500, { error: `Worktree cleanup failed: ${message}` });
     }
   });
 }
 
-async function resolveWorktreeParentDir(): Promise<string> {
+async function resolveWorktreeParentDir(reposConfigDir: string): Promise<string> {
   if (process.env.SYMPHONY_WORKTREE_PARENT_DIR) {
     return expandHome(process.env.SYMPHONY_WORKTREE_PARENT_DIR);
   }
 
-  const config = await loadReposConfig();
+  const config = await loadReposConfig(reposConfigDir);
   if (config.settings.worktreeParentDir) {
     return expandHome(config.settings.worktreeParentDir);
   }

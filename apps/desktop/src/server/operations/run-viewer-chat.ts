@@ -23,15 +23,17 @@ type RunViewerChatHistory = {
 export function registerRunViewerChatRoutes(
   dispatcher: OperationDispatcher,
   processManager: ProcessManager,
-  getAllowedDirectories: () => string[]
+  getAllowedDirectories: () => string[],
+  getSymphonyDir: () => string
 ): void {
   dispatcher.register("GET", "/api/engineer/run-viewer-chat", async (context) => {
-    const history = await loadChatHistory();
+    const dir = getSymphonyDir();
+    const history = await loadChatHistory(dir);
     json(context, 200, history);
   });
 
   dispatcher.register("DELETE", "/api/engineer/run-viewer-chat", async (context) => {
-    await saveChatHistory({ messages: [] });
+    await saveChatHistory(getSymphonyDir(), { messages: [] });
     json(context, 200, { success: true });
   });
 
@@ -63,14 +65,15 @@ export function registerRunViewerChatRoutes(
       }
     }
 
-    const history = await loadChatHistory();
+    const dir = getSymphonyDir();
+    const history = await loadChatHistory(dir);
     history.messages.push({
       id: `user-${Date.now()}`,
       role: "user",
       content: message,
       timestamp: new Date().toISOString()
     });
-    await saveChatHistory(history);
+    await saveChatHistory(dir, history);
 
     const isResuming = Boolean(history.claudeSessionId);
     const allowedTools = validatedRunDir ? READONLY_CODEBASE_TOOLS : WEB_ONLY_TOOLS;
@@ -84,7 +87,7 @@ export function registerRunViewerChatRoutes(
       const streamState = createStreamState(async (sessionId) => {
         if (!history.claudeSessionId) {
           history.claudeSessionId = sessionId;
-          await saveChatHistory(history);
+          await saveChatHistory(dir, history);
         }
       });
 
@@ -102,7 +105,7 @@ export function registerRunViewerChatRoutes(
             content: streamState.assistantContent.trim(),
             timestamp: new Date().toISOString()
           });
-          await saveChatHistory(history);
+          await saveChatHistory(dir, history);
         }
 
         writeEvent(context.response, { type: "done" });
@@ -162,24 +165,20 @@ export function registerRunViewerChatRoutes(
   });
 }
 
-function getChatsRootDir(): string {
-  const override = process.env.SYMPHONY_CHATS_DIR;
-  if (override && override.trim()) {
-    return path.resolve(override);
-  }
-  return path.join(os.homedir(), ".claude", ".symphony", "chats");
+function getChatsRootDir(symphonyDir: string): string {
+  return path.join(symphonyDir, "chats");
 }
 
-function getHistoryPath(): string {
-  return path.join(getChatsRootDir(), "_run-viewer", "chat-history.json");
+function getHistoryPath(symphonyDir: string): string {
+  return path.join(getChatsRootDir(symphonyDir), "_run-viewer", "chat-history.json");
 }
 
-async function loadChatHistory(): Promise<RunViewerChatHistory> {
-  return loadJsonFile<RunViewerChatHistory>(getHistoryPath(), { messages: [] });
+async function loadChatHistory(symphonyDir: string): Promise<RunViewerChatHistory> {
+  return loadJsonFile<RunViewerChatHistory>(getHistoryPath(symphonyDir), { messages: [] });
 }
 
-async function saveChatHistory(history: RunViewerChatHistory): Promise<void> {
-  await saveJsonFile(getHistoryPath(), history);
+async function saveChatHistory(symphonyDir: string, history: RunViewerChatHistory): Promise<void> {
+  await saveJsonFile(getHistoryPath(symphonyDir), history);
 }
 
 function buildRunViewerSystemPrompt(runDir?: string): string {
