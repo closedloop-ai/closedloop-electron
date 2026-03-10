@@ -19,8 +19,10 @@ const SAFE_COMMAND_TIMEOUT_MS = 120_000;
 
 export function registerDeployRoutes(
   dispatcher: OperationDispatcher,
-  getAllowedDirectories: () => string[]
+  getAllowedDirectories: () => string[],
+  getSymphonyDir: () => string
 ): void {
+  const configDir = () => path.join(getSymphonyDir(), "config");
   dispatcher.register("POST", "/api/engineer/deploy", async (context) => {
     const body = parseBody(context);
     if (!body) {
@@ -57,7 +59,7 @@ export function registerDeployRoutes(
       return;
     }
 
-    const reposConfig = await loadReposConfig();
+    const reposConfig = await loadReposConfig(configDir());
     const deployConfig = resolveDeployConfig(reposConfig, expandedRepoPath, expandedWorktreePath);
     if (!deployConfig?.command) {
       json(context, 400, {
@@ -74,7 +76,7 @@ export function registerDeployRoutes(
         ...repoEntry.deployment,
         ...deployConfig
       };
-      await saveReposConfig(reposConfig);
+      await saveReposConfig(reposConfig, configDir());
     }
 
     const claudeWorkDir = path.join(expandedWorktreePath, ".claude", "work");
@@ -275,7 +277,7 @@ export function registerDeployRoutes(
       throw error;
     }
 
-    const config = await loadReposConfig();
+    const config = await loadReposConfig(configDir());
     const repoEntry = config.repos.find(
       (repo) => expandHome(repo.path) === expandedRepoPath
     );
@@ -398,7 +400,7 @@ export function registerDeployRoutes(
       throw error;
     }
 
-    const config = await loadReposConfig();
+    const config = await loadReposConfig(configDir());
     const repoEntry = config.repos.find(
       (repo) => expandHome(repo.path) === expandedRepoPath
     );
@@ -451,7 +453,7 @@ export function registerDeployRoutes(
       return;
     }
 
-    await persistDeploymentConfig(repoPath, expandedRepoPath, detected);
+    await persistDeploymentConfig(repoPath, expandedRepoPath, detected, configDir());
     json(context, 200, { detected: true, config: detected });
   });
 
@@ -480,21 +482,21 @@ export function registerDeployRoutes(
     }
 
     const newConfig = detectDeployment(expandedRepoPath);
-    const config = await loadReposConfig();
+    const config = await loadReposConfig(configDir());
     const repoEntry = config.repos.find(
       (repo) => expandHome(repo.path) === expandedRepoPath
     );
 
     if (newConfig && repoEntry) {
       repoEntry.deployment = newConfig;
-      await saveReposConfig(config);
+      await saveReposConfig(config, configDir());
       json(context, 200, { redetected: true, config: newConfig });
       return;
     }
 
     if (repoEntry?.deployment) {
       repoEntry.deployment = undefined;
-      await saveReposConfig(config);
+      await saveReposConfig(config, configDir());
     }
 
     json(context, 200, { redetected: false });
@@ -524,7 +526,7 @@ export function registerDeployRoutes(
       throw error;
     }
 
-    const config = await loadReposConfig();
+    const config = await loadReposConfig(configDir());
     const repoEntry = config.repos.find(
       (repo) => expandHome(repo.path) === expandedRepoPath
     );
@@ -705,16 +707,17 @@ function shellEscape(target: string): string {
 async function persistDeploymentConfig(
   repoPath: string,
   expandedRepoPath: string,
-  detected: RepoDeploymentConfig
+  detected: RepoDeploymentConfig,
+  reposConfigDir: string
 ): Promise<void> {
-  const config = await loadReposConfig();
+  const config = await loadReposConfig(reposConfigDir);
   const repoEntry = config.repos.find(
     (repo) => expandHome(repo.path) === expandedRepoPath || repo.path === repoPath
   );
 
   if (repoEntry) {
     repoEntry.deployment = detected;
-    await saveReposConfig(config);
+    await saveReposConfig(config, reposConfigDir);
   }
 }
 

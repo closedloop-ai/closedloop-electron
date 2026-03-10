@@ -1,16 +1,16 @@
 import { execFile, execSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { ServerResponse } from "node:http";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import { findPluginScript } from "./plugin-cache.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { createStreamState, processStreamEvent, type ContentBlock } from "./stream-events.js";
-import { assertRepoAllowed, expandHome, resolveWorktreeDir } from "./symphony-utils.js";
+import { assertRepoAllowed, expandHome, resolveWorktreeDir, tryAssertRepoAllowed, tryAssertPathAllowed } from "./symphony-utils.js";
 
 const execFileAsync = promisify(execFile);
 const COMMIT_JSON_REGEX = /\{[\s\S]*"title"[\s\S]*"description"[\s\S]*\}/;
@@ -50,6 +50,14 @@ type CommentChatHistory = {
   contextPercent?: number | null;
 };
 
+function assertAllReposAllowed(repoPaths: string[], allowedDirs: string[]): { error: string; status: 403 } | null {
+  for (const repoPath of repoPaths) {
+    const result = tryAssertRepoAllowed(repoPath, allowedDirs);
+    if ("error" in result) return result;
+  }
+  return null;
+}
+
 export function registerSymphonyInteractiveRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[]
@@ -66,7 +74,7 @@ export function registerSymphonyInteractiveRoutes(
     const message = asString(body.message);
     const repoInput = asString(body.repoPath) ?? context.query.get("repo");
     const contextRepoPaths = Array.isArray(body.contextRepoPaths)
-      ? (body.contextRepoPaths.filter((entry): entry is string => typeof entry === "string") as string[])
+      ? body.contextRepoPaths.filter((entry): entry is string => typeof entry === "string")
       : [];
 
     if (!(message && repoInput)) {
@@ -254,18 +262,13 @@ export function registerSymphonyInteractiveRoutes(
     const messageId = asString(body.messageId);
     const responded = typeof body.responded === "boolean" ? body.responded : true;
 
-    let expandedRepoPath: string;
-    try {
-      expandedRepoPath = assertRepoAllowed(repoPath, getAllowedDirectories());
-    } catch (error) {
-      if (error instanceof DirectoryNotAllowedError) {
-        json(context, 403, { error: "directory not allowed" });
-        return;
-      }
-      throw error;
+    const repoResult = tryAssertRepoAllowed(repoPath, getAllowedDirectories());
+    if ("error" in repoResult) {
+      json(context, repoResult.status, { error: repoResult.error });
+      return;
     }
 
-    const historyPath = getCommentHistoryPath(ticketId, expandedRepoPath, commentId);
+    const historyPath = getCommentHistoryPath(ticketId, repoResult.path, commentId);
     const history = await loadJsonFile<CommentChatHistory>(historyPath, {
       messages: [],
       ticketId,
@@ -414,34 +417,29 @@ export function registerSymphonyInteractiveRoutes(
       return;
     }
 
-    let expandedRepoPath: string;
-    try {
-      expandedRepoPath = assertRepoAllowed(repoPath, getAllowedDirectories());
-      const contextRepoPaths = Array.isArray(ticket?.contextRepoPaths)
-        ? (ticket.contextRepoPaths.filter((entry): entry is string => typeof entry === "string") as string[])
-        : [];
-      for (const contextRepoPath of contextRepoPaths) {
-        assertRepoAllowed(contextRepoPath, getAllowedDirectories());
-      }
-    } catch (error) {
-      if (error instanceof DirectoryNotAllowedError) {
-        json(context, 403, { error: "directory not allowed" });
-        return;
-      }
-      throw error;
+    const repoResult = tryAssertRepoAllowed(repoPath, getAllowedDirectories());
+    if ("error" in repoResult) {
+      json(context, repoResult.status, { error: repoResult.error });
+      return;
+    }
+    const expandedRepoPath = repoResult.path;
+
+    const contextRepoPaths = Array.isArray(ticket?.contextRepoPaths)
+      ? ticket.contextRepoPaths.filter((entry): entry is string => typeof entry === "string")
+      : [];
+    const contextError = assertAllReposAllowed(contextRepoPaths, getAllowedDirectories());
+    if (contextError) {
+      json(context, contextError.status, { error: contextError.error });
+      return;
     }
 
     const branchName = sanitizeBranchName(ticketIdentifier);
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketIdentifier);
 
-    try {
-      assertPathAllowed(path.dirname(worktreeDir), getAllowedDirectories());
-    } catch (error) {
-      if (error instanceof DirectoryNotAllowedError) {
-        json(context, 403, { error: "directory not allowed" });
-        return;
-      }
-      throw error;
+    const pathResult = tryAssertPathAllowed(path.dirname(worktreeDir), getAllowedDirectories());
+    if (pathResult !== true) {
+      json(context, pathResult.status, { error: pathResult.error });
+      return;
     }
 
     try {
@@ -457,7 +455,7 @@ export function registerSymphonyInteractiveRoutes(
       }
 
       const logFile = path.join(claudeWorkDir, "symphony-launch.log");
-      const scriptPath = getRunLoopScriptPath();
+      const scriptPath = findPluginScript("code", "run-loop.sh");
 
       let pid: number | null = null;
       if (scriptPath) {
@@ -633,7 +631,7 @@ function buildCommentPrompt(
 
   if (commentContext.path) {
     parts.unshift(
-      `File: ${commentContext.path}${commentContext.line ? `:${commentContext.line}` : ""}`
+      "File: " + commentContext.path + (commentContext.line ? ":" + commentContext.line : "")
     );
   }
 
@@ -809,7 +807,7 @@ function resolveBaseRef(expandedRepoPath: string, baseBranch?: string | null): s
 }
 
 function shellEscapeArg(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
+  return "'" + value.replaceAll("'", String.raw`'\''`) + "'";
 }
 
 async function createPrdFile(
@@ -824,7 +822,7 @@ async function createPrdFile(
   const additionalContext = asString(ticket.additionalContext);
 
   const contextRepoPaths = Array.isArray(ticket.contextRepoPaths)
-    ? (ticket.contextRepoPaths.filter((entry): entry is string => typeof entry === "string") as string[])
+    ? ticket.contextRepoPaths.filter((entry): entry is string => typeof entry === "string")
     : [];
 
   const primaryRepoName = path.basename(primaryRepoPath);
@@ -857,10 +855,10 @@ async function createPrdFile(
     description,
     additionalContext ? `\n## Additional Instructions\n\n${additionalContext}` : "",
     contextRepoPaths.length > 0
-      ? `\n## Context Repositories\n\n${contextRepoPaths.map((repoPath) => `- \`${expandHome(repoPath)}\``).join("\n")}`
+      ? "\n## Context Repositories\n\n" + contextRepoPaths.map((repoPath) => "- `" + expandHome(repoPath) + "`").join("\n")
       : "",
     referencedFiles.length > 0
-      ? `\n## Referenced Files\n\n${referencedFiles.map((file) => `- \`${file}\``).join("\n")}`
+      ? "\n## Referenced Files\n\n" + referencedFiles.map((file) => "- `" + file + "`").join("\n")
       : ""
   ]
     .filter(Boolean)
@@ -868,61 +866,6 @@ async function createPrdFile(
 
   await fs.mkdir(claudeWorkDir, { recursive: true });
   await fs.writeFile(path.join(claudeWorkDir, "prd.md"), prdContent, "utf-8");
-}
-
-function getRunLoopScriptPath(): string | null {
-  const pluginDir = path.join(
-    os.homedir(),
-    ".claude",
-    "plugins",
-    "cache",
-    "closedloop",
-    "experimental"
-  );
-
-  if (!existsSync(pluginDir)) {
-    return null;
-  }
-
-  const versions = findPluginVersions(pluginDir);
-  for (const version of versions) {
-    const scriptPath = path.join(pluginDir, version, "scripts", "run-loop.sh");
-    if (existsSync(scriptPath)) {
-      return scriptPath;
-    }
-  }
-
-  return null;
-}
-
-function findPluginVersions(pluginDir: string): string[] {
-  try {
-    const entries = execSync(`ls -1 ${shellEscapeArg(pluginDir)}`, {
-      encoding: "utf-8"
-    })
-      .split("\n")
-      .filter(Boolean);
-
-    return entries
-      .filter((entry) => /^\d+\.\d+\.\d+/.test(entry))
-      .sort((a, b) => compareSemverDescending(a, b));
-  } catch {
-    return [];
-  }
-}
-
-function compareSemverDescending(a: string, b: string): number {
-  const partsA = a.split(".").map(Number);
-  const partsB = b.split(".").map(Number);
-
-  for (let index = 0; index < 3; index += 1) {
-    const diff = (partsB[index] ?? 0) - (partsA[index] ?? 0);
-    if (diff !== 0) {
-      return diff;
-    }
-  }
-
-  return 0;
 }
 
 function setStreamingHeaders(response: ServerResponse): void {

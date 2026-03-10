@@ -22,6 +22,7 @@ export interface DesktopGatewayServerOptions {
   webAppOrigin: string;
   getGatewayAuthToken?: () => string;
   getAllowedDirectories: () => string[];
+  getSymphonyDir?: () => string;
   fallbackEngineerOrigin?: string;
   onActivityEvent?: (event: GatewayActivityEvent) => void;
   evaluateApproval?: (
@@ -54,6 +55,7 @@ export class DesktopGatewayServer {
       capabilities: this.options.capabilities,
       getActivePort: () => this.activePort,
       getAllowedDirectories: this.options.getAllowedDirectories,
+      getSymphonyDir: this.options.getSymphonyDir,
       fallbackEngineerOrigin: this.options.fallbackEngineerOrigin,
       onActivityEvent: this.options.onActivityEvent,
       evaluateApproval: this.options.evaluateApproval
@@ -70,7 +72,8 @@ export class DesktopGatewayServer {
     onActivityEvent?: (event: GatewayActivityEvent) => void,
     evaluateApproval?: (
       request: GatewayApprovalRequest
-    ) => GatewayApprovalResult | Promise<GatewayApprovalResult>
+    ) => GatewayApprovalResult | Promise<GatewayApprovalResult>,
+    getSymphonyDir?: () => string
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -79,6 +82,7 @@ export class DesktopGatewayServer {
       webAppOrigin,
       getGatewayAuthToken,
       getAllowedDirectories,
+      getSymphonyDir,
       fallbackEngineerOrigin: process.env.SYMPHONY_ENGINEER_FALLBACK_ORIGIN,
       onActivityEvent,
       evaluateApproval,

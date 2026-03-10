@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import { findPluginScript } from "./plugin-cache.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
 
@@ -248,7 +249,7 @@ export function registerLearningsRoutes(
       "utf-8"
     );
 
-    const scriptPath = getProcessLearningsScriptPath();
+    const scriptPath = findPluginScript("code", "process-chat-learnings.sh");
     if (scriptPath) {
       const logFile = path.join(claudeWorkDir, "process-learnings.log");
       const child = spawn(scriptPath, [claudeWorkDir], {
@@ -334,12 +335,12 @@ export function registerLearningsRoutes(
     const ticketId = asString(body.ticketId);
     const repoPath = asString(body.repoPath);
     const learnings = Array.isArray(body.learnings)
-      ? (body.learnings.filter((entry): entry is LearningUsed => {
-          if (!(entry && typeof entry === "object")) {
-            return false;
-          }
-          return typeof (entry as LearningUsed).summary === "string";
-        }) as LearningUsed[])
+      ? body.learnings.filter((entry): entry is LearningUsed => {
+        if (!(entry && typeof entry === "object")) {
+          return false;
+        }
+        return typeof (entry as LearningUsed).summary === "string";
+      })
       : [];
 
     if (!(ticketId && repoPath)) {
@@ -423,7 +424,7 @@ function parseToon(content: string): ParsedLearningPattern[] {
 }
 
 function triggerSuccessRateComputation(workDir: string): void {
-  const runLoopPath = getRunLoopScriptPath();
+  const runLoopPath = findPluginScript("code", "run-loop.sh");
   if (!runLoopPath) {
     return;
   }
@@ -443,65 +444,6 @@ function triggerSuccessRateComputation(workDir: string): void {
     }
   });
   child.unref();
-}
-
-function getProcessLearningsScriptPath(): string | null {
-  const runLoopPath = getRunLoopScriptPath();
-  if (!runLoopPath) {
-    return null;
-  }
-
-  const candidate = path.join(path.dirname(runLoopPath), "process-chat-learnings.sh");
-  return existsSync(candidate) ? candidate : null;
-}
-
-function getRunLoopScriptPath(): string | null {
-  const pluginDir = path.join(
-    os.homedir(),
-    ".claude",
-    "plugins",
-    "cache",
-    "closedloop",
-    "experimental"
-  );
-
-  if (!existsSync(pluginDir)) {
-    return null;
-  }
-
-  const versions = findPluginVersions(pluginDir);
-  for (const version of versions) {
-    const scriptPath = path.join(pluginDir, version, "scripts", "run-loop.sh");
-    if (existsSync(scriptPath)) {
-      return scriptPath;
-    }
-  }
-
-  return null;
-}
-
-function findPluginVersions(pluginDir: string): string[] {
-  try {
-    return readdirSync(pluginDir)
-      .filter((entry) => /^\d+\.\d+\.\d+/.test(entry))
-      .sort((a, b) => compareSemverDescending(a, b));
-  } catch {
-    return [];
-  }
-}
-
-function compareSemverDescending(a: string, b: string): number {
-  const partsA = a.split(".").map(Number);
-  const partsB = b.split(".").map(Number);
-
-  for (let index = 0; index < 3; index += 1) {
-    const diff = (partsB[index] ?? 0) - (partsA[index] ?? 0);
-    if (diff !== 0) {
-      return diff;
-    }
-  }
-
-  return 0;
 }
 
 function sleep(ms: number): Promise<void> {

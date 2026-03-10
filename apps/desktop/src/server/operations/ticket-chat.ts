@@ -1,5 +1,5 @@
-import os from "node:os";
 import path from "node:path";
+import os from "node:os";
 import type { ServerResponse } from "node:http";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import type { ProcessManager } from "../process-manager.js";
@@ -32,7 +32,8 @@ type TicketContext = {
 export function registerTicketChatRoutes(
   dispatcher: OperationDispatcher,
   processManager: ProcessManager,
-  getAllowedDirectories: () => string[]
+  getAllowedDirectories: () => string[],
+  getSymphonyDir: () => string
 ): void {
   dispatcher.register("GET", "/api/engineer/ticket-chat", async (context) => {
     const ticketId = context.query.get("ticketId");
@@ -41,7 +42,7 @@ export function registerTicketChatRoutes(
       return;
     }
 
-    const history = await loadChatHistory(ticketId);
+    const history = await loadChatHistory(getSymphonyDir(), ticketId);
     json(context, 200, history);
   });
 
@@ -52,7 +53,7 @@ export function registerTicketChatRoutes(
       return;
     }
 
-    await saveChatHistory(ticketId, { messages: [], ticketId });
+    await saveChatHistory(getSymphonyDir(), ticketId, { messages: [], ticketId });
     json(context, 200, { success: true });
   });
 
@@ -87,14 +88,15 @@ export function registerTicketChatRoutes(
       }
     }
 
-    const history = await loadChatHistory(ticketId);
+    const dir = getSymphonyDir();
+    const history = await loadChatHistory(dir, ticketId);
     history.messages.push({
       id: `user-${Date.now()}`,
       role: "user",
       content: message,
       timestamp: new Date().toISOString()
     });
-    await saveChatHistory(ticketId, history);
+    await saveChatHistory(dir, ticketId, history);
 
     const isResuming = Boolean(history.sessionId);
     const contextPrompt = buildTicketContextPrompt(ticketContext, expandedRepoPath);
@@ -108,7 +110,7 @@ export function registerTicketChatRoutes(
       const streamState = createStreamState(async (sessionId) => {
         if (!history.sessionId) {
           history.sessionId = sessionId;
-          await saveChatHistory(ticketId, history);
+          await saveChatHistory(dir, ticketId, history);
         }
       });
 
@@ -129,7 +131,7 @@ export function registerTicketChatRoutes(
           if (streamState.capturedSessionId && !history.sessionId) {
             history.sessionId = streamState.capturedSessionId;
           }
-          await saveChatHistory(ticketId, history);
+          await saveChatHistory(dir, ticketId, history);
         }
 
         writeEvent(context.response, { type: "done" });
@@ -186,28 +188,24 @@ export function registerTicketChatRoutes(
   });
 }
 
-function getChatsRootDir(): string {
-  const override = process.env.SYMPHONY_CHATS_DIR;
-  if (override && override.trim()) {
-    return path.resolve(override);
-  }
-  return path.join(os.homedir(), ".claude", ".symphony", "chats");
+function getChatsRootDir(symphonyDir: string): string {
+  return path.join(symphonyDir, "chats");
 }
 
-function getHistoryPath(ticketId: string): string {
+function getHistoryPath(symphonyDir: string, ticketId: string): string {
   const sanitized = ticketId.replaceAll(/[^a-zA-Z0-9-_]/g, "_");
-  return path.join(getChatsRootDir(), sanitized, "chat-history.json");
+  return path.join(getChatsRootDir(symphonyDir), sanitized, "chat-history.json");
 }
 
-async function loadChatHistory(ticketId: string): Promise<TicketChatHistory> {
-  return loadJsonFile<TicketChatHistory>(getHistoryPath(ticketId), {
+async function loadChatHistory(symphonyDir: string, ticketId: string): Promise<TicketChatHistory> {
+  return loadJsonFile<TicketChatHistory>(getHistoryPath(symphonyDir, ticketId), {
     messages: [],
     ticketId
   });
 }
 
-async function saveChatHistory(ticketId: string, history: TicketChatHistory): Promise<void> {
-  await saveJsonFile(getHistoryPath(ticketId), history);
+async function saveChatHistory(symphonyDir: string, ticketId: string, history: TicketChatHistory): Promise<void> {
+  await saveJsonFile(getHistoryPath(symphonyDir, ticketId), history);
 }
 
 function isTicketContext(value: unknown): value is TicketContext {

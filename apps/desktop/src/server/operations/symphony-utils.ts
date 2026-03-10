@@ -17,6 +17,17 @@ const LOCAL_GIT_TIMEOUT = 10_000;
 /** Timeout for network-touching git commands (fetch, pull, rebase) and worktree add. */
 const NETWORK_GIT_TIMEOUT = 30_000;
 
+export class SymphonyDirNotConfiguredError extends Error {
+  constructor() {
+    super("Symphony directory not configured — complete onboarding");
+    this.name = "SymphonyDirNotConfiguredError";
+  }
+}
+
+export function computeSymphonyDir(sandboxBaseDirectory: string): string {
+  return path.join(sandboxBaseDirectory, ".closedloop-ai");
+}
+
 export function expandHome(inputPath: string): string {
   if (inputPath === "~") {
     return os.homedir();
@@ -311,6 +322,35 @@ export function ensureWorktreeForReview(
   }
 
   return null;
+}
+
+export function tryAssertRepoAllowed(
+  repoPath: string,
+  allowedDirs: string[]
+): { path: string } | { error: string; status: 403 } {
+  try {
+    return { path: assertRepoAllowed(repoPath, allowedDirs) };
+  } catch (error) {
+    if (error instanceof DirectoryNotAllowedError) {
+      return { error: "directory not allowed", status: 403 };
+    }
+    throw error;
+  }
+}
+
+export function tryAssertPathAllowed(
+  dirPath: string,
+  allowedDirs: string[]
+): true | { error: string; status: 403 } {
+  try {
+    assertPathAllowed(dirPath, allowedDirs);
+    return true;
+  } catch (error) {
+    if (error instanceof DirectoryNotAllowedError) {
+      return { error: "directory not allowed", status: 403 };
+    }
+    throw error;
+  }
 }
 
 export function findFirstExisting(...paths: string[]): string | null {

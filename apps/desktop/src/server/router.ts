@@ -30,6 +30,7 @@ import { registerSymphonyUploadRoutes } from "./operations/symphony-upload.js";
 import { registerTerminalChatRoutes } from "./operations/terminal-chat.js";
 import { registerTicketChatRoutes } from "./operations/ticket-chat.js";
 import { ProcessManager } from "./process-manager.js";
+import { SymphonyDirNotConfiguredError } from "./operations/symphony-utils.js";
 
 export interface GatewayRouterOptions {
   webAppOrigin: string;
@@ -38,6 +39,7 @@ export interface GatewayRouterOptions {
   capabilities: ComputeTargetCapabilities;
   getActivePort: () => number;
   getAllowedDirectories: () => string[];
+  getSymphonyDir?: () => string;
   fallbackEngineerOrigin?: string;
   onActivityEvent?: (event: GatewayActivityEvent) => void;
   getGatewayAuthToken?: () => string;
@@ -86,12 +88,13 @@ export class GatewayRouter {
     this.processManager = new ProcessManager({
       getAllowedDirectories: this.options.getAllowedDirectories
     });
+    const getSymphonyDir = this.options.getSymphonyDir ?? (() => { throw new SymphonyDirNotConfiguredError(); });
     registerFilesystemDirectoriesRoutes(
       this.operationDispatcher,
       this.options.getAllowedDirectories
     );
     registerCodexRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
-    registerDeployRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
+    registerDeployRoutes(this.operationDispatcher, this.options.getAllowedDirectories, getSymphonyDir);
     registerFilesystemSearchRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerGitActionRoutes(
       this.operationDispatcher,
@@ -112,16 +115,18 @@ export class GatewayRouter {
     registerGitWorktreeRoutes(
       this.operationDispatcher,
       this.processManager,
-      this.options.getAllowedDirectories
+      this.options.getAllowedDirectories,
+      getSymphonyDir
     );
-    registerHealthCheckRoutes(this.operationDispatcher, this.processManager);
+    registerHealthCheckRoutes(this.operationDispatcher, this.processManager, getSymphonyDir);
     registerLearningsRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
-    registerMetadataRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
-    registerReposConfigRoutes(this.operationDispatcher);
+    registerMetadataRoutes(this.operationDispatcher, this.options.getAllowedDirectories, getSymphonyDir);
+    registerReposConfigRoutes(this.operationDispatcher, getSymphonyDir);
     registerRunViewerChatRoutes(
       this.operationDispatcher,
       this.processManager,
-      this.options.getAllowedDirectories
+      this.options.getAllowedDirectories,
+      getSymphonyDir
     );
     registerRunViewerExtractRoutes(this.operationDispatcher);
     registerSymphonyAttachmentsRoutes(
@@ -136,7 +141,7 @@ export class GatewayRouter {
     registerSymphonyKillRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerSymphonyLogsRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerSymphonyPlanRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
-    registerSymphonySessionRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
+    registerSymphonySessionRoutes(this.operationDispatcher, this.options.getAllowedDirectories, getSymphonyDir);
     registerSymphonyStatusRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerSymphonyInteractiveRoutes(
       this.operationDispatcher,
@@ -146,12 +151,14 @@ export class GatewayRouter {
     registerTerminalChatRoutes(
       this.operationDispatcher,
       this.processManager,
-      this.options.getAllowedDirectories
+      this.options.getAllowedDirectories,
+      getSymphonyDir
     );
     registerTicketChatRoutes(
       this.operationDispatcher,
       this.processManager,
-      this.options.getAllowedDirectories
+      this.options.getAllowedDirectories,
+      getSymphonyDir
     );
   }
 

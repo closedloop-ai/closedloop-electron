@@ -5,6 +5,7 @@ dist
 .vscode
 .claude/
 .closedloop-ai/
+.closedloop/
 .closedloop-ai/code-review/*
 apps/desktop/src/shared/build-info.ts
 .env.local

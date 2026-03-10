@@ -1,4 +1,3 @@
-import os from "node:os";
 import path from "node:path";
 import fs from "node:fs/promises";
 import type { ServerResponse } from "node:http";
@@ -27,15 +26,16 @@ type TerminalChatHistory = {
 export function registerTerminalChatRoutes(
   dispatcher: OperationDispatcher,
   processManager: ProcessManager,
-  getAllowedDirectories: () => string[]
+  getAllowedDirectories: () => string[],
+  getSymphonyDir: () => string
 ): void {
   dispatcher.register("GET", "/api/engineer/terminal-chat", async (context) => {
-    const history = await loadChatHistory();
+    const history = await loadChatHistory(getSymphonyDir());
     json(context, 200, history);
   });
 
   dispatcher.register("DELETE", "/api/engineer/terminal-chat", async (context) => {
-    await saveChatHistory({ messages: [] });
+    await saveChatHistory(getSymphonyDir(), { messages: [] });
     json(context, 200, { success: true });
   });
 
@@ -53,7 +53,8 @@ export function registerTerminalChatRoutes(
     }
 
     const { mode, cleanMessage } = parseMessageMode(message);
-    const history = await loadChatHistory();
+    const dir = getSymphonyDir();
+    const history = await loadChatHistory(dir);
     history.messages.push({
       id: `user-${Date.now()}`,
       role: "user",
@@ -61,7 +62,7 @@ export function registerTerminalChatRoutes(
       timestamp: new Date().toISOString(),
       mode
     });
-    await saveChatHistory(history);
+    await saveChatHistory(dir, history);
 
     const terminalCwd = await resolveTerminalWorkingDirectory(getAllowedDirectories());
     if (!terminalCwd) {
@@ -80,11 +81,11 @@ export function registerTerminalChatRoutes(
     });
 
     if (mode === "claude") {
-      await streamClaude(context.response, processManager, cleanMessage, history, terminalCwd);
+      await streamClaude(context.response, processManager, cleanMessage, history, terminalCwd, dir);
       return;
     }
 
-    await streamCodex(context.response, processManager, cleanMessage, history, terminalCwd);
+    await streamCodex(context.response, processManager, cleanMessage, history, terminalCwd, dir);
   });
 }
 
@@ -93,12 +94,13 @@ async function streamClaude(
   processManager: ProcessManager,
   message: string,
   history: TerminalChatHistory,
-  terminalCwd: string
+  terminalCwd: string,
+  symphonyDir: string
 ): Promise<void> {
   const streamState = createStreamState(async (sessionId) => {
     if (!history.claudeSessionId) {
       history.claudeSessionId = sessionId;
-      await saveChatHistory(history);
+      await saveChatHistory(symphonyDir, history);
     }
   });
 
@@ -119,7 +121,7 @@ async function streamClaude(
           timestamp: new Date().toISOString(),
           mode: "claude"
         });
-        await saveChatHistory(history);
+        await saveChatHistory(symphonyDir, history);
       }
 
       writeEvent(response, { type: "done" });
@@ -179,7 +181,8 @@ async function streamCodex(
   processManager: ProcessManager,
   message: string,
   history: TerminalChatHistory,
-  terminalCwd: string
+  terminalCwd: string,
+  symphonyDir: string
 ): Promise<void> {
   let assistantContent = "";
 
@@ -200,7 +203,7 @@ async function streamCodex(
           timestamp: new Date().toISOString(),
           mode: "codex"
         });
-        await saveChatHistory(history);
+        await saveChatHistory(symphonyDir, history);
       }
 
       writeEvent(response, { type: "done" });
@@ -331,22 +334,18 @@ function json(context: OperationRequestContext, status: number, payload: unknown
   context.response.end(JSON.stringify(payload));
 }
 
-function getChatsRootDir(): string {
-  const override = process.env.SYMPHONY_CHATS_DIR;
-  if (override && override.trim()) {
-    return path.resolve(override);
-  }
-  return path.join(os.homedir(), ".claude", ".symphony", "chats");
+function getChatsRootDir(symphonyDir: string): string {
+  return path.join(symphonyDir, "chats");
 }
 
-function getHistoryPath(): string {
-  return path.join(getChatsRootDir(), "_terminal", "chat-history.json");
+function getHistoryPath(symphonyDir: string): string {
+  return path.join(getChatsRootDir(symphonyDir), "_terminal", "chat-history.json");
 }
 
-async function loadChatHistory(): Promise<TerminalChatHistory> {
-  return loadJsonFile<TerminalChatHistory>(getHistoryPath(), { messages: [] });
+async function loadChatHistory(symphonyDir: string): Promise<TerminalChatHistory> {
+  return loadJsonFile<TerminalChatHistory>(getHistoryPath(symphonyDir), { messages: [] });
 }
 
-async function saveChatHistory(history: TerminalChatHistory): Promise<void> {
-  await saveJsonFile(getHistoryPath(), history);
+async function saveChatHistory(symphonyDir: string, history: TerminalChatHistory): Promise<void> {
+  await saveJsonFile(getHistoryPath(symphonyDir), history);
 }

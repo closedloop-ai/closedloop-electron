@@ -1,7 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed, isPathAllowed } from "../security.js";
@@ -31,7 +30,8 @@ type SessionData = {
 
 export function registerMetadataRoutes(
   dispatcher: OperationDispatcher,
-  getAllowedDirectories: () => string[]
+  getAllowedDirectories: () => string[],
+  getSymphonyDir: () => string
 ): void {
   dispatcher.register("GET", "/api/engineer/version", async (context) => {
     try {
@@ -138,8 +138,10 @@ export function registerMetadataRoutes(
 
     const sanitizedTicket = ticketId.replaceAll(/[^a-zA-Z0-9-_]/g, "_");
     const allowedDirectories = getAllowedDirectories();
+    const symphonyDir = getSymphonyDir();
+    const configDir = path.join(symphonyDir, "config");
 
-    const sessionPath = path.join(getSymphonyDir(), "sessions.json");
+    const sessionPath = path.join(symphonyDir, "sessions.json");
     if (existsSync(sessionPath)) {
       try {
         const sessionContent = await fs.readFile(sessionPath, "utf-8");
@@ -163,7 +165,7 @@ export function registerMetadataRoutes(
       }
     }
 
-    const reposConfig = await loadReposConfig();
+    const reposConfig = await loadReposConfig(configDir);
     for (const repo of reposConfig.repos) {
       const expandedRepoPath = expandHome(repo.path);
       if (!isPathAllowed(expandedRepoPath, allowedDirectories)) {
@@ -264,14 +266,6 @@ function checkBranchStatus(worktreePath: string): {
   } catch {
     return null;
   }
-}
-
-function getSymphonyDir(): string {
-  const override = process.env.SYMPHONY_HOME_DIR;
-  if (override && override.trim()) {
-    return path.resolve(expandHome(override));
-  }
-  return path.join(os.homedir(), ".symphony");
 }
 
 function json(context: OperationRequestContext, status: number, payload: unknown): void {

@@ -1,5 +1,6 @@
 import os from "node:os";
 import path from "node:path";
+import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -20,6 +21,10 @@ import { SettingsStore } from "./settings-store.js";
 import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
 import { DesktopGatewayServer } from "../server/server.js";
+import {
+  computeSymphonyDir,
+  SymphonyDirNotConfiguredError
+} from "../server/operations/symphony-utils.js";
 import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
 import type { GatewayApprovalRequest, GatewayApprovalResult } from "../server/router.js";
@@ -81,7 +86,8 @@ export class DesktopApplication {
       (event) => {
         this.activityLog.add(event);
       },
-      (request) => this.evaluateApproval(request)
+      (request) => this.evaluateApproval(request),
+      () => this.getSymphonyDir()
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -163,6 +169,8 @@ export class DesktopApplication {
     this.tray.setPaused(this.cloudCommandsPaused);
     this.syncPendingApprovalsToTray();
     this.desktopWindow.init();
+
+    this.migrateLegacyData();
 
     try {
       await this.server.start();
@@ -301,6 +309,83 @@ export class DesktopApplication {
 
   private syncPendingApprovalsToTray(): void {
     this.tray.setPendingApprovals(this.approvalStore.countPending());
+  }
+
+  private getSymphonyDir(): string {
+    const sandboxBase = this.settingsStore.getSandboxBaseDirectory();
+    if (!sandboxBase?.trim()) {
+      throw new SymphonyDirNotConfiguredError();
+    }
+    return computeSymphonyDir(sandboxBase);
+  }
+
+  private migrateLegacyData(): void {
+    const sandboxBase = this.settingsStore.getSandboxBaseDirectory();
+    if (!sandboxBase?.trim()) {
+      return;
+    }
+
+    const newDir = computeSymphonyDir(sandboxBase);
+
+    const copyIfMissing = (src: string, dest: string): void => {
+      if (existsSync(src) && !existsSync(dest)) {
+        mkdirSync(path.dirname(dest), { recursive: true });
+        copyFileSync(src, dest);
+      }
+    };
+
+    const copyDirIfMissing = (srcDir: string, destDir: string): void => {
+      if (!existsSync(srcDir)) return;
+      try {
+        for (const entry of readdirSync(srcDir, { withFileTypes: true })) {
+          if (entry.isDirectory()) {
+            copyDirIfMissing(
+              path.join(srcDir, entry.name),
+              path.join(destDir, entry.name)
+            );
+          } else {
+            copyIfMissing(
+              path.join(srcDir, entry.name),
+              path.join(destDir, entry.name)
+            );
+          }
+        }
+      } catch {
+        // Best effort — skip unreadable entries
+      }
+    };
+
+    try {
+      // sessions.json — try newer path first, then legacy
+      copyIfMissing(
+        path.join(os.homedir(), ".closedloop-ai", "sessions.json"),
+        path.join(newDir, "sessions.json")
+      );
+      copyIfMissing(
+        path.join(os.homedir(), ".symphony", "sessions.json"),
+        path.join(newDir, "sessions.json")
+      );
+
+      // repos.json
+      copyIfMissing(
+        path.join(os.homedir(), ".claude", "closedloop", "repos.json"),
+        path.join(newDir, "config", "repos.json")
+      );
+
+      // chats from ~/.closedloop-ai/chats/
+      copyDirIfMissing(
+        path.join(os.homedir(), ".closedloop-ai", "chats"),
+        path.join(newDir, "chats")
+      );
+
+      // chats from ~/.claude/.symphony/chats/
+      copyDirIfMissing(
+        path.join(os.homedir(), ".claude", ".symphony", "chats"),
+        path.join(newDir, "chats")
+      );
+    } catch {
+      // Migration is best-effort — don't block startup
+    }
   }
 
   private getEffectiveAllowedDirectories(): string[] {

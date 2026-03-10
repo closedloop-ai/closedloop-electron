@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { SymphonyDirNotConfiguredError } from "./operations/symphony-utils.js";
 
 export interface OperationRequestContext {
   method: string;
@@ -51,10 +52,22 @@ export class OperationDispatcher {
         params[parameterName] = decodeURIComponent(value);
       }
 
-      await route.handler({
-        ...context,
-        params
-      });
+      try {
+        await route.handler({
+          ...context,
+          params
+        });
+      } catch (error) {
+        if (error instanceof SymphonyDirNotConfiguredError) {
+          context.response.statusCode = 503;
+          context.response.setHeader("content-type", "application/json");
+          context.response.end(
+            JSON.stringify({ error: "Server not configured — complete onboarding" })
+          );
+          return true;
+        }
+        throw error;
+      }
       return true;
     }
     return false;

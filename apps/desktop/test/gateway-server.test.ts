@@ -9,40 +9,20 @@ import { afterEach, test } from "node:test";
 import { promisify } from "node:util";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES, PORT_PROBE_ORDER } from "../src/shared/contracts.js";
+import { SymphonyDirNotConfiguredError, tryAssertRepoAllowed, tryAssertPathAllowed } from "../src/server/operations/symphony-utils.js";
 
 const execFileAsync = promisify(execFile);
 
 const serversToClose: DesktopGatewayServer[] = [];
 const blockersToClose: net.Server[] = [];
 const tempPathsToClean: string[] = [];
-const originalSymphonyHomeDir = process.env.SYMPHONY_HOME_DIR;
 const originalSymphonyWorktreeParentDir = process.env.SYMPHONY_WORKTREE_PARENT_DIR;
-const originalClosedloopConfigDir = process.env.CLOSEDLOOP_CONFIG_DIR;
-const originalSymphonyChatsDir = process.env.SYMPHONY_CHATS_DIR;
 
 afterEach(async () => {
-  if (originalSymphonyHomeDir === undefined) {
-    delete process.env.SYMPHONY_HOME_DIR;
-  } else {
-    process.env.SYMPHONY_HOME_DIR = originalSymphonyHomeDir;
-  }
-
   if (originalSymphonyWorktreeParentDir === undefined) {
     delete process.env.SYMPHONY_WORKTREE_PARENT_DIR;
   } else {
     process.env.SYMPHONY_WORKTREE_PARENT_DIR = originalSymphonyWorktreeParentDir;
-  }
-
-  if (originalClosedloopConfigDir === undefined) {
-    delete process.env.CLOSEDLOOP_CONFIG_DIR;
-  } else {
-    process.env.CLOSEDLOOP_CONFIG_DIR = originalClosedloopConfigDir;
-  }
-
-  if (originalSymphonyChatsDir === undefined) {
-    delete process.env.SYMPHONY_CHATS_DIR;
-  } else {
-    process.env.SYMPHONY_CHATS_DIR = originalSymphonyChatsDir;
   }
 
   for (const server of serversToClose.splice(0)) {
@@ -425,7 +405,6 @@ test("returns approval-required response when approval evaluator blocks engineer
 test("supports async approval evaluation before dispatch", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-approval-async-"));
   tempPathsToClean.push(tmpDir);
-  process.env.SYMPHONY_HOME_DIR = path.join(tmpDir, "symphony-home");
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -437,6 +416,7 @@ test("supports async approval evaluation before dispatch", async () => {
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => path.join(tmpDir, "symphony-home"),
     evaluateApproval: async () => {
       await new Promise((resolve) => setTimeout(resolve, 30));
       return { allow: true };
@@ -473,6 +453,7 @@ test("passes cloud approval headers into approval evaluator context", async () =
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => path.join(tmpDir, "symphony-home"),
     evaluateApproval: (request) => {
       capturedRequest = {
         source: request.source,
@@ -539,7 +520,6 @@ test("falls back to the next configured port when preferred port is in use", asy
 test("supports symphony sessions CRUD with contract-compatible response envelopes", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-sessions-"));
   tempPathsToClean.push(tmpDir);
-  process.env.SYMPHONY_HOME_DIR = path.join(tmpDir, "symphony-home");
 
   const repoPath = path.join(tmpDir, "repo-a");
   const worktreePath = path.join(tmpDir, "repo-a-AI-123");
@@ -555,7 +535,8 @@ test("supports symphony sessions CRUD with contract-compatible response envelope
     machineName: "session-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
-    discoveryFilePath: path.join(tmpDir, "electron-port")
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => path.join(tmpDir, "symphony-home")
   });
   serversToClose.push(server);
   await server.start();
@@ -591,7 +572,6 @@ test("supports symphony sessions CRUD with contract-compatible response envelope
 test("rejects disallowed directories for symphony sessions writes (AC-049)", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-sessions-deny-"));
   tempPathsToClean.push(tmpDir);
-  process.env.SYMPHONY_HOME_DIR = path.join(tmpDir, "symphony-home");
 
   const allowedDir = path.join(tmpDir, "allowed");
   await fs.mkdir(allowedDir, { recursive: true });
@@ -607,7 +587,8 @@ test("rejects disallowed directories for symphony sessions writes (AC-049)", asy
     machineName: "session-deny-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
-    discoveryFilePath: path.join(tmpDir, "electron-port")
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => path.join(tmpDir, "symphony-home")
   });
   serversToClose.push(server);
   await server.start();
@@ -1117,7 +1098,8 @@ test("returns health-check response envelope with required check structure", asy
     machineName: "health-check-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
-    discoveryFilePath: path.join(tmpDir, "electron-port")
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => path.join(tmpDir, "symphony-home")
   });
   serversToClose.push(server);
   await server.start();
@@ -1136,10 +1118,89 @@ test("returns health-check response envelope with required check structure", asy
   assert.equal(body.checks.every((check) => typeof check.passed === "boolean"), true);
 });
 
+test("health-check returns 200 with worktree-dir failed when getSymphonyDir throws", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-health-unconfigured-"));
+  tempPathsToClean.push(tmpDir);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "health-unconfigured-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => { throw new SymphonyDirNotConfiguredError(); }
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/health-check`);
+  assert.equal(response.status, 200, "health-check should return 200 even when unconfigured");
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; passed: boolean; error?: string }>;
+    allRequiredPassed: boolean;
+  };
+
+  const worktreeCheck = body.checks.find((check) => check.id === "worktree-dir");
+  assert.ok(worktreeCheck, "worktree-dir check should be present");
+  assert.equal(worktreeCheck.passed, false, "worktree-dir should fail when unconfigured");
+  assert.equal(worktreeCheck.error, "Not configured");
+});
+
+test("repos-config returns 503 when getSymphonyDir throws (not 500)", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-repos-unconfigured-"));
+  tempPathsToClean.push(tmpDir);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "repos-unconfigured-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => { throw new SymphonyDirNotConfiguredError(); }
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/repos`);
+  assert.equal(response.status, 503, "repos should return 503 when symphony dir not configured");
+  const body = (await response.json()) as { error: string };
+  assert.ok(body.error.includes("not configured"), "error message should mention configuration");
+});
+
+test("tryAssertRepoAllowed returns path on success and error on disallowed", () => {
+  const allowed = ["/allowed/dir"];
+
+  const success = tryAssertRepoAllowed("/allowed/dir/repo", allowed);
+  assert.ok("path" in success, "should return path on allowed directory");
+  assert.equal((success as { path: string }).path, "/allowed/dir/repo");
+
+  const failure = tryAssertRepoAllowed("/other/dir/repo", allowed);
+  assert.ok("error" in failure, "should return error on disallowed directory");
+  assert.equal((failure as { error: string; status: number }).status, 403);
+});
+
+test("tryAssertPathAllowed returns true on success and error on disallowed", () => {
+  const allowed = ["/allowed/dir"];
+
+  const success = tryAssertPathAllowed("/allowed/dir/sub", allowed);
+  assert.equal(success, true, "should return true on allowed path");
+
+  const failure = tryAssertPathAllowed("/other/dir/sub", allowed);
+  assert.ok(failure !== true, "should return error on disallowed path");
+  assert.equal((failure as { error: string; status: number }).status, 403);
+});
+
 test("supports repos config CRUD and settings patch", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-repos-"));
   tempPathsToClean.push(tmpDir);
-  process.env.CLOSEDLOOP_CONFIG_DIR = path.join(tmpDir, "closedloop-config");
 
   const repoPath = path.join(tmpDir, "repo-configured");
   await fs.mkdir(repoPath, { recursive: true });
@@ -1158,7 +1219,8 @@ test("supports repos config CRUD and settings patch", async () => {
     machineName: "repos-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
-    discoveryFilePath: path.join(tmpDir, "electron-port")
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => path.join(tmpDir, "symphony-home")
   });
   serversToClose.push(server);
   await server.start();
@@ -1248,7 +1310,6 @@ test("lists directories and supports file search endpoint", async () => {
 test("supports terminal chat history GET and DELETE", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-terminal-chat-"));
   tempPathsToClean.push(tmpDir);
-  process.env.SYMPHONY_CHATS_DIR = path.join(tmpDir, "chats");
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -1259,7 +1320,8 @@ test("supports terminal chat history GET and DELETE", async () => {
     machineName: "terminal-chat-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
-    discoveryFilePath: path.join(tmpDir, "electron-port")
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => tmpDir
   });
   serversToClose.push(server);
   await server.start();
@@ -1279,7 +1341,6 @@ test("supports terminal chat history GET and DELETE", async () => {
 test("supports ticket chat GET and DELETE with ticketId", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-ticket-chat-"));
   tempPathsToClean.push(tmpDir);
-  process.env.SYMPHONY_CHATS_DIR = path.join(tmpDir, "chats");
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -1290,7 +1351,8 @@ test("supports ticket chat GET and DELETE with ticketId", async () => {
     machineName: "ticket-chat-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
-    discoveryFilePath: path.join(tmpDir, "electron-port")
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => tmpDir
   });
   serversToClose.push(server);
   await server.start();
@@ -1314,7 +1376,6 @@ test("supports ticket chat GET and DELETE with ticketId", async () => {
 test("rejects disallowed repo path for ticket chat POST before spawn (AC-049)", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-ticket-chat-deny-"));
   tempPathsToClean.push(tmpDir);
-  process.env.SYMPHONY_CHATS_DIR = path.join(tmpDir, "chats");
 
   const allowedDir = path.join(tmpDir, "allowed");
   await fs.mkdir(allowedDir, { recursive: true });
@@ -1328,7 +1389,8 @@ test("rejects disallowed repo path for ticket chat POST before spawn (AC-049)", 
     machineName: "ticket-chat-deny-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
-    discoveryFilePath: path.join(tmpDir, "electron-port")
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => tmpDir
   });
   serversToClose.push(server);
   await server.start();
@@ -1354,7 +1416,6 @@ test("rejects disallowed repo path for ticket chat POST before spawn (AC-049)", 
 test("supports run viewer chat history GET and DELETE", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-run-viewer-chat-"));
   tempPathsToClean.push(tmpDir);
-  process.env.SYMPHONY_CHATS_DIR = path.join(tmpDir, "chats");
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -1365,7 +1426,8 @@ test("supports run viewer chat history GET and DELETE", async () => {
     machineName: "run-viewer-chat-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
-    discoveryFilePath: path.join(tmpDir, "electron-port")
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => tmpDir
   });
   serversToClose.push(server);
   await server.start();
@@ -1386,7 +1448,6 @@ test("supports run viewer chat history GET and DELETE", async () => {
 test("rejects disallowed run directory for run viewer chat POST (AC-049)", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-run-viewer-chat-deny-"));
   tempPathsToClean.push(tmpDir);
-  process.env.SYMPHONY_CHATS_DIR = path.join(tmpDir, "chats");
 
   const allowedDir = path.join(tmpDir, "allowed");
   await fs.mkdir(allowedDir, { recursive: true });
@@ -1400,7 +1461,8 @@ test("rejects disallowed run directory for run viewer chat POST (AC-049)", async
     machineName: "run-viewer-chat-deny-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
-    discoveryFilePath: path.join(tmpDir, "electron-port")
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => tmpDir
   });
   serversToClose.push(server);
   await server.start();
@@ -1692,8 +1754,6 @@ test("rejects disallowed repo for git PR list endpoint (AC-049)", async () => {
 test("returns empty work-directory result when no session or worktree exists", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-work-dir-"));
   tempPathsToClean.push(tmpDir);
-  process.env.SYMPHONY_HOME_DIR = path.join(tmpDir, "symphony-home");
-  process.env.CLOSEDLOOP_CONFIG_DIR = path.join(tmpDir, "closedloop-config");
 
   const allowedDir = path.join(tmpDir, "allowed");
   await fs.mkdir(allowedDir, { recursive: true });
@@ -1707,7 +1767,8 @@ test("returns empty work-directory result when no session or worktree exists", a
     machineName: "work-dir-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
-    discoveryFilePath: path.join(tmpDir, "electron-port")
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => path.join(tmpDir, "symphony-home")
   });
   serversToClose.push(server);
   await server.start();
@@ -1757,7 +1818,6 @@ test("rejects disallowed workDir on aggregate symphony status route (AC-049)", a
 test("detects deploy config from repo scripts", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-deploy-detect-"));
   tempPathsToClean.push(tmpDir);
-  process.env.CLOSEDLOOP_CONFIG_DIR = path.join(tmpDir, "closedloop-config");
 
   const repoPath = path.join(tmpDir, "repo-deploy");
   await fs.mkdir(repoPath, { recursive: true });
@@ -1775,6 +1835,7 @@ test("detects deploy config from repo scripts", async () => {
     getAllowedDirectories: () => [tmpDir],
     machineName: "deploy-detect-machine",
     version: "0.1.0-test",
+    getSymphonyDir: () => path.join(tmpDir, "symphony-home"),
     capabilities: EMPTY_CAPABILITIES,
     discoveryFilePath: path.join(tmpDir, "electron-port")
   });
@@ -1905,6 +1966,59 @@ test("returns skipped status when no learnings are pending", async () => {
     status: "skipped",
     reason: "No pending learnings directory"
   });
+});
+
+test("invokes plugin cache discovery when pending learnings exist", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-learnings-plugin-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-plugin");
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+  await fs.mkdir(repoPath, { recursive: true });
+  const pendingDir = path.join(
+    worktreeParent,
+    "repo-plugin-PLG-01",
+    ".claude",
+    "work",
+    ".learnings",
+    "pending"
+  );
+  await fs.mkdir(pendingDir, { recursive: true });
+  await fs.writeFile(path.join(pendingDir, "learning-1.json"), "{}");
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "learnings-plugin-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/process-learnings`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticketId: "PLG-01", repoPath })
+    }
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json() as Record<string, unknown>;
+  assert.equal(body.status, "processing");
+  // pid is null (no plugin cache) or a number (plugin found and script spawned)
+  assert.ok(body.pid === null || typeof body.pid === "number", "pid should be null or a number");
+
+  // Allow the fire-and-forget status write to complete before cleanup
+  await new Promise((resolve) => setTimeout(resolve, 400));
 });
 
 test("rejects disallowed repo path for record-learning-use (AC-049)", async () => {
@@ -2067,6 +2181,52 @@ test("rejects disallowed repo for symphony launch (AC-049)", async () => {
 
   assert.equal(response.status, 403);
   assert.deepEqual(await response.json(), { error: "directory not allowed" });
+});
+
+test("symphony launch invokes plugin cache discovery for run-loop script", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-launch-plugin-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-launch");
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+  await fs.mkdir(repoPath, { recursive: true });
+  // Pre-create worktree dir so the route skips git worktree creation
+  await fs.mkdir(path.join(worktreeParent, "repo-launch-LAUNCH-01"), { recursive: true });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "launch-plugin-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/launch`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ticketIdentifier: "LAUNCH-01",
+        repoPath
+      })
+    }
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json() as Record<string, unknown>;
+  assert.equal(body.success, true);
+  assert.equal(body.ticketId, "LAUNCH-01");
+  // pid is null (no plugin cache) or a number (plugin found and script spawned)
+  assert.ok(body.pid === null || typeof body.pid === "number", "pid should be null or a number");
 });
 
 test("validates required fields for codex chat route", async () => {
