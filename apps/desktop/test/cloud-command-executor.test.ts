@@ -57,6 +57,7 @@ test("serializes conflicting lock keys while allowing parallel non-conflicting c
     maxInFlightCommands: 2,
     onEvent: (event) => events.push(event)
   });
+  executor.setConnected(true);
 
   executor.enqueue(buildCommand("c1", { command: "c1" }, { repoPath: "/repo/a" }));
   executor.enqueue(buildCommand("c2", { command: "c2" }, { repoPath: "/repo/a" }));
@@ -88,6 +89,7 @@ test("cancels queued command with terminal done(cancelled=true)", async () => {
     maxInFlightCommands: 1,
     onEvent: (event) => events.push(event)
   });
+  executor.setConnected(true);
 
   executor.enqueue(buildCommand("c1", { command: "c1" }, { repoPath: "/repo/a" }));
   executor.enqueue(buildCommand("c2", { command: "c2" }, { repoPath: "/repo/b" }));
@@ -113,6 +115,7 @@ test("emits terminal timeout error when command exceeds timeoutMs", async () => 
     maxInFlightCommands: 1,
     onEvent: (event) => events.push(event)
   });
+  executor.setConnected(true);
 
   executor.enqueue(
     buildCommand("timeout-command", { command: "timeout-command" }, { repoPath: "/repo/a", timeoutMs: 30 })
@@ -145,6 +148,7 @@ test("replays buffered events from resume sequence", async () => {
     maxInFlightCommands: 1,
     onEvent: (event) => events.push(event)
   });
+  executor.setConnected(true);
 
   executor.enqueue(buildCommand("replay-command", { command: "replay-command" }, { repoPath: "/repo/a" }));
   await waitFor(() => countDone(events, "replay-command") === 1);
