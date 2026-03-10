@@ -724,10 +724,16 @@ export function registerCodexRoutes(
       });
 
       const sessionIdHolder: { value: string | undefined } = { value: undefined };
+      const stderrHolder: { value: string } = { value: "" };
       const streamFn = provider === "claude" ? streamClaudeReview : streamCodexReview;
-      await streamFn(child, context.response, logPath, sessionIdHolder);
+      await streamFn(child, context.response, logPath, sessionIdHolder, stderrHolder);
 
       const exitCode = await waitForExit(child);
+
+      if (exitCode !== 0 && stderrHolder.value.trim()) {
+        writeEvent(context.response, { type: "error", error: stderrHolder.value.trim() });
+      }
+
       const finalState: ReviewState = {
         ...state,
         status: exitCode === 0 ? "completed" : "failed",
@@ -1032,16 +1038,20 @@ export function registerCodexRoutes(
         }
       });
 
+      let stderrBuffer = "";
       child.stderr.setEncoding("utf-8");
       child.stderr.on("data", (chunk: string | Buffer) => {
-        const text = String(chunk);
-        writeEvent(context.response, { type: "error", error: text });
+        stderrBuffer += String(chunk);
       });
 
       child.stdin.write(prompt);
       child.stdin.end();
 
       const exitCode = await waitForExit(child);
+
+      if (exitCode !== 0 && stderrBuffer.trim()) {
+        writeEvent(context.response, { type: "error", error: stderrBuffer.trim() });
+      }
 
       if (streamState.assistantContent.trim()) {
         history.messages.push({
@@ -1482,7 +1492,8 @@ async function streamClaudeReview(
   child: ChildProcess,
   response: ServerResponse,
   logPath: string,
-  sessionIdHolder: { value: string | undefined }
+  sessionIdHolder: { value: string | undefined },
+  stderrHolder: { value: string }
 ): Promise<void> {
   const streamState = createStreamState((sessionId) => {
     sessionIdHolder.value = sessionId;
@@ -1515,7 +1526,7 @@ async function streamClaudeReview(
   child.stderr?.on("data", (chunk: string | Buffer) => {
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
     void fs.appendFile(logPath, text, "utf-8");
-    writeEvent(response, { type: "error", error: text });
+    stderrHolder.value += text;
   });
 }
 
@@ -1523,7 +1534,8 @@ async function streamCodexReview(
   child: ChildProcess,
   response: ServerResponse,
   logPath: string,
-  sessionIdHolder: { value: string | undefined }
+  sessionIdHolder: { value: string | undefined },
+  stderrHolder: { value: string }
 ): Promise<void> {
   child.stdout?.setEncoding("utf-8");
   child.stdout?.on("data", (chunk: string | Buffer) => {
@@ -1543,7 +1555,7 @@ async function streamCodexReview(
   child.stderr?.on("data", (chunk: string | Buffer) => {
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
     void fs.appendFile(logPath, text, "utf-8");
-    writeEvent(response, { type: "error", error: text });
+    stderrHolder.value += text;
   });
 }
 
@@ -1600,13 +1612,18 @@ async function streamCodexConversation(
       }
     });
 
+    let stderrBuffer = "";
     child.stderr?.setEncoding("utf-8");
     child.stderr?.on("data", (chunk: string | Buffer) => {
-      const text = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
-      writeEvent(response, { type: "error", error: text });
+      stderrBuffer += typeof chunk === "string" ? chunk : chunk.toString("utf-8");
     });
 
     const exitCode = await waitForExit(child);
+
+    if (exitCode !== 0 && stderrBuffer.trim()) {
+      writeEvent(response, { type: "error", error: stderrBuffer.trim() });
+    }
+
     writeEvent(response, {
       type: "result",
       success: exitCode === 0
