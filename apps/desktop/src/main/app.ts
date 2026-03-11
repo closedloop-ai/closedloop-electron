@@ -26,6 +26,7 @@ import {
   computeSymphonyDir,
   SymphonyDirNotConfiguredError
 } from "../server/operations/symphony-utils.js";
+import { seedReposConfig } from "./seed-repos-config.js";
 import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
 import type { GatewayApprovalRequest, GatewayApprovalResult } from "../server/router.js";
@@ -173,6 +174,11 @@ export class DesktopApplication {
 
     this.migrateLegacyData();
 
+    const bootSandbox = this.settingsStore.getSandboxBaseDirectory();
+    if (bootSandbox?.trim()) {
+      await seedReposConfig(bootSandbox);
+    }
+
     try {
       await this.server.start();
       const configuredOrigins = {
@@ -313,7 +319,7 @@ export class DesktopApplication {
   }
 
   private getSymphonyDir(): string {
-    const sandboxBase = this.settingsStore.getSandboxBaseDirectory();
+    const sandboxBase = normalizeScopePath(this.settingsStore.getSandboxBaseDirectory());
     if (!sandboxBase?.trim()) {
       throw new SymphonyDirNotConfiguredError();
     }
@@ -321,7 +327,7 @@ export class DesktopApplication {
   }
 
   private migrateLegacyData(): void {
-    const sandboxBase = this.settingsStore.getSandboxBaseDirectory();
+    const sandboxBase = normalizeScopePath(this.settingsStore.getSandboxBaseDirectory());
     if (!sandboxBase?.trim()) {
       return;
     }
@@ -607,7 +613,7 @@ export class DesktopApplication {
     });
     ipcMain.handle(
       "desktop:update-settings",
-      (_event, partial: {
+      async (_event, partial: {
         sandboxBaseDirectory?: string;
         onboardingCompleted?: boolean;
         apiOrigin?: string;
@@ -642,6 +648,15 @@ export class DesktopApplication {
         }
 
         const updated = this.settingsStore.update(nextPartial);
+
+        if (
+          typeof partial.sandboxBaseDirectory === "string" &&
+          selectedSandbox &&
+          selectedSandbox !== normalizeScopePath(currentSettings.sandboxBaseDirectory)
+        ) {
+          await seedReposConfig(selectedSandbox);
+        }
+
         this.restartCloudSocket();
         return updated;
       }
@@ -765,6 +780,7 @@ export class DesktopApplication {
           sandboxBaseDirectory,
           onboardingCompleted: true
         });
+        await seedReposConfig(sandboxBaseDirectory);
         this.restartCloudSocket();
         return this.getOnboardingState();
       }
