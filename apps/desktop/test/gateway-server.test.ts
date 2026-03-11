@@ -26,7 +26,11 @@ afterEach(async () => {
     process.env.SYMPHONY_WORKTREE_PARENT_DIR = originalSymphonyWorktreeParentDir;
   }
 
-  process.env.HOME = originalHome;
+  if (originalHome === undefined) {
+    delete process.env.HOME;
+  } else {
+    process.env.HOME = originalHome;
+  }
 
   for (const server of serversToClose.splice(0)) {
     await server.stop();
