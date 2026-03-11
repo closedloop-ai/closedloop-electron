@@ -8,6 +8,7 @@ import path from "node:path";
 import { afterEach, test } from "node:test";
 import { promisify } from "node:util";
 import { DesktopGatewayServer } from "../src/server/server.js";
+import { saveCodexChatSession } from "../src/server/operations/codex.js";
 import { EMPTY_CAPABILITIES, PORT_PROBE_ORDER } from "../src/shared/contracts.js";
 import { SymphonyDirNotConfiguredError, tryAssertRepoAllowed, tryAssertPathAllowed } from "../src/server/operations/symphony-utils.js";
 
@@ -915,6 +916,117 @@ test("supports chat history CRUD operations", async () => {
   );
   assert.equal(deleteResponse.status, 200);
   assert.deepEqual(await deleteResponse.json(), { success: true, message: "Chat history cleared" });
+});
+
+test("supports provider-scoped chat history with isolated CRUD", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-chat-provider-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-provider");
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeDir = path.join(worktreeParent, "repo-provider-AI-900");
+  const workDir = path.join(worktreeDir, ".claude", "work");
+  await fs.mkdir(workDir, { recursive: true });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "provider-scope-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const base = `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/chat-history/AI-900`;
+  const repo = `repo=${encodeURIComponent(repoPath)}`;
+
+  // POST with provider=claude → writes to chat-history-claude.json
+  const postClaude = await fetch(`${base}?${repo}&provider=claude`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      message: { id: "c1", role: "user", content: "claude msg", timestamp: "2026-03-11T00:00:00.000Z" }
+    })
+  });
+  assert.equal(postClaude.status, 200);
+
+  // POST with provider=codex → writes to chat-history-codex.json
+  const postCodex = await fetch(`${base}?${repo}&provider=codex`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      message: { id: "x1", role: "user", content: "codex msg", timestamp: "2026-03-11T00:00:01.000Z" }
+    })
+  });
+  assert.equal(postCodex.status, 200);
+
+  // GET with provider=claude → reads only Claude's history
+  // No codex-chat-review.json yet, so codexSessionExists should be false
+  const getClaude = await fetch(`${base}?${repo}&provider=claude`);
+  assert.equal(getClaude.status, 200);
+  const claudeBody = (await getClaude.json()) as { messages: Array<{ content: string }>; codexSessionExists: boolean };
+  assert.equal(claudeBody.messages.length, 1);
+  assert.equal(claudeBody.messages[0]?.content, "claude msg");
+  assert.equal(claudeBody.codexSessionExists, false);
+
+  // GET with provider=codex → reads only Codex's history + codexSessionExists still false
+  const getCodex = await fetch(`${base}?${repo}&provider=codex`);
+  assert.equal(getCodex.status, 200);
+  const codexBody = (await getCodex.json()) as { messages: Array<{ content: string }>; codexSessionExists: boolean };
+  assert.equal(codexBody.messages.length, 1);
+  assert.equal(codexBody.messages[0]?.content, "codex msg");
+  assert.equal(codexBody.codexSessionExists, false);
+
+  // Seed a codex-chat-review.json to test scoped DELETE cleanup AND codexSessionExists=true
+  await fs.writeFile(
+    path.join(workDir, "codex-chat-review.json"),
+    JSON.stringify({ sessionId: "review-session" }),
+    "utf-8"
+  );
+
+  // GET after seeding codex-chat-review.json → codexSessionExists should now be true
+  const getCodexWithSession = await fetch(`${base}?${repo}&provider=codex`);
+  assert.equal(getCodexWithSession.status, 200);
+  const codexWithSession = (await getCodexWithSession.json()) as { codexSessionExists: boolean };
+  assert.equal(codexWithSession.codexSessionExists, true);
+
+  // DELETE with provider=claude → removes only chat-history-claude.json, leaves codex files
+  const deleteClaude = await fetch(`${base}?${repo}&provider=claude`, { method: "DELETE" });
+  assert.equal(deleteClaude.status, 200);
+
+  // Verify codex history + review file still exist
+  const getCodexAfter = await fetch(`${base}?${repo}&provider=codex`);
+  const codexAfter = (await getCodexAfter.json()) as { messages: Array<{ content: string }> };
+  assert.equal(codexAfter.messages.length, 1);
+  const reviewFileExists = await fs.access(path.join(workDir, "codex-chat-review.json")).then(() => true, () => false);
+  assert.equal(reviewFileExists, true);
+
+  // DELETE with provider=codex → removes chat-history-codex.json AND codex-chat-review.json
+  const deleteCodex = await fetch(`${base}?${repo}&provider=codex`, { method: "DELETE" });
+  assert.equal(deleteCodex.status, 200);
+  const reviewFileGone = await fs.access(path.join(workDir, "codex-chat-review.json")).then(() => false, () => true);
+  assert.equal(reviewFileGone, true);
+
+  // DELETE without provider → blanket cleanup (backward compat)
+  // Re-seed files first
+  await fs.writeFile(path.join(workDir, "chat-history.json"), JSON.stringify({ messages: [], ticketId: "AI-900", repoPath }), "utf-8");
+  await fs.writeFile(path.join(workDir, "codex-chat.json"), JSON.stringify({ sessionId: "s1" }), "utf-8");
+  const deleteBlanket = await fetch(`${base}?${repo}`, { method: "DELETE" });
+  assert.equal(deleteBlanket.status, 200);
+  const codexChatGone = await fs.access(path.join(workDir, "codex-chat.json")).then(() => false, () => true);
+  assert.equal(codexChatGone, true);
+
+  // Invalid provider → 400
+  const badProvider = await fetch(`${base}?${repo}&provider=openai`);
+  assert.equal(badProvider.status, 400);
 });
 
 test("returns jsonl log format when claude-output.jsonl exists", async () => {
@@ -2468,6 +2580,56 @@ test("rejects disallowed repo for codex status route (AC-049)", async () => {
 
   assert.equal(response.status, 403);
   assert.deepEqual(await response.json(), { error: "directory not allowed" });
+});
+
+// ---------------------------------------------------------------------------
+// T4: Codex review-scoped session — saveCodexChatSession write path
+//
+// The /codex/chat/:ticketId read path and the review-completion write path
+// both depend on spawning a real `codex` binary, which is unavailable in CI
+// and unit-test environments. A full integration test would require a running
+// Codex process that emits a session ID. Instead we directly test the exported
+// saveCodexChatSession helper which contains the file-selection logic shared
+// by both the write-on-completion (codex.ts:774) and the onSessionId callback
+// (codex.ts:905). This proves chatContextId: "review" writes to
+// codex-chat-review.json while the default writes to codex-chat.json.
+// ---------------------------------------------------------------------------
+test("saveCodexChatSession writes to review-scoped file when chatContextId is 'review'", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-codex-session-"));
+  tempPathsToClean.push(tmpDir);
+
+  const workDir = path.join(tmpDir, ".claude", "work");
+  await fs.mkdir(workDir, { recursive: true });
+
+  // Write with chatContextId: "review" → codex-chat-review.json
+  await saveCodexChatSession(tmpDir, "review-sess-1", "codex", "review");
+  const reviewFile = JSON.parse(await fs.readFile(path.join(workDir, "codex-chat-review.json"), "utf-8")) as { sessionId: string };
+  assert.equal(reviewFile.sessionId, "review-sess-1");
+
+  // Default codex-chat.json should NOT exist
+  const defaultExists = await fs.access(path.join(workDir, "codex-chat.json")).then(() => true, () => false);
+  assert.equal(defaultExists, false);
+
+  // Write without chatContextId → codex-chat.json
+  await saveCodexChatSession(tmpDir, "general-sess-1", "codex");
+  const defaultFile = JSON.parse(await fs.readFile(path.join(workDir, "codex-chat.json"), "utf-8")) as { sessionId: string };
+  assert.equal(defaultFile.sessionId, "general-sess-1");
+
+  // Review file should still have the original session
+  const reviewAfter = JSON.parse(await fs.readFile(path.join(workDir, "codex-chat-review.json"), "utf-8")) as { sessionId: string };
+  assert.equal(reviewAfter.sessionId, "review-sess-1");
+});
+
+test("saveCodexChatSession is a no-op for non-codex providers", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-codex-session-noop-"));
+  tempPathsToClean.push(tmpDir);
+
+  const workDir = path.join(tmpDir, ".claude", "work");
+  await fs.mkdir(workDir, { recursive: true });
+
+  await saveCodexChatSession(tmpDir, "sess-1", "claude", "review");
+  const anyFile = await fs.readdir(workDir);
+  assert.equal(anyFile.length, 0);
 });
 
 async function findAvailablePort(excluded: number[] = []): Promise<number> {

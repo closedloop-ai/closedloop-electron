@@ -10,7 +10,7 @@ import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { createStreamState, processStreamEvent, type ContentBlock } from "./stream-events.js";
-import { assertRepoAllowed, expandHome, resolveWorktreeDir, tryAssertRepoAllowed, tryAssertPathAllowed } from "./symphony-utils.js";
+import { VALID_PROVIDERS, assertRepoAllowed, chatHistoryFilename, expandHome, resolveWorktreeDir, tryAssertRepoAllowed, tryAssertPathAllowed } from "./symphony-utils.js";
 
 const execFileAsync = promisify(execFile);
 const COMMIT_JSON_REGEX = /\{[\s\S]*"title"[\s\S]*"description"[\s\S]*\}/;
@@ -109,7 +109,12 @@ export function registerSymphonyInteractiveRoutes(
       throw error;
     }
 
-    const historyPath = path.join(worktreeDir, ".claude", "work", "chat-history.json");
+    const provider = asString(body.provider);
+    if (provider && !VALID_PROVIDERS.has(provider)) {
+      json(context, 400, { error: "unsupported provider" });
+      return;
+    }
+    const historyPath = path.join(worktreeDir, ".claude", "work", chatHistoryFilename(provider));
     const history = await loadJsonFile<TicketChatHistory>(historyPath, {
       messages: [],
       ticketId,

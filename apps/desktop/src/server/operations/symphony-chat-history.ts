@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
-import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
+import { VALID_PROVIDERS, assertRepoAllowed, chatHistoryFilename, resolveWorktreeDir } from "./symphony-utils.js";
 
 type ChatMessage = {
   id: string;
@@ -28,9 +28,15 @@ export function registerSymphonyChatHistoryRoutes(
   dispatcher.register("GET", "/api/engineer/symphony/chat-history/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
+    const provider = context.query.get("provider");
 
     if (!repoPath) {
       json(context, 400, { error: "repo parameter is required" });
+      return;
+    }
+
+    if (provider && !VALID_PROVIDERS.has(provider)) {
+      json(context, 400, { error: "unsupported provider" });
       return;
     }
 
@@ -45,13 +51,18 @@ export function registerSymphonyChatHistoryRoutes(
       throw error;
     }
 
-    const historyPath = getChatHistoryPath(ticketId, expandedRepoPath);
+    const historyPath = getChatHistoryPath(ticketId, expandedRepoPath, provider);
+    const workDir = path.dirname(historyPath);
+    const codexSessionExists = existsSync(
+      path.join(workDir, "codex-chat-review.json")
+    );
 
     if (!existsSync(historyPath)) {
       json(context, 200, {
         messages: [],
         ticketId,
-        repoPath
+        repoPath,
+        codexSessionExists
       });
       return;
     }
@@ -59,7 +70,7 @@ export function registerSymphonyChatHistoryRoutes(
     try {
       const content = await fs.readFile(historyPath, "utf-8");
       const history = JSON.parse(content) as ChatHistory;
-      json(context, 200, history);
+      json(context, 200, { ...history, codexSessionExists });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown error";
       json(context, 500, { error: `Failed to read chat history: ${message}` });
@@ -69,9 +80,15 @@ export function registerSymphonyChatHistoryRoutes(
   dispatcher.register("POST", "/api/engineer/symphony/chat-history/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
+    const provider = context.query.get("provider");
 
     if (!repoPath) {
       json(context, 400, { error: "repo parameter is required" });
+      return;
+    }
+
+    if (provider && !VALID_PROVIDERS.has(provider)) {
+      json(context, 400, { error: "unsupported provider" });
       return;
     }
 
@@ -95,7 +112,7 @@ export function registerSymphonyChatHistoryRoutes(
     const message = parseMessage(body.message);
     const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
 
-    const historyPath = getChatHistoryPath(ticketId, expandedRepoPath);
+    const historyPath = getChatHistoryPath(ticketId, expandedRepoPath, provider);
     const historyDir = path.dirname(historyPath);
 
     try {
@@ -154,9 +171,15 @@ export function registerSymphonyChatHistoryRoutes(
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const indexParam = context.query.get("index");
+    const provider = context.query.get("provider");
 
     if (!repoPath) {
       json(context, 400, { error: "repo parameter is required" });
+      return;
+    }
+
+    if (provider && !VALID_PROVIDERS.has(provider)) {
+      json(context, 400, { error: "unsupported provider" });
       return;
     }
 
@@ -171,8 +194,16 @@ export function registerSymphonyChatHistoryRoutes(
       throw error;
     }
 
-    const historyPath = getChatHistoryPath(ticketId, expandedRepoPath);
+    const historyPath = getChatHistoryPath(ticketId, expandedRepoPath, provider);
+    const workDir = path.dirname(historyPath);
+
     if (!existsSync(historyPath)) {
+      // Even if no transcript exists, clean up associated state files
+      if (indexParam === null && provider === "codex") {
+        await fs.rm(path.join(workDir, "codex-chat-review.json"), { force: true });
+      } else if (indexParam === null && !provider) {
+        await deleteSharedCodexChatState(workDir);
+      }
       json(context, 200, {
         success: true,
         message: "No history to delete"
@@ -184,10 +215,14 @@ export function registerSymphonyChatHistoryRoutes(
       if (indexParam === null) {
         await fs.unlink(historyPath);
 
-        const codexStatePath = path.join(path.dirname(historyPath), "codex-chat.json");
-        if (existsSync(codexStatePath)) {
-          await fs.unlink(codexStatePath);
+        if (provider === "codex") {
+          // Only clean up the review-scoped Codex session file
+          await fs.rm(path.join(workDir, "codex-chat-review.json"), { force: true });
+        } else if (!provider) {
+          // No provider specified (SymphonyChat full clear) — blanket cleanup
+          await deleteSharedCodexChatState(workDir);
         }
+        // provider=claude: do NOT touch any codex state files
 
         json(context, 200, {
           success: true,
@@ -220,8 +255,19 @@ export function registerSymphonyChatHistoryRoutes(
   });
 }
 
-function getChatHistoryPath(ticketId: string, expandedRepoPath: string): string {
-  return path.join(resolveWorktreeDir(expandedRepoPath, ticketId), ".claude", "work", "chat-history.json");
+function getChatHistoryPath(
+  ticketId: string,
+  expandedRepoPath: string,
+  provider?: string | null
+): string {
+  return path.join(resolveWorktreeDir(expandedRepoPath, ticketId), ".claude", "work", chatHistoryFilename(provider));
+}
+
+/** Delete shared-surface Codex chat state files: legacy + review. */
+async function deleteSharedCodexChatState(workDir: string): Promise<void> {
+  for (const name of ["codex-chat.json", "codex-chat-review.json"]) {
+    await fs.rm(path.join(workDir, name), { force: true });
+  }
 }
 
 function parseJsonBody(context: OperationRequestContext): Record<string, unknown> | null {
