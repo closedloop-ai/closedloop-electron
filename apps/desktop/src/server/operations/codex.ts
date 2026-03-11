@@ -101,13 +101,16 @@ function writeErrorAndEnd(response: ServerResponse, error: unknown): void {
   response.end();
 }
 
-async function saveCodexChatSession(
+/** @internal Exported for testing only. */
+export async function saveCodexChatSession(
   worktreeDir: string,
   sessionId: string | undefined,
-  provider: string
+  provider: string,
+  chatContextId?: string
 ): Promise<void> {
   if (sessionId && provider === "codex") {
-    const chatStatePath = path.join(worktreeDir, ".claude", "work", "codex-chat.json");
+    const filename = chatContextId === "review" ? "codex-chat-review.json" : "codex-chat.json";
+    const chatStatePath = path.join(worktreeDir, ".claude", "work", filename);
     await saveJsonFile(chatStatePath, {
       sessionId,
       messageCount: 0
@@ -769,7 +772,7 @@ export function registerCodexRoutes(
       await fs.writeFile(statePath, JSON.stringify(finalState, null, 2), "utf-8");
       await fs.rm(pidPath, { force: true });
 
-      await saveCodexChatSession(worktreeDir, sessionIdHolder.value, provider);
+      await saveCodexChatSession(worktreeDir, sessionIdHolder.value, provider, "review");
 
       writeEvent(context.response, { type: "result", success: exitCode === 0 });
       writeEvent(context.response, { type: "done" });
@@ -885,7 +888,9 @@ export function registerCodexRoutes(
     const defaultWorktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
     const worktreeDir = existsSync(defaultWorktreeDir) ? defaultWorktreeDir : expandedRepoPath;
 
-    const statePath = path.join(worktreeDir, ".claude", "work", "codex-chat.json");
+    const chatContextId = asString(body.chatContextId);
+    const stateFilename = chatContextId === "review" ? "codex-chat-review.json" : "codex-chat.json";
+    const statePath = path.join(worktreeDir, ".claude", "work", stateFilename);
     const chatState = await loadJsonFile<CodexChatState>(statePath, { messageCount: 0 });
 
     const args = chatState.sessionId

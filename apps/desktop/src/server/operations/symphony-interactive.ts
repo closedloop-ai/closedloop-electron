@@ -109,7 +109,16 @@ export function registerSymphonyInteractiveRoutes(
       throw error;
     }
 
-    const historyPath = path.join(worktreeDir, ".claude", "work", "chat-history.json");
+    const provider = asString(body.provider);
+    const VALID_PROVIDERS = new Set(["claude", "codex"]);
+    if (provider && !VALID_PROVIDERS.has(provider)) {
+      json(context, 400, { error: "unsupported provider" });
+      return;
+    }
+    const historyFilename = provider
+      ? `chat-history-${provider}.json`
+      : "chat-history.json";
+    const historyPath = path.join(worktreeDir, ".claude", "work", historyFilename);
     const history = await loadJsonFile<TicketChatHistory>(historyPath, {
       messages: [],
       ticketId,
