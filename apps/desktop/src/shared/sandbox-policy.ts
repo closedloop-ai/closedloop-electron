@@ -1,5 +1,5 @@
-import os from "node:os";
 import path from "node:path";
+import { expandHomePath } from "./path-utils.js";
 
 /**
  * Derive the effective allowed-directories list from the sandbox base directory.
@@ -25,14 +25,4 @@ export function normalizeScopePath(value: string | null | undefined): string | n
     return null;
   }
   return path.resolve(expandHomePath(trimmed));
-}
-
-function expandHomePath(inputPath: string): string {
-  if (inputPath === "~") {
-    return os.homedir();
-  }
-  if (inputPath.startsWith("~/")) {
-    return path.join(os.homedir(), inputPath.slice(2));
-  }
-  return inputPath;
 }
