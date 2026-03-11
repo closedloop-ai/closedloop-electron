@@ -6,14 +6,27 @@ import {
   type RiskTier
 } from "../shared/contracts.js";
 
+export interface SettingsStoreOptions {
+  cwd?: string;
+  name?: string;
+}
+
 export class SettingsStore {
   private readonly store: Store<DesktopSettings>;
 
-  constructor() {
+  constructor(options?: SettingsStoreOptions) {
     this.store = new Store<DesktopSettings>({
-      name: "desktop-settings",
+      name: options?.name ?? "desktop-settings",
+      cwd: options?.cwd,
       defaults: DEFAULT_DESKTOP_SETTINGS
     });
+
+    // Migration: delete stale allowedDirectories key from previous versions.
+    // electron-store spreads raw persisted data in getAll(), so a stale key
+    // would bleed through to IPC responses even after removing it from the type.
+    if ("allowedDirectories" in this.store.store) {
+      this.store.delete("allowedDirectories" as keyof DesktopSettings);
+    }
   }
 
   getAll(): DesktopSettings {
@@ -26,10 +39,6 @@ export class SettingsStore {
 
   getWebAppOrigin(): string {
     return this.store.get("webAppOrigin", DEFAULT_DESKTOP_SETTINGS.webAppOrigin);
-  }
-
-  getAllowedDirectories(): string[] {
-    return this.store.get("allowedDirectories", DEFAULT_DESKTOP_SETTINGS.allowedDirectories);
   }
 
   getSandboxBaseDirectory(): string {
@@ -50,10 +59,6 @@ export class SettingsStore {
 
   getDefaultApprovalTier(): RiskTier {
     return this.store.get("defaultApprovalTier", DEFAULT_DESKTOP_SETTINGS.defaultApprovalTier);
-  }
-
-  setAllowedDirectories(allowedDirectories: string[]): void {
-    this.store.set("allowedDirectories", allowedDirectories);
   }
 
   setSandboxBaseDirectory(sandboxBaseDirectory: string): void {
@@ -99,9 +104,6 @@ export class SettingsStore {
   }
 
   update(partial: Partial<DesktopSettings>): DesktopSettings {
-    if (partial.allowedDirectories) {
-      this.store.set("allowedDirectories", partial.allowedDirectories);
-    }
     if (typeof partial.sandboxBaseDirectory === "string") {
       this.store.set("sandboxBaseDirectory", partial.sandboxBaseDirectory);
     }
