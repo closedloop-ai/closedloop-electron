@@ -17,12 +17,19 @@ const serversToClose: DesktopGatewayServer[] = [];
 const blockersToClose: net.Server[] = [];
 const tempPathsToClean: string[] = [];
 const originalSymphonyWorktreeParentDir = process.env.SYMPHONY_WORKTREE_PARENT_DIR;
+const originalHome = process.env.HOME;
 
 afterEach(async () => {
   if (originalSymphonyWorktreeParentDir === undefined) {
     delete process.env.SYMPHONY_WORKTREE_PARENT_DIR;
   } else {
     process.env.SYMPHONY_WORKTREE_PARENT_DIR = originalSymphonyWorktreeParentDir;
+  }
+
+  if (originalHome === undefined) {
+    delete process.env.HOME;
+  } else {
+    process.env.HOME = originalHome;
   }
 
   for (const server of serversToClose.splice(0)) {
@@ -2021,6 +2028,89 @@ test("invokes plugin cache discovery when pending learnings exist", async () => 
   await new Promise((resolve) => setTimeout(resolve, 400));
 });
 
+test("process-learnings launches self-learning wrapper with .claude/work as arg 1", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-learnings-wrapper-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-wrapper");
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+  await fs.mkdir(repoPath, { recursive: true });
+  const worktreeDir = path.join(worktreeParent, "repo-wrapper-LRN-01");
+  const pendingDir = path.join(worktreeDir, ".claude", "work", ".learnings", "pending");
+  await fs.mkdir(pendingDir, { recursive: true });
+  await fs.writeFile(path.join(pendingDir, "learning-1.json"), "{}");
+
+  const fakeHome = path.join(tmpDir, "fakehome");
+  const pluginScriptsDir = path.join(
+    fakeHome, ".claude", "plugins", "cache", "closedloop-ai", "self-learning", "1.0.0", "scripts"
+  );
+  await fs.mkdir(pluginScriptsDir, { recursive: true });
+
+  const spyOutputFile = path.join(tmpDir, "learnings-spy.txt");
+  const spyScript = [
+    "#!/bin/bash",
+    `echo "ARG1=$1" > "${spyOutputFile}"`,
+    `echo "CLOSEDLOOP_WORKDIR=$CLOSEDLOOP_WORKDIR" >> "${spyOutputFile}"`,
+    "exit 0"
+  ].join("\n");
+  const scriptPath = path.join(pluginScriptsDir, "process-chat-learnings.sh");
+  await fs.writeFile(scriptPath, spyScript, { mode: 0o755 });
+
+  process.env.HOME = fakeHome;
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "learnings-wrapper-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/process-learnings`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticketId: "LRN-01", repoPath })
+    }
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json() as Record<string, unknown>;
+  assert.equal(body.status, "processing");
+  assert.equal(typeof body.pid, "number", "pid should be a number when wrapper is found");
+
+  const expectedClaudeWorkDir = path.join(worktreeDir, ".claude", "work");
+  let spyContent = "";
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      spyContent = await fs.readFile(spyOutputFile, "utf-8");
+      if (spyContent.includes("ARG1=")) break;
+    } catch {
+      // file not yet written
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  assert.ok(spyContent.includes("ARG1="), "spy script should have recorded its arguments");
+  assert.ok(
+    spyContent.includes(`ARG1=${expectedClaudeWorkDir}`),
+    `wrapper should receive .claude/work as arg 1, got: ${spyContent}`
+  );
+  assert.ok(
+    spyContent.includes(`CLOSEDLOOP_WORKDIR=${expectedClaudeWorkDir}`),
+    `CLOSEDLOOP_WORKDIR env should be .claude/work path, got: ${spyContent}`
+  );
+});
+
 test("rejects disallowed repo path for record-learning-use (AC-049)", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-learnings-deny-"));
   tempPathsToClean.push(tmpDir);
@@ -2227,6 +2317,95 @@ test("symphony launch invokes plugin cache discovery for run-loop script", async
   assert.equal(body.ticketId, "LAUNCH-01");
   // pid is null (no plugin cache) or a number (plugin found and script spawned)
   assert.ok(body.pid === null || typeof body.pid === "number", "pid should be null or a number");
+});
+
+test("symphony launch passes .claude/work path (not ticket ID) as first arg to run-loop.sh", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-launch-args-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-args");
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+  await fs.mkdir(repoPath, { recursive: true });
+
+  // Pre-create worktree dir so the route skips git worktree creation
+  const worktreeDir = path.join(worktreeParent, "repo-args-ARGS-01");
+  await fs.mkdir(worktreeDir, { recursive: true });
+
+  // Create a spy script in a fake plugin cache under a temp HOME
+  const fakeHome = path.join(tmpDir, "fakehome");
+  const pluginScriptsDir = path.join(
+    fakeHome, ".claude", "plugins", "cache", "closedloop-ai", "code", "1.0.0", "scripts"
+  );
+  await fs.mkdir(pluginScriptsDir, { recursive: true });
+
+  const spyOutputFile = path.join(tmpDir, "spawn-spy.txt");
+  const spyScript = [
+    "#!/bin/bash",
+    `echo "ARG1=$1" > "${spyOutputFile}"`,
+    `echo "CLOSEDLOOP_WORKDIR=$CLOSEDLOOP_WORKDIR" >> "${spyOutputFile}"`,
+    "exit 0"
+  ].join("\n");
+  const scriptPath = path.join(pluginScriptsDir, "run-loop.sh");
+  await fs.writeFile(scriptPath, spyScript, { mode: 0o755 });
+
+  // Override HOME so findPluginScript discovers our spy script
+  process.env.HOME = fakeHome;
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "launch-args-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/launch`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ticketIdentifier: "ARGS-01",
+        repoPath
+      })
+    }
+  );
+
+  assert.equal(response.status, 200);
+  const body = await response.json() as Record<string, unknown>;
+  assert.equal(body.success, true);
+  assert.equal(typeof body.pid, "number", "pid should be a number when script is found");
+
+  // Wait for the detached spy script to write its output
+  const expectedClaudeWorkDir = path.join(worktreeDir, ".claude", "work");
+  let spyContent = "";
+  for (let attempt = 0; attempt < 20; attempt++) {
+    try {
+      spyContent = await fs.readFile(spyOutputFile, "utf-8");
+      if (spyContent.includes("ARG1=")) break;
+    } catch {
+      // file not yet written
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  assert.ok(spyContent.includes("ARG1="), "spy script should have recorded its arguments");
+  assert.ok(
+    spyContent.includes(`ARG1=${expectedClaudeWorkDir}`),
+    `first arg should be .claude/work path, got: ${spyContent}`
+  );
+  assert.ok(
+    spyContent.includes(`CLOSEDLOOP_WORKDIR=${expectedClaudeWorkDir}`),
+    `CLOSEDLOOP_WORKDIR env should be .claude/work path, got: ${spyContent}`
+  );
 });
 
 test("validates required fields for codex chat route", async () => {

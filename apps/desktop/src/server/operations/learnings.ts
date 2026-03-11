@@ -249,7 +249,7 @@ export function registerLearningsRoutes(
       "utf-8"
     );
 
-    const scriptPath = findPluginScript("code", "process-chat-learnings.sh");
+    const scriptPath = findPluginScript("self-learning", "process-chat-learnings.sh");
     if (scriptPath) {
       const logFile = path.join(claudeWorkDir, "process-learnings.log");
       const child = spawn(scriptPath, [claudeWorkDir], {
@@ -259,7 +259,7 @@ export function registerLearningsRoutes(
         env: {
           ...process.env,
           PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
-          SYMPHONY_WORKDIR: claudeWorkDir
+          CLOSEDLOOP_WORKDIR: claudeWorkDir
         }
       });
       child.unref();

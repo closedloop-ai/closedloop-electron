@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
@@ -18,32 +18,6 @@ function makeTempSandbox(): string {
 
 function configDir(sandbox: string): string {
   return path.join(sandbox, ".closedloop-ai", "config");
-}
-
-function createGitRepo(sandbox: string, name: string): string {
-  const repoDir = path.join(sandbox, name);
-  mkdirSync(path.join(repoDir, ".git"), { recursive: true });
-  return repoDir;
-}
-
-function createWorktree(sandbox: string, name: string): string {
-  const repoDir = path.join(sandbox, name);
-  mkdirSync(repoDir, { recursive: true });
-  // Worktrees have .git as a file, not a directory
-  writeFileSync(path.join(repoDir, ".git"), "gitdir: /some/other/repo/.git/worktrees/wt");
-  return repoDir;
-}
-
-function createHiddenDir(sandbox: string, name: string): string {
-  const dir = path.join(sandbox, name);
-  mkdirSync(dir, { recursive: true });
-  return dir;
-}
-
-function createNonGitDir(sandbox: string, name: string): string {
-  const dir = path.join(sandbox, name);
-  mkdirSync(dir, { recursive: true });
-  return dir;
 }
 
 afterEach(async () => {
@@ -65,42 +39,19 @@ test("sets worktreeParentDir and worktreeParentDirConfirmed", async () => {
   assert.equal(config.settings.worktreeParentDirConfirmed, true);
 });
 
-test("discovers real git repos but not worktrees, hidden dirs, or non-git dirs", async () => {
-  const sandbox = makeTempSandbox();
-  // Pre-create empty repos.json so legacy copy doesn't pull in real user repos
-  const cd = configDir(sandbox);
-  mkdirSync(cd, { recursive: true });
-  await saveReposConfig({ repos: [], settings: {} }, cd);
-
-  createGitRepo(sandbox, "real-repo-a");
-  createGitRepo(sandbox, "real-repo-b");
-  createWorktree(sandbox, "worktree-dir");
-  createHiddenDir(sandbox, ".hidden-repo");
-  createNonGitDir(sandbox, "plain-dir");
-
-  await seedReposConfig(sandbox);
-
-  const config = await loadReposConfig(cd);
-  const repoPaths = config.repos.map((r) => r.path);
-  const repoNames = repoPaths.map((p) => path.basename(p));
-  assert.deepEqual(repoNames.sort(), ["real-repo-a", "real-repo-b"], `unexpected repos: ${JSON.stringify(repoPaths)}`);
-});
-
-test("calling twice does not create duplicate repos", async () => {
+test("does not auto-discover repos from the filesystem", async () => {
   const sandbox = makeTempSandbox();
   const cd = configDir(sandbox);
   mkdirSync(cd, { recursive: true });
   await saveReposConfig({ repos: [], settings: {} }, cd);
 
-  createGitRepo(sandbox, "my-repo");
+  // Create a git repo in the sandbox — seed should NOT add it
+  mkdirSync(path.join(sandbox, "some-repo", ".git"), { recursive: true });
 
-  await seedReposConfig(sandbox);
   await seedReposConfig(sandbox);
 
   const config = await loadReposConfig(cd);
-  const repoNames = config.repos.map((r) => path.basename(r.path));
-  const count = repoNames.filter((n) => n === "my-repo").length;
-  assert.equal(count, 1, "should not duplicate repos on re-seed");
+  assert.equal(config.repos.length, 0, "seed should not auto-discover repos");
 });
 
 test("worktreeParentDir within sandbox but unconfirmed gets confirmed", async () => {
