@@ -177,8 +177,7 @@ sequenceDiagram
 - Before onboarding is completed, cloud commands are rejected with `onboarding not completed`.
 - Completing onboarding sets:
 1. `sandboxBaseDirectory`
-2. `allowedDirectories=[sandboxBaseDirectory]`
-3. `onboardingCompleted=true`
+2. `onboardingCompleted=true`
 
 ### Command Execution Sequence (Cloud -> Desktop -> Local Gateway)
 
@@ -250,7 +249,7 @@ sequenceDiagram
 | `apps/desktop/src/server/router.ts` | Request dispatch, CORS, approval hook, fallback proxy support |
 | `apps/desktop/src/main/approval-store.ts` | Pending-approval queue persistence and decision waiting |
 | `apps/desktop/src/main/activity-log-store.ts` | Activity event persistence for renderer |
-| `apps/desktop/src/main/settings-store.ts` | API origin, web origin, allowed dirs, approval tier/rules |
+| `apps/desktop/src/main/settings-store.ts` | API origin, web origin, sandbox dir, approval tier/rules |
 | `apps/desktop/src/main/api-key-store.ts` | Secure API key read/write using Electron `safeStorage` |
 
 ## Command Scheduling and Concurrency
@@ -397,11 +396,7 @@ graph TB
 ### Filesystem and Process Safety (AC-049)
 
 - Route handlers enforce path allowlists before filesystem/process operations.
-- Allowed directories come from `SettingsStore`, but are always sandbox-constrained before use.
-- Effective allowlist is computed as:
-1. normalize requested directories
-2. keep only entries under `sandboxBaseDirectory`
-3. ensure sandbox root itself is always included
+- The effective allowlist is derived solely from `sandboxBaseDirectory` via `buildAllowedDirectories()` in `shared/sandbox-policy.ts`, producing a single-entry array `[sandboxBaseDirectory]` or `[]` when unset.
 - All command execution still flows through the same route handlers, so cloud-originated commands do not bypass checks.
 - Path checks canonicalize via nearest realpath to reduce symlink escape risk.
 - Sensitive paths are hard-denied (for example `~/.ssh`, `~/.gnupg`, keychains, and core system dirs like `/etc`).
@@ -443,7 +438,7 @@ Persistent stores used by desktop app:
 Notable persisted settings include:
 
 - API and web origins
-- sandbox base directory and effective allowlist
+- sandbox base directory (sole source of the effective allowlist)
 - onboarding completion
 - cloud command pause toggle
 - cloud connect/disconnect toggle
@@ -486,8 +481,7 @@ Settings UX notes:
 
 - API origin and web app origin are validated/normalized on save.
 - Sandbox base directory is selectable via native folder picker.
-- Broad/sensitive sandbox or allowlist values show warning text (for example `/`, home-root, system directories).
-- Directories outside sandbox are ignored by enforcement, even if entered in settings.
+- Broad/sensitive sandbox values show warning text (for example `/`, home-root, system directories).
 
 ## Current Integration Contract With API
 
@@ -534,7 +528,8 @@ sequenceDiagram
     Desktop->>API: desktop.presence
 ```
 
-Full contract details: `docs/artifacts/api-server-socketio-handoff.md`
+Desktop-side contract checkpoints: `docs/artifacts/desktop-gateway-contracts.md`
+Hosted API handoff details are maintained in `symphony-alpha`.
 
 ## Known Gaps and Notes
 

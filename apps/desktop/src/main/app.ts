@@ -13,6 +13,7 @@ import {
   type DesktopSettings,
   type RiskTier
 } from "../shared/contracts.js";
+import { buildAllowedDirectories, normalizeScopePath } from "../shared/sandbox-policy.js";
 import { ApiKeyStore } from "./api-key-store.js";
 import { CloudCommandExecutor } from "./cloud-command-executor.js";
 import type { CloudSocketStatus } from "./cloud-protocol.js";
@@ -79,7 +80,7 @@ export class DesktopApplication {
     this.server = DesktopGatewayServer.createDefault(
       this.settingsStore.getWebAppOrigin(),
       () => this.gatewayAuthToken,
-      () => this.getEffectiveAllowedDirectories(),
+      () => this.getAllowedDirectoriesFromSandbox(),
       os.hostname(),
       DESKTOP_GATEWAY_VERSION,
       EMPTY_CAPABILITIES,
@@ -109,7 +110,7 @@ export class DesktopApplication {
     this.cloudSocket = new CloudSocketService({
       getApiOrigin: () => this.settingsStore.getApiOrigin(),
       getApiKey: () => this.apiKeyStore.getApiKey(),
-      getAllowedDirectories: () => this.getEffectiveAllowedDirectories(),
+      getAllowedDirectories: () => this.getAllowedDirectoriesFromSandbox(),
       getMaxInFlightCommands: () => MAX_IN_FLIGHT_COMMANDS,
       machineName: os.hostname(),
       pluginVersion: DESKTOP_GATEWAY_VERSION,
@@ -388,10 +389,8 @@ export class DesktopApplication {
     }
   }
 
-  private getEffectiveAllowedDirectories(): string[] {
-    const settings = this.settingsStore.getAll();
-    const sandboxBaseDirectory = normalizeScopePath(settings.sandboxBaseDirectory);
-    return applySandboxPolicyToAllowedDirectories(settings.allowedDirectories, sandboxBaseDirectory);
+  private getAllowedDirectoriesFromSandbox(): string[] {
+    return buildAllowedDirectories(this.settingsStore.getSandboxBaseDirectory());
   }
 
   private getOnboardingState(): {
@@ -400,12 +399,10 @@ export class DesktopApplication {
     hasStoredApiKey: boolean;
   } {
     const settings = this.settingsStore.getAll();
-    const effectiveAllowedDirectories = this.getEffectiveAllowedDirectories();
     return {
       completed: Boolean(settings.onboardingCompleted),
       settings: {
         ...settings,
-        allowedDirectories: effectiveAllowedDirectories,
         sandboxBaseDirectory:
           normalizeScopePath(settings.sandboxBaseDirectory) ?? settings.sandboxBaseDirectory
       },
@@ -605,14 +602,12 @@ export class DesktopApplication {
       }
       return {
         ...settings,
-        allowedDirectories: this.getEffectiveAllowedDirectories(),
         alwaysAllowRules: activeAlwaysAllowRules
       };
     });
     ipcMain.handle(
       "desktop:update-settings",
       (_event, partial: {
-        allowedDirectories?: string[];
         sandboxBaseDirectory?: string;
         onboardingCompleted?: boolean;
         apiOrigin?: string;
@@ -638,10 +633,6 @@ export class DesktopApplication {
           }
           nextPartial.sandboxBaseDirectory = selectedSandbox;
         }
-        nextPartial.allowedDirectories = applySandboxPolicyToAllowedDirectories(
-          partial.allowedDirectories ?? currentSettings.allowedDirectories,
-          selectedSandbox
-        );
         if (
           typeof partial.onboardingCompleted === "boolean" &&
           partial.onboardingCompleted &&
@@ -772,7 +763,6 @@ export class DesktopApplication {
           apiOrigin,
           webAppOrigin,
           sandboxBaseDirectory,
-          allowedDirectories: [sandboxBaseDirectory],
           onboardingCompleted: true
         });
         this.restartCloudSocket();
@@ -982,62 +972,12 @@ function resolveApprovalScopePath(rawBody: string): string | null {
   }
 }
 
-function normalizeScopePath(value: string | null | undefined): string | null {
-  if (!value) {
-    return null;
-  }
-  const trimmed = value.trim();
-  if (!trimmed) {
-    return null;
-  }
-  return path.resolve(expandHomePath(trimmed));
-}
-
 function maybeString(value: unknown): string | null {
   if (typeof value !== "string") {
     return null;
   }
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
-}
-
-function expandHomePath(inputPath: string): string {
-  if (inputPath === "~") {
-    return os.homedir();
-  }
-  if (inputPath.startsWith("~/")) {
-    return path.join(os.homedir(), inputPath.slice(2));
-  }
-  return inputPath;
-}
-
-function applySandboxPolicyToAllowedDirectories(
-  allowedDirectories: string[] | undefined,
-  sandboxBaseDirectory: string | null
-): string[] {
-  const normalizedAllowed = (allowedDirectories ?? [])
-    .map((entry) => normalizeScopePath(entry))
-    .filter((entry): entry is string => Boolean(entry));
-
-  if (!sandboxBaseDirectory) {
-    return [...new Set(normalizedAllowed)];
-  }
-
-  const filtered = normalizedAllowed.filter((entry) => isPathWithinSandbox(entry, sandboxBaseDirectory));
-  if (!filtered.includes(sandboxBaseDirectory)) {
-    filtered.unshift(sandboxBaseDirectory);
-  }
-  return [...new Set(filtered)];
-}
-
-function isPathWithinSandbox(targetPath: string, sandboxBaseDirectory: string): boolean {
-  if (targetPath === sandboxBaseDirectory) {
-    return true;
-  }
-  const prefix = sandboxBaseDirectory.endsWith(path.sep)
-    ? sandboxBaseDirectory
-    : `${sandboxBaseDirectory}${path.sep}`;
-  return targetPath.startsWith(prefix);
 }
 
 function describeRequestLocation(request: GatewayApprovalRequest): string {

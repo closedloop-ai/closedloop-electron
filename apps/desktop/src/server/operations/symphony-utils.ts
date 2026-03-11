@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { expandHomePath } from "../../shared/path-utils.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 
 /** Timeout for local-only git commands (rev-parse, checkout, diff, worktree list/prune). */
@@ -29,13 +30,7 @@ export function computeSymphonyDir(sandboxBaseDirectory: string): string {
 }
 
 export function expandHome(inputPath: string): string {
-  if (inputPath === "~") {
-    return os.homedir();
-  }
-  if (inputPath.startsWith("~/")) {
-    return path.join(os.homedir(), inputPath.slice(2));
-  }
-  return inputPath;
+  return expandHomePath(inputPath);
 }
 
 export function resolveWorktreeParentDir(expandedRepoPath: string): string {

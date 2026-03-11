@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { expandHomePath } from "../shared/path-utils.js";
 
 export class DirectoryNotAllowedError extends Error {
   readonly targetPath: string;
@@ -41,18 +42,8 @@ export function assertPathAllowed(targetPath: string, allowedDirectories: string
   }
 }
 
-function expandTilde(inputPath: string): string {
-  if (inputPath === "~") {
-    return os.homedir();
-  }
-  if (inputPath.startsWith("~/")) {
-    return path.join(os.homedir(), inputPath.slice(2));
-  }
-  return inputPath;
-}
-
 function canonicalizePathForPolicy(inputPath: string): string {
-  const absolutePath = path.resolve(expandTilde(inputPath));
+  const absolutePath = path.resolve(expandHomePath(inputPath));
   return resolveWithNearestRealpath(absolutePath);
 }
 

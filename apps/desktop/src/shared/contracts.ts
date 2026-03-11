@@ -46,7 +46,6 @@ export interface AlwaysAllowRule {
 }
 
 export interface DesktopSettings {
-  allowedDirectories: string[];
   autoApprovalRules: Record<string, RiskTier>;
   alwaysAllowRules: AlwaysAllowRule[];
   sandboxBaseDirectory: string;
@@ -59,7 +58,6 @@ export interface DesktopSettings {
 }
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
-  allowedDirectories: [],
   autoApprovalRules: {},
   alwaysAllowRules: [],
   sandboxBaseDirectory: "",

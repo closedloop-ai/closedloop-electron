@@ -36,7 +36,7 @@ This artifact tracks the Desktop -> Relay contract checkpoints from the desktop 
 - Heartbeat target: `POST {API origin}/compute-targets/:id/heartbeat` every 30s
 - Behavior implemented:
   - Uses `Authorization: Bearer <apiKey>` from `ApiKeyStore` (`safeStorage` encrypted value, `CLOSEDLOOP_API_KEY`, or `SYMPHONY_API_KEY` env fallback).
-  - Registration payload includes `{ machineName, platform, capabilities, allowedDirectories, pluginVersion, supportedOperations }`.
+  - Registration payload includes `{ machineName, platform, capabilities, pluginVersion, supportedOperations }`.
   - Heartbeat retry backoff: `1s, 2s, 4s, 8s, 16s, 30s cap` with jitter.
   - After two consecutive heartbeat failures, tray transitions to degraded state while localhost serving continues.
 - Live validation evidence:

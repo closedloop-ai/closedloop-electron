@@ -919,11 +919,6 @@
           <p class="muted" id="apiKeyStatus"></p>
         </div>
         <div class="row">
-          <label for="allowedDirectories">Allowed Directories (one path per line)</label>
-          <textarea id="allowedDirectories"></textarea>
-          <p class="muted warning-text" id="allowedDirectoriesWarning"></p>
-        </div>
-        <div class="row">
           <label for="sandboxBaseDirectory">Sandbox Base Directory</label>
           <input id="sandboxBaseDirectory" readonly />
           <div class="actions" style="margin-top: 8px">
@@ -978,7 +973,6 @@
       const webAppOrigin = document.getElementById("webAppOrigin");
       const apiKey = document.getElementById("apiKey");
       const apiKeyStatus = document.getElementById("apiKeyStatus");
-      const allowedDirectories = document.getElementById("allowedDirectories");
       const sandboxBaseDirectory = document.getElementById("sandboxBaseDirectory");
       const defaultApprovalTier = document.getElementById("defaultApprovalTier");
       const approvalRules = document.getElementById("approvalRules");
@@ -995,7 +989,6 @@
       const runtimeStatus = document.getElementById("runtimeStatus");
       const wsStatusBadge = document.getElementById("wsStatusBadge");
       const wsStatusDetail = document.getElementById("wsStatusDetail");
-      const allowedDirectoriesWarning = document.getElementById("allowedDirectoriesWarning");
       const sandboxBaseWarning = document.getElementById("sandboxBaseWarning");
       const headerPauseToggle = document.getElementById("headerPauseToggle");
       const headerConnectionToggle = document.getElementById("headerConnectionToggle");
@@ -1607,35 +1600,10 @@
         const settings = await api.getSettings();
         apiOrigin.value = settings.apiOrigin || "";
         webAppOrigin.value = settings.webAppOrigin || "";
-        allowedDirectories.value = (settings.allowedDirectories || []).join("\n");
         sandboxBaseDirectory.value = settings.sandboxBaseDirectory || "";
         defaultApprovalTier.value = settings.defaultApprovalTier || "high";
         approvalRules.value = JSON.stringify(settings.autoApprovalRules || {}, null, 2);
-        updateAllowedDirectoryWarning();
         updateSandboxBaseWarning();
-      }
-
-      function updateAllowedDirectoryWarning() {
-        const lines = allowedDirectories.value
-          .split("\n")
-          .map((line) => line.trim())
-          .filter(Boolean);
-        const risky = lines.filter(isRiskyAllowedDirectory);
-        const sandbox = normalizeDirectory(sandboxBaseDirectory.value);
-        const outsideSandbox = sandbox
-          ? lines.filter((entry) => !isDirectoryInsideSandbox(entry, sandbox))
-          : [];
-        if (!risky.length) {
-          allowedDirectoriesWarning.textContent = outsideSandbox.length
-            ? `Warning: these directories are outside the sandbox and will be ignored: ${outsideSandbox.join(", ")}`
-            : "";
-        } else {
-          const riskText = `Warning: broad/sensitive allowed directories increase compromise risk: ${risky.join(", ")}`;
-          const outsideText = outsideSandbox.length
-            ? ` Outside sandbox and ignored: ${outsideSandbox.join(", ")}`
-            : "";
-          allowedDirectoriesWarning.textContent = `${riskText}${outsideText}`;
-        }
       }
 
       function updateSandboxBaseWarning() {
@@ -1678,17 +1646,6 @@
         return input.trim().replace(/\/+$/, "");
       }
 
-      function isDirectoryInsideSandbox(candidate, sandbox) {
-        const normalizedCandidate = normalizeDirectory(candidate);
-        const normalizedSandbox = normalizeDirectory(sandbox);
-        if (!normalizedCandidate || !normalizedSandbox) {
-          return false;
-        }
-        return (
-          normalizedCandidate === normalizedSandbox ||
-          normalizedCandidate.startsWith(`${normalizedSandbox}/`)
-        );
-      }
 
       function describeApiKeyStatus(status) {
         if (!status || status.source === "none" || !status.hasApiKey) {
@@ -1722,10 +1679,6 @@
           apiOrigin: apiOrigin.value.trim(),
           webAppOrigin: webAppOrigin.value.trim(),
           sandboxBaseDirectory: sandboxBaseDirectory.value.trim(),
-          allowedDirectories: allowedDirectories.value
-            .split("\n")
-            .map((line) => line.trim())
-            .filter(Boolean),
           defaultApprovalTier: defaultApprovalTier.value,
           autoApprovalRules: parsedRules
         };
@@ -1878,7 +1831,6 @@
         .getElementById("pickOnboardingSandbox")
         .addEventListener("click", () => void pickDirectoryForInput(onboardingSandboxDir, updateOnboardingSandboxWarning));
       document.getElementById("completeOnboarding").addEventListener("click", () => void completeOnboarding());
-      allowedDirectories.addEventListener("input", updateAllowedDirectoryWarning);
       sandboxBaseDirectory.addEventListener("input", updateSandboxBaseWarning);
       onboardingSandboxDir.addEventListener("input", updateOnboardingSandboxWarning);
       document.getElementById("refreshApprovals").addEventListener("click", refreshApprovals);
