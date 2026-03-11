@@ -356,3 +356,11 @@ export function findFirstExisting(...paths: string[]): string | null {
   }
   return null;
 }
+
+export const VALID_PROVIDERS = new Set(["claude", "codex"]);
+
+export function chatHistoryFilename(provider?: string | null): string {
+  return provider && VALID_PROVIDERS.has(provider)
+    ? `chat-history-${provider}.json`
+    : "chat-history.json";
+}

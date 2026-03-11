@@ -3,9 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
-import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
-
-const VALID_PROVIDERS = new Set(["claude", "codex"]);
+import { VALID_PROVIDERS, assertRepoAllowed, chatHistoryFilename, resolveWorktreeDir } from "./symphony-utils.js";
 
 type ChatMessage = {
   id: string;
@@ -262,16 +260,12 @@ function getChatHistoryPath(
   expandedRepoPath: string,
   provider?: string | null
 ): string {
-  const filename =
-    provider && VALID_PROVIDERS.has(provider)
-      ? `chat-history-${provider}.json`
-      : "chat-history.json";
-  return path.join(resolveWorktreeDir(expandedRepoPath, ticketId), ".claude", "work", filename);
+  return path.join(resolveWorktreeDir(expandedRepoPath, ticketId), ".claude", "work", chatHistoryFilename(provider));
 }
 
-/** Delete shared-surface Codex chat state files: legacy + general + review. */
+/** Delete shared-surface Codex chat state files: legacy + review. */
 async function deleteSharedCodexChatState(workDir: string): Promise<void> {
-  for (const name of ["codex-chat.json", "codex-chat-general.json", "codex-chat-review.json"]) {
+  for (const name of ["codex-chat.json", "codex-chat-review.json"]) {
     await fs.rm(path.join(workDir, name), { force: true });
   }
 }
