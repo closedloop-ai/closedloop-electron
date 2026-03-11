@@ -1,16 +1,18 @@
 import os from "node:os";
 import path from "node:path";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { normalizeScopePath } from "../shared/sandbox-policy.js";
 import { computeSymphonyDir } from "../server/operations/symphony-utils.js";
-import { normalizePath, loadReposConfig, saveReposConfig } from "../server/operations/repos-config-utils.js";
+import { loadReposConfig, saveReposConfig } from "../server/operations/repos-config-utils.js";
 
 /**
  * Seeds repos.json within the symphony config directory for the given sandbox.
  *
  * - Preserves legacy repos.json from ~/.claude/closedloop/ if dest doesn't exist
  * - Sets worktreeParentDir + worktreeParentDirConfirmed
- * - Discovers git repos in immediate children of sandboxBaseDirectory
+ *
+ * Repos are added explicitly by the user via POST /api/engineer/repos — this
+ * function never auto-discovers repos from the filesystem.
  *
  * Best-effort — logs errors but never throws.
  */
@@ -46,7 +48,6 @@ export async function seedReposConfig(rawSandboxBaseDirectory: string): Promise<
     //   - If worktreeParentDir is within the sandbox but not confirmed →
     //     set confirmed only.
     // Single load → mutate in-memory → single save.
-    // Avoids N read/write cycles for sandboxes with many repos.
     const config = await loadReposConfig(configDir);
     let dirty = false;
 
@@ -66,31 +67,6 @@ export async function seedReposConfig(rawSandboxBaseDirectory: string): Promise<
       dirty = true;
     } else if (!config.settings.worktreeParentDirConfirmed) {
       config.settings = { ...config.settings, worktreeParentDirConfirmed: true };
-      dirty = true;
-    }
-
-    // Discover git repos in immediate children of sandboxBaseDirectory.
-    // Skip hidden dirs (starting with ".").
-    // Only match real repos (.git is a directory), not worktrees (.git is
-    // a file with a gitdir: pointer).
-    const knownPaths = new Set(config.repos.map((r) => normalizePath(r.path)));
-    const entries = readdirSync(sandboxBaseDirectory, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
-      const fullPath = path.join(sandboxBaseDirectory, entry.name);
-      const dotGit = path.join(fullPath, ".git");
-      try {
-        if (!statSync(dotGit).isDirectory()) continue;
-      } catch {
-        continue; // .git doesn't exist or isn't accessible
-      }
-      const normalized = normalizePath(fullPath);
-      if (knownPaths.has(normalized)) continue;
-      knownPaths.add(normalized);
-      config.repos.push({
-        path: normalized,
-        addedAt: new Date().toISOString()
-      });
       dirty = true;
     }
 

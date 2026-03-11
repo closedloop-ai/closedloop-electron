@@ -459,13 +459,13 @@ export function registerSymphonyInteractiveRoutes(
 
       let pid: number | null = null;
       if (scriptPath) {
-        const child = spawn(scriptPath, [ticketIdentifier], {
+        const child = spawn(scriptPath, [claudeWorkDir], {
           cwd: worktreeDir,
           detached: true,
           stdio: "ignore",
           env: {
             ...process.env,
-            SYMPHONY_WORKDIR: claudeWorkDir,
+            CLOSEDLOOP_WORKDIR: claudeWorkDir,
             PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`
           }
         });
