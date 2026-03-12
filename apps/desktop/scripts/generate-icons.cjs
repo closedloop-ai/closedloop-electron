@@ -6,7 +6,7 @@
  *   cd /tmp && mkdir -p icon-gen && cd icon-gen && npm init -y && npm install sharp
  *
  * Usage (from repo root):
- *   node apps/desktop/scripts/generate-icons.js
+ *   node apps/desktop/scripts/generate-icons.cjs
  *
  * After running, convert the iconset to icns on macOS:
  *   iconutil -c icns apps/desktop/resources/icon.iconset -o apps/desktop/resources/icon.icns

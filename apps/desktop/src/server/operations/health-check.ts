@@ -60,22 +60,23 @@ export function registerHealthCheckRoutes(
  * Electron on macOS inherits a minimal PATH that excludes /opt/homebrew/bin,
  * nvm paths, etc.  Spawning the user's shell with -ilc gives us the real PATH.
  */
-let resolvedPath: string | undefined;
+let resolvedPathPromise: Promise<string> | undefined;
 async function getShellPath(): Promise<string> {
-  if (resolvedPath) {
-    return resolvedPath;
+  if (resolvedPathPromise) {
+    return resolvedPathPromise;
   }
-  try {
-    const shell = process.env.SHELL || "/bin/zsh";
-    const { stdout } = await execFileAsync(shell, ["-ilc", "echo $PATH"], {
-      timeout: 3000,
-    });
-    resolvedPath = stdout.trim();
-    return resolvedPath;
-  } catch {
-    resolvedPath = `${process.env.PATH ?? ""}:/opt/homebrew/bin:/usr/local/bin`;
-    return resolvedPath;
-  }
+  resolvedPathPromise = (async () => {
+    try {
+      const shell = process.env.SHELL || "/bin/zsh";
+      const { stdout } = await execFileAsync(shell, ["-ilc", "echo $PATH"], {
+        timeout: 3000,
+      });
+      return stdout.trim();
+    } catch {
+      return `${process.env.PATH ?? ""}:/opt/homebrew/bin:/usr/local/bin`;
+    }
+  })();
+  return resolvedPathPromise;
 }
 
 async function runCommand(_processManager: ProcessManager, cmd: string, args: string[]): Promise<string> {

@@ -831,9 +831,10 @@ export class DesktopApplication {
       try {
         if (app.isPackaged) {
           const result = await autoUpdater.checkForUpdates();
+          const remoteVersion = result?.updateInfo?.version;
           return {
-            updateAvailable: Boolean(result?.updateInfo),
-            version: result?.updateInfo?.version
+            updateAvailable: remoteVersion != null && remoteVersion !== app.getVersion(),
+            version: remoteVersion
           };
         }
         return await this.checkForUpdate();
