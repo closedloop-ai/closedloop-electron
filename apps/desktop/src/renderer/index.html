@@ -320,6 +320,31 @@
         cursor: default;
       }
 
+      .settings-group {
+        margin-bottom: 24px;
+        padding-bottom: 20px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .settings-group:last-of-type {
+        border-bottom: none;
+        margin-bottom: 12px;
+        padding-bottom: 0;
+      }
+
+      .settings-group-title {
+        font-size: 14px;
+        font-weight: 600;
+        margin: 0 0 4px;
+      }
+
+      .settings-group-desc {
+        font-size: 12px;
+        color: var(--muted);
+        margin: 0 0 14px;
+        line-height: 1.45;
+      }
+
       .row {
         margin-bottom: 18px;
       }
@@ -347,6 +372,14 @@
         padding: 8px;
         background: var(--surface);
         color: var(--ink);
+      }
+
+      select {
+        padding-right: 28px;
+        appearance: none;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M2.5 4.5L6 8l3.5-3.5'/%3E%3C/svg%3E");
+        background-repeat: no-repeat;
+        background-position: right 10px center;
       }
 
       input:focus,
@@ -493,6 +526,156 @@
         border: 1px dashed var(--border);
         border-radius: 10px;
         padding: 12px;
+      }
+
+      .tier-override-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 12px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--surface);
+        margin-bottom: 6px;
+      }
+
+      .tier-override-row .override-op {
+        flex: 1;
+        font-weight: 600;
+        font-size: 13px;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .tier-override-row select {
+        width: auto;
+        min-width: 100px;
+        padding: 6px 28px 6px 10px;
+        font-size: 13px;
+        height: 32px;
+      }
+
+      .tier-override-row button {
+        flex-shrink: 0;
+        padding: 4px 10px;
+        font-size: 11px;
+        font-weight: 500;
+        background: none;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        color: var(--muted);
+        cursor: pointer;
+        transition: border-color 0.15s, color 0.15s;
+      }
+
+      .tier-override-row button:hover {
+        border-color: #dc2626;
+        color: #dc2626;
+      }
+
+      .tier-override-add {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-top: 8px;
+      }
+
+      .tier-override-add select {
+        width: auto;
+        flex: 1;
+        padding: 8px 28px 8px 10px;
+        font-size: 13px;
+        height: 36px;
+      }
+
+      .tier-override-add select:first-child {
+        min-width: 160px;
+      }
+
+      .tier-override-add button {
+        height: 36px;
+        padding: 0 14px;
+        font-size: 12px;
+        font-weight: 500;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--ink);
+        border-radius: 8px;
+        cursor: pointer;
+        transition: border-color 0.15s, color 0.15s;
+      }
+
+      .tier-override-add button:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      .tier-override-empty {
+        color: var(--muted);
+        font-size: 13px;
+        padding: 8px 0;
+      }
+
+      .always-allow-rule {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--surface);
+        margin-bottom: 6px;
+      }
+
+      .always-allow-rule .rule-info {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .always-allow-rule .rule-op {
+        font-weight: 600;
+        font-size: 13px;
+      }
+
+      .always-allow-rule .rule-scope {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+        font-size: 11px;
+        color: var(--muted);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .always-allow-rule .rule-ttl {
+        font-size: 11px;
+        color: var(--muted);
+      }
+
+      .always-allow-rule .rule-ttl.expiring-soon {
+        color: #d97706;
+      }
+
+      .always-allow-rule button {
+        flex-shrink: 0;
+        padding: 4px 10px;
+        font-size: 11px;
+        font-weight: 500;
+        background: none;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        color: var(--muted);
+        cursor: pointer;
+        transition: border-color 0.15s, color 0.15s;
+      }
+
+      .always-allow-rule button:hover {
+        border-color: #dc2626;
+        color: #dc2626;
       }
 
       .resolved-section-header {
@@ -901,44 +1084,83 @@
         <div id="activityList" class="activity-list"></div>
       </section>
       <section id="settings" class="panel">
-        <div class="row">
-          <label for="apiOrigin">API Origin</label>
-          <input id="apiOrigin" />
-        </div>
-        <div class="row">
-          <label for="webAppOrigin">Web App Origin (CORS)</label>
-          <input id="webAppOrigin" />
-        </div>
-        <div class="row">
-          <label for="apiKey">Cloud API Key</label>
-          <input id="apiKey" type="password" placeholder="sk_live_..." autocomplete="off" />
-          <div class="actions" style="margin-top: 8px">
-            <button id="saveApiKey">Save API Key</button>
-            <button class="secondary" id="clearApiKey">Clear API Key</button>
+        <!-- Cloud Connection -->
+        <div class="settings-group">
+          <h3 class="settings-group-title">Cloud Connection</h3>
+          <p class="settings-group-desc">Relay server and web app origin for the cloud bridge.</p>
+          <div class="row">
+            <label for="apiOrigin">API Origin</label>
+            <input id="apiOrigin" />
           </div>
-          <p class="muted" id="apiKeyStatus"></p>
-        </div>
-        <div class="row">
-          <label for="sandboxBaseDirectory">Sandbox Base Directory</label>
-          <input id="sandboxBaseDirectory" readonly />
-          <div class="actions" style="margin-top: 8px">
-            <button class="secondary" id="pickSandboxBaseDirectory">Choose Directory</button>
+          <div class="row">
+            <label for="webAppOrigin">Web App Origin (CORS)</label>
+            <input id="webAppOrigin" />
           </div>
-          <p class="muted warning-text" id="sandboxBaseWarning"></p>
+          <div class="row" style="margin-bottom:0">
+            <label for="apiKey">Cloud API Key</label>
+            <input id="apiKey" type="password" placeholder="sk_live_..." autocomplete="off" />
+            <div class="actions" style="margin-top: 8px">
+              <button id="saveApiKey">Save API Key</button>
+              <button class="secondary" id="clearApiKey">Clear API Key</button>
+            </div>
+            <p class="muted" id="apiKeyStatus"></p>
+          </div>
         </div>
-        <div class="row">
-          <label for="defaultApprovalTier">Default Approval Tier</label>
-          <select id="defaultApprovalTier">
-            <option value="high">high</option>
-            <option value="medium">medium</option>
-            <option value="low">low</option>
-            <option value="auto">auto</option>
-          </select>
+
+        <!-- Security & Sandbox -->
+        <div class="settings-group">
+          <h3 class="settings-group-title">Security &amp; Sandbox</h3>
+          <p class="settings-group-desc">Controls which directories gateway operations can access.</p>
+          <div class="row" style="margin-bottom:0">
+            <label for="sandboxBaseDirectory">Sandbox Base Directory</label>
+            <input id="sandboxBaseDirectory" readonly />
+            <div class="actions" style="margin-top: 8px">
+              <button class="secondary" id="pickSandboxBaseDirectory">Choose Directory</button>
+            </div>
+            <p class="muted warning-text" id="sandboxBaseWarning"></p>
+          </div>
         </div>
-        <div class="row">
-          <label for="approvalRules">Per-Operation Overrides (JSON)</label>
-          <textarea id="approvalRules"></textarea>
+
+        <!-- Approval Policy -->
+        <div class="settings-group">
+          <h3 class="settings-group-title">Approval Policy</h3>
+          <p class="settings-group-desc">Controls when gateway operations require manual approval.</p>
+          <div class="row">
+            <label for="defaultApprovalTier">Default Approval Tier</label>
+            <select id="defaultApprovalTier">
+              <option value="high">high — approve everything</option>
+              <option value="medium">medium — approve risky operations</option>
+              <option value="low">low — approve only destructive operations</option>
+              <option value="auto">auto — never prompt</option>
+            </select>
+          </div>
+          <div class="row">
+            <label>Risk Tier Overrides</label>
+            <p class="field-help" style="margin-bottom:8px">Override the default tier for specific operations.</p>
+            <div id="tierOverridesList"></div>
+            <div class="tier-override-add">
+              <select id="tierOverrideOperation">
+                <option value="">Add operation…</option>
+              </select>
+              <select id="tierOverrideTier">
+                <option value="high">high</option>
+                <option value="medium">medium</option>
+                <option value="low">low</option>
+                <option value="auto">auto</option>
+              </select>
+              <button class="secondary" id="tierOverrideAddBtn" type="button">Add</button>
+            </div>
+            <input type="hidden" id="approvalRules" />
+          </div>
         </div>
+
+        <!-- Always-Allow Rules -->
+        <div class="settings-group">
+          <h3 class="settings-group-title">Always-Allow Rules</h3>
+          <p class="settings-group-desc">Temporary bypass rules created when you click "Always Allow" on a pending request. Each rule matches the exact operation, method, path, and scope, and expires after 7 days.</p>
+          <div id="alwaysAllowRulesContainer"><p class="muted" style="margin:0">None — click "Always Allow" on a pending request to add rules here.</p></div>
+        </div>
+
         <div class="actions">
           <button id="saveSettings">Save Settings</button>
           <button class="secondary" id="reloadSettings">Reload</button>
@@ -976,6 +1198,11 @@
       const sandboxBaseDirectory = document.getElementById("sandboxBaseDirectory");
       const defaultApprovalTier = document.getElementById("defaultApprovalTier");
       const approvalRules = document.getElementById("approvalRules");
+      const tierOverridesList = document.getElementById("tierOverridesList");
+      const tierOverrideOperation = document.getElementById("tierOverrideOperation");
+      const tierOverrideTier = document.getElementById("tierOverrideTier");
+      const tierOverrideAddBtn = document.getElementById("tierOverrideAddBtn");
+      const alwaysAllowRulesContainer = document.getElementById("alwaysAllowRulesContainer");
       const settingsMessage = document.getElementById("settingsMessage");
       const dashboardPayload = document.getElementById("dashboardPayload");
       const dashboardPort = document.getElementById("dashboardPort");
@@ -1602,8 +1829,143 @@
         webAppOrigin.value = settings.webAppOrigin || "";
         sandboxBaseDirectory.value = settings.sandboxBaseDirectory || "";
         defaultApprovalTier.value = settings.defaultApprovalTier || "high";
-        approvalRules.value = JSON.stringify(settings.autoApprovalRules || {}, null, 2);
+        renderTierOverrides(settings.autoApprovalRules || {});
+        renderAlwaysAllowRules(settings.alwaysAllowRules || []);
         updateSandboxBaseWarning();
+      }
+
+      const ALL_OPERATION_IDS = [
+        "symphony_launch", "symphony_status", "symphony_kill", "symphony_chat",
+        "symphony_comment_chat", "symphony_commit_message", "symphony_sessions",
+        "symphony_plan", "symphony_judges", "symphony_logs", "symphony_chat_history",
+        "learnings", "terminal_chat", "ticket_chat", "run_viewer_chat",
+        "codex_argue", "codex_review", "git_pr", "git_action",
+        "health_check", "repos_config", "deploy", "filesystem"
+      ];
+
+      const TIER_OPTIONS = ["high", "medium", "low", "auto"];
+
+      function renderTierOverrides(rules) {
+        // Sync hidden input for save
+        approvalRules.value = JSON.stringify(rules);
+        // Render rows
+        tierOverridesList.innerHTML = "";
+        const entries = Object.entries(rules);
+        if (!entries.length) {
+          tierOverridesList.innerHTML = '<p class="tier-override-empty">No overrides — all operations use the default tier.</p>';
+        }
+        for (const [op, tier] of entries) {
+          const row = document.createElement("div");
+          row.className = "tier-override-row";
+
+          const label = document.createElement("span");
+          label.className = "override-op";
+          label.textContent = op;
+          row.appendChild(label);
+
+          const sel = document.createElement("select");
+          for (const t of TIER_OPTIONS) {
+            const opt = document.createElement("option");
+            opt.value = t;
+            opt.textContent = t;
+            if (t === tier) opt.selected = true;
+            sel.appendChild(opt);
+          }
+          sel.addEventListener("change", () => {
+            const current = JSON.parse(approvalRules.value || "{}");
+            current[op] = sel.value;
+            renderTierOverrides(current);
+          });
+          row.appendChild(sel);
+
+          const removeBtn = document.createElement("button");
+          removeBtn.textContent = "Remove";
+          removeBtn.type = "button";
+          removeBtn.addEventListener("click", () => {
+            const current = JSON.parse(approvalRules.value || "{}");
+            delete current[op];
+            renderTierOverrides(current);
+          });
+          row.appendChild(removeBtn);
+          tierOverridesList.appendChild(row);
+        }
+
+        // Populate the "add" dropdown with operations not yet overridden
+        const usedOps = new Set(entries.map(([op]) => op));
+        tierOverrideOperation.innerHTML = '<option value="">Add operation…</option>';
+        for (const op of ALL_OPERATION_IDS) {
+          if (usedOps.has(op)) continue;
+          const opt = document.createElement("option");
+          opt.value = op;
+          opt.textContent = op;
+          tierOverrideOperation.appendChild(opt);
+        }
+      }
+
+      tierOverrideAddBtn.addEventListener("click", () => {
+        const op = tierOverrideOperation.value;
+        if (!op) return;
+        const tier = tierOverrideTier.value;
+        const current = JSON.parse(approvalRules.value || "{}");
+        current[op] = tier;
+        renderTierOverrides(current);
+        tierOverrideOperation.value = "";
+      });
+
+      function renderAlwaysAllowRules(rules) {
+        if (!rules.length) {
+          alwaysAllowRulesContainer.innerHTML = '<p class="muted" style="margin:0">None — click "Always Allow" on a pending request to add rules here.</p>';
+          return;
+        }
+        alwaysAllowRulesContainer.innerHTML = "";
+        for (const rule of rules) {
+          const el = document.createElement("div");
+          el.className = "always-allow-rule";
+          const expires = new Date(rule.expiresAt);
+          const daysLeft = Math.max(0, Math.ceil((expires - Date.now()) / 86400000));
+          const ttlClass = daysLeft <= 1 ? "rule-ttl expiring-soon" : "rule-ttl";
+
+          const ruleInfo = document.createElement("div");
+          ruleInfo.className = "rule-info";
+
+          const opSpan = document.createElement("span");
+          opSpan.className = "rule-op";
+          opSpan.textContent = rule.operationId;
+          ruleInfo.appendChild(opSpan);
+
+          const scopeSpan = document.createElement("span");
+          scopeSpan.className = "rule-scope";
+          if (rule.scopePath) {
+            scopeSpan.title = rule.scopePath;
+            scopeSpan.textContent = `${rule.method} ${rule.path} · ${rule.scopePath}`;
+          } else {
+            scopeSpan.textContent = `${rule.method} ${rule.path}`;
+          }
+          ruleInfo.appendChild(scopeSpan);
+
+          const ttlSpan = document.createElement("span");
+          ttlSpan.className = ttlClass;
+          ttlSpan.textContent = daysLeft === 0 ? "expires today" : daysLeft + "d remaining";
+          ruleInfo.appendChild(ttlSpan);
+
+          el.appendChild(ruleInfo);
+
+          const removeBtn = document.createElement("button");
+          removeBtn.textContent = "Remove";
+          removeBtn.addEventListener("click", () => void removeAlwaysAllowRule(rule.id));
+          el.appendChild(removeBtn);
+          alwaysAllowRulesContainer.appendChild(el);
+        }
+      }
+
+      async function removeAlwaysAllowRule(ruleId) {
+        try {
+          await api.removeAlwaysAllowRule(ruleId);
+          await loadSettings();
+          settingsMessage.textContent = "Always-allow rule removed.";
+        } catch (error) {
+          settingsMessage.textContent = `Failed to remove rule: ${error.message}`;
+        }
       }
 
       function updateSandboxBaseWarning() {
@@ -1667,13 +2029,7 @@
 
       async function saveSettings() {
         settingsMessage.textContent = "";
-        let parsedRules;
-        try {
-          parsedRules = JSON.parse(approvalRules.value || "{}");
-        } catch (error) {
-          settingsMessage.textContent = `Invalid approval JSON: ${error.message}`;
-          return;
-        }
+        const parsedRules = JSON.parse(approvalRules.value || "{}");
 
         const payload = {
           apiOrigin: apiOrigin.value.trim(),

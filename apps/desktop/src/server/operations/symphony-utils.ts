@@ -1,16 +1,24 @@
 import { execFileSync, execSync } from "node:child_process";
 import {
+  closeSync,
+  constants,
   copyFileSync,
   existsSync,
   mkdirSync,
+  openSync,
   readdirSync,
+  readFileSync,
   renameSync,
-  rmSync
+  rmSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+  writeSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { expandHomePath } from "../../shared/path-utils.js";
-import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
+import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 
 /** Timeout for local-only git commands (rev-parse, checkout, diff, worktree list/prune). */
 const LOCAL_GIT_TIMEOUT = 10_000;
@@ -46,13 +54,22 @@ export function sanitizeTicketId(ticketId: string): string {
   return ticketId.replaceAll(/[^a-zA-Z0-9-_]/g, "_");
 }
 
-export function resolveWorktreeDir(expandedRepoPath: string, ticketId: string): string {
+export function resolveWorktreeDir(
+  expandedRepoPath: string,
+  ticketId: string
+): string {
   const sanitizedTicket = sanitizeTicketId(ticketId);
   const repoName = path.basename(expandedRepoPath);
-  return path.join(resolveWorktreeParentDir(expandedRepoPath), `${repoName}-${sanitizedTicket}`);
+  return path.join(
+    resolveWorktreeParentDir(expandedRepoPath),
+    `${repoName}-${sanitizedTicket}`
+  );
 }
 
-export function assertRepoAllowed(repoPath: string, allowedDirectories: string[]): string {
+export function assertRepoAllowed(
+  repoPath: string,
+  allowedDirectories: string[]
+): string {
   const expandedRepoPath = expandHome(repoPath);
   try {
     assertPathAllowed(expandedRepoPath, allowedDirectories);
@@ -211,11 +228,15 @@ function checkoutBranch(worktreeDir: string, branchName: string): void {
     // Branch may not exist locally yet
   }
   try {
-    execFileSync("git", ["checkout", "-B", branchName, `origin/${branchName}`], {
-      cwd: worktreeDir,
-      stdio: "pipe",
-      timeout: LOCAL_GIT_TIMEOUT,
-    });
+    execFileSync(
+      "git",
+      ["checkout", "-B", branchName, `origin/${branchName}`],
+      {
+        cwd: worktreeDir,
+        stdio: "pipe",
+        timeout: LOCAL_GIT_TIMEOUT,
+      }
+    );
     return;
   } catch {
     // Branch may be checked out in another worktree
@@ -268,7 +289,11 @@ function fastForwardBranch(worktreeDir: string, branchName: string): void {
  * Ensure a worktree exists at worktreeDir on the given branch, fast-forwarded to latest.
  * Creates a new worktree if none exists, or checks out the branch and pulls if it does.
  */
-function ensureWorktree(repoPath: string, worktreeDir: string, branchName?: string): void {
+function ensureWorktree(
+  repoPath: string,
+  worktreeDir: string,
+  branchName?: string
+): void {
   fetchOrigin(repoPath);
 
   const hasGit = existsSync(path.join(worktreeDir, ".git"));
@@ -300,8 +325,11 @@ export function ensureWorktreeForReview(
     return null;
   }
 
-  if (!branchName && !existsSync(path.join(worktreeDir, ".git"))) {
-    return { status: 400, message: "branchName is required to create a worktree" };
+  if (!(branchName || existsSync(path.join(worktreeDir, ".git")))) {
+    return {
+      status: 400,
+      message: "branchName is required to create a worktree",
+    };
   }
 
   try {
@@ -363,4 +391,215 @@ export function chatHistoryFilename(provider?: string | null): string {
   return provider && VALID_PROVIDERS.has(provider)
     ? `chat-history-${provider}.json`
     : "chat-history.json";
+}
+
+// --- Launch idempotency utilities ---
+
+/**
+ * Read the PID from process.pid file if it exists.
+ * Returns null if file doesn't exist or is invalid.
+ */
+export function readProcessPidSync(worktreeDir: string): number | null {
+  const pidPath = path.join(worktreeDir, ".claude", "work", "process.pid");
+
+  if (!existsSync(pidPath)) {
+    return null;
+  }
+
+  try {
+    const pidContent = readFileSync(pidPath, "utf-8");
+    const pid = Number.parseInt(pidContent.trim(), 10);
+    return Number.isNaN(pid) ? null : pid;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Check if a process is running by sending signal 0.
+ */
+export function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+type LaunchMetadata = {
+  baseBranch?: string;
+  parentTicketId?: string;
+};
+
+/**
+ * Read launch metadata from {worktreeDir}/.claude/work/launch-metadata.json.
+ */
+export function readLaunchMetadata(worktreeDir: string): LaunchMetadata | null {
+  const metaPath = path.join(
+    worktreeDir,
+    ".claude",
+    "work",
+    "launch-metadata.json"
+  );
+
+  if (!existsSync(metaPath)) {
+    return null;
+  }
+
+  try {
+    const content = readFileSync(metaPath, "utf-8");
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    return {
+      baseBranch:
+        typeof parsed.baseBranch === "string" ? parsed.baseBranch : undefined,
+      parentTicketId:
+        typeof parsed.parentTicketId === "string"
+          ? parsed.parentTicketId
+          : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write launch metadata, merging with existing values.
+ */
+export function writeLaunchMetadata(
+  worktreeDir: string,
+  meta: LaunchMetadata
+): void {
+  const claudeWorkDir = path.join(worktreeDir, ".claude", "work");
+  mkdirSync(claudeWorkDir, { recursive: true });
+
+  const metaPath = path.join(claudeWorkDir, "launch-metadata.json");
+  const existing = readLaunchMetadata(worktreeDir);
+
+  const merged: LaunchMetadata = {
+    baseBranch: meta.baseBranch ?? existing?.baseBranch,
+    parentTicketId: meta.parentTicketId ?? existing?.parentTicketId,
+  };
+
+  writeFileSync(metaPath, JSON.stringify(merged, null, 2));
+}
+
+/**
+ * Acquire an atomic launch lock via O_CREAT | O_EXCL.
+ * Returns { fd } on success, null on EEXIST (contention).
+ */
+export function acquireLaunchLock(lockDir: string): { fd: number } | null {
+  mkdirSync(lockDir, { recursive: true });
+  const lockPath = path.join(lockDir, "launch.lock");
+
+  try {
+    // biome-ignore lint/suspicious/noBitwiseOperators: file open flags require bitwise OR
+    const flags = constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY;
+    const fd = openSync(lockPath, flags);
+    try {
+      // Write through the fd to avoid a window where the file exists but is empty
+      writeSync(
+        fd,
+        Buffer.from(
+          JSON.stringify({ pid: process.pid, timestamp: Date.now() })
+        )
+      );
+    } catch (writeErr) {
+      try {
+        closeSync(fd);
+      } catch {}
+      try {
+        unlinkSync(lockPath);
+      } catch {}
+      throw writeErr;
+    }
+    return { fd };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+      return null;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Release the launch lock.
+ */
+export function releaseLaunchLock(lockDir: string, fd: number): void {
+  try {
+    closeSync(fd);
+  } catch {
+    /* already closed */
+  }
+  try {
+    unlinkSync(path.join(lockDir, "launch.lock"));
+  } catch {
+    /* already removed */
+  }
+}
+
+/** Minimum age (ms) before a malformed lock is considered orphaned vs in-progress write */
+const STALE_LOCK_AGE_MS = 5000;
+
+/**
+ * Clean up a stale lock whose owner process has died.
+ * Malformed/empty locks are only removed if older than STALE_LOCK_AGE_MS
+ * to avoid racing with a concurrent acquireLaunchLock fd write.
+ */
+export function cleanStaleLock(lockDir: string): void {
+  const lockPath = path.join(lockDir, "launch.lock");
+
+  if (!existsSync(lockPath)) {
+    return;
+  }
+
+  try {
+    const content = readFileSync(lockPath, "utf-8");
+    const parsed = JSON.parse(content) as Record<string, unknown>;
+    const pid = parsed.pid;
+
+    if (typeof pid !== "number" || !Number.isFinite(pid)) {
+      if (isLockFileOld(lockPath)) {
+        unlinkSync(lockPath);
+      }
+      return;
+    }
+
+    if (!isProcessRunning(pid)) {
+      unlinkSync(lockPath);
+    }
+  } catch {
+    try {
+      if (isLockFileOld(lockPath)) {
+        unlinkSync(lockPath);
+      }
+    } catch {
+      /* concurrent removal */
+    }
+  }
+}
+
+function isLockFileOld(lockPath: string): boolean {
+  try {
+    const age = Date.now() - statSync(lockPath).mtimeMs;
+    return age > STALE_LOCK_AGE_MS;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Compute the lock directory for a given ticket/repo combination.
+ */
+export function getLockDir(
+  worktreeParentDir: string,
+  repoName: string,
+  sanitizedTicket: string
+): string {
+  return path.join(
+    worktreeParentDir,
+    ".closedloop-ai",
+    "locks",
+    `${repoName}-${sanitizedTicket}`
+  );
 }
