@@ -712,20 +712,14 @@ export class DesktopApplication {
       if (typeof approvalId !== "string" || !approvalId.trim()) {
         throw new Error("approvalId is required");
       }
-      const approved = this.approvalStore.approve(approvalId.trim());
-      if (!approved) {
-        throw new Error("approval not found");
-      }
+      this.approvalStore.approve(approvalId.trim());
       return this.approvalStore.listPending();
     });
     ipcMain.handle("desktop:deny-approval", (_event, approvalId: string) => {
       if (typeof approvalId !== "string" || !approvalId.trim()) {
         throw new Error("approvalId is required");
       }
-      const denied = this.approvalStore.deny(approvalId.trim());
-      if (!denied) {
-        throw new Error("approval not found");
-      }
+      this.approvalStore.deny(approvalId.trim());
       return this.approvalStore.listPending();
     });
     ipcMain.handle("desktop:always-allow-approval", (_event, approvalId: string) => {
@@ -734,7 +728,7 @@ export class DesktopApplication {
       }
       const pending = this.approvalStore.getPendingById(approvalId.trim());
       if (!pending) {
-        throw new Error("approval not found");
+        return this.approvalStore.listPending();
       }
       this.saveAlwaysAllowRuleForPending(pending);
       const resolved = this.approvalStore.alwaysAllow(approvalId.trim());
