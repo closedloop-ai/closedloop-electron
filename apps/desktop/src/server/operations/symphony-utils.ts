@@ -496,11 +496,23 @@ export function acquireLaunchLock(lockDir: string): { fd: number } | null {
     // biome-ignore lint/suspicious/noBitwiseOperators: file open flags require bitwise OR
     const flags = constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY;
     const fd = openSync(lockPath, flags);
-    // Write through the fd to avoid a window where the file exists but is empty
-    writeSync(
-      fd,
-      Buffer.from(JSON.stringify({ pid: process.pid, timestamp: Date.now() }))
-    );
+    try {
+      // Write through the fd to avoid a window where the file exists but is empty
+      writeSync(
+        fd,
+        Buffer.from(
+          JSON.stringify({ pid: process.pid, timestamp: Date.now() })
+        )
+      );
+    } catch (writeErr) {
+      try {
+        closeSync(fd);
+      } catch {}
+      try {
+        unlinkSync(lockPath);
+      } catch {}
+      throw writeErr;
+    }
     return { fd };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "EEXIST") {

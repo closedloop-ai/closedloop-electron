@@ -1924,16 +1924,32 @@
           const expires = new Date(rule.expiresAt);
           const daysLeft = Math.max(0, Math.ceil((expires - Date.now()) / 86400000));
           const ttlClass = daysLeft <= 1 ? "rule-ttl expiring-soon" : "rule-ttl";
-          const scopeHtml = rule.scopePath
-            ? `<span class="rule-scope" title="${rule.scopePath}">${rule.method} ${rule.path} · ${rule.scopePath}</span>`
-            : `<span class="rule-scope">${rule.method} ${rule.path}</span>`;
-          el.innerHTML = `
-            <div class="rule-info">
-              <span class="rule-op">${rule.operationId}</span>
-              ${scopeHtml}
-              <span class="${ttlClass}">${daysLeft === 0 ? "expires today" : daysLeft + "d remaining"}</span>
-            </div>
-          `;
+
+          const ruleInfo = document.createElement("div");
+          ruleInfo.className = "rule-info";
+
+          const opSpan = document.createElement("span");
+          opSpan.className = "rule-op";
+          opSpan.textContent = rule.operationId;
+          ruleInfo.appendChild(opSpan);
+
+          const scopeSpan = document.createElement("span");
+          scopeSpan.className = "rule-scope";
+          if (rule.scopePath) {
+            scopeSpan.title = rule.scopePath;
+            scopeSpan.textContent = `${rule.method} ${rule.path} · ${rule.scopePath}`;
+          } else {
+            scopeSpan.textContent = `${rule.method} ${rule.path}`;
+          }
+          ruleInfo.appendChild(scopeSpan);
+
+          const ttlSpan = document.createElement("span");
+          ttlSpan.className = ttlClass;
+          ttlSpan.textContent = daysLeft === 0 ? "expires today" : daysLeft + "d remaining";
+          ruleInfo.appendChild(ttlSpan);
+
+          el.appendChild(ruleInfo);
+
           const removeBtn = document.createElement("button");
           removeBtn.textContent = "Remove";
           removeBtn.addEventListener("click", () => void removeAlwaysAllowRule(rule.id));
