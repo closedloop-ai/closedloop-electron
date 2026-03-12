@@ -1,6 +1,8 @@
 import { app, nativeTheme } from "electron";
 import { DesktopApplication } from "./app.js";
 
+app.setName("ClosedLoop");
+
 const desktopApplication = new DesktopApplication();
 
 app.on("ready", () => {

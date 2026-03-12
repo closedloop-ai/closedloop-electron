@@ -5,7 +5,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { app, dialog, ipcMain, Notification } from "electron";
+import { app, dialog, ipcMain, nativeImage, Notification } from "electron";
 import {
   type AlwaysAllowRule,
   DESKTOP_GATEWAY_VERSION,
@@ -164,6 +164,13 @@ export class DesktopApplication {
   }
 
   async boot(): Promise<void> {
+    if (process.platform === "darwin" && app.dock) {
+      const dockIcon = nativeImage.createFromPath(
+        path.join(__dirname, "..", "..", "resources", "icon-1024.png")
+      );
+      app.dock.setIcon(dockIcon);
+    }
+
     this.tray.init({
       onOpen: () => this.desktopWindow.show(),
       onTogglePaused: (paused) => this.setCloudCommandsPaused(paused)
