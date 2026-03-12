@@ -93,5 +93,5 @@ function truncateBody(body: string | undefined): string | undefined {
   if (!body || body.length <= MAX_BODY_LENGTH) {
     return body;
   }
-  return `${body.slice(0, MAX_BODY_LENGTH)}… (truncated, ${body.length} bytes total)`;
+  return `${body.slice(0, MAX_BODY_LENGTH)}… (truncated, ${body.length} chars total)`;
 }

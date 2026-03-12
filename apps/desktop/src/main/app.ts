@@ -728,13 +728,13 @@ export class DesktopApplication {
       }
       const pending = this.approvalStore.getPendingById(approvalId.trim());
       if (!pending) {
-        return this.approvalStore.listPending();
+        return {
+          pendingApprovals: this.approvalStore.listPending(),
+          settings: this.settingsStore.getAll()
+        };
       }
       this.saveAlwaysAllowRuleForPending(pending);
-      const resolved = this.approvalStore.alwaysAllow(approvalId.trim());
-      if (!resolved) {
-        throw new Error("approval not found");
-      }
+      this.approvalStore.alwaysAllow(approvalId.trim());
       return {
         pendingApprovals: this.approvalStore.listPending(),
         settings: this.settingsStore.getAll()

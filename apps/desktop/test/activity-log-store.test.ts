@@ -85,7 +85,7 @@ describe("ActivityLogStore body truncation", () => {
     assert.ok(event.requestBody!.length < largeBody.length);
     assert.ok(event.requestBody!.startsWith("x".repeat(100)));
     assert.ok(event.requestBody!.includes("truncated"));
-    assert.ok(event.requestBody!.includes("20000 bytes total"));
+    assert.ok(event.requestBody!.includes("20000 chars total"));
     assert.ok(event.responseBody!.includes("truncated"));
   });
 
