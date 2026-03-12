@@ -746,6 +746,15 @@ export class DesktopApplication {
         settings: this.settingsStore.getAll()
       };
     });
+    ipcMain.handle("desktop:remove-always-allow-rule", (_event, ruleId: string) => {
+      if (typeof ruleId !== "string" || !ruleId.trim()) {
+        throw new Error("ruleId is required");
+      }
+      const settings = this.settingsStore.getAll();
+      const updated = (settings.alwaysAllowRules ?? []).filter((r) => r.id !== ruleId.trim());
+      this.settingsStore.setAlwaysAllowRules(updated);
+      return { alwaysAllowRules: updated };
+    });
     ipcMain.handle("desktop:clear-pending-approvals", () => {
       this.approvalStore.clear();
       return this.approvalStore.listPending();

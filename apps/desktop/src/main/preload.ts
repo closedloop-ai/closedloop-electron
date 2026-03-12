@@ -42,6 +42,8 @@ const desktopApi = {
     ipcRenderer.invoke("desktop:get-dangerous-auto-approve") as Promise<boolean>,
   setDangerousAutoApprove: (enabled: boolean) =>
     ipcRenderer.invoke("desktop:set-dangerous-auto-approve", enabled) as Promise<boolean>,
+  removeAlwaysAllowRule: (ruleId: string) =>
+    ipcRenderer.invoke("desktop:remove-always-allow-rule", ruleId) as Promise<unknown>,
   checkForUpdate: () => ipcRenderer.invoke("desktop:check-for-update") as Promise<unknown>,
   applyUpdate: () => ipcRenderer.invoke("desktop:apply-update") as Promise<unknown>
 };
