@@ -4,13 +4,20 @@
 # - Patches Info.plist CFBundleDisplayName/CFBundleName (menu bar uses these)
 set -euo pipefail
 
+# Plist patching is macOS-only; on other platforms fall back to plain electron binary.
+if [ "$(uname)" != "Darwin" ]; then
+  echo "electron"
+  exit 0
+fi
+
 DIST_DIR=$(find "$(dirname "$0")/../node_modules" -path "*/electron/dist" -type d 2>/dev/null | head -1)
 if [ -z "$DIST_DIR" ]; then
   DIST_DIR=$(find "$(dirname "$0")/../../.." -path "*/electron/dist" -type d -not -path "*/app.asar/*" 2>/dev/null | head -1)
 fi
 
 if [ -z "$DIST_DIR" ]; then
-  echo "patch-electron-plist: electron/dist not found, skipping"
+  echo "patch-electron-plist: electron/dist not found, skipping" >&2
+  echo "electron"
   exit 0
 fi
 
@@ -23,7 +30,8 @@ fi
 
 PLIST="$APP_DIR/Contents/Info.plist"
 if [ ! -f "$PLIST" ]; then
-  echo "patch-electron-plist: Info.plist not found at $PLIST, skipping"
+  echo "patch-electron-plist: Info.plist not found at $PLIST, skipping" >&2
+  echo "electron"
   exit 0
 fi
 
