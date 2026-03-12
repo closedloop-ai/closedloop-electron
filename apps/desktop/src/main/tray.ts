@@ -1,4 +1,8 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { Menu, Tray, nativeImage } from "electron";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export type TrayState = "starting" | "ready" | "degraded" | "error";
 
@@ -111,44 +115,13 @@ export class DesktopTray {
   }
 }
 
-function createTrayIcon(pendingApprovals: number) {
+function createTrayIcon(_pendingApprovals: number) {
+  // On macOS, Electron automatically picks trayIconTemplate.png and trayIconTemplate@2x.png
+  // when the filename contains "Template" and setTemplateImage is true.
+  const resourcesDir = path.join(__dirname, "..", "..", "resources");
+  const icon = nativeImage.createFromPath(path.join(resourcesDir, "trayIconTemplate.png"));
   if (process.platform === "darwin") {
-    const macImage = createMacStatusImage();
-    if (macImage && !macImage.isEmpty()) {
-      return macImage;
-    }
+    icon.setTemplateImage(true);
   }
-
-  const indicatorMarkup =
-    pendingApprovals > 0
-      ? `<circle cx="14.5" cy="4.5" r="2.4" fill="#dc2626"/>`
-      : "";
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 18 18">
-    <rect x="2" y="2" width="14" height="14" rx="4" fill="#0f172a"/>
-    <text x="9" y="11.1" text-anchor="middle" font-family="Arial, sans-serif" font-size="8.4" font-weight="700" fill="#ffffff">S</text>
-    ${indicatorMarkup}
-  </svg>`;
-  return nativeImage
-    .createFromDataURL(`data:image/svg+xml;base64,${Buffer.from(svg, "utf-8").toString("base64")}`)
-    .resize({ width: 18, height: 18 });
-}
-
-function createMacStatusImage() {
-  const candidates = [
-    "NSImageNameActionTemplate",
-    "NSImageNamePreferencesGeneral",
-    "NSImageNameComputer"
-  ];
-  for (const name of candidates) {
-    try {
-      const icon = nativeImage.createFromNamedImage(name);
-      if (!icon.isEmpty()) {
-        icon.setTemplateImage(true);
-        return icon.resize({ width: 18, height: 18 });
-      }
-    } catch {
-      continue;
-    }
-  }
-  return null;
+  return icon;
 }

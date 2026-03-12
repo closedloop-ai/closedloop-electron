@@ -5,8 +5,8 @@
   "type": "module",
   "main": "dist/main/index.js",
   "scripts": {
-    "dev": "pnpm build && electron dist/main/index.js",
-    "start": "electron dist/main/index.js",
+    "dev": "pnpm build && ELECTRON_BIN=$(bash scripts/patch-electron-plist.sh | tail -1) && \"$ELECTRON_BIN\" dist/main/index.js",
+    "start": "ELECTRON_BIN=$(bash scripts/patch-electron-plist.sh | tail -1) && \"$ELECTRON_BIN\" dist/main/index.js",
     "prebuild": "node -e \"const{execSync:e}=require('child_process'),{writeFileSync:w}=require('fs');const h=e('git rev-parse HEAD').toString().trim();w('src/shared/build-info.ts','// AUTO-GENERATED — do not edit\\nexport const BUILD_COMMIT_HASH = \\\"'+h+'\\\";\\n');\"",
     "build": "pnpm prebuild && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
