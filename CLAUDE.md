@@ -39,3 +39,29 @@ curl -s -H "Origin: http://localhost" "http://localhost:19432/api/engineer/direc
 # Should fail — sensitive deny list
 curl -s -H "Origin: http://localhost" "http://localhost:19432/api/engineer/directories?path=/Users/<you>/.ssh"
 ```
+
+## Updating App Icons
+
+The source of truth for the app icon is `apps/desktop/app-icon.svg`. All other icon assets are derived from it. To regenerate after updating the SVG:
+
+1. **Install sharp** in a temp directory (not in the project):
+   ```bash
+   cd /tmp && mkdir -p icon-gen && cd icon-gen && npm init -y && npm install sharp
+   ```
+
+2. **Run the generation script** from the repo root:
+   ```bash
+   node apps/desktop/scripts/generate-icons.cjs
+   ```
+
+3. **Convert iconset to icns** (macOS only):
+   ```bash
+   iconutil -c icns apps/desktop/resources/icon.iconset -o apps/desktop/resources/icon.icns
+   rm -rf apps/desktop/resources/icon.iconset
+   ```
+
+This produces:
+- `resources/icon-1024.png` — full-color 1024x1024 app/dock icon
+- `resources/icon.icns` — macOS app bundle icon (used by electron-builder)
+- `resources/trayIconTemplate.svg` — must be updated manually to match `app-icon.svg` paths with `fill="#000000"`
+- `resources/trayIconTemplate.png` (18x18) and `trayIconTemplate@2x.png` (36x36) — macOS tray template images (black silhouettes)

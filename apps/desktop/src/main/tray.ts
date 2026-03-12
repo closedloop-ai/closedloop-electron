@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Menu, Tray, nativeImage } from "electron";
+import { app, Menu, Tray, nativeImage } from "electron";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -118,7 +118,9 @@ export class DesktopTray {
 function createTrayIcon(_pendingApprovals: number) {
   // On macOS, Electron automatically picks trayIconTemplate.png and trayIconTemplate@2x.png
   // when the filename contains "Template" and setTemplateImage is true.
-  const resourcesDir = path.join(__dirname, "..", "..", "resources");
+  const resourcesDir = app.isPackaged
+    ? process.resourcesPath
+    : path.join(__dirname, "..", "..", "resources");
   const icon = nativeImage.createFromPath(path.join(resourcesDir, "trayIconTemplate.png"));
   if (process.platform === "darwin") {
     icon.setTemplateImage(true);

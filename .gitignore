@@ -9,3 +9,4 @@ dist
 .closedloop-ai/code-review/*
 apps/desktop/src/shared/build-info.ts
 .env.local
+dist-dmg/

@@ -31,6 +31,8 @@ import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
 import type { GatewayApprovalRequest, GatewayApprovalResult } from "../server/router.js";
 import { normalizeAndValidateApiOrigin, normalizeWebAppOrigin } from "./origin-policy.js";
+import pkg from "electron-updater";
+const { autoUpdater } = pkg;
 import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -165,8 +167,11 @@ export class DesktopApplication {
 
   async boot(): Promise<void> {
     if (process.platform === "darwin" && app.dock) {
+      const resourcesDir = app.isPackaged
+        ? process.resourcesPath
+        : path.join(__dirname, "..", "..", "resources");
       const dockIcon = nativeImage.createFromPath(
-        path.join(__dirname, "..", "..", "resources", "icon-1024.png")
+        path.join(resourcesDir, "icon-1024.png")
       );
       app.dock.setIcon(dockIcon);
     }
@@ -202,19 +207,35 @@ export class DesktopApplication {
         this.cloudStatus = { state: "degraded", error: "Cloud connection disabled by user" };
       }
 
-      void this.checkForUpdate().then((result) => {
-        if (result.updateAvailable) {
-          this.desktopWindow.getWindow()?.webContents.send("desktop:update-available", result);
-        }
-      }).catch(() => {});
-      if (this.updateCheckTimer) clearInterval(this.updateCheckTimer);
-      this.updateCheckTimer = setInterval(() => {
+      if (app.isPackaged) {
+        autoUpdater.autoDownload = true;
+        autoUpdater.autoInstallOnAppQuit = true;
+        autoUpdater.on("update-available", (info) => {
+          this.desktopWindow.getWindow()?.webContents.send("desktop:update-available", {
+            updateAvailable: true,
+            version: info.version
+          });
+        });
+        void autoUpdater.checkForUpdates().catch(() => {});
+        if (this.updateCheckTimer) clearInterval(this.updateCheckTimer);
+        this.updateCheckTimer = setInterval(() => {
+          void autoUpdater.checkForUpdates().catch(() => {});
+        }, UPDATE_CHECK_INTERVAL_MS);
+      } else {
         void this.checkForUpdate().then((result) => {
           if (result.updateAvailable) {
             this.desktopWindow.getWindow()?.webContents.send("desktop:update-available", result);
           }
         }).catch(() => {});
-      }, UPDATE_CHECK_INTERVAL_MS);
+        if (this.updateCheckTimer) clearInterval(this.updateCheckTimer);
+        this.updateCheckTimer = setInterval(() => {
+          void this.checkForUpdate().then((result) => {
+            if (result.updateAvailable) {
+              this.desktopWindow.getWindow()?.webContents.send("desktop:update-available", result);
+            }
+          }).catch(() => {});
+        }, UPDATE_CHECK_INTERVAL_MS);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "unknown startup error";
       this.tray.setState("error", `Desktop startup failed: ${message}`);
@@ -808,12 +829,23 @@ export class DesktopApplication {
     });
     ipcMain.handle("desktop:check-for-update", async () => {
       try {
+        if (app.isPackaged) {
+          const result = await autoUpdater.checkForUpdates();
+          return {
+            updateAvailable: Boolean(result?.updateInfo),
+            version: result?.updateInfo?.version
+          };
+        }
         return await this.checkForUpdate();
       } catch (error) {
         return { updateAvailable: false, error: error instanceof Error ? error.message : "unknown error" };
       }
     });
     ipcMain.handle("desktop:apply-update", async () => {
+      if (app.isPackaged) {
+        autoUpdater.quitAndInstall();
+        return;
+      }
       await this.applyUpdate();
     });
   }
