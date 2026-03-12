@@ -1874,17 +1874,19 @@
       const updateBannerBtn = document.getElementById("updateBannerBtn");
 
       function showUpdateBanner(result) {
-        const shortHash = result.remoteHash ? result.remoteHash.slice(0, 7) : "unknown";
-        updateBannerText.textContent = `A new version is available (${shortHash})`;
+        const label = result.version
+          ? result.version
+          : result.remoteHash
+            ? result.remoteHash.slice(0, 7)
+            : "unknown";
+        updateBannerText.textContent = `A new version is available (${label})`;
         updateBanner.classList.add("visible");
       }
 
       async function triggerUpdate() {
         updateBannerBtn.disabled = true;
         try {
-          updateBannerText.textContent = "Pulling\u2026";
-          await new Promise((r) => setTimeout(r, 100));
-          updateBannerText.textContent = "Building\u2026";
+          updateBannerText.textContent = "Updating\u2026";
           await api.applyUpdate();
           updateBannerText.textContent = "Restarting\u2026";
         } catch (error) {

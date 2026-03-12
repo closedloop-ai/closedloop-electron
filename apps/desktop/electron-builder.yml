@@ -1,0 +1,33 @@
+appId: ai.closedloop.desktop
+productName: ClosedLoop
+
+files:
+  - dist/**/*
+  - src/renderer/index.html
+  - package.json
+
+extraResources:
+  - from: resources/icon-1024.png
+    to: icon-1024.png
+  - from: resources/trayIconTemplate.png
+    to: trayIconTemplate.png
+  - from: resources/trayIconTemplate@2x.png
+    to: trayIconTemplate@2x.png
+
+mac:
+  icon: resources/icon.icns
+  target:
+    - target: dmg
+      arch:
+        - universal
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+
+publish:
+  provider: github
+  owner: closedloop-ai
+  repo: closedloop-electron
+
+directories:
+  output: dist-dmg

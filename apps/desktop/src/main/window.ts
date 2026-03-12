@@ -1,4 +1,4 @@
-import { BrowserWindow } from "electron";
+import { app, BrowserWindow } from "electron";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -60,6 +60,10 @@ export class DesktopWindow {
 }
 
 function resolveRendererPath(): string {
+  if (app.isPackaged) {
+    return path.join(__dirname, "..", "..", "src", "renderer", "index.html");
+  }
+
   const cwd = process.cwd();
   const inDesktopCwdPath = path.join(cwd, "src", "renderer", "index.html");
   if (existsSync(inDesktopCwdPath)) {

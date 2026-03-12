@@ -39,3 +39,7 @@ desktop-dev:
 # Start Electron from existing desktop build output.
 desktop-start:
   pnpm -C apps/desktop start
+
+# Package desktop app as a universal macOS DMG.
+desktop-package:
+  pnpm -C apps/desktop package
