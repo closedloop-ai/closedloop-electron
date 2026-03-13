@@ -32,6 +32,22 @@ test("successful verification returns { ok: true, sessionTtlSeconds: 600 }", asy
   assert.deepEqual(result, { ok: true, sessionTtlSeconds: 600 });
 });
 
+test("successful verification also accepts the legacy ApiResult envelope", async () => {
+  globalThis.fetch = makeFetch(200, {
+    success: true,
+    data: { ok: true, sessionTtlSeconds: 600 }
+  });
+
+  const result = await verifyChallenge({
+    challengeToken: "tok123",
+    requestOrigin: "http://localhost:3000",
+    apiOrigin: "https://api.test.com",
+    apiKey: "key-abc",
+  });
+
+  assert.deepEqual(result, { ok: true, sessionTtlSeconds: 600 });
+});
+
 test("401 response returns { ok: false, error: ..., statusCode: 401 }", async () => {
   globalThis.fetch = makeFetch(401, { error: "unauthorized" });
 

@@ -12,6 +12,16 @@ export type VerifyChallengeResult =
 
 const VERIFY_TIMEOUT_MS = 5_000;
 
+type VerifySuccessPayload = {
+  ok?: boolean;
+  sessionTtlSeconds?: number;
+  success?: boolean;
+  data?: {
+    ok?: boolean;
+    sessionTtlSeconds?: number;
+  };
+};
+
 /** Verify a challenge token with the API server using the desktop API key. */
 export async function verifyChallenge(
   options: VerifyChallengeOptions
@@ -41,9 +51,13 @@ export async function verifyChallenge(
     });
 
     if (response.ok) {
-      const data = (await response.json()) as { ok: boolean; sessionTtlSeconds?: number };
-      if (data.ok && typeof data.sessionTtlSeconds === "number") {
-        return { ok: true, sessionTtlSeconds: data.sessionTtlSeconds };
+      const data = (await response.json()) as VerifySuccessPayload;
+      const payload =
+        data.success === true && data.data && typeof data.data === "object"
+          ? data.data
+          : data;
+      if (payload.ok === true && typeof payload.sessionTtlSeconds === "number") {
+        return { ok: true, sessionTtlSeconds: payload.sessionTtlSeconds };
       }
       return { ok: false, error: "unexpected response format", statusCode: response.status };
     }
