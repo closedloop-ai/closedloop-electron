@@ -352,6 +352,7 @@ export function registerCodexRoutes(
         processRunning,
         pid: state.pid,
         provider: state.provider,
+        sessionId: state.sessionId,
         startedAt: state.startedAt,
         completedAt: state.completedAt,
         exitCode: state.exitCode,
@@ -663,6 +664,66 @@ export function registerCodexRoutes(
     json(context, 200, { findings });
   });
 
+  dispatcher.register("POST", "/api/engineer/codex/review-verdict/:ticketId", async (context) => {
+    const ticketId = context.params.ticketId;
+    const body = parseBody(context);
+    if (!body) {
+      json(context, 400, { error: "Invalid or empty JSON body" });
+      return;
+    }
+
+    const repoPath = asString(body.repoPath);
+    const sessionId = asString(body.sessionId);
+    const provider = asProvider(body.provider);
+
+    if (!(repoPath && sessionId && provider)) {
+      json(context, 400, { error: "repoPath, sessionId, and provider are required" });
+      return;
+    }
+
+    let expandedRepoPath: string;
+    try {
+      expandedRepoPath = assertRepoAllowed(repoPath, getAllowedDirectories());
+    } catch (error) {
+      if (error instanceof DirectoryNotAllowedError) {
+        json(context, 403, { error: "directory not allowed" });
+        return;
+      }
+      throw error;
+    }
+
+    const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
+
+    if (!existsSync(worktreeDir)) {
+      json(context, 404, { error: "Work directory not found" });
+      return;
+    }
+
+    try {
+      console.log(
+        `[review-verdict] Starting verdict extraction for ${ticketId}, provider=${provider}, session=${sessionId}`
+      );
+      const collected = provider === "codex"
+        ? await runCodexVerdict(worktreeDir, sessionId)
+        : await runClaudeVerdict(worktreeDir, sessionId);
+
+      console.log(`[review-verdict] Collected ${collected.length} chars of output`);
+
+      const verdict = extractVerdictTag(collected);
+      if (verdict) {
+        console.log(`[review-verdict] Extracted verdict: ${verdict.verdict} — ${verdict.reason}`);
+      } else {
+        console.log("[review-verdict] No verdict tag found in output");
+      }
+
+      json(context, 200, { verdict: verdict ?? null });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[review-verdict] Extraction failed:", msg);
+      json(context, 200, { verdict: null, error: msg });
+    }
+  });
+
   dispatcher.register("POST", "/api/engineer/codex/review/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const body = parseBody(context);
@@ -754,9 +815,9 @@ export function registerCodexRoutes(
       const sessionIdHolder: { value: string | undefined } = { value: undefined };
       const stderrHolder: { value: string } = { value: "" };
       const streamFn = provider === "claude" ? streamClaudeReview : streamCodexReview;
+      const exitPromise = waitForExit(child).catch(() => 1);
       await streamFn(child, context.response, logPath, sessionIdHolder, stderrHolder);
-
-      const exitCode = await waitForExit(child);
+      const exitCode = await exitPromise;
 
       if (exitCode !== 0 && stderrHolder.value.trim()) {
         writeEvent(context.response, { type: "error", error: stderrHolder.value.trim() });
@@ -1570,17 +1631,19 @@ async function streamClaudeReview(
   });
 }
 
-async function streamCodexReview(
+function streamCodexReview(
   child: ChildProcess,
   response: ServerResponse,
   logPath: string,
   sessionIdHolder: { value: string | undefined },
   stderrHolder: { value: string }
 ): Promise<void> {
+  const logStream = createWriteStream(logPath, { flags: "a", encoding: "utf-8" });
+
   child.stdout?.setEncoding("utf-8");
   child.stdout?.on("data", (chunk: string | Buffer) => {
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
-    void fs.appendFile(logPath, text, "utf-8");
+    logStream.write(text);
 
     const sessionMatch = CODEX_SESSION_ID_REGEX.exec(text);
     if (sessionMatch?.[1] && !sessionIdHolder.value) {
@@ -1594,8 +1657,15 @@ async function streamCodexReview(
   child.stderr?.setEncoding("utf-8");
   child.stderr?.on("data", (chunk: string | Buffer) => {
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
-    void fs.appendFile(logPath, text, "utf-8");
+    logStream.write(text);
     stderrHolder.value += text;
+  });
+
+  child.on("close", () => { logStream.end(); });
+
+  return new Promise<void>((resolve, reject) => {
+    logStream.once("finish", resolve);
+    logStream.once("error", reject);
   });
 }
 
@@ -1859,4 +1929,219 @@ function json(context: OperationRequestContext, status: number, payload: unknown
   context.response.statusCode = status;
   context.response.setHeader("content-type", "application/json");
   context.response.end(JSON.stringify(payload));
+}
+
+// --- Verdict extraction ---
+
+const VERDICT_PROMPT = `Now perform a Premise Review of the changes you just reviewed. Question whether the changes were necessary at all:
+
+- Non-existent bug "fix": The author claims to fix a bug, but the original code was correct
+- Redundant workaround: The problem is already handled by the framework or upstream code
+- Phantom dead-code removal: Code removed as "unused" but still referenced elsewhere
+- Duplicate abstraction: A new helper was added but an equivalent already exists
+- Unnecessary optimization: Caching/batching for a path that is not a bottleneck
+
+Use Read, Grep, and Glob to investigate the existing codebase for evidence.
+
+After your analysis, output exactly one line as the LAST line of your response:
+<pr_verdict>{"verdict":"X","reason":"..."}</pr_verdict>
+
+Where verdict is:
+- "decline" if you found blocking premise issues (changes are unnecessary or harmful) OR your review found critical/blocking issues
+- "needs_attention" if there are high-priority issues but no blocking ones
+- "approve" if no blocking or high-priority issues were found
+
+Keep reason under 120 characters. The reason should reference the most important issue.`;
+
+const VERDICT_TAG_RE = /<pr_verdict>([\s\S]*?)<\/pr_verdict>/;
+const VALID_VERDICTS = new Set(["decline", "needs_attention", "approve"]);
+
+type ReviewVerdict = {
+  verdict: "decline" | "needs_attention" | "approve";
+  reason: string;
+};
+
+/** @internal Exported for testing only. */
+export function extractVerdictTag(rawOutput: string): ReviewVerdict | undefined {
+  const match = VERDICT_TAG_RE.exec(rawOutput);
+  if (!match) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(match[1]) as Record<string, unknown>;
+    if (
+      typeof parsed.verdict !== "string" ||
+      !VALID_VERDICTS.has(parsed.verdict) ||
+      typeof parsed.reason !== "string" ||
+      parsed.reason.length === 0
+    ) {
+      return undefined;
+    }
+    return {
+      verdict: parsed.verdict as ReviewVerdict["verdict"],
+      reason: parsed.reason,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function extractClaudeText(event: any): string | null {
+  // assistant message with content blocks — append newline to separate turns
+  if (event.type === "assistant" && event.message?.content) {
+    const texts: string[] = [];
+    for (const block of event.message.content) {
+      if (block.type === "text" && block.text) {
+        texts.push(block.text);
+      }
+    }
+    if (texts.length === 0) {
+      return null;
+    }
+    const joined = texts.join("");
+    return joined.endsWith("\n") ? joined : `${joined}\n`;
+  }
+
+  // Streaming text deltas
+  if (
+    event.type === "content_block_delta" &&
+    event.delta?.type === "text_delta" &&
+    event.delta.text
+  ) {
+    return event.delta.text;
+  }
+
+  // Result event with text in content (can be a plain string or array of content blocks)
+  if (event.type === "result" && event.result) {
+    if (typeof event.result === "string") {
+      return event.result.endsWith("\n") ? event.result : `${event.result}\n`;
+    }
+    const texts: string[] = [];
+    for (const block of event.result ?? []) {
+      if (block.type === "text" && block.text) {
+        texts.push(block.text);
+      }
+    }
+    if (texts.length === 0) {
+      return null;
+    }
+    const joined = texts.join("");
+    return joined.endsWith("\n") ? joined : `${joined}\n`;
+  }
+
+  return null;
+}
+
+const VERDICT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+
+function runVerdictProcess(
+  cmd: string,
+  args: string[],
+  options: { cwd: string; stdin?: string; env?: Record<string, string | undefined> },
+  extractLine: (trimmedLine: string) => string | null
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, {
+      cwd: options.cwd,
+      stdio: [options.stdin ? "pipe" : "ignore", "pipe", "pipe"],
+      env: { ...process.env, ...options.env },
+    });
+
+    if (options.stdin) {
+      child.stdin?.write(options.stdin);
+      child.stdin?.end();
+    }
+
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`${cmd} verdict timed out after ${VERDICT_TIMEOUT_MS / 1000}s`));
+    }, VERDICT_TIMEOUT_MS);
+
+    let buffer = "";
+    let collected = "";
+
+    child.stdout?.on("data", (data: Buffer) => {
+      buffer += data.toString();
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          continue;
+        }
+        const text = extractLine(trimmed);
+        if (text) {
+          collected += text;
+        }
+      }
+    });
+
+    child.stderr?.on("data", (data: Buffer) => {
+      console.log(`[review-verdict] ${cmd} stderr: ${data.toString().trim().slice(0, 300)}`);
+    });
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (buffer.trim()) {
+        const text = extractLine(buffer.trim());
+        if (text) {
+          collected += text;
+        }
+      }
+      console.log(`[review-verdict] ${cmd} exited with code ${code}`);
+      if (code === 0) {
+        resolve(collected);
+      } else {
+        reject(new Error(`${cmd} process exited with code ${code}`));
+      }
+    });
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+  });
+}
+
+function extractCodexVerdictLine(trimmedLine: string): string | null {
+  try {
+    const event = JSON.parse(trimmedLine) as Record<string, unknown>;
+    const item = event.item as { type?: string; text?: string } | undefined;
+    if (event.type === "item.completed" && item?.text && item.type === "agent_message") {
+      return item.text;
+    }
+    return null;
+  } catch {
+    // Not JSON — accumulate raw text as fallback
+    return trimmedLine;
+  }
+}
+
+function extractClaudeVerdictLine(trimmedLine: string): string | null {
+  try {
+    const event = JSON.parse(trimmedLine);
+    return extractClaudeText(event);
+  } catch {
+    return null;
+  }
+}
+
+function runCodexVerdict(worktreeDir: string, sessionId: string): Promise<string> {
+  return runVerdictProcess(
+    "codex",
+    ["exec", "resume", sessionId, VERDICT_PROMPT, "--full-auto", "--json"],
+    { cwd: worktreeDir, env: { FORCE_COLOR: "0" } },
+    extractCodexVerdictLine
+  );
+}
+
+function runClaudeVerdict(worktreeDir: string, sessionId: string): Promise<string> {
+  return runVerdictProcess(
+    "claude",
+    ["-p", "--resume", sessionId, "--output-format", "stream-json", "--model", "sonnet", "--allowedTools", "Read,Glob,Grep"],
+    { cwd: worktreeDir, stdin: VERDICT_PROMPT, env: { PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin` } },
+    extractClaudeVerdictLine
+  );
 }

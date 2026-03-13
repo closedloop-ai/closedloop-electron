@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { afterEach, describe, test } from "node:test";
-import { extractTextFromNdjsonLog } from "../src/server/operations/codex.js";
+import { extractTextFromNdjsonLog, extractVerdictTag } from "../src/server/operations/codex.js";
 import { createStreamState, processStreamEvent } from "../src/server/operations/stream-events.js";
 
 const tempPaths: string[] = [];
@@ -287,5 +287,115 @@ describe("streamClaudeReview log write ordering", () => {
       const parsed = JSON.parse(lines[i]);
       assert.equal(parsed.seq, i, `Sequence ${i} missing or out of order`);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// streamCodexReview flush-gate — verify log is fully written before resolve
+// ---------------------------------------------------------------------------
+
+describe("streamCodexReview flush-gate pattern", () => {
+  test("log finish resolves only after all data is flushed from child stdout", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "codex-flush-gate-"));
+    tempPaths.push(tmpDir);
+    const logPath = path.join(tmpDir, "codex-review.log");
+
+    // Spawn a child that outputs many lines — simulates codex review output
+    const child = spawn("node", [
+      "-e",
+      `for (let i = 0; i < 50; i++) { process.stdout.write("line " + i + "\\n"); }`,
+    ]);
+
+    // Replicate the streamCodexReview pattern: createWriteStream + close→end + finish→resolve
+    const logStream = createWriteStream(logPath, { flags: "a", encoding: "utf-8" });
+
+    child.stdout?.setEncoding("utf-8");
+    child.stdout?.on("data", (chunk: string) => {
+      logStream.write(chunk);
+    });
+
+    child.on("close", () => { logStream.end(); });
+
+    // This is the key assertion: the promise should not resolve until finish fires,
+    // which means all data is flushed to disk.
+    await new Promise<void>((resolve, reject) => {
+      logStream.once("finish", resolve);
+      logStream.once("error", reject);
+    });
+
+    const content = await fs.readFile(logPath, "utf-8");
+    const lines = content.trim().split("\n");
+    assert.equal(lines.length, 50, `Expected 50 lines, got ${lines.length}`);
+    assert.equal(lines[0], "line 0");
+    assert.equal(lines[49], "line 49");
+  });
+
+  test("logStream error rejects the promise instead of hanging", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "codex-flush-error-"));
+    tempPaths.push(tmpDir);
+
+    // Point logStream at a path inside a non-existent directory to trigger an error
+    const badLogPath = path.join(tmpDir, "nonexistent-dir", "subdir", "codex-review.log");
+    const logStream = createWriteStream(badLogPath, { flags: "a", encoding: "utf-8" });
+
+    const result = await new Promise<"error" | "finish">((resolve) => {
+      logStream.once("finish", () => resolve("finish"));
+      logStream.once("error", () => resolve("error"));
+    });
+
+    assert.equal(result, "error", "Expected error event for invalid log path");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// extractVerdictTag
+// ---------------------------------------------------------------------------
+
+describe("extractVerdictTag", () => {
+  test("extracts valid verdict from raw output", () => {
+    const raw = `Some analysis...\n<pr_verdict>{"verdict":"approve","reason":"No blocking issues found"}</pr_verdict>`;
+    const result = extractVerdictTag(raw);
+    assert.deepEqual(result, { verdict: "approve", reason: "No blocking issues found" });
+  });
+
+  test("extracts decline verdict", () => {
+    const raw = `<pr_verdict>{"verdict":"decline","reason":"Bug fix is unnecessary"}</pr_verdict>`;
+    const result = extractVerdictTag(raw);
+    assert.deepEqual(result, { verdict: "decline", reason: "Bug fix is unnecessary" });
+  });
+
+  test("extracts needs_attention verdict", () => {
+    const raw = `<pr_verdict>{"verdict":"needs_attention","reason":"High-priority perf issue"}</pr_verdict>`;
+    const result = extractVerdictTag(raw);
+    assert.deepEqual(result, { verdict: "needs_attention", reason: "High-priority perf issue" });
+  });
+
+  test("returns undefined for missing tag", () => {
+    assert.equal(extractVerdictTag("no tag here"), undefined);
+  });
+
+  test("returns undefined for invalid verdict value", () => {
+    const raw = `<pr_verdict>{"verdict":"reject","reason":"bad"}</pr_verdict>`;
+    assert.equal(extractVerdictTag(raw), undefined);
+  });
+
+  test("returns undefined for empty reason", () => {
+    const raw = `<pr_verdict>{"verdict":"approve","reason":""}</pr_verdict>`;
+    assert.equal(extractVerdictTag(raw), undefined);
+  });
+
+  test("returns undefined for malformed JSON inside tag", () => {
+    const raw = `<pr_verdict>{not valid json}</pr_verdict>`;
+    assert.equal(extractVerdictTag(raw), undefined);
+  });
+
+  test("returns undefined when reason is missing", () => {
+    const raw = `<pr_verdict>{"verdict":"approve"}</pr_verdict>`;
+    assert.equal(extractVerdictTag(raw), undefined);
+  });
+
+  test("returns undefined when verdict is missing", () => {
+    const raw = `<pr_verdict>{"reason":"some reason"}</pr_verdict>`;
+    assert.equal(extractVerdictTag(raw), undefined);
   });
 });
