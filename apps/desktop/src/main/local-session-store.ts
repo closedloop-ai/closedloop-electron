@@ -1,10 +1,14 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 interface Session {
-  tokenHash: Buffer;
+  tokenDigest: Buffer;
   origin: string;
   expiresAt: number;
   createdAt: number;
+}
+
+function sha256(input: string): Buffer {
+  return createHash("sha256").update(input).digest();
 }
 
 const DEFAULT_TTL_SECONDS = 600;
@@ -35,7 +39,7 @@ export class LocalSessionStore {
     const expiresAt = Date.now() + ttl * 1000;
 
     this.sessions.set(sessionToken, {
-      tokenHash: Buffer.from(sessionToken),
+      tokenDigest: sha256(sessionToken),
       origin,
       expiresAt,
       createdAt: Date.now(),
@@ -61,11 +65,11 @@ export class LocalSessionStore {
       return false;
     }
 
-    const tokenBuffer = Buffer.from(token);
-    if (tokenBuffer.length !== session.tokenHash.length) {
+    const tokenDigest = sha256(token);
+    if (tokenDigest.length !== session.tokenDigest.length) {
       return false;
     }
-    if (!timingSafeEqual(tokenBuffer, session.tokenHash)) {
+    if (!timingSafeEqual(tokenDigest, session.tokenDigest)) {
       return false;
     }
 

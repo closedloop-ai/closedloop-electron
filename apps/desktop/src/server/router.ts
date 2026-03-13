@@ -411,7 +411,7 @@ export class GatewayRouter {
       response.setHeader("content-type", "application/json");
       response.setHeader("Cache-Control", "no-store");
       response.end(JSON.stringify({ error: "loopback only" }));
-      return null;
+      return { activityType: "security", activityDetail: "exchange rejected: non-loopback origin" };
     }
 
     const apiKey = this.options.getApiKey?.();
