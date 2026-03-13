@@ -1,0 +1,72 @@
+name: Release Desktop
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm -C apps/desktop typecheck
+
+      - name: Run tests
+        run: pnpm -C apps/desktop test
+
+      - name: Build and publish to GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm -C apps/desktop release
+
+      - name: Upload DMG as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClosedLoop-macOS
+          path: apps/desktop/dist-dmg/*.dmg
+          if-no-files-found: error
+
+      - name: Build Slack message
+        if: success()
+        id: slack_message
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/${GITHUB_REF_NAME}"
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          MSG=$(printf "New ClosedLoop Desktop build ready\nVersion: %s\nRelease: %s\nArtifact: %s" \
+            "$VERSION" "$RELEASE_URL" "$RUN_URL")
+          echo "message<<EOF" >> $GITHUB_OUTPUT
+          echo "$MSG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Notify Slack
+        if: success()
+        continue-on-error: true
+        uses: ./.github/actions/slack-notify
+        with:
+          webhook_url: ${{ secrets.SLACK_GITHUB_REPO_WEBHOOK_URL }}
+          message: ${{ steps.slack_message.outputs.message }}
