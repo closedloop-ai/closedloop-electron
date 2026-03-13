@@ -1,9 +1,8 @@
-import { execFile, execSync, spawn } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import { closeSync, existsSync, openSync } from "node:fs";
 import fs from "node:fs/promises";
 import type { ServerResponse } from "node:http";
 import path from "node:path";
-import { promisify } from "node:util";
 import type {
   OperationDispatcher,
   OperationRequestContext,
@@ -36,7 +35,6 @@ import {
   writeLaunchMetadata,
 } from "./symphony-utils.js";
 
-const execFileAsync = promisify(execFile);
 const COMMIT_JSON_REGEX = /\{[\s\S]*"title"[\s\S]*"description"[\s\S]*\}/;
 
 type ChatMessage = {
@@ -482,10 +480,14 @@ export function registerSymphonyInteractiveRoutes(
           ...generated,
           source: "claude",
         });
-      } catch {
+      } catch (err) {
+        console.error(
+          "[commit-message] generation failed:",
+          err instanceof Error ? err.message : err
+        );
         json(context, 200, {
           title: `Work on ${ticketId}`,
-          description: summarizeDiff(diff),
+          description: "",
           source: "default",
         });
       }
@@ -897,16 +899,21 @@ function sanitizeCommitMessage(text: string): string {
 
 function getGitDiff(worktreeDir: string): string {
   try {
-    const diff = execSync(
-      "git diff HEAD --stat && echo '---' && git diff HEAD",
-      {
-        cwd: worktreeDir,
-        encoding: "utf-8",
-        maxBuffer: 1024 * 1024,
-        timeout: 10_000,
-      }
-    );
+    const opts = {
+      cwd: worktreeDir,
+      encoding: "utf-8" as const,
+      maxBuffer: 1024 * 1024,
+      timeout: 10_000,
+    };
 
+    const stat = execSync("git diff HEAD --stat", opts).trim();
+    const patch = execSync("git diff HEAD", opts).trim();
+
+    if (!stat && !patch) {
+      return "";
+    }
+
+    const diff = `${stat}\n---\n${patch}`;
     if (diff.length > 15_000) {
       return `${diff.slice(0, 15_000)}\n\n[diff truncated...]`;
     }
@@ -917,61 +924,95 @@ function getGitDiff(worktreeDir: string): string {
   }
 }
 
-async function generateCommitWithClaude(
+function generateCommitWithClaude(
   worktreeDir: string,
   ticketId: string,
   diff: string
 ): Promise<{ title: string; description: string }> {
-  const prompt = [
-    `Generate a git commit message for ticket ${ticketId}.`,
-    "",
-    "Here is the diff of all changes:",
-    "```diff",
-    diff,
-    "```",
-    "",
-    "Return ONLY a JSON object with this exact format:",
-    '{"title": "Short title under 72 chars", "description": "Bullet points of what changed"}',
-    "",
-    "Do NOT include AI or assistant references.",
-  ].join("\n");
+  return new Promise((resolve, reject) => {
+    const prompt = [
+      `Generate a git commit message for ticket ${ticketId}.`,
+      "",
+      "Here is the diff of all changes:",
+      "```diff",
+      diff,
+      "```",
+      "",
+      "Return ONLY a JSON object with this exact format:",
+      '{"title": "Short title under 72 chars", "description": "Bullet points of what changed"}',
+      "",
+      "Do NOT include AI or assistant references.",
+    ].join("\n");
 
-  const { stdout } = await execFileAsync(
-    "claude",
-    ["--model", "haiku", "-p", prompt],
-    {
+    const child = spawn("claude", ["--model", "haiku", "-p", prompt], {
       cwd: worktreeDir,
-      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
         PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
       },
-      timeout: 30_000,
-    }
-  );
+    });
 
-  const match = COMMIT_JSON_REGEX.exec(stdout);
-  if (match?.[0]) {
-    const parsed = JSON.parse(match[0]) as {
-      title?: string;
-      description?: string;
-    };
-    return {
-      title: sanitizeCommitMessage(parsed.title ?? `Work on ${ticketId}`),
-      description: sanitizeCommitMessage(parsed.description ?? ""),
-    };
-  }
+    let stdout = "";
+    let stderr = "";
 
-  return {
-    title: `Work on ${ticketId}`,
-    description: sanitizeCommitMessage(stdout.trim().slice(0, 500)),
-  };
+    child.stdout.on("data", (data: Buffer) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on("data", (data: Buffer) => {
+      stderr += data.toString();
+    });
+
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error("claude timed out after 30s"));
+    }, 30_000);
+
+    child.on("close", (code) => {
+      clearTimeout(timer);
+
+      if (stderr) {
+        console.error("[commit-message] claude stderr:", stderr.slice(0, 500));
+      }
+
+      if (code !== 0) {
+        console.error(`[commit-message] claude exited with code ${code}`);
+      }
+
+      // Parse stdout regardless of exit code — claude may produce
+      // valid output even with non-zero exit.
+      const match = COMMIT_JSON_REGEX.exec(stdout);
+      if (match?.[0]) {
+        try {
+          const parsed = JSON.parse(match[0]) as {
+            title?: string;
+            description?: string;
+          };
+          resolve({
+            title: sanitizeCommitMessage(
+              parsed.title ?? `Work on ${ticketId}`
+            ),
+            description: sanitizeCommitMessage(parsed.description ?? ""),
+          });
+          return;
+        } catch {
+          // JSON parse failed, fall through
+        }
+      }
+
+      reject(new Error(`claude exited with code ${code}, no usable output`));
+    });
+
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      console.error("[commit-message] failed to spawn claude:", err.message);
+      reject(err);
+    });
+  });
 }
 
-function summarizeDiff(diff: string): string {
-  const statSection = diff.split("---")[0]?.trim() ?? "";
-  return sanitizeCommitMessage(statSection);
-}
+
 
 function sanitizeBranchName(ticketId: string): string {
   const normalized = ticketId.replaceAll(/[^a-zA-Z0-9-_]/g, "-");
