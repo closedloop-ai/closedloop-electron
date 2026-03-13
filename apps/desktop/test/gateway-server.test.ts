@@ -14,11 +14,21 @@ import { SymphonyDirNotConfiguredError, tryAssertRepoAllowed, tryAssertPathAllow
 
 const execFileAsync = promisify(execFile);
 
+async function initGitRepo(repoPath: string): Promise<void> {
+  await execFileAsync("git", ["init", repoPath]);
+  await execFileAsync("git", ["-C", repoPath, "config", "user.email", "test@test.com"]);
+  await execFileAsync("git", ["-C", repoPath, "config", "user.name", "Test"]);
+  await fs.writeFile(path.join(repoPath, "README.md"), "# initial\n");
+  await execFileAsync("git", ["-C", repoPath, "add", "."]);
+  await execFileAsync("git", ["-C", repoPath, "commit", "-m", "initial"]);
+}
+
 const serversToClose: DesktopGatewayServer[] = [];
 const blockersToClose: net.Server[] = [];
 const tempPathsToClean: string[] = [];
 const originalSymphonyWorktreeParentDir = process.env.SYMPHONY_WORKTREE_PARENT_DIR;
 const originalHome = process.env.HOME;
+const originalPath = process.env.PATH;
 
 afterEach(async () => {
   if (originalSymphonyWorktreeParentDir === undefined) {
@@ -31,6 +41,12 @@ afterEach(async () => {
     delete process.env.HOME;
   } else {
     process.env.HOME = originalHome;
+  }
+
+  if (originalPath === undefined) {
+    delete process.env.PATH;
+  } else {
+    process.env.PATH = originalPath;
   }
 
   for (const server of serversToClose.splice(0)) {
@@ -2346,6 +2362,173 @@ test("returns default commit message when worktree does not exist", async () => 
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), {
     title: "Work on AI-123",
+    description: "",
+    source: "default"
+  });
+});
+
+test("returns empty description when claude CLI is unavailable", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-commit-claude-unavail-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-commit-noclip");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  await initGitRepo(repoPath);
+
+  // Create a worktree matching the naming pattern resolveWorktreeDir produces
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+  const ticketId = "CM-001";
+  const worktreeDir = path.join(worktreeParent, `repo-commit-noclip-${ticketId}`);
+  await execFileAsync("git", ["-C", repoPath, "worktree", "add", worktreeDir, "-b", `work/${ticketId}`]);
+
+  // Make a file change so git diff HEAD produces output
+  await fs.writeFile(path.join(worktreeDir, "feature.ts"), "export const x = 1;\n");
+  await execFileAsync("git", ["-C", worktreeDir, "add", "."]);
+
+  // Create a fake claude that exits non-zero with no output, placed first in
+  // PATH so it shadows any real installation (the spawn env appends
+  // /opt/homebrew/bin:/usr/local/bin, so restricting PATH alone is not enough)
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "commit-claude-unavail-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/commit-message/${ticketId}?repo=${encodeURIComponent(
+      repoPath
+    )}`
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(body, {
+    title: `Work on ${ticketId}`,
+    description: "",
+    source: "default"
+  });
+  // Key regression guard: description must be "", NOT a file list from git diff --stat
+  assert.equal(body.description, "", "description must be empty, not a diff --stat file list");
+});
+
+test("uses valid JSON from claude stdout even when exit code is non-zero", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-commit-nonzero-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-commit-nonzero");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  await initGitRepo(repoPath);
+
+  // Create a worktree with a staged change so getGitDiff returns non-empty
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+  const ticketId = "CM-003";
+  const worktreeDir = path.join(worktreeParent, `repo-commit-nonzero-${ticketId}`);
+  await execFileAsync("git", ["-C", repoPath, "worktree", "add", worktreeDir, "-b", `work/${ticketId}`]);
+  await fs.writeFile(path.join(worktreeDir, "feature.ts"), "export const x = 1;\n");
+  await execFileAsync("git", ["-C", worktreeDir, "add", "."]);
+
+  // Create a fake claude that exits non-zero but prints valid commit JSON.
+  // This is the core spawn-over-execFile regression guard: execFileAsync
+  // discards stdout on non-zero exit, but spawn preserves it.
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  const fakeScript = [
+    "#!/bin/sh",
+    'echo \'{"title": "CM-003: Add feature module", "description": "- Added feature.ts export"}\'',
+    "exit 1",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "claude"), fakeScript, { mode: 0o755 });
+
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "commit-nonzero-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/commit-message/${ticketId}?repo=${encodeURIComponent(
+      repoPath
+    )}`
+  );
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  // Must parse the JSON from stdout despite non-zero exit — this is the
+  // contract that spawn preserves and execFileAsync would break.
+  assert.equal(body.source, "claude", "source should be claude when valid JSON is parsed from stdout");
+  assert.equal(body.title, "CM-003: Add feature module");
+  assert.equal(body.description, "- Added feature.ts export");
+});
+
+test("returns default with empty description when worktree has no diff", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-commit-nodiff-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-commit-nodiff");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  await initGitRepo(repoPath);
+
+  // Create a real worktree with no uncommitted changes — getGitDiff returns ""
+  // because git diff HEAD produces no output, hitting the !diff early-return
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+  const ticketId = "CM-002";
+  const worktreeDir = path.join(worktreeParent, `repo-commit-nodiff-${ticketId}`);
+  await execFileAsync("git", ["-C", repoPath, "worktree", "add", worktreeDir, "-b", `work/${ticketId}`]);
+
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "commit-nodiff-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/commit-message/${ticketId}?repo=${encodeURIComponent(
+      repoPath
+    )}`
+  );
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), {
+    title: `Work on ${ticketId}`,
     description: "",
     source: "default"
   });
