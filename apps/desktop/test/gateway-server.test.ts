@@ -2632,6 +2632,156 @@ test("saveCodexChatSession is a no-op for non-codex providers", async () => {
   assert.equal(anyFile.length, 0);
 });
 
+// --- Review status + verdict tests ---
+
+test("GET codex status returns sessionId when state file has one", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-status-sessionid-"));
+  tempPathsToClean.push(tmpDir);
+
+  // Set SYMPHONY_WORKTREE_PARENT_DIR so resolveWorktreeDir uses tmpDir as parent
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = tmpDir;
+
+  // Create repo dir inside tmpDir (allowed directory)
+  const repoDir = path.join(tmpDir, "my-repo");
+  await fs.mkdir(repoDir, { recursive: true });
+
+  // Create worktree structure: <parent>/<repoName>-<ticketId>/.claude/work/
+  const ticketId = "TEST-123";
+  const worktreeDir = path.join(tmpDir, `my-repo-${ticketId}`);
+  const workDir = path.join(worktreeDir, ".claude", "work");
+  await fs.mkdir(workDir, { recursive: true });
+
+  // Write state file with sessionId
+  const stateFile = path.join(workDir, "codex-review-codex.json");
+  await fs.writeFile(stateFile, JSON.stringify({
+    status: "completed",
+    pid: 12345,
+    startedAt: "2025-01-01T00:00:00Z",
+    completedAt: "2025-01-01T00:01:00Z",
+    exitCode: 0,
+    provider: "codex",
+    sessionId: "abc-session-id-123",
+    config: { model: "o3", reasoningEffort: "medium", reviewMode: "base", baseBranch: "main" }
+  }));
+
+  // Write empty log
+  await fs.writeFile(path.join(workDir, "codex-review-codex.log"), "review output here");
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "http://localhost:3000",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "status-sessionid-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const res = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/codex/status/${ticketId}?repo=${encodeURIComponent(repoDir)}&provider=codex`
+  );
+  assert.equal(res.status, 200);
+  const data = await res.json() as { hasReview: boolean; sessionId?: string; status: string };
+  assert.equal(data.hasReview, true);
+  assert.equal(data.status, "completed");
+  assert.equal(data.sessionId, "abc-session-id-123");
+});
+
+test("POST review-verdict returns 400 when sessionId is missing", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-verdict-400-"));
+  tempPathsToClean.push(tmpDir);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "http://localhost:3000",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "verdict-400-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const res = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/codex/review-verdict/TICKET-1`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repoPath: tmpDir, provider: "codex" })
+    }
+  );
+  assert.equal(res.status, 400);
+  const data = await res.json() as { error: string };
+  assert.equal(data.error, "repoPath, sessionId, and provider are required");
+});
+
+test("POST review-verdict returns 400 for invalid provider", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-verdict-bad-provider-"));
+  tempPathsToClean.push(tmpDir);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "http://localhost:3000",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "verdict-bad-provider-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const res = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/codex/review-verdict/TICKET-1`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repoPath: tmpDir, sessionId: "sess-1", provider: "foo" })
+    }
+  );
+  assert.equal(res.status, 400);
+  const data = await res.json() as { error: string };
+  assert.equal(data.error, "repoPath, sessionId, and provider are required");
+});
+
+test("POST review-verdict returns 403 for disallowed repo", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-verdict-403-"));
+  tempPathsToClean.push(tmpDir);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "http://localhost:3000",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "verdict-403-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const res = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/codex/review-verdict/TICKET-1`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repoPath: "/not-allowed/repo", sessionId: "sess-1", provider: "codex" })
+    }
+  );
+  assert.equal(res.status, 403);
+});
+
 async function findAvailablePort(excluded: number[] = []): Promise<number> {
   return await new Promise<number>((resolve, reject) => {
     const probe = net.createServer();
