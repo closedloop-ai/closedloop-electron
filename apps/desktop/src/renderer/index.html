@@ -1105,6 +1105,14 @@
             </div>
             <p class="muted" id="apiKeyStatus"></p>
           </div>
+          <div class="row" id="debugAuthSection" style="display:none; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border)">
+            <label>Debug Auth Token (dev-only)</label>
+            <p class="field-help">Mint a short-lived session token for manual curl testing. Bound to <code>http://localhost</code>.</p>
+            <div class="actions" style="margin-top: 8px">
+              <button id="mintDebugToken">Mint Debug Token</button>
+            </div>
+            <p class="muted" id="debugTokenOutput" style="word-break: break-all;"></p>
+          </div>
         </div>
 
         <!-- Security & Sandbox -->
@@ -1234,6 +1242,7 @@
       const expandedActivityIds = new Set();
       let cachedCommandsPaused = false;
       let cachedConnectionEnabled = true;
+      let cachedPort = 19432;
 
       async function refreshRuntime() {
         const status = await api.getRuntimeStatus();
@@ -1241,6 +1250,7 @@
         const websocket = describeWebsocketStatus(cloudStatus);
         cachedCommandsPaused = Boolean(status.commandsPaused);
         cachedConnectionEnabled = status.connectionEnabled !== false;
+        cachedPort = status.port ?? 19432;
         const runtimeHealth = describeRuntimeHealth(cloudStatus, cachedConnectionEnabled);
         runtimeStatus.className = `runtime-health ${runtimeHealth.tone}`;
         runtimeStatus.title = runtimeHealth.detail;
@@ -2203,6 +2213,20 @@
       showRequestEvents.addEventListener("change", renderActivity);
       showSecurityEvents.addEventListener("change", renderActivity);
 
+      const debugAuthSection = document.getElementById("debugAuthSection");
+      const debugTokenOutput = document.getElementById("debugTokenOutput");
+      document.getElementById("mintDebugToken").addEventListener("click", async () => {
+        debugTokenOutput.textContent = "";
+        try {
+          const result = await api.mintDebugToken();
+          debugTokenOutput.textContent =
+            `Token: ${result.sessionToken}\nOrigin: ${result.origin}\nExpires: ${result.expiresAt}\n\n` +
+            `curl -H 'X-Desktop-Session-Token: ${result.sessionToken}' -H 'Origin: ${result.origin}' http://localhost:${cachedPort}/api/engineer/...`;
+        } catch (error) {
+          debugTokenOutput.textContent = `Error: ${error.message}`;
+        }
+      });
+
       Promise.all([
         loadOnboardingState(),
         loadSettings(),
@@ -2213,6 +2237,9 @@
         api.getDangerousAutoApprove().then((enabled) => {
           dangerAutoApproveToggle.checked = enabled;
           dangerAutoApproveLabel.classList.toggle("active", enabled);
+        }),
+        api.isDebugAuthEnabled().then((enabled) => {
+          debugAuthSection.style.display = enabled ? "" : "none";
         })
       ]).catch((error) => {
         settingsMessage.textContent = `Failed to load desktop state: ${error.message}`;
