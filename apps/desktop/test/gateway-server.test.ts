@@ -14,6 +14,15 @@ import { SymphonyDirNotConfiguredError, tryAssertRepoAllowed, tryAssertPathAllow
 
 const execFileAsync = promisify(execFile);
 
+async function initGitRepo(repoPath: string): Promise<void> {
+  await execFileAsync("git", ["init", repoPath]);
+  await execFileAsync("git", ["-C", repoPath, "config", "user.email", "test@test.com"]);
+  await execFileAsync("git", ["-C", repoPath, "config", "user.name", "Test"]);
+  await fs.writeFile(path.join(repoPath, "README.md"), "# initial\n");
+  await execFileAsync("git", ["-C", repoPath, "add", "."]);
+  await execFileAsync("git", ["-C", repoPath, "commit", "-m", "initial"]);
+}
+
 const serversToClose: DesktopGatewayServer[] = [];
 const blockersToClose: net.Server[] = [];
 const tempPathsToClean: string[] = [];
@@ -2365,13 +2374,7 @@ test("returns empty description when claude CLI is unavailable", async () => {
   const repoPath = path.join(tmpDir, "repo-commit-noclip");
   await fs.mkdir(repoPath, { recursive: true });
 
-  // Initialize a git repo with an initial commit
-  await execFileAsync("git", ["init", repoPath]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.email", "test@test.com"]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.name", "Test"]);
-  await fs.writeFile(path.join(repoPath, "README.md"), "# initial\n");
-  await execFileAsync("git", ["-C", repoPath, "add", "."]);
-  await execFileAsync("git", ["-C", repoPath, "commit", "-m", "initial"]);
+  await initGitRepo(repoPath);
 
   // Create a worktree matching the naming pattern resolveWorktreeDir produces
   const worktreeParent = path.join(tmpDir, "worktrees");
@@ -2431,13 +2434,7 @@ test("uses valid JSON from claude stdout even when exit code is non-zero", async
   const repoPath = path.join(tmpDir, "repo-commit-nonzero");
   await fs.mkdir(repoPath, { recursive: true });
 
-  // Initialize a git repo with an initial commit
-  await execFileAsync("git", ["init", repoPath]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.email", "test@test.com"]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.name", "Test"]);
-  await fs.writeFile(path.join(repoPath, "README.md"), "# initial\n");
-  await execFileAsync("git", ["-C", repoPath, "add", "."]);
-  await execFileAsync("git", ["-C", repoPath, "commit", "-m", "initial"]);
+  await initGitRepo(repoPath);
 
   // Create a worktree with a staged change so getGitDiff returns non-empty
   const worktreeParent = path.join(tmpDir, "worktrees");
@@ -2498,13 +2495,7 @@ test("returns default with empty description when worktree has no diff", async (
   const repoPath = path.join(tmpDir, "repo-commit-nodiff");
   await fs.mkdir(repoPath, { recursive: true });
 
-  // Initialize a git repo with an initial commit
-  await execFileAsync("git", ["init", repoPath]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.email", "test@test.com"]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.name", "Test"]);
-  await fs.writeFile(path.join(repoPath, "README.md"), "# initial\n");
-  await execFileAsync("git", ["-C", repoPath, "add", "."]);
-  await execFileAsync("git", ["-C", repoPath, "commit", "-m", "initial"]);
+  await initGitRepo(repoPath);
 
   // Create a real worktree with no uncommitted changes — getGitDiff returns ""
   // because git diff HEAD produces no output, hitting the !diff early-return

@@ -899,26 +899,27 @@ function sanitizeCommitMessage(text: string): string {
 
 function getGitDiff(worktreeDir: string): string {
   try {
-    const opts = {
-      cwd: worktreeDir,
-      encoding: "utf-8" as const,
-      maxBuffer: 1024 * 1024,
-      timeout: 10_000,
-    };
+    const raw = execSync(
+      "git diff HEAD --stat && echo '---' && git diff HEAD",
+      {
+        cwd: worktreeDir,
+        encoding: "utf-8",
+        maxBuffer: 1024 * 1024,
+        timeout: 10_000,
+      }
+    );
 
-    const stat = execSync("git diff HEAD --stat", opts).trim();
-    const patch = execSync("git diff HEAD", opts).trim();
-
-    if (!stat && !patch) {
+    // The echo separator is always present; strip it to detect empty diffs
+    const diff = raw.replaceAll(/^---\n?$/gm, "").trim();
+    if (!diff) {
       return "";
     }
 
-    const diff = `${stat}\n---\n${patch}`;
-    if (diff.length > 15_000) {
-      return `${diff.slice(0, 15_000)}\n\n[diff truncated...]`;
+    if (raw.length > 15_000) {
+      return `${raw.slice(0, 15_000)}\n\n[diff truncated...]`;
     }
 
-    return diff;
+    return raw;
   } catch {
     return "";
   }
