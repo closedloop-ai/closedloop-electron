@@ -56,6 +56,11 @@ desktop-debug-auth:
 desktop-release bump="patch":
   #!/usr/bin/env bash
   set -euo pipefail
+  CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+  if [ "$CURRENT_BRANCH" != "main" ]; then
+    echo "Error: releases must be created from the main branch (currently on $CURRENT_BRANCH)." >&2
+    exit 1
+  fi
   cd apps/desktop
   NEW_VERSION=$(npm version "{{bump}}" --no-git-tag-version | tr -d 'v')
   echo "Bumped to version $NEW_VERSION"
