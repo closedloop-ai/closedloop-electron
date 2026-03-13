@@ -694,6 +694,11 @@ export function registerCodexRoutes(
 
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
 
+    if (!existsSync(worktreeDir)) {
+      json(context, 404, { error: "Work directory not found" });
+      return;
+    }
+
     try {
       console.log(
         `[review-verdict] Starting verdict extraction for ${ticketId}, provider=${provider}, session=${sessionId}`
@@ -711,7 +716,7 @@ export function registerCodexRoutes(
         console.log("[review-verdict] No verdict tag found in output");
       }
 
-      json(context, 200, { verdict });
+      json(context, 200, { verdict: verdict ?? null });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[review-verdict] Extraction failed:", msg);
@@ -810,7 +815,7 @@ export function registerCodexRoutes(
       const sessionIdHolder: { value: string | undefined } = { value: undefined };
       const stderrHolder: { value: string } = { value: "" };
       const streamFn = provider === "claude" ? streamClaudeReview : streamCodexReview;
-      const exitPromise = waitForExit(child);
+      const exitPromise = waitForExit(child).catch(() => 1);
       await streamFn(child, context.response, logPath, sessionIdHolder, stderrHolder);
       const exitCode = await exitPromise;
 
@@ -2028,17 +2033,30 @@ function extractClaudeText(event: any): string | null {
   return null;
 }
 
-function runCodexVerdict(worktreeDir: string, sessionId: string): Promise<string> {
+const VERDICT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+
+function runVerdictProcess(
+  cmd: string,
+  args: string[],
+  options: { cwd: string; stdin?: string; env?: Record<string, string | undefined> },
+  extractLine: (trimmedLine: string) => string | null
+): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn(
-      "codex",
-      ["exec", "resume", sessionId, VERDICT_PROMPT, "--full-auto", "--json"],
-      {
-        cwd: worktreeDir,
-        stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, FORCE_COLOR: "0" },
-      }
-    );
+    const child = spawn(cmd, args, {
+      cwd: options.cwd,
+      stdio: [options.stdin ? "pipe" : "ignore", "pipe", "pipe"],
+      env: { ...process.env, ...options.env },
+    });
+
+    if (options.stdin) {
+      child.stdin?.write(options.stdin);
+      child.stdin?.end();
+    }
+
+    const timer = setTimeout(() => {
+      child.kill();
+      reject(new Error(`${cmd} verdict timed out after ${VERDICT_TIMEOUT_MS / 1000}s`));
+    }, VERDICT_TIMEOUT_MS);
 
     let buffer = "";
     let collected = "";
@@ -2053,133 +2071,77 @@ function runCodexVerdict(worktreeDir: string, sessionId: string): Promise<string
         if (!trimmed) {
           continue;
         }
-        try {
-          const event = JSON.parse(trimmed) as Record<string, unknown>;
-          const item = event.item as { type?: string; text?: string } | undefined;
-          if (
-            event.type === "item.completed" &&
-            item?.text &&
-            item.type === "agent_message"
-          ) {
-            collected += item.text;
-          }
-        } catch {
-          // Not JSON — accumulate raw text as fallback
-          collected += trimmed;
+        const text = extractLine(trimmed);
+        if (text) {
+          collected += text;
         }
       }
     });
 
     child.stderr?.on("data", (data: Buffer) => {
-      console.log(`[review-verdict] codex stderr: ${data.toString().trim().slice(0, 300)}`);
+      console.log(`[review-verdict] ${cmd} stderr: ${data.toString().trim().slice(0, 300)}`);
     });
 
     child.on("close", (code) => {
-      // Flush remaining buffer
+      clearTimeout(timer);
       if (buffer.trim()) {
-        try {
-          const event = JSON.parse(buffer.trim()) as Record<string, unknown>;
-          const item = event.item as { type?: string; text?: string } | undefined;
-          if (
-            event.type === "item.completed" &&
-            item?.text &&
-            item.type === "agent_message"
-          ) {
-            collected += item.text;
-          }
-        } catch {
-          collected += buffer.trim();
+        const text = extractLine(buffer.trim());
+        if (text) {
+          collected += text;
         }
       }
-      console.log(`[review-verdict] Codex exited with code ${code}`);
+      console.log(`[review-verdict] ${cmd} exited with code ${code}`);
       if (code === 0) {
         resolve(collected);
       } else {
-        reject(new Error(`Codex process exited with code ${code}`));
+        reject(new Error(`${cmd} process exited with code ${code}`));
       }
     });
 
-    child.on("error", reject);
+    child.on("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
   });
 }
 
+function extractCodexVerdictLine(trimmedLine: string): string | null {
+  try {
+    const event = JSON.parse(trimmedLine) as Record<string, unknown>;
+    const item = event.item as { type?: string; text?: string } | undefined;
+    if (event.type === "item.completed" && item?.text && item.type === "agent_message") {
+      return item.text;
+    }
+    return null;
+  } catch {
+    // Not JSON — accumulate raw text as fallback
+    return trimmedLine;
+  }
+}
+
+function extractClaudeVerdictLine(trimmedLine: string): string | null {
+  try {
+    const event = JSON.parse(trimmedLine);
+    return extractClaudeText(event);
+  } catch {
+    return null;
+  }
+}
+
+function runCodexVerdict(worktreeDir: string, sessionId: string): Promise<string> {
+  return runVerdictProcess(
+    "codex",
+    ["exec", "resume", sessionId, VERDICT_PROMPT, "--full-auto", "--json"],
+    { cwd: worktreeDir, env: { FORCE_COLOR: "0" } },
+    extractCodexVerdictLine
+  );
+}
+
 function runClaudeVerdict(worktreeDir: string, sessionId: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      "claude",
-      [
-        "-p",
-        "--resume",
-        sessionId,
-        "--output-format",
-        "stream-json",
-        "--model",
-        "sonnet",
-        "--allowedTools",
-        "Read,Glob,Grep",
-      ],
-      {
-        cwd: worktreeDir,
-        stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
-        },
-      }
-    );
-
-    child.stdin?.write(VERDICT_PROMPT);
-    child.stdin?.end();
-
-    let buffer = "";
-    let collected = "";
-
-    child.stdout?.on("data", (data: Buffer) => {
-      buffer += data.toString();
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) {
-          continue;
-        }
-        try {
-          const event = JSON.parse(trimmed);
-          const text = extractClaudeText(event);
-          if (text) {
-            collected += text;
-          }
-        } catch {
-          // Not JSON — ignore
-        }
-      }
-    });
-
-    child.stderr?.on("data", (data: Buffer) => {
-      console.log(`[review-verdict] claude stderr: ${data.toString().trim().slice(0, 300)}`);
-    });
-
-    child.on("close", (code) => {
-      if (buffer.trim()) {
-        try {
-          const event = JSON.parse(buffer.trim());
-          const text = extractClaudeText(event);
-          if (text) {
-            collected += text;
-          }
-        } catch {
-          // ignore
-        }
-      }
-      console.log(`[review-verdict] Claude exited with code ${code}`);
-      if (code === 0) {
-        resolve(collected);
-      } else {
-        reject(new Error(`Claude process exited with code ${code}`));
-      }
-    });
-
-    child.on("error", reject);
-  });
+  return runVerdictProcess(
+    "claude",
+    ["-p", "--resume", sessionId, "--output-format", "stream-json", "--model", "sonnet", "--allowedTools", "Read,Glob,Grep"],
+    { cwd: worktreeDir, stdin: VERDICT_PROMPT, env: { PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin` } },
+    extractClaudeVerdictLine
+  );
 }
