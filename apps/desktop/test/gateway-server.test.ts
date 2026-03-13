@@ -146,7 +146,7 @@ test("returns 204 for CORS preflight requests", async () => {
   assert.equal(preflight.headers.get("access-control-allow-origin"), "https://staging.symphony.com");
   assert.equal(
     preflight.headers.get("access-control-allow-headers"),
-    "Content-Type,Authorization,X-Desktop-Gateway-Token,X-Desktop-Source,X-Desktop-Force-Approval,X-Desktop-Approval-Reason"
+    "Content-Type,Authorization,X-Desktop-Gateway-Token,X-Desktop-Session-Token,X-Desktop-Source,X-Desktop-Force-Approval,X-Desktop-Approval-Reason"
   );
 });
 
@@ -245,7 +245,8 @@ test("requires gateway token when configured", async () => {
 
   const unauthorized = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`);
   assert.equal(unauthorized.status, 401);
-  assert.deepEqual(await unauthorized.json(), { error: "unauthorized" });
+  const body = await unauthorized.json() as { error: string; reason?: string };
+  assert.equal(body.error, "unauthorized");
 
   const authorized = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`, {
     headers: {
@@ -254,23 +255,16 @@ test("requires gateway token when configured", async () => {
   });
   assert.equal(authorized.status, 501);
 
-  assert.deepEqual(activityEvents, [
-    {
-      type: "security",
-      statusCode: 401,
-      path: "/api/engineer/unimplemented-route",
-      detail: "unauthorized"
-    },
-    {
-      type: "request",
-      statusCode: 501,
-      path: "/api/engineer/unimplemented-route",
-      detail: undefined
-    }
-  ]);
+  assert.equal(activityEvents.length, 2);
+  assert.equal(activityEvents[0].type, "security");
+  assert.equal(activityEvents[0].statusCode, 401);
+  assert.equal(activityEvents[0].path, "/api/engineer/unimplemented-route");
+  assert.equal(activityEvents[1].type, "request");
+  assert.equal(activityEvents[1].statusCode, 501);
+  assert.equal(activityEvents[1].path, "/api/engineer/unimplemented-route");
 });
 
-test("accepts trusted browser origin without gateway token on loopback", async () => {
+test("rejects trusted browser origin without session token (origin-only bypass removed)", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-origin-auth-"));
   tempPathsToClean.push(tmpDir);
 
@@ -289,12 +283,13 @@ test("accepts trusted browser origin without gateway token on loopback", async (
   serversToClose.push(server);
   await server.start();
 
+  // Trusted origin alone is no longer sufficient — session token required
   const trusted = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`, {
     headers: {
       Origin: "https://app.closedloop.ai"
     }
   });
-  assert.equal(trusted.status, 501);
+  assert.equal(trusted.status, 401);
 
   const untrusted = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`, {
     headers: {
@@ -304,7 +299,7 @@ test("accepts trusted browser origin without gateway token on loopback", async (
   assert.equal(untrusted.status, 401);
 });
 
-test("accepts localhost browser origin without gateway token", async () => {
+test("rejects localhost browser origin without session token", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-localhost-origin-"));
   tempPathsToClean.push(tmpDir);
 
@@ -331,10 +326,10 @@ test("accepts localhost browser origin without gateway token", async () => {
       }
     }
   );
-  assert.equal(localhostOrigin.status, 501);
+  assert.equal(localhostOrigin.status, 401);
 });
 
-test("accepts loopback browser request without origin header", async () => {
+test("rejects loopback browser request without origin or session token", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-no-origin-browser-"));
   tempPathsToClean.push(tmpDir);
 
@@ -362,7 +357,7 @@ test("accepts loopback browser request without origin header", async () => {
     }
   });
 
-  assert.equal(response.status, 501);
+  assert.equal(response.status, 401);
 });
 
 test("keeps non-browser loopback request unauthorized without token", async () => {

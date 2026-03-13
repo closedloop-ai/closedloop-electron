@@ -6,18 +6,45 @@ The desktop Electron app runs a localhost HTTP gateway. To test it manually:
 
 ### Authentication
 
-Engineer routes (`/api/engineer/*`) require auth. The gateway token is a random 24-byte hex generated in-memory at startup — you cannot extract it externally. However, **loopback requests with a localhost Origin header bypass token auth**:
+Engineer routes (`/api/engineer/*`) require one of:
+1. **Internal gateway token** (`X-Desktop-Gateway-Token`) — used by cloud command executor for internal calls.
+2. **Browser session token** (`X-Desktop-Session-Token`) — obtained via authenticated challenge-exchange flow. Must be accompanied by an `Origin` header matching the origin bound during exchange.
 
-```bash
-curl -s -H "Origin: http://localhost" "http://localhost:<PORT>/api/engineer/..."
-```
+**Origin-only auth is not supported.** A spoofed `Origin` header alone will not grant access to engineer routes.
 
-The health endpoint is unauthenticated:
+### Fail-Closed Behavior (Missing API Key)
+
+The gateway **fails closed** when the desktop API key is not configured:
+- **App startup is unaffected** — the server binds, the UI opens, health endpoint works, cloud relay works.
+- **Local-electron browser mode becomes unavailable** — the challenge-exchange route returns HTTP 503 `"Local gateway auth unavailable: API key required"`. Without a session token, all engineer routes return 401.
+- **No silent fallback** — the browser interceptor surfaces the 503 error to the UI rather than silently degrading or falling back to an insecure auth path.
+- **No crashes** — `getApiKey()` returns `null` safely; no uncaught exceptions.
+
+"Fail closed" means the *feature* is unavailable with an explicit, actionable error — not that the app crashes.
+
+The health endpoint remains unauthenticated:
 ```bash
 curl -s http://localhost:<PORT>/health
 ```
 
 The gateway port is visible in the health response or the Electron UI. Typical dev port: `19432`.
+
+### Debug Auth for Development
+
+For manual `curl` testing during development, use the debug auth workflow:
+
+1. Start Electron with debug auth enabled: `just desktop-debug-auth`
+2. In the Electron UI Settings panel, click **Mint Debug Token** to generate a short-lived session token.
+3. Use the token in curl:
+
+```bash
+curl -s \
+  -H "X-Desktop-Session-Token: <token>" \
+  -H "Origin: http://localhost" \
+  "http://localhost:19432/api/engineer/directories?path=/Users/<you>/Source"
+```
+
+Debug tokens are short-lived (10 minutes), memory-only, and only available when `CL_LOCAL_GATEWAY_DEBUG_AUTH=1` in an unpackaged build.
 
 ### Sandbox Directory Enforcement
 
@@ -29,15 +56,23 @@ Hardcoded sensitive paths (`~/.ssh`, `~/.gnupg`, `~/.aws`, `~/Library/Keychains`
 
 ### Example Test Commands
 
+Obtain a debug token first via `just desktop-debug-auth` + UI "Mint Debug Token" button, then:
+
 ```bash
-# Should succeed (if /Users/<you>/Source is the sandbox base directory)
+# Should succeed (with valid session token, sandbox directory)
+curl -s -H "X-Desktop-Session-Token: <TOKEN>" -H "Origin: http://localhost" \
+  "http://localhost:19432/api/engineer/directories?path=/Users/<you>/Source"
+
+# Should fail — no session token (401)
 curl -s -H "Origin: http://localhost" "http://localhost:19432/api/engineer/directories?path=/Users/<you>/Source"
 
-# Should fail — outside sandbox
-curl -s -H "Origin: http://localhost" "http://localhost:19432/api/engineer/directories?path=/tmp"
+# Should fail — outside sandbox (403)
+curl -s -H "X-Desktop-Session-Token: <TOKEN>" -H "Origin: http://localhost" \
+  "http://localhost:19432/api/engineer/directories?path=/tmp"
 
-# Should fail — sensitive deny list
-curl -s -H "Origin: http://localhost" "http://localhost:19432/api/engineer/directories?path=/Users/<you>/.ssh"
+# Should fail — sensitive deny list (403)
+curl -s -H "X-Desktop-Session-Token: <TOKEN>" -H "Origin: http://localhost" \
+  "http://localhost:19432/api/engineer/directories?path=/Users/<you>/.ssh"
 ```
 
 ## Updating App Icons

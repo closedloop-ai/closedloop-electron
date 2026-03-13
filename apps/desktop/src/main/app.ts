@@ -31,6 +31,7 @@ import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
 import type { GatewayApprovalRequest, GatewayApprovalResult } from "../server/router.js";
 import { normalizeAndValidateApiOrigin, normalizeWebAppOrigin } from "./origin-policy.js";
+import { LocalSessionStore } from "./local-session-store.js";
 import pkg from "electron-updater";
 const { autoUpdater } = pkg;
 import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
@@ -50,6 +51,7 @@ export class DesktopApplication {
   private readonly activityLog: ActivityLogStore;
   private readonly approvalStore: ApprovalStore;
   private readonly gatewayAuthToken: string;
+  private readonly sessionStore: LocalSessionStore;
   private shuttingDown = false;
   private dangerousAutoApprove = false;
   private cloudStatus: CloudSocketStatus = { state: "idle" };
@@ -59,6 +61,7 @@ export class DesktopApplication {
 
   constructor() {
     this.gatewayAuthToken = randomBytes(24).toString("hex");
+    this.sessionStore = new LocalSessionStore();
     this.settingsStore = new SettingsStore();
     this.cloudCommandsPaused = this.settingsStore.getCloudCommandsPaused();
     this.cloudConnectionEnabled = this.settingsStore.getCloudConnectionEnabled();
@@ -91,7 +94,10 @@ export class DesktopApplication {
         this.activityLog.add(event);
       },
       (request) => this.evaluateApproval(request),
-      () => this.getSymphonyDir()
+      () => this.getSymphonyDir(),
+      this.sessionStore,
+      () => this.apiKeyStore.getApiKey(),
+      () => this.settingsStore.getApiOrigin()
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -421,6 +427,10 @@ export class DesktopApplication {
     } catch {
       // Migration is best-effort — don't block startup
     }
+  }
+
+  private isDebugAuthEnabled(): boolean {
+    return process.env.CL_LOCAL_GATEWAY_DEBUG_AUTH === "1" && !app.isPackaged;
   }
 
   private getAllowedDirectoriesFromSandbox(): string[] {
@@ -829,6 +839,17 @@ export class DesktopApplication {
     ipcMain.handle("desktop:set-dangerous-auto-approve", (_event, enabled: boolean) => {
       this.dangerousAutoApprove = Boolean(enabled);
       return this.dangerousAutoApprove;
+    });
+    ipcMain.handle("desktop:is-debug-auth-enabled", () => this.isDebugAuthEnabled());
+    ipcMain.handle("desktop:mint-debug-token", (_event, origin?: string) => {
+      if (!this.isDebugAuthEnabled()) {
+        throw new Error("Debug auth is not enabled");
+      }
+      const boundOrigin = typeof origin === "string" && origin.trim()
+        ? origin.trim()
+        : "http://localhost";
+      const session = this.sessionStore.create(boundOrigin);
+      return { ...session, origin: boundOrigin };
     });
     ipcMain.handle("desktop:check-for-update", async () => {
       try {

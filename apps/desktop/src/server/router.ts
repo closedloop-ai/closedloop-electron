@@ -1,6 +1,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import type { ComputeTargetCapabilities, HealthResponse } from "../shared/contracts.js";
+import type { LocalSessionStore } from "../main/local-session-store.js";
+import { verifyChallenge } from "../main/local-auth-verifier.js";
 import { OperationDispatcher } from "./operation-dispatcher.js";
 import { registerFilesystemDirectoriesRoutes } from "./operations/filesystem-directories.js";
 import { registerFilesystemSearchRoutes } from "./operations/filesystem-search.js";
@@ -46,6 +48,9 @@ export interface GatewayRouterOptions {
   evaluateApproval?: (
     request: GatewayApprovalRequest
   ) => GatewayApprovalResult | Promise<GatewayApprovalResult>;
+  sessionStore?: LocalSessionStore;
+  getApiKey?: () => string | null;
+  getApiOrigin?: () => string;
 }
 
 export interface GatewayActivityEvent {
@@ -168,13 +173,14 @@ export class GatewayRouter {
     const method = request.method?.toUpperCase() ?? "GET";
     const url = new URL(request.url ?? "/", "http://localhost");
     const isEngineerRoute = url.pathname.startsWith("/api/engineer/");
+    const isExchangeRoute = method === "POST" && url.pathname === "/gateway-auth/exchange";
     const startedAt = Date.now();
     let activityType: GatewayActivityEvent["type"] = "request";
     let activityDetail: string | undefined;
     let capturedRequestBody: string | undefined;
     let capturedResponseBody = "";
 
-    if (isEngineerRoute && method !== "OPTIONS") {
+    if ((isEngineerRoute || isExchangeRoute) && method !== "OPTIONS") {
       const origWrite = response.write;
       const origEnd = response.end;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -225,12 +231,22 @@ export class GatewayRouter {
       return;
     }
 
-    if (isEngineerRoute && !this.isAuthorizedEngineerRequest(request)) {
+    if (isExchangeRoute) {
+      const exchangeResult = await this.handleExchange(request, response);
+      if (exchangeResult) {
+        activityType = exchangeResult.activityType;
+        activityDetail = exchangeResult.activityDetail;
+      }
+      return;
+    }
+
+    const authResult = this.isAuthorizedEngineerRequest(request);
+    if (isEngineerRoute && !authResult.authorized) {
       activityType = "security";
-      activityDetail = "unauthorized";
+      activityDetail = authResult.reason ?? "unauthorized";
       response.statusCode = 401;
       response.setHeader("content-type", "application/json");
-      response.end(JSON.stringify({ error: "unauthorized" }));
+      response.end(JSON.stringify({ error: "unauthorized", reason: authResult.reason }));
       return;
     }
 
@@ -321,7 +337,7 @@ export class GatewayRouter {
     response.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     response.setHeader(
       "Access-Control-Allow-Headers",
-      "Content-Type,Authorization,X-Desktop-Gateway-Token,X-Desktop-Source,X-Desktop-Force-Approval,X-Desktop-Approval-Reason"
+      "Content-Type,Authorization,X-Desktop-Gateway-Token,X-Desktop-Session-Token,X-Desktop-Source,X-Desktop-Force-Approval,X-Desktop-Approval-Reason"
     );
     response.setHeader("Access-Control-Allow-Credentials", "false");
     response.setHeader(
@@ -337,30 +353,138 @@ export class GatewayRouter {
     }
   }
 
-  private isAuthorizedEngineerRequest(request: IncomingMessage): boolean {
+  private isAuthorizedEngineerRequest(
+    request: IncomingMessage
+  ): { authorized: true } | { authorized: false; reason: string } {
     const expectedToken = this.options.getGatewayAuthToken?.();
     if (!expectedToken) {
-      return true;
+      return { authorized: true };
     }
 
-    const providedToken = firstHeaderValue(request.headers["x-desktop-gateway-token"]);
-    if (providedToken && safeEqualToken(providedToken, expectedToken)) {
-      return true;
+    // Path 1: Internal cloud executor token (unchanged)
+    const providedGatewayToken = firstHeaderValue(request.headers["x-desktop-gateway-token"]);
+    if (providedGatewayToken && safeEqualToken(providedGatewayToken, expectedToken)) {
+      return { authorized: true };
     }
 
+    // Path 2: Browser session token with origin validation
+    const sessionStore = this.options.sessionStore;
+    const sessionToken = firstHeaderValue(request.headers["x-desktop-session-token"]);
     const requestOrigin = firstHeaderValue(request.headers.origin);
-    if (!isLoopbackAddress(request.socket.remoteAddress)) {
-      return false;
+
+    if (sessionToken) {
+      if (!requestOrigin || requestOrigin === "null") {
+        return { authorized: false, reason: "session token present but Origin header missing" };
+      }
+      if (!sessionStore) {
+        return { authorized: false, reason: "session store not configured" };
+      }
+      if (sessionStore.validate(sessionToken, requestOrigin)) {
+        return { authorized: true };
+      }
+      return { authorized: false, reason: "invalid or expired session token, or origin mismatch" };
     }
+
+    // No valid credential provided
+    if (!requestOrigin || requestOrigin === "null") {
+      return { authorized: false, reason: "no credential provided" };
+    }
+    return { authorized: false, reason: "session token required for browser requests" };
+  }
+
+  private async handleExchange(
+    request: IncomingMessage,
+    response: ServerResponse
+  ): Promise<{ activityType: GatewayActivityEvent["type"]; activityDetail: string } | null> {
+    const requestOrigin = firstHeaderValue(request.headers.origin);
 
     if (!requestOrigin || requestOrigin === "null") {
-      return isLikelyBrowserRequest(request.headers);
+      response.statusCode = 400;
+      response.setHeader("content-type", "application/json");
+      response.setHeader("Cache-Control", "no-store");
+      response.end(JSON.stringify({ error: "Origin header required" }));
+      return null;
     }
 
-    return (
-      sameOrigin(requestOrigin, this.options.webAppOrigin) ||
-      isLoopbackOrigin(requestOrigin)
-    );
+    if (!isLoopbackAddress(request.socket.remoteAddress)) {
+      response.statusCode = 403;
+      response.setHeader("content-type", "application/json");
+      response.setHeader("Cache-Control", "no-store");
+      response.end(JSON.stringify({ error: "loopback only" }));
+      return { activityType: "security", activityDetail: "exchange rejected: non-loopback origin" };
+    }
+
+    const apiKey = this.options.getApiKey?.();
+    if (!apiKey) {
+      response.statusCode = 503;
+      response.setHeader("content-type", "application/json");
+      response.setHeader("Cache-Control", "no-store");
+      response.end(JSON.stringify({ error: "Local gateway auth unavailable: API key required" }));
+      return null;
+    }
+
+    const apiOrigin = this.options.getApiOrigin?.();
+    if (!apiOrigin) {
+      response.statusCode = 503;
+      response.setHeader("content-type", "application/json");
+      response.setHeader("Cache-Control", "no-store");
+      response.end(JSON.stringify({ error: "API origin not configured" }));
+      return null;
+    }
+
+    const rawBody = await this.readBody(request);
+    let challengeToken: string;
+    try {
+      const parsed = JSON.parse(rawBody.toString("utf-8")) as Record<string, unknown>;
+      if (typeof parsed.challengeToken !== "string" || !parsed.challengeToken) {
+        throw new Error("missing challengeToken");
+      }
+      challengeToken = parsed.challengeToken;
+    } catch {
+      response.statusCode = 400;
+      response.setHeader("content-type", "application/json");
+      response.setHeader("Cache-Control", "no-store");
+      response.end(JSON.stringify({ error: "invalid request body: challengeToken required" }));
+      return null;
+    }
+
+    const userAgent = firstHeaderValue(request.headers["user-agent"]) ?? undefined;
+    const result = await verifyChallenge({
+      challengeToken,
+      requestOrigin,
+      userAgent,
+      apiOrigin,
+      apiKey,
+    });
+
+    if (!result.ok) {
+      const statusCode = result.statusCode ?? 401;
+      response.statusCode = statusCode;
+      response.setHeader("content-type", "application/json");
+      response.setHeader("Cache-Control", "no-store");
+      response.end(JSON.stringify({ error: result.error }));
+      return { activityType: "security", activityDetail: `exchange rejected: ${result.error}` };
+    }
+
+    const sessionStore = this.options.sessionStore;
+    if (!sessionStore) {
+      response.statusCode = 500;
+      response.setHeader("content-type", "application/json");
+      response.setHeader("Cache-Control", "no-store");
+      response.end(JSON.stringify({ error: "session store not available" }));
+      return null;
+    }
+
+    const session = sessionStore.create(requestOrigin, result.sessionTtlSeconds);
+
+    response.statusCode = 200;
+    response.setHeader("content-type", "application/json");
+    response.setHeader("Cache-Control", "no-store");
+    response.end(JSON.stringify({
+      sessionToken: session.sessionToken,
+      expiresAt: session.expiresAt,
+    }));
+    return null;
   }
 
   private async readBody(request: IncomingMessage): Promise<Buffer> {
@@ -513,33 +637,3 @@ function resolveCorsAllowOrigin(
   return configuredWebAppOrigin;
 }
 
-function isLikelyBrowserRequest(
-  headers: IncomingMessage["headers"]
-): boolean {
-  const secFetchMode = firstHeaderValue(headers["sec-fetch-mode"]);
-  const secFetchSite = firstHeaderValue(headers["sec-fetch-site"]);
-  const secChUa = firstHeaderValue(headers["sec-ch-ua"]);
-  const userAgent = firstHeaderValue(headers["user-agent"]);
-
-  if (secFetchMode || secFetchSite || secChUa) {
-    if (secChUa) {
-      return true;
-    }
-    if (
-      typeof userAgent === "string" &&
-      /(mozilla|chrome|safari|firefox|edg)/i.test(userAgent)
-    ) {
-      return true;
-    }
-  }
-
-  if (
-    typeof userAgent === "string" &&
-    /(mozilla|chrome|safari|firefox|edg)/i.test(userAgent) &&
-    (secFetchMode || secFetchSite)
-  ) {
-    return true;
-  }
-
-  return false;
-}

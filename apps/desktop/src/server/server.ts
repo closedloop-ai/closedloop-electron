@@ -8,6 +8,7 @@ import {
   type ComputeTargetCapabilities,
   type HealthResponse
 } from "../shared/contracts.js";
+import type { LocalSessionStore } from "../main/local-session-store.js";
 import {
   GatewayRouter,
   type GatewayActivityEvent,
@@ -32,6 +33,9 @@ export interface DesktopGatewayServerOptions {
   version: string;
   capabilities: ComputeTargetCapabilities;
   discoveryFilePath?: string;
+  sessionStore?: LocalSessionStore;
+  getApiKey?: () => string | null;
+  getApiOrigin?: () => string;
 }
 
 export class DesktopGatewayServer {
@@ -58,7 +62,10 @@ export class DesktopGatewayServer {
       getSymphonyDir: this.options.getSymphonyDir,
       fallbackEngineerOrigin: this.options.fallbackEngineerOrigin,
       onActivityEvent: this.options.onActivityEvent,
-      evaluateApproval: this.options.evaluateApproval
+      evaluateApproval: this.options.evaluateApproval,
+      sessionStore: this.options.sessionStore,
+      getApiKey: this.options.getApiKey,
+      getApiOrigin: this.options.getApiOrigin,
     });
   }
 
@@ -73,7 +80,10 @@ export class DesktopGatewayServer {
     evaluateApproval?: (
       request: GatewayApprovalRequest
     ) => GatewayApprovalResult | Promise<GatewayApprovalResult>,
-    getSymphonyDir?: () => string
+    getSymphonyDir?: () => string,
+    sessionStore?: LocalSessionStore,
+    getApiKey?: () => string | null,
+    getApiOrigin?: () => string
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -88,7 +98,10 @@ export class DesktopGatewayServer {
       evaluateApproval,
       machineName,
       version,
-      capabilities
+      capabilities,
+      sessionStore,
+      getApiKey,
+      getApiOrigin,
     });
   }
 

@@ -43,3 +43,7 @@ desktop-start:
 # Package desktop app as a universal macOS DMG.
 desktop-package:
   pnpm -C apps/desktop package
+
+# Start Electron in debug-auth mode (dev-only, enables debug token minting).
+desktop-debug-auth:
+  CL_LOCAL_GATEWAY_DEBUG_AUTH=1 pnpm -C apps/desktop dev

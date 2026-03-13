@@ -45,7 +45,10 @@ const desktopApi = {
   removeAlwaysAllowRule: (ruleId: string) =>
     ipcRenderer.invoke("desktop:remove-always-allow-rule", ruleId) as Promise<unknown>,
   checkForUpdate: () => ipcRenderer.invoke("desktop:check-for-update") as Promise<unknown>,
-  applyUpdate: () => ipcRenderer.invoke("desktop:apply-update") as Promise<unknown>
+  applyUpdate: () => ipcRenderer.invoke("desktop:apply-update") as Promise<unknown>,
+  isDebugAuthEnabled: () => ipcRenderer.invoke("desktop:is-debug-auth-enabled") as Promise<boolean>,
+  mintDebugToken: (origin?: string) =>
+    ipcRenderer.invoke("desktop:mint-debug-token", origin) as Promise<unknown>
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);
