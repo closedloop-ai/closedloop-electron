@@ -48,12 +48,12 @@ desktop-package:
 desktop-debug-auth:
   CL_LOCAL_GATEWAY_DEBUG_AUTH=1 pnpm -C apps/desktop dev
 
-# Bump desktop app version, commit, tag, and push to trigger the release workflow.
-# Usage: just desktop-release patch    (0.1.0 → 0.1.1)
-#        just desktop-release minor    (0.1.0 → 0.2.0)
-#        just desktop-release major    (0.1.0 → 1.0.0)
+# Manually bump desktop version and tag (for minor/major releases).
+# Patch releases happen automatically on merge to main when apps/desktop/** changes.
+# Usage: just desktop-release minor    (0.1.1 → 0.2.0)
+#        just desktop-release major    (0.2.0 → 1.0.0)
 #        just desktop-release 2.0.0    (explicit version)
-desktop-release bump="patch":
+desktop-release bump:
   #!/usr/bin/env bash
   set -euo pipefail
   CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
@@ -68,10 +68,10 @@ desktop-release bump="patch":
   git add apps/desktop/package.json
   git commit -m "release: desktop v$NEW_VERSION"
   git tag "v$NEW_VERSION"
-  git push origin HEAD "v$NEW_VERSION"
+  git push origin main "v$NEW_VERSION"
   echo ""
-  echo "Pushed tag v$NEW_VERSION — CI will build and publish the release."
-  echo "  https://github.com/closedloop-ai/closedloop-electron/actions"
+  echo "Pushed tag v$NEW_VERSION to GitHub Releases."
+  echo "  https://github.com/closedloop-ai/closedloop-electron/releases/tag/v$NEW_VERSION"
 
 # Build and publish desktop DMG to GitHub Releases locally (bypasses CI).
 desktop-publish:
