@@ -21,6 +21,7 @@ import { registerSymphonyAttachmentsRoutes } from "./operations/symphony-attachm
 import { registerSymphonyChatHistoryRoutes } from "./operations/symphony-chat-history.js";
 import { registerSymphonyJudgesRoutes } from "./operations/symphony-judges.js";
 import { registerSymphonyKillRoutes } from "./operations/symphony-kill.js";
+import { registerSymphonyLoopRoutes } from "./operations/symphony-loop.js";
 import { registerSymphonyLogsRoutes } from "./operations/symphony-logs.js";
 import { registerSymphonyPlanRoutes } from "./operations/symphony-plan.js";
 import { registerSymphonySessionRoutes } from "./operations/symphony-sessions.js";
@@ -139,6 +140,7 @@ export class GatewayRouter {
     );
     registerSymphonyJudgesRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerSymphonyKillRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
+    registerSymphonyLoopRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerSymphonyLogsRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerSymphonyPlanRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerSymphonySessionRoutes(this.operationDispatcher, this.options.getAllowedDirectories, getSymphonyDir);

@@ -857,6 +857,8 @@ export class DesktopApplication {
 
 const SUPPORTED_OPERATION_IDS = [
   "symphony_launch",
+  "symphony_loop",
+  "symphony_loop_kill",
   "symphony_status",
   "symphony_kill",
   "symphony_chat",
@@ -888,6 +890,12 @@ function resolveOperationId(pathname: string): string | null {
 
   if (pathname === "/api/engineer/symphony/launch") {
     return "symphony_launch";
+  }
+  if (pathname === "/api/engineer/symphony/loop") {
+    return "symphony_loop";
+  }
+  if (pathname === "/api/engineer/symphony/loop/kill") {
+    return "symphony_loop_kill";
   }
   if (pathname.startsWith("/api/engineer/symphony/status/")) {
     return "symphony_status";
