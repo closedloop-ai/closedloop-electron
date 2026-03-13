@@ -126,6 +126,10 @@ function validateApiBaseUrl(url: string): boolean {
     if (/^::ffff:/i.test(normalized) || /^0{0,4}:0{0,4}:0{0,4}:0{0,4}:0{0,4}:ffff:/i.test(normalized)) {
       return false;
     }
+    // Block ULA (fc00::/7) and link-local (fe80::/10)
+    if (/^f[cd]/i.test(normalized) || /^fe[89ab]/i.test(normalized)) {
+      return false;
+    }
   }
 
   return true;
@@ -334,22 +338,6 @@ async function writeArtifactsForPlan(
 ): Promise<void> {
   for (const artifact of artifacts) {
     if (artifact.type === "prd" || artifact.type === "artifact") {
-      await fs.writeFile(path.join(claudeWorkDir, "prd.md"), artifact.content);
-    }
-  }
-}
-
-async function writeArtifactsForExecute(
-  claudeWorkDir: string,
-  artifacts: LoopArtifact[]
-): Promise<void> {
-  for (const artifact of artifacts) {
-    if (artifact.type === "plan") {
-      await fs.writeFile(
-        path.join(claudeWorkDir, "plan.json"),
-        artifact.content
-      );
-    } else if (artifact.type === "prd" || artifact.type === "artifact") {
       await fs.writeFile(path.join(claudeWorkDir, "prd.md"), artifact.content);
     }
   }
@@ -770,6 +758,17 @@ async function handleLoopRequest(
           expandedRepoPath,
           body.parentBranchName
         );
+        if (worktreeDir) {
+          try {
+            assertPathAllowed(worktreeDir, allowedDirs);
+          } catch (e) {
+            if (e instanceof DirectoryNotAllowedError) {
+              json(context, 403, { error: `Worktree path not allowed: ${worktreeDir}` });
+              return;
+            }
+            throw e;
+          }
+        }
       }
       if (!worktreeDir) {
         // Create new worktree
@@ -786,7 +785,7 @@ async function handleLoopRequest(
       await fs.mkdir(claudeWorkDir, { recursive: true });
 
       if (body.command === "EXECUTE") {
-        await writeArtifactsForExecute(claudeWorkDir, body.artifacts);
+        await writeArtifactsForRequestChanges(claudeWorkDir, body.artifacts);
       } else {
         await writeArtifactsForRequestChanges(
           claudeWorkDir,
@@ -844,7 +843,18 @@ async function handleLoopRequest(
 
     // Spawn process
     const logFile = path.join(claudeWorkDir, "symphony-loop.log");
-    const logFd = openSync(logFile, "a");
+    let logFd: number;
+    try {
+      logFd = openSync(logFile, "a");
+    } catch (logErr) {
+      const msg = logErr instanceof Error ? logErr.message : String(logErr);
+      await postLoopEvent(body.apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+        type: "error",
+        error: { code: "SPAWN_FAILED", message: `Cannot open log file: ${msg}` },
+      });
+      json(context, 500, { error: `Cannot open log file: ${msg}` });
+      return;
+    }
     let child: ReturnType<typeof spawn>;
 
     try {
@@ -856,17 +866,20 @@ async function handleLoopRequest(
         await fs.writeFile(promptFile, decomposePrompt);
 
         const promptFd = openSync(promptFile, "r");
-        child = spawn("claude", ["-p", "-", "--output-format", "json"], {
-          cwd: claudeWorkDir,
-          detached: true,
-          stdio: [promptFd, logFd, logFd],
-          env: {
-            ...process.env,
-            PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
-          },
-        });
-        child.unref();
-        closeSync(promptFd);
+        try {
+          child = spawn("claude", ["-p", "-", "--output-format", "json"], {
+            cwd: claudeWorkDir,
+            detached: true,
+            stdio: [promptFd, logFd, logFd],
+            env: {
+              ...process.env,
+              PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
+            },
+          });
+          child.unref();
+        } finally {
+          closeSync(promptFd);
+        }
       } else {
         // PLAN, EXECUTE, REQUEST_CHANGES: spawn run-loop.sh
         const spawnEnv: Record<string, string> = {
@@ -887,9 +900,17 @@ async function handleLoopRequest(
         });
         child.unref();
       }
-    } finally {
+    } catch (spawnErr) {
       closeSync(logFd);
+      const msg = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
+      await postLoopEvent(body.apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+        type: "error",
+        error: { code: "SPAWN_FAILED", message: msg },
+      });
+      json(context, 500, { error: `Failed to spawn process: ${msg}` });
+      return;
     }
+    closeSync(logFd);
 
     // Guard against double-firing: both 'error' and 'close' can emit.
     let completionHandled = false;
