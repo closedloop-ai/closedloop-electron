@@ -97,9 +97,8 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/v${VERSION}"
-          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          MSG=$(printf "New ClosedLoop Desktop build ready\nVersion: %s\nRelease: %s\nArtifact: %s" \
-            "$VERSION" "$RELEASE_URL" "$RUN_URL")
+          MSG=$(printf "ClosedLoop Gateway build ready\nVersion: %s\nRelease: %s" \
+            "$VERSION" "$RELEASE_URL")
           echo "message<<EOF" >> $GITHUB_OUTPUT
           echo "$MSG" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
