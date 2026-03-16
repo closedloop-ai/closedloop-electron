@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
+import http from "node:http";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
@@ -8,11 +10,18 @@ import { LocalSessionStore } from "../src/main/local-session-store.js";
 import { EMPTY_CAPABILITIES, PORT_PROBE_ORDER } from "../src/shared/contracts.js";
 
 const serversToClose: DesktopGatewayServer[] = [];
+const fakeApiServersToClose: http.Server[] = [];
 const tempPathsToClean: string[] = [];
 
 afterEach(async () => {
   for (const server of serversToClose.splice(0)) {
     await server.stop();
+  }
+
+  for (const fakeServer of fakeApiServersToClose.splice(0)) {
+    await new Promise<void>((resolve, reject) => {
+      fakeServer.close((err) => (err ? reject(err) : resolve()));
+    });
   }
 
   for (const tmpPath of tempPathsToClean.splice(0)) {
@@ -279,6 +288,73 @@ test("hosted relay path (cloud gateway token) unaffected by missing API key", as
   );
 
   assert.equal(response.status, 200);
+});
+
+test("exchange handler passes REST API origin (getApiOrigin) to verifyChallenge, not relay origin", async () => {
+  const tmpDir = await makeTempDir("exchange-uses-api-origin");
+  const store = new LocalSessionStore();
+
+  // Start a fake API server that records verify requests and returns a 401
+  // so we can assert it was called at the correct origin.
+  const verifyRequests: string[] = [];
+  const fakeApiServer = http.createServer((req, res) => {
+    verifyRequests.push(req.url ?? "");
+    res.statusCode = 401;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ error: "test-rejected" }));
+  });
+  fakeApiServersToClose.push(fakeApiServer);
+
+  await new Promise<void>((resolve) => {
+    fakeApiServer.listen(0, "127.0.0.1", resolve);
+  });
+
+  const fakeApiAddress = fakeApiServer.address() as net.AddressInfo;
+  const fakeApiOrigin = `http://127.0.0.1:${fakeApiAddress.port}`;
+  // Use a clearly different relay origin to prove the exchange uses getApiOrigin, not relayOrigin
+  const relayOrigin = "http://127.0.0.1:19999";
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "https://app.test.com",
+    getAllowedDirectories: () => [tmpDir],
+    getGatewayAuthToken: () => "test-gateway-token-hex",
+    machineName: "test-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    sessionStore: store,
+    getApiKey: () => "sk_live_testkey",
+    getApiOrigin: () => fakeApiOrigin,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  // Call the exchange endpoint — it will fail (401 from fake server),
+  // but the important thing is the fake API server received the verify call.
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/gateway-auth/exchange`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: "http://localhost:3000",
+      },
+      body: JSON.stringify({ challengeToken: "some-challenge-jwt" }),
+    }
+  );
+
+  // The fake server rejected it, so the exchange should return 401
+  assert.equal(response.status, 401);
+
+  // The fake API server must have received a verify request on its /compute-targets/local-auth/verify path
+  assert.ok(
+    verifyRequests.some((url) => url === "/compute-targets/local-auth/verify"),
+    `Expected fake API server (${fakeApiOrigin}) to receive /compute-targets/local-auth/verify but got: ${JSON.stringify(verifyRequests)}. ` +
+      `This proves getApiOrigin() (REST API) is used for auth, not the relay origin (${relayOrigin}).`
+  );
 });
 
 test("CORS preflight includes X-Desktop-Session-Token in Access-Control-Allow-Headers", async () => {

@@ -21,6 +21,7 @@ export interface DesktopGatewayServerOptions {
   preferredPort: number;
   fallbackPorts: readonly number[];
   webAppOrigin: string;
+  getWebAppOrigin?: () => string;
   getGatewayAuthToken?: () => string;
   getAllowedDirectories: () => string[];
   getSymphonyDir?: () => string;
@@ -53,6 +54,7 @@ export class DesktopGatewayServer {
     this.activePort = this.options.preferredPort;
     this.router = new GatewayRouter({
       webAppOrigin: this.options.webAppOrigin,
+      getWebAppOrigin: this.options.getWebAppOrigin,
       getGatewayAuthToken: this.options.getGatewayAuthToken,
       machineName: this.options.machineName,
       version: this.options.version,
@@ -83,13 +85,15 @@ export class DesktopGatewayServer {
     getSymphonyDir?: () => string,
     sessionStore?: LocalSessionStore,
     getApiKey?: () => string | null,
-    getApiOrigin?: () => string
+    getApiOrigin?: () => string,
+    getWebAppOrigin?: () => string
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
       preferredPort: DEFAULT_GATEWAY_PORT,
       fallbackPorts: FALLBACK_GATEWAY_PORTS,
       webAppOrigin,
+      getWebAppOrigin,
       getGatewayAuthToken,
       getAllowedDirectories,
       getSymphonyDir,

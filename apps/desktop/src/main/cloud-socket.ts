@@ -13,10 +13,10 @@ import {
   type DesktopHelloEvent,
   type DesktopPresenceEvent
 } from "./cloud-protocol.js";
-import { normalizeAndValidateApiOrigin } from "./origin-policy.js";
+import { normalizeAndValidateOrigin } from "./origin-policy.js";
 
 export interface CloudSocketOptions {
-  getApiOrigin: () => string;
+  getRelayOrigin: () => string;
   getApiKey: () => string | null;
   getAllowedDirectories: () => string[];
   getMaxInFlightCommands: () => number;
@@ -55,17 +55,17 @@ export class CloudSocketService {
       return;
     }
 
-    let apiOrigin: string;
+    let relayOrigin: string;
     try {
-      apiOrigin = normalizeAndValidateApiOrigin(this.options.getApiOrigin());
+      relayOrigin = normalizeAndValidateOrigin(this.options.getRelayOrigin());
     } catch (error) {
-      const message = error instanceof Error ? error.message : "invalid API origin";
+      const message = error instanceof Error ? error.message : "invalid relay origin";
       this.notifyStatus({ state: "degraded", error: message });
       return;
     }
 
     this.notifyStatus({ state: "idle" });
-    this.connect(apiKey, apiOrigin);
+    this.connect(apiKey, relayOrigin);
   }
 
   stop(): void {

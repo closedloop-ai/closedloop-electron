@@ -30,7 +30,7 @@ import { seedReposConfig } from "./seed-repos-config.js";
 import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
 import type { GatewayApprovalRequest, GatewayApprovalResult } from "../server/router.js";
-import { normalizeAndValidateApiOrigin, normalizeWebAppOrigin } from "./origin-policy.js";
+import { normalizeAndValidateOrigin, normalizeWebAppOrigin } from "./origin-policy.js";
 import { LocalSessionStore } from "./local-session-store.js";
 import pkg from "electron-updater";
 const { autoUpdater } = pkg;
@@ -97,7 +97,8 @@ export class DesktopApplication {
       () => this.getSymphonyDir(),
       this.sessionStore,
       () => this.apiKeyStore.getApiKey(),
-      () => this.settingsStore.getApiOrigin()
+      () => this.settingsStore.getApiOrigin(),
+      () => this.settingsStore.getWebAppOrigin()
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -117,7 +118,7 @@ export class DesktopApplication {
       }
     });
     this.cloudSocket = new CloudSocketService({
-      getApiOrigin: () => this.settingsStore.getApiOrigin(),
+      getRelayOrigin: () => this.settingsStore.getRelayOrigin(),
       getApiKey: () => this.apiKeyStore.getApiKey(),
       getAllowedDirectories: () => this.getAllowedDirectoriesFromSandbox(),
       getMaxInFlightCommands: () => MAX_IN_FLIGHT_COMMANDS,
@@ -200,11 +201,12 @@ export class DesktopApplication {
     try {
       await this.server.start();
       const configuredOrigins = {
+        relayOrigin: this.settingsStore.getRelayOrigin(),
         apiOrigin: this.settingsStore.getApiOrigin(),
         webAppOrigin: this.settingsStore.getWebAppOrigin()
       };
       this.refreshTrayState(
-        `Serving on localhost:${this.server.getActivePort()} | api=${configuredOrigins.apiOrigin} web=${configuredOrigins.webAppOrigin}`
+        `Serving on localhost:${this.server.getActivePort()} | relay=${configuredOrigins.relayOrigin} api=${configuredOrigins.apiOrigin} web=${configuredOrigins.webAppOrigin}`
       );
 
       if (this.cloudConnectionEnabled) {
@@ -654,6 +656,7 @@ export class DesktopApplication {
       async (_event, partial: {
         sandboxBaseDirectory?: string;
         onboardingCompleted?: boolean;
+        relayOrigin?: string;
         apiOrigin?: string;
         webAppOrigin?: string;
         defaultApprovalTier?: "auto" | "low" | "medium" | "high";
@@ -661,8 +664,11 @@ export class DesktopApplication {
       }) => {
         const currentSettings = this.settingsStore.getAll();
         const nextPartial = { ...partial };
+        if (typeof partial.relayOrigin === "string") {
+          nextPartial.relayOrigin = normalizeAndValidateOrigin(partial.relayOrigin);
+        }
         if (typeof partial.apiOrigin === "string") {
-          nextPartial.apiOrigin = normalizeAndValidateApiOrigin(partial.apiOrigin);
+          nextPartial.apiOrigin = normalizeAndValidateOrigin(partial.apiOrigin);
         }
         if (typeof partial.webAppOrigin === "string") {
           nextPartial.webAppOrigin = normalizeWebAppOrigin(partial.webAppOrigin);
@@ -702,6 +708,7 @@ export class DesktopApplication {
     ipcMain.handle("desktop:get-runtime-status", () => ({
       port: this.server.getActivePort(),
       cloudStatus: this.cloudStatus,
+      relayOrigin: this.settingsStore.getRelayOrigin(),
       apiOrigin: this.settingsStore.getApiOrigin(),
       sandboxBaseDirectory: this.settingsStore.getSandboxBaseDirectory(),
       commandsPaused: this.cloudCommandsPaused,
@@ -794,13 +801,19 @@ export class DesktopApplication {
       async (
         _event,
         payload: {
-          apiOrigin: string;
+          relayOrigin?: string;
+          apiOrigin?: string;
           webAppOrigin: string;
           sandboxBaseDirectory: string;
           apiKey?: string;
         }
       ) => {
-        const apiOrigin = normalizeAndValidateApiOrigin(payload.apiOrigin);
+        const relayOrigin = typeof payload.relayOrigin === "string"
+          ? normalizeAndValidateOrigin(payload.relayOrigin)
+          : undefined;
+        const apiOrigin = typeof payload.apiOrigin === "string"
+          ? normalizeAndValidateOrigin(payload.apiOrigin)
+          : undefined;
         const webAppOrigin = normalizeWebAppOrigin(payload.webAppOrigin);
         const sandboxBaseDirectory = normalizeScopePath(payload.sandboxBaseDirectory);
         if (!sandboxBaseDirectory) {
@@ -816,7 +829,8 @@ export class DesktopApplication {
         }
 
         this.settingsStore.update({
-          apiOrigin,
+          ...(relayOrigin !== undefined ? { relayOrigin } : {}),
+          ...(apiOrigin !== undefined ? { apiOrigin } : {}),
           webAppOrigin,
           sandboxBaseDirectory,
           onboardingCompleted: true

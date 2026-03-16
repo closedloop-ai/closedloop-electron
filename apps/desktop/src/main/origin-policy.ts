@@ -1,16 +1,16 @@
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 
-export function normalizeAndValidateApiOrigin(rawOrigin: string): string {
+export function normalizeAndValidateOrigin(rawOrigin: string): string {
   const trimmed = rawOrigin.trim();
   if (!trimmed) {
-    throw new Error("API origin is required");
+    throw new Error("Origin is required");
   }
 
   let parsed: URL;
   try {
     parsed = new URL(trimmed);
   } catch {
-    throw new Error("API origin must be a valid URL");
+    throw new Error("Origin must be a valid URL");
   }
 
   if (parsed.protocol === "https:") {
@@ -22,9 +22,12 @@ export function normalizeAndValidateApiOrigin(rawOrigin: string): string {
   }
 
   throw new Error(
-    "API origin must use https (http is allowed only for localhost/127.0.0.1 in local development)"
+    "Origin must use https (http is allowed only for localhost/127.0.0.1 in local development)"
   );
 }
+
+/** @deprecated Use normalizeAndValidateOrigin instead. */
+export const normalizeAndValidateApiOrigin = normalizeAndValidateOrigin;
 
 export function normalizeWebAppOrigin(rawOrigin: string): string {
   const trimmed = rawOrigin.trim();

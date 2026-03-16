@@ -5,6 +5,7 @@ import {
   type DesktopSettings,
   type RiskTier
 } from "../shared/contracts.js";
+import { normalizeAndValidateOrigin } from "./origin-policy.js";
 
 export interface SettingsStoreOptions {
   cwd?: string;
@@ -17,8 +18,7 @@ export class SettingsStore {
   constructor(options?: SettingsStoreOptions) {
     this.store = new Store<DesktopSettings>({
       name: options?.name ?? "desktop-settings",
-      cwd: options?.cwd,
-      defaults: DEFAULT_DESKTOP_SETTINGS
+      cwd: options?.cwd
     });
 
     // Migration: delete stale allowedDirectories key from previous versions.
@@ -27,10 +27,53 @@ export class SettingsStore {
     if ("allowedDirectories" in this.store.store) {
       this.store.delete("allowedDirectories" as keyof DesktopSettings);
     }
+
+    // Migration: rename apiOrigin → relayOrigin, preserve authApiOrigin → apiOrigin.
+    // With defaults removed, this.store.store only contains actually-persisted keys,
+    // so key-presence checks are reliable.
+    const raw = this.store.store as unknown as Record<string, unknown>;
+    const hadRelayOrigin = "relayOrigin" in raw;
+    const hadAuthApiOrigin = "authApiOrigin" in raw;
+    const oldApiOrigin = raw.apiOrigin as string | undefined;
+    const oldAuthApiOrigin = raw.authApiOrigin as string | undefined;
+
+    if (!hadRelayOrigin && typeof oldApiOrigin === "string") {
+      // Legacy: apiOrigin held the relay URL. Move it to relayOrigin.
+      let relayOrigin = DEFAULT_DESKTOP_SETTINGS.relayOrigin;
+      try {
+        relayOrigin = normalizeAndValidateOrigin(oldApiOrigin);
+      } catch {
+        // Fall back to default on invalid value
+      }
+      this.store.set("relayOrigin" as keyof DesktopSettings, relayOrigin);
+
+      if (hadAuthApiOrigin && typeof oldAuthApiOrigin === "string") {
+        // Intermediate build: authApiOrigin held the REST API URL. Promote it.
+        let apiOrigin = DEFAULT_DESKTOP_SETTINGS.apiOrigin;
+        try {
+          apiOrigin = normalizeAndValidateOrigin(oldAuthApiOrigin);
+        } catch {
+          // Fall back to default on invalid value
+        }
+        this.store.set("apiOrigin" as keyof DesktopSettings, apiOrigin);
+      } else {
+        // Pre-auth install: no REST API origin was ever set. Use default.
+        this.store.set("apiOrigin" as keyof DesktopSettings, DEFAULT_DESKTOP_SETTINGS.apiOrigin);
+      }
+    }
+
+    // Always clean up stale authApiOrigin key (intermediate build artifact).
+    if (hadAuthApiOrigin) {
+      this.store.delete("authApiOrigin" as keyof DesktopSettings);
+    }
   }
 
   getAll(): DesktopSettings {
     return { ...DEFAULT_DESKTOP_SETTINGS, ...this.store.store };
+  }
+
+  getRelayOrigin(): string {
+    return this.store.get("relayOrigin" as keyof DesktopSettings, DEFAULT_DESKTOP_SETTINGS.relayOrigin) as string;
   }
 
   getApiOrigin(): string {
@@ -81,6 +124,10 @@ export class SettingsStore {
     this.store.set("defaultApprovalTier", defaultApprovalTier);
   }
 
+  setRelayOrigin(relayOrigin: string): void {
+    this.store.set("relayOrigin" as keyof DesktopSettings, relayOrigin);
+  }
+
   setApiOrigin(apiOrigin: string): void {
     this.store.set("apiOrigin", apiOrigin);
   }
@@ -115,6 +162,9 @@ export class SettingsStore {
     }
     if (typeof partial.cloudConnectionEnabled === "boolean") {
       this.store.set("cloudConnectionEnabled", partial.cloudConnectionEnabled);
+    }
+    if (typeof partial.relayOrigin === "string") {
+      this.store.set("relayOrigin" as keyof DesktopSettings, partial.relayOrigin);
     }
     if (typeof partial.apiOrigin === "string") {
       this.store.set("apiOrigin", partial.apiOrigin);

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
 import { SettingsStore } from "../src/main/settings-store.js";
+import { DEFAULT_AUTH_API_ORIGIN, DEFAULT_DESKTOP_SETTINGS } from "../src/shared/contracts.js";
 
 const tempDirs: string[] = [];
 
@@ -46,4 +47,85 @@ test("constructor does not error when allowedDirectories key is absent", () => {
 
   assert.equal("allowedDirectories" in all, false);
   assert.equal(all.sandboxBaseDirectory, "/Users/test/Source");
+});
+
+// --- Origin migration tests ---
+
+test("migration: pre-authApiOrigin install promotes apiOrigin → relayOrigin and sets default apiOrigin", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "settings-migration-relay-"));
+  tempDirs.push(tmpDir);
+
+  const storeName = "test-settings-pre-auth";
+  // Seed a file that only has the old apiOrigin (the relay URL), no authApiOrigin
+  fs.writeFileSync(
+    path.join(tmpDir, `${storeName}.json`),
+    JSON.stringify({ apiOrigin: "https://relay.example.test" })
+  );
+
+  const store = new SettingsStore({ cwd: tmpDir, name: storeName });
+  const all = store.getAll();
+
+  assert.equal(all.relayOrigin, "https://relay.example.test", "relayOrigin should be the sentinel relay URL");
+  assert.equal(all.apiOrigin, DEFAULT_AUTH_API_ORIGIN, "apiOrigin should be the default REST API origin");
+  assert.equal("authApiOrigin" in all, false, "authApiOrigin should not be present");
+});
+
+test("migration: intermediate build promotes apiOrigin → relayOrigin and authApiOrigin → apiOrigin", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "settings-migration-intermediate-"));
+  tempDirs.push(tmpDir);
+
+  const storeName = "test-settings-intermediate";
+  // Seed a file with both old apiOrigin (relay URL) and authApiOrigin (REST API URL)
+  fs.writeFileSync(
+    path.join(tmpDir, `${storeName}.json`),
+    JSON.stringify({
+      apiOrigin: "https://relay.example.test",
+      authApiOrigin: "https://api.example.test"
+    })
+  );
+
+  const store = new SettingsStore({ cwd: tmpDir, name: storeName });
+  const all = store.getAll();
+
+  assert.equal(all.relayOrigin, "https://relay.example.test", "relayOrigin should be the sentinel relay URL");
+  assert.equal(all.apiOrigin, "https://api.example.test", "apiOrigin should be the sentinel REST API URL");
+  assert.equal("authApiOrigin" in all, false, "authApiOrigin should be deleted after migration");
+});
+
+test("migration: fresh install applies defaults", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "settings-migration-fresh-"));
+  tempDirs.push(tmpDir);
+
+  const storeName = "test-settings-fresh";
+  // Seed an empty file — no legacy keys
+  fs.writeFileSync(path.join(tmpDir, `${storeName}.json`), JSON.stringify({}));
+
+  const store = new SettingsStore({ cwd: tmpDir, name: storeName });
+  const all = store.getAll();
+
+  assert.equal(all.relayOrigin, DEFAULT_DESKTOP_SETTINGS.relayOrigin, "relayOrigin should be the default relay origin");
+  assert.equal(all.apiOrigin, DEFAULT_DESKTOP_SETTINGS.apiOrigin, "apiOrigin should be the default REST API origin");
+  assert.equal("authApiOrigin" in all, false, "no stale authApiOrigin key should be present");
+});
+
+test("migration: already migrated install is a no-op — both values preserved", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "settings-migration-noop-"));
+  tempDirs.push(tmpDir);
+
+  const storeName = "test-settings-noop";
+  // Seed a file that already has the new keys — migration should be a no-op
+  fs.writeFileSync(
+    path.join(tmpDir, `${storeName}.json`),
+    JSON.stringify({
+      relayOrigin: "https://relay.example.test",
+      apiOrigin: "https://api.example.test"
+    })
+  );
+
+  const store = new SettingsStore({ cwd: tmpDir, name: storeName });
+  const all = store.getAll();
+
+  assert.equal(all.relayOrigin, "https://relay.example.test", "relayOrigin should be preserved unchanged");
+  assert.equal(all.apiOrigin, "https://api.example.test", "apiOrigin should be preserved unchanged");
+  assert.equal("authApiOrigin" in all, false, "no stale authApiOrigin key should be added");
 });
