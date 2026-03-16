@@ -13,8 +13,11 @@ runs:
   steps:
     - name: Send Slack notification
       shell: bash
+      env:
+        SLACK_WEBHOOK_URL: ${{ inputs.webhook_url }}
+        SLACK_MESSAGE: ${{ inputs.message }}
       run: |
-        PAYLOAD=$(jq -n --arg text "${{ inputs.message }}" '{text: $text}')
-        curl -X POST -H 'Content-type: application/json' \
+        PAYLOAD=$(jq -n --arg text "$SLACK_MESSAGE" '{text: $text}')
+        curl --fail-with-body -X POST -H 'Content-type: application/json' \
               --data "$PAYLOAD" \
-              "${{ inputs.webhook_url }}"
+              "$SLACK_WEBHOOK_URL"
