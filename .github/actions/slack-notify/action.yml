@@ -1,0 +1,23 @@
+name: 'Slack Notification'
+description: 'Send a notification to Slack via incoming webhook'
+inputs:
+  webhook_url:
+    description: 'Slack webhook URL'
+    required: true
+  message:
+    description: 'Message text (supports Slack mrkdwn and \n for newlines)'
+    required: true
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Send Slack notification
+      shell: bash
+      env:
+        SLACK_WEBHOOK_URL: ${{ inputs.webhook_url }}
+        SLACK_MESSAGE: ${{ inputs.message }}
+      run: |
+        PAYLOAD=$(jq -n --arg text "$SLACK_MESSAGE" '{text: $text}')
+        curl --fail-with-body -X POST -H 'Content-type: application/json' \
+              --data "$PAYLOAD" \
+              "$SLACK_WEBHOOK_URL"
