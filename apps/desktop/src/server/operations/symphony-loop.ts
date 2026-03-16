@@ -50,8 +50,6 @@ interface LoopRequestBody {
   committer?: LoopCommitter;
   parentBranchName?: string;
   parentSessionId?: string;
-  /** The loop's own session ID from a previous run (for --resume). */
-  sessionId?: string;
   prompt?: string;
 }
 
@@ -213,30 +211,29 @@ function findLocalRepo(
 
 /**
  * Resolve worktree directory for a loop.
- * Prefers session ID for stable naming (matches ECS harness behavior).
- * Falls back to full artifact or loop ID if session ID is unavailable.
+ * Uses full untruncated stable ID for directory naming.
  */
 function resolveLoopWorktreeDir(
   expandedRepoPath: string,
   stableId: string
 ): string {
   const repoName = path.basename(expandedRepoPath);
-  const shortId = stableId.slice(0, 8);
   return path.join(
     resolveWorktreeParentDir(expandedRepoPath),
-    `${repoName}-loop-${shortId}`
+    `${repoName}-loop-${stableId}`
   );
 }
 
 /**
- * Pick the best stable ID for worktree naming.
- * Priority: sessionId > artifactId > loopId (all full, untruncated UUIDs).
+ * Pick the stable ID for worktree/branch naming.
+ * Uses loopId (matching ECS harness branch/run-dir naming).
+ * Slugified the same way as the harness: lowercase, non-alnum to dashes, max 50 chars.
  */
 function pickStableId(body: LoopRequestBody): string {
-  if (body.sessionId) {
-    return body.sessionId;
-  }
-  return body.artifacts[0]?.id ?? body.loopId;
+  return body.loopId
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .slice(0, 50);
 }
 
 // ---------------------------------------------------------------------------
@@ -407,15 +404,31 @@ function findExistingLoopWorktree(
 // Per-command artifact writing
 // ---------------------------------------------------------------------------
 
+/**
+ * Write PRD for PLAN command.
+ * Matches ECS harness writePrdFile(): prompt first, then PRD artifact, then FEATURE.
+ */
 async function writeArtifactsForPlan(
   claudeWorkDir: string,
-  artifacts: LoopArtifact[]
+  artifacts: LoopArtifact[],
+  prompt?: string
 ): Promise<void> {
-  const prdTypes = new Set(["prd", "PRD", "artifact", "FEATURE"]);
-  for (const artifact of artifacts) {
-    if (prdTypes.has(artifact.type)) {
-      await fs.writeFile(path.join(claudeWorkDir, "prd.md"), artifact.content);
+  // Priority: explicit prompt > PRD artifact > FEATURE artifact (matches harness)
+  let prdContent = prompt ?? null;
+
+  if (!prdContent) {
+    const prdArtifact = artifacts.find((a) => a.type === "PRD" || a.type === "prd");
+    const featureArtifact = prdArtifact
+      ? null
+      : artifacts.find((a) => a.type === "FEATURE" || a.type === "artifact");
+    const source = prdArtifact ?? featureArtifact;
+    if (source?.content) {
+      prdContent = source.content;
     }
+  }
+
+  if (prdContent) {
+    await fs.writeFile(path.join(claudeWorkDir, "prd.md"), prdContent);
   }
 }
 
@@ -464,11 +477,21 @@ async function writeArtifactsForExecuteOrAmend(
 
 async function writeArtifactsForDecompose(
   tmpDir: string,
-  artifacts: LoopArtifact[]
+  artifacts: LoopArtifact[],
+  prompt?: string
 ): Promise<void> {
-  for (const artifact of artifacts) {
-    if (artifact.type === "prd" || artifact.type === "artifact") {
-      await fs.writeFile(path.join(tmpDir, "prd.md"), artifact.content);
+  const prdTypes = new Set(["prd", "PRD", "artifact", "FEATURE"]);
+  let written = false;
+  if (prompt) {
+    await fs.writeFile(path.join(tmpDir, "prd.md"), prompt);
+    written = true;
+  }
+  if (!written) {
+    for (const artifact of artifacts) {
+      if (prdTypes.has(artifact.type)) {
+        await fs.writeFile(path.join(tmpDir, "prd.md"), artifact.content);
+        break;
+      }
     }
   }
 }
@@ -696,9 +719,12 @@ async function handleProcessCompletion(
 
   if (exitCode !== 0) {
     loopError(loopId, `Process failed with exit code ${exitCode}`);
+    // Error shape matches ECS harness: top-level code/message, not nested error object
     await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
       type: "error",
-      error: { code: "PROCESS_FAILED", message: `Process exited with code ${exitCode}` },
+      code: "PROCESS_FAILED",
+      message: `Process exited with code ${exitCode}`,
+      loopId,
     });
     return;
   }
@@ -756,28 +782,31 @@ async function handleProcessCompletion(
   const tokensUsed = parseTokenUsage(claudeWorkDir);
   loopLog(loopId, `Tokens used: input=${tokensUsed.input}, output=${tokensUsed.output}`);
 
-  // Post completed event
-  const completedEvent: Record<string, unknown> = {
-    type: "completed",
-    result: { subtype: command.toLowerCase() },
-    tokensUsed,
-    timestamp: new Date().toISOString(),
+  // Post completed event — shape matches ECS harness reportFinalStatus()
+  const result: Record<string, unknown> = {
+    exitCode,
+    subtype: command.toLowerCase(),
   };
 
   if (command === "EXECUTE" && artifacts.executionResult) {
     const execResult = artifacts.executionResult as Record<string, unknown>;
-    completedEvent.result = {
-      subtype: "execute",
-      pr_url: execResult.pr_url,
-      pr_number: execResult.pr_number,
-      branch_name: execResult.branch_name,
-      has_changes: execResult.has_changes ?? false,
-    };
+    result.pr_url = execResult.pr_url;
+    result.pr_number = execResult.pr_number;
+    result.branch_name = execResult.branch_name;
+    result.has_changes = execResult.has_changes ?? false;
   }
 
+  // sessionId inside result (matches harness)
   if (metadata.sessionId) {
-    completedEvent.sessionId = metadata.sessionId;
+    result.sessionId = metadata.sessionId;
   }
+
+  const completedEvent: Record<string, unknown> = {
+    type: "completed",
+    result,
+    tokensUsed,
+    loopId,
+  };
 
   loopLog(loopId, "Posting completed event...");
   await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, completedEvent);
@@ -842,7 +871,7 @@ async function handleLoopRequest(
   // Claim the loopId immediately to prevent concurrent requests from racing
   // past the has() check. Replaced with real entry after spawn succeeds.
   runningLoops.set(body.loopId, { pid: -1, child: null as unknown as ReturnType<typeof spawn> });
-  loopLog(body.loopId, `Received ${body.command} request, repo=${body.repo?.fullName ?? "none"}, stableId=${pickStableId(body).slice(0, 8)}, sessionId=${body.sessionId ?? "none"}, parentSessionId=${body.parentSessionId ?? "none"}`);
+  loopLog(body.loopId, `Received ${body.command} request, repo=${body.repo?.fullName ?? "none"}, stableId=${pickStableId(body)}, parentSessionId=${body.parentSessionId ?? "none"}`);
 
   let spawnedSuccessfully = false;
   try {
@@ -879,7 +908,7 @@ async function handleLoopRequest(
       );
       await fs.mkdir(tmpDir, { recursive: true });
       claudeWorkDir = tmpDir;
-      await writeArtifactsForDecompose(claudeWorkDir, body.artifacts);
+      await writeArtifactsForDecompose(claudeWorkDir, body.artifacts, body.prompt);
     } else if (!expandedRepoPath) {
       json(context, 400, {
         error: "Repository required for PLAN, EXECUTE, and REQUEST_CHANGES commands",
@@ -900,7 +929,7 @@ async function handleLoopRequest(
           throw e;
         }
       } else {
-        const loopBranch = `symphony/loop-${pickStableId(body).slice(0, 8)}`;
+        const loopBranch = `symphony/loop-${pickStableId(body)}`;
         worktreeDir = resolveLoopWorktreeDir(expandedRepoPath, pickStableId(body));
         await ensureWorktree(
           expandedRepoPath,
@@ -912,7 +941,7 @@ async function handleLoopRequest(
       }
       claudeWorkDir = path.join(worktreeDir, ".claude", "work");
       await fs.mkdir(claudeWorkDir, { recursive: true });
-      await writeArtifactsForPlan(claudeWorkDir, body.artifacts);
+      await writeArtifactsForPlan(claudeWorkDir, body.artifacts, body.prompt);
     } else if (body.command === "EXECUTE" || body.command === "REQUEST_CHANGES") {
       // EXECUTE/REQUEST_CHANGES: reuse parent worktree if possible
       if (body.parentBranchName) {
@@ -934,7 +963,7 @@ async function handleLoopRequest(
       }
       if (!worktreeDir) {
         // Create new worktree
-        const loopBranch = `symphony/loop-${pickStableId(body).slice(0, 8)}`;
+        const loopBranch = `symphony/loop-${pickStableId(body)}`;
         worktreeDir = resolveLoopWorktreeDir(expandedRepoPath, pickStableId(body));
         await ensureWorktree(
           expandedRepoPath,
@@ -960,9 +989,13 @@ async function handleLoopRequest(
       return;
     }
 
-    // Pre-flight: verify required binary exists BEFORE posting 'started' event
+    // Pre-flight: verify required binary exists BEFORE posting 'started' event.
+    // PLAN and EXECUTE use run-loop.sh; REQUEST_CHANGES and DECOMPOSE use claude CLI directly.
+    const usesRunLoop = body.command === "PLAN" || body.command === "EXECUTE";
+    const usesClaude = body.command === "REQUEST_CHANGES" || body.command === "DECOMPOSE";
     let scriptPath: string | null = null;
-    if (body.command === "DECOMPOSE") {
+
+    if (usesClaude) {
       try {
         execSync("which claude", { stdio: "pipe", timeout: 5000 });
       } catch {
@@ -978,7 +1011,7 @@ async function handleLoopRequest(
         json(context, 500, { error: "claude CLI not found in PATH" });
         return;
       }
-    } else {
+    } else if (usesRunLoop) {
       scriptPath = findPluginScript("code", "run-loop.sh");
       if (!scriptPath) {
         await postLoopEvent(
@@ -1021,6 +1054,12 @@ async function handleLoopRequest(
     let child: ReturnType<typeof spawn>;
 
     try {
+      const spawnEnv: Record<string, string> = {
+        ...(process.env as Record<string, string>),
+        CLOSEDLOOP_WORKDIR: claudeWorkDir,
+        PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
+      };
+
       if (body.command === "DECOMPOSE") {
         // DECOMPOSE: write prompt to file and pass via stdin to avoid E2BIG
         const prdContent = readTextFile(path.join(claudeWorkDir, "prd.md")) ?? "";
@@ -1034,33 +1073,58 @@ async function handleLoopRequest(
             cwd: claudeWorkDir,
             detached: true,
             stdio: [promptFd, logFd, logFd],
-            env: {
-              ...process.env,
-              PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
-            },
+            env: spawnEnv,
           });
           child.unref();
         } finally {
           closeSync(promptFd);
         }
-      } else {
-        // PLAN, EXECUTE, REQUEST_CHANGES: spawn run-loop.sh
-        const spawnEnv: Record<string, string> = {
-          ...(process.env as Record<string, string>),
-          CLOSEDLOOP_WORKDIR: claudeWorkDir,
-          PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
-        };
+      } else if (body.command === "REQUEST_CHANGES") {
+        // REQUEST_CHANGES: use claude directly with /code:amend-plan
+        // Matches ECS harness buildClaudeDirectArgs() for REQUEST_CHANGES
+        const claudeArgs: string[] = [];
 
-        // Prefer loop's own session ID (re-run/resume), fall back to parent's
-        const resumeSessionId = body.sessionId ?? body.parentSessionId;
-        if (resumeSessionId) {
-          spawnEnv.CLOSEDLOOP_SESSION_ID = resumeSessionId;
+        // Grant tool permissions matching harness
+        claudeArgs.push(
+          "--allowedTools",
+          "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
+          "--max-turns",
+          "200"
+        );
+
+        // Resume from parent session if available (matches harness --resume)
+        if (body.parentSessionId) {
+          claudeArgs.push("--resume", body.parentSessionId);
         }
 
+        // Build /code:amend-plan invocation matching harness
+        const promptFile = path.join(claudeWorkDir, "prompt.md");
+        let amendPrompt = "Please amend the plan based on the requested changes.";
+        if (existsSync(promptFile)) {
+          amendPrompt = readFileSync(promptFile, "utf-8");
+        }
+        // Sanitize prompt matching harness's prepare-message step
+        const sanitized = amendPrompt
+          .replace(/[\n\r]+/g, " ")
+          .replace(/\s{2,}/g, " ")
+          .replace(/"/g, '\\"');
+        claudeArgs.push(
+          `/code:amend-plan --workdir ${claudeWorkDir} --message "${sanitized}"`
+        );
+
+        child = spawn("claude", claudeArgs, {
+          cwd: worktreeDir!,
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: spawnEnv,
+        });
+        child.unref();
+      } else {
+        // PLAN, EXECUTE: spawn run-loop.sh
         // Build args matching ECS harness-agent's buildRunLoopArgs():
         // 1. workdir (positional)
-        // 2. --max-iterations (EXECUTE=150, others=50)
-        // 3. --prd (always, when prd.md exists)
+        // 2. --max-iterations (EXECUTE=150, PLAN=50)
+        // 3. --prd (when prd.md exists)
         const scriptArgs = [claudeWorkDir];
 
         const maxIterations = body.command === "EXECUTE" ? "150" : "50";
