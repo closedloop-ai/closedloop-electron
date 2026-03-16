@@ -75,6 +75,38 @@ curl -s -H "X-Desktop-Session-Token: <TOKEN>" -H "Origin: http://localhost" \
   "http://localhost:19432/api/engineer/directories?path=/Users/<you>/.ssh"
 ```
 
+## Releasing Desktop Builds
+
+Releases are automated via CI. When a PR that touches `apps/desktop/**` is merged to main, the release workflow runs:
+
+1. Reads the `version` from `apps/desktop/package.json`
+2. Checks if that version already has a GitHub Release — if so, skips with a warning
+3. Builds a universal macOS DMG via `electron-builder`
+4. Publishes the DMG to GitHub Releases and uploads it as a workflow artifact
+5. Sends a Slack notification to the team
+
+### Triggering a new release
+
+Bump the `version` field in `apps/desktop/package.json` as part of your PR. When it merges, CI will build and publish automatically.
+
+```jsonc
+// apps/desktop/package.json
+{ "version": "0.2.0" }  // ← bump this
+```
+
+If you merge desktop changes **without** bumping the version, the workflow will skip the build and log a warning — no harm done, no duplicate releases.
+
+### Auto-update for users
+
+- **Packaged builds** (DMG installs) use `electron-updater` to check GitHub Releases every 5 minutes. Users are notified in-app when a new version is available, and it auto-installs on quit.
+- **Dev builds** (running from source) compare `origin/main` commit hashes via `git fetch` and offer to pull + rebuild.
+
+### Required GitHub secrets
+
+- `SLACK_GITHUB_REPO_WEBHOOK_URL` — Slack incoming webhook for release notifications
+
+The `GITHUB_TOKEN` (automatic in Actions) handles GitHub Releases publishing. If the repo has restricted default token permissions, ensure `contents: write` is allowed (Settings → Actions → General).
+
 ## Updating App Icons
 
 The source of truth for the app icon is `apps/desktop/app-icon.svg`. All other icon assets are derived from it. To regenerate after updating the SVG:
