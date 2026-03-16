@@ -215,7 +215,7 @@ async function postLoopEvent(
   token: string,
   eventBody: Record<string, unknown>
 ): Promise<void> {
-  const url = `${apiBaseUrl}/api/loops/${loopId}/events`;
+  const url = `${apiBaseUrl}/loops/${loopId}/events`;
   try {
     await fetch(url, {
       method: "POST",
@@ -237,7 +237,7 @@ async function uploadArtifacts(
   token: string,
   body: Record<string, unknown>
 ): Promise<void> {
-  const url = `${apiBaseUrl}/api/loops/${loopId}/upload-artifacts`;
+  const url = `${apiBaseUrl}/loops/${loopId}/upload-artifacts`;
   try {
     await fetch(url, {
       method: "POST",
