@@ -2960,6 +2960,39 @@ test("POST review-verdict returns 403 for disallowed repo", async () => {
   assert.equal(res.status, 403);
 });
 
+test("getWebAppOrigin getter takes effect on next CORS response without restart", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-live-origin-"));
+  tempPathsToClean.push(tmpDir);
+
+  let currentWebAppOrigin = "https://initial.example.com";
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "https://initial.example.com",
+    getWebAppOrigin: () => currentWebAppOrigin,
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "live-origin-test",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  // First request: should reflect initial origin
+  const res1 = await fetch(`http://127.0.0.1:${server.getActivePort()}/health`);
+  assert.equal(res1.headers.get("access-control-allow-origin"), "https://initial.example.com");
+
+  // Change origin via getter — no restart
+  currentWebAppOrigin = "https://updated.example.com";
+
+  // Second request: should reflect the updated origin immediately
+  const res2 = await fetch(`http://127.0.0.1:${server.getActivePort()}/health`);
+  assert.equal(res2.headers.get("access-control-allow-origin"), "https://updated.example.com");
+});
+
 async function findAvailablePort(excluded: number[] = []): Promise<number> {
   return await new Promise<number>((resolve, reject) => {
     const probe = net.createServer();

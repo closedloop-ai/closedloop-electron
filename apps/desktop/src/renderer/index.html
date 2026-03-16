@@ -939,6 +939,16 @@
         border-radius: 14px;
         padding: 22px;
       }
+
+      .settings-columns {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+      }
+
+      @media (max-width: 768px) {
+        .settings-columns { grid-template-columns: 1fr; }
+      }
     </style>
   </head>
   <body>
@@ -973,12 +983,19 @@
     <div id="onboardingOverlay" class="onboarding-overlay hidden">
       <div class="onboarding-card">
         <h2 style="margin-top: 0">Setup Required</h2>
-        <p class="muted">Configure your API, web app origin, and sandbox directory before accepting commands.</p>
+        <p class="muted">Configure your relay, API origin, web app origin, and sandbox directory before accepting commands.</p>
+        <div class="row">
+          <label for="onboardingRelayOrigin">Relay Origin</label>
+          <input id="onboardingRelayOrigin" placeholder="https://relay.closedloop.ai" />
+          <p class="field-help">
+            The WebSocket relay server your desktop app connects to for cloud command mode.
+          </p>
+        </div>
         <div class="row">
           <label for="onboardingApiOrigin">API Origin</label>
           <input id="onboardingApiOrigin" placeholder="https://api.closedloop.ai" />
           <p class="field-help">
-            The API server your desktop app connects to for remote commands and status updates.
+            The REST API server used for auth verification and other API calls.
           </p>
         </div>
         <div class="row">
@@ -1043,7 +1060,11 @@
             <div class="status-value mono" id="dashboardTarget">Loading...</div>
           </div>
           <div class="status-card">
-            <div class="status-label">API Server</div>
+            <div class="status-label">Relay Origin</div>
+            <div class="status-value mono" id="dashboardRelayOrigin">Loading...</div>
+          </div>
+          <div class="status-card">
+            <div class="status-label">API Origin</div>
             <div class="status-value mono" id="dashboardApiOrigin">Loading...</div>
           </div>
           <div class="status-card">
@@ -1084,34 +1105,45 @@
         <div id="activityList" class="activity-list"></div>
       </section>
       <section id="settings" class="panel">
-        <!-- Cloud Connection -->
-        <div class="settings-group">
-          <h3 class="settings-group-title">Cloud Connection</h3>
-          <p class="settings-group-desc">Relay server and web app origin for the cloud bridge.</p>
-          <div class="row">
-            <label for="apiOrigin">API Origin</label>
-            <input id="apiOrigin" />
-          </div>
-          <div class="row">
-            <label for="webAppOrigin">Web App Origin (CORS)</label>
-            <input id="webAppOrigin" />
-          </div>
-          <div class="row" style="margin-bottom:0">
-            <label for="apiKey">Cloud API Key</label>
-            <input id="apiKey" type="password" placeholder="sk_live_..." autocomplete="off" />
-            <div class="actions" style="margin-top: 8px">
-              <button id="saveApiKey">Save API Key</button>
-              <button class="secondary" id="clearApiKey">Clear API Key</button>
+        <!-- Cloud Connection (two-column) -->
+        <div class="settings-columns">
+          <div class="settings-group">
+            <h3 class="settings-group-title">Cloud Relay</h3>
+            <p class="settings-group-desc">WebSocket relay for cloud command mode.</p>
+            <div class="row">
+              <label for="relayOrigin">Relay Origin</label>
+              <input id="relayOrigin" />
             </div>
-            <p class="muted" id="apiKeyStatus"></p>
-          </div>
-          <div class="row" id="debugAuthSection" style="display:none; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border)">
-            <label>Debug Auth Token (dev-only)</label>
-            <p class="field-help">Mint a short-lived session token for manual curl testing. Bound to <code>http://localhost</code>.</p>
-            <div class="actions" style="margin-top: 8px">
-              <button id="mintDebugToken">Mint Debug Token</button>
+            <div class="row" style="margin-bottom:0">
+              <label for="apiKey">Cloud API Key</label>
+              <input id="apiKey" type="password" placeholder="sk_live_..." autocomplete="off" />
+              <div class="actions" style="margin-top: 8px">
+                <button id="saveApiKey">Save API Key</button>
+                <button class="secondary" id="clearApiKey">Clear API Key</button>
+              </div>
+              <p class="muted" id="apiKeyStatus"></p>
             </div>
-            <p class="muted" id="debugTokenOutput" style="word-break: break-all;"></p>
+            <div class="row" id="debugAuthSection" style="display:none; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border)">
+              <label>Debug Auth Token (dev-only)</label>
+              <p class="field-help">Mint a short-lived session token for manual curl testing. Bound to <code>http://localhost</code>.</p>
+              <div class="actions" style="margin-top: 8px">
+                <button id="mintDebugToken">Mint Debug Token</button>
+              </div>
+              <p class="muted" id="debugTokenOutput" style="word-break: break-all;"></p>
+            </div>
+          </div>
+
+          <div class="settings-group">
+            <h3 class="settings-group-title">Local Gateway</h3>
+            <p class="settings-group-desc">REST API and browser origin for local mode.</p>
+            <div class="row">
+              <label for="apiOrigin">API Origin</label>
+              <input id="apiOrigin" />
+            </div>
+            <div class="row">
+              <label for="webAppOrigin">Web App Origin (CORS)</label>
+              <input id="webAppOrigin" />
+            </div>
           </div>
         </div>
 
@@ -1199,6 +1231,7 @@
         activateTab(event.detail);
       });
 
+      const relayOrigin = document.getElementById("relayOrigin");
       const apiOrigin = document.getElementById("apiOrigin");
       const webAppOrigin = document.getElementById("webAppOrigin");
       const apiKey = document.getElementById("apiKey");
@@ -1216,6 +1249,7 @@
       const dashboardPort = document.getElementById("dashboardPort");
       const dashboardCloud = document.getElementById("dashboardCloud");
       const dashboardTarget = document.getElementById("dashboardTarget");
+      const dashboardRelayOrigin = document.getElementById("dashboardRelayOrigin");
       const dashboardApiOrigin = document.getElementById("dashboardApiOrigin");
       const dashboardCommandsState = document.getElementById("dashboardCommandsState");
       const dashboardApproval = document.getElementById("dashboardApproval");
@@ -1228,6 +1262,7 @@
       const headerPauseToggle = document.getElementById("headerPauseToggle");
       const headerConnectionToggle = document.getElementById("headerConnectionToggle");
       const onboardingOverlay = document.getElementById("onboardingOverlay");
+      const onboardingRelayOrigin = document.getElementById("onboardingRelayOrigin");
       const onboardingApiOrigin = document.getElementById("onboardingApiOrigin");
       const onboardingWebAppOrigin = document.getElementById("onboardingWebAppOrigin");
       const onboardingApiKey = document.getElementById("onboardingApiKey");
@@ -1277,7 +1312,9 @@
         dashboardCloud.textContent = describeCloudConnection(cloudStatus);
         dashboardTarget.textContent = describeTargetId(cloudStatus);
         dashboardTarget.title = cloudStatus.targetId || "";
-        dashboardApiOrigin.textContent = describeApiOrigin(status.apiOrigin);
+        dashboardRelayOrigin.textContent = describeOrigin(status.relayOrigin);
+        dashboardRelayOrigin.title = status.relayOrigin || "";
+        dashboardApiOrigin.textContent = describeOrigin(status.apiOrigin);
         dashboardApiOrigin.title = status.apiOrigin || "";
         dashboardCommandsState.textContent = !cachedConnectionEnabled
           ? "Disconnected"
@@ -1289,11 +1326,11 @@
         dashboardPayload.textContent = JSON.stringify(status, null, 2);
       }
 
-      function describeApiOrigin(apiOrigin) {
-        if (typeof apiOrigin !== "string" || !apiOrigin.trim()) {
+      function describeOrigin(origin) {
+        if (typeof origin !== "string" || !origin.trim()) {
           return "Not configured";
         }
-        return apiOrigin.trim();
+        return origin.trim();
       }
 
       function describeCloudConnection(cloudStatus) {
@@ -1835,6 +1872,7 @@
 
       async function loadSettings() {
         const settings = await api.getSettings();
+        relayOrigin.value = settings.relayOrigin || "";
         apiOrigin.value = settings.apiOrigin || "";
         webAppOrigin.value = settings.webAppOrigin || "";
         sandboxBaseDirectory.value = settings.sandboxBaseDirectory || "";
@@ -2042,6 +2080,7 @@
         const parsedRules = JSON.parse(approvalRules.value || "{}");
 
         const payload = {
+          relayOrigin: relayOrigin.value.trim(),
           apiOrigin: apiOrigin.value.trim(),
           webAppOrigin: webAppOrigin.value.trim(),
           sandboxBaseDirectory: sandboxBaseDirectory.value.trim(),
@@ -2132,6 +2171,7 @@
       async function loadOnboardingState() {
         const state = await api.getOnboardingState();
         const settings = state?.settings || {};
+        onboardingRelayOrigin.value = settings.relayOrigin || relayOrigin.value || "";
         onboardingApiOrigin.value = settings.apiOrigin || apiOrigin.value || "";
         onboardingWebAppOrigin.value = settings.webAppOrigin || webAppOrigin.value || "";
         onboardingSandboxDir.value = settings.sandboxBaseDirectory || sandboxBaseDirectory.value || "";
@@ -2166,6 +2206,7 @@
         onboardingMessage.textContent = "";
         try {
           await api.completeOnboarding({
+            relayOrigin: onboardingRelayOrigin.value.trim(),
             apiOrigin: onboardingApiOrigin.value.trim(),
             webAppOrigin: onboardingWebAppOrigin.value.trim(),
             sandboxBaseDirectory: onboardingSandboxDir.value.trim(),

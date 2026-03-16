@@ -37,6 +37,7 @@ import { SymphonyDirNotConfiguredError } from "./operations/symphony-utils.js";
 
 export interface GatewayRouterOptions {
   webAppOrigin: string;
+  getWebAppOrigin?: () => string;
   machineName: string;
   version: string;
   capabilities: ComputeTargetCapabilities;
@@ -332,9 +333,10 @@ export class GatewayRouter {
 
   private applyCorsHeaders(request: IncomingMessage, response: ServerResponse): void {
     const requestOrigin = firstHeaderValue(request.headers.origin);
+    const resolvedWebAppOrigin = this.options.getWebAppOrigin?.() ?? this.options.webAppOrigin;
     response.setHeader(
       "Access-Control-Allow-Origin",
-      resolveCorsAllowOrigin(requestOrigin, this.options.webAppOrigin)
+      resolveCorsAllowOrigin(requestOrigin, resolvedWebAppOrigin)
     );
     response.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     response.setHeader(

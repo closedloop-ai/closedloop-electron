@@ -6,6 +6,8 @@ export const DESKTOP_GATEWAY_VERSION = "0.1.0";
 /** WebSocket relay host — the electron app connects here for cloud commands, not the REST API. */
 export const DEFAULT_RELAY_ORIGIN = process.env.CL_RELAY_ORIGIN ?? "https://relay.closedloop.ai";
 export const DEFAULT_WEB_APP_ORIGIN = process.env.CL_WEB_APP_ORIGIN ?? "https://app.closedloop.ai";
+/** REST API origin — used for auth verification and other REST calls (not the Socket.IO relay). */
+export const DEFAULT_AUTH_API_ORIGIN = process.env.CL_AUTH_API_ORIGIN ?? "https://api.closedloop.ai";
 
 export type CapabilityToolName = "claude" | "codex" | "git" | "gh" | "python3";
 
@@ -53,6 +55,7 @@ export interface DesktopSettings {
   cloudCommandsPaused: boolean;
   cloudConnectionEnabled: boolean;
   defaultApprovalTier: RiskTier;
+  relayOrigin: string;
   apiOrigin: string;
   webAppOrigin: string;
 }
@@ -65,6 +68,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   cloudCommandsPaused: false,
   cloudConnectionEnabled: true,
   defaultApprovalTier: "high",
-  apiOrigin: DEFAULT_RELAY_ORIGIN,
+  relayOrigin: DEFAULT_RELAY_ORIGIN,
+  apiOrigin: DEFAULT_AUTH_API_ORIGIN,
   webAppOrigin: DEFAULT_WEB_APP_ORIGIN
 };
