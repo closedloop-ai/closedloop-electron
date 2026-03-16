@@ -1,6 +1,8 @@
 {
   "name": "desktop",
   "version": "0.1.0",
+  "description": "ClosedLoop Desktop",
+  "author": "ClosedLoop AI <support@closedloop.ai>",
   "private": true,
   "type": "module",
   "main": "dist/main/index.js",
