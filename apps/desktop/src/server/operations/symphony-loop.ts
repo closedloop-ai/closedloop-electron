@@ -24,6 +24,7 @@ type LoopCommand = "PLAN" | "EXECUTE" | "REQUEST_CHANGES" | "DECOMPOSE";
 const VALID_COMMANDS = new Set<LoopCommand>(["PLAN", "EXECUTE", "REQUEST_CHANGES", "DECOMPOSE"]);
 
 interface LoopArtifact {
+  id?: string;
   type: string;
   title?: string;
   content: string;
@@ -49,11 +50,29 @@ interface LoopRequestBody {
   committer?: LoopCommitter;
   parentBranchName?: string;
   parentSessionId?: string;
+  /** The loop's own session ID from a previous run (for --resume). */
+  sessionId?: string;
   prompt?: string;
 }
 
-/** Track running loop processes for cancellation. */
-const runningLoops = new Map<string, number>();
+/** Track running loop processes for cancellation and to prevent GC of ChildProcess. */
+interface RunningLoop {
+  pid: number;
+  child: ReturnType<typeof spawn>;
+}
+const runningLoops = new Map<string, RunningLoop>();
+
+function loopLog(loopId: string, ...args: unknown[]): void {
+  const short = loopId.slice(0, 8);
+  const ts = new Date().toISOString().slice(11, 23);
+  console.log(`[symphony-loop][${ts}][${short}]`, ...args);
+}
+
+function loopError(loopId: string, ...args: unknown[]): void {
+  const short = loopId.slice(0, 8);
+  const ts = new Date().toISOString().slice(11, 23);
+  console.error(`[symphony-loop][${ts}][${short}]`, ...args);
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -192,17 +211,32 @@ function findLocalRepo(
   return null;
 }
 
-/** Resolve worktree directory for a loop. Uses loop-{short-id} naming. */
+/**
+ * Resolve worktree directory for a loop.
+ * Prefers session ID for stable naming (matches ECS harness behavior).
+ * Falls back to full artifact or loop ID if session ID is unavailable.
+ */
 function resolveLoopWorktreeDir(
   expandedRepoPath: string,
-  loopId: string
+  stableId: string
 ): string {
   const repoName = path.basename(expandedRepoPath);
-  const shortId = loopId.slice(0, 8);
+  const shortId = stableId.slice(0, 8);
   return path.join(
     resolveWorktreeParentDir(expandedRepoPath),
     `${repoName}-loop-${shortId}`
   );
+}
+
+/**
+ * Pick the best stable ID for worktree naming.
+ * Priority: sessionId > artifactId > loopId (all full, untruncated UUIDs).
+ */
+function pickStableId(body: LoopRequestBody): string {
+  if (body.sessionId) {
+    return body.sessionId;
+  }
+  return body.artifacts[0]?.id ?? body.loopId;
 }
 
 // ---------------------------------------------------------------------------
@@ -215,9 +249,10 @@ async function postLoopEvent(
   token: string,
   eventBody: Record<string, unknown>
 ): Promise<void> {
-  const url = `${apiBaseUrl}/api/loops/${loopId}/events`;
+  const url = `${apiBaseUrl}/loops/${loopId}/events`;
+  loopLog(loopId, `POST event: ${eventBody.type}`, url);
   try {
-    await fetch(url, {
+    const resp = await fetch(url, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${token}`,
@@ -226,8 +261,14 @@ async function postLoopEvent(
       },
       body: JSON.stringify(eventBody),
     });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      loopError(loopId, `Event POST failed: ${resp.status} ${resp.statusText}`, text);
+    } else {
+      loopLog(loopId, `Event POST success: ${resp.status}`);
+    }
   } catch (err) {
-    console.error("[symphony-loop] Failed to post event:", err);
+    loopError(loopId, "Failed to post event:", err);
   }
 }
 
@@ -237,9 +278,10 @@ async function uploadArtifacts(
   token: string,
   body: Record<string, unknown>
 ): Promise<void> {
-  const url = `${apiBaseUrl}/api/loops/${loopId}/upload-artifacts`;
+  const url = `${apiBaseUrl}/loops/${loopId}/upload-artifacts`;
+  loopLog(loopId, "Uploading artifacts...", url);
   try {
-    await fetch(url, {
+    const resp = await fetch(url, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${token}`,
@@ -247,8 +289,14 @@ async function uploadArtifacts(
       },
       body: JSON.stringify(body),
     });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      loopError(loopId, `Upload failed: ${resp.status} ${resp.statusText}`, text);
+    } else {
+      loopLog(loopId, `Upload success: ${resp.status}`);
+    }
   } catch (err) {
-    console.error("[symphony-loop] Failed to upload artifacts:", err);
+    loopError(loopId, "Failed to upload artifacts:", err);
   }
 }
 
@@ -328,6 +376,33 @@ function findWorktreeForBranch(
   return null;
 }
 
+/** Find any existing symphony loop worktree for a repo (reuse across loops). */
+function findExistingLoopWorktree(
+  expandedRepoPath: string
+): string | null {
+  try {
+    const output = execSync("git worktree list --porcelain", {
+      cwd: expandedRepoPath,
+      encoding: "utf-8",
+      stdio: "pipe",
+      timeout: 10_000,
+    });
+
+    let currentWorktree: string | null = null;
+    for (const line of output.split("\n")) {
+      if (line.startsWith("worktree ")) {
+        currentWorktree = line.slice("worktree ".length);
+      }
+      if (line.startsWith("branch ") && line.includes("/symphony/loop-")) {
+        return currentWorktree;
+      }
+    }
+  } catch {
+    // fall through
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Per-command artifact writing
 // ---------------------------------------------------------------------------
@@ -336,25 +411,49 @@ async function writeArtifactsForPlan(
   claudeWorkDir: string,
   artifacts: LoopArtifact[]
 ): Promise<void> {
+  const prdTypes = new Set(["prd", "PRD", "artifact", "FEATURE"]);
   for (const artifact of artifacts) {
-    if (artifact.type === "prd" || artifact.type === "artifact") {
+    if (prdTypes.has(artifact.type)) {
       await fs.writeFile(path.join(claudeWorkDir, "prd.md"), artifact.content);
     }
   }
 }
 
-async function writeArtifactsForRequestChanges(
+async function writeArtifactsForExecuteOrAmend(
   claudeWorkDir: string,
   artifacts: LoopArtifact[],
   prompt?: string
 ): Promise<void> {
   for (const artifact of artifacts) {
-    if (artifact.type === "plan") {
-      await fs.writeFile(
-        path.join(claudeWorkDir, "plan.json"),
-        artifact.content
-      );
-    } else if (artifact.type === "prd" || artifact.type === "artifact") {
+    if (artifact.type === "IMPLEMENTATION_PLAN" || artifact.type === "plan") {
+      // Sync plan content like ECS harness's syncPlanFromContextPack():
+      // If plan.json already exists (from parent PLAN loop), update only the
+      // .content field — preserving tasks, openQuestions, metadata, etc.
+      // This picks up manual edits the user made in the Liveblocks editor.
+      const planJsonPath = path.join(claudeWorkDir, "plan.json");
+      if (existsSync(planJsonPath)) {
+        try {
+          const existing = JSON.parse(readFileSync(planJsonPath, "utf-8")) as Record<string, unknown>;
+          existing.content = artifact.content;
+          await fs.writeFile(planJsonPath, JSON.stringify(existing, null, 2));
+        } catch {
+          // If existing plan.json is corrupt, overwrite entirely
+          await fs.writeFile(planJsonPath, artifact.content);
+        }
+      } else {
+        // No existing plan.json — write the content as-is.
+        // If it's valid JSON, write directly. Otherwise wrap it.
+        try {
+          JSON.parse(artifact.content);
+          await fs.writeFile(planJsonPath, artifact.content);
+        } catch {
+          await fs.writeFile(
+            planJsonPath,
+            JSON.stringify({ content: artifact.content }, null, 2)
+          );
+        }
+      }
+    } else if (artifact.type === "prd" || artifact.type === "artifact" || artifact.type === "PRD" || artifact.type === "FEATURE") {
       await fs.writeFile(path.join(claudeWorkDir, "prd.md"), artifact.content);
     }
   }
@@ -431,6 +530,42 @@ function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
 function readDecomposeOutputs(workDir: string): Record<string, unknown> {
   const features = readJsonFile(path.join(workDir, "features.json"));
   return { features: features ?? undefined };
+}
+
+/** Parse token usage from claude-output.jsonl (JSONL stream output). */
+function parseTokenUsage(claudeWorkDir: string): { input: number; output: number } {
+  const totals = { input: 0, output: 0 };
+  const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
+  if (!existsSync(outputFile)) {
+    return totals;
+  }
+  try {
+    const content = readFileSync(outputFile, "utf-8");
+    for (const line of content.split("\n")) {
+      if (!line.trim()) {
+        continue;
+      }
+      try {
+        const entry = JSON.parse(line) as Record<string, unknown>;
+        if (entry.type === "assistant") {
+          const message = entry.message as Record<string, unknown> | undefined;
+          const usage = message?.usage as Record<string, number> | undefined;
+          if (usage) {
+            totals.input +=
+              (usage.input_tokens ?? 0) +
+              (usage.cache_creation_input_tokens ?? 0) +
+              (usage.cache_read_input_tokens ?? 0);
+            totals.output += usage.output_tokens ?? 0;
+          }
+        }
+      } catch {
+        // skip malformed lines
+      }
+    }
+  } catch {
+    // file read error
+  }
+  return totals;
 }
 
 // ---------------------------------------------------------------------------
@@ -556,9 +691,11 @@ async function handleProcessCompletion(
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, apiBaseUrl, committer } = body;
 
+  loopLog(loopId, `Process exited with code ${exitCode}, command=${command}`);
   runningLoops.delete(loopId);
 
   if (exitCode !== 0) {
+    loopError(loopId, `Process failed with exit code ${exitCode}`);
     await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
       type: "error",
       error: { code: "PROCESS_FAILED", message: `Process exited with code ${exitCode}` },
@@ -609,15 +746,22 @@ async function handleProcessCompletion(
   }
 
   // Upload artifacts
+  loopLog(loopId, "Artifact keys:", Object.keys(artifacts));
   await uploadArtifacts(apiBaseUrl, loopId, closedLoopAuthToken, {
     artifacts,
     metadata,
   });
 
+  // Parse token usage from claude output
+  const tokensUsed = parseTokenUsage(claudeWorkDir);
+  loopLog(loopId, `Tokens used: input=${tokensUsed.input}, output=${tokensUsed.output}`);
+
   // Post completed event
   const completedEvent: Record<string, unknown> = {
     type: "completed",
     result: { subtype: command.toLowerCase() },
+    tokensUsed,
+    timestamp: new Date().toISOString(),
   };
 
   if (command === "EXECUTE" && artifacts.executionResult) {
@@ -635,7 +779,9 @@ async function handleProcessCompletion(
     completedEvent.sessionId = metadata.sessionId;
   }
 
+  loopLog(loopId, "Posting completed event...");
   await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, completedEvent);
+  loopLog(loopId, "Loop completed successfully");
 
   // Clean up DECOMPOSE temp directory after all reads and uploads are complete
   if (command === "DECOMPOSE") {
@@ -694,8 +840,9 @@ async function handleLoopRequest(
   }
 
   // Claim the loopId immediately to prevent concurrent requests from racing
-  // past the has() check. Replaced with real PID after spawn succeeds.
-  runningLoops.set(body.loopId, -1);
+  // past the has() check. Replaced with real entry after spawn succeeds.
+  runningLoops.set(body.loopId, { pid: -1, child: null as unknown as ReturnType<typeof spawn> });
+  loopLog(body.loopId, `Received ${body.command} request, repo=${body.repo?.fullName ?? "none"}, stableId=${pickStableId(body).slice(0, 8)}, sessionId=${body.sessionId ?? "none"}, parentSessionId=${body.parentSessionId ?? "none"}`);
 
   let spawnedSuccessfully = false;
   try {
@@ -739,15 +886,30 @@ async function handleLoopRequest(
       });
       return;
     } else if (body.command === "PLAN") {
-      // PLAN: create new worktree from target branch
-      const loopBranch = `symphony/loop-${body.loopId.slice(0, 8)}`;
-      worktreeDir = resolveLoopWorktreeDir(expandedRepoPath, body.loopId);
-      await ensureWorktree(
-        expandedRepoPath,
-        worktreeDir,
-        loopBranch,
-        body.repo?.branch ?? "main"
-      );
+      // PLAN: reuse existing symphony loop worktree if available, else create new
+      worktreeDir = findExistingLoopWorktree(expandedRepoPath);
+      if (worktreeDir) {
+        loopLog(body.loopId, `Reusing existing loop worktree: ${worktreeDir}`);
+        try {
+          assertPathAllowed(worktreeDir, allowedDirs);
+        } catch (e) {
+          if (e instanceof DirectoryNotAllowedError) {
+            json(context, 403, { error: `Worktree path not allowed: ${worktreeDir}` });
+            return;
+          }
+          throw e;
+        }
+      } else {
+        const loopBranch = `symphony/loop-${pickStableId(body).slice(0, 8)}`;
+        worktreeDir = resolveLoopWorktreeDir(expandedRepoPath, pickStableId(body));
+        await ensureWorktree(
+          expandedRepoPath,
+          worktreeDir,
+          loopBranch,
+          body.repo?.branch ?? "main"
+        );
+        loopLog(body.loopId, `Created new loop worktree: ${worktreeDir}`);
+      }
       claudeWorkDir = path.join(worktreeDir, ".claude", "work");
       await fs.mkdir(claudeWorkDir, { recursive: true });
       await writeArtifactsForPlan(claudeWorkDir, body.artifacts);
@@ -772,8 +934,8 @@ async function handleLoopRequest(
       }
       if (!worktreeDir) {
         // Create new worktree
-        const loopBranch = `symphony/loop-${body.loopId.slice(0, 8)}`;
-        worktreeDir = resolveLoopWorktreeDir(expandedRepoPath, body.loopId);
+        const loopBranch = `symphony/loop-${pickStableId(body).slice(0, 8)}`;
+        worktreeDir = resolveLoopWorktreeDir(expandedRepoPath, pickStableId(body));
         await ensureWorktree(
           expandedRepoPath,
           worktreeDir,
@@ -785,9 +947,9 @@ async function handleLoopRequest(
       await fs.mkdir(claudeWorkDir, { recursive: true });
 
       if (body.command === "EXECUTE") {
-        await writeArtifactsForRequestChanges(claudeWorkDir, body.artifacts);
+        await writeArtifactsForExecuteOrAmend(claudeWorkDir, body.artifacts);
       } else {
-        await writeArtifactsForRequestChanges(
+        await writeArtifactsForExecuteOrAmend(
           claudeWorkDir,
           body.artifacts,
           body.prompt
@@ -834,6 +996,7 @@ async function handleLoopRequest(
     }
 
     // Post "started" event — only after confirming we can proceed
+    loopLog(body.loopId, "Posting started event...");
     await postLoopEvent(
       body.apiBaseUrl,
       body.loopId,
@@ -888,11 +1051,27 @@ async function handleLoopRequest(
           PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
         };
 
-        if (body.parentSessionId) {
-          spawnEnv.CLOSEDLOOP_SESSION_ID = body.parentSessionId;
+        // Prefer loop's own session ID (re-run/resume), fall back to parent's
+        const resumeSessionId = body.sessionId ?? body.parentSessionId;
+        if (resumeSessionId) {
+          spawnEnv.CLOSEDLOOP_SESSION_ID = resumeSessionId;
         }
 
-        child = spawn(scriptPath!, [claudeWorkDir], {
+        // Build args matching ECS harness-agent's buildRunLoopArgs():
+        // 1. workdir (positional)
+        // 2. --max-iterations (EXECUTE=150, others=50)
+        // 3. --prd (always, when prd.md exists)
+        const scriptArgs = [claudeWorkDir];
+
+        const maxIterations = body.command === "EXECUTE" ? "150" : "50";
+        scriptArgs.push("--max-iterations", maxIterations);
+
+        const prdPath = path.join(claudeWorkDir, "prd.md");
+        if (existsSync(prdPath)) {
+          scriptArgs.push("--prd", prdPath);
+        }
+
+        child = spawn(scriptPath!, scriptArgs, {
           cwd: worktreeDir!,
           detached: true,
           stdio: ["ignore", logFd, logFd],
@@ -912,28 +1091,31 @@ async function handleLoopRequest(
     }
     closeSync(logFd);
 
-    // Guard against double-firing: both 'error' and 'close' can emit.
+    // Guard against double-firing: both 'error' and 'exit' can emit.
     let completionHandled = false;
     const onceComplete = (code: number) => {
       if (completionHandled) {
         return;
       }
       completionHandled = true;
+      loopLog(body.loopId, `onceComplete fired, code=${code}`);
       handleProcessCompletion(code, body, worktreeDir, claudeWorkDir).catch(
-        (err) => console.error("[symphony-loop] Completion handler error:", err)
+        (err) => loopError(body.loopId, "Completion handler error:", err)
       );
     };
 
     // Prevent unhandled 'error' events (e.g. ENOENT if binary vanishes
     // between pre-flight check and spawn) from crashing Electron.
     child.on("error", (err) => {
-      console.error("[symphony-loop] Spawn error:", err.message);
+      loopError(body.loopId, "Spawn error:", err.message);
       onceComplete(1);
     });
 
-    // Register close handler BEFORE any async work to avoid missing
-    // fast-exiting processes that fire 'close' during an await yield.
-    child.on("close", (code) => {
+    // Use 'exit' instead of 'close' — with detached processes using
+    // inherited file descriptors (not pipes), 'close' may never fire
+    // because there are no Node.js streams to track closure of.
+    child.on("exit", (code) => {
+      loopLog(body.loopId, `Process exit event, code=${code}`);
       onceComplete(code ?? 1);
     });
 
@@ -945,9 +1127,11 @@ async function handleLoopRequest(
       return;
     }
 
-    // Replace sentinel with real PID
-    runningLoops.set(body.loopId, pid);
+    // Replace sentinel with real entry — storing `child` prevents GC of the
+    // ChildProcess handle which would silently drop the exit listener.
+    runningLoops.set(body.loopId, { pid, child });
     spawnedSuccessfully = true;
+    loopLog(body.loopId, `Spawned pid=${pid}, worktree=${worktreeDir}`);
 
     // Write PID file (safe to await now — close handler is already registered)
     await fs.writeFile(
@@ -988,24 +1172,24 @@ async function handleLoopKill(
     return;
   }
 
-  const pid = runningLoops.get(loopId);
-  if (pid === undefined) {
+  const entry = runningLoops.get(loopId);
+  if (entry === undefined) {
     json(context, 404, { error: "No running process found for this loop" });
     return;
   }
-  if (pid <= 0) {
+  if (entry.pid <= 0) {
     json(context, 409, { error: "Loop is still initializing, retry shortly" });
     return;
   }
 
   try {
-    process.kill(pid, 0); // Check alive
-    process.kill(-pid, "SIGTERM");
+    process.kill(entry.pid, 0); // Check alive
+    process.kill(-entry.pid, "SIGTERM");
     await new Promise((resolve) => setTimeout(resolve, 3000));
 
     try {
-      process.kill(pid, 0);
-      process.kill(-pid, "SIGKILL");
+      process.kill(entry.pid, 0);
+      process.kill(-entry.pid, "SIGKILL");
     } catch {
       // Already gone
     }
