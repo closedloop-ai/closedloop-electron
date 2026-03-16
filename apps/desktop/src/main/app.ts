@@ -808,10 +808,10 @@ export class DesktopApplication {
           apiKey?: string;
         }
       ) => {
-        const relayOrigin = typeof payload.relayOrigin === "string"
+        const relayOrigin = typeof payload.relayOrigin === "string" && payload.relayOrigin.trim()
           ? normalizeAndValidateOrigin(payload.relayOrigin)
           : undefined;
-        const apiOrigin = typeof payload.apiOrigin === "string"
+        const apiOrigin = typeof payload.apiOrigin === "string" && payload.apiOrigin.trim()
           ? normalizeAndValidateOrigin(payload.apiOrigin)
           : undefined;
         const webAppOrigin = normalizeWebAppOrigin(payload.webAppOrigin);

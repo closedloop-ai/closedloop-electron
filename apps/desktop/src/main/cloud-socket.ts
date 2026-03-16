@@ -111,8 +111,8 @@ export class CloudSocketService {
     }
   }
 
-  private connect(apiKey: string, apiOrigin: string): void {
-    const socket = io(`${apiOrigin}/desktop-gateway`, {
+  private connect(apiKey: string, relayOrigin: string): void {
+    const socket = io(`${relayOrigin}/desktop-gateway`, {
       transports: ["websocket"],
       reconnection: true,
       reconnectionDelay: 1000,
