@@ -480,19 +480,22 @@ async function writeArtifactsForDecompose(
   artifacts: LoopArtifact[],
   prompt?: string
 ): Promise<void> {
-  const prdTypes = new Set(["prd", "PRD", "artifact", "FEATURE"]);
-  let written = false;
-  if (prompt) {
-    await fs.writeFile(path.join(tmpDir, "prd.md"), prompt);
-    written = true;
-  }
-  if (!written) {
-    for (const artifact of artifacts) {
-      if (prdTypes.has(artifact.type)) {
-        await fs.writeFile(path.join(tmpDir, "prd.md"), artifact.content);
-        break;
-      }
+  // Same priority as writeArtifactsForPlan: prompt > PRD > FEATURE
+  let prdContent = prompt ?? null;
+
+  if (!prdContent) {
+    const prdArtifact = artifacts.find((a) => a.type === "PRD" || a.type === "prd");
+    const featureArtifact = prdArtifact
+      ? null
+      : artifacts.find((a) => a.type === "FEATURE" || a.type === "artifact");
+    const source = prdArtifact ?? featureArtifact;
+    if (source?.content) {
+      prdContent = source.content;
     }
+  }
+
+  if (prdContent) {
+    await fs.writeFile(path.join(tmpDir, "prd.md"), prdContent);
   }
 }
 
@@ -1005,7 +1008,7 @@ async function handleLoopRequest(
           body.closedLoopAuthToken,
           {
             type: "error",
-            error: { code: "BINARY_NOT_FOUND", message: "claude CLI not found in PATH" },
+            code: "BINARY_NOT_FOUND", message: "claude CLI not found in PATH",
           }
         );
         json(context, 500, { error: "claude CLI not found in PATH" });
@@ -1020,7 +1023,7 @@ async function handleLoopRequest(
           body.closedLoopAuthToken,
           {
             type: "error",
-            error: { code: "SCRIPT_NOT_FOUND", message: "run-loop.sh not found in plugin cache" },
+            code: "SCRIPT_NOT_FOUND", message: "run-loop.sh not found in plugin cache",
           }
         );
         json(context, 500, { error: "run-loop.sh not found in plugin cache" });
@@ -1046,7 +1049,7 @@ async function handleLoopRequest(
       const msg = logErr instanceof Error ? logErr.message : String(logErr);
       await postLoopEvent(body.apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
         type: "error",
-        error: { code: "SPAWN_FAILED", message: `Cannot open log file: ${msg}` },
+        code: "SPAWN_FAILED", message: `Cannot open log file: ${msg}`,
       });
       json(context, 500, { error: `Cannot open log file: ${msg}` });
       return;
@@ -1148,7 +1151,7 @@ async function handleLoopRequest(
       const msg = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
       await postLoopEvent(body.apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
         type: "error",
-        error: { code: "SPAWN_FAILED", message: msg },
+        code: "SPAWN_FAILED", message: msg,
       });
       json(context, 500, { error: `Failed to spawn process: ${msg}` });
       return;
