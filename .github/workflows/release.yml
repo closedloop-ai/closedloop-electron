@@ -58,6 +58,10 @@ jobs:
         if: steps.check_release.outputs.skip != 'true'
         run: pnpm install --frozen-lockfile
 
+      - name: Generate build info
+        if: steps.check_release.outputs.skip != 'true'
+        run: pnpm -r prebuild
+
       - name: Typecheck
         if: steps.check_release.outputs.skip != 'true'
         run: pnpm -C apps/desktop typecheck
