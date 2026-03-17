@@ -96,6 +96,10 @@ Bump the `version` field in `apps/desktop/package.json` as part of your PR. When
 
 If you merge desktop changes **without** bumping the version, the workflow will skip the build and log a warning — no harm done, no duplicate releases.
 
+### Version Bump Rule
+
+**Any commit that touches files in `apps/desktop/` MUST include a version bump in `apps/desktop/package.json`.** Before committing, check whether `package.json` is already modified in the staged changes. If the version was already bumped (e.g. by a prior edit in the same branch), do not bump again. If it was not bumped, increment the patch version (e.g. `0.4.0` -> `0.4.1`) and stage it alongside the other changes. A CI check will fail the PR if desktop files changed without a version bump.
+
 ### Auto-update for users
 
 - **Packaged builds** (DMG installs) use `electron-updater` to check GitHub Releases every 5 minutes. Users are notified in-app when a new version is available, and it auto-installs on quit.
