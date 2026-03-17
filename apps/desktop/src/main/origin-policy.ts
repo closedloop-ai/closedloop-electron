@@ -1,3 +1,5 @@
+import { isLoopbackIPv4 } from "../shared/network-utils.js";
+
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 
 export function normalizeAndValidateOrigin(rawOrigin: string): string {
@@ -56,11 +58,4 @@ function isLoopbackHost(hostname: string): boolean {
     return true;
   }
   return isLoopbackIPv4(hostname);
-}
-
-function isLoopbackIPv4(hostname: string): boolean {
-  if (!hostname.startsWith("127.")) return false;
-  const parts = hostname.split(".");
-  if (parts.length !== 4) return false;
-  return parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255);
 }

@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import type { ComputeTargetCapabilities, HealthResponse } from "../shared/contracts.js";
+import { isLoopbackIPv4 } from "../shared/network-utils.js";
 import type { LocalSessionStore } from "../main/local-session-store.js";
 import { verifyChallenge } from "../main/local-auth-verifier.js";
 import { OperationDispatcher } from "./operation-dispatcher.js";
@@ -685,13 +686,6 @@ function isLoopbackOrigin(originValue: string): boolean {
   } catch {
     return false;
   }
-}
-
-function isLoopbackIPv4(hostname: string): boolean {
-  if (!hostname.startsWith("127.")) return false;
-  const parts = hostname.split(".");
-  if (parts.length !== 4) return false;
-  return parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255);
 }
 
 
