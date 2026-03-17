@@ -928,31 +928,69 @@ async function handleLoopRequest(
       });
       return;
     } else if (body.command === "PLAN" || body.command === "EXECUTE" || body.command === "REQUEST_CHANGES") {
-      // All repo-based commands share a single worktree keyed by artifact slug.
-      // PLAN creates it; EXECUTE/REQUEST_CHANGES reuse it. Human-readable branches
-      // like symphony/PLAN-5 instead of symphony/loop-019cfa96-...
-      const worktreeKey = body.artifactSlug
-        ? body.artifactSlug.toLowerCase()
-        : pickStableId(body);
-      const branchName = body.artifactSlug
-        ? `symphony/${body.artifactSlug}`
+      // Worktree keyed by artifact slug (e.g., symphony/PLAN-5).
+      // PLAN always creates fresh; EXECUTE/REQUEST_CHANGES reuse.
+      // Sanitize slug the same way we sanitize loopId to prevent path traversal.
+      const sanitizedSlug = body.artifactSlug
+        ? slugifyLoopId(body.artifactSlug)
+        : null;
+      const worktreeKey = sanitizedSlug ?? pickStableId(body);
+      const branchName = sanitizedSlug
+        ? `symphony/${sanitizedSlug}`
         : `symphony/loop-${pickStableId(body)}`;
 
       worktreeDir = resolveLoopWorktreeDir(expandedRepoPath, worktreeKey);
 
-      // Try to find existing worktree for this artifact's branch
-      const existingWorktree = findWorktreeForBranch(expandedRepoPath, branchName);
-      if (existingWorktree) {
-        worktreeDir = existingWorktree;
-        loopLog(body.loopId, `Reusing existing worktree: ${worktreeDir} (branch: ${branchName})`);
-      } else {
+      if (body.command === "PLAN") {
+        // PLAN always starts fresh — remove stale worktree if it exists.
+        // PLAN has requiresParent: false, so it must not inherit prior state.
+        const staleWorktree = findWorktreeForBranch(expandedRepoPath, branchName);
+        if (staleWorktree) {
+          loopLog(body.loopId, `Removing stale worktree for fresh PLAN: ${staleWorktree}`);
+          try {
+            execSync(`git worktree remove --force ${shellEscape(staleWorktree)}`, {
+              cwd: expandedRepoPath,
+              stdio: "pipe",
+              timeout: 15_000,
+            });
+          } catch {
+            // May already be gone — not critical
+          }
+        }
         await ensureWorktree(
           expandedRepoPath,
           worktreeDir,
           branchName,
           body.repo?.branch ?? "main"
         );
-        loopLog(body.loopId, `Created worktree: ${worktreeDir} (branch: ${branchName})`);
+        loopLog(body.loopId, `Created fresh worktree for PLAN: ${worktreeDir} (branch: ${branchName})`);
+      } else {
+        // EXECUTE/REQUEST_CHANGES: reuse existing worktree.
+        // Try artifact slug first, then parentLoopId fallback, then create new.
+        const existingWorktree = findWorktreeForBranch(expandedRepoPath, branchName);
+        if (existingWorktree) {
+          worktreeDir = existingWorktree;
+          loopLog(body.loopId, `Reusing worktree via artifact slug: ${worktreeDir} (branch: ${branchName})`);
+        } else if (body.parentLoopId) {
+          // Fallback: try parent's loopId-based branch (pre-slug deployments or missing slug)
+          const parentBranch = `symphony/loop-${slugifyLoopId(body.parentLoopId)}`;
+          const parentWorktree = findWorktreeForBranch(expandedRepoPath, parentBranch);
+          if (parentWorktree) {
+            worktreeDir = parentWorktree;
+            loopLog(body.loopId, `Reusing worktree via parentLoopId fallback: ${worktreeDir} (branch: ${parentBranch})`);
+          }
+        }
+        if (!worktreeDir || !existsSync(worktreeDir)) {
+          // No existing worktree found — create new
+          worktreeDir = resolveLoopWorktreeDir(expandedRepoPath, worktreeKey);
+          await ensureWorktree(
+            expandedRepoPath,
+            worktreeDir,
+            branchName,
+            body.repo?.branch ?? "main"
+          );
+          loopLog(body.loopId, `Created new worktree: ${worktreeDir} (branch: ${branchName})`);
+        }
       }
 
       try {
