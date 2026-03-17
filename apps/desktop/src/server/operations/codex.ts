@@ -1,5 +1,5 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { createWriteStream, existsSync } from "node:fs";
+import { execSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { createWriteStream, existsSync, unlinkSync, writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { ServerResponse } from "node:http";
@@ -13,6 +13,8 @@ import { assertRepoAllowed, ensureWorktreeForReview, resolveWorktreeDir, resolve
 const CODEX_SESSION_ID_REGEX = /session id:\s*([0-9a-f-]{36})/i;
 const FINDINGS_CODE_BLOCK_REGEX = /```json\s*\n([\s\S]*?)\n\s*```/;
 const FINDINGS_ARRAY_REGEX = /\[[\s\S]*\]/;
+const PR_PREFIX_REGEX = /^pr-/;
+const SAFE_REF_REGEX = /^[a-zA-Z0-9/_.-]+$/;
 
 const REVIEW_SYSTEM_PROMPT = [
   "IMPORTANT: Before flagging any change, examine the surrounding context in the file, the PR description, and any linked issues.",
@@ -765,7 +767,7 @@ export function registerCodexRoutes(
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
 
     // Create or update worktree (unless useBaseRepo is set)
-    const worktreeError = ensureWorktreeForReview(expandedRepoPath, worktreeDir, branchName, useBaseRepo);
+    const worktreeError = ensureWorktreeForReview(expandedRepoPath, worktreeDir, branchName, useBaseRepo, baseBranch);
     if (worktreeError) {
       json(context, worktreeError.status, { error: worktreeError.message });
       return;
@@ -783,12 +785,18 @@ export function registerCodexRoutes(
       return;
     }
 
+    // Detect merged PRs where HEAD == merge-base (empty diff).
+    // Apply the GitHub PR diff as uncommitted changes and switch to --uncommitted mode.
+    const effectiveReviewMode = resolveEffectiveReviewMode(
+      reviewCwd, baseBranch, ticketId, reviewMode, useBaseRepo, provider
+    );
+
     setStreamingHeaders(context.response);
 
     try {
       const child = provider === "claude"
         ? await resolveClaudeReviewProcess(reviewCwd, model, ticketId.slice(3), logPath)
-        : spawnCodexReviewProcess({ cwd: reviewCwd, model, reasoningEffort, reviewMode, baseBranch, instructions });
+        : spawnCodexReviewProcess({ cwd: reviewCwd, model, reasoningEffort, reviewMode: effectiveReviewMode, baseBranch, instructions });
 
       if (!child.pid) {
         throw new Error("failed to start review process");
@@ -819,7 +827,10 @@ export function registerCodexRoutes(
       await streamFn(child, context.response, logPath, sessionIdHolder, stderrHolder);
       const exitCode = await exitPromise;
 
-      if (exitCode !== 0 && stderrHolder.value.trim()) {
+      // Detect context window exhaustion — codex exited mid-review, findings are incomplete
+      const isContextError = exitCode !== 0 && /context window|out of room/i.test(stderrHolder.value);
+
+      if (exitCode !== 0 && !isContextError && stderrHolder.value.trim()) {
         writeEvent(context.response, { type: "error", error: stderrHolder.value.trim() });
       }
 
@@ -835,8 +846,17 @@ export function registerCodexRoutes(
 
       await saveCodexChatSession(worktreeDir, sessionIdHolder.value, provider, "review");
 
-      writeEvent(context.response, { type: "result", success: exitCode === 0 });
-      writeEvent(context.response, { type: "done" });
+      if (isContextError) {
+        // Send terminal error — client will show error toast instead of "completed"
+        writeEvent(context.response, {
+          type: "error",
+          terminal: true,
+          error: "Review interrupted: codex ran out of context window space. Partial findings may appear above."
+        });
+      } else {
+        writeEvent(context.response, { type: "result", success: exitCode === 0 });
+        writeEvent(context.response, { type: "done" });
+      }
       context.response.end();
     } catch (error) {
       writeErrorAndEnd(context.response, error);
@@ -1551,6 +1571,101 @@ async function resolveClaudeReviewProcess(
   return fallback;
 }
 
+/**
+ * Detect when a worktree is on the merge-base (merged PR) and apply the PR diff
+ * as uncommitted changes so codex can review with --uncommitted instead of --base.
+ */
+function resolveEffectiveReviewMode(
+  worktreeDir: string,
+  baseBranch: string,
+  ticketId: string,
+  reviewMode: "uncommitted" | "base",
+  useBaseRepo: boolean,
+  provider: string
+): "uncommitted" | "base" {
+  if (useBaseRepo || provider !== "codex" || reviewMode !== "base") {
+    return reviewMode;
+  }
+  try {
+    if (!SAFE_REF_REGEX.test(baseBranch)) {
+      return reviewMode;
+    }
+    const headSha = execSync("git rev-parse HEAD", {
+      cwd: worktreeDir, encoding: "utf-8", timeout: 10_000,
+    }).trim();
+    const mergeBaseResult = spawnSync(
+      "git", ["merge-base", "HEAD", `origin/${baseBranch}`],
+      { cwd: worktreeDir, encoding: "utf-8", timeout: 10_000 }
+    );
+    const mergeBase = (mergeBaseResult.stdout as string).trim();
+    if (mergeBase !== headSha) {
+      return reviewMode; // Not a merged PR — normal diff exists
+    }
+    // HEAD == merge-base → merged PR, apply the PR diff as uncommitted changes
+    return applyMergedPrDiff(worktreeDir, ticketId);
+  } catch (err) {
+    console.warn("[codex-review] Merged PR detection failed, falling back to --base:", err);
+  }
+  return reviewMode;
+}
+
+function applyMergedPrDiff(
+  worktreeDir: string,
+  ticketId: string
+): "uncommitted" | "base" {
+  const prNum = ticketId.replace(PR_PREFIX_REGEX, "");
+  if (!/^\d+$/.test(prNum)) {
+    return "base";
+  }
+  console.log("[codex-review] Merged PR detected. Applying gh pr diff.");
+
+  const diffResult = spawnSync("gh", ["pr", "diff", prNum], {
+    cwd: worktreeDir, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024, timeout: 30_000,
+  });
+  const diff = (diffResult.stdout as string) ?? "";
+  if (!diff.trim()) {
+    console.log("[codex-review] gh pr diff returned empty");
+    return "base";
+  }
+
+  // Checkout the merge commit's parent so the diff applies cleanly
+  const mergeOidResult = spawnSync(
+    "gh", ["pr", "view", prNum, "--json", "mergeCommit", "--jq", ".mergeCommit.oid"],
+    { cwd: worktreeDir, encoding: "utf-8", timeout: 30_000 }
+  );
+  const mergeOid = (mergeOidResult.stdout as string).trim();
+  if (mergeOid) {
+    const baseCommitResult = spawnSync("git", ["rev-parse", `${mergeOid}^1`], {
+      cwd: worktreeDir, encoding: "utf-8", timeout: 10_000,
+    });
+    const baseCommit = (baseCommitResult.stdout as string).trim();
+    if (!baseCommit || baseCommitResult.status !== 0) {
+      console.warn("[codex-review] Failed to resolve base commit for merged PR");
+      return "base";
+    }
+    const checkoutResult = spawnSync("git", ["checkout", "--detach", baseCommit], {
+      cwd: worktreeDir, stdio: "pipe", timeout: 10_000,
+    });
+    if (checkoutResult.status !== 0) {
+      console.warn("[codex-review] Failed to checkout base commit:", baseCommit);
+      return "base";
+    }
+  }
+
+  const patchPath = path.join(worktreeDir, ".pr-review-diff.patch");
+  writeFileSync(patchPath, diff);
+  try {
+    execSync(`git apply "${patchPath}"`, { cwd: worktreeDir, stdio: "pipe" });
+  } catch (err) {
+    console.warn("[codex-review] Failed to apply PR diff:", err);
+    unlinkSync(patchPath);
+    return "base";
+  }
+  unlinkSync(patchPath);
+  console.log("[codex-review] PR diff applied as uncommitted changes");
+  return "uncommitted";
+}
+
 function spawnCodexReviewProcess(options: {
   cwd: string;
   model: string;
@@ -1639,6 +1754,7 @@ function streamCodexReview(
   stderrHolder: { value: string }
 ): Promise<void> {
   const logStream = createWriteStream(logPath, { flags: "a", encoding: "utf-8" });
+  let eventCount = 0;
 
   child.stdout?.setEncoding("utf-8");
   child.stdout?.on("data", (chunk: string | Buffer) => {
@@ -1651,7 +1767,11 @@ function streamCodexReview(
       writeEvent(response, { type: "status", sessionId: sessionMatch[1] });
     }
 
-    writeEvent(response, { type: "text", content: text });
+    eventCount++;
+    const ok = writeEvent(response, { type: "text", content: text });
+    if (eventCount <= 3 || eventCount % 50 === 0) {
+      console.log(`[codex-stream] event #${eventCount}: write=${ok}, destroyed=${response.destroyed}, writable=${response.writable}, content=${text.length} chars`);
+    }
   });
 
   child.stderr?.setEncoding("utf-8");
@@ -1659,9 +1779,14 @@ function streamCodexReview(
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
     logStream.write(text);
     stderrHolder.value += text;
+    eventCount++;
+    writeEvent(response, { type: "text", content: text });
   });
 
-  child.on("close", () => { logStream.end(); });
+  child.on("close", () => {
+    console.log(`[codex-stream] child closed, total events: ${eventCount}, response destroyed: ${response.destroyed}`);
+    logStream.end();
+  });
 
   return new Promise<void>((resolve, reject) => {
     logStream.once("finish", resolve);
@@ -1890,10 +2015,12 @@ function setStreamingHeaders(response: ServerResponse): void {
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
   response.setHeader("Connection", "keep-alive");
+  response.flushHeaders();
+  response.socket?.setNoDelay(true);
 }
 
-function writeEvent(response: ServerResponse, payload: Record<string, unknown>): void {
-  response.write(`${JSON.stringify(payload)}\n`);
+function writeEvent(response: ServerResponse, payload: Record<string, unknown>): boolean {
+  return response.write(`${JSON.stringify(payload)}\n`);
 }
 
 function parseBody(context: OperationRequestContext): Record<string, unknown> | null {

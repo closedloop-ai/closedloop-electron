@@ -1168,6 +1168,8 @@ function setStreamingHeaders(response: ServerResponse): void {
   response.setHeader("Content-Type", "text/event-stream");
   response.setHeader("Cache-Control", "no-cache");
   response.setHeader("Connection", "keep-alive");
+  response.flushHeaders();
+  response.socket?.setNoDelay(true);
 }
 
 function writeEvent(

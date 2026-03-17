@@ -286,20 +286,56 @@ function fastForwardBranch(worktreeDir: string, branchName: string): void {
 }
 
 /**
+ * Resolve a branch name to a valid git ref, trying remote then local.
+ * Returns the resolved ref string, or null if neither exists.
+ */
+function resolveRef(repoPath: string, branchName: string): string | null {
+  for (const candidate of [`origin/${branchName}`, branchName]) {
+    try {
+      execFileSync("git", ["rev-parse", "--verify", candidate], {
+        cwd: repoPath,
+        stdio: "pipe",
+        timeout: LOCAL_GIT_TIMEOUT,
+      });
+      return candidate;
+    } catch {
+      // Try next candidate
+    }
+  }
+  return null;
+}
+
+/**
  * Ensure a worktree exists at worktreeDir on the given branch, fast-forwarded to latest.
  * Creates a new worktree if none exists, or checks out the branch and pulls if it does.
+ *
+ * When the branch ref no longer exists (e.g. deleted after merge), falls back to a
+ * detached worktree on `origin/${baseBranch}` so that merged-PR reviews can still run.
  */
 function ensureWorktree(
   repoPath: string,
   worktreeDir: string,
-  branchName?: string
+  branchName?: string,
+  baseBranch?: string
 ): void {
   fetchOrigin(repoPath);
 
   const hasGit = existsSync(path.join(worktreeDir, ".git"));
 
   if (!hasGit && branchName) {
-    addWorktree(repoPath, worktreeDir, `origin/${branchName}`);
+    const ref = resolveRef(repoPath, branchName);
+    if (ref) {
+      addWorktree(repoPath, worktreeDir, ref);
+    } else {
+      // Branch was deleted (e.g. after PR merge) — fall back to base branch
+      const fallbackRef = resolveRef(repoPath, baseBranch ?? "main");
+      if (!fallbackRef) {
+        throw new Error(
+          `Branch '${branchName}' not found (may have been deleted after merge) and base branch '${baseBranch ?? "main"}' also not found`
+        );
+      }
+      addWorktree(repoPath, worktreeDir, fallbackRef);
+    }
   } else if (hasGit && branchName) {
     checkoutBranch(worktreeDir, branchName);
     fastForwardBranch(worktreeDir, branchName);
@@ -319,7 +355,8 @@ export function ensureWorktreeForReview(
   expandedRepoPath: string,
   worktreeDir: string,
   branchName: string | undefined,
-  useBaseRepo: boolean
+  useBaseRepo: boolean,
+  baseBranch?: string
 ): { status: number; message: string } | null {
   if (useBaseRepo) {
     return null;
@@ -333,7 +370,7 @@ export function ensureWorktreeForReview(
   }
 
   try {
-    ensureWorktree(expandedRepoPath, worktreeDir, branchName);
+    ensureWorktree(expandedRepoPath, worktreeDir, branchName, baseBranch);
   } catch (err) {
     // A concurrent request may have won the race — if the worktree now exists, use it
     if (!existsSync(path.join(worktreeDir, ".git"))) {
