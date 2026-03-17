@@ -22,7 +22,7 @@ export interface DesktopGatewayServerOptions {
   fallbackPorts: readonly number[];
   webAppOrigin: string;
   getWebAppOrigin?: () => string;
-  getGatewayAuthToken?: () => string;
+  getGatewayAuthToken?: () => string | undefined;
   getAllowedDirectories: () => string[];
   getSymphonyDir?: () => string;
   fallbackEngineerOrigin?: string;
@@ -73,7 +73,7 @@ export class DesktopGatewayServer {
 
   static createDefault(
     webAppOrigin: string,
-    getGatewayAuthToken: () => string,
+    getGatewayAuthToken: () => string | undefined,
     getAllowedDirectories: () => string[],
     machineName: string,
     version: string,
