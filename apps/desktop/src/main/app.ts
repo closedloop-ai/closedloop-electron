@@ -98,7 +98,8 @@ export class DesktopApplication {
       this.sessionStore,
       () => this.apiKeyStore.getApiKey(),
       () => this.settingsStore.getApiOrigin(),
-      () => this.settingsStore.getWebAppOrigin()
+      () => this.settingsStore.getWebAppOrigin(),
+      this.isProdOriginsOnly()
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -437,6 +438,10 @@ export class DesktopApplication {
 
   private isNoAuthMode(): boolean {
     return process.env.CL_LOCAL_GATEWAY_NO_AUTH === "1" && !app.isPackaged;
+  }
+
+  private isProdOriginsOnly(): boolean {
+    return process.env.CL_LOCAL_GATEWAY_PROD_ORIGINS_ONLY === "1";
   }
 
   private getAllowedDirectoriesFromSandbox(): string[] {

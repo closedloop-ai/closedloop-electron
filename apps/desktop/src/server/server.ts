@@ -37,6 +37,7 @@ export interface DesktopGatewayServerOptions {
   sessionStore?: LocalSessionStore;
   getApiKey?: () => string | null;
   getApiOrigin?: () => string;
+  prodOriginsOnly?: boolean;
 }
 
 export class DesktopGatewayServer {
@@ -68,6 +69,7 @@ export class DesktopGatewayServer {
       sessionStore: this.options.sessionStore,
       getApiKey: this.options.getApiKey,
       getApiOrigin: this.options.getApiOrigin,
+      prodOriginsOnly: this.options.prodOriginsOnly,
     });
   }
 
@@ -86,7 +88,8 @@ export class DesktopGatewayServer {
     sessionStore?: LocalSessionStore,
     getApiKey?: () => string | null,
     getApiOrigin?: () => string,
-    getWebAppOrigin?: () => string
+    getWebAppOrigin?: () => string,
+    prodOriginsOnly?: boolean
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -106,6 +109,7 @@ export class DesktopGatewayServer {
       sessionStore,
       getApiKey,
       getApiOrigin,
+      prodOriginsOnly,
     });
   }
 

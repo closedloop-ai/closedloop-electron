@@ -383,3 +383,138 @@ test("CORS preflight includes X-Desktop-Session-Token in Access-Control-Allow-He
     `Expected Access-Control-Allow-Headers to include X-Desktop-Session-Token, got: ${allowedHeaders}`
   );
 });
+
+// --- Production Origins Only Mode ---
+
+test("prodOriginsOnly: exchange from loopback origin returns 403", async () => {
+  const tmpDir = await makeTempDir("prod-exchange-loopback");
+  const store = new LocalSessionStore();
+  const server = makeServer(tmpDir, store, { prodOriginsOnly: true });
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/gateway-auth/exchange`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: "http://localhost:3000",
+      },
+      body: JSON.stringify({ challengeToken: "some-token" }),
+    }
+  );
+
+  assert.equal(response.status, 403);
+  const body = (await response.json()) as { error: string };
+  assert.match(body.error, /production-origins-only/);
+});
+
+test("prodOriginsOnly: no-auth mode + loopback origin engineer request returns 401", async () => {
+  const tmpDir = await makeTempDir("prod-noauth-loopback");
+  const store = new LocalSessionStore();
+  const server = makeServer(tmpDir, store, {
+    prodOriginsOnly: true,
+    getGatewayAuthToken: () => undefined,
+  });
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/directories?path=${tmpDir}`,
+    {
+      headers: { Origin: "http://localhost:3000" },
+    }
+  );
+
+  assert.equal(response.status, 401);
+  const body = (await response.json()) as { error: string; reason?: string };
+  assert.equal(body.error, "unauthorized");
+  assert.match(body.reason ?? "", /prod-origins-only/);
+});
+
+test("prodOriginsOnly: exchange from configured origin succeeds (no-auth shortcut)", async () => {
+  const tmpDir = await makeTempDir("prod-exchange-configured");
+  const store = new LocalSessionStore();
+  const server = makeServer(tmpDir, store, {
+    prodOriginsOnly: true,
+    getGatewayAuthToken: () => undefined,
+  });
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/gateway-auth/exchange`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: "https://app.test.com",
+      },
+      body: JSON.stringify({}),
+    }
+  );
+
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as { sessionToken: string; expiresAt: string };
+  assert.ok(typeof body.sessionToken === "string" && body.sessionToken.length > 0);
+});
+
+test("prodOriginsOnly: gateway token request (no Origin) succeeds", async () => {
+  const tmpDir = await makeTempDir("prod-gateway-token");
+  const store = new LocalSessionStore();
+  const server = makeServer(tmpDir, store, { prodOriginsOnly: true });
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/directories?path=${tmpDir}`,
+    {
+      headers: {
+        "X-Desktop-Gateway-Token": "test-gateway-token-hex",
+      },
+    }
+  );
+
+  assert.equal(response.status, 200);
+});
+
+test("prodOriginsOnly: gateway token + blocked Origin header still succeeds", async () => {
+  const tmpDir = await makeTempDir("prod-gateway-token-with-origin");
+  const store = new LocalSessionStore();
+  const server = makeServer(tmpDir, store, { prodOriginsOnly: true });
+  await server.start();
+
+  // Relayed cloud commands may carry an Origin header forwarded from the browser.
+  // The gateway token must take precedence over the origin gate.
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/directories?path=${tmpDir}`,
+    {
+      headers: {
+        "X-Desktop-Gateway-Token": "test-gateway-token-hex",
+        Origin: "http://localhost:3000",
+      },
+    }
+  );
+
+  assert.equal(response.status, 200);
+});
+
+test("normal mode: exchange from random origin does NOT return 403 (reaches normal flow)", async () => {
+  const tmpDir = await makeTempDir("normal-random-origin");
+  const store = new LocalSessionStore();
+  // No prodOriginsOnly flag
+  const server = makeServer(tmpDir, store);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/gateway-auth/exchange`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: "https://random.example",
+      },
+      body: JSON.stringify({ challengeToken: "some-token" }),
+    }
+  );
+
+  // Should return 503 (no API key configured), NOT 403
+  assert.equal(response.status, 503);
+});
