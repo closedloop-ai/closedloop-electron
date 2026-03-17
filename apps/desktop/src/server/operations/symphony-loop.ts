@@ -256,7 +256,7 @@ async function postLoopEvent(
 ): Promise<void> {
   const url = `${apiBaseUrl}/loops/${loopId}/events`;
   // Auto-inject timestamp on every event (matches ECS harness reportEvent())
-  const payload = {
+  const payload: Record<string, unknown> = {
     ...eventBody,
     timestamp: eventBody.timestamp ?? new Date().toISOString(),
   };
