@@ -46,7 +46,7 @@ export interface GatewayRouterOptions {
   getSymphonyDir?: () => string;
   fallbackEngineerOrigin?: string;
   onActivityEvent?: (event: GatewayActivityEvent) => void;
-  getGatewayAuthToken?: () => string;
+  getGatewayAuthToken?: () => string | undefined;
   evaluateApproval?: (
     request: GatewayApprovalRequest
   ) => GatewayApprovalResult | Promise<GatewayApprovalResult>;
@@ -416,6 +416,28 @@ export class GatewayRouter {
       response.setHeader("Cache-Control", "no-store");
       response.end(JSON.stringify({ error: "loopback only" }));
       return { activityType: "security", activityDetail: "exchange rejected: non-loopback origin" };
+    }
+
+    // No-auth mode: skip challenge verification and issue a session immediately
+    const noAuth = !this.options.getGatewayAuthToken?.();
+    if (noAuth) {
+      const sessionStore = this.options.sessionStore;
+      if (!sessionStore) {
+        response.statusCode = 500;
+        response.setHeader("content-type", "application/json");
+        response.setHeader("Cache-Control", "no-store");
+        response.end(JSON.stringify({ error: "session store not available" }));
+        return null;
+      }
+      const session = sessionStore.create(requestOrigin, 86400); // 24h session
+      response.statusCode = 200;
+      response.setHeader("content-type", "application/json");
+      response.setHeader("Cache-Control", "no-store");
+      response.end(JSON.stringify({
+        sessionToken: session.sessionToken,
+        expiresAt: session.expiresAt,
+      }));
+      return null;
     }
 
     const apiKey = this.options.getApiKey?.();

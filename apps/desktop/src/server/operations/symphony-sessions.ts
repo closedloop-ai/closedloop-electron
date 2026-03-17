@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
-import { expandHome } from "./symphony-utils.js";
+import { VALID_PROVIDERS, chatHistoryFilename, expandHome } from "./symphony-utils.js";
 
 type ActiveSession = {
   ticketId: string;
@@ -86,6 +86,36 @@ export function registerSymphonySessionRoutes(
   getAllowedDirectories: () => string[],
   getSymphonyDir: () => string
 ): void {
+
+  dispatcher.register("GET", "/api/engineer/symphony/sessions/unread-count", async (context) => {
+    const dir = getSymphonyDir();
+    const config = await loadSessions(dir);
+
+    let count = 0;
+    for (const session of config.sessions) {
+      const worktreePath = expandHome(session.worktreePath);
+      if (!existsSync(worktreePath)) {
+        continue;
+      }
+      const workDir = path.join(worktreePath, ".claude", "work");
+      const candidates = [chatHistoryFilename(), ...[...VALID_PROVIDERS].map((p) => chatHistoryFilename(p))];
+      const chatPath = candidates.map((f) => path.join(workDir, f)).find((p) => existsSync(p));
+      if (!chatPath) {
+        continue;
+      }
+      try {
+        const raw = await fs.readFile(chatPath, "utf-8");
+        const history = JSON.parse(raw) as { messages?: { role: string }[] };
+        if (history.messages?.at(-1)?.role === "assistant") {
+          count++;
+        }
+      } catch {
+        // Corrupt or unreadable chat history — skip
+      }
+    }
+
+    json(context, 200, { count });
+  });
 
   dispatcher.register("GET", "/api/engineer/symphony/sessions", async (context) => {
     const dir = getSymphonyDir();

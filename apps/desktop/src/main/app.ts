@@ -85,7 +85,7 @@ export class DesktopApplication {
     });
     this.server = DesktopGatewayServer.createDefault(
       this.settingsStore.getWebAppOrigin(),
-      () => this.gatewayAuthToken,
+      () => this.isNoAuthMode() ? undefined : this.gatewayAuthToken,
       () => this.getAllowedDirectoriesFromSandbox(),
       os.hostname(),
       DESKTOP_GATEWAY_VERSION,
@@ -433,6 +433,10 @@ export class DesktopApplication {
 
   private isDebugAuthEnabled(): boolean {
     return process.env.CL_LOCAL_GATEWAY_DEBUG_AUTH === "1" && !app.isPackaged;
+  }
+
+  private isNoAuthMode(): boolean {
+    return process.env.CL_LOCAL_GATEWAY_NO_AUTH === "1" && !app.isPackaged;
   }
 
   private getAllowedDirectoriesFromSandbox(): string[] {

@@ -1,0 +1,31 @@
+name: Desktop Version Bump Check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "apps/desktop/**"
+
+jobs:
+  version-bump-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check desktop version bump
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+
+          OLD_VERSION=$(git show "$BASE":apps/desktop/package.json | jq -r .version)
+          NEW_VERSION=$(jq -r .version apps/desktop/package.json)
+
+          if [ "$OLD_VERSION" = "$NEW_VERSION" ]; then
+            echo "::error::apps/desktop/ was modified but version in apps/desktop/package.json was not bumped (still $OLD_VERSION). Please bump the version."
+            exit 1
+          fi
+
+          echo "Version bumped: $OLD_VERSION -> $NEW_VERSION"
