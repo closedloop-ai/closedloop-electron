@@ -48,6 +48,7 @@ interface LoopRequestBody {
   artifacts: LoopArtifact[];
   repo?: LoopRepo;
   committer?: LoopCommitter;
+  parentLoopId?: string;
   parentBranchName?: string;
   parentSessionId?: string;
   prompt?: string;
@@ -225,15 +226,22 @@ function resolveLoopWorktreeDir(
 }
 
 /**
- * Pick the stable ID for worktree/branch naming.
- * Uses loopId (matching ECS harness branch/run-dir naming).
- * Slugified the same way as the harness: lowercase, non-alnum to dashes, max 50 chars.
+ * Slugify a loop ID for worktree/branch naming.
+ * Matches ECS harness convention: lowercase, non-alnum to dashes, max 50 chars.
  */
-function pickStableId(body: LoopRequestBody): string {
-  return body.loopId
+function slugifyLoopId(loopId: string): string {
+  return loopId
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, "-")
     .slice(0, 50);
+}
+
+/**
+ * Pick the stable ID for worktree/branch naming.
+ * Uses loopId (matching ECS harness branch/run-dir naming).
+ */
+function pickStableId(body: LoopRequestBody): string {
+  return slugifyLoopId(body.loopId);
 }
 
 // ---------------------------------------------------------------------------
@@ -247,7 +255,12 @@ async function postLoopEvent(
   eventBody: Record<string, unknown>
 ): Promise<void> {
   const url = `${apiBaseUrl}/loops/${loopId}/events`;
-  loopLog(loopId, `POST event: ${eventBody.type}`, url);
+  // Auto-inject timestamp on every event (matches ECS harness reportEvent())
+  const payload: Record<string, unknown> = {
+    ...eventBody,
+    timestamp: eventBody.timestamp ?? new Date().toISOString(),
+  };
+  loopLog(loopId, `POST event: ${payload.type}`, url);
   try {
     const resp = await fetch(url, {
       method: "POST",
@@ -256,7 +269,7 @@ async function postLoopEvent(
         "Content-Type": "application/json",
         "x-loop-event-nonce": crypto.randomUUID(),
       },
-      body: JSON.stringify(eventBody),
+      body: JSON.stringify(payload),
     });
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
@@ -771,10 +784,28 @@ async function handleProcessCompletion(
 
   if (command === "EXECUTE" && artifacts.executionResult) {
     const execResult = artifacts.executionResult as Record<string, unknown>;
-    result.pr_url = execResult.pr_url;
-    result.pr_number = execResult.pr_number;
-    result.branch_name = execResult.branch_name;
+    result.prUrl = execResult.pr_url;
+    result.prNumber = execResult.pr_number;
+    result.branchName = execResult.branch_name;
     result.has_changes = execResult.has_changes ?? false;
+  }
+
+  // Include worktree branch name for all commands that use a worktree.
+  // The server persists this on the loop record for display/debugging.
+  if (worktreeDir && !result.branchName) {
+    try {
+      const branch = execSync("git rev-parse --abbrev-ref HEAD", {
+        cwd: worktreeDir,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 5_000,
+      }).trim();
+      if (branch) {
+        result.branchName = branch;
+      }
+    } catch {
+      // Non-critical — worktree may already be cleaned up
+    }
   }
 
   // sessionId inside result (matches harness)
@@ -911,26 +942,36 @@ async function handleLoopRequest(
       await fs.mkdir(claudeWorkDir, { recursive: true });
       await writeArtifactsForPlan(claudeWorkDir, body.artifacts, body.prompt);
     } else if (body.command === "EXECUTE" || body.command === "REQUEST_CHANGES") {
-      // EXECUTE/REQUEST_CHANGES: reuse parent worktree if possible
-      if (body.parentBranchName) {
-        worktreeDir = findWorktreeForBranch(
-          expandedRepoPath,
-          body.parentBranchName
-        );
+      // EXECUTE/REQUEST_CHANGES: reuse parent's worktree.
+      // Derive the parent's worktree path from parentLoopId (deterministic naming),
+      // falling back to parentBranchName for backwards compat.
+      const parentStableId = body.parentLoopId ? slugifyLoopId(body.parentLoopId) : null;
+      if (parentStableId) {
+        const parentBranch = `symphony/loop-${parentStableId}`;
+        worktreeDir = findWorktreeForBranch(expandedRepoPath, parentBranch);
         if (worktreeDir) {
-          try {
-            assertPathAllowed(worktreeDir, allowedDirs);
-          } catch (e) {
-            if (e instanceof DirectoryNotAllowedError) {
-              json(context, 403, { error: `Worktree path not allowed: ${worktreeDir}` });
-              return;
-            }
-            throw e;
+          loopLog(body.loopId, `Reusing parent worktree via parentLoopId: ${worktreeDir}`);
+        }
+      }
+      if (!worktreeDir && body.parentBranchName) {
+        worktreeDir = findWorktreeForBranch(expandedRepoPath, body.parentBranchName);
+        if (worktreeDir) {
+          loopLog(body.loopId, `Reusing parent worktree via parentBranchName: ${worktreeDir}`);
+        }
+      }
+      if (worktreeDir) {
+        try {
+          assertPathAllowed(worktreeDir, allowedDirs);
+        } catch (e) {
+          if (e instanceof DirectoryNotAllowedError) {
+            json(context, 403, { error: `Worktree path not allowed: ${worktreeDir}` });
+            return;
           }
+          throw e;
         }
       }
       if (!worktreeDir) {
-        // Create new worktree
+        // No parent worktree found — create a new one
         const loopBranch = `symphony/loop-${pickStableId(body)}`;
         worktreeDir = resolveLoopWorktreeDir(expandedRepoPath, pickStableId(body));
         await ensureWorktree(
