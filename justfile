@@ -28,6 +28,10 @@ desktop-build:
 desktop-test:
   pnpm -C apps/desktop test
 
+# Lint the desktop app.
+desktop-lint:
+  pnpm -C apps/desktop lint
+
 # Run typecheck for desktop app only.
 desktop-typecheck:
   pnpm -C apps/desktop typecheck
