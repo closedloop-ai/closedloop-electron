@@ -34,6 +34,9 @@ jobs:
       - name: Generate build info
         run: pnpm -r prebuild
 
+      - name: Lint
+        run: pnpm -C apps/desktop lint
+
       - name: Typecheck
         run: pnpm typecheck
 

@@ -184,10 +184,13 @@ export class GatewayRouter {
     let capturedResponseBody = "";
 
     if ((isEngineerRoute || isExchangeRoute) && method !== "OPTIONS") {
-      const origWrite = response.write;
-      const origEnd = response.end;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (response as any).write = function (chunk: any, ...rest: any[]) {
+      const origWrite = response.write.bind(response) as typeof response.write;
+      const origEnd = response.end.bind(response) as typeof response.end;
+
+      response.write = function (
+        chunk: unknown,
+        ...rest: unknown[]
+      ): boolean {
         if (chunk != null) {
           const s =
             typeof chunk === "string"
@@ -197,10 +200,13 @@ export class GatewayRouter {
                 : "";
           capturedResponseBody += s;
         }
-        return origWrite.apply(response, [chunk, ...rest] as any);
-      };
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (response as any).end = function (chunk: any, ...rest: any[]) {
+        return origWrite(chunk as string, ...rest as [BufferEncoding]);
+      } as typeof response.write;
+
+      response.end = function (
+        chunk: unknown,
+        ...rest: unknown[]
+      ): ServerResponse {
         if (chunk != null && typeof chunk !== "function") {
           const s =
             typeof chunk === "string"
@@ -210,8 +216,8 @@ export class GatewayRouter {
                 : "";
           capturedResponseBody += s;
         }
-        return origEnd.apply(response, [chunk, ...rest] as any);
-      };
+        return origEnd(chunk as string, ...rest as [BufferEncoding]);
+      } as typeof response.end;
 
       response.once("finish", () => {
         this.options.onActivityEvent?.({
