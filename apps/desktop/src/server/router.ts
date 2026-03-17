@@ -410,27 +410,34 @@ export class GatewayRouter {
       return null;
     }
 
-    // No-auth mode: skip challenge verification and issue a session immediately
-    const noAuth = !this.options.getGatewayAuthToken?.();
-    if (noAuth) {
-      const sessionStore = this.options.sessionStore;
-      const session = sessionStore?.create(requestOrigin, 86400); // 24h session
-      response.statusCode = 200;
-      response.setHeader("content-type", "application/json");
-      response.setHeader("Cache-Control", "no-store");
-      response.end(JSON.stringify({
-        sessionToken: session?.sessionToken ?? "no-auth",
-        expiresAt: session?.expiresAt ?? new Date(Date.now() + 86400_000).toISOString(),
-      }));
-      return null;
-    }
-
     if (!isLoopbackAddress(request.socket.remoteAddress)) {
       response.statusCode = 403;
       response.setHeader("content-type", "application/json");
       response.setHeader("Cache-Control", "no-store");
       response.end(JSON.stringify({ error: "loopback only" }));
       return { activityType: "security", activityDetail: "exchange rejected: non-loopback origin" };
+    }
+
+    // No-auth mode: skip challenge verification and issue a session immediately
+    const noAuth = !this.options.getGatewayAuthToken?.();
+    if (noAuth) {
+      const sessionStore = this.options.sessionStore;
+      if (!sessionStore) {
+        response.statusCode = 500;
+        response.setHeader("content-type", "application/json");
+        response.setHeader("Cache-Control", "no-store");
+        response.end(JSON.stringify({ error: "session store not available" }));
+        return null;
+      }
+      const session = sessionStore.create(requestOrigin, 86400); // 24h session
+      response.statusCode = 200;
+      response.setHeader("content-type", "application/json");
+      response.setHeader("Cache-Control", "no-store");
+      response.end(JSON.stringify({
+        sessionToken: session.sessionToken,
+        expiresAt: session.expiresAt,
+      }));
+      return null;
     }
 
     const apiKey = this.options.getApiKey?.();
