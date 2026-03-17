@@ -953,8 +953,16 @@ async function handleLoopRequest(
               stdio: "pipe",
               timeout: 15_000,
             });
-          } catch {
-            // May already be gone — not critical
+          } catch (wtErr) {
+            loopLog(body.loopId, `git worktree remove failed, falling back to fs.rm: ${wtErr instanceof Error ? wtErr.message : wtErr}`);
+            // Force-remove the directory so ensureWorktree can recreate it
+            await fs.rm(staleWorktree, { recursive: true, force: true });
+            // Prune stale worktree entries from git's tracking
+            try {
+              execSync("git worktree prune", { cwd: expandedRepoPath, stdio: "pipe", timeout: 10_000 });
+            } catch {
+              // Best-effort
+            }
           }
         }
         await ensureWorktree(
