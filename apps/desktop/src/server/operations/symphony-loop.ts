@@ -373,32 +373,10 @@ function findWorktreeForBranch(
   return null;
 }
 
-/** Find any existing symphony loop worktree for a repo (reuse across loops). */
-function findExistingLoopWorktree(
-  expandedRepoPath: string
-): string | null {
-  try {
-    const output = execSync("git worktree list --porcelain", {
-      cwd: expandedRepoPath,
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 10_000,
-    });
-
-    let currentWorktree: string | null = null;
-    for (const line of output.split("\n")) {
-      if (line.startsWith("worktree ")) {
-        currentWorktree = line.slice("worktree ".length);
-      }
-      if (line.startsWith("branch ") && line.includes("/symphony/loop-")) {
-        return currentWorktree;
-      }
-    }
-  } catch {
-    // fall through
-  }
-  return null;
-}
+// findExistingLoopWorktree was removed — it greedy-matched ANY loop worktree
+// from ANY prior loop, causing new PLAN loops to reuse stale worktrees.
+// PLAN always creates a fresh worktree. EXECUTE/REQUEST_CHANGES reuse via
+// findWorktreeForBranch(parentBranchName) which matches the specific parent.
 
 // ---------------------------------------------------------------------------
 // Per-command artifact writing
@@ -918,30 +896,17 @@ async function handleLoopRequest(
       });
       return;
     } else if (body.command === "PLAN") {
-      // PLAN: reuse existing symphony loop worktree if available, else create new
-      worktreeDir = findExistingLoopWorktree(expandedRepoPath);
-      if (worktreeDir) {
-        loopLog(body.loopId, `Reusing existing loop worktree: ${worktreeDir}`);
-        try {
-          assertPathAllowed(worktreeDir, allowedDirs);
-        } catch (e) {
-          if (e instanceof DirectoryNotAllowedError) {
-            json(context, 403, { error: `Worktree path not allowed: ${worktreeDir}` });
-            return;
-          }
-          throw e;
-        }
-      } else {
-        const loopBranch = `symphony/loop-${pickStableId(body)}`;
-        worktreeDir = resolveLoopWorktreeDir(expandedRepoPath, pickStableId(body));
-        await ensureWorktree(
-          expandedRepoPath,
-          worktreeDir,
-          loopBranch,
-          body.repo?.branch ?? "main"
-        );
-        loopLog(body.loopId, `Created new loop worktree: ${worktreeDir}`);
-      }
+      // PLAN: always create a fresh worktree (matches ECS harness which always clones fresh).
+      // No reuse — each PLAN loop gets its own worktree keyed by loopId.
+      const loopBranch = `symphony/loop-${pickStableId(body)}`;
+      worktreeDir = resolveLoopWorktreeDir(expandedRepoPath, pickStableId(body));
+      await ensureWorktree(
+        expandedRepoPath,
+        worktreeDir,
+        loopBranch,
+        body.repo?.branch ?? "main"
+      );
+      loopLog(body.loopId, `Created loop worktree: ${worktreeDir}`);
       claudeWorkDir = path.join(worktreeDir, ".claude", "work");
       await fs.mkdir(claudeWorkDir, { recursive: true });
       await writeArtifactsForPlan(claudeWorkDir, body.artifacts, body.prompt);
