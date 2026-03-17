@@ -54,6 +54,13 @@ Debug tokens are short-lived (10 minutes), memory-only, and only available when 
 
 Start with `just desktop-no-auth` to bypass all gateway auth. All engineer routes are open, and the exchange endpoint issues session tokens without challenge verification. Guarded by `!app.isPackaged` -- cannot be enabled in production builds.
 
+### Production Origins Only Mode
+
+Start with `just desktop-prod-origins` when the gateway is connected to a production relay
+and you have a localhost dev instance open. This blocks requests from all origins except
+the configured webAppOrigin, so dev traffic doesn't leak into the production relay.
+Cross-origin browser reads of /health will also fail for blocked origins.
+
 ### Sandbox Directory Enforcement
 
 Every API route checks target paths against the sandbox base directory via `isPathAllowed()` in `src/server/security.ts`. Paths outside the sandbox return HTTP 403 `{"error": "directory not allowed"}`.

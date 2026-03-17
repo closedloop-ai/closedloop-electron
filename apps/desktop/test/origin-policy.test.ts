@@ -15,6 +15,16 @@ test("rejects insecure non-loopback api origin", () => {
   assert.throws(() => normalizeAndValidateOrigin("http://example.com"), /must use https/i);
 });
 
+test("rejects DNS names that start with 127 but are not loopback IPs", () => {
+  assert.throws(() => normalizeAndValidateOrigin("http://127.evil.com:3000"), /must use https/i);
+  assert.throws(() => normalizeWebAppOrigin("http://127.evil.com:3000"), /must use https/i);
+});
+
+test("accepts valid 127.x.x.x loopback variants", () => {
+  assert.equal(normalizeAndValidateOrigin("http://127.0.0.2:3000"), "http://127.0.0.2:3000");
+  assert.equal(normalizeWebAppOrigin("http://127.0.0.2:3000"), "http://127.0.0.2:3000");
+});
+
 test("normalizes web app origin", () => {
   assert.equal(normalizeWebAppOrigin("https://app.example.com/path"), "https://app.example.com");
 });

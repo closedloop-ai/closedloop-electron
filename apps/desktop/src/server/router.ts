@@ -53,6 +53,7 @@ export interface GatewayRouterOptions {
   sessionStore?: LocalSessionStore;
   getApiKey?: () => string | null;
   getApiOrigin?: () => string;
+  prodOriginsOnly?: boolean;
 }
 
 export interface GatewayActivityEvent {
@@ -340,9 +341,11 @@ export class GatewayRouter {
   private applyCorsHeaders(request: IncomingMessage, response: ServerResponse): void {
     const requestOrigin = firstHeaderValue(request.headers.origin);
     const resolvedWebAppOrigin = this.options.getWebAppOrigin?.() ?? this.options.webAppOrigin;
+    const allowed = this.isOriginAllowed(requestOrigin);
+
     response.setHeader(
       "Access-Control-Allow-Origin",
-      resolveCorsAllowOrigin(requestOrigin, resolvedWebAppOrigin)
+      allowed && requestOrigin ? requestOrigin : resolvedWebAppOrigin
     );
     response.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
     response.setHeader(
@@ -358,22 +361,45 @@ export class GatewayRouter {
     const privateNetworkRequest = firstHeaderValue(
       request.headers["access-control-request-private-network"]
     );
-    if (privateNetworkRequest?.toLowerCase() === "true") {
+    if (privateNetworkRequest?.toLowerCase() === "true" && allowed) {
       response.setHeader("Access-Control-Allow-Private-Network", "true");
     }
+  }
+
+  private isOriginAllowed(origin: string | null | undefined): boolean {
+    if (!origin) return true;
+    if (origin === "null") return false;
+    const webAppOrigin = this.options.getWebAppOrigin?.() ?? this.options.webAppOrigin;
+    if (sameOrigin(origin, webAppOrigin)) return true;
+    if (this.options.prodOriginsOnly) return false;
+    if (isLoopbackOrigin(origin)) return true;
+    return false;
   }
 
   private isAuthorizedEngineerRequest(
     request: IncomingMessage
   ): { authorized: true } | { authorized: false; reason: string } {
     const expectedToken = this.options.getGatewayAuthToken?.();
-    if (!expectedToken) {
+
+    // Path 1: Internal cloud executor token -- checked first so relayed
+    // commands that happen to carry an Origin header are never blocked
+    // by the prod-origins-only gate below.
+    const providedGatewayToken = firstHeaderValue(request.headers["x-desktop-gateway-token"]);
+    if (expectedToken && providedGatewayToken && safeEqualToken(providedGatewayToken, expectedToken)) {
       return { authorized: true };
     }
 
-    // Path 1: Internal cloud executor token (unchanged)
-    const providedGatewayToken = firstHeaderValue(request.headers["x-desktop-gateway-token"]);
-    if (providedGatewayToken && safeEqualToken(providedGatewayToken, expectedToken)) {
+    // Prod-origins-only gate: reject disallowed origins for browser paths.
+    // Placed after gateway-token check so cloud executor is never blocked,
+    // but before no-auth shortcut so blocked origins can't get a free pass.
+    if (this.options.prodOriginsOnly) {
+      const requestOrigin = firstHeaderValue(request.headers.origin);
+      if (!this.isOriginAllowed(requestOrigin)) {
+        return { authorized: false, reason: "origin not allowed in prod-origins-only mode" };
+      }
+    }
+
+    if (!expectedToken) {
       return { authorized: true };
     }
 
@@ -422,6 +448,16 @@ export class GatewayRouter {
       response.setHeader("Cache-Control", "no-store");
       response.end(JSON.stringify({ error: "loopback only" }));
       return { activityType: "security", activityDetail: "exchange rejected: non-loopback origin" };
+    }
+
+    if (this.options.prodOriginsOnly && !this.isOriginAllowed(requestOrigin)) {
+      response.statusCode = 403;
+      response.setHeader("content-type", "application/json");
+      response.setHeader("Cache-Control", "no-store");
+      response.end(JSON.stringify({
+        error: "Origin not allowed -- gateway is in production-origins-only mode"
+      }));
+      return { activityType: "security", activityDetail: "exchange rejected: origin blocked by prod-origins-only" };
     }
 
     // No-auth mode: skip challenge verification and issue a session immediately
@@ -638,34 +674,25 @@ function isLoopbackAddress(address: string | undefined | null): boolean {
 function isLoopbackOrigin(originValue: string): boolean {
   try {
     const parsed = new URL(originValue);
+    const h = parsed.hostname;
     return (
-      parsed.hostname === "localhost" ||
-      parsed.hostname === "127.0.0.1" ||
-      parsed.hostname === "::1" ||
-      parsed.hostname === "[::1]" ||
-      parsed.hostname.endsWith(".localhost")
+      h === "localhost" ||
+      h === "::1" ||
+      h === "[::1]" ||
+      isLoopbackIPv4(h) ||
+      h.endsWith(".localhost")
     );
   } catch {
     return false;
   }
 }
 
-function resolveCorsAllowOrigin(
-  requestOrigin: string | null,
-  configuredWebAppOrigin: string
-): string {
-  if (!requestOrigin) {
-    return configuredWebAppOrigin;
-  }
-  if (requestOrigin === "null") {
-    return configuredWebAppOrigin;
-  }
-  if (sameOrigin(requestOrigin, configuredWebAppOrigin)) {
-    return requestOrigin;
-  }
-  if (isLoopbackOrigin(requestOrigin)) {
-    return requestOrigin;
-  }
-  return configuredWebAppOrigin;
+function isLoopbackIPv4(hostname: string): boolean {
+  if (!hostname.startsWith("127.")) return false;
+  const parts = hostname.split(".");
+  if (parts.length !== 4) return false;
+  return parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255);
 }
+
+
 

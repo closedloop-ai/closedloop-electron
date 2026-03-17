@@ -55,3 +55,7 @@ desktop-debug-auth:
 # Start Electron with auth disabled (dev-only, all engineer routes are open. For debugging only. Do not use!).
 desktop-no-auth:
   CL_LOCAL_GATEWAY_NO_AUTH=1 pnpm -C apps/desktop dev
+
+# Start Electron blocking non-production origins (use when gateway is connected to production relay).
+desktop-prod-origins:
+  CL_LOCAL_GATEWAY_PROD_ORIGINS_ONLY=1 pnpm -C apps/desktop dev

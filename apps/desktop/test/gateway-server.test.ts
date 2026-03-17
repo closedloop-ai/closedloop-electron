@@ -215,6 +215,201 @@ test("allows loopback origin variants for CORS preflight", async () => {
   assert.equal(preflight.headers.get("access-control-allow-origin"), "http://127.0.0.1:3001");
 });
 
+test("normal mode: 127.0.0.2 loopback variant echoed back in CORS preflight", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-127-2-"));
+  tempPathsToClean.push(tmpDir);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "https://app.closedloop.ai",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "loopback-127-2-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "http://127.0.0.2:8080",
+      "Access-Control-Request-Method": "POST",
+      "Access-Control-Request-Headers": "content-type"
+    }
+  });
+
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "http://127.0.0.2:8080");
+});
+
+test("normal mode: DNS name like 127.evil.com is NOT treated as loopback", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-127-evil-"));
+  tempPathsToClean.push(tmpDir);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "https://app.closedloop.ai",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "loopback-evil-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "http://127.evil.com:8080",
+      "Access-Control-Request-Method": "POST",
+      "Access-Control-Request-Headers": "content-type"
+    }
+  });
+
+  assert.equal(preflight.status, 204);
+  // Should NOT echo back the spoofed origin -- falls back to configured origin
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "https://app.closedloop.ai");
+});
+
+test("prodOriginsOnly: preflight from loopback returns configured origin, no PNA header", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-prod-loopback-"));
+  tempPathsToClean.push(tmpDir);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "https://app.closedloop.ai",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "prod-loopback-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    prodOriginsOnly: true
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "http://localhost:3000",
+      "Access-Control-Request-Method": "POST",
+      "Access-Control-Request-Headers": "content-type",
+      "Access-Control-Request-Private-Network": "true"
+    }
+  });
+
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "https://app.closedloop.ai");
+  assert.equal(preflight.headers.get("access-control-allow-private-network"), null);
+});
+
+test("prodOriginsOnly: preflight from configured origin returns correct CORS + PNA header", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-prod-configured-"));
+  tempPathsToClean.push(tmpDir);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "https://app.closedloop.ai",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "prod-configured-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    prodOriginsOnly: true
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "https://app.closedloop.ai",
+      "Access-Control-Request-Method": "POST",
+      "Access-Control-Request-Headers": "content-type",
+      "Access-Control-Request-Private-Network": "true"
+    }
+  });
+
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "https://app.closedloop.ai");
+  assert.equal(preflight.headers.get("access-control-allow-private-network"), "true");
+});
+
+test("prodOriginsOnly: preflight from random origin returns configured origin", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-prod-random-"));
+  tempPathsToClean.push(tmpDir);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "https://app.closedloop.ai",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "prod-random-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    prodOriginsOnly: true
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "https://random.example",
+      "Access-Control-Request-Method": "POST",
+      "Access-Control-Request-Headers": "content-type"
+    }
+  });
+
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "https://app.closedloop.ai");
+});
+
+test("prodOriginsOnly: loopback webAppOrigin preflight from that origin echoes it back", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-prod-loopback-webapp-"));
+  tempPathsToClean.push(tmpDir);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "http://localhost:3000",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "prod-loopback-webapp-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    prodOriginsOnly: true
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "http://localhost:3000",
+      "Access-Control-Request-Method": "POST",
+      "Access-Control-Request-Headers": "content-type"
+    }
+  });
+
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "http://localhost:3000");
+});
+
 test("requires gateway token when configured", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-auth-token-"));
   tempPathsToClean.push(tmpDir);
