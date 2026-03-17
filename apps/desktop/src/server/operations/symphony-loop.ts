@@ -48,6 +48,7 @@ interface LoopRequestBody {
   artifacts: LoopArtifact[];
   repo?: LoopRepo;
   committer?: LoopCommitter;
+  artifactSlug?: string;
   parentLoopId?: string;
   parentBranchName?: string;
   parentSessionId?: string;
@@ -926,67 +927,52 @@ async function handleLoopRequest(
         error: "Repository required for PLAN, EXECUTE, and REQUEST_CHANGES commands",
       });
       return;
-    } else if (body.command === "PLAN") {
-      // PLAN: always create a fresh worktree (matches ECS harness which always clones fresh).
-      // No reuse — each PLAN loop gets its own worktree keyed by loopId.
-      const loopBranch = `symphony/loop-${pickStableId(body)}`;
-      worktreeDir = resolveLoopWorktreeDir(expandedRepoPath, pickStableId(body));
-      await ensureWorktree(
-        expandedRepoPath,
-        worktreeDir,
-        loopBranch,
-        body.repo?.branch ?? "main"
-      );
-      loopLog(body.loopId, `Created loop worktree: ${worktreeDir}`);
-      claudeWorkDir = path.join(worktreeDir, ".claude", "work");
-      await fs.mkdir(claudeWorkDir, { recursive: true });
-      await writeArtifactsForPlan(claudeWorkDir, body.artifacts, body.prompt);
-    } else if (body.command === "EXECUTE" || body.command === "REQUEST_CHANGES") {
-      // EXECUTE/REQUEST_CHANGES: reuse parent's worktree.
-      // Derive the parent's worktree path from parentLoopId (deterministic naming),
-      // falling back to parentBranchName for backwards compat.
-      const parentStableId = body.parentLoopId ? slugifyLoopId(body.parentLoopId) : null;
-      if (parentStableId) {
-        const parentBranch = `symphony/loop-${parentStableId}`;
-        worktreeDir = findWorktreeForBranch(expandedRepoPath, parentBranch);
-        if (worktreeDir) {
-          loopLog(body.loopId, `Reusing parent worktree via parentLoopId: ${worktreeDir}`);
-        }
-      }
-      if (!worktreeDir && body.parentBranchName) {
-        worktreeDir = findWorktreeForBranch(expandedRepoPath, body.parentBranchName);
-        if (worktreeDir) {
-          loopLog(body.loopId, `Reusing parent worktree via parentBranchName: ${worktreeDir}`);
-        }
-      }
-      if (worktreeDir) {
-        try {
-          assertPathAllowed(worktreeDir, allowedDirs);
-        } catch (e) {
-          if (e instanceof DirectoryNotAllowedError) {
-            json(context, 403, { error: `Worktree path not allowed: ${worktreeDir}` });
-            return;
-          }
-          throw e;
-        }
-      }
-      if (!worktreeDir) {
-        // No parent worktree found — create a new one
-        const loopBranch = `symphony/loop-${pickStableId(body)}`;
-        worktreeDir = resolveLoopWorktreeDir(expandedRepoPath, pickStableId(body));
+    } else if (body.command === "PLAN" || body.command === "EXECUTE" || body.command === "REQUEST_CHANGES") {
+      // All repo-based commands share a single worktree keyed by artifact slug.
+      // PLAN creates it; EXECUTE/REQUEST_CHANGES reuse it. Human-readable branches
+      // like symphony/PLAN-5 instead of symphony/loop-019cfa96-...
+      const worktreeKey = body.artifactSlug
+        ? body.artifactSlug.toLowerCase()
+        : pickStableId(body);
+      const branchName = body.artifactSlug
+        ? `symphony/${body.artifactSlug}`
+        : `symphony/loop-${pickStableId(body)}`;
+
+      worktreeDir = resolveLoopWorktreeDir(expandedRepoPath, worktreeKey);
+
+      // Try to find existing worktree for this artifact's branch
+      const existingWorktree = findWorktreeForBranch(expandedRepoPath, branchName);
+      if (existingWorktree) {
+        worktreeDir = existingWorktree;
+        loopLog(body.loopId, `Reusing existing worktree: ${worktreeDir} (branch: ${branchName})`);
+      } else {
         await ensureWorktree(
           expandedRepoPath,
           worktreeDir,
-          loopBranch,
+          branchName,
           body.repo?.branch ?? "main"
         );
+        loopLog(body.loopId, `Created worktree: ${worktreeDir} (branch: ${branchName})`);
+      }
+
+      try {
+        assertPathAllowed(worktreeDir, allowedDirs);
+      } catch (e) {
+        if (e instanceof DirectoryNotAllowedError) {
+          json(context, 403, { error: `Worktree path not allowed: ${worktreeDir}` });
+          return;
+        }
+        throw e;
       }
       claudeWorkDir = path.join(worktreeDir, ".claude", "work");
       await fs.mkdir(claudeWorkDir, { recursive: true });
 
-      if (body.command === "EXECUTE") {
+      if (body.command === "PLAN") {
+        await writeArtifactsForPlan(claudeWorkDir, body.artifacts, body.prompt);
+      } else if (body.command === "EXECUTE") {
         await writeArtifactsForExecuteOrAmend(claudeWorkDir, body.artifacts);
       } else {
+        // REQUEST_CHANGES
         await writeArtifactsForExecuteOrAmend(
           claudeWorkDir,
           body.artifacts,
