@@ -749,6 +749,14 @@
         background: #2563eb;
       }
 
+      .activity-method {
+        font-family: "Berkeley Mono", "JetBrains Mono", "SF Mono", "Fira Code", monospace;
+        font-size: 10px;
+        font-weight: 700;
+        color: var(--muted);
+        flex-shrink: 0;
+      }
+
       .activity-title {
         font-weight: 600;
         flex: 1;
@@ -1564,6 +1572,11 @@
         const dot = document.createElement("span");
         dot.className = `activity-dot ${kind === "security" ? "server-error" : tone}`;
         top.appendChild(dot);
+
+        const method = document.createElement("span");
+        method.className = "activity-method";
+        method.textContent = event.method || "GET";
+        top.appendChild(method);
 
         const title = document.createElement("span");
         title.className = "activity-title";
