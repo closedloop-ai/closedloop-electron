@@ -110,8 +110,6 @@ function shellEscape(value: string): string {
  * Uses deny-by-default for IP literals: extracts the IPv4 address (including
  * from IPv4-mapped IPv6 like ::ffff:127.0.0.1) and checks it against
  * private/reserved ranges. Non-IP hostnames are allowed except "localhost".
- *
- * Set CL_TEST_ALLOW_LOOPBACK_API=1 to bypass private-address checks in tests.
  */
 function validateApiBaseUrl(url: string): boolean {
   let parsed: URL;
@@ -122,9 +120,6 @@ function validateApiBaseUrl(url: string): boolean {
   }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
     return false;
-  }
-  if (process.env.CL_TEST_ALLOW_LOOPBACK_API === "1") {
-    return true;
   }
   // WHATWG URL parser strips brackets from IPv6, so hostname is e.g. "::1"
   const hostname = parsed.hostname;
@@ -190,6 +185,13 @@ function isPrivateIPv4(ip: string): boolean {
     (a === 192 && b === 168)  // 192.168.0.0/16
   );
 }
+
+/**
+ * Seam for tests: holds the active URL validator so tests can substitute
+ * their own implementation without touching production code.
+ * Use _forTesting.overrideValidateApiBaseUrl / resetValidateApiBaseUrl.
+ */
+let _validateApiBaseUrlFn: (url: string) => boolean = validateApiBaseUrl;
 
 /** Find the local repo path for a given fullName (e.g. "org/repo"). */
 function findLocalRepo(
@@ -500,21 +502,7 @@ async function writePrdArtifact(
   }
 }
 
-async function writeArtifactsForDecompose(
-  tmpDir: string,
-  artifacts: LoopArtifact[],
-  prompt?: string
-): Promise<void> {
-  await writePrdArtifact(tmpDir, artifacts, prompt);
-}
 
-async function writeArtifactsForEvaluatePrd(
-  tmpDir: string,
-  artifacts: LoopArtifact[],
-  prompt?: string
-): Promise<void> {
-  await writePrdArtifact(tmpDir, artifacts, prompt);
-}
 
 // ---------------------------------------------------------------------------
 // Per-command output reading
@@ -927,7 +915,7 @@ async function handleLoopRequest(
     return;
   }
 
-  if (!validateApiBaseUrl(body.apiBaseUrl)) {
+  if (!_validateApiBaseUrlFn(body.apiBaseUrl)) {
     json(context, 400, {
       error: "Invalid apiBaseUrl: must be a valid http(s) URL to a non-private host",
     });
@@ -979,7 +967,7 @@ async function handleLoopRequest(
       );
       await fs.mkdir(tmpDir, { recursive: true });
       claudeWorkDir = tmpDir;
-      await writeArtifactsForDecompose(claudeWorkDir, body.artifacts, body.prompt);
+      await writePrdArtifact(claudeWorkDir, body.artifacts, body.prompt);
     } else if (body.command === "EVALUATE_PRD") {
       // EVALUATE_PRD: use temp dir, no worktree needed.
       // Temp dir is intentionally exempt from assertPathAllowed.
@@ -989,7 +977,7 @@ async function handleLoopRequest(
       );
       await fs.mkdir(tmpDir, { recursive: true });
       claudeWorkDir = tmpDir;
-      await writeArtifactsForEvaluatePrd(claudeWorkDir, body.artifacts, body.prompt);
+      await writePrdArtifact(claudeWorkDir, body.artifacts, body.prompt);
     } else if (!expandedRepoPath) {
       json(context, 400, {
         error: "Repository required for PLAN, EXECUTE, and REQUEST_CHANGES commands",
@@ -1384,8 +1372,14 @@ async function handleLoopKill(
 // ---------------------------------------------------------------------------
 
 export const _forTesting = {
-  writeArtifactsForEvaluatePrd,
+  writePrdArtifact,
   readEvaluatePrdOutputs,
+  overrideValidateApiBaseUrl(fn: (url: string) => boolean): void {
+    _validateApiBaseUrlFn = fn;
+  },
+  resetValidateApiBaseUrl(): void {
+    _validateApiBaseUrlFn = validateApiBaseUrl;
+  },
 };
 
 // ---------------------------------------------------------------------------

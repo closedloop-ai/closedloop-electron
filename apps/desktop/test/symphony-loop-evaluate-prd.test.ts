@@ -11,12 +11,10 @@ import { DesktopGatewayServer } from "../src/server/server.js";
 import { _forTesting } from "../src/server/operations/symphony-loop.js";
 import { EMPTY_CAPABILITIES, PORT_PROBE_ORDER } from "../src/shared/contracts.js";
 
-const { writeArtifactsForEvaluatePrd, readEvaluatePrdOutputs } = _forTesting;
+const { writePrdArtifact, readEvaluatePrdOutputs } = _forTesting;
 
-// ---------------------------------------------------------------------------
-// Allow loopback apiBaseUrl in tests (bypass SSRF validation for localhost)
-// ---------------------------------------------------------------------------
-process.env.CL_TEST_ALLOW_LOOPBACK_API = "1";
+// Allow loopback apiBaseUrl in tests via the _forTesting seam, not an env var.
+_forTesting.overrideValidateApiBaseUrl(() => true);
 
 // ---------------------------------------------------------------------------
 // Shared cleanup state
@@ -238,13 +236,13 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T-5.2: writeArtifactsForEvaluatePrd unit tests + prompt string assertions
+// T-5.2: writePrdArtifact unit tests + prompt string assertions
 // ---------------------------------------------------------------------------
 
-describe("T-5.2: writeArtifactsForEvaluatePrd", () => {
+describe("T-5.2: writePrdArtifact", () => {
   test("(a) PRD type artifact writes prd.md", async () => {
     const tmpDir = makeTempDir();
-    await writeArtifactsForEvaluatePrd(tmpDir, [
+    await writePrdArtifact(tmpDir, [
       { type: "PRD", content: "This is the PRD content" },
     ]);
     const prdPath = path.join(tmpDir, "prd.md");
@@ -255,13 +253,13 @@ describe("T-5.2: writeArtifactsForEvaluatePrd", () => {
 
   test("(b) empty artifacts does not throw and does not write prd.md", async () => {
     const tmpDir = makeTempDir();
-    await assert.doesNotReject(() => writeArtifactsForEvaluatePrd(tmpDir, []));
+    await assert.doesNotReject(() => writePrdArtifact(tmpDir, []));
     assert.ok(!existsSync(path.join(tmpDir, "prd.md")), "prd.md should not exist");
   });
 
   test("(c) artifact fallback type ('artifact') writes prd.md", async () => {
     const tmpDir = makeTempDir();
-    await writeArtifactsForEvaluatePrd(tmpDir, [
+    await writePrdArtifact(tmpDir, [
       { type: "artifact", content: "Fallback PRD content" },
     ]);
     const prdPath = path.join(tmpDir, "prd.md");
