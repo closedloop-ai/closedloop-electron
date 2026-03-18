@@ -1122,10 +1122,13 @@ async function handleLoopRequest(
         }
       } else if (body.command === "REQUEST_CHANGES") {
         // REQUEST_CHANGES: use claude directly with /code:amend-plan
-        // Matches ECS harness buildClaudeDirectArgs() for REQUEST_CHANGES
-        const claudeArgs: string[] = [];
+        // Matches ECS harness buildClaudeDirectArgs() for REQUEST_CHANGES.
+        // Must use -p (headless mode) so --allowedTools grants full permission
+        // without prompting — without -p, Claude runs interactively and the
+        // detached process hangs waiting for permission approval.
+        const claudeArgs: string[] = ["-p"];
 
-        // Grant tool permissions matching harness
+        // Grant tool permissions matching harness + run-loop.sh
         claudeArgs.push(
           "--allowedTools",
           "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
