@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
-import { copyFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomBytes, randomUUID } from "node:crypto";
@@ -29,9 +30,11 @@ import {
 import { seedReposConfig } from "./seed-repos-config.js";
 import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
+import { JobStore, isTerminalJobStatus } from "./job-store.js";
 import type { GatewayApprovalRequest, GatewayApprovalResult } from "../server/router.js";
 import { normalizeAndValidateOrigin, normalizeWebAppOrigin } from "./origin-policy.js";
 import { LocalSessionStore } from "./local-session-store.js";
+import { enrichJobSnapshot } from "../server/operations/symphony-job-snapshot.js";
 import pkg from "electron-updater";
 const { autoUpdater } = pkg;
 import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
@@ -50,6 +53,7 @@ export class DesktopApplication {
   private readonly commandExecutor: CloudCommandExecutor;
   private readonly activityLog: ActivityLogStore;
   private readonly approvalStore: ApprovalStore;
+  private readonly jobStore: JobStore;
   private readonly gatewayAuthToken: string;
   private readonly sessionStore: LocalSessionStore;
   private shuttingDown = false;
@@ -69,6 +73,7 @@ export class DesktopApplication {
     this.tray = new DesktopTray();
     this.desktopWindow = new DesktopWindow();
     this.activityLog = new ActivityLogStore();
+    this.jobStore = new JobStore();
     this.approvalStore = new ApprovalStore({
       onChange: (pendingCount) => this.tray.setPendingApprovals(pendingCount),
       onNewApproval: (approval) => {
@@ -99,7 +104,8 @@ export class DesktopApplication {
       () => this.apiKeyStore.getApiKey(),
       () => this.settingsStore.getApiOrigin(),
       () => this.settingsStore.getWebAppOrigin(),
-      this.isProdOriginsOnly()
+      this.isProdOriginsOnly(),
+      this.jobStore
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -143,7 +149,10 @@ export class DesktopApplication {
           return;
         }
         const resolvedOperationId = resolveOperationId(command.path);
-        if (!resolvedOperationId || resolvedOperationId !== command.operationId) {
+        // Accept the command if either:
+        // 1. The operationId matches exactly (explicit dispatch like symphony_loop)
+        // 2. The path resolves to a known operation (relay HTTP proxy uses random UUIDs)
+        if (!resolvedOperationId) {
           this.cloudSocket.sendCommandAck({
             commandId: command.commandId,
             accepted: false,
@@ -193,6 +202,7 @@ export class DesktopApplication {
     this.desktopWindow.init();
 
     this.migrateLegacyData();
+    this.reconcileJobStore();
 
     const bootSandbox = this.settingsStore.getSandboxBaseDirectory();
     if (bootSandbox?.trim()) {
@@ -648,6 +658,70 @@ export class DesktopApplication {
     app.exit(0);
   }
 
+  private reconcileJobStore(): void {
+    this.jobStore.reconcile((job) => {
+      const now = new Date().toISOString();
+
+      // If no PID, we cannot verify liveness
+      if (job.pid == null) {
+        // Preserve CANCEL_PENDING -- we don't know if the process is gone
+        if (job.status === "CANCEL_PENDING") {
+          return job;
+        }
+        return { ...job, status: "UNKNOWN", updatedAt: now, completedAt: now };
+      }
+
+      // Check whether the process is still alive
+      let processAlive = false;
+      try {
+        process.kill(job.pid, 0);
+        processAlive = true;
+      } catch {
+        processAlive = false;
+      }
+
+      if (!processAlive) {
+        // Try to determine final status from state.json
+        if (job.statePath) {
+          try {
+            const stateRaw = readFileSync(job.statePath, "utf-8");
+            const state = JSON.parse(stateRaw) as Record<string, unknown>;
+            const rawStatus = typeof state.status === "string" ? state.status.toUpperCase() : null;
+            if (rawStatus === "COMPLETED") {
+              return { ...job, status: "COMPLETED", updatedAt: now, completedAt: now };
+            }
+            if (rawStatus === "FAILED") {
+              return { ...job, status: "FAILED", updatedAt: now, completedAt: now };
+            }
+            if (rawStatus === "CANCELLED") {
+              return { ...job, status: "CANCELLED", updatedAt: now, completedAt: now };
+            }
+            if (rawStatus === "AWAITING_USER") {
+              return { ...job, status: "AWAITING_USER", updatedAt: now };
+            }
+            if (rawStatus === "STOPPED") {
+              return { ...job, status: "STOPPED", updatedAt: now, completedAt: now };
+            }
+          } catch {
+            // state.json unreadable -- fall through
+          }
+        }
+        // CANCEL_PENDING + process dead = confirmed cancelled
+        if (job.status === "CANCEL_PENDING") {
+          return { ...job, status: "CANCELLED", updatedAt: now, completedAt: now };
+        }
+        return { ...job, status: "UNKNOWN", updatedAt: now, completedAt: now };
+      }
+
+      // Process is still alive -- preserve existing status (RUNNING, CANCEL_PENDING, etc.)
+      // Only upgrade to RUNNING if it was in a pre-running state
+      if (job.status === "QUEUED" || job.status === "STARTING") {
+        return { ...job, status: "RUNNING", updatedAt: now };
+      }
+      return { ...job, updatedAt: now };
+    });
+  }
+
   private registerIpcHandlers(): void {
     ipcMain.handle("desktop:get-settings", () => {
       const settings = this.settingsStore.getAll();
@@ -723,6 +797,52 @@ export class DesktopApplication {
       commandsPaused: this.cloudCommandsPaused,
       connectionEnabled: this.cloudConnectionEnabled
     }));
+    ipcMain.handle("desktop:list-running-jobs", async () => {
+      const jobs = this.jobStore.listRunning();
+      const snapshots = await Promise.all(jobs.map((j) => enrichJobSnapshot(j)));
+
+      // Reconcile: if enrichment detected a terminal status (process dead),
+      // persist it so the job moves from active to terminal in the store.
+      const stillRunning = [];
+      for (const snapshot of snapshots) {
+        if (isTerminalJobStatus(snapshot.status) && !isTerminalJobStatus(this.jobStore.getById(snapshot.id)?.status ?? "UNKNOWN")) {
+          this.jobStore.upsert({
+            ...this.jobStore.getById(snapshot.id)!,
+            status: snapshot.status,
+            updatedAt: new Date().toISOString(),
+            completedAt: snapshot.completedAt ?? new Date().toISOString(),
+          });
+        } else {
+          stillRunning.push(snapshot);
+        }
+      }
+
+      return stillRunning;
+    });
+    ipcMain.handle("desktop:list-completed-jobs", () => this.jobStore.listCompleted());
+    ipcMain.handle("desktop:get-job", (_event, jobId: string) => {
+      if (typeof jobId !== "string" || !jobId.trim()) {
+        throw new Error("jobId is required");
+      }
+      return this.jobStore.getById(jobId.trim()) ?? null;
+    });
+    ipcMain.handle("desktop:get-job-log-tail", async (_event, jobId: string, lines?: number) => {
+      if (typeof jobId !== "string" || !jobId.trim()) {
+        throw new Error("jobId is required");
+      }
+      const job = this.jobStore.getById(jobId.trim());
+      if (!job?.logPath) {
+        return null;
+      }
+      try {
+        const content = await readFile(job.logPath!, "utf-8");
+        const allLines = content.split("\n");
+        const maxLines = typeof lines === "number" && lines > 0 ? lines : 200;
+        return allLines.slice(-maxLines).join("\n");
+      } catch {
+        return null;
+      }
+    });
     ipcMain.handle("desktop:get-activity-events", () => this.activityLog.list());
     ipcMain.handle("desktop:clear-activity-events", () => {
       this.activityLog.clear();
@@ -903,6 +1023,7 @@ const SUPPORTED_OPERATION_IDS = [
   "symphony_launch",
   "symphony_loop",
   "symphony_loop_kill",
+  "symphony_plan_loop",
   "symphony_status",
   "symphony_kill",
   "symphony_chat",
@@ -940,6 +1061,9 @@ function resolveOperationId(pathname: string): string | null {
   }
   if (pathname === "/api/engineer/symphony/loop/kill") {
     return "symphony_loop_kill";
+  }
+  if (pathname.startsWith("/api/engineer/symphony/plan-loop/")) {
+    return "symphony_plan_loop";
   }
   if (pathname.startsWith("/api/engineer/symphony/status/")) {
     return "symphony_status";
@@ -1012,6 +1136,12 @@ function resolveOperationId(pathname: string): string | null {
   }
   if (pathname === "/api/engineer/learnings") {
     return "learnings";
+  }
+  if (pathname.startsWith("/api/engineer/work-directory/")) {
+    return "filesystem";
+  }
+  if (pathname.startsWith("/api/engineer/symphony/sessions/")) {
+    return "symphony_sessions";
   }
   if (
     pathname === "/api/engineer/directories" ||

@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
+import type { JobStore } from "../../main/job-store.js";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { expandHome, findFirstExisting, resolveWorktreeDir, sanitizeTicketId } from "./symphony-utils.js";
@@ -28,7 +29,8 @@ type EffectiveState = {
 
 export function registerSymphonyStatusRoutes(
   dispatcher: OperationDispatcher,
-  getAllowedDirectories: () => string[]
+  getAllowedDirectories: () => string[],
+  jobStore?: JobStore
 ): void {
   dispatcher.register("GET", "/api/engineer/symphony/status/:ticketId", async (context) => {
     try {
@@ -56,7 +58,29 @@ export function registerSymphonyStatusRoutes(
         throw error;
       }
 
-      const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
+      let worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
+
+      // Fallback: if the ticket-based worktree doesn't exist, check the
+      // JobStore for a loop-backed job matching this ticketId. The loop
+      // handler creates worktrees at a different path (<repoName>-loop-<slug>)
+      // than the ticket-based scheme (<repoName>-<ticketId>).
+      if (!existsSync(worktreeDir) && jobStore) {
+        for (const job of jobStore.listRunning()) {
+          if (job.ticketId === ticketId && job.worktreeDir && existsSync(job.worktreeDir)) {
+            worktreeDir = job.worktreeDir;
+            break;
+          }
+        }
+        // Also check completed jobs (process may have finished)
+        if (!existsSync(worktreeDir)) {
+          for (const job of jobStore.listCompleted()) {
+            if (job.ticketId === ticketId && job.worktreeDir && existsSync(job.worktreeDir)) {
+              worktreeDir = job.worktreeDir;
+              break;
+            }
+          }
+        }
+      }
       const safeTicketId = sanitizeTicketId(ticketId);
       const statePath = findFirstExisting(
         path.join(worktreeDir, safeTicketId, "state.json"),

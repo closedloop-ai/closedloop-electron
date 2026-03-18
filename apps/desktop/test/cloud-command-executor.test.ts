@@ -161,6 +161,82 @@ test("replays buffered events from resume sequence", async () => {
   assert.ok(replayed.every((event) => event.sequence > 1));
 });
 
+test("forwards request body for DELETE commands", async () => {
+  let receivedBody = "";
+  let receivedMethod = "";
+
+  await startGateway(async (request, response, body) => {
+    receivedMethod = request.method ?? "";
+    receivedBody = body;
+    response.statusCode = 200;
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ ok: true }));
+  });
+
+  const events: Array<Omit<DesktopCommandStreamEvent, "protocolVersion" | "messageId" | "timestamp">> = [];
+  executor = createExecutor({
+    maxInFlightCommands: 1,
+    onEvent: (event) => events.push(event),
+  });
+  executor.setConnected(true);
+
+  executor.enqueue({
+    protocolVersion: "1",
+    messageId: "delete-body-msg",
+    timestamp: new Date().toISOString(),
+    commandId: "delete-body",
+    operationId: "git_worktree_delete",
+    method: "DELETE",
+    path: "/api/engineer/git/worktree",
+    query: {},
+    body: {
+      worktreePath: "/repo/my-worktree",
+      force: true,
+    },
+  });
+
+  await waitFor(() => countDone(events, "delete-body") === 1);
+
+  assert.equal(receivedMethod, "DELETE");
+  const parsed = JSON.parse(receivedBody) as Record<string, unknown>;
+  assert.equal(parsed.worktreePath, "/repo/my-worktree");
+  assert.equal(parsed.force, true);
+});
+
+test("does not forward body for GET commands", async () => {
+  let receivedBody = "";
+
+  await startGateway(async (_request, response, body) => {
+    receivedBody = body;
+    response.statusCode = 200;
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ ok: true }));
+  });
+
+  const events: Array<Omit<DesktopCommandStreamEvent, "protocolVersion" | "messageId" | "timestamp">> = [];
+  executor = createExecutor({
+    maxInFlightCommands: 1,
+    onEvent: (event) => events.push(event),
+  });
+  executor.setConnected(true);
+
+  executor.enqueue({
+    protocolVersion: "1",
+    messageId: "get-nobody-msg",
+    timestamp: new Date().toISOString(),
+    commandId: "get-nobody",
+    operationId: "status_check",
+    method: "GET",
+    path: "/api/engineer/symphony/status/TICKET-1",
+    query: { repo: "/repo/a" },
+    body: { shouldNotBeSent: true },
+  });
+
+  await waitFor(() => countDone(events, "get-nobody") === 1);
+
+  assert.equal(receivedBody, "");
+});
+
 function createExecutor(options: {
   maxInFlightCommands: number;
   onEvent: (event: Omit<DesktopCommandStreamEvent, "protocolVersion" | "messageId" | "timestamp">) => void;

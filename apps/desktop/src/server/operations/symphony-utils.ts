@@ -464,7 +464,11 @@ export function isProcessRunning(pid: number): boolean {
   }
 }
 
-type LaunchMetadata = {
+export type LaunchMetadata = {
+  issueId?: string;
+  ticketTitle?: string;
+  artifactId?: string;
+  loopId?: string;
   baseBranch?: string;
   parentTicketId?: string;
 };
@@ -488,6 +492,14 @@ export function readLaunchMetadata(worktreeDir: string): LaunchMetadata | null {
     const content = readFileSync(metaPath, "utf-8");
     const parsed = JSON.parse(content) as Record<string, unknown>;
     return {
+      issueId:
+        typeof parsed.issueId === "string" ? parsed.issueId : undefined,
+      ticketTitle:
+        typeof parsed.ticketTitle === "string" ? parsed.ticketTitle : undefined,
+      artifactId:
+        typeof parsed.artifactId === "string" ? parsed.artifactId : undefined,
+      loopId:
+        typeof parsed.loopId === "string" ? parsed.loopId : undefined,
       baseBranch:
         typeof parsed.baseBranch === "string" ? parsed.baseBranch : undefined,
       parentTicketId:
@@ -514,6 +526,10 @@ export function writeLaunchMetadata(
   const existing = readLaunchMetadata(worktreeDir);
 
   const merged: LaunchMetadata = {
+    issueId: meta.issueId ?? existing?.issueId,
+    ticketTitle: meta.ticketTitle ?? existing?.ticketTitle,
+    artifactId: meta.artifactId ?? existing?.artifactId,
+    loopId: meta.loopId ?? existing?.loopId,
     baseBranch: meta.baseBranch ?? existing?.baseBranch,
     parentTicketId: meta.parentTicketId ?? existing?.parentTicketId,
   };

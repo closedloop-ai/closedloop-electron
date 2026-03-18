@@ -4,6 +4,7 @@ import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
 import type {
   OperationDispatcher,
   OperationRequestContext,
@@ -13,6 +14,7 @@ import { findPluginScript, findPluginVersions, getPluginCacheRoot } from "./plug
 import {
   expandHome,
   resolveWorktreeParentDir,
+  tryAssertRepoAllowed,
 } from "./symphony-utils.js";
 
 // ---------------------------------------------------------------------------
@@ -53,6 +55,8 @@ interface LoopRequestBody {
   parentBranchName?: string;
   parentSessionId?: string;
   prompt?: string;
+  /** Local filesystem checkout root. When present and sandbox-allowed, used as checkout root for worktree creation/reuse instead of repo.fullName lookup. */
+  localRepoPath?: string;
 }
 
 /** Track running loop processes for cancellation and to prevent GC of ChildProcess. */
@@ -177,6 +181,13 @@ function validateApiBaseUrl(url: string): boolean {
   }
   // WHATWG URL parser strips brackets from IPv6, so hostname is e.g. "::1"
   const hostname = parsed.hostname;
+
+  // The desktop gateway runs on the same machine as the loop process.
+  // Allow loopback/private addresses so the process can post events back
+  // to a locally running API server during development.
+  if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") {
+    return true;
+  }
 
   if (hostname === "localhost") {
     return false;
@@ -759,7 +770,8 @@ async function handleProcessCompletion(
   exitCode: number,
   body: LoopRequestBody,
   worktreeDir: string | null,
-  claudeWorkDir: string
+  claudeWorkDir: string,
+  jobStore?: JobStore
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, apiBaseUrl, committer } = body;
 
@@ -775,6 +787,19 @@ async function handleProcessCompletion(
       message: `Process exited with code ${exitCode}`,
       loopId,
     });
+    if (jobStore) {
+      const existingJob = jobStore.getByLoopId(loopId);
+      if (existingJob) {
+        const now = new Date().toISOString();
+        jobStore.upsert({
+          ...existingJob,
+          status: "FAILED",
+          exitCode,
+          updatedAt: now,
+          completedAt: now,
+        });
+      }
+    }
     return;
   }
 
@@ -879,6 +904,20 @@ async function handleProcessCompletion(
   await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, completedEvent);
   loopLog(loopId, "Loop completed successfully");
 
+  if (jobStore) {
+    const existingJob = jobStore.getByLoopId(loopId);
+    if (existingJob) {
+      const now = new Date().toISOString();
+      jobStore.upsert({
+        ...existingJob,
+        status: "COMPLETED",
+        exitCode: 0,
+        updatedAt: now,
+        completedAt: now,
+      });
+    }
+  }
+
   // Clean up DECOMPOSE temp directory after all reads and uploads are complete
   if (command === "DECOMPOSE") {
     fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
@@ -891,7 +930,8 @@ async function handleProcessCompletion(
 
 async function handleLoopRequest(
   context: OperationRequestContext,
-  getAllowedDirectories: () => string[]
+  getAllowedDirectories: () => string[],
+  jobStore?: JobStore
 ): Promise<void> {
   const rawBody = parseJsonBody(context);
   if (!rawBody) {
@@ -945,7 +985,16 @@ async function handleLoopRequest(
     const allowedDirs = getAllowedDirectories();
     let expandedRepoPath: string | null = null;
 
-    if (body.repo?.fullName) {
+    if (body.localRepoPath) {
+      // localRepoPath takes precedence over repo.fullName lookup when present
+      const repoResult = tryAssertRepoAllowed(body.localRepoPath, allowedDirs);
+      if ("error" in repoResult) {
+        json(context, repoResult.status, { error: repoResult.error });
+        return;
+      }
+      expandedRepoPath = repoResult.path;
+      loopLog(body.loopId, `Using localRepoPath: ${expandedRepoPath}`);
+    } else if (body.repo?.fullName) {
       expandedRepoPath = findLocalRepo(body.repo.fullName, allowedDirs);
       if (!expandedRepoPath) {
         json(context, 404, {
@@ -1263,7 +1312,7 @@ async function handleLoopRequest(
       }
       completionHandled = true;
       loopLog(body.loopId, `onceComplete fired, code=${code}`);
-      handleProcessCompletion(code, body, worktreeDir, claudeWorkDir).catch(
+      handleProcessCompletion(code, body, worktreeDir, claudeWorkDir, jobStore).catch(
         (err) => loopError(body.loopId, "Completion handler error:", err)
       );
     };
@@ -1296,6 +1345,32 @@ async function handleLoopRequest(
     runningLoops.set(body.loopId, { pid, child });
     spawnedSuccessfully = true;
     loopLog(body.loopId, `Spawned pid=${pid}, worktree=${worktreeDir}`);
+
+    // Bind runtime details to an existing LocalJob or create a new one for this loop
+    if (jobStore) {
+      const existing = jobStore.getByLoopId(body.loopId);
+      const now = new Date().toISOString();
+      const logPath = path.join(claudeWorkDir, "symphony-loop.log");
+      const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+      const statePath = path.join(claudeWorkDir, "state.json");
+      const command = body.command as LocalJobCommand;
+      jobStore.upsert({
+        id: body.loopId,
+        kind: "SYMPHONY_LOOP",
+        loopId: body.loopId,
+        command,
+        ...(existing ?? {}),
+        worktreeDir: worktreeDir ?? undefined,
+        claudeWorkDir,
+        logPath,
+        jsonlPath,
+        statePath,
+        pid,
+        status: "RUNNING",
+        updatedAt: now,
+        startedAt: existing?.startedAt ?? now,
+      });
+    }
 
     // Write PID file (safe to await now — close handler is already registered)
     await fs.writeFile(
@@ -1371,13 +1446,14 @@ async function handleLoopKill(
 
 export function registerSymphonyLoopRoutes(
   dispatcher: OperationDispatcher,
-  getAllowedDirectories: () => string[]
+  getAllowedDirectories: () => string[],
+  jobStore?: JobStore
 ): void {
   dispatcher.register(
     "POST",
     "/api/engineer/symphony/loop",
     async (context) => {
-      await handleLoopRequest(context, getAllowedDirectories);
+      await handleLoopRequest(context, getAllowedDirectories, jobStore);
     }
   );
 
