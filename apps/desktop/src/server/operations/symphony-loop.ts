@@ -19,9 +19,9 @@ import {
 // Types
 // ---------------------------------------------------------------------------
 
-type LoopCommand = "PLAN" | "EXECUTE" | "REQUEST_CHANGES" | "DECOMPOSE";
+type LoopCommand = "PLAN" | "EXECUTE" | "REQUEST_CHANGES" | "DECOMPOSE" | "EVALUATE_PRD";
 
-const VALID_COMMANDS = new Set<LoopCommand>(["PLAN", "EXECUTE", "REQUEST_CHANGES", "DECOMPOSE"]);
+const VALID_COMMANDS = new Set<LoopCommand>(["PLAN", "EXECUTE", "REQUEST_CHANGES", "DECOMPOSE", "EVALUATE_PRD"]);
 
 interface LoopArtifact {
   id?: string;
@@ -110,6 +110,8 @@ function shellEscape(value: string): string {
  * Uses deny-by-default for IP literals: extracts the IPv4 address (including
  * from IPv4-mapped IPv6 like ::ffff:127.0.0.1) and checks it against
  * private/reserved ranges. Non-IP hostnames are allowed except "localhost".
+ *
+ * Set CL_TEST_ALLOW_LOOPBACK_API=1 to bypass private-address checks in tests.
  */
 function validateApiBaseUrl(url: string): boolean {
   let parsed: URL;
@@ -120,6 +122,9 @@ function validateApiBaseUrl(url: string): boolean {
   }
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
     return false;
+  }
+  if (process.env.CL_TEST_ALLOW_LOOPBACK_API === "1") {
+    return true;
   }
   // WHATWG URL parser strips brackets from IPv6, so hostname is e.g. "::1"
   const hostname = parsed.hostname;
@@ -467,12 +472,16 @@ async function writeArtifactsForExecuteOrAmend(
   }
 }
 
-async function writeArtifactsForDecompose(
-  tmpDir: string,
+/**
+ * Write prd.md to a work directory from a list of artifacts and an optional
+ * explicit prompt.  Priority: prompt > PRD artifact > FEATURE artifact.
+ * Shared by DECOMPOSE and EVALUATE_PRD, which both need the same prd.md.
+ */
+async function writePrdArtifact(
+  workDir: string,
   artifacts: LoopArtifact[],
   prompt?: string
 ): Promise<void> {
-  // Same priority as writeArtifactsForPlan: prompt > PRD > FEATURE
   let prdContent = prompt ?? null;
 
   if (!prdContent) {
@@ -487,8 +496,24 @@ async function writeArtifactsForDecompose(
   }
 
   if (prdContent) {
-    await fs.writeFile(path.join(tmpDir, "prd.md"), prdContent);
+    await fs.writeFile(path.join(workDir, "prd.md"), prdContent);
   }
+}
+
+async function writeArtifactsForDecompose(
+  tmpDir: string,
+  artifacts: LoopArtifact[],
+  prompt?: string
+): Promise<void> {
+  await writePrdArtifact(tmpDir, artifacts, prompt);
+}
+
+async function writeArtifactsForEvaluatePrd(
+  tmpDir: string,
+  artifacts: LoopArtifact[],
+  prompt?: string
+): Promise<void> {
+  await writePrdArtifact(tmpDir, artifacts, prompt);
 }
 
 // ---------------------------------------------------------------------------
@@ -548,6 +573,11 @@ function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
 function readDecomposeOutputs(workDir: string): Record<string, unknown> {
   const features = readJsonFile(path.join(workDir, "features.json"));
   return { features: features ?? undefined };
+}
+
+function readEvaluatePrdOutputs(workDir: string): Record<string, unknown> {
+  const prdJudges = readJsonFile(path.join(workDir, "prd-judges.json"));
+  return { prdJudges: prdJudges ?? undefined };
 }
 
 /** Parse token usage from claude-output.jsonl (JSONL stream output). */
@@ -757,6 +787,8 @@ async function handleProcessCompletion(
     }
   } else if (command === "DECOMPOSE") {
     artifacts = readDecomposeOutputs(claudeWorkDir);
+  } else if (command === "EVALUATE_PRD") {
+    artifacts = readEvaluatePrdOutputs(claudeWorkDir);
   }
 
   // Read session ID if available
@@ -825,9 +857,35 @@ async function handleProcessCompletion(
   await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, completedEvent);
   loopLog(loopId, "Loop completed successfully");
 
-  // Clean up DECOMPOSE temp directory after all reads and uploads are complete
-  if (command === "DECOMPOSE") {
+  // Clean up DECOMPOSE and EVALUATE_PRD temp directories after all reads and uploads are complete
+  if (command === "DECOMPOSE" || command === "EVALUATE_PRD") {
     fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Spawn `claude -p - --output-format json` with a prompt file as stdin.
+ * Opens the file as a raw fd to avoid E2BIG, unref()s the child so it
+ * outlives the gateway process, and always closes the fd on return.
+ */
+function spawnClaudeFromFile(
+  promptFile: string,
+  workDir: string,
+  logFd: number,
+  spawnEnv: Record<string, string>
+): ReturnType<typeof spawn> {
+  const promptFd = openSync(promptFile, "r");
+  try {
+    const child = spawn("claude", ["-p", "-", "--output-format", "json"], {
+      cwd: workDir,
+      detached: true,
+      stdio: [promptFd, logFd, logFd],
+      env: spawnEnv,
+    });
+    child.unref();
+    return child;
+  } finally {
+    closeSync(promptFd);
   }
 }
 
@@ -922,6 +980,16 @@ async function handleLoopRequest(
       await fs.mkdir(tmpDir, { recursive: true });
       claudeWorkDir = tmpDir;
       await writeArtifactsForDecompose(claudeWorkDir, body.artifacts, body.prompt);
+    } else if (body.command === "EVALUATE_PRD") {
+      // EVALUATE_PRD: use temp dir, no worktree needed.
+      // Temp dir is intentionally exempt from assertPathAllowed.
+      const tmpDir = path.join(
+        os.tmpdir(),
+        `symphony-evaluate-prd-${body.loopId.slice(0, 8)}`
+      );
+      await fs.mkdir(tmpDir, { recursive: true });
+      claudeWorkDir = tmpDir;
+      await writeArtifactsForEvaluatePrd(claudeWorkDir, body.artifacts, body.prompt);
     } else if (!expandedRepoPath) {
       json(context, 400, {
         error: "Repository required for PLAN, EXECUTE, and REQUEST_CHANGES commands",
@@ -1033,7 +1101,7 @@ async function handleLoopRequest(
     // Pre-flight: verify required binary exists BEFORE posting 'started' event.
     // PLAN and EXECUTE use run-loop.sh; REQUEST_CHANGES and DECOMPOSE use claude CLI directly.
     const usesRunLoop = body.command === "PLAN" || body.command === "EXECUTE";
-    const usesClaude = body.command === "REQUEST_CHANGES" || body.command === "DECOMPOSE";
+    const usesClaude = body.command === "REQUEST_CHANGES" || body.command === "DECOMPOSE" || body.command === "EVALUATE_PRD";
     let scriptPath: string | null = null;
 
     if (usesClaude) {
@@ -1046,7 +1114,8 @@ async function handleLoopRequest(
           body.closedLoopAuthToken,
           {
             type: "error",
-            code: "BINARY_NOT_FOUND", message: "claude CLI not found in PATH",
+            code: "BINARY_NOT_FOUND",
+            message: "claude CLI not found in PATH",
           }
         );
         json(context, 500, { error: "claude CLI not found in PATH" });
@@ -1061,7 +1130,8 @@ async function handleLoopRequest(
           body.closedLoopAuthToken,
           {
             type: "error",
-            code: "SCRIPT_NOT_FOUND", message: "run-loop.sh not found in plugin cache",
+            code: "SCRIPT_NOT_FOUND",
+            message: "run-loop.sh not found in plugin cache",
           }
         );
         json(context, 500, { error: "run-loop.sh not found in plugin cache" });
@@ -1087,7 +1157,8 @@ async function handleLoopRequest(
       const msg = logErr instanceof Error ? logErr.message : String(logErr);
       await postLoopEvent(body.apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
         type: "error",
-        code: "SPAWN_FAILED", message: `Cannot open log file: ${msg}`,
+        code: "SPAWN_FAILED",
+        message: `Cannot open log file: ${msg}`,
       });
       json(context, 500, { error: `Cannot open log file: ${msg}` });
       return;
@@ -1102,24 +1173,25 @@ async function handleLoopRequest(
       };
 
       if (body.command === "DECOMPOSE") {
-        // DECOMPOSE: write prompt to file and pass via stdin to avoid E2BIG
+        // Write prompt to file and pass via stdin to avoid E2BIG
         const prdContent = readTextFile(path.join(claudeWorkDir, "prd.md")) ?? "";
         const decomposePrompt = body.prompt ?? `Decompose the following PRD into features:\n\n${prdContent}`;
         const promptFile = path.join(claudeWorkDir, "decompose-prompt.txt");
         await fs.writeFile(promptFile, decomposePrompt);
-
-        const promptFd = openSync(promptFile, "r");
-        try {
-          child = spawn("claude", ["-p", "-", "--output-format", "json"], {
-            cwd: claudeWorkDir,
-            detached: true,
-            stdio: [promptFd, logFd, logFd],
-            env: spawnEnv,
-          });
-          child.unref();
-        } finally {
-          closeSync(promptFd);
-        }
+        child = spawnClaudeFromFile(promptFile, claudeWorkDir, logFd, spawnEnv);
+      } else if (body.command === "EVALUATE_PRD") {
+        // CLOSEDLOOP_WORKDIR appears in both spawnEnv and prompt text intentionally:
+        // spawnEnv makes it available to skills; prompt text tells the model where to look.
+        const repoLine = expandedRepoPath
+          ? `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`
+          : `No repository is linked to this evaluation.\n`;
+        const evaluatePrdPrompt =
+          `Activate judges:run-judges skill --artifact-type prd.\n` +
+          `CLOSEDLOOP_WORKDIR=${claudeWorkDir} (contains prd.md).\n` +
+          repoLine;
+        const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
+        await fs.writeFile(promptFile, evaluatePrdPrompt);
+        child = spawnClaudeFromFile(promptFile, claudeWorkDir, logFd, spawnEnv);
       } else if (body.command === "REQUEST_CHANGES") {
         // REQUEST_CHANGES: use claude directly with /code:amend-plan
         // Matches ECS harness buildClaudeDirectArgs() for REQUEST_CHANGES
@@ -1189,7 +1261,8 @@ async function handleLoopRequest(
       const msg = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
       await postLoopEvent(body.apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
         type: "error",
-        code: "SPAWN_FAILED", message: msg,
+        code: "SPAWN_FAILED",
+        message: msg,
       });
       json(context, 500, { error: `Failed to spawn process: ${msg}` });
       return;
@@ -1305,6 +1378,15 @@ async function handleLoopKill(
   runningLoops.delete(loopId);
   json(context, 200, { success: true, message: "Loop process terminated" });
 }
+
+// ---------------------------------------------------------------------------
+// Testing exports
+// ---------------------------------------------------------------------------
+
+export const _forTesting = {
+  writeArtifactsForEvaluatePrd,
+  readEvaluatePrdOutputs,
+};
 
 // ---------------------------------------------------------------------------
 // Route registration
