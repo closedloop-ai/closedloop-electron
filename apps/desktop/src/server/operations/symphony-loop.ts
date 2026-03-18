@@ -1142,7 +1142,11 @@ async function handleLoopRequest(
         // Must use -p (headless mode) so --allowedTools grants full permission
         // without prompting — without -p, Claude runs interactively and the
         // detached process hangs waiting for permission approval.
-        const claudeArgs: string[] = ["-p"];
+        const claudeArgs: string[] = [
+          "-p",
+          "--output-format", "stream-json",
+          "--verbose",
+        ];
 
         // Grant tool permissions matching harness + run-loop.sh
         claudeArgs.push(
