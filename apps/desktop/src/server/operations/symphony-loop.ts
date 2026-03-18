@@ -1013,6 +1013,22 @@ async function handleLoopRequest(
       claudeWorkDir = path.join(worktreeDir, ".claude", "work");
       await fs.mkdir(claudeWorkDir, { recursive: true });
 
+      // Grant edit/write permissions for .claude/work/ — Claude Code treats
+      // files under .claude/ as sensitive and blocks edits even with --allowedTools.
+      // This settings.local.json allows headless (-p) runs to modify plan.json etc.
+      const settingsLocalPath = path.join(worktreeDir, ".claude", "settings.local.json");
+      const settingsLocal = {
+        permissions: {
+          allow: [
+            `Edit(path:.claude/work/**)`,
+            `Write(path:.claude/work/**)`,
+            `Edit(path:${claudeWorkDir}/**)`,
+            `Write(path:${claudeWorkDir}/**)`,
+          ],
+        },
+      };
+      await fs.writeFile(settingsLocalPath, JSON.stringify(settingsLocal, null, 2));
+
       if (body.command === "PLAN") {
         await writeArtifactsForPlan(claudeWorkDir, body.artifacts, body.prompt);
       } else if (body.command === "EXECUTE") {
