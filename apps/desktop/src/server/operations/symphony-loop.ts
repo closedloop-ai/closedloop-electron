@@ -739,6 +739,9 @@ async function handleProcessCompletion(
       message: `Process exited with code ${exitCode}`,
       loopId,
     });
+    if (command === "DECOMPOSE" || command === "EVALUATE_PRD") {
+      fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+    }
     return;
   }
 
@@ -1106,6 +1109,9 @@ async function handleLoopRequest(
             message: "claude CLI not found in PATH",
           }
         );
+        if (body.command === "DECOMPOSE" || body.command === "EVALUATE_PRD") {
+          fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+        }
         json(context, 500, { error: "claude CLI not found in PATH" });
         return;
       }
