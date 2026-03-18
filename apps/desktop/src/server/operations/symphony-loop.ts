@@ -1,6 +1,6 @@
 import { execSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { closeSync, existsSync, openSync, readFileSync, readdirSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -9,7 +9,7 @@ import type {
   OperationRequestContext,
 } from "../operation-dispatcher.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
-import { findPluginScript } from "./plugin-cache.js";
+import { findPluginScript, findPluginVersions, getPluginCacheRoot } from "./plugin-cache.js";
 import {
   expandHome,
   resolveWorktreeParentDir,
@@ -107,28 +107,15 @@ function shellEscape(value: string): string {
 
 /**
  * Find the stream_formatter.py script from the code plugin.
+ * Reuses getPluginCacheRoot() and findPluginVersions() from plugin-cache.ts.
  * Falls back to null if not installed — caller should degrade gracefully.
  */
 function findStreamFormatter(): string | null {
-  const cacheRoot = path.join(os.homedir(), ".claude", "plugins", "cache", "closedloop-ai", "code");
-  try {
-    const versions = readdirSync(cacheRoot)
-      .filter((e: string) => /^\d+\.\d+\.\d+/.test(e))
-      .sort((a: string, b: string) => {
-        const pa = a.split(".").map(Number);
-        const pb = b.split(".").map(Number);
-        for (let i = 0; i < 3; i++) {
-          const diff = (pb[i] ?? 0) - (pa[i] ?? 0);
-          if (diff !== 0) { return diff; }
-        }
-        return 0;
-      });
-    for (const v of versions) {
-      const p = path.join(cacheRoot, v, "tools", "python", "stream_formatter.py");
-      if (existsSync(p)) { return p; }
-    }
-  } catch {
-    // Plugin not installed
+  const pluginDir = path.join(getPluginCacheRoot(), "code");
+  const versions = findPluginVersions(pluginDir);
+  for (const v of versions) {
+    const p = path.join(pluginDir, v, "tools", "python", "stream_formatter.py");
+    if (existsSync(p)) { return p; }
   }
   return null;
 }
