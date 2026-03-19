@@ -535,7 +535,7 @@ function applyQuery(url: URL, query: DesktopCommandEvent["query"]): void {
 }
 
 function serializeBody(body: unknown, headers: Headers, method: string): string | undefined {
-  if (method === "GET" || method === "DELETE") {
+  if (method === "GET") {
     return undefined;
   }
   if (typeof body === "undefined") {

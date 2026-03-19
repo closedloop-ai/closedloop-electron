@@ -48,7 +48,12 @@ const desktopApi = {
   applyUpdate: () => ipcRenderer.invoke("desktop:apply-update") as Promise<unknown>,
   isDebugAuthEnabled: () => ipcRenderer.invoke("desktop:is-debug-auth-enabled") as Promise<boolean>,
   mintDebugToken: (origin?: string) =>
-    ipcRenderer.invoke("desktop:mint-debug-token", origin) as Promise<unknown>
+    ipcRenderer.invoke("desktop:mint-debug-token", origin) as Promise<unknown>,
+  listRunningJobs: () => ipcRenderer.invoke("desktop:list-running-jobs") as Promise<unknown>,
+  listCompletedJobs: () => ipcRenderer.invoke("desktop:list-completed-jobs") as Promise<unknown>,
+  getJob: (jobId: string) => ipcRenderer.invoke("desktop:get-job", jobId) as Promise<unknown>,
+  getJobLogTail: (jobId: string, lines?: number) =>
+    ipcRenderer.invoke("desktop:get-job-log-tail", jobId, lines) as Promise<unknown>
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);

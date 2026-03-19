@@ -9,6 +9,7 @@ import {
   type HealthResponse
 } from "../shared/contracts.js";
 import type { LocalSessionStore } from "../main/local-session-store.js";
+import type { JobStore } from "../main/job-store.js";
 import {
   GatewayRouter,
   type GatewayActivityEvent,
@@ -38,6 +39,7 @@ export interface DesktopGatewayServerOptions {
   getApiKey?: () => string | null;
   getApiOrigin?: () => string;
   prodOriginsOnly?: boolean;
+  jobStore?: JobStore;
 }
 
 export class DesktopGatewayServer {
@@ -70,6 +72,7 @@ export class DesktopGatewayServer {
       getApiKey: this.options.getApiKey,
       getApiOrigin: this.options.getApiOrigin,
       prodOriginsOnly: this.options.prodOriginsOnly,
+      jobStore: this.options.jobStore,
     });
   }
 
@@ -89,7 +92,8 @@ export class DesktopGatewayServer {
     getApiKey?: () => string | null,
     getApiOrigin?: () => string,
     getWebAppOrigin?: () => string,
-    prodOriginsOnly?: boolean
+    prodOriginsOnly?: boolean,
+    jobStore?: JobStore
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -110,6 +114,7 @@ export class DesktopGatewayServer {
       getApiKey,
       getApiOrigin,
       prodOriginsOnly,
+      jobStore,
     });
   }
 

@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { timingSafeEqual } from "node:crypto";
 import type { ComputeTargetCapabilities, HealthResponse } from "../shared/contracts.js";
 import { isLoopbackIPv4 } from "../shared/network-utils.js";
+import type { JobStore } from "../main/job-store.js";
 import type { LocalSessionStore } from "../main/local-session-store.js";
 import { verifyChallenge } from "../main/local-auth-verifier.js";
 import { OperationDispatcher } from "./operation-dispatcher.js";
@@ -30,6 +31,7 @@ import { registerSymphonyPlanRoutes } from "./operations/symphony-plan.js";
 import { registerSymphonySessionRoutes } from "./operations/symphony-sessions.js";
 import { registerSymphonyStatusRoutes } from "./operations/symphony-status.js";
 import { registerSymphonyInteractiveRoutes } from "./operations/symphony-interactive.js";
+import { registerSymphonyPlanLoopRoutes } from "./operations/symphony-plan-loop.js";
 import { registerSymphonyUploadRoutes } from "./operations/symphony-upload.js";
 import { registerTerminalChatRoutes } from "./operations/terminal-chat.js";
 import { registerTicketChatRoutes } from "./operations/ticket-chat.js";
@@ -55,6 +57,7 @@ export interface GatewayRouterOptions {
   getApiKey?: () => string | null;
   getApiOrigin?: () => string;
   prodOriginsOnly?: boolean;
+  jobStore?: JobStore;
 }
 
 export interface GatewayActivityEvent {
@@ -148,15 +151,31 @@ export class GatewayRouter {
     );
     registerSymphonyJudgesRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerSymphonyKillRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
-    registerSymphonyLoopRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
+    registerSymphonyLoopRoutes(
+      this.operationDispatcher,
+      this.options.getAllowedDirectories,
+      this.options.getApiOrigin,
+      this.options.jobStore
+    );
     registerSymphonyLogsRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerSymphonyPlanRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerSymphonySessionRoutes(this.operationDispatcher, this.options.getAllowedDirectories, getSymphonyDir);
-    registerSymphonyStatusRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
+    registerSymphonyStatusRoutes(this.operationDispatcher, this.options.getAllowedDirectories, this.options.jobStore);
     registerSymphonyInteractiveRoutes(
       this.operationDispatcher,
       this.options.getAllowedDirectories
     );
+    if (this.options.getApiKey && this.options.getApiOrigin) {
+      const getApiKey = this.options.getApiKey;
+      const getApiOrigin = this.options.getApiOrigin;
+      registerSymphonyPlanLoopRoutes(
+        this.operationDispatcher,
+        this.options.getAllowedDirectories,
+        getApiKey,
+        getApiOrigin,
+        this.options.jobStore
+      );
+    }
     registerSymphonyUploadRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerTerminalChatRoutes(
       this.operationDispatcher,

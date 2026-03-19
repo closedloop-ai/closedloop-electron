@@ -641,6 +641,8 @@ export function registerSymphonyInteractiveRoutes(
         // Write metadata BEFORE PID (ordering guarantee).
         // Merge preserves existing values when new ones are undefined.
         writeLaunchMetadata(worktreeDir, {
+          issueId: asString(ticket?.issueId) ?? undefined,
+          ticketTitle: asString(ticket?.title) ?? undefined,
           baseBranch: resolvedBaseBranch ?? baseBranch ?? undefined,
           parentTicketId: undefined,
         });
