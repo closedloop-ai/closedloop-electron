@@ -154,6 +154,7 @@ export class GatewayRouter {
     registerSymphonyLoopRoutes(
       this.operationDispatcher,
       this.options.getAllowedDirectories,
+      this.options.getApiOrigin,
       this.options.jobStore
     );
     registerSymphonyLogsRoutes(this.operationDispatcher, this.options.getAllowedDirectories);

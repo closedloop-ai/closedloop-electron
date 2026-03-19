@@ -46,7 +46,8 @@ interface LoopRequestBody {
   loopId: string;
   command: LoopCommand;
   closedLoopAuthToken: string;
-  apiBaseUrl: string;
+  /** @deprecated Ignored. The gateway uses its configured API origin instead. */
+  apiBaseUrl?: string;
   artifacts: LoopArtifact[];
   repo?: LoopRepo;
   committer?: LoopCommitter;
@@ -162,95 +163,6 @@ function buildClaudePipeline(
   }
   return { cmd: "claude", args: claudeArgs };
 }
-
-/**
- * Validate apiBaseUrl to prevent SSRF to private/metadata/loopback endpoints.
- * Uses deny-by-default for IP literals: extracts the IPv4 address (including
- * from IPv4-mapped IPv6 like ::ffff:127.0.0.1) and checks it against
- * private/reserved ranges. Non-IP hostnames are allowed except "localhost".
- */
-function validateApiBaseUrl(url: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return false;
-  }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    return false;
-  }
-  // WHATWG URL parser strips brackets from IPv6, so hostname is e.g. "::1"
-  const hostname = parsed.hostname;
-
-  // The desktop gateway runs on the same machine as the loop process.
-  // Allow loopback/private addresses so the process can post events back
-  // to a locally running API server during development.
-  if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") {
-    return true;
-  }
-
-  if (hostname === "localhost") {
-    return false;
-  }
-
-  // Extract IPv4 for range checking. Handles plain IPv4, IPv4-mapped IPv6
-  // (::ffff:1.2.3.4), and IPv4-compatible IPv6 (::1.2.3.4).
-  const ipv4 = extractIPv4(hostname);
-  if (ipv4) {
-    return !isPrivateIPv4(ipv4);
-  }
-
-  // Pure IPv6 (not IPv4-mapped): block loopback (::1) and all-zeros (::)
-  if (hostname.includes(":")) {
-    const normalized = hostname.replace(/^\[|]$/g, "");
-    if (normalized === "::1" || normalized === "::" || normalized === "0:0:0:0:0:0:0:0" || normalized === "0:0:0:0:0:0:0:1") {
-      return false;
-    }
-    // Block any remaining IPv6 with embedded IPv4-mapped prefix
-    if (/^::ffff:/i.test(normalized) || /^0{0,4}:0{0,4}:0{0,4}:0{0,4}:0{0,4}:ffff:/i.test(normalized)) {
-      return false;
-    }
-    // Block ULA (fc00::/7) and link-local (fe80::/10)
-    if (/^f[cd]/i.test(normalized) || /^fe[89ab]/i.test(normalized)) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-/** Extract the IPv4 dotted-quad from a hostname, handling IPv4-mapped IPv6. */
-function extractIPv4(hostname: string): string | null {
-  // Plain IPv4
-  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) {
-    return hostname;
-  }
-  // IPv4-mapped IPv6: "::ffff:1.2.3.4" or "[::ffff:1.2.3.4]"
-  const stripped = hostname.replace(/^\[|]$/g, "");
-  const mapped = /::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(stripped);
-  if (mapped) {
-    return mapped[1];
-  }
-  return null;
-}
-
-/** Check if an IPv4 dotted-quad is in a private/reserved range. */
-function isPrivateIPv4(ip: string): boolean {
-  const parts = ip.split(".").map(Number);
-  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) {
-    return true; // Malformed → treat as private (deny)
-  }
-  const [a, b] = parts;
-  return (
-    a === 0 ||            // 0.0.0.0/8
-    a === 10 ||           // 10.0.0.0/8
-    a === 127 ||          // 127.0.0.0/8 (loopback)
-    (a === 169 && b === 254) || // 169.254.0.0/16 (link-local / cloud metadata)
-    (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
-    (a === 192 && b === 168)  // 192.168.0.0/16
-  );
-}
-
 /** Find the local repo path for a given fullName (e.g. "org/repo"). */
 function findLocalRepo(
   fullName: string,
@@ -769,11 +681,12 @@ function executeGitOperations(
 async function handleProcessCompletion(
   exitCode: number,
   body: LoopRequestBody,
+  apiBaseUrl: string,
   worktreeDir: string | null,
   claudeWorkDir: string,
   jobStore?: JobStore
 ): Promise<void> {
-  const { loopId, command, closedLoopAuthToken, apiBaseUrl, committer } = body;
+  const { loopId, command, closedLoopAuthToken, committer } = body;
 
   loopLog(loopId, `Process exited with code ${exitCode}, command=${command}`);
   runningLoops.delete(loopId);
@@ -931,8 +844,18 @@ async function handleProcessCompletion(
 async function handleLoopRequest(
   context: OperationRequestContext,
   getAllowedDirectories: () => string[],
+  getApiOrigin?: () => string,
   jobStore?: JobStore
 ): Promise<void> {
+  // Derive the callback URL from the gateway's trusted configuration.
+  // body.apiBaseUrl is ignored -- the caller does not control where
+  // loop events and artifact uploads are sent.
+  const apiBaseUrl = getApiOrigin?.();
+  if (!apiBaseUrl) {
+    json(context, 503, { error: "API origin not configured" });
+    return;
+  }
+
   const rawBody = parseJsonBody(context);
   if (!rawBody) {
     json(context, 400, { error: "Invalid JSON body" });
@@ -941,9 +864,9 @@ async function handleLoopRequest(
 
   const body = rawBody as unknown as LoopRequestBody;
 
-  if (!body.loopId || !body.command || !body.closedLoopAuthToken || !body.apiBaseUrl) {
+  if (!body.loopId || !body.command || !body.closedLoopAuthToken) {
     json(context, 400, {
-      error: "Missing required fields: loopId, command, closedLoopAuthToken, apiBaseUrl",
+      error: "Missing required fields: loopId, command, closedLoopAuthToken",
     });
     return;
   }
@@ -960,13 +883,6 @@ async function handleLoopRequest(
 
   if (!Array.isArray(body.artifacts)) {
     json(context, 400, { error: "artifacts must be an array" });
-    return;
-  }
-
-  if (!validateApiBaseUrl(body.apiBaseUrl)) {
-    json(context, 400, {
-      error: "Invalid apiBaseUrl: must be a valid http(s) URL to a non-private host",
-    });
     return;
   }
 
@@ -1144,7 +1060,7 @@ async function handleLoopRequest(
         execSync("which claude", { stdio: "pipe", timeout: 5000 });
       } catch {
         await postLoopEvent(
-          body.apiBaseUrl,
+          apiBaseUrl,
           body.loopId,
           body.closedLoopAuthToken,
           {
@@ -1159,7 +1075,7 @@ async function handleLoopRequest(
       scriptPath = findPluginScript("code", "run-loop.sh");
       if (!scriptPath) {
         await postLoopEvent(
-          body.apiBaseUrl,
+          apiBaseUrl,
           body.loopId,
           body.closedLoopAuthToken,
           {
@@ -1175,7 +1091,7 @@ async function handleLoopRequest(
     // Post "started" event — only after confirming we can proceed
     loopLog(body.loopId, "Posting started event...");
     await postLoopEvent(
-      body.apiBaseUrl,
+      apiBaseUrl,
       body.loopId,
       body.closedLoopAuthToken,
       { type: "started" }
@@ -1188,7 +1104,7 @@ async function handleLoopRequest(
       logFd = openSync(logFile, "a");
     } catch (logErr) {
       const msg = logErr instanceof Error ? logErr.message : String(logErr);
-      await postLoopEvent(body.apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+      await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
         type: "error",
         code: "SPAWN_FAILED", message: `Cannot open log file: ${msg}`,
       });
@@ -1295,7 +1211,7 @@ async function handleLoopRequest(
     } catch (spawnErr) {
       closeSync(logFd);
       const msg = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
-      await postLoopEvent(body.apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+      await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
         type: "error",
         code: "SPAWN_FAILED", message: msg,
       });
@@ -1312,7 +1228,7 @@ async function handleLoopRequest(
       }
       completionHandled = true;
       loopLog(body.loopId, `onceComplete fired, code=${code}`);
-      handleProcessCompletion(code, body, worktreeDir, claudeWorkDir, jobStore).catch(
+      handleProcessCompletion(code, body, apiBaseUrl, worktreeDir, claudeWorkDir, jobStore).catch(
         (err) => loopError(body.loopId, "Completion handler error:", err)
       );
     };
@@ -1447,13 +1363,14 @@ async function handleLoopKill(
 export function registerSymphonyLoopRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[],
+  getApiOrigin?: () => string,
   jobStore?: JobStore
 ): void {
   dispatcher.register(
     "POST",
     "/api/engineer/symphony/loop",
     async (context) => {
-      await handleLoopRequest(context, getAllowedDirectories, jobStore);
+      await handleLoopRequest(context, getAllowedDirectories, getApiOrigin, jobStore);
     }
   );
 
