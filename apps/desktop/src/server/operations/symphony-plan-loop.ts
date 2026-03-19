@@ -6,7 +6,6 @@ import type {
 } from "../operation-dispatcher.js";
 import path from "node:path";
 import {
-  expandHome,
   isProcessRunning,
   readProcessPidSync,
   resolveWorktreeDir,
