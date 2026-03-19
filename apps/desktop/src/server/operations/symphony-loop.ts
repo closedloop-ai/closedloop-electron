@@ -9,7 +9,7 @@ import type {
   OperationRequestContext,
 } from "../operation-dispatcher.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
-import { findPluginScript } from "./plugin-cache.js";
+import { findPluginScript, findPluginVersions, getPluginCacheRoot } from "./plugin-cache.js";
 import {
   expandHome,
   resolveWorktreeParentDir,
@@ -103,6 +103,60 @@ function parseJsonBody(
 
 function shellEscape(value: string): string {
   return "'" + value.replaceAll("'", String.raw`'\''`) + "'";
+}
+
+/**
+ * Find the stream_formatter.py script from the code plugin.
+ * Reuses getPluginCacheRoot() and findPluginVersions() from plugin-cache.ts.
+ * Falls back to null if not installed — caller should degrade gracefully.
+ */
+function findStreamFormatter(): string | null {
+  const pluginDir = path.join(getPluginCacheRoot(), "code");
+  const versions = findPluginVersions(pluginDir);
+  for (const v of versions) {
+    const p = path.join(pluginDir, v, "tools", "python", "stream_formatter.py");
+    if (existsSync(p)) { return p; }
+  }
+  return null;
+}
+
+/**
+ * Build a bash pipeline command that runs claude with stream-json output,
+ * filters JSON lines, tees to a jsonl log, and formats for human reading.
+ * Falls back to raw claude if formatter is not available.
+ */
+function buildClaudePipeline(
+  claudeArgs: string[],
+  claudeWorkDir: string,
+  stdinFile?: string
+): { cmd: string; args: string[] } {
+  const formatter = findStreamFormatter();
+  const stderrFile = path.join(claudeWorkDir, "claude-stderr.log");
+  const jsonlFile = path.join(claudeWorkDir, "claude-output.jsonl");
+
+  // Build the claude command with properly escaped args
+  const escapedArgs = claudeArgs.map(shellEscape).join(" ");
+  const claudeCmd = stdinFile
+    ? `claude ${escapedArgs} < ${shellEscape(stdinFile)}`
+    : `claude ${escapedArgs}`;
+
+  if (formatter) {
+    // Full pipeline matching run-loop.sh:
+    // claude ... 2>stderr | grep JSON | tee jsonl | formatter
+    const pipeline = [
+      `${claudeCmd} 2>${shellEscape(stderrFile)}`,
+      "grep --line-buffered '^{'",
+      `tee -a ${shellEscape(jsonlFile)}`,
+      `python3 ${shellEscape(formatter)}`,
+    ].join(" | ");
+    return { cmd: "bash", args: ["-c", pipeline] };
+  }
+
+  // No formatter — run claude directly (raw stream-json to stdout)
+  if (stdinFile) {
+    return { cmd: "bash", args: ["-c", claudeCmd] };
+  }
+  return { cmd: "claude", args: claudeArgs };
 }
 
 /**
@@ -854,32 +908,6 @@ async function handleProcessCompletion(
   }
 }
 
-/**
- * Spawn `claude -p - --output-format json` with a prompt file as stdin.
- * Opens the file as a raw fd to avoid E2BIG, unref()s the child so it
- * outlives the gateway process, and always closes the fd on return.
- */
-function spawnClaudeFromFile(
-  promptFile: string,
-  workDir: string,
-  logFd: number,
-  spawnEnv: Record<string, string>
-): ReturnType<typeof spawn> {
-  const promptFd = openSync(promptFile, "r");
-  try {
-    const child = spawn("claude", ["-p", "-", "--output-format", "json"], {
-      cwd: workDir,
-      detached: true,
-      stdio: [promptFd, logFd, logFd],
-      env: spawnEnv,
-    });
-    child.unref();
-    return child;
-  } finally {
-    closeSync(promptFd);
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Main route handler
 // ---------------------------------------------------------------------------
@@ -1170,12 +1198,28 @@ async function handleLoopRequest(
       };
 
       if (body.command === "DECOMPOSE") {
-        // Write prompt to file and pass via stdin to avoid E2BIG
+        // DECOMPOSE: write prompt to file and pass via stdin to avoid E2BIG
         const prdContent = readTextFile(path.join(claudeWorkDir, "prd.md")) ?? "";
         const decomposePrompt = body.prompt ?? `Decompose the following PRD into features:\n\n${prdContent}`;
         const promptFile = path.join(claudeWorkDir, "decompose-prompt.txt");
         await fs.writeFile(promptFile, decomposePrompt);
-        child = spawnClaudeFromFile(promptFile, claudeWorkDir, logFd, spawnEnv);
+
+        const claudeArgs = [
+          "-p", "-",
+          "--output-format", "stream-json",
+          "--verbose",
+          "--allowedTools",
+          "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
+          "--max-turns", "200",
+        ];
+        const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir, promptFile);
+        child = spawn(pipeline.cmd, pipeline.args, {
+          cwd: claudeWorkDir,
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: spawnEnv,
+        });
+        child.unref();
       } else if (body.command === "EVALUATE_PRD") {
         // CLOSEDLOOP_WORKDIR appears in both spawnEnv and prompt text intentionally:
         // spawnEnv makes it available to skills; prompt text tells the model where to look.
@@ -1188,19 +1232,35 @@ async function handleLoopRequest(
           repoLine;
         const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
         await fs.writeFile(promptFile, evaluatePrdPrompt);
-        child = spawnClaudeFromFile(promptFile, claudeWorkDir, logFd, spawnEnv);
-      } else if (body.command === "REQUEST_CHANGES") {
-        // REQUEST_CHANGES: use claude directly with /code:amend-plan
-        // Matches ECS harness buildClaudeDirectArgs() for REQUEST_CHANGES
-        const claudeArgs: string[] = [];
 
-        // Grant tool permissions matching harness
-        claudeArgs.push(
+        const claudeArgs = [
+          "-p", "-",
+          "--output-format", "stream-json",
+          "--verbose",
           "--allowedTools",
           "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
-          "--max-turns",
-          "200"
-        );
+          "--max-turns", "200",
+        ];
+        const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir, promptFile);
+        child = spawn(pipeline.cmd, pipeline.args, {
+          cwd: claudeWorkDir,
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: spawnEnv,
+        });
+        child.unref();
+      } else if (body.command === "REQUEST_CHANGES") {
+        // REQUEST_CHANGES: use claude directly with /code:amend-plan.
+        // Must use -p (headless mode) so --allowedTools grants full permission
+        // without prompting. Pipes through stream_formatter.py for readable logs.
+        const claudeArgs: string[] = [
+          "-p",
+          "--output-format", "stream-json",
+          "--verbose",
+          "--allowedTools",
+          "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
+          "--max-turns", "200",
+        ];
 
         // Resume from parent session if available (matches harness --resume)
         if (body.parentSessionId) {
@@ -1222,7 +1282,8 @@ async function handleLoopRequest(
           `/code:amend-plan --workdir ${claudeWorkDir} --message "${sanitized}"`
         );
 
-        child = spawn("claude", claudeArgs, {
+        const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir);
+        child = spawn(pipeline.cmd, pipeline.args, {
           cwd: worktreeDir!,
           detached: true,
           stdio: ["ignore", logFd, logFd],
