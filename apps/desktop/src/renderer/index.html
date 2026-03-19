@@ -1723,8 +1723,9 @@
 
         const title = document.createElement("span");
         title.className = "job-title";
+        const cmd = job.command || "(unknown)";
         const label = job.artifactSlug || job.loopId || job.id;
-        title.textContent = `${job.command} — ${label}`;
+        title.textContent = `${cmd} — ${label}`;
         top.appendChild(title);
 
         const badge = document.createElement("span");
@@ -1770,7 +1771,7 @@
       }
 
       async function refreshJobs() {
-        if (!api.listRunningJobs) return;
+        if (!api.listRunningJobs || !api.listCompletedJobs) return;
         const [running, completed] = await Promise.all([
           api.listRunningJobs().catch(() => []),
           api.listCompletedJobs().catch(() => []),

@@ -1,7 +1,8 @@
 import { existsSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
-import type { LocalJob, LocalJobStatus, TaskProgress } from "../../main/job-store.js";
+import { type LocalJob, type LocalJobStatus, type TaskProgress, isTerminalJobStatus } from "../../main/job-store.js";
+import { isProcessRunning } from "./symphony-utils.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -12,19 +13,6 @@ export type JobSnapshot = LocalJob & {
   taskProgress?: TaskProgress;
   currentTaskId?: string;
 };
-
-// ---------------------------------------------------------------------------
-// Process liveness
-// ---------------------------------------------------------------------------
-
-export function isProcessRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Effective status / phase from state.json
@@ -196,13 +184,13 @@ export async function enrichJobSnapshot(job: LocalJob): Promise<JobSnapshot> {
     // Apply effective status from state.json for non-terminal jobs.
     // Terminal statuses (COMPLETED, FAILED, CANCELLED, STOPPED) set by the
     // process exit handler are authoritative and should not be overridden.
-    if (stateData.status && !isTerminalStatus(status)) {
+    if (stateData.status && !isTerminalJobStatus(status)) {
       status = stateData.status;
     }
   }
 
   // If the process is dead but the job isn't terminal yet, finalize it.
-  if (!processRunning && !isTerminalStatus(status) && status !== "QUEUED" && status !== "STARTING") {
+  if (!processRunning && !isTerminalJobStatus(status) && status !== "QUEUED" && status !== "STARTING") {
     status = status === "CANCEL_PENDING" ? "CANCELLED" : "STOPPED";
   }
 
@@ -230,6 +218,3 @@ export async function enrichJobSnapshot(job: LocalJob): Promise<JobSnapshot> {
   };
 }
 
-function isTerminalStatus(status: LocalJobStatus): boolean {
-  return status === "COMPLETED" || status === "FAILED" || status === "CANCELLED" || status === "STOPPED" || status === "UNKNOWN";
-}

@@ -16,6 +16,143 @@ import {
 } from "./symphony-utils.js";
 
 // ---------------------------------------------------------------------------
+// Shared prepare/confirm handler implementations
+// ---------------------------------------------------------------------------
+
+async function handlePrepare(
+  context: OperationRequestContext,
+  getAllowedDirectories: () => string[]
+): Promise<void> {
+  const ticketId = context.params.ticketId;
+  const body = parseBody(context);
+  if (!body) {
+    json(context, 400, { error: "Invalid JSON body" });
+    return;
+  }
+
+  const repoPath = asString(body.repoPath);
+  const baseBranch = asString(body.baseBranch);
+
+  if (!repoPath) {
+    json(context, 400, { error: "repoPath is required" });
+    return;
+  }
+
+  const repoResult = tryAssertRepoAllowed(repoPath, getAllowedDirectories());
+  if ("error" in repoResult) {
+    json(context, repoResult.status, { error: repoResult.error });
+    return;
+  }
+  const expandedRepoPath = repoResult.path;
+
+  const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
+
+  const fullName = resolveRepoFullName(expandedRepoPath);
+  const branch =
+    baseBranch ??
+    resolveCurrentBranch(expandedRepoPath) ??
+    resolveDefaultBranch(expandedRepoPath);
+
+  json(context, 200, {
+    repoPath: expandedRepoPath,
+    worktreeDir,
+    repo: { fullName: fullName ?? "", branch },
+  });
+}
+
+async function handleConfirm(
+  context: OperationRequestContext,
+  ticketId: string,
+  getAllowedDirectories: () => string[],
+  jobStore: JobStore | undefined
+): Promise<void> {
+  const body = parseBody(context);
+  if (!body) {
+    json(context, 400, { error: "Invalid JSON body" });
+    return;
+  }
+
+  const repoPath = asString(body.repoPath);
+  const loopId = asString(body.loopId);
+  const artifactId = asString(body.artifactId);
+  const artifactSlug = asString(body.artifactSlug);
+  const issueId = asString(body.issueId);
+  const ticketTitle = asString(body.ticketTitle);
+  const outcome = asString(body.outcome);
+
+  if (!repoPath) {
+    json(context, 400, { error: "repoPath is required" });
+    return;
+  }
+
+  const repoResult = tryAssertRepoAllowed(repoPath, getAllowedDirectories());
+  if ("error" in repoResult) {
+    json(context, repoResult.status, { error: repoResult.error });
+    return;
+  }
+  const expandedRepoPath = repoResult.path;
+
+  const worktreeDir = artifactSlug
+    ? resolveLoopWorktreeDir(expandedRepoPath, artifactSlug)
+    : resolveWorktreeDir(expandedRepoPath, ticketId);
+
+  if (loopId && artifactId) {
+    writeLaunchMetadata(worktreeDir, {
+      issueId: issueId ?? undefined,
+      ticketTitle: ticketTitle ?? undefined,
+      artifactId,
+      loopId,
+    });
+  }
+
+  if (loopId && jobStore) {
+    const existing = jobStore.getByLoopId(loopId);
+
+    if (outcome === "already-running") {
+      if (!existing) {
+        const now = new Date().toISOString();
+        jobStore.upsert({
+          id: loopId,
+          kind: "SYMPHONY_LOOP",
+          loopId,
+          command: "PLAN",
+          ticketId: ticketId ?? undefined,
+          artifactId: artifactId ?? undefined,
+          artifactSlug: artifactSlug ?? undefined,
+          issueId: issueId ?? undefined,
+          repoPath: expandedRepoPath,
+          localRepoPath: expandedRepoPath,
+          worktreeDir,
+          status: "RUNNING",
+          startedAt: now,
+          updatedAt: now,
+        });
+      }
+    } else if (!existing) {
+      const now = new Date().toISOString();
+      jobStore.upsert({
+        id: loopId,
+        kind: "SYMPHONY_LOOP",
+        loopId,
+        command: "PLAN",
+        ticketId: ticketId ?? undefined,
+        artifactId: artifactId ?? undefined,
+        artifactSlug: artifactSlug ?? undefined,
+        issueId: issueId ?? undefined,
+        repoPath: expandedRepoPath,
+        localRepoPath: expandedRepoPath,
+        worktreeDir,
+        status: "QUEUED",
+        startedAt: now,
+        updatedAt: now,
+      });
+    }
+  }
+
+  json(context, 200, { ok: true, worktreeDir });
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -145,47 +282,7 @@ export function registerSymphonyPlanLoopRoutes(
   dispatcher.register(
     "POST",
     "/api/engineer/symphony/plan-loop/:ticketId/prepare",
-    async (context) => {
-      const ticketId = context.params.ticketId;
-      const body = parseBody(context);
-      if (!body) {
-        json(context, 400, { error: "Invalid JSON body" });
-        return;
-      }
-
-      console.log("[plan-loop:prepare] handler reached, body keys:", Object.keys(body));
-
-      const repoPath = asString(body.repoPath);
-      const baseBranch = asString(body.baseBranch);
-
-      if (!repoPath) {
-        console.log("[plan-loop:prepare] missing repoPath");
-        json(context, 400, { error: "repoPath is required" });
-        return;
-      }
-
-      const repoResult = tryAssertRepoAllowed(repoPath, getAllowedDirectories());
-      if ("error" in repoResult) {
-        json(context, repoResult.status, { error: repoResult.error });
-        return;
-      }
-      const expandedRepoPath = repoResult.path;
-
-      const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-
-      // Resolve local repo hints
-      const fullName = resolveRepoFullName(expandedRepoPath);
-      const branch =
-        baseBranch ??
-        resolveCurrentBranch(expandedRepoPath) ??
-        resolveDefaultBranch(expandedRepoPath);
-
-      json(context, 200, {
-        repoPath: expandedRepoPath,
-        worktreeDir,
-        repo: { fullName: fullName ?? "", branch },
-      });
-    }
+    (context) => handlePrepare(context, getAllowedDirectories)
   );
 
   // Also register the same prepare handler for the select-artifact path.
@@ -193,43 +290,7 @@ export function registerSymphonyPlanLoopRoutes(
   dispatcher.register(
     "POST",
     "/api/engineer/symphony/plan-loop/:ticketId/select-artifact/prepare",
-    async (context) => {
-      const ticketId = context.params.ticketId;
-      const body = parseBody(context);
-      if (!body) {
-        json(context, 400, { error: "Invalid JSON body" });
-        return;
-      }
-
-      const repoPath = asString(body.repoPath);
-      const baseBranch = asString(body.baseBranch);
-
-      if (!repoPath) {
-        json(context, 400, { error: "repoPath is required" });
-        return;
-      }
-
-      const repoResult = tryAssertRepoAllowed(repoPath, getAllowedDirectories());
-      if ("error" in repoResult) {
-        json(context, repoResult.status, { error: repoResult.error });
-        return;
-      }
-      const expandedRepoPath = repoResult.path;
-
-      const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-
-      const fullName = resolveRepoFullName(expandedRepoPath);
-      const branch =
-        baseBranch ??
-        resolveCurrentBranch(expandedRepoPath) ??
-        resolveDefaultBranch(expandedRepoPath);
-
-      json(context, 200, {
-        repoPath: expandedRepoPath,
-        worktreeDir,
-        repo: { fullName: fullName ?? "", branch },
-      });
-    }
+    (context) => handlePrepare(context, getAllowedDirectories)
   );
 
   // -----------------------------------------------------------------------
@@ -242,192 +303,14 @@ export function registerSymphonyPlanLoopRoutes(
   dispatcher.register(
     "POST",
     "/api/engineer/symphony/plan-loop/:ticketId/confirm",
-    async (context) => {
-      const ticketId = context.params.ticketId;
-      const body = parseBody(context);
-      if (!body) {
-        json(context, 400, { error: "Invalid JSON body" });
-        return;
-      }
-
-      const repoPath = asString(body.repoPath);
-      const loopId = asString(body.loopId);
-      const artifactId = asString(body.artifactId);
-      const artifactSlug = asString(body.artifactSlug);
-      const issueId = asString(body.issueId);
-      const ticketTitle = asString(body.ticketTitle);
-      const outcome = asString(body.outcome);
-
-      if (!repoPath) {
-        json(context, 400, { error: "repoPath is required" });
-        return;
-      }
-
-      // Re-derive worktreeDir from repoPath (don't trust browser-provided paths)
-      const repoResult = tryAssertRepoAllowed(repoPath, getAllowedDirectories());
-      if ("error" in repoResult) {
-        json(context, repoResult.status, { error: repoResult.error });
-        return;
-      }
-      const expandedRepoPath = repoResult.path;
-
-      // Use the loop-style worktree path that matches what symphony-loop.ts
-      // will actually create. Falls back to ticket-based path if no slug.
-      const worktreeDir = artifactSlug
-        ? resolveLoopWorktreeDir(expandedRepoPath, artifactSlug)
-        : resolveWorktreeDir(expandedRepoPath, ticketId);
-
-      // Write launch metadata to the correct worktree location
-      if (loopId && artifactId) {
-        writeLaunchMetadata(worktreeDir, {
-          issueId: issueId ?? undefined,
-          ticketTitle: ticketTitle ?? undefined,
-          artifactId,
-          loopId,
-        });
-      }
-
-      // Update JobStore
-      if (loopId && jobStore) {
-        const jobStatus = outcome === "already-running" ? "RUNNING" : "QUEUED";
-
-        if (outcome === "already-running") {
-          const existing = jobStore.getByLoopId(loopId);
-          if (!existing) {
-            const now = new Date().toISOString();
-            jobStore.upsert({
-              id: loopId,
-              kind: "SYMPHONY_LOOP",
-              loopId,
-              command: "PLAN",
-              ticketId: ticketId ?? undefined,
-              artifactId: artifactId ?? undefined,
-              artifactSlug: artifactSlug ?? undefined,
-              issueId: issueId ?? undefined,
-              repoPath: expandedRepoPath,
-              localRepoPath: expandedRepoPath,
-              worktreeDir,
-              status: jobStatus,
-              startedAt: now,
-              updatedAt: now,
-            });
-          }
-        } else {
-          const now = new Date().toISOString();
-          jobStore.upsert({
-            id: loopId,
-            kind: "SYMPHONY_LOOP",
-            loopId,
-            command: "PLAN",
-            ticketId: ticketId ?? undefined,
-            artifactId: artifactId ?? undefined,
-            artifactSlug: artifactSlug ?? undefined,
-            issueId: issueId ?? undefined,
-            repoPath: expandedRepoPath,
-            localRepoPath: expandedRepoPath,
-            worktreeDir,
-            status: "QUEUED",
-            startedAt: now,
-            updatedAt: now,
-          });
-        }
-      }
-
-      json(context, 200, { ok: true, worktreeDir });
-    }
+    (context) => handleConfirm(context, context.params.ticketId, getAllowedDirectories, jobStore)
   );
 
   // Also register the same confirm handler for the select-artifact path.
   dispatcher.register(
     "POST",
     "/api/engineer/symphony/plan-loop/:ticketId/select-artifact/confirm",
-    async (context) => {
-      const ticketId = context.params.ticketId;
-      const body = parseBody(context);
-      if (!body) {
-        json(context, 400, { error: "Invalid JSON body" });
-        return;
-      }
-
-      const repoPath = asString(body.repoPath);
-      const loopId = asString(body.loopId);
-      const artifactId = asString(body.artifactId);
-      const artifactSlug = asString(body.artifactSlug);
-      const issueId = asString(body.issueId);
-      const ticketTitle = asString(body.ticketTitle);
-      const outcome = asString(body.outcome);
-
-      if (!repoPath) {
-        json(context, 400, { error: "repoPath is required" });
-        return;
-      }
-
-      const repoResult = tryAssertRepoAllowed(repoPath, getAllowedDirectories());
-      if ("error" in repoResult) {
-        json(context, repoResult.status, { error: repoResult.error });
-        return;
-      }
-      const expandedRepoPath = repoResult.path;
-      const worktreeDir = artifactSlug
-        ? resolveLoopWorktreeDir(expandedRepoPath, artifactSlug)
-        : resolveWorktreeDir(expandedRepoPath, ticketId);
-
-      if (loopId && artifactId) {
-        writeLaunchMetadata(worktreeDir, {
-          issueId: issueId ?? undefined,
-          ticketTitle: ticketTitle ?? undefined,
-          artifactId,
-          loopId,
-        });
-      }
-
-      if (loopId && jobStore) {
-        const jobStatus = outcome === "already-running" ? "RUNNING" : "QUEUED";
-
-        if (outcome === "already-running") {
-          const existing = jobStore.getByLoopId(loopId);
-          if (!existing) {
-            const now = new Date().toISOString();
-            jobStore.upsert({
-              id: loopId,
-              kind: "SYMPHONY_LOOP",
-              loopId,
-              command: "PLAN",
-              ticketId: ticketId ?? undefined,
-              artifactId: artifactId ?? undefined,
-              artifactSlug: artifactSlug ?? undefined,
-              issueId: issueId ?? undefined,
-              repoPath: expandedRepoPath,
-              localRepoPath: expandedRepoPath,
-              worktreeDir,
-              status: jobStatus,
-              startedAt: now,
-              updatedAt: now,
-            });
-          }
-        } else {
-          const now = new Date().toISOString();
-          jobStore.upsert({
-            id: loopId,
-            kind: "SYMPHONY_LOOP",
-            loopId,
-            command: "PLAN",
-            ticketId: ticketId ?? undefined,
-            artifactId: artifactId ?? undefined,
-            artifactSlug: artifactSlug ?? undefined,
-            issueId: issueId ?? undefined,
-            repoPath: expandedRepoPath,
-            localRepoPath: expandedRepoPath,
-            worktreeDir,
-            status: "QUEUED",
-            startedAt: now,
-            updatedAt: now,
-          });
-        }
-      }
-
-      json(context, 200, { ok: true, worktreeDir });
-    }
+    (context) => handleConfirm(context, context.params.ticketId, getAllowedDirectories, jobStore)
   );
 
   // -----------------------------------------------------------------------
@@ -482,7 +365,7 @@ export function registerSymphonyPlanLoopRoutes(
             "Authorization": `Bearer ${apiKey}`,
           },
         });
-        if (!cancelResponse.ok) {
+        if (!cancelResponse.ok && cancelResponse.status !== 404) {
           const errText = await cancelResponse.text().catch(() => "");
           json(context, cancelResponse.status, {
             error: `DB cancel failed: ${errText}`,

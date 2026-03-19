@@ -812,7 +812,7 @@ export class DesktopApplication {
             updatedAt: new Date().toISOString(),
             completedAt: snapshot.completedAt ?? new Date().toISOString(),
           });
-        } else {
+        } else if (!isTerminalJobStatus(snapshot.status)) {
           stillRunning.push(snapshot);
         }
       }
