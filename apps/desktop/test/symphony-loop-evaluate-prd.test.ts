@@ -6,15 +6,12 @@ import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, test } from "node:test";
+import { afterEach, beforeEach, describe, test } from "node:test";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { _forTesting } from "../src/server/operations/symphony-loop.js";
 import { EMPTY_CAPABILITIES, PORT_PROBE_ORDER } from "../src/shared/contracts.js";
 
 const { writePrdArtifact, readEvaluatePrdOutputs } = _forTesting;
-
-// Allow loopback apiBaseUrl in tests via the _forTesting seam, not an env var.
-_forTesting.overrideValidateApiBaseUrl(() => true);
 
 // ---------------------------------------------------------------------------
 // Shared cleanup state
@@ -25,7 +22,16 @@ const serversToClose: DesktopGatewayServer[] = [];
 const eventServersToClose: http.Server[] = [];
 const originalPath = process.env.PATH;
 
+beforeEach(() => {
+  // Allow loopback apiBaseUrl via the _forTesting seam (reset in afterEach).
+  _forTesting.overrideValidateApiBaseUrl(() => true);
+});
+
 afterEach(async () => {
+  // Reset URL validator so the override doesn't leak into other test files
+  // that share this Node.js process.
+  _forTesting.resetValidateApiBaseUrl();
+
   // Restore PATH
   if (originalPath === undefined) {
     delete process.env.PATH;
@@ -89,7 +95,7 @@ function makeGatewayServer(options?: { allowedDirs?: string[]; tmpDir?: string }
 /**
  * Start an event-capture HTTP server on a random port (port 0).
  * Returns the server port and a function that waits for the next matching event.
- * CL_TEST_ALLOW_LOOPBACK_API=1 must be set so the loopback URL passes validation.
+ * Loopback URL validation is bypassed via _forTesting.overrideValidateApiBaseUrl (set in beforeEach).
  */
 async function startEventServer(): Promise<{
   port: number;
@@ -177,7 +183,7 @@ async function startEventServer(): Promise<{
 /** Build a valid EVALUATE_PRD request body. */
 function buildEvaluatePrdBody(overrides?: Partial<Record<string, unknown>>): Record<string, unknown> {
   return {
-    loopId: "00000000-0000-0000-0000-000000000001",
+    loopId: "11111111-0000-0000-0000-000000000001",
     command: "EVALUATE_PRD",
     closedLoopAuthToken: "cl-token",
     apiBaseUrl: "https://api.example.com",
@@ -289,7 +295,7 @@ describe("T-5.2: writePrdArtifact", () => {
     const server = makeGatewayServer();
     await server.start();
 
-    const loopId = "00000000-0000-0000-0000-000000000002";
+    const loopId = "22222222-0000-0000-0000-000000000002";
     const response = await fetch(
       `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
       {
@@ -367,7 +373,7 @@ describe("T-5.2: writePrdArtifact", () => {
     const server = makeGatewayServer({ allowedDirs: [tmpDir] });
     await server.start();
 
-    const loopId = "00000000-0000-0000-0000-000000000006";
+    const loopId = "66666666-0000-0000-0000-000000000006";
     const response = await fetch(
       `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
       {
@@ -474,7 +480,7 @@ describe("T-5.4: Temp dir cleanup after EVALUATE_PRD completes", () => {
     const server = makeGatewayServer();
     await server.start();
 
-    const loopId = "00000000-0000-0000-0000-000000000004";
+    const loopId = "44444444-0000-0000-0000-000000000004";
     const response = await fetch(
       `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
       {
@@ -531,7 +537,7 @@ describe("T-5.5: BINARY_NOT_FOUND when claude not in PATH", () => {
     const server = makeGatewayServer();
     await server.start();
 
-    const loopId = "00000000-0000-0000-0000-000000000005";
+    const loopId = "55555555-0000-0000-0000-000000000005";
     const response = await fetch(
       `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
       {

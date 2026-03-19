@@ -1154,6 +1154,9 @@ async function handleLoopRequest(
         code: "SPAWN_FAILED",
         message: `Cannot open log file: ${msg}`,
       });
+      if (body.command === "DECOMPOSE" || body.command === "EVALUATE_PRD") {
+        fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+      }
       json(context, 500, { error: `Cannot open log file: ${msg}` });
       return;
     }
@@ -1258,6 +1261,9 @@ async function handleLoopRequest(
         code: "SPAWN_FAILED",
         message: msg,
       });
+      if (body.command === "DECOMPOSE" || body.command === "EVALUATE_PRD") {
+        fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+      }
       json(context, 500, { error: `Failed to spawn process: ${msg}` });
       return;
     }
