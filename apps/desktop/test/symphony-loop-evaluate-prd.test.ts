@@ -274,8 +274,8 @@ describe("T-5.2: writePrdArtifact", () => {
     assert.equal(content, "Fallback PRD content");
   });
 
-  test("prompt without repo contains 'Activate judges:run-judges skill' and CLOSEDLOOP_WORKDIR= but not REPO_PATH=", async () => {
-    // Verify evaluate-prd-prompt.txt contents when no repo is provided.
+  test("prompt without repo contains skill --workdir runDir but not REPO_PATH=", async () => {
+    // Verify evaluate-prd-prompt.txt matches harness-agent EVALUATE_PRD when no target repo.
     const tmpDir = makeTempDir();
     const fakeBin = path.join(tmpDir, "fake-bin");
     await fs.mkdir(fakeBin, { recursive: true });
@@ -334,16 +334,10 @@ describe("T-5.2: writePrdArtifact", () => {
     );
 
     assert.ok(
-      promptContent.includes("Activate judges:run-judges skill --artifact-type prd."),
-      `Prompt should contain skill invocation, got: ${promptContent}`
-    );
-    assert.ok(
-      promptContent.includes("CLOSEDLOOP_WORKDIR="),
-      `Prompt should contain CLOSEDLOOP_WORKDIR=, got: ${promptContent}`
-    );
-    assert.ok(
-      promptContent.includes("No repository is linked to this evaluation."),
-      `Prompt should say no repo linked, got: ${promptContent}`
+      promptContent.includes(
+        `Activate judges:run-judges skill --artifact-type prd --workdir ${claudeWorkDir}.`
+      ),
+      `Prompt should contain skill with --workdir runDir, got: ${promptContent}`
     );
     assert.ok(
       !promptContent.includes("REPO_PATH"),
@@ -351,7 +345,7 @@ describe("T-5.2: writePrdArtifact", () => {
     );
   });
 
-  test("prompt with repo contains REPO_PATH= and not 'No repository is linked'", async () => {
+  test("prompt with repo contains --workdir runDir and REPO_PATH=", async () => {
     // Use a real local repo directory to test repo-present prompt
     const tmpDir = makeTempDir();
     const fakeBin = path.join(tmpDir, "fake-bin");
@@ -419,12 +413,14 @@ describe("T-5.2: writePrdArtifact", () => {
       `Prompt should contain REPO_PATH=, got: ${promptContent}`
     );
     assert.ok(
-      promptContent.includes("Activate judges:run-judges skill --artifact-type prd."),
-      `Prompt should contain skill invocation, got: ${promptContent}`
+      promptContent.includes(
+        `Activate judges:run-judges skill --artifact-type prd --workdir ${claudeWorkDir}.`
+      ),
+      `Prompt should contain skill with --workdir runDir, got: ${promptContent}`
     );
     assert.ok(
-      promptContent.includes("CLOSEDLOOP_WORKDIR="),
-      `Prompt should contain CLOSEDLOOP_WORKDIR=, got: ${promptContent}`
+      promptContent.includes(`REPO_PATH=${repoDir}`),
+      `Prompt should point REPO_PATH at local repo root, got: ${promptContent}`
     );
   });
 });

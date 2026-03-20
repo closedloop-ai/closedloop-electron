@@ -1226,15 +1226,15 @@ async function handleLoopRequest(
         await fs.writeFile(promptFile, decomposePrompt);
         child = spawnFromPromptFile(promptFile);
       } else if (body.command === "EVALUATE_PRD") {
-        // CLOSEDLOOP_WORKDIR appears in both spawnEnv and prompt text intentionally:
-        // spawnEnv makes it available to skills; prompt text tells the model where to look.
-        const repoLine = expandedRepoPath
-          ? `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`
-          : `No repository is linked to this evaluation.\n`;
-        const evaluatePrdPrompt =
-          `Activate judges:run-judges skill --artifact-type prd.\n` +
-          `CLOSEDLOOP_WORKDIR=${claudeWorkDir} (contains prd.md).\n` +
-          repoLine;
+        // Match ECS harness-agent EVALUATE_PRD: prd.md lives in runDir; skill gets --workdir runDir;
+        // REPO_PATH only when a target repo is linked (expandedRepoPath). spawnEnv still sets
+        // CLOSEDLOOP_WORKDIR for skills/tools that read the env.
+        const runDir = claudeWorkDir;
+        let evaluatePrdPrompt =
+          `Activate judges:run-judges skill --artifact-type prd --workdir ${runDir}.\n`;
+        if (expandedRepoPath) {
+          evaluatePrdPrompt += `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`;
+        }
         const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
         await fs.writeFile(promptFile, evaluatePrdPrompt);
         child = spawnFromPromptFile(promptFile);
