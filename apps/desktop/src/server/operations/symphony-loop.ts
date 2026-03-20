@@ -1126,27 +1126,6 @@ async function handleLoopRequest(
         PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
       };
 
-      // Shared args for headless Claude invocations that read prompt from stdin file.
-      const headlessClaudeArgs = [
-        "-p", "-",
-        "--output-format", "stream-json",
-        "--verbose",
-        "--allowedTools",
-        "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
-        "--max-turns", "200",
-      ];
-      const spawnFromPromptFile = (promptFile: string): ReturnType<typeof spawn> => {
-        const pipeline = buildClaudePipeline(headlessClaudeArgs, claudeWorkDir, promptFile);
-        const proc = spawn(pipeline.cmd, pipeline.args, {
-          cwd: claudeWorkDir,
-          detached: true,
-          stdio: ["ignore", logFd, logFd],
-          env: spawnEnv,
-        });
-        proc.unref();
-        return proc;
-      };
-
       if (body.command === "DECOMPOSE") {
         // DECOMPOSE: write prompt to file and pass via stdin to avoid E2BIG
         const prdContent = readTextFile(path.join(claudeWorkDir, "prd.md")) ?? "";
