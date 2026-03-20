@@ -9,6 +9,7 @@ import type {
   OperationDispatcher,
   OperationRequestContext,
 } from "../operation-dispatcher.js";
+import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { findPluginScript, findPluginVersions, getPluginCacheRoot } from "./plugin-cache.js";
 import {
@@ -457,17 +458,6 @@ async function writeArtifactsForExecuteOrAmend(
 // Per-command output reading
 // ---------------------------------------------------------------------------
 
-function readJsonFile(filePath: string): unknown | null {
-  try {
-    if (!existsSync(filePath)) {
-      return null;
-    }
-    return JSON.parse(readFileSync(filePath, "utf-8"));
-  } catch {
-    return null;
-  }
-}
-
 function readTextFile(filePath: string): string | null {
   try {
     if (!existsSync(filePath)) {
@@ -480,11 +470,11 @@ function readTextFile(filePath: string): string | null {
 }
 
 function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
-  const plan = readJsonFile(path.join(claudeWorkDir, "plan.json"));
+  const plan = readJsonFileSync(path.join(claudeWorkDir, "plan.json"));
   const openQuestions = readTextFile(
     path.join(claudeWorkDir, "open-questions.md")
   );
-  const judges = readJsonFile(path.join(claudeWorkDir, "judges.json"));
+  const judges = readJsonFileSync(path.join(claudeWorkDir, "judges.json"));
 
   return {
     plan: plan ?? undefined,
@@ -494,10 +484,10 @@ function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
 }
 
 function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
-  const executionResult = readJsonFile(
+  const executionResult = readJsonFileSync(
     path.join(claudeWorkDir, "execution-result.json")
   );
-  const codeJudges = readJsonFile(
+  const codeJudges = readJsonFileSync(
     path.join(claudeWorkDir, "code-judges.json")
   );
 
@@ -508,7 +498,7 @@ function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
 }
 
 function readDecomposeOutputs(workDir: string): Record<string, unknown> {
-  const features = readJsonFile(path.join(workDir, "features.json"));
+  const features = readJsonFileSync(path.join(workDir, "features.json"));
   return { features: features ?? undefined };
 }
 
@@ -669,6 +659,7 @@ async function handleProcessCompletion(
   apiBaseUrl: string,
   worktreeDir: string | null,
   claudeWorkDir: string,
+  usedTempDir: boolean,
   jobStore?: JobStore
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
@@ -818,8 +809,8 @@ async function handleProcessCompletion(
     }
   }
 
-  // Clean up DECOMPOSE / EVALUATE_PRD temp directory after all reads and uploads are complete
-  if (command === "DECOMPOSE" || command === "EVALUATE_PRD") {
+  // Clean up temp claude workdir after all reads and uploads are complete
+  if (usedTempDir) {
     fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
   }
 }
@@ -918,9 +909,11 @@ async function handleLoopRequest(
 
     let worktreeDir: string | null = null;
     let claudeWorkDir: string;
+    let usedTempDir = false;
 
     if (body.command === "DECOMPOSE") {
       // DECOMPOSE: use temp dir, no worktree needed
+      usedTempDir = true;
       const tmpDir = path.join(
         os.tmpdir(),
         `symphony-decompose-${body.loopId.slice(0, 8)}`
@@ -931,6 +924,7 @@ async function handleLoopRequest(
     } else if (body.command === "EVALUATE_PRD") {
       // EVALUATE_PRD: use temp dir, no worktree needed.
       // Temp dir is intentionally exempt from assertPathAllowed.
+      usedTempDir = true;
       const tmpDir = path.join(
         os.tmpdir(),
         `symphony-evaluate-prd-${body.loopId.slice(0, 8)}`
@@ -1046,6 +1040,10 @@ async function handleLoopRequest(
       return;
     }
 
+    const cleanupTempClaudeWorkDir = (): void => {
+      fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+    };
+
     // Pre-flight: verify required binary exists BEFORE posting 'started' event.
     // PLAN and EXECUTE use run-loop.sh; REQUEST_CHANGES and DECOMPOSE use claude CLI directly.
     const usesRunLoop = body.command === "PLAN" || body.command === "EXECUTE";
@@ -1066,8 +1064,8 @@ async function handleLoopRequest(
             message: "claude CLI not found in PATH",
           }
         );
-        if (body.command === "DECOMPOSE" || body.command === "EVALUATE_PRD") {
-          fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+        if (usedTempDir) {
+          cleanupTempClaudeWorkDir();
         }
         json(context, 500, { error: "claude CLI not found in PATH" });
         return;
@@ -1111,8 +1109,8 @@ async function handleLoopRequest(
         code: "SPAWN_FAILED",
         message: `Cannot open log file: ${msg}`,
       });
-      if (body.command === "DECOMPOSE" || body.command === "EVALUATE_PRD") {
-        fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+      if (usedTempDir) {
+        cleanupTempClaudeWorkDir();
       }
       json(context, 500, { error: `Cannot open log file: ${msg}` });
       return;
@@ -1247,8 +1245,8 @@ async function handleLoopRequest(
         code: "SPAWN_FAILED",
         message: msg,
       });
-      if (body.command === "DECOMPOSE" || body.command === "EVALUATE_PRD") {
-        fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+      if (usedTempDir) {
+        cleanupTempClaudeWorkDir();
       }
       json(context, 500, { error: `Failed to spawn process: ${msg}` });
       return;
@@ -1263,9 +1261,15 @@ async function handleLoopRequest(
       }
       completionHandled = true;
       loopLog(body.loopId, `onceComplete fired, code=${code}`);
-      handleProcessCompletion(code, body, apiBaseUrl, worktreeDir, claudeWorkDir, jobStore).catch(
-        (err) => loopError(body.loopId, "Completion handler error:", err)
-      );
+      handleProcessCompletion(
+        code,
+        body,
+        apiBaseUrl,
+        worktreeDir,
+        claudeWorkDir,
+        usedTempDir,
+        jobStore
+      ).catch((err) => loopError(body.loopId, "Completion handler error:", err));
     };
 
     // Prevent unhandled 'error' events (e.g. ENOENT if binary vanishes

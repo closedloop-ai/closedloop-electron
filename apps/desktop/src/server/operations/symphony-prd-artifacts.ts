@@ -1,22 +1,11 @@
-import { existsSync, readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { readJsonFileSync } from "../read-json-file-sync.js";
 
 /** Minimal artifact shape for PRD resolution (DECOMPOSE / EVALUATE_PRD). */
 export interface LoopPrdArtifact {
   type: string;
   content: string;
-}
-
-function readJsonFile(filePath: string): unknown | null {
-  try {
-    if (!existsSync(filePath)) {
-      return null;
-    }
-    return JSON.parse(readFileSync(filePath, "utf-8"));
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -48,6 +37,6 @@ export async function writePrdArtifact(
 }
 
 export function readEvaluatePrdOutputs(workDir: string): Record<string, unknown> {
-  const prdJudges = readJsonFile(path.join(workDir, "prd-judges.json"));
+  const prdJudges = readJsonFileSync(path.join(workDir, "prd-judges.json"));
   return { prdJudges: prdJudges ?? undefined };
 }
