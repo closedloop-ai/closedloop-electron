@@ -29,6 +29,14 @@ import {
 type LoopCommand = "PLAN" | "EXECUTE" | "REQUEST_CHANGES" | "DECOMPOSE" | "EVALUATE_PRD";
 
 const VALID_COMMANDS = new Set<LoopCommand>(["PLAN", "EXECUTE", "REQUEST_CHANGES", "DECOMPOSE", "EVALUATE_PRD"]);
+type RepoRequirement = "REQUIRED" | "OPTIONAL" | "NOT_REQUIRED";
+const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
+  PLAN: "REQUIRED",
+  EXECUTE: "REQUIRED",
+  REQUEST_CHANGES: "REQUIRED",
+  EVALUATE_PRD: "OPTIONAL",
+  DECOMPOSE: "NOT_REQUIRED",
+};
 
 interface LoopArtifact {
   id?: string;
@@ -841,6 +849,7 @@ async function handleLoopRequest(
   }
 
   const body = rawBody as unknown as LoopRequestBody;
+  const repoRequirement = REPO_REQUIREMENT_BY_COMMAND[body.command] ?? "NOT_REQUIRED";
 
   if (!body.loopId || !body.command || !body.closedLoopAuthToken) {
     json(context, 400, {
@@ -879,31 +888,63 @@ async function handleLoopRequest(
     const allowedDirs = getAllowedDirectories();
     let expandedRepoPath: string | null = null;
 
-    if (body.localRepoPath) {
+    if (repoRequirement !== "NOT_REQUIRED" && body.localRepoPath) {
       // localRepoPath takes precedence over repo.fullName lookup when present
-      const repoResult = tryAssertRepoAllowed(body.localRepoPath, allowedDirs);
-      if ("error" in repoResult) {
-        json(context, repoResult.status, { error: repoResult.error });
-        return;
+      try {
+        const repoResult = tryAssertRepoAllowed(body.localRepoPath, allowedDirs);
+        if ("error" in repoResult) {
+          if (repoRequirement === "REQUIRED") {
+            json(context, repoResult.status, { error: repoResult.error });
+            return;
+          }
+          loopLog(
+            body.loopId,
+            `Ignoring localRepoPath for ${body.command}: ${repoResult.error}`
+          );
+        } else {
+          expandedRepoPath = repoResult.path;
+          loopLog(body.loopId, `Using localRepoPath: ${expandedRepoPath}`);
+        }
+      } catch (repoPathError) {
+        if (repoRequirement === "REQUIRED") {
+          throw repoPathError;
+        }
+        loopLog(
+          body.loopId,
+          `Ignoring localRepoPath for ${body.command} after resolution error: ${repoPathError instanceof Error ? repoPathError.message : String(repoPathError)}`
+        );
       }
-      expandedRepoPath = repoResult.path;
-      loopLog(body.loopId, `Using localRepoPath: ${expandedRepoPath}`);
-    } else if (body.repo?.fullName) {
+    } else if (repoRequirement !== "NOT_REQUIRED" && body.repo?.fullName) {
       expandedRepoPath = findLocalRepo(body.repo.fullName, allowedDirs);
       if (!expandedRepoPath) {
-        json(context, 404, {
-          error: `Repository not found locally: ${body.repo.fullName}`,
-        });
-        return;
-      }
-      try {
-        assertPathAllowed(expandedRepoPath, allowedDirs);
-      } catch (err) {
-        if (err instanceof DirectoryNotAllowedError) {
-          json(context, 403, { error: "Repository path not allowed" });
+        if (repoRequirement === "REQUIRED") {
+          json(context, 404, {
+            error: `Repository not found locally: ${body.repo.fullName}`,
+          });
           return;
         }
-        throw err;
+        loopLog(
+          body.loopId,
+          `Ignoring repo.fullName for ${body.command}: not found locally (${body.repo.fullName})`
+        );
+      } else {
+        try {
+          assertPathAllowed(expandedRepoPath, allowedDirs);
+        } catch (err) {
+          if (err instanceof DirectoryNotAllowedError) {
+            if (repoRequirement === "REQUIRED") {
+              json(context, 403, { error: "Repository path not allowed" });
+              return;
+            }
+            loopLog(
+              body.loopId,
+              `Ignoring repo.fullName for ${body.command}: repository path not allowed (${expandedRepoPath})`
+            );
+            expandedRepoPath = null;
+          } else {
+            throw err;
+          }
+        }
       }
     }
 
@@ -918,6 +959,7 @@ async function handleLoopRequest(
         os.tmpdir(),
         `symphony-decompose-${body.loopId.slice(0, 8)}`
       );
+      await fs.rm(tmpDir, { recursive: true, force: true });
       await fs.mkdir(tmpDir, { recursive: true });
       claudeWorkDir = tmpDir;
       await writePrdArtifact(claudeWorkDir, body.artifacts, body.prompt);
@@ -929,15 +971,24 @@ async function handleLoopRequest(
         os.tmpdir(),
         `symphony-evaluate-prd-${body.loopId.slice(0, 8)}`
       );
+      await fs.rm(tmpDir, { recursive: true, force: true });
       await fs.mkdir(tmpDir, { recursive: true });
       claudeWorkDir = tmpDir;
       await writePrdArtifact(claudeWorkDir, body.artifacts, body.prompt);
-    } else if (!expandedRepoPath) {
+    } else if (repoRequirement === "REQUIRED" && !expandedRepoPath) {
       json(context, 400, {
         error: "Repository required for PLAN, EXECUTE, and REQUEST_CHANGES commands",
       });
       return;
     } else if (body.command === "PLAN" || body.command === "EXECUTE" || body.command === "REQUEST_CHANGES") {
+      const repoPath = expandedRepoPath;
+      if (!repoPath) {
+        json(context, 400, {
+          error: "Repository required for PLAN, EXECUTE, and REQUEST_CHANGES commands",
+        });
+        return;
+      }
+
       // Worktree keyed by artifact slug (e.g., symphony/PLAN-5).
       // PLAN always creates fresh; EXECUTE/REQUEST_CHANGES reuse.
       // Sanitize slug the same way we sanitize loopId to prevent path traversal.
@@ -949,17 +1000,17 @@ async function handleLoopRequest(
         ? `symphony/${sanitizedSlug}`
         : `symphony/loop-${pickStableId(body)}`;
 
-      worktreeDir = resolveLoopWorktreeDir(expandedRepoPath, worktreeKey);
+      worktreeDir = resolveLoopWorktreeDir(repoPath, worktreeKey);
 
       if (body.command === "PLAN") {
         // PLAN always starts fresh — remove stale worktree if it exists.
         // PLAN has requiresParent: false, so it must not inherit prior state.
-        const staleWorktree = findWorktreeForBranch(expandedRepoPath, branchName);
+        const staleWorktree = findWorktreeForBranch(repoPath, branchName);
         if (staleWorktree) {
           loopLog(body.loopId, `Removing stale worktree for fresh PLAN: ${staleWorktree}`);
           try {
             execSync(`git worktree remove --force ${shellEscape(staleWorktree)}`, {
-              cwd: expandedRepoPath,
+              cwd: repoPath,
               stdio: "pipe",
               timeout: 15_000,
             });
@@ -969,14 +1020,14 @@ async function handleLoopRequest(
             await fs.rm(staleWorktree, { recursive: true, force: true });
             // Prune stale worktree entries from git's tracking
             try {
-              execSync("git worktree prune", { cwd: expandedRepoPath, stdio: "pipe", timeout: 10_000 });
+              execSync("git worktree prune", { cwd: repoPath, stdio: "pipe", timeout: 10_000 });
             } catch {
               // Best-effort
             }
           }
         }
         await ensureWorktree(
-          expandedRepoPath,
+          repoPath,
           worktreeDir,
           branchName,
           body.repo?.branch ?? "main"
@@ -985,14 +1036,14 @@ async function handleLoopRequest(
       } else {
         // EXECUTE/REQUEST_CHANGES: reuse existing worktree.
         // Try artifact slug first, then parentLoopId fallback, then create new.
-        const existingWorktree = findWorktreeForBranch(expandedRepoPath, branchName);
+        const existingWorktree = findWorktreeForBranch(repoPath, branchName);
         if (existingWorktree) {
           worktreeDir = existingWorktree;
           loopLog(body.loopId, `Reusing worktree via artifact slug: ${worktreeDir} (branch: ${branchName})`);
         } else if (body.parentLoopId) {
           // Fallback: try parent's loopId-based branch (pre-slug deployments or missing slug)
           const parentBranch = `symphony/loop-${slugifyLoopId(body.parentLoopId)}`;
-          const parentWorktree = findWorktreeForBranch(expandedRepoPath, parentBranch);
+          const parentWorktree = findWorktreeForBranch(repoPath, parentBranch);
           if (parentWorktree) {
             worktreeDir = parentWorktree;
             loopLog(body.loopId, `Reusing worktree via parentLoopId fallback: ${worktreeDir} (branch: ${parentBranch})`);
@@ -1000,9 +1051,9 @@ async function handleLoopRequest(
         }
         if (!worktreeDir || !existsSync(worktreeDir)) {
           // No existing worktree found — create new
-          worktreeDir = resolveLoopWorktreeDir(expandedRepoPath, worktreeKey);
+          worktreeDir = resolveLoopWorktreeDir(repoPath, worktreeKey);
           await ensureWorktree(
-            expandedRepoPath,
+            repoPath,
             worktreeDir,
             branchName,
             body.repo?.branch ?? "main"

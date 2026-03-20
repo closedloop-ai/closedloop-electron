@@ -228,6 +228,123 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
     assert.notEqual(response.status, 400, `Expected non-400, got ${response.status}`);
   });
 
+  test("EVALUATE_PRD ignores stale repo.fullName and still proceeds", async () => {
+    const tmpDir = makeTempDir();
+    const fakeBin = path.join(tmpDir, "fake-bin");
+    await fs.mkdir(fakeBin, { recursive: true });
+    const eventSrv = await startEventServer();
+    const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+    const stubScript = [
+      "#!/bin/sh",
+      'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
+      "exit 0",
+    ].join("\n");
+    await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
+    process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+
+    const server = makeGatewayServer({
+      allowedDirs: [tmpDir],
+      getApiOrigin: () => apiBaseUrl,
+    });
+    await server.start();
+
+    const loopId = "77777777-0000-0000-0000-000000000007";
+    const response = await fetch(
+      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-desktop-gateway-token": "test-token",
+        },
+        body: JSON.stringify({
+          loopId,
+          command: "EVALUATE_PRD",
+          closedLoopAuthToken: "cl-token",
+          apiBaseUrl,
+          artifacts: [{ type: "PRD", content: "PRD content here" }],
+          repo: { fullName: "org/missing-repo", branch: "main" },
+        }),
+      }
+    );
+
+    assert.equal(response.status, 200, `Expected 200, got ${response.status}`);
+
+    const claudeWorkDir = path.join(os.tmpdir(), `symphony-evaluate-prd-${loopId.slice(0, 8)}`);
+    const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
+    assert.ok(existsSync(promptFile), `Prompt file should exist at ${promptFile}`);
+    const promptContent = await fs.readFile(promptFile, "utf-8");
+    assert.ok(
+      !promptContent.includes("REPO_PATH"),
+      `Prompt should not include REPO_PATH for stale repo metadata, got: ${promptContent}`
+    );
+
+    await eventSrv.waitForEvent(
+      (b) => b.type === "completed" || b.type === "error",
+      15_000
+    );
+  });
+
+  test("EVALUATE_PRD ignores disallowed localRepoPath and still proceeds", async () => {
+    const tmpDir = makeTempDir();
+    const fakeBin = path.join(tmpDir, "fake-bin");
+    await fs.mkdir(fakeBin, { recursive: true });
+    const eventSrv = await startEventServer();
+    const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+    const stubScript = [
+      "#!/bin/sh",
+      'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
+      "exit 0",
+    ].join("\n");
+    await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
+    process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+
+    const disallowedRepoPath = path.join(tmpDir, "..", "outside-allowed-dir");
+    const server = makeGatewayServer({
+      allowedDirs: [tmpDir],
+      getApiOrigin: () => apiBaseUrl,
+    });
+    await server.start();
+
+    const loopId = "88888888-0000-0000-0000-000000000008";
+    const response = await fetch(
+      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-desktop-gateway-token": "test-token",
+        },
+        body: JSON.stringify({
+          loopId,
+          command: "EVALUATE_PRD",
+          closedLoopAuthToken: "cl-token",
+          apiBaseUrl,
+          artifacts: [{ type: "PRD", content: "PRD content here" }],
+          localRepoPath: disallowedRepoPath,
+        }),
+      }
+    );
+
+    assert.equal(response.status, 200, `Expected 200, got ${response.status}`);
+
+    const claudeWorkDir = path.join(os.tmpdir(), `symphony-evaluate-prd-${loopId.slice(0, 8)}`);
+    const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
+    assert.ok(existsSync(promptFile), `Prompt file should exist at ${promptFile}`);
+    const promptContent = await fs.readFile(promptFile, "utf-8");
+    assert.ok(
+      !promptContent.includes("REPO_PATH"),
+      `Prompt should not include REPO_PATH for disallowed localRepoPath, got: ${promptContent}`
+    );
+
+    await eventSrv.waitForEvent(
+      (b) => b.type === "completed" || b.type === "error",
+      15_000
+    );
+  });
+
   test("INVALID_COMMAND returns 400", async () => {
     const server = makeGatewayServer();
     await server.start();
