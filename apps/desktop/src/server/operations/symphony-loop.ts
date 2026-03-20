@@ -1197,29 +1197,34 @@ async function handleLoopRequest(
         PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
       };
 
+      // Shared args for headless Claude invocations that read prompt from stdin file.
+      const headlessClaudeArgs = [
+        "-p", "-",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--allowedTools",
+        "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
+        "--max-turns", "200",
+      ];
+      const spawnFromPromptFile = (promptFile: string): ReturnType<typeof spawn> => {
+        const pipeline = buildClaudePipeline(headlessClaudeArgs, claudeWorkDir, promptFile);
+        const proc = spawn(pipeline.cmd, pipeline.args, {
+          cwd: claudeWorkDir,
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: spawnEnv,
+        });
+        proc.unref();
+        return proc;
+      };
+
       if (body.command === "DECOMPOSE") {
         // DECOMPOSE: write prompt to file and pass via stdin to avoid E2BIG
         const prdContent = readTextFile(path.join(claudeWorkDir, "prd.md")) ?? "";
         const decomposePrompt = body.prompt ?? `Decompose the following PRD into features:\n\n${prdContent}`;
         const promptFile = path.join(claudeWorkDir, "decompose-prompt.txt");
         await fs.writeFile(promptFile, decomposePrompt);
-
-        const claudeArgs = [
-          "-p", "-",
-          "--output-format", "stream-json",
-          "--verbose",
-          "--allowedTools",
-          "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
-          "--max-turns", "200",
-        ];
-        const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir, promptFile);
-        child = spawn(pipeline.cmd, pipeline.args, {
-          cwd: claudeWorkDir,
-          detached: true,
-          stdio: ["ignore", logFd, logFd],
-          env: spawnEnv,
-        });
-        child.unref();
+        child = spawnFromPromptFile(promptFile);
       } else if (body.command === "EVALUATE_PRD") {
         // CLOSEDLOOP_WORKDIR appears in both spawnEnv and prompt text intentionally:
         // spawnEnv makes it available to skills; prompt text tells the model where to look.
@@ -1232,23 +1237,7 @@ async function handleLoopRequest(
           repoLine;
         const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
         await fs.writeFile(promptFile, evaluatePrdPrompt);
-
-        const claudeArgs = [
-          "-p", "-",
-          "--output-format", "stream-json",
-          "--verbose",
-          "--allowedTools",
-          "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
-          "--max-turns", "200",
-        ];
-        const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir, promptFile);
-        child = spawn(pipeline.cmd, pipeline.args, {
-          cwd: claudeWorkDir,
-          detached: true,
-          stdio: ["ignore", logFd, logFd],
-          env: spawnEnv,
-        });
-        child.unref();
+        child = spawnFromPromptFile(promptFile);
       } else if (body.command === "REQUEST_CHANGES") {
         // REQUEST_CHANGES: use claude directly with /code:amend-plan.
         // Must use -p (headless mode) so --allowedTools grants full permission

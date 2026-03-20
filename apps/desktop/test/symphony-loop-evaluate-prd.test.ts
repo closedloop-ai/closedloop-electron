@@ -317,18 +317,22 @@ describe("T-5.2: writePrdArtifact", () => {
 
     assert.equal(response.status, 200, `Expected 200, got ${response.status}`);
 
+    // Read the prompt file before waiting for the completed event.
+    // The file is written before the HTTP 200 response is sent, so it is safe
+    // to read here. After the completed event fires, production code calls
+    // fs.rm(claudeWorkDir) fire-and-forget, which races with async readFile.
+    const claudeWorkDir = path.join(os.tmpdir(), `symphony-evaluate-prd-${loopId.slice(0, 8)}`);
+    const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
+
+    assert.ok(existsSync(promptFile), `Prompt file should exist at ${promptFile}`);
+    const promptContent = await fs.readFile(promptFile, "utf-8");
+
     // Wait for completed or error event
     await eventSrv.waitForEvent(
       (b) => b.type === "completed" || b.type === "error",
       15_000
     );
 
-    // Check the prompt file was written with expected contents
-    const claudeWorkDir = path.join(os.tmpdir(), `symphony-evaluate-prd-${loopId.slice(0, 8)}`);
-    const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
-
-    assert.ok(existsSync(promptFile), `Prompt file should exist at ${promptFile}`);
-    const promptContent = await fs.readFile(promptFile, "utf-8");
     assert.ok(
       promptContent.includes("Activate judges:run-judges skill --artifact-type prd."),
       `Prompt should contain skill invocation, got: ${promptContent}`
@@ -395,16 +399,21 @@ describe("T-5.2: writePrdArtifact", () => {
 
     assert.equal(response.status, 200, `Expected 200, got ${response.status}`);
 
-    await eventSrv.waitForEvent(
-      (b) => b.type === "completed" || b.type === "error",
-      15_000
-    );
-
+    // Read the prompt file before waiting for the completed event.
+    // The file is written before the HTTP 200 response is sent, so it is safe
+    // to read here. After the completed event fires, production code calls
+    // fs.rm(claudeWorkDir) fire-and-forget, which races with async readFile.
     const claudeWorkDir = path.join(os.tmpdir(), `symphony-evaluate-prd-${loopId.slice(0, 8)}`);
     const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
 
     assert.ok(existsSync(promptFile), `Prompt file should exist at ${promptFile}`);
     const promptContent = await fs.readFile(promptFile, "utf-8");
+
+    await eventSrv.waitForEvent(
+      (b) => b.type === "completed" || b.type === "error",
+      15_000
+    );
+
     assert.ok(
       promptContent.includes("REPO_PATH="),
       `Prompt should contain REPO_PATH=, got: ${promptContent}`
@@ -507,10 +516,15 @@ describe("T-5.4: Temp dir cleanup after EVALUATE_PRD completes", () => {
       15_000
     );
 
-    // Give fs.rm a brief moment to complete (it's called with .catch from handleProcessCompletion)
-    await new Promise<void>((resolve) => setTimeout(resolve, 300));
-
     const claudeWorkDir = path.join(os.tmpdir(), `symphony-evaluate-prd-${loopId.slice(0, 8)}`);
+
+    // Poll for fs.rm completion (fire-and-forget in handleProcessCompletion) rather than
+    // sleeping a fixed 300ms, which is flaky on loaded CI hosts.
+    const deadline = Date.now() + 3_000;
+    while (existsSync(claudeWorkDir) && Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    }
+
     assert.equal(
       existsSync(claudeWorkDir),
       false,
