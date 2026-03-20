@@ -1146,21 +1146,7 @@ async function handleLoopRequest(
       const staleWorktree = findWorktreeForBranch(expandedRepoPath, branchName);
       if (staleWorktree) {
         loopLog(body.loopId, `Removing stale worktree for fresh GENERATE_PRD: ${staleWorktree}`);
-        try {
-          execSync(`git worktree remove --force ${shellEscape(staleWorktree)}`, {
-            cwd: expandedRepoPath,
-            stdio: "pipe",
-            timeout: 15_000,
-          });
-        } catch (wtErr) {
-          loopLog(body.loopId, `git worktree remove failed, falling back to fs.rm: ${wtErr instanceof Error ? wtErr.message : wtErr}`);
-          await fs.rm(staleWorktree, { recursive: true, force: true });
-          try {
-            execSync("git worktree prune", { cwd: expandedRepoPath, stdio: "pipe", timeout: 10_000 });
-          } catch {
-            // Best-effort
-          }
-        }
+        await cleanupGeneratePrdWorktree(staleWorktree, expandedRepoPath, body.loopId);
       }
 
       await ensureWorktree(
@@ -1175,6 +1161,7 @@ async function handleLoopRequest(
         assertPathAllowed(worktreeDir, allowedDirs);
       } catch (e) {
         if (e instanceof DirectoryNotAllowedError) {
+          await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, body.loopId);
           json(context, 403, { error: `Worktree path not allowed: ${worktreeDir}` });
           return;
         }

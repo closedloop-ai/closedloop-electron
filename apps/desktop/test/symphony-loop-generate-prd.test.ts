@@ -670,11 +670,15 @@ test("GENERATE_PRD: cleans up worktree on failure (exit code 1)", async () => {
 
   assert.equal(response.status, 200);
 
-  // Wait for the error event (indicates process completion on failure path)
-  await mock.waitForRequest("events");
-
-  // Give cleanup a moment to run (it runs after the error event is posted)
-  await new Promise((resolve) => setTimeout(resolve, 1000));
+  // Poll until cleanup completes (worktree directory removed) instead of relying
+  // on a fragile waitForRequest("events") + fixed sleep -- the first "events" match
+  // is the "started" event, not the "error" event, so cleanup hasn't run yet.
+  const pollDeadline = Date.now() + 15_000;
+  while (Date.now() < pollDeadline) {
+    const entries = await fs.readdir(worktreeParent).catch(() => []);
+    if (!entries.some((e) => e.includes("generate-prd"))) break;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
 
   // Verify no stale worktree entries remain
   const worktreeList = execSync("git worktree list --porcelain", {
