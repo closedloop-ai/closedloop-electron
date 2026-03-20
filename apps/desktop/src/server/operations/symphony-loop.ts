@@ -26,15 +26,29 @@ import {
 // Types
 // ---------------------------------------------------------------------------
 
-type LoopCommand = "PLAN" | "EXECUTE" | "REQUEST_CHANGES" | "DECOMPOSE" | "EVALUATE_PRD";
+type LoopCommand =
+  | "PLAN"
+  | "EXECUTE"
+  | "REQUEST_CHANGES"
+  | "DECOMPOSE"
+  | "EVALUATE_PRD"
+  | "GENERATE_PRD";
 
-const VALID_COMMANDS = new Set<LoopCommand>(["PLAN", "EXECUTE", "REQUEST_CHANGES", "DECOMPOSE", "EVALUATE_PRD"]);
+const VALID_COMMANDS = new Set<LoopCommand>([
+  "PLAN",
+  "EXECUTE",
+  "REQUEST_CHANGES",
+  "DECOMPOSE",
+  "EVALUATE_PRD",
+  "GENERATE_PRD",
+]);
 type RepoRequirement = "REQUIRED" | "OPTIONAL" | "NOT_REQUIRED";
 const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
   PLAN: "REQUIRED",
   EXECUTE: "REQUIRED",
   REQUEST_CHANGES: "REQUIRED",
   EVALUATE_PRD: "OPTIONAL",
+  GENERATE_PRD: "REQUIRED",
   DECOMPOSE: "NOT_REQUIRED",
 };
 
@@ -387,6 +401,35 @@ function findWorktreeForBranch(
 // PLAN always creates a fresh worktree. EXECUTE/REQUEST_CHANGES reuse via
 // findWorktreeForBranch(parentBranchName) which matches the specific parent.
 
+/**
+ * Remove a GENERATE_PRD worktree via git worktree remove, falling back to
+ * fs.rm + git worktree prune. Used from both handleProcessCompletion and
+ * early-return cleanup in handleLoopRequest.
+ */
+async function cleanupGeneratePrdWorktree(
+  worktreeDir: string,
+  expandedRepoPath: string,
+  loopId?: string
+): Promise<void> {
+  try {
+    execSync(`git worktree remove --force ${shellEscape(worktreeDir)}`, {
+      cwd: expandedRepoPath,
+      stdio: "pipe",
+      timeout: 15_000,
+    });
+  } catch {
+    if (loopId) {
+      loopLog(loopId, `git worktree remove failed for GENERATE_PRD, falling back to fs.rm`);
+    }
+    await fs.rm(worktreeDir, { recursive: true, force: true });
+    try {
+      execSync("git worktree prune", { cwd: expandedRepoPath, stdio: "pipe", timeout: 10_000 });
+    } catch {
+      // Best-effort
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Per-command artifact writing
 // ---------------------------------------------------------------------------
@@ -462,6 +505,43 @@ async function writeArtifactsForExecuteOrAmend(
   }
 }
 
+/**
+ * Write context pack files for GENERATE_PRD command.
+ * Mirrors writeContextPackFiles in harness-agent.mjs (lines 744-816).
+ * Files go under worktreeDir/.claude/context/ (NOT claudeWorkDir).
+ */
+async function writeArtifactsForGeneratePrd(
+  worktreeDir: string,
+  artifacts: LoopArtifact[],
+  prompt: string,
+  repo?: unknown
+): Promise<void> {
+  const contextDir = path.join(worktreeDir, ".claude", "context");
+  const artifactsDir = path.join(contextDir, "artifacts");
+  await fs.mkdir(artifactsDir, { recursive: true });
+
+  // Write prompt
+  await fs.writeFile(path.join(contextDir, "prompt.md"), prompt);
+
+  // Write repo-info.json when present
+  if (repo) {
+    await fs.writeFile(
+      path.join(contextDir, "repo-info.json"),
+      JSON.stringify(repo, null, 2)
+    );
+  }
+
+  // Write each artifact
+  for (const artifact of artifacts) {
+    const safeName = artifact.type.toLowerCase().replace(/[^a-z0-9_-]/g, "_");
+    const safeId = (artifact.id ?? "unknown").replace(/[^a-zA-Z0-9_-]/g, "_");
+    const header = `# ${artifact.title ?? "Untitled"}\n\n`;
+    await fs.writeFile(
+      path.join(artifactsDir, `${safeName}-${safeId}.md`),
+      header + artifact.content
+    );
+  }
+}
 // ---------------------------------------------------------------------------
 // Per-command output reading
 // ---------------------------------------------------------------------------
@@ -508,6 +588,11 @@ function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
 function readDecomposeOutputs(workDir: string): Record<string, unknown> {
   const features = readJsonFileSync(path.join(workDir, "features.json"));
   return { features: features ?? undefined };
+}
+
+function readGeneratePrdOutputs(worktreeDir: string): Record<string, unknown> {
+  const prdContent = readTextFile(path.join(worktreeDir, "prd.md"));
+  return { prd: prdContent ? { content: prdContent } : undefined };
 }
 
 /** Parse token usage from claude-output.jsonl (JSONL stream output). */
@@ -668,6 +753,7 @@ async function handleProcessCompletion(
   worktreeDir: string | null,
   claudeWorkDir: string,
   usedTempDir: boolean,
+  expandedRepoPath: string | null,
   jobStore?: JobStore
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
@@ -696,6 +782,11 @@ async function handleProcessCompletion(
           completedAt: now,
         });
       }
+    }
+    if (usedTempDir) {
+      fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+    } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
+      await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, loopId);
     }
     return;
   }
@@ -735,6 +826,8 @@ async function handleProcessCompletion(
     artifacts = readDecomposeOutputs(claudeWorkDir);
   } else if (command === "EVALUATE_PRD") {
     artifacts = readEvaluatePrdOutputs(claudeWorkDir);
+  } else if (command === "GENERATE_PRD") {
+    artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
   }
 
   // Read session ID if available
@@ -820,6 +913,8 @@ async function handleProcessCompletion(
   // Clean up temp claude workdir after all reads and uploads are complete
   if (usedTempDir) {
     fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+  } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
+    await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, loopId);
   }
 }
 
@@ -870,6 +965,11 @@ async function handleLoopRequest(
 
   if (!Array.isArray(body.artifacts)) {
     json(context, 400, { error: "artifacts must be an array" });
+    return;
+  }
+
+  if (body.command === "GENERATE_PRD" && (typeof body.prompt !== "string" || !body.prompt.trim())) {
+    json(context, 400, { error: "No prompt found for GENERATE_PRD" });
     return;
   }
 
@@ -977,7 +1077,7 @@ async function handleLoopRequest(
       await writePrdArtifact(claudeWorkDir, body.artifacts, body.prompt);
     } else if (repoRequirement === "REQUIRED" && !expandedRepoPath) {
       json(context, 400, {
-        error: "Repository required for PLAN, EXECUTE, and REQUEST_CHANGES commands",
+        error: "Repository required for PLAN, EXECUTE, REQUEST_CHANGES, and GENERATE_PRD commands",
       });
       return;
     } else if (body.command === "PLAN" || body.command === "EXECUTE" || body.command === "REQUEST_CHANGES") {
@@ -1086,6 +1186,59 @@ async function handleLoopRequest(
           body.prompt
         );
       }
+    } else if (body.command === "GENERATE_PRD") {
+      const repoPath = expandedRepoPath;
+      if (!repoPath) {
+        json(context, 400, {
+          error: "Repository required for GENERATE_PRD command",
+        });
+        return;
+      }
+
+      // Use a dedicated branch namespace to avoid collisions with PLAN/EXECUTE worktrees.
+      // GENERATE_PRD always starts fresh -- it must not inherit a prior PLAN worktree.
+      const sanitizedSlug = body.artifactSlug
+        ? slugifyLoopId(body.artifactSlug)
+        : null;
+      const worktreeKey = sanitizedSlug ?? pickStableId(body);
+      const branchName = sanitizedSlug
+        ? `symphony/generate-prd-${sanitizedSlug}`
+        : `symphony/generate-prd-${pickStableId(body)}`;
+
+      worktreeDir = resolveLoopWorktreeDir(repoPath, `generate-prd-${worktreeKey}`);
+
+      // Always start fresh: remove any stale worktree for this branch before creation.
+      const staleWorktree = findWorktreeForBranch(repoPath, branchName);
+      if (staleWorktree) {
+        loopLog(body.loopId, `Removing stale worktree for fresh GENERATE_PRD: ${staleWorktree}`);
+        await cleanupGeneratePrdWorktree(staleWorktree, repoPath, body.loopId);
+      }
+
+      await ensureWorktree(
+        repoPath,
+        worktreeDir,
+        branchName,
+        body.repo?.branch ?? "main"
+      );
+      loopLog(body.loopId, `Created worktree for GENERATE_PRD: ${worktreeDir} (branch: ${branchName})`);
+
+      try {
+        assertPathAllowed(worktreeDir, allowedDirs);
+      } catch (e) {
+        if (e instanceof DirectoryNotAllowedError) {
+          await cleanupGeneratePrdWorktree(worktreeDir, repoPath, body.loopId);
+          json(context, 403, { error: `Worktree path not allowed: ${worktreeDir}` });
+          return;
+        }
+        throw e;
+      }
+
+      // claudeWorkDir is a separate operational dir inside the worktree (same pattern as PLAN/EXECUTE).
+      // Spawn uses cwd: worktreeDir so Claude writes prd.md to the repo root.
+      // Logs, PID, and prompt file go to claudeWorkDir, not the repo root.
+      claudeWorkDir = path.join(worktreeDir, ".claude", "work");
+      await fs.mkdir(claudeWorkDir, { recursive: true });
+      await writeArtifactsForGeneratePrd(worktreeDir, body.artifacts, body.prompt!, body.repo);
     } else {
       json(context, 400, { error: `Unknown command: ${body.command}` });
       return;
@@ -1098,7 +1251,11 @@ async function handleLoopRequest(
     // Pre-flight: verify required binary exists BEFORE posting 'started' event.
     // PLAN and EXECUTE use run-loop.sh; REQUEST_CHANGES and DECOMPOSE use claude CLI directly.
     const usesRunLoop = body.command === "PLAN" || body.command === "EXECUTE";
-    const usesClaude = body.command === "REQUEST_CHANGES" || body.command === "DECOMPOSE" || body.command === "EVALUATE_PRD";
+    const usesClaude =
+      body.command === "REQUEST_CHANGES" ||
+      body.command === "DECOMPOSE" ||
+      body.command === "EVALUATE_PRD" ||
+      body.command === "GENERATE_PRD";
     let scriptPath: string | null = null;
 
     if (usesClaude) {
@@ -1117,6 +1274,9 @@ async function handleLoopRequest(
         );
         if (usedTempDir) {
           cleanupTempClaudeWorkDir();
+        }
+        if (body.command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
+          await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, body.loopId);
         }
         json(context, 500, { error: "claude CLI not found in PATH" });
         return;
@@ -1162,6 +1322,9 @@ async function handleLoopRequest(
       });
       if (usedTempDir) {
         cleanupTempClaudeWorkDir();
+      }
+      if (body.command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
+        await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, body.loopId);
       }
       json(context, 500, { error: `Cannot open log file: ${msg}` });
       return;
@@ -1264,6 +1427,26 @@ async function handleLoopRequest(
           env: spawnEnv,
         });
         child.unref();
+      } else if (body.command === "GENERATE_PRD") {
+        const promptFile = path.join(claudeWorkDir, "generate-prd-prompt.txt");
+        await fs.writeFile(promptFile, body.prompt!);
+
+        const claudeArgs = [
+          "-p", "-",
+          "--output-format", "stream-json",
+          "--verbose",
+          "--allowedTools",
+          "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
+          "--max-turns", "200",
+        ];
+        const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir, promptFile);
+        child = spawn(pipeline.cmd, pipeline.args, {
+          cwd: worktreeDir!,
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: spawnEnv,
+        });
+        child.unref();
       } else {
         // PLAN, EXECUTE: spawn run-loop.sh
         // Build args matching ECS harness-agent's buildRunLoopArgs():
@@ -1299,6 +1482,9 @@ async function handleLoopRequest(
       if (usedTempDir) {
         cleanupTempClaudeWorkDir();
       }
+      if (body.command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
+        await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, body.loopId);
+      }
       json(context, 500, { error: `Failed to spawn process: ${msg}` });
       return;
     }
@@ -1319,6 +1505,7 @@ async function handleLoopRequest(
         worktreeDir,
         claudeWorkDir,
         usedTempDir,
+        expandedRepoPath,
         jobStore
       ).catch((err) => loopError(body.loopId, "Completion handler error:", err));
     };
