@@ -14,7 +14,7 @@ export type LocalJobStatus =
 
 export type LocalJobKind = "SYMPHONY_LOOP";
 
-export type LocalJobCommand = "PLAN" | "EXECUTE" | "REQUEST_CHANGES" | "DECOMPOSE";
+export type LocalJobCommand = "PLAN" | "EXECUTE" | "REQUEST_CHANGES" | "DECOMPOSE" | "GENERATE_PRD";
 
 export type TaskProgress = {
   pending: number;
