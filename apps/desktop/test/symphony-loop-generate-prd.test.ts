@@ -67,7 +67,7 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 
 async function initGitRepo(repoPath: string): Promise<void> {
-  await execFileAsync("git", ["init", repoPath]);
+  await execFileAsync("git", ["init", "-b", "main", repoPath]);
   await execFileAsync("git", ["-C", repoPath, "config", "user.email", "test@test.com"]);
   await execFileAsync("git", ["-C", repoPath, "config", "user.name", "Test"]);
   await fs.writeFile(path.join(repoPath, "README.md"), "# initial\n");
