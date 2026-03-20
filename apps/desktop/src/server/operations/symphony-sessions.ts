@@ -13,6 +13,8 @@ type ActiveSession = {
   contextRepoPaths?: string[];
   baseBranch?: string;
   parentTicketId?: string;
+  loopId?: string;
+  artifactId?: string;
   startedAt: string;
   lastAccessedAt: string;
 };
@@ -33,6 +35,8 @@ function parseSessionBody(body: Record<string, unknown>): {
   contextRepoPaths: string[] | undefined;
   baseBranch: string | undefined;
   parentTicketId: string | undefined;
+  loopId: string | undefined;
+  artifactId: string | undefined;
 } {
   return {
     ticketId: asString(body.ticketId),
@@ -44,20 +48,24 @@ function parseSessionBody(body: Record<string, unknown>): {
         ? body.contextRepoPaths
         : undefined,
     baseBranch: asString(body.baseBranch) ?? undefined,
-    parentTicketId: asString(body.parentTicketId) ?? undefined
+    parentTicketId: asString(body.parentTicketId) ?? undefined,
+    loopId: asString(body.loopId) ?? undefined,
+    artifactId: asString(body.artifactId) ?? undefined,
   };
 }
 
 function upsertSession(
   config: SessionsConfig,
-  fields: { ticketId: string; repoPath: string; worktreePath: string; pid?: number; contextRepoPaths?: string[]; baseBranch?: string; parentTicketId?: string }
+  fields: { ticketId: string; repoPath: string; worktreePath: string; pid?: number; contextRepoPaths?: string[]; baseBranch?: string; parentTicketId?: string; loopId?: string; artifactId?: string }
 ): void {
   const now = new Date().toISOString();
   const optionals = {
     ...(fields.pid !== undefined && { pid: fields.pid }),
     ...(fields.contextRepoPaths !== undefined && { contextRepoPaths: fields.contextRepoPaths }),
     ...(fields.baseBranch !== undefined && { baseBranch: fields.baseBranch }),
-    ...(fields.parentTicketId !== undefined && { parentTicketId: fields.parentTicketId })
+    ...(fields.parentTicketId !== undefined && { parentTicketId: fields.parentTicketId }),
+    ...(fields.loopId !== undefined && { loopId: fields.loopId }),
+    ...(fields.artifactId !== undefined && { artifactId: fields.artifactId }),
   };
   const existingIndex = config.sessions.findIndex((session) => session.ticketId === fields.ticketId);
 
@@ -163,7 +171,9 @@ export function registerSymphonySessionRoutes(
       pid: fields.pid,
       contextRepoPaths: fields.contextRepoPaths,
       baseBranch: fields.baseBranch,
-      parentTicketId: fields.parentTicketId
+      parentTicketId: fields.parentTicketId,
+      loopId: fields.loopId,
+      artifactId: fields.artifactId,
     });
 
     await saveSessions(dir, config);

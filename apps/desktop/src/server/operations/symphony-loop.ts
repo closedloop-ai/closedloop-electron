@@ -4,6 +4,7 @@ import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
 import type {
   OperationDispatcher,
   OperationRequestContext,
@@ -11,8 +12,13 @@ import type {
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { findPluginScript, findPluginVersions, getPluginCacheRoot } from "./plugin-cache.js";
 import {
+  readEvaluatePrdOutputs,
+  writePrdArtifact,
+} from "./symphony-prd-artifacts.js";
+import {
   expandHome,
   resolveWorktreeParentDir,
+  tryAssertRepoAllowed,
 } from "./symphony-utils.js";
 
 // ---------------------------------------------------------------------------
@@ -44,7 +50,8 @@ interface LoopRequestBody {
   loopId: string;
   command: LoopCommand;
   closedLoopAuthToken: string;
-  apiBaseUrl: string;
+  /** @deprecated Ignored. The gateway uses its configured API origin instead. */
+  apiBaseUrl?: string;
   artifacts: LoopArtifact[];
   repo?: LoopRepo;
   committer?: LoopCommitter;
@@ -53,6 +60,8 @@ interface LoopRequestBody {
   parentBranchName?: string;
   parentSessionId?: string;
   prompt?: string;
+  /** Local filesystem checkout root. When present and sandbox-allowed, used as checkout root for worktree creation/reuse instead of repo.fullName lookup. */
+  localRepoPath?: string;
 }
 
 /** Track running loop processes for cancellation and to prevent GC of ChildProcess. */
@@ -111,6 +120,11 @@ function shellEscape(value: string): string {
  * Falls back to null if not installed — caller should degrade gracefully.
  */
 function findStreamFormatter(): string | null {
+  // Unit/integration tests set this to exercise the raw `claude` bash wrapper
+  // without grep/tee/python (stub claude output is not a full formatter stream).
+  if (process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE === "1") {
+    return null;
+  }
   const pluginDir = path.join(getPluginCacheRoot(), "code");
   const versions = findPluginVersions(pluginDir);
   for (const v of versions) {
@@ -158,95 +172,6 @@ function buildClaudePipeline(
   }
   return { cmd: "claude", args: claudeArgs };
 }
-
-/**
- * Validate apiBaseUrl to prevent SSRF to private/metadata/loopback endpoints.
- * Uses deny-by-default for IP literals: extracts the IPv4 address (including
- * from IPv4-mapped IPv6 like ::ffff:127.0.0.1) and checks it against
- * private/reserved ranges. Non-IP hostnames are allowed except "localhost".
- */
-function validateApiBaseUrl(url: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return false;
-  }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    return false;
-  }
-  // WHATWG URL parser strips brackets from IPv6, so hostname is e.g. "::1"
-  const hostname = parsed.hostname;
-
-  if (hostname === "localhost") {
-    return false;
-  }
-
-  // Extract IPv4 for range checking. Handles plain IPv4, IPv4-mapped IPv6
-  // (::ffff:1.2.3.4), and IPv4-compatible IPv6 (::1.2.3.4).
-  const ipv4 = extractIPv4(hostname);
-  if (ipv4) {
-    return !isPrivateIPv4(ipv4);
-  }
-
-  // Pure IPv6 (not IPv4-mapped): block loopback (::1) and all-zeros (::)
-  if (hostname.includes(":")) {
-    const normalized = hostname.replace(/^\[|]$/g, "");
-    if (normalized === "::1" || normalized === "::" || normalized === "0:0:0:0:0:0:0:0" || normalized === "0:0:0:0:0:0:0:1") {
-      return false;
-    }
-    // Block any remaining IPv6 with embedded IPv4-mapped prefix
-    if (/^::ffff:/i.test(normalized) || /^0{0,4}:0{0,4}:0{0,4}:0{0,4}:0{0,4}:ffff:/i.test(normalized)) {
-      return false;
-    }
-    // Block ULA (fc00::/7) and link-local (fe80::/10)
-    if (/^f[cd]/i.test(normalized) || /^fe[89ab]/i.test(normalized)) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-/** Extract the IPv4 dotted-quad from a hostname, handling IPv4-mapped IPv6. */
-function extractIPv4(hostname: string): string | null {
-  // Plain IPv4
-  if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(hostname)) {
-    return hostname;
-  }
-  // IPv4-mapped IPv6: "::ffff:1.2.3.4" or "[::ffff:1.2.3.4]"
-  const stripped = hostname.replace(/^\[|]$/g, "");
-  const mapped = /::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/i.exec(stripped);
-  if (mapped) {
-    return mapped[1];
-  }
-  return null;
-}
-
-/** Check if an IPv4 dotted-quad is in a private/reserved range. */
-function isPrivateIPv4(ip: string): boolean {
-  const parts = ip.split(".").map(Number);
-  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) {
-    return true; // Malformed → treat as private (deny)
-  }
-  const [a, b] = parts;
-  return (
-    a === 0 ||            // 0.0.0.0/8
-    a === 10 ||           // 10.0.0.0/8
-    a === 127 ||          // 127.0.0.0/8 (loopback)
-    (a === 169 && b === 254) || // 169.254.0.0/16 (link-local / cloud metadata)
-    (a === 172 && b >= 16 && b <= 31) || // 172.16.0.0/12
-    (a === 192 && b === 168)  // 192.168.0.0/16
-  );
-}
-
-/**
- * Seam for tests: holds the active URL validator so tests can substitute
- * their own implementation without touching production code.
- * Use _forTesting.overrideValidateApiBaseUrl / resetValidateApiBaseUrl.
- */
-let _validateApiBaseUrlFn: (url: string) => boolean = validateApiBaseUrl;
-
 /** Find the local repo path for a given fullName (e.g. "org/repo"). */
 function findLocalRepo(
   fullName: string,
@@ -528,36 +453,6 @@ async function writeArtifactsForExecuteOrAmend(
   }
 }
 
-/**
- * Write prd.md to a work directory from a list of artifacts and an optional
- * explicit prompt.  Priority: prompt > PRD artifact > FEATURE artifact.
- * Shared by DECOMPOSE and EVALUATE_PRD, which both need the same prd.md.
- */
-async function writePrdArtifact(
-  workDir: string,
-  artifacts: LoopArtifact[],
-  prompt?: string
-): Promise<void> {
-  let prdContent = prompt ?? null;
-
-  if (!prdContent) {
-    const prdArtifact = artifacts.find((a) => a.type === "PRD" || a.type === "prd");
-    const featureArtifact = prdArtifact
-      ? null
-      : artifacts.find((a) => a.type === "FEATURE" || a.type === "artifact");
-    const source = prdArtifact ?? featureArtifact;
-    if (source?.content) {
-      prdContent = source.content;
-    }
-  }
-
-  if (prdContent) {
-    await fs.writeFile(path.join(workDir, "prd.md"), prdContent);
-  }
-}
-
-
-
 // ---------------------------------------------------------------------------
 // Per-command output reading
 // ---------------------------------------------------------------------------
@@ -615,11 +510,6 @@ function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
 function readDecomposeOutputs(workDir: string): Record<string, unknown> {
   const features = readJsonFile(path.join(workDir, "features.json"));
   return { features: features ?? undefined };
-}
-
-function readEvaluatePrdOutputs(workDir: string): Record<string, unknown> {
-  const prdJudges = readJsonFile(path.join(workDir, "prd-judges.json"));
-  return { prdJudges: prdJudges ?? undefined };
 }
 
 /** Parse token usage from claude-output.jsonl (JSONL stream output). */
@@ -776,10 +666,12 @@ function executeGitOperations(
 async function handleProcessCompletion(
   exitCode: number,
   body: LoopRequestBody,
+  apiBaseUrl: string,
   worktreeDir: string | null,
-  claudeWorkDir: string
+  claudeWorkDir: string,
+  jobStore?: JobStore
 ): Promise<void> {
-  const { loopId, command, closedLoopAuthToken, apiBaseUrl, committer } = body;
+  const { loopId, command, closedLoopAuthToken, committer } = body;
 
   loopLog(loopId, `Process exited with code ${exitCode}, command=${command}`);
   runningLoops.delete(loopId);
@@ -793,8 +685,18 @@ async function handleProcessCompletion(
       message: `Process exited with code ${exitCode}`,
       loopId,
     });
-    if (command === "DECOMPOSE" || command === "EVALUATE_PRD") {
-      fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+    if (jobStore) {
+      const existingJob = jobStore.getByLoopId(loopId);
+      if (existingJob) {
+        const now = new Date().toISOString();
+        jobStore.upsert({
+          ...existingJob,
+          status: "FAILED",
+          exitCode,
+          updatedAt: now,
+          completedAt: now,
+        });
+      }
     }
     return;
   }
@@ -902,7 +804,21 @@ async function handleProcessCompletion(
   await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, completedEvent);
   loopLog(loopId, "Loop completed successfully");
 
-  // Clean up DECOMPOSE and EVALUATE_PRD temp directories after all reads and uploads are complete
+  if (jobStore) {
+    const existingJob = jobStore.getByLoopId(loopId);
+    if (existingJob) {
+      const now = new Date().toISOString();
+      jobStore.upsert({
+        ...existingJob,
+        status: "COMPLETED",
+        exitCode: 0,
+        updatedAt: now,
+        completedAt: now,
+      });
+    }
+  }
+
+  // Clean up DECOMPOSE / EVALUATE_PRD temp directory after all reads and uploads are complete
   if (command === "DECOMPOSE" || command === "EVALUATE_PRD") {
     fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
   }
@@ -914,8 +830,19 @@ async function handleProcessCompletion(
 
 async function handleLoopRequest(
   context: OperationRequestContext,
-  getAllowedDirectories: () => string[]
+  getAllowedDirectories: () => string[],
+  getApiOrigin?: () => string,
+  jobStore?: JobStore
 ): Promise<void> {
+  // Derive the callback URL from the gateway's trusted configuration.
+  // body.apiBaseUrl is ignored -- the caller does not control where
+  // loop events and artifact uploads are sent.
+  const apiBaseUrl = getApiOrigin?.();
+  if (!apiBaseUrl) {
+    json(context, 503, { error: "API origin not configured" });
+    return;
+  }
+
   const rawBody = parseJsonBody(context);
   if (!rawBody) {
     json(context, 400, { error: "Invalid JSON body" });
@@ -924,9 +851,9 @@ async function handleLoopRequest(
 
   const body = rawBody as unknown as LoopRequestBody;
 
-  if (!body.loopId || !body.command || !body.closedLoopAuthToken || !body.apiBaseUrl) {
+  if (!body.loopId || !body.command || !body.closedLoopAuthToken) {
     json(context, 400, {
-      error: "Missing required fields: loopId, command, closedLoopAuthToken, apiBaseUrl",
+      error: "Missing required fields: loopId, command, closedLoopAuthToken",
     });
     return;
   }
@@ -946,13 +873,6 @@ async function handleLoopRequest(
     return;
   }
 
-  if (!_validateApiBaseUrlFn(body.apiBaseUrl)) {
-    json(context, 400, {
-      error: "Invalid apiBaseUrl: must be a valid http(s) URL to a non-private host",
-    });
-    return;
-  }
-
   if (runningLoops.has(body.loopId)) {
     json(context, 409, { error: "Loop is already running on this machine" });
     return;
@@ -968,7 +888,16 @@ async function handleLoopRequest(
     const allowedDirs = getAllowedDirectories();
     let expandedRepoPath: string | null = null;
 
-    if (body.repo?.fullName) {
+    if (body.localRepoPath) {
+      // localRepoPath takes precedence over repo.fullName lookup when present
+      const repoResult = tryAssertRepoAllowed(body.localRepoPath, allowedDirs);
+      if ("error" in repoResult) {
+        json(context, repoResult.status, { error: repoResult.error });
+        return;
+      }
+      expandedRepoPath = repoResult.path;
+      loopLog(body.loopId, `Using localRepoPath: ${expandedRepoPath}`);
+    } else if (body.repo?.fullName) {
       expandedRepoPath = findLocalRepo(body.repo.fullName, allowedDirs);
       if (!expandedRepoPath) {
         json(context, 404, {
@@ -1128,7 +1057,7 @@ async function handleLoopRequest(
         execSync("which claude", { stdio: "pipe", timeout: 5000 });
       } catch {
         await postLoopEvent(
-          body.apiBaseUrl,
+          apiBaseUrl,
           body.loopId,
           body.closedLoopAuthToken,
           {
@@ -1147,7 +1076,7 @@ async function handleLoopRequest(
       scriptPath = findPluginScript("code", "run-loop.sh");
       if (!scriptPath) {
         await postLoopEvent(
-          body.apiBaseUrl,
+          apiBaseUrl,
           body.loopId,
           body.closedLoopAuthToken,
           {
@@ -1164,7 +1093,7 @@ async function handleLoopRequest(
     // Post "started" event — only after confirming we can proceed
     loopLog(body.loopId, "Posting started event...");
     await postLoopEvent(
-      body.apiBaseUrl,
+      apiBaseUrl,
       body.loopId,
       body.closedLoopAuthToken,
       { type: "started" }
@@ -1177,7 +1106,7 @@ async function handleLoopRequest(
       logFd = openSync(logFile, "a");
     } catch (logErr) {
       const msg = logErr instanceof Error ? logErr.message : String(logErr);
-      await postLoopEvent(body.apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+      await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
         type: "error",
         code: "SPAWN_FAILED",
         message: `Cannot open log file: ${msg}`,
@@ -1224,20 +1153,48 @@ async function handleLoopRequest(
         const decomposePrompt = body.prompt ?? `Decompose the following PRD into features:\n\n${prdContent}`;
         const promptFile = path.join(claudeWorkDir, "decompose-prompt.txt");
         await fs.writeFile(promptFile, decomposePrompt);
-        child = spawnFromPromptFile(promptFile);
+
+        const claudeArgs = [
+          "-p", "-",
+          "--output-format", "stream-json",
+          "--verbose",
+          "--allowedTools",
+          "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
+          "--max-turns", "200",
+        ];
+        const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir, promptFile);
+        child = spawn(pipeline.cmd, pipeline.args, {
+          cwd: claudeWorkDir,
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: spawnEnv,
+        });
+        child.unref();
       } else if (body.command === "EVALUATE_PRD") {
-        // Match ECS harness-agent EVALUATE_PRD: prd.md lives in runDir; skill gets --workdir runDir;
-        // REPO_PATH only when a target repo is linked (expandedRepoPath). spawnEnv still sets
-        // CLOSEDLOOP_WORKDIR for skills/tools that read the env.
-        const runDir = claudeWorkDir;
+        // REPO_PATH only when a target repo is linked (expandedRepoPath).
         let evaluatePrdPrompt =
-          `Activate judges:run-judges skill --artifact-type prd --workdir ${runDir}.\n`;
+          `Activate judges:run-judges skill --artifact-type prd --workdir ${claudeWorkDir}.\n`;
         if (expandedRepoPath) {
           evaluatePrdPrompt += `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`;
         }
         const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
         await fs.writeFile(promptFile, evaluatePrdPrompt);
-        child = spawnFromPromptFile(promptFile);
+        const claudeArgs = [
+          "-p", "-",
+          "--output-format", "stream-json",
+          "--verbose",
+          "--allowedTools",
+          "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
+          "--max-turns", "200",
+        ];
+        const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir, promptFile);
+        child = spawn(pipeline.cmd, pipeline.args, {
+          cwd: claudeWorkDir,
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: spawnEnv,
+        });
+        child.unref();
       } else if (body.command === "REQUEST_CHANGES") {
         // REQUEST_CHANGES: use claude directly with /code:amend-plan.
         // Must use -p (headless mode) so --allowedTools grants full permission
@@ -1306,7 +1263,7 @@ async function handleLoopRequest(
     } catch (spawnErr) {
       closeSync(logFd);
       const msg = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
-      await postLoopEvent(body.apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+      await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
         type: "error",
         code: "SPAWN_FAILED",
         message: msg,
@@ -1327,7 +1284,7 @@ async function handleLoopRequest(
       }
       completionHandled = true;
       loopLog(body.loopId, `onceComplete fired, code=${code}`);
-      handleProcessCompletion(code, body, worktreeDir, claudeWorkDir).catch(
+      handleProcessCompletion(code, body, apiBaseUrl, worktreeDir, claudeWorkDir, jobStore).catch(
         (err) => loopError(body.loopId, "Completion handler error:", err)
       );
     };
@@ -1360,6 +1317,32 @@ async function handleLoopRequest(
     runningLoops.set(body.loopId, { pid, child });
     spawnedSuccessfully = true;
     loopLog(body.loopId, `Spawned pid=${pid}, worktree=${worktreeDir}`);
+
+    // Bind runtime details to an existing LocalJob or create a new one for this loop
+    if (jobStore) {
+      const existing = jobStore.getByLoopId(body.loopId);
+      const now = new Date().toISOString();
+      const logPath = path.join(claudeWorkDir, "symphony-loop.log");
+      const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+      const statePath = path.join(claudeWorkDir, "state.json");
+      const command = body.command as LocalJobCommand;
+      jobStore.upsert({
+        id: body.loopId,
+        kind: "SYMPHONY_LOOP",
+        loopId: body.loopId,
+        command,
+        ...(existing ?? {}),
+        worktreeDir: worktreeDir ?? undefined,
+        claudeWorkDir,
+        logPath,
+        jsonlPath,
+        statePath,
+        pid,
+        status: "RUNNING",
+        updatedAt: now,
+        startedAt: existing?.startedAt ?? now,
+      });
+    }
 
     // Write PID file (safe to await now — close handler is already registered)
     await fs.writeFile(
@@ -1430,33 +1413,20 @@ async function handleLoopKill(
 }
 
 // ---------------------------------------------------------------------------
-// Testing exports
-// ---------------------------------------------------------------------------
-
-export const _forTesting = {
-  writePrdArtifact,
-  readEvaluatePrdOutputs,
-  overrideValidateApiBaseUrl(fn: (url: string) => boolean): void {
-    _validateApiBaseUrlFn = fn;
-  },
-  resetValidateApiBaseUrl(): void {
-    _validateApiBaseUrlFn = validateApiBaseUrl;
-  },
-};
-
-// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
 export function registerSymphonyLoopRoutes(
   dispatcher: OperationDispatcher,
-  getAllowedDirectories: () => string[]
+  getAllowedDirectories: () => string[],
+  getApiOrigin?: () => string,
+  jobStore?: JobStore
 ): void {
   dispatcher.register(
     "POST",
     "/api/engineer/symphony/loop",
     async (context) => {
-      await handleLoopRequest(context, getAllowedDirectories);
+      await handleLoopRequest(context, getAllowedDirectories, getApiOrigin, jobStore);
     }
   );
 

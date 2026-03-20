@@ -618,6 +618,11 @@
         padding: 8px 0;
       }
 
+      #alwaysAllowRulesContainer {
+        max-height: 280px;
+        overflow-y: auto;
+      }
+
       .always-allow-rule {
         display: flex;
         align-items: center;
@@ -925,6 +930,149 @@
         margin-bottom: 8px;
       }
 
+      .job-section {
+        margin-bottom: 20px;
+      }
+
+      .job-section-title {
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        margin: 0 0 8px;
+      }
+
+      details.job-section > summary.job-section-title {
+        cursor: pointer;
+        list-style: none;
+      }
+
+      details.job-section > summary.job-section-title::before {
+        content: "\25B6";
+        display: inline-block;
+        margin-right: 6px;
+        font-size: 9px;
+        transition: transform 0.15s;
+      }
+
+      details.job-section[open] > summary.job-section-title::before {
+        transform: rotate(90deg);
+      }
+
+      .job-list-capped {
+        max-height: 310px;
+        overflow-y: auto;
+      }
+
+      .job-list {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--surface);
+        padding: 10px;
+      }
+
+      .job-card {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px 12px;
+        margin-bottom: 8px;
+        background: var(--surface-alt);
+      }
+
+      .job-card:last-child {
+        margin-bottom: 0;
+      }
+
+      .job-top {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 4px;
+      }
+
+      .job-title {
+        font-weight: 600;
+        flex: 1;
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+
+      .job-status-badge {
+        display: inline-flex;
+        align-items: center;
+        border: 1px solid;
+        border-radius: 999px;
+        padding: 1px 8px;
+        font-size: 11px;
+        font-weight: 600;
+        flex-shrink: 0;
+      }
+
+      .job-status-badge.running {
+        border-color: #16a34a;
+        color: #16a34a;
+      }
+
+      .job-status-badge.queued,
+      .job-status-badge.starting {
+        border-color: #2563eb;
+        color: #2563eb;
+      }
+
+      .job-status-badge.cancel-pending {
+        border-color: #d97706;
+        color: #d97706;
+      }
+
+      .job-status-badge.completed {
+        border-color: #6b7280;
+        color: #6b7280;
+      }
+
+      .job-status-badge.failed {
+        border-color: #dc2626;
+        color: #dc2626;
+      }
+
+      .job-status-badge.awaiting-user {
+        border-color: #8b5cf6;
+        color: #8b5cf6;
+      }
+
+      .job-status-badge.stopped {
+        border-color: #f59e0b;
+        color: #f59e0b;
+      }
+
+      .job-status-badge.cancelled,
+      .job-status-badge.unknown {
+        border-color: #9ca3af;
+        color: #9ca3af;
+      }
+
+      .job-meta {
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.4;
+      }
+
+      .job-phase {
+        font-family: "Berkeley Mono", "JetBrains Mono", "SF Mono", "Fira Code", monospace;
+        font-size: 11px;
+        color: var(--accent);
+        margin-top: 2px;
+      }
+
+      .activity-section-title {
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--muted);
+        margin: 16px 0 8px;
+      }
+
       .onboarding-overlay {
         position: fixed;
         inset: 0;
@@ -956,6 +1104,80 @@
 
       @media (max-width: 768px) {
         .settings-columns { grid-template-columns: 1fr; }
+      }
+
+      /* Settings sub-tabs */
+      .settings-sub-nav {
+        display: flex;
+        gap: 0;
+        border-bottom: 1px solid var(--border);
+        margin: -16px -22px 20px;
+        padding: 0 22px;
+      }
+
+      .settings-sub-nav button {
+        background: none;
+        border: none;
+        border-bottom: 2px solid transparent;
+        color: var(--muted);
+        padding: 10px 16px;
+        font-size: 12px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        cursor: pointer;
+        transition: color 0.15s, border-color 0.15s;
+      }
+
+      .settings-sub-nav button:hover {
+        color: var(--ink);
+      }
+
+      .settings-sub-nav button.active {
+        color: var(--accent);
+        border-bottom-color: var(--accent);
+      }
+
+      .settings-sub-panel {
+        display: none;
+      }
+
+      .settings-sub-panel.active {
+        display: block;
+      }
+
+      .settings-tab-footer {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding-top: 16px;
+        margin-top: 16px;
+        border-top: 1px solid var(--border);
+      }
+
+      .settings-tab-footer .muted {
+        margin: 0;
+        margin-left: 4px;
+        font-size: 12px;
+      }
+
+      .settings-tab-footer button {
+        padding: 8px 18px;
+        border-radius: 8px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        border: 1px solid var(--border);
+      }
+
+      .settings-tab-footer button:not(.secondary) {
+        background: var(--accent);
+        color: var(--accent-ink);
+        border-color: var(--accent);
+      }
+
+      .settings-tab-footer button.secondary {
+        background: var(--surface);
+        color: var(--ink);
       }
     </style>
   </head>
@@ -1095,7 +1317,15 @@
         <div id="approvalsList"></div>
       </section>
       <section id="activity" class="panel">
-        <p class="muted">Recent gateway requests handled by this desktop app.</p>
+        <div class="job-section">
+          <p class="job-section-title">Running Jobs</p>
+          <div id="runningJobsList" class="job-list"></div>
+        </div>
+        <details class="job-section">
+          <summary class="job-section-title">Completed Jobs</summary>
+          <div id="completedJobsList" class="job-list job-list-capped"></div>
+        </details>
+        <p class="activity-section-title">Gateway Request Log</p>
         <div class="actions" style="margin-bottom: 12px">
           <button id="refreshActivity">Refresh Activity</button>
           <button class="secondary" id="clearActivity">Clear Activity</button>
@@ -1113,107 +1343,127 @@
         <div id="activityList" class="activity-list"></div>
       </section>
       <section id="settings" class="panel">
-        <!-- Cloud Connection (two-column) -->
-        <div class="settings-columns">
-          <div class="settings-group">
-            <h3 class="settings-group-title">Cloud Relay</h3>
-            <p class="settings-group-desc">WebSocket relay for cloud command mode.</p>
-            <div class="row">
-              <label for="relayOrigin">Relay Origin</label>
-              <input id="relayOrigin" />
+        <div class="settings-sub-nav">
+          <button data-settings-tab="relay-gateway" class="active">Relay / Gateway</button>
+          <button data-settings-tab="security">Security</button>
+          <button data-settings-tab="policies">Policies</button>
+        </div>
+
+        <!-- Relay / Gateway sub-tab -->
+        <div id="settings-relay-gateway" class="settings-sub-panel active">
+          <div class="settings-columns">
+            <div class="settings-group">
+              <h3 class="settings-group-title">Cloud Relay</h3>
+              <p class="settings-group-desc">WebSocket relay for cloud command mode.</p>
+              <div class="row">
+                <label for="relayOrigin">Relay Origin</label>
+                <input id="relayOrigin" />
+              </div>
+              <div class="row" style="margin-bottom:0">
+                <label for="apiKey">Cloud API Key</label>
+                <input id="apiKey" type="password" placeholder="sk_live_..." autocomplete="off" />
+                <div class="actions" style="margin-top: 8px">
+                  <button id="saveApiKey">Save API Key</button>
+                  <button class="secondary" id="clearApiKey">Clear API Key</button>
+                </div>
+                <p class="muted" id="apiKeyStatus"></p>
+              </div>
+              <div class="row" id="debugAuthSection" style="display:none; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border)">
+                <label>Debug Auth Token (dev-only)</label>
+                <p class="field-help">Mint a short-lived session token for manual curl testing. Bound to <code>http://localhost</code>.</p>
+                <div class="actions" style="margin-top: 8px">
+                  <button id="mintDebugToken">Mint Debug Token</button>
+                </div>
+                <p class="muted" id="debugTokenOutput" style="word-break: break-all;"></p>
+              </div>
             </div>
+
+            <div class="settings-group">
+              <h3 class="settings-group-title">Local Gateway</h3>
+              <p class="settings-group-desc">REST API and browser origin for local mode.</p>
+              <div class="row">
+                <label for="apiOrigin">API Origin</label>
+                <input id="apiOrigin" />
+              </div>
+              <div class="row">
+                <label for="webAppOrigin">Web App Origin (CORS)</label>
+                <input id="webAppOrigin" />
+              </div>
+            </div>
+          </div>
+          <div class="settings-tab-footer">
+            <button id="saveRelayGateway">Save</button>
+            <button class="secondary" id="reloadRelayGateway">Reload</button>
+            <p class="muted" id="relayGatewayMessage"></p>
+          </div>
+        </div>
+
+        <!-- Security sub-tab -->
+        <div id="settings-security" class="settings-sub-panel">
+          <div class="settings-group" style="border-bottom:none; margin-bottom:0; padding-bottom:0">
+            <h3 class="settings-group-title">Sandbox Directory</h3>
+            <p class="settings-group-desc">Controls which directories gateway operations can access. Paths outside this directory are blocked. Sensitive system paths (~/.ssh, ~/.aws, etc.) are always denied.</p>
             <div class="row" style="margin-bottom:0">
-              <label for="apiKey">Cloud API Key</label>
-              <input id="apiKey" type="password" placeholder="sk_live_..." autocomplete="off" />
+              <label for="sandboxBaseDirectory">Sandbox Base Directory</label>
+              <input id="sandboxBaseDirectory" readonly />
               <div class="actions" style="margin-top: 8px">
-                <button id="saveApiKey">Save API Key</button>
-                <button class="secondary" id="clearApiKey">Clear API Key</button>
+                <button class="secondary" id="pickSandboxBaseDirectory">Choose Directory</button>
               </div>
-              <p class="muted" id="apiKeyStatus"></p>
-            </div>
-            <div class="row" id="debugAuthSection" style="display:none; margin-top: 12px; padding-top: 12px; border-top: 1px dashed var(--border)">
-              <label>Debug Auth Token (dev-only)</label>
-              <p class="field-help">Mint a short-lived session token for manual curl testing. Bound to <code>http://localhost</code>.</p>
-              <div class="actions" style="margin-top: 8px">
-                <button id="mintDebugToken">Mint Debug Token</button>
-              </div>
-              <p class="muted" id="debugTokenOutput" style="word-break: break-all;"></p>
+              <p class="muted warning-text" id="sandboxBaseWarning"></p>
             </div>
           </div>
+          <div class="settings-tab-footer">
+            <button id="saveSecurity">Save</button>
+            <button class="secondary" id="reloadSecurity">Reload</button>
+            <p class="muted" id="securityMessage"></p>
+          </div>
+        </div>
 
+        <!-- Policies sub-tab -->
+        <div id="settings-policies" class="settings-sub-panel">
           <div class="settings-group">
-            <h3 class="settings-group-title">Local Gateway</h3>
-            <p class="settings-group-desc">REST API and browser origin for local mode.</p>
+            <h3 class="settings-group-title">Approval Policy</h3>
+            <p class="settings-group-desc">Controls when gateway operations require manual approval.</p>
             <div class="row">
-              <label for="apiOrigin">API Origin</label>
-              <input id="apiOrigin" />
+              <label for="defaultApprovalTier">Default Approval Tier</label>
+              <select id="defaultApprovalTier">
+                <option value="high">high -- approve everything</option>
+                <option value="medium">medium -- approve risky operations</option>
+                <option value="low">low -- approve only destructive operations</option>
+                <option value="auto">auto -- never prompt</option>
+              </select>
             </div>
             <div class="row">
-              <label for="webAppOrigin">Web App Origin (CORS)</label>
-              <input id="webAppOrigin" />
+              <label>Risk Tier Overrides</label>
+              <p class="field-help" style="margin-bottom:8px">Override the default tier for specific operations.</p>
+              <div id="tierOverridesList"></div>
+              <div class="tier-override-add">
+                <select id="tierOverrideOperation">
+                  <option value="">Add operation...</option>
+                </select>
+                <select id="tierOverrideTier">
+                  <option value="high">high</option>
+                  <option value="medium">medium</option>
+                  <option value="low">low</option>
+                  <option value="auto">auto</option>
+                </select>
+                <button class="secondary" id="tierOverrideAddBtn" type="button">Add</button>
+              </div>
+              <input type="hidden" id="approvalRules" />
             </div>
           </div>
-        </div>
 
-        <!-- Security & Sandbox -->
-        <div class="settings-group">
-          <h3 class="settings-group-title">Security &amp; Sandbox</h3>
-          <p class="settings-group-desc">Controls which directories gateway operations can access.</p>
-          <div class="row" style="margin-bottom:0">
-            <label for="sandboxBaseDirectory">Sandbox Base Directory</label>
-            <input id="sandboxBaseDirectory" readonly />
-            <div class="actions" style="margin-top: 8px">
-              <button class="secondary" id="pickSandboxBaseDirectory">Choose Directory</button>
-            </div>
-            <p class="muted warning-text" id="sandboxBaseWarning"></p>
+          <div class="settings-group" style="margin-bottom:0; padding-bottom:0; border-bottom:none">
+            <h3 class="settings-group-title">Always-Allow Rules</h3>
+            <p class="settings-group-desc">Temporary bypass rules created when you click "Always Allow" on a pending request. Each rule matches the exact operation, method, path, and scope, and expires after 7 days.</p>
+            <div id="alwaysAllowRulesContainer"><p class="muted" style="margin:0">None -- click "Always Allow" on a pending request to add rules here.</p></div>
+          </div>
+          <div class="settings-tab-footer">
+            <button id="savePolicies">Save</button>
+            <button class="secondary" id="reloadPolicies">Reload</button>
+            <p class="muted" id="policiesMessage"></p>
           </div>
         </div>
-
-        <!-- Approval Policy -->
-        <div class="settings-group">
-          <h3 class="settings-group-title">Approval Policy</h3>
-          <p class="settings-group-desc">Controls when gateway operations require manual approval.</p>
-          <div class="row">
-            <label for="defaultApprovalTier">Default Approval Tier</label>
-            <select id="defaultApprovalTier">
-              <option value="high">high — approve everything</option>
-              <option value="medium">medium — approve risky operations</option>
-              <option value="low">low — approve only destructive operations</option>
-              <option value="auto">auto — never prompt</option>
-            </select>
-          </div>
-          <div class="row">
-            <label>Risk Tier Overrides</label>
-            <p class="field-help" style="margin-bottom:8px">Override the default tier for specific operations.</p>
-            <div id="tierOverridesList"></div>
-            <div class="tier-override-add">
-              <select id="tierOverrideOperation">
-                <option value="">Add operation…</option>
-              </select>
-              <select id="tierOverrideTier">
-                <option value="high">high</option>
-                <option value="medium">medium</option>
-                <option value="low">low</option>
-                <option value="auto">auto</option>
-              </select>
-              <button class="secondary" id="tierOverrideAddBtn" type="button">Add</button>
-            </div>
-            <input type="hidden" id="approvalRules" />
-          </div>
-        </div>
-
-        <!-- Always-Allow Rules -->
-        <div class="settings-group">
-          <h3 class="settings-group-title">Always-Allow Rules</h3>
-          <p class="settings-group-desc">Temporary bypass rules created when you click "Always Allow" on a pending request. Each rule matches the exact operation, method, path, and scope, and expires after 7 days.</p>
-          <div id="alwaysAllowRulesContainer"><p class="muted" style="margin:0">None — click "Always Allow" on a pending request to add rules here.</p></div>
-        </div>
-
-        <div class="actions">
-          <button id="saveSettings">Save Settings</button>
-          <button class="secondary" id="reloadSettings">Reload</button>
-        </div>
-        <p class="muted" id="settingsMessage"></p>
       </section>
     </main>
     <script>
@@ -1239,6 +1489,24 @@
         activateTab(event.detail);
       });
 
+      // Settings sub-tab switching
+      const settingsSubTabs = document.querySelectorAll(".settings-sub-nav button");
+      const settingsSubPanels = document.querySelectorAll(".settings-sub-panel");
+
+      function activateSettingsTab(tabName) {
+        settingsSubTabs.forEach((btn) => btn.classList.remove("active"));
+        settingsSubPanels.forEach((panel) => panel.classList.remove("active"));
+        const btn = document.querySelector(`.settings-sub-nav button[data-settings-tab="${tabName}"]`);
+        if (btn) {
+          btn.classList.add("active");
+          document.getElementById(`settings-${tabName}`)?.classList.add("active");
+        }
+      }
+
+      settingsSubTabs.forEach((btn) => {
+        btn.addEventListener("click", () => activateSettingsTab(btn.dataset.settingsTab));
+      });
+
       const relayOrigin = document.getElementById("relayOrigin");
       const apiOrigin = document.getElementById("apiOrigin");
       const webAppOrigin = document.getElementById("webAppOrigin");
@@ -1252,7 +1520,9 @@
       const tierOverrideTier = document.getElementById("tierOverrideTier");
       const tierOverrideAddBtn = document.getElementById("tierOverrideAddBtn");
       const alwaysAllowRulesContainer = document.getElementById("alwaysAllowRulesContainer");
-      const settingsMessage = document.getElementById("settingsMessage");
+      const relayGatewayMessage = document.getElementById("relayGatewayMessage");
+      const securityMessage = document.getElementById("securityMessage");
+      const policiesMessage = document.getElementById("policiesMessage");
       const dashboardPayload = document.getElementById("dashboardPayload");
       const dashboardPort = document.getElementById("dashboardPort");
       const dashboardCloud = document.getElementById("dashboardCloud");
@@ -1263,6 +1533,8 @@
       const dashboardApproval = document.getElementById("dashboardApproval");
       const approvalsList = document.getElementById("approvalsList");
       const activityList = document.getElementById("activityList");
+      const runningJobsList = document.getElementById("runningJobsList");
+      const completedJobsList = document.getElementById("completedJobsList");
       const runtimeStatus = document.getElementById("runtimeStatus");
       const wsStatusBadge = document.getElementById("wsStatusBadge");
       const wsStatusDetail = document.getElementById("wsStatusDetail");
@@ -1435,6 +1707,77 @@
           tone: "unhealthy",
           detail: "Gateway is connecting to cloud service."
         };
+      }
+
+      function jobStatusClass(status) {
+        const s = (status || "").toLowerCase().replace(/_/g, "-");
+        return s;
+      }
+
+      function renderJobCard(job) {
+        const card = document.createElement("div");
+        card.className = "job-card";
+
+        const top = document.createElement("div");
+        top.className = "job-top";
+
+        const title = document.createElement("span");
+        title.className = "job-title";
+        const cmd = job.command || "(unknown)";
+        const label = job.artifactSlug || job.loopId || job.id;
+        title.textContent = `${cmd} — ${label}`;
+        top.appendChild(title);
+
+        const badge = document.createElement("span");
+        badge.className = `job-status-badge ${jobStatusClass(job.status)}`;
+        badge.textContent = job.status;
+        top.appendChild(badge);
+
+        card.appendChild(top);
+
+        const meta = document.createElement("div");
+        meta.className = "job-meta";
+        const startedAt = job.startedAt ? new Date(job.startedAt).toLocaleString() : "";
+        const updatedAt = job.updatedAt ? new Date(job.updatedAt).toLocaleString() : "";
+        const parts = [];
+        if (startedAt) parts.push(`Started: ${startedAt}`);
+        if (job.status !== "RUNNING" && updatedAt) parts.push(`Updated: ${updatedAt}`);
+        if (job.repoPath) parts.push(`Repo: ${job.repoPath}`);
+        meta.textContent = parts.join(" | ");
+        card.appendChild(meta);
+
+        if (job.phase || job.liveActivity) {
+          const phase = document.createElement("div");
+          phase.className = "job-phase";
+          phase.textContent = job.liveActivity || job.phase;
+          card.appendChild(phase);
+        }
+
+        return card;
+      }
+
+      function renderJobList(container, jobs) {
+        container.innerHTML = "";
+        if (!jobs.length) {
+          const empty = document.createElement("div");
+          empty.className = "approval-empty";
+          empty.textContent = "None";
+          container.appendChild(empty);
+          return;
+        }
+        for (const job of jobs) {
+          container.appendChild(renderJobCard(job));
+        }
+      }
+
+      async function refreshJobs() {
+        if (!api.listRunningJobs || !api.listCompletedJobs) return;
+        const [running, completed] = await Promise.all([
+          api.listRunningJobs().catch(() => []),
+          api.listCompletedJobs().catch(() => []),
+        ]);
+        renderJobList(runningJobsList, Array.isArray(running) ? running : []);
+        renderJobList(completedJobsList, Array.isArray(completed) ? completed : []);
       }
 
       let lastActivityFingerprint = "";
@@ -2023,9 +2366,9 @@
         try {
           await api.removeAlwaysAllowRule(ruleId);
           await loadSettings();
-          settingsMessage.textContent = "Always-allow rule removed.";
+          policiesMessage.textContent = "Always-allow rule removed.";
         } catch (error) {
-          settingsMessage.textContent = `Failed to remove rule: ${error.message}`;
+          policiesMessage.textContent = `Failed to remove rule: ${error.message}`;
         }
       }
 
@@ -2088,33 +2431,52 @@
         apiKeyStatus.textContent = describeApiKeyStatus(status);
       }
 
-      async function saveSettings() {
-        settingsMessage.textContent = "";
-        const parsedRules = JSON.parse(approvalRules.value || "{}");
+      function clearAllSettingsMessages() {
+        relayGatewayMessage.textContent = "";
+        securityMessage.textContent = "";
+        policiesMessage.textContent = "";
+      }
 
-        const payload = {
+      async function saveRelayGatewaySettings() {
+        clearAllSettingsMessages();
+        await api.updateSettings({
           relayOrigin: relayOrigin.value.trim(),
           apiOrigin: apiOrigin.value.trim(),
-          webAppOrigin: webAppOrigin.value.trim(),
-          sandboxBaseDirectory: sandboxBaseDirectory.value.trim(),
+          webAppOrigin: webAppOrigin.value.trim()
+        });
+        relayGatewayMessage.textContent = "Saved.";
+        await Promise.all([refreshRuntime(), refreshApprovals()]);
+      }
+
+      async function saveSecuritySettings() {
+        clearAllSettingsMessages();
+        await api.updateSettings({
+          sandboxBaseDirectory: sandboxBaseDirectory.value.trim()
+        });
+        securityMessage.textContent = "Saved.";
+        await refreshRuntime();
+      }
+
+      async function savePoliciesSettings() {
+        clearAllSettingsMessages();
+        const parsedRules = JSON.parse(approvalRules.value || "{}");
+        await api.updateSettings({
           defaultApprovalTier: defaultApprovalTier.value,
           autoApprovalRules: parsedRules
-        };
-
-        await api.updateSettings(payload);
-        settingsMessage.textContent = "Settings saved.";
+        });
+        policiesMessage.textContent = "Saved.";
         await Promise.all([refreshRuntime(), refreshApprovals()]);
       }
 
       async function saveApiKeyValue() {
-        settingsMessage.textContent = "";
+        relayGatewayMessage.textContent = "";
         const value = apiKey.value.trim();
         if (!value) {
-          settingsMessage.textContent = "Enter an API key before saving.";
+          relayGatewayMessage.textContent = "Enter an API key before saving.";
           return;
         }
         if (!value.startsWith("sk_live_")) {
-          settingsMessage.textContent = "API key must start with sk_live_.";
+          relayGatewayMessage.textContent = "API key must start with sk_live_.";
           return;
         }
 
@@ -2122,21 +2484,21 @@
           await api.setApiKey(value);
           apiKey.value = "";
           await Promise.all([refreshApiKeyStatus(), refreshRuntime()]);
-          settingsMessage.textContent = "API key saved to secure storage.";
+          relayGatewayMessage.textContent = "API key saved to secure storage.";
         } catch (error) {
-          settingsMessage.textContent = `Failed to save API key: ${error.message}`;
+          relayGatewayMessage.textContent = `Failed to save API key: ${error.message}`;
         }
       }
 
       async function clearApiKeyValue() {
-        settingsMessage.textContent = "";
+        relayGatewayMessage.textContent = "";
         try {
           await api.clearApiKey();
           apiKey.value = "";
           await Promise.all([refreshApiKeyStatus(), refreshRuntime()]);
-          settingsMessage.textContent = "Stored API key cleared.";
+          relayGatewayMessage.textContent = "Stored API key cleared.";
         } catch (error) {
-          settingsMessage.textContent = `Failed to clear API key: ${error.message}`;
+          relayGatewayMessage.textContent = `Failed to clear API key: ${error.message}`;
         }
       }
 
@@ -2149,19 +2511,19 @@
         try {
           if (action === "approve") {
             await api.approveApproval(approvalId);
-            settingsMessage.textContent = "Request approved.";
+            policiesMessage.textContent = "Request approved.";
           } else if (action === "deny") {
             await api.denyApproval(approvalId);
-            settingsMessage.textContent = "Request declined.";
+            policiesMessage.textContent = "Request declined.";
           } else {
             await api.alwaysAllowApproval(approvalId);
             await loadSettings();
-            settingsMessage.textContent =
+            policiesMessage.textContent =
               "Always Allow saved for this operation and scope (expires in 7 days).";
           }
           await refreshApprovals();
         } catch (error) {
-          settingsMessage.textContent = `Approval action failed: ${error.message}`;
+          policiesMessage.textContent = `Approval action failed: ${error.message}`;
         }
       }
 
@@ -2232,8 +2594,12 @@
         }
       }
 
-      document.getElementById("saveSettings").addEventListener("click", saveSettings);
-      document.getElementById("reloadSettings").addEventListener("click", loadSettings);
+      document.getElementById("saveRelayGateway").addEventListener("click", saveRelayGatewaySettings);
+      document.getElementById("reloadRelayGateway").addEventListener("click", loadSettings);
+      document.getElementById("saveSecurity").addEventListener("click", saveSecuritySettings);
+      document.getElementById("reloadSecurity").addEventListener("click", loadSettings);
+      document.getElementById("savePolicies").addEventListener("click", savePoliciesSettings);
+      document.getElementById("reloadPolicies").addEventListener("click", loadSettings);
       document.getElementById("saveApiKey").addEventListener("click", saveApiKeyValue);
       document.getElementById("clearApiKey").addEventListener("click", clearApiKeyValue);
       headerPauseToggle.addEventListener("change", async () => {
@@ -2288,6 +2654,7 @@
         refreshApiKeyStatus(),
         refreshApprovals(),
         refreshActivity(),
+        refreshJobs(),
         api.getDangerousAutoApprove().then((enabled) => {
           dangerAutoApproveToggle.checked = enabled;
           dangerAutoApproveLabel.classList.toggle("active", enabled);
@@ -2296,13 +2663,14 @@
           debugAuthSection.style.display = enabled ? "" : "none";
         })
       ]).catch((error) => {
-        settingsMessage.textContent = `Failed to load desktop state: ${error.message}`;
+        relayGatewayMessage.textContent = `Failed to load desktop state: ${error.message}`;
       });
 
       setInterval(() => {
         void refreshRuntime();
         void refreshApprovals();
         void refreshActivity();
+        void refreshJobs();
       }, 2000);
 
       // --- Auto-update banner ---

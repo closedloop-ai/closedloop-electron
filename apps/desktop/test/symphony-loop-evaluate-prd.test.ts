@@ -7,11 +7,12 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
+import {
+  readEvaluatePrdOutputs,
+  writePrdArtifact,
+} from "../src/server/operations/symphony-prd-artifacts.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
-import { _forTesting } from "../src/server/operations/symphony-loop.js";
 import { EMPTY_CAPABILITIES, PORT_PROBE_ORDER } from "../src/shared/contracts.js";
-
-const { writePrdArtifact, readEvaluatePrdOutputs } = _forTesting;
 
 // ---------------------------------------------------------------------------
 // Shared cleanup state
@@ -21,16 +22,19 @@ const tempPathsToClean: string[] = [];
 const serversToClose: DesktopGatewayServer[] = [];
 const eventServersToClose: http.Server[] = [];
 const originalPath = process.env.PATH;
+const originalRawPipeline = process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
 
 beforeEach(() => {
-  // Allow loopback apiBaseUrl via the _forTesting seam (reset in afterEach).
-  _forTesting.overrideValidateApiBaseUrl(() => true);
+  // Avoid grep|tee|python stream_formatter pipeline — stub claude is not a real stream.
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
 });
 
 afterEach(async () => {
-  // Reset URL validator so the override doesn't leak into other test files
-  // that share this Node.js process.
-  _forTesting.resetValidateApiBaseUrl();
+  if (originalRawPipeline === undefined) {
+    delete process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
+  } else {
+    process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = originalRawPipeline;
+  }
 
   // Restore PATH
   if (originalPath === undefined) {
@@ -74,7 +78,11 @@ function makeTempDir(): string {
   return dir;
 }
 
-function makeGatewayServer(options?: { allowedDirs?: string[]; tmpDir?: string }): DesktopGatewayServer {
+function makeGatewayServer(options?: {
+  allowedDirs?: string[];
+  tmpDir?: string;
+  getApiOrigin?: () => string;
+}): DesktopGatewayServer {
   const tmpDir = options?.tmpDir ?? makeTempDir();
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -82,6 +90,8 @@ function makeGatewayServer(options?: { allowedDirs?: string[]; tmpDir?: string }
     fallbackPorts: PORT_PROBE_ORDER.slice(1),
     webAppOrigin: "https://app.symphony.com",
     getGatewayAuthToken: () => "test-token",
+    // Dummy origin for tests that never POST loop events (Node fetch rejects port 9 as invalid).
+    getApiOrigin: options?.getApiOrigin ?? (() => "http://127.0.0.1:49152"),
     getAllowedDirectories: () => options?.allowedDirs ?? [os.tmpdir()],
     machineName: "evaluate-prd-test-machine",
     version: "0.1.0-test",
@@ -94,8 +104,7 @@ function makeGatewayServer(options?: { allowedDirs?: string[]; tmpDir?: string }
 
 /**
  * Start an event-capture HTTP server on a random port (port 0).
- * Returns the server port and a function that waits for the next matching event.
- * Loopback URL validation is bypassed via _forTesting.overrideValidateApiBaseUrl (set in beforeEach).
+ * Pass `getApiOrigin: () => \`http://127.0.0.1:${port}\`` into makeGatewayServer so loop events reach this server.
  */
 async function startEventServer(): Promise<{
   port: number;
@@ -286,13 +295,14 @@ describe("T-5.2: writePrdArtifact", () => {
     // stub claude: reads stdin (the prompt), exits 0
     const stubScript = [
       "#!/bin/sh",
-      'echo \'[{"type":"result","subtype":"success","result":"","is_error":false}]\'',
+      // One stream-json line starting with { so grep in buildClaudePipeline succeeds.
+      'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
       "exit 0",
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
 
-    const server = makeGatewayServer();
+    const server = makeGatewayServer({ getApiOrigin: () => apiBaseUrl });
     await server.start();
 
     const loopId = "22222222-0000-0000-0000-000000000002";
@@ -356,7 +366,8 @@ describe("T-5.2: writePrdArtifact", () => {
 
     const stubScript = [
       "#!/bin/sh",
-      'echo \'[{"type":"result","subtype":"success","result":"","is_error":false}]\'',
+      // One stream-json line starting with { so grep in buildClaudePipeline succeeds.
+      'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
       "exit 0",
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
@@ -368,7 +379,10 @@ describe("T-5.2: writePrdArtifact", () => {
     const repoDir = path.join(tmpDir, repoName);
     await fs.mkdir(repoDir, { recursive: true });
 
-    const server = makeGatewayServer({ allowedDirs: [tmpDir] });
+    const server = makeGatewayServer({
+      allowedDirs: [tmpDir],
+      getApiOrigin: () => apiBaseUrl,
+    });
     await server.start();
 
     const loopId = "66666666-0000-0000-0000-000000000006";
@@ -473,7 +487,8 @@ describe("T-5.4: Temp dir cleanup after EVALUATE_PRD completes", () => {
     const stubScript = [
       "#!/bin/sh",
       'echo "{}" > "$CLOSEDLOOP_WORKDIR/prd-judges.json"',
-      'echo \'[{"type":"result","subtype":"success","result":"","is_error":false}]\'',
+      // One stream-json line starting with { so grep in buildClaudePipeline succeeds.
+      'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
       "exit 0",
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
@@ -482,7 +497,7 @@ describe("T-5.4: Temp dir cleanup after EVALUATE_PRD completes", () => {
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
 
-    const server = makeGatewayServer();
+    const server = makeGatewayServer({ getApiOrigin: () => apiBaseUrl });
     await server.start();
 
     const loopId = "44444444-0000-0000-0000-000000000004";
@@ -544,7 +559,7 @@ describe("T-5.5: BINARY_NOT_FOUND when claude not in PATH", () => {
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
 
-    const server = makeGatewayServer();
+    const server = makeGatewayServer({ getApiOrigin: () => apiBaseUrl });
     await server.start();
 
     const loopId = "55555555-0000-0000-0000-000000000005";

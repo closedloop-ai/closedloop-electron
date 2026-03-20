@@ -97,7 +97,14 @@ describe("readLaunchMetadata", () => {
     );
 
     const meta = readLaunchMetadata(dir);
-    assert.deepEqual(meta, { baseBranch: "main", parentTicketId: "AI-100" });
+    assert.deepEqual(meta, {
+      artifactId: undefined,
+      baseBranch: "main",
+      issueId: undefined,
+      loopId: undefined,
+      parentTicketId: "AI-100",
+      ticketTitle: undefined,
+    });
   });
 
   test("returns null for malformed JSON", () => {
@@ -123,8 +130,12 @@ describe("readLaunchMetadata", () => {
 
     const meta = readLaunchMetadata(dir);
     assert.deepEqual(meta, {
+      artifactId: undefined,
       baseBranch: undefined,
+      issueId: undefined,
+      loopId: undefined,
       parentTicketId: undefined,
+      ticketTitle: undefined,
     });
   });
 });
@@ -154,7 +165,14 @@ describe("writeLaunchMetadata", () => {
     });
 
     const meta = readLaunchMetadata(dir);
-    assert.deepEqual(meta, { baseBranch: "main", parentTicketId: "AI-50" });
+    assert.deepEqual(meta, {
+      artifactId: undefined,
+      baseBranch: "main",
+      issueId: undefined,
+      loopId: undefined,
+      parentTicketId: "AI-50",
+      ticketTitle: undefined,
+    });
   });
 
   test("overrides existing values when new values are defined", () => {
@@ -166,7 +184,14 @@ describe("writeLaunchMetadata", () => {
     writeLaunchMetadata(dir, { baseBranch: "develop" });
 
     const meta = readLaunchMetadata(dir);
-    assert.deepEqual(meta, { baseBranch: "develop", parentTicketId: "AI-50" });
+    assert.deepEqual(meta, {
+      artifactId: undefined,
+      baseBranch: "develop",
+      issueId: undefined,
+      loopId: undefined,
+      parentTicketId: "AI-50",
+      ticketTitle: undefined,
+    });
   });
 });
 
