@@ -59,8 +59,16 @@ test("resolveOperationId maps known paths correctly", () => {
   assert.equal(resolveOperationId("/api/engineer/deploy/anything"), "deploy");
 });
 
-test("resolveOperationId returns null for unmapped engineer paths", () => {
-  assert.equal(resolveOperationId("/api/engineer/version"), null);
+test("resolveOperationId maps previously unmapped routes", () => {
+  assert.equal(resolveOperationId("/api/engineer/version"), "health_check");
+  assert.equal(resolveOperationId("/api/engineer/symphony/status"), "symphony_status");
+  assert.equal(resolveOperationId("/api/engineer/symphony/status/FEAT-1"), "symphony_status");
+  assert.equal(resolveOperationId("/api/engineer/symphony/attachments/FEAT-1/img.png"), "filesystem");
+  assert.equal(resolveOperationId("/api/engineer/symphony/upload/FEAT-1"), "filesystem");
+});
+
+test("resolveOperationId returns null for truly unknown engineer paths", () => {
+  assert.equal(resolveOperationId("/api/engineer/does-not-exist"), null);
 });
 
 test("resolveOperationId returns null for paths outside /api/engineer/", () => {

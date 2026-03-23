@@ -51,7 +51,7 @@ export function resolveOperationId(pathname: string): string | null {
   if (pathname.startsWith("/api/engineer/symphony/plan-loop/")) {
     return "symphony_plan_loop";
   }
-  if (pathname.startsWith("/api/engineer/symphony/status/")) {
+  if (pathname === "/api/engineer/symphony/status" || pathname.startsWith("/api/engineer/symphony/status/")) {
     return "symphony_status";
   }
   if (pathname === "/api/engineer/symphony/kill") {
@@ -137,6 +137,15 @@ export function resolveOperationId(pathname: string): string | null {
   }
   if (pathname.startsWith("/api/engineer/symphony/sessions/")) {
     return "symphony_sessions";
+  }
+  if (pathname.startsWith("/api/engineer/symphony/attachments/")) {
+    return "filesystem";
+  }
+  if (pathname.startsWith("/api/engineer/symphony/upload/")) {
+    return "filesystem";
+  }
+  if (pathname === "/api/engineer/version") {
+    return "health_check";
   }
   if (
     pathname === "/api/engineer/directories" ||

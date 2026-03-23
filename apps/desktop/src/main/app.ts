@@ -527,7 +527,11 @@ export class DesktopApplication {
 
     const operationId = resolveOperationId(request.path);
     if (!operationId) {
-      return { allow: true };
+      return {
+        allow: false,
+        statusCode: 403,
+        payload: { error: `Unmapped operation: ${request.path}` }
+      };
     }
 
     const settings = this.settingsStore.getAll();
