@@ -30,7 +30,9 @@ export const SUPPORTED_OPERATION_IDS = [
   "deploy",
   "learnings",
   "filesystem"
-];
+] as const;
+
+export type OperationId = (typeof SUPPORTED_OPERATION_IDS)[number];
 
 export function resolveOperationId(pathname: string): string | null {
   if (!pathname.startsWith("/api/engineer/")) {

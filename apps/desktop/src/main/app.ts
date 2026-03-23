@@ -133,7 +133,7 @@ export class DesktopApplication {
       getMaxInFlightCommands: () => MAX_IN_FLIGHT_COMMANDS,
       machineName: os.hostname(),
       pluginVersion: DESKTOP_GATEWAY_VERSION,
-      supportedOperations: SUPPORTED_OPERATION_IDS,
+      supportedOperations: [...SUPPORTED_OPERATION_IDS],
       onStatusChange: (status) => this.onCloudSocketStatus(status),
       onHelloAck: (event) => {
         if (event.resumeFromSequence) {

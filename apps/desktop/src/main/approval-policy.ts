@@ -1,10 +1,11 @@
 import type { RiskTier } from "../shared/contracts.js";
+import type { OperationId } from "./approval-operations.js";
 
 /**
  * Per-operation inherent risk tiers. The risk assigned reflects the
  * highest-risk HTTP method that each approval ID handles.
  */
-export const OPERATION_RISK_TIERS: Record<string, Exclude<RiskTier, "auto">> = {
+export const OPERATION_RISK_TIERS: Record<OperationId, Exclude<RiskTier, "auto">> = {
   health_check:            "low",
   repos_config:            "medium",
   filesystem:              "medium",
@@ -52,6 +53,6 @@ export function shouldAutoApprove(
   forceApproval: boolean
 ): boolean {
   if (forceApproval) return false;
-  const operationRisk = OPERATION_RISK_TIERS[operationId] ?? "high";
+  const operationRisk = (OPERATION_RISK_TIERS as Record<string, Exclude<RiskTier, "auto">>)[operationId] ?? "high";
   return riskTierOrder(operationRisk) <= riskTierOrder(configuredTier);
 }
