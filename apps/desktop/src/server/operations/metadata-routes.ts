@@ -68,12 +68,6 @@ export function registerMetadataRoutes(
     }
   });
 
-  dispatcher.register("GET", "/api/engineer/mcp-auth", (context) => {
-    json(context, 200, {
-      apiKey: process.env.CLOSEDLOOP_API_KEY ?? ""
-    });
-  });
-
   dispatcher.register("GET", "/api/engineer/symphony/status", async (context) => {
     const workDir = context.query.get("workDir");
     if (!workDir) {

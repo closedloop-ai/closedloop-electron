@@ -28,6 +28,8 @@ import {
   SymphonyDirNotConfiguredError
 } from "../server/operations/symphony-utils.js";
 import { seedReposConfig } from "./seed-repos-config.js";
+import { SUPPORTED_OPERATION_IDS, resolveOperationId } from "./approval-operations.js";
+import { shouldAutoApprove } from "./approval-policy.js";
 import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
 import { JobStore, isTerminalJobStatus } from "./job-store.js";
@@ -131,7 +133,7 @@ export class DesktopApplication {
       getMaxInFlightCommands: () => MAX_IN_FLIGHT_COMMANDS,
       machineName: os.hostname(),
       pluginVersion: DESKTOP_GATEWAY_VERSION,
-      supportedOperations: SUPPORTED_OPERATION_IDS,
+      supportedOperations: [...SUPPORTED_OPERATION_IDS],
       onStatusChange: (status) => this.onCloudSocketStatus(status),
       onHelloAck: (event) => {
         if (event.resumeFromSequence) {
@@ -525,7 +527,11 @@ export class DesktopApplication {
 
     const operationId = resolveOperationId(request.path);
     if (!operationId) {
-      return { allow: true };
+      return {
+        allow: false,
+        statusCode: 403,
+        payload: { error: `Unmapped operation: ${request.path}` }
+      };
     }
 
     const settings = this.settingsStore.getAll();
@@ -547,11 +553,13 @@ export class DesktopApplication {
 
     const configuredTier = (settings.autoApprovalRules[operationId] ??
       settings.defaultApprovalTier) as RiskTier;
-    const tier: RiskTier = request.forceApproval ? "high" : configuredTier;
-    if (tier === "auto" && !request.forceApproval) {
+    if (configuredTier === "auto" && !request.forceApproval) {
       return { allow: true };
     }
-    const manualTier: Exclude<RiskTier, "auto"> = tier === "auto" ? "high" : tier;
+    const manualTier: Exclude<RiskTier, "auto"> = configuredTier === "auto" ? "high" : configuredTier;
+    if (shouldAutoApprove(operationId, manualTier, request.forceApproval ?? false)) {
+      return { allow: true };
+    }
 
     const reason =
       request.approvalReason?.trim() ||
@@ -1019,140 +1027,6 @@ export class DesktopApplication {
   }
 }
 
-const SUPPORTED_OPERATION_IDS = [
-  "symphony_launch",
-  "symphony_loop",
-  "symphony_loop_kill",
-  "symphony_plan_loop",
-  "symphony_status",
-  "symphony_kill",
-  "symphony_chat",
-  "symphony_comment_chat",
-  "symphony_commit_message",
-  "symphony_sessions",
-  "symphony_plan",
-  "symphony_judges",
-  "symphony_logs",
-  "symphony_chat_history",
-  "terminal_chat",
-  "ticket_chat",
-  "run_viewer_chat",
-  "codex_review",
-  "codex_argue",
-  "git_action",
-  "git_pr",
-  "health_check",
-  "repos_config",
-  "deploy",
-  "learnings",
-  "filesystem"
-];
-
-function resolveOperationId(pathname: string): string | null {
-  if (!pathname.startsWith("/api/engineer/")) {
-    return null;
-  }
-
-  if (pathname === "/api/engineer/symphony/launch") {
-    return "symphony_launch";
-  }
-  if (pathname === "/api/engineer/symphony/loop") {
-    return "symphony_loop";
-  }
-  if (pathname === "/api/engineer/symphony/loop/kill") {
-    return "symphony_loop_kill";
-  }
-  if (pathname.startsWith("/api/engineer/symphony/plan-loop/")) {
-    return "symphony_plan_loop";
-  }
-  if (pathname.startsWith("/api/engineer/symphony/status/")) {
-    return "symphony_status";
-  }
-  if (pathname === "/api/engineer/symphony/kill") {
-    return "symphony_kill";
-  }
-  if (pathname.startsWith("/api/engineer/symphony/chat/")) {
-    return "symphony_chat";
-  }
-  if (pathname.startsWith("/api/engineer/symphony/comment-chat/")) {
-    return "symphony_comment_chat";
-  }
-  if (pathname.startsWith("/api/engineer/symphony/commit-message/")) {
-    return "symphony_commit_message";
-  }
-  if (pathname === "/api/engineer/symphony/sessions") {
-    return "symphony_sessions";
-  }
-  if (pathname.startsWith("/api/engineer/symphony/plan/")) {
-    return "symphony_plan";
-  }
-  if (pathname.startsWith("/api/engineer/symphony/judges/")) {
-    return "symphony_judges";
-  }
-  if (pathname.startsWith("/api/engineer/symphony/logs/")) {
-    return "symphony_logs";
-  }
-  if (pathname.startsWith("/api/engineer/symphony/chat-history/")) {
-    return "symphony_chat_history";
-  }
-  if (pathname.startsWith("/api/engineer/symphony/pending-learnings")) {
-    return "learnings";
-  }
-  if (pathname.startsWith("/api/engineer/symphony/process-learnings")) {
-    return "learnings";
-  }
-  if (pathname.startsWith("/api/engineer/symphony/process-all-learnings")) {
-    return "learnings";
-  }
-  if (pathname === "/api/engineer/terminal-chat") {
-    return "terminal_chat";
-  }
-  if (pathname === "/api/engineer/ticket-chat") {
-    return "ticket_chat";
-  }
-  if (pathname === "/api/engineer/run-viewer-chat") {
-    return "run_viewer_chat";
-  }
-  if (pathname.startsWith("/api/engineer/codex/argue/")) {
-    return "codex_argue";
-  }
-  if (pathname.startsWith("/api/engineer/codex/")) {
-    return "codex_review";
-  }
-  if (pathname.startsWith("/api/engineer/git/pr") || pathname === "/api/engineer/git/user") {
-    return "git_pr";
-  }
-  if (pathname.startsWith("/api/engineer/git")) {
-    return "git_action";
-  }
-  if (pathname === "/api/engineer/health-check") {
-    return "health_check";
-  }
-  if (pathname === "/api/engineer/repos") {
-    return "repos_config";
-  }
-  if (pathname.startsWith("/api/engineer/deploy")) {
-    return "deploy";
-  }
-  if (pathname === "/api/engineer/learnings") {
-    return "learnings";
-  }
-  if (pathname.startsWith("/api/engineer/work-directory/")) {
-    return "filesystem";
-  }
-  if (pathname.startsWith("/api/engineer/symphony/sessions/")) {
-    return "symphony_sessions";
-  }
-  if (
-    pathname === "/api/engineer/directories" ||
-    pathname === "/api/engineer/files/search" ||
-    pathname.startsWith("/api/engineer/run-viewer-extract")
-  ) {
-    return "filesystem";
-  }
-
-  return null;
-}
 
 const APPROVAL_TIMEOUT_MS = 120_000;
 const MAX_IN_FLIGHT_COMMANDS = 2;

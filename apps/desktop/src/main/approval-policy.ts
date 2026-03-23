@@ -1,0 +1,58 @@
+import type { RiskTier } from "../shared/contracts.js";
+import type { OperationId } from "./approval-operations.js";
+
+/**
+ * Per-operation inherent risk tiers. The risk assigned reflects the
+ * highest-risk HTTP method that each approval ID handles.
+ */
+export const OPERATION_RISK_TIERS: Record<OperationId, Exclude<RiskTier, "auto">> = {
+  health_check:            "low",
+  repos_config:            "medium",
+  filesystem:              "medium",
+  symphony_status:         "low",
+  symphony_sessions:       "medium",
+  symphony_logs:           "low",
+  symphony_chat_history:   "medium",
+  git_action:              "medium",
+  git_pr:                  "medium",
+  symphony_launch:         "medium",
+  symphony_loop:           "medium",
+  symphony_loop_kill:      "medium",
+  symphony_plan_loop:      "medium",
+  symphony_kill:           "medium",
+  symphony_chat:           "medium",
+  symphony_comment_chat:   "medium",
+  symphony_commit_message: "medium",
+  symphony_plan:           "medium",
+  symphony_judges:         "medium",
+  terminal_chat:           "medium",
+  ticket_chat:             "medium",
+  run_viewer_chat:         "medium",
+  codex_review:            "medium",
+  codex_argue:             "medium",
+  deploy:                  "high",
+  learnings:               "medium"
+};
+
+/** Converts a non-auto RiskTier to a numeric value for threshold comparison. */
+export function riskTierOrder(tier: Exclude<RiskTier, "auto">): number {
+  switch (tier) {
+    case "low": return 1;
+    case "medium": return 2;
+    case "high": return 3;
+  }
+}
+
+/**
+ * Returns true if the operation should be auto-approved based on the
+ * configured policy threshold. Unknown operations default to "high" risk.
+ */
+export function shouldAutoApprove(
+  operationId: string,
+  configuredTier: Exclude<RiskTier, "auto">,
+  forceApproval: boolean
+): boolean {
+  if (forceApproval) return false;
+  const operationRisk = (OPERATION_RISK_TIERS as Record<string, Exclude<RiskTier, "auto">>)[operationId] ?? "high";
+  return riskTierOrder(operationRisk) <= riskTierOrder(configuredTier);
+}
