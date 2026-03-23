@@ -9,8 +9,13 @@ import type {
   OperationDispatcher,
   OperationRequestContext,
 } from "../operation-dispatcher.js";
+import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { findPluginScript, findPluginVersions, getPluginCacheRoot } from "./plugin-cache.js";
+import {
+  readEvaluatePrdOutputs,
+  writePrdArtifact,
+} from "./symphony-prd-artifacts.js";
 import {
   expandHome,
   resolveWorktreeParentDir,
@@ -21,9 +26,31 @@ import {
 // Types
 // ---------------------------------------------------------------------------
 
-type LoopCommand = "PLAN" | "EXECUTE" | "REQUEST_CHANGES" | "DECOMPOSE" | "GENERATE_PRD";
+type LoopCommand =
+  | "PLAN"
+  | "EXECUTE"
+  | "REQUEST_CHANGES"
+  | "DECOMPOSE"
+  | "EVALUATE_PRD"
+  | "GENERATE_PRD";
 
-const VALID_COMMANDS = new Set<LoopCommand>(["PLAN", "EXECUTE", "REQUEST_CHANGES", "DECOMPOSE", "GENERATE_PRD"]);
+const VALID_COMMANDS = new Set<LoopCommand>([
+  "PLAN",
+  "EXECUTE",
+  "REQUEST_CHANGES",
+  "DECOMPOSE",
+  "EVALUATE_PRD",
+  "GENERATE_PRD",
+]);
+type RepoRequirement = "REQUIRED" | "OPTIONAL" | "NOT_REQUIRED";
+const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
+  PLAN: "REQUIRED",
+  EXECUTE: "REQUIRED",
+  REQUEST_CHANGES: "REQUIRED",
+  EVALUATE_PRD: "OPTIONAL",
+  GENERATE_PRD: "REQUIRED",
+  DECOMPOSE: "NOT_REQUIRED",
+};
 
 interface LoopArtifact {
   id?: string;
@@ -116,6 +143,11 @@ function shellEscape(value: string): string {
  * Falls back to null if not installed — caller should degrade gracefully.
  */
 function findStreamFormatter(): string | null {
+  // Unit/integration tests set this to exercise the raw `claude` bash wrapper
+  // without grep/tee/python (stub claude output is not a full formatter stream).
+  if (process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE === "1") {
+    return null;
+  }
   const pluginDir = path.join(getPluginCacheRoot(), "code");
   const versions = findPluginVersions(pluginDir);
   for (const v of versions) {
@@ -473,30 +505,6 @@ async function writeArtifactsForExecuteOrAmend(
   }
 }
 
-async function writeArtifactsForDecompose(
-  tmpDir: string,
-  artifacts: LoopArtifact[],
-  prompt?: string
-): Promise<void> {
-  // Same priority as writeArtifactsForPlan: prompt > PRD > FEATURE
-  let prdContent = prompt ?? null;
-
-  if (!prdContent) {
-    const prdArtifact = artifacts.find((a) => a.type === "PRD" || a.type === "prd");
-    const featureArtifact = prdArtifact
-      ? null
-      : artifacts.find((a) => a.type === "FEATURE" || a.type === "artifact");
-    const source = prdArtifact ?? featureArtifact;
-    if (source?.content) {
-      prdContent = source.content;
-    }
-  }
-
-  if (prdContent) {
-    await fs.writeFile(path.join(tmpDir, "prd.md"), prdContent);
-  }
-}
-
 /**
  * Write context pack files for GENERATE_PRD command.
  * Mirrors writeContextPackFiles in harness-agent.mjs (lines 744-816).
@@ -534,21 +542,9 @@ async function writeArtifactsForGeneratePrd(
     );
   }
 }
-
 // ---------------------------------------------------------------------------
 // Per-command output reading
 // ---------------------------------------------------------------------------
-
-function readJsonFile(filePath: string): unknown | null {
-  try {
-    if (!existsSync(filePath)) {
-      return null;
-    }
-    return JSON.parse(readFileSync(filePath, "utf-8"));
-  } catch {
-    return null;
-  }
-}
 
 function readTextFile(filePath: string): string | null {
   try {
@@ -562,11 +558,11 @@ function readTextFile(filePath: string): string | null {
 }
 
 function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
-  const plan = readJsonFile(path.join(claudeWorkDir, "plan.json"));
+  const plan = readJsonFileSync(path.join(claudeWorkDir, "plan.json"));
   const openQuestions = readTextFile(
     path.join(claudeWorkDir, "open-questions.md")
   );
-  const judges = readJsonFile(path.join(claudeWorkDir, "judges.json"));
+  const judges = readJsonFileSync(path.join(claudeWorkDir, "judges.json"));
 
   return {
     plan: plan ?? undefined,
@@ -576,10 +572,10 @@ function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
 }
 
 function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
-  const executionResult = readJsonFile(
+  const executionResult = readJsonFileSync(
     path.join(claudeWorkDir, "execution-result.json")
   );
-  const codeJudges = readJsonFile(
+  const codeJudges = readJsonFileSync(
     path.join(claudeWorkDir, "code-judges.json")
   );
 
@@ -590,7 +586,7 @@ function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
 }
 
 function readDecomposeOutputs(workDir: string): Record<string, unknown> {
-  const features = readJsonFile(path.join(workDir, "features.json"));
+  const features = readJsonFileSync(path.join(workDir, "features.json"));
   return { features: features ?? undefined };
 }
 
@@ -756,6 +752,7 @@ async function handleProcessCompletion(
   apiBaseUrl: string,
   worktreeDir: string | null,
   claudeWorkDir: string,
+  usedTempDir: boolean,
   expandedRepoPath: string | null,
   jobStore?: JobStore
 ): Promise<void> {
@@ -786,7 +783,9 @@ async function handleProcessCompletion(
         });
       }
     }
-    if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
+    if (usedTempDir) {
+      fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+    } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
       await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, loopId);
     }
     return;
@@ -825,6 +824,8 @@ async function handleProcessCompletion(
     }
   } else if (command === "DECOMPOSE") {
     artifacts = readDecomposeOutputs(claudeWorkDir);
+  } else if (command === "EVALUATE_PRD") {
+    artifacts = readEvaluatePrdOutputs(claudeWorkDir);
   } else if (command === "GENERATE_PRD") {
     artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
   }
@@ -909,8 +910,8 @@ async function handleProcessCompletion(
     }
   }
 
-  // Clean up DECOMPOSE temp directory after all reads and uploads are complete
-  if (command === "DECOMPOSE") {
+  // Clean up temp claude workdir after all reads and uploads are complete
+  if (usedTempDir) {
     fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
   } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
     await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, loopId);
@@ -943,6 +944,7 @@ async function handleLoopRequest(
   }
 
   const body = rawBody as unknown as LoopRequestBody;
+  const repoRequirement = REPO_REQUIREMENT_BY_COMMAND[body.command] ?? "NOT_REQUIRED";
 
   if (!body.loopId || !body.command || !body.closedLoopAuthToken) {
     json(context, 400, {
@@ -986,52 +988,107 @@ async function handleLoopRequest(
     const allowedDirs = getAllowedDirectories();
     let expandedRepoPath: string | null = null;
 
-    if (body.localRepoPath) {
+    if (repoRequirement !== "NOT_REQUIRED" && body.localRepoPath) {
       // localRepoPath takes precedence over repo.fullName lookup when present
-      const repoResult = tryAssertRepoAllowed(body.localRepoPath, allowedDirs);
-      if ("error" in repoResult) {
-        json(context, repoResult.status, { error: repoResult.error });
-        return;
+      try {
+        const repoResult = tryAssertRepoAllowed(body.localRepoPath, allowedDirs);
+        if ("error" in repoResult) {
+          if (repoRequirement === "REQUIRED") {
+            json(context, repoResult.status, { error: repoResult.error });
+            return;
+          }
+          loopLog(
+            body.loopId,
+            `Ignoring localRepoPath for ${body.command}: ${repoResult.error}`
+          );
+        } else {
+          expandedRepoPath = repoResult.path;
+          loopLog(body.loopId, `Using localRepoPath: ${expandedRepoPath}`);
+        }
+      } catch (repoPathError) {
+        if (repoRequirement === "REQUIRED") {
+          throw repoPathError;
+        }
+        loopLog(
+          body.loopId,
+          `Ignoring localRepoPath for ${body.command} after resolution error: ${repoPathError instanceof Error ? repoPathError.message : String(repoPathError)}`
+        );
       }
-      expandedRepoPath = repoResult.path;
-      loopLog(body.loopId, `Using localRepoPath: ${expandedRepoPath}`);
-    } else if (body.repo?.fullName) {
+    } else if (repoRequirement !== "NOT_REQUIRED" && body.repo?.fullName) {
       expandedRepoPath = findLocalRepo(body.repo.fullName, allowedDirs);
       if (!expandedRepoPath) {
-        json(context, 404, {
-          error: `Repository not found locally: ${body.repo.fullName}`,
-        });
-        return;
-      }
-      try {
-        assertPathAllowed(expandedRepoPath, allowedDirs);
-      } catch (err) {
-        if (err instanceof DirectoryNotAllowedError) {
-          json(context, 403, { error: "Repository path not allowed" });
+        if (repoRequirement === "REQUIRED") {
+          json(context, 404, {
+            error: `Repository not found locally: ${body.repo.fullName}`,
+          });
           return;
         }
-        throw err;
+        loopLog(
+          body.loopId,
+          `Ignoring repo.fullName for ${body.command}: not found locally (${body.repo.fullName})`
+        );
+      } else {
+        try {
+          assertPathAllowed(expandedRepoPath, allowedDirs);
+        } catch (err) {
+          if (err instanceof DirectoryNotAllowedError) {
+            if (repoRequirement === "REQUIRED") {
+              json(context, 403, { error: "Repository path not allowed" });
+              return;
+            }
+            loopLog(
+              body.loopId,
+              `Ignoring repo.fullName for ${body.command}: repository path not allowed (${expandedRepoPath})`
+            );
+            expandedRepoPath = null;
+          } else {
+            throw err;
+          }
+        }
       }
     }
 
     let worktreeDir: string | null = null;
     let claudeWorkDir: string;
+    let usedTempDir = false;
 
     if (body.command === "DECOMPOSE") {
       // DECOMPOSE: use temp dir, no worktree needed
+      usedTempDir = true;
       const tmpDir = path.join(
         os.tmpdir(),
         `symphony-decompose-${body.loopId.slice(0, 8)}`
       );
+      await fs.rm(tmpDir, { recursive: true, force: true });
       await fs.mkdir(tmpDir, { recursive: true });
       claudeWorkDir = tmpDir;
-      await writeArtifactsForDecompose(claudeWorkDir, body.artifacts, body.prompt);
-    } else if (!expandedRepoPath) {
+      await writePrdArtifact(claudeWorkDir, body.artifacts, body.prompt);
+    } else if (body.command === "EVALUATE_PRD") {
+      // EVALUATE_PRD: use temp dir, no worktree needed.
+      // Temp dir is intentionally exempt from assertPathAllowed.
+      usedTempDir = true;
+      const tmpDir = path.join(
+        os.tmpdir(),
+        `symphony-evaluate-prd-${body.loopId.slice(0, 8)}`
+      );
+      await fs.rm(tmpDir, { recursive: true, force: true });
+      await fs.mkdir(tmpDir, { recursive: true });
+      claudeWorkDir = tmpDir;
+      await writePrdArtifact(claudeWorkDir, body.artifacts, body.prompt);
+    } else if (repoRequirement === "REQUIRED" && !expandedRepoPath) {
       json(context, 400, {
         error: "Repository required for PLAN, EXECUTE, REQUEST_CHANGES, and GENERATE_PRD commands",
       });
       return;
     } else if (body.command === "PLAN" || body.command === "EXECUTE" || body.command === "REQUEST_CHANGES") {
+      const repoPath = expandedRepoPath;
+      if (!repoPath) {
+        json(context, 400, {
+          error: "Repository required for PLAN, EXECUTE, and REQUEST_CHANGES commands",
+        });
+        return;
+      }
+
       // Worktree keyed by artifact slug (e.g., symphony/PLAN-5).
       // PLAN always creates fresh; EXECUTE/REQUEST_CHANGES reuse.
       // Sanitize slug the same way we sanitize loopId to prevent path traversal.
@@ -1043,17 +1100,17 @@ async function handleLoopRequest(
         ? `symphony/${sanitizedSlug}`
         : `symphony/loop-${pickStableId(body)}`;
 
-      worktreeDir = resolveLoopWorktreeDir(expandedRepoPath, worktreeKey);
+      worktreeDir = resolveLoopWorktreeDir(repoPath, worktreeKey);
 
       if (body.command === "PLAN") {
         // PLAN always starts fresh — remove stale worktree if it exists.
         // PLAN has requiresParent: false, so it must not inherit prior state.
-        const staleWorktree = findWorktreeForBranch(expandedRepoPath, branchName);
+        const staleWorktree = findWorktreeForBranch(repoPath, branchName);
         if (staleWorktree) {
           loopLog(body.loopId, `Removing stale worktree for fresh PLAN: ${staleWorktree}`);
           try {
             execSync(`git worktree remove --force ${shellEscape(staleWorktree)}`, {
-              cwd: expandedRepoPath,
+              cwd: repoPath,
               stdio: "pipe",
               timeout: 15_000,
             });
@@ -1063,14 +1120,14 @@ async function handleLoopRequest(
             await fs.rm(staleWorktree, { recursive: true, force: true });
             // Prune stale worktree entries from git's tracking
             try {
-              execSync("git worktree prune", { cwd: expandedRepoPath, stdio: "pipe", timeout: 10_000 });
+              execSync("git worktree prune", { cwd: repoPath, stdio: "pipe", timeout: 10_000 });
             } catch {
               // Best-effort
             }
           }
         }
         await ensureWorktree(
-          expandedRepoPath,
+          repoPath,
           worktreeDir,
           branchName,
           body.repo?.branch ?? "main"
@@ -1079,14 +1136,14 @@ async function handleLoopRequest(
       } else {
         // EXECUTE/REQUEST_CHANGES: reuse existing worktree.
         // Try artifact slug first, then parentLoopId fallback, then create new.
-        const existingWorktree = findWorktreeForBranch(expandedRepoPath, branchName);
+        const existingWorktree = findWorktreeForBranch(repoPath, branchName);
         if (existingWorktree) {
           worktreeDir = existingWorktree;
           loopLog(body.loopId, `Reusing worktree via artifact slug: ${worktreeDir} (branch: ${branchName})`);
         } else if (body.parentLoopId) {
           // Fallback: try parent's loopId-based branch (pre-slug deployments or missing slug)
           const parentBranch = `symphony/loop-${slugifyLoopId(body.parentLoopId)}`;
-          const parentWorktree = findWorktreeForBranch(expandedRepoPath, parentBranch);
+          const parentWorktree = findWorktreeForBranch(repoPath, parentBranch);
           if (parentWorktree) {
             worktreeDir = parentWorktree;
             loopLog(body.loopId, `Reusing worktree via parentLoopId fallback: ${worktreeDir} (branch: ${parentBranch})`);
@@ -1094,9 +1151,9 @@ async function handleLoopRequest(
         }
         if (!worktreeDir || !existsSync(worktreeDir)) {
           // No existing worktree found — create new
-          worktreeDir = resolveLoopWorktreeDir(expandedRepoPath, worktreeKey);
+          worktreeDir = resolveLoopWorktreeDir(repoPath, worktreeKey);
           await ensureWorktree(
-            expandedRepoPath,
+            repoPath,
             worktreeDir,
             branchName,
             body.repo?.branch ?? "main"
@@ -1130,6 +1187,14 @@ async function handleLoopRequest(
         );
       }
     } else if (body.command === "GENERATE_PRD") {
+      const repoPath = expandedRepoPath;
+      if (!repoPath) {
+        json(context, 400, {
+          error: "Repository required for GENERATE_PRD command",
+        });
+        return;
+      }
+
       // Use a dedicated branch namespace to avoid collisions with PLAN/EXECUTE worktrees.
       // GENERATE_PRD always starts fresh -- it must not inherit a prior PLAN worktree.
       const sanitizedSlug = body.artifactSlug
@@ -1140,17 +1205,17 @@ async function handleLoopRequest(
         ? `symphony/generate-prd-${sanitizedSlug}`
         : `symphony/generate-prd-${pickStableId(body)}`;
 
-      worktreeDir = resolveLoopWorktreeDir(expandedRepoPath, `generate-prd-${worktreeKey}`);
+      worktreeDir = resolveLoopWorktreeDir(repoPath, `generate-prd-${worktreeKey}`);
 
       // Always start fresh: remove any stale worktree for this branch before creation.
-      const staleWorktree = findWorktreeForBranch(expandedRepoPath, branchName);
+      const staleWorktree = findWorktreeForBranch(repoPath, branchName);
       if (staleWorktree) {
         loopLog(body.loopId, `Removing stale worktree for fresh GENERATE_PRD: ${staleWorktree}`);
-        await cleanupGeneratePrdWorktree(staleWorktree, expandedRepoPath, body.loopId);
+        await cleanupGeneratePrdWorktree(staleWorktree, repoPath, body.loopId);
       }
 
       await ensureWorktree(
-        expandedRepoPath,
+        repoPath,
         worktreeDir,
         branchName,
         body.repo?.branch ?? "main"
@@ -1161,7 +1226,7 @@ async function handleLoopRequest(
         assertPathAllowed(worktreeDir, allowedDirs);
       } catch (e) {
         if (e instanceof DirectoryNotAllowedError) {
-          await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, body.loopId);
+          await cleanupGeneratePrdWorktree(worktreeDir, repoPath, body.loopId);
           json(context, 403, { error: `Worktree path not allowed: ${worktreeDir}` });
           return;
         }
@@ -1179,10 +1244,18 @@ async function handleLoopRequest(
       return;
     }
 
+    const cleanupTempClaudeWorkDir = (): void => {
+      fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+    };
+
     // Pre-flight: verify required binary exists BEFORE posting 'started' event.
     // PLAN and EXECUTE use run-loop.sh; REQUEST_CHANGES and DECOMPOSE use claude CLI directly.
     const usesRunLoop = body.command === "PLAN" || body.command === "EXECUTE";
-    const usesClaude = body.command === "REQUEST_CHANGES" || body.command === "DECOMPOSE" || body.command === "GENERATE_PRD";
+    const usesClaude =
+      body.command === "REQUEST_CHANGES" ||
+      body.command === "DECOMPOSE" ||
+      body.command === "EVALUATE_PRD" ||
+      body.command === "GENERATE_PRD";
     let scriptPath: string | null = null;
 
     if (usesClaude) {
@@ -1195,9 +1268,13 @@ async function handleLoopRequest(
           body.closedLoopAuthToken,
           {
             type: "error",
-            code: "BINARY_NOT_FOUND", message: "claude CLI not found in PATH",
+            code: "BINARY_NOT_FOUND",
+            message: "claude CLI not found in PATH",
           }
         );
+        if (usedTempDir) {
+          cleanupTempClaudeWorkDir();
+        }
         if (body.command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
           await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, body.loopId);
         }
@@ -1213,7 +1290,8 @@ async function handleLoopRequest(
           body.closedLoopAuthToken,
           {
             type: "error",
-            code: "SCRIPT_NOT_FOUND", message: "run-loop.sh not found in plugin cache",
+            code: "SCRIPT_NOT_FOUND",
+            message: "run-loop.sh not found in plugin cache",
           }
         );
         json(context, 500, { error: "run-loop.sh not found in plugin cache" });
@@ -1239,8 +1317,12 @@ async function handleLoopRequest(
       const msg = logErr instanceof Error ? logErr.message : String(logErr);
       await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
         type: "error",
-        code: "SPAWN_FAILED", message: `Cannot open log file: ${msg}`,
+        code: "SPAWN_FAILED",
+        message: `Cannot open log file: ${msg}`,
       });
+      if (usedTempDir) {
+        cleanupTempClaudeWorkDir();
+      }
       if (body.command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
         await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, body.loopId);
       }
@@ -1263,6 +1345,31 @@ async function handleLoopRequest(
         const promptFile = path.join(claudeWorkDir, "decompose-prompt.txt");
         await fs.writeFile(promptFile, decomposePrompt);
 
+        const claudeArgs = [
+          "-p", "-",
+          "--output-format", "stream-json",
+          "--verbose",
+          "--allowedTools",
+          "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
+          "--max-turns", "200",
+        ];
+        const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir, promptFile);
+        child = spawn(pipeline.cmd, pipeline.args, {
+          cwd: claudeWorkDir,
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: spawnEnv,
+        });
+        child.unref();
+      } else if (body.command === "EVALUATE_PRD") {
+        // REPO_PATH only when a target repo is linked (expandedRepoPath).
+        let evaluatePrdPrompt =
+          `Activate judges:run-judges skill --artifact-type prd --workdir ${claudeWorkDir}.\n`;
+        if (expandedRepoPath) {
+          evaluatePrdPrompt += `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`;
+        }
+        const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
+        await fs.writeFile(promptFile, evaluatePrdPrompt);
         const claudeArgs = [
           "-p", "-",
           "--output-format", "stream-json",
@@ -1369,8 +1476,12 @@ async function handleLoopRequest(
       const msg = spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
       await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
         type: "error",
-        code: "SPAWN_FAILED", message: msg,
+        code: "SPAWN_FAILED",
+        message: msg,
       });
+      if (usedTempDir) {
+        cleanupTempClaudeWorkDir();
+      }
       if (body.command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
         await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, body.loopId);
       }
@@ -1387,9 +1498,16 @@ async function handleLoopRequest(
       }
       completionHandled = true;
       loopLog(body.loopId, `onceComplete fired, code=${code}`);
-      handleProcessCompletion(code, body, apiBaseUrl, worktreeDir, claudeWorkDir, expandedRepoPath, jobStore).catch(
-        (err) => loopError(body.loopId, "Completion handler error:", err)
-      );
+      handleProcessCompletion(
+        code,
+        body,
+        apiBaseUrl,
+        worktreeDir,
+        claudeWorkDir,
+        usedTempDir,
+        expandedRepoPath,
+        jobStore
+      ).catch((err) => loopError(body.loopId, "Completion handler error:", err));
     };
 
     // Prevent unhandled 'error' events (e.g. ENOENT if binary vanishes
