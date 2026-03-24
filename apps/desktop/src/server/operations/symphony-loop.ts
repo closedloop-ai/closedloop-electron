@@ -683,8 +683,18 @@ async function attemptLlmCommit(
     footer = `---\nLoop ID: ${safeLoopId}`;
   }
 
+  // Build slug instruction for the prompt
+  const slugInstruction = artifactSlug
+    ? `The artifact slug is ${sanitizeCommitMessage(artifactSlug).replace(/[\r\n]/g, '')}. ` +
+      `You MUST prefix the PR title with "${sanitizeCommitMessage(artifactSlug).replace(/[\r\n]/g, '')}: " ` +
+      `(e.g., "${sanitizeCommitMessage(artifactSlug).replace(/[\r\n]/g, '')}: Add feature X"). ` +
+      `Also prefix the commit message the same way.`
+    : "No artifact slug is available — use a descriptive title without a prefix.";
+
   const prompt = [
     `You are a commit assistant finalizing work from a Symphony ${command} loop.`,
+    "",
+    slugInstruction,
     "",
     "Review all uncommitted changes in this repository and create a proper commit, push it, and create a pull request.",
     "",
@@ -695,14 +705,18 @@ async function attemptLlmCommit(
     "3. Write a clear, descriptive commit message based on the actual code changes",
     "   - Summarize WHAT changed and WHY (not just 'Symphony loop output')",
     "   - Use conventional commit style if the changes have a clear category",
+    "   - If an artifact slug is provided, prefix the commit message with it",
     "4. Run `git commit` (do NOT use --no-verify). If pre-commit hooks fail, attempt to fix",
     "   the issue (e.g., run the linter/formatter if the error message tells you how).",
     "   If you cannot quickly fix it, the commit fails — do not bypass hooks.",
     "5. Push to origin with: git push -u origin HEAD",
     "6. Check if a PR already exists for this branch: gh pr list --head <branch>",
     "   - If NO PR exists:",
-    `     a. Write the following to a file called pr-body.md:\n${footer}`,
-    `     b. Create the PR: gh pr create --label symphony --base ${shellEscape(safeBranch)} --title '<descriptive title>' --body-file pr-body.md`,
+    "     a. Write a file called pr-body.md with:",
+    "        - A summary section describing what changed and why (2-4 sentences)",
+    "        - Then the following metadata footer on its own lines:",
+    `        ${footer}`,
+    `     b. Create the PR: gh pr create --label symphony --base ${shellEscape(safeBranch)} --title '<slug-prefixed descriptive title>' --body-file pr-body.md`,
     "   - If a PR already exists, get its URL with: gh pr view --json url,number",
     `     Then ensure the metadata footer is present: write pr-body.md with the footer above and run gh pr edit <number> --body-file pr-body.md`,
     "7. ONLY after a successful commit AND push, write this EXACT JSON file:",
@@ -838,7 +852,9 @@ function executeGitOperations(
   committer: LoopCommitter | undefined,
   baseBranch: string,
   loopId: string,
-  command: string
+  command: string,
+  artifactSlug?: string,
+  webAppOrigin?: string
 ): { prUrl: string; prNumber: number; branchName: string; commitSha: string } | null {
   const shortId = loopId.slice(0, 8);
   const env: Record<string, string> = { ...process.env } as Record<string, string>;
@@ -874,7 +890,8 @@ function executeGitOperations(
       timeout: 10_000,
     });
 
-    const commitMessage = `Symphony: ${command} -- loop ${shortId}`;
+    const commitPrefix = artifactSlug ? `${artifactSlug}: ` : "";
+    const commitMessage = `${commitPrefix}Symphony: ${command} -- loop ${shortId}`;
     execSync(`git commit -m ${shellEscape(commitMessage)}`, {
       cwd: worktreeDir,
       stdio: "pipe",
@@ -905,7 +922,10 @@ function executeGitOperations(
 
     // Build PR body with metadata footer, written to a temp file to avoid
     // shell escaping issues with special characters (--body-file approach).
-    const prBody = `Loop ID: ${loopId}\nCommand: ${command}`;
+    const artifactLine = artifactSlug && webAppOrigin
+      ? `\nArtifact: ${webAppOrigin}/artifact/by-slug/${artifactSlug}`
+      : "";
+    const prBody = `Loop ID: ${loopId}\nCommand: ${command}${artifactLine}`;
     const bodyFile = path.join(worktreeDir, ".claude", "work", "pr-body.md");
     writeFileSync(bodyFile, prBody);
 
@@ -928,7 +948,7 @@ function executeGitOperations(
       prNumber = parsed.number;
     } catch {
       // No existing PR — create one using --body-file to avoid shell escaping
-      const prTitle = `Symphony: ${command} -- loop ${shortId}`;
+      const prTitle = `${commitPrefix}Symphony: ${command} -- loop ${shortId}`;
       const prOutput = execSync(
         `gh pr create --title ${shellEscape(prTitle)} --body-file ${shellEscape(bodyFile)} --base ${shellEscape(baseBranch)} --label symphony`,
         {
@@ -1049,7 +1069,7 @@ async function handleProcessCompletion(
       }
 
       const gitResult: { prUrl: string; prNumber: number; branchName: string; commitSha: string } | null =
-        llmResult ?? executeGitOperations(worktreeDir, committer, baseBranch, loopId, command);
+        llmResult ?? executeGitOperations(worktreeDir, committer, baseBranch, loopId, command, body.artifactSlug, webAppOrigin ?? "");
 
       if (gitResult) {
         // Merge git info into execution result
