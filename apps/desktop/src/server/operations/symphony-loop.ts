@@ -1,6 +1,6 @@
 import { execSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -16,6 +16,7 @@ import {
   readEvaluatePrdOutputs,
   writePrdArtifact,
 } from "./symphony-prd-artifacts.js";
+import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import {
   expandHome,
   resolveWorktreeParentDir,
@@ -85,6 +86,31 @@ interface LoopRequestBody {
   prompt?: string;
   /** Local filesystem checkout root. When present and sandbox-allowed, used as checkout root for worktree creation/reuse instead of repo.fullName lookup. */
   localRepoPath?: string;
+}
+
+interface ExecutionResult {
+  prUrl: string;
+  prNumber: number;
+  branchName: string;
+  commitSha: string;
+}
+
+function isExecutionResult(value: unknown): value is ExecutionResult {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (
+    typeof v.prUrl !== "string" ||
+    typeof v.prNumber !== "number" ||
+    typeof v.branchName !== "string" ||
+    typeof v.commitSha !== "string"
+  ) {
+    return false;
+  }
+  // Sanity-check field shapes to reject garbage values from the LLM
+  if (!/^https?:\/\//.test(v.prUrl)) return false;
+  if (!/^[a-f0-9]{7,}$/i.test(v.commitSha)) return false;
+  if (!v.branchName.trim()) return false;
+  return true;
 }
 
 /** Track running loop processes for cancellation and to prevent GC of ChildProcess. */
@@ -195,6 +221,7 @@ function buildClaudePipeline(
   }
   return { cmd: "claude", args: claudeArgs };
 }
+
 /** Find the local repo path for a given fullName (e.g. "org/repo"). */
 function findLocalRepo(
   fullName: string,
@@ -632,14 +659,188 @@ function parseTokenUsage(claudeWorkDir: string): { input: number; output: number
 }
 
 // ---------------------------------------------------------------------------
+// LLM-assisted commit (EXECUTE only)
+// ---------------------------------------------------------------------------
+
+async function attemptLlmCommit(
+  worktreeDir: string,
+  baseBranch: string,
+  loopId: string,
+  command: string,
+  artifactSlug: string | undefined,
+  webAppOrigin: string
+): Promise<ExecutionResult | null> {
+  // Build metadata footer for PR body
+  // Strip newlines from user-controlled fields to prevent prompt injection
+  const safeBranch = baseBranch.replace(/[\r\n]/g, '');
+  const safeLoopId = sanitizeCommitMessage(loopId).replace(/[\r\n]/g, '');
+  let footer: string;
+  if (artifactSlug) {
+    const safeSlug = sanitizeCommitMessage(artifactSlug).replace(/[\r\n]/g, '');
+    const artifactLink = `${webAppOrigin}/artifact/by-slug/${safeSlug}`;
+    footer = `---\nLoop ID: ${safeLoopId}\nArtifact: ${artifactLink}`;
+  } else {
+    footer = `---\nLoop ID: ${safeLoopId}`;
+  }
+
+  const prompt = [
+    `You are a commit assistant finalizing work from a Symphony ${command} loop.`,
+    "",
+    "Review all uncommitted changes in this repository and create a proper commit, push it, and create a pull request.",
+    "",
+    "STEPS:",
+    "1. Run `git status` and `git diff --stat` to understand what changed",
+    "2. Stage all changed/new files EXCEPT the .claude/ directory:",
+    "   git add -- . ':!.claude/'",
+    "3. Write a clear, descriptive commit message based on the actual code changes",
+    "   - Summarize WHAT changed and WHY (not just 'Symphony loop output')",
+    "   - Use conventional commit style if the changes have a clear category",
+    "4. Run `git commit` (do NOT use --no-verify). If pre-commit hooks fail, attempt to fix",
+    "   the issue (e.g., run the linter/formatter if the error message tells you how).",
+    "   If you cannot quickly fix it, the commit fails — do not bypass hooks.",
+    "5. Push to origin with: git push -u origin HEAD",
+    "6. Check if a PR already exists for this branch: gh pr list --head <branch>",
+    "   - If NO PR exists:",
+    `     a. Write the following to a file called pr-body.md:\n${footer}`,
+    `     b. Create the PR: gh pr create --label symphony --base ${shellEscape(safeBranch)} --title '<descriptive title>' --body-file pr-body.md`,
+    "   - If a PR already exists, get its URL with: gh pr view --json url,number",
+    `     Then ensure the metadata footer is present: write pr-body.md with the footer above and run gh pr edit <number> --body-file pr-body.md`,
+    "7. ONLY after a successful commit AND push, write this EXACT JSON file:",
+    "   File path: execution-result.json",
+    "   ```json",
+    "   {",
+    '     "prUrl": "<full GitHub PR URL>",',
+    '     "prNumber": <PR number as integer>,',
+    '     "branchName": "<current branch name>",',
+    '     "commitSha": "<output of git rev-parse HEAD>"',
+    "   }",
+    "   ```",
+    "   Run `git rev-parse HEAD` to get the commit SHA.",
+    "",
+    "RULES:",
+    "- NEVER stage or commit the .claude/ directory",
+    "- Do NOT use --no-verify on git commit",
+    "- Do NOT modify any source code except to fix pre-commit hook failures (formatting, lint)",
+    "- Do NOT write execution-result.json unless you successfully committed AND pushed",
+    "- Keep it quick — commit, push, PR, write result file, done",
+  ].join("\n");
+
+  loopLog(loopId, "Attempting LLM-assisted commit...");
+
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(
+      "claude",
+      ["-p", prompt, "--allowedTools", "Bash,Read,Write,Glob,Grep"],
+      { cwd: worktreeDir, detached: true, stdio: "pipe" }
+    );
+  } catch (err) {
+    loopError(loopId, "LLM commit spawn failed:", err);
+    return null;
+  }
+
+  const pid = child.pid ?? null;
+  if (!pid) {
+    loopError(loopId, "LLM commit: spawn returned no PID");
+    return null;
+  }
+
+  return new Promise<ExecutionResult | null>((resolve) => {
+    let killed = false;
+
+    const killTimer = setTimeout(() => {
+      if (!killed) {
+        killed = true;
+        loopError(loopId, "LLM commit timed out after 90s — sending SIGTERM");
+        try {
+          process.kill(-pid, "SIGTERM");
+        } catch (killErr) {
+          loopError(loopId, "Failed to kill LLM commit process:", killErr);
+        }
+        // Escalate to SIGKILL after 5s if process survives SIGTERM
+        setTimeout(() => {
+          try {
+            process.kill(pid, 0); // check alive
+            process.kill(-pid, "SIGKILL");
+          } catch {
+            // Already gone
+          }
+        }, 5_000);
+      }
+    }, 90_000);
+
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdoutChunks.push(chunk);
+    });
+
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderrChunks.push(chunk);
+    });
+
+    child.on("close", (code: number | null) => {
+      clearTimeout(killTimer);
+
+      const stdout = Buffer.concat(stdoutChunks).toString("utf-8");
+      const stderr = Buffer.concat(stderrChunks).toString("utf-8");
+      if (stdout) {
+        loopLog(loopId, `LLM commit stdout (tail): ${stdout.slice(-2000)}`);
+      }
+      if (stderr) {
+        loopLog(loopId, `LLM commit stderr (tail): ${stderr.slice(-1000)}`);
+      }
+
+      // code is null when the process was killed by a signal
+      if (killed || code == null || code !== 0) {
+        loopError(loopId, `LLM commit exited with code ${code ?? "killed"}`);
+        resolve(null);
+        return;
+      }
+
+      // Read execution-result.json written by the LLM
+      const resultFilePath = path.join(worktreeDir, "execution-result.json");
+      try {
+        const raw = readFileSync(resultFilePath, "utf-8");
+        const parsed: unknown = JSON.parse(raw);
+        if (isExecutionResult(parsed)) {
+          loopLog(loopId, `LLM commit wrote execution-result.json, pr=${parsed.prUrl}`);
+          resolve(parsed);
+          return;
+        }
+        loopError(loopId, "LLM execution-result.json failed type guard, returning null");
+        resolve(null);
+      } catch (err) {
+        loopError(loopId, "LLM commit: failed to read execution-result.json:", err);
+        resolve(null);
+      }
+    });
+
+    child.on("error", (err: Error) => {
+      clearTimeout(killTimer);
+      loopError(loopId, "LLM commit process error:", err);
+      resolve(null);
+    });
+
+    // unref AFTER event listeners are attached so the ChildProcess handle
+    // is not garbage-collected before exit/error events fire.
+    child.unref();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Git operations (EXECUTE only)
 // ---------------------------------------------------------------------------
 
 function executeGitOperations(
   worktreeDir: string,
   committer: LoopCommitter | undefined,
-  baseBranch: string
+  baseBranch: string,
+  loopId: string,
+  command: string
 ): { prUrl: string; prNumber: number; branchName: string; commitSha: string } | null {
+  const shortId = loopId.slice(0, 8);
   const env: Record<string, string> = { ...process.env } as Record<string, string>;
   if (committer) {
     env.GIT_AUTHOR_NAME = committer.name;
@@ -666,14 +867,15 @@ function executeGitOperations(
 
   // Stage, commit, push
   try {
-    execSync("git add -A", {
+    execSync("git add -- . ':!.claude/'", {
       cwd: worktreeDir,
       stdio: "pipe",
       env,
       timeout: 10_000,
     });
 
-    execSync('git commit -m "Symphony: implement plan"', {
+    const commitMessage = `Symphony: ${command} -- loop ${shortId}`;
+    execSync(`git commit -m ${shellEscape(commitMessage)}`, {
       cwd: worktreeDir,
       stdio: "pipe",
       env,
@@ -701,6 +903,12 @@ function executeGitOperations(
       timeout: 10_000,
     }).trim();
 
+    // Build PR body with metadata footer, written to a temp file to avoid
+    // shell escaping issues with special characters (--body-file approach).
+    const prBody = `Loop ID: ${loopId}\nCommand: ${command}`;
+    const bodyFile = path.join(worktreeDir, ".claude", "work", "pr-body.md");
+    writeFileSync(bodyFile, prBody);
+
     // Check for existing PR before creating (handles retries gracefully)
     let prUrl: string;
     let prNumber: number;
@@ -719,9 +927,10 @@ function executeGitOperations(
       prUrl = parsed.url;
       prNumber = parsed.number;
     } catch {
-      // No existing PR — create one
+      // No existing PR — create one using --body-file to avoid shell escaping
+      const prTitle = `Symphony: ${command} -- loop ${shortId}`;
       const prOutput = execSync(
-        `gh pr create --title "Symphony: implement plan" --body "Automated PR from Symphony loop" --base ${shellEscape(baseBranch)}`,
+        `gh pr create --title ${shellEscape(prTitle)} --body-file ${shellEscape(bodyFile)} --base ${shellEscape(baseBranch)} --label symphony`,
         {
           cwd: worktreeDir,
           encoding: "utf-8",
@@ -733,6 +942,23 @@ function executeGitOperations(
       prUrl = prOutput;
       const prNumberMatch = /\/pull\/(\d+)/.exec(prUrl);
       prNumber = prNumberMatch ? Number.parseInt(prNumberMatch[1], 10) : 0;
+    }
+
+    // Guarantee metadata footer on the PR body (covers both new and existing PRs).
+    // For new PRs this is a no-op since we just created it with the body.
+    // For existing PRs this ensures the footer is always present.
+    try {
+      execSync(
+        `gh pr edit ${prNumber} --body-file ${shellEscape(bodyFile)}`,
+        {
+          cwd: worktreeDir,
+          stdio: "pipe",
+          env,
+          timeout: 15_000,
+        }
+      );
+    } catch {
+      // Non-critical — PR exists, metadata is best-effort
     }
 
     return { prUrl, prNumber, branchName, commitSha };
@@ -754,7 +980,8 @@ async function handleProcessCompletion(
   claudeWorkDir: string,
   usedTempDir: boolean,
   expandedRepoPath: string | null,
-  jobStore?: JobStore
+  jobStore?: JobStore,
+  webAppOrigin?: string
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
 
@@ -803,11 +1030,27 @@ async function handleProcessCompletion(
     // Git operations for EXECUTE
     if (worktreeDir) {
       const baseBranch = body.repo?.branch ?? "main";
-      const gitResult = executeGitOperations(
+
+      // Try LLM-assisted commit first; fall back to executeGitOperations if it
+      // returns null.  Never call both.
+      const llmResult = await attemptLlmCommit(
         worktreeDir,
-        committer,
-        baseBranch
+        baseBranch,
+        loopId,
+        command,
+        body.artifactSlug,
+        webAppOrigin ?? ""
       );
+
+      // Clean up LLM artifacts before fallback to prevent them from being committed
+      if (!llmResult) {
+        try { unlinkSync(path.join(worktreeDir, 'execution-result.json')); } catch { /* file may not exist */ }
+        try { unlinkSync(path.join(worktreeDir, 'execution-footer.txt')); } catch { /* file may not exist */ }
+      }
+
+      const gitResult: { prUrl: string; prNumber: number; branchName: string; commitSha: string } | null =
+        llmResult ?? executeGitOperations(worktreeDir, committer, baseBranch, loopId, command);
+
       if (gitResult) {
         // Merge git info into execution result
         const execResult =
@@ -926,7 +1169,8 @@ async function handleLoopRequest(
   context: OperationRequestContext,
   getAllowedDirectories: () => string[],
   getApiOrigin?: () => string,
-  jobStore?: JobStore
+  jobStore?: JobStore,
+  getWebAppOrigin?: () => string
 ): Promise<void> {
   // Derive the callback URL from the gateway's trusted configuration.
   // body.apiBaseUrl is ignored -- the caller does not control where
@@ -936,6 +1180,7 @@ async function handleLoopRequest(
     json(context, 503, { error: "API origin not configured" });
     return;
   }
+  const webAppOrigin = getWebAppOrigin?.() ?? '';
 
   const rawBody = parseJsonBody(context);
   if (!rawBody) {
@@ -1052,24 +1297,14 @@ async function handleLoopRequest(
     let claudeWorkDir: string;
     let usedTempDir = false;
 
-    if (body.command === "DECOMPOSE") {
-      // DECOMPOSE: use temp dir, no worktree needed
-      usedTempDir = true;
-      const tmpDir = path.join(
-        os.tmpdir(),
-        `symphony-decompose-${body.loopId.slice(0, 8)}`
-      );
-      await fs.rm(tmpDir, { recursive: true, force: true });
-      await fs.mkdir(tmpDir, { recursive: true });
-      claudeWorkDir = tmpDir;
-      await writePrdArtifact(claudeWorkDir, body.artifacts, body.prompt);
-    } else if (body.command === "EVALUATE_PRD") {
-      // EVALUATE_PRD: use temp dir, no worktree needed.
+    if (body.command === "DECOMPOSE" || body.command === "EVALUATE_PRD") {
+      // DECOMPOSE and EVALUATE_PRD: use temp dir, no worktree needed.
       // Temp dir is intentionally exempt from assertPathAllowed.
       usedTempDir = true;
+      const label = body.command === "DECOMPOSE" ? "decompose" : "evaluate-prd";
       const tmpDir = path.join(
         os.tmpdir(),
-        `symphony-evaluate-prd-${body.loopId.slice(0, 8)}`
+        `symphony-${label}-${body.loopId.slice(0, 8)}`
       );
       await fs.rm(tmpDir, { recursive: true, force: true });
       await fs.mkdir(tmpDir, { recursive: true });
@@ -1081,13 +1316,9 @@ async function handleLoopRequest(
       });
       return;
     } else if (body.command === "PLAN" || body.command === "EXECUTE" || body.command === "REQUEST_CHANGES") {
-      const repoPath = expandedRepoPath;
-      if (!repoPath) {
-        json(context, 400, {
-          error: "Repository required for PLAN, EXECUTE, and REQUEST_CHANGES commands",
-        });
-        return;
-      }
+      // expandedRepoPath is guaranteed non-null here: the repoRequirement === "REQUIRED"
+      // guard above already returned 400 when it was missing.
+      const repoPath = expandedRepoPath!;
 
       // Worktree keyed by artifact slug (e.g., symphony/PLAN-5).
       // PLAN always creates fresh; EXECUTE/REQUEST_CHANGES reuse.
@@ -1187,13 +1418,9 @@ async function handleLoopRequest(
         );
       }
     } else if (body.command === "GENERATE_PRD") {
-      const repoPath = expandedRepoPath;
-      if (!repoPath) {
-        json(context, 400, {
-          error: "Repository required for GENERATE_PRD command",
-        });
-        return;
-      }
+      // expandedRepoPath is guaranteed non-null here: the repoRequirement === "REQUIRED"
+      // guard above already returned 400 when it was missing.
+      const repoPath = expandedRepoPath!;
 
       // Use a dedicated branch namespace to avoid collisions with PLAN/EXECUTE worktrees.
       // GENERATE_PRD always starts fresh -- it must not inherit a prior PLAN worktree.
@@ -1244,8 +1471,14 @@ async function handleLoopRequest(
       return;
     }
 
-    const cleanupTempClaudeWorkDir = (): void => {
-      fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+    /** Clean up temporary resources on early-return error paths. */
+    const cleanupOnError = async (): Promise<void> => {
+      if (usedTempDir) {
+        await fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+      }
+      if (body.command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
+        await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, body.loopId);
+      }
     };
 
     // Pre-flight: verify required binary exists BEFORE posting 'started' event.
@@ -1272,12 +1505,7 @@ async function handleLoopRequest(
             message: "claude CLI not found in PATH",
           }
         );
-        if (usedTempDir) {
-          cleanupTempClaudeWorkDir();
-        }
-        if (body.command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
-          await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, body.loopId);
-        }
+        await cleanupOnError();
         json(context, 500, { error: "claude CLI not found in PATH" });
         return;
       }
@@ -1320,12 +1548,7 @@ async function handleLoopRequest(
         code: "SPAWN_FAILED",
         message: `Cannot open log file: ${msg}`,
       });
-      if (usedTempDir) {
-        cleanupTempClaudeWorkDir();
-      }
-      if (body.command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
-        await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, body.loopId);
-      }
+      await cleanupOnError();
       json(context, 500, { error: `Cannot open log file: ${msg}` });
       return;
     }
@@ -1338,6 +1561,18 @@ async function handleLoopRequest(
         PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
       };
 
+      // Shared claude CLI args for commands that run claude directly.
+      // REQUEST_CHANGES omits "-" (stdin) because it passes the prompt as a CLI argument.
+      const baseClaudeArgs: string[] = [
+        "-p",
+        "--output-format", "stream-json",
+        "--verbose",
+        "--allowedTools",
+        "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
+        "--max-turns", "200",
+      ];
+      const stdinClaudeArgs = ["-p", "-", ...baseClaudeArgs.slice(1)];
+
       if (body.command === "DECOMPOSE") {
         // DECOMPOSE: write prompt to file and pass via stdin to avoid E2BIG
         const prdContent = readTextFile(path.join(claudeWorkDir, "prd.md")) ?? "";
@@ -1345,15 +1580,7 @@ async function handleLoopRequest(
         const promptFile = path.join(claudeWorkDir, "decompose-prompt.txt");
         await fs.writeFile(promptFile, decomposePrompt);
 
-        const claudeArgs = [
-          "-p", "-",
-          "--output-format", "stream-json",
-          "--verbose",
-          "--allowedTools",
-          "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
-          "--max-turns", "200",
-        ];
-        const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir, promptFile);
+        const pipeline = buildClaudePipeline(stdinClaudeArgs, claudeWorkDir, promptFile);
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: claudeWorkDir,
           detached: true,
@@ -1370,15 +1597,8 @@ async function handleLoopRequest(
         }
         const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
         await fs.writeFile(promptFile, evaluatePrdPrompt);
-        const claudeArgs = [
-          "-p", "-",
-          "--output-format", "stream-json",
-          "--verbose",
-          "--allowedTools",
-          "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
-          "--max-turns", "200",
-        ];
-        const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir, promptFile);
+
+        const pipeline = buildClaudePipeline(stdinClaudeArgs, claudeWorkDir, promptFile);
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: claudeWorkDir,
           detached: true,
@@ -1390,14 +1610,7 @@ async function handleLoopRequest(
         // REQUEST_CHANGES: use claude directly with /code:amend-plan.
         // Must use -p (headless mode) so --allowedTools grants full permission
         // without prompting. Pipes through stream_formatter.py for readable logs.
-        const claudeArgs: string[] = [
-          "-p",
-          "--output-format", "stream-json",
-          "--verbose",
-          "--allowedTools",
-          "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
-          "--max-turns", "200",
-        ];
+        const claudeArgs = [...baseClaudeArgs];
 
         // Resume from parent session if available (matches harness --resume)
         if (body.parentSessionId) {
@@ -1431,15 +1644,7 @@ async function handleLoopRequest(
         const promptFile = path.join(claudeWorkDir, "generate-prd-prompt.txt");
         await fs.writeFile(promptFile, body.prompt!);
 
-        const claudeArgs = [
-          "-p", "-",
-          "--output-format", "stream-json",
-          "--verbose",
-          "--allowedTools",
-          "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
-          "--max-turns", "200",
-        ];
-        const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir, promptFile);
+        const pipeline = buildClaudePipeline(stdinClaudeArgs, claudeWorkDir, promptFile);
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: worktreeDir!,
           detached: true,
@@ -1479,12 +1684,7 @@ async function handleLoopRequest(
         code: "SPAWN_FAILED",
         message: msg,
       });
-      if (usedTempDir) {
-        cleanupTempClaudeWorkDir();
-      }
-      if (body.command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
-        await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, body.loopId);
-      }
+      await cleanupOnError();
       json(context, 500, { error: `Failed to spawn process: ${msg}` });
       return;
     }
@@ -1506,7 +1706,8 @@ async function handleLoopRequest(
         claudeWorkDir,
         usedTempDir,
         expandedRepoPath,
-        jobStore
+        jobStore,
+        webAppOrigin
       ).catch((err) => loopError(body.loopId, "Completion handler error:", err));
     };
 
@@ -1641,13 +1842,14 @@ export function registerSymphonyLoopRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[],
   getApiOrigin?: () => string,
-  jobStore?: JobStore
+  jobStore?: JobStore,
+  getWebAppOrigin?: () => string
 ): void {
   dispatcher.register(
     "POST",
     "/api/engineer/symphony/loop",
     async (context) => {
-      await handleLoopRequest(context, getAllowedDirectories, getApiOrigin, jobStore);
+      await handleLoopRequest(context, getAllowedDirectories, getApiOrigin, jobStore, getWebAppOrigin);
     }
   );
 
