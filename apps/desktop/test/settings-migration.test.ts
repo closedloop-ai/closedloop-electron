@@ -140,8 +140,8 @@ test("migration: defaultApprovalTier 'auto' is rewritten to 'high'", () => {
 
   // Verify persisted JSON no longer contains "auto"
   const persisted = JSON.parse(fs.readFileSync(path.join(tmpDir, `${storeName}.json`), "utf-8"));
-  assert.notEqual(persisted.defaultApprovalTier, "auto", "persisted defaultApprovalTier should not be 'auto'");
-  assert.notEqual(persisted.autoApprovalRules?.deploy, "auto", "persisted autoApprovalRules should not contain 'auto'");
+  assert.equal(persisted.defaultApprovalTier, "high", "persisted defaultApprovalTier should be 'high'");
+  assert.equal(persisted.autoApprovalRules?.deploy, "high", "persisted autoApprovalRules.deploy should be 'high'");
 });
 
 test("migration: already migrated install is a no-op — both values preserved", () => {
