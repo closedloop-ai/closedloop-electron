@@ -66,6 +66,24 @@ export class SettingsStore {
     if (hadAuthApiOrigin) {
       this.store.delete("authApiOrigin" as keyof DesktopSettings);
     }
+
+    // Migration: replace legacy "auto" tier with "high" (identical behavior).
+    if (raw.defaultApprovalTier === "auto") {
+      this.store.set("defaultApprovalTier", "high" as RiskTier);
+    }
+    const rules = raw.autoApprovalRules as Record<string, string> | undefined;
+    if (rules) {
+      let rulesChanged = false;
+      for (const [key, val] of Object.entries(rules)) {
+        if (val === "auto") {
+          rules[key] = "high";
+          rulesChanged = true;
+        }
+      }
+      if (rulesChanged) {
+        this.store.set("autoApprovalRules", rules as unknown as Record<string, RiskTier>);
+      }
+    }
   }
 
   getAll(): DesktopSettings {
@@ -162,6 +180,9 @@ export class SettingsStore {
     }
     if (typeof partial.cloudConnectionEnabled === "boolean") {
       this.store.set("cloudConnectionEnabled", partial.cloudConnectionEnabled);
+    }
+    if (typeof partial.verboseLogging === "boolean") {
+      this.store.set("verboseLogging", partial.verboseLogging);
     }
     if (typeof partial.relayOrigin === "string") {
       this.store.set("relayOrigin" as keyof DesktopSettings, partial.relayOrigin);

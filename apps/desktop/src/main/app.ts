@@ -29,7 +29,8 @@ import {
 } from "../server/operations/symphony-utils.js";
 import { seedReposConfig } from "./seed-repos-config.js";
 import { SUPPORTED_OPERATION_IDS, resolveOperationId } from "./approval-operations.js";
-import { shouldAutoApprove } from "./approval-policy.js";
+import { shouldAutoApprove, OPERATION_RISK_TIERS } from "./approval-policy.js";
+import { gatewayLog } from "./gateway-logger.js";
 import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
 import { JobStore, isTerminalJobStatus } from "./job-store.js";
@@ -203,6 +204,7 @@ export class DesktopApplication {
     this.syncPendingApprovalsToTray();
     this.desktopWindow.init();
 
+    gatewayLog.setVerbose(this.settingsStore.getAll().verboseLogging);
     this.migrateLegacyData();
     this.reconcileJobStore();
 
@@ -553,20 +555,17 @@ export class DesktopApplication {
 
     const configuredTier = (settings.autoApprovalRules[operationId] ??
       settings.defaultApprovalTier) as RiskTier;
-    if (configuredTier === "auto" && !request.forceApproval) {
-      return { allow: true };
-    }
-    const manualTier: Exclude<RiskTier, "auto"> = configuredTier === "auto" ? "high" : configuredTier;
-    if (shouldAutoApprove(operationId, manualTier, request.forceApproval ?? false)) {
+    if (shouldAutoApprove(operationId, configuredTier, request.forceApproval ?? false)) {
       return { allow: true };
     }
 
+    const operationRisk = (OPERATION_RISK_TIERS as Record<string, Exclude<RiskTier, "none">>)[operationId] ?? "high";
     const reason =
       request.approvalReason?.trim() ||
-      `Manual approval required for ${operationId} (${manualTier})`;
+      `${operationId} is ${operationRisk}-risk, but your auto-approve threshold is ${configuredTier}`;
     const pending = this.approvalStore.enqueue({
       operationId,
-      riskTier: manualTier,
+      riskTier: operationRisk,
       method: request.method,
       path: request.path,
       body: request.body,
@@ -731,6 +730,9 @@ export class DesktopApplication {
   }
 
   private registerIpcHandlers(): void {
+    ipcMain.handle("desktop:get-logs", () => gatewayLog.getEntries());
+    ipcMain.handle("desktop:clear-logs", () => { gatewayLog.clear(); });
+
     ipcMain.handle("desktop:get-settings", () => {
       const settings = this.settingsStore.getAll();
       const activeAlwaysAllowRules = pruneExpiredAlwaysAllowRules(settings.alwaysAllowRules);
@@ -750,11 +752,21 @@ export class DesktopApplication {
         relayOrigin?: string;
         apiOrigin?: string;
         webAppOrigin?: string;
-        defaultApprovalTier?: "auto" | "low" | "medium" | "high";
-        autoApprovalRules?: Record<string, "auto" | "low" | "medium" | "high">;
+        defaultApprovalTier?: "auto" | "none" | "low" | "medium" | "high";
+        autoApprovalRules?: Record<string, "auto" | "none" | "low" | "medium" | "high">;
+        verboseLogging?: boolean;
       }) => {
         const currentSettings = this.settingsStore.getAll();
         const nextPartial = { ...partial };
+        // Normalize legacy "auto" tier to "high" (they behave identically)
+        if (nextPartial.defaultApprovalTier === "auto") {
+          nextPartial.defaultApprovalTier = "high";
+        }
+        if (nextPartial.autoApprovalRules) {
+          for (const [key, val] of Object.entries(nextPartial.autoApprovalRules)) {
+            if (val === "auto") nextPartial.autoApprovalRules[key] = "high";
+          }
+        }
         if (typeof partial.relayOrigin === "string") {
           nextPartial.relayOrigin = normalizeAndValidateOrigin(partial.relayOrigin);
         }
@@ -782,7 +794,10 @@ export class DesktopApplication {
           throw new Error("Complete onboarding requires a sandbox base directory");
         }
 
-        const updated = this.settingsStore.update(nextPartial);
+        const updated = this.settingsStore.update(nextPartial as Partial<DesktopSettings>);
+        if (typeof nextPartial.verboseLogging === "boolean") {
+          gatewayLog.setVerbose(nextPartial.verboseLogging);
+        }
 
         if (
           typeof partial.sandboxBaseDirectory === "string" &&
