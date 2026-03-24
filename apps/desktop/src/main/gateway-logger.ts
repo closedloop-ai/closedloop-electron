@@ -59,7 +59,8 @@ export class GatewayLogger {
 
   clear(): void {
     this.buffer.length = 0;
-    this.onChange?.(this.buffer);
+    this.lastMessage = "";
+    this.onChange?.([]);
   }
 
   private log(level: LogLevel, tag: string, message: string): void {

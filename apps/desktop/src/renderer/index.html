@@ -2822,7 +2822,6 @@
 
       // --- Logs tab ---
       const logsList = document.getElementById("logsList");
-      const LOG_LEVEL_COLORS = { info: "var(--muted)", warn: "#d97706", error: "#dc2626" };
 
       let logsAutoRefreshTimer = null;
 
@@ -2839,6 +2838,7 @@
       }
 
       async function renderLogs() {
+        const wasAtBottom = logsList.scrollTop + logsList.clientHeight >= logsList.scrollHeight - 20;
         const entries = await api.getLogs();
         if (!entries || !entries.length) {
           logsList.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;color:var(--muted);text-align:center;gap:6px"><div style="font-size:13px">No log entries yet</div><div style="font-size:11px;opacity:0.7">Turn on Verbose to capture detailed diagnostics.</div></div>';
@@ -2849,10 +2849,12 @@
           const isWarn = e.level === "warn";
           const rowClass = isError ? "log-row log-error" : isWarn ? "log-row log-warn" : "log-row";
           const ts = e.timestamp.slice(11, 23);
-          return `<div class="${rowClass}"><span class="log-ts">${ts}</span><span class="log-tag">${e.tag}</span><span class="log-msg">${escapeHtml(e.message)}</span></div>`;
+          return `<div class="${rowClass}"><span class="log-ts">${ts}</span><span class="log-tag">${escapeHtml(e.tag)}</span><span class="log-msg">${escapeHtml(e.message)}</span></div>`;
         }).join("");
         logsList.innerHTML = html;
-        logsList.scrollTop = logsList.scrollHeight;
+        if (wasAtBottom) {
+          logsList.scrollTop = logsList.scrollHeight;
+        }
       }
 
       function escapeHtml(s) {
