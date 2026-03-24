@@ -1,6 +1,6 @@
 import { execSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, statSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -21,6 +21,7 @@ import {
   resolveWorktreeParentDir,
   tryAssertRepoAllowed,
 } from "./symphony-utils.js";
+import { startOutputTailer } from "./output-tailer.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -189,12 +190,15 @@ function buildClaudePipeline(
     return { cmd: "bash", args: ["-c", pipeline] };
   }
 
-  // No formatter — run claude directly (raw stream-json to stdout)
-  if (stdinFile) {
-    return { cmd: "bash", args: ["-c", claudeCmd] };
-  }
-  return { cmd: "claude", args: claudeArgs };
+  // No formatter — wrap in bash pipeline so grep|tee still writes claude-output.jsonl
+  const pipeline = [
+    `${claudeCmd} 2>${shellEscape(stderrFile)}`,
+    "grep --line-buffered '^{'",
+    `tee -a ${shellEscape(jsonlFile)}`,
+  ].join(" | ");
+  return { cmd: "bash", args: ["-c", pipeline] };
 }
+
 /** Find the local repo path for a given fullName (e.g. "org/repo"). */
 function findLocalRepo(
   fullName: string,
@@ -1490,31 +1494,34 @@ async function handleLoopRequest(
     }
     closeSync(logFd);
 
+    const tailerJsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+    const jsonlPreSpawnOffset = existsSync(tailerJsonlPath) ? statSync(tailerJsonlPath).size : 0;
+
     // Guard against double-firing: both 'error' and 'exit' can emit.
     let completionHandled = false;
-    const onceComplete = (code: number) => {
-      if (completionHandled) {
-        return;
-      }
+    let stopTailer: { stop: () => void; flush: () => Promise<void> } = {
+      stop: () => {},
+      flush: () => Promise.resolve(),
+    };
+    const onceComplete = async (code: number): Promise<void> => {
+      if (completionHandled) return;
       completionHandled = true;
       loopLog(body.loopId, `onceComplete fired, code=${code}`);
-      handleProcessCompletion(
-        code,
-        body,
-        apiBaseUrl,
-        worktreeDir,
-        claudeWorkDir,
-        usedTempDir,
-        expandedRepoPath,
-        jobStore
-      ).catch((err) => loopError(body.loopId, "Completion handler error:", err));
+      try {
+        await stopTailer.flush();
+        await handleProcessCompletion(
+          code, body, apiBaseUrl, worktreeDir, claudeWorkDir, usedTempDir, expandedRepoPath, jobStore
+        );
+      } catch (err) {
+        loopError(body.loopId, "Completion handler error:", err);
+      }
     };
 
     // Prevent unhandled 'error' events (e.g. ENOENT if binary vanishes
     // between pre-flight check and spawn) from crashing Electron.
     child.on("error", (err) => {
       loopError(body.loopId, "Spawn error:", err.message);
-      onceComplete(1);
+      void onceComplete(1);
     });
 
     // Use 'exit' instead of 'close' — with detached processes using
@@ -1522,7 +1529,7 @@ async function handleLoopRequest(
     // because there are no Node.js streams to track closure of.
     child.on("exit", (code) => {
       loopLog(body.loopId, `Process exit event, code=${code}`);
-      onceComplete(code ?? 1);
+      void onceComplete(code ?? 1);
     });
 
     const pid = child.pid ?? null;
@@ -1536,6 +1543,13 @@ async function handleLoopRequest(
     // Replace sentinel with real entry — storing `child` prevents GC of the
     // ChildProcess handle which would silently drop the exit listener.
     runningLoops.set(body.loopId, { pid, child });
+    stopTailer = startOutputTailer(
+      tailerJsonlPath,
+      apiBaseUrl,
+      body.loopId,
+      body.closedLoopAuthToken,
+      jsonlPreSpawnOffset
+    );
     spawnedSuccessfully = true;
     loopLog(body.loopId, `Spawned pid=${pid}, worktree=${worktreeDir}`);
 
