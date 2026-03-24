@@ -1,7 +1,7 @@
 import { execSync, spawn } from "node:child_process";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import crypto from "node:crypto";
-import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -677,7 +677,8 @@ async function attemptLlmCommit(
   loopId: string,
   command: string,
   artifactSlug: string | undefined,
-  webAppOrigin: string
+  webAppOrigin: string,
+  committer: LoopCommitter | undefined
 ): Promise<ExecutionResult | null> {
   // Build metadata footer for PR body
   // Strip newlines from user-controlled fields to prevent prompt injection
@@ -750,12 +751,20 @@ async function attemptLlmCommit(
 
   loopLog(loopId, "Attempting LLM-assisted commit...");
 
+  const spawnEnv: Record<string, string> = { ...process.env } as Record<string, string>;
+  if (committer) {
+    spawnEnv.GIT_AUTHOR_NAME = committer.name;
+    spawnEnv.GIT_AUTHOR_EMAIL = committer.email;
+    spawnEnv.GIT_COMMITTER_NAME = committer.name;
+    spawnEnv.GIT_COMMITTER_EMAIL = committer.email;
+  }
+
   let child: ReturnType<typeof spawn>;
   try {
     child = spawn(
       "claude",
       ["-p", prompt, "--allowedTools", "Bash,Read,Write,Glob,Grep"],
-      { cwd: worktreeDir, detached: true, stdio: "pipe" }
+      { cwd: worktreeDir, detached: true, stdio: "pipe", env: spawnEnv }
     );
   } catch (err) {
     loopError(loopId, "LLM commit spawn failed:", err);
@@ -822,22 +831,27 @@ async function attemptLlmCommit(
         return;
       }
 
-      // Read execution-result.json written by the LLM
+      // Read execution-result.json written by the LLM, then clean up scratch
+      // files unconditionally so they never leak into subsequent worktree runs.
       const resultFilePath = path.join(worktreeDir, "execution-result.json");
+      const prBodyFilePath = path.join(worktreeDir, "pr-body.md");
+      let result: ExecutionResult | null = null;
       try {
         const raw = readFileSync(resultFilePath, "utf-8");
         const parsed: unknown = JSON.parse(raw);
         if (isExecutionResult(parsed)) {
           loopLog(loopId, `LLM commit wrote execution-result.json, pr=${parsed.prUrl}`);
-          resolve(parsed);
-          return;
+          result = parsed;
+        } else {
+          loopError(loopId, "LLM execution-result.json failed type guard, returning null");
         }
-        loopError(loopId, "LLM execution-result.json failed type guard, returning null");
-        resolve(null);
       } catch (err) {
         loopError(loopId, "LLM commit: failed to read execution-result.json:", err);
-        resolve(null);
       }
+      // Always remove LLM scratch files from the worktree
+      try { unlinkSync(resultFilePath); } catch { /* may not exist */ }
+      try { unlinkSync(prBodyFilePath); } catch { /* may not exist */ }
+      resolve(result);
     });
 
     child.on("error", (err: Error) => {
@@ -936,6 +950,7 @@ function executeGitOperations(
       : "";
     const prBody = `Loop ID: ${loopId}\nCommand: ${command}${artifactLine}`;
     const bodyFile = path.join(worktreeDir, ".claude", "work", "pr-body.md");
+    mkdirSync(path.dirname(bodyFile), { recursive: true });
     writeFileSync(bodyFile, prBody);
 
     // Check for existing PR before creating (handles retries gracefully)
@@ -956,10 +971,12 @@ function executeGitOperations(
       prUrl = parsed.url;
       prNumber = parsed.number;
     } catch {
-      // No existing PR — create one using --body-file to avoid shell escaping
+      // No existing PR — create one using --body-file to avoid shell escaping.
+      // Create without --label first so the PR still succeeds on repos where the
+      // 'symphony' label doesn't exist yet, then attach the label best-effort.
       const prTitle = `${commitPrefix}Symphony: ${command} -- loop ${shortId}`;
       const prOutput = execSync(
-        `gh pr create --title ${shellEscape(prTitle)} --body-file ${shellEscape(bodyFile)} --base ${shellEscape(baseBranch)} --label symphony`,
+        `gh pr create --title ${shellEscape(prTitle)} --body-file ${shellEscape(bodyFile)} --base ${shellEscape(baseBranch)}`,
         {
           cwd: worktreeDir,
           encoding: "utf-8",
@@ -971,21 +988,40 @@ function executeGitOperations(
       prUrl = prOutput;
       const prNumberMatch = /\/pull\/(\d+)/.exec(prUrl);
       prNumber = prNumberMatch ? Number.parseInt(prNumberMatch[1], 10) : 0;
+
+      // Best-effort label attachment — non-fatal if the label doesn't exist
+      if (prNumber) {
+        try {
+          execSync(`gh pr edit ${prNumber} --add-label symphony`, {
+            cwd: worktreeDir,
+            stdio: "pipe",
+            env,
+            timeout: 15_000,
+          });
+        } catch {
+          // Label may not exist on this repo — not critical
+        }
+      }
     }
 
-    // Guarantee metadata footer on the PR body (covers both new and existing PRs).
-    // For new PRs this is a no-op since we just created it with the body.
-    // For existing PRs this ensures the footer is always present.
+    // Ensure the metadata footer is present on the PR body.  For existing PRs,
+    // fetch the current body and append the metadata instead of replacing it.
     try {
-      execSync(
-        `gh pr edit ${prNumber} --body-file ${shellEscape(bodyFile)}`,
-        {
-          cwd: worktreeDir,
-          stdio: "pipe",
-          env,
-          timeout: 15_000,
-        }
-      );
+      const currentBody = execSync(
+        `gh pr view ${prNumber} --json body --jq .body`,
+        { cwd: worktreeDir, encoding: "utf-8", stdio: "pipe", env, timeout: 15_000 }
+      ).trim();
+      // Only update if the footer isn't already present
+      if (!currentBody.includes(`Loop ID: ${loopId}`)) {
+        const updatedBody = currentBody
+          ? `${currentBody}\n\n---\n${prBody}`
+          : prBody;
+        writeFileSync(bodyFile, updatedBody);
+        execSync(
+          `gh pr edit ${prNumber} --body-file ${shellEscape(bodyFile)}`,
+          { cwd: worktreeDir, stdio: "pipe", env, timeout: 15_000 }
+        );
+      }
     } catch {
       // Non-critical — PR exists, metadata is best-effort
     }
@@ -1070,13 +1106,17 @@ async function handleProcessCompletion(
         loopId,
         command,
         body.artifactSlug,
-        webAppOrigin ?? ""
+        webAppOrigin ?? "",
+        committer
       );
 
-      // Clean up LLM artifacts before fallback to prevent them from being committed
+      // Clean up any remaining LLM scratch files before fallback to prevent
+      // them from being committed by executeGitOperations.  attemptLlmCommit
+      // already cleans up on success, but these guards cover edge cases where
+      // the process was killed before the cleanup ran.
       if (!llmResult) {
-        try { unlinkSync(path.join(worktreeDir, 'execution-result.json')); } catch { /* file may not exist */ }
-        try { unlinkSync(path.join(worktreeDir, 'execution-footer.txt')); } catch { /* file may not exist */ }
+        try { unlinkSync(path.join(worktreeDir, 'execution-result.json')); } catch { /* may not exist */ }
+        try { unlinkSync(path.join(worktreeDir, 'pr-body.md')); } catch { /* may not exist */ }
       }
 
       const gitResult: { prUrl: string; prNumber: number; branchName: string; commitSha: string } | null =
