@@ -181,6 +181,9 @@ export class SettingsStore {
     if (typeof partial.cloudConnectionEnabled === "boolean") {
       this.store.set("cloudConnectionEnabled", partial.cloudConnectionEnabled);
     }
+    if (typeof partial.verboseLogging === "boolean") {
+      this.store.set("verboseLogging", partial.verboseLogging);
+    }
     if (typeof partial.relayOrigin === "string") {
       this.store.set("relayOrigin" as keyof DesktopSettings, partial.relayOrigin);
     }

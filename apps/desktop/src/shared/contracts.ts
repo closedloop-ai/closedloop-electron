@@ -58,6 +58,7 @@ export interface DesktopSettings {
   relayOrigin: string;
   apiOrigin: string;
   webAppOrigin: string;
+  verboseLogging: boolean;
 }
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
@@ -70,5 +71,6 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   defaultApprovalTier: "high",
   relayOrigin: DEFAULT_RELAY_ORIGIN,
   apiOrigin: DEFAULT_AUTH_API_ORIGIN,
-  webAppOrigin: DEFAULT_WEB_APP_ORIGIN
+  webAppOrigin: DEFAULT_WEB_APP_ORIGIN,
+  verboseLogging: false
 };
