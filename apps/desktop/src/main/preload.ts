@@ -53,7 +53,9 @@ const desktopApi = {
   listCompletedJobs: () => ipcRenderer.invoke("desktop:list-completed-jobs") as Promise<unknown>,
   getJob: (jobId: string) => ipcRenderer.invoke("desktop:get-job", jobId) as Promise<unknown>,
   getJobLogTail: (jobId: string, lines?: number) =>
-    ipcRenderer.invoke("desktop:get-job-log-tail", jobId, lines) as Promise<unknown>
+    ipcRenderer.invoke("desktop:get-job-log-tail", jobId, lines) as Promise<unknown>,
+  getLogs: () => ipcRenderer.invoke("desktop:get-logs") as Promise<unknown>,
+  clearLogs: () => ipcRenderer.invoke("desktop:clear-logs") as Promise<unknown>
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);

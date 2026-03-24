@@ -886,7 +886,7 @@ function resolveWorktreeForComment(
   return expandedRepoPath;
 }
 
-function sanitizeCommitMessage(text: string): string {
+export function sanitizeCommitMessage(text: string): string {
   return text
     .replaceAll(/claude\s*code/gi, "")
     .replaceAll(/\bopus\b/gi, "")
