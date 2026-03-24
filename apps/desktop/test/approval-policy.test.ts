@@ -6,6 +6,7 @@ import { SUPPORTED_OPERATION_IDS, resolveOperationId } from "../src/main/approva
 // --- riskTierOrder ---
 
 test("riskTierOrder returns correct numeric ordering", () => {
+  assert.ok(riskTierOrder("none") < riskTierOrder("low"));
   assert.ok(riskTierOrder("low") < riskTierOrder("medium"));
   assert.ok(riskTierOrder("medium") < riskTierOrder("high"));
 });
@@ -28,6 +29,13 @@ test("policy high: auto-approves all mapped operations", () => {
   assert.equal(shouldAutoApprove("health_check", "high", false), true);
   assert.equal(shouldAutoApprove("symphony_loop", "high", false), true);
   assert.equal(shouldAutoApprove("deploy", "high", false), true);
+});
+
+test("policy none: blocks all operations including low-risk", () => {
+  assert.equal(shouldAutoApprove("health_check", "none", false), false);
+  assert.equal(shouldAutoApprove("symphony_loop", "none", false), false);
+  assert.equal(shouldAutoApprove("deploy", "none", false), false);
+  assert.equal(shouldAutoApprove("unknown_op", "none", false), false);
 });
 
 test("forceApproval overrides threshold", () => {

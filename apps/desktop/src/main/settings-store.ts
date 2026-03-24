@@ -66,6 +66,24 @@ export class SettingsStore {
     if (hadAuthApiOrigin) {
       this.store.delete("authApiOrigin" as keyof DesktopSettings);
     }
+
+    // Migration: replace legacy "auto" tier with "high" (identical behavior).
+    if (raw.defaultApprovalTier === "auto") {
+      this.store.set("defaultApprovalTier", "high" as RiskTier);
+    }
+    const rules = raw.autoApprovalRules as Record<string, string> | undefined;
+    if (rules) {
+      let rulesChanged = false;
+      for (const [key, val] of Object.entries(rules)) {
+        if (val === "auto") {
+          rules[key] = "high";
+          rulesChanged = true;
+        }
+      }
+      if (rulesChanged) {
+        this.store.set("autoApprovalRules", rules as unknown as Record<string, RiskTier>);
+      }
+    }
   }
 
   getAll(): DesktopSettings {

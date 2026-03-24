@@ -8,7 +8,7 @@ export type PendingApproval = {
   id: string;
   createdAt: string;
   operationId: string;
-  riskTier: Exclude<RiskTier, "auto">;
+  riskTier: Exclude<RiskTier, "none">;
   method: string;
   path: string;
   scopePath?: string;
@@ -74,7 +74,7 @@ export class ApprovalStore {
 
   enqueue(input: {
     operationId: string;
-    riskTier: Exclude<RiskTier, "auto">;
+    riskTier: Exclude<RiskTier, "none">;
     method: string;
     path: string;
     body: string;
