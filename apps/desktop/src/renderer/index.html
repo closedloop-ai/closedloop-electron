@@ -514,6 +514,48 @@
         line-height: 1.4;
       }
 
+      .approval-risk-tier {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 4px;
+        padding: 1px 7px;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        flex-shrink: 0;
+      }
+
+      .approval-risk-tier.risk-low {
+        background: rgba(22, 163, 74, 0.12);
+        color: #16a34a;
+      }
+
+      .approval-risk-tier.risk-medium {
+        background: rgba(245, 158, 11, 0.12);
+        color: #d97706;
+      }
+
+      .approval-risk-tier.risk-high {
+        background: rgba(220, 38, 38, 0.12);
+        color: #dc2626;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .approval-risk-tier.risk-low {
+          background: rgba(22, 163, 74, 0.18);
+          color: #4ade80;
+        }
+        .approval-risk-tier.risk-medium {
+          background: rgba(245, 158, 11, 0.18);
+          color: #fbbf24;
+        }
+        .approval-risk-tier.risk-high {
+          background: rgba(220, 38, 38, 0.18);
+          color: #f87171;
+        }
+      }
+
       .approval-reason {
         color: var(--ink);
         font-size: 13px;
@@ -1427,10 +1469,10 @@
             <div class="row">
               <label for="defaultApprovalTier">Default Approval Tier</label>
               <select id="defaultApprovalTier">
-                <option value="high">high -- approve everything</option>
-                <option value="medium">medium -- approve risky operations</option>
-                <option value="low">low -- approve only destructive operations</option>
-                <option value="auto">auto -- never prompt</option>
+                <option value="high">high -- auto-approve all operations</option>
+                <option value="medium">medium -- prompt only for high-risk (e.g. deploy)</option>
+                <option value="low">low -- prompt for medium and high-risk operations</option>
+                <option value="none">none -- prompt for all operations</option>
               </select>
             </div>
             <div class="row">
@@ -1445,7 +1487,7 @@
                   <option value="high">high</option>
                   <option value="medium">medium</option>
                   <option value="low">low</option>
-                  <option value="auto">auto</option>
+                  <option value="none">none</option>
                 </select>
                 <button class="secondary" id="tierOverrideAddBtn" type="button">Add</button>
               </div>
@@ -2114,6 +2156,13 @@
         title.textContent = operationLabel(approval.operationId);
         header.appendChild(title);
 
+        if (approval.riskTier) {
+          const riskBadge = document.createElement("span");
+          riskBadge.className = `approval-risk-tier risk-${approval.riskTier}`;
+          riskBadge.textContent = approval.riskTier;
+          header.appendChild(riskBadge);
+        }
+
         const badge = document.createElement("span");
         badge.className = `approval-badge ${statusKey}`;
         badge.textContent = resolved
@@ -2232,7 +2281,7 @@
         apiOrigin.value = settings.apiOrigin || "";
         webAppOrigin.value = settings.webAppOrigin || "";
         sandboxBaseDirectory.value = settings.sandboxBaseDirectory || "";
-        defaultApprovalTier.value = settings.defaultApprovalTier || "high";
+        defaultApprovalTier.value = settings.defaultApprovalTier === "auto" ? "high" : (settings.defaultApprovalTier || "high");
         renderTierOverrides(settings.autoApprovalRules || {});
         renderAlwaysAllowRules(settings.alwaysAllowRules || []);
         updateSandboxBaseWarning();
@@ -2247,7 +2296,7 @@
         "health_check", "repos_config", "deploy", "filesystem"
       ];
 
-      const TIER_OPTIONS = ["high", "medium", "low", "auto"];
+      const TIER_OPTIONS = ["high", "medium", "low", "none"];
 
       function renderTierOverrides(rules) {
         // Sync hidden input for save
@@ -2272,7 +2321,8 @@
             const opt = document.createElement("option");
             opt.value = t;
             opt.textContent = t;
-            if (t === tier) opt.selected = true;
+            const normalizedTier = tier === "auto" ? "high" : tier;
+            if (t === normalizedTier) opt.selected = true;
             sel.appendChild(opt);
           }
           sel.addEventListener("change", () => {

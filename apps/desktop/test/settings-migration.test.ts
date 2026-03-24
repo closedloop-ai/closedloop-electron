@@ -108,6 +108,42 @@ test("migration: fresh install applies defaults", () => {
   assert.equal("authApiOrigin" in all, false, "no stale authApiOrigin key should be present");
 });
 
+// --- Approval tier "auto" → "high" migration ---
+
+test("migration: defaultApprovalTier 'auto' is rewritten to 'high'", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "settings-migration-auto-tier-"));
+  tempDirs.push(tmpDir);
+
+  const storeName = "test-auto-tier";
+  fs.writeFileSync(
+    path.join(tmpDir, `${storeName}.json`),
+    JSON.stringify({
+      defaultApprovalTier: "auto",
+      autoApprovalRules: { deploy: "auto", health_check: "low" }
+    })
+  );
+
+  const store = new SettingsStore({ cwd: tmpDir, name: storeName });
+  const all = store.getAll();
+
+  assert.equal(all.defaultApprovalTier, "high", "defaultApprovalTier should be migrated to 'high'");
+  assert.equal(
+    (all.autoApprovalRules as Record<string, string>).deploy,
+    "high",
+    "autoApprovalRules 'auto' entries should be migrated to 'high'"
+  );
+  assert.equal(
+    (all.autoApprovalRules as Record<string, string>).health_check,
+    "low",
+    "non-auto autoApprovalRules entries should be preserved"
+  );
+
+  // Verify persisted JSON no longer contains "auto"
+  const persisted = JSON.parse(fs.readFileSync(path.join(tmpDir, `${storeName}.json`), "utf-8"));
+  assert.notEqual(persisted.defaultApprovalTier, "auto", "persisted defaultApprovalTier should not be 'auto'");
+  assert.notEqual(persisted.autoApprovalRules?.deploy, "auto", "persisted autoApprovalRules should not contain 'auto'");
+});
+
 test("migration: already migrated install is a no-op — both values preserved", () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "settings-migration-noop-"));
   tempDirs.push(tmpDir);

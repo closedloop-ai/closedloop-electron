@@ -35,7 +35,7 @@ export interface HealthResponse {
   port: number;
 }
 
-export type RiskTier = "auto" | "low" | "medium" | "high";
+export type RiskTier = "none" | "low" | "medium" | "high";
 
 export interface AlwaysAllowRule {
   id: string;

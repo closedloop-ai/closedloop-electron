@@ -5,7 +5,7 @@ import type { OperationId } from "./approval-operations.js";
  * Per-operation inherent risk tiers. The risk assigned reflects the
  * highest-risk HTTP method that each approval ID handles.
  */
-export const OPERATION_RISK_TIERS: Record<OperationId, Exclude<RiskTier, "auto">> = {
+export const OPERATION_RISK_TIERS: Record<OperationId, Exclude<RiskTier, "none">> = {
   health_check:            "low",
   repos_config:            "medium",
   filesystem:              "medium",
@@ -34,9 +34,10 @@ export const OPERATION_RISK_TIERS: Record<OperationId, Exclude<RiskTier, "auto">
   learnings:               "medium"
 };
 
-/** Converts a non-auto RiskTier to a numeric value for threshold comparison. */
-export function riskTierOrder(tier: Exclude<RiskTier, "auto">): number {
+/** Converts a RiskTier to a numeric value for threshold comparison. */
+export function riskTierOrder(tier: RiskTier): number {
   switch (tier) {
+    case "none": return 0;
     case "low": return 1;
     case "medium": return 2;
     case "high": return 3;
@@ -49,10 +50,10 @@ export function riskTierOrder(tier: Exclude<RiskTier, "auto">): number {
  */
 export function shouldAutoApprove(
   operationId: string,
-  configuredTier: Exclude<RiskTier, "auto">,
+  configuredTier: RiskTier,
   forceApproval: boolean
 ): boolean {
   if (forceApproval) return false;
-  const operationRisk = (OPERATION_RISK_TIERS as Record<string, Exclude<RiskTier, "auto">>)[operationId] ?? "high";
+  const operationRisk = (OPERATION_RISK_TIERS as Record<string, Exclude<RiskTier, "none">>)[operationId] ?? "high";
   return riskTierOrder(operationRisk) <= riskTierOrder(configuredTier);
 }
