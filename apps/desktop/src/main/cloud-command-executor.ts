@@ -1,4 +1,5 @@
 import { URL } from "node:url";
+import { gatewayLog } from "./gateway-logger.js";
 import type {
   CommandEventRecord,
   DesktopCancelEvent,
@@ -57,6 +58,7 @@ export class CloudCommandExecutor {
 
     const validationError = validateCommand(command);
     if (validationError) {
+      gatewayLog.warn("command-executor", `Rejected command ${command.commandId}: ${validationError}`);
       this.options.sendCommandAck({
         commandId: command.commandId,
         accepted: false,
@@ -66,6 +68,7 @@ export class CloudCommandExecutor {
       return;
     }
 
+    gatewayLog.debug("command-executor", `Enqueued command ${command.commandId}: ${command.method} ${command.path}`);
     const tracked: TrackedCommand = {
       command,
       state: "queued",
@@ -181,6 +184,7 @@ export class CloudCommandExecutor {
       return;
     }
     tracked.state = "running";
+    gatewayLog.debug("command-executor", `Executing command ${command.commandId}: ${command.method} ${command.path}`);
 
     const lockKey = deriveLockKey(command);
     if (lockKey) {
@@ -221,6 +225,7 @@ export class CloudCommandExecutor {
           cancelled: true,
           reason: running.cancelReason ?? "cancelled"
         });
+        gatewayLog.debug("command-executor", `Command ${command.commandId} cancelled`);
         this.markTerminal(command.commandId, "cancelled");
       } else if (running.timedOut) {
         this.emitTrackedEvent(command.commandId, "error", {
@@ -229,13 +234,16 @@ export class CloudCommandExecutor {
           code: "timeout",
           error: "command timed out"
         });
+        gatewayLog.error("command-executor", `Command ${command.commandId} timed out`);
         this.markTerminal(command.commandId, "failed");
       } else {
+        const msg = error instanceof Error ? error.message : "unknown command failure";
         this.emitTrackedEvent(command.commandId, "error", {
           type: "error",
           terminal: true,
-          error: error instanceof Error ? error.message : "unknown command failure"
+          error: msg
         });
+        gatewayLog.error("command-executor", `Command ${command.commandId} failed: ${msg}`);
         this.markTerminal(command.commandId, "failed");
       }
     } finally {
@@ -268,6 +276,7 @@ export class CloudCommandExecutor {
     const method = command.method.toUpperCase();
     const body = serializeBody(command.body, headers, method);
 
+    gatewayLog.debug("command-executor", `Gateway fetch: ${method} ${requestUrl.pathname}`);
     const response = await fetch(requestUrl, {
       method,
       headers,
@@ -280,6 +289,7 @@ export class CloudCommandExecutor {
 
     if (!response.ok && !isStream) {
       const message = await safeReadBodyAsText(response);
+      gatewayLog.error("command-executor", `Gateway returned ${response.status} for ${method} ${requestUrl.pathname}: ${message}`);
       throw new Error(`gateway returned ${response.status}${message ? `: ${message}` : ""}`);
     }
 

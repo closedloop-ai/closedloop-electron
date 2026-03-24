@@ -1,4 +1,5 @@
 import { execSync, spawn } from "node:child_process";
+import { gatewayLog } from "../../main/gateway-logger.js";
 import crypto from "node:crypto";
 import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import fs from "node:fs/promises";
@@ -284,11 +285,15 @@ async function postLoopEvent(
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
       loopError(loopId, `Event POST failed: ${resp.status} ${resp.statusText}`, text);
+      gatewayLog.error("loop-event", `POST ${payload.type} to ${url} failed: ${resp.status} ${resp.statusText} ${text}`);
     } else {
       loopLog(loopId, `Event POST success: ${resp.status}`);
+      gatewayLog.debug("loop-event", `POST ${payload.type} to ${url}: ${resp.status}`);
     }
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     loopError(loopId, "Failed to post event:", err);
+    gatewayLog.error("loop-event", `POST ${payload.type} network error: ${msg}`);
   }
 }
 
@@ -312,11 +317,15 @@ async function uploadArtifacts(
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
       loopError(loopId, `Upload failed: ${resp.status} ${resp.statusText}`, text);
+      gatewayLog.error("loop-upload", `Artifact upload to ${url} failed: ${resp.status} ${resp.statusText} ${text}`);
     } else {
       loopLog(loopId, `Upload success: ${resp.status}`);
+      gatewayLog.debug("loop-upload", `Artifact upload to ${url}: ${resp.status}`);
     }
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     loopError(loopId, "Failed to upload artifacts:", err);
+    gatewayLog.error("loop-upload", `Artifact upload network error: ${msg}`);
   }
 }
 
@@ -763,6 +772,7 @@ async function handleProcessCompletion(
 
   if (exitCode !== 0) {
     loopError(loopId, `Process failed with exit code ${exitCode}`);
+    gatewayLog.error("loop-harness", `${command} failed with exit code ${exitCode}, loopId=${loopId}`);
     // Error shape matches ECS harness: top-level code/message, not nested error object
     await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
       type: "error",
@@ -792,6 +802,7 @@ async function handleProcessCompletion(
   }
 
   // Read outputs per command
+  gatewayLog.debug("loop-harness", `${command} succeeded (exit 0), reading artifacts for loopId=${loopId}`);
   let artifacts: Record<string, unknown> = {};
   const metadata: Record<string, unknown> = {};
 
@@ -838,7 +849,9 @@ async function handleProcessCompletion(
   }
 
   // Upload artifacts
-  loopLog(loopId, "Artifact keys:", Object.keys(artifacts));
+  const artifactKeys = Object.keys(artifacts);
+  loopLog(loopId, "Artifact keys:", artifactKeys);
+  gatewayLog.debug("loop-harness", `Uploading artifacts for ${command} loopId=${loopId}: [${artifactKeys.join(", ")}]`);
   await uploadArtifacts(apiBaseUrl, loopId, closedLoopAuthToken, {
     artifacts,
     metadata,
@@ -981,7 +994,9 @@ async function handleLoopRequest(
   // Claim the loopId immediately to prevent concurrent requests from racing
   // past the has() check. Replaced with real entry after spawn succeeds.
   runningLoops.set(body.loopId, { pid: -1, child: null as unknown as ReturnType<typeof spawn> });
+  const requestSource = context.request?.headers?.["x-desktop-source"] === "cloud-socket" ? "relay" : "local";
   loopLog(body.loopId, `Received ${body.command} request, repo=${body.repo?.fullName ?? "none"}, stableId=${pickStableId(body)}, parentSessionId=${body.parentSessionId ?? "none"}`);
+  gatewayLog.info("loop-harness", `${body.command} request via ${requestSource}, loopId=${body.loopId}, repo=${body.repo?.fullName ?? "none"}`);
 
   let spawnedSuccessfully = false;
   try {
@@ -1507,7 +1522,10 @@ async function handleLoopRequest(
         usedTempDir,
         expandedRepoPath,
         jobStore
-      ).catch((err) => loopError(body.loopId, "Completion handler error:", err));
+      ).catch((err) => {
+        loopError(body.loopId, "Completion handler error:", err);
+        gatewayLog.error("loop-harness", `Completion handler error for loopId=${body.loopId}: ${err instanceof Error ? err.message : err}`);
+      });
     };
 
     // Prevent unhandled 'error' events (e.g. ENOENT if binary vanishes
@@ -1538,6 +1556,7 @@ async function handleLoopRequest(
     runningLoops.set(body.loopId, { pid, child });
     spawnedSuccessfully = true;
     loopLog(body.loopId, `Spawned pid=${pid}, worktree=${worktreeDir}`);
+    gatewayLog.debug("loop-harness", `Spawned ${body.command} pid=${pid}, loopId=${body.loopId}, worktree=${worktreeDir}`);
 
     // Bind runtime details to an existing LocalJob or create a new one for this loop
     if (jobStore) {

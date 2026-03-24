@@ -30,6 +30,7 @@ import {
 import { seedReposConfig } from "./seed-repos-config.js";
 import { SUPPORTED_OPERATION_IDS, resolveOperationId } from "./approval-operations.js";
 import { shouldAutoApprove, OPERATION_RISK_TIERS } from "./approval-policy.js";
+import { gatewayLog } from "./gateway-logger.js";
 import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
 import { JobStore, isTerminalJobStatus } from "./job-store.js";
@@ -203,6 +204,7 @@ export class DesktopApplication {
     this.syncPendingApprovalsToTray();
     this.desktopWindow.init();
 
+    gatewayLog.setVerbose(this.settingsStore.getAll().verboseLogging);
     this.migrateLegacyData();
     this.reconcileJobStore();
 
@@ -728,6 +730,9 @@ export class DesktopApplication {
   }
 
   private registerIpcHandlers(): void {
+    ipcMain.handle("desktop:get-logs", () => gatewayLog.getEntries());
+    ipcMain.handle("desktop:clear-logs", () => { gatewayLog.clear(); });
+
     ipcMain.handle("desktop:get-settings", () => {
       const settings = this.settingsStore.getAll();
       const activeAlwaysAllowRules = pruneExpiredAlwaysAllowRules(settings.alwaysAllowRules);
@@ -749,6 +754,7 @@ export class DesktopApplication {
         webAppOrigin?: string;
         defaultApprovalTier?: "auto" | "none" | "low" | "medium" | "high";
         autoApprovalRules?: Record<string, "auto" | "none" | "low" | "medium" | "high">;
+        verboseLogging?: boolean;
       }) => {
         const currentSettings = this.settingsStore.getAll();
         const nextPartial = { ...partial };
@@ -789,6 +795,9 @@ export class DesktopApplication {
         }
 
         const updated = this.settingsStore.update(nextPartial as Partial<DesktopSettings>);
+        if (typeof nextPartial.verboseLogging === "boolean") {
+          gatewayLog.setVerbose(nextPartial.verboseLogging);
+        }
 
         if (
           typeof partial.sandboxBaseDirectory === "string" &&

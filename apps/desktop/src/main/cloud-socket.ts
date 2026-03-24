@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { gatewayLog } from "./gateway-logger.js";
 import { io, type Socket } from "socket.io-client";
 import {
   PROTOCOL_VERSION,
@@ -94,6 +95,7 @@ export class CloudSocketService {
       state: DesktopPresenceEvent["state"];
     }
   ): void {
+    gatewayLog.debug("cloud-socket", `Sending presence: state=${event.state}`);
     this.emit("desktop.presence", event);
   }
 
@@ -129,6 +131,7 @@ export class CloudSocketService {
       if (this.stopped) {
         return;
       }
+      gatewayLog.info("cloud-socket", "Connected to relay, sending hello handshake");
       this.awaitingHelloAck = true;
       this.emitHello();
       this.scheduleHelloAckTimeout();
@@ -142,11 +145,13 @@ export class CloudSocketService {
       this.clearHelloAckTimer();
       const message = error instanceof Error ? error.message : "connection failed";
       if (looksLikeAuthError(error)) {
+        gatewayLog.error("cloud-socket", "Authentication failed on connect");
         this.notifyStatus({
           state: "degraded",
           error: "Authentication failed — verify your API key in Settings"
         });
       } else {
+        gatewayLog.error("cloud-socket", `Connection error: ${message}`);
         this.notifyStatus({ state: "degraded", error: `Cloud socket connection failed: ${message}` });
       }
     });
@@ -155,6 +160,7 @@ export class CloudSocketService {
       if (this.stopped) {
         return;
       }
+      gatewayLog.warn("cloud-socket", `Disconnected: ${reason}`);
       this.awaitingHelloAck = false;
       this.clearHelloAckTimer();
       this.notifyStatus({ state: "degraded", error: `Cloud socket disconnected: ${reason}` });
@@ -164,12 +170,14 @@ export class CloudSocketService {
       const event = asObject(payload);
       const computeTargetId = asNonEmptyString(event.computeTargetId);
       if (!computeTargetId) {
+        gatewayLog.warn("cloud-socket", "hello.ack missing computeTargetId, ignoring");
         return;
       }
 
       this.targetId = computeTargetId;
       this.awaitingHelloAck = false;
       this.clearHelloAckTimer();
+      gatewayLog.info("cloud-socket", `Hello ack received, targetId=${computeTargetId}`);
       const ackEvent: DesktopHelloAckEvent = {
         ...createEnvelope(),
         computeTargetId,
@@ -190,8 +198,10 @@ export class CloudSocketService {
     socket.on("desktop.command", (payload: unknown) => {
       const parsed = parseDesktopCommand(payload);
       if (!parsed) {
+        gatewayLog.warn("cloud-socket", "Received unparseable desktop.command, ignoring");
         return;
       }
+      gatewayLog.debug("cloud-socket", `Command received: ${parsed.operationId} ${parsed.method} ${parsed.path} (commandId=${parsed.commandId})`);
       this.options.onCommand?.(parsed);
     });
 
@@ -267,6 +277,7 @@ export class CloudSocketService {
       if (this.stopped || !this.awaitingHelloAck) {
         return;
       }
+      gatewayLog.warn("cloud-socket", "Hello ack timeout -- retrying handshake");
       this.notifyStatus({
         state: "degraded",
         error: "Connected to cloud socket but did not receive desktop.hello.ack"
