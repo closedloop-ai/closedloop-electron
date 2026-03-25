@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
@@ -11,6 +11,8 @@ import { DesktopGatewayServer } from "../src/server/server.js";
 import { saveCodexChatSession } from "../src/server/operations/codex.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { SymphonyDirNotConfiguredError, tryAssertRepoAllowed, tryAssertPathAllowed } from "../src/server/operations/symphony-utils.js";
+import { JobStore } from "../src/main/job-store.js";
+import type { LocalJob, LocalJobStatus } from "../src/main/job-store.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -26,6 +28,7 @@ async function initGitRepo(repoPath: string): Promise<void> {
 const serversToClose: DesktopGatewayServer[] = [];
 const blockersToClose: net.Server[] = [];
 const tempPathsToClean: string[] = [];
+const childPidsToKill: number[] = [];
 const originalSymphonyWorktreeParentDir = process.env.SYMPHONY_WORKTREE_PARENT_DIR;
 const originalHome = process.env.HOME;
 const originalPath = process.env.PATH;
@@ -63,6 +66,10 @@ afterEach(async () => {
         resolve();
       });
     });
+  }
+
+  for (const pid of childPidsToKill.splice(0)) {
+    try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
   }
 
   for (const tempPath of tempPathsToClean.splice(0)) {
@@ -3186,6 +3193,318 @@ test("getWebAppOrigin getter takes effect on next CORS response without restart"
   // Second request: should reflect the updated origin immediately
   const res2 = await fetch(`http://127.0.0.1:${server.getActivePort()}/health`);
   assert.equal(res2.headers.get("access-control-allow-origin"), "https://updated.example.com");
+});
+
+// ---------------------------------------------------------------------------
+// Helper: build a minimal LocalJob for seeding JobStore
+// ---------------------------------------------------------------------------
+
+function makeTestJob(overrides: Partial<LocalJob> = {}): LocalJob {
+  const now = new Date().toISOString();
+  return {
+    id: overrides.id ?? "test-job-1",
+    kind: "SYMPHONY_LOOP",
+    loopId: overrides.loopId ?? "test-loop-1",
+    command: "EXECUTE",
+    status: "RUNNING" as LocalJobStatus,
+    startedAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Bug 3: /api/engineer/symphony/kill updates JobStore immediately
+// ---------------------------------------------------------------------------
+
+test("symphony/kill updates JobStore to STOPPED when killing by ticket", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-kill-jobstore-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-kill-js");
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeDir = path.join(worktreeParent, "repo-kill-js-AI-900");
+  const workDir = path.join(worktreeDir, ".claude", "work");
+  await fs.mkdir(workDir, { recursive: true });
+  await fs.writeFile(
+    path.join(workDir, "state.json"),
+    JSON.stringify({ status: "IN_PROGRESS", phase: "Running" }),
+    "utf-8"
+  );
+
+  // Seed JobStore with a RUNNING job whose worktreeDir matches the kill target
+  const jobStore = new JobStore({ cwd: tmpDir, name: "test-kill-jobstore" });
+  const seededJob = makeTestJob({
+    id: "kill-js-job-1",
+    worktreeDir,
+    status: "RUNNING",
+  });
+  jobStore.upsert(seededJob);
+  assert.equal(jobStore.listRunning().length, 1, "precondition: job is active");
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "kill-jobstore-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  // Kill via ticketId + repoPath (no PID file -> noPidFile branch)
+  const killResponse = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/kill`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticketId: "AI-900", repoPath }),
+    }
+  );
+  assert.equal(killResponse.status, 200);
+
+  // JobStore should now have the job as STOPPED (not stale RUNNING)
+  const updatedJob = jobStore.getById("kill-js-job-1");
+  assert.ok(updatedJob, "job should still exist in store");
+  assert.equal(updatedJob!.status, "STOPPED", "job status should be STOPPED after kill");
+  assert.ok(updatedJob!.completedAt, "completedAt should be set");
+  assert.equal(jobStore.listRunning().length, 0, "no active jobs should remain");
+});
+
+// ---------------------------------------------------------------------------
+// Bug 4e: Restart-fallback cancel via loop/kill
+// ---------------------------------------------------------------------------
+
+test("loop/kill uses JobStore fallback when runningLoops is empty (post-restart)", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-loopkill-fallback-"));
+  tempPathsToClean.push(tmpDir);
+
+  // Spawn a real process so the kill handler can find it alive
+  const sleeper = spawn("sleep", ["120"], { detached: true, stdio: "ignore" });
+  const sleeperPid = sleeper.pid!;
+  childPidsToKill.push(sleeperPid);
+
+  // Seed JobStore with a RUNNING job that has a loopId and the sleeper PID
+  const jobStore = new JobStore({ cwd: tmpDir, name: "test-loopkill-fallback" });
+  const loopId = "restart-fallback-loop-1";
+  const seededJob = makeTestJob({
+    id: "loopkill-fb-job-1",
+    loopId,
+    pid: sleeperPid,
+    status: "RUNNING",
+  });
+  jobStore.upsert(seededJob);
+
+  // Fresh server (runningLoops map is empty since this is a new server instance)
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "loopkill-fallback-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const killResponse = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop/kill`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ loopId }),
+    }
+  );
+  assert.equal(killResponse.status, 200);
+  const killBody = (await killResponse.json()) as { success: boolean; message: string };
+  assert.equal(killBody.success, true);
+  assert.ok(killBody.message.includes("restart fallback"), "message should mention restart fallback");
+
+  // JobStore should now have the job as CANCEL_PENDING
+  const updatedJob = jobStore.getById("loopkill-fb-job-1");
+  assert.ok(updatedJob, "job should still exist in store");
+  assert.equal(updatedJob!.status, "CANCEL_PENDING", "job status should be CANCEL_PENDING");
+
+  // Process should be dead (the handler sends SIGTERM + waits + SIGKILL)
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  let processAlive = false;
+  try { process.kill(sleeperPid, 0); processAlive = true; } catch { /* dead */ }
+  assert.equal(processAlive, false, "sleeper process should be killed");
+});
+
+// ---------------------------------------------------------------------------
+// Bug 5: status endpoint suppresses terminal status while process is alive
+// ---------------------------------------------------------------------------
+
+test("symphony/status returns IN_PROGRESS when state.json says COMPLETED but process is alive", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-status-alive-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-status-alive");
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeDir = path.join(worktreeParent, "repo-status-alive-AI-555");
+  const workDir = path.join(worktreeDir, ".claude", "work");
+  await fs.mkdir(workDir, { recursive: true });
+
+  // Spawn a real process so isProcessRunning returns true
+  const sleeper = spawn("sleep", ["120"], { detached: true, stdio: "ignore" });
+  const sleeperPid = sleeper.pid!;
+  childPidsToKill.push(sleeperPid);
+
+  // Write PID file so the status handler finds the alive process
+  await fs.writeFile(path.join(workDir, "process.pid"), String(sleeperPid), "utf-8");
+
+  // Write state.json with terminal status COMPLETED
+  await fs.writeFile(
+    path.join(workDir, "state.json"),
+    JSON.stringify({
+      status: "COMPLETED",
+      phase: "Completed",
+      timestamp: new Date().toISOString(),
+    }),
+    "utf-8"
+  );
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "status-alive-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/status/AI-555?repo=${encodeURIComponent(repoPath)}`
+  );
+  assert.equal(response.status, 200);
+
+  const body = (await response.json()) as {
+    exists: boolean;
+    stateExists: boolean;
+    status: string;
+    phase: string;
+    processRunning: boolean;
+    pid: number;
+  };
+  assert.equal(body.exists, true);
+  assert.equal(body.stateExists, true);
+  assert.equal(body.processRunning, true, "process should be detected as alive");
+  assert.equal(body.pid, sleeperPid);
+  // Key assertion: terminal status is suppressed while process is alive
+  assert.equal(body.status, "IN_PROGRESS", "should show IN_PROGRESS, not COMPLETED, while process alive");
+  assert.equal(body.phase, "Running", "phase should be normalized to Running");
+});
+
+// ---------------------------------------------------------------------------
+// Bug 4f: Restart-fallback cancel via plan-loop/:ticketId/cancel
+// ---------------------------------------------------------------------------
+
+test("plan-loop cancel uses JobStore PID fallback when pid file is stale (post-restart)", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-planloop-cancel-"));
+  tempPathsToClean.push(tmpDir);
+
+  // Spawn a real process so the cancel handler can find it alive
+  const sleeper = spawn("sleep", ["120"], { detached: true, stdio: "ignore" });
+  const sleeperPid = sleeper.pid!;
+  childPidsToKill.push(sleeperPid);
+
+  const ticketId = "TEST-PLC-1";
+  const loopId = "planloop-cancel-fallback-loop-1";
+
+  // Set up worktree directory WITHOUT a pid file -- simulates post-restart where
+  // the pid file was never written or was cleaned up. This forces the fallback
+  // chain: readProcessPidSync -> null -> getActiveLoopPid -> null -> JobStore PID.
+  const worktreeDir = path.join(tmpDir, "repo", ".worktrees", ticketId);
+  await fs.mkdir(path.join(worktreeDir, ".claude"), { recursive: true });
+
+  // Seed JobStore with a RUNNING job whose PID is the real sleeper
+  const jobStore = new JobStore({ cwd: tmpDir, name: "test-planloop-cancel-fallback" });
+  const seededJob = makeTestJob({
+    id: "planloop-fb-job-1",
+    loopId,
+    pid: sleeperPid,
+    status: "RUNNING",
+    worktreeDir,
+  });
+  jobStore.upsert(seededJob);
+
+  // Mock API server that accepts DELETE /loops/:id
+  const mockApi = http.createServer((_req, res) => {
+    res.statusCode = 200;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ ok: true }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    mockApi.listen(0, "127.0.0.1", () => resolve());
+    mockApi.once("error", reject);
+  });
+  blockersToClose.push(mockApi);
+  const mockApiAddr = mockApi.address();
+  if (!mockApiAddr || typeof mockApiAddr === "string") throw new Error("mock API address failed");
+  const mockApiOrigin = `http://127.0.0.1:${mockApiAddr.port}`;
+
+  // Fresh server with getApiKey/getApiOrigin
+  const repoPath = path.join(tmpDir, "repo");
+  await fs.mkdir(repoPath, { recursive: true });
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [repoPath],
+    machineName: "planloop-cancel-fallback-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    jobStore,
+    getApiKey: () => "test-api-key",
+    getApiOrigin: () => mockApiOrigin,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const cancelResponse = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/plan-loop/${ticketId}/cancel`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repoPath, loopId }),
+    }
+  );
+  assert.equal(cancelResponse.status, 200);
+  const cancelBody = (await cancelResponse.json()) as { cancelled: boolean };
+  assert.equal(cancelBody.cancelled, true);
+
+  // readProcessPidSync returns null (no pid file), getActiveLoopPid returns null
+  // (fresh server, empty runningLoops), so the JobStore fallback finds sleeperPid.
+  // Wait for the handler's kill timeout
+  await new Promise((resolve) => setTimeout(resolve, 1500));
+
+  // The sleeper should be killed via the JobStore PID fallback
+  let processAlive = false;
+  try { process.kill(sleeperPid, 0); processAlive = true; } catch { /* dead */ }
+  assert.equal(processAlive, false, "sleeper process should be killed via JobStore PID fallback");
 });
 
 async function findAvailablePort(excluded: number[] = []): Promise<number> {

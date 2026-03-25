@@ -3,15 +3,46 @@ import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { expandHome, resolveWorktreeDir } from "./symphony-utils.js";
+import type { JobStore, LocalJob } from "../../main/job-store.js";
 
 type ResolveResult =
   | { pid: number; pidFilePath: string | null; worktreeDir: string | null }
   | { noPidFile: true; worktreeDir: string }
   | { error: string; status: number };
 
+function findJobForKill(
+  jobStore: JobStore,
+  pid: number | null,
+  worktreeDir: string | null
+): LocalJob | undefined {
+  const running = jobStore.listRunning();
+  if (pid != null) {
+    const byPid = running.find((j) => j.pid === pid);
+    if (byPid) return byPid;
+  }
+  if (worktreeDir != null) {
+    return running.find((j) => j.worktreeDir === worktreeDir);
+  }
+  return undefined;
+}
+
+function markJobStopped(
+  jobStore: JobStore | undefined,
+  pid: number | null,
+  worktreeDir: string | null
+): void {
+  if (!jobStore) return;
+  const job = findJobForKill(jobStore, pid, worktreeDir);
+  if (job) {
+    const now = new Date().toISOString();
+    jobStore.upsert({ ...job, status: "STOPPED", updatedAt: now, completedAt: now });
+  }
+}
+
 export function registerSymphonyKillRoutes(
   dispatcher: OperationDispatcher,
-  getAllowedDirectories: () => string[]
+  getAllowedDirectories: () => string[],
+  jobStore?: JobStore
 ): void {
   dispatcher.register("POST", "/api/engineer/symphony/kill", async (context) => {
     try {
@@ -30,6 +61,7 @@ export function registerSymphonyKillRoutes(
       if ("noPidFile" in resolved) {
         cancelLoop(resolved.worktreeDir);
         markStateAsStopped(resolved.worktreeDir);
+        markJobStopped(jobStore, null, resolved.worktreeDir);
         json(context, 200, {
           success: true,
           message: "No process to kill (no PID file), state marked as stopped"
@@ -50,6 +82,7 @@ export function registerSymphonyKillRoutes(
         if (worktreeDir) {
           markStateAsStopped(worktreeDir);
         }
+        markJobStopped(jobStore, pid, worktreeDir);
         json(context, 200, { success: true, message: "Process already terminated", pid });
         return;
       }
@@ -69,6 +102,7 @@ export function registerSymphonyKillRoutes(
         if (worktreeDir) {
           markStateAsStopped(worktreeDir);
         }
+        markJobStopped(jobStore, pid, worktreeDir);
 
         json(context, 200, { success: true, message: "Process terminated", pid });
       } catch (error) {
@@ -77,6 +111,13 @@ export function registerSymphonyKillRoutes(
           deletePidFile(pidFilePath);
           if (worktreeDir) {
             markStateAsStopped(worktreeDir);
+          }
+          if (jobStore) {
+            const job = findJobForKill(jobStore, pid, worktreeDir);
+            if (job) {
+              const now = new Date().toISOString();
+              jobStore.upsert({ ...job, status: "STOPPED", updatedAt: now, completedAt: now });
+            }
           }
           json(context, 200, { success: true, message: "Process already terminated", pid });
           return;
