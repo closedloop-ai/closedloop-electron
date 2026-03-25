@@ -1,7 +1,7 @@
 import { execSync, spawn } from "node:child_process";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import crypto from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -23,6 +23,7 @@ import {
   resolveWorktreeParentDir,
   tryAssertRepoAllowed,
 } from "./symphony-utils.js";
+import { startOutputTailer } from "./output-tailer.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -216,11 +217,13 @@ function buildClaudePipeline(
     return { cmd: "bash", args: ["-c", pipeline] };
   }
 
-  // No formatter — run claude directly (raw stream-json to stdout)
-  if (stdinFile) {
-    return { cmd: "bash", args: ["-c", claudeCmd] };
-  }
-  return { cmd: "claude", args: claudeArgs };
+  // No formatter — wrap in bash pipeline so grep|tee still writes claude-output.jsonl
+  const pipeline = [
+    `${claudeCmd} 2>${shellEscape(stderrFile)}`,
+    "grep --line-buffered '^{'",
+    `tee -a ${shellEscape(jsonlFile)}`,
+  ].join(" | ");
+  return { cmd: "bash", args: ["-c", pipeline] };
 }
 
 /** Find the local repo path for a given fullName (e.g. "org/repo"). */
@@ -1765,14 +1768,24 @@ async function handleLoopRequest(
     }
     closeSync(logFd);
 
+    const tailerJsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+    const jsonlPreSpawnOffset = existsSync(tailerJsonlPath) ? statSync(tailerJsonlPath).size : 0;
+
     // Guard against double-firing: both 'error' and 'exit' can emit.
     let completionHandled = false;
-    const onceComplete = (code: number) => {
-      if (completionHandled) {
-        return;
-      }
+    let stopTailer: { stop: () => void; flush: () => Promise<void> } = {
+      stop: () => {},
+      flush: () => Promise.resolve(),
+    };
+    const onceComplete = async (code: number): Promise<void> => {
+      if (completionHandled) return;
       completionHandled = true;
       loopLog(body.loopId, `onceComplete fired, code=${code}`);
+      try {
+        await stopTailer.flush();
+      } catch (err) {
+        loopError(body.loopId, "Tailer flush error:", err);
+      }
       handleProcessCompletion(
         code,
         body,
@@ -1793,7 +1806,7 @@ async function handleLoopRequest(
     // between pre-flight check and spawn) from crashing Electron.
     child.on("error", (err) => {
       loopError(body.loopId, "Spawn error:", err.message);
-      onceComplete(1);
+      void onceComplete(1);
     });
 
     // Use 'exit' instead of 'close' — with detached processes using
@@ -1801,7 +1814,7 @@ async function handleLoopRequest(
     // because there are no Node.js streams to track closure of.
     child.on("exit", (code) => {
       loopLog(body.loopId, `Process exit event, code=${code}`);
-      onceComplete(code ?? 1);
+      void onceComplete(code ?? 1);
     });
 
     const pid = child.pid ?? null;
@@ -1815,6 +1828,13 @@ async function handleLoopRequest(
     // Replace sentinel with real entry — storing `child` prevents GC of the
     // ChildProcess handle which would silently drop the exit listener.
     runningLoops.set(body.loopId, { pid, child });
+    stopTailer = startOutputTailer(
+      tailerJsonlPath,
+      apiBaseUrl,
+      body.loopId,
+      body.closedLoopAuthToken,
+      jsonlPreSpawnOffset
+    );
     spawnedSuccessfully = true;
     loopLog(body.loopId, `Spawned pid=${pid}, worktree=${worktreeDir}`);
     gatewayLog.debug("loop-harness", `Spawned ${body.command} pid=${pid}, loopId=${body.loopId}, worktree=${worktreeDir}`);
