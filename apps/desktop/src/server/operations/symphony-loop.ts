@@ -16,6 +16,7 @@ import {
   readEvaluatePrdOutputs,
   writePrdArtifact,
 } from "./symphony-prd-artifacts.js";
+import { readEvaluateFeatureOutputs, writeFeatureArtifact } from "./symphony-feature-artifacts.js";
 import {
   expandHome,
   resolveWorktreeParentDir,
@@ -32,6 +33,7 @@ type LoopCommand =
   | "REQUEST_CHANGES"
   | "DECOMPOSE"
   | "EVALUATE_PRD"
+  | "EVALUATE_FEATURE"
   | "GENERATE_PRD";
 
 const VALID_COMMANDS = new Set<LoopCommand>([
@@ -40,6 +42,7 @@ const VALID_COMMANDS = new Set<LoopCommand>([
   "REQUEST_CHANGES",
   "DECOMPOSE",
   "EVALUATE_PRD",
+  "EVALUATE_FEATURE",
   "GENERATE_PRD",
 ]);
 type RepoRequirement = "REQUIRED" | "OPTIONAL" | "NOT_REQUIRED";
@@ -48,6 +51,7 @@ const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
   EXECUTE: "REQUIRED",
   REQUEST_CHANGES: "REQUIRED",
   EVALUATE_PRD: "OPTIONAL",
+  EVALUATE_FEATURE: "OPTIONAL",
   GENERATE_PRD: "REQUIRED",
   DECOMPOSE: "NOT_REQUIRED",
 };
@@ -826,6 +830,8 @@ async function handleProcessCompletion(
     artifacts = readDecomposeOutputs(claudeWorkDir);
   } else if (command === "EVALUATE_PRD") {
     artifacts = readEvaluatePrdOutputs(claudeWorkDir);
+  } else if (command === 'EVALUATE_FEATURE') {
+    artifacts = readEvaluateFeatureOutputs(claudeWorkDir);
   } else if (command === "GENERATE_PRD") {
     artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
   }
@@ -1063,18 +1069,23 @@ async function handleLoopRequest(
       await fs.mkdir(tmpDir, { recursive: true });
       claudeWorkDir = tmpDir;
       await writePrdArtifact(claudeWorkDir, body.artifacts, body.prompt);
-    } else if (body.command === "EVALUATE_PRD") {
-      // EVALUATE_PRD: use temp dir, no worktree needed.
+    } else if (body.command === "EVALUATE_PRD" || body.command === "EVALUATE_FEATURE") {
+      // EVALUATE_PRD / EVALUATE_FEATURE: use temp dir, no worktree needed.
       // Temp dir is intentionally exempt from assertPathAllowed.
       usedTempDir = true;
+      const commandSlug = body.command === "EVALUATE_PRD" ? "evaluate-prd" : "evaluate-feature";
       const tmpDir = path.join(
         os.tmpdir(),
-        `symphony-evaluate-prd-${body.loopId.slice(0, 8)}`
+        `symphony-${commandSlug}-${body.loopId.slice(0, 8)}`
       );
       await fs.rm(tmpDir, { recursive: true, force: true });
       await fs.mkdir(tmpDir, { recursive: true });
       claudeWorkDir = tmpDir;
-      await writePrdArtifact(claudeWorkDir, body.artifacts, body.prompt);
+      if (body.command === "EVALUATE_PRD") {
+        await writePrdArtifact(claudeWorkDir, body.artifacts, body.prompt);
+      } else {
+        await writeFeatureArtifact(claudeWorkDir, body.artifacts, body.prompt);
+      }
     } else if (repoRequirement === "REQUIRED" && !expandedRepoPath) {
       json(context, 400, {
         error: "Repository required for PLAN, EXECUTE, REQUEST_CHANGES, and GENERATE_PRD commands",
@@ -1249,13 +1260,9 @@ async function handleLoopRequest(
     };
 
     // Pre-flight: verify required binary exists BEFORE posting 'started' event.
-    // PLAN and EXECUTE use run-loop.sh; REQUEST_CHANGES and DECOMPOSE use claude CLI directly.
+    // PLAN and EXECUTE use run-loop.sh; all other commands use claude CLI directly.
     const usesRunLoop = body.command === "PLAN" || body.command === "EXECUTE";
-    const usesClaude =
-      body.command === "REQUEST_CHANGES" ||
-      body.command === "DECOMPOSE" ||
-      body.command === "EVALUATE_PRD" ||
-      body.command === "GENERATE_PRD";
+    const usesClaude = !usesRunLoop;
     let scriptPath: string | null = null;
 
     if (usesClaude) {
@@ -1281,7 +1288,7 @@ async function handleLoopRequest(
         json(context, 500, { error: "claude CLI not found in PATH" });
         return;
       }
-    } else if (usesRunLoop) {
+    } else {
       scriptPath = findPluginScript("code", "run-loop.sh");
       if (!scriptPath) {
         await postLoopEvent(
@@ -1361,15 +1368,16 @@ async function handleLoopRequest(
           env: spawnEnv,
         });
         child.unref();
-      } else if (body.command === "EVALUATE_PRD") {
+      } else if (body.command === "EVALUATE_PRD" || body.command === "EVALUATE_FEATURE") {
         // REPO_PATH only when a target repo is linked (expandedRepoPath).
-        let evaluatePrdPrompt =
-          `Activate judges:run-judges skill --artifact-type prd --workdir ${claudeWorkDir}.\n`;
+        const artifactType = body.command === "EVALUATE_PRD" ? "prd" : "feature";
+        const commandSlug = body.command === "EVALUATE_PRD" ? "evaluate-prd" : "evaluate-feature";
+        let evaluatePrompt = `Activate judges:run-judges skill --artifact-type ${artifactType} --workdir ${claudeWorkDir}.\n`;
         if (expandedRepoPath) {
-          evaluatePrdPrompt += `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`;
+          evaluatePrompt += `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`;
         }
-        const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
-        await fs.writeFile(promptFile, evaluatePrdPrompt);
+        const promptFile = path.join(claudeWorkDir, `${commandSlug}-prompt.txt`);
+        await fs.writeFile(promptFile, evaluatePrompt);
         const claudeArgs = [
           "-p", "-",
           "--output-format", "stream-json",
