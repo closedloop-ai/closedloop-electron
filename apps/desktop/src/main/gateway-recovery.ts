@@ -19,6 +19,7 @@ export class GatewayRecoveryManager {
 
   recoverGateway(reason: string): Promise<void> {
     if (this.recoveryInFlight) {
+      this.deps.log("warn", `Recovery already in flight, deduplicating: ${reason}`);
       return this.recoveryInFlight;
     }
     this.epoch++;
