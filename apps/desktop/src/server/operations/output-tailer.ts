@@ -87,7 +87,7 @@ async function postLoopEvent(
   apiBaseUrl: string,
   loopId: string,
   token: string,
-  event: { type: string; data: { text: string } }
+  event: { type: string; data: { chunk: string } }
 ): Promise<void> {
   try {
     await fetch(`${apiBaseUrl}/loops/${loopId}/events`, {
@@ -99,7 +99,7 @@ async function postLoopEvent(
       },
       body: JSON.stringify({
         type: event.type,
-        data: { text: event.data.text },
+        data: { chunk: event.data.chunk },
         timestamp: new Date().toISOString(),
       }),
     });
@@ -168,7 +168,7 @@ export function startOutputTailer(
       const now = Date.now();
       if (lastSentAt === null || now - lastSentAt >= 5000) {
         lastSentAt = now;
-        await postLoopEvent(apiBaseUrl, loopId, token, { type: "output", data: { text: lastDisplay } });
+        await postLoopEvent(apiBaseUrl, loopId, token, { type: "output", data: { chunk: lastDisplay } });
       }
     }
   }

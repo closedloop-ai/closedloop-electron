@@ -646,8 +646,8 @@ describe("T-5.5: No-formatter fallback", () => {
     assert.ok(
       typeof outputEvents[0].data === "object" &&
         outputEvents[0].data !== null &&
-        typeof (outputEvents[0].data as Record<string, unknown>).text === "string",
-      `Expected output event to have data.text, got: ${JSON.stringify(outputEvents[0])}`
+        typeof (outputEvents[0].data as Record<string, unknown>).chunk === "string",
+      `Expected output event to have data.chunk, got: ${JSON.stringify(outputEvents[0])}`
     );
   });
 });
