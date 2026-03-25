@@ -2042,13 +2042,20 @@ async function handleLoopKill(
     if (jobStore) {
       const job = jobStore.getByLoopId(loopId);
       if (job?.pid != null) {
+        let processWasAlive = false;
         try {
           process.kill(job.pid, 0); // alive?
+          processWasAlive = true;
           process.kill(-job.pid, "SIGTERM");
           await new Promise((resolve) => setTimeout(resolve, 3000));
           try { process.kill(job.pid, 0); process.kill(-job.pid, "SIGKILL"); } catch { /* gone */ }
         } catch { /* already dead */ }
-        jobStore.upsert({ ...job, status: "CANCEL_PENDING", updatedAt: new Date().toISOString() });
+        jobStore.upsert({
+          ...job,
+          status: processWasAlive ? "CANCEL_PENDING" : "CANCELLED",
+          updatedAt: new Date().toISOString(),
+          ...(!processWasAlive ? { completedAt: new Date().toISOString() } : {}),
+        });
         json(context, 200, { success: true, message: "Loop process terminated (restart fallback)" });
         return;
       }
@@ -2059,6 +2066,19 @@ async function handleLoopKill(
   if (entry.pid <= 0) {
     json(context, 409, { error: "Loop is still initializing, retry shortly" });
     return;
+  }
+
+  // Set CANCEL_PENDING before sending signals so handleProcessCompletion
+  // sees the cancellation intent when the exit event fires.
+  if (jobStore) {
+    const existingJob = jobStore.getByLoopId(loopId);
+    if (existingJob) {
+      jobStore.upsert({
+        ...existingJob,
+        status: "CANCEL_PENDING",
+        updatedAt: new Date().toISOString(),
+      });
+    }
   }
 
   try {
@@ -2074,17 +2094,6 @@ async function handleLoopKill(
     }
   } catch {
     // Process already terminated
-  }
-
-  if (jobStore) {
-    const existingJob = jobStore.getByLoopId(loopId);
-    if (existingJob) {
-      jobStore.upsert({
-        ...existingJob,
-        status: "CANCEL_PENDING",
-        updatedAt: new Date().toISOString(),
-      });
-    }
   }
 
   runningLoops.delete(loopId);

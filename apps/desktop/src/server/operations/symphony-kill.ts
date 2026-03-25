@@ -26,6 +26,19 @@ function findJobForKill(
   return undefined;
 }
 
+function markJobStopped(
+  jobStore: JobStore | undefined,
+  pid: number | null,
+  worktreeDir: string | null
+): void {
+  if (!jobStore) return;
+  const job = findJobForKill(jobStore, pid, worktreeDir);
+  if (job) {
+    const now = new Date().toISOString();
+    jobStore.upsert({ ...job, status: "STOPPED", updatedAt: now, completedAt: now });
+  }
+}
+
 export function registerSymphonyKillRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[],
@@ -48,13 +61,7 @@ export function registerSymphonyKillRoutes(
       if ("noPidFile" in resolved) {
         cancelLoop(resolved.worktreeDir);
         markStateAsStopped(resolved.worktreeDir);
-        if (jobStore) {
-          const job = findJobForKill(jobStore, null, resolved.worktreeDir);
-          if (job) {
-            const now = new Date().toISOString();
-            jobStore.upsert({ ...job, status: "STOPPED", updatedAt: now, completedAt: now });
-          }
-        }
+        markJobStopped(jobStore, null, resolved.worktreeDir);
         json(context, 200, {
           success: true,
           message: "No process to kill (no PID file), state marked as stopped"
@@ -75,13 +82,7 @@ export function registerSymphonyKillRoutes(
         if (worktreeDir) {
           markStateAsStopped(worktreeDir);
         }
-        if (jobStore) {
-          const job = findJobForKill(jobStore, pid, worktreeDir);
-          if (job) {
-            const now = new Date().toISOString();
-            jobStore.upsert({ ...job, status: "STOPPED", updatedAt: now, completedAt: now });
-          }
-        }
+        markJobStopped(jobStore, pid, worktreeDir);
         json(context, 200, { success: true, message: "Process already terminated", pid });
         return;
       }
@@ -101,13 +102,7 @@ export function registerSymphonyKillRoutes(
         if (worktreeDir) {
           markStateAsStopped(worktreeDir);
         }
-        if (jobStore) {
-          const job = findJobForKill(jobStore, pid, worktreeDir);
-          if (job) {
-            const now = new Date().toISOString();
-            jobStore.upsert({ ...job, status: "STOPPED", updatedAt: now, completedAt: now });
-          }
-        }
+        markJobStopped(jobStore, pid, worktreeDir);
 
         json(context, 200, { success: true, message: "Process terminated", pid });
       } catch (error) {
