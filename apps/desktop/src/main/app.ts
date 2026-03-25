@@ -38,6 +38,7 @@ import type { GatewayApprovalRequest, GatewayApprovalResult } from "../server/ro
 import { normalizeAndValidateOrigin, normalizeWebAppOrigin } from "./origin-policy.js";
 import { LocalSessionStore } from "./local-session-store.js";
 import { enrichJobSnapshot } from "../server/operations/symphony-job-snapshot.js";
+import { GatewayRecoveryManager } from "./gateway-recovery.js";
 import pkg from "electron-updater";
 const { autoUpdater } = pkg;
 import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
@@ -57,6 +58,7 @@ export class DesktopApplication {
   private readonly activityLog: ActivityLogStore;
   private readonly approvalStore: ApprovalStore;
   private readonly jobStore: JobStore;
+  private readonly recovery: GatewayRecoveryManager;
   private readonly gatewayAuthToken: string;
   private readonly sessionStore: LocalSessionStore;
   private shuttingDown = false;
@@ -108,7 +110,8 @@ export class DesktopApplication {
       () => this.settingsStore.getApiOrigin(),
       () => this.settingsStore.getWebAppOrigin(),
       this.isProdOriginsOnly(),
-      this.jobStore
+      this.jobStore,
+      () => this.recovery.onUnexpectedClose()
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -118,7 +121,8 @@ export class DesktopApplication {
       sendCommandEvent: (event) => this.cloudSocket.sendCommandEvent(event),
       onQueueStatsChange: (stats) => {
         const presenceState =
-          this.cloudStatus.state === "online" && !this.cloudCommandsPaused ? "online" : "degraded";
+          this.cloudStatus.state === "online" && !this.cloudCommandsPaused && this.recovery.gatewayHealthy
+            ? "online" : "degraded";
         this.cloudSocket.sendPresence({
           state: presenceState,
           ...(this.cloudCommandsPaused ? { error: "cloud commands paused by user" } : {}),
@@ -181,6 +185,25 @@ export class DesktopApplication {
       onCommandEventAck: (event) => {
         this.commandExecutor.acknowledge(event);
       }
+    });
+    this.recovery = new GatewayRecoveryManager({
+      probe: () => this.probeGatewayAlive(),
+      restart: () => this.server.restart(),
+      getCloudStatus: () => this.cloudStatus,
+      setConnected: (connected) => this.commandExecutor.setConnected(connected),
+      sendPresence: (state, error) => {
+        const stats = this.commandExecutor.getStats();
+        this.cloudSocket.sendPresence({
+          state,
+          ...(error ? { error } : {}),
+          activeCommands: stats.activeCommands,
+          queueDepth: stats.queueDepth
+        });
+      },
+      refreshTray: (detail) => this.refreshTrayState(detail),
+      log: (level, msg) => gatewayLog[level]("gateway-recovery", msg),
+      isShuttingDown: () => this.shuttingDown,
+      isPaused: () => this.cloudCommandsPaused,
     });
     this.registerIpcHandlers();
   }
@@ -288,6 +311,19 @@ export class DesktopApplication {
     this.tray.dispose();
   }
 
+  private async probeGatewayAlive(): Promise<boolean> {
+    if (!this.server.isAlive()) return false;
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${this.server.getActivePort()}/health`,
+        { signal: AbortSignal.timeout(2000) }
+      );
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
   private onCloudSocketStatus(status: CloudSocketStatus): void {
     if (!this.cloudConnectionEnabled) {
       this.cloudStatus = { state: "degraded", error: "Cloud connection disabled by user" };
@@ -296,29 +332,23 @@ export class DesktopApplication {
     }
 
     this.cloudStatus = status;
-    const stats = this.commandExecutor.getStats();
-
-    this.commandExecutor.setConnected(status.state === "online");
 
     if (status.state === "online") {
-      this.cloudSocket.sendPresence({
-        state: this.cloudCommandsPaused ? "degraded" : "online",
-        ...(this.cloudCommandsPaused ? { error: "cloud commands paused by user" } : {}),
-        activeCommands: stats.activeCommands,
-        queueDepth: stats.queueDepth
-      });
-      this.refreshTrayState(`Serving on localhost:${this.server.getActivePort()} | cloud: online (${status.targetId})`);
+      void this.recovery.onCloudOnline();
       return;
     }
+
+    this.commandExecutor.setConnected(false);
 
     if (status.state === "degraded") {
       this.cloudSocket.sendPresence({
         state: "degraded",
         error: status.error,
-        activeCommands: stats.activeCommands,
-        queueDepth: stats.queueDepth
+        ...this.commandExecutor.getStats()
       });
-      this.refreshTrayState(`Serving on localhost:${this.server.getActivePort()} | cloud degraded: ${status.error}`);
+      this.refreshTrayState(
+        `Serving on localhost:${this.server.getActivePort()} | cloud degraded: ${status.error}`
+      );
       return;
     }
 
@@ -332,8 +362,11 @@ export class DesktopApplication {
     this.refreshTrayState(paused ? "Gateway paused from tray/menu" : undefined);
 
     const stats = this.commandExecutor.getStats();
+    const presenceState =
+      this.cloudStatus.state === "online" && !paused && this.recovery.gatewayHealthy
+        ? "online" : "degraded";
     this.cloudSocket.sendPresence({
-      state: this.cloudStatus.state === "online" && !paused ? "online" : "degraded",
+      state: presenceState,
       ...(paused ? { error: "cloud commands paused by user" } : {}),
       activeCommands: stats.activeCommands,
       queueDepth: stats.queueDepth
@@ -480,6 +513,14 @@ export class DesktopApplication {
   }
 
   private refreshTrayState(explicitDetails?: string): void {
+    if (!this.recovery.gatewayHealthy) {
+      this.tray.setState(
+        "error",
+        explicitDetails ?? `Gateway down on port ${this.server.getActivePort()}`
+      );
+      return;
+    }
+
     if (this.cloudCommandsPaused) {
       this.tray.setState(
         "degraded",
@@ -818,7 +859,9 @@ export class DesktopApplication {
       apiOrigin: this.settingsStore.getApiOrigin(),
       sandboxBaseDirectory: this.settingsStore.getSandboxBaseDirectory(),
       commandsPaused: this.cloudCommandsPaused,
-      connectionEnabled: this.cloudConnectionEnabled
+      connectionEnabled: this.cloudConnectionEnabled,
+      serverAlive: this.server.isAlive(),
+      gatewayHealthy: this.recovery.gatewayHealthy,
     }));
     ipcMain.handle("desktop:list-running-jobs", async () => {
       const jobs = this.jobStore.listRunning();

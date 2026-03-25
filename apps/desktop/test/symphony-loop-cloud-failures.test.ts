@@ -20,7 +20,7 @@ import path from "node:path";
 import { afterEach, test } from "node:test";
 import { JobStore } from "../src/main/job-store.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
-import { EMPTY_CAPABILITIES, PORT_PROBE_ORDER } from "../src/shared/contracts.js";
+import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import {
   createFakeRunLoopScript,
   initGitRepo,
@@ -123,8 +123,8 @@ test("EXECUTE: artifact upload failure sets ARTIFACT_UPLOAD_FAILED in completed 
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "cloud-fail-upload-machine",
@@ -222,8 +222,8 @@ test("EXECUTE: event post failure logged as warning in job store", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "cloud-fail-event-machine",

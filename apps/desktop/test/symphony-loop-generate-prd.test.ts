@@ -13,7 +13,7 @@ import path from "node:path";
 import { afterEach, test } from "node:test";
 import { promisify } from "node:util";
 import { DesktopGatewayServer } from "../src/server/server.js";
-import { EMPTY_CAPABILITIES, PORT_PROBE_ORDER } from "../src/shared/contracts.js";
+import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -161,8 +161,8 @@ test("GENERATE_PRD: rejects with 400 when no repo configured", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "genprd-norepo-machine",
@@ -226,8 +226,8 @@ test("GENERATE_PRD: accepts valid command and responds 200", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "genprd-accept-machine",
@@ -274,8 +274,8 @@ test("GENERATE_PRD: rejects with 400 when prompt is missing", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "genprd-noprompt-machine",
@@ -382,8 +382,8 @@ test("GENERATE_PRD: spawns with worktree cwd, writes context pack, no --add-dir"
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "genprd-layout-machine",
@@ -495,8 +495,8 @@ test("GENERATE_PRD: uploads { prd: { content } } when prd.md is written", async 
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "genprd-upload-machine",
@@ -567,8 +567,8 @@ test("GENERATE_PRD: uploads empty artifacts when prd.md is not written", async (
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "genprd-noout-machine",
@@ -638,8 +638,8 @@ test("GENERATE_PRD: cleans up worktree on failure (exit code 1)", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "genprd-cleanup-machine",

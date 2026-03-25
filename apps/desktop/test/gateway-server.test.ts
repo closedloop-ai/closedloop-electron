@@ -9,7 +9,7 @@ import { afterEach, test } from "node:test";
 import { promisify } from "node:util";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { saveCodexChatSession } from "../src/server/operations/codex.js";
-import { EMPTY_CAPABILITIES, PORT_PROBE_ORDER } from "../src/shared/contracts.js";
+import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { SymphonyDirNotConfiguredError, tryAssertRepoAllowed, tryAssertPathAllowed } from "../src/server/operations/symphony-utils.js";
 
 const execFileAsync = promisify(execFile);
@@ -73,8 +73,8 @@ afterEach(async () => {
 test("uses closedloop-ai discovery file path by default", () => {
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [os.homedir()],
     machineName: "discovery-default-machine",
@@ -95,8 +95,8 @@ test("returns health contract with active port and CORS headers", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "test-machine",
@@ -126,8 +126,8 @@ test("returns 204 for CORS preflight requests", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://staging.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "preflight-machine",
@@ -156,8 +156,8 @@ test("returns private-network CORS allow header for terminal-chat preflight", as
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.closedloop.ai",
     getAllowedDirectories: () => [tmpDir],
     machineName: "pna-preflight-machine",
@@ -190,8 +190,8 @@ test("allows loopback origin variants for CORS preflight", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "http://localhost:3000",
     getAllowedDirectories: () => [tmpDir],
     machineName: "loopback-origin-machine",
@@ -221,8 +221,8 @@ test("normal mode: 127.0.0.2 loopback variant echoed back in CORS preflight", as
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.closedloop.ai",
     getAllowedDirectories: () => [tmpDir],
     machineName: "loopback-127-2-machine",
@@ -252,8 +252,8 @@ test("normal mode: DNS name like 127.evil.com is NOT treated as loopback", async
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.closedloop.ai",
     getAllowedDirectories: () => [tmpDir],
     machineName: "loopback-evil-machine",
@@ -284,8 +284,8 @@ test("prodOriginsOnly: preflight from loopback returns configured origin, no PNA
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.closedloop.ai",
     getAllowedDirectories: () => [tmpDir],
     machineName: "prod-loopback-machine",
@@ -318,8 +318,8 @@ test("prodOriginsOnly: preflight from configured origin returns correct CORS + P
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.closedloop.ai",
     getAllowedDirectories: () => [tmpDir],
     machineName: "prod-configured-machine",
@@ -352,8 +352,8 @@ test("prodOriginsOnly: preflight from random origin returns configured origin", 
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.closedloop.ai",
     getAllowedDirectories: () => [tmpDir],
     machineName: "prod-random-machine",
@@ -384,8 +384,8 @@ test("prodOriginsOnly: loopback webAppOrigin preflight from that origin echoes i
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "http://localhost:3000",
     getAllowedDirectories: () => [tmpDir],
     machineName: "prod-loopback-webapp-machine",
@@ -417,8 +417,8 @@ test("requires gateway token when configured", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getGatewayAuthToken: () => "test-gateway-token",
     getAllowedDirectories: () => [tmpDir],
@@ -465,8 +465,8 @@ test("rejects trusted browser origin without session token (origin-only bypass r
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.closedloop.ai",
     getGatewayAuthToken: () => "test-gateway-token",
     getAllowedDirectories: () => [tmpDir],
@@ -500,8 +500,8 @@ test("rejects localhost browser origin without session token", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.closedloop.ai",
     getGatewayAuthToken: () => "test-gateway-token",
     getAllowedDirectories: () => [tmpDir],
@@ -530,8 +530,8 @@ test("rejects loopback browser request without origin or session token", async (
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "http://localhost:3000",
     getGatewayAuthToken: () => "test-gateway-token",
     getAllowedDirectories: () => [tmpDir],
@@ -561,8 +561,8 @@ test("keeps non-browser loopback request unauthorized without token", async () =
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "http://localhost:3000",
     getGatewayAuthToken: () => "test-gateway-token",
     getAllowedDirectories: () => [tmpDir],
@@ -584,8 +584,8 @@ test("returns approval-required response when approval evaluator blocks engineer
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "approval-machine",
@@ -622,8 +622,8 @@ test("supports async approval evaluation before dispatch", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "approval-async-machine",
@@ -659,8 +659,8 @@ test("passes cloud approval headers into approval evaluator context", async () =
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "approval-header-machine",
@@ -742,8 +742,8 @@ test("supports symphony sessions CRUD with contract-compatible response envelope
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "session-machine",
@@ -794,8 +794,8 @@ test("rejects disallowed directories for symphony sessions writes (AC-049)", asy
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "session-deny-machine",
@@ -852,8 +852,8 @@ test("returns symphony status envelope for existing state file", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "status-machine",
@@ -896,8 +896,8 @@ test("rejects disallowed repo paths for symphony status (AC-049)", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "status-deny-machine",
@@ -938,8 +938,8 @@ test("marks state as stopped when killing by ticket without PID file", async () 
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "kill-machine",
@@ -981,8 +981,8 @@ test("rejects disallowed repo paths for symphony kill (AC-049)", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "kill-deny-machine",
@@ -1030,8 +1030,8 @@ test("returns plan content envelope for symphony plan route", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "plan-machine",
@@ -1067,8 +1067,8 @@ test("supports chat history CRUD operations", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "chat-history-machine",
@@ -1139,8 +1139,8 @@ test("supports provider-scoped chat history with isolated CRUD", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "provider-scope-machine",
@@ -1255,8 +1255,8 @@ test("returns jsonl log format when claude-output.jsonl exists", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "logs-machine",
@@ -1297,8 +1297,8 @@ test("returns judges payload when judges.json exists", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "judges-machine",
@@ -1336,8 +1336,8 @@ test("serves attachment binary from wildcard route", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "attachments-machine",
@@ -1371,8 +1371,8 @@ test("uploads image attachments and returns file metadata", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "upload-machine",
@@ -1416,8 +1416,8 @@ test("returns health-check response envelope with required check structure", asy
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "health-check-machine",
@@ -1449,8 +1449,8 @@ test("health-check returns 200 with worktree-dir failed when getSymphonyDir thro
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "health-unconfigured-machine",
@@ -1481,8 +1481,8 @@ test("repos-config returns 503 when getSymphonyDir throws (not 500)", async () =
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "repos-unconfigured-machine",
@@ -1537,8 +1537,8 @@ test("supports repos config CRUD and settings patch", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "repos-machine",
@@ -1600,8 +1600,8 @@ test("lists directories and supports file search endpoint", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "filesystem-machine",
@@ -1638,8 +1638,8 @@ test("supports terminal chat history GET and DELETE", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "terminal-chat-machine",
@@ -1669,8 +1669,8 @@ test("supports ticket chat GET and DELETE with ticketId", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "ticket-chat-machine",
@@ -1707,8 +1707,8 @@ test("rejects disallowed repo path for ticket chat POST before spawn (AC-049)", 
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "ticket-chat-deny-machine",
@@ -1744,8 +1744,8 @@ test("supports run viewer chat history GET and DELETE", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "run-viewer-chat-machine",
@@ -1779,8 +1779,8 @@ test("rejects disallowed run directory for run viewer chat POST (AC-049)", async
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "run-viewer-chat-deny-machine",
@@ -1816,8 +1816,8 @@ test("lists and cleans up extracted run-viewer directories", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "run-viewer-extract-machine",
@@ -1855,8 +1855,8 @@ test("validates run-viewer-extract POST multipart payload", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "run-viewer-extract-post-machine",
@@ -1899,8 +1899,8 @@ test("proxies unimplemented engineer routes to fallback origin when configured",
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     fallbackEngineerOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
@@ -1934,8 +1934,8 @@ test("supports core git action routes", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "git-action-machine",
@@ -1990,8 +1990,8 @@ test("supports git diff route for working tree changes", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "git-diff-machine",
@@ -2023,8 +2023,8 @@ test("validates git PR create request payload", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "git-pr-validate-machine",
@@ -2054,8 +2054,8 @@ test("rejects disallowed repo for git PR list endpoint (AC-049)", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "git-pr-deny-machine",
@@ -2085,8 +2085,8 @@ test("returns empty work-directory result when no session or worktree exists", a
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "work-dir-machine",
@@ -2119,8 +2119,8 @@ test("rejects disallowed workDir on aggregate symphony status route (AC-049)", a
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "status-all-deny-machine",
@@ -2154,8 +2154,8 @@ test("detects deploy config from repo scripts", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "deploy-detect-machine",
@@ -2192,8 +2192,8 @@ test("rejects disallowed repo/worktree for deploy check-existing (AC-049)", asyn
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "deploy-deny-machine",
@@ -2226,8 +2226,8 @@ test("validates required fields for symphony extract-learnings route", async () 
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "learnings-validate-machine",
@@ -2265,8 +2265,8 @@ test("returns skipped status when no learnings are pending", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "learnings-process-machine",
@@ -2315,8 +2315,8 @@ test("invokes plugin cache discovery when pending learnings exist", async () => 
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "learnings-plugin-machine",
@@ -2380,8 +2380,8 @@ test("process-learnings launches self-learning wrapper with .claude/work as arg 
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "learnings-wrapper-machine",
@@ -2438,8 +2438,8 @@ test("rejects disallowed repo path for record-learning-use (AC-049)", async () =
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "learnings-deny-machine",
@@ -2473,8 +2473,8 @@ test("validates required fields for symphony chat route", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "symphony-chat-validate-machine",
@@ -2503,8 +2503,8 @@ test("validates required query params for symphony comment-chat GET", async () =
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "comment-chat-validate-machine",
@@ -2532,8 +2532,8 @@ test("returns default commit message when worktree does not exist", async () => 
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "commit-message-default-machine",
@@ -2589,8 +2589,8 @@ test("returns empty description when claude CLI is unavailable", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "commit-claude-unavail-machine",
@@ -2652,8 +2652,8 @@ test("uses valid JSON from claude stdout even when exit code is non-zero", async
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "commit-nonzero-machine",
@@ -2699,8 +2699,8 @@ test("returns default with empty description when worktree has no diff", async (
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "commit-nodiff-machine",
@@ -2733,8 +2733,8 @@ test("rejects disallowed repo for symphony launch (AC-049)", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "launch-deny-machine",
@@ -2772,8 +2772,8 @@ test("symphony launch invokes plugin cache discovery for run-loop script", async
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "launch-plugin-machine",
@@ -2840,8 +2840,8 @@ test("symphony launch passes .claude/work path (not ticket ID) as first arg to r
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "launch-args-machine",
@@ -2899,8 +2899,8 @@ test("validates required fields for codex chat route", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "codex-chat-validate-machine",
@@ -2933,8 +2933,8 @@ test("rejects disallowed repo for codex status route (AC-049)", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "codex-status-deny-machine",
@@ -3042,8 +3042,8 @@ test("GET codex status returns sessionId when state file has one", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "http://localhost:3000",
     getAllowedDirectories: () => [tmpDir],
     machineName: "status-sessionid-machine",
@@ -3070,8 +3070,8 @@ test("POST review-verdict returns 400 when sessionId is missing", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "http://localhost:3000",
     getAllowedDirectories: () => [tmpDir],
     machineName: "verdict-400-machine",
@@ -3101,8 +3101,8 @@ test("POST review-verdict returns 400 for invalid provider", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "http://localhost:3000",
     getAllowedDirectories: () => [tmpDir],
     machineName: "verdict-bad-provider-machine",
@@ -3132,8 +3132,8 @@ test("POST review-verdict returns 403 for disallowed repo", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "http://localhost:3000",
     getAllowedDirectories: () => [tmpDir],
     machineName: "verdict-403-machine",
@@ -3163,8 +3163,8 @@ test("getWebAppOrigin getter takes effect on next CORS response without restart"
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://initial.example.com",
     getWebAppOrigin: () => currentWebAppOrigin,
     getAllowedDirectories: () => [tmpDir],
