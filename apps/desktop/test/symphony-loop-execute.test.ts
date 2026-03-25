@@ -579,29 +579,7 @@ async function waitForJobRunning(
   );
 }
 
-/**
- * Poll a JobStore until the job's PID changes from the initial value.
- * Used to detect when attemptLlmCommit has been entered (PID updates from
- * run-loop PID to claude PID).
- */
-async function waitForPidChange(
-  jobStore: JobStore,
-  loopId: string,
-  initialPid: number,
-  timeoutMs = 10_000
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const job = jobStore.getByLoopId(loopId);
-    if (job && job.pid != null && job.pid !== initialPid) {
-      return;
-    }
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(
-    `Timed out waiting for PID change from ${initialPid} for loopId=${loopId} after ${timeoutMs}ms`
-  );
-}
+
 
 // ---------------------------------------------------------------------------
 // Test 5: Cancellation gate — cancel before attemptLlmCommit (gate 1)
@@ -748,12 +726,14 @@ test("EXECUTE: cancel during attemptLlmCommit ends job as CANCELLED with no comp
   // fake run-loop.sh: exits immediately so gate 1 passes (not yet cancelled)
   await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
 
-  // fake-bin: claude sleeps so the test can set CANCEL_PENDING mid-flight
+  // fake-bin: claude creates a marker file on entry then sleeps, so the test
+  // can poll the marker to detect when attemptLlmCommit has been entered.
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
+  const claudeStartedMarker = path.join(tmpDir, "claude-started");
   await fs.writeFile(
     path.join(fakeBin, "claude"),
-    "#!/bin/sh\nsleep 3\nexit 0\n",
+    `#!/bin/sh\ntouch ${claudeStartedMarker}\nsleep 3\nexit 0\n`,
     { mode: 0o755 }
   );
 
@@ -804,13 +784,21 @@ test("EXECUTE: cancel during attemptLlmCommit ends job as CANCELLED with no comp
     `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
   );
 
-  // Wait for the job to appear as RUNNING and capture the initial PID (run-loop.sh)
-  const runningJob = await waitForJobRunning(jobStore, loopId);
-  const initialPid = runningJob.pid!;
+  // Wait for the job to appear as RUNNING
+  await waitForJobRunning(jobStore, loopId);
 
-  // Wait for PID to change — indicates attemptLlmCommit has been entered
-  // (gate 1 already passed, claude binary is now running and sleeping)
-  await waitForPidChange(jobStore, loopId, initialPid);
+  // Wait for the fake claude binary to start (marker file created on entry).
+  // This proves gate 1 passed and attemptLlmCommit has been entered.
+  const markerDeadline = Date.now() + 15_000;
+  while (Date.now() < markerDeadline) {
+    try {
+      await fs.access(claudeStartedMarker);
+      break;
+    } catch {
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  await fs.access(claudeStartedMarker); // throws if still missing
 
   // Set CANCEL_PENDING now. Gate 1 has already passed.
   // Claude is sleeping for 3s, so gate 2 hasn't run yet.
