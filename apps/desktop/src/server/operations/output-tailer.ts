@@ -10,9 +10,9 @@ export function isRecord(v: unknown): v is Record<string, unknown> {
 // ---------------------------------------------------------------------------
 
 type TextBlock = { type: "text"; text: string };
-type ToolUseBlock = { type: "tool_use"; name: string };
+type ToolUseBlock = { type: "tool_use"; name: string; input?: Record<string, unknown> };
 type ThinkingBlock = { type: "thinking" };
-type ToolResultBlock = { type: "tool_result"; is_error?: boolean };
+type ToolResultBlock = { type: "tool_result"; is_error?: boolean; content?: string | unknown[] };
 
 type ContentBlock = TextBlock | ToolUseBlock | ThinkingBlock | ToolResultBlock;
 
@@ -54,6 +54,28 @@ function redactSensitive(input: string): string {
     .replace(/-----BEGIN [A-Z ]+ KEY-----/g, "[REDACTED]");
 }
 
+function summarizeToolInput(name: string, input: Record<string, unknown>): string {
+  const filePath = input.file_path ?? input.path;
+  if (typeof filePath === "string") return `Tool: ${name}(${truncate(filePath, 80)})`;
+  if (typeof input.command === "string") return `Tool: ${name}(${truncate(input.command, 80)})`;
+  if (typeof input.pattern === "string") return `Tool: ${name}(${truncate(input.pattern, 80)})`;
+  return `Tool: ${name}`;
+}
+
+function summarizeToolResult(block: ToolResultBlock): string {
+  if (block.is_error === true) return "Tool error";
+  const content = block.content;
+  if (typeof content === "string" && content.length > 0) return `Tool result: ${truncate(content, 120)}`;
+  if (Array.isArray(content)) {
+    for (const part of content) {
+      if (isRecord(part) && part.type === "text" && typeof part.text === "string") {
+        return `Tool result: ${truncate(part.text, 120)}`;
+      }
+    }
+  }
+  return "Tool result";
+}
+
 /** Accepts a parsed JSONL record (untrusted) and returns a display summary, or null to skip. */
 export function summarizeJsonlRecord(record: Record<string, unknown>): string | null {
   const typed = record as JsonlRecord;
@@ -67,14 +89,17 @@ export function summarizeJsonlRecord(record: Record<string, unknown>): string | 
       for (const block of content) {
         if (!isRecord(block)) continue;
         switch (block.type) {
-          case "tool_use":
-            return redactSensitive(`Tool: ${String((block as ToolUseBlock).name ?? "unknown")}`);
+          case "tool_use": {
+            const b = block as ToolUseBlock;
+            const input = isRecord(b.input) ? b.input : {};
+            return redactSensitive(summarizeToolInput(String(b.name ?? "unknown"), input));
+          }
           case "text":
             return redactSensitive(truncate(String((block as TextBlock).text ?? ""), 200));
           case "thinking":
             return redactSensitive("Thinking...");
           case "tool_result":
-            return redactSensitive((block as ToolResultBlock).is_error === true ? "Tool error" : "Tool result");
+            return redactSensitive(summarizeToolResult(block as ToolResultBlock));
         }
       }
       return null;
