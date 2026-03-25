@@ -5,6 +5,42 @@ export function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+// ---------------------------------------------------------------------------
+// JSONL record types (Claude CLI streaming output)
+// ---------------------------------------------------------------------------
+
+type TextBlock = { type: "text"; text: string };
+type ToolUseBlock = { type: "tool_use"; name: string };
+type ThinkingBlock = { type: "thinking" };
+type ToolResultBlock = { type: "tool_result"; is_error?: boolean };
+
+type ContentBlock = TextBlock | ToolUseBlock | ThinkingBlock | ToolResultBlock;
+
+type AssistantRecord = {
+  type: "assistant";
+  message: { content: ContentBlock[] };
+};
+
+type UserRecord = {
+  type: "user";
+  message: { content: ContentBlock[] };
+};
+
+type ContentBlockDeltaRecord = {
+  type: "content_block_delta";
+  delta: { type: "text_delta"; text: string };
+};
+
+type ResultRecord = {
+  type: "result";
+  subtype?: "success" | "error";
+  is_error?: boolean;
+  result?: string;
+  error?: string;
+};
+
+export type JsonlRecord = AssistantRecord | UserRecord | ContentBlockDeltaRecord | ResultRecord;
+
 function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + "..." : s;
 }
@@ -18,65 +54,53 @@ function redactSensitive(input: string): string {
     .replace(/-----BEGIN [A-Z ]+ KEY-----/g, "[REDACTED]");
 }
 
+/** Accepts a parsed JSONL record (untrusted) and returns a display summary, or null to skip. */
 export function summarizeJsonlRecord(record: Record<string, unknown>): string | null {
-  if (record.type === "assistant") {
-    const message = isRecord(record.message) ? record.message : null;
-    if (message) {
-      const content = Array.isArray(message.content) ? (message.content as unknown[]) : [];
+  const typed = record as JsonlRecord;
+
+  switch (typed.type) {
+    case "assistant":
+    case "user": {
+      const message = isRecord(typed.message) ? typed.message : null;
+      if (!message) return null;
+      const content = Array.isArray(message.content) ? (message.content as ContentBlock[]) : [];
       for (const block of content) {
         if (!isRecord(block)) continue;
-        if (block.type === "tool_use") {
-          return redactSensitive(`Tool: ${String(block.name ?? "unknown")}`);
-        }
-        if (block.type === "text") {
-          return redactSensitive(truncate(String(block.text ?? ""), 200));
-        }
-        if (block.type === "thinking") {
-          return redactSensitive("Thinking...");
-        }
-      }
-    }
-    return null;
-  }
-
-  if (record.type === "user") {
-    const message = isRecord(record.message) ? record.message : null;
-    if (message) {
-      const content = Array.isArray(message.content) ? (message.content as unknown[]) : [];
-      for (const block of content) {
-        if (!isRecord(block)) continue;
-        if (block.type === "tool_result") {
-          if (block.is_error === true) {
-            return redactSensitive("Tool error");
-          }
-          return redactSensitive("Tool result");
+        switch (block.type) {
+          case "tool_use":
+            return redactSensitive(`Tool: ${String((block as ToolUseBlock).name ?? "unknown")}`);
+          case "text":
+            return redactSensitive(truncate(String((block as TextBlock).text ?? ""), 200));
+          case "thinking":
+            return redactSensitive("Thinking...");
+          case "tool_result":
+            return redactSensitive((block as ToolResultBlock).is_error === true ? "Tool error" : "Tool result");
         }
       }
+      return null;
     }
-    return null;
+    case "content_block_delta": {
+      const delta = isRecord(typed.delta) ? typed.delta : null;
+      if (delta && (delta as ContentBlockDeltaRecord["delta"]).type === "text_delta") {
+        return redactSensitive(truncate(String((delta as ContentBlockDeltaRecord["delta"]).text ?? ""), 200));
+      }
+      return null;
+    }
+    case "result": {
+      const r = typed as ResultRecord;
+      if (r.subtype === "success") {
+        return redactSensitive("Turn complete");
+      }
+      if (r.subtype === "error" || r.is_error === true) {
+        return redactSensitive(
+          `Error: ${truncate(String(r.result ?? r.error ?? ""), 200)}`
+        );
+      }
+      return null;
+    }
+    default:
+      return null;
   }
-
-  if (record.type === "content_block_delta") {
-    const delta = isRecord(record.delta) ? record.delta : null;
-    if (delta && delta.type === "text_delta") {
-      return redactSensitive(truncate(String(delta.text ?? ""), 200));
-    }
-    return null;
-  }
-
-  if (record.type === "result") {
-    if (record.subtype === "success") {
-      return redactSensitive("Turn complete");
-    }
-    if (record.subtype === "error" || record.is_error === true) {
-      return redactSensitive(
-        `Error: ${truncate(String(record.result ?? record.error ?? ""), 200)}`
-      );
-    }
-    return null;
-  }
-
-  return null;
 }
 
 // ---------------------------------------------------------------------------
