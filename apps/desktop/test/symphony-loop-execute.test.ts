@@ -17,7 +17,7 @@
  */
 
 import assert from "node:assert/strict";
-import { execFile, execSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -37,35 +37,25 @@ const serversToClose: DesktopGatewayServer[] = [];
 const mockServersToClose: http.Server[] = [];
 const tempPathsToClean: string[] = [];
 
-const originalSymphonyWorktreeParentDir = process.env.SYMPHONY_WORKTREE_PARENT_DIR;
-const originalPath = process.env.PATH;
-const originalHome = process.env.HOME;
-const originalRawPipeline = process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
+const savedEnv: Record<string, string | undefined> = {
+  SYMPHONY_WORKTREE_PARENT_DIR: process.env.SYMPHONY_WORKTREE_PARENT_DIR,
+  PATH: process.env.PATH,
+  HOME: process.env.HOME,
+  CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE: process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE,
+};
+
+function restoreEnv(): void {
+  for (const [key, value] of Object.entries(savedEnv)) {
+    if (value === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = value;
+    }
+  }
+}
 
 afterEach(async () => {
-  if (originalSymphonyWorktreeParentDir === undefined) {
-    delete process.env.SYMPHONY_WORKTREE_PARENT_DIR;
-  } else {
-    process.env.SYMPHONY_WORKTREE_PARENT_DIR = originalSymphonyWorktreeParentDir;
-  }
-
-  if (originalPath === undefined) {
-    delete process.env.PATH;
-  } else {
-    process.env.PATH = originalPath;
-  }
-
-  if (originalHome === undefined) {
-    delete process.env.HOME;
-  } else {
-    process.env.HOME = originalHome;
-  }
-
-  if (originalRawPipeline === undefined) {
-    delete process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
-  } else {
-    process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = originalRawPipeline;
-  }
+  restoreEnv();
 
   for (const server of serversToClose.splice(0)) {
     await server.stop();
@@ -189,6 +179,37 @@ async function createFakeRunLoopScript(homeDir: string, scriptContent: string): 
   return scriptPath;
 }
 
+/**
+ * Poll mock.requests until a request to /loops/{loopId}/events with
+ * type === "completed" is found, or until the timeout elapses.
+ */
+async function waitForCompletedEvent(
+  requests: RecordedRequest[],
+  loopId: string,
+  timeoutMs = 20_000
+): Promise<Record<string, unknown>> {
+  const eventsUrlSubstring = `/loops/${loopId}/events`;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    for (const req of requests) {
+      if (!req.url.includes(eventsUrlSubstring)) continue;
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(req.body) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      if (parsed.type === "completed") {
+        return parsed;
+      }
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(
+    `Timed out waiting for completed event for loopId=${loopId} after ${timeoutMs}ms`
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Test 1: No-changes → executeGitOperations returns null (no PR URL in upload)
 // ---------------------------------------------------------------------------
@@ -287,6 +308,14 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
     uploadBody.artifacts.executionResult?.has_changes,
     undefined,
     "Expected has_changes to be absent when there are no changes"
+  );
+
+  // Also check the completed event does NOT contain GIT_PUSH_FAILED in warnings.
+  // The completed event is posted after upload-artifacts, so poll until it appears.
+  const completedEvent = await waitForCompletedEvent(mock.requests, loopId);
+  assert.ok(
+    !(completedEvent.warnings as string[] | undefined)?.includes("GIT_PUSH_FAILED"),
+    `Expected no GIT_PUSH_FAILED warning in completed event for no-changes path, got warnings: ${JSON.stringify(completedEvent.warnings)}`
   );
 });
 
@@ -550,5 +579,103 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
     ghCalls.trim(),
     "",
     `gh pr create should not have been called, but capture file contains: ${ghCalls}`
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 4: git status exits 1 → executeGitOperations returns 'error' →
+//         completed event warnings contains 'GIT_PUSH_FAILED'
+// ---------------------------------------------------------------------------
+
+test("EXECUTE: git status failure sets GIT_PUSH_FAILED in completed event warnings", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-gitstatus-fail-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-gitstatus-fail");
+  await initGitRepo(repoPath);
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  // fake run-loop.sh: exits 0 (loop runs successfully, no LLM commits)
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+
+  // fake claude: exits 0 without writing execution-result.json
+  // → attemptLlmCommit returns null → falls through to executeGitOperations
+  await fs.writeFile(
+    path.join(fakeBin, "claude"),
+    "#!/bin/sh\nexit 0\n",
+    { mode: 0o755 }
+  );
+
+  // fake git: delegates most commands to real git, but exits 1 for 'status --porcelain'.
+  // This causes executeGitOperations to return { status: 'error' }, which adds
+  // GIT_PUSH_FAILED to the warnings array posted in the completed event.
+  const fakeGitScript = [
+    "#!/bin/sh",
+    "# Exit 1 for 'git status --porcelain' to simulate a git status failure",
+    "if [ \"$1\" = status ]; then exit 1; fi",
+    "# Delegate everything else (worktree, fetch, rev-parse, etc.) to real git",
+    `exec /usr/bin/git "$@"`,
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-gitstatus-fail-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000000400";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        repo: { fullName: `gitstatus-fail/${path.basename(repoPath)}`, branch: "main" },
+      }),
+    }
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
+  );
+
+  // Wait for the completed event and assert GIT_PUSH_FAILED is in warnings.
+  // The loop posts upload-artifacts first, then the completed event.
+  await mock.waitForRequest("upload-artifacts");
+  const completedEvent = await waitForCompletedEvent(mock.requests, loopId);
+  const warnings = completedEvent.warnings as string[] | undefined;
+  assert.ok(
+    Array.isArray(warnings) && warnings.includes("GIT_PUSH_FAILED"),
+    `Expected GIT_PUSH_FAILED in completed event warnings when git status exits 1, got warnings: ${JSON.stringify(warnings)}`
   );
 });
