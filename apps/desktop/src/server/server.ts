@@ -8,6 +8,7 @@ import {
   type ComputeTargetCapabilities,
   type HealthResponse
 } from "../shared/contracts.js";
+import { gatewayLog } from "../main/gateway-logger.js";
 import type { LocalSessionStore } from "../main/local-session-store.js";
 import type { JobStore } from "../main/job-store.js";
 import {
@@ -40,12 +41,14 @@ export interface DesktopGatewayServerOptions {
   getApiOrigin?: () => string;
   prodOriginsOnly?: boolean;
   jobStore?: JobStore;
+  onUnexpectedClose?: () => void;
 }
 
 export class DesktopGatewayServer {
   private readonly options: DesktopGatewayServerOptions;
   private readonly router: GatewayRouter;
   private server: Server | null = null;
+  private alive = false;
   private activePort: number;
 
   constructor(options: DesktopGatewayServerOptions) {
@@ -93,7 +96,8 @@ export class DesktopGatewayServer {
     getApiOrigin?: () => string,
     getWebAppOrigin?: () => string,
     prodOriginsOnly?: boolean,
-    jobStore?: JobStore
+    jobStore?: JobStore,
+    onUnexpectedClose?: () => void
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -115,6 +119,7 @@ export class DesktopGatewayServer {
       getApiOrigin,
       prodOriginsOnly,
       jobStore,
+      onUnexpectedClose,
     });
   }
 
@@ -152,7 +157,20 @@ export class DesktopGatewayServer {
       try {
         await this.listen(candidateServer, candidate);
         this.server = candidateServer;
-        this.activePort = candidate;
+        this.alive = true;
+        const addr = candidateServer.address();
+        this.activePort = typeof addr === "object" && addr ? addr.port : candidate;
+        candidateServer.on("error", (err) => {
+          gatewayLog.error("gateway-server", `Server error: ${err.message}`);
+        });
+        candidateServer.on("close", () => {
+          if (this.server === candidateServer) {
+            this.alive = false;
+            this.server = null;
+            gatewayLog.warn("gateway-server", "Server closed unexpectedly");
+            this.options.onUnexpectedClose?.();
+          }
+        });
         await this.writeDiscoveryFile();
         return;
       } catch (error) {
@@ -173,6 +191,7 @@ export class DesktopGatewayServer {
   }
 
   async stop(): Promise<void> {
+    this.alive = false;
     if (!this.server) {
       return;
     }
@@ -181,13 +200,22 @@ export class DesktopGatewayServer {
     this.server = null;
     await new Promise<void>((resolve, reject) => {
       runningServer.close((error) => {
-        if (error) {
+        if (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") {
           reject(error);
           return;
         }
         resolve();
       });
     });
+  }
+
+  isAlive(): boolean {
+    return this.alive && this.server !== null && this.server.listening;
+  }
+
+  async restart(): Promise<void> {
+    await this.stop();
+    await this.start();
   }
 
   private async listen(server: Server, port: number): Promise<void> {

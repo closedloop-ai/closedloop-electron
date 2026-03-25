@@ -7,7 +7,7 @@ import path from "node:path";
 import { afterEach, test } from "node:test";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { LocalSessionStore } from "../src/main/local-session-store.js";
-import { EMPTY_CAPABILITIES, PORT_PROBE_ORDER } from "../src/shared/contracts.js";
+import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 
 const serversToClose: DesktopGatewayServer[] = [];
 const fakeApiServersToClose: http.Server[] = [];
@@ -42,8 +42,8 @@ function makeServer(
 ): DesktopGatewayServer {
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.test.com",
     getAllowedDirectories: () => [tmpDir],
     getGatewayAuthToken: () => "test-gateway-token-hex",
@@ -316,8 +316,8 @@ test("exchange handler passes REST API origin (getApiOrigin) to verifyChallenge,
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.test.com",
     getAllowedDirectories: () => [tmpDir],
     getGatewayAuthToken: () => "test-gateway-token-hex",

@@ -23,7 +23,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
 import { DesktopGatewayServer } from "../src/server/server.js";
-import { EMPTY_CAPABILITIES, PORT_PROBE_ORDER } from "../src/shared/contracts.js";
+import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import {
   createFakeRunLoopScript,
   initGitRepo,
@@ -101,8 +101,8 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "execute-nochange-machine",
@@ -232,8 +232,8 @@ test("EXECUTE: handleProcessCompletion reads pre-written execution-result.json a
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "execute-llmresult-machine",
@@ -367,8 +367,8 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "execute-existingpr-machine",
@@ -484,8 +484,8 @@ test("EXECUTE: git status failure sets GIT_PUSH_FAILED in completed event warnin
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "execute-gitstatus-fail-machine",
