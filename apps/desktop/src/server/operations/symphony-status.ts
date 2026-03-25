@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import type { JobStore } from "../../main/job-store.js";
+import { isTerminalJobStatus, type JobStore, type LocalJobStatus } from "../../main/job-store.js";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { expandHome, findFirstExisting, resolveWorktreeDir, sanitizeTicketId } from "./symphony-utils.js";
@@ -197,14 +197,20 @@ async function resolveEffectiveState(
   state: Record<string, unknown>,
   statePath: string
 ): Promise<EffectiveState> {
-  const status = typeof state.status === "string" ? state.status : "UNKNOWN";
-  const phase = typeof state.phase === "string" ? state.phase : "Unknown";
+  let effectiveStatus = typeof state.status === "string" ? state.status : "UNKNOWN";
+  let effectivePhase = typeof state.phase === "string" ? state.phase : "Unknown";
   const pid = await readProcessPid(worktreeDir);
   const processRunning = pid !== null && isProcessRunning(pid);
   const base = { processRunning, pid };
 
-  if (status !== "IN_PROGRESS") {
-    return { status, phase, fallbackDetected: false, ...base };
+  // Normalize: if process is alive but state.json says terminal, treat as IN_PROGRESS
+  if (processRunning && isTerminalJobStatus(effectiveStatus as LocalJobStatus)) {
+    effectiveStatus = "IN_PROGRESS";
+    effectivePhase = "Running";
+  }
+
+  if (effectiveStatus !== "IN_PROGRESS") {
+    return { status: effectiveStatus, phase: effectivePhase, fallbackDetected: false, ...base };
   }
 
   if (pid !== null && !processRunning) {
@@ -218,18 +224,18 @@ async function resolveEffectiveState(
 
   const lockPath = path.join(worktreeDir, ".claude", "work", ".learnings", ".lock");
   if (existsSync(lockPath)) {
-    return { status, phase, fallbackDetected: false, ...base };
+    return { status: effectiveStatus, phase: effectivePhase, fallbackDetected: false, ...base };
   }
 
   const stateStats = await stat(statePath);
   const stateAgeMs = Date.now() - stateStats.mtime.getTime();
   if (stateAgeMs <= 2 * 60 * 1000) {
-    return { status, phase, fallbackDetected: false, ...base };
+    return { status: effectiveStatus, phase: effectivePhase, fallbackDetected: false, ...base };
   }
 
   const fallback = await detectCompletionFromLogs(worktreeDir);
   if (!fallback.completed) {
-    return { status, phase, fallbackDetected: false, ...base };
+    return { status: effectiveStatus, phase: effectivePhase, fallbackDetected: false, ...base };
   }
 
   const resolvedStatus = fallback.awaitingUser ? "AWAITING_USER" : "COMPLETED";

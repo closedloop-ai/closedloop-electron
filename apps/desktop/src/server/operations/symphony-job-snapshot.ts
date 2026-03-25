@@ -54,6 +54,21 @@ export async function readEffectiveStatusFromState(statePath: string): Promise<{
 }
 
 // ---------------------------------------------------------------------------
+// Guard terminal status from state.json when process is alive
+// ---------------------------------------------------------------------------
+
+/**
+ * Suppress terminal status from state.json when the process is still alive.
+ */
+export function shouldApplyStateStatus(
+  stateStatus: string,
+  processRunning: boolean
+): boolean {
+  if (!processRunning) return true;
+  return !isTerminalJobStatus(stateStatus as LocalJobStatus);
+}
+
+// ---------------------------------------------------------------------------
 // Task progress / currentTaskId from plan.json
 // ---------------------------------------------------------------------------
 
@@ -179,13 +194,19 @@ export async function enrichJobSnapshot(job: LocalJob): Promise<JobSnapshot> {
   if (job.statePath) {
     const stateData = await readEffectiveStatusFromState(job.statePath);
     if (stateData.phase) {
-      phase = stateData.phase;
+      if (processRunning && stateData.status && isTerminalJobStatus(stateData.status)) {
+        // Don't apply "Completed" phase text while process is still alive
+      } else {
+        phase = stateData.phase;
+      }
     }
     // Apply effective status from state.json for non-terminal jobs.
     // Terminal statuses (COMPLETED, FAILED, CANCELLED, STOPPED) set by the
     // process exit handler are authoritative and should not be overridden.
     if (stateData.status && !isTerminalJobStatus(status)) {
-      status = stateData.status;
+      if (shouldApplyStateStatus(stateData.status, processRunning)) {
+        status = stateData.status;
+      }
     }
   }
 
