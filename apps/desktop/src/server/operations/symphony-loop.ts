@@ -1,10 +1,10 @@
 import { execSync, spawn } from "node:child_process";
-import { gatewayLog } from "../../main/gateway-logger.js";
 import crypto from "node:crypto";
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { gatewayLog } from "../../main/gateway-logger.js";
 import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
 import type {
   OperationDispatcher,
@@ -294,7 +294,7 @@ async function postLoopEvent(
   loopId: string,
   token: string,
   eventBody: Record<string, unknown>
-): Promise<void> {
+): Promise<{ success: boolean; error?: string }> {
   const url = `${apiBaseUrl}/loops/${loopId}/events`;
   // Auto-inject timestamp on every event (matches ECS harness reportEvent())
   const payload: Record<string, unknown> = {
@@ -316,14 +316,16 @@ async function postLoopEvent(
       const text = await resp.text().catch(() => "");
       loopError(loopId, `Event POST failed: ${resp.status} ${resp.statusText}`, text);
       gatewayLog.error("loop-event", `POST ${payload.type} to ${url} failed: ${resp.status} ${resp.statusText} ${text}`);
-    } else {
-      loopLog(loopId, `Event POST success: ${resp.status}`);
-      gatewayLog.debug("loop-event", `POST ${payload.type} to ${url}: ${resp.status}`);
+      return { success: false, error: "HTTP " + resp.status + " " + resp.statusText };
     }
+    loopLog(loopId, `Event POST success: ${resp.status}`);
+    gatewayLog.debug("loop-event", `POST ${payload.type} to ${url}: ${resp.status}`);
+    return { success: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     loopError(loopId, "Failed to post event:", err);
     gatewayLog.error("loop-event", `POST ${payload.type} network error: ${msg}`);
+    return { success: false, error: msg };
   }
 }
 
@@ -332,7 +334,7 @@ async function uploadArtifacts(
   loopId: string,
   token: string,
   body: Record<string, unknown>
-): Promise<void> {
+): Promise<{ success: boolean; error?: string }> {
   const url = `${apiBaseUrl}/loops/${loopId}/upload-artifacts`;
   loopLog(loopId, "Uploading artifacts...", url);
   try {
@@ -348,14 +350,16 @@ async function uploadArtifacts(
       const text = await resp.text().catch(() => "");
       loopError(loopId, `Upload failed: ${resp.status} ${resp.statusText}`, text);
       gatewayLog.error("loop-upload", `Artifact upload to ${url} failed: ${resp.status} ${resp.statusText} ${text}`);
-    } else {
-      loopLog(loopId, `Upload success: ${resp.status}`);
-      gatewayLog.debug("loop-upload", `Artifact upload to ${url}: ${resp.status}`);
+      return { success: false, error: `HTTP ${resp.status} ${resp.statusText}` };
     }
+    loopLog(loopId, `Upload success: ${resp.status}`);
+    gatewayLog.debug("loop-upload", `Artifact upload to ${url}: ${resp.status}`);
+    return { success: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     loopError(loopId, "Failed to upload artifacts:", err);
     gatewayLog.error("loop-upload", `Artifact upload network error: ${msg}`);
+    return { success: false, error: msg };
   }
 }
 
@@ -681,15 +685,19 @@ async function attemptLlmCommit(
   command: string,
   artifactSlug: string | undefined,
   webAppOrigin: string,
-  committer: LoopCommitter | undefined
+  committer: LoopCommitter | undefined,
+  onTimeout?: () => void
 ): Promise<ExecutionResult | null> {
   // Build metadata footer for PR body
   // Strip newlines from user-controlled fields to prevent prompt injection
   const safeBranch = baseBranch.replace(/[\r\n]/g, '');
   const safeLoopId = sanitizeCommitMessage(loopId).replace(/[\r\n]/g, '');
+  const safeSlug = artifactSlug
+    ? sanitizeCommitMessage(artifactSlug).replace(/[\r\n]/g, '')
+    : null;
+
   let footer: string;
-  if (artifactSlug) {
-    const safeSlug = sanitizeCommitMessage(artifactSlug).replace(/[\r\n]/g, '');
+  if (safeSlug) {
     const artifactLink = `${webAppOrigin}/artifact/by-slug/${safeSlug}`;
     footer = `---\nLoop ID: ${safeLoopId}\nArtifact: ${artifactLink}`;
   } else {
@@ -697,10 +705,10 @@ async function attemptLlmCommit(
   }
 
   // Build slug instruction for the prompt
-  const slugInstruction = artifactSlug
-    ? `The artifact slug is ${sanitizeCommitMessage(artifactSlug).replace(/[\r\n]/g, '')}. ` +
-      `You MUST prefix the PR title with "${sanitizeCommitMessage(artifactSlug).replace(/[\r\n]/g, '')}: " ` +
-      `(e.g., "${sanitizeCommitMessage(artifactSlug).replace(/[\r\n]/g, '')}: Add feature X"). ` +
+  const slugInstruction = safeSlug
+    ? `The artifact slug is ${safeSlug}. ` +
+      `You MUST prefix the PR title with "${safeSlug}: " ` +
+      `(e.g., "${safeSlug}: Add feature X"). ` +
       `Also prefix the commit message the same way.`
     : "No artifact slug is available — use a descriptive title without a prefix.";
 
@@ -787,6 +795,7 @@ async function attemptLlmCommit(
       if (!killed) {
         killed = true;
         loopError(loopId, "LLM commit timed out after 90s — sending SIGTERM");
+        onTimeout?.();
         try {
           process.kill(-pid, "SIGTERM");
         } catch (killErr) {
@@ -873,6 +882,11 @@ async function attemptLlmCommit(
 // Git operations (EXECUTE only)
 // ---------------------------------------------------------------------------
 
+type GitOperationResult =
+  | { status: 'success'; prUrl: string; prNumber: number; branchName: string; commitSha: string }
+  | { status: 'no-changes' }
+  | { status: 'error'; reason: string };
+
 function executeGitOperations(
   worktreeDir: string,
   committer: LoopCommitter | undefined,
@@ -881,7 +895,7 @@ function executeGitOperations(
   command: string,
   artifactSlug?: string,
   webAppOrigin?: string
-): { prUrl: string; prNumber: number; branchName: string; commitSha: string } | null {
+): GitOperationResult {
   const shortId = loopId.slice(0, 8);
   const env: Record<string, string> = { ...process.env } as Record<string, string>;
   if (committer) {
@@ -891,9 +905,10 @@ function executeGitOperations(
     env.GIT_COMMITTER_EMAIL = committer.email;
   }
 
-  // Check for changes
+  // Check for changes, excluding .claude/ which is written by the gateway
+  // itself (work dir, artifacts) and must never be committed.
   try {
-    const status = execSync("git status --porcelain", {
+    const status = execSync("git status --porcelain -- ':!.claude/'", {
       cwd: worktreeDir,
       encoding: "utf-8",
       stdio: "pipe",
@@ -901,10 +916,11 @@ function executeGitOperations(
     }).trim();
 
     if (!status) {
-      return null; // No changes
+      return { status: 'no-changes' }; // No changes
     }
-  } catch {
-    return null;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { status: 'error', reason };
   }
 
   // Stage, commit, push
@@ -1029,11 +1045,23 @@ function executeGitOperations(
       // Non-critical — PR exists, metadata is best-effort
     }
 
-    return { prUrl, prNumber, branchName, commitSha };
+    return { status: 'success', prUrl, prNumber, branchName, commitSha };
   } catch (err) {
-    console.error("[symphony-loop] Git operations failed:", err);
-    return null;
+    const reason = err instanceof Error ? err.message : String(err);
+    return { status: 'error', reason };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Sanitize error messages before persisting to job store
+// ---------------------------------------------------------------------------
+
+function sanitizeErrorMessage(msg: string): string {
+  return msg
+    .replace(/:\/\/[^@]+@/g, '://***@')
+    .replace(/\b[0-9a-f]{20,}\b/gi, '[REDACTED]')
+    .replace(/\b[A-Za-z0-9+/]{40,}={0,2}\b/g, '[REDACTED]')
+    .slice(0, 500);
 }
 
 // ---------------------------------------------------------------------------
@@ -1088,9 +1116,10 @@ async function handleProcessCompletion(
   }
 
   // Read outputs per command
-  gatewayLog.debug("loop-harness", `${command} succeeded (exit 0), reading artifacts for loopId=${loopId}`);
+  gatewayLog.info("loop-harness", `${command} succeeded (exit 0), reading artifacts for loopId=${loopId}`);
   let artifacts: Record<string, unknown> = {};
   const metadata: Record<string, unknown> = {};
+  const warnings: string[] = [];
 
   if (command === "PLAN" || command === "REQUEST_CHANGES") {
     artifacts = readPlanOutputs(claudeWorkDir);
@@ -1110,7 +1139,8 @@ async function handleProcessCompletion(
         command,
         body.artifactSlug,
         webAppOrigin ?? "",
-        committer
+        committer,
+        () => { warnings.push(sanitizeErrorMessage('LLM commit timed out after 90s')); }
       );
 
       // Clean up any remaining LLM scratch files before fallback to prevent
@@ -1122,10 +1152,11 @@ async function handleProcessCompletion(
         try { unlinkSync(path.join(worktreeDir, 'pr-body.md')); } catch { /* may not exist */ }
       }
 
-      const gitResult: { prUrl: string; prNumber: number; branchName: string; commitSha: string } | null =
-        llmResult ?? executeGitOperations(worktreeDir, committer, baseBranch, loopId, command, body.artifactSlug, webAppOrigin ?? "");
+      const gitResult: GitOperationResult = llmResult
+        ? { status: 'success' as const, ...llmResult }
+        : executeGitOperations(worktreeDir, committer, baseBranch, loopId, command, body.artifactSlug, webAppOrigin ?? "");
 
-      if (gitResult) {
+      if (gitResult.status === 'success') {
         // Merge git info into execution result
         const execResult =
           (artifacts.executionResult as Record<string, unknown>) ?? {};
@@ -1137,6 +1168,11 @@ async function handleProcessCompletion(
         execResult.base_branch = baseBranch;
         artifacts.executionResult = execResult;
         metadata.branchName = gitResult.branchName;
+      } else if (gitResult.status === 'no-changes') {
+        gatewayLog.info('loop-harness', 'no local changes detected, skipping PR creation, loopId=' + loopId);
+      } else if (gitResult.status === 'error') {
+        gatewayLog.warn('loop-harness', 'git operations failed: ' + sanitizeErrorMessage(gitResult.reason) + ', loopId=' + loopId);
+        warnings.push('GIT_PUSH_FAILED');
       }
     }
   } else if (command === "DECOMPOSE") {
@@ -1157,11 +1193,15 @@ async function handleProcessCompletion(
   // Upload artifacts
   const artifactKeys = Object.keys(artifacts);
   loopLog(loopId, "Artifact keys:", artifactKeys);
-  gatewayLog.debug("loop-harness", `Uploading artifacts for ${command} loopId=${loopId}: [${artifactKeys.join(", ")}]`);
-  await uploadArtifacts(apiBaseUrl, loopId, closedLoopAuthToken, {
+  gatewayLog.info("loop-harness", `Uploading artifacts for ${command} loopId=${loopId}: [${artifactKeys.join(", ")}]`);
+  const uploadResult = await uploadArtifacts(apiBaseUrl, loopId, closedLoopAuthToken, {
     artifacts,
     metadata,
   });
+  if (!uploadResult.success) {
+    gatewayLog.warn('loop-harness', 'Artifact upload failed: ' + (uploadResult.error ?? 'unknown error') + ', loopId=' + loopId);
+    warnings.push('ARTIFACT_UPLOAD_FAILED');
+  }
 
   // Parse token usage from claude output
   const tokensUsed = parseTokenUsage(claudeWorkDir);
@@ -1209,10 +1249,15 @@ async function handleProcessCompletion(
     result,
     tokensUsed,
     loopId,
+    ...(warnings.length > 0 ? { warnings } : {}),
   };
 
   loopLog(loopId, "Posting completed event...");
-  await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, completedEvent);
+  const eventResult = await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, completedEvent);
+  if (!eventResult.success) {
+    gatewayLog.warn('loop-harness', 'Completed event POST failed: ' + (eventResult.error ?? 'unknown error') + ', loopId=' + loopId);
+    warnings.push('EVENT_POST_FAILED');
+  }
   loopLog(loopId, "Loop completed successfully");
 
   if (jobStore) {
@@ -1225,6 +1270,7 @@ async function handleProcessCompletion(
         exitCode: 0,
         updatedAt: now,
         completedAt: now,
+        warning: warnings.length > 0 ? warnings.map(sanitizeErrorMessage).join('; ') : undefined,
       });
     }
   }

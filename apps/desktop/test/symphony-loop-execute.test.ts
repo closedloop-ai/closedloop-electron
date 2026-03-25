@@ -17,17 +17,21 @@
  */
 
 import assert from "node:assert/strict";
-import { execFile, execSync } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
-import { promisify } from "node:util";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES, PORT_PROBE_ORDER } from "../src/shared/contracts.js";
-
-const execFileAsync = promisify(execFile);
+import {
+  createFakeRunLoopScript,
+  initGitRepo,
+  restoreEnv,
+  saveEnv,
+  startMockApiServer,
+  waitForCompletedEvent,
+} from "./symphony-test-utils.js";
 
 // ---------------------------------------------------------------------------
 // Shared state and cleanup
@@ -36,36 +40,10 @@ const execFileAsync = promisify(execFile);
 const serversToClose: DesktopGatewayServer[] = [];
 const mockServersToClose: http.Server[] = [];
 const tempPathsToClean: string[] = [];
-
-const originalSymphonyWorktreeParentDir = process.env.SYMPHONY_WORKTREE_PARENT_DIR;
-const originalPath = process.env.PATH;
-const originalHome = process.env.HOME;
-const originalRawPipeline = process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
+const savedEnv = saveEnv();
 
 afterEach(async () => {
-  if (originalSymphonyWorktreeParentDir === undefined) {
-    delete process.env.SYMPHONY_WORKTREE_PARENT_DIR;
-  } else {
-    process.env.SYMPHONY_WORKTREE_PARENT_DIR = originalSymphonyWorktreeParentDir;
-  }
-
-  if (originalPath === undefined) {
-    delete process.env.PATH;
-  } else {
-    process.env.PATH = originalPath;
-  }
-
-  if (originalHome === undefined) {
-    delete process.env.HOME;
-  } else {
-    process.env.HOME = originalHome;
-  }
-
-  if (originalRawPipeline === undefined) {
-    delete process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
-  } else {
-    process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = originalRawPipeline;
-  }
+  restoreEnv(savedEnv);
 
   for (const server of serversToClose.splice(0)) {
     await server.stop();
@@ -81,113 +59,6 @@ afterEach(async () => {
     await fs.rm(tempPath, { recursive: true, force: true });
   }
 });
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-async function initGitRepo(repoPath: string): Promise<void> {
-  await execFileAsync("git", ["init", "-b", "main", repoPath]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.email", "test@test.com"]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.name", "Test"]);
-  await fs.writeFile(path.join(repoPath, "README.md"), "# initial\n");
-  await execFileAsync("git", ["-C", repoPath, "add", "."]);
-  await execFileAsync("git", ["-C", repoPath, "commit", "-m", "initial"]);
-}
-
-type RecordedRequest = { method: string; url: string; body: string };
-
-async function startMockApiServer(): Promise<{
-  server: http.Server;
-  port: number;
-  requests: RecordedRequest[];
-  waitForRequest: (urlSubstring: string, timeoutMs?: number) => Promise<RecordedRequest>;
-}> {
-  const requests: RecordedRequest[] = [];
-  const waiters: Array<{ urlSubstring: string; resolve: (r: RecordedRequest) => void }> = [];
-
-  const server = http.createServer((req, res) => {
-    void (async () => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of req) {
-        chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-      }
-      const recorded: RecordedRequest = {
-        method: req.method ?? "",
-        url: req.url ?? "",
-        body: Buffer.concat(chunks).toString("utf-8"),
-      };
-      requests.push(recorded);
-
-      for (let i = waiters.length - 1; i >= 0; i--) {
-        if (recorded.url.includes(waiters[i].urlSubstring)) {
-          waiters[i].resolve(recorded);
-          waiters.splice(i, 1);
-        }
-      }
-
-      res.statusCode = 200;
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ success: true }));
-    })();
-  });
-
-  await new Promise<void>((resolve, reject) => {
-    server.listen(0, "127.0.0.1", () => resolve());
-    server.once("error", reject);
-  });
-
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    throw new Error("failed to bind mock API server");
-  }
-
-  function waitForRequest(urlSubstring: string, timeoutMs = 20_000): Promise<RecordedRequest> {
-    const existing = requests.find((r) => r.url.includes(urlSubstring));
-    if (existing) {
-      return Promise.resolve(existing);
-    }
-    return new Promise<RecordedRequest>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(
-          new Error(
-            `Timed out waiting for request matching "${urlSubstring}" after ${timeoutMs}ms`
-          )
-        );
-      }, timeoutMs);
-      waiters.push({
-        urlSubstring,
-        resolve: (r) => {
-          clearTimeout(timer);
-          resolve(r);
-        },
-      });
-    });
-  }
-
-  return { server, port: address.port, requests, waitForRequest };
-}
-
-/**
- * Create the fake plugin cache structure so findPluginScript("code", "run-loop.sh")
- * finds the provided script content.
- */
-async function createFakeRunLoopScript(homeDir: string, scriptContent: string): Promise<string> {
-  const scriptDir = path.join(
-    homeDir,
-    ".claude",
-    "plugins",
-    "cache",
-    "closedloop-ai",
-    "code",
-    "1.0.0",
-    "scripts"
-  );
-  await fs.mkdir(scriptDir, { recursive: true });
-  const scriptPath = path.join(scriptDir, "run-loop.sh");
-  await fs.writeFile(scriptPath, scriptContent, { mode: 0o755 });
-  return scriptPath;
-}
 
 // ---------------------------------------------------------------------------
 // Test 1: No-changes → executeGitOperations returns null (no PR URL in upload)
@@ -287,6 +158,14 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
     uploadBody.artifacts.executionResult?.has_changes,
     undefined,
     "Expected has_changes to be absent when there are no changes"
+  );
+
+  // Also check the completed event does NOT contain GIT_PUSH_FAILED in warnings.
+  // The completed event is posted after upload-artifacts, so poll until it appears.
+  const completedEvent = await waitForCompletedEvent(mock.requests, loopId);
+  assert.ok(
+    !(completedEvent.warnings as string[] | undefined)?.includes("GIT_PUSH_FAILED"),
+    `Expected no GIT_PUSH_FAILED warning in completed event for no-changes path, got warnings: ${JSON.stringify(completedEvent.warnings)}`
   );
 });
 
@@ -550,5 +429,103 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
     ghCalls.trim(),
     "",
     `gh pr create should not have been called, but capture file contains: ${ghCalls}`
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 4: git status exits 1 → executeGitOperations returns 'error' →
+//         completed event warnings contains 'GIT_PUSH_FAILED'
+// ---------------------------------------------------------------------------
+
+test("EXECUTE: git status failure sets GIT_PUSH_FAILED in completed event warnings", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-gitstatus-fail-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-gitstatus-fail");
+  await initGitRepo(repoPath);
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  // fake run-loop.sh: exits 0 (loop runs successfully, no LLM commits)
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+
+  // fake claude: exits 0 without writing execution-result.json
+  // → attemptLlmCommit returns null → falls through to executeGitOperations
+  await fs.writeFile(
+    path.join(fakeBin, "claude"),
+    "#!/bin/sh\nexit 0\n",
+    { mode: 0o755 }
+  );
+
+  // fake git: delegates most commands to real git, but exits 1 for 'status --porcelain'.
+  // This causes executeGitOperations to return { status: 'error' }, which adds
+  // GIT_PUSH_FAILED to the warnings array posted in the completed event.
+  const fakeGitScript = [
+    "#!/bin/sh",
+    "# Exit 1 for 'git status --porcelain' to simulate a git status failure",
+    "if [ \"$1\" = status ]; then exit 1; fi",
+    "# Delegate everything else (worktree, fetch, rev-parse, etc.) to real git",
+    `exec /usr/bin/git "$@"`,
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: PORT_PROBE_ORDER[0],
+    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-gitstatus-fail-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000000400";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        repo: { fullName: `gitstatus-fail/${path.basename(repoPath)}`, branch: "main" },
+      }),
+    }
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
+  );
+
+  // Wait for the completed event and assert GIT_PUSH_FAILED is in warnings.
+  // The loop posts upload-artifacts first, then the completed event.
+  await mock.waitForRequest("upload-artifacts");
+  const completedEvent = await waitForCompletedEvent(mock.requests, loopId);
+  const warnings = completedEvent.warnings as string[] | undefined;
+  assert.ok(
+    Array.isArray(warnings) && warnings.includes("GIT_PUSH_FAILED"),
+    `Expected GIT_PUSH_FAILED in completed event warnings when git status exits 1, got warnings: ${JSON.stringify(warnings)}`
   );
 });
