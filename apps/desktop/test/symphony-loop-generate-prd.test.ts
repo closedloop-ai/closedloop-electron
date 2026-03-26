@@ -190,6 +190,16 @@ test("GENERATE_PRD: accepts valid command and responds 200", async () => {
     200,
     `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
   );
+
+  // Wait for handleProcessCompletion to finish (including worktree cleanup)
+  // before afterEach tears down the mock server and temp dirs. Without this,
+  // concurrent fs.rm calls race and can fail with ENOTEMPTY.
+  const pollDeadline = Date.now() + 15_000;
+  while (Date.now() < pollDeadline) {
+    const entries = await fs.readdir(worktreeParent).catch(() => []);
+    if (!entries.some((e) => e.includes("generate-prd"))) break;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
 });
 
 // ---------------------------------------------------------------------------
