@@ -11,7 +11,7 @@ import {
   type RepoDeploymentConfig,
   type ReposConfig
 } from "./repos-config-utils.js";
-import { expandHome } from "./symphony-utils.js";
+import { checkAndMigrateLegacyWorkDir, expandHome, findFirstExisting } from "./symphony-utils.js";
 
 type DeployStatus = "running" | "completed" | "failed" | "not-started";
 
@@ -79,7 +79,13 @@ export function registerDeployRoutes(
       await saveReposConfig(reposConfig, configDir());
     }
 
-    const claudeWorkDir = path.join(expandedWorktreePath, ".claude", "work");
+    const migrationResult = checkAndMigrateLegacyWorkDir(expandedWorktreePath);
+    if (migrationResult === "blocked") {
+      json(context, 409, { error: "A job started before the .closedloop-ai migration is still running. Stop it first, then retry." });
+      return;
+    }
+
+    const claudeWorkDir = path.join(expandedWorktreePath, ".closedloop-ai", "work");
     await fs.mkdir(claudeWorkDir, { recursive: true });
 
     const logFile = path.join(claudeWorkDir, "deploy.log");
@@ -123,6 +129,8 @@ export function registerDeployRoutes(
       if (!child.pid) {
         throw new Error("failed to start deploy process");
       }
+
+      await fs.writeFile(path.join(claudeWorkDir, "process.pid"), String(child.pid));
 
       child.on("exit", (code) => {
         if (code === 0) {
@@ -351,17 +359,31 @@ export function registerDeployRoutes(
       throw error;
     }
 
-    const claudeWorkDir = path.join(worktreeDir, ".claude", "work");
-    const logs = await readTextFile(path.join(claudeWorkDir, "deploy.log"));
-    const exitInfo = await readJsonFile<{ exitCode: number; failedCommand: string }>(
-      path.join(claudeWorkDir, "deploy-exit.json")
+    const newDeployWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+    const oldDeployWorkDir = path.join(worktreeDir, ".claude", "work");
+    // Per-file resolution: each deploy artifact may be at either location
+    const logsPath = findFirstExisting(
+      path.join(newDeployWorkDir, "deploy.log"),
+      path.join(oldDeployWorkDir, "deploy.log")
     );
-    const deployResult = await readJsonFile<{ url?: string; serviceId?: string }>(
-      path.join(claudeWorkDir, "deploy-result.json")
+    const exitInfoPath = findFirstExisting(
+      path.join(newDeployWorkDir, "deploy-exit.json"),
+      path.join(oldDeployWorkDir, "deploy-exit.json")
     );
+    const deployResultPath = findFirstExisting(
+      path.join(newDeployWorkDir, "deploy-result.json"),
+      path.join(oldDeployWorkDir, "deploy-result.json")
+    );
+    const logs = logsPath ? await readTextFile(logsPath) : null;
+    const exitInfo = exitInfoPath
+      ? await readJsonFile<{ exitCode: number; failedCommand: string }>(exitInfoPath)
+      : null;
+    const deployResult = deployResultPath
+      ? await readJsonFile<{ url?: string; serviceId?: string }>(deployResultPath)
+      : null;
 
     const processAlive = isProcessAlive(pidRaw);
-    const status = determineStatus(exitInfo, deployResult?.url, processAlive, logs, pidRaw);
+    const status = determineStatus(exitInfo, deployResult?.url, processAlive, logs ?? "", pidRaw);
 
     json(context, 200, {
       status,
@@ -606,7 +628,7 @@ function detectDeployment(repoPath: string): RepoDeploymentConfig | null {
     };
 
     const framework = detectFramework(deps);
-    const script = resolveStartCommand(packageJson.scripts ?? {});
+    const script = resolveStartCommand(packageJson.scripts ?? {}, repoPath);
     if (!script) {
       return null;
     }
@@ -662,21 +684,21 @@ function detectFramework(dependencies: Record<string, string>): string | undefin
   return undefined;
 }
 
-function resolveStartCommand(scripts: Record<string, string>): string | null {
+function resolveStartCommand(scripts: Record<string, string>, repoPath: string): string | null {
   if (scripts.dev) {
-    if (existsSync(path.join(process.cwd(), "pnpm-lock.yaml"))) {
+    if (existsSync(path.join(repoPath, "pnpm-lock.yaml"))) {
       return "pnpm dev";
     }
-    if (existsSync(path.join(process.cwd(), "yarn.lock"))) {
+    if (existsSync(path.join(repoPath, "yarn.lock"))) {
       return "yarn dev";
     }
     return "npm run dev";
   }
   if (scripts.start) {
-    if (existsSync(path.join(process.cwd(), "pnpm-lock.yaml"))) {
+    if (existsSync(path.join(repoPath, "pnpm-lock.yaml"))) {
       return "pnpm start";
     }
-    if (existsSync(path.join(process.cwd(), "yarn.lock"))) {
+    if (existsSync(path.join(repoPath, "yarn.lock"))) {
       return "yarn start";
     }
     return "npm run start";

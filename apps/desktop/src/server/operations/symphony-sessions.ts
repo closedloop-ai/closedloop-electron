@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
-import { VALID_PROVIDERS, chatHistoryFilename, expandHome } from "./symphony-utils.js";
+import { VALID_PROVIDERS, chatHistoryFilename, expandHome, findFirstExisting } from "./symphony-utils.js";
 
 type ActiveSession = {
   ticketId: string;
@@ -105,9 +105,14 @@ export function registerSymphonySessionRoutes(
       if (!existsSync(worktreePath)) {
         continue;
       }
-      const workDir = path.join(worktreePath, ".claude", "work");
+      const newWorkDir = path.join(worktreePath, ".closedloop-ai", "work");
+      const oldWorkDir = path.join(worktreePath, ".claude", "work");
       const candidates = [chatHistoryFilename(), ...[...VALID_PROVIDERS].map((p) => chatHistoryFilename(p))];
-      const chatPath = candidates.map((f) => path.join(workDir, f)).find((p) => existsSync(p));
+      // Per-file resolution: check each candidate across both dirs
+      const chatPath = [
+        ...candidates.map((f) => path.join(newWorkDir, f)),
+        ...candidates.map((f) => path.join(oldWorkDir, f)),
+      ].find((p) => existsSync(p));
       if (!chatPath) {
         continue;
       }

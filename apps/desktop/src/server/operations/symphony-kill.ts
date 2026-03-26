@@ -1,8 +1,8 @@
-import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
-import { expandHome, resolveWorktreeDir } from "./symphony-utils.js";
+import { expandHome, findFirstExisting, resolveWorktreeDir } from "./symphony-utils.js";
 import type { JobStore, LocalJob } from "../../main/job-store.js";
 
 type ResolveResult =
@@ -169,8 +169,11 @@ function resolvePid(
     }
 
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-    const pidFilePath = path.join(worktreeDir, ".claude", "work", "process.pid");
-    if (!existsSync(pidFilePath)) {
+    const pidFilePath = findFirstExisting(
+      path.join(worktreeDir, ".closedloop-ai", "work", "process.pid"),
+      path.join(worktreeDir, ".claude", "work", "process.pid")
+    );
+    if (!pidFilePath) {
       return { noPidFile: true, worktreeDir };
     }
 
@@ -191,9 +194,12 @@ function resolvePid(
 }
 
 function cancelLoop(worktreeDir: string): boolean {
-  const stateFile = path.join(worktreeDir, ".claude", "symphony-loop.local.md");
+  const stateFile = findFirstExisting(
+    path.join(worktreeDir, ".closedloop-ai", "symphony-loop.local.md"),
+    path.join(worktreeDir, ".claude", "symphony-loop.local.md")
+  );
   try {
-    if (existsSync(stateFile)) {
+    if (stateFile) {
       unlinkSync(stateFile);
       return true;
     }
@@ -204,34 +210,41 @@ function cancelLoop(worktreeDir: string): boolean {
 }
 
 function clearAgentTypes(worktreeDir: string): void {
-  const agentTypesDir = path.join(worktreeDir, ".claude", "work", ".agent-types");
-  try {
-    if (!existsSync(agentTypesDir)) {
-      return;
-    }
+  const newAgentTypesDir = path.join(worktreeDir, ".closedloop-ai", "work", ".agent-types");
+  const oldAgentTypesDir = path.join(worktreeDir, ".claude", "work", ".agent-types");
+  for (const agentTypesDir of [newAgentTypesDir, oldAgentTypesDir]) {
+    try {
+      if (!existsSync(agentTypesDir)) {
+        continue;
+      }
 
-    for (const file of readdirSync(agentTypesDir)) {
-      unlinkSync(path.join(agentTypesDir, file));
+      for (const file of readdirSync(agentTypesDir)) {
+        unlinkSync(path.join(agentTypesDir, file));
+      }
+    } catch {
+      // Best effort
     }
-  } catch {
-    return;
   }
 }
 
 function markStateAsStopped(worktreeDir: string): void {
-  const statePath = path.join(worktreeDir, ".claude", "work", "state.json");
+  // Always write to the new canonical path; read from legacy path as fallback for existing state.
+  const newStatePath = path.join(worktreeDir, ".closedloop-ai", "work", "state.json");
+  const oldStatePath = path.join(worktreeDir, ".claude", "work", "state.json");
+  const readStatePath = existsSync(newStatePath) ? newStatePath : oldStatePath;
 
   try {
     let state: Record<string, unknown> = {};
-    if (existsSync(statePath)) {
-      const content = readFileSync(statePath, "utf-8");
+    if (existsSync(readStatePath)) {
+      const content = readFileSync(readStatePath, "utf-8");
       state = JSON.parse(content) as Record<string, unknown>;
     }
 
     state.status = "STOPPED";
     state.phase = "Process stopped by user";
     state.timestamp = new Date().toISOString();
-    writeFileSync(statePath, JSON.stringify(state, null, 2), "utf-8");
+    mkdirSync(path.dirname(newStatePath), { recursive: true });
+    writeFileSync(newStatePath, JSON.stringify(state, null, 2), "utf-8");
   } catch {
     // Best effort only
   }

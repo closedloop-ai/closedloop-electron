@@ -8,7 +8,7 @@ import { DirectoryNotAllowedError } from "../security.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { createStreamState, processStreamEvent, type ContentBlock } from "./stream-events.js";
-import { assertRepoAllowed, ensureWorktreeForReview, resolveWorktreeDir, resolveWorktreeParentDir, tryAssertRepoAllowed, tryAssertPathAllowed } from "./symphony-utils.js";
+import { assertRepoAllowed, ensureWorktreeForReview, findFirstExisting, resolveWorktreeDir, resolveWorktreeParentDir, tryAssertRepoAllowed, tryAssertPathAllowed } from "./symphony-utils.js";
 
 const CODEX_SESSION_ID_REGEX = /session id:\s*([0-9a-f-]{36})/i;
 const FINDINGS_CODE_BLOCK_REGEX = /```json\s*\n([\s\S]*?)\n\s*```/;
@@ -112,7 +112,7 @@ export async function saveCodexChatSession(
 ): Promise<void> {
   if (sessionId && provider === "codex") {
     const filename = chatContextId === "review" ? "codex-chat-review.json" : "codex-chat.json";
-    const chatStatePath = path.join(worktreeDir, ".claude", "work", filename);
+    const chatStatePath = path.join(worktreeDir, ".closedloop-ai", "work", filename);
     await saveJsonFile(chatStatePath, {
       sessionId,
       messageCount: 0
@@ -178,19 +178,26 @@ async function stopAndCleanProvider(
   providerName: string
 ): Promise<string[]> {
   const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-  const { statePath, logPath, pidPath, findingsPath } = getReviewPaths(worktreeDir, providerName);
+  // Read paths resolve from whichever dir has state
+  const readPaths = getReviewPaths(worktreeDir, providerName);
   const deleted: string[] = [];
 
-  if (existsSync(statePath)) {
+  if (existsSync(readPaths.statePath)) {
     try {
-      const state = JSON.parse(await fs.readFile(statePath, "utf-8")) as ReviewState;
+      const state = JSON.parse(await fs.readFile(readPaths.statePath, "utf-8")) as ReviewState;
       tryKillRunningReview(state);
     } catch {
       // Ignore corrupted state.
     }
   }
 
-  for (const targetPath of [statePath, logPath, pidPath, findingsPath]) {
+  // Clean from both old and new dirs to catch split-root state
+  const writePaths = getReviewWritePaths(worktreeDir, providerName);
+  const allPaths = new Set([
+    readPaths.statePath, readPaths.logPath, readPaths.pidPath, readPaths.findingsPath,
+    writePaths.statePath, writePaths.logPath, writePaths.pidPath, writePaths.findingsPath,
+  ]);
+  for (const targetPath of allPaths) {
     if (existsSync(targetPath)) {
       await fs.rm(targetPath, { force: true });
       deleted.push(path.basename(targetPath));
@@ -202,21 +209,23 @@ async function stopAndCleanProvider(
 
 async function handleMarkCommented(
   context: OperationRequestContext,
-  findingsPath: string,
+  readPath: string,
+  writePath: string,
   commentedIndex: number
 ): Promise<void> {
-  if (!existsSync(findingsPath)) {
+  if (!existsSync(readPath)) {
     json(context, 404, { error: "No findings file found" });
     return;
   }
   try {
-    const data = JSON.parse(await fs.readFile(findingsPath, "utf-8")) as FindingsFile;
+    const data = JSON.parse(await fs.readFile(readPath, "utf-8")) as FindingsFile;
     if (commentedIndex < 0 || commentedIndex >= data.findings.length) {
       json(context, 400, { error: "Index out of range" });
       return;
     }
     data.findings[commentedIndex].commented = true;
-    await fs.writeFile(findingsPath, JSON.stringify(data, null, 2), "utf-8");
+    await fs.mkdir(path.dirname(writePath), { recursive: true });
+    await fs.writeFile(writePath, JSON.stringify(data, null, 2), "utf-8");
     json(context, 200, { success: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -226,18 +235,20 @@ async function handleMarkCommented(
 
 async function handleDeclineFindings(
   context: OperationRequestContext,
-  findingsPath: string,
+  readPath: string,
+  writePath: string,
   declineReason: string
 ): Promise<void> {
-  if (!existsSync(findingsPath)) {
+  if (!existsSync(readPath)) {
     json(context, 404, { error: "No findings file found" });
     return;
   }
   try {
-    const data = JSON.parse(await fs.readFile(findingsPath, "utf-8")) as FindingsFile;
+    const data = JSON.parse(await fs.readFile(readPath, "utf-8")) as FindingsFile;
     data.declined = true;
     data.declineReason = declineReason;
-    await fs.writeFile(findingsPath, JSON.stringify(data, null, 2), "utf-8");
+    await fs.mkdir(path.dirname(writePath), { recursive: true });
+    await fs.writeFile(writePath, JSON.stringify(data, null, 2), "utf-8");
     json(context, 200, { success: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -325,11 +336,10 @@ export function registerCodexRoutes(
       return;
     }
 
-    const workDir = path.join(worktreeDir, ".claude", "work");
     const provider =
       requestedProvider && (requestedProvider === "claude" || requestedProvider === "codex")
         ? requestedProvider
-        : resolveProvider(workDir);
+        : resolveProvider(worktreeDir);
 
     if (!provider) {
       json(context, 200, { hasReview: false, worktreeDir, message: "No review has been started" });
@@ -392,10 +402,16 @@ export function registerCodexRoutes(
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
     const providers = provider ? [provider] : ["claude", "codex"];
 
+    // Delete from both new and legacy roots to clear dual-copy leftovers
     await Promise.all(
       providers.flatMap((name) => {
-        const { statePath, logPath, pidPath, findingsPath } = getReviewPaths(worktreeDir, name);
-        return [statePath, logPath, pidPath, findingsPath].map(async (targetPath) => {
+        const readPaths = getReviewPaths(worktreeDir, name);
+        const writePaths = getReviewWritePaths(worktreeDir, name);
+        const allPaths = new Set([
+          readPaths.statePath, readPaths.logPath, readPaths.pidPath, readPaths.findingsPath,
+          writePaths.statePath, writePaths.logPath, writePaths.pidPath, writePaths.findingsPath,
+        ]);
+        return [...allPaths].map(async (targetPath) => {
           await fs.rm(targetPath, { force: true });
         });
       })
@@ -436,15 +452,15 @@ export function registerCodexRoutes(
     }
 
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-    const { statePath } = getReviewPaths(worktreeDir, provider);
+    const { statePath: readStatePath } = getReviewPaths(worktreeDir, provider);
 
-    if (!existsSync(statePath)) {
+    if (!existsSync(readStatePath)) {
       json(context, 404, { error: "No review found" });
       return;
     }
 
     try {
-      const state = JSON.parse(await fs.readFile(statePath, "utf-8")) as ReviewState;
+      const state = JSON.parse(await fs.readFile(readStatePath, "utf-8")) as ReviewState;
       if (state.status !== "running") {
         json(context, 200, {
           stopped: false,
@@ -464,12 +480,14 @@ export function registerCodexRoutes(
         // Process may have already exited.
       }
 
+      const { statePath: writeStatePath } = getReviewWritePaths(worktreeDir, provider);
+      await fs.mkdir(path.dirname(writeStatePath), { recursive: true });
       const updatedState: ReviewState = {
         ...state,
         status: "stopped",
         completedAt: new Date().toISOString()
       };
-      await fs.writeFile(statePath, JSON.stringify(updatedState, null, 2), "utf-8");
+      await fs.writeFile(writeStatePath, JSON.stringify(updatedState, null, 2), "utf-8");
 
       json(context, 200, { stopped: true, pid: state.pid });
     } catch (error) {
@@ -558,15 +576,17 @@ export function registerCodexRoutes(
       return;
     }
 
-    const findingsPath = getReviewPaths(resolveWorktreeDir(repoResult.path, ticketId), provider).findingsPath;
+    const worktreeDir = resolveWorktreeDir(repoResult.path, ticketId);
+    const readFindingsPath = getReviewPaths(worktreeDir, provider).findingsPath;
+    const writeFindingsPath = getReviewWritePaths(worktreeDir, provider).findingsPath;
 
     if (typeof body.commentedIndex === "number") {
-      await handleMarkCommented(context, findingsPath, body.commentedIndex);
+      await handleMarkCommented(context, readFindingsPath, writeFindingsPath, body.commentedIndex);
       return;
     }
 
     if (body.declined === true && typeof body.declineReason === "string" && body.declineReason.trim().length > 0) {
-      await handleDeclineFindings(context, findingsPath, body.declineReason);
+      await handleDeclineFindings(context, readFindingsPath, writeFindingsPath, body.declineReason);
       return;
     }
 
@@ -575,7 +595,7 @@ export function registerCodexRoutes(
       return;
     }
 
-    await handleSaveFindings(context, findingsPath, body, provider);
+    await handleSaveFindings(context, writeFindingsPath, body, provider);
   });
 
   dispatcher.register("POST", "/api/engineer/codex/review-dedup/:ticketId", async (context) => {
@@ -648,15 +668,23 @@ export function registerCodexRoutes(
     }
 
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-    const workDir = path.join(worktreeDir, ".claude", "work");
+    const extractWorkDirs = [
+      path.join(worktreeDir, ".closedloop-ai", "work"),
+      path.join(worktreeDir, ".claude", "work"),
+    ];
 
     let raw = "";
     for (const fileName of ["codex-review-claude.log", "codex-review-codex.log"]) {
-      const candidate = path.join(workDir, fileName);
-      if (!existsSync(candidate)) {
-        continue;
+      for (const dir of extractWorkDirs) {
+        const candidate = path.join(dir, fileName);
+        if (!existsSync(candidate)) {
+          continue;
+        }
+        raw = await fs.readFile(candidate, "utf-8");
+        if (raw.trim()) {
+          break;
+        }
       }
-      raw = await fs.readFile(candidate, "utf-8");
       if (raw.trim()) {
         break;
       }
@@ -776,7 +804,7 @@ export function registerCodexRoutes(
     // Process cwd: use base repo when requested, otherwise use worktree
     const reviewCwd = useBaseRepo ? expandedRepoPath : worktreeDir;
 
-    const { statePath, logPath, pidPath } = getReviewPaths(worktreeDir, provider);
+    const { statePath, logPath, pidPath } = getReviewWritePaths(worktreeDir, provider);
     await fs.mkdir(path.dirname(statePath), { recursive: true });
     await fs.writeFile(logPath, "", "utf-8");
 
@@ -906,7 +934,13 @@ export function registerCodexRoutes(
       return;
     }
 
-    const debateStatePath = path.join(worktreeDir, ".claude", "work", "codex-debate.json");
+    const newDebateWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+    // Per-file resolution: find debate state wherever it exists
+    const debateStatePath = findFirstExisting(
+      path.join(newDebateWorkDir, "codex-debate.json"),
+      path.join(worktreeDir, ".claude", "work", "codex-debate.json")
+    ) ?? path.join(newDebateWorkDir, "codex-debate.json");
+    const debateStateWritePath = path.join(newDebateWorkDir, "codex-debate.json");
     const debateState = await loadJsonFile<{ sessionId?: string; rounds: number }>(debateStatePath, {
       rounds: 0
     });
@@ -933,7 +967,7 @@ export function registerCodexRoutes(
       async (sessionId) => {
         debateState.sessionId = sessionId;
         debateState.rounds += 1;
-        await saveJsonFile(debateStatePath, debateState);
+        await saveJsonFile(debateStateWritePath, debateState);
       }
     );
   });
@@ -971,7 +1005,14 @@ export function registerCodexRoutes(
 
     const chatContextId = asString(body.chatContextId);
     const stateFilename = chatContextId === "review" ? "codex-chat-review.json" : "codex-chat.json";
-    const statePath = path.join(worktreeDir, ".claude", "work", stateFilename);
+    const newStateDirForChat = path.join(worktreeDir, ".closedloop-ai", "work");
+    const oldStateDirForChat = path.join(worktreeDir, ".claude", "work");
+    // Read from legacy path if file only exists there; always write to new canonical path.
+    const stateDirForChat = existsSync(path.join(newStateDirForChat, stateFilename))
+      ? newStateDirForChat
+      : (existsSync(path.join(oldStateDirForChat, stateFilename)) ? oldStateDirForChat : newStateDirForChat);
+    const statePath = path.join(stateDirForChat, stateFilename);
+    const stateWritePath = path.join(newStateDirForChat, stateFilename);
     const chatState = await loadJsonFile<CodexChatState>(statePath, { messageCount: 0 });
 
     const args = chatState.sessionId
@@ -987,7 +1028,7 @@ export function registerCodexRoutes(
       async (sessionId) => {
         chatState.sessionId = sessionId;
         chatState.messageCount += 1;
-        await saveJsonFile(statePath, chatState);
+        await saveJsonFile(stateWritePath, chatState);
       }
     );
   });
@@ -1070,7 +1111,9 @@ export function registerCodexRoutes(
       return;
     }
 
+    // Read from legacy path if file only exists there; always write to new canonical path.
     const historyPath = getFindingHistoryPath(ticketId, expandedRepoPath, findingId);
+    const historyWritePath = getFindingHistoryWritePath(ticketId, expandedRepoPath, findingId);
     const history = await loadJsonFile<FindingChatHistory>(historyPath, {
       messages: [],
       ticketId,
@@ -1088,13 +1131,13 @@ export function registerCodexRoutes(
     };
 
     history.messages.push(userMessage);
-    await saveJsonFile(historyPath, history);
+    await saveJsonFile(historyWritePath, history);
 
     setStreamingHeaders(context.response);
 
     const streamState = createStreamState(async (sessionId) => {
       history.sessionId = sessionId;
-      await saveJsonFile(historyPath, history);
+      await saveJsonFile(historyWritePath, history);
     });
 
     const prompt = buildFindingPrompt(history.findingContext, message, history.messages);
@@ -1174,7 +1217,7 @@ export function registerCodexRoutes(
         });
       }
       history.contextPercent = streamState.contextPercent;
-      await saveJsonFile(historyPath, history);
+      await saveJsonFile(historyWritePath, history);
 
       writeEvent(context.response, {
         type: "result",
@@ -1222,7 +1265,9 @@ export function registerCodexRoutes(
       throw error;
     }
 
+    // Read from legacy path if file only exists there; always write to new canonical path.
     const historyPath = getFindingHistoryPath(ticketId, expandedRepoPath, findingId);
+    const historyWritePath = getFindingHistoryWritePath(ticketId, expandedRepoPath, findingId);
     const history = await loadJsonFile<FindingChatHistory>(historyPath, {
       messages: [],
       ticketId,
@@ -1237,7 +1282,7 @@ export function registerCodexRoutes(
       target.responded = responded;
     }
 
-    await saveJsonFile(historyPath, history);
+    await saveJsonFile(historyWritePath, history);
     json(context, 200, { success: true });
   });
 
@@ -1262,8 +1307,12 @@ export function registerCodexRoutes(
       throw error;
     }
 
-    const historyPath = getFindingHistoryPath(ticketId, expandedRepoPath, findingId);
-    await fs.rm(historyPath, { force: true });
+    // Delete from both new and legacy roots to clear dual-copy leftovers
+    const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
+    const sanitizedFinding = findingId.replaceAll(/[^a-zA-Z0-9-_]/g, "_");
+    const findingFile = path.join("finding-chats", `${sanitizedFinding}.json`);
+    await fs.rm(path.join(worktreeDir, ".closedloop-ai", "work", findingFile), { force: true });
+    await fs.rm(path.join(worktreeDir, ".claude", "work", findingFile), { force: true });
     json(context, 200, { success: true });
   });
 }
@@ -1275,20 +1324,28 @@ function asProvider(value: unknown): "claude" | "codex" | null {
   return null;
 }
 
-function resolveProvider(workDir: string): "claude" | "codex" | null {
-  const claudeState = path.join(workDir, "codex-review-claude.json");
-  if (existsSync(claudeState)) {
-    return "claude";
+function resolveProvider(worktreeDir: string): "claude" | "codex" | null {
+  // Check both new and legacy work dirs for review state files
+  const dirs = [
+    path.join(worktreeDir, ".closedloop-ai", "work"),
+    path.join(worktreeDir, ".claude", "work"),
+  ];
+  for (const dir of dirs) {
+    if (existsSync(path.join(dir, "codex-review-claude.json"))) {
+      return "claude";
+    }
+    if (existsSync(path.join(dir, "codex-review-codex.json"))) {
+      return "codex";
+    }
   }
-
-  const codexState = path.join(workDir, "codex-review-codex.json");
-  if (existsSync(codexState)) {
-    return "codex";
-  }
-
   return null;
 }
 
+/**
+ * Resolve review file paths for READ operations.
+ * Uses per-file findFirstExisting so each file resolves independently
+ * (state may be split across old and new dirs during transition).
+ */
 function getReviewPaths(worktreeDir: string, provider: string): {
   workDir: string;
   statePath: string;
@@ -1296,7 +1353,44 @@ function getReviewPaths(worktreeDir: string, provider: string): {
   pidPath: string;
   findingsPath: string;
 } {
-  const workDir = path.join(worktreeDir, ".claude", "work");
+  const newWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+  const oldWorkDir = path.join(worktreeDir, ".claude", "work");
+  const workDir = existsSync(newWorkDir) ? newWorkDir
+    : existsSync(oldWorkDir) ? oldWorkDir
+    : newWorkDir;
+  return {
+    workDir,
+    statePath: findFirstExisting(
+      path.join(newWorkDir, `codex-review-${provider}.json`),
+      path.join(oldWorkDir, `codex-review-${provider}.json`)
+    ) ?? path.join(newWorkDir, `codex-review-${provider}.json`),
+    logPath: findFirstExisting(
+      path.join(newWorkDir, `codex-review-${provider}.log`),
+      path.join(oldWorkDir, `codex-review-${provider}.log`)
+    ) ?? path.join(newWorkDir, `codex-review-${provider}.log`),
+    pidPath: findFirstExisting(
+      path.join(newWorkDir, `codex-review-${provider}.pid`),
+      path.join(oldWorkDir, `codex-review-${provider}.pid`)
+    ) ?? path.join(newWorkDir, `codex-review-${provider}.pid`),
+    findingsPath: findFirstExisting(
+      path.join(newWorkDir, `review-findings-${provider}.json`),
+      path.join(oldWorkDir, `review-findings-${provider}.json`)
+    ) ?? path.join(newWorkDir, `review-findings-${provider}.json`)
+  };
+}
+
+/**
+ * Resolve review file paths for WRITE operations.
+ * Always targets .closedloop-ai/work so new state never lands in .claude/work.
+ */
+function getReviewWritePaths(worktreeDir: string, provider: string): {
+  workDir: string;
+  statePath: string;
+  logPath: string;
+  pidPath: string;
+  findingsPath: string;
+} {
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
   return {
     workDir,
     statePath: path.join(workDir, `codex-review-${provider}.json`),
@@ -1962,14 +2056,25 @@ function buildFindingPrompt(
 function getFindingHistoryPath(ticketId: string, expandedRepoPath: string, findingId: string): string {
   const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
   const sanitizedFindingId = findingId.replaceAll(/[^a-zA-Z0-9-_]/g, "_");
+  const newFindingWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+  const oldFindingWorkDir = path.join(worktreeDir, ".claude", "work");
+  const filename = path.join("finding-chats", `${sanitizedFindingId}.json`);
+  // For reads: return old path if the file exists there and not in the new location.
+  // Writes always target the new canonical path (see getFindingHistoryWritePath).
+  const newFindingPath = path.join(newFindingWorkDir, filename);
+  const oldFindingPath = path.join(oldFindingWorkDir, filename);
+  if (!existsSync(newFindingPath) && existsSync(oldFindingPath)) {
+    return oldFindingPath;
+  }
+  return newFindingPath;
+}
 
-  return path.join(
-    worktreeDir,
-    ".claude",
-    "work",
-    "finding-chats",
-    `${sanitizedFindingId}.json`
-  );
+/** Always returns the canonical new-path for writes, regardless of where the file currently lives. */
+function getFindingHistoryWritePath(ticketId: string, expandedRepoPath: string, findingId: string): string {
+  const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
+  const sanitizedFindingId = findingId.replaceAll(/[^a-zA-Z0-9-_]/g, "_");
+  const filename = path.join("finding-chats", `${sanitizedFindingId}.json`);
+  return path.join(worktreeDir, ".closedloop-ai", "work", filename);
 }
 
 async function waitForExit(child: ChildProcess): Promise<number> {

@@ -838,9 +838,9 @@ test("returns symphony status envelope for existing state file", async () => {
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-status-AI-321");
-  await fs.mkdir(path.join(worktreeDir, ".claude", "work"), { recursive: true });
+  await fs.mkdir(path.join(worktreeDir, ".closedloop-ai", "work"), { recursive: true });
   await fs.writeFile(
-    path.join(worktreeDir, ".claude", "work", "state.json"),
+    path.join(worktreeDir, ".closedloop-ai", "work", "state.json"),
     JSON.stringify({
       status: "STOPPED",
       phase: "Process stopped by user",
@@ -849,7 +849,7 @@ test("returns symphony status envelope for existing state file", async () => {
     "utf-8"
   );
   await fs.writeFile(
-    path.join(worktreeDir, ".claude", "work", "plan.json"),
+    path.join(worktreeDir, ".closedloop-ai", "work", "plan.json"),
     JSON.stringify({
       pendingTasks: [{ id: "task-2" }],
       completedTasks: [{ id: "task-1" }]
@@ -934,14 +934,15 @@ test("marks state as stopped when killing by ticket without PID file", async () 
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-kill-AI-444");
-  const workDir = path.join(worktreeDir, ".claude", "work");
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
   await fs.mkdir(workDir, { recursive: true });
   await fs.writeFile(
     path.join(workDir, "state.json"),
     JSON.stringify({ status: "IN_PROGRESS", phase: "Running" }),
     "utf-8"
   );
-  await fs.writeFile(path.join(worktreeDir, ".claude", "symphony-loop.local.md"), "loop-state", "utf-8");
+  await fs.mkdir(path.join(worktreeDir, ".closedloop-ai"), { recursive: true });
+  await fs.writeFile(path.join(worktreeDir, ".closedloop-ai", "symphony-loop.local.md"), "loop-state", "utf-8");
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -975,7 +976,7 @@ test("marks state as stopped when killing by ticket without PID file", async () 
   assert.equal(stateAfterKill.status, "STOPPED");
   assert.equal(stateAfterKill.phase, "Process stopped by user");
   await assert.rejects(
-    fs.readFile(path.join(worktreeDir, ".claude", "symphony-loop.local.md"), "utf-8")
+    fs.readFile(path.join(worktreeDir, ".closedloop-ai", "symphony-loop.local.md"), "utf-8")
   );
 });
 
@@ -1023,7 +1024,7 @@ test("returns plan content envelope for symphony plan route", async () => {
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-plan-AI-777");
-  const workDir = path.join(worktreeDir, ".claude", "work");
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
   await fs.mkdir(workDir, { recursive: true });
   await fs.writeFile(
     path.join(workDir, "plan.json"),
@@ -1070,7 +1071,7 @@ test("supports chat history CRUD operations", async () => {
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-chat-AI-888");
-  await fs.mkdir(path.join(worktreeDir, ".claude", "work"), { recursive: true });
+  await fs.mkdir(path.join(worktreeDir, ".closedloop-ai", "work"), { recursive: true });
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -1141,7 +1142,7 @@ test("supports provider-scoped chat history with isolated CRUD", async () => {
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-provider-AI-900");
-  const workDir = path.join(worktreeDir, ".claude", "work");
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
   await fs.mkdir(workDir, { recursive: true });
 
   const server = new DesktopGatewayServer({
@@ -1252,7 +1253,7 @@ test("returns jsonl log format when claude-output.jsonl exists", async () => {
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-logs-AI-999");
-  const workDir = path.join(worktreeDir, ".claude", "work");
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
   await fs.mkdir(workDir, { recursive: true });
   await fs.writeFile(
     path.join(workDir, "claude-output.jsonl"),
@@ -1294,7 +1295,7 @@ test("returns judges payload when judges.json exists", async () => {
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-judges-AI-456");
-  const workDir = path.join(worktreeDir, ".claude", "work");
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
   await fs.mkdir(workDir, { recursive: true });
   await fs.writeFile(
     path.join(workDir, "judges.json"),
@@ -1336,7 +1337,7 @@ test("serves attachment binary from wildcard route", async () => {
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-attachments-AI-111");
-  const attachmentsDir = path.join(worktreeDir, ".claude", "work", "attachments");
+  const attachmentsDir = path.join(worktreeDir, ".closedloop-ai", "work", "attachments");
   await fs.mkdir(attachmentsDir, { recursive: true });
   const imageFile = path.join(attachmentsDir, "image.png");
   await fs.writeFile(imageFile, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
@@ -1374,7 +1375,7 @@ test("uploads image attachments and returns file metadata", async () => {
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-upload-AI-222");
-  await fs.mkdir(path.join(worktreeDir, ".claude", "work"), { recursive: true });
+  await fs.mkdir(path.join(worktreeDir, ".closedloop-ai", "work"), { recursive: true });
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -2266,7 +2267,7 @@ test("returns skipped status when no learnings are pending", async () => {
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
 
   await fs.mkdir(repoPath, { recursive: true });
-  await fs.mkdir(path.join(worktreeParent, "repo-learning-AI-101", ".claude", "work"), {
+  await fs.mkdir(path.join(worktreeParent, "repo-learning-AI-101", ".closedloop-ai", "work"), {
     recursive: true
   });
 
@@ -2312,7 +2313,7 @@ test("invokes plugin cache discovery when pending learnings exist", async () => 
   const pendingDir = path.join(
     worktreeParent,
     "repo-plugin-PLG-01",
-    ".claude",
+    ".closedloop-ai",
     "work",
     ".learnings",
     "pending"
@@ -2353,7 +2354,7 @@ test("invokes plugin cache discovery when pending learnings exist", async () => 
   await new Promise((resolve) => setTimeout(resolve, 400));
 });
 
-test("process-learnings launches self-learning wrapper with .claude/work as arg 1", async () => {
+test("process-learnings launches self-learning wrapper with .closedloop-ai/work as arg 1", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-learnings-wrapper-"));
   tempPathsToClean.push(tmpDir);
 
@@ -2363,7 +2364,7 @@ test("process-learnings launches self-learning wrapper with .claude/work as arg 
 
   await fs.mkdir(repoPath, { recursive: true });
   const worktreeDir = path.join(worktreeParent, "repo-wrapper-LRN-01");
-  const pendingDir = path.join(worktreeDir, ".claude", "work", ".learnings", "pending");
+  const pendingDir = path.join(worktreeDir, ".closedloop-ai", "work", ".learnings", "pending");
   await fs.mkdir(pendingDir, { recursive: true });
   await fs.writeFile(path.join(pendingDir, "learning-1.json"), "{}");
 
@@ -2413,7 +2414,7 @@ test("process-learnings launches self-learning wrapper with .claude/work as arg 
   assert.equal(body.status, "processing");
   assert.equal(typeof body.pid, "number", "pid should be a number when wrapper is found");
 
-  const expectedClaudeWorkDir = path.join(worktreeDir, ".claude", "work");
+  const expectedClaudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
   let spyContent = "";
   for (let attempt = 0; attempt < 20; attempt++) {
     try {
@@ -2428,11 +2429,11 @@ test("process-learnings launches self-learning wrapper with .claude/work as arg 
   assert.ok(spyContent.includes("ARG1="), "spy script should have recorded its arguments");
   assert.ok(
     spyContent.includes(`ARG1=${expectedClaudeWorkDir}`),
-    `wrapper should receive .claude/work as arg 1, got: ${spyContent}`
+    `wrapper should receive .closedloop-ai/work as arg 1, got: ${spyContent}`
   );
   assert.ok(
     spyContent.includes(`CLOSEDLOOP_WORKDIR=${expectedClaudeWorkDir}`),
-    `CLOSEDLOOP_WORKDIR env should be .claude/work path, got: ${spyContent}`
+    `CLOSEDLOOP_WORKDIR env should be .closedloop-ai/work path, got: ${spyContent}`
   );
 });
 
@@ -2811,7 +2812,7 @@ test("symphony launch invokes plugin cache discovery for run-loop script", async
   assert.ok(body.pid === null || typeof body.pid === "number", "pid should be null or a number");
 });
 
-test("symphony launch passes .claude/work path (not ticket ID) as first arg to run-loop.sh", async () => {
+test("symphony launch passes .closedloop-ai/work path (not ticket ID) as first arg to run-loop.sh", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-launch-args-"));
   tempPathsToClean.push(tmpDir);
 
@@ -2877,7 +2878,7 @@ test("symphony launch passes .claude/work path (not ticket ID) as first arg to r
   assert.equal(typeof body.pid, "number", "pid should be a number when script is found");
 
   // Wait for the detached spy script to write its output
-  const expectedClaudeWorkDir = path.join(worktreeDir, ".claude", "work");
+  const expectedClaudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
   let spyContent = "";
   for (let attempt = 0; attempt < 20; attempt++) {
     try {
@@ -2892,11 +2893,11 @@ test("symphony launch passes .claude/work path (not ticket ID) as first arg to r
   assert.ok(spyContent.includes("ARG1="), "spy script should have recorded its arguments");
   assert.ok(
     spyContent.includes(`ARG1=${expectedClaudeWorkDir}`),
-    `first arg should be .claude/work path, got: ${spyContent}`
+    `first arg should be .closedloop-ai/work path, got: ${spyContent}`
   );
   assert.ok(
     spyContent.includes(`CLOSEDLOOP_WORKDIR=${expectedClaudeWorkDir}`),
-    `CLOSEDLOOP_WORKDIR env should be .claude/work path, got: ${spyContent}`
+    `CLOSEDLOOP_WORKDIR env should be .closedloop-ai/work path, got: ${spyContent}`
   );
 });
 
@@ -2978,7 +2979,7 @@ test("saveCodexChatSession writes to review-scoped file when chatContextId is 'r
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-codex-session-"));
   tempPathsToClean.push(tmpDir);
 
-  const workDir = path.join(tmpDir, ".claude", "work");
+  const workDir = path.join(tmpDir, ".closedloop-ai", "work");
   await fs.mkdir(workDir, { recursive: true });
 
   // Write with chatContextId: "review" → codex-chat-review.json
@@ -3004,7 +3005,7 @@ test("saveCodexChatSession is a no-op for non-codex providers", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-codex-session-noop-"));
   tempPathsToClean.push(tmpDir);
 
-  const workDir = path.join(tmpDir, ".claude", "work");
+  const workDir = path.join(tmpDir, ".closedloop-ai", "work");
   await fs.mkdir(workDir, { recursive: true });
 
   await saveCodexChatSession(tmpDir, "sess-1", "claude", "review");
@@ -3025,10 +3026,10 @@ test("GET codex status returns sessionId when state file has one", async () => {
   const repoDir = path.join(tmpDir, "my-repo");
   await fs.mkdir(repoDir, { recursive: true });
 
-  // Create worktree structure: <parent>/<repoName>-<ticketId>/.claude/work/
+  // Create worktree structure: <parent>/<repoName>-<ticketId>/.closedloop-ai/work/
   const ticketId = "TEST-123";
   const worktreeDir = path.join(tmpDir, `my-repo-${ticketId}`);
-  const workDir = path.join(worktreeDir, ".claude", "work");
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
   await fs.mkdir(workDir, { recursive: true });
 
   // Write state file with sessionId
@@ -3227,7 +3228,7 @@ test("symphony/kill updates JobStore to STOPPED when killing by ticket", async (
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-kill-js-AI-900");
-  const workDir = path.join(worktreeDir, ".claude", "work");
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
   await fs.mkdir(workDir, { recursive: true });
   await fs.writeFile(
     path.join(workDir, "state.json"),
@@ -3358,7 +3359,7 @@ test("symphony/status returns IN_PROGRESS when state.json says COMPLETED but pro
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-status-alive-AI-555");
-  const workDir = path.join(worktreeDir, ".claude", "work");
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
   await fs.mkdir(workDir, { recursive: true });
 
   // Spawn a real process so isProcessRunning returns true
@@ -3436,7 +3437,7 @@ test("plan-loop cancel uses JobStore PID fallback when pid file is stale (post-r
   // the pid file was never written or was cleaned up. This forces the fallback
   // chain: readProcessPidSync -> null -> getActiveLoopPid -> null -> JobStore PID.
   const worktreeDir = path.join(tmpDir, "repo", ".worktrees", ticketId);
-  await fs.mkdir(path.join(worktreeDir, ".claude"), { recursive: true });
+  await fs.mkdir(path.join(worktreeDir, ".closedloop-ai"), { recursive: true });
 
   // Seed JobStore with a RUNNING job whose PID is the real sleeper
   const jobStore = new JobStore({ cwd: tmpDir, name: "test-planloop-cancel-fallback" });

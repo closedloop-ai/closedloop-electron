@@ -359,9 +359,9 @@ test("GENERATE_PRD: spawns with worktree cwd, writes context pack, no --add-dir"
   const spyScript = [
     "#!/bin/sh",
     `echo "CWD=$(pwd)" > ${JSON.stringify(captureFile)}`,
-    `echo "PROMPT_MD=$(cat .claude/context/prompt.md 2>/dev/null || echo MISSING)" >> ${JSON.stringify(captureFile)}`,
-    `echo "REPO_INFO_EXISTS=$(test -f .claude/context/repo-info.json && echo yes || echo no)" >> ${JSON.stringify(captureFile)}`,
-    `echo "ARTIFACTS=$(find .claude/context/artifacts -maxdepth 1 -type f 2>/dev/null | sort | tr '\\n' ',')" >> ${JSON.stringify(captureFile)}`,
+    `echo "PROMPT_MD=$(cat .closedloop-ai/context/prompt.md 2>/dev/null || echo MISSING)" >> ${JSON.stringify(captureFile)}`,
+    `echo "REPO_INFO_EXISTS=$(test -f .closedloop-ai/context/repo-info.json && echo yes || echo no)" >> ${JSON.stringify(captureFile)}`,
+    `echo "ARTIFACTS=$(find .closedloop-ai/context/artifacts -maxdepth 1 -type f 2>/dev/null | sort | tr '\\n' ',')" >> ${JSON.stringify(captureFile)}`,
     `echo "ARGS=$*" >> ${JSON.stringify(captureFile)}`,
     // Check that operational files are NOT at worktree root
     `echo "ROOT_LOG=$(test -f symphony-loop.log && echo present || echo absent)" >> ${JSON.stringify(captureFile)}`,

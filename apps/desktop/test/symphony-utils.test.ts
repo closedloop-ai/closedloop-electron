@@ -50,7 +50,7 @@ describe("readProcessPidSync", () => {
 
   test("returns parsed PID from valid file", () => {
     const dir = makeTempDir();
-    const claudeWorkDir = path.join(dir, ".claude", "work");
+    const claudeWorkDir = path.join(dir, ".closedloop-ai", "work");
     mkdirSync(claudeWorkDir, { recursive: true });
     writeFileSync(path.join(claudeWorkDir, "process.pid"), "12345");
 
@@ -59,11 +59,20 @@ describe("readProcessPidSync", () => {
 
   test("returns null for non-numeric content", () => {
     const dir = makeTempDir();
-    const claudeWorkDir = path.join(dir, ".claude", "work");
+    const claudeWorkDir = path.join(dir, ".closedloop-ai", "work");
     mkdirSync(claudeWorkDir, { recursive: true });
     writeFileSync(path.join(claudeWorkDir, "process.pid"), "not-a-pid");
 
     assert.equal(readProcessPidSync(dir), null);
+  });
+
+  test("falls back to legacy .claude/work when .closedloop-ai/work is absent", () => {
+    const dir = makeTempDir();
+    const legacyWorkDir = path.join(dir, ".claude", "work");
+    mkdirSync(legacyWorkDir, { recursive: true });
+    writeFileSync(path.join(legacyWorkDir, "process.pid"), "99999");
+
+    assert.equal(readProcessPidSync(dir), 99999);
   });
 });
 
@@ -89,7 +98,7 @@ describe("readLaunchMetadata", () => {
 
   test("returns baseBranch and parentTicketId from valid file", () => {
     const dir = makeTempDir();
-    const claudeWorkDir = path.join(dir, ".claude", "work");
+    const claudeWorkDir = path.join(dir, ".closedloop-ai", "work");
     mkdirSync(claudeWorkDir, { recursive: true });
     writeFileSync(
       path.join(claudeWorkDir, "launch-metadata.json"),
@@ -109,7 +118,7 @@ describe("readLaunchMetadata", () => {
 
   test("returns null for malformed JSON", () => {
     const dir = makeTempDir();
-    const claudeWorkDir = path.join(dir, ".claude", "work");
+    const claudeWorkDir = path.join(dir, ".closedloop-ai", "work");
     mkdirSync(claudeWorkDir, { recursive: true });
     writeFileSync(
       path.join(claudeWorkDir, "launch-metadata.json"),
@@ -121,7 +130,7 @@ describe("readLaunchMetadata", () => {
 
   test("ignores non-string fields", () => {
     const dir = makeTempDir();
-    const claudeWorkDir = path.join(dir, ".claude", "work");
+    const claudeWorkDir = path.join(dir, ".closedloop-ai", "work");
     mkdirSync(claudeWorkDir, { recursive: true });
     writeFileSync(
       path.join(claudeWorkDir, "launch-metadata.json"),
@@ -143,11 +152,11 @@ describe("readLaunchMetadata", () => {
 // --- writeLaunchMetadata ---
 
 describe("writeLaunchMetadata", () => {
-  test("writes launch-metadata.json and creates .claude/work dir", () => {
+  test("writes launch-metadata.json and creates .closedloop-ai/work dir", () => {
     const dir = makeTempDir();
     writeLaunchMetadata(dir, { baseBranch: "develop" });
 
-    const metaPath = path.join(dir, ".claude", "work", "launch-metadata.json");
+    const metaPath = path.join(dir, ".closedloop-ai", "work", "launch-metadata.json");
     assert.ok(existsSync(metaPath));
     const content = JSON.parse(readFileSync(metaPath, "utf-8"));
     assert.equal(content.baseBranch, "develop");

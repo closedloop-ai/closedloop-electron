@@ -6,7 +6,7 @@ import Busboy from "busboy";
 import type { Readable } from "node:stream";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
-import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
+import { assertRepoAllowed, checkAndMigrateLegacyWorkDir, resolveWorktreeDir } from "./symphony-utils.js";
 
 const ALLOWED_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -55,7 +55,13 @@ export function registerSymphonyUploadRoutes(
       return;
     }
 
-    const attachmentsDir = path.join(worktreeDir, ".claude", "work", "attachments");
+    const migrationResult = checkAndMigrateLegacyWorkDir(worktreeDir);
+    if (migrationResult === "blocked") {
+      json(context, 409, { error: "A job started before the .closedloop-ai migration is still running. Stop it first, then retry." });
+      return;
+    }
+
+    const attachmentsDir = path.join(worktreeDir, ".closedloop-ai", "work", "attachments");
     try {
       assertPathAllowed(attachmentsDir, getAllowedDirectories());
     } catch (error) {
