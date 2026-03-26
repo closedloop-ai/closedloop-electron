@@ -16,26 +16,19 @@ import os from "node:os";
 import path from "node:path";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
+import type { TelemetryEmitter } from "../../main/telemetry-protocol.js";
 import {
   TELEMETRY_LOG_TAIL_LINES,
   TELEMETRY_LOG_TAIL_MAX_BYTES,
 } from "../../main/telemetry-protocol.js";
-import type { TelemetryEmitter } from "../../main/telemetry-protocol.js";
 import type {
   OperationDispatcher,
   OperationRequestContext,
 } from "../operation-dispatcher.js";
 import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
-import {
-  findPluginScript,
-  findPluginVersions,
-  getPluginCacheRoot,
-} from "./plugin-cache.js";
-import {
-  readEvaluatePrdOutputs,
-  writePrdArtifact,
-} from "./symphony-prd-artifacts.js";
+import { startOutputTailer } from "./output-tailer.js";
+import { findPluginScript, findPluginVersions, getPluginCacheRoot } from "./plugin-cache.js";
 import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import {
   expandHome,
@@ -44,7 +37,6 @@ import {
   resolveWorktreeParentDir,
   tryAssertRepoAllowed,
 } from "./symphony-utils.js";
-import { startOutputTailer } from "./output-tailer.js";
 
 // ---------------------------------------------------------------------------
 // WorktreeProvider: abstraction over git worktree operations for testability
@@ -154,7 +146,9 @@ type LoopCommand =
   | "REQUEST_CHANGES"
   | "DECOMPOSE"
   | "EVALUATE_PRD"
-  | "GENERATE_PRD";
+  | "GENERATE_PRD"
+  | "EVALUATE_PLAN"
+  | "EVALUATE_CODE";
 
 const VALID_COMMANDS = new Set<LoopCommand>([
   "PLAN",
@@ -163,6 +157,8 @@ const VALID_COMMANDS = new Set<LoopCommand>([
   "DECOMPOSE",
   "EVALUATE_PRD",
   "GENERATE_PRD",
+  "EVALUATE_PLAN",
+  "EVALUATE_CODE",
 ]);
 type RepoRequirement = "REQUIRED" | "OPTIONAL" | "NOT_REQUIRED";
 const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
@@ -172,6 +168,8 @@ const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
   EVALUATE_PRD: "OPTIONAL",
   GENERATE_PRD: "REQUIRED",
   DECOMPOSE: "NOT_REQUIRED",
+  EVALUATE_PLAN: "REQUIRED",
+  EVALUATE_CODE: "REQUIRED",
 };
 
 interface LoopArtifact {
@@ -179,6 +177,88 @@ interface LoopArtifact {
   type: string;
   title?: string;
   content: string;
+}
+
+/** Artifact types that represent an implementation plan. */
+export const PLAN_ARTIFACT_TYPES = ["IMPLEMENTATION_PLAN", "plan"] as const;
+
+/**
+ * Write prd.md to a work directory from a list of artifacts and an optional
+ * explicit prompt. Priority: prompt > PRD artifact > FEATURE artifact.
+ */
+export async function writePrdArtifact(
+  workDir: string,
+  artifacts: LoopArtifact[],
+  prompt?: string
+): Promise<void> {
+  let prdContent = prompt ?? null;
+
+  if (!prdContent) {
+    const prdArtifact = artifacts.find((a) => a.type === "PRD" || a.type === "prd");
+    const featureArtifact = prdArtifact
+      ? null
+      : artifacts.find((a) => a.type === "FEATURE" || a.type === "artifact");
+    const source = prdArtifact ?? featureArtifact;
+    if (source?.content) {
+      prdContent = source.content;
+    }
+  }
+
+  if (prdContent) {
+    await fs.writeFile(path.join(workDir, "prd.md"), prdContent);
+  }
+}
+
+/** Internal helper: writes plan.md to workDir from the first matching plan artifact. */
+async function writePlanFileToWorkDir(
+  workDir: string,
+  artifacts: LoopArtifact[]
+): Promise<void> {
+  const artifact = artifacts.find((a) =>
+    (PLAN_ARTIFACT_TYPES as readonly string[]).includes(a.type)
+  );
+  if (artifact?.content) {
+    await fs.writeFile(path.join(workDir, "plan.md"), artifact.content);
+  }
+}
+
+/** Write both prd.md and plan.md to a work directory from a list of artifacts. */
+export async function writePlanArtifact(
+  workDir: string,
+  artifacts: LoopArtifact[],
+  prompt?: string
+): Promise<void> {
+  await writePrdArtifact(workDir, artifacts, prompt);
+  await writePlanFileToWorkDir(workDir, artifacts);
+}
+
+/** Write plan.md to a work directory from a list of artifacts. */
+export async function writeCodeArtifact(
+  workDir: string,
+  artifacts: LoopArtifact[]
+): Promise<void> {
+  await writePlanFileToWorkDir(workDir, artifacts);
+}
+
+/**
+ * Read outputs produced by an EVALUATE_{type} loop iteration.
+ * Returns undefined values for missing or unreadable files.
+ */
+function readEvaluateOutputs(workDir: string, artifactType: string): Record<string, unknown> {
+  const judges = readJsonFileSync(path.join(workDir, `${artifactType}-judges.json`));
+  return { [`${artifactType}Judges`]: judges ?? undefined };
+}
+
+export function readEvaluatePrdOutputs(workDir: string): Record<string, unknown> {
+  return readEvaluateOutputs(workDir, "prd");
+}
+
+export function readEvaluatePlanOutputs(workDir: string): Record<string, unknown> {
+  return readEvaluateOutputs(workDir, "plan");
+}
+
+export function readEvaluateCodeOutputs(workDir: string): Record<string, unknown> {
+  return readEvaluateOutputs(workDir, "code");
 }
 
 interface LoopRepo {
@@ -1729,7 +1809,17 @@ async function handleProcessCompletion(
       if (branch) {
         result.branchName = branch;
       }
-    }
+  } else if (command === "DECOMPOSE") {
+    artifacts = readDecomposeOutputs(claudeWorkDir);
+  } else if (command === "EVALUATE_PRD") {
+    artifacts = readEvaluatePrdOutputs(claudeWorkDir);
+  } else if (command === "EVALUATE_PLAN") {
+    artifacts = readEvaluatePlanOutputs(claudeWorkDir);
+  } else if (command === "EVALUATE_CODE") {
+    artifacts = readEvaluateCodeOutputs(claudeWorkDir);
+  } else if (command === "GENERATE_PRD") {
+    artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
+  }
 
     // sessionId inside result (matches harness)
     if (metadata.sessionId) {
@@ -1913,6 +2003,37 @@ async function handleLoopRequest(
     return;
   }
 
+  if (body.command === "EVALUATE_PLAN") {
+    const hasPrdArtifact = body.artifacts.some((a: LoopArtifact) =>
+      ["PRD", "prd", "FEATURE", "artifact"].includes(a.type)
+    );
+    const hasPlanArtifact = body.artifacts.some((a: LoopArtifact) =>
+      (PLAN_ARTIFACT_TYPES as readonly string[]).includes(a.type)
+    );
+    if ((!hasPrdArtifact && !body.prompt) || !hasPlanArtifact) {
+      json(context, 400, { error: "EVALUATE_PLAN requires a PRD artifact (or prompt) and an implementation plan artifact" });
+      return;
+    }
+    if (!body.localRepoPath && !body.repo?.fullName) {
+      json(context, 400, { error: "EVALUATE_PLAN requires a repository (repo.fullName or localRepoPath)" });
+      return;
+    }
+  }
+
+  if (body.command === "EVALUATE_CODE") {
+    const hasPlanArtifact = body.artifacts.some((a: LoopArtifact) =>
+      (PLAN_ARTIFACT_TYPES as readonly string[]).includes(a.type)
+    );
+    if (!hasPlanArtifact) {
+      json(context, 400, { error: "EVALUATE_CODE requires an implementation plan artifact" });
+      return;
+    }
+    if (!body.localRepoPath && !body.repo?.fullName) {
+      json(context, 400, { error: "EVALUATE_CODE requires a repository (repo.fullName or localRepoPath)" });
+      return;
+    }
+  }
+
   if (runningLoops.has(body.loopId)) {
     json(context, 409, { error: "Loop is already running on this machine" });
     return;
@@ -2010,11 +2131,16 @@ async function handleLoopRequest(
     let claudeWorkDir: string;
     let usedTempDir = false;
 
-    if (body.command === "DECOMPOSE" || body.command === "EVALUATE_PRD") {
-      // DECOMPOSE and EVALUATE_PRD: use temp dir, no worktree needed.
+    if (
+      body.command === "DECOMPOSE" ||
+      body.command === "EVALUATE_PRD" ||
+      body.command === "EVALUATE_PLAN" ||
+      body.command === "EVALUATE_CODE"
+    ) {
+      // DECOMPOSE, EVALUATE_PRD, EVALUATE_PLAN, and EVALUATE_CODE: use temp dir, no worktree needed.
       // Temp dir is intentionally exempt from assertPathAllowed.
       usedTempDir = true;
-      const label = body.command === "DECOMPOSE" ? "decompose" : "evaluate-prd";
+      const label = body.command.toLowerCase().replace(/_/g, "-");
       const tmpDir = path.join(
         os.tmpdir(),
         `symphony-${label}-${body.loopId.slice(0, 8)}`,
@@ -2022,7 +2148,24 @@ async function handleLoopRequest(
       await fs.rm(tmpDir, { recursive: true, force: true });
       await fs.mkdir(tmpDir, { recursive: true });
       claudeWorkDir = tmpDir;
-      await writePrdArtifact(claudeWorkDir, body.artifacts, body.prompt);
+      try {
+        if (body.command === "DECOMPOSE" || body.command === "EVALUATE_PRD") {
+          await writePrdArtifact(claudeWorkDir, body.artifacts, body.prompt);
+        } else if (body.command === "EVALUATE_PLAN") {
+          await writePlanArtifact(claudeWorkDir, body.artifacts, body.prompt);
+        } else if (body.command === "EVALUATE_CODE") {
+          await writeCodeArtifact(claudeWorkDir, body.artifacts);
+        }
+      } catch (artifactErr) {
+        await fs.rm(claudeWorkDir, { recursive: true, force: true });
+        await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+          type: "error",
+          code: "ARTIFACT_WRITE_FAILED",
+          message: artifactErr instanceof Error ? artifactErr.message : String(artifactErr),
+        });
+        json(context, 500, { error: "Failed to write artifacts to workdir" });
+        return;
+      }
     } else if (repoRequirement === "REQUIRED" && !expandedRepoPath) {
       json(context, 400, {
         error:
@@ -2237,7 +2380,9 @@ async function handleLoopRequest(
       body.command === "REQUEST_CHANGES" ||
       body.command === "DECOMPOSE" ||
       body.command === "EVALUATE_PRD" ||
-      body.command === "GENERATE_PRD";
+      body.command === "GENERATE_PRD" ||
+      body.command === "EVALUATE_PLAN" ||
+      body.command === "EVALUATE_CODE";
     let scriptPath: string | null = null;
 
     if (usesClaude) {
@@ -2377,6 +2522,28 @@ async function handleLoopRequest(
           claudeWorkDir,
           promptFile,
         );
+        child = spawn(pipeline.cmd, pipeline.args, {
+          cwd: claudeWorkDir,
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: spawnEnv,
+        });
+        child.unref();
+      } else if (body.command === "EVALUATE_PLAN" || body.command === "EVALUATE_CODE") {
+        // EVALUATE_PLAN and EVALUATE_CODE share identical spawn logic,
+        // differing only in the artifact type passed to run-judges.
+        // Unlike EVALUATE_PRD (where REPO_PATH is optional—only added when a repo is linked),
+        // plan and code judges need the implementation tree, so the request must resolve to
+        // a local repo and expandedRepoPath is always set on this path.
+        const artifactType = body.command === "EVALUATE_PLAN" ? "plan" : "code";
+        const label = `evaluate-${artifactType}`;
+        const prompt =
+          `Activate judges:run-judges skill --artifact-type ${artifactType} --workdir ${claudeWorkDir}.\n` +
+          `REPO_PATH=${expandedRepoPath}\n`;
+        const promptFile = path.join(claudeWorkDir, `${label}-prompt.txt`);
+        await fs.writeFile(promptFile, prompt);
+
+        const pipeline = buildClaudePipeline(stdinClaudeArgs, claudeWorkDir, promptFile);
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: claudeWorkDir,
           detached: true,

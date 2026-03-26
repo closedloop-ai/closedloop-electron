@@ -37,8 +37,10 @@ afterEach(async () => {
     process.env.HOME = originalHome;
   }
 
-  // Restore raw pipeline env var (tests may set it individually)
+  // Restore raw pipeline env var and tailer overrides (tests may set individually)
   delete process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
+  delete process.env.CLOSEDLOOP_TAILER_POLL_MS;
+  delete process.env.CLOSEDLOOP_TAILER_THROTTLE_MS;
 
   for (const server of serversToClose.splice(0)) {
     await server.stop();
@@ -510,6 +512,9 @@ describe("T-5.4: Flush on exit", () => {
     { timeout: 20_000 },
     async () => {
       process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+      // Use fast poll interval so the sleep can be short
+      process.env.CLOSEDLOOP_TAILER_POLL_MS = "200";
+      process.env.CLOSEDLOOP_TAILER_THROTTLE_MS = "100";
 
       const tmpDir = makeTempDir();
       const fakeBin = path.join(tmpDir, "fake-bin");
@@ -518,13 +523,13 @@ describe("T-5.4: Flush on exit", () => {
       const eventSrv = await startEventServer();
       const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
 
-      // Stub claude: emit first line, sleep 3s, emit second line, exit
-      // The sleep ensures the second line arrives after the tailer's first poll,
-      // exercising the flush-on-exit path.
+      // Stub claude: emit first line, sleep past the tailer's poll interval,
+      // emit second line, exit — exercising the flush-on-exit path.
+      // Poll interval is set to 200ms via env var above.
       const stubScript = [
         "#!/bin/sh",
         `echo '{"type":"assistant","message":{"content":[{"type":"text","text":"first message"}]}}'`,
-        "sleep 3",
+        "sleep 0.5",
         `echo '{"type":"result","subtype":"success","result":"","is_error":false}'`,
         "exit 0",
       ].join("\n");

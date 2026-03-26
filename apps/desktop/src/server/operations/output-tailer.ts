@@ -161,6 +161,9 @@ async function postLoopEvent(
 // Output tailer
 // ---------------------------------------------------------------------------
 
+const DEFAULT_POLL_MS = 2000;
+const DEFAULT_THROTTLE_MS = 5000;
+
 export function startOutputTailer(
   jsonlPath: string,
   apiBaseUrl: string,
@@ -168,6 +171,8 @@ export function startOutputTailer(
   token: string,
   initialByteOffset: number
 ): { stop: () => void; flush: () => Promise<void> } {
+  const pollIntervalMs = Number(process.env.CLOSEDLOOP_TAILER_POLL_MS) || DEFAULT_POLL_MS;
+  const throttleMs = Number(process.env.CLOSEDLOOP_TAILER_THROTTLE_MS) || DEFAULT_THROTTLE_MS;
   let stopped = false;
   let byteOffset = initialByteOffset;
   let pendingRemainder = Buffer.alloc(0);
@@ -215,14 +220,14 @@ export function startOutputTailer(
 
     if (lastDisplay !== null) {
       const now = Date.now();
-      if (lastSentAt === null || now - lastSentAt >= 5000) {
+      if (lastSentAt === null || now - lastSentAt >= throttleMs) {
         lastSentAt = now;
         await postLoopEvent(apiBaseUrl, loopId, token, { type: "output", data: { chunk: lastDisplay } });
       }
     }
   }
 
-  const intervalId = setInterval(() => { pollOnce().catch(() => {}); }, 2000);
+  const intervalId = setInterval(() => { pollOnce().catch(() => {}); }, pollIntervalMs);
 
   return {
     stop: () => { stopped = true; clearInterval(intervalId); },
