@@ -259,6 +259,15 @@ test("GENERATE_PRD: accepts valid command and responds 200", async () => {
   );
 
   assert.equal(response.status, 200, `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`);
+
+  // Wait for background processing to finish (child process + worktree cleanup)
+  // before afterEach tears down the temp directory, to avoid ENOTEMPTY races.
+  const pollDeadline = Date.now() + 15_000;
+  while (Date.now() < pollDeadline) {
+    const entries = await fs.readdir(worktreeParent).catch(() => []);
+    if (!entries.some((e) => e.includes("generate-prd"))) break;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
 });
 
 // ---------------------------------------------------------------------------
