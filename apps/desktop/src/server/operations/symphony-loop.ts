@@ -689,8 +689,6 @@ async function cleanupGeneratePrdWorktree(
 // Per-command artifact writing
 // ---------------------------------------------------------------------------
 
-const ADDITIONAL_CONTEXT_FILENAME = "additional-context.md";
-
 /**
  * Write PRD for PLAN command.
  * Matches ECS harness writePrdFile(): prompt first, then PRD artifact, then FEATURE.
@@ -716,15 +714,19 @@ async function writeArtifactsForPlan(
     }
   }
 
-  if (prdContent) {
-    await fs.writeFile(path.join(claudeWorkDir, "prd.md"), prdContent);
+  // Append user-supplied Additional Context to the PRD so the planning agent
+  // sees it as part of the requirements (guaranteed to be read). Written as a
+  // clearly delineated section at the end of prd.md.
+  if (userContext?.trim()) {
+    const section =
+      "\n\n---\n\n## User Context / Additional Constraints\n\n" +
+      userContext.trim() +
+      "\n";
+    prdContent = prdContent ? prdContent + section : section;
   }
 
-  if (userContext?.trim()) {
-    await fs.writeFile(
-      path.join(claudeWorkDir, ADDITIONAL_CONTEXT_FILENAME),
-      "# User Context / Additional Constraints\n\n" + userContext.trim(),
-    );
+  if (prdContent) {
+    await fs.writeFile(path.join(claudeWorkDir, "prd.md"), prdContent);
   }
 }
 
