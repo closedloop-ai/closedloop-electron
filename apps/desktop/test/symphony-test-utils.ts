@@ -281,6 +281,7 @@ export interface EvaluateTestHarness {
       predicate: (body: Record<string, unknown>) => boolean,
       timeoutMs?: number
     ) => Promise<Record<string, unknown>>;
+    cancelWaiters: () => void;
   }>;
   /** Call from node:test beforeEach. Sets CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE=1. */
   beforeEach: () => void;
@@ -292,6 +293,7 @@ export function createEvaluateTestHarness(machineName: string): EvaluateTestHarn
   const tempPathsToClean: string[] = [];
   const serversToClose: DesktopGatewayServer[] = [];
   const eventServersToClose: http.Server[] = [];
+  const eventServerCancellers: Array<() => void> = [];
   const originalPath = process.env.PATH;
   const originalRawPipeline = process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
 
@@ -334,12 +336,14 @@ export function createEvaluateTestHarness(machineName: string): EvaluateTestHarn
       predicate: (body: Record<string, unknown>) => boolean,
       timeoutMs?: number
     ) => Promise<Record<string, unknown>>;
+    cancelWaiters: () => void;
   }> {
     const collected: Array<Record<string, unknown>> = [];
     const waiters: Array<{
       predicate: (b: Record<string, unknown>) => boolean;
       resolve: (b: Record<string, unknown>) => void;
       reject: (e: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
     }> = [];
 
     const server = http.createServer((req, res) => {
@@ -380,6 +384,12 @@ export function createEvaluateTestHarness(machineName: string): EvaluateTestHarn
     });
 
     eventServersToClose.push(server);
+    eventServerCancellers.push(() => {
+      for (const waiter of waiters.splice(0)) {
+        clearTimeout(waiter.timer);
+        waiter.reject(new Error("waitForEvent cancelled during teardown"));
+      }
+    });
 
     function waitForEvent(
       predicate: (b: Record<string, unknown>) => boolean,
@@ -390,15 +400,6 @@ export function createEvaluateTestHarness(machineName: string): EvaluateTestHarn
         return Promise.resolve(existing);
       }
       return new Promise<Record<string, unknown>>((resolve, reject) => {
-        const waiter = {
-          predicate,
-          resolve: (b: Record<string, unknown>) => {
-            clearTimeout(timer);
-            resolve(b);
-          },
-          reject,
-        };
-
         const timer = setTimeout(() => {
           const idx = waiters.indexOf(waiter);
           if (idx !== -1) {
@@ -407,11 +408,28 @@ export function createEvaluateTestHarness(machineName: string): EvaluateTestHarn
           reject(new Error(`waitForEvent timed out after ${timeoutMs}ms. Collected so far: ${JSON.stringify(collected)}`));
         }, timeoutMs);
 
+        const waiter = {
+          predicate,
+          resolve: (b: Record<string, unknown>) => {
+            clearTimeout(timer);
+            resolve(b);
+          },
+          reject,
+          timer,
+        };
+
         waiters.push(waiter);
       });
     }
 
-    return { port, waitForEvent };
+    function cancelWaiters(): void {
+      for (const waiter of waiters.splice(0)) {
+        clearTimeout(waiter.timer);
+        waiter.reject(new Error("waitForEvent cancelled during teardown"));
+      }
+    }
+
+    return { port, waitForEvent, cancelWaiters };
   }
 
   return {
@@ -436,6 +454,10 @@ export function createEvaluateTestHarness(machineName: string): EvaluateTestHarn
 
       for (const server of serversToClose.splice(0)) {
         await server.stop();
+      }
+
+      for (const cancel of eventServerCancellers.splice(0)) {
+        cancel();
       }
 
       for (const srv of eventServersToClose.splice(0)) {
