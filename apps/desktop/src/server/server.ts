@@ -16,6 +16,7 @@ import {
   type GatewayApprovalRequest,
   type GatewayApprovalResult
 } from "./router.js";
+import type { TelemetryEmitter } from "../main/telemetry-protocol.js";
 
 export interface DesktopGatewayServerOptions {
   host: string;
@@ -40,6 +41,7 @@ export interface DesktopGatewayServerOptions {
   getApiOrigin?: () => string;
   prodOriginsOnly?: boolean;
   jobStore?: JobStore;
+  telemetry?: TelemetryEmitter;
 }
 
 export class DesktopGatewayServer {
@@ -73,6 +75,7 @@ export class DesktopGatewayServer {
       getApiOrigin: this.options.getApiOrigin,
       prodOriginsOnly: this.options.prodOriginsOnly,
       jobStore: this.options.jobStore,
+      telemetry: this.options.telemetry,
     });
   }
 
@@ -93,7 +96,8 @@ export class DesktopGatewayServer {
     getApiOrigin?: () => string,
     getWebAppOrigin?: () => string,
     prodOriginsOnly?: boolean,
-    jobStore?: JobStore
+    jobStore?: JobStore,
+    telemetry?: TelemetryEmitter
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -115,6 +119,7 @@ export class DesktopGatewayServer {
       getApiOrigin,
       prodOriginsOnly,
       jobStore,
+      telemetry,
     });
   }
 

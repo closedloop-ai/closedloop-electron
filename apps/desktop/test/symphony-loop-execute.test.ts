@@ -17,17 +17,13 @@
  */
 
 import assert from "node:assert/strict";
-import { execFile, execSync } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
-import { promisify } from "node:util";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES, PORT_PROBE_ORDER } from "../src/shared/contracts.js";
-
-const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Shared state and cleanup
@@ -86,87 +82,8 @@ afterEach(async () => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function initGitRepo(repoPath: string): Promise<void> {
-  await execFileAsync("git", ["init", "-b", "main", repoPath]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.email", "test@test.com"]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.name", "Test"]);
-  await fs.writeFile(path.join(repoPath, "README.md"), "# initial\n");
-  await execFileAsync("git", ["-C", repoPath, "add", "."]);
-  await execFileAsync("git", ["-C", repoPath, "commit", "-m", "initial"]);
-}
-
-type RecordedRequest = { method: string; url: string; body: string };
-
-async function startMockApiServer(): Promise<{
-  server: http.Server;
-  port: number;
-  requests: RecordedRequest[];
-  waitForRequest: (urlSubstring: string, timeoutMs?: number) => Promise<RecordedRequest>;
-}> {
-  const requests: RecordedRequest[] = [];
-  const waiters: Array<{ urlSubstring: string; resolve: (r: RecordedRequest) => void }> = [];
-
-  const server = http.createServer((req, res) => {
-    void (async () => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of req) {
-        chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-      }
-      const recorded: RecordedRequest = {
-        method: req.method ?? "",
-        url: req.url ?? "",
-        body: Buffer.concat(chunks).toString("utf-8"),
-      };
-      requests.push(recorded);
-
-      for (let i = waiters.length - 1; i >= 0; i--) {
-        if (recorded.url.includes(waiters[i].urlSubstring)) {
-          waiters[i].resolve(recorded);
-          waiters.splice(i, 1);
-        }
-      }
-
-      res.statusCode = 200;
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ success: true }));
-    })();
-  });
-
-  await new Promise<void>((resolve, reject) => {
-    server.listen(0, "127.0.0.1", () => resolve());
-    server.once("error", reject);
-  });
-
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    throw new Error("failed to bind mock API server");
-  }
-
-  function waitForRequest(urlSubstring: string, timeoutMs = 20_000): Promise<RecordedRequest> {
-    const existing = requests.find((r) => r.url.includes(urlSubstring));
-    if (existing) {
-      return Promise.resolve(existing);
-    }
-    return new Promise<RecordedRequest>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(
-          new Error(
-            `Timed out waiting for request matching "${urlSubstring}" after ${timeoutMs}ms`
-          )
-        );
-      }, timeoutMs);
-      waiters.push({
-        urlSubstring,
-        resolve: (r) => {
-          clearTimeout(timer);
-          resolve(r);
-        },
-      });
-    });
-  }
-
-  return { server, port: address.port, requests, waitForRequest };
-}
+// Shared test helpers — see test/helpers/mock-api-server.ts
+import { initGitRepo, startMockApiServer } from "./helpers/mock-api-server.js";
 
 /**
  * Create the fake plugin cache structure so findPluginScript("code", "run-loop.sh")

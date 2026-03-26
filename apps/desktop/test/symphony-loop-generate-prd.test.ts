@@ -5,17 +5,18 @@
  * and real git repos with worktrees.
  */
 import assert from "node:assert/strict";
-import { execFile, execSync } from "node:child_process";
+import { execSync } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
-import { promisify } from "node:util";
 import { DesktopGatewayServer } from "../src/server/server.js";
-import { EMPTY_CAPABILITIES, PORT_PROBE_ORDER } from "../src/shared/contracts.js";
+import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 
-const execFileAsync = promisify(execFile);
+// Use a file-local port range so this suite does not collide with other
+// integration test files that still use the default gateway probe order.
+const GENERATE_PRD_TEST_PORTS = [39432, 39433, 39434, 39435] as const;
 
 // ---------------------------------------------------------------------------
 // Shared state and cleanup
@@ -66,85 +67,8 @@ afterEach(async () => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function initGitRepo(repoPath: string): Promise<void> {
-  await execFileAsync("git", ["init", "-b", "main", repoPath]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.email", "test@test.com"]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.name", "Test"]);
-  await fs.writeFile(path.join(repoPath, "README.md"), "# initial\n");
-  await execFileAsync("git", ["-C", repoPath, "add", "."]);
-  await execFileAsync("git", ["-C", repoPath, "commit", "-m", "initial"]);
-}
-
-type RecordedRequest = { method: string; url: string; body: string };
-
-async function startMockApiServer(): Promise<{
-  server: http.Server;
-  port: number;
-  requests: RecordedRequest[];
-  waitForRequest: (urlSubstring: string, timeoutMs?: number) => Promise<RecordedRequest>;
-}> {
-  const requests: RecordedRequest[] = [];
-  const waiters: Array<{ urlSubstring: string; resolve: (r: RecordedRequest) => void }> = [];
-
-  const server = http.createServer((req, res) => {
-    void (async () => {
-      const chunks: Buffer[] = [];
-      for await (const chunk of req) {
-        chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-      }
-      const recorded: RecordedRequest = {
-        method: req.method ?? "",
-        url: req.url ?? "",
-        body: Buffer.concat(chunks).toString("utf-8"),
-      };
-      requests.push(recorded);
-
-      // Resolve any waiters matching this URL
-      for (let i = waiters.length - 1; i >= 0; i--) {
-        if (recorded.url.includes(waiters[i].urlSubstring)) {
-          waiters[i].resolve(recorded);
-          waiters.splice(i, 1);
-        }
-      }
-
-      res.statusCode = 200;
-      res.setHeader("content-type", "application/json");
-      res.end(JSON.stringify({ success: true }));
-    })();
-  });
-
-  await new Promise<void>((resolve, reject) => {
-    server.listen(0, "127.0.0.1", () => resolve());
-    server.once("error", reject);
-  });
-
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    throw new Error("failed to bind mock API server");
-  }
-
-  function waitForRequest(urlSubstring: string, timeoutMs = 15_000): Promise<RecordedRequest> {
-    // Check if already received
-    const existing = requests.find((r) => r.url.includes(urlSubstring));
-    if (existing) {
-      return Promise.resolve(existing);
-    }
-    return new Promise<RecordedRequest>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new Error(`Timed out waiting for request matching "${urlSubstring}" after ${timeoutMs}ms`));
-      }, timeoutMs);
-      waiters.push({
-        urlSubstring,
-        resolve: (r) => {
-          clearTimeout(timer);
-          resolve(r);
-        },
-      });
-    });
-  }
-
-  return { server, port: address.port, requests, waitForRequest };
-}
+// Shared test helpers — see test/helpers/mock-api-server.ts
+import { initGitRepo, startMockApiServer } from "./helpers/mock-api-server.js";
 
 const LOOP_UUID = "00000000-0000-0000-0000-000000000099";
 
@@ -161,8 +85,8 @@ test("GENERATE_PRD: rejects with 400 when no repo configured", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: GENERATE_PRD_TEST_PORTS[0],
+    fallbackPorts: GENERATE_PRD_TEST_PORTS.slice(1),
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "genprd-norepo-machine",
@@ -226,8 +150,8 @@ test("GENERATE_PRD: accepts valid command and responds 200", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: GENERATE_PRD_TEST_PORTS[0],
+    fallbackPorts: GENERATE_PRD_TEST_PORTS.slice(1),
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "genprd-accept-machine",
@@ -274,8 +198,8 @@ test("GENERATE_PRD: rejects with 400 when prompt is missing", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: GENERATE_PRD_TEST_PORTS[0],
+    fallbackPorts: GENERATE_PRD_TEST_PORTS.slice(1),
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "genprd-noprompt-machine",
@@ -382,8 +306,8 @@ test("GENERATE_PRD: spawns with worktree cwd, writes context pack, no --add-dir"
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: GENERATE_PRD_TEST_PORTS[0],
+    fallbackPorts: GENERATE_PRD_TEST_PORTS.slice(1),
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "genprd-layout-machine",
@@ -495,8 +419,8 @@ test("GENERATE_PRD: uploads { prd: { content } } when prd.md is written", async 
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: GENERATE_PRD_TEST_PORTS[0],
+    fallbackPorts: GENERATE_PRD_TEST_PORTS.slice(1),
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "genprd-upload-machine",
@@ -567,8 +491,8 @@ test("GENERATE_PRD: uploads empty artifacts when prd.md is not written", async (
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: GENERATE_PRD_TEST_PORTS[0],
+    fallbackPorts: GENERATE_PRD_TEST_PORTS.slice(1),
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "genprd-noout-machine",
@@ -638,8 +562,8 @@ test("GENERATE_PRD: cleans up worktree on failure (exit code 1)", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: GENERATE_PRD_TEST_PORTS[0],
+    fallbackPorts: GENERATE_PRD_TEST_PORTS.slice(1),
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "genprd-cleanup-machine",
