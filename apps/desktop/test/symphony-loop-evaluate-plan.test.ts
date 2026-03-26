@@ -6,7 +6,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
-import { createEvaluateTestHarness, setupStubClaude } from "./symphony-test-utils.js";
+import { createEvaluateTestHarness, postToLoopEndpoint, setupStubClaude } from "./symphony-test-utils.js";
 
 // ---------------------------------------------------------------------------
 // Shared test harness
@@ -37,23 +37,7 @@ function buildEvaluatePlanBody(overrides?: Partial<Record<string, unknown>>): Re
   };
 }
 
-/** POST an EVALUATE_PLAN request to the gateway server. */
-async function postEvaluatePlan(
-  serverPort: number,
-  body: Record<string, unknown>
-): Promise<Response> {
-  return fetch(
-    `http://127.0.0.1:${serverPort}/api/engineer/symphony/loop`,
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-desktop-gateway-token": "test-token",
-      },
-      body: JSON.stringify(body),
-    }
-  );
-}
+
 
 // ---------------------------------------------------------------------------
 // EVALUATE_PLAN-specific validation
@@ -64,7 +48,7 @@ describe("EVALUATE_PLAN validation", () => {
     const server = makeGatewayServer();
     await server.start();
 
-    const response = await postEvaluatePlan(server.getActivePort(), buildEvaluatePlanBody());
+    const response = await postToLoopEndpoint(server.getActivePort(), buildEvaluatePlanBody());
 
     assert.equal(response.status, 400, `Expected 400 when no repo provided, got ${response.status}`);
     const body = await response.json() as { error: string };
@@ -79,14 +63,14 @@ describe("EVALUATE_PLAN validation", () => {
     const server = makeGatewayServer({ allowedDirs: [tmpDir] });
     await server.start();
 
-    const response = await postEvaluatePlan(server.getActivePort(), buildEvaluatePlanBody({
+    const response = await postToLoopEndpoint(server.getActivePort(), buildEvaluatePlanBody({
       artifacts: [{ type: "IMPLEMENTATION_PLAN", content: "Plan content" }],
       localRepoPath: repoDir,
     }));
 
     assert.equal(response.status, 400, `Expected 400 when PRD missing, got ${response.status}`);
     const responseBody = await response.json() as { error: string };
-    assert.ok(responseBody.error, `Error should be set, got: ${responseBody.error}`);
+    assert.ok(responseBody.error, "Response should have error message");
   });
 
   test("prompt substitutes for PRD artifact", async () => {
@@ -104,7 +88,7 @@ describe("EVALUATE_PLAN validation", () => {
     });
     await server.start();
 
-    const response = await postEvaluatePlan(server.getActivePort(), buildEvaluatePlanBody({
+    const response = await postToLoopEndpoint(server.getActivePort(), buildEvaluatePlanBody({
       artifacts: [{ type: "IMPLEMENTATION_PLAN", content: "Plan content" }],
       prompt: "Build a REST API for user management",
       localRepoPath: repoDir,
@@ -128,7 +112,7 @@ describe("EVALUATE_PLAN validation", () => {
     const server = makeGatewayServer({ allowedDirs: [tmpDir] });
     await server.start();
 
-    const response = await postEvaluatePlan(server.getActivePort(), buildEvaluatePlanBody({
+    const response = await postToLoopEndpoint(server.getActivePort(), buildEvaluatePlanBody({
       artifacts: [{ type: "PRD", content: "PRD content" }],
       localRepoPath: repoDir,
     }));
@@ -160,7 +144,7 @@ describe("EVALUATE_PLAN prompt content", () => {
     await server.start();
 
     const loopId = "bbbbbbbb-0000-0000-0000-000000000009";
-    const response = await postEvaluatePlan(server.getActivePort(), buildEvaluatePlanBody({
+    const response = await postToLoopEndpoint(server.getActivePort(), buildEvaluatePlanBody({
       loopId,
       localRepoPath: repoDir,
       apiBaseUrl,

@@ -289,6 +289,24 @@ export interface EvaluateTestHarness {
   afterEach: () => Promise<void>;
 }
 
+/** POST a symphony loop request to the gateway server. */
+export async function postToLoopEndpoint(
+  serverPort: number,
+  body: Record<string, unknown>
+): Promise<Response> {
+  return fetch(
+    `http://127.0.0.1:${serverPort}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-desktop-gateway-token": "test-token",
+      },
+      body: JSON.stringify(body),
+    }
+  );
+}
+
 export function createEvaluateTestHarness(machineName: string): EvaluateTestHarness {
   const tempPathsToClean: string[] = [];
   const serversToClose: DesktopGatewayServer[] = [];

@@ -6,7 +6,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
-import { createEvaluateTestHarness, setupStubClaude } from "./symphony-test-utils.js";
+import { createEvaluateTestHarness, postToLoopEndpoint, setupStubClaude } from "./symphony-test-utils.js";
 
 // ---------------------------------------------------------------------------
 // Shared test harness
@@ -34,23 +34,6 @@ function buildEvaluateCodeBody(overrides?: Partial<Record<string, unknown>>): Re
   };
 }
 
-/** POST an EVALUATE_CODE request to the gateway server. */
-async function postEvaluateCode(
-  serverPort: number,
-  body: Record<string, unknown>
-): Promise<Response> {
-  return fetch(
-    `http://127.0.0.1:${serverPort}/api/engineer/symphony/loop`,
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-desktop-gateway-token": "test-token",
-      },
-      body: JSON.stringify(body),
-    }
-  );
-}
 
 // ---------------------------------------------------------------------------
 // EVALUATE_CODE-specific validation
@@ -61,7 +44,7 @@ describe("T-5.2: EVALUATE_CODE dispatch validation", () => {
     const server = makeGatewayServer();
     await server.start();
 
-    const response = await postEvaluateCode(server.getActivePort(), buildEvaluateCodeBody({
+    const response = await postToLoopEndpoint(server.getActivePort(), buildEvaluateCodeBody({
       loopId: "ec000001-0000-0000-0000-000000000001",
       repo: undefined,
     }));
@@ -73,7 +56,7 @@ describe("T-5.2: EVALUATE_CODE dispatch validation", () => {
     const server = makeGatewayServer();
     await server.start();
 
-    const response = await postEvaluateCode(server.getActivePort(), buildEvaluateCodeBody({
+    const response = await postToLoopEndpoint(server.getActivePort(), buildEvaluateCodeBody({
       loopId: "ec000002-0000-0000-0000-000000000002",
       artifacts: [],
     }));
@@ -107,7 +90,7 @@ describe("T-5.2: EVALUATE_CODE prompt content", () => {
     await server.start();
 
     const loopId = "a0000001-0000-0000-0000-000000000007";
-    const response = await postEvaluateCode(server.getActivePort(), {
+    const response = await postToLoopEndpoint(server.getActivePort(), {
       loopId,
       command: "EVALUATE_CODE",
       closedLoopAuthToken: "cl-token",
@@ -161,7 +144,7 @@ describe("T-5.2: EVALUATE_CODE prompt content", () => {
     const loopId = "a0000003-0000-0000-0000-000000000009";
     const planContent = "This is the raw implementation plan content for testing.";
 
-    const response = await postEvaluateCode(server.getActivePort(), {
+    const response = await postToLoopEndpoint(server.getActivePort(), {
       loopId,
       command: "EVALUATE_CODE",
       closedLoopAuthToken: "cl-token",

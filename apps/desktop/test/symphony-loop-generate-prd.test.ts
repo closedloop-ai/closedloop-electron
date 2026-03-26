@@ -5,17 +5,15 @@
  * and real git repos with worktrees.
  */
 import assert from "node:assert/strict";
-import { execFile, execSync } from "node:child_process";
+import { execSync } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
-import { promisify } from "node:util";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
-
-const execFileAsync = promisify(execFile);
+import { initGitRepo } from "./symphony-test-utils.js";
 
 // ---------------------------------------------------------------------------
 // Shared state and cleanup
@@ -65,18 +63,6 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-async function initGitRepo(repoPath: string): Promise<void> {
-  await execFileAsync("/bin/sh", ["-c", [
-    `git init -b main "${repoPath}"`,
-    `cd "${repoPath}"`,
-    `git config user.email test@test.com`,
-    `git config user.name Test`,
-    `echo "# initial" > README.md`,
-    `git add .`,
-    `git commit -m initial`,
-  ].join(" && ")]);
-}
 
 type RecordedRequest = { method: string; url: string; body: string };
 
