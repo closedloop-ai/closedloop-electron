@@ -13,6 +13,8 @@ import path from "node:path";
 import { afterEach, test } from "node:test";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
+// Shared test helpers
+import { initGitRepo, startMockApiServer } from "./symphony-test-utils.js";
 
 // Use a file-local port range so this suite does not collide with other
 // integration test files that still use the default gateway probe order.
@@ -68,9 +70,6 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-// Shared test helpers
-import { initGitRepo, startMockApiServer } from "./symphony-test-utils.js";
 
 const LOOP_UUID = "00000000-0000-0000-0000-000000000099";
 
