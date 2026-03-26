@@ -31,13 +31,38 @@ jobs:
       pull-requests: write
       issues: write
       actions: read
+      id-token: write
 
     steps:
+      - name: Generate GitHub App Token
+        id: generate_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CLOSEDLOOP_APP_ID_STAGE }}
+          private-key: ${{ secrets.CLOSEDLOOP_APP_SECRET_STAGE }}
+          owner: ${{ github.repository_owner }}
+          # Access to claude-plugins repo required for private plugin marketplace (code, code-review plugins)
+          repositories: ${{ github.event.repository.name }},claude-plugins
+          permission-contents: read
+          permission-issues: write
+          permission-pull-requests: write
+          permission-actions: read
+
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          # Full history required so agents can run `git diff` against any base branch
           fetch-depth: 0
+
+      - name: Restore code review cache
+        if: github.event.pull_request.number != 0
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/cr-cache
+          key: cr-${{ github.event.pull_request.number }}-${{ github.sha }}
+          restore-keys: |
+            cr-${{ github.event.pull_request.number }}-
 
       - name: Verify checkout matches PR head
         if: github.event.pull_request.head.sha != ''
@@ -54,24 +79,151 @@ jobs:
             echo "Checkout verified: HEAD is $ACTUAL_SHA"
           fi
 
+      - name: Configure Git for Private Marketplace
+        shell: bash
+        run: |
+          git config --global url."https://x-access-token:${{ steps.generate_token.outputs.token }}@github.com/".insteadOf "https://github.com/"
+
       - name: Run Claude Code Review
         id: claude-review
         continue-on-error: true
         uses: anthropics/claude-code-action@v1
         with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ steps.generate_token.outputs.token }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY_NEW }}
           show_full_output: true
+          plugin_marketplaces: |
+            https://github.com/closedloop-ai/claude-plugins.git
+          plugins: |
+            judges@closedloop-ai
+            code@closedloop-ai
+            code-review@closedloop-ai
 
           # Allow bot actors like Dependabot to trigger Claude code review
           allowed_bots: "dependabot,closedloop-ai-stage,closedloop-ai"
 
-          prompt: |
-            Review this PR for bugs, security issues, and code quality problems.
-            Focus on correctness and potential regressions.
-            Post your findings as a PR review comment.
+          prompt: "/code-review:start --github${{ github.event.pull_request.number && format(' {0}', github.event.pull_request.number) || '' }}"
 
+          claude_args: |
+            --mcp-config '{"mcpServers": {"context7": {"type": "http", "url": "https://mcp.context7.com/mcp"}}}'
+            --allowedTools "Read,Write,Task,TodoWrite,Skill,Grep,Glob,mcp__context7__resolve-library-id,mcp__context7__query-docs,Bash(gh *),Bash(gh api *),Bash(gh api -X *),Bash(gh api -F *),Bash(gh api -f *),Bash(gh pr *),Bash(git *),Bash(git show *),Bash(git diff *),Bash(git log *),Bash(env *),Bash(grep *),Bash(ls *),Bash(jq *),Bash(cat *),Bash(mkdir *),Bash(echo *),Bash(pnpm *),Bash(npx *),Bash(node *),Bash(tsc *),Bash(python *),Bash(python3 *),Bash(FIND_SCRIPT *),Bash(RESULT *)"
+
+          # Sticky comments disabled - was causing streaming mode errors
           use_sticky_comment: false
+
+      - name: Resolve outdated review threads
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.generate_token.outputs.token }}
+        shell: bash
+        run: |
+          THREADS_FILE=".claude/code-review-threads.json"
+          if [ ! -f "$THREADS_FILE" ]; then
+            echo "No threads file — skipping."
+            exit 0
+          fi
+          HELPERS=$(find "$HOME/.claude" -name "code_review_helpers.py" -path "*/code-review/*" 2>/dev/null | head -1)
+          if [ -z "$HELPERS" ]; then
+            echo "Warning: helpers not found — skipping."
+            exit 0
+          fi
+          python3 "$HELPERS" resolve-threads --threads "$THREADS_FILE"
+
+      - name: Post inline review comments
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.generate_token.outputs.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          FINDINGS_FILE=".claude/code-review-findings.json"
+          if [ ! -f "$FINDINGS_FILE" ]; then
+            echo "No findings file — skipping."
+            exit 0
+          fi
+          HELPERS=$(find "$HOME/.claude" -name "code_review_helpers.py" -path "*/code-review/*" 2>/dev/null | head -1)
+          if [ -z "$HELPERS" ]; then
+            echo "Warning: helpers not found — skipping."
+            exit 0
+          fi
+          python3 "$HELPERS" post-comments --findings "$FINDINGS_FILE"
+
+      - name: Post code review summary
+        id: post-summary
+        if: always()
+        env:
+          GH_TOKEN: ${{ steps.generate_token.outputs.token }}
+        shell: bash
+        run: |
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          REPO="${{ github.repository }}"
+
+          if [ -z "$PR_NUMBER" ]; then
+            echo "No PR number available (workflow_dispatch without PR context). Skipping."
+            echo "posted=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          SUMMARY_FILE=".claude/code-review-summary.md"
+
+          if [ -f "$SUMMARY_FILE" ]; then
+            SUMMARY=$(cat "$SUMMARY_FILE")
+            echo "Found summary file, posting to PR..."
+          else
+            # Check if Claude already posted a summary directly (old slash command behavior)
+            EXISTING=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate --jq '
+              [.[] | select(
+                (.user.login == "closedloop-ai-stage[bot]" or .user.login == "closedloop-ai[bot]" or .user.login == "symphony-cl") and
+                (.body | startswith("## Code Review Summary"))
+              )] | length
+            ' 2>/dev/null || echo "0")
+
+            if [ "$EXISTING" -gt 0 ] 2>/dev/null; then
+              echo "No summary file found, but Claude already posted $EXISTING summary comment(s) directly. Skipping."
+              echo "posted=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            echo "No summary file found and no existing summary comment. Posting fallback."
+            SUMMARY="## Code Review Summary"$'\n\n'"**Status:** Completed"$'\n\n'"Review completed but no summary was generated. Check the workflow logs for details."
+          fi
+
+          # Post the summary as a PR comment
+          RESPONSE=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            -f body="$SUMMARY" 2>&1)
+
+          NEW_COMMENT_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
+          COMMENT_URL=$(echo "$RESPONSE" | jq -r '.html_url // empty')
+          if [ -n "$COMMENT_URL" ]; then
+            echo "Summary posted: $COMMENT_URL"
+            echo "posted=true" >> "$GITHUB_OUTPUT"
+            echo "comment_url=$COMMENT_URL" >> "$GITHUB_OUTPUT"
+          else
+            echo "Warning: Failed to post summary comment"
+            echo "$RESPONSE"
+            echo "posted=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Delete old summary comments (posted by previous runs) to prevent duplicates.
+          # This runs AFTER posting the new comment so we never lose the summary entirely.
+          OLD_IDS=$(gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --paginate --jq '
+            [.[] | select(
+              (.user.login == "closedloop-ai-stage[bot]" or .user.login == "closedloop-ai[bot]" or .user.login == "symphony-cl") and
+              (.body | startswith("## Code Review Summary"))
+            ) | .id][]
+          ' 2>/dev/null || true)
+
+          for OLD_ID in $OLD_IDS; do
+            # Skip the comment we just posted
+            if [ "$OLD_ID" = "$NEW_COMMENT_ID" ]; then
+              continue
+            fi
+            echo "Deleting old summary comment: $OLD_ID"
+            gh api "repos/${REPO}/issues/comments/$OLD_ID" -X DELETE 2>/dev/null || echo "Warning: Failed to delete comment $OLD_ID"
+          done
+
+          echo "Summary cleanup complete."
 
       - name: Review completed
         if: always()
