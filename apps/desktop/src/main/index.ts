@@ -18,10 +18,21 @@ app.on("activate", () => {
   desktopApplication.showWindow();
 });
 
-app.on("before-quit", () => {
-  void desktopApplication.shutdown().catch((error) => {
-    const message = error instanceof Error ? error.message : "unknown shutdown error";
-    console.error(`desktop shutdown failed: ${message}`);
+let quitPromise: Promise<void> | null = null;
+
+app.on("before-quit", (event) => {
+  // Prevent Electron from proceeding until async shutdown completes.
+  event.preventDefault();
+
+  // If shutdown is already in progress (e.g. window-all-closed fired app.quit()
+  // on non-macOS after DesktopWindow.dispose() closed the last window), do nothing.
+  // The first invocation's .then() continuation will call app.exit() exactly once.
+  if (quitPromise) {
+    return;
+  }
+
+  quitPromise = desktopApplication.shutdown().then((result) => {
+    app.exit(result === "clean" ? 0 : 1);
   });
 });
 

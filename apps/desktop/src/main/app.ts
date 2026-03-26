@@ -58,6 +58,8 @@ import {
 import { LocalSessionStore } from "./local-session-store.js";
 import { enrichJobSnapshot } from "../server/operations/symphony-job-snapshot.js";
 import { GatewayRecoveryManager } from "./gateway-recovery.js";
+import { runShutdownSequence } from "./shutdown.js";
+import type { ShutdownResult } from "./shutdown.js";
 import pkg from "electron-updater";
 const { autoUpdater } = pkg;
 import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
@@ -360,21 +362,26 @@ export class DesktopApplication {
     this.desktopWindow.show();
   }
 
-  async shutdown(): Promise<void> {
+  async shutdown(): Promise<ShutdownResult> {
     if (this.shuttingDown) {
-      return;
+      return "clean";
     }
 
     this.shuttingDown = true;
-    if (this.updateCheckTimer) {
-      clearInterval(this.updateCheckTimer);
-      this.updateCheckTimer = null;
-    }
-    this.cloudSocket.stop();
-    this.commandExecutor.dispose();
-    await this.server.stop();
-    this.desktopWindow.dispose();
-    this.tray.dispose();
+    return runShutdownSequence({
+      updateCheckTimer: this.updateCheckTimer,
+      clearUpdateCheckTimer: () => {
+        if (this.updateCheckTimer) {
+          clearInterval(this.updateCheckTimer);
+          this.updateCheckTimer = null;
+        }
+      },
+      cloudSocket: this.cloudSocket,
+      commandExecutor: this.commandExecutor,
+      server: this.server,
+      desktopWindow: this.desktopWindow,
+      tray: this.tray,
+    });
   }
 
   private async probeGatewayAlive(): Promise<boolean> {
