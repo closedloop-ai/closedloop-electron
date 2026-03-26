@@ -12,6 +12,7 @@ import {
   writePrdArtifact,
 } from "../src/server/operations/symphony-loop.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
+import { setupStubClaude } from "./symphony-test-utils.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 
 // ---------------------------------------------------------------------------
@@ -210,6 +211,8 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
     // We post a valid EVALUATE_PRD without a repo field.
     // The handler should not return 400 — it treats repo as optional for this command.
     // It may return 200 (if spawn succeeds) or 500 (if claude not found) but never 400.
+    // Stub claude so we never spawn the real CLI (would hit the API and take minutes).
+    await setupStubClaude(makeTempDir());
     const server = makeGatewayServer();
     await server.start();
 
