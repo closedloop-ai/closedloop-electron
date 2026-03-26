@@ -58,12 +58,15 @@ export function restoreEnv(saved: Record<string, string | undefined>): void {
 // ---------------------------------------------------------------------------
 
 export async function initGitRepo(repoPath: string): Promise<void> {
-  await execFileAsync("git", ["init", "-b", "main", repoPath]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.email", "test@test.com"]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.name", "Test"]);
-  await fs.writeFile(path.join(repoPath, "README.md"), "# initial\n");
-  await execFileAsync("git", ["-C", repoPath, "add", "."]);
-  await execFileAsync("git", ["-C", repoPath, "commit", "-m", "initial"]);
+  await execFileAsync("/bin/sh", ["-c", [
+    `git init -b main "${repoPath}"`,
+    `cd "${repoPath}"`,
+    `git config user.email test@test.com`,
+    `git config user.name Test`,
+    `echo "# initial" > README.md`,
+    `git add .`,
+    `git commit -m initial`,
+  ].join(" && ")]);
 }
 
 // ---------------------------------------------------------------------------
@@ -228,7 +231,7 @@ export async function waitForCompletedEvent(
         return parsed;
       }
     }
-    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(
     `Timed out waiting for completed event for loopId=${loopId} after ${timeoutMs}ms`

@@ -15,12 +15,15 @@ import { SymphonyDirNotConfiguredError, tryAssertRepoAllowed, tryAssertPathAllow
 const execFileAsync = promisify(execFile);
 
 async function initGitRepo(repoPath: string): Promise<void> {
-  await execFileAsync("git", ["init", repoPath]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.email", "test@test.com"]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.name", "Test"]);
-  await fs.writeFile(path.join(repoPath, "README.md"), "# initial\n");
-  await execFileAsync("git", ["-C", repoPath, "add", "."]);
-  await execFileAsync("git", ["-C", repoPath, "commit", "-m", "initial"]);
+  await execFileAsync("/bin/sh", ["-c", [
+    `git init "${repoPath}"`,
+    `cd "${repoPath}"`,
+    `git config user.email test@test.com`,
+    `git config user.name Test`,
+    `echo "# initial" > README.md`,
+    `git add .`,
+    `git commit -m initial`,
+  ].join(" && ")]);
 }
 
 const serversToClose: DesktopGatewayServer[] = [];
@@ -1925,12 +1928,7 @@ test("supports core git action routes", async () => {
   const repoPath = path.join(tmpDir, "repo-git");
   await fs.mkdir(repoPath, { recursive: true });
 
-  await execFileAsync("git", ["init"], { cwd: repoPath });
-  await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: repoPath });
-  await execFileAsync("git", ["config", "user.name", "Test User"], { cwd: repoPath });
-  await fs.writeFile(path.join(repoPath, "README.md"), "# Hello\n", "utf-8");
-  await execFileAsync("git", ["add", "."], { cwd: repoPath });
-  await execFileAsync("git", ["commit", "-m", "initial"], { cwd: repoPath });
+  await initGitRepo(repoPath);
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -1980,12 +1978,15 @@ test("supports git diff route for working tree changes", async () => {
   const repoPath = path.join(tmpDir, "repo-git-diff");
   await fs.mkdir(repoPath, { recursive: true });
 
-  await execFileAsync("git", ["init"], { cwd: repoPath });
-  await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: repoPath });
-  await execFileAsync("git", ["config", "user.name", "Test User"], { cwd: repoPath });
-  await fs.writeFile(path.join(repoPath, "app.ts"), "export const value = 1;\n", "utf-8");
-  await execFileAsync("git", ["add", "."], { cwd: repoPath });
-  await execFileAsync("git", ["commit", "-m", "initial"], { cwd: repoPath });
+  await execFileAsync("/bin/sh", ["-c", [
+    `cd "${repoPath}"`,
+    `git init`,
+    `git config user.email test@test.com`,
+    `git config user.name Test`,
+    `echo 'export const value = 1;' > app.ts`,
+    `git add .`,
+    `git commit -m initial`,
+  ].join(" && ")]);
   await fs.writeFile(path.join(repoPath, "app.ts"), "export const value = 2;\n", "utf-8");
 
   const server = new DesktopGatewayServer({
