@@ -7,11 +7,9 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import {
-  PLAN_ARTIFACT_TYPES,
-  readEvaluatePlanOutputs,
-  writePlanArtifact,
+  readEvaluatePlanOutputs
 } from "../src/server/operations/symphony-loop.js";
-import { createEvaluateTestHarness } from "./symphony-test-utils.js";
+import { createEvaluateTestHarness, setupStubClaude } from "./symphony-test-utils.js";
 
 // ---------------------------------------------------------------------------
 // Shared test harness
@@ -40,18 +38,6 @@ function buildEvaluatePlanBody(overrides?: Partial<Record<string, unknown>>): Re
     ],
     ...overrides,
   };
-}
-
-async function setupStubClaude(tmpDir: string): Promise<void> {
-  const fakeBin = path.join(tmpDir, "fake-bin");
-  await fs.mkdir(fakeBin, { recursive: true });
-  const stubScript = [
-    "#!/bin/sh",
-    'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
-    "exit 0",
-  ].join("\n");
-  await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
-  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
 }
 
 /** POST an EVALUATE_PLAN request to the gateway server. */
@@ -137,6 +123,7 @@ describe("EVALUATE_PLAN validation", () => {
     await server.start();
 
     const response = await postEvaluatePlan(server.getActivePort(), buildEvaluatePlanBody({
+      loopId: "aaaaaaaa-0000-0000-0000-000000000004",
       artifacts: [
         { type: "PRD", content: "PRD content" },
         { type: "IMPLEMENTATION_PLAN", content: "Plan content" },
@@ -144,7 +131,7 @@ describe("EVALUATE_PLAN validation", () => {
       localRepoPath: repoDir,
     }));
 
-    assert.notEqual(response.status, 400, `IMPLEMENTATION_PLAN type should be accepted, but got 400`);
+    assert.equal(response.status, 200, `IMPLEMENTATION_PLAN type should be accepted, got ${response.status}`);
   });
 
   // Test 5: plan type accepted
@@ -157,6 +144,7 @@ describe("EVALUATE_PLAN validation", () => {
     await server.start();
 
     const response = await postEvaluatePlan(server.getActivePort(), buildEvaluatePlanBody({
+      loopId: "aaaaaaaa-0000-0000-0000-000000000005",
       artifacts: [
         { type: "PRD", content: "PRD content" },
         { type: "plan", content: "Plan content" },
@@ -164,7 +152,7 @@ describe("EVALUATE_PLAN validation", () => {
       localRepoPath: repoDir,
     }));
 
-    assert.notEqual(response.status, 400, `'plan' type should be accepted, but got 400`);
+    assert.equal(response.status, 200, `'plan' type should be accepted, got ${response.status}`);
   });
 
   // Test 6: FEATURE artifact fallback for PRD accepted
@@ -177,6 +165,7 @@ describe("EVALUATE_PLAN validation", () => {
     await server.start();
 
     const response = await postEvaluatePlan(server.getActivePort(), buildEvaluatePlanBody({
+      loopId: "aaaaaaaa-0000-0000-0000-000000000006",
       artifacts: [
         { type: "FEATURE", content: "Feature content as PRD" },
         { type: "IMPLEMENTATION_PLAN", content: "Plan content" },
@@ -184,7 +173,7 @@ describe("EVALUATE_PLAN validation", () => {
       localRepoPath: repoDir,
     }));
 
-    assert.notEqual(response.status, 400, `FEATURE artifact fallback for PRD should be accepted, but got 400`);
+    assert.equal(response.status, 200, `FEATURE artifact fallback for PRD should be accepted, got ${response.status}`);
   });
 
   // Test 7: disallowed localRepoPath returns 403
@@ -495,41 +484,6 @@ describe("EVALUATE_PLAN temp dir cleanup", () => {
       existsSync(claudeWorkDir),
       false,
       `Expected temp dir to be cleaned up: ${claudeWorkDir}`
-    );
-  });
-
-  // Test 17: temp dir cleaned up after artifact write failure
-  test("temp dir cleaned up after artifact write failure (posts ARTIFACT_WRITE_FAILED error)", async () => {
-    const tmpDir = makeTempDir("evaluate-plan-test");
-    const workDir = path.join(tmpDir, "artifact-work");
-    await fs.mkdir(workDir, { recursive: true });
-    // Make directory read-only so file writes inside will fail
-    await fs.chmod(workDir, 0o444);
-
-    let threwError = false;
-    try {
-      await writePlanArtifact(workDir, [
-        { type: "PRD", content: "PRD content" },
-        { type: "IMPLEMENTATION_PLAN", content: "Plan content" },
-      ]);
-    } catch {
-      threwError = true;
-    } finally {
-      // Restore permissions so cleanup can proceed
-      await fs.chmod(workDir, 0o755);
-    }
-
-    assert.ok(
-      threwError,
-      "writePlanArtifact should throw when workdir is not writable (simulating artifact write failure)"
-    );
-
-    // Simulate what the handler does on artifact error: rm the workdir
-    await fs.rm(workDir, { recursive: true, force: true });
-    assert.equal(
-      existsSync(workDir),
-      false,
-      "Workdir should be removed after simulated artifact write failure cleanup"
     );
   });
 });

@@ -1549,13 +1549,7 @@ async function handleLoopRequest(
       // DECOMPOSE, EVALUATE_PRD, EVALUATE_PLAN, and EVALUATE_CODE: use temp dir, no worktree needed.
       // Temp dir is intentionally exempt from assertPathAllowed.
       usedTempDir = true;
-      const labelMap: Record<string, string> = {
-        DECOMPOSE: "decompose",
-        EVALUATE_PRD: "evaluate-prd",
-        EVALUATE_PLAN: "evaluate-plan",
-        EVALUATE_CODE: "evaluate-code",
-      };
-      const label = labelMap[body.command] ?? body.command.toLowerCase().replace(/_/g, "-");
+      const label = body.command.toLowerCase().replace(/_/g, "-");
       const tmpDir = path.join(
         os.tmpdir(),
         `symphony-${label}-${body.loopId.slice(0, 8)}`
@@ -1885,6 +1879,9 @@ async function handleLoopRequest(
       } else if (body.command === "EVALUATE_PLAN" || body.command === "EVALUATE_CODE") {
         // EVALUATE_PLAN and EVALUATE_CODE share identical spawn logic,
         // differing only in the artifact type passed to run-judges.
+        // Unlike EVALUATE_PRD (where REPO_PATH is optional—only added when a repo is linked),
+        // plan and code judges need the implementation tree, so the request must resolve to
+        // a local repo and expandedRepoPath is always set on this path.
         const artifactType = body.command === "EVALUATE_PLAN" ? "plan" : "code";
         const label = `evaluate-${artifactType}`;
         const prompt =

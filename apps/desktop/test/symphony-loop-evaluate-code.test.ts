@@ -10,7 +10,7 @@ import {
   PLAN_ARTIFACT_TYPES,
   readEvaluateCodeOutputs,
 } from "../src/server/operations/symphony-loop.js";
-import { createEvaluateTestHarness } from "./symphony-test-utils.js";
+import { createEvaluateTestHarness, setupStubClaude } from "./symphony-test-utils.js";
 
 // ---------------------------------------------------------------------------
 // Shared test harness
@@ -36,18 +36,6 @@ function buildEvaluateCodeBody(overrides?: Partial<Record<string, unknown>>): Re
     repo: { fullName: "org/repo", branch: "main" },
     ...overrides,
   };
-}
-
-async function setupStubClaude(tmpDir: string, scriptLines?: string[]): Promise<void> {
-  const fakeBin = path.join(tmpDir, "fake-bin");
-  await fs.mkdir(fakeBin, { recursive: true });
-  const stubScript = (scriptLines ?? [
-    "#!/bin/sh",
-    'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
-    "exit 0",
-  ]).join("\n");
-  await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
-  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
 }
 
 /** POST an EVALUATE_CODE request to the gateway server. */
@@ -433,7 +421,7 @@ describe("T-5.2: Temp dir cleanup after EVALUATE_CODE completes", () => {
     );
   });
 
-  test("(15) temp dir cleaned up after artifact write failure", async () => {
+  test("(15) temp dir cleaned up after BINARY_NOT_FOUND error", async () => {
     const tmpDir = makeTempDir("evaluate-code-test");
 
     const eventSrv = await startEventServer();
@@ -483,6 +471,70 @@ describe("T-5.2: Temp dir cleanup after EVALUATE_CODE completes", () => {
       existsSync(claudeWorkDir),
       false,
       `Expected temp dir to be cleaned up after error: ${claudeWorkDir}`
+    );
+  });
+
+  test("(15b) temp dir cleaned up after ARTIFACT_WRITE_FAILED", async (t) => {
+    const tmpDir = makeTempDir("evaluate-code-test");
+
+    const eventSrv = await startEventServer();
+    const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+    const server = makeGatewayServer({
+      allowedDirs: [tmpDir],
+      getApiOrigin: () => apiBaseUrl,
+    });
+    await server.start();
+
+    const repoName = "cleanup-artifact-fail-repo";
+    const repoDir = path.join(tmpDir, repoName);
+    await fs.mkdir(repoDir, { recursive: true });
+
+    const loopId = "a0000006-0000-0000-0000-00000000000d";
+
+    // Mock fs.writeFile to throw for plan.md writes, triggering ARTIFACT_WRITE_FAILED
+    const original = fs.writeFile;
+    t.mock.method(fs, "writeFile", async function (
+      filePath: Parameters<typeof fs.writeFile>[0],
+      ...args: unknown[]
+    ) {
+      if (typeof filePath === "string" && filePath.endsWith("/plan.md")) {
+        throw new Error("Simulated artifact write failure");
+      }
+      return (original as Function).apply(fs, [filePath, ...args]);
+    });
+
+    const response = await postEvaluateCode(server.getActivePort(), {
+      loopId,
+      command: "EVALUATE_CODE",
+      closedLoopAuthToken: "cl-token",
+      artifacts: [{ type: "IMPLEMENTATION_PLAN", content: "Plan content" }],
+      repo: { fullName: `org/${repoName}`, branch: "main" },
+    });
+
+    assert.equal(response.status, 500, `Expected 500 on artifact write failure, got ${response.status}`);
+
+    const body = await response.json() as Record<string, unknown>;
+    assert.equal(body.error, "Failed to write artifacts to workdir");
+
+    const errorEvent = await eventSrv.waitForEvent(
+      (b) => b.type === "error" && b.code === "ARTIFACT_WRITE_FAILED",
+      5_000
+    );
+    assert.ok(errorEvent, "Expected ARTIFACT_WRITE_FAILED error event");
+
+    const claudeWorkDir = path.join(os.tmpdir(), `symphony-evaluate-code-${loopId.slice(0, 8)}`);
+
+    // Poll for cleanup (fs.rm in the ARTIFACT_WRITE_FAILED branch)
+    const deadline = Date.now() + 3_000;
+    while (existsSync(claudeWorkDir) && Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    }
+
+    assert.equal(
+      existsSync(claudeWorkDir),
+      false,
+      `Expected temp dir to be cleaned up after ARTIFACT_WRITE_FAILED: ${claudeWorkDir}`
     );
   });
 });

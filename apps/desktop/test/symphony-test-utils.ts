@@ -236,6 +236,23 @@ export async function waitForCompletedEvent(
 }
 
 // ---------------------------------------------------------------------------
+// Shared stub helpers
+// ---------------------------------------------------------------------------
+
+/** Create a fake `claude` binary in tmpDir/fake-bin and prepend it to PATH. */
+export async function setupStubClaude(tmpDir: string, scriptLines?: string[]): Promise<void> {
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  const stubScript = (scriptLines ?? [
+    "#!/bin/sh",
+    'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
+    "exit 0",
+  ]).join("\n");
+  await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+}
+
+// ---------------------------------------------------------------------------
 // Evaluate-test infrastructure (shared by evaluate-plan, evaluate-code, etc.)
 // ---------------------------------------------------------------------------
 
@@ -370,22 +387,24 @@ export function createEvaluateTestHarness(machineName: string): EvaluateTestHarn
         return Promise.resolve(existing);
       }
       return new Promise<Record<string, unknown>>((resolve, reject) => {
+        const waiter = {
+          predicate,
+          resolve: (b: Record<string, unknown>) => {
+            clearTimeout(timer);
+            resolve(b);
+          },
+          reject,
+        };
+
         const timer = setTimeout(() => {
-          const idx = waiters.findIndex((w) => w.resolve === resolve);
+          const idx = waiters.indexOf(waiter);
           if (idx !== -1) {
             waiters.splice(idx, 1);
           }
           reject(new Error(`waitForEvent timed out after ${timeoutMs}ms. Collected so far: ${JSON.stringify(collected)}`));
         }, timeoutMs);
 
-        waiters.push({
-          predicate,
-          resolve: (b) => {
-            clearTimeout(timer);
-            resolve(b);
-          },
-          reject,
-        });
+        waiters.push(waiter);
       });
     }
 
