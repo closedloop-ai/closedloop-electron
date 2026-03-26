@@ -256,16 +256,25 @@ export class DesktopApplication {
       if (app.isPackaged) {
         autoUpdater.autoDownload = true;
         autoUpdater.autoInstallOnAppQuit = true;
+        autoUpdater.on("error", (err) => {
+          gatewayLog.error("auto-update", `Auto-update error: ${err.message}`);
+        });
         autoUpdater.on("update-available", (info) => {
           this.desktopWindow.getWindow()?.webContents.send("desktop:update-available", {
             updateAvailable: true,
             version: info.version
           });
         });
-        void autoUpdater.checkForUpdates().catch(() => {});
+        void autoUpdater.checkForUpdates().catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          gatewayLog.error("auto-update", `Failed to check for updates: ${msg}`);
+        });
         if (this.updateCheckTimer) clearInterval(this.updateCheckTimer);
         this.updateCheckTimer = setInterval(() => {
-          void autoUpdater.checkForUpdates().catch(() => {});
+          void autoUpdater.checkForUpdates().catch((err: unknown) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            gatewayLog.error("auto-update", `Failed to check for updates: ${msg}`);
+          });
         }, UPDATE_CHECK_INTERVAL_MS);
       } else {
         void this.checkForUpdate().then((result) => {
