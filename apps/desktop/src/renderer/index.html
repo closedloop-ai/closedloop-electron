@@ -205,22 +205,11 @@
         color: var(--muted);
       }
 
-      .status-line {
-        margin-bottom: 12px;
-      }
-
-      .ws-status {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        margin-bottom: 12px;
-      }
-
       .dashboard-summary {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        grid-template-columns: repeat(3, 1fr);
         gap: 10px;
-        margin-bottom: 12px;
+        margin-bottom: 16px;
       }
 
       .status-card {
@@ -245,6 +234,77 @@
         white-space: nowrap;
       }
 
+      .status-value.ok {
+        color: #16a34a;
+      }
+
+      .status-value.warn {
+        color: #d97706;
+      }
+
+      .status-value.err {
+        color: #dc2626;
+      }
+
+      .status-detail {
+        color: var(--muted);
+        font-size: 11px;
+        margin-top: 4px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .status-detail a {
+        color: var(--accent);
+        font-weight: 600;
+      }
+
+      .config-section-label {
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }
+
+      .dashboard-config {
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+        margin-bottom: 12px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+        background: var(--border);
+      }
+
+      .config-row {
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+        padding: 8px 12px;
+        background: var(--surface);
+        min-width: 0;
+      }
+
+      .config-row-label {
+        color: var(--muted);
+        font-size: 12px;
+        flex-shrink: 0;
+        width: 90px;
+      }
+
+      .config-row-value {
+        font-size: 13px;
+        font-weight: 500;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        min-width: 0;
+      }
+
       .warning-text {
         color: #d97706;
       }
@@ -258,40 +318,17 @@
           monospace;
       }
 
-      .ws-badge {
-        display: inline-flex;
-        align-items: center;
-        border: 1px solid var(--border);
-        border-radius: 999px;
-        padding: 4px 10px;
-        font-size: 12px;
-        font-weight: 600;
-        background: var(--surface);
-      }
-
-      .ws-badge.connected {
-        border-color: #16a34a;
-        color: #16a34a;
-      }
-
-      .ws-badge.reconnecting {
-        border-color: #d97706;
-        color: #d97706;
-      }
-
-      .ws-badge.disconnected {
-        border-color: #dc2626;
-        color: #dc2626;
-      }
-
       #updateBanner {
         display: none;
         align-items: center;
-        justify-content: center;
         gap: 12px;
-        padding: 10px 20px;
-        background: var(--accent);
-        color: var(--accent-ink);
+        padding: 10px 14px;
+        margin-bottom: 12px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--accent);
+        border-radius: 8px;
+        color: var(--ink);
         font-size: 13px;
         font-weight: 500;
       }
@@ -301,18 +338,20 @@
       }
 
       #updateBanner button {
-        padding: 4px 14px;
-        border: 1px solid var(--accent-ink);
-        border-radius: 4px;
-        background: transparent;
+        margin-left: auto;
+        padding: 5px 14px;
+        border: none;
+        border-radius: 6px;
+        background: var(--accent);
         color: var(--accent-ink);
         font-size: 12px;
         font-weight: 600;
         cursor: pointer;
+        white-space: nowrap;
       }
 
       #updateBanner button:hover {
-        background: rgba(255, 255, 255, 0.15);
+        filter: brightness(1.1);
       }
 
       #updateBanner button:disabled {
@@ -1114,12 +1153,6 @@
         overflow: auto;
       }
 
-      .tech-details summary {
-        cursor: pointer;
-        color: var(--muted);
-        margin-bottom: 8px;
-      }
-
       .job-section {
         margin-bottom: 20px;
       }
@@ -1396,10 +1429,6 @@
         </div>
       </div>
     </header>
-    <div id="updateBanner">
-      <span id="updateBannerText">A new version is available</span>
-      <button id="updateBannerBtn">Update &amp; Restart</button>
-    </div>
     <div id="onboardingOverlay" class="onboarding-overlay hidden">
       <div class="onboarding-card">
         <h2 style="margin-top: 0">Setup Required</h2>
@@ -1459,45 +1488,42 @@
       <button data-tab="settings">Settings</button>
     </nav>
     <main>
+      <div id="updateBanner">
+        <span id="updateBannerText">A new version is available</span>
+        <button id="updateBannerBtn">Update &amp; Restart</button>
+      </div>
       <section id="dashboard" class="panel active">
-        <div class="status-line">
-          Active operations are tracked server-side. This panel reflects gateway readiness.
-        </div>
-        <div class="ws-status">
-          <div class="ws-badge reconnecting" id="wsStatusBadge">WebSocket: Reconnecting</div>
-          <div class="muted" id="wsStatusDetail">Waiting for cloud connection status...</div>
-        </div>
         <div class="dashboard-summary">
           <div class="status-card">
-            <div class="status-label">Local Gateway Port</div>
+            <div class="status-label">Gateway Port</div>
             <div class="status-value" id="dashboardPort">Loading...</div>
           </div>
           <div class="status-card">
             <div class="status-label">Cloud Connection</div>
             <div class="status-value" id="dashboardCloud">Loading...</div>
-          </div>
-          <div class="status-card">
-            <div class="status-label">Target ID</div>
-            <div class="status-value mono" id="dashboardTarget">Loading...</div>
-          </div>
-          <div class="status-card">
-            <div class="status-label">Relay Origin</div>
-            <div class="status-value mono" id="dashboardRelayOrigin">Loading...</div>
-          </div>
-          <div class="status-card">
-            <div class="status-label">API Origin</div>
-            <div class="status-value mono" id="dashboardApiOrigin">Loading...</div>
+            <div class="status-detail" id="wsStatusDetail">Loading...</div>
           </div>
           <div class="status-card">
             <div class="status-label">Remote Commands</div>
             <div class="status-value" id="dashboardCommandsState">Loading...</div>
           </div>
         </div>
+        <div class="config-section-label">Endpoints</div>
+        <div class="dashboard-config">
+          <div class="config-row">
+            <div class="config-row-label">Target ID</div>
+            <div class="config-row-value mono" id="dashboardTarget" title="">Loading...</div>
+          </div>
+          <div class="config-row">
+            <div class="config-row-label">Relay Origin</div>
+            <div class="config-row-value mono" id="dashboardRelayOrigin" title="">Loading...</div>
+          </div>
+          <div class="config-row">
+            <div class="config-row-label">API Origin</div>
+            <div class="config-row-value mono" id="dashboardApiOrigin" title="">Loading...</div>
+          </div>
+        </div>
         <div id="dashboardApproval"></div>
-        <details class="tech-details">
-          <summary>Technical details</summary>
-          <pre id="dashboardPayload">Loading...</pre>
-        </details>
       </section>
       <section id="approvals" class="panel">
         <p class="muted">Pending requests that need approval (Approve, Decline, or Always Allow).</p>
@@ -1741,7 +1767,6 @@
       const relayGatewayMessage = document.getElementById("relayGatewayMessage");
       const securityMessage = document.getElementById("securityMessage");
       const policiesMessage = document.getElementById("policiesMessage");
-      const dashboardPayload = document.getElementById("dashboardPayload");
       const dashboardPort = document.getElementById("dashboardPort");
       const dashboardCloud = document.getElementById("dashboardCloud");
       const dashboardTarget = document.getElementById("dashboardTarget");
@@ -1754,7 +1779,6 @@
       const runningJobsList = document.getElementById("runningJobsList");
       const completedJobsList = document.getElementById("completedJobsList");
       const runtimeStatus = document.getElementById("runtimeStatus");
-      const wsStatusBadge = document.getElementById("wsStatusBadge");
       const wsStatusDetail = document.getElementById("wsStatusDetail");
       const sandboxBaseWarning = document.getElementById("sandboxBaseWarning");
       const headerPauseToggle = document.getElementById("headerPauseToggle");
@@ -1793,35 +1817,45 @@
         if (runtimeHealthLabel) {
           runtimeHealthLabel.textContent = runtimeHealth.label;
         }
-        wsStatusBadge.className = `ws-badge ${websocket.tone}`;
-        wsStatusBadge.textContent = `WebSocket: ${websocket.label}`;
+        // Cloud connection card -- value + color + detail subtitle
+        const cloudToneMap = { connected: "ok", reconnecting: "warn", disconnected: "err" };
+        dashboardCloud.textContent = describeCloudConnection(cloudStatus);
+        dashboardCloud.className = `status-value ${cloudToneMap[websocket.tone] ?? ""}`;
         wsStatusDetail.innerHTML = "";
         wsStatusDetail.textContent = websocket.detail;
         if (isAuthError(cloudStatus.error)) {
           const settingsLink = document.createElement("a");
           settingsLink.href = "#";
           settingsLink.textContent = " Open Settings";
-          settingsLink.style.color = "var(--accent)";
-          settingsLink.style.fontWeight = "600";
           settingsLink.addEventListener("click", (e) => { e.preventDefault(); activateTab("settings"); });
           wsStatusDetail.appendChild(settingsLink);
         }
+
+        // Gateway port
         dashboardPort.textContent = String(status.port ?? "-");
-        dashboardCloud.textContent = describeCloudConnection(cloudStatus);
-        dashboardTarget.textContent = describeTargetId(cloudStatus);
+
+        // Remote commands card -- value + color
+        const cmdText = !cachedConnectionEnabled
+          ? "Disconnected"
+          : cachedCommandsPaused
+            ? "Paused"
+            : "Running";
+        const cmdTone = !cachedConnectionEnabled || cachedCommandsPaused ? "warn" : "ok";
+        dashboardCommandsState.textContent = cmdText;
+        dashboardCommandsState.className = `status-value ${cmdTone}`;
+
+        // Config rows
+        dashboardTarget.textContent = cloudStatus.state === "online" && cloudStatus.targetId
+          ? cloudStatus.targetId
+          : "Not assigned";
         dashboardTarget.title = cloudStatus.targetId || "";
         dashboardRelayOrigin.textContent = describeOrigin(status.relayOrigin);
         dashboardRelayOrigin.title = status.relayOrigin || "";
         dashboardApiOrigin.textContent = describeOrigin(status.apiOrigin);
         dashboardApiOrigin.title = status.apiOrigin || "";
-        dashboardCommandsState.textContent = !cachedConnectionEnabled
-          ? "Disconnected"
-          : cachedCommandsPaused
-            ? "Paused"
-            : "Running";
+
         headerPauseToggle.checked = cachedCommandsPaused;
         headerConnectionToggle.textContent = cachedConnectionEnabled ? "Disconnect" : "Reconnect";
-        dashboardPayload.textContent = JSON.stringify(status, null, 2);
       }
 
       function describeOrigin(origin) {
@@ -1839,20 +1873,6 @@
           return "Disconnected";
         }
         return "Connecting";
-      }
-
-      function describeTargetId(cloudStatus) {
-        if (cloudStatus.state !== "online" || !cloudStatus.targetId) {
-          return "Not assigned";
-        }
-        return abbreviateId(cloudStatus.targetId);
-      }
-
-      function abbreviateId(value) {
-        if (typeof value !== "string" || value.length <= 20) {
-          return value;
-        }
-        return `${value.slice(0, 8)}...${value.slice(-6)}`;
       }
 
       function isAuthError(errorText) {
