@@ -198,7 +198,6 @@ export function registerSymphonyChatHistoryRoutes(
 
     const historyPath = getChatHistoryPath(ticketId, expandedRepoPath, provider);
     const historyWritePath = getChatHistoryWritePath(ticketId, expandedRepoPath, provider);
-    const workDir = path.dirname(historyPath);
     // Both roots for dual-copy cleanup
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
     const workDirs = [

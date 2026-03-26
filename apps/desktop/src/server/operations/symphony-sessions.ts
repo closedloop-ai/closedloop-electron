@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
-import { VALID_PROVIDERS, chatHistoryFilename, expandHome, findFirstExisting } from "./symphony-utils.js";
+import { VALID_PROVIDERS, chatHistoryFilename, expandHome } from "./symphony-utils.js";
 
 type ActiveSession = {
   ticketId: string;
