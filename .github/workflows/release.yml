@@ -63,6 +63,10 @@ jobs:
         if: steps.check_release.outputs.skip != 'true'
         run: pnpm -r prebuild
 
+      - name: Lint
+        if: steps.check_release.outputs.skip != 'true'
+        run: pnpm -C apps/desktop lint
+
       - name: Typecheck
         if: steps.check_release.outputs.skip != 'true'
         run: pnpm -C apps/desktop typecheck
