@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 import {
   readEvaluatePrdOutputs,
   writePrdArtifact,
-} from "../src/server/operations/symphony-prd-artifacts.js";
+} from "../src/server/operations/symphony-loop.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 

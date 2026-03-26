@@ -1,15 +1,20 @@
 /**
  * Shared test helpers for symphony loop integration tests.
  *
- * Extracted from symphony-loop-execute.test.ts and
- * symphony-loop-cloud-failures.test.ts to eliminate duplication.
+ * Extracted from symphony-loop-execute.test.ts,
+ * symphony-loop-cloud-failures.test.ts, and the evaluate-* test files
+ * to eliminate duplication.
  */
 
 import { execFile } from "node:child_process";
+import { mkdirSync } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { DesktopGatewayServer } from "../src/server/server.js";
+import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -228,4 +233,204 @@ export async function waitForCompletedEvent(
   throw new Error(
     `Timed out waiting for completed event for loopId=${loopId} after ${timeoutMs}ms`
   );
+}
+
+// ---------------------------------------------------------------------------
+// Evaluate-test infrastructure (shared by evaluate-plan, evaluate-code, etc.)
+// ---------------------------------------------------------------------------
+
+/**
+ * Cleanup tracker for evaluate-style integration tests.
+ * Call `createEvaluateTestHarness()` at module scope, then use the returned
+ * `makeTempDir`, `makeGatewayServer`, and `startEventServer` helpers.
+ * Register `harness.beforeEach` and `harness.afterEach` with the test runner.
+ */
+export interface EvaluateTestHarness {
+  /** Create a temp directory that will be cleaned up in afterEach. */
+  makeTempDir: (label: string) => string;
+  /** Create a gateway server pre-configured for testing. */
+  makeGatewayServer: (options?: {
+    allowedDirs?: string[];
+    tmpDir?: string;
+    getApiOrigin?: () => string;
+  }) => DesktopGatewayServer;
+  /** Start an event-capture HTTP server for asserting on posted loop events. */
+  startEventServer: () => Promise<{
+    port: number;
+    waitForEvent: (
+      predicate: (body: Record<string, unknown>) => boolean,
+      timeoutMs?: number
+    ) => Promise<Record<string, unknown>>;
+  }>;
+  /** Call from node:test beforeEach. Sets CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE=1. */
+  beforeEach: () => void;
+  /** Call from node:test afterEach. Restores env, stops servers, removes temp dirs. */
+  afterEach: () => Promise<void>;
+}
+
+export function createEvaluateTestHarness(machineName: string): EvaluateTestHarness {
+  const tempPathsToClean: string[] = [];
+  const serversToClose: DesktopGatewayServer[] = [];
+  const eventServersToClose: http.Server[] = [];
+  const originalPath = process.env.PATH;
+  const originalRawPipeline = process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
+
+  function makeTempDir(label: string): string {
+    const dir = path.join(
+      os.tmpdir(),
+      `${label}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    );
+    mkdirSync(dir, { recursive: true });
+    tempPathsToClean.push(dir);
+    return dir;
+  }
+
+  function makeGatewayServer(options?: {
+    allowedDirs?: string[];
+    tmpDir?: string;
+    getApiOrigin?: () => string;
+  }): DesktopGatewayServer {
+    const tmpDir = options?.tmpDir ?? makeTempDir(machineName);
+    const server = new DesktopGatewayServer({
+      host: "127.0.0.1",
+      preferredPort: 0,
+      fallbackPorts: [0],
+      webAppOrigin: "https://app.symphony.com",
+      getGatewayAuthToken: () => "test-token",
+      getApiOrigin: options?.getApiOrigin ?? (() => "http://127.0.0.1:49152"),
+      getAllowedDirectories: () => options?.allowedDirs ?? [os.tmpdir()],
+      machineName,
+      version: "0.1.0-test",
+      capabilities: EMPTY_CAPABILITIES,
+      discoveryFilePath: path.join(tmpDir, "electron-port"),
+    });
+    serversToClose.push(server);
+    return server;
+  }
+
+  async function startEventServer(): Promise<{
+    port: number;
+    waitForEvent: (
+      predicate: (body: Record<string, unknown>) => boolean,
+      timeoutMs?: number
+    ) => Promise<Record<string, unknown>>;
+  }> {
+    const collected: Array<Record<string, unknown>> = [];
+    const waiters: Array<{
+      predicate: (b: Record<string, unknown>) => boolean;
+      resolve: (b: Record<string, unknown>) => void;
+      reject: (e: Error) => void;
+    }> = [];
+
+    const server = http.createServer((req, res) => {
+      let raw = "";
+      req.on("data", (chunk: Buffer) => {
+        raw += chunk.toString();
+      });
+      req.on("end", () => {
+        res.statusCode = 200;
+        res.end("{}");
+        let body: Record<string, unknown>;
+        try {
+          body = JSON.parse(raw) as Record<string, unknown>;
+        } catch {
+          body = {};
+        }
+        collected.push(body);
+        for (let i = waiters.length - 1; i >= 0; i--) {
+          const waiter = waiters[i];
+          if (waiter.predicate(body)) {
+            waiters.splice(i, 1);
+            waiter.resolve(body);
+          }
+        }
+      });
+    });
+
+    const port = await new Promise<number>((resolve, reject) => {
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        if (!addr || typeof addr === "string") {
+          reject(new Error("Could not get server address"));
+          return;
+        }
+        resolve(addr.port);
+      });
+      server.once("error", reject);
+    });
+
+    eventServersToClose.push(server);
+
+    function waitForEvent(
+      predicate: (b: Record<string, unknown>) => boolean,
+      timeoutMs = 10_000
+    ): Promise<Record<string, unknown>> {
+      const existing = collected.find(predicate);
+      if (existing) {
+        return Promise.resolve(existing);
+      }
+      return new Promise<Record<string, unknown>>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          const idx = waiters.findIndex((w) => w.resolve === resolve);
+          if (idx !== -1) {
+            waiters.splice(idx, 1);
+          }
+          reject(new Error(`waitForEvent timed out after ${timeoutMs}ms. Collected so far: ${JSON.stringify(collected)}`));
+        }, timeoutMs);
+
+        waiters.push({
+          predicate,
+          resolve: (b) => {
+            clearTimeout(timer);
+            resolve(b);
+          },
+          reject,
+        });
+      });
+    }
+
+    return { port, waitForEvent };
+  }
+
+  return {
+    makeTempDir,
+    makeGatewayServer,
+    startEventServer,
+    beforeEach() {
+      process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+    },
+    async afterEach() {
+      if (originalRawPipeline === undefined) {
+        delete process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
+      } else {
+        process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = originalRawPipeline;
+      }
+
+      if (originalPath === undefined) {
+        delete process.env.PATH;
+      } else {
+        process.env.PATH = originalPath;
+      }
+
+      for (const server of serversToClose.splice(0)) {
+        await server.stop();
+      }
+
+      for (const srv of eventServersToClose.splice(0)) {
+        await new Promise<void>((resolve, reject) => {
+          srv.close((err) => {
+            if (err) {
+              reject(err);
+            } else {
+              resolve();
+            }
+          });
+        });
+      }
+
+      for (const p of tempPathsToClean.splice(0)) {
+        await fs.rm(p, { recursive: true, force: true });
+      }
+    },
+  };
 }
