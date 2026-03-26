@@ -47,6 +47,36 @@ import {
 import { startOutputTailer } from "./output-tailer.js";
 
 // ---------------------------------------------------------------------------
+// WorktreeProvider: abstraction over git worktree operations for testability
+// ---------------------------------------------------------------------------
+
+export interface WorktreeProvider {
+  ensureWorktree(
+    repoPath: string,
+    worktreeDir: string,
+    branchName: string,
+    baseBranch: string,
+  ): Promise<void>;
+  findWorktreeForBranch(
+    repoPath: string,
+    branchName: string,
+  ): string | null;
+  removeWorktree(
+    worktreeDir: string,
+    repoPath: string,
+    loopId?: string,
+  ): Promise<void>;
+  getCurrentBranch(worktreeDir: string): string | null;
+}
+
+export const defaultWorktreeProvider: WorktreeProvider = {
+  ensureWorktree: ensureWorktreeImpl,
+  findWorktreeForBranch: findWorktreeForBranchImpl,
+  removeWorktree: removeWorktreeImpl,
+  getCurrentBranch: getCurrentBranchImpl,
+};
+
+// ---------------------------------------------------------------------------
 // Legacy migration helper
 // ---------------------------------------------------------------------------
 
@@ -490,7 +520,7 @@ async function uploadArtifacts(
 // Worktree management
 // ---------------------------------------------------------------------------
 
-async function ensureWorktree(
+async function ensureWorktreeImpl(
   expandedRepoPath: string,
   worktreeDir: string,
   branchName: string,
@@ -535,7 +565,7 @@ async function ensureWorktree(
 }
 
 /** Find existing worktree for a branch name. */
-function findWorktreeForBranch(
+function findWorktreeForBranchImpl(
   expandedRepoPath: string,
   branchName: string,
 ): string | null {
@@ -568,11 +598,11 @@ function findWorktreeForBranch(
 // findWorktreeForBranch(parentBranchName) which matches the specific parent.
 
 /**
- * Remove a GENERATE_PRD worktree via git worktree remove, falling back to
+ * Remove a worktree via git worktree remove, falling back to
  * fs.rm + git worktree prune. Used from both handleProcessCompletion and
  * early-return cleanup in handleLoopRequest.
  */
-async function cleanupGeneratePrdWorktree(
+async function removeWorktreeImpl(
   worktreeDir: string,
   expandedRepoPath: string,
   loopId?: string,
@@ -600,6 +630,20 @@ async function cleanupGeneratePrdWorktree(
     } catch {
       // Best-effort
     }
+  }
+}
+
+/** Read the current branch name from a worktree directory. */
+function getCurrentBranchImpl(worktreeDir: string): string | null {
+  try {
+    return execSync("git rev-parse --abbrev-ref HEAD", {
+      cwd: worktreeDir,
+      encoding: "utf-8",
+      stdio: "pipe",
+      timeout: 5_000,
+    }).trim() || null;
+  } catch {
+    return null;
   }
 }
 
@@ -1407,6 +1451,7 @@ async function handleProcessCompletion(
   telemetry?: TelemetryEmitter,
   commandId?: string,
   operationId?: string,
+  wt: WorktreeProvider = defaultWorktreeProvider,
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
 
@@ -1473,7 +1518,7 @@ async function handleProcessCompletion(
     if (usedTempDir) {
       fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
     } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
-      await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, loopId);
+      await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
     return;
   }
@@ -1680,18 +1725,9 @@ async function handleProcessCompletion(
     // Include worktree branch name for all commands that use a worktree.
     // The server persists this on the loop record for display/debugging.
     if (worktreeDir && !result.branchName) {
-      try {
-        const branch = execSync("git rev-parse --abbrev-ref HEAD", {
-          cwd: worktreeDir,
-          encoding: "utf-8",
-          stdio: "pipe",
-          timeout: 5_000,
-        }).trim();
-        if (branch) {
-          result.branchName = branch;
-        }
-      } catch {
-        // Non-critical — worktree may already be cleaned up
+      const branch = wt.getCurrentBranch(worktreeDir);
+      if (branch) {
+        result.branchName = branch;
       }
     }
 
@@ -1727,7 +1763,7 @@ async function handleProcessCompletion(
         worktreeDir &&
         expandedRepoPath
       ) {
-        await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, loopId);
+        await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
       }
       return;
     }
@@ -1790,7 +1826,7 @@ async function handleProcessCompletion(
     if (usedTempDir) {
       fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
     } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
-      await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, loopId);
+      await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
   } finally {
     runningLoops.delete(loopId);
@@ -1808,7 +1844,9 @@ async function handleLoopRequest(
   jobStore?: JobStore,
   getWebAppOrigin?: () => string,
   telemetry?: TelemetryEmitter,
+  worktreeProvider?: WorktreeProvider,
 ): Promise<void> {
+  const wt = worktreeProvider ?? defaultWorktreeProvider;
   // Derive the callback URL from the gateway's trusted configuration.
   // body.apiBaseUrl is ignored -- the caller does not control where
   // loop events and artifact uploads are sent.
@@ -2016,41 +2054,15 @@ async function handleLoopRequest(
       if (body.command === "PLAN") {
         // PLAN always starts fresh — remove stale worktree if it exists.
         // PLAN has requiresParent: false, so it must not inherit prior state.
-        const staleWorktree = findWorktreeForBranch(repoPath, branchName);
+        const staleWorktree = wt.findWorktreeForBranch(repoPath, branchName);
         if (staleWorktree) {
           loopLog(
             body.loopId,
             `Removing stale worktree for fresh PLAN: ${staleWorktree}`,
           );
-          try {
-            execSync(
-              `git worktree remove --force ${shellEscape(staleWorktree)}`,
-              {
-                cwd: repoPath,
-                stdio: "pipe",
-                timeout: 15_000,
-              },
-            );
-          } catch (wtErr) {
-            loopLog(
-              body.loopId,
-              `git worktree remove failed, falling back to fs.rm: ${wtErr instanceof Error ? wtErr.message : wtErr}`,
-            );
-            // Force-remove the directory so ensureWorktree can recreate it
-            await fs.rm(staleWorktree, { recursive: true, force: true });
-            // Prune stale worktree entries from git's tracking
-            try {
-              execSync("git worktree prune", {
-                cwd: repoPath,
-                stdio: "pipe",
-                timeout: 10_000,
-              });
-            } catch {
-              // Best-effort
-            }
-          }
+          await wt.removeWorktree(staleWorktree, repoPath, body.loopId);
         }
-        await ensureWorktree(
+        await wt.ensureWorktree(
           repoPath,
           worktreeDir,
           branchName,
@@ -2063,7 +2075,7 @@ async function handleLoopRequest(
       } else {
         // EXECUTE/REQUEST_CHANGES: reuse existing worktree.
         // Try artifact slug first, then parentLoopId fallback, then create new.
-        const existingWorktree = findWorktreeForBranch(repoPath, branchName);
+        const existingWorktree = wt.findWorktreeForBranch(repoPath, branchName);
         if (existingWorktree) {
           worktreeDir = existingWorktree;
           loopLog(
@@ -2073,7 +2085,7 @@ async function handleLoopRequest(
         } else if (body.parentLoopId) {
           // Fallback: try parent's loopId-based branch (pre-slug deployments or missing slug)
           const parentBranch = `symphony/loop-${slugifyLoopId(body.parentLoopId)}`;
-          const parentWorktree = findWorktreeForBranch(repoPath, parentBranch);
+          const parentWorktree = wt.findWorktreeForBranch(repoPath, parentBranch);
           if (parentWorktree) {
             worktreeDir = parentWorktree;
             loopLog(
@@ -2085,7 +2097,7 @@ async function handleLoopRequest(
         if (!worktreeDir || !existsSync(worktreeDir)) {
           // No existing worktree found — create new
           worktreeDir = resolveLoopWorktreeDir(repoPath, worktreeKey);
-          await ensureWorktree(
+          await wt.ensureWorktree(
             repoPath,
             worktreeDir,
             branchName,
@@ -2149,16 +2161,16 @@ async function handleLoopRequest(
       );
 
       // Always start fresh: remove any stale worktree for this branch before creation.
-      const staleWorktree = findWorktreeForBranch(repoPath, branchName);
+      const staleWorktree = wt.findWorktreeForBranch(repoPath, branchName);
       if (staleWorktree) {
         loopLog(
           body.loopId,
           `Removing stale worktree for fresh GENERATE_PRD: ${staleWorktree}`,
         );
-        await cleanupGeneratePrdWorktree(staleWorktree, repoPath, body.loopId);
+        await wt.removeWorktree(staleWorktree, repoPath, body.loopId);
       }
 
-      await ensureWorktree(
+      await wt.ensureWorktree(
         repoPath,
         worktreeDir,
         branchName,
@@ -2173,7 +2185,7 @@ async function handleLoopRequest(
         assertPathAllowed(worktreeDir, allowedDirs);
       } catch (e) {
         if (e instanceof DirectoryNotAllowedError) {
-          await cleanupGeneratePrdWorktree(worktreeDir, repoPath, body.loopId);
+          await wt.removeWorktree(worktreeDir, repoPath, body.loopId);
           json(context, 403, {
             error: `Worktree path not allowed: ${worktreeDir}`,
           });
@@ -2210,7 +2222,7 @@ async function handleLoopRequest(
           .catch(() => {});
       }
       if (body.command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
-        await cleanupGeneratePrdWorktree(
+        await wt.removeWorktree(
           worktreeDir,
           expandedRepoPath,
           body.loopId,
@@ -2505,6 +2517,7 @@ async function handleLoopRequest(
         telemetry,
         commandId,
         operationId,
+        wt,
       ).catch((err) => {
         loopError(body.loopId, "Completion handler error:", err);
         gatewayLog.error(
@@ -2718,6 +2731,7 @@ export function registerSymphonyLoopRoutes(
   jobStore?: JobStore,
   getWebAppOrigin?: () => string,
   telemetry?: TelemetryEmitter,
+  worktreeProvider?: WorktreeProvider,
 ): void {
   dispatcher.register(
     "POST",
@@ -2730,6 +2744,7 @@ export function registerSymphonyLoopRoutes(
         jobStore,
         getWebAppOrigin,
         telemetry,
+        worktreeProvider,
       );
     },
   );

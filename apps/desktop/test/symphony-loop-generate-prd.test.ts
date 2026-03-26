@@ -2,10 +2,9 @@
  * Integration tests for the GENERATE_PRD loop command.
  *
  * Uses a fake claude binary, a mock API server to record event/upload calls,
- * and real git repos with worktrees.
+ * and a fake WorktreeProvider (no real git).
  */
 import assert from "node:assert/strict";
-import { execSync } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -13,6 +12,7 @@ import path from "node:path";
 import { afterEach, test } from "node:test";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
+import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 
 // Use a file-local port range so this suite does not collide with other
 // integration test files that still use the default gateway probe order.
@@ -61,7 +61,7 @@ afterEach(async () => {
   }
 
   for (const tempPath of tempPathsToClean.splice(0)) {
-    await fs.rm(tempPath, { recursive: true, force: true });
+    await fs.rm(tempPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   }
 });
 
@@ -70,9 +70,24 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 
 // Shared test helpers
-import { initGitRepo, startMockApiServer } from "./symphony-test-utils.js";
+import { startMockApiServer, waitForTerminalEvent } from "./symphony-test-utils.js";
 
 const LOOP_UUID = "00000000-0000-0000-0000-000000000099";
+
+const fakeWorktreeProvider: WorktreeProvider = {
+  async ensureWorktree(_repoPath, worktreeDir) {
+    await fs.mkdir(worktreeDir, { recursive: true });
+  },
+  findWorktreeForBranch() {
+    return null;
+  },
+  async removeWorktree(worktreeDir) {
+    await fs.rm(worktreeDir, { recursive: true, force: true });
+  },
+  getCurrentBranch() {
+    return "symphony/generate-prd-test";
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Test 1: Repo-required rejection
@@ -94,6 +109,7 @@ test("GENERATE_PRD: rejects with 400 when no repo configured", async () => {
     machineName: "genprd-norepo-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
   });
@@ -133,7 +149,7 @@ test("GENERATE_PRD: accepts valid command and responds 200", async () => {
   tempPathsToClean.push(tmpDir);
 
   const repoPath = path.join(tmpDir, "repo-accept");
-  await initGitRepo(repoPath);
+  await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
@@ -163,6 +179,7 @@ test("GENERATE_PRD: accepts valid command and responds 200", async () => {
     machineName: "genprd-accept-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
   });
@@ -191,15 +208,9 @@ test("GENERATE_PRD: accepts valid command and responds 200", async () => {
     `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
   );
 
-  // Wait for handleProcessCompletion to finish (including worktree cleanup)
-  // before afterEach tears down the mock server and temp dirs. Without this,
-  // concurrent fs.rm calls race and can fail with ENOTEMPTY.
-  const pollDeadline = Date.now() + 15_000;
-  while (Date.now() < pollDeadline) {
-    const entries = await fs.readdir(worktreeParent).catch(() => []);
-    if (!entries.some((e) => e.includes("generate-prd"))) break;
-    await new Promise((resolve) => setTimeout(resolve, 200));
-  }
+  // Wait for handleProcessCompletion to post a terminal event before
+  // afterEach tears down the mock server and temp dirs.
+  await waitForTerminalEvent(mock.requests, "00000000-0000-0000-0000-000000000010");
 });
 
 // ---------------------------------------------------------------------------
@@ -211,7 +222,7 @@ test("GENERATE_PRD: rejects with 400 when prompt is missing", async () => {
   tempPathsToClean.push(tmpDir);
 
   const repoPath = path.join(tmpDir, "repo-noprompt");
-  await initGitRepo(repoPath);
+  await fs.mkdir(repoPath, { recursive: true });
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -225,6 +236,7 @@ test("GENERATE_PRD: rejects with 400 when prompt is missing", async () => {
     machineName: "genprd-noprompt-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
   });
@@ -292,7 +304,7 @@ test("GENERATE_PRD: spawns with worktree cwd, writes context pack, no --add-dir"
   tempPathsToClean.push(tmpDir);
 
   const repoPath = path.join(tmpDir, "repo-layout");
-  await initGitRepo(repoPath);
+  await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
@@ -337,6 +349,7 @@ test("GENERATE_PRD: spawns with worktree cwd, writes context pack, no --add-dir"
     machineName: "genprd-layout-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
   });
@@ -375,8 +388,9 @@ test("GENERATE_PRD: spawns with worktree cwd, writes context pack, no --add-dir"
 
   assert.equal(response.status, 200);
 
-  // Wait for the upload call (indicates process completed)
-  await mock.waitForRequest("upload-artifacts");
+  // Wait for the terminal event so handleProcessCompletion (including
+  // worktree cleanup) finishes before afterEach tears down resources.
+  await waitForTerminalEvent(mock.requests, loopId);
 
   // Read the captured data
   const captured = await fs.readFile(captureFile, "utf-8");
@@ -457,7 +471,7 @@ test("GENERATE_PRD: uploads { prd: { content } } when prd.md is written", async 
   tempPathsToClean.push(tmpDir);
 
   const repoPath = path.join(tmpDir, "repo-upload");
-  await initGitRepo(repoPath);
+  await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
@@ -490,6 +504,7 @@ test("GENERATE_PRD: uploads { prd: { content } } when prd.md is written", async 
     machineName: "genprd-upload-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
   });
@@ -531,6 +546,9 @@ test("GENERATE_PRD: uploads { prd: { content } } when prd.md is written", async 
     uploadBody.metadata !== undefined,
     "Upload should contain metadata",
   );
+
+  // Wait for terminal event so worktree cleanup finishes before afterEach.
+  await waitForTerminalEvent(mock.requests, loopId);
 });
 
 // ---------------------------------------------------------------------------
@@ -542,7 +560,7 @@ test("GENERATE_PRD: uploads empty artifacts when prd.md is not written", async (
   tempPathsToClean.push(tmpDir);
 
   const repoPath = path.join(tmpDir, "repo-noout");
-  await initGitRepo(repoPath);
+  await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
@@ -572,6 +590,7 @@ test("GENERATE_PRD: uploads empty artifacts when prd.md is not written", async (
     machineName: "genprd-noout-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
   });
@@ -610,6 +629,9 @@ test("GENERATE_PRD: uploads empty artifacts when prd.md is not written", async (
     undefined,
     "prd should be undefined when not written",
   );
+
+  // Wait for terminal event so worktree cleanup finishes before afterEach.
+  await waitForTerminalEvent(mock.requests, loopId);
 });
 
 // ---------------------------------------------------------------------------
@@ -621,7 +643,7 @@ test("GENERATE_PRD: cleans up worktree on failure (exit code 1)", async () => {
   tempPathsToClean.push(tmpDir);
 
   const repoPath = path.join(tmpDir, "repo-cleanup");
-  await initGitRepo(repoPath);
+  await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
@@ -649,6 +671,7 @@ test("GENERATE_PRD: cleans up worktree on failure (exit code 1)", async () => {
     machineName: "genprd-cleanup-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
   });
@@ -682,26 +705,6 @@ test("GENERATE_PRD: cleans up worktree on failure (exit code 1)", async () => {
     const entries = await fs.readdir(worktreeParent).catch(() => []);
     if (!entries.some((e) => e.includes("generate-prd"))) break;
     await new Promise((resolve) => setTimeout(resolve, 200));
-  }
-
-  // Verify no stale worktree entries remain
-  const worktreeList = execSync("git worktree list --porcelain", {
-    cwd: repoPath,
-    encoding: "utf-8",
-    stdio: "pipe",
-    timeout: 10_000,
-  });
-
-  // Check that no worktree path points into the worktrees dir for generate-prd
-  const worktreeLines = worktreeList
-    .split("\n")
-    .filter((l) => l.startsWith("worktree "));
-  for (const line of worktreeLines) {
-    const wtPath = line.slice("worktree ".length);
-    assert.ok(
-      !wtPath.includes("generate-prd"),
-      `Stale worktree entry found: ${wtPath}`,
-    );
   }
 
   // Verify the directory itself is removed

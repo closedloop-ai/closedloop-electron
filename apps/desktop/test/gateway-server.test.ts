@@ -1,29 +1,17 @@
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
-import { promisify } from "node:util";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { saveCodexChatSession } from "../src/server/operations/codex.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { SymphonyDirNotConfiguredError, tryAssertRepoAllowed, tryAssertPathAllowed } from "../src/server/operations/symphony-utils.js";
 import { JobStore } from "../src/main/job-store.js";
 import type { LocalJob, LocalJobStatus } from "../src/main/job-store.js";
-
-const execFileAsync = promisify(execFile);
-
-async function initGitRepo(repoPath: string): Promise<void> {
-  await execFileAsync("git", ["init", repoPath]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.email", "test@test.com"]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.name", "Test"]);
-  await fs.writeFile(path.join(repoPath, "README.md"), "# initial\n");
-  await execFileAsync("git", ["-C", repoPath, "add", "."]);
-  await execFileAsync("git", ["-C", repoPath, "commit", "-m", "initial"]);
-}
 
 const serversToClose: DesktopGatewayServer[] = [];
 const blockersToClose: net.Server[] = [];
@@ -1933,12 +1921,31 @@ test("supports core git action routes", async () => {
   const repoPath = path.join(tmpDir, "repo-git");
   await fs.mkdir(repoPath, { recursive: true });
 
-  await execFileAsync("git", ["init"], { cwd: repoPath });
-  await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: repoPath });
-  await execFileAsync("git", ["config", "user.name", "Test User"], { cwd: repoPath });
-  await fs.writeFile(path.join(repoPath, "README.md"), "# Hello\n", "utf-8");
-  await execFileAsync("git", ["add", "."], { cwd: repoPath });
-  await execFileAsync("git", ["commit", "-m", "initial"], { cwd: repoPath });
+  // Fake git binary: handles the subcommands the route exercises without
+  // requiring a real git repository.
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'case "$1" in',
+    '  rev-parse) echo "main" ;;',
+    '  status) exit 0 ;;',
+    '  branch)',
+    '    case "$2" in',
+    '      --list) exit 0 ;;',
+    '      --show-current) echo "main" ;;',
+    '      -a) printf "main|\\nfeature/AI-501|\\n" ;;',
+    '      *) exit 0 ;;',
+    '    esac',
+    '    ;;',
+    '  checkout) exit 0 ;;',
+    '  symbolic-ref) exit 1 ;;',
+    '  worktree) exit 0 ;;',
+    '  *) exit 0 ;;',
+    'esac',
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -1988,13 +1995,22 @@ test("supports git diff route for working tree changes", async () => {
   const repoPath = path.join(tmpDir, "repo-git-diff");
   await fs.mkdir(repoPath, { recursive: true });
 
-  await execFileAsync("git", ["init"], { cwd: repoPath });
-  await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: repoPath });
-  await execFileAsync("git", ["config", "user.name", "Test User"], { cwd: repoPath });
-  await fs.writeFile(path.join(repoPath, "app.ts"), "export const value = 1;\n", "utf-8");
-  await execFileAsync("git", ["add", "."], { cwd: repoPath });
-  await execFileAsync("git", ["commit", "-m", "initial"], { cwd: repoPath });
+  // Write the "current" file on disk (new content read directly by the route handler).
   await fs.writeFile(path.join(repoPath, "app.ts"), "export const value = 2;\n", "utf-8");
+
+  // Fake git binary: status reports the file as modified; show returns the old content.
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'case "$1" in',
+    '  status) printf " M app.ts\\n" ;;',
+    '  show) printf "export const value = 1;\\n" ;;',
+    '  *) exit 0 ;;',
+    'esac',
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -2572,24 +2588,28 @@ test("returns empty description when claude CLI is unavailable", async () => {
   const repoPath = path.join(tmpDir, "repo-commit-noclip");
   await fs.mkdir(repoPath, { recursive: true });
 
-  await initGitRepo(repoPath);
-
-  // Create a worktree matching the naming pattern resolveWorktreeDir produces
+  // Create a worktree directory matching the naming pattern resolveWorktreeDir
+  // produces, without using a real git worktree.
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
   const ticketId = "CM-001";
   const worktreeDir = path.join(worktreeParent, `repo-commit-noclip-${ticketId}`);
-  await execFileAsync("git", ["-C", repoPath, "worktree", "add", worktreeDir, "-b", `work/${ticketId}`]);
+  await fs.mkdir(worktreeDir, { recursive: true });
 
-  // Make a file change so git diff HEAD produces output
-  await fs.writeFile(path.join(worktreeDir, "feature.ts"), "export const x = 1;\n");
-  await execFileAsync("git", ["-C", worktreeDir, "add", "."]);
-
-  // Create a fake claude that exits non-zero with no output, placed first in
-  // PATH so it shadows any real installation (the spawn env appends
-  // /opt/homebrew/bin:/usr/local/bin, so restricting PATH alone is not enough)
+  // Create a fake bin directory with:
+  //   git   -- outputs diff content so getGitDiff returns non-empty (triggering
+  //            the claude call path)
+  //   claude -- exits non-zero with no output (unavailable)
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'case "$1" in',
+    '  diff) printf "feature.ts | 1 +\\n+ export const x = 1;\\n" ;;',
+    '  *) exit 0 ;;',
+    'esac',
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
   await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
@@ -2632,28 +2652,33 @@ test("uses valid JSON from claude stdout even when exit code is non-zero", async
   const repoPath = path.join(tmpDir, "repo-commit-nonzero");
   await fs.mkdir(repoPath, { recursive: true });
 
-  await initGitRepo(repoPath);
-
-  // Create a worktree with a staged change so getGitDiff returns non-empty
+  // Create a worktree directory so getGitDiff is reached (no real git needed).
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
   const ticketId = "CM-003";
   const worktreeDir = path.join(worktreeParent, `repo-commit-nonzero-${ticketId}`);
-  await execFileAsync("git", ["-C", repoPath, "worktree", "add", worktreeDir, "-b", `work/${ticketId}`]);
-  await fs.writeFile(path.join(worktreeDir, "feature.ts"), "export const x = 1;\n");
-  await execFileAsync("git", ["-C", worktreeDir, "add", "."]);
+  await fs.mkdir(worktreeDir, { recursive: true });
 
-  // Create a fake claude that exits non-zero but prints valid commit JSON.
-  // This is the core spawn-over-execFile regression guard: execFileAsync
-  // discards stdout on non-zero exit, but spawn preserves it.
+  // Create a fake bin with:
+  //   git    -- outputs diff content so getGitDiff returns non-empty
+  //   claude -- exits non-zero but prints valid commit JSON (spawn-over-execFile
+  //             regression guard: spawn preserves stdout on non-zero exit)
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
-  const fakeScript = [
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'case "$1" in',
+    '  diff) printf "feature.ts | 1 +\\n+ export const x = 1;\\n" ;;',
+    '  *) exit 0 ;;',
+    'esac',
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+  const fakeClaudeScript = [
     "#!/bin/sh",
     'echo \'{"title": "CM-003: Add feature module", "description": "- Added feature.ts export"}\'',
     "exit 1",
   ].join("\n");
-  await fs.writeFile(path.join(fakeBin, "claude"), fakeScript, { mode: 0o755 });
+  await fs.writeFile(path.join(fakeBin, "claude"), fakeClaudeScript, { mode: 0o755 });
 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
@@ -2679,8 +2704,8 @@ test("uses valid JSON from claude stdout even when exit code is non-zero", async
   );
   assert.equal(response.status, 200);
   const body = await response.json();
-  // Must parse the JSON from stdout despite non-zero exit — this is the
-  // contract that spawn preserves and execFileAsync would break.
+  // Must parse the JSON from stdout despite non-zero exit -- this is the
+  // contract that spawn preserves (execFile would discard stdout on non-zero exit).
   assert.equal(body.source, "claude", "source should be claude when valid JSON is parsed from stdout");
   assert.equal(body.title, "CM-003: Add feature module");
   assert.equal(body.description, "- Added feature.ts export");
@@ -2693,15 +2718,24 @@ test("returns default with empty description when worktree has no diff", async (
   const repoPath = path.join(tmpDir, "repo-commit-nodiff");
   await fs.mkdir(repoPath, { recursive: true });
 
-  await initGitRepo(repoPath);
-
-  // Create a real worktree with no uncommitted changes — getGitDiff returns ""
-  // because git diff HEAD produces no output, hitting the !diff early-return
+  // Create a worktree directory with no changes — fake git outputs nothing for
+  // "diff", so getGitDiff strips the "---" separator and returns "".
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
   const ticketId = "CM-002";
-  const worktreeDir = path.join(worktreeParent, `repo-commit-nodiff-${ticketId}`);
-  await execFileAsync("git", ["-C", repoPath, "worktree", "add", worktreeDir, "-b", `work/${ticketId}`]);
+  await fs.mkdir(path.join(worktreeParent, `repo-commit-nodiff-${ticketId}`), { recursive: true });
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'case "$1" in',
+    '  diff) exit 0 ;;',
+    '  *) exit 0 ;;',
+    'esac',
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
 

@@ -229,3 +229,35 @@ export async function waitForCompletedEvent(
     `Timed out waiting for completed event for loopId=${loopId} after ${timeoutMs}ms`
   );
 }
+
+/**
+ * Poll mock.requests until a terminal event (type "completed" or "error")
+ * is found for the given loopId. Use this instead of waitForCompletedEvent
+ * when the process may exit with a non-zero code.
+ */
+export async function waitForTerminalEvent(
+  requests: RecordedRequest[],
+  loopId: string,
+  timeoutMs = 20_000
+): Promise<Record<string, unknown>> {
+  const eventsUrlSubstring = `/loops/${loopId}/events`;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    for (const req of requests) {
+      if (!req.url.includes(eventsUrlSubstring)) continue;
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(req.body) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      if (parsed.type === "completed" || parsed.type === "error") {
+        return parsed;
+      }
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(
+    `Timed out waiting for terminal event for loopId=${loopId} after ${timeoutMs}ms`
+  );
+}
