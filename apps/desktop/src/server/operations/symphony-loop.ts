@@ -305,22 +305,30 @@ function buildClaudePipeline(
   if (formatter) {
     // Full pipeline matching run-loop.sh:
     // claude ... 2>stderr | grep JSON | tee jsonl | formatter
+    //
+    // Without pipefail, bash returns the exit code of the LAST pipeline
+    // command (formatter/tee), masking claude's non-zero exit.  We use
+    // pipefail so claude's failure propagates.  However, grep returns 1
+    // when there are no matches (e.g. claude exits 0 but emits no JSON),
+    // which would false-positive as a failure.  Wrapping grep in a
+    // subshell with `|| true` neutralises the no-match exit code while
+    // still letting claude's real failures through.
     const pipeline = [
       `${claudeCmd} 2>${shellEscape(stderrFile)}`,
-      "grep --line-buffered '^{'",
+      `(grep --line-buffered '^{' || true)`,
       `tee -a ${shellEscape(jsonlFile)}`,
       `python3 ${shellEscape(formatter)}`,
     ].join(" | ");
-    return { cmd: "bash", args: ["-c", pipeline] };
+    return { cmd: "bash", args: ["-c", `set -o pipefail; ${pipeline}`] };
   }
 
   // No formatter — wrap in bash pipeline so grep|tee still writes claude-output.jsonl
   const pipeline = [
     `${claudeCmd} 2>${shellEscape(stderrFile)}`,
-    "grep --line-buffered '^{'",
+    `(grep --line-buffered '^{' || true)`,
     `tee -a ${shellEscape(jsonlFile)}`,
   ].join(" | ");
-  return { cmd: "bash", args: ["-c", pipeline] };
+  return { cmd: "bash", args: ["-c", `set -o pipefail; ${pipeline}`] };
 }
 
 /** Find the local repo path for a given fullName (e.g. "org/repo"). */
