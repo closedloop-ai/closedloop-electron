@@ -1435,8 +1435,8 @@ async function handleLoopRequest(
     const hasPlanArtifact = body.artifacts.some((a: LoopArtifact) =>
       (PLAN_ARTIFACT_TYPES as readonly string[]).includes(a.type)
     );
-    if (!hasPrdArtifact || !hasPlanArtifact) {
-      json(context, 400, { error: "EVALUATE_PLAN requires a PRD artifact and an implementation plan artifact" });
+    if ((!hasPrdArtifact && !body.prompt) || !hasPlanArtifact) {
+      json(context, 400, { error: "EVALUATE_PLAN requires a PRD artifact (or prompt) and an implementation plan artifact" });
       return;
     }
     if (!body.localRepoPath && !body.repo?.fullName) {

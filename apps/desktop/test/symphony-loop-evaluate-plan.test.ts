@@ -89,6 +89,37 @@ describe("EVALUATE_PLAN validation", () => {
     assert.ok(responseBody.error, `Error should be set, got: ${responseBody.error}`);
   });
 
+  test("prompt substitutes for PRD artifact", async () => {
+    const tmpDir = makeTempDir("evaluate-plan-test");
+    await setupStubClaude(tmpDir);
+    const repoDir = path.join(tmpDir, "my-repo");
+    mkdirSync(repoDir, { recursive: true });
+
+    const eventSrv = await startEventServer();
+    const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+    const server = makeGatewayServer({
+      allowedDirs: [tmpDir],
+      getApiOrigin: () => apiBaseUrl,
+    });
+    await server.start();
+
+    const response = await postEvaluatePlan(server.getActivePort(), buildEvaluatePlanBody({
+      artifacts: [{ type: "IMPLEMENTATION_PLAN", content: "Plan content" }],
+      prompt: "Build a REST API for user management",
+      localRepoPath: repoDir,
+      apiBaseUrl,
+    }));
+
+    // Should NOT be 400 — prompt satisfies the PRD requirement
+    assert.equal(response.status, 200, `Expected prompt to substitute for PRD artifact, got ${response.status}`);
+
+    await eventSrv.waitForEvent(
+      (b: { type: string }) => b.type === "completed" || b.type === "error",
+      15_000
+    );
+  });
+
   test("missing plan artifact returns 400", async () => {
     const tmpDir = makeTempDir("evaluate-plan-test");
     const repoDir = path.join(tmpDir, "my-repo");
