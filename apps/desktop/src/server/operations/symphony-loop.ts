@@ -257,6 +257,8 @@ interface LoopRequestBody {
   prompt?: string;
   /** Local filesystem checkout root. When present and sandbox-allowed, used as checkout root for worktree creation/reuse instead of repo.fullName lookup. */
   localRepoPath?: string;
+  /** User-supplied Additional Context from ArtifactVersion v1. Written to additional-context.md for PLAN commands. */
+  userContext?: string;
 }
 
 interface ExecutionResult {
@@ -687,6 +689,8 @@ async function cleanupGeneratePrdWorktree(
 // Per-command artifact writing
 // ---------------------------------------------------------------------------
 
+const ADDITIONAL_CONTEXT_FILENAME = "additional-context.md";
+
 /**
  * Write PRD for PLAN command.
  * Matches ECS harness writePrdFile(): prompt first, then PRD artifact, then FEATURE.
@@ -695,6 +699,7 @@ async function writeArtifactsForPlan(
   claudeWorkDir: string,
   artifacts: LoopArtifact[],
   prdContent: string | null = null,
+  userContext?: string,
 ): Promise<void> {
   // Priority: explicit prompt > PRD artifact > FEATURE artifact (matches harness)
 
@@ -713,6 +718,13 @@ async function writeArtifactsForPlan(
 
   if (prdContent) {
     await fs.writeFile(path.join(claudeWorkDir, "prd.md"), prdContent);
+  }
+
+  if (userContext?.trim()) {
+    await fs.writeFile(
+      path.join(claudeWorkDir, ADDITIONAL_CONTEXT_FILENAME),
+      "# User Context / Additional Constraints\n\n" + userContext.trim(),
+    );
   }
 }
 
@@ -2260,7 +2272,7 @@ async function handleLoopRequest(
       await fs.mkdir(claudeWorkDir, { recursive: true });
 
       if (body.command === "PLAN") {
-        await writeArtifactsForPlan(claudeWorkDir, body.artifacts, body.prompt);
+        await writeArtifactsForPlan(claudeWorkDir, body.artifacts, body.prompt, body.userContext);
       } else if (body.command === "EXECUTE") {
         await writeArtifactsForExecuteOrAmend(claudeWorkDir, body.artifacts);
       } else {
