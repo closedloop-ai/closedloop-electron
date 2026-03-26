@@ -949,6 +949,12 @@ function resolveWorktreeForComment(
   return expandedRepoPath;
 }
 
+// Strips AI-vendor branding from commit text and normalises whitespace.
+// Backticks are intentionally NOT stripped here — slugs used in URL paths
+// (e.g. /implementation-plans/<slug>) never contain backticks because slug
+// values arrive as alphanumeric-hyphen strings; the caller additionally strips
+// newlines via .replace(/[\r\n]/g, ''), so the result is safe for shell
+// heredocs and template-literal URL construction.
 export function sanitizeCommitMessage(text: string): string {
   return text
     .replaceAll(/claude\s*code/gi, "")

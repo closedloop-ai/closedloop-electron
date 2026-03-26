@@ -1,4 +1,4 @@
-import { execSync, spawn } from "node:child_process";
+import { execFileSync, execSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import {
   closeSync,
@@ -7,6 +7,7 @@ import {
   openSync,
   readFileSync,
   readSync,
+  renameSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -104,6 +105,78 @@ async function killLegacyAndMigrate(worktreeDir: string): Promise<void> {
     }
   }
   migrateWorkDirIfNeeded(worktreeDir);
+}
+
+// ---------------------------------------------------------------------------
+// Claude binary resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Cached absolute path to the `claude` binary, resolved once at first use.
+ *
+ * Resolution strategy (tried in order):
+ *   1. `which claude` using the current process.env.PATH (fast; works in
+ *      tests where PATH is set to a fake-bin directory, and in dev shells).
+ *   2. `bash -lc 'which claude'` in a login shell so that nvm/homebrew/local
+ *      bin directories are found even when Electron strips PATH at launch via
+ *      the .app bundle, launchd (macOS), or systemd (Linux).
+ *   3. Falls back to the bare string "claude" so that the caller can still
+ *      attempt spawn and receive a descriptive ENOENT error.
+ */
+let resolvedClaudePath: string | null = null;
+
+/**
+ * Reset the cached claude binary path. Intended for use in tests where PATH
+ * changes between test cases — production code should not call this.
+ */
+export function resetResolvedClaudePath(): void {
+  resolvedClaudePath = null;
+}
+
+export function getResolvedClaudePath(): string {
+  // If we have a cached path, return it only if the binary still exists on
+  // disk. This handles test scenarios where a fake binary directory is cleaned
+  // up between test cases, causing the cached path to become stale.
+  if (resolvedClaudePath !== null && existsSync(resolvedClaudePath)) {
+    return resolvedClaudePath;
+  }
+  // Invalidate stale cache entry before re-resolving
+  resolvedClaudePath = null;
+
+  // Strategy 1: which via current process PATH (works in tests and dev shells)
+  try {
+    const result = execFileSync("which", ["claude"], {
+      encoding: "utf-8",
+      stdio: "pipe",
+      timeout: 5_000,
+    }).trim();
+    if (result) {
+      resolvedClaudePath = result;
+      return resolvedClaudePath;
+    }
+  } catch {
+    // Not found in current PATH — try login shell
+  }
+
+  // Strategy 2: login shell which — sources ~/.nvm/nvm.sh and similar to
+  // populate the full user PATH that Electron strips on launch.
+  try {
+    const result = execFileSync("bash", ["-lc", "which claude"], {
+      encoding: "utf-8",
+      stdio: "pipe",
+      timeout: 5_000,
+    }).trim();
+    if (result) {
+      resolvedClaudePath = result;
+      return resolvedClaudePath;
+    }
+  } catch {
+    // Login shell which also failed — fall through to bare name fallback
+  }
+
+  // Fall back to bare name; spawn will throw ENOENT with a descriptive message
+  resolvedClaudePath = "claude";
+  return resolvedClaudePath;
 }
 
 // ---------------------------------------------------------------------------
@@ -1014,6 +1087,7 @@ async function attemptLlmCommit(
   artifactSlug: string | undefined,
   webAppOrigin: string,
   committer: LoopCommitter | undefined,
+  getAllowedDirectories: () => string[],
   onTimeout?: () => void,
   jobStore?: JobStore,
   claudeWorkDir?: string,
@@ -1028,7 +1102,10 @@ async function attemptLlmCommit(
 
   let footer: string;
   if (safeSlug) {
-    const artifactLink = `${webAppOrigin}/artifact/by-slug/${safeSlug}`;
+    // safeSlug contains only alphanumerics, hyphens, and underscores after
+    // sanitizeCommitMessage() + newline stripping — no backticks that would
+    // break shell heredocs or prompt injection via template literals.
+    const artifactLink = `${webAppOrigin}/implementation-plans/${safeSlug}`;
     footer = `---\nLoop ID: ${safeLoopId}\nArtifact: ${artifactLink}`;
   } else {
     footer = `---\nLoop ID: ${safeLoopId}`;
@@ -1092,6 +1169,22 @@ async function attemptLlmCommit(
 
   loopLog(loopId, "Attempting LLM-assisted commit...");
 
+  // Sandbox gate: verify the worktree directory is within an allowed path
+  // before spawning any child process on it. This mirrors the assertPathAllowed
+  // check performed in handleLoopRequest before the main loop spawn.
+  try {
+    assertPathAllowed(worktreeDir, getAllowedDirectories());
+  } catch (sandboxErr) {
+    if (sandboxErr instanceof DirectoryNotAllowedError) {
+      loopError(
+        loopId,
+        `LLM commit aborted: worktreeDir not in allowed sandbox: ${worktreeDir}`,
+      );
+      return null;
+    }
+    throw sandboxErr;
+  }
+
   const spawnEnv: Record<string, string> = { ...process.env } as Record<
     string,
     string
@@ -1103,15 +1196,33 @@ async function attemptLlmCommit(
     spawnEnv.GIT_COMMITTER_EMAIL = committer.email;
   }
 
+  // Resolve the absolute path to the `claude` binary once at first use.
+  // Electron strips PATH to a minimal system set when launching via the .app
+  // bundle or launchd (macOS) / systemd (Linux), so the bare name "claude"
+  // typically resolves to ENOENT even though it works in a terminal. Running
+  // `which claude` in a login shell picks up the full user PATH including
+  // nvm/homebrew/local bin directories. getResolvedClaudePath() caches the
+  // result for the process lifetime.
+  const claudeBinary = getResolvedClaudePath();
+  const spawnArgs = ["-p", prompt, "--allowedTools", "Bash,Read,Write,Glob,Grep"];
+  loopLog(
+    loopId,
+    `LLM commit spawn: binary=${claudeBinary} args=["-p", "<prompt omitted>", "--allowedTools", "Bash,Read,Write,Glob,Grep"] cwd=${worktreeDir} PATH=${spawnEnv.PATH ?? "(unset)"}`
+  );
+
   let child: ReturnType<typeof spawn>;
   try {
     child = spawn(
-      "claude",
-      ["-p", prompt, "--allowedTools", "Bash,Read,Write,Glob,Grep"],
+      claudeBinary,
+      spawnArgs,
       { cwd: worktreeDir, detached: true, stdio: "pipe", env: spawnEnv },
     );
   } catch (err) {
-    loopError(loopId, "LLM commit spawn failed:", err);
+    const code = (err as NodeJS.ErrnoException).code ?? "unknown";
+    const enoentDetail = code === "ENOENT"
+      ? ` — '${claudeBinary}' binary not found; PATH=${spawnEnv.PATH ?? "(unset)"}`
+      : "";
+    loopError(loopId, `LLM commit spawn failed [code=${code}${enoentDetail}]`, err);
     return null;
   }
 
@@ -1138,10 +1249,14 @@ async function attemptLlmCommit(
   }
   // Update on-disk PID file so readProcessPidSync (used by plan-loop cancel and
   // status endpoint liveness checks) sees the LLM commit child, not the dead
-  // main-loop PID.
+  // main-loop PID.  Write atomically via a .pid.tmp temp file renamed into
+  // place to prevent a concurrent reader from observing a partial write.
   if (claudeWorkDir) {
     try {
-      writeFileSync(path.join(claudeWorkDir, "process.pid"), String(pid));
+      const pidFilePath = path.join(claudeWorkDir, "process.pid");
+      const pidTmpPath = path.join(claudeWorkDir, "process.pid.tmp");
+      writeFileSync(pidTmpPath, String(pid));
+      renameSync(pidTmpPath, pidFilePath);
     } catch {
       loopLog(loopId, "Failed to update process.pid for LLM commit child");
     }
@@ -1150,6 +1265,12 @@ async function attemptLlmCommit(
   return new Promise<ExecutionResult | null>((resolve) => {
     let killed = false;
 
+    // Process group kill behavior:
+    // The child is spawned with `detached: true`, which places it in its own
+    // process group (pgid === child.pid on POSIX). Sending SIGTERM/SIGKILL to
+    // -pid (negative PID) targets the entire process group, ensuring that any
+    // subprocesses spawned by claude (git, gh, etc.) are also terminated and
+    // do not become orphans when the timeout fires or cancel is requested.
     const killTimer = setTimeout(() => {
       if (!killed) {
         killed = true;
@@ -1160,7 +1281,7 @@ async function attemptLlmCommit(
         } catch (killErr) {
           loopError(loopId, "Failed to kill LLM commit process:", killErr);
         }
-        // Escalate to SIGKILL after 5s if process survives SIGTERM
+        // Escalate to SIGKILL after 5s if the process group survives SIGTERM
         setTimeout(() => {
           try {
             process.kill(pid, 0); // check alive
@@ -1245,7 +1366,11 @@ async function attemptLlmCommit(
 
     child.on("error", (err: Error) => {
       clearTimeout(killTimer);
-      loopError(loopId, "LLM commit process error:", err);
+      const code = (err as NodeJS.ErrnoException).code ?? "unknown";
+      const enoentDetail = code === "ENOENT"
+        ? ` — '${claudeBinary}' binary not found; PATH=${spawnEnv.PATH ?? "(unset)"}`
+        : "";
+      loopError(loopId, `LLM commit process error [code=${code}${enoentDetail}]:`, err);
       resolve(null);
     });
 
@@ -1322,8 +1447,8 @@ function executeGitOperations(
     });
 
     const commitPrefix = artifactSlug ? `${artifactSlug}: ` : "";
-    const commitMessage = `${commitPrefix}Symphony: ${command} -- loop ${shortId}`;
-    execSync(`git commit -m ${shellEscape(commitMessage)}`, {
+    const fallbackTitle = `${commitPrefix}Automated changes from loop ${shortId}`;
+    execSync(`git commit -m ${shellEscape(fallbackTitle)}`, {
       cwd: worktreeDir,
       stdio: "pipe",
       env,
@@ -1355,7 +1480,7 @@ function executeGitOperations(
     // shell escaping issues with special characters (--body-file approach).
     const artifactLine =
       artifactSlug && webAppOrigin
-        ? `\nArtifact: ${webAppOrigin}/artifact/by-slug/${artifactSlug}`
+        ? `\nArtifact: ${webAppOrigin}/implementation-plans/${artifactSlug}`
         : "";
     const prBody = `Loop ID: ${loopId}\nCommand: ${command}${artifactLine}`;
     const bodyFile = path.join(
@@ -1381,16 +1506,24 @@ function executeGitOperations(
           timeout: 15_000,
         },
       ).trim();
-      const parsed = JSON.parse(existingPr) as { url: string; number: number };
+      const parsedUnknown: unknown = JSON.parse(existingPr);
+      if (
+        typeof parsedUnknown !== "object" ||
+        parsedUnknown === null ||
+        typeof (parsedUnknown as Record<string, unknown>).url !== "string" ||
+        typeof (parsedUnknown as Record<string, unknown>).number !== "number"
+      ) {
+        throw new Error("Unexpected shape from gh pr view JSON");
+      }
+      const parsed = parsedUnknown as { url: string; number: number };
       prUrl = parsed.url;
       prNumber = parsed.number;
     } catch {
       // No existing PR — create one using --body-file to avoid shell escaping.
       // Create without --label first so the PR still succeeds on repos where the
       // 'symphony' label doesn't exist yet, then attach the label best-effort.
-      const prTitle = `${commitPrefix}Symphony: ${command} -- loop ${shortId}`;
       const prOutput = execSync(
-        `gh pr create --title ${shellEscape(prTitle)} --body-file ${shellEscape(bodyFile)} --base ${shellEscape(baseBranch)}`,
+        `gh pr create --title ${shellEscape(fallbackTitle)} --body-file ${shellEscape(bodyFile)} --base ${shellEscape(baseBranch)}`,
         {
           cwd: worktreeDir,
           encoding: "utf-8",
@@ -1482,6 +1615,7 @@ async function handleProcessCompletion(
   claudeWorkDir: string,
   usedTempDir: boolean,
   expandedRepoPath: string | null,
+  getAllowedDirectories: () => string[],
   jobStore?: JobStore,
   webAppOrigin?: string,
   telemetry?: TelemetryEmitter,
@@ -1608,6 +1742,7 @@ async function handleProcessCompletion(
           body.artifactSlug,
           webAppOrigin ?? "",
           committer,
+          getAllowedDirectories,
           () => {
             warnings.push(
               sanitizeErrorMessage("LLM commit timed out after 90s"),
@@ -2667,6 +2802,7 @@ async function handleLoopRequest(
         claudeWorkDir,
         usedTempDir,
         expandedRepoPath,
+        getAllowedDirectories,
         jobStore,
         webAppOrigin,
         telemetry,
