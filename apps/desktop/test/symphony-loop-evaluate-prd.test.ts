@@ -12,7 +12,7 @@ import {
   writePrdArtifact,
 } from "../src/server/operations/symphony-prd-artifacts.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
-import { EMPTY_CAPABILITIES, PORT_PROBE_ORDER } from "../src/shared/contracts.js";
+import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 
 // ---------------------------------------------------------------------------
 // Shared cleanup state
@@ -86,8 +86,8 @@ function makeGatewayServer(options?: {
   const tmpDir = options?.tmpDir ?? makeTempDir();
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getGatewayAuthToken: () => "test-token",
     // Dummy origin for tests that never POST loop events (Node fetch rejects port 9 as invalid).

@@ -5,6 +5,7 @@ import type {
   OperationRequestContext,
 } from "../operation-dispatcher.js";
 import path from "node:path";
+import { getActiveLoopPid } from "./symphony-loop.js";
 import {
   isProcessRunning,
   readProcessPidSync,
@@ -388,7 +389,17 @@ export function registerSymphonyPlanLoopRoutes(
           worktreeDir = job.worktreeDir;
         }
       }
-      const pid = readProcessPidSync(worktreeDir);
+      // Resolve PID: file first, then in-memory tracker, then JobStore fallback
+      let pid = readProcessPidSync(worktreeDir);
+      if (pid === null) {
+        pid = getActiveLoopPid(loopId);
+      }
+      if (pid === null && jobStore) {
+        const job = jobStore.getByLoopId(loopId);
+        if (job?.pid != null && isProcessRunning(job.pid)) {
+          pid = job.pid;
+        }
+      }
 
       if (pid === null) {
         // No PID found -- process state is uncertain
@@ -412,7 +423,7 @@ export function registerSymphonyPlanLoopRoutes(
 
       // Attempt to kill the process
       try {
-        process.kill(pid, "SIGTERM");
+        process.kill(-pid, "SIGTERM");
 
         // Brief wait to allow graceful exit before liveness check
         await new Promise<void>((resolve) => setTimeout(resolve, 500));
@@ -423,7 +434,7 @@ export function registerSymphonyPlanLoopRoutes(
           process.kill(pid, 0);
           // Still alive after SIGTERM
           try {
-            process.kill(pid, "SIGKILL");
+            process.kill(-pid, "SIGKILL");
           } catch {
             // Already gone
           }

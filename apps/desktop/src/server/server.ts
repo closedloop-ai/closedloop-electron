@@ -6,15 +6,16 @@ import {
   DEFAULT_GATEWAY_PORT,
   FALLBACK_GATEWAY_PORTS,
   type ComputeTargetCapabilities,
-  type HealthResponse
+  type HealthResponse,
 } from "../shared/contracts.js";
+import { gatewayLog } from "../main/gateway-logger.js";
 import type { LocalSessionStore } from "../main/local-session-store.js";
 import type { JobStore } from "../main/job-store.js";
 import {
   GatewayRouter,
   type GatewayActivityEvent,
   type GatewayApprovalRequest,
-  type GatewayApprovalResult
+  type GatewayApprovalResult,
 } from "./router.js";
 import type { TelemetryEmitter } from "../main/telemetry-protocol.js";
 
@@ -30,7 +31,7 @@ export interface DesktopGatewayServerOptions {
   fallbackEngineerOrigin?: string;
   onActivityEvent?: (event: GatewayActivityEvent) => void;
   evaluateApproval?: (
-    request: GatewayApprovalRequest
+    request: GatewayApprovalRequest,
   ) => GatewayApprovalResult | Promise<GatewayApprovalResult>;
   machineName: string;
   version: string;
@@ -42,19 +43,22 @@ export interface DesktopGatewayServerOptions {
   prodOriginsOnly?: boolean;
   jobStore?: JobStore;
   telemetry?: TelemetryEmitter;
+  onUnexpectedClose?: () => void;
 }
 
 export class DesktopGatewayServer {
   private readonly options: DesktopGatewayServerOptions;
   private readonly router: GatewayRouter;
   private server: Server | null = null;
+  private alive = false;
   private activePort: number;
 
   constructor(options: DesktopGatewayServerOptions) {
     this.options = {
       ...options,
       discoveryFilePath:
-        options.discoveryFilePath ?? path.join(os.homedir(), ".closedloop-ai", "electron-port")
+        options.discoveryFilePath ??
+        path.join(os.homedir(), ".closedloop-ai", "electron-port"),
     };
     this.activePort = this.options.preferredPort;
     this.router = new GatewayRouter({
@@ -88,7 +92,7 @@ export class DesktopGatewayServer {
     capabilities: ComputeTargetCapabilities,
     onActivityEvent?: (event: GatewayActivityEvent) => void,
     evaluateApproval?: (
-      request: GatewayApprovalRequest
+      request: GatewayApprovalRequest,
     ) => GatewayApprovalResult | Promise<GatewayApprovalResult>,
     getSymphonyDir?: () => string,
     sessionStore?: LocalSessionStore,
@@ -97,7 +101,8 @@ export class DesktopGatewayServer {
     getWebAppOrigin?: () => string,
     prodOriginsOnly?: boolean,
     jobStore?: JobStore,
-    telemetry?: TelemetryEmitter
+    telemetry?: TelemetryEmitter,
+    onUnexpectedClose?: () => void,
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -120,6 +125,7 @@ export class DesktopGatewayServer {
       prodOriginsOnly,
       jobStore,
       telemetry,
+      onUnexpectedClose,
     });
   }
 
@@ -137,7 +143,7 @@ export class DesktopGatewayServer {
       machineName: this.options.machineName,
       capabilities: this.options.capabilities,
       version: this.options.version,
-      port: this.activePort
+      port: this.activePort,
     };
   }
 
@@ -146,7 +152,10 @@ export class DesktopGatewayServer {
       return;
     }
 
-    const candidates = [this.options.preferredPort, ...this.options.fallbackPorts];
+    const candidates = [
+      this.options.preferredPort,
+      ...this.options.fallbackPorts,
+    ];
     let lastError: Error | null = null;
 
     for (const candidate of candidates) {
@@ -157,7 +166,21 @@ export class DesktopGatewayServer {
       try {
         await this.listen(candidateServer, candidate);
         this.server = candidateServer;
-        this.activePort = candidate;
+        this.alive = true;
+        const addr = candidateServer.address();
+        this.activePort =
+          typeof addr === "object" && addr ? addr.port : candidate;
+        candidateServer.on("error", (err) => {
+          gatewayLog.error("gateway-server", `Server error: ${err.message}`);
+        });
+        candidateServer.on("close", () => {
+          if (this.server === candidateServer) {
+            this.alive = false;
+            this.server = null;
+            gatewayLog.warn("gateway-server", "Server closed unexpectedly");
+            this.options.onUnexpectedClose?.();
+          }
+        });
         await this.writeDiscoveryFile();
         return;
       } catch (error) {
@@ -173,11 +196,12 @@ export class DesktopGatewayServer {
     }
 
     throw new Error(
-      `failed to bind gateway server to any candidate port (${candidates.join(", ")}): ${lastError?.message ?? "unknown error"}`
+      `failed to bind gateway server to any candidate port (${candidates.join(", ")}): ${lastError?.message ?? "unknown error"}`,
     );
   }
 
   async stop(): Promise<void> {
+    this.alive = false;
     if (!this.server) {
       return;
     }
@@ -186,13 +210,25 @@ export class DesktopGatewayServer {
     this.server = null;
     await new Promise<void>((resolve, reject) => {
       runningServer.close((error) => {
-        if (error) {
+        if (
+          error &&
+          (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING"
+        ) {
           reject(error);
           return;
         }
         resolve();
       });
     });
+  }
+
+  isAlive(): boolean {
+    return this.alive && this.server !== null && this.server.listening;
+  }
+
+  async restart(): Promise<void> {
+    await this.stop();
+    await this.start();
   }
 
   private async listen(server: Server, port: number): Promise<void> {
@@ -209,6 +245,10 @@ export class DesktopGatewayServer {
 
     const discoveryDirectory = path.dirname(this.options.discoveryFilePath);
     await fs.mkdir(discoveryDirectory, { recursive: true });
-    await fs.writeFile(this.options.discoveryFilePath, String(this.activePort), "utf-8");
+    await fs.writeFile(
+      this.options.discoveryFilePath,
+      String(this.activePort),
+      "utf-8",
+    );
   }
 }

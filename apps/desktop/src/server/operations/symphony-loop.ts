@@ -1,5 +1,4 @@
 import { execSync, spawn } from "node:child_process";
-import { gatewayLog } from "../../main/gateway-logger.js";
 import crypto from "node:crypto";
 import {
   closeSync,
@@ -15,6 +14,7 @@ import {
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { gatewayLog } from "../../main/gateway-logger.js";
 import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
 import {
   TELEMETRY_LOG_TAIL_LINES,
@@ -39,9 +39,80 @@ import {
 import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import {
   expandHome,
+  isProcessRunning,
+  migrateWorkDirIfNeeded,
   resolveWorktreeParentDir,
   tryAssertRepoAllowed,
 } from "./symphony-utils.js";
+import { startOutputTailer } from "./output-tailer.js";
+
+// ---------------------------------------------------------------------------
+// Legacy migration helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Kill any live legacy process at .claude/work, clean up PID file, then migrate.
+ * Always migrates and returns -- callers can proceed immediately.
+ */
+async function killLegacyAndMigrate(worktreeDir: string): Promise<void> {
+  const newWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+  const legacyWorkDir = path.join(worktreeDir, ".claude", "work");
+  if (existsSync(newWorkDir) || !existsSync(legacyWorkDir)) {
+    return;
+  }
+  const legacyPidPath = path.join(legacyWorkDir, "process.pid");
+  if (existsSync(legacyPidPath)) {
+    let rawPid: string;
+    try {
+      rawPid = readFileSync(legacyPidPath, "utf-8").trim();
+    } catch {
+      // TOCTOU: PID file removed between check and read -- treat as dead
+      migrateWorkDirIfNeeded(worktreeDir);
+      return;
+    }
+    const legacyPid = Number.parseInt(rawPid, 10);
+    if (!Number.isNaN(legacyPid) && isProcessRunning(legacyPid)) {
+      try {
+        process.kill(-legacyPid, "SIGTERM");
+      } catch {
+        // Group kill failed (ESRCH) -- try individual process
+        try {
+          process.kill(legacyPid, "SIGTERM");
+        } catch {
+          // Already dead
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      // Re-check if still alive after SIGTERM
+      if (isProcessRunning(legacyPid)) {
+        try {
+          process.kill(-legacyPid, "SIGKILL");
+        } catch {
+          /* already dead */
+        }
+        try {
+          process.kill(legacyPid, "SIGKILL");
+        } catch {
+          /* already dead */
+        }
+      }
+      try {
+        unlinkSync(legacyPidPath);
+      } catch {
+        // Best effort
+      }
+      migrateWorkDirIfNeeded(worktreeDir);
+      return;
+    }
+    // Dead process: remove stale PID file
+    try {
+      unlinkSync(legacyPidPath);
+    } catch {
+      // Best effort
+    }
+  }
+  migrateWorkDirIfNeeded(worktreeDir);
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -137,8 +208,14 @@ function isExecutionResult(value: unknown): value is ExecutionResult {
 interface RunningLoop {
   pid: number;
   child: ReturnType<typeof spawn>;
+  stage: "running" | "post-processing";
 }
 const runningLoops = new Map<string, RunningLoop>();
+
+export function getActiveLoopPid(loopId: string): number | null {
+  const entry = runningLoops.get(loopId);
+  return entry?.pid ?? null;
+}
 
 function loopLog(loopId: string, ...args: unknown[]): void {
   const short = loopId.slice(0, 8);
@@ -237,11 +314,13 @@ function buildClaudePipeline(
     return { cmd: "bash", args: ["-c", pipeline] };
   }
 
-  // No formatter — run claude directly (raw stream-json to stdout)
-  if (stdinFile) {
-    return { cmd: "bash", args: ["-c", claudeCmd] };
-  }
-  return { cmd: "claude", args: claudeArgs };
+  // No formatter — wrap in bash pipeline so grep|tee still writes claude-output.jsonl
+  const pipeline = [
+    `${claudeCmd} 2>${shellEscape(stderrFile)}`,
+    "grep --line-buffered '^{'",
+    `tee -a ${shellEscape(jsonlFile)}`,
+  ].join(" | ");
+  return { cmd: "bash", args: ["-c", pipeline] };
 }
 
 /** Find the local repo path for a given fullName (e.g. "org/repo"). */
@@ -309,7 +388,7 @@ async function postLoopEvent(
   loopId: string,
   token: string,
   eventBody: Record<string, unknown>,
-): Promise<void> {
+): Promise<{ success: boolean; error?: string }> {
   const url = `${apiBaseUrl}/loops/${loopId}/events`;
   // Auto-inject timestamp on every event (matches ECS harness reportEvent())
   const payload: Record<string, unknown> = {
@@ -327,13 +406,7 @@ async function postLoopEvent(
       },
       body: JSON.stringify(payload),
     });
-    if (resp.ok) {
-      loopLog(loopId, `Event POST success: ${resp.status}`);
-      gatewayLog.debug(
-        "loop-event",
-        `POST ${payload.type} to ${url}: ${resp.status}`,
-      );
-    } else {
+    if (!resp.ok) {
       const text = await resp.text().catch(() => "");
       loopError(
         loopId,
@@ -344,7 +417,17 @@ async function postLoopEvent(
         "loop-event",
         `POST ${payload.type} to ${url} failed: ${resp.status} ${resp.statusText} ${text}`,
       );
+      return {
+        success: false,
+        error: "HTTP " + resp.status + " " + resp.statusText,
+      };
     }
+    loopLog(loopId, `Event POST success: ${resp.status}`);
+    gatewayLog.debug(
+      "loop-event",
+      `POST ${payload.type} to ${url}: ${resp.status}`,
+    );
+    return { success: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     loopError(loopId, "Failed to post event:", err);
@@ -352,6 +435,7 @@ async function postLoopEvent(
       "loop-event",
       `POST ${payload.type} network error: ${msg}`,
     );
+    return { success: false, error: msg };
   }
 }
 
@@ -360,7 +444,7 @@ async function uploadArtifacts(
   loopId: string,
   token: string,
   body: Record<string, unknown>,
-): Promise<void> {
+): Promise<{ success: boolean; error?: string }> {
   const url = `${apiBaseUrl}/loops/${loopId}/upload-artifacts`;
   loopLog(loopId, "Uploading artifacts...", url);
   try {
@@ -372,13 +456,7 @@ async function uploadArtifacts(
       },
       body: JSON.stringify(body),
     });
-    if (resp.ok) {
-      loopLog(loopId, `Upload success: ${resp.status}`);
-      gatewayLog.debug(
-        "loop-upload",
-        `Artifact upload to ${url}: ${resp.status}`,
-      );
-    } else {
+    if (!resp.ok) {
       const text = await resp.text().catch(() => "");
       loopError(
         loopId,
@@ -389,11 +467,22 @@ async function uploadArtifacts(
         "loop-upload",
         `Artifact upload to ${url} failed: ${resp.status} ${resp.statusText} ${text}`,
       );
+      return {
+        success: false,
+        error: `HTTP ${resp.status} ${resp.statusText}`,
+      };
     }
+    loopLog(loopId, `Upload success: ${resp.status}`);
+    gatewayLog.debug(
+      "loop-upload",
+      `Artifact upload to ${url}: ${resp.status}`,
+    );
+    return { success: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     loopError(loopId, "Failed to upload artifacts:", err);
     gatewayLog.error("loop-upload", `Artifact upload network error: ${msg}`);
+    return { success: false, error: msg };
   }
 }
 
@@ -608,7 +697,7 @@ async function writeArtifactsForGeneratePrd(
   prompt: string,
   repo?: unknown,
 ): Promise<void> {
-  const contextDir = path.join(worktreeDir, ".claude", "context");
+  const contextDir = path.join(worktreeDir, ".closedloop-ai", "context");
   const artifactsDir = path.join(contextDir, "artifacts");
   await fs.mkdir(artifactsDir, { recursive: true });
 
@@ -845,17 +934,20 @@ async function attemptLlmCommit(
   artifactSlug: string | undefined,
   webAppOrigin: string,
   committer: LoopCommitter | undefined,
+  onTimeout?: () => void,
+  jobStore?: JobStore,
+  claudeWorkDir?: string,
 ): Promise<ExecutionResult | null> {
   // Build metadata footer for PR body
   // Strip newlines from user-controlled fields to prevent prompt injection
-  const safeBranch = baseBranch.replaceAll(/[\r\n]/g, "");
-  const safeLoopId = sanitizeCommitMessage(loopId).replaceAll(/[\r\n]/g, "");
+  const safeBranch = baseBranch.replace(/[\r\n]/g, "");
+  const safeLoopId = sanitizeCommitMessage(loopId).replace(/[\r\n]/g, "");
+  const safeSlug = artifactSlug
+    ? sanitizeCommitMessage(artifactSlug).replace(/[\r\n]/g, "")
+    : null;
+
   let footer: string;
-  if (artifactSlug) {
-    const safeSlug = sanitizeCommitMessage(artifactSlug).replaceAll(
-      /[\r\n]/g,
-      "",
-    );
+  if (safeSlug) {
     const artifactLink = `${webAppOrigin}/artifact/by-slug/${safeSlug}`;
     footer = `---\nLoop ID: ${safeLoopId}\nArtifact: ${artifactLink}`;
   } else {
@@ -863,10 +955,10 @@ async function attemptLlmCommit(
   }
 
   // Build slug instruction for the prompt
-  const slugInstruction = artifactSlug
-    ? `The artifact slug is ${sanitizeCommitMessage(artifactSlug).replaceAll(/[\r\n]/g, "")}. ` +
-      `You MUST prefix the PR title with "${sanitizeCommitMessage(artifactSlug).replaceAll(/[\r\n]/g, "")}: " ` +
-      `(e.g., "${sanitizeCommitMessage(artifactSlug).replaceAll(/[\r\n]/g, "")}: Add feature X"). ` +
+  const slugInstruction = safeSlug
+    ? `The artifact slug is ${safeSlug}. ` +
+      `You MUST prefix the PR title with "${safeSlug}: " ` +
+      `(e.g., "${safeSlug}: Add feature X"). ` +
       `Also prefix the commit message the same way.`
     : "No artifact slug is available — use a descriptive title without a prefix.";
 
@@ -879,8 +971,8 @@ async function attemptLlmCommit(
     "",
     "STEPS:",
     "1. Run `git status` and `git diff --stat` to understand what changed",
-    "2. Stage all changed/new files EXCEPT the .claude/ directory:",
-    "   git add -- . ':!.claude/'",
+    "2. Stage all changed/new files EXCEPT the .claude/ and .closedloop-ai/ directories:",
+    "   git add -- . ':!.claude/' ':!.closedloop-ai/'",
     "3. Write a clear, descriptive commit message based on the actual code changes",
     "   - Summarize WHAT changed and WHY (not just 'Symphony loop output')",
     "   - Use conventional commit style if the changes have a clear category",
@@ -911,7 +1003,7 @@ async function attemptLlmCommit(
     "   Run `git rev-parse HEAD` to get the commit SHA.",
     "",
     "RULES:",
-    "- NEVER stage or commit the .claude/ directory",
+    "- NEVER stage or commit the .claude/ or .closedloop-ai/ directories",
     "- Do NOT use --no-verify on git commit",
     "- Do NOT modify any source code except to fix pre-commit hook failures (formatting, lint)",
     "- Do NOT write execution-result.json unless you successfully committed AND pushed",
@@ -949,6 +1041,32 @@ async function attemptLlmCommit(
     return null;
   }
 
+  // Track the LLM commit PID so kill routes and snapshot enrichment see the current process
+  const existing = runningLoops.get(loopId);
+  if (existing) {
+    runningLoops.set(loopId, { pid, child, stage: "post-processing" });
+  }
+  if (jobStore) {
+    const existingJob = jobStore.getByLoopId(loopId);
+    if (existingJob) {
+      jobStore.upsert({
+        ...existingJob,
+        pid,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+  }
+  // Update on-disk PID file so readProcessPidSync (used by plan-loop cancel and
+  // status endpoint liveness checks) sees the LLM commit child, not the dead
+  // main-loop PID.
+  if (claudeWorkDir) {
+    try {
+      writeFileSync(path.join(claudeWorkDir, "process.pid"), String(pid));
+    } catch {
+      loopLog(loopId, "Failed to update process.pid for LLM commit child");
+    }
+  }
+
   return new Promise<ExecutionResult | null>((resolve) => {
     let killed = false;
 
@@ -956,6 +1074,7 @@ async function attemptLlmCommit(
       if (!killed) {
         killed = true;
         loopError(loopId, "LLM commit timed out after 90s — sending SIGTERM");
+        onTimeout?.();
         try {
           process.kill(-pid, "SIGTERM");
         } catch (killErr) {
@@ -1060,6 +1179,17 @@ async function attemptLlmCommit(
 // Git operations (EXECUTE only)
 // ---------------------------------------------------------------------------
 
+type GitOperationResult =
+  | {
+      status: "success";
+      prUrl: string;
+      prNumber: number;
+      branchName: string;
+      commitSha: string;
+    }
+  | { status: "no-changes" }
+  | { status: "error"; reason: string };
+
 function executeGitOperations(
   worktreeDir: string,
   committer: LoopCommitter | undefined,
@@ -1068,12 +1198,7 @@ function executeGitOperations(
   command: string,
   artifactSlug?: string,
   webAppOrigin?: string,
-): {
-  prUrl: string;
-  prNumber: number;
-  branchName: string;
-  commitSha: string;
-} | null {
+): GitOperationResult {
   const shortId = loopId.slice(0, 8);
   const env: Record<string, string> = { ...process.env } as Record<
     string,
@@ -1086,25 +1211,30 @@ function executeGitOperations(
     env.GIT_COMMITTER_EMAIL = committer.email;
   }
 
-  // Check for changes
+  // Check for changes, excluding .claude/ and .closedloop-ai/ which are written
+  // by the gateway itself (work dir, artifacts) and must never be committed.
   try {
-    const status = execSync("git status --porcelain", {
-      cwd: worktreeDir,
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 10_000,
-    }).trim();
+    const status = execSync(
+      "git status --porcelain -- ':!.claude/' ':!.closedloop-ai/'",
+      {
+        cwd: worktreeDir,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 10_000,
+      },
+    ).trim();
 
     if (!status) {
-      return null; // No changes
+      return { status: "no-changes" }; // No changes
     }
-  } catch {
-    return null;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { status: "error", reason };
   }
 
   // Stage, commit, push
   try {
-    execSync("git add -- . ':!.claude/'", {
+    execSync("git add -- . ':!.claude/' ':!.closedloop-ai/'", {
       cwd: worktreeDir,
       stdio: "pipe",
       env,
@@ -1148,7 +1278,12 @@ function executeGitOperations(
         ? `\nArtifact: ${webAppOrigin}/artifact/by-slug/${artifactSlug}`
         : "";
     const prBody = `Loop ID: ${loopId}\nCommand: ${command}${artifactLine}`;
-    const bodyFile = path.join(worktreeDir, ".claude", "work", "pr-body.md");
+    const bodyFile = path.join(
+      worktreeDir,
+      ".closedloop-ai",
+      "work",
+      "pr-body.md",
+    );
     mkdirSync(path.dirname(bodyFile), { recursive: true });
     writeFileSync(bodyFile, prBody);
 
@@ -1231,16 +1366,33 @@ function executeGitOperations(
       // Non-critical — PR exists, metadata is best-effort
     }
 
-    return { prUrl, prNumber, branchName, commitSha };
+    return { status: "success", prUrl, prNumber, branchName, commitSha };
   } catch (err) {
-    console.error("[symphony-loop] Git operations failed:", err);
-    return null;
+    const reason = err instanceof Error ? err.message : String(err);
+    return { status: "error", reason };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Sanitize error messages before persisting to job store
+// ---------------------------------------------------------------------------
+
+function sanitizeErrorMessage(msg: string): string {
+  return msg
+    .replace(/:\/\/[^@]+@/g, "://***@")
+    .replace(/\b[0-9a-f]{20,}\b/gi, "[REDACTED]")
+    .replace(/\b[A-Za-z0-9+/]{40,}={0,2}\b/g, "[REDACTED]")
+    .slice(0, 500);
 }
 
 // ---------------------------------------------------------------------------
 // Process completion handler (async, runs after spawn)
 // ---------------------------------------------------------------------------
+
+function isCancelled(jobStore: JobStore | undefined, loopId: string): boolean {
+  const status = jobStore?.getByLoopId(loopId)?.status;
+  return status === "CANCEL_PENDING" || status === "CANCELLED";
+}
 
 async function handleProcessCompletion(
   exitCode: number,
@@ -1259,27 +1411,28 @@ async function handleProcessCompletion(
   const { loopId, command, closedLoopAuthToken, committer } = body;
 
   loopLog(loopId, `Process exited with code ${exitCode}, command=${command}`);
-  runningLoops.delete(loopId);
 
   if (exitCode !== 0) {
-    loopError(loopId, `Process failed with exit code ${exitCode}`);
-    gatewayLog.error(
-      "loop-harness",
-      `${command} failed with exit code ${exitCode}, loopId=${loopId}`,
-    );
     // Collect diagnostics (log tail + token usage) for the failure event
     const diagnostics = collectFailureDiagnostics(claudeWorkDir);
     const sessionFileForTelemetry = path.join(claudeWorkDir, "session-id.txt");
     const rawSessionId = readTextFile(sessionFileForTelemetry);
     const failureSessionId = rawSessionId ? rawSessionId.trim() : undefined;
-    const failedJob = jobStore?.getByLoopId(loopId);
+    runningLoops.delete(loopId);
+    const existingJob = jobStore?.getByLoopId(loopId);
+    const wasCancelled =
+      existingJob?.status === "CANCEL_PENDING" ||
+      existingJob?.status === "CANCELLED";
+
     telemetry?.emit({
-      severity: "error",
-      category: "job.failed",
-      message: `Process exited with code ${exitCode}`,
+      severity: wasCancelled ? "info" : "error",
+      category: wasCancelled ? "job.cancelled" : "job.failed",
+      message: wasCancelled
+        ? `Process cancelled (exit code ${exitCode})`
+        : `Process exited with code ${exitCode}`,
       trace: {
-        commandId: commandId ?? failedJob?.commandId,
-        operationId: operationId ?? failedJob?.operationId,
+        commandId: commandId ?? existingJob?.commandId,
+        operationId: operationId ?? existingJob?.operationId,
         loopId,
         jobId: loopId,
         loopSessionId: failureSessionId,
@@ -1289,28 +1442,33 @@ async function handleProcessCompletion(
         exitCode,
       },
     });
-    // Error shape matches ECS harness: top-level code/message, not nested error object
-    await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
-      type: "error",
-      code: "PROCESS_FAILED",
-      message: `Process exited with code ${exitCode}`,
-      loopId,
-      tokenUsage: diagnostics.tokenUsage,
-      logTail: diagnostics.logTail,
-      diagnosticsVersion: diagnostics.diagnosticsVersion,
-    });
-    if (jobStore) {
-      const existingJob = jobStore.getByLoopId(loopId);
-      if (existingJob) {
-        const now = new Date().toISOString();
-        jobStore.upsert({
-          ...existingJob,
-          status: "FAILED",
-          exitCode,
-          updatedAt: now,
-          completedAt: now,
-        });
-      }
+
+    if (!wasCancelled) {
+      loopError(loopId, `Process failed with exit code ${exitCode}`);
+      gatewayLog.error(
+        "loop-harness",
+        `${command} failed with exit code ${exitCode}, loopId=${loopId}`,
+      );
+      await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+        type: "error",
+        code: "PROCESS_FAILED",
+        message: `Process exited with code ${exitCode}`,
+        loopId,
+        tokenUsage: diagnostics.tokenUsage,
+        logTail: diagnostics.logTail,
+        diagnosticsVersion: diagnostics.diagnosticsVersion,
+      });
+    }
+
+    if (existingJob && jobStore) {
+      const now = new Date().toISOString();
+      jobStore.upsert({
+        ...existingJob,
+        status: wasCancelled ? "CANCELLED" : "FAILED",
+        exitCode,
+        updatedAt: now,
+        completedAt: now,
+      });
     }
     if (usedTempDir) {
       fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
@@ -1320,199 +1478,322 @@ async function handleProcessCompletion(
     return;
   }
 
-  // Read outputs per command
-  gatewayLog.debug(
-    "loop-harness",
-    `${command} succeeded (exit 0), reading artifacts for loopId=${loopId}`,
-  );
-  let artifacts: Record<string, unknown> = {};
-  const metadata: Record<string, unknown> = {};
+  // exitCode === 0 success path -- keep in runningLoops until post-processing completes
+  try {
+    // Read outputs per command
+    gatewayLog.info(
+      "loop-harness",
+      `${command} succeeded (exit 0), reading artifacts for loopId=${loopId}`,
+    );
+    let artifacts: Record<string, unknown> = {};
+    const metadata: Record<string, unknown> = {};
+    const warnings: string[] = [];
 
-  if (command === "PLAN" || command === "REQUEST_CHANGES") {
-    artifacts = readPlanOutputs(claudeWorkDir);
-  } else if (command === "EXECUTE") {
-    artifacts = readExecuteOutputs(claudeWorkDir);
+    if (command === "PLAN" || command === "REQUEST_CHANGES") {
+      artifacts = readPlanOutputs(claudeWorkDir);
+    } else if (command === "EXECUTE") {
+      artifacts = readExecuteOutputs(claudeWorkDir);
 
-    // Git operations for EXECUTE
-    if (worktreeDir) {
-      const baseBranch = body.repo?.branch ?? "main";
+      // Git operations for EXECUTE
+      if (worktreeDir) {
+        const baseBranch = body.repo?.branch ?? "main";
 
-      // Try LLM-assisted commit first; fall back to executeGitOperations if it
-      // returns null.  Never call both.
-      const llmResult = await attemptLlmCommit(
-        worktreeDir,
-        baseBranch,
-        loopId,
-        command,
-        body.artifactSlug,
-        webAppOrigin ?? "",
-        committer,
-      );
-
-      // Clean up any remaining LLM scratch files before fallback to prevent
-      // them from being committed by executeGitOperations.  attemptLlmCommit
-      // already cleans up on success, but these guards cover edge cases where
-      // the process was killed before the cleanup ran.
-      if (!llmResult) {
-        try {
-          unlinkSync(path.join(worktreeDir, "execution-result.json"));
-        } catch {
-          /* may not exist */
+        // Cancellation gate: skip git operations if cancelled during main process
+        if (isCancelled(jobStore, loopId)) {
+          const cancelJob = jobStore?.getByLoopId(loopId);
+          if (cancelJob && jobStore) {
+            const now = new Date().toISOString();
+            jobStore.upsert({
+              ...cancelJob,
+              status: "CANCELLED",
+              updatedAt: now,
+              completedAt: now,
+            });
+          }
+          if (usedTempDir) {
+            fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(
+              () => {},
+            );
+          }
+          return;
         }
-        try {
-          unlinkSync(path.join(worktreeDir, "pr-body.md"));
-        } catch {
-          /* may not exist */
-        }
-      }
 
-      const gitResult: {
-        prUrl: string;
-        prNumber: number;
-        branchName: string;
-        commitSha: string;
-      } | null =
-        llmResult ??
-        executeGitOperations(
+        // Try LLM-assisted commit first; fall back to executeGitOperations if it
+        // returns null.  Never call both.
+        const llmResult = await attemptLlmCommit(
           worktreeDir,
-          committer,
           baseBranch,
           loopId,
           command,
           body.artifactSlug,
           webAppOrigin ?? "",
+          committer,
+          () => {
+            warnings.push(
+              sanitizeErrorMessage("LLM commit timed out after 90s"),
+            );
+          },
+          jobStore,
+          claudeWorkDir,
         );
 
-      if (gitResult) {
-        // Merge git info into execution result
-        const execResult =
-          (artifacts.executionResult as Record<string, unknown>) ?? {};
-        execResult.pr_url = gitResult.prUrl;
-        execResult.pr_number = gitResult.prNumber;
-        execResult.branch_name = gitResult.branchName;
-        execResult.commit_sha = gitResult.commitSha;
-        execResult.has_changes = true;
-        execResult.base_branch = baseBranch;
-        artifacts.executionResult = execResult;
-        metadata.branchName = gitResult.branchName;
+        // Clean up any remaining LLM scratch files before fallback to prevent
+        // them from being committed by executeGitOperations.  attemptLlmCommit
+        // already cleans up on success, but these guards cover edge cases where
+        // the process was killed before the cleanup ran.
+        if (!llmResult) {
+          try {
+            unlinkSync(path.join(worktreeDir, "execution-result.json"));
+          } catch {
+            /* may not exist */
+          }
+          try {
+            unlinkSync(path.join(worktreeDir, "pr-body.md"));
+          } catch {
+            /* may not exist */
+          }
+        }
+
+        // Cancellation gate: skip fallback git operations if cancelled during LLM commit
+        if (isCancelled(jobStore, loopId)) {
+          const cancelJob = jobStore?.getByLoopId(loopId);
+          if (cancelJob && jobStore) {
+            const now = new Date().toISOString();
+            jobStore.upsert({
+              ...cancelJob,
+              status: "CANCELLED",
+              updatedAt: now,
+              completedAt: now,
+            });
+          }
+          if (usedTempDir) {
+            fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(
+              () => {},
+            );
+          }
+          return;
+        }
+
+        const gitResult: GitOperationResult = llmResult
+          ? { status: "success" as const, ...llmResult }
+          : executeGitOperations(
+              worktreeDir,
+              committer,
+              baseBranch,
+              loopId,
+              command,
+              body.artifactSlug,
+              webAppOrigin ?? "",
+            );
+
+        if (gitResult.status === "success") {
+          // Merge git info into execution result
+          const execResult =
+            (artifacts.executionResult as Record<string, unknown>) ?? {};
+          execResult.pr_url = gitResult.prUrl;
+          execResult.pr_number = gitResult.prNumber;
+          execResult.branch_name = gitResult.branchName;
+          execResult.commit_sha = gitResult.commitSha;
+          execResult.has_changes = true;
+          execResult.base_branch = baseBranch;
+          artifacts.executionResult = execResult;
+          metadata.branchName = gitResult.branchName;
+        } else if (gitResult.status === "no-changes") {
+          gatewayLog.info(
+            "loop-harness",
+            "no local changes detected, skipping PR creation, loopId=" + loopId,
+          );
+        } else if (gitResult.status === "error") {
+          gatewayLog.warn(
+            "loop-harness",
+            "git operations failed: " +
+              sanitizeErrorMessage(gitResult.reason) +
+              ", loopId=" +
+              loopId,
+          );
+          warnings.push("GIT_PUSH_FAILED");
+        }
       }
+    } else if (command === "DECOMPOSE") {
+      artifacts = readDecomposeOutputs(claudeWorkDir);
+    } else if (command === "EVALUATE_PRD") {
+      artifacts = readEvaluatePrdOutputs(claudeWorkDir);
+    } else if (command === "GENERATE_PRD") {
+      artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
     }
-  } else if (command === "DECOMPOSE") {
-    artifacts = readDecomposeOutputs(claudeWorkDir);
-  } else if (command === "EVALUATE_PRD") {
-    artifacts = readEvaluatePrdOutputs(claudeWorkDir);
-  } else if (command === "GENERATE_PRD") {
-    artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
-  }
 
-  // Read session ID if available
-  const sessionFile = path.join(claudeWorkDir, "session-id.txt");
-  const sessionId = readTextFile(sessionFile);
-  if (sessionId) {
-    metadata.sessionId = sessionId.trim();
-  }
-
-  // Upload artifacts
-  const artifactKeys = Object.keys(artifacts);
-  loopLog(loopId, "Artifact keys:", artifactKeys);
-  gatewayLog.debug(
-    "loop-harness",
-    `Uploading artifacts for ${command} loopId=${loopId}: [${artifactKeys.join(", ")}]`,
-  );
-  await uploadArtifacts(apiBaseUrl, loopId, closedLoopAuthToken, {
-    artifacts,
-    metadata,
-  });
-
-  // Parse token usage from claude output
-  const tokensUsed = parseTokenUsage(claudeWorkDir);
-  loopLog(
-    loopId,
-    `Tokens used: input=${tokensUsed.inputTokens}, output=${tokensUsed.outputTokens}`,
-  );
-
-  // Post completed event — shape matches ECS harness reportFinalStatus()
-  const result: Record<string, unknown> = {
-    exitCode,
-    subtype: command.toLowerCase(),
-  };
-
-  if (command === "EXECUTE" && artifacts.executionResult) {
-    const execResult = artifacts.executionResult as Record<string, unknown>;
-    result.prUrl = execResult.pr_url;
-    result.prNumber = execResult.pr_number;
-    result.branchName = execResult.branch_name;
-    result.has_changes = execResult.has_changes ?? false;
-  }
-
-  // Include worktree branch name for all commands that use a worktree.
-  // The server persists this on the loop record for display/debugging.
-  if (worktreeDir && !result.branchName) {
-    try {
-      const branch = execSync("git rev-parse --abbrev-ref HEAD", {
-        cwd: worktreeDir,
-        encoding: "utf-8",
-        stdio: "pipe",
-        timeout: 5_000,
-      }).trim();
-      if (branch) {
-        result.branchName = branch;
-      }
-    } catch {
-      // Non-critical — worktree may already be cleaned up
+    // Read session ID if available
+    const sessionFile = path.join(claudeWorkDir, "session-id.txt");
+    const sessionId = readTextFile(sessionFile);
+    if (sessionId) {
+      metadata.sessionId = sessionId.trim();
     }
-  }
 
-  // sessionId inside result (matches harness)
-  if (metadata.sessionId) {
-    result.sessionId = metadata.sessionId;
-  }
-
-  const completedEvent: Record<string, unknown> = {
-    type: "completed",
-    result,
-    tokensUsed,
-    loopId,
-  };
-
-  loopLog(loopId, "Posting completed event...");
-  await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, completedEvent);
-  loopLog(loopId, "Loop completed successfully");
-
-  if (jobStore) {
-    const existingJob = jobStore.getByLoopId(loopId);
-    if (existingJob) {
-      const now = new Date().toISOString();
-      jobStore.upsert({
-        ...existingJob,
-        status: "COMPLETED",
-        exitCode: 0,
-        updatedAt: now,
-        completedAt: now,
-      });
-    }
-  }
-
-  const completedJob = jobStore?.getByLoopId(loopId);
-  telemetry?.emit({
-    severity: "info",
-    category: "job.completed",
-    message: `Job completed successfully`,
-    trace: {
-      commandId: commandId ?? completedJob?.commandId,
-      operationId: operationId ?? completedJob?.operationId,
+    // Upload artifacts
+    const artifactKeys = Object.keys(artifacts);
+    loopLog(loopId, "Artifact keys:", artifactKeys);
+    gatewayLog.info(
+      "loop-harness",
+      `Uploading artifacts for ${command} loopId=${loopId}: [${artifactKeys.join(", ")}]`,
+    );
+    const uploadResult = await uploadArtifacts(
+      apiBaseUrl,
       loopId,
-      jobId: loopId,
-      loopSessionId:
-        typeof metadata.sessionId === "string" ? metadata.sessionId : undefined,
-    },
-  });
+      closedLoopAuthToken,
+      {
+        artifacts,
+        metadata,
+      },
+    );
+    if (!uploadResult.success) {
+      gatewayLog.warn(
+        "loop-harness",
+        "Artifact upload failed: " +
+          (uploadResult.error ?? "unknown error") +
+          ", loopId=" +
+          loopId,
+      );
+      warnings.push("ARTIFACT_UPLOAD_FAILED");
+    }
 
-  // Clean up temp claude workdir after all reads and uploads are complete
-  if (usedTempDir) {
-    fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
-  } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
-    await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, loopId);
+    // Parse token usage from claude output
+    const tokensUsed = parseTokenUsage(claudeWorkDir);
+    loopLog(
+      loopId,
+      `Tokens used: input=${tokensUsed.inputTokens}, output=${tokensUsed.outputTokens}`,
+    );
+
+    // Post completed event — shape matches ECS harness reportFinalStatus()
+    const result: Record<string, unknown> = {
+      exitCode,
+      subtype: command.toLowerCase(),
+    };
+
+    if (command === "EXECUTE" && artifacts.executionResult) {
+      const execResult = artifacts.executionResult as Record<string, unknown>;
+      result.prUrl = execResult.pr_url;
+      result.prNumber = execResult.pr_number;
+      result.branchName = execResult.branch_name;
+      result.has_changes = execResult.has_changes ?? false;
+    }
+
+    // Include worktree branch name for all commands that use a worktree.
+    // The server persists this on the loop record for display/debugging.
+    if (worktreeDir && !result.branchName) {
+      try {
+        const branch = execSync("git rev-parse --abbrev-ref HEAD", {
+          cwd: worktreeDir,
+          encoding: "utf-8",
+          stdio: "pipe",
+          timeout: 5_000,
+        }).trim();
+        if (branch) {
+          result.branchName = branch;
+        }
+      } catch {
+        // Non-critical — worktree may already be cleaned up
+      }
+    }
+
+    // sessionId inside result (matches harness)
+    if (metadata.sessionId) {
+      result.sessionId = metadata.sessionId;
+    }
+
+    const completedEvent: Record<string, unknown> = {
+      type: "completed",
+      result,
+      tokensUsed,
+      loopId,
+      ...(warnings.length > 0 ? { warnings } : {}),
+    };
+
+    // Cancellation gate: skip completed event if cancelled during post-processing
+    if (isCancelled(jobStore, loopId)) {
+      const cancelJob = jobStore?.getByLoopId(loopId);
+      if (cancelJob && jobStore) {
+        const now = new Date().toISOString();
+        jobStore.upsert({
+          ...cancelJob,
+          status: "CANCELLED",
+          updatedAt: now,
+          completedAt: now,
+        });
+      }
+      if (usedTempDir) {
+        fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+      } else if (
+        command === "GENERATE_PRD" &&
+        worktreeDir &&
+        expandedRepoPath
+      ) {
+        await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, loopId);
+      }
+      return;
+    }
+
+    loopLog(loopId, "Posting completed event...");
+    const eventResult = await postLoopEvent(
+      apiBaseUrl,
+      loopId,
+      closedLoopAuthToken,
+      completedEvent,
+    );
+    if (!eventResult.success) {
+      gatewayLog.warn(
+        "loop-harness",
+        "Completed event POST failed: " +
+          (eventResult.error ?? "unknown error") +
+          ", loopId=" +
+          loopId,
+      );
+      warnings.push("EVENT_POST_FAILED");
+    }
+    loopLog(loopId, "Loop completed successfully");
+
+    if (jobStore) {
+      const existingJob = jobStore.getByLoopId(loopId);
+      if (existingJob) {
+        const now = new Date().toISOString();
+        jobStore.upsert({
+          ...existingJob,
+          status: "COMPLETED",
+          exitCode: 0,
+          updatedAt: now,
+          completedAt: now,
+          warning:
+            warnings.length > 0
+              ? warnings.map(sanitizeErrorMessage).join("; ")
+              : undefined,
+        });
+      }
+    }
+
+    const completedJob = jobStore?.getByLoopId(loopId);
+    telemetry?.emit({
+      severity: "info",
+      category: "job.completed",
+      message: `Job completed successfully`,
+      trace: {
+        commandId: commandId ?? completedJob?.commandId,
+        operationId: operationId ?? completedJob?.operationId,
+        loopId,
+        jobId: loopId,
+        loopSessionId:
+          typeof metadata.sessionId === "string"
+            ? metadata.sessionId
+            : undefined,
+      },
+    });
+
+    // Clean up temp claude workdir after all reads and uploads are complete
+    if (usedTempDir) {
+      fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+    } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
+      await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, loopId);
+    }
+  } finally {
+    runningLoops.delete(loopId);
   }
 }
 
@@ -1604,6 +1885,7 @@ async function handleLoopRequest(
   runningLoops.set(body.loopId, {
     pid: -1,
     child: null as unknown as ReturnType<typeof spawn>,
+    stage: "running",
   });
   const requestSource =
     context.request?.headers?.["x-desktop-source"] === "cloud-socket"
@@ -1827,7 +2109,11 @@ async function handleLoopRequest(
         }
         throw e;
       }
-      claudeWorkDir = path.join(worktreeDir, ".claude", "work");
+      claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+
+      // Legacy migration: kill any live legacy process, then migrate
+      await killLegacyAndMigrate(worktreeDir);
+
       await fs.mkdir(claudeWorkDir, { recursive: true });
 
       if (body.command === "PLAN") {
@@ -1899,7 +2185,11 @@ async function handleLoopRequest(
       // claudeWorkDir is a separate operational dir inside the worktree (same pattern as PLAN/EXECUTE).
       // Spawn uses cwd: worktreeDir so Claude writes prd.md to the repo root.
       // Logs, PID, and prompt file go to claudeWorkDir, not the repo root.
-      claudeWorkDir = path.join(worktreeDir, ".claude", "work");
+      claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+
+      // Legacy migration preflight for GENERATE_PRD worktree
+      await killLegacyAndMigrate(worktreeDir);
+
       await fs.mkdir(claudeWorkDir, { recursive: true });
       await writeArtifactsForGeneratePrd(
         worktreeDir,
@@ -2182,14 +2472,26 @@ async function handleLoopRequest(
     }
     closeSync(logFd);
 
+    const tailerJsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+    const jsonlPreSpawnOffset = existsSync(tailerJsonlPath)
+      ? statSync(tailerJsonlPath).size
+      : 0;
+
     // Guard against double-firing: both 'error' and 'exit' can emit.
     let completionHandled = false;
-    const onceComplete = (code: number) => {
-      if (completionHandled) {
-        return;
-      }
+    let stopTailer: { stop: () => void; flush: () => Promise<void> } = {
+      stop: () => {},
+      flush: () => Promise.resolve(),
+    };
+    const onceComplete = async (code: number): Promise<void> => {
+      if (completionHandled) return;
       completionHandled = true;
       loopLog(body.loopId, `onceComplete fired, code=${code}`);
+      try {
+        await stopTailer.flush();
+      } catch (err) {
+        loopError(body.loopId, "Tailer flush error:", err);
+      }
       handleProcessCompletion(
         code,
         body,
@@ -2216,7 +2518,7 @@ async function handleLoopRequest(
     // between pre-flight check and spawn) from crashing Electron.
     child.on("error", (err) => {
       loopError(body.loopId, "Spawn error:", err.message);
-      onceComplete(1);
+      void onceComplete(1);
     });
 
     // Use 'exit' instead of 'close' — with detached processes using
@@ -2224,7 +2526,7 @@ async function handleLoopRequest(
     // because there are no Node.js streams to track closure of.
     child.on("exit", (code) => {
       loopLog(body.loopId, `Process exit event, code=${code}`);
-      onceComplete(code ?? 1);
+      void onceComplete(code ?? 1);
     });
 
     const pid = child.pid ?? null;
@@ -2237,7 +2539,14 @@ async function handleLoopRequest(
 
     // Replace sentinel with real entry — storing `child` prevents GC of the
     // ChildProcess handle which would silently drop the exit listener.
-    runningLoops.set(body.loopId, { pid, child });
+    runningLoops.set(body.loopId, { pid, child, stage: "running" });
+    stopTailer = startOutputTailer(
+      tailerJsonlPath,
+      apiBaseUrl,
+      body.loopId,
+      body.closedLoopAuthToken,
+      jsonlPreSpawnOffset,
+    );
     spawnedSuccessfully = true;
     loopLog(body.loopId, `Spawned pid=${pid}, worktree=${worktreeDir}`);
     gatewayLog.debug(
@@ -2306,7 +2615,10 @@ async function handleLoopRequest(
 // Kill handler
 // ---------------------------------------------------------------------------
 
-async function handleLoopKill(context: OperationRequestContext): Promise<void> {
+async function handleLoopKill(
+  context: OperationRequestContext,
+  jobStore?: JobStore,
+): Promise<void> {
   const rawBody = parseJsonBody(context);
   if (!rawBody) {
     json(context, 400, { error: "Invalid JSON body" });
@@ -2321,12 +2633,59 @@ async function handleLoopKill(context: OperationRequestContext): Promise<void> {
 
   const entry = runningLoops.get(loopId);
   if (entry === undefined) {
+    // Post-restart fallback: check JobStore for a live PID
+    if (jobStore) {
+      const job = jobStore.getByLoopId(loopId);
+      if (job?.pid != null) {
+        let processWasAlive = false;
+        try {
+          process.kill(job.pid, 0); // alive?
+          processWasAlive = true;
+          process.kill(-job.pid, "SIGTERM");
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+          try {
+            process.kill(job.pid, 0);
+            process.kill(-job.pid, "SIGKILL");
+          } catch {
+            /* gone */
+          }
+        } catch {
+          /* already dead */
+        }
+        jobStore.upsert({
+          ...job,
+          status: processWasAlive ? "CANCEL_PENDING" : "CANCELLED",
+          updatedAt: new Date().toISOString(),
+          ...(!processWasAlive
+            ? { completedAt: new Date().toISOString() }
+            : {}),
+        });
+        json(context, 200, {
+          success: true,
+          message: "Loop process terminated (restart fallback)",
+        });
+        return;
+      }
+    }
     json(context, 404, { error: "No running process found for this loop" });
     return;
   }
   if (entry.pid <= 0) {
     json(context, 409, { error: "Loop is still initializing, retry shortly" });
     return;
+  }
+
+  // Set CANCEL_PENDING before sending signals so handleProcessCompletion
+  // sees the cancellation intent when the exit event fires.
+  if (jobStore) {
+    const existingJob = jobStore.getByLoopId(loopId);
+    if (existingJob) {
+      jobStore.upsert({
+        ...existingJob,
+        status: "CANCEL_PENDING",
+        updatedAt: new Date().toISOString(),
+      });
+    }
   }
 
   try {
@@ -2379,7 +2738,7 @@ export function registerSymphonyLoopRoutes(
     "POST",
     "/api/engineer/symphony/loop/kill",
     async (context) => {
-      await handleLoopKill(context);
+      await handleLoopKill(context, jobStore);
     },
   );
 }

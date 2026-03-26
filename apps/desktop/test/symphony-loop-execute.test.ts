@@ -22,8 +22,17 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import { JobStore } from "../src/main/job-store.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
-import { EMPTY_CAPABILITIES, PORT_PROBE_ORDER } from "../src/shared/contracts.js";
+import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
+import {
+  createFakeRunLoopScript,
+  initGitRepo,
+  restoreEnv,
+  saveEnv,
+  startMockApiServer,
+  waitForCompletedEvent,
+} from "./symphony-test-utils.js";
 
 // ---------------------------------------------------------------------------
 // Shared state and cleanup
@@ -32,36 +41,10 @@ import { EMPTY_CAPABILITIES, PORT_PROBE_ORDER } from "../src/shared/contracts.js
 const serversToClose: DesktopGatewayServer[] = [];
 const mockServersToClose: http.Server[] = [];
 const tempPathsToClean: string[] = [];
-
-const originalSymphonyWorktreeParentDir = process.env.SYMPHONY_WORKTREE_PARENT_DIR;
-const originalPath = process.env.PATH;
-const originalHome = process.env.HOME;
-const originalRawPipeline = process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
+const savedEnv = saveEnv();
 
 afterEach(async () => {
-  if (originalSymphonyWorktreeParentDir === undefined) {
-    delete process.env.SYMPHONY_WORKTREE_PARENT_DIR;
-  } else {
-    process.env.SYMPHONY_WORKTREE_PARENT_DIR = originalSymphonyWorktreeParentDir;
-  }
-
-  if (originalPath === undefined) {
-    delete process.env.PATH;
-  } else {
-    process.env.PATH = originalPath;
-  }
-
-  if (originalHome === undefined) {
-    delete process.env.HOME;
-  } else {
-    process.env.HOME = originalHome;
-  }
-
-  if (originalRawPipeline === undefined) {
-    delete process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
-  } else {
-    process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = originalRawPipeline;
-  }
+  restoreEnv(savedEnv);
 
   for (const server of serversToClose.splice(0)) {
     await server.stop();
@@ -77,34 +60,6 @@ afterEach(async () => {
     await fs.rm(tempPath, { recursive: true, force: true });
   }
 });
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-// Shared test helpers — see test/helpers/mock-api-server.ts
-import { initGitRepo, startMockApiServer } from "./helpers/mock-api-server.js";
-
-/**
- * Create the fake plugin cache structure so findPluginScript("code", "run-loop.sh")
- * finds the provided script content.
- */
-async function createFakeRunLoopScript(homeDir: string, scriptContent: string): Promise<string> {
-  const scriptDir = path.join(
-    homeDir,
-    ".claude",
-    "plugins",
-    "cache",
-    "closedloop-ai",
-    "code",
-    "1.0.0",
-    "scripts"
-  );
-  await fs.mkdir(scriptDir, { recursive: true });
-  const scriptPath = path.join(scriptDir, "run-loop.sh");
-  await fs.writeFile(scriptPath, scriptContent, { mode: 0o755 });
-  return scriptPath;
-}
 
 // ---------------------------------------------------------------------------
 // Test 1: No-changes → executeGitOperations returns null (no PR URL in upload)
@@ -131,11 +86,9 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
   //   (simulates attemptLlmCommit finding no result file → returns null)
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
-  await fs.writeFile(
-    path.join(fakeBin, "claude"),
-    "#!/bin/sh\nexit 0\n",
-    { mode: 0o755 }
-  );
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
 
   // Disable stream_formatter pipeline — fake claude output is not a real stream
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
@@ -147,8 +100,8 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "execute-nochange-machine",
@@ -171,15 +124,18 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
         command: "EXECUTE",
         closedLoopAuthToken: "tok",
         artifacts: [],
-        repo: { fullName: `nochange/${path.basename(repoPath)}`, branch: "main" },
+        repo: {
+          fullName: `nochange/${path.basename(repoPath)}`,
+          branch: "main",
+        },
       }),
-    }
+    },
   );
 
   assert.equal(
     response.status,
     200,
-    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
   );
 
   // Wait for the upload call that signals process completion
@@ -198,12 +154,22 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
   assert.equal(
     uploadBody.artifacts.executionResult?.pr_url,
     undefined,
-    `Expected no pr_url when there are no changes, got: ${uploadBody.artifacts.executionResult?.pr_url}`
+    `Expected no pr_url when there are no changes, got: ${uploadBody.artifacts.executionResult?.pr_url}`,
   );
   assert.equal(
     uploadBody.artifacts.executionResult?.has_changes,
     undefined,
-    "Expected has_changes to be absent when there are no changes"
+    "Expected has_changes to be absent when there are no changes",
+  );
+
+  // Also check the completed event does NOT contain GIT_PUSH_FAILED in warnings.
+  // The completed event is posted after upload-artifacts, so poll until it appears.
+  const completedEvent = await waitForCompletedEvent(mock.requests, loopId);
+  assert.ok(
+    !(completedEvent.warnings as string[] | undefined)?.includes(
+      "GIT_PUSH_FAILED",
+    ),
+    `Expected no GIT_PUSH_FAILED warning in completed event for no-changes path, got warnings: ${JSON.stringify(completedEvent.warnings)}`,
   );
 });
 
@@ -250,13 +216,15 @@ test("EXECUTE: handleProcessCompletion reads pre-written execution-result.json a
     `printf '%s' ${JSON.stringify(executionResultContent).replace(/'/g, String.raw`'\''`)} > execution-result.json`,
     "exit 0",
   ].join("\n");
-  await fs.writeFile(path.join(fakeBin, "claude"), claudeScript, { mode: 0o755 });
+  await fs.writeFile(path.join(fakeBin, "claude"), claudeScript, {
+    mode: 0o755,
+  });
 
   // fake git that stubs push (so executeGitOperations wouldn't fail if accidentally called)
   // We verify via upload payload that git ops were NOT needed.
   const fakeGitScript = [
     "#!/bin/sh",
-    "if [ \"$1\" = push ]; then exit 0; fi",
+    'if [ "$1" = push ]; then exit 0; fi',
     `exec /usr/bin/git "$@"`,
   ].join("\n");
   await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
@@ -270,8 +238,8 @@ test("EXECUTE: handleProcessCompletion reads pre-written execution-result.json a
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "execute-llmresult-machine",
@@ -294,15 +262,18 @@ test("EXECUTE: handleProcessCompletion reads pre-written execution-result.json a
         command: "EXECUTE",
         closedLoopAuthToken: "tok",
         artifacts: [],
-        repo: { fullName: `llmresult/${path.basename(repoPath)}`, branch: "main" },
+        repo: {
+          fullName: `llmresult/${path.basename(repoPath)}`,
+          branch: "main",
+        },
       }),
-    }
+    },
   );
 
   assert.equal(
     response.status,
     200,
-    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
   );
 
   // Wait for upload — signals process completion including attemptLlmCommit
@@ -318,17 +289,17 @@ test("EXECUTE: handleProcessCompletion reads pre-written execution-result.json a
   assert.equal(
     uploadBody.artifacts.executionResult?.pr_url,
     expectedPrUrl,
-    `Expected pr_url=${expectedPrUrl} from pre-written execution-result.json, got: ${String(uploadBody.artifacts.executionResult?.pr_url)}`
+    `Expected pr_url=${expectedPrUrl} from pre-written execution-result.json, got: ${String(uploadBody.artifacts.executionResult?.pr_url)}`,
   );
   assert.equal(
     uploadBody.artifacts.executionResult?.pr_number,
     77,
-    "Expected pr_number=77 from pre-written execution-result.json"
+    "Expected pr_number=77 from pre-written execution-result.json",
   );
   assert.equal(
     uploadBody.artifacts.executionResult?.has_changes,
     true,
-    "Expected has_changes=true when execution-result.json was written"
+    "Expected has_changes=true when execution-result.json was written",
   );
 });
 
@@ -337,7 +308,9 @@ test("EXECUTE: handleProcessCompletion reads pre-written execution-result.json a
 // ---------------------------------------------------------------------------
 
 test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create", async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-existingpr-"));
+  const tmpDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "execute-existingpr-"),
+  );
   tempPathsToClean.push(tmpDir);
 
   const repoPath = path.join(tmpDir, "repo-existingpr");
@@ -356,7 +329,7 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
       // Write a file to create an uncommitted change
       "echo 'implement feature' > feature-output.txt",
       "exit 0",
-    ].join("\n")
+    ].join("\n"),
   );
 
   const fakeBin = path.join(tmpDir, "fake-bin");
@@ -364,11 +337,9 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
 
   // fake claude for attemptLlmCommit: exits 0 without writing execution-result.json
   // → attemptLlmCommit returns null → falls through to executeGitOperations
-  await fs.writeFile(
-    path.join(fakeBin, "claude"),
-    "#!/bin/sh\nexit 0\n",
-    { mode: 0o755 }
-  );
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
 
   // Capture file to record whether gh pr create was called
   const captureFile = path.join(tmpDir, "gh-calls.txt");
@@ -376,11 +347,11 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
   // fake gh: pr view returns existing PR JSON; pr create records a call and exits 1
   const fakeGhScript = [
     "#!/bin/sh",
-    "if [ \"$1\" = pr ] && [ \"$2\" = view ]; then",
-    "  printf '{\"url\":\"https://github.com/org/repo-existingpr/pull/42\",\"number\":42}\\n'",
+    'if [ "$1" = pr ] && [ "$2" = view ]; then',
+    '  printf \'{"url":"https://github.com/org/repo-existingpr/pull/42","number":42}\\n\'',
     "  exit 0",
     "fi",
-    "if [ \"$1\" = pr ] && [ \"$2\" = create ]; then",
+    'if [ "$1" = pr ] && [ "$2" = create ]; then',
     `  echo "gh pr create was called (should not happen)" >> ${JSON.stringify(captureFile)}`,
     "  exit 1",
     "fi",
@@ -391,7 +362,7 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
   // fake git: pass through all commands except push (stub push to avoid remote requirement)
   const fakeGitScript = [
     "#!/bin/sh",
-    "if [ \"$1\" = push ]; then exit 0; fi",
+    'if [ "$1" = push ]; then exit 0; fi',
     `exec /usr/bin/git "$@"`,
   ].join("\n");
   await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
@@ -405,8 +376,8 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "execute-existingpr-machine",
@@ -429,15 +400,18 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
         command: "EXECUTE",
         closedLoopAuthToken: "tok",
         artifacts: [],
-        repo: { fullName: `existingpr/${path.basename(repoPath)}`, branch: "main" },
+        repo: {
+          fullName: `existingpr/${path.basename(repoPath)}`,
+          branch: "main",
+        },
       }),
-    }
+    },
   );
 
   assert.equal(
     response.status,
     200,
-    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
   );
 
   // Wait for upload — signals that git ops + PR lookup completed
@@ -453,12 +427,12 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
   assert.equal(
     uploadBody.artifacts.executionResult?.pr_url,
     "https://github.com/org/repo-existingpr/pull/42",
-    `Expected existing PR URL in pr_url, got: ${String(uploadBody.artifacts.executionResult?.pr_url)}`
+    `Expected existing PR URL in pr_url, got: ${String(uploadBody.artifacts.executionResult?.pr_url)}`,
   );
   assert.equal(
     uploadBody.artifacts.executionResult?.pr_number,
     42,
-    "Expected pr_number=42 from gh pr view"
+    "Expected pr_number=42 from gh pr view",
   );
 
   // gh pr create must NOT have been called
@@ -466,6 +440,548 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
   assert.equal(
     ghCalls.trim(),
     "",
-    `gh pr create should not have been called, but capture file contains: ${ghCalls}`
+    `gh pr create should not have been called, but capture file contains: ${ghCalls}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 4: git status exits 1 → executeGitOperations returns 'error' →
+//         completed event warnings contains 'GIT_PUSH_FAILED'
+// ---------------------------------------------------------------------------
+
+test("EXECUTE: git status failure sets GIT_PUSH_FAILED in completed event warnings", async () => {
+  const tmpDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "execute-gitstatus-fail-"),
+  );
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-gitstatus-fail");
+  await initGitRepo(repoPath);
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  // fake run-loop.sh: exits 0 (loop runs successfully, no LLM commits)
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+
+  // fake claude: exits 0 without writing execution-result.json
+  // → attemptLlmCommit returns null → falls through to executeGitOperations
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+
+  // fake git: delegates most commands to real git, but exits 1 for 'status --porcelain'.
+  // This causes executeGitOperations to return { status: 'error' }, which adds
+  // GIT_PUSH_FAILED to the warnings array posted in the completed event.
+  const fakeGitScript = [
+    "#!/bin/sh",
+    "# Exit 1 for 'git status --porcelain' to simulate a git status failure",
+    'if [ "$1" = status ]; then exit 1; fi',
+    "# Delegate everything else (worktree, fetch, rev-parse, etc.) to real git",
+    `exec /usr/bin/git "$@"`,
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-gitstatus-fail-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000000400";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        repo: {
+          fullName: `gitstatus-fail/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  // Wait for the completed event and assert GIT_PUSH_FAILED is in warnings.
+  // The loop posts upload-artifacts first, then the completed event.
+  await mock.waitForRequest("upload-artifacts");
+  const completedEvent = await waitForCompletedEvent(mock.requests, loopId);
+  const warnings = completedEvent.warnings as string[] | undefined;
+  assert.ok(
+    Array.isArray(warnings) && warnings.includes("GIT_PUSH_FAILED"),
+    `Expected GIT_PUSH_FAILED in completed event warnings when git status exits 1, got warnings: ${JSON.stringify(warnings)}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Cancellation gate helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Poll a JobStore until the job for the given loopId reaches a terminal status,
+ * or until the timeout elapses.
+ */
+async function waitForJobTerminal(
+  jobStore: JobStore,
+  loopId: string,
+  timeoutMs = 20_000,
+): Promise<import("../src/main/job-store.js").LocalJob> {
+  const terminalStatuses = new Set([
+    "COMPLETED",
+    "FAILED",
+    "CANCELLED",
+    "STOPPED",
+    "UNKNOWN",
+  ]);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const job = jobStore.getByLoopId(loopId);
+    if (job && terminalStatuses.has(job.status)) {
+      return job;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(
+    `Timed out waiting for terminal job status for loopId=${loopId} after ${timeoutMs}ms`,
+  );
+}
+
+/**
+ * Poll a JobStore until the job for the given loopId has status RUNNING.
+ */
+async function waitForJobRunning(
+  jobStore: JobStore,
+  loopId: string,
+  timeoutMs = 10_000,
+): Promise<import("../src/main/job-store.js").LocalJob> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const job = jobStore.getByLoopId(loopId);
+    if (job && job.status === "RUNNING") {
+      return job;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(
+    `Timed out waiting for RUNNING job for loopId=${loopId} after ${timeoutMs}ms`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: Cancellation gate — cancel before attemptLlmCommit (gate 1)
+//         CANCEL_PENDING is set while run-loop.sh is still running.
+//         When the process exits, isCancelled() returns true before
+//         attemptLlmCommit is called → no upload, no completed event.
+// ---------------------------------------------------------------------------
+
+test("EXECUTE: cancel before attemptLlmCommit ends job as CANCELLED with no upload or completed event", async () => {
+  const tmpDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "execute-cancel-gate1-"),
+  );
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-cancel-gate1");
+  await initGitRepo(repoPath);
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  // fake run-loop.sh: sleep so the test can set CANCEL_PENDING before exit
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nsleep 2\nexit 0\n");
+
+  // fake-bin: claude exits 0 (won't be called — gate 1 catches before attemptLlmCommit)
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const jobStore = new JobStore({
+    cwd: tmpDir,
+    name: "test-jobs-cancel-gate1",
+  });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-cancel-gate1-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000000700";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        repo: {
+          fullName: `cancel-gate1/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  // Wait for the job to appear as RUNNING, then set CANCEL_PENDING.
+  // run-loop.sh is sleeping for 2s, so this fires well before it exits.
+  const runningJob = await waitForJobRunning(jobStore, loopId);
+  jobStore.upsert({
+    ...runningJob,
+    status: "CANCEL_PENDING",
+    updatedAt: new Date().toISOString(),
+  });
+
+  // Wait for the job to reach terminal state (CANCELLED via gate 1)
+  const terminalJob = await waitForJobTerminal(jobStore, loopId);
+  assert.equal(
+    terminalJob.status,
+    "CANCELLED",
+    `Expected job status CANCELLED, got: ${terminalJob.status}`,
+  );
+
+  // Verify no upload-artifacts request was made
+  const uploadRequests = mock.requests.filter((r) =>
+    r.url.includes("upload-artifacts"),
+  );
+  assert.equal(
+    uploadRequests.length,
+    0,
+    `Expected no upload-artifacts requests when cancelled before attemptLlmCommit, got ${uploadRequests.length}`,
+  );
+
+  // Verify no completed event was posted
+  const eventsUrl = `/loops/${loopId}/events`;
+  const completedEvents = mock.requests.filter((r) => {
+    if (!r.url.includes(eventsUrl)) return false;
+    try {
+      const body = JSON.parse(r.body) as Record<string, unknown>;
+      return body.type === "completed";
+    } catch {
+      return false;
+    }
+  });
+  assert.equal(
+    completedEvents.length,
+    0,
+    `Expected no completed event when cancelled before attemptLlmCommit, got ${completedEvents.length}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 6: Cancellation gate — cancel during attemptLlmCommit (gate 2)
+//         run-loop.sh exits immediately (gate 1 passes — not cancelled yet).
+//         The fake claude binary sleeps so CANCEL_PENDING can be set while
+//         attemptLlmCommit is awaiting. After claude exits, gate 2 fires.
+// ---------------------------------------------------------------------------
+
+test("EXECUTE: cancel during attemptLlmCommit ends job as CANCELLED with no completed event", async () => {
+  const tmpDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "execute-cancel-gate2-"),
+  );
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-cancel-gate2");
+  await initGitRepo(repoPath);
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  // fake run-loop.sh: exits immediately so gate 1 passes (not yet cancelled)
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
+
+  // fake-bin: claude creates a marker file on entry then sleeps, so the test
+  // can poll the marker to detect when attemptLlmCommit has been entered.
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  const claudeStartedMarker = path.join(tmpDir, "claude-started");
+  await fs.writeFile(
+    path.join(fakeBin, "claude"),
+    `#!/bin/sh\ntouch ${claudeStartedMarker}\nsleep 3\nexit 0\n`,
+    { mode: 0o755 },
+  );
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const jobStore = new JobStore({
+    cwd: tmpDir,
+    name: "test-jobs-cancel-gate2",
+  });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-cancel-gate2-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000000800";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        repo: {
+          fullName: `cancel-gate2/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  // Wait for the job to appear as RUNNING
+  await waitForJobRunning(jobStore, loopId);
+
+  // Wait for the fake claude binary to start (marker file created on entry).
+  // This proves gate 1 passed and attemptLlmCommit has been entered.
+  const markerDeadline = Date.now() + 15_000;
+  while (Date.now() < markerDeadline) {
+    try {
+      await fs.access(claudeStartedMarker);
+      break;
+    } catch {
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  await fs.access(claudeStartedMarker); // throws if still missing
+
+  // Set CANCEL_PENDING now. Gate 1 has already passed.
+  // Claude is sleeping for 3s, so gate 2 hasn't run yet.
+  const currentJob = jobStore.getByLoopId(loopId)!;
+  jobStore.upsert({
+    ...currentJob,
+    status: "CANCEL_PENDING",
+    updatedAt: new Date().toISOString(),
+  });
+
+  // Wait for terminal state — gate 2 fires after claude exits
+  const terminalJob = await waitForJobTerminal(jobStore, loopId);
+  assert.equal(
+    terminalJob.status,
+    "CANCELLED",
+    `Expected job status CANCELLED, got: ${terminalJob.status}`,
+  );
+
+  // Verify no completed event was posted
+  const eventsUrl = `/loops/${loopId}/events`;
+  const completedEvents = mock.requests.filter((r) => {
+    if (!r.url.includes(eventsUrl)) return false;
+    try {
+      const body = JSON.parse(r.body) as Record<string, unknown>;
+      return body.type === "completed";
+    } catch {
+      return false;
+    }
+  });
+  assert.equal(
+    completedEvents.length,
+    0,
+    `Expected no completed event when cancelled during attemptLlmCommit, got ${completedEvents.length}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 7: Non-zero exit with CANCEL_PENDING — PROCESS_FAILED event skipped
+//         run-loop.sh sleeps then exits with code 1. CANCEL_PENDING is set
+//         while it sleeps. The non-zero exit path detects wasCancelled and
+//         skips the PROCESS_FAILED error event. Job ends as CANCELLED.
+// ---------------------------------------------------------------------------
+
+test("EXECUTE: non-zero exit with CANCEL_PENDING skips PROCESS_FAILED and ends as CANCELLED", async () => {
+  const tmpDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "execute-cancel-nonzero-"),
+  );
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-cancel-nonzero");
+  await initGitRepo(repoPath);
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  // fake run-loop.sh: sleep then exit with non-zero code
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nsleep 2\nexit 1\n");
+
+  // fake-bin: claude exits 0 (won't be called — non-zero exit path skips attemptLlmCommit)
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const jobStore = new JobStore({
+    cwd: tmpDir,
+    name: "test-jobs-cancel-nonzero",
+  });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-cancel-nonzero-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000000900";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        repo: {
+          fullName: `cancel-nonzero/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  // Wait for the job to appear as RUNNING, then set CANCEL_PENDING.
+  // run-loop.sh is sleeping for 2s, so this fires well before it exits.
+  const runningJob = await waitForJobRunning(jobStore, loopId);
+  jobStore.upsert({
+    ...runningJob,
+    status: "CANCEL_PENDING",
+    updatedAt: new Date().toISOString(),
+  });
+
+  // Wait for the job to reach terminal state
+  const terminalJob = await waitForJobTerminal(jobStore, loopId);
+  assert.equal(
+    terminalJob.status,
+    "CANCELLED",
+    `Expected job status CANCELLED (not FAILED), got: ${terminalJob.status}`,
+  );
+
+  // Verify no PROCESS_FAILED error event was posted
+  const eventsUrl = `/loops/${loopId}/events`;
+  const errorEvents = mock.requests.filter((r) => {
+    if (!r.url.includes(eventsUrl)) return false;
+    try {
+      const body = JSON.parse(r.body) as Record<string, unknown>;
+      return body.type === "error" && body.code === "PROCESS_FAILED";
+    } catch {
+      return false;
+    }
+  });
+  assert.equal(
+    errorEvents.length,
+    0,
+    `Expected no PROCESS_FAILED event when cancelled, got ${errorEvents.length}`,
   );
 });

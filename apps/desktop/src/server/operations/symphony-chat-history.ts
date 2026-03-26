@@ -112,11 +112,13 @@ export function registerSymphonyChatHistoryRoutes(
     const message = parseMessage(body.message);
     const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
 
-    const historyPath = getChatHistoryPath(ticketId, expandedRepoPath, provider);
-    const historyDir = path.dirname(historyPath);
+    // Read from legacy path if file only exists there; always write to new canonical path.
+    const historyReadPath = getChatHistoryPath(ticketId, expandedRepoPath, provider);
+    const historyWritePath = getChatHistoryWritePath(ticketId, expandedRepoPath, provider);
+    const historyWriteDir = path.dirname(historyWritePath);
 
     try {
-      assertPathAllowed(historyDir, getAllowedDirectories());
+      assertPathAllowed(historyWriteDir, getAllowedDirectories());
     } catch (error) {
       if (error instanceof DirectoryNotAllowedError) {
         json(context, 403, { error: "directory not allowed" });
@@ -125,12 +127,12 @@ export function registerSymphonyChatHistoryRoutes(
       throw error;
     }
 
-    await fs.mkdir(historyDir, { recursive: true });
+    await fs.mkdir(historyWriteDir, { recursive: true });
 
     let history: ChatHistory;
-    if (existsSync(historyPath)) {
+    if (existsSync(historyReadPath)) {
       try {
-        const content = await fs.readFile(historyPath, "utf-8");
+        const content = await fs.readFile(historyReadPath, "utf-8");
         history = JSON.parse(content) as ChatHistory;
       } catch {
         history = { messages: [], ticketId, repoPath };
@@ -142,7 +144,7 @@ export function registerSymphonyChatHistoryRoutes(
     if (sessionId && !message) {
       history.sessionId = sessionId;
       try {
-        await fs.writeFile(historyPath, JSON.stringify(history, null, 2), "utf-8");
+        await fs.writeFile(historyWritePath, JSON.stringify(history, null, 2), "utf-8");
         json(context, 200, { success: true, sessionId });
       } catch (error) {
         const messageText = error instanceof Error ? error.message : "Unknown error";
@@ -159,7 +161,7 @@ export function registerSymphonyChatHistoryRoutes(
     history.messages.push(message);
 
     try {
-      await fs.writeFile(historyPath, JSON.stringify(history, null, 2), "utf-8");
+      await fs.writeFile(historyWritePath, JSON.stringify(history, null, 2), "utf-8");
       json(context, 200, { success: true, history });
     } catch (error) {
       const messageText = error instanceof Error ? error.message : "Unknown error";
@@ -195,14 +197,24 @@ export function registerSymphonyChatHistoryRoutes(
     }
 
     const historyPath = getChatHistoryPath(ticketId, expandedRepoPath, provider);
-    const workDir = path.dirname(historyPath);
+    const historyWritePath = getChatHistoryWritePath(ticketId, expandedRepoPath, provider);
+    // Both roots for dual-copy cleanup
+    const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
+    const workDirs = [
+      path.join(worktreeDir, ".closedloop-ai", "work"),
+      path.join(worktreeDir, ".claude", "work"),
+    ];
 
     if (!existsSync(historyPath)) {
-      // Even if no transcript exists, clean up associated state files
+      // Even if no transcript exists, clean up associated state files from both roots
       if (indexParam === null && provider === "codex") {
-        await fs.rm(path.join(workDir, "codex-chat-review.json"), { force: true });
+        for (const wd of workDirs) {
+          await fs.rm(path.join(wd, "codex-chat-review.json"), { force: true });
+        }
       } else if (indexParam === null && !provider) {
-        await deleteSharedCodexChatState(workDir);
+        for (const wd of workDirs) {
+          await deleteSharedCodexChatState(wd);
+        }
       }
       json(context, 200, {
         success: true,
@@ -213,14 +225,20 @@ export function registerSymphonyChatHistoryRoutes(
 
     try {
       if (indexParam === null) {
-        await fs.unlink(historyPath);
+        // Delete from both roots to clear dual-copy leftovers
+        await fs.rm(historyPath, { force: true });
+        if (historyWritePath !== historyPath) {
+          await fs.rm(historyWritePath, { force: true });
+        }
 
         if (provider === "codex") {
-          // Only clean up the review-scoped Codex session file
-          await fs.rm(path.join(workDir, "codex-chat-review.json"), { force: true });
+          for (const wd of workDirs) {
+            await fs.rm(path.join(wd, "codex-chat-review.json"), { force: true });
+          }
         } else if (!provider) {
-          // No provider specified (SymphonyChat full clear) — blanket cleanup
-          await deleteSharedCodexChatState(workDir);
+          for (const wd of workDirs) {
+            await deleteSharedCodexChatState(wd);
+          }
         }
         // provider=claude: do NOT touch any codex state files
 
@@ -260,7 +278,24 @@ function getChatHistoryPath(
   expandedRepoPath: string,
   provider?: string | null
 ): string {
-  return path.join(resolveWorktreeDir(expandedRepoPath, ticketId), ".claude", "work", chatHistoryFilename(provider));
+  const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
+  const filename = chatHistoryFilename(provider);
+  const newPath = path.join(worktreeDir, ".closedloop-ai", "work", filename);
+  const oldPath = path.join(worktreeDir, ".claude", "work", filename);
+  // For reads: return old path if it exists and new path doesn't (legacy fallback).
+  // Writes always target the new path (canonical location).
+  return existsSync(newPath) || !existsSync(oldPath) ? newPath : oldPath;
+}
+
+/** Always returns the canonical new-path for writes, regardless of where the file currently lives. */
+function getChatHistoryWritePath(
+  ticketId: string,
+  expandedRepoPath: string,
+  provider?: string | null
+): string {
+  const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
+  const filename = chatHistoryFilename(provider);
+  return path.join(worktreeDir, ".closedloop-ai", "work", filename);
 }
 
 /** Delete shared-surface Codex chat state files: legacy + review. */

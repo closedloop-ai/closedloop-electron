@@ -152,7 +152,7 @@ export class GatewayRouter {
       this.options.getAllowedDirectories
     );
     registerSymphonyJudgesRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
-    registerSymphonyKillRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
+    registerSymphonyKillRoutes(this.operationDispatcher, this.options.getAllowedDirectories, this.options.jobStore);
     registerSymphonyLoopRoutes(
       this.operationDispatcher,
       this.options.getAllowedDirectories,

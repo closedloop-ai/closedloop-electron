@@ -55,6 +55,7 @@ export function registerSymphonyPlanRoutes(
       const safeTicketId = sanitizeTicketId(ticketId);
       const planPath = findFirstExisting(
         path.join(worktreeDir, safeTicketId, "plan.json"),
+        path.join(worktreeDir, ".closedloop-ai", "work", "plan.json"),
         path.join(worktreeDir, ".claude", "work", "plan.json")
       );
 
@@ -81,6 +82,7 @@ export function registerSymphonyPlanRoutes(
       if (!markdownContent) {
         const planMdPath = findFirstExisting(
           path.join(worktreeDir, safeTicketId, "plan.md"),
+          path.join(worktreeDir, ".closedloop-ai", "work", "plan.md"),
           path.join(worktreeDir, ".claude", "work", "plan.md")
         );
         if (planMdPath) {

@@ -14,6 +14,7 @@ export type TelemetryCategory =
   | "job.started"
   | "job.completed"
   | "job.failed"
+  | "job.cancelled"
   | "preflight.binary_not_found"
   | "preflight.script_not_found"
   | "preflight.spawn_failed";

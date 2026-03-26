@@ -86,7 +86,7 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 
 // Shared test helpers — see test/helpers/mock-api-server.ts
-import { initGitRepo, startMockApiServer } from "./helpers/mock-api-server.js";
+import { initGitRepo, startMockApiServer } from "./symphony-test-utils.js";
 
 /**
  * Build a TelemetryService that collects all emitted events.
@@ -449,7 +449,7 @@ test("telemetry: preflight.spawn_failed emitted when log file open fails (EISDIR
     worktreeParent,
     `spawn-fail-repo-loop-${slugifiedId}`
   );
-  const predictedClaudeWorkDir = path.join(predictedWorktreeDir, ".claude", "work");
+  const predictedClaudeWorkDir = path.join(predictedWorktreeDir, ".closedloop-ai", "work");
   const predictedLogFile = path.join(predictedClaudeWorkDir, "symphony-loop.log");
 
   // Pre-create worktreeDir as a plain directory (not a real git worktree).
