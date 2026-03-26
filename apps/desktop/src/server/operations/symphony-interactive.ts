@@ -20,8 +20,10 @@ import {
   acquireLaunchLock,
   assertRepoAllowed,
   chatHistoryFilename,
+  checkAndMigrateLegacyWorkDir,
   cleanStaleLock,
   expandHome,
+  findFirstExisting,
   getLockDir,
   isProcessRunning,
   readLaunchMetadata,
@@ -149,13 +151,13 @@ export function registerSymphonyInteractiveRoutes(
         json(context, 400, { error: "unsupported provider" });
         return;
       }
-      const historyPath = path.join(
-        worktreeDir,
-        ".claude",
-        "work",
-        chatHistoryFilename(provider)
-      );
-      const history = await loadJsonFile<TicketChatHistory>(historyPath, {
+      const historyFilename = chatHistoryFilename(provider);
+      const historyReadPath = findFirstExisting(
+        path.join(worktreeDir, ".closedloop-ai", "work", historyFilename),
+        path.join(worktreeDir, ".claude", "work", historyFilename)
+      ) ?? path.join(worktreeDir, ".closedloop-ai", "work", historyFilename);
+      const historyWritePath = path.join(worktreeDir, ".closedloop-ai", "work", historyFilename);
+      const history = await loadJsonFile<TicketChatHistory>(historyReadPath, {
         messages: [],
         ticketId,
         repoPath: repoInput,
@@ -167,14 +169,15 @@ export function registerSymphonyInteractiveRoutes(
         content: message,
         timestamp: new Date().toISOString(),
       });
-      await saveJsonFile(historyPath, history);
+      await fs.mkdir(path.dirname(historyWritePath), { recursive: true });
+      await saveJsonFile(historyWritePath, history);
 
       setStreamingHeaders(context.response);
       await streamClaudeChat({
         response: context.response,
         cwd: worktreeDir,
         history,
-        historyPath,
+        historyPath: historyWritePath,
         prompt: buildSymphonyPrompt(message, contextRepoPaths),
         tools: withMcpTools(ENGINEER_CHAT_TOOLS),
       });
@@ -272,12 +275,17 @@ export function registerSymphonyInteractiveRoutes(
         return;
       }
 
-      const historyPath = getCommentHistoryPath(
+      const readHistoryPath = getCommentHistoryPath(
         ticketId,
         expandedRepoPath,
         commentId
       );
-      const history = await loadJsonFile<CommentChatHistory>(historyPath, {
+      const writeHistoryPath = getCommentHistoryWritePath(
+        ticketId,
+        expandedRepoPath,
+        commentId
+      );
+      const history = await loadJsonFile<CommentChatHistory>(readHistoryPath, {
         messages: [],
         ticketId,
         repoPath,
@@ -295,14 +303,15 @@ export function registerSymphonyInteractiveRoutes(
         content: message,
         timestamp: new Date().toISOString(),
       });
-      await saveJsonFile(historyPath, history);
+      await fs.mkdir(path.dirname(writeHistoryPath), { recursive: true });
+      await saveJsonFile(writeHistoryPath, history);
 
       setStreamingHeaders(context.response);
       await streamClaudeChat({
         response: context.response,
         cwd: worktreeDir,
         history,
-        historyPath,
+        historyPath: writeHistoryPath,
         prompt: buildCommentPrompt(message, history.commentContext),
         tools: withMcpTools(ENGINEER_CHAT_TOOLS),
       });
@@ -343,12 +352,17 @@ export function registerSymphonyInteractiveRoutes(
         return;
       }
 
-      const historyPath = getCommentHistoryPath(
+      const readHistoryPath = getCommentHistoryPath(
         ticketId,
         repoResult.path,
         commentId
       );
-      const history = await loadJsonFile<CommentChatHistory>(historyPath, {
+      const writeHistoryPath = getCommentHistoryWritePath(
+        ticketId,
+        repoResult.path,
+        commentId
+      );
+      const history = await loadJsonFile<CommentChatHistory>(readHistoryPath, {
         messages: [],
         ticketId,
         repoPath,
@@ -371,7 +385,8 @@ export function registerSymphonyInteractiveRoutes(
         }
       }
 
-      await saveJsonFile(historyPath, history);
+      await fs.mkdir(path.dirname(writeHistoryPath), { recursive: true });
+      await saveJsonFile(writeHistoryPath, history);
       json(context, 200, { success: true });
     }
   );
@@ -402,12 +417,26 @@ export function registerSymphonyInteractiveRoutes(
         throw error;
       }
 
-      const historyPath = getCommentHistoryPath(
+      const readHistoryPath = getCommentHistoryPath(
         ticketId,
         expandedRepoPath,
         commentId
       );
-      await fs.rm(historyPath, { force: true });
+      const writeHistoryPath = getCommentHistoryWritePath(
+        ticketId,
+        expandedRepoPath,
+        commentId
+      );
+      // Delete from both roots to clear dual-copy leftovers
+      await fs.rm(readHistoryPath, { force: true });
+      await fs.rm(writeHistoryPath, { force: true });
+      // Also try the other root explicitly in case both copies exist
+      const worktreeDir = resolveWorktreeForComment(ticketId, expandedRepoPath);
+      const sanitizedComment = commentId.replaceAll(/[^a-zA-Z0-9-_]/g, "_");
+      await fs.rm(
+        path.join(worktreeDir, ".claude", "work", "comment-chats", `${sanitizedComment}.json`),
+        { force: true }
+      );
       json(context, 200, { success: true });
     }
   );
@@ -573,13 +602,23 @@ export function registerSymphonyInteractiveRoutes(
       );
       const lockDir = getLockDir(worktreeParentDir, repoName, sanitizedTicket);
 
+      // Migration preflight: run BEFORE alreadyRunning check so the work dir is at
+      // the correct location by the time we inspect the running process.
+      if (existsSync(worktreeDir)) {
+        const migrationResult = checkAndMigrateLegacyWorkDir(worktreeDir);
+        if (migrationResult === "blocked") {
+          json(context, 409, { error: "A job started before the .closedloop-ai migration is still running. Stop it first, then retry." });
+          return;
+        }
+      }
+
       // Fast path: if worktree exists and process is alive, return alreadyRunning
       if (existsSync(worktreeDir)) {
         const existingPid = readProcessPidSync(worktreeDir);
         if (existingPid !== null && isProcessRunning(existingPid)) {
           // Refresh PRD (harmless to running process)
           if (ticket) {
-            const claudeWorkDir = path.join(worktreeDir, ".claude", "work");
+            const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
             await fs.mkdir(claudeWorkDir, { recursive: true });
             await createPrdFile(claudeWorkDir, ticket, expandedRepoPath);
           }
@@ -587,7 +626,7 @@ export function registerSymphonyInteractiveRoutes(
           const meta = readLaunchMetadata(worktreeDir);
           const logFile = path.join(
             worktreeDir,
-            ".claude",
+            ".closedloop-ai",
             "work",
             "symphony-launch.log"
           );
@@ -599,7 +638,7 @@ export function registerSymphonyInteractiveRoutes(
             worktreePath: worktreeDir,
             pid: existingPid,
             logFile,
-            prdFile: path.join(worktreeDir, ".claude", "work", "prd.md"),
+            prdFile: path.join(worktreeDir, ".closedloop-ai", "work", "prd.md"),
             baseBranch: meta?.baseBranch,
             parentTicketId: meta?.parentTicketId,
             alreadyRunning: true,
@@ -631,7 +670,7 @@ export function registerSymphonyInteractiveRoutes(
           resolvedBaseBranch = result.resolvedBaseBranch;
         }
 
-        const claudeWorkDir = path.join(worktreeDir, ".claude", "work");
+        const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
         await fs.mkdir(claudeWorkDir, { recursive: true });
 
         if (ticket) {
@@ -688,7 +727,7 @@ export function registerSymphonyInteractiveRoutes(
           worktreePath: worktreeDir,
           pid,
           logFile,
-          prdFile: path.join(claudeWorkDir, "prd.md"),
+          prdFile: path.join(worktreeDir, ".closedloop-ai", "work", "prd.md"),
           baseBranch: mergedMeta?.baseBranch,
           parentTicketId: mergedMeta?.parentTicketId,
         });
@@ -866,9 +905,33 @@ function getCommentHistoryPath(
   const worktreeDir = resolveWorktreeForComment(ticketId, expandedRepoPath);
   const sanitizedComment = commentId.replaceAll(/[^a-zA-Z0-9-_]/g, "_");
 
-  return path.join(
+  const newPath = path.join(
+    worktreeDir,
+    ".closedloop-ai",
+    "work",
+    "comment-chats",
+    `${sanitizedComment}.json`
+  );
+  const oldPath = path.join(
     worktreeDir,
     ".claude",
+    "work",
+    "comment-chats",
+    `${sanitizedComment}.json`
+  );
+  return findFirstExisting(newPath, oldPath) ?? newPath;
+}
+
+function getCommentHistoryWritePath(
+  ticketId: string,
+  expandedRepoPath: string,
+  commentId: string
+): string {
+  const worktreeDir = resolveWorktreeForComment(ticketId, expandedRepoPath);
+  const sanitizedComment = commentId.replaceAll(/[^a-zA-Z0-9-_]/g, "_");
+  return path.join(
+    worktreeDir,
+    ".closedloop-ai",
     "work",
     "comment-chats",
     `${sanitizedComment}.json`

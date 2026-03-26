@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError } from "../security.js";
-import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
+import { assertRepoAllowed, findFirstExisting, resolveWorktreeDir } from "./symphony-utils.js";
 
 export function registerSymphonyLogsRoutes(
   dispatcher: OperationDispatcher,
@@ -31,8 +31,15 @@ export function registerSymphonyLogsRoutes(
     }
 
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-    const jsonlFile = path.join(worktreeDir, ".claude", "work", "claude-output.jsonl");
-    const legacyLogFile = path.join(worktreeDir, ".claude", "work", "symphony-launch.log");
+    // Check new path first, fall back to legacy .claude/work
+    const jsonlFile = findFirstExisting(
+      path.join(worktreeDir, ".closedloop-ai", "work", "claude-output.jsonl"),
+      path.join(worktreeDir, ".claude", "work", "claude-output.jsonl")
+    ) ?? path.join(worktreeDir, ".closedloop-ai", "work", "claude-output.jsonl");
+    const legacyLogFile = findFirstExisting(
+      path.join(worktreeDir, ".closedloop-ai", "work", "symphony-launch.log"),
+      path.join(worktreeDir, ".claude", "work", "symphony-launch.log")
+    ) ?? path.join(worktreeDir, ".closedloop-ai", "work", "symphony-launch.log");
 
     const isJsonl = existsSync(jsonlFile);
     const logFile = isJsonl ? jsonlFile : legacyLogFile;

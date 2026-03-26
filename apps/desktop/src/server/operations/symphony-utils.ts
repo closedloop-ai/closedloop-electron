@@ -3,6 +3,7 @@ import {
   closeSync,
   constants,
   copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   openSync,
@@ -138,44 +139,123 @@ function fetchOrigin(repoPath: string): void {
 }
 
 /**
- * Save .claude/ from a non-git directory to a temp location.
- * Returns the temp path, or null if there was nothing to save.
+ * Migrate .claude/work to .closedloop-ai/work if the new path doesn't exist
+ * but the old one does.
  */
-function saveClaudeState(worktreeDir: string): string | null {
-  const claudeDir = path.join(worktreeDir, ".claude");
-  if (!existsSync(claudeDir)) {
-    return null;
+export function migrateWorkDirIfNeeded(worktreeDir: string): void {
+  const oldDir = path.join(worktreeDir, ".claude", "work");
+  const newDir = path.join(worktreeDir, ".closedloop-ai", "work");
+  if (existsSync(oldDir) && !existsSync(newDir)) {
+    mkdirSync(path.join(worktreeDir, ".closedloop-ai"), { recursive: true });
+    try {
+      renameSync(oldDir, newDir);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "EEXIST") { throw err; }
+    }
   }
-  const saved = path.join(os.tmpdir(), `worktree-claude-${Date.now()}`);
-  renameSync(claudeDir, saved);
-  return saved;
 }
 
 /**
- * Restore previously saved .claude/ state files into worktreeDir.
- * Merges work files if .claude/ already exists (created by git worktree add).
+ * Write-handler preflight: if .closedloop-ai/work doesn't exist but .claude/work does,
+ * check for a live legacy process. Returns "blocked" if a live process is found,
+ * "migrated" if migration was performed, or "noop" if nothing needed.
  */
-function restoreClaudeState(savedDir: string, worktreeDir: string): void {
-  const destClaude = path.join(worktreeDir, ".claude");
-  if (!existsSync(destClaude)) {
-    renameSync(savedDir, destClaude);
-    return;
+export function checkAndMigrateLegacyWorkDir(
+  worktreeDir: string
+): "blocked" | "migrated" | "noop" {
+  const newWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+  const oldWorkDir = path.join(worktreeDir, ".claude", "work");
+  if (existsSync(newWorkDir) || !existsSync(oldWorkDir)) {
+    return "noop";
   }
-  // Merge: copy saved work files into the new worktree's .claude/work
-  const savedWork = path.join(savedDir, "work");
-  if (existsSync(savedWork)) {
-    const destWork = path.join(destClaude, "work");
-    mkdirSync(destWork, { recursive: true });
-    for (const file of readdirSync(savedWork)) {
-      try {
-        copyFileSync(path.join(savedWork, file), path.join(destWork, file));
-      } catch {
-        // Best effort
+  const legacyPidPath = path.join(oldWorkDir, "process.pid");
+  if (existsSync(legacyPidPath)) {
+    try {
+      const rawPid = readFileSync(legacyPidPath, "utf-8").trim();
+      const legacyPid = Number.parseInt(rawPid, 10);
+      if (!Number.isNaN(legacyPid) && isProcessRunning(legacyPid)) {
+        return "blocked";
       }
+    } catch {
+      // Can't read PID -- proceed with migration
     }
   }
-  rmSync(savedDir, { recursive: true, force: true });
+  migrateWorkDirIfNeeded(worktreeDir);
+  return "migrated";
 }
+
+type SavedWorktreeState = {
+  savedClaudeDir: string | null;
+  savedClosedloopDir: string | null;
+};
+
+/**
+ * Save .claude/ and .closedloop-ai/ from a non-git directory to temp locations.
+ * Returns the saved paths (null if nothing was saved for that dir).
+ */
+function saveWorktreeState(worktreeDir: string): SavedWorktreeState {
+  const claudeDir = path.join(worktreeDir, ".claude");
+  const closedloopDir = path.join(worktreeDir, ".closedloop-ai");
+  const ts = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+  let savedClaudeDir: string | null = null;
+  if (existsSync(claudeDir)) {
+    savedClaudeDir = path.join(os.tmpdir(), `worktree-claude-${ts}`);
+    renameSync(claudeDir, savedClaudeDir);
+  }
+
+  let savedClosedloopDir: string | null = null;
+  if (existsSync(closedloopDir)) {
+    savedClosedloopDir = path.join(os.tmpdir(), `worktree-closedloop-${ts}`);
+    renameSync(closedloopDir, savedClosedloopDir);
+  }
+
+  return { savedClaudeDir, savedClosedloopDir };
+}
+
+/**
+ * Restore previously saved state directories into worktreeDir.
+ * - .claude/: if absent in new worktree, rename straight in. If exists (git recreated),
+ *   destination-precedence merge using cpSync.
+ * - .closedloop-ai/: always merge using cpSync.
+ */
+function restoreWorktreeState(
+  saved: SavedWorktreeState,
+  worktreeDir: string
+): void {
+  const { savedClaudeDir, savedClosedloopDir } = saved;
+
+  if (savedClaudeDir) {
+    const destClaude = path.join(worktreeDir, ".claude");
+    if (!existsSync(destClaude)) {
+      renameSync(savedClaudeDir, destClaude);
+    } else {
+      // Destination-precedence merge: only restore children absent in destination
+      for (const child of readdirSync(savedClaudeDir)) {
+        const savedChild = path.join(savedClaudeDir, child);
+        const destChild = path.join(destClaude, child);
+        if (!existsSync(destChild)) {
+          const st = statSync(savedChild);
+          if (st.isDirectory()) {
+            cpSync(savedChild, destChild, { recursive: true });
+          } else {
+            copyFileSync(savedChild, destChild);
+          }
+        }
+      }
+      rmSync(savedClaudeDir, { recursive: true, force: true });
+    }
+  }
+
+  if (savedClosedloopDir) {
+    const destClosedloop = path.join(worktreeDir, ".closedloop-ai");
+    mkdirSync(destClosedloop, { recursive: true });
+    cpSync(savedClosedloopDir, destClosedloop, { recursive: true });
+    rmSync(savedClosedloopDir, { recursive: true, force: true });
+  }
+}
+
 
 /**
  * Create a new git worktree at worktreeDir checked out to ref,
@@ -184,10 +264,10 @@ function restoreClaudeState(savedDir: string, worktreeDir: string): void {
 function addWorktree(repoPath: string, worktreeDir: string, ref: string): void {
   // If the directory exists but isn't a git worktree (e.g. state files were
   // written there by a "use base repo" review), remove it so git worktree add
-  // can create it cleanly. Preserve .claude/ (review state files).
-  let savedClaudeDir: string | null = null;
+  // can create it cleanly. Preserve .claude/ and .closedloop-ai/ (review state files).
+  let savedState: ReturnType<typeof saveWorktreeState> | null = null;
   if (existsSync(worktreeDir) && !existsSync(path.join(worktreeDir, ".git"))) {
-    savedClaudeDir = saveClaudeState(worktreeDir);
+    savedState = saveWorktreeState(worktreeDir);
     rmSync(worktreeDir, { recursive: true, force: true });
   }
 
@@ -202,14 +282,23 @@ function addWorktree(repoPath: string, worktreeDir: string, ref: string): void {
     // Best effort
   }
 
-  execFileSync("git", ["worktree", "add", worktreeDir, ref], {
-    cwd: repoPath,
-    stdio: "pipe",
-    timeout: NETWORK_GIT_TIMEOUT,
-  });
+  try {
+    execFileSync("git", ["worktree", "add", worktreeDir, ref], {
+      cwd: repoPath,
+      stdio: "pipe",
+      timeout: NETWORK_GIT_TIMEOUT,
+    });
+  } catch (err) {
+    // Restore saved state before propagating -- prevents stranding in /tmp
+    if (savedState) {
+      mkdirSync(worktreeDir, { recursive: true });
+      restoreWorktreeState(savedState, worktreeDir);
+    }
+    throw err;
+  }
 
-  if (savedClaudeDir) {
-    restoreClaudeState(savedClaudeDir, worktreeDir);
+  if (savedState) {
+    restoreWorktreeState(savedState, worktreeDir);
   }
 
   copyEnvLocalFiles(repoPath, worktreeDir);
@@ -434,12 +523,15 @@ export function chatHistoryFilename(provider?: string | null): string {
 
 /**
  * Read the PID from process.pid file if it exists.
+ * Checks .closedloop-ai/work first, falls back to .claude/work for legacy worktrees.
  * Returns null if file doesn't exist or is invalid.
  */
 export function readProcessPidSync(worktreeDir: string): number | null {
-  const pidPath = path.join(worktreeDir, ".claude", "work", "process.pid");
+  const newPidPath = path.join(worktreeDir, ".closedloop-ai", "work", "process.pid");
+  const oldPidPath = path.join(worktreeDir, ".claude", "work", "process.pid");
+  const pidPath = findFirstExisting(newPidPath, oldPidPath);
 
-  if (!existsSync(pidPath)) {
+  if (!pidPath) {
     return null;
   }
 
@@ -474,17 +566,16 @@ export type LaunchMetadata = {
 };
 
 /**
- * Read launch metadata from {worktreeDir}/.claude/work/launch-metadata.json.
+ * Read launch metadata from {worktreeDir}/.closedloop-ai/work/launch-metadata.json.
+ * Falls back to .claude/work for legacy worktrees.
  */
 export function readLaunchMetadata(worktreeDir: string): LaunchMetadata | null {
-  const metaPath = path.join(
-    worktreeDir,
-    ".claude",
-    "work",
-    "launch-metadata.json"
+  const metaPath = findFirstExisting(
+    path.join(worktreeDir, ".closedloop-ai", "work", "launch-metadata.json"),
+    path.join(worktreeDir, ".claude", "work", "launch-metadata.json")
   );
 
-  if (!existsSync(metaPath)) {
+  if (!metaPath) {
     return null;
   }
 
@@ -519,7 +610,7 @@ export function writeLaunchMetadata(
   worktreeDir: string,
   meta: LaunchMetadata
 ): void {
-  const claudeWorkDir = path.join(worktreeDir, ".claude", "work");
+  const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
   mkdirSync(claudeWorkDir, { recursive: true });
 
   const metaPath = path.join(claudeWorkDir, "launch-metadata.json");

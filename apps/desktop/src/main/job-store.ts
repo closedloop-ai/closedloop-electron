@@ -27,6 +27,7 @@ export type LocalJob = {
   kind: LocalJobKind;
   loopId: string;
   commandId?: string;
+  operationId?: string;
   command: LocalJobCommand;
   ticketId?: string;
   artifactId?: string;

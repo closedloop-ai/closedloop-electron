@@ -12,9 +12,11 @@ import {
   type DesktopCommandStreamEvent,
   type DesktopHelloAckEvent,
   type DesktopHelloEvent,
-  type DesktopPresenceEvent
+  type DesktopPresenceEvent,
+  type ProtocolEnvelope
 } from "./cloud-protocol.js";
 import { normalizeAndValidateOrigin } from "./origin-policy.js";
+import type { DesktopTelemetryEvent } from "./telemetry-protocol.js";
 
 export interface CloudSocketOptions {
   getRelayOrigin: () => string;
@@ -80,6 +82,10 @@ export class CloudSocketService {
   restart(): void {
     this.stop();
     void this.start();
+  }
+
+  sendTelemetry(event: Omit<DesktopTelemetryEvent, keyof EnvelopeOnlyFields>): void {
+    this.emit("desktop.telemetry", event);
   }
 
   sendCommandAck(event: Omit<DesktopCommandAckEvent, keyof EnvelopeOnlyFields>): void {
@@ -302,11 +308,7 @@ export class CloudSocketService {
   }
 }
 
-type EnvelopeOnlyFields = {
-  protocolVersion: string;
-  messageId: string;
-  timestamp: string;
-};
+type EnvelopeOnlyFields = ProtocolEnvelope;
 
 const HELLO_ACK_TIMEOUT_MS = 10_000;
 

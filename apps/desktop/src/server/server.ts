@@ -6,7 +6,7 @@ import {
   DEFAULT_GATEWAY_PORT,
   FALLBACK_GATEWAY_PORTS,
   type ComputeTargetCapabilities,
-  type HealthResponse
+  type HealthResponse,
 } from "../shared/contracts.js";
 import { gatewayLog } from "../main/gateway-logger.js";
 import type { LocalSessionStore } from "../main/local-session-store.js";
@@ -15,8 +15,9 @@ import {
   GatewayRouter,
   type GatewayActivityEvent,
   type GatewayApprovalRequest,
-  type GatewayApprovalResult
+  type GatewayApprovalResult,
 } from "./router.js";
+import type { TelemetryEmitter } from "../main/telemetry-protocol.js";
 
 export interface DesktopGatewayServerOptions {
   host: string;
@@ -30,7 +31,7 @@ export interface DesktopGatewayServerOptions {
   fallbackEngineerOrigin?: string;
   onActivityEvent?: (event: GatewayActivityEvent) => void;
   evaluateApproval?: (
-    request: GatewayApprovalRequest
+    request: GatewayApprovalRequest,
   ) => GatewayApprovalResult | Promise<GatewayApprovalResult>;
   machineName: string;
   version: string;
@@ -41,6 +42,7 @@ export interface DesktopGatewayServerOptions {
   getApiOrigin?: () => string;
   prodOriginsOnly?: boolean;
   jobStore?: JobStore;
+  telemetry?: TelemetryEmitter;
   onUnexpectedClose?: () => void;
 }
 
@@ -55,7 +57,8 @@ export class DesktopGatewayServer {
     this.options = {
       ...options,
       discoveryFilePath:
-        options.discoveryFilePath ?? path.join(os.homedir(), ".closedloop-ai", "electron-port")
+        options.discoveryFilePath ??
+        path.join(os.homedir(), ".closedloop-ai", "electron-port"),
     };
     this.activePort = this.options.preferredPort;
     this.router = new GatewayRouter({
@@ -76,6 +79,7 @@ export class DesktopGatewayServer {
       getApiOrigin: this.options.getApiOrigin,
       prodOriginsOnly: this.options.prodOriginsOnly,
       jobStore: this.options.jobStore,
+      telemetry: this.options.telemetry,
     });
   }
 
@@ -88,7 +92,7 @@ export class DesktopGatewayServer {
     capabilities: ComputeTargetCapabilities,
     onActivityEvent?: (event: GatewayActivityEvent) => void,
     evaluateApproval?: (
-      request: GatewayApprovalRequest
+      request: GatewayApprovalRequest,
     ) => GatewayApprovalResult | Promise<GatewayApprovalResult>,
     getSymphonyDir?: () => string,
     sessionStore?: LocalSessionStore,
@@ -97,7 +101,8 @@ export class DesktopGatewayServer {
     getWebAppOrigin?: () => string,
     prodOriginsOnly?: boolean,
     jobStore?: JobStore,
-    onUnexpectedClose?: () => void
+    telemetry?: TelemetryEmitter,
+    onUnexpectedClose?: () => void,
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -119,6 +124,7 @@ export class DesktopGatewayServer {
       getApiOrigin,
       prodOriginsOnly,
       jobStore,
+      telemetry,
       onUnexpectedClose,
     });
   }
@@ -137,7 +143,7 @@ export class DesktopGatewayServer {
       machineName: this.options.machineName,
       capabilities: this.options.capabilities,
       version: this.options.version,
-      port: this.activePort
+      port: this.activePort,
     };
   }
 
@@ -146,7 +152,10 @@ export class DesktopGatewayServer {
       return;
     }
 
-    const candidates = [this.options.preferredPort, ...this.options.fallbackPorts];
+    const candidates = [
+      this.options.preferredPort,
+      ...this.options.fallbackPorts,
+    ];
     let lastError: Error | null = null;
 
     for (const candidate of candidates) {
@@ -159,7 +168,8 @@ export class DesktopGatewayServer {
         this.server = candidateServer;
         this.alive = true;
         const addr = candidateServer.address();
-        this.activePort = typeof addr === "object" && addr ? addr.port : candidate;
+        this.activePort =
+          typeof addr === "object" && addr ? addr.port : candidate;
         candidateServer.on("error", (err) => {
           gatewayLog.error("gateway-server", `Server error: ${err.message}`);
         });
@@ -186,7 +196,7 @@ export class DesktopGatewayServer {
     }
 
     throw new Error(
-      `failed to bind gateway server to any candidate port (${candidates.join(", ")}): ${lastError?.message ?? "unknown error"}`
+      `failed to bind gateway server to any candidate port (${candidates.join(", ")}): ${lastError?.message ?? "unknown error"}`,
     );
   }
 
@@ -200,7 +210,10 @@ export class DesktopGatewayServer {
     this.server = null;
     await new Promise<void>((resolve, reject) => {
       runningServer.close((error) => {
-        if (error && (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING") {
+        if (
+          error &&
+          (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING"
+        ) {
           reject(error);
           return;
         }
@@ -232,6 +245,10 @@ export class DesktopGatewayServer {
 
     const discoveryDirectory = path.dirname(this.options.discoveryFilePath);
     await fs.mkdir(discoveryDirectory, { recursive: true });
-    await fs.writeFile(this.options.discoveryFilePath, String(this.activePort), "utf-8");
+    await fs.writeFile(
+      this.options.discoveryFilePath,
+      String(this.activePort),
+      "utf-8",
+    );
   }
 }
