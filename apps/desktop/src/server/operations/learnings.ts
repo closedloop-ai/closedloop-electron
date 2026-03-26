@@ -6,7 +6,7 @@ import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { findPluginScript } from "./plugin-cache.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
-import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
+import { assertRepoAllowed, findFirstExisting, resolveWorktreeDir } from "./symphony-utils.js";
 
 type ParsedLearningPattern = {
   id: string;
@@ -74,8 +74,14 @@ export function registerLearningsRoutes(
       return;
     }
 
-    const claudeWorkDir = path.join(worktreeDir, ".claude", "work");
-    const chatHistoryPath = path.join(claudeWorkDir, chatFile);
+    const newLearningsWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+    const oldLearningsWorkDir = path.join(worktreeDir, ".claude", "work");
+    // Per-file resolution: find chat history wherever it exists
+    const chatHistoryPath = findFirstExisting(
+      path.join(newLearningsWorkDir, chatFile),
+      path.join(oldLearningsWorkDir, chatFile)
+    ) ?? path.join(newLearningsWorkDir, chatFile);
+    const claudeWorkDir = chatHistoryPath.startsWith(newLearningsWorkDir) ? newLearningsWorkDir : oldLearningsWorkDir;
 
     try {
       assertPathAllowed(claudeWorkDir, getAllowedDirectories());
@@ -147,15 +153,12 @@ export function registerLearningsRoutes(
     }
 
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-    const statusPath = path.join(
-      worktreeDir,
-      ".claude",
-      "work",
-      ".learnings",
-      "processing-status.json"
+    const statusPath = findFirstExisting(
+      path.join(worktreeDir, ".closedloop-ai", "work", ".learnings", "processing-status.json"),
+      path.join(worktreeDir, ".claude", "work", ".learnings", "processing-status.json")
     );
 
-    if (!existsSync(statusPath)) {
+    if (!statusPath) {
       json(context, 200, { status: "none" });
       return;
     }
@@ -201,7 +204,9 @@ export function registerLearningsRoutes(
       return;
     }
 
-    const claudeWorkDir = path.join(worktreeDir, ".claude", "work");
+    const newProcWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+    // Always write to the new canonical path; reads may fall back to legacy.
+    const claudeWorkDir = newProcWorkDir;
     const learningsDir = path.join(claudeWorkDir, ".learnings");
     const pendingDir = path.join(learningsDir, "pending");
     const processingStatusPath = path.join(learningsDir, "processing-status.json");
@@ -228,9 +233,21 @@ export function registerLearningsRoutes(
       return;
     }
 
-    if (!existsSync(pendingDir)) {
+    // Check both new and legacy locations for pending learnings
+    const legacyPendingDir = path.join(worktreeDir, ".claude", "work", ".learnings", "pending");
+    const effectivePendingDir = findFirstExisting(pendingDir, legacyPendingDir);
+    if (!effectivePendingDir) {
       json(context, 200, { status: "skipped", reason: "No pending learnings directory" });
       return;
+    }
+
+    // If pending learnings are at legacy location, copy them to new location
+    if (effectivePendingDir === legacyPendingDir && !existsSync(pendingDir)) {
+      await fs.mkdir(pendingDir, { recursive: true });
+      const legacyFiles = await fs.readdir(legacyPendingDir).catch(() => []);
+      for (const file of legacyFiles) {
+        await fs.copyFile(path.join(legacyPendingDir, file), path.join(pendingDir, file)).catch(() => {});
+      }
     }
 
     const pendingFiles = await fs
@@ -304,15 +321,12 @@ export function registerLearningsRoutes(
     }
 
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-    const statusPath = path.join(
-      worktreeDir,
-      ".claude",
-      "work",
-      ".learnings",
-      "chat-extraction-status.json"
+    const statusPath = findFirstExisting(
+      path.join(worktreeDir, ".closedloop-ai", "work", ".learnings", "chat-extraction-status.json"),
+      path.join(worktreeDir, ".claude", "work", ".learnings", "chat-extraction-status.json")
     );
 
-    if (!existsSync(statusPath)) {
+    if (!statusPath) {
       json(context, 200, { status: "none", count: 0 });
       return;
     }
@@ -372,7 +386,9 @@ export function registerLearningsRoutes(
       return;
     }
 
-    const claudeWorkDir = path.join(worktreeDir, ".claude", "work");
+    const newRecordWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+    // Always write to the new canonical path; reads may fall back to legacy.
+    const claudeWorkDir = newRecordWorkDir;
     const learningsDir = path.join(claudeWorkDir, ".learnings");
 
     try {

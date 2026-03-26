@@ -4,7 +4,7 @@ import path from "node:path";
 import { isTerminalJobStatus, type JobStore, type LocalJobStatus } from "../../main/job-store.js";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
-import { expandHome, findFirstExisting, resolveWorktreeDir, sanitizeTicketId } from "./symphony-utils.js";
+import { expandHome, findFirstExisting, readProcessPidSync, resolveWorktreeDir, sanitizeTicketId } from "./symphony-utils.js";
 
 type TaskProgress = {
   pending: number;
@@ -84,6 +84,7 @@ export function registerSymphonyStatusRoutes(
       const safeTicketId = sanitizeTicketId(ticketId);
       const statePath = findFirstExisting(
         path.join(worktreeDir, safeTicketId, "state.json"),
+        path.join(worktreeDir, ".closedloop-ai", "work", "state.json"),
         path.join(worktreeDir, ".claude", "work", "state.json")
       );
 
@@ -114,6 +115,7 @@ export function registerSymphonyStatusRoutes(
       const effective = await resolveEffectiveState(worktreeDir, state, statePath);
       const resolvedPlanPath = findFirstExisting(
         path.join(worktreeDir, safeTicketId, "plan.json"),
+        path.join(worktreeDir, ".closedloop-ai", "work", "plan.json"),
         path.join(worktreeDir, ".claude", "work", "plan.json")
       );
       const planExists = resolvedPlanPath !== null;
@@ -152,25 +154,12 @@ function isProcessRunning(pid: number): boolean {
   }
 }
 
-async function readProcessPid(worktreeDir: string): Promise<number | null> {
-  const pidPath = path.join(worktreeDir, ".claude", "work", "process.pid");
-  if (!existsSync(pidPath)) {
-    return null;
-  }
-
-  try {
-    const pidContent = await readFile(pidPath, "utf-8");
-    const pid = Number.parseInt(pidContent.trim(), 10);
-    return Number.isNaN(pid) ? null : pid;
-  } catch {
-    return null;
-  }
-}
-
 async function detectCompletionFromLogs(
   worktreeDir: string
 ): Promise<{ completed: boolean; awaitingUser: boolean }> {
-  const logPath = path.join(worktreeDir, ".claude", "work", "symphony-launch.log");
+  const newLogPath = path.join(worktreeDir, ".closedloop-ai", "work", "symphony-launch.log");
+  const oldLogPath = path.join(worktreeDir, ".claude", "work", "symphony-launch.log");
+  const logPath = existsSync(newLogPath) ? newLogPath : oldLogPath;
   if (!existsSync(logPath)) {
     return { completed: false, awaitingUser: false };
   }
@@ -199,7 +188,7 @@ async function resolveEffectiveState(
 ): Promise<EffectiveState> {
   let effectiveStatus = typeof state.status === "string" ? state.status : "UNKNOWN";
   let effectivePhase = typeof state.phase === "string" ? state.phase : "Unknown";
-  const pid = await readProcessPid(worktreeDir);
+  const pid = readProcessPidSync(worktreeDir);
   const processRunning = pid !== null && isProcessRunning(pid);
   const base = { processRunning, pid };
 
@@ -222,7 +211,10 @@ async function resolveEffectiveState(
     };
   }
 
-  const lockPath = path.join(worktreeDir, ".claude", "work", ".learnings", ".lock");
+  const lockPath =
+    existsSync(path.join(worktreeDir, ".closedloop-ai", "work", ".learnings", ".lock"))
+      ? path.join(worktreeDir, ".closedloop-ai", "work", ".learnings", ".lock")
+      : path.join(worktreeDir, ".claude", "work", ".learnings", ".lock");
   if (existsSync(lockPath)) {
     return { status: effectiveStatus, phase: effectivePhase, fallbackDetected: false, ...base };
   }
@@ -279,40 +271,51 @@ async function readPlanProgress(
 }
 
 async function readActiveAgents(worktreeDir: string): Promise<ActiveAgent[]> {
-  const agentTypesDir = path.join(worktreeDir, ".claude", "work", ".agent-types");
-  if (!existsSync(agentTypesDir)) {
-    return [];
-  }
+  const agentTypeDirs = [
+    path.join(worktreeDir, ".closedloop-ai", "work", ".agent-types"),
+    path.join(worktreeDir, ".claude", "work", ".agent-types"),
+  ];
 
-  try {
-    const files = await readdir(agentTypesDir);
-    const agents: ActiveAgent[] = [];
+  const agentMap = new Map<string, ActiveAgent>();
 
-    for (const file of files) {
-      if (file.includes("-")) {
-        continue;
-      }
-
-      try {
-        const content = await readFile(path.join(agentTypesDir, file), "utf-8");
-        const [agentType, agentName, startedAt] = content.trim().split("|");
-        if (agentType && agentName) {
-          agents.push({
-            agentId: file,
-            agentType,
-            agentName,
-            startedAt: startedAt || ""
-          });
-        }
-      } catch {
-        continue;
-      }
+  for (const agentTypesDir of agentTypeDirs) {
+    if (!existsSync(agentTypesDir)) {
+      continue;
     }
 
-    return agents;
-  } catch {
-    return [];
+    try {
+      const files = await readdir(agentTypesDir);
+
+      for (const file of files) {
+        if (file.includes("-")) {
+          continue;
+        }
+
+        if (agentMap.has(file)) {
+          continue;
+        }
+
+        try {
+          const content = await readFile(path.join(agentTypesDir, file), "utf-8");
+          const [agentType, agentName, startedAt] = content.trim().split("|");
+          if (agentType && agentName) {
+            agentMap.set(file, {
+              agentId: file,
+              agentType,
+              agentName,
+              startedAt: startedAt || ""
+            });
+          }
+        } catch {
+          continue;
+        }
+      }
+    } catch {
+      continue;
+    }
   }
+
+  return [...agentMap.values()];
 }
 
 function json(context: OperationRequestContext, status: number, payload: unknown): void {
