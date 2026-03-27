@@ -40,6 +40,7 @@ export class CloudSocketService {
   private targetId: string | null = null;
   private helloAckTimer: NodeJS.Timeout | null = null;
   private awaitingHelloAck = false;
+  private lastPresenceState: string | null = null;
 
   constructor(options: CloudSocketOptions) {
     this.options = options;
@@ -101,7 +102,10 @@ export class CloudSocketService {
       state: DesktopPresenceEvent["state"];
     }
   ): void {
-    gatewayLog.debug("cloud-socket", `Sending presence: state=${event.state}`);
+    if (event.state !== this.lastPresenceState) {
+      gatewayLog.debug("cloud-socket", `Sending presence: state=${event.state}`);
+      this.lastPresenceState = event.state;
+    }
     this.emit("desktop.presence", event);
   }
 

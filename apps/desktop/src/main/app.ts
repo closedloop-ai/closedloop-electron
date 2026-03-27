@@ -299,7 +299,9 @@ export class DesktopApplication {
         autoUpdater.autoDownload = true;
         autoUpdater.autoInstallOnAppQuit = true;
         autoUpdater.on("error", (err) => {
-          gatewayLog.error("auto-update", `Auto-update error: ${err.message}`);
+          const isNetworkError = /ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|ENOTFOUND|ETIMEDOUT/i.test(err.message);
+          const level = isNetworkError ? "debug" : "error";
+          gatewayLog[level]("auto-update", `Auto-update error: ${err.message}`);
         });
         autoUpdater.on("update-available", (info) => {
           this.desktopWindow
@@ -318,9 +320,12 @@ export class DesktopApplication {
         });
         if (this.updateCheckTimer) clearInterval(this.updateCheckTimer);
         this.updateCheckTimer = setInterval(() => {
+          if (this.cloudStatus.state !== "online") {
+            return;
+          }
           void autoUpdater.checkForUpdates().catch((err: unknown) => {
             const msg = err instanceof Error ? err.message : String(err);
-            gatewayLog.error(
+            gatewayLog.debug(
               "auto-update",
               `Failed to check for updates: ${msg}`,
             );

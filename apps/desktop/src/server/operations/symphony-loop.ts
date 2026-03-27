@@ -1052,7 +1052,7 @@ async function attemptLlmCommit(
     "STEPS:",
     "1. Run `git status` and `git diff --stat` to understand what changed",
     "2. Stage all changed/new files EXCEPT the .claude/ and .closedloop-ai/ directories:",
-    "   git add -- . ':!.claude/' ':!.closedloop-ai/'",
+    "   git add -- . ':!.claude' ':!.closedloop-ai'",
     "3. Write a clear, descriptive commit message based on the actual code changes",
     "   - Summarize WHAT changed and WHY (not just 'Symphony loop output')",
     "   - Use conventional commit style if the changes have a clear category",
@@ -1295,7 +1295,7 @@ function executeGitOperations(
   // by the gateway itself (work dir, artifacts) and must never be committed.
   try {
     const status = execSync(
-      "git status --porcelain -- ':!.claude/' ':!.closedloop-ai/'",
+      "git status --porcelain -- . ':!.claude' ':!.closedloop-ai'",
       {
         cwd: worktreeDir,
         encoding: "utf-8",
@@ -1314,7 +1314,7 @@ function executeGitOperations(
 
   // Stage, commit, push
   try {
-    execSync("git add -- . ':!.claude/' ':!.closedloop-ai/'", {
+    execSync("git add -- . ':!.claude' ':!.closedloop-ai'", {
       cwd: worktreeDir,
       stdio: "pipe",
       env,
@@ -1326,7 +1326,7 @@ function executeGitOperations(
     execSync(`git commit -m ${shellEscape(commitMessage)}`, {
       cwd: worktreeDir,
       stdio: "pipe",
-      env,
+      env: { ...env, HUSKY: "0" },
       timeout: 30_000,
     });
 
@@ -1698,6 +1698,10 @@ async function handleProcessCompletion(
       artifacts = readDecomposeOutputs(claudeWorkDir);
     } else if (command === "EVALUATE_PRD") {
       artifacts = readEvaluatePrdOutputs(claudeWorkDir);
+    } else if (command === "EVALUATE_PLAN") {
+      artifacts = readEvaluatePlanOutputs(claudeWorkDir);
+    } else if (command === "EVALUATE_CODE") {
+      artifacts = readEvaluateCodeOutputs(claudeWorkDir);
     } else if (command === "GENERATE_PRD") {
       artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
     }
@@ -1773,17 +1777,7 @@ async function handleProcessCompletion(
       } catch {
         // Non-critical — worktree may already be cleaned up
       }
-  } else if (command === "DECOMPOSE") {
-    artifacts = readDecomposeOutputs(claudeWorkDir);
-  } else if (command === "EVALUATE_PRD") {
-    artifacts = readEvaluatePrdOutputs(claudeWorkDir);
-  } else if (command === "EVALUATE_PLAN") {
-    artifacts = readEvaluatePlanOutputs(claudeWorkDir);
-  } else if (command === "EVALUATE_CODE") {
-    artifacts = readEvaluateCodeOutputs(claudeWorkDir);
-  } else if (command === "GENERATE_PRD") {
-    artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
-  }
+    }
 
     // sessionId inside result (matches harness)
     if (metadata.sessionId) {
