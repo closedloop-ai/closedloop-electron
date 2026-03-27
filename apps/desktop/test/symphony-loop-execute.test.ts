@@ -28,7 +28,7 @@ import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { resetResolvedClaudePath } from "../src/server/operations/symphony-loop.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
-import { resetShellPathCache } from "../src/server/shell-path.js";
+import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
   initGitRepo,
@@ -64,6 +64,7 @@ const savedEnv = saveEnv();
 
 afterEach(async () => {
   restoreEnv(savedEnv);
+  resetShellPathCache();
 
   for (const server of serversToClose.splice(0)) {
     await server.stop();
@@ -128,7 +129,7 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  resetShellPathCache();
+  setShellPathForTest(process.env.PATH);
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -276,7 +277,7 @@ test("EXECUTE: handleProcessCompletion reads pre-written execution-result.json a
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  resetShellPathCache();
+  setShellPathForTest(process.env.PATH);
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -424,7 +425,7 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  resetShellPathCache();
+  setShellPathForTest(process.env.PATH);
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -553,7 +554,7 @@ test("EXECUTE: git status failure sets GIT_PUSH_FAILED in completed event warnin
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  resetShellPathCache();
+  setShellPathForTest(process.env.PATH);
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -698,7 +699,7 @@ test("EXECUTE: cancel before attemptLlmCommit ends job as CANCELLED with no uplo
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  resetShellPathCache();
+  setShellPathForTest(process.env.PATH);
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -833,7 +834,7 @@ test("EXECUTE: cancel during attemptLlmCommit ends job as CANCELLED with no comp
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  resetShellPathCache();
+  setShellPathForTest(process.env.PATH);
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -1462,7 +1463,7 @@ test("EXECUTE: non-zero exit with CANCEL_PENDING skips PROCESS_FAILED and ends a
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  resetShellPathCache();
+  setShellPathForTest(process.env.PATH);
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
