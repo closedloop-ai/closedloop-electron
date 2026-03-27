@@ -168,7 +168,7 @@ test("GENERATE_PRD: accepts valid command and responds 200", async () => {
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.HOME = tmpDir; // Prevents findStreamFormatter from finding real formatter
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH!);
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -339,7 +339,7 @@ test("GENERATE_PRD: spawns with worktree cwd, writes context pack, no --add-dir"
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.HOME = tmpDir; // Prevents findStreamFormatter from finding real formatter
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH!);
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -495,7 +495,7 @@ test("GENERATE_PRD: uploads { prd: { content } } when prd.md is written", async 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.HOME = tmpDir; // Prevents findStreamFormatter from finding real formatter
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH!);
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -582,7 +582,7 @@ test("GENERATE_PRD: uploads empty artifacts when prd.md is not written", async (
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.HOME = tmpDir; // Prevents findStreamFormatter from finding real formatter
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH!);
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -664,7 +664,7 @@ test("GENERATE_PRD: cleans up worktree on failure (exit code 1)", async () => {
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.HOME = tmpDir; // Prevents findStreamFormatter from finding real formatter
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH!);
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);

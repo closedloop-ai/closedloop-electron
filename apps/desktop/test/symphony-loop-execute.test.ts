@@ -129,7 +129,7 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH);
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -277,7 +277,7 @@ test("EXECUTE: handleProcessCompletion reads pre-written execution-result.json a
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH);
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -425,7 +425,7 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH);
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -554,7 +554,7 @@ test("EXECUTE: git status failure sets GIT_PUSH_FAILED in completed event warnin
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH);
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -699,7 +699,7 @@ test("EXECUTE: cancel before attemptLlmCommit ends job as CANCELLED with no uplo
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH);
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -834,7 +834,7 @@ test("EXECUTE: cancel during attemptLlmCommit ends job as CANCELLED with no comp
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH);
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -1035,10 +1035,10 @@ test("EXECUTE: artifact links use /implementation-plans/ in PR body and LLM prom
 
   // Reset cached claude path and shell PATH so this test's fake-bin is used
   resetResolvedClaudePath();
-  resetShellPathCache();
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -1189,10 +1189,10 @@ test("EXECUTE: SAFETY commit PR title uses '<slug>: Automated changes from loop 
   await fs.writeFile(path.join(fakeBin, "gh"), fakeGhScript, { mode: 0o755 });
 
   resetResolvedClaudePath();
-  resetShellPathCache();
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -1463,7 +1463,7 @@ test("EXECUTE: non-zero exit with CANCEL_PENDING skips PROCESS_FAILED and ends a
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH);
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);

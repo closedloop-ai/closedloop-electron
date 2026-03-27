@@ -86,12 +86,12 @@ export function resetShellPathCache(): void {
 }
 
 /**
- * Override the resolved shell PATH with an explicit value.
+ * Lock the resolved shell PATH to the current process.env.PATH.
  * Only needed in tests that set process.env.PATH to a fake-bin directory —
  * call this instead of resetShellPathCache() so the next getShellPath()
  * returns the test's PATH rather than spawning a login shell that may
  * rebuild PATH via macOS path_helper.
  */
-export function setShellPathForTest(path: string): void {
-  resolvedPathPromise = Promise.resolve(path);
+export function setShellPathForTest(): void {
+  resolvedPathPromise = Promise.resolve(process.env.PATH ?? "");
 }

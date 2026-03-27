@@ -1948,7 +1948,7 @@ test("supports core git action routes", async () => {
   ].join("\n");
   await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH!);
+  setShellPathForTest();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -2014,7 +2014,7 @@ test("supports git diff route for working tree changes", async () => {
   ].join("\n");
   await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH!);
+  setShellPathForTest();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -2618,7 +2618,7 @@ test("returns empty description when claude CLI is unavailable", async () => {
 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH!);
+  setShellPathForTest();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -2687,7 +2687,7 @@ test("uses valid JSON from claude stdout even when exit code is non-zero", async
 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH!);
+  setShellPathForTest();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -2742,7 +2742,7 @@ test("returns default with empty description when worktree has no diff", async (
   ].join("\n");
   await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH!);
+  setShellPathForTest();
 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
 

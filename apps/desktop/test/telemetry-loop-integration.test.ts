@@ -183,7 +183,7 @@ test("telemetry: job.failed emitted with correct category/trace/diagnostics on p
   const fakeBin = path.join(tmpDir, "fake-bin");
   await createFakeClaudeBin(fakeBin, 1);
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH!);
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -267,7 +267,7 @@ test("telemetry: job.completed emitted with correct category/trace on process ex
   const fakeBin = path.join(tmpDir, "fake-bin");
   await createFakeClaudeBin(fakeBin, 0);
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH!);
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -347,7 +347,7 @@ test("telemetry: preflight.binary_not_found emitted when claude is absent from P
   const emptyBin = path.join(tmpDir, "empty-bin");
   await fs.mkdir(emptyBin, { recursive: true });
   process.env.PATH = emptyBin;
-  setShellPathForTest(process.env.PATH!);
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -448,7 +448,7 @@ test("telemetry: preflight.spawn_failed emitted when log file open fails (EISDIR
   await fs.writeFile(runLoopScript, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH!);
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -550,7 +550,7 @@ test("telemetry: commandId and operationId from request headers appear in trace 
   const fakeBin = path.join(tmpDir, "fake-bin");
   await createFakeClaudeBin(fakeBin, 1);
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH!);
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);

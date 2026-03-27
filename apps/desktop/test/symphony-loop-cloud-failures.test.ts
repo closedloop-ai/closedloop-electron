@@ -128,7 +128,7 @@ test("EXECUTE: artifact upload failure sets ARTIFACT_UPLOAD_FAILED in completed 
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH!);
+  setShellPathForTest();
 
   // Configure mock server to return 500 for upload-artifacts requests
   const failUrls = new Map<string, number>([["upload-artifacts", 500]]);
@@ -226,7 +226,7 @@ test("EXECUTE: event post failure logged as warning in job store", async () => {
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest(process.env.PATH!);
+  setShellPathForTest();
 
   // Configure mock server to return 500 for all /events requests.
   // This causes both the "started" event and the "completed" event to fail.
