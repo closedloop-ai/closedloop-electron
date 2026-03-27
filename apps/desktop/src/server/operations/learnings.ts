@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
-import { getShellPath } from "../shell-path.js";
+import { getShellEnv } from "../shell-path.js";
 import { findPluginScript } from "./plugin-cache.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { assertRepoAllowed, findFirstExisting, resolveWorktreeDir } from "./symphony-utils.js";
@@ -274,11 +274,7 @@ export function registerLearningsRoutes(
         detached: true,
         stdio: "ignore",
         cwd: worktreeDir,
-        env: {
-          ...process.env,
-          PATH: await getShellPath(),
-          CLOSEDLOOP_WORKDIR: claudeWorkDir
-        }
+        env: await getShellEnv({ CLOSEDLOOP_WORKDIR: claudeWorkDir }),
       });
       child.unref();
       json(context, 200, { status: "processing", pid: child.pid, logFile });
@@ -452,14 +448,10 @@ async function triggerSuccessRateComputation(workDir: string): Promise<void> {
     return;
   }
 
-  const shellPath = await getShellPath();
   const child = spawn("python3", [ratesScript, "--workdir", workDir], {
     stdio: "ignore",
     detached: true,
-    env: {
-      ...process.env,
-      PATH: shellPath
-    }
+    env: await getShellEnv(),
   });
   child.unref();
 }

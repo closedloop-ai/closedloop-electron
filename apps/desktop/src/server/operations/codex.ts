@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { ServerResponse } from "node:http";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
-import { getShellPath } from "../shell-path.js";
+import { getShellEnv } from "../shell-path.js";
 import { DirectoryNotAllowedError } from "../security.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
@@ -1157,10 +1157,7 @@ export function registerCodexRoutes(
       const child = spawn("claude", args, {
         cwd: worktreeDir,
         stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          PATH: await getShellPath()
-        }
+        env: await getShellEnv(),
       });
 
       if (!child.pid) {
@@ -1551,7 +1548,6 @@ function similarityScore(messageA: string, messageB: string, fileA: string, file
 }
 
 async function spawnClaudeReview(cwd: string, model: string): Promise<ChildProcess> {
-  const shellPath = await getShellPath();
   return spawn(
     "claude",
     [
@@ -1570,10 +1566,7 @@ async function spawnClaudeReview(cwd: string, model: string): Promise<ChildProce
       cwd,
       detached: false,
       stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        PATH: shellPath
-      }
+      env: await getShellEnv(),
     }
   );
 }
@@ -2087,14 +2080,11 @@ async function waitForExit(child: ChildProcess): Promise<number> {
 }
 
 async function runCommand(command: string, args: string[]): Promise<string> {
-  const shellPath = await getShellPath();
+  const env = await getShellEnv();
   return await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        PATH: shellPath
-      }
+      env,
     });
 
     let output = "";
@@ -2373,11 +2363,10 @@ function runCodexVerdict(worktreeDir: string, sessionId: string): Promise<string
 }
 
 async function runClaudeVerdict(worktreeDir: string, sessionId: string): Promise<string> {
-  const shellPath = await getShellPath();
   return runVerdictProcess(
     "claude",
     ["-p", "--resume", sessionId, "--output-format", "stream-json", "--model", "sonnet", "--allowedTools", "Read,Glob,Grep"],
-    { cwd: worktreeDir, stdin: VERDICT_PROMPT, env: { PATH: shellPath } },
+    { cwd: worktreeDir, stdin: VERDICT_PROMPT, env: await getShellEnv() },
     extractClaudeVerdictLine
   );
 }

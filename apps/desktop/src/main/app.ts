@@ -42,7 +42,7 @@ import {
   resolveOperationId,
 } from "./approval-operations.js";
 import { shouldAutoApprove, OPERATION_RISK_TIERS } from "./approval-policy.js";
-import { gatewayLog } from "./gateway-logger.js";
+import { gatewayLog, isNetworkError } from "./gateway-logger.js";
 import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
 import { JobStore, isTerminalJobStatus } from "./job-store.js";
@@ -299,7 +299,8 @@ export class DesktopApplication {
         autoUpdater.autoDownload = true;
         autoUpdater.autoInstallOnAppQuit = true;
         autoUpdater.on("error", (err) => {
-          gatewayLog.error("auto-update", `Auto-update error: ${err.message}`);
+          const level = isNetworkError(err.message) ? "debug" : "error";
+          gatewayLog[level]("auto-update", `Auto-update error: ${err.message}`);
         });
         autoUpdater.on("update-available", (info) => {
           this.desktopWindow
@@ -320,7 +321,7 @@ export class DesktopApplication {
         this.updateCheckTimer = setInterval(() => {
           void autoUpdater.checkForUpdates().catch((err: unknown) => {
             const msg = err instanceof Error ? err.message : String(err);
-            gatewayLog.error(
+            gatewayLog.debug(
               "auto-update",
               `Failed to check for updates: ${msg}`,
             );

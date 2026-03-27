@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import net from "node:net";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
-import { getShellPath } from "../shell-path.js";
+import { getShellEnv, getShellPath } from "../shell-path.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import {
   loadReposConfig,
@@ -883,10 +883,7 @@ async function runTeardownCommand(command: string, worktreePath: string): Promis
       shell: "/bin/bash",
       timeout: 60_000,
       stdio: "pipe",
-      env: {
-        ...process.env,
-        PATH: await getShellPath()
-      }
+      env: await getShellEnv(),
     });
     return true;
   } catch {

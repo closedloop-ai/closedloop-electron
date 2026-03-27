@@ -1,6 +1,6 @@
 import { execSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { getShellPath } from "../shell-path.js";
+import { getShellEnv, getShellPath } from "../shell-path.js";
 import {
   closeSync,
   existsSync,
@@ -1113,7 +1113,7 @@ async function attemptLlmCommit(
     "STEPS:",
     "1. Run `git status` and `git diff --stat` to understand what changed",
     "2. Stage all changed/new files EXCEPT the .claude/ and .closedloop-ai/ directories:",
-    "   git add -- . ':!.claude/' ':!.closedloop-ai/'",
+    "   git add -- . ':!.claude' ':!.closedloop-ai'",
     "3. Write a clear, descriptive commit message based on the actual code changes",
     "   - Summarize WHAT changed and WHY (not just 'Symphony loop output')",
     "   - Use conventional commit style if the changes have a clear category",
@@ -1153,10 +1153,7 @@ async function attemptLlmCommit(
 
   loopLog(loopId, "Attempting LLM-assisted commit...");
 
-  const spawnEnv: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    PATH: await getShellPath(),
-  };
+  const spawnEnv: Record<string, string> = await getShellEnv();
   if (committer) {
     spawnEnv.GIT_AUTHOR_NAME = committer.name;
     spawnEnv.GIT_AUTHOR_EMAIL = committer.email;
@@ -1357,7 +1354,7 @@ function executeGitOperations(
   // by the gateway itself (work dir, artifacts) and must never be committed.
   try {
     const status = execSync(
-      "git status --porcelain -- ':!.claude/' ':!.closedloop-ai/'",
+      "git status --porcelain -- . ':!.claude' ':!.closedloop-ai'",
       {
         cwd: worktreeDir,
         encoding: "utf-8",
@@ -1376,7 +1373,7 @@ function executeGitOperations(
 
   // Stage, commit, push
   try {
-    execSync("git add -- . ':!.claude/' ':!.closedloop-ai/'", {
+    execSync("git add -- . ':!.claude' ':!.closedloop-ai'", {
       cwd: worktreeDir,
       stdio: "pipe",
       env,
@@ -1763,6 +1760,10 @@ async function handleProcessCompletion(
       artifacts = readDecomposeOutputs(claudeWorkDir);
     } else if (command === "EVALUATE_PRD") {
       artifacts = readEvaluatePrdOutputs(claudeWorkDir);
+    } else if (command === "EVALUATE_PLAN") {
+      artifacts = readEvaluatePlanOutputs(claudeWorkDir);
+    } else if (command === "EVALUATE_CODE") {
+      artifacts = readEvaluateCodeOutputs(claudeWorkDir);
     } else if (command === "GENERATE_PRD") {
       artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
     }
@@ -1829,17 +1830,7 @@ async function handleProcessCompletion(
       if (branch) {
         result.branchName = branch;
       }
-  } else if (command === "DECOMPOSE") {
-    artifacts = readDecomposeOutputs(claudeWorkDir);
-  } else if (command === "EVALUATE_PRD") {
-    artifacts = readEvaluatePrdOutputs(claudeWorkDir);
-  } else if (command === "EVALUATE_PLAN") {
-    artifacts = readEvaluatePlanOutputs(claudeWorkDir);
-  } else if (command === "EVALUATE_CODE") {
-    artifacts = readEvaluateCodeOutputs(claudeWorkDir);
-  } else if (command === "GENERATE_PRD") {
-    artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
-  }
+    }
 
     // sessionId inside result (matches harness)
     if (metadata.sessionId) {
@@ -2490,11 +2481,9 @@ async function handleLoopRequest(
     let child: ReturnType<typeof spawn>;
 
     try {
-      const spawnEnv: Record<string, string> = {
-        ...(process.env as Record<string, string>),
+      const spawnEnv: Record<string, string> = await getShellEnv({
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
-        PATH: await getShellPath(),
-      };
+      });
 
       // Shared claude CLI args for commands that run claude directly.
       // REQUEST_CHANGES omits "-" (stdin) because it passes the prompt as a CLI argument.
