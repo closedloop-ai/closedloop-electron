@@ -1,6 +1,6 @@
 import { execFileSync, execSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { getShellPath } from "../shell-path.js";
+import { getShellEnv, getShellPath } from "../shell-path.js";
 import {
   closeSync,
   existsSync,
@@ -34,8 +34,6 @@ import { findPluginScript, findPluginVersions, getPluginCacheRoot } from "./plug
 import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import {
   expandHome,
-  isProcessRunning,
-  migrateWorkDirIfNeeded,
   resolveWorktreeParentDir,
   tryAssertRepoAllowed,
 } from "./symphony-utils.js";
@@ -69,74 +67,6 @@ export const defaultWorktreeProvider: WorktreeProvider = {
   removeWorktree: removeWorktreeImpl,
   getCurrentBranch: getCurrentBranchImpl,
 };
-
-// ---------------------------------------------------------------------------
-// Legacy migration helper
-// ---------------------------------------------------------------------------
-
-/**
- * Kill any live legacy process at .claude/work, clean up PID file, then migrate.
- * Always migrates and returns -- callers can proceed immediately.
- */
-async function killLegacyAndMigrate(worktreeDir: string): Promise<void> {
-  const newWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
-  const legacyWorkDir = path.join(worktreeDir, ".claude", "work");
-  if (existsSync(newWorkDir) || !existsSync(legacyWorkDir)) {
-    return;
-  }
-  const legacyPidPath = path.join(legacyWorkDir, "process.pid");
-  if (existsSync(legacyPidPath)) {
-    let rawPid: string;
-    try {
-      rawPid = readFileSync(legacyPidPath, "utf-8").trim();
-    } catch {
-      // TOCTOU: PID file removed between check and read -- treat as dead
-      migrateWorkDirIfNeeded(worktreeDir);
-      return;
-    }
-    const legacyPid = Number.parseInt(rawPid, 10);
-    if (!Number.isNaN(legacyPid) && isProcessRunning(legacyPid)) {
-      try {
-        process.kill(-legacyPid, "SIGTERM");
-      } catch {
-        // Group kill failed (ESRCH) -- try individual process
-        try {
-          process.kill(legacyPid, "SIGTERM");
-        } catch {
-          // Already dead
-        }
-      }
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      // Re-check if still alive after SIGTERM
-      if (isProcessRunning(legacyPid)) {
-        try {
-          process.kill(-legacyPid, "SIGKILL");
-        } catch {
-          /* already dead */
-        }
-        try {
-          process.kill(legacyPid, "SIGKILL");
-        } catch {
-          /* already dead */
-        }
-      }
-      try {
-        unlinkSync(legacyPidPath);
-      } catch {
-        // Best effort
-      }
-      migrateWorkDirIfNeeded(worktreeDir);
-      return;
-    }
-    // Dead process: remove stale PID file
-    try {
-      unlinkSync(legacyPidPath);
-    } catch {
-      // Best effort
-    }
-  }
-  migrateWorkDirIfNeeded(worktreeDir);
-}
 
 // ---------------------------------------------------------------------------
 // Claude binary resolution
@@ -1190,7 +1120,7 @@ async function attemptLlmCommit(
     "STEPS:",
     "1. Run `git status` and `git diff --stat` to understand what changed",
     "2. Stage all changed/new files EXCEPT the .claude/ and .closedloop-ai/ directories:",
-    "   git add -- . ':!.claude/' ':!.closedloop-ai/'",
+    "   git add -- . ':!.claude' ':!.closedloop-ai'",
     "3. Write a clear, descriptive commit message based on the actual code changes",
     "   - Summarize WHAT changed and WHY (not just 'Symphony loop output')",
     "   - Use conventional commit style if the changes have a clear category",
@@ -1246,10 +1176,7 @@ async function attemptLlmCommit(
     throw sandboxErr;
   }
 
-  const spawnEnv: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    PATH: await getShellPath(),
-  };
+  const spawnEnv: Record<string, string> = await getShellEnv();
   if (committer) {
     spawnEnv.GIT_AUTHOR_NAME = committer.name;
     spawnEnv.GIT_AUTHOR_EMAIL = committer.email;
@@ -1482,7 +1409,7 @@ function executeGitOperations(
   // by the gateway itself (work dir, artifacts) and must never be committed.
   try {
     const status = execSync(
-      "git status --porcelain -- ':!.claude/' ':!.closedloop-ai/'",
+      "git status --porcelain -- . ':!.claude' ':!.closedloop-ai'",
       {
         cwd: worktreeDir,
         encoding: "utf-8",
@@ -1501,7 +1428,7 @@ function executeGitOperations(
 
   // Stage, commit, push
   try {
-    execSync("git add -- . ':!.claude/' ':!.closedloop-ai/'", {
+    execSync("git add -- . ':!.claude' ':!.closedloop-ai'", {
       cwd: worktreeDir,
       stdio: "pipe",
       env,
@@ -1898,6 +1825,10 @@ async function handleProcessCompletion(
       artifacts = readDecomposeOutputs(claudeWorkDir);
     } else if (command === "EVALUATE_PRD") {
       artifacts = readEvaluatePrdOutputs(claudeWorkDir);
+    } else if (command === "EVALUATE_PLAN") {
+      artifacts = readEvaluatePlanOutputs(claudeWorkDir);
+    } else if (command === "EVALUATE_CODE") {
+      artifacts = readEvaluateCodeOutputs(claudeWorkDir);
     } else if (command === "GENERATE_PRD") {
       artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
     }
@@ -1964,17 +1895,7 @@ async function handleProcessCompletion(
       if (branch) {
         result.branchName = branch;
       }
-  } else if (command === "DECOMPOSE") {
-    artifacts = readDecomposeOutputs(claudeWorkDir);
-  } else if (command === "EVALUATE_PRD") {
-    artifacts = readEvaluatePrdOutputs(claudeWorkDir);
-  } else if (command === "EVALUATE_PLAN") {
-    artifacts = readEvaluatePlanOutputs(claudeWorkDir);
-  } else if (command === "EVALUATE_CODE") {
-    artifacts = readEvaluateCodeOutputs(claudeWorkDir);
-  } else if (command === "GENERATE_PRD") {
-    artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
-  }
+    }
 
     // sessionId inside result (matches harness)
     if (metadata.sessionId) {
@@ -2423,10 +2344,6 @@ async function handleLoopRequest(
         throw e;
       }
       claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
-
-      // Legacy migration: kill any live legacy process, then migrate
-      await killLegacyAndMigrate(worktreeDir);
-
       await fs.mkdir(claudeWorkDir, { recursive: true });
 
       if (body.command === "PLAN") {
@@ -2499,10 +2416,6 @@ async function handleLoopRequest(
       // Spawn uses cwd: worktreeDir so Claude writes prd.md to the repo root.
       // Logs, PID, and prompt file go to claudeWorkDir, not the repo root.
       claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
-
-      // Legacy migration preflight for GENERATE_PRD worktree
-      await killLegacyAndMigrate(worktreeDir);
-
       await fs.mkdir(claudeWorkDir, { recursive: true });
       await writeArtifactsForGeneratePrd(
         worktreeDir,
@@ -2625,11 +2538,9 @@ async function handleLoopRequest(
     let child: ReturnType<typeof spawn>;
 
     try {
-      const spawnEnv: Record<string, string> = {
-        ...(process.env as Record<string, string>),
+      const spawnEnv: Record<string, string> = await getShellEnv({
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
-        PATH: await getShellPath(),
-      };
+      });
 
       // Shared claude CLI args for commands that run claude directly.
       // REQUEST_CHANGES omits "-" (stdin) because it passes the prompt as a CLI argument.

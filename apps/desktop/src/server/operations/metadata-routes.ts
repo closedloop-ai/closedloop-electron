@@ -86,9 +86,7 @@ export function registerMetadataRoutes(
       throw error;
     }
 
-    const newStateFile = path.join(expandedWorkDir, ".closedloop-ai", "work", "state.json");
-    const oldStateFile = path.join(expandedWorkDir, ".claude", "work", "state.json");
-    const stateFile = existsSync(newStateFile) ? newStateFile : oldStateFile;
+    const stateFile = path.join(expandedWorkDir, ".closedloop-ai", "work", "state.json");
 
     if (!existsSync(stateFile)) {
       json(context, 200, {

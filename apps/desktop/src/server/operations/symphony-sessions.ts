@@ -105,14 +105,9 @@ export function registerSymphonySessionRoutes(
       if (!existsSync(worktreePath)) {
         continue;
       }
-      const newWorkDir = path.join(worktreePath, ".closedloop-ai", "work");
-      const oldWorkDir = path.join(worktreePath, ".claude", "work");
+      const workDir = path.join(worktreePath, ".closedloop-ai", "work");
       const candidates = [chatHistoryFilename(), ...[...VALID_PROVIDERS].map((p) => chatHistoryFilename(p))];
-      // Per-file resolution: check each candidate across both dirs
-      const chatPath = [
-        ...candidates.map((f) => path.join(newWorkDir, f)),
-        ...candidates.map((f) => path.join(oldWorkDir, f)),
-      ].find((p) => existsSync(p));
+      const chatPath = candidates.map((f) => path.join(workDir, f)).find((p) => existsSync(p));
       if (!chatPath) {
         continue;
       }

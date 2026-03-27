@@ -92,3 +92,10 @@ export class GatewayLogger {
 
 /** Singleton instance shared across the app. */
 export const gatewayLog = new GatewayLogger();
+
+const NETWORK_ERROR_RE = /ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|ENOTFOUND|ETIMEDOUT|ECONNREFUSED|ECONNRESET/i;
+
+/** Returns true when the message looks like a transient network failure. */
+export function isNetworkError(message: string): boolean {
+  return NETWORK_ERROR_RE.test(message);
+}
