@@ -288,6 +288,8 @@ interface LoopRequestBody {
   prompt?: string;
   /** Local filesystem checkout root. When present and sandbox-allowed, used as checkout root for worktree creation/reuse instead of repo.fullName lookup. */
   localRepoPath?: string;
+  /** User-supplied Additional Context from ArtifactVersion v1. Written to additional-context.md for PLAN commands. */
+  userContext?: string;
 }
 
 interface ExecutionResult {
@@ -740,6 +742,7 @@ async function writeArtifactsForPlan(
   claudeWorkDir: string,
   artifacts: LoopArtifact[],
   prdContent: string | null = null,
+  userContext?: string,
 ): Promise<void> {
   // Priority: explicit prompt > PRD artifact > FEATURE artifact (matches harness)
 
@@ -754,6 +757,19 @@ async function writeArtifactsForPlan(
     if (source?.content) {
       prdContent = source.content;
     }
+  }
+
+  // Append user-supplied Additional Context to the PRD so the planning agent
+  // sees it as part of the requirements (guaranteed to be read). Written as a
+  // clearly delineated section at the end of prd.md.
+  const safeUserContext =
+    typeof userContext === "string" ? userContext.trim() : "";
+  if (safeUserContext) {
+    const section =
+      "\n\n---\n\n## User Context / Additional Constraints\n\n" +
+      safeUserContext +
+      "\n";
+    prdContent = prdContent ? prdContent + section : section;
   }
 
   if (prdContent) {
@@ -2279,7 +2295,7 @@ async function handleLoopRequest(
       await fs.mkdir(claudeWorkDir, { recursive: true });
 
       if (body.command === "PLAN") {
-        await writeArtifactsForPlan(claudeWorkDir, body.artifacts, body.prompt);
+        await writeArtifactsForPlan(claudeWorkDir, body.artifacts, body.prompt, body.userContext);
       } else if (body.command === "EXECUTE") {
         await writeArtifactsForExecuteOrAmend(claudeWorkDir, body.artifacts);
       } else {
