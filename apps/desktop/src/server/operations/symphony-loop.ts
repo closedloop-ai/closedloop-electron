@@ -1,5 +1,6 @@
 import { execSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
+import { getShellPath } from "../shell-path.js";
 import {
   closeSync,
   existsSync,
@@ -1136,10 +1137,10 @@ async function attemptLlmCommit(
 
   loopLog(loopId, "Attempting LLM-assisted commit...");
 
-  const spawnEnv: Record<string, string> = { ...process.env } as Record<
-    string,
-    string
-  >;
+  const spawnEnv: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+    PATH: await getShellPath(),
+  };
   if (committer) {
     spawnEnv.GIT_AUTHOR_NAME = committer.name;
     spawnEnv.GIT_AUTHOR_EMAIL = committer.email;
@@ -1322,12 +1323,13 @@ function executeGitOperations(
   command: string,
   artifactSlug?: string,
   webAppOrigin?: string,
+  shellPath?: string,
 ): GitOperationResult {
   const shortId = loopId.slice(0, 8);
-  const env: Record<string, string> = { ...process.env } as Record<
-    string,
-    string
-  >;
+  const env: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+    ...(shellPath ? { PATH: shellPath } : {}),
+  };
   if (committer) {
     env.GIT_AUTHOR_NAME = committer.name;
     env.GIT_AUTHOR_EMAIL = committer.email;
@@ -1699,6 +1701,7 @@ async function handleProcessCompletion(
           return;
         }
 
+        const gitShellPath = await getShellPath();
         const gitResult: GitOperationResult = llmResult
           ? { status: "success" as const, ...llmResult }
           : executeGitOperations(
@@ -1709,6 +1712,7 @@ async function handleProcessCompletion(
               command,
               body.artifactSlug,
               webAppOrigin ?? "",
+              gitShellPath,
             );
 
         if (gitResult.status === "success") {
@@ -2390,7 +2394,8 @@ async function handleLoopRequest(
 
     if (usesClaude) {
       try {
-        execSync("which claude", { stdio: "pipe", timeout: 5000 });
+        const whichEnv = { ...process.env, PATH: await getShellPath() };
+        execSync("which claude", { stdio: "pipe", timeout: 5000, env: whichEnv });
       } catch {
         await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
           type: "error",
@@ -2472,7 +2477,7 @@ async function handleLoopRequest(
       const spawnEnv: Record<string, string> = {
         ...(process.env as Record<string, string>),
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
-        PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
+        PATH: await getShellPath(),
       };
 
       // Shared claude CLI args for commands that run claude directly.

@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import { getShellPath } from "../shell-path.js";
 import { findPluginScript } from "./plugin-cache.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { assertRepoAllowed, findFirstExisting, resolveWorktreeDir } from "./symphony-utils.js";
@@ -275,7 +276,7 @@ export function registerLearningsRoutes(
         cwd: worktreeDir,
         env: {
           ...process.env,
-          PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
+          PATH: await getShellPath(),
           CLOSEDLOOP_WORKDIR: claudeWorkDir
         }
       });
@@ -413,7 +414,7 @@ export function registerLearningsRoutes(
     });
 
     await fs.appendFile(outcomesPath, `${lines.join("\n")}\n`, "utf-8");
-    triggerSuccessRateComputation(claudeWorkDir);
+    void triggerSuccessRateComputation(claudeWorkDir);
 
     json(context, 200, {
       status: "recorded",
@@ -439,7 +440,7 @@ function parseToon(content: string): ParsedLearningPattern[] {
   });
 }
 
-function triggerSuccessRateComputation(workDir: string): void {
+async function triggerSuccessRateComputation(workDir: string): Promise<void> {
   const runLoopPath = findPluginScript("code", "run-loop.sh");
   if (!runLoopPath) {
     return;
@@ -451,12 +452,13 @@ function triggerSuccessRateComputation(workDir: string): void {
     return;
   }
 
+  const shellPath = await getShellPath();
   const child = spawn("python3", [ratesScript, "--workdir", workDir], {
     stdio: "ignore",
     detached: true,
     env: {
       ...process.env,
-      PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`
+      PATH: shellPath
     }
   });
   child.unref();
