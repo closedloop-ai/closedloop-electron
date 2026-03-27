@@ -28,6 +28,59 @@ This produces:
 - `resources/trayIconTemplate.svg` -- must be updated manually to match `app-icon.svg` paths with `fill="#000000"`
 - `resources/trayIconTemplate.png` (18x18) and `trayIconTemplate@2x.png` (36x36) -- macOS tray template images (black silhouettes)
 
+## Environment Variables
+
+### API Keys
+
+| Variable | Description |
+|---|---|
+| `CLOSEDLOOP_API_KEY` | ClosedLoop platform API key. Checked before safeStorage; if set, takes precedence over the encrypted key store. |
+| `SYMPHONY_API_KEY` | Symphony API key. Fallback if `CLOSEDLOOP_API_KEY` is not set and no key is stored in safeStorage. |
+
+### Gateway Auth (dev-only)
+
+These only take effect when `app.isPackaged` is false (i.e., running from source).
+
+| Variable | Description |
+|---|---|
+| `CL_LOCAL_GATEWAY_DEBUG_AUTH=1` | Enable debug token minting in the Electron UI. Allows generating short-lived session tokens for manual `curl` testing. |
+| `CL_LOCAL_GATEWAY_NO_AUTH=1` | Disable all gateway authentication. All engineer routes become open. |
+| `CL_LOCAL_GATEWAY_PROD_ORIGINS_ONLY=1` | Restrict gateway requests to the configured production `webAppOrigin` only. Blocks dev-origin traffic. |
+
+### Origin Overrides
+
+Override the default service URLs. Useful for local development or staging environments.
+
+| Variable | Default | Description |
+|---|---|---|
+| `CL_RELAY_ORIGIN` | `https://relay.closedloop.ai` | Cloud relay server origin |
+| `CL_WEB_APP_ORIGIN` | `https://app.closedloop.ai` | Web app origin (used for CORS and origin validation) |
+| `CL_AUTH_API_ORIGIN` | `https://api.closedloop.ai` | Auth API origin |
+
+### Symphony / Worktree
+
+| Variable | Description |
+|---|---|
+| `SYMPHONY_ENGINEER_FALLBACK_ORIGIN` | Fallback origin for the engineer service, used when the primary is unavailable. |
+| `SYMPHONY_WORKTREE_PARENT_DIR` | Custom parent directory for git worktrees created by Symphony sessions. Defaults to a sibling directory of the repo. |
+| `CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE=1` | Test mode flag that bypasses the normal Symphony pipeline and runs raw Claude instead. |
+
+### Output Tailer Tuning
+
+| Variable | Description |
+|---|---|
+| `CLOSEDLOOP_TAILER_POLL_MS` | Poll interval in milliseconds for the output tailer (default determined at runtime). |
+| `CLOSEDLOOP_TAILER_THROTTLE_MS` | Throttle interval in milliseconds for the output tailer (default determined at runtime). |
+
+### Passed to Child Processes
+
+These are set on spawned subprocesses (Claude Code, deploy, learnings) rather than read by the gateway itself.
+
+| Variable | Description |
+|---|---|
+| `CLOSEDLOOP_WORKDIR` | Working directory for ClosedLoop run artifacts. Set on Claude Code and learnings child processes. |
+| `HOME`, `USER`, `SHELL`, `TERM`, `NODE_ENV` | Standard environment inherited into deploy child processes to ensure a sane shell environment. |
+
 ## Required GitHub Secrets
 
 - `SLACK_GITHUB_REPO_WEBHOOK_URL` -- Slack incoming webhook for release notifications

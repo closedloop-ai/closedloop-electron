@@ -112,9 +112,8 @@ export function registerSymphonyChatHistoryRoutes(
     const message = parseMessage(body.message);
     const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
 
-    // Read from legacy path if file only exists there; always write to new canonical path.
     const historyReadPath = getChatHistoryPath(ticketId, expandedRepoPath, provider);
-    const historyWritePath = getChatHistoryWritePath(ticketId, expandedRepoPath, provider);
+    const historyWritePath = historyReadPath;
     const historyWriteDir = path.dirname(historyWritePath);
 
     try {
@@ -197,24 +196,14 @@ export function registerSymphonyChatHistoryRoutes(
     }
 
     const historyPath = getChatHistoryPath(ticketId, expandedRepoPath, provider);
-    const historyWritePath = getChatHistoryWritePath(ticketId, expandedRepoPath, provider);
-    // Both roots for dual-copy cleanup
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-    const workDirs = [
-      path.join(worktreeDir, ".closedloop-ai", "work"),
-      path.join(worktreeDir, ".claude", "work"),
-    ];
+    const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
 
     if (!existsSync(historyPath)) {
-      // Even if no transcript exists, clean up associated state files from both roots
       if (indexParam === null && provider === "codex") {
-        for (const wd of workDirs) {
-          await fs.rm(path.join(wd, "codex-chat-review.json"), { force: true });
-        }
+        await fs.rm(path.join(workDir, "codex-chat-review.json"), { force: true });
       } else if (indexParam === null && !provider) {
-        for (const wd of workDirs) {
-          await deleteSharedCodexChatState(wd);
-        }
+        await deleteSharedCodexChatState(workDir);
       }
       json(context, 200, {
         success: true,
@@ -225,20 +214,12 @@ export function registerSymphonyChatHistoryRoutes(
 
     try {
       if (indexParam === null) {
-        // Delete from both roots to clear dual-copy leftovers
         await fs.rm(historyPath, { force: true });
-        if (historyWritePath !== historyPath) {
-          await fs.rm(historyWritePath, { force: true });
-        }
 
         if (provider === "codex") {
-          for (const wd of workDirs) {
-            await fs.rm(path.join(wd, "codex-chat-review.json"), { force: true });
-          }
+          await fs.rm(path.join(workDir, "codex-chat-review.json"), { force: true });
         } else if (!provider) {
-          for (const wd of workDirs) {
-            await deleteSharedCodexChatState(wd);
-          }
+          await deleteSharedCodexChatState(workDir);
         }
         // provider=claude: do NOT touch any codex state files
 
@@ -273,22 +254,8 @@ export function registerSymphonyChatHistoryRoutes(
   });
 }
 
+/** Returns the canonical path for chat history reads and writes. */
 function getChatHistoryPath(
-  ticketId: string,
-  expandedRepoPath: string,
-  provider?: string | null
-): string {
-  const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-  const filename = chatHistoryFilename(provider);
-  const newPath = path.join(worktreeDir, ".closedloop-ai", "work", filename);
-  const oldPath = path.join(worktreeDir, ".claude", "work", filename);
-  // For reads: return old path if it exists and new path doesn't (legacy fallback).
-  // Writes always target the new path (canonical location).
-  return existsSync(newPath) || !existsSync(oldPath) ? newPath : oldPath;
-}
-
-/** Always returns the canonical new-path for writes, regardless of where the file currently lives. */
-function getChatHistoryWritePath(
   ticketId: string,
   expandedRepoPath: string,
   provider?: string | null
@@ -298,7 +265,7 @@ function getChatHistoryWritePath(
   return path.join(worktreeDir, ".closedloop-ai", "work", filename);
 }
 
-/** Delete shared-surface Codex chat state files: legacy + review. */
+/** Delete shared-surface Codex chat state files. */
 async function deleteSharedCodexChatState(workDir: string): Promise<void> {
   for (const name of ["codex-chat.json", "codex-chat-review.json"]) {
     await fs.rm(path.join(workDir, name), { force: true });
