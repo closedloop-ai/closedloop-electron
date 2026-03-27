@@ -1032,8 +1032,9 @@ test("EXECUTE: artifact links use /implementation-plans/ in PR body and LLM prom
   ].join("\n");
   await fs.writeFile(path.join(fakeBin, "gh"), fakeGhScript, { mode: 0o755 });
 
-  // Reset cached claude path so this test's fake-bin is used
+  // Reset cached claude path and shell PATH so this test's fake-bin is used
   resetResolvedClaudePath();
+  resetShellPathCache();
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
@@ -1187,6 +1188,7 @@ test("EXECUTE: SAFETY commit PR title uses '<slug>: Automated changes from loop 
   await fs.writeFile(path.join(fakeBin, "gh"), fakeGhScript, { mode: 0o755 });
 
   resetResolvedClaudePath();
+  resetShellPathCache();
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
