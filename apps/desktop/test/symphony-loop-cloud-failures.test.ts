@@ -57,6 +57,7 @@ const savedEnv = saveEnv();
 
 afterEach(async () => {
   restoreEnv(savedEnv);
+  resetShellPathCache();
 
   for (const server of serversToClose.splice(0)) {
     await server.stop();
