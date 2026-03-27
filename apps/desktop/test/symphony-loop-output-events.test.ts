@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, test } from "node:test";
 import { summarizeJsonlRecord, startOutputTailer } from "../src/server/operations/output-tailer.js";
+import { resetShellPathCache } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 
@@ -29,6 +30,7 @@ afterEach(async () => {
   } else {
     process.env.PATH = originalPath;
   }
+  resetShellPathCache();
 
   // Restore HOME
   if (originalHome === undefined) {
@@ -341,6 +343,7 @@ describe("T-5.2: Output events arrive before completed event", () => {
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+    resetShellPathCache();
 
     const loopId = "bbbbbbbb-0000-0000-0000-000000000001";
     const server = makeGatewayServer({
@@ -419,6 +422,7 @@ describe("T-5.2: Output events arrive before completed event", () => {
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+    resetShellPathCache();
 
     const loopId = "cccccccc-0000-0000-0000-000000000001";
     const server = makeGatewayServer({
@@ -535,6 +539,7 @@ describe("T-5.4: Flush on exit", () => {
       ].join("\n");
       await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
       process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+      resetShellPathCache();
 
       const loopId = "dddddddd-0000-0000-0000-000000000001";
       const server = makeGatewayServer({
@@ -611,6 +616,7 @@ describe("T-5.5: No-formatter fallback", () => {
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
     // Include system paths so 'bash', 'grep', 'tee' are available for the pipeline
     process.env.PATH = `${fakeBin}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin`;
+    resetShellPathCache();
 
     const loopId = "eeeeeeee-0000-0000-0000-000000000001";
     const server = makeGatewayServer({
@@ -713,6 +719,7 @@ describe("T-5.7: tokensUsed shape in completed event", () => {
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+    resetShellPathCache();
 
     const loopId = "ffffffff-0000-0000-0000-000000000001";
     const server = makeGatewayServer({
@@ -769,6 +776,7 @@ describe("T-5.7: tokensUsed shape in completed event", () => {
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+    resetShellPathCache();
 
     const loopId = "ffffffff-0000-0000-0000-000000000002";
     const server = makeGatewayServer({

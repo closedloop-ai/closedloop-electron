@@ -3,6 +3,7 @@ import os from "node:os";
 import type { ServerResponse } from "node:http";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import type { ProcessManager } from "../process-manager.js";
+import { getShellEnv } from "../shell-path.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { READONLY_CODEBASE_TOOLS, WEB_ONLY_TOOLS } from "./chat-tools.js";
@@ -106,6 +107,8 @@ export function registerTicketChatRoutes(
     setStreamingHeaders(context.response);
     writeEvent(context.response, { type: "status", status: "spawning", resuming: isResuming });
 
+    const shellEnv = await getShellEnv();
+
     await new Promise<void>((resolve) => {
       const streamState = createStreamState(async (sessionId) => {
         if (!history.sessionId) {
@@ -151,6 +154,7 @@ export function registerTicketChatRoutes(
             ...(isResuming && history.sessionId ? ["--resume", history.sessionId] : [])
           ],
           cwd: expandedRepoPath ?? os.homedir(),
+          env: shellEnv,
           input: prompt,
           onLine: (line) => {
             try {

@@ -1,6 +1,7 @@
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import { getShellPath } from "../shell-path.js";
 import { DirectoryNotAllowedError } from "../security.js";
 import { assertRepoAllowed } from "./symphony-utils.js";
 
@@ -298,7 +299,7 @@ export function registerGitPrRoutes(
           {
             cwd,
             encoding: "utf-8",
-            env: withPathEnv()
+            env: await withPathEnv()
           }
         );
 
@@ -772,7 +773,7 @@ async function runRead(
   const { stdout } = await execFileAsync(command, args, {
     cwd,
     encoding: "utf-8",
-    env: withPathEnv()
+    env: await withPathEnv()
   });
   return stdout.trim();
 }
@@ -781,26 +782,27 @@ async function run(cwd: string | undefined, command: string, args: string[]): Pr
   await execFileAsync(command, args, {
     cwd,
     encoding: "utf-8",
-    env: withPathEnv()
+    env: await withPathEnv()
   });
 }
 
-function withPathEnv(): NodeJS.ProcessEnv {
+async function withPathEnv(): Promise<NodeJS.ProcessEnv> {
   return {
     ...process.env,
-    PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`
+    PATH: await getShellPath()
   };
 }
 
-function ghApiViaStdin(
+async function ghApiViaStdin(
   apiPath: string,
   payload: Record<string, unknown>,
   cwd: string
 ): Promise<{ stdout: string; stderr: string }> {
+  const env = await withPathEnv();
   return new Promise((resolve, reject) => {
     const process = spawn("gh", ["api", apiPath, "--method", "POST", "--input", "-"], {
       cwd,
-      env: withPathEnv()
+      env
     });
 
     let stdout = "";
@@ -828,15 +830,16 @@ function ghApiViaStdin(
   });
 }
 
-function ghPrCommentViaStdin(
+async function ghPrCommentViaStdin(
   args: string[],
   body: string,
   cwd: string
 ): Promise<{ stdout: string; stderr: string }> {
+  const env = await withPathEnv();
   return new Promise((resolve, reject) => {
     const process = spawn("gh", [...args, "--body-file", "-"], {
       cwd,
-      env: withPathEnv()
+      env
     });
 
     let stdout = "";

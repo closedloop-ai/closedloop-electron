@@ -13,6 +13,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { resetShellPathCache } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 
@@ -285,6 +286,7 @@ export async function setupStubClaude(tmpDir: string, scriptLines?: string[]): P
   ]).join("\n");
   await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  resetShellPathCache();
 }
 
 // ---------------------------------------------------------------------------
@@ -501,6 +503,7 @@ export function createEvaluateTestHarness(machineName: string): EvaluateTestHarn
       } else {
         process.env.PATH = originalPath;
       }
+      resetShellPathCache();
 
       for (const server of serversToClose.splice(0)) {
         await server.stop();

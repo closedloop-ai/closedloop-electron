@@ -9,6 +9,7 @@ import { afterEach, test } from "node:test";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { saveCodexChatSession } from "../src/server/operations/codex.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
+import { resetShellPathCache } from "../src/server/shell-path.js";
 import { SymphonyDirNotConfiguredError, tryAssertRepoAllowed, tryAssertPathAllowed } from "../src/server/operations/symphony-utils.js";
 import { JobStore } from "../src/main/job-store.js";
 import type { LocalJob, LocalJobStatus } from "../src/main/job-store.js";
@@ -39,6 +40,7 @@ afterEach(async () => {
   } else {
     process.env.PATH = originalPath;
   }
+  resetShellPathCache();
 
   for (const server of serversToClose.splice(0)) {
     await server.stop();
@@ -1946,6 +1948,7 @@ test("supports core git action routes", async () => {
   ].join("\n");
   await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  resetShellPathCache();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -2011,6 +2014,7 @@ test("supports git diff route for working tree changes", async () => {
   ].join("\n");
   await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  resetShellPathCache();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -2614,6 +2618,7 @@ test("returns empty description when claude CLI is unavailable", async () => {
 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  resetShellPathCache();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -2682,6 +2687,7 @@ test("uses valid JSON from claude stdout even when exit code is non-zero", async
 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  resetShellPathCache();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -2736,6 +2742,7 @@ test("returns default with empty description when worktree has no diff", async (
   ].join("\n");
   await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  resetShellPathCache();
 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
 
