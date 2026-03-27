@@ -21,14 +21,29 @@ import { afterEach, test } from "node:test";
 import { JobStore } from "../src/main/job-store.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
+import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 import {
   createFakeRunLoopScript,
-  initGitRepo,
   restoreEnv,
   saveEnv,
   startMockApiServer,
   waitForCompletedEvent,
 } from "./symphony-test-utils.js";
+
+const fakeWorktreeProvider: WorktreeProvider = {
+  async ensureWorktree(_repoPath, worktreeDir) {
+    await fs.mkdir(worktreeDir, { recursive: true });
+  },
+  findWorktreeForBranch() {
+    return null;
+  },
+  async removeWorktree(worktreeDir) {
+    await fs.rm(worktreeDir, { recursive: true, force: true });
+  },
+  getCurrentBranch() {
+    return "symphony/cloud-failures-test";
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Shared state and cleanup
@@ -53,7 +68,7 @@ afterEach(async () => {
   }
 
   for (const tempPath of tempPathsToClean.splice(0)) {
-    await fs.rm(tempPath, { recursive: true, force: true });
+    await fs.rm(tempPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   }
 });
 
@@ -90,7 +105,7 @@ test("EXECUTE: artifact upload failure sets ARTIFACT_UPLOAD_FAILED in completed 
   tempPathsToClean.push(tmpDir);
 
   const repoPath = path.join(tmpDir, "repo-upload-fail");
-  await initGitRepo(repoPath);
+  await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
@@ -130,6 +145,7 @@ test("EXECUTE: artifact upload failure sets ARTIFACT_UPLOAD_FAILED in completed 
     machineName: "cloud-fail-upload-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
     jobStore,
@@ -186,7 +202,7 @@ test("EXECUTE: event post failure logged as warning in job store", async () => {
   tempPathsToClean.push(tmpDir);
 
   const repoPath = path.join(tmpDir, "repo-event-fail");
-  await initGitRepo(repoPath);
+  await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
@@ -229,6 +245,7 @@ test("EXECUTE: event post failure logged as warning in job store", async () => {
     machineName: "cloud-fail-event-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
     jobStore,

@@ -77,7 +77,7 @@ afterEach(async () => {
   }
 
   for (const tempPath of tempPathsToClean.splice(0)) {
-    await fs.rm(tempPath, { recursive: true, force: true });
+    await fs.rm(tempPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   }
 });
 
@@ -86,7 +86,23 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 
 // Shared test helpers — see test/helpers/mock-api-server.ts
-import { initGitRepo, startMockApiServer } from "./symphony-test-utils.js";
+import { startMockApiServer } from "./symphony-test-utils.js";
+import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
+
+const fakeWorktreeProvider: WorktreeProvider = {
+  async ensureWorktree(_repoPath, worktreeDir) {
+    await fs.mkdir(worktreeDir, { recursive: true });
+  },
+  findWorktreeForBranch() {
+    return null;
+  },
+  async removeWorktree(worktreeDir) {
+    await fs.rm(worktreeDir, { recursive: true, force: true });
+  },
+  getCurrentBranch() {
+    return "symphony/telemetry-test";
+  },
+};
 
 /**
  * Build a TelemetryService that collects all emitted events.
@@ -180,6 +196,7 @@ test("telemetry: job.failed emitted with correct category/trace/diagnostics on p
     machineName: "telem-failed-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
     telemetry: service,
@@ -262,6 +279,7 @@ test("telemetry: job.completed emitted with correct category/trace on process ex
     machineName: "telem-completed-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
     telemetry: service,
@@ -340,6 +358,7 @@ test("telemetry: preflight.binary_not_found emitted when claude is absent from P
     machineName: "telem-binnotfound-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
     telemetry: service,
@@ -434,7 +453,7 @@ test("telemetry: preflight.spawn_failed emitted when log file open fails (EISDIR
   const loopId = "00000000-0000-0000-0000-000000000a04";
 
   const repoPath = path.join(tmpDir, "spawn-fail-repo");
-  await initGitRepo(repoPath);
+  await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
@@ -470,6 +489,7 @@ test("telemetry: preflight.spawn_failed emitted when log file open fails (EISDIR
     machineName: "telem-spawnfail-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
     telemetry: service,
@@ -539,6 +559,7 @@ test("telemetry: commandId and operationId from request headers appear in trace 
     machineName: "telem-headers-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
     telemetry: service,
