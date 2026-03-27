@@ -2,6 +2,7 @@ import { execFile, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { getShellEnv } from "../shell-path.js";
+import { isNetworkError } from "../../main/gateway-logger.js";
 import { DirectoryNotAllowedError } from "../security.js";
 import { assertRepoAllowed } from "./symphony-utils.js";
 
@@ -758,7 +759,7 @@ function parseGhError(error: unknown): string {
   if (message.includes("not found") || message.includes("404")) {
     return "Repository not found or no access.";
   }
-  if (message.includes("network") || message.includes("ENOTFOUND")) {
+  if (message.includes("network") || isNetworkError(message)) {
     return "Network error. Check your connection.";
   }
 

@@ -42,7 +42,7 @@ import {
   resolveOperationId,
 } from "./approval-operations.js";
 import { shouldAutoApprove, OPERATION_RISK_TIERS } from "./approval-policy.js";
-import { gatewayLog } from "./gateway-logger.js";
+import { gatewayLog, isNetworkError } from "./gateway-logger.js";
 import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
 import { JobStore, isTerminalJobStatus } from "./job-store.js";
@@ -299,8 +299,7 @@ export class DesktopApplication {
         autoUpdater.autoDownload = true;
         autoUpdater.autoInstallOnAppQuit = true;
         autoUpdater.on("error", (err) => {
-          const isNetworkError = /ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|ENOTFOUND|ETIMEDOUT/i.test(err.message);
-          const level = isNetworkError ? "debug" : "error";
+          const level = isNetworkError(err.message) ? "debug" : "error";
           gatewayLog[level]("auto-update", `Auto-update error: ${err.message}`);
         });
         autoUpdater.on("update-available", (info) => {
