@@ -7,6 +7,7 @@ import type {
   OperationDispatcher,
   OperationRequestContext,
 } from "../operation-dispatcher.js";
+import { getShellPath } from "../shell-path.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
@@ -702,7 +703,7 @@ export function registerSymphonyInteractiveRoutes(
             env: {
               ...process.env,
               CLOSEDLOOP_WORKDIR: claudeWorkDir,
-              PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
+              PATH: await getShellPath(),
             },
           });
           child.unref();
@@ -774,7 +775,7 @@ async function streamClaudeChat(options: {
         stdio: ["pipe", "pipe", "pipe"],
         env: {
           ...process.env,
-          PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
+          PATH: await getShellPath(),
         },
       }
     );
@@ -996,11 +997,12 @@ function getGitDiff(worktreeDir: string): string {
   }
 }
 
-function generateCommitWithClaude(
+async function generateCommitWithClaude(
   worktreeDir: string,
   ticketId: string,
   diff: string
 ): Promise<{ title: string; description: string }> {
+  const shellPath = await getShellPath();
   return new Promise((resolve, reject) => {
     const prompt = [
       `Generate a git commit message for ticket ${ticketId}.`,
@@ -1021,7 +1023,7 @@ function generateCommitWithClaude(
       stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
-        PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
+        PATH: shellPath,
       },
     });
 

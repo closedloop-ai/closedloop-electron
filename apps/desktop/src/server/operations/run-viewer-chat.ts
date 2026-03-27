@@ -3,6 +3,7 @@ import path from "node:path";
 import type { ServerResponse } from "node:http";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import type { ProcessManager } from "../process-manager.js";
+import { getShellEnv } from "../shell-path.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { READONLY_CODEBASE_TOOLS, WEB_ONLY_TOOLS } from "./chat-tools.js";
@@ -83,6 +84,8 @@ export function registerRunViewerChatRoutes(
     setStreamingHeaders(context.response);
     writeEvent(context.response, { type: "status", status: "spawning", mode: "claude" });
 
+    const shellEnv = await getShellEnv();
+
     await new Promise<void>((resolve) => {
       const streamState = createStreamState(async (sessionId) => {
         if (!history.claudeSessionId) {
@@ -127,6 +130,7 @@ export function registerRunViewerChatRoutes(
               : [])
           ],
           cwd: validatedRunDir ?? os.homedir(),
+          env: shellEnv,
           input: prompt,
           onLine: (line) => {
             try {

@@ -14,6 +14,7 @@
  * Fake binaries (run-loop.sh, claude, git, gh) are placed in a temp fake-bin/ dir
  * prepended to PATH. CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE=1 disables the
  * stream_formatter pipeline so the fake claude can emit simple output.
+ * Uses a fake WorktreeProvider (no real git) so no real git repos are needed.
  */
 
 import assert from "node:assert/strict";
@@ -26,14 +27,30 @@ import { JobStore } from "../src/main/job-store.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { resetResolvedClaudePath } from "../src/server/operations/symphony-loop.js";
+import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
+import { resetShellPathCache } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
-  initGitRepo,
   restoreEnv,
   saveEnv,
   startMockApiServer,
   waitForCompletedEvent,
 } from "./symphony-test-utils.js";
+
+const fakeWorktreeProvider: WorktreeProvider = {
+  async ensureWorktree(_repoPath, worktreeDir) {
+    await fs.mkdir(worktreeDir, { recursive: true });
+  },
+  findWorktreeForBranch() {
+    return null;
+  },
+  async removeWorktree(worktreeDir) {
+    await fs.rm(worktreeDir, { recursive: true, force: true });
+  },
+  getCurrentBranch() {
+    return "symphony/execute-test";
+  },
+};
 
 // ---------------------------------------------------------------------------
 // Shared state and cleanup
@@ -58,7 +75,7 @@ afterEach(async () => {
   }
 
   for (const tempPath of tempPathsToClean.splice(0)) {
-    await fs.rm(tempPath, { recursive: true, force: true });
+    await fs.rm(tempPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   }
 });
 
@@ -70,9 +87,8 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-nochange-"));
   tempPathsToClean.push(tmpDir);
 
-  // Use real git to initialise repo before we point HOME at tmpDir
   const repoPath = path.join(tmpDir, "repo-nochange");
-  await initGitRepo(repoPath);
+  await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
@@ -91,10 +107,27 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
     mode: 0o755,
   });
 
+  // fake git: status returns empty (no changes); all other commands succeed
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'if [ "$1" = status ]; then exit 0; fi',
+    'if [ "$1" = push ]; then exit 0; fi',
+    'if [ "$1" = add ]; then exit 0; fi',
+    'if [ "$1" = commit ]; then exit 0; fi',
+    'if [ "$1" = fetch ]; then exit 0; fi',
+    'if [ "$1" = "rev-parse" ]; then',
+    '  if [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+    "  exit 0",
+    "fi",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
   // Disable stream_formatter pipeline — fake claude output is not a real stream
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  resetShellPathCache();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -108,6 +141,7 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
     machineName: "execute-nochange-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
   });
@@ -184,7 +218,7 @@ test("EXECUTE: handleProcessCompletion reads pre-written execution-result.json a
   tempPathsToClean.push(tmpDir);
 
   const repoPath = path.join(tmpDir, "repo-llmresult");
-  await initGitRepo(repoPath);
+  await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
@@ -221,18 +255,27 @@ test("EXECUTE: handleProcessCompletion reads pre-written execution-result.json a
     mode: 0o755,
   });
 
-  // fake git that stubs push (so executeGitOperations wouldn't fail if accidentally called)
+  // fake git that stubs all commands (so executeGitOperations wouldn't fail if accidentally called)
   // We verify via upload payload that git ops were NOT needed.
   const fakeGitScript = [
     "#!/bin/sh",
     'if [ "$1" = push ]; then exit 0; fi',
-    `exec /usr/bin/git "$@"`,
+    'if [ "$1" = status ]; then exit 0; fi',
+    'if [ "$1" = add ]; then exit 0; fi',
+    'if [ "$1" = commit ]; then exit 0; fi',
+    'if [ "$1" = fetch ]; then exit 0; fi',
+    'if [ "$1" = "rev-parse" ]; then',
+    '  if [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+    "  exit 0",
+    "fi",
+    "exit 0",
   ].join("\n");
   await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
 
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  resetShellPathCache();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -246,6 +289,7 @@ test("EXECUTE: handleProcessCompletion reads pre-written execution-result.json a
     machineName: "execute-llmresult-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
   });
@@ -315,7 +359,7 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
   tempPathsToClean.push(tmpDir);
 
   const repoPath = path.join(tmpDir, "repo-existingpr");
-  await initGitRepo(repoPath);
+  await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
@@ -356,21 +400,30 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
     `  echo "gh pr create was called (should not happen)" >> ${JSON.stringify(captureFile)}`,
     "  exit 1",
     "fi",
-    `exec /usr/bin/gh "$@" 2>/dev/null`,
+    "exit 0",
   ].join("\n");
   await fs.writeFile(path.join(fakeBin, "gh"), fakeGhScript, { mode: 0o755 });
 
-  // fake git: pass through all commands except push (stub push to avoid remote requirement)
+  // fake git: stubs all commands without falling back to real git
   const fakeGitScript = [
     "#!/bin/sh",
     'if [ "$1" = push ]; then exit 0; fi',
-    `exec /usr/bin/git "$@"`,
+    'if [ "$1" = status ]; then printf "M feature-output.txt\\n"; exit 0; fi',
+    'if [ "$1" = add ]; then exit 0; fi',
+    'if [ "$1" = commit ]; then exit 0; fi',
+    'if [ "$1" = fetch ]; then exit 0; fi',
+    'if [ "$1" = "rev-parse" ]; then',
+    '  if [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+    "  exit 0",
+    "fi",
+    "exit 0",
   ].join("\n");
   await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
 
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  resetShellPathCache();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -384,6 +437,7 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
     machineName: "execute-existingpr-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
   });
@@ -457,7 +511,7 @@ test("EXECUTE: git status failure sets GIT_PUSH_FAILED in completed event warnin
   tempPathsToClean.push(tmpDir);
 
   const repoPath = path.join(tmpDir, "repo-gitstatus-fail");
-  await initGitRepo(repoPath);
+  await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
@@ -476,21 +530,29 @@ test("EXECUTE: git status failure sets GIT_PUSH_FAILED in completed event warnin
     mode: 0o755,
   });
 
-  // fake git: delegates most commands to real git, but exits 1 for 'status --porcelain'.
+  // fake git: exits 1 for 'git status --porcelain' to simulate a git status failure.
   // This causes executeGitOperations to return { status: 'error' }, which adds
   // GIT_PUSH_FAILED to the warnings array posted in the completed event.
+  // All other commands succeed without falling back to real git.
   const fakeGitScript = [
     "#!/bin/sh",
-    "# Exit 1 for 'git status --porcelain' to simulate a git status failure",
     'if [ "$1" = status ]; then exit 1; fi',
-    "# Delegate everything else (worktree, fetch, rev-parse, etc.) to real git",
-    `exec /usr/bin/git "$@"`,
+    'if [ "$1" = push ]; then exit 0; fi',
+    'if [ "$1" = add ]; then exit 0; fi',
+    'if [ "$1" = commit ]; then exit 0; fi',
+    'if [ "$1" = fetch ]; then exit 0; fi',
+    'if [ "$1" = "rev-parse" ]; then',
+    '  if [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+    "  exit 0",
+    "fi",
+    "exit 0",
   ].join("\n");
   await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
 
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  resetShellPathCache();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -504,6 +566,7 @@ test("EXECUTE: git status failure sets GIT_PUSH_FAILED in completed event warnin
     machineName: "execute-gitstatus-fail-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
   });
@@ -614,7 +677,7 @@ test("EXECUTE: cancel before attemptLlmCommit ends job as CANCELLED with no uplo
   tempPathsToClean.push(tmpDir);
 
   const repoPath = path.join(tmpDir, "repo-cancel-gate1");
-  await initGitRepo(repoPath);
+  await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
@@ -634,6 +697,7 @@ test("EXECUTE: cancel before attemptLlmCommit ends job as CANCELLED with no uplo
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  resetShellPathCache();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -652,6 +716,7 @@ test("EXECUTE: cancel before attemptLlmCommit ends job as CANCELLED with no uplo
     machineName: "execute-cancel-gate1-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
     jobStore,
@@ -743,7 +808,7 @@ test("EXECUTE: cancel during attemptLlmCommit ends job as CANCELLED with no comp
   tempPathsToClean.push(tmpDir);
 
   const repoPath = path.join(tmpDir, "repo-cancel-gate2");
-  await initGitRepo(repoPath);
+  await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
@@ -767,6 +832,7 @@ test("EXECUTE: cancel during attemptLlmCommit ends job as CANCELLED with no comp
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  resetShellPathCache();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -785,6 +851,7 @@ test("EXECUTE: cancel during attemptLlmCommit ends job as CANCELLED with no comp
     machineName: "execute-cancel-gate2-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
     jobStore,
@@ -1372,7 +1439,7 @@ test("EXECUTE: non-zero exit with CANCEL_PENDING skips PROCESS_FAILED and ends a
   tempPathsToClean.push(tmpDir);
 
   const repoPath = path.join(tmpDir, "repo-cancel-nonzero");
-  await initGitRepo(repoPath);
+  await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
@@ -1392,6 +1459,7 @@ test("EXECUTE: non-zero exit with CANCEL_PENDING skips PROCESS_FAILED and ends a
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  resetShellPathCache();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -1410,6 +1478,7 @@ test("EXECUTE: non-zero exit with CANCEL_PENDING skips PROCESS_FAILED and ends a
     machineName: "execute-cancel-nonzero-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
     jobStore,

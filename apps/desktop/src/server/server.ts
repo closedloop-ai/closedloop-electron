@@ -18,6 +18,7 @@ import {
   type GatewayApprovalResult,
 } from "./router.js";
 import type { TelemetryEmitter } from "../main/telemetry-protocol.js";
+import type { WorktreeProvider } from "./operations/symphony-loop.js";
 
 export interface DesktopGatewayServerOptions {
   host: string;
@@ -43,6 +44,7 @@ export interface DesktopGatewayServerOptions {
   prodOriginsOnly?: boolean;
   jobStore?: JobStore;
   telemetry?: TelemetryEmitter;
+  worktreeProvider?: WorktreeProvider;
   onUnexpectedClose?: () => void;
 }
 
@@ -80,6 +82,7 @@ export class DesktopGatewayServer {
       prodOriginsOnly: this.options.prodOriginsOnly,
       jobStore: this.options.jobStore,
       telemetry: this.options.telemetry,
+      worktreeProvider: this.options.worktreeProvider,
     });
   }
 

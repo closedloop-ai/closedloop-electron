@@ -26,7 +26,7 @@ import { registerSymphonyAttachmentsRoutes } from "./operations/symphony-attachm
 import { registerSymphonyChatHistoryRoutes } from "./operations/symphony-chat-history.js";
 import { registerSymphonyJudgesRoutes } from "./operations/symphony-judges.js";
 import { registerSymphonyKillRoutes } from "./operations/symphony-kill.js";
-import { registerSymphonyLoopRoutes } from "./operations/symphony-loop.js";
+import { registerSymphonyLoopRoutes, type WorktreeProvider } from "./operations/symphony-loop.js";
 import { registerSymphonyLogsRoutes } from "./operations/symphony-logs.js";
 import { registerSymphonyPlanRoutes } from "./operations/symphony-plan.js";
 import { registerSymphonySessionRoutes } from "./operations/symphony-sessions.js";
@@ -60,6 +60,7 @@ export interface GatewayRouterOptions {
   prodOriginsOnly?: boolean;
   jobStore?: JobStore;
   telemetry?: TelemetryEmitter;
+  worktreeProvider?: WorktreeProvider;
 }
 
 export interface GatewayActivityEvent {
@@ -159,7 +160,8 @@ export class GatewayRouter {
       this.options.getApiOrigin,
       this.options.jobStore,
       this.options.getWebAppOrigin ?? (() => this.options.webAppOrigin),
-      this.options.telemetry
+      this.options.telemetry,
+      this.options.worktreeProvider
     );
     registerSymphonyLogsRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerSymphonyPlanRoutes(this.operationDispatcher, this.options.getAllowedDirectories);

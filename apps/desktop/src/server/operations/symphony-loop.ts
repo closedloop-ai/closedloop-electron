@@ -1,5 +1,6 @@
 import { execFileSync, execSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
+import { getShellPath } from "../shell-path.js";
 import {
   closeSync,
   existsSync,
@@ -38,6 +39,36 @@ import {
   resolveWorktreeParentDir,
   tryAssertRepoAllowed,
 } from "./symphony-utils.js";
+
+// ---------------------------------------------------------------------------
+// WorktreeProvider: abstraction over git worktree operations for testability
+// ---------------------------------------------------------------------------
+
+export interface WorktreeProvider {
+  ensureWorktree(
+    repoPath: string,
+    worktreeDir: string,
+    branchName: string,
+    baseBranch: string,
+  ): Promise<void>;
+  findWorktreeForBranch(
+    repoPath: string,
+    branchName: string,
+  ): string | null;
+  removeWorktree(
+    worktreeDir: string,
+    repoPath: string,
+    loopId?: string,
+  ): Promise<void>;
+  getCurrentBranch(worktreeDir: string): string | null;
+}
+
+export const defaultWorktreeProvider: WorktreeProvider = {
+  ensureWorktree: ensureWorktreeImpl,
+  findWorktreeForBranch: findWorktreeForBranchImpl,
+  removeWorktree: removeWorktreeImpl,
+  getCurrentBranch: getCurrentBranchImpl,
+};
 
 // ---------------------------------------------------------------------------
 // Legacy migration helper
@@ -330,6 +361,8 @@ interface LoopRequestBody {
   prompt?: string;
   /** Local filesystem checkout root. When present and sandbox-allowed, used as checkout root for worktree creation/reuse instead of repo.fullName lookup. */
   localRepoPath?: string;
+  /** User-supplied Additional Context from ArtifactVersion v1. Written to additional-context.md for PLAN commands. */
+  userContext?: string;
 }
 
 interface ExecutionResult {
@@ -643,7 +676,7 @@ async function uploadArtifacts(
 // Worktree management
 // ---------------------------------------------------------------------------
 
-async function ensureWorktree(
+async function ensureWorktreeImpl(
   expandedRepoPath: string,
   worktreeDir: string,
   branchName: string,
@@ -688,7 +721,7 @@ async function ensureWorktree(
 }
 
 /** Find existing worktree for a branch name. */
-function findWorktreeForBranch(
+function findWorktreeForBranchImpl(
   expandedRepoPath: string,
   branchName: string,
 ): string | null {
@@ -721,11 +754,11 @@ function findWorktreeForBranch(
 // findWorktreeForBranch(parentBranchName) which matches the specific parent.
 
 /**
- * Remove a GENERATE_PRD worktree via git worktree remove, falling back to
+ * Remove a worktree via git worktree remove, falling back to
  * fs.rm + git worktree prune. Used from both handleProcessCompletion and
  * early-return cleanup in handleLoopRequest.
  */
-async function cleanupGeneratePrdWorktree(
+async function removeWorktreeImpl(
   worktreeDir: string,
   expandedRepoPath: string,
   loopId?: string,
@@ -756,6 +789,20 @@ async function cleanupGeneratePrdWorktree(
   }
 }
 
+/** Read the current branch name from a worktree directory. */
+function getCurrentBranchImpl(worktreeDir: string): string | null {
+  try {
+    return execSync("git rev-parse --abbrev-ref HEAD", {
+      cwd: worktreeDir,
+      encoding: "utf-8",
+      stdio: "pipe",
+      timeout: 5_000,
+    }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Per-command artifact writing
 // ---------------------------------------------------------------------------
@@ -768,6 +815,7 @@ async function writeArtifactsForPlan(
   claudeWorkDir: string,
   artifacts: LoopArtifact[],
   prdContent: string | null = null,
+  userContext?: string,
 ): Promise<void> {
   // Priority: explicit prompt > PRD artifact > FEATURE artifact (matches harness)
 
@@ -782,6 +830,19 @@ async function writeArtifactsForPlan(
     if (source?.content) {
       prdContent = source.content;
     }
+  }
+
+  // Append user-supplied Additional Context to the PRD so the planning agent
+  // sees it as part of the requirements (guaranteed to be read). Written as a
+  // clearly delineated section at the end of prd.md.
+  const safeUserContext =
+    typeof userContext === "string" ? userContext.trim() : "";
+  if (safeUserContext) {
+    const section =
+      "\n\n---\n\n## User Context / Additional Constraints\n\n" +
+      safeUserContext +
+      "\n";
+    prdContent = prdContent ? prdContent + section : section;
   }
 
   if (prdContent) {
@@ -1185,10 +1246,10 @@ async function attemptLlmCommit(
     throw sandboxErr;
   }
 
-  const spawnEnv: Record<string, string> = { ...process.env } as Record<
-    string,
-    string
-  >;
+  const spawnEnv: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+    PATH: await getShellPath(),
+  };
   if (committer) {
     spawnEnv.GIT_AUTHOR_NAME = committer.name;
     spawnEnv.GIT_AUTHOR_EMAIL = committer.email;
@@ -1403,12 +1464,13 @@ function executeGitOperations(
   command: string,
   artifactSlug?: string,
   webAppOrigin?: string,
+  shellPath?: string,
 ): GitOperationResult {
   const shortId = loopId.slice(0, 8);
-  const env: Record<string, string> = { ...process.env } as Record<
-    string,
-    string
-  >;
+  const env: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+    ...(shellPath ? { PATH: shellPath } : {}),
+  };
   if (committer) {
     env.GIT_AUTHOR_NAME = committer.name;
     env.GIT_AUTHOR_EMAIL = committer.email;
@@ -1621,6 +1683,7 @@ async function handleProcessCompletion(
   telemetry?: TelemetryEmitter,
   commandId?: string,
   operationId?: string,
+  wt: WorktreeProvider = defaultWorktreeProvider,
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
 
@@ -1687,7 +1750,7 @@ async function handleProcessCompletion(
     if (usedTempDir) {
       fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
     } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
-      await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, loopId);
+      await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
     return;
   }
@@ -1789,6 +1852,7 @@ async function handleProcessCompletion(
           return;
         }
 
+        const gitShellPath = await getShellPath();
         const gitResult: GitOperationResult = llmResult
           ? { status: "success" as const, ...llmResult }
           : executeGitOperations(
@@ -1799,6 +1863,7 @@ async function handleProcessCompletion(
               command,
               body.artifactSlug,
               webAppOrigin ?? "",
+              gitShellPath,
             );
 
         if (gitResult.status === "success") {
@@ -1895,18 +1960,9 @@ async function handleProcessCompletion(
     // Include worktree branch name for all commands that use a worktree.
     // The server persists this on the loop record for display/debugging.
     if (worktreeDir && !result.branchName) {
-      try {
-        const branch = execSync("git rev-parse --abbrev-ref HEAD", {
-          cwd: worktreeDir,
-          encoding: "utf-8",
-          stdio: "pipe",
-          timeout: 5_000,
-        }).trim();
-        if (branch) {
-          result.branchName = branch;
-        }
-      } catch {
-        // Non-critical — worktree may already be cleaned up
+      const branch = wt.getCurrentBranch(worktreeDir);
+      if (branch) {
+        result.branchName = branch;
       }
   } else if (command === "DECOMPOSE") {
     artifacts = readDecomposeOutputs(claudeWorkDir);
@@ -1928,7 +1984,10 @@ async function handleProcessCompletion(
     const completedEvent: Record<string, unknown> = {
       type: "completed",
       result,
-      tokensUsed,
+      tokensUsed: {
+        input: tokensUsed.inputTokens,
+        output: tokensUsed.outputTokens,
+      },
       loopId,
       ...(warnings.length > 0 ? { warnings } : {}),
     };
@@ -1952,7 +2011,7 @@ async function handleProcessCompletion(
         worktreeDir &&
         expandedRepoPath
       ) {
-        await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, loopId);
+        await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
       }
       return;
     }
@@ -2015,7 +2074,7 @@ async function handleProcessCompletion(
     if (usedTempDir) {
       fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
     } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
-      await cleanupGeneratePrdWorktree(worktreeDir, expandedRepoPath, loopId);
+      await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
   } finally {
     runningLoops.delete(loopId);
@@ -2033,7 +2092,9 @@ async function handleLoopRequest(
   jobStore?: JobStore,
   getWebAppOrigin?: () => string,
   telemetry?: TelemetryEmitter,
+  worktreeProvider?: WorktreeProvider,
 ): Promise<void> {
+  const wt = worktreeProvider ?? defaultWorktreeProvider;
   // Derive the callback URL from the gateway's trusted configuration.
   // body.apiBaseUrl is ignored -- the caller does not control where
   // loop events and artifact uploads are sent.
@@ -2294,41 +2355,15 @@ async function handleLoopRequest(
       if (body.command === "PLAN") {
         // PLAN always starts fresh — remove stale worktree if it exists.
         // PLAN has requiresParent: false, so it must not inherit prior state.
-        const staleWorktree = findWorktreeForBranch(repoPath, branchName);
+        const staleWorktree = wt.findWorktreeForBranch(repoPath, branchName);
         if (staleWorktree) {
           loopLog(
             body.loopId,
             `Removing stale worktree for fresh PLAN: ${staleWorktree}`,
           );
-          try {
-            execSync(
-              `git worktree remove --force ${shellEscape(staleWorktree)}`,
-              {
-                cwd: repoPath,
-                stdio: "pipe",
-                timeout: 15_000,
-              },
-            );
-          } catch (wtErr) {
-            loopLog(
-              body.loopId,
-              `git worktree remove failed, falling back to fs.rm: ${wtErr instanceof Error ? wtErr.message : wtErr}`,
-            );
-            // Force-remove the directory so ensureWorktree can recreate it
-            await fs.rm(staleWorktree, { recursive: true, force: true });
-            // Prune stale worktree entries from git's tracking
-            try {
-              execSync("git worktree prune", {
-                cwd: repoPath,
-                stdio: "pipe",
-                timeout: 10_000,
-              });
-            } catch {
-              // Best-effort
-            }
-          }
+          await wt.removeWorktree(staleWorktree, repoPath, body.loopId);
         }
-        await ensureWorktree(
+        await wt.ensureWorktree(
           repoPath,
           worktreeDir,
           branchName,
@@ -2341,7 +2376,7 @@ async function handleLoopRequest(
       } else {
         // EXECUTE/REQUEST_CHANGES: reuse existing worktree.
         // Try artifact slug first, then parentLoopId fallback, then create new.
-        const existingWorktree = findWorktreeForBranch(repoPath, branchName);
+        const existingWorktree = wt.findWorktreeForBranch(repoPath, branchName);
         if (existingWorktree) {
           worktreeDir = existingWorktree;
           loopLog(
@@ -2351,7 +2386,7 @@ async function handleLoopRequest(
         } else if (body.parentLoopId) {
           // Fallback: try parent's loopId-based branch (pre-slug deployments or missing slug)
           const parentBranch = `symphony/loop-${slugifyLoopId(body.parentLoopId)}`;
-          const parentWorktree = findWorktreeForBranch(repoPath, parentBranch);
+          const parentWorktree = wt.findWorktreeForBranch(repoPath, parentBranch);
           if (parentWorktree) {
             worktreeDir = parentWorktree;
             loopLog(
@@ -2363,7 +2398,7 @@ async function handleLoopRequest(
         if (!worktreeDir || !existsSync(worktreeDir)) {
           // No existing worktree found — create new
           worktreeDir = resolveLoopWorktreeDir(repoPath, worktreeKey);
-          await ensureWorktree(
+          await wt.ensureWorktree(
             repoPath,
             worktreeDir,
             branchName,
@@ -2395,7 +2430,7 @@ async function handleLoopRequest(
       await fs.mkdir(claudeWorkDir, { recursive: true });
 
       if (body.command === "PLAN") {
-        await writeArtifactsForPlan(claudeWorkDir, body.artifacts, body.prompt);
+        await writeArtifactsForPlan(claudeWorkDir, body.artifacts, body.prompt, body.userContext);
       } else if (body.command === "EXECUTE") {
         await writeArtifactsForExecuteOrAmend(claudeWorkDir, body.artifacts);
       } else {
@@ -2427,16 +2462,16 @@ async function handleLoopRequest(
       );
 
       // Always start fresh: remove any stale worktree for this branch before creation.
-      const staleWorktree = findWorktreeForBranch(repoPath, branchName);
+      const staleWorktree = wt.findWorktreeForBranch(repoPath, branchName);
       if (staleWorktree) {
         loopLog(
           body.loopId,
           `Removing stale worktree for fresh GENERATE_PRD: ${staleWorktree}`,
         );
-        await cleanupGeneratePrdWorktree(staleWorktree, repoPath, body.loopId);
+        await wt.removeWorktree(staleWorktree, repoPath, body.loopId);
       }
 
-      await ensureWorktree(
+      await wt.ensureWorktree(
         repoPath,
         worktreeDir,
         branchName,
@@ -2451,7 +2486,7 @@ async function handleLoopRequest(
         assertPathAllowed(worktreeDir, allowedDirs);
       } catch (e) {
         if (e instanceof DirectoryNotAllowedError) {
-          await cleanupGeneratePrdWorktree(worktreeDir, repoPath, body.loopId);
+          await wt.removeWorktree(worktreeDir, repoPath, body.loopId);
           json(context, 403, {
             error: `Worktree path not allowed: ${worktreeDir}`,
           });
@@ -2488,7 +2523,7 @@ async function handleLoopRequest(
           .catch(() => {});
       }
       if (body.command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
-        await cleanupGeneratePrdWorktree(
+        await wt.removeWorktree(
           worktreeDir,
           expandedRepoPath,
           body.loopId,
@@ -2510,7 +2545,8 @@ async function handleLoopRequest(
 
     if (usesClaude) {
       try {
-        execSync("which claude", { stdio: "pipe", timeout: 5000 });
+        const whichEnv = { ...process.env, PATH: await getShellPath() };
+        execSync("which claude", { stdio: "pipe", timeout: 5000, env: whichEnv });
       } catch {
         await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
           type: "error",
@@ -2592,7 +2628,7 @@ async function handleLoopRequest(
       const spawnEnv: Record<string, string> = {
         ...(process.env as Record<string, string>),
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
-        PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
+        PATH: await getShellPath(),
       };
 
       // Shared claude CLI args for commands that run claude directly.
@@ -2808,6 +2844,7 @@ async function handleLoopRequest(
         telemetry,
         commandId,
         operationId,
+        wt,
       ).catch((err) => {
         loopError(body.loopId, "Completion handler error:", err);
         gatewayLog.error(
@@ -3021,6 +3058,7 @@ export function registerSymphonyLoopRoutes(
   jobStore?: JobStore,
   getWebAppOrigin?: () => string,
   telemetry?: TelemetryEmitter,
+  worktreeProvider?: WorktreeProvider,
 ): void {
   dispatcher.register(
     "POST",
@@ -3033,6 +3071,7 @@ export function registerSymphonyLoopRoutes(
         jobStore,
         getWebAppOrigin,
         telemetry,
+        worktreeProvider,
       );
     },
   );
