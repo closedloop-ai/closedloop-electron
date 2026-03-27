@@ -26,10 +26,12 @@ import { afterEach, test } from "node:test";
 import { JobStore } from "../src/main/job-store.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
+import { resetResolvedClaudePath } from "../src/server/operations/symphony-loop.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 import { resetShellPathCache } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
+  initGitRepo,
   restoreEnv,
   saveEnv,
   startMockApiServer,
@@ -931,6 +933,498 @@ test("EXECUTE: cancel during attemptLlmCommit ends job as CANCELLED with no comp
     completedEvents.length,
     0,
     `Expected no completed event when cancelled during attemptLlmCommit, got ${completedEvents.length}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 8 (T-1.3): Artifact links use /implementation-plans/ path in both the
+//         SAFETY commit PR body and the LLM commit prompt footer.
+//
+// The fake gh binary captures --body-file content.
+// The fake claude binary captures its -p argument to a file (then exits without
+// writing execution-result.json so the code falls through to executeGitOperations).
+// Both captures are asserted to contain /implementation-plans/ and not to
+// contain /artifact/by-slug/.
+// ---------------------------------------------------------------------------
+
+test("EXECUTE: artifact links use /implementation-plans/ in PR body and LLM prompt footer", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-artifactlink-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-artifactlink");
+  await initGitRepo(repoPath);
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  // fake run-loop.sh: writes a file to create an uncommitted change so that
+  // executeGitOperations finds something to commit after attemptLlmCommit falls through.
+  await createFakeRunLoopScript(
+    tmpDir,
+    [
+      "#!/bin/sh",
+      "echo 'feature output' > feature-output.txt",
+      "exit 0",
+    ].join("\n")
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+
+  // Capture paths
+  const claudePromptCapture = path.join(tmpDir, "claude-prompt-capture.txt");
+  const ghBodyCapture = path.join(tmpDir, "gh-body-capture.txt");
+
+  // fake claude for attemptLlmCommit: captures the -p argument (the LLM prompt)
+  // to a file, then exits 0 without writing execution-result.json so the code
+  // falls through to the SAFETY executeGitOperations path.
+  const claudeScript = [
+    "#!/bin/sh",
+    "# Capture the argument following -p",
+    "prev=''",
+    'for arg in "$@"; do',
+    '  if [ "$prev" = "-p" ]; then',
+    `    printf '%s' "$arg" > ${JSON.stringify(claudePromptCapture)}`,
+    "  fi",
+    '  prev="$arg"',
+    "done",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "claude"), claudeScript, { mode: 0o755 });
+
+  // fake git: pass through all real git operations; stub push to avoid remote requirement
+  const fakeGitScript = [
+    "#!/bin/sh",
+    "if [ \"$1\" = push ]; then exit 0; fi",
+    `exec /usr/bin/git "$@"`,
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  // fake gh: capture --body-file content to ghBodyCapture.
+  // pr view (existing-PR check) exits non-zero so code proceeds to gh pr create.
+  // pr view --json body returns empty body so the metadata-footer update is a no-op.
+  const fakeGhScript = [
+    "#!/bin/sh",
+    "if [ \"$1\" = pr ] && [ \"$2\" = view ] && [ \"$3\" != \"--json\" ]; then",
+    "  exit 1",
+    "fi",
+    "if [ \"$1\" = pr ] && [ \"$2\" = view ] && [ \"$3\" = \"--json\" ]; then",
+    "  printf '{\"body\":\"\"}\\n'",
+    "  exit 0",
+    "fi",
+    "if [ \"$1\" = pr ] && [ \"$2\" = create ]; then",
+    "  prev=''",
+    "  for arg in \"$@\"; do",
+    "    if [ \"$prev\" = \"--body-file\" ] && [ -f \"$arg\" ]; then",
+    `      cp "$arg" ${JSON.stringify(ghBodyCapture)}`,
+    "    fi",
+    "    prev=\"$arg\"",
+    "  done",
+    "  printf 'https://github.com/org/repo-artifactlink/pull/99\\n'",
+    "  exit 0",
+    "fi",
+    "if [ \"$1\" = pr ] && [ \"$2\" = edit ]; then",
+    "  exit 0",
+    "fi",
+    `exec /usr/bin/gh "$@" 2>/dev/null || true`,
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "gh"), fakeGhScript, { mode: 0o755 });
+
+  // Reset cached claude path and shell PATH so this test's fake-bin is used
+  resetResolvedClaudePath();
+  resetShellPathCache();
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-artifactlink-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000001000";
+  const artifactSlug = "PLAN-42";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        artifactSlug,
+        repo: { fullName: `artifactlink/${path.basename(repoPath)}`, branch: "main" },
+      }),
+    }
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
+  );
+
+  // Wait for upload to confirm the flow completed
+  await mock.waitForRequest("upload-artifacts");
+
+  // Assert the LLM prompt footer contains /implementation-plans/ and not /artifact/by-slug/
+  const capturedPrompt = await fs.readFile(claudePromptCapture, "utf-8").catch(() => "");
+  assert.ok(
+    capturedPrompt.includes("/implementation-plans/"),
+    `Expected LLM prompt footer to contain /implementation-plans/, got prompt (tail): ${capturedPrompt.slice(-500)}`
+  );
+  assert.ok(
+    !capturedPrompt.includes("/artifact/by-slug/"),
+    `Expected LLM prompt to NOT contain /artifact/by-slug/, but it does. Prompt (tail): ${capturedPrompt.slice(-500)}`
+  );
+
+  // Assert the SAFETY commit PR body also contains /implementation-plans/ and not /artifact/by-slug/
+  const capturedBody = await fs.readFile(ghBodyCapture, "utf-8").catch(() => "");
+  assert.ok(
+    capturedBody.includes("/implementation-plans/"),
+    `Expected SAFETY PR body to contain /implementation-plans/, got body: ${capturedBody}`
+  );
+  assert.ok(
+    !capturedBody.includes("/artifact/by-slug/"),
+    `Expected SAFETY PR body to NOT contain /artifact/by-slug/, but it does. Body: ${capturedBody}`
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 9 (T-2.3): SAFETY commit PR title format is
+//         "<artifactSlug>: Automated changes from loop <shortId>"
+//         and does NOT contain the old 'Symphony: EXECUTE' substring.
+// ---------------------------------------------------------------------------
+
+test("EXECUTE: SAFETY commit PR title uses '<slug>: Automated changes from loop <shortId>' format", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-prtitle-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-prtitle");
+  await initGitRepo(repoPath);
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  // fake run-loop.sh: write a file so there are changes to commit
+  await createFakeRunLoopScript(
+    tmpDir,
+    [
+      "#!/bin/sh",
+      "echo 'implementation output' > impl.txt",
+      "exit 0",
+    ].join("\n")
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+
+  // fake claude: exits 0 without execution-result.json so code falls through to
+  // executeGitOperations (the SAFETY commit path)
+  await fs.writeFile(
+    path.join(fakeBin, "claude"),
+    "#!/bin/sh\nexit 0\n",
+    { mode: 0o755 }
+  );
+
+  // Capture file for the gh pr create --title argument
+  const ghTitleCapture = path.join(tmpDir, "gh-title-capture.txt");
+
+  // fake git: stub push; delegate everything else to real git
+  const fakeGitScript = [
+    "#!/bin/sh",
+    "if [ \"$1\" = push ]; then exit 0; fi",
+    `exec /usr/bin/git "$@"`,
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  // fake gh: capture --title argument; return a fake PR URL from pr create;
+  // return non-zero for pr view (no existing PR) so pr create is called;
+  // return empty body for pr view --json body to skip the footer-update step.
+  const fakeGhScript = [
+    "#!/bin/sh",
+    "if [ \"$1\" = pr ] && [ \"$2\" = view ] && [ \"$3\" != \"--json\" ]; then",
+    "  exit 1",
+    "fi",
+    "if [ \"$1\" = pr ] && [ \"$2\" = view ] && [ \"$3\" = \"--json\" ]; then",
+    "  printf '{\"body\":\"\"}\\n'",
+    "  exit 0",
+    "fi",
+    "if [ \"$1\" = pr ] && [ \"$2\" = create ]; then",
+    "  prev=''",
+    "  for arg in \"$@\"; do",
+    "    if [ \"$prev\" = \"--title\" ]; then",
+    `      printf '%s' "$arg" > ${JSON.stringify(ghTitleCapture)}`,
+    "    fi",
+    "    prev=\"$arg\"",
+    "  done",
+    "  printf 'https://github.com/org/repo-prtitle/pull/55\\n'",
+    "  exit 0",
+    "fi",
+    "if [ \"$1\" = pr ] && [ \"$2\" = edit ]; then",
+    "  exit 0",
+    "fi",
+    `exec /usr/bin/gh "$@" 2>/dev/null || true`,
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "gh"), fakeGhScript, { mode: 0o755 });
+
+  resetResolvedClaudePath();
+  resetShellPathCache();
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-prtitle-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000001100";
+  const artifactSlug = "PLAN-55";
+  const shortId = loopId.slice(0, 8); // "00000000"
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        artifactSlug,
+        repo: { fullName: `prtitle/${path.basename(repoPath)}`, branch: "main" },
+      }),
+    }
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
+  );
+
+  // Wait for the upload to confirm git operations completed
+  await mock.waitForRequest("upload-artifacts");
+
+  const capturedTitle = await fs.readFile(ghTitleCapture, "utf-8").catch(() => "");
+
+  // Assert the title matches the expected format:
+  // "<artifactSlug>: Automated changes from loop <shortId>"
+  const expectedTitle = `${artifactSlug}: Automated changes from loop ${shortId}`;
+  assert.equal(
+    capturedTitle,
+    expectedTitle,
+    `Expected PR title "${expectedTitle}", got "${capturedTitle}"`
+  );
+
+  // Assert the old 'Symphony: EXECUTE' format is NOT used
+  assert.ok(
+    !capturedTitle.includes("Symphony: EXECUTE"),
+    `PR title must not contain 'Symphony: EXECUTE', got: "${capturedTitle}"`
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 10 (T-3.3): LLM commit spawn correctness
+//   - spawn uses the resolved absolute binary path (not bare 'claude' string)
+//   - assertPathAllowed is called before spawn (evidenced by the spawn succeeding
+//     when worktreeDir is within allowed directories)
+//   - PID is written atomically (process.pid exists and .pid.tmp is cleaned up)
+// ---------------------------------------------------------------------------
+
+test("EXECUTE: LLM commit spawns claude via resolved absolute path and writes PID atomically", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-llmspawn-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-llmspawn");
+  await initGitRepo(repoPath);
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  // fake run-loop.sh: exits 0 immediately so attemptLlmCommit is reached
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+
+  // Capture paths
+  const claudeArgvCapture = path.join(tmpDir, "claude-argv-capture.txt");
+  const claudeBinaryCapture = path.join(tmpDir, "claude-binary-capture.txt");
+
+  // fake claude for attemptLlmCommit:
+  // 1. Writes its own invocation path ($0) to claudeBinaryCapture — this is the
+  //    path that the OS resolved when spawning the binary.  If spawn used the
+  //    absolute path it will start with '/'; if it used bare 'claude' it will
+  //    just be 'claude'.
+  // 2. Writes all args to claudeArgvCapture for inspection.
+  // 3. Exits 0 without writing execution-result.json (falls through to SAFETY path,
+  //    which is fine — we only care about proving the spawn happened).
+  const claudeScript = [
+    "#!/bin/sh",
+    `printf '%s' "$0" > ${JSON.stringify(claudeBinaryCapture)}`,
+    `printf '%s\\n' "$@" > ${JSON.stringify(claudeArgvCapture)}`,
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "claude"), claudeScript, { mode: 0o755 });
+
+  // fake git: stub push; pass everything else to real git
+  const fakeGitScript = [
+    "#!/bin/sh",
+    "if [ \"$1\" = push ]; then exit 0; fi",
+    `exec /usr/bin/git "$@"`,
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  // fake gh: return non-zero for pr view so SAFETY path tries to create
+  // but return non-zero for create too — we don't need a real PR since the test
+  // only asserts on the LLM spawn behaviour (claude exits without result file,
+  // executeGitOperations runs, git status returns empty because run-loop.sh
+  // made no changes, so no-changes path is taken — no gh calls needed).
+  await fs.writeFile(
+    path.join(fakeBin, "gh"),
+    "#!/bin/sh\nexit 1\n",
+    { mode: 0o755 }
+  );
+
+  resetResolvedClaudePath();
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const jobStore = new JobStore({ cwd: tmpDir, name: "test-jobs-llmspawn" });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-llmspawn-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000001200";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        repo: { fullName: `llmspawn/${path.basename(repoPath)}`, branch: "main" },
+      }),
+    }
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
+  );
+
+  // Wait for the upload to confirm the full post-processing pipeline ran
+  await mock.waitForRequest("upload-artifacts");
+
+  // --- Assert 1: claude was spawned with the resolved absolute binary path ---
+  // The fake claude writes $0 (its own path as seen by the OS) to claudeBinaryCapture.
+  // When spawned via the absolute path the value will be the full path under fakeBin.
+  // If the code fell back to bare 'claude' it would just be 'claude'.
+  const capturedBinary = await fs.readFile(claudeBinaryCapture, "utf-8").catch(() => "");
+  assert.ok(
+    capturedBinary.startsWith("/"),
+    `Expected claude binary path to be absolute (starts with '/'), got: "${capturedBinary}"`
+  );
+  assert.ok(
+    capturedBinary.includes(fakeBin),
+    `Expected claude binary path to be under fakeBin (${fakeBin}), got: "${capturedBinary}"`
+  );
+
+  // --- Assert 2: spawn received -p as first argument (correct arg format) ---
+  const capturedArgv = await fs.readFile(claudeArgvCapture, "utf-8").catch(() => "");
+  assert.ok(
+    capturedArgv.startsWith("-p\n"),
+    `Expected first captured arg to be '-p', got argv (head): "${capturedArgv.slice(0, 100)}"`
+  );
+
+  // --- Assert 3: PID written atomically (process.pid exists, .pid.tmp cleaned up) ---
+  // The PID file is written inside claudeWorkDir = worktreeDir/.claude/work
+  // We don't know the exact worktreeDir, but we can get it from the job store.
+  const job = jobStore.getByLoopId(loopId);
+  assert.ok(job, "Expected job to exist in store after completion");
+
+  const claudeWorkDir = job!.claudeWorkDir;
+  assert.ok(claudeWorkDir, "Expected claudeWorkDir to be set on job");
+
+  const pidFilePath = path.join(claudeWorkDir!, "process.pid");
+  const pidTmpPath = path.join(claudeWorkDir!, "process.pid.tmp");
+
+  // process.pid should exist and contain a numeric PID
+  const pidContent = await fs.readFile(pidFilePath, "utf-8").catch(() => "");
+  assert.ok(
+    /^\d+$/.test(pidContent.trim()),
+    `Expected process.pid to contain a numeric PID, got: "${pidContent}"`
+  );
+
+  // process.pid.tmp should NOT exist — the atomic rename should have moved it
+  let tmpExists = false;
+  try {
+    await fs.access(pidTmpPath);
+    tmpExists = true;
+  } catch {
+    // Expected: file does not exist
+  }
+  assert.ok(
+    !tmpExists,
+    `Expected process.pid.tmp to be cleaned up after atomic rename, but it still exists`
   );
 });
 
