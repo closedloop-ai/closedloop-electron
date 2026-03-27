@@ -9,7 +9,7 @@ import { DirectoryNotAllowedError } from "../security.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { createStreamState, processStreamEvent, type ContentBlock } from "./stream-events.js";
-import { assertRepoAllowed, ensureWorktreeForReview, findFirstExisting, resolveWorktreeDir, resolveWorktreeParentDir, tryAssertRepoAllowed, tryAssertPathAllowed } from "./symphony-utils.js";
+import { assertRepoAllowed, ensureWorktreeForReview, resolveWorktreeDir, resolveWorktreeParentDir, tryAssertRepoAllowed, tryAssertPathAllowed } from "./symphony-utils.js";
 
 const CODEX_SESSION_ID_REGEX = /session id:\s*([0-9a-f-]{36})/i;
 const FINDINGS_CODE_BLOCK_REGEX = /```json\s*\n([\s\S]*?)\n\s*```/;
@@ -179,26 +179,19 @@ async function stopAndCleanProvider(
   providerName: string
 ): Promise<string[]> {
   const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-  // Read paths resolve from whichever dir has state
-  const readPaths = getReviewPaths(worktreeDir, providerName);
+  const paths = getReviewPaths(worktreeDir, providerName);
   const deleted: string[] = [];
 
-  if (existsSync(readPaths.statePath)) {
+  if (existsSync(paths.statePath)) {
     try {
-      const state = JSON.parse(await fs.readFile(readPaths.statePath, "utf-8")) as ReviewState;
+      const state = JSON.parse(await fs.readFile(paths.statePath, "utf-8")) as ReviewState;
       tryKillRunningReview(state);
     } catch {
       // Ignore corrupted state.
     }
   }
 
-  // Clean from both old and new dirs to catch split-root state
-  const writePaths = getReviewWritePaths(worktreeDir, providerName);
-  const allPaths = new Set([
-    readPaths.statePath, readPaths.logPath, readPaths.pidPath, readPaths.findingsPath,
-    writePaths.statePath, writePaths.logPath, writePaths.pidPath, writePaths.findingsPath,
-  ]);
-  for (const targetPath of allPaths) {
+  for (const targetPath of [paths.statePath, paths.logPath, paths.pidPath, paths.findingsPath]) {
     if (existsSync(targetPath)) {
       await fs.rm(targetPath, { force: true });
       deleted.push(path.basename(targetPath));
@@ -403,18 +396,14 @@ export function registerCodexRoutes(
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
     const providers = provider ? [provider] : ["claude", "codex"];
 
-    // Delete from both new and legacy roots to clear dual-copy leftovers
     await Promise.all(
       providers.flatMap((name) => {
-        const readPaths = getReviewPaths(worktreeDir, name);
-        const writePaths = getReviewWritePaths(worktreeDir, name);
-        const allPaths = new Set([
-          readPaths.statePath, readPaths.logPath, readPaths.pidPath, readPaths.findingsPath,
-          writePaths.statePath, writePaths.logPath, writePaths.pidPath, writePaths.findingsPath,
-        ]);
-        return [...allPaths].map(async (targetPath) => {
-          await fs.rm(targetPath, { force: true });
-        });
+        const paths = getReviewPaths(worktreeDir, name);
+        return [paths.statePath, paths.logPath, paths.pidPath, paths.findingsPath].map(
+          async (targetPath) => {
+            await fs.rm(targetPath, { force: true });
+          }
+        );
       })
     );
 
@@ -453,15 +442,15 @@ export function registerCodexRoutes(
     }
 
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-    const { statePath: readStatePath } = getReviewPaths(worktreeDir, provider);
+    const { statePath } = getReviewPaths(worktreeDir, provider);
 
-    if (!existsSync(readStatePath)) {
+    if (!existsSync(statePath)) {
       json(context, 404, { error: "No review found" });
       return;
     }
 
     try {
-      const state = JSON.parse(await fs.readFile(readStatePath, "utf-8")) as ReviewState;
+      const state = JSON.parse(await fs.readFile(statePath, "utf-8")) as ReviewState;
       if (state.status !== "running") {
         json(context, 200, {
           stopped: false,
@@ -481,14 +470,13 @@ export function registerCodexRoutes(
         // Process may have already exited.
       }
 
-      const { statePath: writeStatePath } = getReviewWritePaths(worktreeDir, provider);
-      await fs.mkdir(path.dirname(writeStatePath), { recursive: true });
+      await fs.mkdir(path.dirname(statePath), { recursive: true });
       const updatedState: ReviewState = {
         ...state,
         status: "stopped",
         completedAt: new Date().toISOString()
       };
-      await fs.writeFile(writeStatePath, JSON.stringify(updatedState, null, 2), "utf-8");
+      await fs.writeFile(statePath, JSON.stringify(updatedState, null, 2), "utf-8");
 
       json(context, 200, { stopped: true, pid: state.pid });
     } catch (error) {
@@ -578,16 +566,15 @@ export function registerCodexRoutes(
     }
 
     const worktreeDir = resolveWorktreeDir(repoResult.path, ticketId);
-    const readFindingsPath = getReviewPaths(worktreeDir, provider).findingsPath;
-    const writeFindingsPath = getReviewWritePaths(worktreeDir, provider).findingsPath;
+    const findingsPath = getReviewPaths(worktreeDir, provider).findingsPath;
 
     if (typeof body.commentedIndex === "number") {
-      await handleMarkCommented(context, readFindingsPath, writeFindingsPath, body.commentedIndex);
+      await handleMarkCommented(context, findingsPath, findingsPath, body.commentedIndex);
       return;
     }
 
     if (body.declined === true && typeof body.declineReason === "string" && body.declineReason.trim().length > 0) {
-      await handleDeclineFindings(context, readFindingsPath, writeFindingsPath, body.declineReason);
+      await handleDeclineFindings(context, findingsPath, findingsPath, body.declineReason);
       return;
     }
 
@@ -596,7 +583,7 @@ export function registerCodexRoutes(
       return;
     }
 
-    await handleSaveFindings(context, writeFindingsPath, body, provider);
+    await handleSaveFindings(context, findingsPath, body, provider);
   });
 
   dispatcher.register("POST", "/api/engineer/codex/review-dedup/:ticketId", async (context) => {
@@ -669,25 +656,16 @@ export function registerCodexRoutes(
     }
 
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-    const extractWorkDirs = [
-      path.join(worktreeDir, ".closedloop-ai", "work"),
-      path.join(worktreeDir, ".claude", "work"),
-    ];
+    const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
 
     let raw = "";
     for (const fileName of ["codex-review-claude.log", "codex-review-codex.log"]) {
-      for (const dir of extractWorkDirs) {
-        const candidate = path.join(dir, fileName);
-        if (!existsSync(candidate)) {
-          continue;
-        }
+      const candidate = path.join(workDir, fileName);
+      if (existsSync(candidate)) {
         raw = await fs.readFile(candidate, "utf-8");
         if (raw.trim()) {
           break;
         }
-      }
-      if (raw.trim()) {
-        break;
       }
     }
 
@@ -805,7 +783,7 @@ export function registerCodexRoutes(
     // Process cwd: use base repo when requested, otherwise use worktree
     const reviewCwd = useBaseRepo ? expandedRepoPath : worktreeDir;
 
-    const { statePath, logPath, pidPath } = getReviewWritePaths(worktreeDir, provider);
+    const { statePath, logPath, pidPath } = getReviewPaths(worktreeDir, provider);
     await fs.mkdir(path.dirname(statePath), { recursive: true });
     await fs.writeFile(logPath, "", "utf-8");
 
@@ -935,13 +913,8 @@ export function registerCodexRoutes(
       return;
     }
 
-    const newDebateWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
-    // Per-file resolution: find debate state wherever it exists
-    const debateStatePath = findFirstExisting(
-      path.join(newDebateWorkDir, "codex-debate.json"),
-      path.join(worktreeDir, ".claude", "work", "codex-debate.json")
-    ) ?? path.join(newDebateWorkDir, "codex-debate.json");
-    const debateStateWritePath = path.join(newDebateWorkDir, "codex-debate.json");
+    const debateWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+    const debateStatePath = path.join(debateWorkDir, "codex-debate.json");
     const debateState = await loadJsonFile<{ sessionId?: string; rounds: number }>(debateStatePath, {
       rounds: 0
     });
@@ -968,7 +941,7 @@ export function registerCodexRoutes(
       async (sessionId) => {
         debateState.sessionId = sessionId;
         debateState.rounds += 1;
-        await saveJsonFile(debateStateWritePath, debateState);
+        await saveJsonFile(debateStatePath, debateState);
       }
     );
   });
@@ -1006,14 +979,7 @@ export function registerCodexRoutes(
 
     const chatContextId = asString(body.chatContextId);
     const stateFilename = chatContextId === "review" ? "codex-chat-review.json" : "codex-chat.json";
-    const newStateDirForChat = path.join(worktreeDir, ".closedloop-ai", "work");
-    const oldStateDirForChat = path.join(worktreeDir, ".claude", "work");
-    // Read from legacy path if file only exists there; always write to new canonical path.
-    const stateDirForChat = existsSync(path.join(newStateDirForChat, stateFilename))
-      ? newStateDirForChat
-      : (existsSync(path.join(oldStateDirForChat, stateFilename)) ? oldStateDirForChat : newStateDirForChat);
-    const statePath = path.join(stateDirForChat, stateFilename);
-    const stateWritePath = path.join(newStateDirForChat, stateFilename);
+    const statePath = path.join(worktreeDir, ".closedloop-ai", "work", stateFilename);
     const chatState = await loadJsonFile<CodexChatState>(statePath, { messageCount: 0 });
 
     const args = chatState.sessionId
@@ -1029,7 +995,7 @@ export function registerCodexRoutes(
       async (sessionId) => {
         chatState.sessionId = sessionId;
         chatState.messageCount += 1;
-        await saveJsonFile(stateWritePath, chatState);
+        await saveJsonFile(statePath, chatState);
       }
     );
   });
@@ -1112,9 +1078,7 @@ export function registerCodexRoutes(
       return;
     }
 
-    // Read from legacy path if file only exists there; always write to new canonical path.
     const historyPath = getFindingHistoryPath(ticketId, expandedRepoPath, findingId);
-    const historyWritePath = getFindingHistoryWritePath(ticketId, expandedRepoPath, findingId);
     const history = await loadJsonFile<FindingChatHistory>(historyPath, {
       messages: [],
       ticketId,
@@ -1132,13 +1096,13 @@ export function registerCodexRoutes(
     };
 
     history.messages.push(userMessage);
-    await saveJsonFile(historyWritePath, history);
+    await saveJsonFile(historyPath, history);
 
     setStreamingHeaders(context.response);
 
     const streamState = createStreamState(async (sessionId) => {
       history.sessionId = sessionId;
-      await saveJsonFile(historyWritePath, history);
+      await saveJsonFile(historyPath, history);
     });
 
     const prompt = buildFindingPrompt(history.findingContext, message, history.messages);
@@ -1218,7 +1182,7 @@ export function registerCodexRoutes(
         });
       }
       history.contextPercent = streamState.contextPercent;
-      await saveJsonFile(historyWritePath, history);
+      await saveJsonFile(historyPath, history);
 
       writeEvent(context.response, {
         type: "result",
@@ -1266,9 +1230,7 @@ export function registerCodexRoutes(
       throw error;
     }
 
-    // Read from legacy path if file only exists there; always write to new canonical path.
     const historyPath = getFindingHistoryPath(ticketId, expandedRepoPath, findingId);
-    const historyWritePath = getFindingHistoryWritePath(ticketId, expandedRepoPath, findingId);
     const history = await loadJsonFile<FindingChatHistory>(historyPath, {
       messages: [],
       ticketId,
@@ -1283,7 +1245,7 @@ export function registerCodexRoutes(
       target.responded = responded;
     }
 
-    await saveJsonFile(historyWritePath, history);
+    await saveJsonFile(historyPath, history);
     json(context, 200, { success: true });
   });
 
@@ -1308,12 +1270,10 @@ export function registerCodexRoutes(
       throw error;
     }
 
-    // Delete from both new and legacy roots to clear dual-copy leftovers
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
     const sanitizedFinding = findingId.replaceAll(/[^a-zA-Z0-9-_]/g, "_");
     const findingFile = path.join("finding-chats", `${sanitizedFinding}.json`);
     await fs.rm(path.join(worktreeDir, ".closedloop-ai", "work", findingFile), { force: true });
-    await fs.rm(path.join(worktreeDir, ".claude", "work", findingFile), { force: true });
     json(context, 200, { success: true });
   });
 }
@@ -1326,65 +1286,18 @@ function asProvider(value: unknown): "claude" | "codex" | null {
 }
 
 function resolveProvider(worktreeDir: string): "claude" | "codex" | null {
-  // Check both new and legacy work dirs for review state files
-  const dirs = [
-    path.join(worktreeDir, ".closedloop-ai", "work"),
-    path.join(worktreeDir, ".claude", "work"),
-  ];
-  for (const dir of dirs) {
-    if (existsSync(path.join(dir, "codex-review-claude.json"))) {
-      return "claude";
-    }
-    if (existsSync(path.join(dir, "codex-review-codex.json"))) {
-      return "codex";
-    }
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
+  if (existsSync(path.join(workDir, "codex-review-claude.json"))) {
+    return "claude";
+  }
+  if (existsSync(path.join(workDir, "codex-review-codex.json"))) {
+    return "codex";
   }
   return null;
 }
 
-/**
- * Resolve review file paths for READ operations.
- * Uses per-file findFirstExisting so each file resolves independently
- * (state may be split across old and new dirs during transition).
- */
+/** Resolve review file paths from .closedloop-ai/work. */
 function getReviewPaths(worktreeDir: string, provider: string): {
-  workDir: string;
-  statePath: string;
-  logPath: string;
-  pidPath: string;
-  findingsPath: string;
-} {
-  const newWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
-  const oldWorkDir = path.join(worktreeDir, ".claude", "work");
-  const workDir = existsSync(newWorkDir) ? newWorkDir
-    : existsSync(oldWorkDir) ? oldWorkDir
-    : newWorkDir;
-  return {
-    workDir,
-    statePath: findFirstExisting(
-      path.join(newWorkDir, `codex-review-${provider}.json`),
-      path.join(oldWorkDir, `codex-review-${provider}.json`)
-    ) ?? path.join(newWorkDir, `codex-review-${provider}.json`),
-    logPath: findFirstExisting(
-      path.join(newWorkDir, `codex-review-${provider}.log`),
-      path.join(oldWorkDir, `codex-review-${provider}.log`)
-    ) ?? path.join(newWorkDir, `codex-review-${provider}.log`),
-    pidPath: findFirstExisting(
-      path.join(newWorkDir, `codex-review-${provider}.pid`),
-      path.join(oldWorkDir, `codex-review-${provider}.pid`)
-    ) ?? path.join(newWorkDir, `codex-review-${provider}.pid`),
-    findingsPath: findFirstExisting(
-      path.join(newWorkDir, `review-findings-${provider}.json`),
-      path.join(oldWorkDir, `review-findings-${provider}.json`)
-    ) ?? path.join(newWorkDir, `review-findings-${provider}.json`)
-  };
-}
-
-/**
- * Resolve review file paths for WRITE operations.
- * Always targets .closedloop-ai/work so new state never lands in .claude/work.
- */
-function getReviewWritePaths(worktreeDir: string, provider: string): {
   workDir: string;
   statePath: string;
   logPath: string;
@@ -2055,24 +1968,8 @@ function buildFindingPrompt(
   return parts.join("\n\n");
 }
 
+/** Returns the canonical path for finding chat history. */
 function getFindingHistoryPath(ticketId: string, expandedRepoPath: string, findingId: string): string {
-  const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-  const sanitizedFindingId = findingId.replaceAll(/[^a-zA-Z0-9-_]/g, "_");
-  const newFindingWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
-  const oldFindingWorkDir = path.join(worktreeDir, ".claude", "work");
-  const filename = path.join("finding-chats", `${sanitizedFindingId}.json`);
-  // For reads: return old path if the file exists there and not in the new location.
-  // Writes always target the new canonical path (see getFindingHistoryWritePath).
-  const newFindingPath = path.join(newFindingWorkDir, filename);
-  const oldFindingPath = path.join(oldFindingWorkDir, filename);
-  if (!existsSync(newFindingPath) && existsSync(oldFindingPath)) {
-    return oldFindingPath;
-  }
-  return newFindingPath;
-}
-
-/** Always returns the canonical new-path for writes, regardless of where the file currently lives. */
-function getFindingHistoryWritePath(ticketId: string, expandedRepoPath: string, findingId: string): string {
   const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
   const sanitizedFindingId = findingId.replaceAll(/[^a-zA-Z0-9-_]/g, "_");
   const filename = path.join("finding-chats", `${sanitizedFindingId}.json`);

@@ -33,8 +33,6 @@ import { findPluginScript, findPluginVersions, getPluginCacheRoot } from "./plug
 import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import {
   expandHome,
-  isProcessRunning,
-  migrateWorkDirIfNeeded,
   resolveWorktreeParentDir,
   tryAssertRepoAllowed,
 } from "./symphony-utils.js";
@@ -68,74 +66,6 @@ export const defaultWorktreeProvider: WorktreeProvider = {
   removeWorktree: removeWorktreeImpl,
   getCurrentBranch: getCurrentBranchImpl,
 };
-
-// ---------------------------------------------------------------------------
-// Legacy migration helper
-// ---------------------------------------------------------------------------
-
-/**
- * Kill any live legacy process at .claude/work, clean up PID file, then migrate.
- * Always migrates and returns -- callers can proceed immediately.
- */
-async function killLegacyAndMigrate(worktreeDir: string): Promise<void> {
-  const newWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
-  const legacyWorkDir = path.join(worktreeDir, ".claude", "work");
-  if (existsSync(newWorkDir) || !existsSync(legacyWorkDir)) {
-    return;
-  }
-  const legacyPidPath = path.join(legacyWorkDir, "process.pid");
-  if (existsSync(legacyPidPath)) {
-    let rawPid: string;
-    try {
-      rawPid = readFileSync(legacyPidPath, "utf-8").trim();
-    } catch {
-      // TOCTOU: PID file removed between check and read -- treat as dead
-      migrateWorkDirIfNeeded(worktreeDir);
-      return;
-    }
-    const legacyPid = Number.parseInt(rawPid, 10);
-    if (!Number.isNaN(legacyPid) && isProcessRunning(legacyPid)) {
-      try {
-        process.kill(-legacyPid, "SIGTERM");
-      } catch {
-        // Group kill failed (ESRCH) -- try individual process
-        try {
-          process.kill(legacyPid, "SIGTERM");
-        } catch {
-          // Already dead
-        }
-      }
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      // Re-check if still alive after SIGTERM
-      if (isProcessRunning(legacyPid)) {
-        try {
-          process.kill(-legacyPid, "SIGKILL");
-        } catch {
-          /* already dead */
-        }
-        try {
-          process.kill(legacyPid, "SIGKILL");
-        } catch {
-          /* already dead */
-        }
-      }
-      try {
-        unlinkSync(legacyPidPath);
-      } catch {
-        // Best effort
-      }
-      migrateWorkDirIfNeeded(worktreeDir);
-      return;
-    }
-    // Dead process: remove stale PID file
-    try {
-      unlinkSync(legacyPidPath);
-    } catch {
-      // Best effort
-    }
-  }
-  migrateWorkDirIfNeeded(worktreeDir);
-}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -2272,10 +2202,6 @@ async function handleLoopRequest(
         throw e;
       }
       claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
-
-      // Legacy migration: kill any live legacy process, then migrate
-      await killLegacyAndMigrate(worktreeDir);
-
       await fs.mkdir(claudeWorkDir, { recursive: true });
 
       if (body.command === "PLAN") {
@@ -2348,10 +2274,6 @@ async function handleLoopRequest(
       // Spawn uses cwd: worktreeDir so Claude writes prd.md to the repo root.
       // Logs, PID, and prompt file go to claudeWorkDir, not the repo root.
       claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
-
-      // Legacy migration preflight for GENERATE_PRD worktree
-      await killLegacyAndMigrate(worktreeDir);
-
       await fs.mkdir(claudeWorkDir, { recursive: true });
       await writeArtifactsForGeneratePrd(
         worktreeDir,
