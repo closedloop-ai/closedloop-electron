@@ -31,6 +31,7 @@ import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js
 import { resetShellPathCache } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
+  initGitRepo,
   restoreEnv,
   saveEnv,
   startMockApiServer,
