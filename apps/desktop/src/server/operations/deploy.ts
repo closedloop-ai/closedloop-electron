@@ -4,8 +4,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import net from "node:net";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import { getShellEnv, getShellPath } from "../shell-path.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
-import { envWithShellPath, getShellPathSync } from "./shell-path.js";
 import {
   loadReposConfig,
   saveReposConfig,
@@ -98,7 +98,7 @@ export function registerDeployRoutes(
     copyEnvLocalFiles(expandedRepoPath, expandedWorktreePath).catch(() => undefined);
 
     const spawnEnv: NodeJS.ProcessEnv = {
-      PATH: `${process.env.PATH ?? ""}:${getShellPathSync()}`,
+      PATH: await getShellPath(),
       HOME: process.env.HOME,
       USER: process.env.USER,
       SHELL: process.env.SHELL ?? "/bin/bash",
@@ -305,7 +305,7 @@ export function registerDeployRoutes(
     }
 
     if (deployConfig?.teardownCommand) {
-      if (runTeardownCommand(deployConfig.teardownCommand, expandedWorktreePath)) {
+      if (await runTeardownCommand(deployConfig.teardownCommand, expandedWorktreePath)) {
         json(context, 200, { success: true });
         return;
       }
@@ -876,14 +876,14 @@ function killByPort(port: number): "killed" | "none" | "error" {
   }
 }
 
-function runTeardownCommand(command: string, worktreePath: string): boolean {
+async function runTeardownCommand(command: string, worktreePath: string): Promise<boolean> {
   try {
     execSync(command, {
       cwd: worktreePath,
       shell: "/bin/bash",
       timeout: 60_000,
       stdio: "pipe",
-      env: envWithShellPath(),
+      env: await getShellEnv(),
     });
     return true;
   } catch {

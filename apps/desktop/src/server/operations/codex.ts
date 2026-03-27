@@ -4,8 +4,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { ServerResponse } from "node:http";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import { getShellEnv, getShellPath } from "../shell-path.js";
 import { DirectoryNotAllowedError } from "../security.js";
-import { envWithShellPath, getShellPathSync } from "./shell-path.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { createStreamState, processStreamEvent, type ContentBlock } from "./stream-events.js";
@@ -1157,7 +1157,7 @@ export function registerCodexRoutes(
       const child = spawn("claude", args, {
         cwd: worktreeDir,
         stdio: ["pipe", "pipe", "pipe"],
-        env: envWithShellPath(),
+        env: await getShellEnv(),
       });
 
       if (!child.pid) {
@@ -1547,7 +1547,7 @@ function similarityScore(messageA: string, messageB: string, fileA: string, file
   return Math.min(score, 1);
 }
 
-function spawnClaudeReview(cwd: string, model: string): ChildProcess {
+async function spawnClaudeReview(cwd: string, model: string): Promise<ChildProcess> {
   return spawn(
     "claude",
     [
@@ -1566,7 +1566,7 @@ function spawnClaudeReview(cwd: string, model: string): ChildProcess {
       cwd,
       detached: false,
       stdio: ["pipe", "pipe", "pipe"],
-      env: envWithShellPath(),
+      env: await getShellEnv(),
     }
   );
 }
@@ -1582,7 +1582,7 @@ async function resolveClaudeReviewProcess(
   prNum: string,
   logPath: string
 ): Promise<ChildProcess> {
-  const first = spawnClaudeReview(cwd, model);
+  const first = await spawnClaudeReview(cwd, model);
   first.stdin?.write("/code-review:start");
   first.stdin?.end();
 
@@ -1654,7 +1654,7 @@ async function resolveClaudeReviewProcess(
   // Skill exited without producing review content — fall back to /review <prNum>
   await fs.writeFile(logPath, "", "utf-8");
 
-  const fallback = spawnClaudeReview(cwd, model);
+  const fallback = await spawnClaudeReview(cwd, model);
   fallback.stdin?.write(`/review ${prNum}`);
   fallback.stdin?.end();
   return fallback;
@@ -2080,10 +2080,11 @@ async function waitForExit(child: ChildProcess): Promise<number> {
 }
 
 async function runCommand(command: string, args: string[]): Promise<string> {
+  const env = await getShellEnv();
   return await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       stdio: ["ignore", "pipe", "pipe"],
-      env: envWithShellPath(),
+      env,
     });
 
     let output = "";
@@ -2361,11 +2362,11 @@ function runCodexVerdict(worktreeDir: string, sessionId: string): Promise<string
   );
 }
 
-function runClaudeVerdict(worktreeDir: string, sessionId: string): Promise<string> {
+async function runClaudeVerdict(worktreeDir: string, sessionId: string): Promise<string> {
   return runVerdictProcess(
     "claude",
     ["-p", "--resume", sessionId, "--output-format", "stream-json", "--model", "sonnet", "--allowedTools", "Read,Glob,Grep"],
-    { cwd: worktreeDir, stdin: VERDICT_PROMPT, env: { PATH: `${process.env.PATH ?? ""}:${getShellPathSync()}` } },
+    { cwd: worktreeDir, stdin: VERDICT_PROMPT, env: { PATH: await getShellPath() } },
     extractClaudeVerdictLine
   );
 }

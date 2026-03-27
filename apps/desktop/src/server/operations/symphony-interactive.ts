@@ -7,8 +7,8 @@ import type {
   OperationDispatcher,
   OperationRequestContext,
 } from "../operation-dispatcher.js";
+import { getShellEnv } from "../shell-path.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
-import { envWithShellPath } from "./shell-path.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
 import { findPluginScript } from "./plugin-cache.js";
@@ -700,7 +700,7 @@ export function registerSymphonyInteractiveRoutes(
             cwd: worktreeDir,
             detached: true,
             stdio: ["ignore", logFd, logFd],
-            env: envWithShellPath({ CLOSEDLOOP_WORKDIR: claudeWorkDir }),
+            env: await getShellEnv({ CLOSEDLOOP_WORKDIR: claudeWorkDir }),
           });
           child.unref();
           pid = child.pid ?? null;
@@ -769,7 +769,7 @@ async function streamClaudeChat(options: {
       {
         cwd,
         stdio: ["pipe", "pipe", "pipe"],
-        env: envWithShellPath(),
+        env: await getShellEnv(),
       }
     );
 
@@ -984,11 +984,12 @@ function getGitDiff(worktreeDir: string): string {
   }
 }
 
-function generateCommitWithClaude(
+async function generateCommitWithClaude(
   worktreeDir: string,
   ticketId: string,
   diff: string
 ): Promise<{ title: string; description: string }> {
+  const env = await getShellEnv();
   return new Promise((resolve, reject) => {
     const prompt = [
       `Generate a git commit message for ticket ${ticketId}.`,
@@ -1007,7 +1008,7 @@ function generateCommitWithClaude(
     const child = spawn("claude", ["--model", "haiku", "-p", prompt], {
       cwd: worktreeDir,
       stdio: ["ignore", "pipe", "pipe"],
-      env: envWithShellPath(),
+      env,
     });
 
     let stdout = "";

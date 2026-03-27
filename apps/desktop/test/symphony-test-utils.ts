@@ -13,6 +13,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { resetShellPathCache } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 
@@ -238,6 +239,38 @@ export async function waitForCompletedEvent(
   );
 }
 
+/**
+ * Poll mock.requests until a terminal event (type "completed" or "error")
+ * is found for the given loopId. Use this instead of waitForCompletedEvent
+ * when the process may exit with a non-zero code.
+ */
+export async function waitForTerminalEvent(
+  requests: RecordedRequest[],
+  loopId: string,
+  timeoutMs = 20_000
+): Promise<Record<string, unknown>> {
+  const eventsUrlSubstring = `/loops/${loopId}/events`;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    for (const req of requests) {
+      if (!req.url.includes(eventsUrlSubstring)) continue;
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(req.body) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      if (parsed.type === "completed" || parsed.type === "error") {
+        return parsed;
+      }
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(
+    `Timed out waiting for terminal event for loopId=${loopId} after ${timeoutMs}ms`
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Shared stub helpers
 // ---------------------------------------------------------------------------
@@ -253,6 +286,7 @@ export async function setupStubClaude(tmpDir: string, scriptLines?: string[]): P
   ]).join("\n");
   await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  resetShellPathCache();
 }
 
 // ---------------------------------------------------------------------------
@@ -469,6 +503,7 @@ export function createEvaluateTestHarness(machineName: string): EvaluateTestHarn
       } else {
         process.env.PATH = originalPath;
       }
+      resetShellPathCache();
 
       for (const server of serversToClose.splice(0)) {
         await server.stop();

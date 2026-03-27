@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import type { ServerResponse } from "node:http";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import type { ProcessManager } from "../process-manager.js";
+import { getShellEnv } from "../shell-path.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { createStreamState, processStreamEvent } from "./stream-events.js";
 import { withMcpTools } from "./chat-tools.js";
@@ -104,6 +105,8 @@ async function streamClaude(
     }
   });
 
+  const shellEnv = await getShellEnv();
+
   await new Promise<void>((resolve) => {
     let handled = false;
 
@@ -141,6 +144,7 @@ async function streamClaude(
           ...(history.claudeSessionId ? ["--resume", history.claudeSessionId] : [])
         ],
         cwd: terminalCwd,
+        env: shellEnv,
         input: message,
         onLine: (line) => {
           try {
@@ -185,6 +189,7 @@ async function streamCodex(
   symphonyDir: string
 ): Promise<void> {
   let assistantContent = "";
+  const codexShellEnv = await getShellEnv();
 
   await new Promise<void>((resolve) => {
     let handled = false;
@@ -216,6 +221,7 @@ async function streamCodex(
         command: "codex",
         args: ["exec", "--full-auto", "--json", "-m", "codex-mini-latest", message],
         cwd: terminalCwd,
+        env: codexShellEnv,
         isResultEvent: (line) => {
           try {
             const parsed = JSON.parse(line) as { type?: string };
