@@ -17,7 +17,12 @@ export type TelemetryCategory =
   | "job.cancelled"
   | "preflight.binary_not_found"
   | "preflight.script_not_found"
-  | "preflight.spawn_failed";
+  | "preflight.spawn_failed"
+  | "job.recovery.scan_started"
+  | "job.recovery.reattached"
+  | "job.recovery.reconciled_completed"
+  | "job.recovery.identity_mismatch"
+  | "job.recovery.finalize_replayed";
 
 export interface TelemetryTraceContext {
   computeTargetId?: string;

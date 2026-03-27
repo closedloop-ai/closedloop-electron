@@ -51,6 +51,17 @@ export type LocalJob = {
   completedAt?: string;
   warning?: string;
   exitCode?: number | null;
+  // Runtime metadata fields for supervision and idempotency
+  runtimeToken?: string;
+  pidStartedAt?: string;
+  lastObservedJsonlOffset?: number;
+  artifactsUploadedAt?: string;
+  completedEventPostedAt?: string;
+  finalStatusPersistedAt?: string;
+  lastHeartbeatAt?: string;
+  supervisionEpoch?: number;
+  lastOutputEventAt?: string;
+  apiBaseUrl?: string;
 };
 
 const TERMINAL_STATUSES: ReadonlySet<LocalJobStatus> = new Set([

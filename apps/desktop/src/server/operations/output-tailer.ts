@@ -169,7 +169,8 @@ export function startOutputTailer(
   apiBaseUrl: string,
   loopId: string,
   token: string,
-  initialByteOffset: number
+  initialByteOffset: number,
+  onOffset?: (offset: number) => void
 ): { stop: () => void; flush: () => Promise<void> } {
   const pollIntervalMs = Number(process.env.CLOSEDLOOP_TAILER_POLL_MS) || DEFAULT_POLL_MS;
   const throttleMs = Number(process.env.CLOSEDLOOP_TAILER_THROTTLE_MS) || DEFAULT_THROTTLE_MS;
@@ -182,6 +183,7 @@ export function startOutputTailer(
     if (stopped) return;
     if (!existsSync(jsonlPath)) return;
     let fd: number | null = null;
+    const offsetBefore = byteOffset;
     try {
       fd = openSync(jsonlPath, "r");
       const chunkSize = 65536;
@@ -195,6 +197,10 @@ export function startOutputTailer(
       return;
     } finally {
       if (fd !== null) closeSync(fd);
+    }
+
+    if (byteOffset > offsetBefore) {
+      onOffset?.(byteOffset);
     }
 
     const newlineIndex = pendingRemainder.lastIndexOf(10); // 0x0a = newline

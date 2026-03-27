@@ -17,6 +17,10 @@ import os from "node:os";
 import path from "node:path";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
+import {
+  finalizeLoopFromRuntime,
+  type LoopFinalizerDeps,
+} from "../../main/loop-finalizer.js";
 import type { TelemetryEmitter } from "../../main/telemetry-protocol.js";
 import {
   TELEMETRY_LOG_TAIL_LINES,
@@ -546,53 +550,6 @@ async function postLoopEvent(
       "loop-event",
       `POST ${payload.type} network error: ${msg}`,
     );
-    return { success: false, error: msg };
-  }
-}
-
-async function uploadArtifacts(
-  apiBaseUrl: string,
-  loopId: string,
-  token: string,
-  body: Record<string, unknown>,
-): Promise<{ success: boolean; error?: string }> {
-  const url = `${apiBaseUrl}/loops/${loopId}/upload-artifacts`;
-  loopLog(loopId, "Uploading artifacts...", url);
-  try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      loopError(
-        loopId,
-        `Upload failed: ${resp.status} ${resp.statusText}`,
-        text,
-      );
-      gatewayLog.error(
-        "loop-upload",
-        `Artifact upload to ${url} failed: ${resp.status} ${resp.statusText} ${text}`,
-      );
-      return {
-        success: false,
-        error: `HTTP ${resp.status} ${resp.statusText}`,
-      };
-    }
-    loopLog(loopId, `Upload success: ${resp.status}`);
-    gatewayLog.debug(
-      "loop-upload",
-      `Artifact upload to ${url}: ${resp.status}`,
-    );
-    return { success: true };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    loopError(loopId, "Failed to upload artifacts:", err);
-    gatewayLog.error("loop-upload", `Artifact upload network error: ${msg}`);
     return { success: false, error: msg };
   }
 }
@@ -1605,328 +1562,213 @@ async function handleProcessCompletion(
     return;
   }
 
-  // exitCode === 0 success path -- keep in runningLoops until post-processing completes
-  try {
-    // Read outputs per command
-    gatewayLog.info(
-      "loop-harness",
-      `${command} succeeded (exit 0), reading artifacts for loopId=${loopId}`,
-    );
-    let artifacts: Record<string, unknown> = {};
-    const metadata: Record<string, unknown> = {};
-    const warnings: string[] = [];
+  // exitCode === 0 success path
+  // Read outputs per command and perform git operations before delegating to finalizer
+  gatewayLog.info(
+    "loop-harness",
+    `${command} succeeded (exit 0), reading artifacts for loopId=${loopId}`,
+  );
+  let artifacts: Record<string, unknown> = {};
+  const warnings: string[] = [];
 
-    if (command === "PLAN" || command === "REQUEST_CHANGES") {
-      artifacts = readPlanOutputs(claudeWorkDir);
-    } else if (command === "EXECUTE") {
-      artifacts = readExecuteOutputs(claudeWorkDir);
+  if (command === "PLAN" || command === "REQUEST_CHANGES") {
+    artifacts = readPlanOutputs(claudeWorkDir);
+  } else if (command === "EXECUTE") {
+    artifacts = readExecuteOutputs(claudeWorkDir);
 
-      // Git operations for EXECUTE
-      if (worktreeDir) {
-        const baseBranch = body.repo?.branch ?? "main";
+    // Git operations for EXECUTE
+    if (worktreeDir) {
+      const baseBranch = body.repo?.branch ?? "main";
 
-        // Cancellation gate: skip git operations if cancelled during main process
-        if (isCancelled(jobStore, loopId)) {
-          const cancelJob = jobStore?.getByLoopId(loopId);
-          if (cancelJob && jobStore) {
-            const now = new Date().toISOString();
-            jobStore.upsert({
-              ...cancelJob,
-              status: "CANCELLED",
-              updatedAt: now,
-              completedAt: now,
-            });
-          }
-          if (usedTempDir) {
-            fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(
-              () => {},
-            );
-          }
-          return;
+      // Cancellation gate: skip git operations if cancelled during main process
+      if (isCancelled(jobStore, loopId)) {
+        const cancelJob = jobStore?.getByLoopId(loopId);
+        if (cancelJob && jobStore) {
+          const now = new Date().toISOString();
+          jobStore.upsert({
+            ...cancelJob,
+            status: "CANCELLED",
+            updatedAt: now,
+            completedAt: now,
+          });
         }
-
-        // Try LLM-assisted commit first; fall back to executeGitOperations if it
-        // returns null.  Never call both.
-        const llmResult = await attemptLlmCommit(
-          worktreeDir,
-          baseBranch,
-          loopId,
-          command,
-          body.artifactSlug,
-          webAppOrigin ?? "",
-          committer,
-          () => {
-            warnings.push(
-              sanitizeErrorMessage("LLM commit timed out after 90s"),
-            );
-          },
-          jobStore,
-          claudeWorkDir,
-        );
-
-        // Clean up any remaining LLM scratch files before fallback to prevent
-        // them from being committed by executeGitOperations.  attemptLlmCommit
-        // already cleans up on success, but these guards cover edge cases where
-        // the process was killed before the cleanup ran.
-        if (!llmResult) {
-          try {
-            unlinkSync(path.join(worktreeDir, "execution-result.json"));
-          } catch {
-            /* may not exist */
-          }
-          try {
-            unlinkSync(path.join(worktreeDir, "pr-body.md"));
-          } catch {
-            /* may not exist */
-          }
-        }
-
-        // Cancellation gate: skip fallback git operations if cancelled during LLM commit
-        if (isCancelled(jobStore, loopId)) {
-          const cancelJob = jobStore?.getByLoopId(loopId);
-          if (cancelJob && jobStore) {
-            const now = new Date().toISOString();
-            jobStore.upsert({
-              ...cancelJob,
-              status: "CANCELLED",
-              updatedAt: now,
-              completedAt: now,
-            });
-          }
-          if (usedTempDir) {
-            fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(
-              () => {},
-            );
-          }
-          return;
-        }
-
-        const gitShellPath = await getShellPath();
-        const gitResult: GitOperationResult = llmResult
-          ? { status: "success" as const, ...llmResult }
-          : executeGitOperations(
-              worktreeDir,
-              committer,
-              baseBranch,
-              loopId,
-              command,
-              body.artifactSlug,
-              webAppOrigin ?? "",
-              gitShellPath,
-            );
-
-        if (gitResult.status === "success") {
-          // Merge git info into execution result
-          const execResult =
-            (artifacts.executionResult as Record<string, unknown>) ?? {};
-          execResult.pr_url = gitResult.prUrl;
-          execResult.pr_number = gitResult.prNumber;
-          execResult.branch_name = gitResult.branchName;
-          execResult.commit_sha = gitResult.commitSha;
-          execResult.has_changes = true;
-          execResult.base_branch = baseBranch;
-          artifacts.executionResult = execResult;
-          metadata.branchName = gitResult.branchName;
-        } else if (gitResult.status === "no-changes") {
-          gatewayLog.info(
-            "loop-harness",
-            "no local changes detected, skipping PR creation, loopId=" + loopId,
+        runningLoops.delete(loopId);
+        if (usedTempDir) {
+          fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(
+            () => {},
           );
-        } else if (gitResult.status === "error") {
-          gatewayLog.warn(
-            "loop-harness",
-            "git operations failed: " +
-              sanitizeErrorMessage(gitResult.reason) +
-              ", loopId=" +
-              loopId,
-          );
-          warnings.push("GIT_PUSH_FAILED");
         }
+        return;
       }
-    } else if (command === "DECOMPOSE") {
-      artifacts = readDecomposeOutputs(claudeWorkDir);
-    } else if (command === "EVALUATE_PRD") {
-      artifacts = readEvaluatePrdOutputs(claudeWorkDir);
-    } else if (command === "GENERATE_PRD") {
-      artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
-    }
 
-    // Read session ID if available
-    const sessionFile = path.join(claudeWorkDir, "session-id.txt");
-    const sessionId = readTextFile(sessionFile);
-    if (sessionId) {
-      metadata.sessionId = sessionId.trim();
-    }
-
-    // Upload artifacts
-    const artifactKeys = Object.keys(artifacts);
-    loopLog(loopId, "Artifact keys:", artifactKeys);
-    gatewayLog.info(
-      "loop-harness",
-      `Uploading artifacts for ${command} loopId=${loopId}: [${artifactKeys.join(", ")}]`,
-    );
-    const uploadResult = await uploadArtifacts(
-      apiBaseUrl,
-      loopId,
-      closedLoopAuthToken,
-      {
-        artifacts,
-        metadata,
-      },
-    );
-    if (!uploadResult.success) {
-      gatewayLog.warn(
-        "loop-harness",
-        "Artifact upload failed: " +
-          (uploadResult.error ?? "unknown error") +
-          ", loopId=" +
-          loopId,
+      // Try LLM-assisted commit first; fall back to executeGitOperations if it
+      // returns null.  Never call both.
+      const llmResult = await attemptLlmCommit(
+        worktreeDir,
+        baseBranch,
+        loopId,
+        command,
+        body.artifactSlug,
+        webAppOrigin ?? "",
+        committer,
+        () => {
+          warnings.push(
+            sanitizeErrorMessage("LLM commit timed out after 90s"),
+          );
+        },
+        jobStore,
+        claudeWorkDir,
       );
-      warnings.push("ARTIFACT_UPLOAD_FAILED");
-    }
 
-    // Parse token usage from claude output
-    const tokensUsed = parseTokenUsage(claudeWorkDir);
-    loopLog(
-      loopId,
-      `Tokens used: input=${tokensUsed.inputTokens}, output=${tokensUsed.outputTokens}`,
-    );
-
-    // Post completed event — shape matches ECS harness reportFinalStatus()
-    const result: Record<string, unknown> = {
-      exitCode,
-      subtype: command.toLowerCase(),
-    };
-
-    if (command === "EXECUTE" && artifacts.executionResult) {
-      const execResult = artifacts.executionResult as Record<string, unknown>;
-      result.prUrl = execResult.pr_url;
-      result.prNumber = execResult.pr_number;
-      result.branchName = execResult.branch_name;
-      result.has_changes = execResult.has_changes ?? false;
-    }
-
-    // Include worktree branch name for all commands that use a worktree.
-    // The server persists this on the loop record for display/debugging.
-    if (worktreeDir && !result.branchName) {
-      const branch = wt.getCurrentBranch(worktreeDir);
-      if (branch) {
-        result.branchName = branch;
+      // Clean up any remaining LLM scratch files before fallback to prevent
+      // them from being committed by executeGitOperations.  attemptLlmCommit
+      // already cleans up on success, but these guards cover edge cases where
+      // the process was killed before the cleanup ran.
+      if (!llmResult) {
+        try {
+          unlinkSync(path.join(worktreeDir, "execution-result.json"));
+        } catch {
+          /* may not exist */
+        }
+        try {
+          unlinkSync(path.join(worktreeDir, "pr-body.md"));
+        } catch {
+          /* may not exist */
+        }
       }
+
+      // Cancellation gate: skip fallback git operations if cancelled during LLM commit
+      if (isCancelled(jobStore, loopId)) {
+        const cancelJob = jobStore?.getByLoopId(loopId);
+        if (cancelJob && jobStore) {
+          const now = new Date().toISOString();
+          jobStore.upsert({
+            ...cancelJob,
+            status: "CANCELLED",
+            updatedAt: now,
+            completedAt: now,
+          });
+        }
+        runningLoops.delete(loopId);
+        if (usedTempDir) {
+          fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(
+            () => {},
+          );
+        }
+        return;
+      }
+
+      const gitShellPath = await getShellPath();
+      const gitResult: GitOperationResult = llmResult
+        ? { status: "success" as const, ...llmResult }
+        : executeGitOperations(
+            worktreeDir,
+            committer,
+            baseBranch,
+            loopId,
+            command,
+            body.artifactSlug,
+            webAppOrigin ?? "",
+            gitShellPath,
+          );
+
+      if (gitResult.status === "success") {
+        // Merge git info into execution result
+        const execResult =
+          (artifacts.executionResult as Record<string, unknown>) ?? {};
+        execResult.pr_url = gitResult.prUrl;
+        execResult.pr_number = gitResult.prNumber;
+        execResult.branch_name = gitResult.branchName;
+        execResult.commit_sha = gitResult.commitSha;
+        execResult.has_changes = true;
+        execResult.base_branch = baseBranch;
+        artifacts.executionResult = execResult;
+      } else if (gitResult.status === "no-changes") {
+        gatewayLog.info(
+          "loop-harness",
+          "no local changes detected, skipping PR creation, loopId=" + loopId,
+        );
+      } else if (gitResult.status === "error") {
+        gatewayLog.warn(
+          "loop-harness",
+          "git operations failed: " +
+            sanitizeErrorMessage(gitResult.reason) +
+            ", loopId=" +
+            loopId,
+        );
+        warnings.push("GIT_PUSH_FAILED");
+      }
+
+      // Persist the git-merged execution-result to claudeWorkDir so the
+      // LoopFinalizer can read it when uploading artifacts.
+      if (artifacts.executionResult) {
+        try {
+          writeFileSync(
+            path.join(claudeWorkDir, "execution-result.json"),
+            JSON.stringify(artifacts.executionResult),
+          );
+        } catch (err) {
+          loopLog(loopId, "Failed to persist merged execution-result.json:", err);
+        }
+      }
+    }
   } else if (command === "DECOMPOSE") {
     artifacts = readDecomposeOutputs(claudeWorkDir);
   } else if (command === "EVALUATE_PRD") {
     artifacts = readEvaluatePrdOutputs(claudeWorkDir);
-  } else if (command === "EVALUATE_PLAN") {
-    artifacts = readEvaluatePlanOutputs(claudeWorkDir);
-  } else if (command === "EVALUATE_CODE") {
-    artifacts = readEvaluateCodeOutputs(claudeWorkDir);
   } else if (command === "GENERATE_PRD") {
     artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
   }
 
-    // sessionId inside result (matches harness)
-    if (metadata.sessionId) {
-      result.sessionId = metadata.sessionId;
+  // Cancellation gate: skip finalization if cancelled during post-processing
+  if (isCancelled(jobStore, loopId)) {
+    const cancelJob = jobStore?.getByLoopId(loopId);
+    if (cancelJob && jobStore) {
+      const now = new Date().toISOString();
+      jobStore.upsert({
+        ...cancelJob,
+        status: "CANCELLED",
+        updatedAt: now,
+        completedAt: now,
+      });
     }
-
-    const completedEvent: Record<string, unknown> = {
-      type: "completed",
-      result,
-      tokensUsed: {
-        input: tokensUsed.inputTokens,
-        output: tokensUsed.outputTokens,
-      },
-      loopId,
-      ...(warnings.length > 0 ? { warnings } : {}),
-    };
-
-    // Cancellation gate: skip completed event if cancelled during post-processing
-    if (isCancelled(jobStore, loopId)) {
-      const cancelJob = jobStore?.getByLoopId(loopId);
-      if (cancelJob && jobStore) {
-        const now = new Date().toISOString();
-        jobStore.upsert({
-          ...cancelJob,
-          status: "CANCELLED",
-          updatedAt: now,
-          completedAt: now,
-        });
-      }
-      if (usedTempDir) {
-        fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
-      } else if (
-        command === "GENERATE_PRD" &&
-        worktreeDir &&
-        expandedRepoPath
-      ) {
-        await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
-      }
-      return;
-    }
-
-    loopLog(loopId, "Posting completed event...");
-    const eventResult = await postLoopEvent(
-      apiBaseUrl,
-      loopId,
-      closedLoopAuthToken,
-      completedEvent,
-    );
-    if (!eventResult.success) {
-      gatewayLog.warn(
-        "loop-harness",
-        "Completed event POST failed: " +
-          (eventResult.error ?? "unknown error") +
-          ", loopId=" +
-          loopId,
-      );
-      warnings.push("EVENT_POST_FAILED");
-    }
-    loopLog(loopId, "Loop completed successfully");
-
-    if (jobStore) {
-      const existingJob = jobStore.getByLoopId(loopId);
-      if (existingJob) {
-        const now = new Date().toISOString();
-        jobStore.upsert({
-          ...existingJob,
-          status: "COMPLETED",
-          exitCode: 0,
-          updatedAt: now,
-          completedAt: now,
-          warning:
-            warnings.length > 0
-              ? warnings.map(sanitizeErrorMessage).join("; ")
-              : undefined,
-        });
-      }
-    }
-
-    const completedJob = jobStore?.getByLoopId(loopId);
-    telemetry?.emit({
-      severity: "info",
-      category: "job.completed",
-      message: `Job completed successfully`,
-      trace: {
-        commandId: commandId ?? completedJob?.commandId,
-        operationId: operationId ?? completedJob?.operationId,
-        loopId,
-        jobId: loopId,
-        loopSessionId:
-          typeof metadata.sessionId === "string"
-            ? metadata.sessionId
-            : undefined,
-      },
-    });
-
-    // Clean up temp claude workdir after all reads and uploads are complete
+    runningLoops.delete(loopId);
     if (usedTempDir) {
       fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
     } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
       await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
-  } finally {
-    runningLoops.delete(loopId);
+    return;
+  }
+
+  // Delegate completion logic to LoopFinalizer: artifact upload,
+  // completed-event POST, job status update, and telemetry are all owned
+  // by the finalizer.  runningLoops.delete() is called before the finalizer
+  // so the loop is no longer considered live during finalization.
+  const job = jobStore?.getByLoopId(loopId);
+  runningLoops.delete(loopId);
+  if (job && jobStore && telemetry) {
+    const finalizerDeps: LoopFinalizerDeps = {
+      jobStore,
+      telemetry,
+      assertPathAllowed,
+      apiAuthToken: closedLoopAuthToken,
+      apiBaseUrl,
+      isProcessRunning,
+    };
+    await finalizeLoopFromRuntime(job, "live-exit", finalizerDeps);
+  } else {
+    loopLog(
+      loopId,
+      "Cannot delegate to LoopFinalizer: missing jobStore, telemetry, or job record",
+    );
+  }
+
+  // Clean up temp claude workdir after all reads and uploads are complete
+  if (usedTempDir) {
+    fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+  } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
+    await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
   }
 }
 
@@ -2473,10 +2315,15 @@ async function handleLoopRequest(
     }
     let child: ReturnType<typeof spawn>;
 
+    // Generate a runtime token before spawn so it can be passed to the child
+    // process via environment variable and written to runtime.json.
+    const runtimeToken = crypto.randomUUID();
+
     try {
       const spawnEnv: Record<string, string> = {
         ...(process.env as Record<string, string>),
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
+        CLOSEDLOOP_LOOP_RUNTIME_TOKEN: runtimeToken,
         PATH: await getShellPath(),
       };
 
@@ -2702,6 +2549,27 @@ async function handleLoopRequest(
       });
     };
 
+    const pid = child.pid ?? null;
+
+    if (!pid) {
+      // error handler will fire asynchronously — respond immediately
+      json(context, 500, { error: "Failed to spawn process" });
+      return;
+    }
+
+    // Write runtime.json (Electron-side, not child) before registering the
+    // exit handler so the file is guaranteed to exist before any exit event
+    // can fire.  Written synchronously to eliminate any async ordering risk.
+    const spawnedAt = new Date().toISOString();
+    try {
+      writeFileSync(
+        path.join(claudeWorkDir, "runtime.json"),
+        JSON.stringify({ runtimeToken, pid, spawnedAt }),
+      );
+    } catch {
+      loopLog(body.loopId, "Failed to write runtime.json");
+    }
+
     // Prevent unhandled 'error' events (e.g. ENOENT if binary vanishes
     // between pre-flight check and spawn) from crashing Electron.
     child.on("error", (err) => {
@@ -2717,14 +2585,6 @@ async function handleLoopRequest(
       void onceComplete(code ?? 1);
     });
 
-    const pid = child.pid ?? null;
-
-    if (!pid) {
-      // error handler above will fire asynchronously — respond immediately
-      json(context, 500, { error: "Failed to spawn process" });
-      return;
-    }
-
     // Replace sentinel with real entry — storing `child` prevents GC of the
     // ChildProcess handle which would silently drop the exit listener.
     runningLoops.set(body.loopId, { pid, child, stage: "running" });
@@ -2734,6 +2594,14 @@ async function handleLoopRequest(
       body.loopId,
       body.closedLoopAuthToken,
       jsonlPreSpawnOffset,
+      jobStore
+        ? (offset) => {
+            const job = jobStore.getByLoopId(body.loopId);
+            if (job) {
+              jobStore.upsert({ ...job, lastObservedJsonlOffset: offset });
+            }
+          }
+        : undefined,
     );
     spawnedSuccessfully = true;
     loopLog(body.loopId, `Spawned pid=${pid}, worktree=${worktreeDir}`);
@@ -2767,6 +2635,9 @@ async function handleLoopRequest(
         status: "RUNNING",
         updatedAt: now,
         startedAt: existing?.startedAt ?? now,
+        runtimeToken,
+        pidStartedAt: spawnedAt,
+        apiBaseUrl,
       });
     }
 
