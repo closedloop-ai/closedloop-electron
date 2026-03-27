@@ -2,6 +2,7 @@ import { execFile, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError } from "../security.js";
+import { envWithShellPath } from "./shell-path.js";
 import { assertRepoAllowed } from "./symphony-utils.js";
 
 const execFileAsync = promisify(execFile);
@@ -786,10 +787,7 @@ async function run(cwd: string | undefined, command: string, args: string[]): Pr
 }
 
 function withPathEnv(): NodeJS.ProcessEnv {
-  return {
-    ...process.env,
-    PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`
-  };
+  return envWithShellPath();
 }
 
 function ghApiViaStdin(

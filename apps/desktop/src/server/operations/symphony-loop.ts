@@ -27,7 +27,7 @@ import type {
 } from "../operation-dispatcher.js";
 import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
-import { getShellPath } from "./health-check.js";
+import { envWithShellPath } from "./shell-path.js";
 import { startOutputTailer } from "./output-tailer.js";
 import { findPluginScript, findPluginVersions, getPluginCacheRoot } from "./plugin-cache.js";
 import { sanitizeCommitMessage } from "./symphony-interactive.js";
@@ -1093,11 +1093,7 @@ async function attemptLlmCommit(
 
   loopLog(loopId, "Attempting LLM-assisted commit...");
 
-  const llmShellPath = await getShellPath();
-  const spawnEnv: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    PATH: `${process.env.PATH ?? ""}:${llmShellPath}`,
-  };
+  const spawnEnv: Record<string, string> = envWithShellPath();
   if (committer) {
     spawnEnv.GIT_AUTHOR_NAME = committer.name;
     spawnEnv.GIT_AUTHOR_EMAIL = committer.email;
@@ -1280,15 +1276,9 @@ function executeGitOperations(
   command: string,
   artifactSlug?: string,
   webAppOrigin?: string,
-  shellPath?: string,
 ): GitOperationResult {
   const shortId = loopId.slice(0, 8);
-  const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    ...(shellPath
-      ? { PATH: `${process.env.PATH ?? ""}:${shellPath}` }
-      : {}),
-  };
+  const env: Record<string, string> = envWithShellPath();
   if (committer) {
     env.GIT_AUTHOR_NAME = committer.name;
     env.GIT_AUTHOR_EMAIL = committer.email;
@@ -1582,7 +1572,6 @@ async function handleProcessCompletion(
       // Git operations for EXECUTE
       if (worktreeDir) {
         const baseBranch = body.repo?.branch ?? "main";
-        const shellPath = await getShellPath();
 
         // Cancellation gate: skip git operations if cancelled during main process
         if (isCancelled(jobStore, loopId)) {
@@ -1670,7 +1659,6 @@ async function handleProcessCompletion(
               command,
               body.artifactSlug,
               webAppOrigin ?? "",
-              shellPath,
             );
 
         if (gitResult.status === "success") {
@@ -2458,11 +2446,9 @@ async function handleLoopRequest(
     let child: ReturnType<typeof spawn>;
 
     try {
-      const spawnEnv: Record<string, string> = {
-        ...(process.env as Record<string, string>),
+      const spawnEnv: Record<string, string> = envWithShellPath({
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
-        PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
-      };
+      });
 
       // Shared claude CLI args for commands that run claude directly.
       // REQUEST_CHANGES omits "-" (stdin) because it passes the prompt as a CLI argument.

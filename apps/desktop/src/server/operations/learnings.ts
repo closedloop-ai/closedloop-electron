@@ -6,6 +6,7 @@ import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { findPluginScript } from "./plugin-cache.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
+import { envWithShellPath } from "./shell-path.js";
 import { assertRepoAllowed, findFirstExisting, resolveWorktreeDir } from "./symphony-utils.js";
 
 type ParsedLearningPattern = {
@@ -273,11 +274,7 @@ export function registerLearningsRoutes(
         detached: true,
         stdio: "ignore",
         cwd: worktreeDir,
-        env: {
-          ...process.env,
-          PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
-          CLOSEDLOOP_WORKDIR: claudeWorkDir
-        }
+        env: envWithShellPath({ CLOSEDLOOP_WORKDIR: claudeWorkDir }),
       });
       child.unref();
       json(context, 200, { status: "processing", pid: child.pid, logFile });
@@ -454,10 +451,7 @@ function triggerSuccessRateComputation(workDir: string): void {
   const child = spawn("python3", [ratesScript, "--workdir", workDir], {
     stdio: "ignore",
     detached: true,
-    env: {
-      ...process.env,
-      PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`
-    }
+    env: envWithShellPath(),
   });
   child.unref();
 }

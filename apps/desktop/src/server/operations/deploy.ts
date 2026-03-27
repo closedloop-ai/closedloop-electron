@@ -5,6 +5,7 @@ import path from "node:path";
 import net from "node:net";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
+import { envWithShellPath, getShellPathSync } from "./shell-path.js";
 import {
   loadReposConfig,
   saveReposConfig,
@@ -97,7 +98,7 @@ export function registerDeployRoutes(
     copyEnvLocalFiles(expandedRepoPath, expandedWorktreePath).catch(() => undefined);
 
     const spawnEnv: NodeJS.ProcessEnv = {
-      PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
+      PATH: `${process.env.PATH ?? ""}:${getShellPathSync()}`,
       HOME: process.env.HOME,
       USER: process.env.USER,
       SHELL: process.env.SHELL ?? "/bin/bash",
@@ -882,10 +883,7 @@ function runTeardownCommand(command: string, worktreePath: string): boolean {
       shell: "/bin/bash",
       timeout: 60_000,
       stdio: "pipe",
-      env: {
-        ...process.env,
-        PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`
-      }
+      env: envWithShellPath(),
     });
     return true;
   } catch {

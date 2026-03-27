@@ -8,6 +8,7 @@ import type {
   OperationRequestContext,
 } from "../operation-dispatcher.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
+import { envWithShellPath } from "./shell-path.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
 import { findPluginScript } from "./plugin-cache.js";
@@ -699,11 +700,7 @@ export function registerSymphonyInteractiveRoutes(
             cwd: worktreeDir,
             detached: true,
             stdio: ["ignore", logFd, logFd],
-            env: {
-              ...process.env,
-              CLOSEDLOOP_WORKDIR: claudeWorkDir,
-              PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
-            },
+            env: envWithShellPath({ CLOSEDLOOP_WORKDIR: claudeWorkDir }),
           });
           child.unref();
           pid = child.pid ?? null;
@@ -772,10 +769,7 @@ async function streamClaudeChat(options: {
       {
         cwd,
         stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
-        },
+        env: envWithShellPath(),
       }
     );
 
@@ -1013,10 +1007,7 @@ function generateCommitWithClaude(
     const child = spawn("claude", ["--model", "haiku", "-p", prompt], {
       cwd: worktreeDir,
       stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
-      },
+      env: envWithShellPath(),
     });
 
     let stdout = "";

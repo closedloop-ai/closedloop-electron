@@ -5,6 +5,7 @@ import path from "node:path";
 import type { ServerResponse } from "node:http";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError } from "../security.js";
+import { envWithShellPath, getShellPathSync } from "./shell-path.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { createStreamState, processStreamEvent, type ContentBlock } from "./stream-events.js";
@@ -1156,10 +1157,7 @@ export function registerCodexRoutes(
       const child = spawn("claude", args, {
         cwd: worktreeDir,
         stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`
-        }
+        env: envWithShellPath(),
       });
 
       if (!child.pid) {
@@ -1568,10 +1566,7 @@ function spawnClaudeReview(cwd: string, model: string): ChildProcess {
       cwd,
       detached: false,
       stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`
-      }
+      env: envWithShellPath(),
     }
   );
 }
@@ -2088,10 +2083,7 @@ async function runCommand(command: string, args: string[]): Promise<string> {
   return await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`
-      }
+      env: envWithShellPath(),
     });
 
     let output = "";
@@ -2373,7 +2365,7 @@ function runClaudeVerdict(worktreeDir: string, sessionId: string): Promise<strin
   return runVerdictProcess(
     "claude",
     ["-p", "--resume", sessionId, "--output-format", "stream-json", "--model", "sonnet", "--allowedTools", "Read,Glob,Grep"],
-    { cwd: worktreeDir, stdin: VERDICT_PROMPT, env: { PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin` } },
+    { cwd: worktreeDir, stdin: VERDICT_PROMPT, env: { PATH: `${process.env.PATH ?? ""}:${getShellPathSync()}` } },
     extractClaudeVerdictLine
   );
 }
