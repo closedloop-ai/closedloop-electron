@@ -1793,7 +1793,10 @@ async function handleProcessCompletion(
     const completedEvent: Record<string, unknown> = {
       type: "completed",
       result,
-      tokensUsed,
+      tokensUsed: {
+        input: tokensUsed.inputTokens,
+        output: tokensUsed.outputTokens,
+      },
       loopId,
       ...(warnings.length > 0 ? { warnings } : {}),
     };
