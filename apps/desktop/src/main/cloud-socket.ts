@@ -76,6 +76,7 @@ export class CloudSocketService {
     this.stopped = true;
     this.targetId = null;
     this.awaitingHelloAck = false;
+    this.lastPresenceState = null;
     this.clearHelloAckTimer();
     this.disconnectSocket();
   }

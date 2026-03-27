@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { ServerResponse } from "node:http";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
-import { getShellEnv, getShellPath } from "../shell-path.js";
+import { getShellEnv } from "../shell-path.js";
 import { DirectoryNotAllowedError } from "../security.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
@@ -2366,7 +2366,7 @@ async function runClaudeVerdict(worktreeDir: string, sessionId: string): Promise
   return runVerdictProcess(
     "claude",
     ["-p", "--resume", sessionId, "--output-format", "stream-json", "--model", "sonnet", "--allowedTools", "Read,Glob,Grep"],
-    { cwd: worktreeDir, stdin: VERDICT_PROMPT, env: { PATH: await getShellPath() } },
+    { cwd: worktreeDir, stdin: VERDICT_PROMPT, env: await getShellEnv() },
     extractClaudeVerdictLine
   );
 }

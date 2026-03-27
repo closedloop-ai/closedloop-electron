@@ -319,9 +319,6 @@ export class DesktopApplication {
         });
         if (this.updateCheckTimer) clearInterval(this.updateCheckTimer);
         this.updateCheckTimer = setInterval(() => {
-          if (this.cloudStatus.state !== "online") {
-            return;
-          }
           void autoUpdater.checkForUpdates().catch((err: unknown) => {
             const msg = err instanceof Error ? err.message : String(err);
             gatewayLog.debug(
