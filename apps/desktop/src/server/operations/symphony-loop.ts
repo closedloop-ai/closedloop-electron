@@ -717,10 +717,12 @@ async function writeArtifactsForPlan(
   // Append user-supplied Additional Context to the PRD so the planning agent
   // sees it as part of the requirements (guaranteed to be read). Written as a
   // clearly delineated section at the end of prd.md.
-  if (userContext?.trim()) {
+  const safeUserContext =
+    typeof userContext === "string" ? userContext.trim() : "";
+  if (safeUserContext) {
     const section =
       "\n\n---\n\n## User Context / Additional Constraints\n\n" +
-      userContext.trim() +
+      safeUserContext +
       "\n";
     prdContent = prdContent ? prdContent + section : section;
   }
