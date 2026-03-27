@@ -689,3 +689,116 @@ describe("T-5.6: Throttle", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-5.7: tokensUsed shape in completed event
+// ---------------------------------------------------------------------------
+
+describe("T-5.7: tokensUsed shape in completed event", () => {
+  test("(a) tokensUsed has input and output fields (not inputTokens/outputTokens)", async () => {
+    process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+
+    const tmpDir = makeTempDir();
+    const fakeBin = path.join(tmpDir, "fake-bin");
+    await fs.mkdir(fakeBin, { recursive: true });
+
+    const eventSrv = await startEventServer();
+    const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+    const stubScript = [
+      "#!/bin/sh",
+      `echo '{"type":"assistant","message":{"content":[{"type":"text","text":"work"}],"usage":{"input_tokens":10,"output_tokens":5}}}'`,
+      `echo '{"type":"result","subtype":"success","result":"","is_error":false}'`,
+      "exit 0",
+    ].join("\n");
+    await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
+    process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+
+    const loopId = "ffffffff-0000-0000-0000-000000000001";
+    const server = makeGatewayServer({
+      allowedDirs: [tmpDir],
+      getApiOrigin: () => apiBaseUrl,
+    });
+    await server.start();
+
+    const response = await fetch(
+      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-desktop-gateway-token": "test-token",
+        },
+        body: JSON.stringify(buildLoopBody({ loopId, apiBaseUrl })),
+      }
+    );
+
+    assert.equal(response.status, 200, `Expected 200, got ${response.status}`);
+
+    const completedEvent = await eventSrv.waitForEvent(
+      (b) => b.type === "completed" || b.type === "error",
+      15_000
+    );
+
+    assert.equal(completedEvent.type, "completed", `Expected completed event, got: ${JSON.stringify(completedEvent)}`);
+    const tokensUsed = completedEvent.tokensUsed as Record<string, unknown>;
+    assert.ok(tokensUsed !== null && typeof tokensUsed === "object", "tokensUsed must be an object");
+    assert.equal(typeof tokensUsed.input, "number", "tokensUsed.input must be a number");
+    assert.equal(typeof tokensUsed.output, "number", "tokensUsed.output must be a number");
+    assert.equal(tokensUsed.inputTokens, undefined, "tokensUsed.inputTokens must be absent (old wrong field name)");
+    assert.equal(tokensUsed.outputTokens, undefined, "tokensUsed.outputTokens must be absent (old wrong field name)");
+  });
+
+  test("(b) tokensUsed aggregates token counts from JSONL across multiple turns", async () => {
+    process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+
+    const tmpDir = makeTempDir();
+    const fakeBin = path.join(tmpDir, "fake-bin");
+    await fs.mkdir(fakeBin, { recursive: true });
+
+    const eventSrv = await startEventServer();
+    const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+    // Two turns: input 10+20=30, output 5+7=12
+    const stubScript = [
+      "#!/bin/sh",
+      `echo '{"type":"assistant","message":{"content":[{"type":"text","text":"turn 1"}],"usage":{"input_tokens":10,"output_tokens":5}}}'`,
+      `echo '{"type":"assistant","message":{"content":[{"type":"text","text":"turn 2"}],"usage":{"input_tokens":20,"output_tokens":7}}}'`,
+      `echo '{"type":"result","subtype":"success","result":"","is_error":false}'`,
+      "exit 0",
+    ].join("\n");
+    await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
+    process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+
+    const loopId = "ffffffff-0000-0000-0000-000000000002";
+    const server = makeGatewayServer({
+      allowedDirs: [tmpDir],
+      getApiOrigin: () => apiBaseUrl,
+    });
+    await server.start();
+
+    const response = await fetch(
+      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-desktop-gateway-token": "test-token",
+        },
+        body: JSON.stringify(buildLoopBody({ loopId, apiBaseUrl })),
+      }
+    );
+
+    assert.equal(response.status, 200, `Expected 200, got ${response.status}`);
+
+    const completedEvent = await eventSrv.waitForEvent(
+      (b) => b.type === "completed" || b.type === "error",
+      15_000
+    );
+
+    assert.equal(completedEvent.type, "completed", `Expected completed event, got: ${JSON.stringify(completedEvent)}`);
+    const tokensUsed = completedEvent.tokensUsed as Record<string, unknown>;
+    assert.equal(tokensUsed.input, 30, `Expected input=30, got ${tokensUsed.input}`);
+    assert.equal(tokensUsed.output, 12, `Expected output=12, got ${tokensUsed.output}`);
+  });
+});
