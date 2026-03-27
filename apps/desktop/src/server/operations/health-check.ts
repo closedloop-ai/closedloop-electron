@@ -61,7 +61,7 @@ export function registerHealthCheckRoutes(
  * nvm paths, etc.  Spawning the user's shell with -ilc gives us the real PATH.
  */
 let resolvedPathPromise: Promise<string> | undefined;
-async function getShellPath(): Promise<string> {
+export async function getShellPath(): Promise<string> {
   if (resolvedPathPromise) {
     return resolvedPathPromise;
   }
