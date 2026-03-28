@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import net from "node:net";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
-import { getShellPath } from "../shell-path.js";
+import { getShellEnv, getShellPath } from "../shell-path.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import {
   loadReposConfig,
@@ -12,7 +12,7 @@ import {
   type RepoDeploymentConfig,
   type ReposConfig
 } from "./repos-config-utils.js";
-import { checkAndMigrateLegacyWorkDir, expandHome, findFirstExisting } from "./symphony-utils.js";
+import { expandHome } from "./symphony-utils.js";
 
 type DeployStatus = "running" | "completed" | "failed" | "not-started";
 
@@ -78,12 +78,6 @@ export function registerDeployRoutes(
         ...deployConfig
       };
       await saveReposConfig(reposConfig, configDir());
-    }
-
-    const migrationResult = checkAndMigrateLegacyWorkDir(expandedWorktreePath);
-    if (migrationResult === "blocked") {
-      json(context, 409, { error: "A job started before the .closedloop-ai migration is still running. Stop it first, then retry." });
-      return;
     }
 
     const claudeWorkDir = path.join(expandedWorktreePath, ".closedloop-ai", "work");
@@ -360,28 +354,13 @@ export function registerDeployRoutes(
       throw error;
     }
 
-    const newDeployWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
-    const oldDeployWorkDir = path.join(worktreeDir, ".claude", "work");
-    // Per-file resolution: each deploy artifact may be at either location
-    const logsPath = findFirstExisting(
-      path.join(newDeployWorkDir, "deploy.log"),
-      path.join(oldDeployWorkDir, "deploy.log")
-    );
-    const exitInfoPath = findFirstExisting(
-      path.join(newDeployWorkDir, "deploy-exit.json"),
-      path.join(oldDeployWorkDir, "deploy-exit.json")
-    );
-    const deployResultPath = findFirstExisting(
-      path.join(newDeployWorkDir, "deploy-result.json"),
-      path.join(oldDeployWorkDir, "deploy-result.json")
-    );
-    const logs = logsPath ? await readTextFile(logsPath) : null;
-    const exitInfo = exitInfoPath
-      ? await readJsonFile<{ exitCode: number; failedCommand: string }>(exitInfoPath)
-      : null;
-    const deployResult = deployResultPath
-      ? await readJsonFile<{ url?: string; serviceId?: string }>(deployResultPath)
-      : null;
+    const deployWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+    const logsPath = path.join(deployWorkDir, "deploy.log");
+    const exitInfoPath = path.join(deployWorkDir, "deploy-exit.json");
+    const deployResultPath = path.join(deployWorkDir, "deploy-result.json");
+    const logs = await readTextFile(logsPath) || null;
+    const exitInfo = await readJsonFile<{ exitCode: number; failedCommand: string }>(exitInfoPath);
+    const deployResult = await readJsonFile<{ url?: string; serviceId?: string }>(deployResultPath);
 
     const processAlive = isProcessAlive(pidRaw);
     const status = determineStatus(exitInfo, deployResult?.url, processAlive, logs ?? "", pidRaw);
@@ -883,10 +862,7 @@ async function runTeardownCommand(command: string, worktreePath: string): Promis
       shell: "/bin/bash",
       timeout: 60_000,
       stdio: "pipe",
-      env: {
-        ...process.env,
-        PATH: await getShellPath()
-      }
+      env: await getShellEnv(),
     });
     return true;
   } catch {

@@ -1,6 +1,6 @@
-import { execSync, spawn } from "node:child_process";
+import { execFileSync, execSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { getShellPath } from "../shell-path.js";
+import { getShellEnv, getShellPath } from "../shell-path.js";
 import {
   closeSync,
   existsSync,
@@ -8,6 +8,7 @@ import {
   openSync,
   readFileSync,
   readSync,
+  renameSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -33,8 +34,6 @@ import { findPluginScript, findPluginVersions, getPluginCacheRoot } from "./plug
 import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import {
   expandHome,
-  isProcessRunning,
-  migrateWorkDirIfNeeded,
   resolveWorktreeParentDir,
   tryAssertRepoAllowed,
 } from "./symphony-utils.js";
@@ -70,71 +69,75 @@ export const defaultWorktreeProvider: WorktreeProvider = {
 };
 
 // ---------------------------------------------------------------------------
-// Legacy migration helper
+// Claude binary resolution
 // ---------------------------------------------------------------------------
 
 /**
- * Kill any live legacy process at .claude/work, clean up PID file, then migrate.
- * Always migrates and returns -- callers can proceed immediately.
+ * Cached absolute path to the `claude` binary, resolved once at first use.
+ *
+ * Resolution strategy (tried in order):
+ *   1. `which claude` using the current process.env.PATH (fast; works in
+ *      tests where PATH is set to a fake-bin directory, and in dev shells).
+ *   2. `bash -lc 'which claude'` in a login shell so that nvm/homebrew/local
+ *      bin directories are found even when Electron strips PATH at launch via
+ *      the .app bundle, launchd (macOS), or systemd (Linux).
+ *   3. Falls back to the bare string "claude" so that the caller can still
+ *      attempt spawn and receive a descriptive ENOENT error.
  */
-async function killLegacyAndMigrate(worktreeDir: string): Promise<void> {
-  const newWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
-  const legacyWorkDir = path.join(worktreeDir, ".claude", "work");
-  if (existsSync(newWorkDir) || !existsSync(legacyWorkDir)) {
-    return;
+let resolvedClaudePath: string | null = null;
+
+/**
+ * Reset the cached claude binary path. Intended for use in tests where PATH
+ * changes between test cases — production code should not call this.
+ */
+export function resetResolvedClaudePath(): void {
+  resolvedClaudePath = null;
+}
+
+export function getResolvedClaudePath(): string {
+  // If we have a cached path, return it only if the binary still exists on
+  // disk. This handles test scenarios where a fake binary directory is cleaned
+  // up between test cases, causing the cached path to become stale.
+  if (resolvedClaudePath !== null && existsSync(resolvedClaudePath)) {
+    return resolvedClaudePath;
   }
-  const legacyPidPath = path.join(legacyWorkDir, "process.pid");
-  if (existsSync(legacyPidPath)) {
-    let rawPid: string;
-    try {
-      rawPid = readFileSync(legacyPidPath, "utf-8").trim();
-    } catch {
-      // TOCTOU: PID file removed between check and read -- treat as dead
-      migrateWorkDirIfNeeded(worktreeDir);
-      return;
+  // Invalidate stale cache entry before re-resolving
+  resolvedClaudePath = null;
+
+  // Strategy 1: which via current process PATH (works in tests and dev shells)
+  try {
+    const result = execFileSync("which", ["claude"], {
+      encoding: "utf-8",
+      stdio: "pipe",
+      timeout: 5_000,
+    }).trim();
+    if (result) {
+      resolvedClaudePath = result;
+      return resolvedClaudePath;
     }
-    const legacyPid = Number.parseInt(rawPid, 10);
-    if (!Number.isNaN(legacyPid) && isProcessRunning(legacyPid)) {
-      try {
-        process.kill(-legacyPid, "SIGTERM");
-      } catch {
-        // Group kill failed (ESRCH) -- try individual process
-        try {
-          process.kill(legacyPid, "SIGTERM");
-        } catch {
-          // Already dead
-        }
-      }
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      // Re-check if still alive after SIGTERM
-      if (isProcessRunning(legacyPid)) {
-        try {
-          process.kill(-legacyPid, "SIGKILL");
-        } catch {
-          /* already dead */
-        }
-        try {
-          process.kill(legacyPid, "SIGKILL");
-        } catch {
-          /* already dead */
-        }
-      }
-      try {
-        unlinkSync(legacyPidPath);
-      } catch {
-        // Best effort
-      }
-      migrateWorkDirIfNeeded(worktreeDir);
-      return;
-    }
-    // Dead process: remove stale PID file
-    try {
-      unlinkSync(legacyPidPath);
-    } catch {
-      // Best effort
-    }
+  } catch {
+    // Not found in current PATH — try login shell
   }
-  migrateWorkDirIfNeeded(worktreeDir);
+
+  // Strategy 2: login shell which — sources ~/.nvm/nvm.sh and similar to
+  // populate the full user PATH that Electron strips on launch.
+  try {
+    const result = execFileSync("bash", ["-lc", "which claude"], {
+      encoding: "utf-8",
+      stdio: "pipe",
+      timeout: 5_000,
+    }).trim();
+    if (result) {
+      resolvedClaudePath = result;
+      return resolvedClaudePath;
+    }
+  } catch {
+    // Login shell which also failed — fall through to bare name fallback
+  }
+
+  // Fall back to bare name; spawn will throw ENOENT with a descriptive message
+  resolvedClaudePath = "claude";
+  return resolvedClaudePath;
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +291,8 @@ interface LoopRequestBody {
   prompt?: string;
   /** Local filesystem checkout root. When present and sandbox-allowed, used as checkout root for worktree creation/reuse instead of repo.fullName lookup. */
   localRepoPath?: string;
+  /** User-supplied Additional Context from ArtifactVersion v1. Written to additional-context.md for PLAN commands. */
+  userContext?: string;
 }
 
 interface ExecutionResult {
@@ -740,6 +745,7 @@ async function writeArtifactsForPlan(
   claudeWorkDir: string,
   artifacts: LoopArtifact[],
   prdContent: string | null = null,
+  userContext?: string,
 ): Promise<void> {
   // Priority: explicit prompt > PRD artifact > FEATURE artifact (matches harness)
 
@@ -754,6 +760,19 @@ async function writeArtifactsForPlan(
     if (source?.content) {
       prdContent = source.content;
     }
+  }
+
+  // Append user-supplied Additional Context to the PRD so the planning agent
+  // sees it as part of the requirements (guaranteed to be read). Written as a
+  // clearly delineated section at the end of prd.md.
+  const safeUserContext =
+    typeof userContext === "string" ? userContext.trim() : "";
+  if (safeUserContext) {
+    const section =
+      "\n\n---\n\n## User Context / Additional Constraints\n\n" +
+      safeUserContext +
+      "\n";
+    prdContent = prdContent ? prdContent + section : section;
   }
 
   if (prdContent) {
@@ -1059,6 +1078,7 @@ async function attemptLlmCommit(
   artifactSlug: string | undefined,
   webAppOrigin: string,
   committer: LoopCommitter | undefined,
+  getAllowedDirectories: () => string[],
   onTimeout?: () => void,
   jobStore?: JobStore,
   claudeWorkDir?: string,
@@ -1073,7 +1093,10 @@ async function attemptLlmCommit(
 
   let footer: string;
   if (safeSlug) {
-    const artifactLink = `${webAppOrigin}/artifact/by-slug/${safeSlug}`;
+    // safeSlug contains only alphanumerics, hyphens, and underscores after
+    // sanitizeCommitMessage() + newline stripping — no backticks that would
+    // break shell heredocs or prompt injection via template literals.
+    const artifactLink = `${webAppOrigin}/implementation-plans/${safeSlug}`;
     footer = `---\nLoop ID: ${safeLoopId}\nArtifact: ${artifactLink}`;
   } else {
     footer = `---\nLoop ID: ${safeLoopId}`;
@@ -1097,7 +1120,7 @@ async function attemptLlmCommit(
     "STEPS:",
     "1. Run `git status` and `git diff --stat` to understand what changed",
     "2. Stage all changed/new files EXCEPT the .claude/ and .closedloop-ai/ directories:",
-    "   git add -- . ':!.claude/' ':!.closedloop-ai/'",
+    "   git add -- . ':!.claude' ':!.closedloop-ai'",
     "3. Write a clear, descriptive commit message based on the actual code changes",
     "   - Summarize WHAT changed and WHY (not just 'Symphony loop output')",
     "   - Use conventional commit style if the changes have a clear category",
@@ -1137,10 +1160,23 @@ async function attemptLlmCommit(
 
   loopLog(loopId, "Attempting LLM-assisted commit...");
 
-  const spawnEnv: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    PATH: await getShellPath(),
-  };
+  // Sandbox gate: verify the worktree directory is within an allowed path
+  // before spawning any child process on it. This mirrors the assertPathAllowed
+  // check performed in handleLoopRequest before the main loop spawn.
+  try {
+    assertPathAllowed(worktreeDir, getAllowedDirectories());
+  } catch (sandboxErr) {
+    if (sandboxErr instanceof DirectoryNotAllowedError) {
+      loopError(
+        loopId,
+        `LLM commit aborted: worktreeDir not in allowed sandbox: ${worktreeDir}`,
+      );
+      return null;
+    }
+    throw sandboxErr;
+  }
+
+  const spawnEnv: Record<string, string> = await getShellEnv();
   if (committer) {
     spawnEnv.GIT_AUTHOR_NAME = committer.name;
     spawnEnv.GIT_AUTHOR_EMAIL = committer.email;
@@ -1148,15 +1184,33 @@ async function attemptLlmCommit(
     spawnEnv.GIT_COMMITTER_EMAIL = committer.email;
   }
 
+  // Resolve the absolute path to the `claude` binary once at first use.
+  // Electron strips PATH to a minimal system set when launching via the .app
+  // bundle or launchd (macOS) / systemd (Linux), so the bare name "claude"
+  // typically resolves to ENOENT even though it works in a terminal. Running
+  // `which claude` in a login shell picks up the full user PATH including
+  // nvm/homebrew/local bin directories. getResolvedClaudePath() caches the
+  // result for the process lifetime.
+  const claudeBinary = getResolvedClaudePath();
+  const spawnArgs = ["-p", prompt, "--allowedTools", "Bash,Read,Write,Glob,Grep"];
+  loopLog(
+    loopId,
+    `LLM commit spawn: binary=${claudeBinary} args=["-p", "<prompt omitted>", "--allowedTools", "Bash,Read,Write,Glob,Grep"] cwd=${worktreeDir} PATH=${spawnEnv.PATH ?? "(unset)"}`
+  );
+
   let child: ReturnType<typeof spawn>;
   try {
     child = spawn(
-      "claude",
-      ["-p", prompt, "--allowedTools", "Bash,Read,Write,Glob,Grep"],
+      claudeBinary,
+      spawnArgs,
       { cwd: worktreeDir, detached: true, stdio: "pipe", env: spawnEnv },
     );
   } catch (err) {
-    loopError(loopId, "LLM commit spawn failed:", err);
+    const code = (err as NodeJS.ErrnoException).code ?? "unknown";
+    const enoentDetail = code === "ENOENT"
+      ? ` — '${claudeBinary}' binary not found; PATH=${spawnEnv.PATH ?? "(unset)"}`
+      : "";
+    loopError(loopId, `LLM commit spawn failed [code=${code}${enoentDetail}]`, err);
     return null;
   }
 
@@ -1183,10 +1237,14 @@ async function attemptLlmCommit(
   }
   // Update on-disk PID file so readProcessPidSync (used by plan-loop cancel and
   // status endpoint liveness checks) sees the LLM commit child, not the dead
-  // main-loop PID.
+  // main-loop PID.  Write atomically via a .pid.tmp temp file renamed into
+  // place to prevent a concurrent reader from observing a partial write.
   if (claudeWorkDir) {
     try {
-      writeFileSync(path.join(claudeWorkDir, "process.pid"), String(pid));
+      const pidFilePath = path.join(claudeWorkDir, "process.pid");
+      const pidTmpPath = path.join(claudeWorkDir, "process.pid.tmp");
+      writeFileSync(pidTmpPath, String(pid));
+      renameSync(pidTmpPath, pidFilePath);
     } catch {
       loopLog(loopId, "Failed to update process.pid for LLM commit child");
     }
@@ -1195,6 +1253,12 @@ async function attemptLlmCommit(
   return new Promise<ExecutionResult | null>((resolve) => {
     let killed = false;
 
+    // Process group kill behavior:
+    // The child is spawned with `detached: true`, which places it in its own
+    // process group (pgid === child.pid on POSIX). Sending SIGTERM/SIGKILL to
+    // -pid (negative PID) targets the entire process group, ensuring that any
+    // subprocesses spawned by claude (git, gh, etc.) are also terminated and
+    // do not become orphans when the timeout fires or cancel is requested.
     const killTimer = setTimeout(() => {
       if (!killed) {
         killed = true;
@@ -1205,7 +1269,7 @@ async function attemptLlmCommit(
         } catch (killErr) {
           loopError(loopId, "Failed to kill LLM commit process:", killErr);
         }
-        // Escalate to SIGKILL after 5s if process survives SIGTERM
+        // Escalate to SIGKILL after 5s if the process group survives SIGTERM
         setTimeout(() => {
           try {
             process.kill(pid, 0); // check alive
@@ -1290,7 +1354,11 @@ async function attemptLlmCommit(
 
     child.on("error", (err: Error) => {
       clearTimeout(killTimer);
-      loopError(loopId, "LLM commit process error:", err);
+      const code = (err as NodeJS.ErrnoException).code ?? "unknown";
+      const enoentDetail = code === "ENOENT"
+        ? ` — '${claudeBinary}' binary not found; PATH=${spawnEnv.PATH ?? "(unset)"}`
+        : "";
+      loopError(loopId, `LLM commit process error [code=${code}${enoentDetail}]:`, err);
       resolve(null);
     });
 
@@ -1341,7 +1409,7 @@ function executeGitOperations(
   // by the gateway itself (work dir, artifacts) and must never be committed.
   try {
     const status = execSync(
-      "git status --porcelain -- ':!.claude/' ':!.closedloop-ai/'",
+      "git status --porcelain -- . ':!.claude' ':!.closedloop-ai'",
       {
         cwd: worktreeDir,
         encoding: "utf-8",
@@ -1360,7 +1428,7 @@ function executeGitOperations(
 
   // Stage, commit, push
   try {
-    execSync("git add -- . ':!.claude/' ':!.closedloop-ai/'", {
+    execSync("git add -- . ':!.claude' ':!.closedloop-ai'", {
       cwd: worktreeDir,
       stdio: "pipe",
       env,
@@ -1368,8 +1436,8 @@ function executeGitOperations(
     });
 
     const commitPrefix = artifactSlug ? `${artifactSlug}: ` : "";
-    const commitMessage = `${commitPrefix}Symphony: ${command} -- loop ${shortId}`;
-    execSync(`git commit -m ${shellEscape(commitMessage)}`, {
+    const fallbackTitle = `${commitPrefix}Automated changes from loop ${shortId}`;
+    execSync(`git commit -m ${shellEscape(fallbackTitle)}`, {
       cwd: worktreeDir,
       stdio: "pipe",
       env,
@@ -1401,7 +1469,7 @@ function executeGitOperations(
     // shell escaping issues with special characters (--body-file approach).
     const artifactLine =
       artifactSlug && webAppOrigin
-        ? `\nArtifact: ${webAppOrigin}/artifact/by-slug/${artifactSlug}`
+        ? `\nArtifact: ${webAppOrigin}/implementation-plans/${artifactSlug}`
         : "";
     const prBody = `Loop ID: ${loopId}\nCommand: ${command}${artifactLine}`;
     const bodyFile = path.join(
@@ -1427,16 +1495,24 @@ function executeGitOperations(
           timeout: 15_000,
         },
       ).trim();
-      const parsed = JSON.parse(existingPr) as { url: string; number: number };
+      const parsedUnknown: unknown = JSON.parse(existingPr);
+      if (
+        typeof parsedUnknown !== "object" ||
+        parsedUnknown === null ||
+        typeof (parsedUnknown as Record<string, unknown>).url !== "string" ||
+        typeof (parsedUnknown as Record<string, unknown>).number !== "number"
+      ) {
+        throw new Error("Unexpected shape from gh pr view JSON");
+      }
+      const parsed = parsedUnknown as { url: string; number: number };
       prUrl = parsed.url;
       prNumber = parsed.number;
     } catch {
       // No existing PR — create one using --body-file to avoid shell escaping.
       // Create without --label first so the PR still succeeds on repos where the
       // 'symphony' label doesn't exist yet, then attach the label best-effort.
-      const prTitle = `${commitPrefix}Symphony: ${command} -- loop ${shortId}`;
       const prOutput = execSync(
-        `gh pr create --title ${shellEscape(prTitle)} --body-file ${shellEscape(bodyFile)} --base ${shellEscape(baseBranch)}`,
+        `gh pr create --title ${shellEscape(fallbackTitle)} --body-file ${shellEscape(bodyFile)} --base ${shellEscape(baseBranch)}`,
         {
           cwd: worktreeDir,
           encoding: "utf-8",
@@ -1528,6 +1604,7 @@ async function handleProcessCompletion(
   claudeWorkDir: string,
   usedTempDir: boolean,
   expandedRepoPath: string | null,
+  getAllowedDirectories: () => string[],
   jobStore?: JobStore,
   webAppOrigin?: string,
   commandId?: string,
@@ -1654,6 +1731,7 @@ async function handleProcessCompletion(
           body.artifactSlug,
           webAppOrigin ?? "",
           committer,
+          getAllowedDirectories,
           () => {
             warnings.push(
               sanitizeErrorMessage("LLM commit timed out after 90s"),
@@ -1746,6 +1824,10 @@ async function handleProcessCompletion(
       artifacts = readDecomposeOutputs(claudeWorkDir);
     } else if (command === "EVALUATE_PRD") {
       artifacts = readEvaluatePrdOutputs(claudeWorkDir);
+    } else if (command === "EVALUATE_PLAN") {
+      artifacts = readEvaluatePlanOutputs(claudeWorkDir);
+    } else if (command === "EVALUATE_CODE") {
+      artifacts = readEvaluateCodeOutputs(claudeWorkDir);
     } else if (command === "GENERATE_PRD") {
       artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
     }
@@ -1812,17 +1894,7 @@ async function handleProcessCompletion(
       if (branch) {
         result.branchName = branch;
       }
-  } else if (command === "DECOMPOSE") {
-    artifacts = readDecomposeOutputs(claudeWorkDir);
-  } else if (command === "EVALUATE_PRD") {
-    artifacts = readEvaluatePrdOutputs(claudeWorkDir);
-  } else if (command === "EVALUATE_PLAN") {
-    artifacts = readEvaluatePlanOutputs(claudeWorkDir);
-  } else if (command === "EVALUATE_CODE") {
-    artifacts = readEvaluateCodeOutputs(claudeWorkDir);
-  } else if (command === "GENERATE_PRD") {
-    artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
-  }
+    }
 
     // sessionId inside result (matches harness)
     if (metadata.sessionId) {
@@ -2262,14 +2334,10 @@ async function handleLoopRequest(
         throw e;
       }
       claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
-
-      // Legacy migration: kill any live legacy process, then migrate
-      await killLegacyAndMigrate(worktreeDir);
-
       await fs.mkdir(claudeWorkDir, { recursive: true });
 
       if (body.command === "PLAN") {
-        await writeArtifactsForPlan(claudeWorkDir, body.artifacts, body.prompt);
+        await writeArtifactsForPlan(claudeWorkDir, body.artifacts, body.prompt, body.userContext);
       } else if (body.command === "EXECUTE") {
         await writeArtifactsForExecuteOrAmend(claudeWorkDir, body.artifacts);
       } else {
@@ -2338,10 +2406,6 @@ async function handleLoopRequest(
       // Spawn uses cwd: worktreeDir so Claude writes prd.md to the repo root.
       // Logs, PID, and prompt file go to claudeWorkDir, not the repo root.
       claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
-
-      // Legacy migration preflight for GENERATE_PRD worktree
-      await killLegacyAndMigrate(worktreeDir);
-
       await fs.mkdir(claudeWorkDir, { recursive: true });
       await writeArtifactsForGeneratePrd(
         worktreeDir,
@@ -2437,11 +2501,9 @@ async function handleLoopRequest(
     let child: ReturnType<typeof spawn>;
 
     try {
-      const spawnEnv: Record<string, string> = {
-        ...(process.env as Record<string, string>),
+      const spawnEnv: Record<string, string> = await getShellEnv({
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
-        PATH: await getShellPath(),
-      };
+      });
 
       // Shared claude CLI args for commands that run claude directly.
       // REQUEST_CHANGES omits "-" (stdin) because it passes the prompt as a CLI argument.
@@ -2641,6 +2703,7 @@ async function handleLoopRequest(
         claudeWorkDir,
         usedTempDir,
         expandedRepoPath,
+        getAllowedDirectories,
         jobStore,
         webAppOrigin,
         commandId,

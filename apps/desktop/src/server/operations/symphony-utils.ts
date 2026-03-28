@@ -138,53 +138,6 @@ function fetchOrigin(repoPath: string): void {
   }
 }
 
-/**
- * Migrate .claude/work to .closedloop-ai/work if the new path doesn't exist
- * but the old one does.
- */
-export function migrateWorkDirIfNeeded(worktreeDir: string): void {
-  const oldDir = path.join(worktreeDir, ".claude", "work");
-  const newDir = path.join(worktreeDir, ".closedloop-ai", "work");
-  if (existsSync(oldDir) && !existsSync(newDir)) {
-    mkdirSync(path.join(worktreeDir, ".closedloop-ai"), { recursive: true });
-    try {
-      renameSync(oldDir, newDir);
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT" && code !== "EEXIST") { throw err; }
-    }
-  }
-}
-
-/**
- * Write-handler preflight: if .closedloop-ai/work doesn't exist but .claude/work does,
- * check for a live legacy process. Returns "blocked" if a live process is found,
- * "migrated" if migration was performed, or "noop" if nothing needed.
- */
-export function checkAndMigrateLegacyWorkDir(
-  worktreeDir: string
-): "blocked" | "migrated" | "noop" {
-  const newWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
-  const oldWorkDir = path.join(worktreeDir, ".claude", "work");
-  if (existsSync(newWorkDir) || !existsSync(oldWorkDir)) {
-    return "noop";
-  }
-  const legacyPidPath = path.join(oldWorkDir, "process.pid");
-  if (existsSync(legacyPidPath)) {
-    try {
-      const rawPid = readFileSync(legacyPidPath, "utf-8").trim();
-      const legacyPid = Number.parseInt(rawPid, 10);
-      if (!Number.isNaN(legacyPid) && isProcessRunning(legacyPid)) {
-        return "blocked";
-      }
-    } catch {
-      // Can't read PID -- proceed with migration
-    }
-  }
-  migrateWorkDirIfNeeded(worktreeDir);
-  return "migrated";
-}
-
 type SavedWorktreeState = {
   savedClaudeDir: string | null;
   savedClosedloopDir: string | null;
@@ -255,7 +208,6 @@ function restoreWorktreeState(
     rmSync(savedClosedloopDir, { recursive: true, force: true });
   }
 }
-
 
 /**
  * Create a new git worktree at worktreeDir checked out to ref,
@@ -502,15 +454,6 @@ export function tryAssertPathAllowed(
   }
 }
 
-export function findFirstExisting(...paths: string[]): string | null {
-  for (const p of paths) {
-    if (existsSync(p)) {
-      return p;
-    }
-  }
-  return null;
-}
-
 export const VALID_PROVIDERS = new Set(["claude", "codex"]);
 
 export function chatHistoryFilename(provider?: string | null): string {
@@ -522,18 +465,11 @@ export function chatHistoryFilename(provider?: string | null): string {
 // --- Launch idempotency utilities ---
 
 /**
- * Read the PID from process.pid file if it exists.
- * Checks .closedloop-ai/work first, falls back to .claude/work for legacy worktrees.
+ * Read the PID from .closedloop-ai/work/process.pid if it exists.
  * Returns null if file doesn't exist or is invalid.
  */
 export function readProcessPidSync(worktreeDir: string): number | null {
-  const newPidPath = path.join(worktreeDir, ".closedloop-ai", "work", "process.pid");
-  const oldPidPath = path.join(worktreeDir, ".claude", "work", "process.pid");
-  const pidPath = findFirstExisting(newPidPath, oldPidPath);
-
-  if (!pidPath) {
-    return null;
-  }
+  const pidPath = path.join(worktreeDir, ".closedloop-ai", "work", "process.pid");
 
   try {
     const pidContent = readFileSync(pidPath, "utf-8");
@@ -567,17 +503,9 @@ export type LaunchMetadata = {
 
 /**
  * Read launch metadata from {worktreeDir}/.closedloop-ai/work/launch-metadata.json.
- * Falls back to .claude/work for legacy worktrees.
  */
 export function readLaunchMetadata(worktreeDir: string): LaunchMetadata | null {
-  const metaPath = findFirstExisting(
-    path.join(worktreeDir, ".closedloop-ai", "work", "launch-metadata.json"),
-    path.join(worktreeDir, ".claude", "work", "launch-metadata.json")
-  );
-
-  if (!metaPath) {
-    return null;
-  }
+  const metaPath = path.join(worktreeDir, ".closedloop-ai", "work", "launch-metadata.json");
 
   try {
     const content = readFileSync(metaPath, "utf-8");
