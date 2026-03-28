@@ -26,7 +26,8 @@ import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 // Use unique high ports to avoid EADDRINUSE with other test files that use PORT_PROBE_ORDER (19432-19435)
 const TELEM_TEST_PORTS = [29432, 29433, 29434, 29435] as const;
 import { TELEMETRY_MAX_FIELD_BYTES } from "../src/main/telemetry-protocol.js";
-import { TelemetryService, type EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
+import { type EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
+import { Observability } from "../src/main/observability.js";
 import { resetShellPathCache } from "../src/server/shell-path.js";
 
 // ---------------------------------------------------------------------------
@@ -81,6 +82,8 @@ afterEach(async () => {
   for (const tempPath of tempPathsToClean.splice(0)) {
     await fs.rm(tempPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
   }
+
+  Observability.reset();
 });
 
 // ---------------------------------------------------------------------------
@@ -107,19 +110,18 @@ const fakeWorktreeProvider: WorktreeProvider = {
 };
 
 /**
- * Build a TelemetryService that collects all emitted events.
- * Returns the service and the shared captured events array.
+ * Initialize Observability with a capturing telemetry backend.
+ * Returns the shared captured events array and a waiter helper.
  */
-function buildCapturingTelemetry(): {
-  service: TelemetryService;
+function initCapturingObservability(): {
   captured: EnrichedTelemetryEvent[];
   waitForCategory: (category: string, timeoutMs?: number) => Promise<EnrichedTelemetryEvent>;
 } {
   const captured: EnrichedTelemetryEvent[] = [];
   const waiters: Array<{ category: string; resolve: (e: EnrichedTelemetryEvent) => void }> = [];
 
-  const service = new TelemetryService({
-    sendTelemetry: (event) => {
+  Observability.init({
+    telemetrySend: (event) => {
       captured.push(event);
       for (let i = waiters.length - 1; i >= 0; i--) {
         if (event.category === waiters[i].category) {
@@ -152,7 +154,7 @@ function buildCapturingTelemetry(): {
     });
   }
 
-  return { service, captured, waitForCategory };
+  return { captured, waitForCategory };
 }
 
 /**
@@ -188,7 +190,7 @@ test("telemetry: job.failed emitted with correct category/trace/diagnostics on p
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
 
-  const { service, waitForCategory } = buildCapturingTelemetry();
+  const { waitForCategory } = initCapturingObservability();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -202,7 +204,7 @@ test("telemetry: job.failed emitted with correct category/trace/diagnostics on p
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
-    telemetry: service,
+
   });
   serversToClose.push(server);
   await server.start();
@@ -272,7 +274,7 @@ test("telemetry: job.completed emitted with correct category/trace on process ex
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
 
-  const { service, waitForCategory } = buildCapturingTelemetry();
+  const { waitForCategory } = initCapturingObservability();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -286,7 +288,7 @@ test("telemetry: job.completed emitted with correct category/trace on process ex
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
-    telemetry: service,
+
   });
   serversToClose.push(server);
   await server.start();
@@ -352,7 +354,7 @@ test("telemetry: preflight.binary_not_found emitted when claude is absent from P
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
 
-  const { service, waitForCategory } = buildCapturingTelemetry();
+  const { waitForCategory } = initCapturingObservability();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -366,7 +368,7 @@ test("telemetry: preflight.binary_not_found emitted when claude is absent from P
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
-    telemetry: service,
+
   });
   serversToClose.push(server);
   await server.start();
@@ -453,7 +455,7 @@ test("telemetry: preflight.spawn_failed emitted when log file open fails (EISDIR
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
 
-  const { service, waitForCategory } = buildCapturingTelemetry();
+  const { waitForCategory } = initCapturingObservability();
 
   // loopId determines the worktree path — we use a known value to predict the path
   const loopId = "00000000-0000-0000-0000-000000000a04";
@@ -498,7 +500,7 @@ test("telemetry: preflight.spawn_failed emitted when log file open fails (EISDIR
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
-    telemetry: service,
+
   });
   serversToClose.push(server);
   await server.start();
@@ -555,7 +557,7 @@ test("telemetry: commandId and operationId from request headers appear in trace 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
 
-  const { service, waitForCategory } = buildCapturingTelemetry();
+  const { waitForCategory } = initCapturingObservability();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -569,7 +571,7 @@ test("telemetry: commandId and operationId from request headers appear in trace 
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
-    telemetry: service,
+
   });
   serversToClose.push(server);
   await server.start();
@@ -624,8 +626,8 @@ test("telemetry: commandId and operationId from request headers appear in trace 
 // Test 6: logTail truncation — diagnostics.logTail capped at TELEMETRY_MAX_FIELD_BYTES
 // ---------------------------------------------------------------------------
 
-test("telemetry: TelemetryService truncates logTail to TELEMETRY_MAX_FIELD_BYTES", () => {
-  const { service, captured } = buildCapturingTelemetry();
+test("telemetry: Observability truncates logTail to TELEMETRY_MAX_FIELD_BYTES via TelemetryService", () => {
+  const { captured } = initCapturingObservability();
 
   // Build a string longer than TELEMETRY_MAX_FIELD_BYTES (4096 bytes)
   // Use ASCII lines so byte count == char count
@@ -640,13 +642,13 @@ test("telemetry: TelemetryService truncates logTail to TELEMETRY_MAX_FIELD_BYTES
     "Test data must exceed TELEMETRY_MAX_FIELD_BYTES for this test to be meaningful"
   );
 
-  service.emit({
-    severity: "error",
-    category: "job.failed",
-    message: "test truncation",
-    trace: { loopId: "00000000-0000-0000-0000-000000000b01" },
-    diagnostics: { logTail: largeTail },
-  });
+  Observability.jobFailed(
+    "cmd-trunc",
+    "OP_TRUNC",
+    "00000000-0000-0000-0000-000000000b01",
+    1,
+    { logTail: largeTail },
+  );
 
   assert.equal(captured.length, 1, "Expected exactly one captured event");
   const event = captured[0];

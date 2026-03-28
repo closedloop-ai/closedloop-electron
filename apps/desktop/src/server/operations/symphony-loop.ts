@@ -17,11 +17,11 @@ import os from "node:os";
 import path from "node:path";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
-import type { TelemetryEmitter } from "../../main/telemetry-protocol.js";
 import {
   TELEMETRY_LOG_TAIL_LINES,
   TELEMETRY_LOG_TAIL_MAX_BYTES,
 } from "../../main/telemetry-protocol.js";
+import { Observability } from "../../main/observability.js";
 import type {
   OperationDispatcher,
   OperationRequestContext,
@@ -1530,7 +1530,6 @@ async function handleProcessCompletion(
   expandedRepoPath: string | null,
   jobStore?: JobStore,
   webAppOrigin?: string,
-  telemetry?: TelemetryEmitter,
   commandId?: string,
   operationId?: string,
   wt: WorktreeProvider = defaultWorktreeProvider,
@@ -1551,24 +1550,24 @@ async function handleProcessCompletion(
       existingJob?.status === "CANCEL_PENDING" ||
       existingJob?.status === "CANCELLED";
 
-    telemetry?.emit({
-      severity: wasCancelled ? "info" : "error",
-      category: wasCancelled ? "job.cancelled" : "job.failed",
-      message: wasCancelled
-        ? `Process cancelled (exit code ${exitCode})`
-        : `Process exited with code ${exitCode}`,
-      trace: {
-        commandId: commandId ?? existingJob?.commandId,
-        operationId: operationId ?? existingJob?.operationId,
+    if (wasCancelled) {
+      Observability.jobCancelled(
+        commandId ?? existingJob?.commandId,
+        operationId ?? existingJob?.operationId,
         loopId,
-        jobId: loopId,
-        loopSessionId: failureSessionId,
-      },
-      diagnostics: {
-        ...diagnostics,
         exitCode,
-      },
-    });
+        failureSessionId,
+      );
+    } else {
+      Observability.jobFailed(
+        commandId ?? existingJob?.commandId,
+        operationId ?? existingJob?.operationId,
+        loopId,
+        exitCode,
+        diagnostics,
+        failureSessionId,
+      );
+    }
 
     if (!wasCancelled) {
       loopError(loopId, `Process failed with exit code ${exitCode}`);
@@ -1903,21 +1902,13 @@ async function handleProcessCompletion(
     }
 
     const completedJob = jobStore?.getByLoopId(loopId);
-    telemetry?.emit({
-      severity: "info",
-      category: "job.completed",
-      message: `Job completed successfully`,
-      trace: {
-        commandId: commandId ?? completedJob?.commandId,
-        operationId: operationId ?? completedJob?.operationId,
-        loopId,
-        jobId: loopId,
-        loopSessionId:
-          typeof metadata.sessionId === "string"
-            ? metadata.sessionId
-            : undefined,
-      },
-    });
+    Observability.jobCompleted(
+      commandId ?? completedJob?.commandId,
+      operationId ?? completedJob?.operationId,
+      loopId,
+      undefined,
+      typeof metadata.sessionId === "string" ? metadata.sessionId : undefined,
+    );
 
     // Clean up temp claude workdir after all reads and uploads are complete
     if (usedTempDir) {
@@ -1940,7 +1931,6 @@ async function handleLoopRequest(
   getApiOrigin?: () => string,
   jobStore?: JobStore,
   getWebAppOrigin?: () => string,
-  telemetry?: TelemetryEmitter,
   worktreeProvider?: WorktreeProvider,
 ): Promise<void> {
   const wt = worktreeProvider ?? defaultWorktreeProvider;
@@ -2402,16 +2392,7 @@ async function handleLoopRequest(
           code: "BINARY_NOT_FOUND",
           message: "claude CLI not found in PATH",
         });
-        telemetry?.emit({
-          severity: "error",
-          category: "preflight.binary_not_found",
-          message: "claude CLI not found in PATH",
-          trace: {
-            commandId,
-            operationId,
-            loopId: body.loopId,
-          },
-        });
+        Observability.preflightBinaryNotFound(commandId, operationId, body.loopId);
         await cleanupOnError();
         json(context, 500, { error: "claude CLI not found in PATH" });
         return;
@@ -2424,16 +2405,7 @@ async function handleLoopRequest(
           code: "SCRIPT_NOT_FOUND",
           message: "run-loop.sh not found in plugin cache",
         });
-        telemetry?.emit({
-          severity: "error",
-          category: "preflight.script_not_found",
-          message: "run-loop.sh not found in plugin cache",
-          trace: {
-            commandId,
-            operationId,
-            loopId: body.loopId,
-          },
-        });
+        Observability.preflightScriptNotFound(commandId, operationId, body.loopId);
         json(context, 500, { error: "run-loop.sh not found in plugin cache" });
         return;
       }
@@ -2457,16 +2429,7 @@ async function handleLoopRequest(
         code: "SPAWN_FAILED",
         message: `Cannot open log file: ${msg}`,
       });
-      telemetry?.emit({
-        severity: "error",
-        category: "preflight.spawn_failed",
-        message: `Cannot open log file: ${msg}`,
-        trace: {
-          commandId,
-          operationId,
-          loopId: body.loopId,
-        },
-      });
+      Observability.preflightSpawnFailed(commandId, operationId, body.loopId, `Cannot open log file: ${msg}`);
       await cleanupOnError();
       json(context, 500, { error: `Cannot open log file: ${msg}` });
       return;
@@ -2643,16 +2606,7 @@ async function handleLoopRequest(
         code: "SPAWN_FAILED",
         message: msg,
       });
-      telemetry?.emit({
-        severity: "error",
-        category: "preflight.spawn_failed",
-        message: msg,
-        trace: {
-          commandId,
-          operationId,
-          loopId: body.loopId,
-        },
-      });
+      Observability.preflightSpawnFailed(commandId, operationId, body.loopId, msg);
       await cleanupOnError();
       json(context, 500, { error: `Failed to spawn process: ${msg}` });
       return;
@@ -2689,7 +2643,6 @@ async function handleLoopRequest(
         expandedRepoPath,
         jobStore,
         webAppOrigin,
-        telemetry,
         commandId,
         operationId,
         wt,
@@ -2770,17 +2723,7 @@ async function handleLoopRequest(
       });
     }
 
-    telemetry?.emit({
-      severity: "info",
-      category: "job.started",
-      message: `Job started with pid=${pid}`,
-      trace: {
-        commandId,
-        operationId,
-        loopId: body.loopId,
-        jobId: body.loopId,
-      },
-    });
+    Observability.jobStarted(commandId, operationId, body.loopId, pid);
 
     // Write PID file (safe to await now — close handler is already registered)
     await fs.writeFile(path.join(claudeWorkDir, "process.pid"), String(pid));
@@ -2905,7 +2848,6 @@ export function registerSymphonyLoopRoutes(
   getApiOrigin?: () => string,
   jobStore?: JobStore,
   getWebAppOrigin?: () => string,
-  telemetry?: TelemetryEmitter,
   worktreeProvider?: WorktreeProvider,
 ): void {
   dispatcher.register(
@@ -2918,7 +2860,6 @@ export function registerSymphonyLoopRoutes(
         getApiOrigin,
         jobStore,
         getWebAppOrigin,
-        telemetry,
         worktreeProvider,
       );
     },

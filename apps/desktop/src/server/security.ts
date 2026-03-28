@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { expandHomePath } from "../shared/path-utils.js";
+import { Observability } from "../main/observability.js";
 
 export class DirectoryNotAllowedError extends Error {
   readonly targetPath: string;
@@ -38,6 +39,7 @@ export function isPathAllowed(targetPath: string, allowedDirectories: string[]):
 
 export function assertPathAllowed(targetPath: string, allowedDirectories: string[]): void {
   if (!isPathAllowed(targetPath, allowedDirectories)) {
+    Observability.sandboxBlocked("path_denied");
     throw new DirectoryNotAllowedError(targetPath);
   }
 }

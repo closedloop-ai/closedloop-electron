@@ -3,7 +3,6 @@ import { timingSafeEqual } from "node:crypto";
 import type { ComputeTargetCapabilities, HealthResponse } from "../shared/contracts.js";
 import { isLoopbackIPv4 } from "../shared/network-utils.js";
 import type { JobStore } from "../main/job-store.js";
-import type { TelemetryEmitter } from "../main/telemetry-protocol.js";
 import type { LocalSessionStore } from "../main/local-session-store.js";
 import { verifyChallenge } from "../main/local-auth-verifier.js";
 import { OperationDispatcher } from "./operation-dispatcher.js";
@@ -59,7 +58,6 @@ export interface GatewayRouterOptions {
   getApiOrigin?: () => string;
   prodOriginsOnly?: boolean;
   jobStore?: JobStore;
-  telemetry?: TelemetryEmitter;
   worktreeProvider?: WorktreeProvider;
 }
 
@@ -160,7 +158,6 @@ export class GatewayRouter {
       this.options.getApiOrigin,
       this.options.jobStore,
       this.options.getWebAppOrigin ?? (() => this.options.webAppOrigin),
-      this.options.telemetry,
       this.options.worktreeProvider
     );
     registerSymphonyLogsRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
