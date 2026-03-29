@@ -7,7 +7,9 @@ import type {
   OperationDispatcher,
   OperationRequestContext,
 } from "../operation-dispatcher.js";
+import { gatewayLog } from "../../main/gateway-logger.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
+import { retrySpawn, type RetrySpawnDeps } from "../../main/spawn-retry.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
 import { findPluginScript } from "./plugin-cache.js";
@@ -87,7 +89,8 @@ function assertAllReposAllowed(
 
 export function registerSymphonyInteractiveRoutes(
   dispatcher: OperationDispatcher,
-  getAllowedDirectories: () => string[]
+  getAllowedDirectories: () => string[],
+  deps: RetrySpawnDeps
 ): void {
   dispatcher.register(
     "POST",
@@ -503,7 +506,8 @@ export function registerSymphonyInteractiveRoutes(
         const generated = await generateCommitWithClaude(
           worktreeDir,
           ticketId,
-          diff
+          diff,
+          deps
         );
         json(context, 200, {
           ...generated,
@@ -695,6 +699,7 @@ export function registerSymphonyInteractiveRoutes(
         let pid: number | null = null;
         if (scriptPath) {
           const logFd = openSync(logFile, "a");
+          let fdClosed = false;
           const child = spawn(scriptPath, [claudeWorkDir], {
             cwd: worktreeDir,
             detached: true,
@@ -705,11 +710,41 @@ export function registerSymphonyInteractiveRoutes(
               PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
             },
           });
+          child.on("error", (err: NodeJS.ErrnoException) => {
+            if (!fdClosed) {
+              try {
+                closeSync(logFd);
+                fdClosed = true;
+              } catch (closeErr) {
+                gatewayLog.warn(
+                  "symphony-launch",
+                  `closeSync failed: ${closeErr instanceof Error ? closeErr.message : String(closeErr)}`
+                );
+              }
+            }
+            gatewayLog.warn(
+              "symphony-launch",
+              `detached-spawn-failed: ${err.message}`
+            );
+          });
+          if (!child.pid) {
+            if (!fdClosed) {
+              closeSync(logFd);
+              fdClosed = true;
+            }
+            json(context, 500, {
+              error: "failed to launch work loop: process did not start",
+            });
+            return;
+          }
           child.unref();
-          pid = child.pid ?? null;
+          pid = child.pid;
 
           // Close parent's copy of the log fd — the child inherited it via spawn
-          closeSync(logFd);
+          if (!fdClosed) {
+            closeSync(logFd);
+            fdClosed = true;
+          }
         }
 
         // Write PID AFTER metadata
@@ -993,9 +1028,10 @@ function getGitDiff(worktreeDir: string): string {
 function generateCommitWithClaude(
   worktreeDir: string,
   ticketId: string,
-  diff: string
+  diff: string,
+  deps: RetrySpawnDeps
 ): Promise<{ title: string; description: string }> {
-  return new Promise((resolve, reject) => {
+  return retrySpawn(() => new Promise<{ title: string; description: string }>((resolve, reject) => {
     const prompt = [
       `Generate a git commit message for ticket ${ticketId}.`,
       "",
@@ -1075,7 +1111,7 @@ function generateCommitWithClaude(
       console.error("[commit-message] failed to spawn claude:", err.message);
       reject(err);
     });
-  });
+  }), deps);
 }
 
 

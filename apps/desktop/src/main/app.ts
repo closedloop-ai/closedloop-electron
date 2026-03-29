@@ -60,6 +60,7 @@ import { enrichJobSnapshot } from "../server/operations/symphony-job-snapshot.js
 import { GatewayRecoveryManager } from "./gateway-recovery.js";
 import { runShutdownSequence } from "./shutdown.js";
 import type { ShutdownResult } from "./shutdown.js";
+import type { RetrySpawnDeps } from "./spawn-retry.js";
 import pkg from "electron-updater";
 const { autoUpdater } = pkg;
 import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
@@ -121,6 +122,12 @@ export class DesktopApplication {
         notification.show();
       },
     });
+    const retrySpawnDeps: RetrySpawnDeps = {
+      log: (level, msg) => gatewayLog[level]("spawn-retry", msg),
+      refreshTray: (msg) => this.refreshTrayState(msg),
+      isShuttingDown: () => this.shuttingDown,
+      delay: (ms) => new Promise((r) => setTimeout(r, ms)),
+    };
     this.server = DesktopGatewayServer.createDefault(
       this.settingsStore.getWebAppOrigin(),
       () => (this.isNoAuthMode() ? undefined : this.gatewayAuthToken),
@@ -141,6 +148,7 @@ export class DesktopApplication {
       this.jobStore,
       this.telemetry,
       () => this.recovery.onUnexpectedClose(),
+      retrySpawnDeps,
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),

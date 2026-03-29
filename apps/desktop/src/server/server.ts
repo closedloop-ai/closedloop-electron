@@ -19,6 +19,7 @@ import {
 } from "./router.js";
 import type { TelemetryEmitter } from "../main/telemetry-protocol.js";
 import type { WorktreeProvider } from "./operations/symphony-loop.js";
+import type { RetrySpawnDeps } from "../main/spawn-retry.js";
 
 export interface DesktopGatewayServerOptions {
   host: string;
@@ -45,6 +46,7 @@ export interface DesktopGatewayServerOptions {
   jobStore?: JobStore;
   telemetry?: TelemetryEmitter;
   worktreeProvider?: WorktreeProvider;
+  retrySpawnDeps?: RetrySpawnDeps;
   onUnexpectedClose?: () => void;
 }
 
@@ -83,6 +85,7 @@ export class DesktopGatewayServer {
       jobStore: this.options.jobStore,
       telemetry: this.options.telemetry,
       worktreeProvider: this.options.worktreeProvider,
+      retrySpawnDeps: this.options.retrySpawnDeps,
     });
   }
 
@@ -106,6 +109,7 @@ export class DesktopGatewayServer {
     jobStore?: JobStore,
     telemetry?: TelemetryEmitter,
     onUnexpectedClose?: () => void,
+    retrySpawnDeps?: RetrySpawnDeps,
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -129,6 +133,7 @@ export class DesktopGatewayServer {
       jobStore,
       telemetry,
       onUnexpectedClose,
+      retrySpawnDeps,
     });
   }
 

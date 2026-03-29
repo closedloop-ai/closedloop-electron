@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import { gatewayLog } from "../../main/gateway-logger.js";
 import { findPluginScript } from "./plugin-cache.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { assertRepoAllowed, findFirstExisting, resolveWorktreeDir } from "./symphony-utils.js";
@@ -278,6 +279,9 @@ export function registerLearningsRoutes(
           PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
           CLOSEDLOOP_WORKDIR: claudeWorkDir
         }
+      });
+      child.on('error', (err: NodeJS.ErrnoException) => {
+        gatewayLog.warn('learnings-launch', `detached-spawn-failed: ${err.message}`);
       });
       child.unref();
       json(context, 200, { status: "processing", pid: child.pid, logFile });
