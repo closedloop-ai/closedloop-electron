@@ -3,11 +3,11 @@ import pkg from "electron-updater";
 import { execFile } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import {
-    copyFileSync,
-    existsSync,
-    mkdirSync,
-    readdirSync,
-    readFileSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
 } from "node:fs";
 import { readFile } from "node:fs/promises";
 import os from "node:os";
@@ -16,44 +16,45 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { enrichJobSnapshot } from "../server/operations/symphony-job-snapshot.js";
 import {
-    computeSymphonyDir,
-    SymphonyDirNotConfiguredError,
+  computeSymphonyDir,
+  SymphonyDirNotConfiguredError,
 } from "../server/operations/symphony-utils.js";
 import type {
-    GatewayApprovalRequest,
-    GatewayApprovalResult,
+  GatewayApprovalRequest,
+  GatewayApprovalResult,
 } from "../server/router.js";
 import { DesktopGatewayServer } from "../server/server.js";
 import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
 import {
-    DESKTOP_GATEWAY_VERSION,
-    EMPTY_CAPABILITIES,
-    type AlwaysAllowRule,
-    type DesktopSettings,
-    type RiskTier,
+  DESKTOP_GATEWAY_VERSION,
+  EMPTY_CAPABILITIES,
+  type AlwaysAllowRule,
+  type DesktopSettings,
+  type RiskTier,
 } from "../shared/contracts.js";
 import {
-    buildAllowedDirectories,
-    normalizeScopePath,
+  buildAllowedDirectories,
+  normalizeScopePath,
 } from "../shared/sandbox-policy.js";
 import { ActivityLogStore } from "./activity-log-store.js";
 import { ApiKeyStore } from "./api-key-store.js";
 import {
-    resolveOperationId,
-    SUPPORTED_OPERATION_IDS,
+  resolveOperationId,
+  SUPPORTED_OPERATION_IDS,
 } from "./approval-operations.js";
 import { OPERATION_RISK_TIERS, shouldAutoApprove } from "./approval-policy.js";
 import { ApprovalStore } from "./approval-store.js";
+import { BootRecoveryService } from "./boot-recovery.js";
 import { CloudCommandExecutor } from "./cloud-command-executor.js";
 import type { CloudSocketStatus } from "./cloud-protocol.js";
 import { CloudSocketService } from "./cloud-socket.js";
 import { gatewayLog } from "./gateway-logger.js";
 import { GatewayRecoveryManager } from "./gateway-recovery.js";
-import { isTerminalJobStatus, JobStore } from "./job-store.js";
+import { isTerminalJobStatus, JobStore, type LocalJob } from "./job-store.js";
 import { LocalSessionStore } from "./local-session-store.js";
 import {
-    normalizeAndValidateOrigin,
-    normalizeWebAppOrigin,
+  normalizeAndValidateOrigin,
+  normalizeWebAppOrigin,
 } from "./origin-policy.js";
 import { seedReposConfig } from "./seed-repos-config.js";
 import { SettingsStore } from "./settings-store.js";
@@ -80,6 +81,7 @@ export class DesktopApplication {
   private readonly approvalStore: ApprovalStore;
   private readonly jobStore: JobStore;
   private readonly recovery: GatewayRecoveryManager;
+  private readonly bootRecovery: BootRecoveryService;
   private readonly gatewayAuthToken: string;
   private readonly sessionStore: LocalSessionStore;
   private readonly telemetry: TelemetryService;
@@ -244,6 +246,12 @@ export class DesktopApplication {
       isShuttingDown: () => this.shuttingDown,
       isPaused: () => this.cloudCommandsPaused,
     });
+    this.bootRecovery = new BootRecoveryService({
+      jobStore: this.jobStore,
+      telemetry: this.telemetry,
+      getApiKey: () => this.apiKeyStore.getApiKey(),
+      getApiOrigin: () => this.settingsStore.getApiOrigin(),
+    });
     this.registerIpcHandlers();
   }
 
@@ -268,7 +276,8 @@ export class DesktopApplication {
 
     gatewayLog.setVerbose(this.settingsStore.getAll().verboseLogging);
     this.migrateLegacyData();
-    this.reconcileJobStore();
+    const deadJobs = this.reconcileJobStore();
+    await this.bootRecovery.run(deadJobs);
 
     const bootSandbox = this.settingsStore.getSandboxBaseDirectory();
     if (bootSandbox?.trim()) {
@@ -368,6 +377,7 @@ export class DesktopApplication {
     }
 
     this.shuttingDown = true;
+    this.bootRecovery.dispose();
     return runShutdownSequence({
       updateCheckTimer: this.updateCheckTimer,
       clearUpdateCheckTimer: () => {
@@ -842,8 +852,8 @@ export class DesktopApplication {
     app.exit(0);
   }
 
-  private reconcileJobStore(): void {
-    this.jobStore.reconcile((job) => {
+  private reconcileJobStore(): LocalJob[] {
+    return this.jobStore.reconcile((job) => {
       const now = new Date().toISOString();
 
       // If no PID, we cannot verify liveness
@@ -932,7 +942,7 @@ export class DesktopApplication {
       }
       return { ...job, updatedAt: now };
     });
-  }
+  }  // reconcileJobStore
 
   private registerIpcHandlers(): void {
     ipcMain.handle("desktop:get-logs", () => gatewayLog.getEntries());

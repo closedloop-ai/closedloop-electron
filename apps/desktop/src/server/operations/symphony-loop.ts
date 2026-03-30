@@ -325,7 +325,8 @@ function isExecutionResult(value: unknown): value is ExecutionResult {
 /** Track running loop processes for cancellation and to prevent GC of ChildProcess. */
 interface RunningLoop {
   pid: number;
-  child: ReturnType<typeof spawn>;
+  /** Undefined for loops recovered after an app restart — the ChildProcess handle is gone. */
+  child?: ReturnType<typeof spawn>;
   stage: "running" | "post-processing";
 }
 const runningLoops = new Map<string, RunningLoop>();
@@ -333,6 +334,20 @@ const runningLoops = new Map<string, RunningLoop>();
 export function getActiveLoopPid(loopId: string): number | null {
   const entry = runningLoops.get(loopId);
   return entry?.pid ?? null;
+}
+
+/**
+ * Register a loop that was discovered alive after an app restart.
+ * The ChildProcess handle is unavailable; only the PID is known.
+ * This enables cancellation via the normal kill path.
+ */
+export function registerRecoveredLoop(loopId: string, pid: number): void {
+  runningLoops.set(loopId, { pid, stage: "running" });
+}
+
+/** Remove a loop from the in-memory registry (used by boot-recovery exit watcher). */
+export function unregisterLoop(loopId: string): void {
+  runningLoops.delete(loopId);
 }
 
 function loopLog(loopId: string, ...args: unknown[]): void {
