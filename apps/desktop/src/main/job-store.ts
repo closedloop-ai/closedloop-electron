@@ -52,7 +52,6 @@ export type LocalJob = {
   warning?: string;
   exitCode?: number | null;
   // Runtime metadata fields for supervision and idempotency
-  runtimeToken?: string;
   pidStartedAt?: string;
   lastObservedJsonlOffset?: number;
   artifactsUploadedAt?: string;

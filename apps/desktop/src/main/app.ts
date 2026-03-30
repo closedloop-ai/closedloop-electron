@@ -1,68 +1,68 @@
-import os from "node:os";
-import path from "node:path";
+import { app, dialog, ipcMain, nativeImage, Notification } from "electron";
+import pkg from "electron-updater";
+import { execFile } from "node:child_process";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
+    copyFileSync,
+    existsSync,
+    mkdirSync,
+    readdirSync,
+    readFileSync,
 } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { randomBytes, randomUUID } from "node:crypto";
+import os from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, dialog, ipcMain, nativeImage, Notification } from "electron";
+import { promisify } from "node:util";
+import { enrichJobSnapshot } from "../server/operations/symphony-job-snapshot.js";
 import {
-  type AlwaysAllowRule,
-  DESKTOP_GATEWAY_VERSION,
-  EMPTY_CAPABILITIES,
-  type DesktopSettings,
-  type RiskTier,
+    computeSymphonyDir,
+    SymphonyDirNotConfiguredError,
+} from "../server/operations/symphony-utils.js";
+import type {
+    GatewayApprovalRequest,
+    GatewayApprovalResult,
+} from "../server/router.js";
+import { DesktopGatewayServer } from "../server/server.js";
+import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
+import {
+    DESKTOP_GATEWAY_VERSION,
+    EMPTY_CAPABILITIES,
+    type AlwaysAllowRule,
+    type DesktopSettings,
+    type RiskTier,
 } from "../shared/contracts.js";
 import {
-  buildAllowedDirectories,
-  normalizeScopePath,
+    buildAllowedDirectories,
+    normalizeScopePath,
 } from "../shared/sandbox-policy.js";
+import { ActivityLogStore } from "./activity-log-store.js";
 import { ApiKeyStore } from "./api-key-store.js";
+import {
+    resolveOperationId,
+    SUPPORTED_OPERATION_IDS,
+} from "./approval-operations.js";
+import { OPERATION_RISK_TIERS, shouldAutoApprove } from "./approval-policy.js";
+import { ApprovalStore } from "./approval-store.js";
 import { CloudCommandExecutor } from "./cloud-command-executor.js";
 import type { CloudSocketStatus } from "./cloud-protocol.js";
 import { CloudSocketService } from "./cloud-socket.js";
+import { gatewayLog } from "./gateway-logger.js";
+import { GatewayRecoveryManager } from "./gateway-recovery.js";
+import { isTerminalJobStatus, JobStore } from "./job-store.js";
+import { LocalSessionStore } from "./local-session-store.js";
+import {
+    normalizeAndValidateOrigin,
+    normalizeWebAppOrigin,
+} from "./origin-policy.js";
+import { seedReposConfig } from "./seed-repos-config.js";
 import { SettingsStore } from "./settings-store.js";
+import type { ShutdownResult } from "./shutdown.js";
+import { runShutdownSequence } from "./shutdown.js";
+import { TelemetryService } from "./telemetry-service.js";
 import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
-import { DesktopGatewayServer } from "../server/server.js";
-import {
-  computeSymphonyDir,
-  SymphonyDirNotConfiguredError,
-} from "../server/operations/symphony-utils.js";
-import { seedReposConfig } from "./seed-repos-config.js";
-import {
-  SUPPORTED_OPERATION_IDS,
-  resolveOperationId,
-} from "./approval-operations.js";
-import { shouldAutoApprove, OPERATION_RISK_TIERS } from "./approval-policy.js";
-import { gatewayLog } from "./gateway-logger.js";
-import { ActivityLogStore } from "./activity-log-store.js";
-import { ApprovalStore } from "./approval-store.js";
-import { JobStore, isTerminalJobStatus } from "./job-store.js";
-import { TelemetryService } from "./telemetry-service.js";
-import type {
-  GatewayApprovalRequest,
-  GatewayApprovalResult,
-} from "../server/router.js";
-import {
-  normalizeAndValidateOrigin,
-  normalizeWebAppOrigin,
-} from "./origin-policy.js";
-import { LocalSessionStore } from "./local-session-store.js";
-import { enrichJobSnapshot } from "../server/operations/symphony-job-snapshot.js";
-import { GatewayRecoveryManager } from "./gateway-recovery.js";
-import { runShutdownSequence } from "./shutdown.js";
-import type { ShutdownResult } from "./shutdown.js";
-import pkg from "electron-updater";
 const { autoUpdater } = pkg;
-import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);

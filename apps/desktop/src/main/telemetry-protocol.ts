@@ -21,7 +21,6 @@ export type TelemetryCategory =
   | "job.recovery.scan_started"
   | "job.recovery.reattached"
   | "job.recovery.reconciled_completed"
-  | "job.recovery.identity_mismatch"
   | "job.recovery.finalize_replayed";
 
 export interface TelemetryTraceContext {
@@ -31,7 +30,6 @@ export interface TelemetryTraceContext {
   loopId?: string;
   jobId?: string;
   gatewaySessionId?: string;
-  loopSessionId?: string;
 }
 
 export interface TelemetryDiagnostics {

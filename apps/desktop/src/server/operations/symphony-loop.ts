@@ -1,13 +1,11 @@
 import { execSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { getShellPath } from "../shell-path.js";
 import {
   closeSync,
   existsSync,
   mkdirSync,
   openSync,
   readFileSync,
-  readSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -15,6 +13,12 @@ import {
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import {
+  readLogTail,
+  readTextFile,
+  redactCredentials,
+  sanitizeErrorMessage,
+} from "../../main/diagnostics-helpers.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
 import {
@@ -22,16 +26,14 @@ import {
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
 import type { TelemetryEmitter } from "../../main/telemetry-protocol.js";
-import {
-  TELEMETRY_LOG_TAIL_LINES,
-  TELEMETRY_LOG_TAIL_MAX_BYTES,
-} from "../../main/telemetry-protocol.js";
+import { parseTokenUsage } from "../../main/token-usage.js";
 import type {
   OperationDispatcher,
   OperationRequestContext,
 } from "../operation-dispatcher.js";
 import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
+import { getShellPath } from "../shell-path.js";
 import { startOutputTailer } from "./output-tailer.js";
 import { findPluginScript, findPluginVersions, getPluginCacheRoot } from "./plugin-cache.js";
 import { sanitizeCommitMessage } from "./symphony-interactive.js";
@@ -42,6 +44,7 @@ import {
   resolveWorktreeParentDir,
   tryAssertRepoAllowed,
 } from "./symphony-utils.js";
+export { readLogTail } from "../../main/diagnostics-helpers.js";
 
 // ---------------------------------------------------------------------------
 // WorktreeProvider: abstraction over git worktree operations for testability
@@ -814,17 +817,6 @@ async function writeArtifactsForGeneratePrd(
 // Per-command output reading
 // ---------------------------------------------------------------------------
 
-function readTextFile(filePath: string): string | null {
-  try {
-    if (!existsSync(filePath)) {
-      return null;
-    }
-    return readFileSync(filePath, "utf-8");
-  } catch {
-    return null;
-  }
-}
-
 function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
   const plan = readJsonFileSync(path.join(claudeWorkDir, "plan.json"));
   const openQuestions = readTextFile(
@@ -863,126 +855,9 @@ function readGeneratePrdOutputs(worktreeDir: string): Record<string, unknown> {
   return { prd: prdContent ? { content: prdContent } : undefined };
 }
 
-/** Parse token usage from claude-output.jsonl (JSONL stream output). */
-function parseTokenUsage(claudeWorkDir: string): {
-  inputTokens: number;
-  outputTokens: number;
-} {
-  const totals = { inputTokens: 0, outputTokens: 0 };
-  const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
-  if (!existsSync(outputFile)) {
-    return totals;
-  }
-  try {
-    const content = readFileSync(outputFile, "utf-8");
-    for (const line of content.split("\n")) {
-      if (!line.trim()) {
-        continue;
-      }
-      try {
-        const entry = JSON.parse(line) as Record<string, unknown>;
-        if (entry.type === "assistant") {
-          const message = entry.message as Record<string, unknown> | undefined;
-          const usage = message?.usage as Record<string, number> | undefined;
-          if (usage) {
-            totals.inputTokens +=
-              (usage.input_tokens ?? 0) +
-              (usage.cache_creation_input_tokens ?? 0) +
-              (usage.cache_read_input_tokens ?? 0);
-            totals.outputTokens += usage.output_tokens ?? 0;
-          }
-        }
-      } catch {
-        // skip malformed lines
-      }
-    }
-  } catch {
-    // file read error
-  }
-  return totals;
-}
-
 // ---------------------------------------------------------------------------
 // Failure diagnostics helpers
 // ---------------------------------------------------------------------------
-
-/** Maximum bytes to read from the tail of a log file for diagnostics. */
-const LOG_TAIL_MAX_BYTES = TELEMETRY_LOG_TAIL_MAX_BYTES;
-
-/**
- * Read up to LOG_TAIL_MAX_BYTES from the tail of a log file synchronously.
- * Exported so that edge-case tests can import it directly.
- */
-export function readLogTail(logPath: string): string | null {
-  if (!existsSync(logPath)) {
-    return null;
-  }
-  try {
-    const stat = statSync(logPath);
-    const fileSize = stat.size;
-    if (fileSize === 0) {
-      return null;
-    }
-    const readBytes = Math.min(fileSize, LOG_TAIL_MAX_BYTES);
-    const offset = fileSize - readBytes;
-    const buf = Buffer.alloc(readBytes);
-    const fd = openSync(logPath, "r");
-    try {
-      readSync(fd, buf, 0, readBytes, offset);
-    } finally {
-      closeSync(fd);
-    }
-    const raw = buf.toString("utf-8");
-    // If we started mid-file, drop any partial first line to avoid garbled output
-    let tail: string;
-    if (offset > 0) {
-      const newlineIdx = raw.indexOf("\n");
-      tail = newlineIdx === -1 ? raw : raw.slice(newlineIdx + 1);
-    } else {
-      tail = raw;
-    }
-    // Cap to the last TELEMETRY_LOG_TAIL_LINES lines (AC-002: "last 50 lines / 32KB")
-    const lines = tail.split("\n");
-    if (lines.length > TELEMETRY_LOG_TAIL_LINES) {
-      return lines.slice(-TELEMETRY_LOG_TAIL_LINES).join("\n");
-    }
-    return tail;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Patterns matching common credential / secret formats.
- * Applied to log tail before including in telemetry events.
- * Each entry is a [pattern, replacement] tuple with a string replacement.
- */
-const CREDENTIAL_PATTERNS: Array<[RegExp, string]> = [
-  // AWS keys: AKIA... style (20 uppercase alphanum after AKIA/ASIA/AROA prefix)
-  [/\b(AKIA|ASIA|AROA)[A-Z0-9]{16}\b/g, "[REDACTED_AWS_KEY]"],
-  // Generic bearer / API tokens: "Bearer <token>"
-  [/\bBearer\s+[A-Za-z0-9\-._~+/]+=*/g, "Bearer [REDACTED]"],
-  // sk- prefixed API keys (OpenAI, Anthropic, etc.)
-  [/\bsk-[A-Za-z0-9\-_]{10,}/g, "[REDACTED_SK_KEY]"],
-  // GitHub personal access tokens: ghp_, gho_, ghs_, ghr_
-  [/\b(ghp|gho|ghs|ghr)_[A-Za-z0-9]{36,}/g, "[REDACTED_GH_TOKEN]"],
-  // Generic "password=..." or "secret=..." in query strings / env
-  [
-    /\b(password|secret|passwd|api_key|apikey|auth_token)=[^\s&"']+/gi,
-    "$1=[REDACTED]",
-  ],
-];
-
-/**
- * Apply credential-pattern filters to redact common secret formats from a string.
- */
-function redactCredentials(text: string): string {
-  let result = text;
-  for (const [pattern, replacement] of CREDENTIAL_PATTERNS) {
-    result = result.replace(pattern, replacement);
-  }
-  return result;
-}
 
 /**
  * Collect failure diagnostics for a failed loop process.
@@ -1457,18 +1332,6 @@ function executeGitOperations(
 }
 
 // ---------------------------------------------------------------------------
-// Sanitize error messages before persisting to job store
-// ---------------------------------------------------------------------------
-
-function sanitizeErrorMessage(msg: string): string {
-  return msg
-    .replace(/:\/\/[^@]+@/g, "://***@")
-    .replace(/\b[0-9a-f]{20,}\b/gi, "[REDACTED]")
-    .replace(/\b[A-Za-z0-9+/]{40,}={0,2}\b/g, "[REDACTED]")
-    .slice(0, 500);
-}
-
-// ---------------------------------------------------------------------------
 // Process completion handler (async, runs after spawn)
 // ---------------------------------------------------------------------------
 
@@ -1499,9 +1362,6 @@ async function handleProcessCompletion(
   if (exitCode !== 0) {
     // Collect diagnostics (log tail + token usage) for the failure event
     const diagnostics = collectFailureDiagnostics(claudeWorkDir);
-    const sessionFileForTelemetry = path.join(claudeWorkDir, "session-id.txt");
-    const rawSessionId = readTextFile(sessionFileForTelemetry);
-    const failureSessionId = rawSessionId ? rawSessionId.trim() : undefined;
     runningLoops.delete(loopId);
     const existingJob = jobStore?.getByLoopId(loopId);
     const wasCancelled =
@@ -1519,7 +1379,6 @@ async function handleProcessCompletion(
         operationId: operationId ?? existingJob?.operationId,
         loopId,
         jobId: loopId,
-        loopSessionId: failureSessionId,
       },
       diagnostics: {
         ...diagnostics,
@@ -2315,15 +2174,10 @@ async function handleLoopRequest(
     }
     let child: ReturnType<typeof spawn>;
 
-    // Generate a runtime token before spawn so it can be passed to the child
-    // process via environment variable and written to runtime.json.
-    const runtimeToken = crypto.randomUUID();
-
     try {
       const spawnEnv: Record<string, string> = {
         ...(process.env as Record<string, string>),
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
-        CLOSEDLOOP_LOOP_RUNTIME_TOKEN: runtimeToken,
         PATH: await getShellPath(),
       };
 
@@ -2557,14 +2411,15 @@ async function handleLoopRequest(
       return;
     }
 
-    // Write runtime.json (Electron-side, not child) before registering the
-    // exit handler so the file is guaranteed to exist before any exit event
-    // can fire.  Written synchronously to eliminate any async ordering risk.
+    // Write runtime.json (Electron-side, not child) with spawn metadata before
+    // registering the exit handler so the file exists before any exit event.
+    // Written synchronously to eliminate async ordering risk. Recovery is
+    // driven by LocalJob; this file mirrors pid/spawn time for diagnostics.
     const spawnedAt = new Date().toISOString();
     try {
       writeFileSync(
         path.join(claudeWorkDir, "runtime.json"),
-        JSON.stringify({ runtimeToken, pid, spawnedAt }),
+        JSON.stringify({ pid, spawnedAt }),
       );
     } catch {
       loopLog(body.loopId, "Failed to write runtime.json");
@@ -2635,7 +2490,6 @@ async function handleLoopRequest(
         status: "RUNNING",
         updatedAt: now,
         startedAt: existing?.startedAt ?? now,
-        runtimeToken,
         pidStartedAt: spawnedAt,
         apiBaseUrl,
       });

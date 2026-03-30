@@ -15,15 +15,18 @@
  */
 
 import crypto from "node:crypto";
-import { existsSync, readFileSync, statSync, openSync, readSync, closeSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import {
+  readLogTail,
+  readTextFile,
+  redactCredentials,
+  sanitizeErrorMessage,
+} from "./diagnostics-helpers.js";
+import { gatewayLog } from "./gateway-logger.js";
 import type { JobStore, LocalJob } from "./job-store.js";
 import type { TelemetryEmitter } from "./telemetry-protocol.js";
-import { gatewayLog } from "./gateway-logger.js";
-import {
-  TELEMETRY_LOG_TAIL_LINES,
-  TELEMETRY_LOG_TAIL_MAX_BYTES,
-} from "./telemetry-protocol.js";
+import { parseTokenUsage } from "./token-usage.js";
 
 // ---------------------------------------------------------------------------
 // Deps interface
@@ -60,18 +63,6 @@ export type LoopFinalizationReason = "live-exit" | "boot-recovery" | "manual-rep
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-function finalizerLog(loopId: string, ...args: unknown[]): void {
-  const short = loopId.slice(0, 8);
-  const ts = new Date().toISOString().slice(11, 23);
-  console.log(`[loop-finalizer][${ts}][${short}]`, ...args);
-}
-
-function finalizerWarn(loopId: string, ...args: unknown[]): void {
-  const short = loopId.slice(0, 8);
-  const ts = new Date().toISOString().slice(11, 23);
-  console.warn(`[loop-finalizer][${ts}][${short}]`, ...args);
-}
-
 /**
  * Read and parse a JSON file; returns null if missing, empty, or invalid.
  * Inlined here to avoid importing from server/ (cross-layer violation).
@@ -85,118 +76,6 @@ function readJsonFileSync(filePath: string): unknown | null {
   } catch {
     return null;
   }
-}
-
-function readTextFile(filePath: string): string | null {
-  try {
-    if (!existsSync(filePath)) {
-      return null;
-    }
-    return readFileSync(filePath, "utf-8");
-  } catch {
-    return null;
-  }
-}
-
-/** Read up to TELEMETRY_LOG_TAIL_MAX_BYTES from the tail of a log file. */
-function readLogTail(logPath: string): string | null {
-  if (!existsSync(logPath)) {
-    return null;
-  }
-  try {
-    const stat = statSync(logPath);
-    const fileSize = stat.size;
-    if (fileSize === 0) {
-      return null;
-    }
-    const readBytes = Math.min(fileSize, TELEMETRY_LOG_TAIL_MAX_BYTES);
-    const offset = fileSize - readBytes;
-    const buf = Buffer.alloc(readBytes);
-    const fd = openSync(logPath, "r");
-    try {
-      readSync(fd, buf, 0, readBytes, offset);
-    } finally {
-      closeSync(fd);
-    }
-    const raw = buf.toString("utf-8");
-    let tail: string;
-    if (offset > 0) {
-      const newlineIdx = raw.indexOf("\n");
-      tail = newlineIdx === -1 ? raw : raw.slice(newlineIdx + 1);
-    } else {
-      tail = raw;
-    }
-    const lines = tail.split("\n");
-    if (lines.length > TELEMETRY_LOG_TAIL_LINES) {
-      return lines.slice(-TELEMETRY_LOG_TAIL_LINES).join("\n");
-    }
-    return tail;
-  } catch {
-    return null;
-  }
-}
-
-const CREDENTIAL_PATTERNS: Array<[RegExp, string]> = [
-  [/\b(AKIA|ASIA|AROA)[A-Z0-9]{16}\b/g, "[REDACTED_AWS_KEY]"],
-  [/\bBearer\s+[A-Za-z0-9\-._~+/]+=*/g, "Bearer [REDACTED]"],
-  [/\bsk-[A-Za-z0-9\-_]{10,}/g, "[REDACTED_SK_KEY]"],
-  [/\b(ghp|gho|ghs|ghr)_[A-Za-z0-9]{36,}/g, "[REDACTED_GH_TOKEN]"],
-  [/\b(password|secret|passwd|api_key|apikey|auth_token)=[^\s&"']+/gi, "$1=[REDACTED]"],
-];
-
-function redactCredentials(text: string): string {
-  let result = text;
-  for (const [pattern, replacement] of CREDENTIAL_PATTERNS) {
-    result = result.replace(pattern, replacement);
-  }
-  return result;
-}
-
-function sanitizeErrorMessage(msg: string): string {
-  return msg
-    .replace(/:\/\/[^@]+@/g, "://***@")
-    .replace(/\b[0-9a-f]{20,}\b/gi, "[REDACTED]")
-    .replace(/\b[A-Za-z0-9+/]{40,}={0,2}\b/g, "[REDACTED]")
-    .slice(0, 500);
-}
-
-/** Parse token usage from claude-output.jsonl */
-function parseTokenUsage(claudeWorkDir: string): {
-  inputTokens: number;
-  outputTokens: number;
-} {
-  const totals = { inputTokens: 0, outputTokens: 0 };
-  const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
-  if (!existsSync(outputFile)) {
-    return totals;
-  }
-  try {
-    const content = readFileSync(outputFile, "utf-8");
-    for (const line of content.split("\n")) {
-      if (!line.trim()) {
-        continue;
-      }
-      try {
-        const entry = JSON.parse(line) as Record<string, unknown>;
-        if (entry.type === "assistant") {
-          const message = entry.message as Record<string, unknown> | undefined;
-          const usage = message?.usage as Record<string, number> | undefined;
-          if (usage) {
-            totals.inputTokens +=
-              (usage.input_tokens ?? 0) +
-              (usage.cache_creation_input_tokens ?? 0) +
-              (usage.cache_read_input_tokens ?? 0);
-            totals.outputTokens += usage.output_tokens ?? 0;
-          }
-        }
-      } catch {
-        // skip malformed lines
-      }
-    }
-  } catch {
-    // file read error
-  }
-  return totals;
 }
 
 /** Read artifacts from claudeWorkDir based on job command. */
@@ -260,7 +139,10 @@ async function postLoopEvent(
     ...eventBody,
     timestamp: eventBody.timestamp ?? new Date().toISOString(),
   };
-  finalizerLog(loopId, `POST event: ${payload.type}`, url);
+  gatewayLog.info(
+    "loop-finalizer",
+    `loopId=${loopId} POST event: ${String(payload.type)} ${url}`,
+  );
   try {
     const resp = await fetch(url, {
       method: "POST",
@@ -273,18 +155,16 @@ async function postLoopEvent(
     });
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
-      finalizerWarn(loopId, `Event POST failed: ${resp.status} ${resp.statusText}`, text);
       gatewayLog.error(
         "loop-finalizer",
         `POST ${payload.type} to ${url} failed: ${resp.status} ${resp.statusText} ${text}`,
       );
       return { success: false, error: `HTTP ${resp.status} ${resp.statusText}` };
     }
-    finalizerLog(loopId, `Event POST success: ${resp.status}`);
+    gatewayLog.info("loop-finalizer", `loopId=${loopId} Event POST success: ${resp.status}`);
     return { success: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    finalizerWarn(loopId, "Failed to post event:", err);
     gatewayLog.error("loop-finalizer", `POST ${payload.type} network error: ${msg}`);
     return { success: false, error: msg };
   }
@@ -297,7 +177,7 @@ async function uploadArtifacts(
   body: Record<string, unknown>,
 ): Promise<{ success: boolean; error?: string }> {
   const url = `${apiBaseUrl}/loops/${loopId}/upload-artifacts`;
-  finalizerLog(loopId, "Uploading artifacts...", url);
+  gatewayLog.info("loop-finalizer", `loopId=${loopId} Uploading artifacts... ${url}`);
   try {
     const resp = await fetch(url, {
       method: "POST",
@@ -309,18 +189,16 @@ async function uploadArtifacts(
     });
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
-      finalizerWarn(loopId, `Upload failed: ${resp.status} ${resp.statusText}`, text);
       gatewayLog.error(
         "loop-finalizer",
         `Artifact upload to ${url} failed: ${resp.status} ${resp.statusText} ${text}`,
       );
       return { success: false, error: `HTTP ${resp.status} ${resp.statusText}` };
     }
-    finalizerLog(loopId, `Upload success: ${resp.status}`);
+    gatewayLog.info("loop-finalizer", `loopId=${loopId} Artifact upload success: ${resp.status}`);
     return { success: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    finalizerWarn(loopId, "Failed to upload artifacts:", err);
     gatewayLog.error("loop-finalizer", `Artifact upload network error: ${msg}`);
     return { success: false, error: msg };
   }
@@ -350,35 +228,24 @@ export async function finalizeLoopFromRuntime(
   reason: LoopFinalizationReason,
   deps: LoopFinalizerDeps,
 ): Promise<void> {
-  const { jobStore, telemetry, assertPathAllowed, apiAuthToken, apiBaseUrl, isProcessRunning } = deps;
-  const { loopId } = job;
+  const { jobStore, telemetry, apiAuthToken, apiBaseUrl, isProcessRunning } = deps;
 
   // Entry guard: if job is pending cancellation and process is still alive, bail out.
   if (job.status === "CANCEL_PENDING") {
     if (job.pid != null && isProcessRunning(job.pid)) {
-      finalizerLog(loopId, "CANCEL_PENDING and process still alive — skipping finalization");
+      gatewayLog.info(
+        "loop-finalizer",
+        `loopId=${job.loopId} CANCEL_PENDING and process still alive — skipping finalization`,
+      );
       return;
     }
   }
 
   const claudeWorkDir = job.claudeWorkDir;
   if (!claudeWorkDir) {
-    finalizerWarn(loopId, "No claudeWorkDir on job — cannot finalize");
-    return;
-  }
-
-  // Security: verify the work directory is inside the allowed sandbox before
-  // any filesystem read.  allowedDirectories is derived from the job's own
-  // claudeWorkDir (it must be allowed by definition) so we use it as a
-  // self-contained single-entry allowlist.  Callers in boot-recovery paths
-  // may pass a wider allowedDirectories list via the assertPathAllowed closure.
-  try {
-    assertPathAllowed(claudeWorkDir, [claudeWorkDir]);
-  } catch (err) {
-    finalizerWarn(loopId, "claudeWorkDir failed sandbox check — skipping finalization", err);
-    gatewayLog.error(
+    gatewayLog.warn(
       "loop-finalizer",
-      `Security: claudeWorkDir=${claudeWorkDir} not in allowed directories for loopId=${loopId}`,
+      `loopId=${job.loopId} No claudeWorkDir on job — cannot finalize`,
     );
     return;
   }
@@ -391,56 +258,41 @@ export async function finalizeLoopFromRuntime(
   // Step 1: Artifact upload (skip if already done)
   // ------------------------------------------------------------------
   let artifacts: Record<string, unknown> = {};
-  const metadata: Record<string, unknown> = {};
 
   if (!job.artifactsUploadedAt) {
-    finalizerLog(loopId, `Reading artifacts for command=${command}`);
-    artifacts = readArtifacts(command, claudeWorkDir, worktreeDir);
-
-    // Read session ID if available
-    const sessionFile = path.join(claudeWorkDir, "session-id.txt");
-    const sessionId = readTextFile(sessionFile);
-    if (sessionId) {
-      metadata.sessionId = sessionId.trim();
-    }
-
-    const artifactKeys = Object.keys(artifacts);
-    finalizerLog(loopId, "Artifact keys:", artifactKeys);
     gatewayLog.info(
       "loop-finalizer",
-      `Uploading artifacts for ${command} loopId=${loopId}: [${artifactKeys.join(", ")}]`,
+      `Reading artifacts loopId=${job.loopId} command=${command}`,
+    );
+    artifacts = readArtifacts(command, claudeWorkDir, worktreeDir);
+
+    const artifactKeys = Object.keys(artifacts);
+    gatewayLog.info(
+      "loop-finalizer",
+      `Uploading artifacts for ${command} loopId=${job.loopId}: [${artifactKeys.join(", ")}]`,
     );
 
-    const uploadResult = await uploadArtifacts(apiBaseUrl, loopId, apiAuthToken, {
+    const uploadResult = await uploadArtifacts(apiBaseUrl, job.loopId, apiAuthToken, {
       artifacts,
-      metadata,
     });
 
     if (!uploadResult.success) {
-      finalizerWarn(
-        loopId,
-        "Artifact upload failed:",
-        uploadResult.error ?? "unknown error",
-      );
       gatewayLog.warn(
         "loop-finalizer",
-        `Artifact upload failed: ${uploadResult.error ?? "unknown error"}, loopId=${loopId}`,
+        `Artifact upload failed: ${uploadResult.error ?? "unknown error"}, loopId=${job.loopId}`,
       );
       warnings.push("ARTIFACT_UPLOAD_FAILED");
     } else {
       // Persist the idempotency timestamp
       const now = new Date().toISOString();
-      const current = jobStore.getByLoopId(loopId) ?? job;
+      const current = jobStore.getByLoopId(job.loopId) ?? job;
       jobStore.upsert({ ...current, artifactsUploadedAt: now, updatedAt: now });
     }
   } else {
-    finalizerLog(loopId, `Skipping artifact upload — already done at ${job.artifactsUploadedAt}`);
-    // Re-read metadata for use in the completed event (session ID)
-    const sessionFile = path.join(claudeWorkDir, "session-id.txt");
-    const sessionId = readTextFile(sessionFile);
-    if (sessionId) {
-      metadata.sessionId = sessionId.trim();
-    }
+    gatewayLog.info(
+      "loop-finalizer",
+      `loopId=${job.loopId} Skipping artifact upload — already done at ${job.artifactsUploadedAt}`,
+    );
     artifacts = readArtifacts(command, claudeWorkDir, worktreeDir);
   }
 
@@ -449,9 +301,9 @@ export async function finalizeLoopFromRuntime(
   // ------------------------------------------------------------------
   if (!job.completedEventPostedAt) {
     const tokensUsed = parseTokenUsage(claudeWorkDir);
-    finalizerLog(
-      loopId,
-      `Tokens used: input=${tokensUsed.inputTokens}, output=${tokensUsed.outputTokens}`,
+    gatewayLog.info(
+      "loop-finalizer",
+      `loopId=${job.loopId} Tokens used: input=${tokensUsed.inputTokens}, output=${tokensUsed.outputTokens}`,
     );
 
     const result: Record<string, unknown> = {
@@ -467,10 +319,6 @@ export async function finalizeLoopFromRuntime(
       result.has_changes = execResult.has_changes ?? false;
     }
 
-    if (metadata.sessionId) {
-      result.sessionId = metadata.sessionId;
-    }
-
     const completedEvent: Record<string, unknown> = {
       type: "completed",
       result,
@@ -478,37 +326,39 @@ export async function finalizeLoopFromRuntime(
         input: tokensUsed.inputTokens,
         output: tokensUsed.outputTokens,
       },
-      loopId,
+      loopId: job.loopId,
       ...(warnings.length > 0 ? { warnings } : {}),
     };
 
-    finalizerLog(loopId, "Posting completed event...");
-    const eventResult = await postLoopEvent(apiBaseUrl, loopId, apiAuthToken, completedEvent);
+    gatewayLog.info("loop-finalizer", `loopId=${job.loopId} Posting completed event...`);
+    const eventResult = await postLoopEvent(apiBaseUrl, job.loopId, apiAuthToken, completedEvent);
 
     if (!eventResult.success) {
-      finalizerWarn(loopId, "Completed event POST failed:", eventResult.error ?? "unknown error");
       gatewayLog.warn(
         "loop-finalizer",
-        `Completed event POST failed: ${eventResult.error ?? "unknown error"}, loopId=${loopId}`,
+        `Completed event POST failed: ${eventResult.error ?? "unknown error"}, loopId=${job.loopId}`,
       );
       warnings.push("EVENT_POST_FAILED");
     } else {
       // Persist the idempotency timestamp
       const now = new Date().toISOString();
-      const current = jobStore.getByLoopId(loopId) ?? job;
+      const current = jobStore.getByLoopId(job.loopId) ?? job;
       jobStore.upsert({ ...current, completedEventPostedAt: now, updatedAt: now });
     }
   } else {
-    finalizerLog(loopId, `Skipping completed event — already posted at ${job.completedEventPostedAt}`);
+    gatewayLog.info(
+      "loop-finalizer",
+      `loopId=${job.loopId} Skipping completed event — already posted at ${job.completedEventPostedAt}`,
+    );
   }
 
   // ------------------------------------------------------------------
   // Step 3: Persist final status (skip if already done)
   // ------------------------------------------------------------------
   if (!job.finalStatusPersistedAt) {
-    finalizerLog(loopId, "Persisting final COMPLETED status");
+    gatewayLog.info("loop-finalizer", `loopId=${job.loopId} Persisting final COMPLETED status`);
     const now = new Date().toISOString();
-    const current = jobStore.getByLoopId(loopId) ?? job;
+    const current = jobStore.getByLoopId(job.loopId) ?? job;
     jobStore.upsert({
       ...current,
       status: "COMPLETED",
@@ -521,25 +371,23 @@ export async function finalizeLoopFromRuntime(
           ? warnings.map(sanitizeErrorMessage).join("; ")
           : undefined,
     });
-    finalizerLog(loopId, "Loop finalized successfully");
+    gatewayLog.info("loop-finalizer", `loopId=${job.loopId} Loop finalized successfully`);
   } else {
-    finalizerLog(loopId, `Skipping status update — already persisted at ${job.finalStatusPersistedAt}`);
+    gatewayLog.info(
+      "loop-finalizer",
+      `loopId=${job.loopId} Skipping status update — already persisted at ${job.finalStatusPersistedAt}`,
+    );
   }
 
   // ------------------------------------------------------------------
   // Telemetry: emit based on reason
   // ------------------------------------------------------------------
-  const finalJob = jobStore.getByLoopId(loopId) ?? job;
+  const finalJob = jobStore.getByLoopId(job.loopId) ?? job;
 
   const telemetryCategory =
     reason === "live-exit"
       ? ("job.completed" as const)
-      : reason === "boot-recovery"
-        ? ("job.completed" as const)
-        : ("job.completed" as const);
-
-  const loopSessionId =
-    typeof metadata.sessionId === "string" ? metadata.sessionId : undefined;
+      : ("job.recovery.finalize_replayed" as const);
 
   // Collect diagnostics for non-live-exit reasons (boot-recovery / manual-repair)
   let diagnostics: { logTail?: string; tokenUsage?: { inputTokens: number; outputTokens: number } } | undefined;
@@ -563,9 +411,8 @@ export async function finalizeLoopFromRuntime(
     trace: {
       commandId: finalJob.commandId,
       operationId: finalJob.operationId,
-      loopId,
-      jobId: loopId,
-      loopSessionId,
+      loopId: job.loopId,
+      jobId: job.loopId,
     },
     ...(diagnostics ? { diagnostics } : {}),
   });
