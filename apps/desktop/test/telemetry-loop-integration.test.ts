@@ -292,7 +292,7 @@ test("telemetry: job.failed emitted with correct category/trace/diagnostics on p
     "diagnostics.diagnosticsVersion must be a number",
   );
   assert.ok(
-    diag.diagnosticsVersion ?? 0 >= 1,
+    (diag.diagnosticsVersion ?? 0) >= 1,
     "diagnosticsVersion must be >= 1",
   );
 });

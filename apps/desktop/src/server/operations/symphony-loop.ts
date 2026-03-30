@@ -1633,6 +1633,7 @@ async function handleProcessCompletion(
         operationId ?? existingJob?.operationId,
         loopId,
         exitCode,
+        diagnostics,
         failureSessionId,
       );
     } else {

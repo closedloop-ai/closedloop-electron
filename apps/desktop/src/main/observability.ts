@@ -223,6 +223,7 @@ export class Observability {
     operationId: string | undefined,
     loopId: string,
     exitCode: number,
+    diagnostics?: TelemetryDiagnostics,
     loopSessionId?: string,
   ): void {
     Observability.emitTelemetry(
@@ -230,7 +231,7 @@ export class Observability {
       "job.cancelled",
       `Process cancelled (exit code ${exitCode})`,
       { commandId, operationId, loopId, jobId: loopId, loopSessionId },
-      { exitCode },
+      diagnostics ? { ...diagnostics, exitCode } : { exitCode },
     );
   }
 
