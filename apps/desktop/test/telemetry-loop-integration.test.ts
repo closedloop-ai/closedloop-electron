@@ -39,6 +39,7 @@ const tempPathsToClean: string[] = [];
 
 const originalPath = process.env.PATH;
 const originalHome = process.env.HOME;
+const originalShell = process.env.SHELL;
 const originalRawPipeline = process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
 const originalWorktreeParentDir = process.env.SYMPHONY_WORKTREE_PARENT_DIR;
 
@@ -47,6 +48,12 @@ afterEach(async () => {
     delete process.env.PATH;
   } else {
     process.env.PATH = originalPath;
+  }
+
+  if (originalShell === undefined) {
+    delete process.env.SHELL;
+  } else {
+    process.env.SHELL = originalShell;
   }
   resetShellPathCache();
 
@@ -166,6 +173,7 @@ async function createFakeClaudeBin(fakeBin: string, exitCode: number): Promise<v
     `#!/bin/sh\nexit ${exitCode}\n`,
     { mode: 0o755 }
   );
+  process.env.SHELL = "/bin/false";
 }
 
 // ---------------------------------------------------------------------------
@@ -346,6 +354,7 @@ test("telemetry: preflight.binary_not_found emitted when claude is absent from P
   // No claude binary — PATH has no executable named "claude"
   const emptyBin = path.join(tmpDir, "empty-bin");
   await fs.mkdir(emptyBin, { recursive: true });
+  process.env.SHELL = "/bin/false";
   process.env.PATH = emptyBin;
   resetShellPathCache();
 

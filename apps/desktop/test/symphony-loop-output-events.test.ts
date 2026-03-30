@@ -19,6 +19,7 @@ const serversToClose: DesktopGatewayServer[] = [];
 const eventServersToClose: http.Server[] = [];
 const originalPath = process.env.PATH;
 const originalHome = process.env.HOME;
+const originalShell = process.env.SHELL;
 
 // NOTE: We do NOT set CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE globally.
 // Tests that need the raw pipeline (no formatter) set it per-test.
@@ -29,6 +30,12 @@ afterEach(async () => {
     delete process.env.PATH;
   } else {
     process.env.PATH = originalPath;
+  }
+
+  if (originalShell === undefined) {
+    delete process.env.SHELL;
+  } else {
+    process.env.SHELL = originalShell;
   }
   resetShellPathCache();
 
@@ -342,6 +349,7 @@ describe("T-5.2: Output events arrive before completed event", () => {
       "exit 0",
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
+    process.env.SHELL = "/bin/false";
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
     resetShellPathCache();
 
@@ -421,6 +429,7 @@ describe("T-5.2: Output events arrive before completed event", () => {
       "exit 0",
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
+    process.env.SHELL = "/bin/false";
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
     resetShellPathCache();
 
@@ -538,6 +547,7 @@ describe("T-5.4: Flush on exit", () => {
         "exit 0",
       ].join("\n");
       await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
+      process.env.SHELL = "/bin/false";
       process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
       resetShellPathCache();
 
@@ -615,6 +625,7 @@ describe("T-5.5: No-formatter fallback", () => {
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
     // Include system paths so 'bash', 'grep', 'tee' are available for the pipeline
+    process.env.SHELL = "/bin/false";
     process.env.PATH = `${fakeBin}:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin`;
     resetShellPathCache();
 
@@ -718,6 +729,7 @@ describe("T-5.7: tokensUsed shape in completed event", () => {
       "exit 0",
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
+    process.env.SHELL = "/bin/false";
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
     resetShellPathCache();
 
@@ -775,6 +787,7 @@ describe("T-5.7: tokensUsed shape in completed event", () => {
       "exit 0",
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
+    process.env.SHELL = "/bin/false";
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
     resetShellPathCache();
 

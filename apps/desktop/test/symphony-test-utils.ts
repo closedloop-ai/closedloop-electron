@@ -13,6 +13,8 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { JobStore } from "../src/main/job-store.js";
+import type { TelemetryEmitter } from "../src/main/telemetry-protocol.js";
 import { resetShellPathCache } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
@@ -25,6 +27,10 @@ const execFileAsync = promisify(execFile);
 
 export type RecordedRequest = { method: string; url: string; body: string };
 
+export const TEST_NOOP_TELEMETRY: TelemetryEmitter = {
+  emit() {},
+};
+
 // ---------------------------------------------------------------------------
 // Environment save/restore
 // ---------------------------------------------------------------------------
@@ -33,6 +39,7 @@ const ENV_KEYS = [
   "SYMPHONY_WORKTREE_PARENT_DIR",
   "PATH",
   "HOME",
+  "SHELL",
   "CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE",
 ] as const;
 
@@ -285,6 +292,9 @@ export async function setupStubClaude(tmpDir: string, scriptLines?: string[]): P
     "exit 0",
   ]).join("\n");
   await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
+  // Force getShellPath() to fall back to process.env.PATH so the stubbed
+  // claude binary is used instead of whatever the user's login shell exposes.
+  process.env.SHELL = "/bin/false";
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   resetShellPathCache();
 }
@@ -347,6 +357,7 @@ export function createEvaluateTestHarness(machineName: string): EvaluateTestHarn
   const eventServersToClose: http.Server[] = [];
   const eventServerCancellers: Array<() => void> = [];
   const originalPath = process.env.PATH;
+  const originalShell = process.env.SHELL;
   const originalRawPipeline = process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
 
   function makeTempDir(label: string): string {
@@ -365,6 +376,10 @@ export function createEvaluateTestHarness(machineName: string): EvaluateTestHarn
     getApiOrigin?: () => string;
   }): DesktopGatewayServer {
     const tmpDir = options?.tmpDir ?? makeTempDir(machineName);
+    const jobStore = new JobStore({
+      cwd: tmpDir,
+      name: `${machineName}-jobs`,
+    });
     const server = new DesktopGatewayServer({
       host: "127.0.0.1",
       preferredPort: 0,
@@ -377,6 +392,8 @@ export function createEvaluateTestHarness(machineName: string): EvaluateTestHarn
       version: "0.1.0-test",
       capabilities: EMPTY_CAPABILITIES,
       discoveryFilePath: path.join(tmpDir, "electron-port"),
+      jobStore,
+      telemetry: TEST_NOOP_TELEMETRY,
     });
     serversToClose.push(server);
     return server;
@@ -502,6 +519,12 @@ export function createEvaluateTestHarness(machineName: string): EvaluateTestHarn
         delete process.env.PATH;
       } else {
         process.env.PATH = originalPath;
+      }
+
+      if (originalShell === undefined) {
+        delete process.env.SHELL;
+      } else {
+        process.env.SHELL = originalShell;
       }
       resetShellPathCache();
 

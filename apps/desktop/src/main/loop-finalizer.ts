@@ -20,7 +20,6 @@ import path from "node:path";
 import {
   readLogTail,
   readTextFile,
-  redactCredentials,
   sanitizeErrorMessage,
 } from "./diagnostics-helpers.js";
 import { gatewayLog } from "./gateway-logger.js";
@@ -252,7 +251,12 @@ export async function finalizeLoopFromRuntime(
 
   const command = job.command;
   const worktreeDir = job.worktreeDir;
-  const warnings: string[] = [];
+  const warnings: string[] = job.warning
+    ? job.warning
+        .split(";")
+        .map((part) => part.trim())
+        .filter((part) => part.length > 0)
+    : [];
 
   // ------------------------------------------------------------------
   // Step 1: Artifact upload (skip if already done)
@@ -274,6 +278,10 @@ export async function finalizeLoopFromRuntime(
 
     const uploadResult = await uploadArtifacts(apiBaseUrl, job.loopId, apiAuthToken, {
       artifacts,
+      metadata: {
+        finishedAt: new Date().toISOString(),
+        command: command.toLowerCase(),
+      },
     });
 
     if (!uploadResult.success) {
@@ -394,7 +402,7 @@ export async function finalizeLoopFromRuntime(
   if (reason !== "live-exit") {
     const logPath = path.join(claudeWorkDir, "symphony-loop.log");
     const rawTail = readLogTail(logPath);
-    const logTail = rawTail ? redactCredentials(rawTail) : undefined;
+    const logTail = rawTail ?? undefined;
     const tokenUsage = parseTokenUsage(claudeWorkDir);
     if (logTail || tokenUsage.inputTokens > 0 || tokenUsage.outputTokens > 0) {
       diagnostics = { logTail, tokenUsage };

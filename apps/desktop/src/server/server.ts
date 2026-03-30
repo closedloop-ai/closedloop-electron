@@ -10,7 +10,7 @@ import {
 } from "../shared/contracts.js";
 import { gatewayLog } from "../main/gateway-logger.js";
 import type { LocalSessionStore } from "../main/local-session-store.js";
-import type { JobStore } from "../main/job-store.js";
+import { JobStore } from "../main/job-store.js";
 import {
   GatewayRouter,
   type GatewayActivityEvent,
@@ -56,11 +56,24 @@ export class DesktopGatewayServer {
   private activePort: number;
 
   constructor(options: DesktopGatewayServerOptions) {
+    const discoveryFilePath =
+      options.discoveryFilePath ??
+      path.join(os.homedir(), ".closedloop-ai", "electron-port");
+    const resolvedJobStore =
+      options.jobStore ??
+      new JobStore({
+        cwd: path.dirname(discoveryFilePath),
+        name: `${options.machineName}-jobs`,
+      });
+    const defaultTelemetry: TelemetryEmitter = {
+      emit() {},
+    };
+
     this.options = {
       ...options,
-      discoveryFilePath:
-        options.discoveryFilePath ??
-        path.join(os.homedir(), ".closedloop-ai", "electron-port"),
+      discoveryFilePath,
+      jobStore: resolvedJobStore,
+      telemetry: options.telemetry ?? defaultTelemetry,
     };
     this.activePort = this.options.preferredPort;
     this.router = new GatewayRouter({

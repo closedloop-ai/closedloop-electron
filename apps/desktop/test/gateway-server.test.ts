@@ -21,6 +21,7 @@ const childPidsToKill: number[] = [];
 const originalSymphonyWorktreeParentDir = process.env.SYMPHONY_WORKTREE_PARENT_DIR;
 const originalHome = process.env.HOME;
 const originalPath = process.env.PATH;
+const originalShell = process.env.SHELL;
 
 afterEach(async () => {
   if (originalSymphonyWorktreeParentDir === undefined) {
@@ -39,6 +40,12 @@ afterEach(async () => {
     delete process.env.PATH;
   } else {
     process.env.PATH = originalPath;
+  }
+
+  if (originalShell === undefined) {
+    delete process.env.SHELL;
+  } else {
+    process.env.SHELL = originalShell;
   }
   resetShellPathCache();
 
@@ -2617,6 +2624,7 @@ test("returns empty description when claude CLI is unavailable", async () => {
   await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.SHELL = "/bin/false";
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   resetShellPathCache();
 
@@ -2686,6 +2694,7 @@ test("uses valid JSON from claude stdout even when exit code is non-zero", async
   await fs.writeFile(path.join(fakeBin, "claude"), fakeClaudeScript, { mode: 0o755 });
 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.SHELL = "/bin/false";
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   resetShellPathCache();
 

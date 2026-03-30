@@ -3,7 +3,6 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
-import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
@@ -11,186 +10,26 @@ import {
   readEvaluatePrdOutputs,
   writePrdArtifact,
 } from "../src/server/operations/symphony-loop.js";
+import {
+  createEvaluateTestHarness,
+  postToLoopEndpoint,
+  setupStubClaude,
+} from "./symphony-test-utils.js";
 import { resetShellPathCache } from "../src/server/shell-path.js";
-import { DesktopGatewayServer } from "../src/server/server.js";
-import { setupStubClaude } from "./symphony-test-utils.js";
-import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 
 // ---------------------------------------------------------------------------
 // Shared cleanup state
 // ---------------------------------------------------------------------------
 
-const tempPathsToClean: string[] = [];
-const serversToClose: DesktopGatewayServer[] = [];
-const eventServersToClose: http.Server[] = [];
-const originalPath = process.env.PATH;
-const originalRawPipeline = process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
+const harness = createEvaluateTestHarness("evaluate-prd-test-machine");
+const { makeTempDir, makeGatewayServer, startEventServer } = harness;
 
-beforeEach(() => {
-  // Avoid grep|tee|python stream_formatter pipeline — stub claude is not a real stream.
-  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
-});
-
-afterEach(async () => {
-  if (originalRawPipeline === undefined) {
-    delete process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
-  } else {
-    process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = originalRawPipeline;
-  }
-
-  // Restore PATH
-  if (originalPath === undefined) {
-    delete process.env.PATH;
-  } else {
-    process.env.PATH = originalPath;
-  }
-  resetShellPathCache();
-
-  for (const server of serversToClose.splice(0)) {
-    await server.stop();
-  }
-
-  for (const srv of eventServersToClose.splice(0)) {
-    await new Promise<void>((resolve, reject) => {
-      srv.close((err) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve();
-        }
-      });
-    });
-  }
-
-  for (const p of tempPathsToClean.splice(0)) {
-    await fs.rm(p, { recursive: true, force: true });
-  }
-});
+beforeEach(() => harness.beforeEach());
+afterEach(() => harness.afterEach());
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function makeTempDir(): string {
-  const dir = path.join(
-    os.tmpdir(),
-    `evaluate-prd-test-${Date.now()}-${Math.random().toString(36).slice(2)}`
-  );
-  mkdirSync(dir, { recursive: true });
-  tempPathsToClean.push(dir);
-  return dir;
-}
-
-function makeGatewayServer(options?: {
-  allowedDirs?: string[];
-  tmpDir?: string;
-  getApiOrigin?: () => string;
-}): DesktopGatewayServer {
-  const tmpDir = options?.tmpDir ?? makeTempDir();
-  const server = new DesktopGatewayServer({
-    host: "127.0.0.1",
-    preferredPort: 0,
-    fallbackPorts: [0],
-    webAppOrigin: "https://app.symphony.com",
-    getGatewayAuthToken: () => "test-token",
-    // Dummy origin for tests that never POST loop events (Node fetch rejects port 9 as invalid).
-    getApiOrigin: options?.getApiOrigin ?? (() => "http://127.0.0.1:49152"),
-    getAllowedDirectories: () => options?.allowedDirs ?? [os.tmpdir()],
-    machineName: "evaluate-prd-test-machine",
-    version: "0.1.0-test",
-    capabilities: EMPTY_CAPABILITIES,
-    discoveryFilePath: path.join(tmpDir, "electron-port"),
-  });
-  serversToClose.push(server);
-  return server;
-}
-
-/**
- * Start an event-capture HTTP server on a random port (port 0).
- * Pass `getApiOrigin: () => \`http://127.0.0.1:${port}\`` into makeGatewayServer so loop events reach this server.
- */
-async function startEventServer(): Promise<{
-  port: number;
-  waitForEvent: (
-    predicate: (body: Record<string, unknown>) => boolean,
-    timeoutMs?: number
-  ) => Promise<Record<string, unknown>>;
-}> {
-  const collected: Array<Record<string, unknown>> = [];
-  const waiters: Array<{
-    predicate: (b: Record<string, unknown>) => boolean;
-    resolve: (b: Record<string, unknown>) => void;
-    reject: (e: Error) => void;
-  }> = [];
-
-  const server = http.createServer((req, res) => {
-    let raw = "";
-    req.on("data", (chunk: Buffer) => {
-      raw += chunk.toString();
-    });
-    req.on("end", () => {
-      res.statusCode = 200;
-      res.end("{}");
-      let body: Record<string, unknown>;
-      try {
-        body = JSON.parse(raw) as Record<string, unknown>;
-      } catch {
-        body = {};
-      }
-      collected.push(body);
-      for (let i = waiters.length - 1; i >= 0; i--) {
-        const waiter = waiters[i];
-        if (waiter.predicate(body)) {
-          waiters.splice(i, 1);
-          waiter.resolve(body);
-        }
-      }
-    });
-  });
-
-  // Await the listen to ensure port is assigned before returning
-  const port = await new Promise<number>((resolve, reject) => {
-    server.listen(0, "127.0.0.1", () => {
-      const addr = server.address();
-      if (!addr || typeof addr === "string") {
-        reject(new Error("Could not get server address"));
-        return;
-      }
-      resolve(addr.port);
-    });
-    server.once("error", reject);
-  });
-
-  eventServersToClose.push(server);
-
-  const waitForEvent = (predicate: (b: Record<string, unknown>) => boolean, timeoutMs = 10_000) => {
-    // Check already-collected events first
-    const existing = collected.find(predicate);
-    if (existing) {
-      return Promise.resolve(existing);
-    }
-    return new Promise<Record<string, unknown>>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        const idx = waiters.findIndex((w) => w.resolve === resolve);
-        if (idx !== -1) {
-          waiters.splice(idx, 1);
-        }
-        reject(new Error(`waitForEvent timed out after ${timeoutMs}ms. Collected so far: ${JSON.stringify(collected)}`));
-      }, timeoutMs);
-
-      waiters.push({
-        predicate,
-        resolve: (b) => {
-          clearTimeout(timer);
-          resolve(b);
-        },
-        reject,
-      });
-    });
-  };
-
-  return { port, waitForEvent };
-}
 
 /** Build a valid EVALUATE_PRD request body. */
 function buildEvaluatePrdBody(overrides?: Partial<Record<string, unknown>>): Record<string, unknown> {
@@ -218,16 +57,9 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
     const server = makeGatewayServer();
     await server.start();
 
-    const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-desktop-gateway-token": "test-token",
-        },
-        body: JSON.stringify(buildEvaluatePrdBody()),
-      }
+    const response = await postToLoopEndpoint(
+      server.getActivePort(),
+      buildEvaluatePrdBody(),
     );
 
     assert.notEqual(response.status, 400, `Expected non-400, got ${response.status}`);
@@ -235,19 +67,9 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
 
   test("EVALUATE_PRD ignores stale repo.fullName and still proceeds", async () => {
     const tmpDir = makeTempDir();
-    const fakeBin = path.join(tmpDir, "fake-bin");
-    await fs.mkdir(fakeBin, { recursive: true });
+    await setupStubClaude(tmpDir);
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
-
-    const stubScript = [
-      "#!/bin/sh",
-      'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
-      "exit 0",
-    ].join("\n");
-    await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
-    process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-    resetShellPathCache();
 
     const server = makeGatewayServer({
       allowedDirs: [tmpDir],
@@ -256,24 +78,14 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
     await server.start();
 
     const loopId = "77777777-0000-0000-0000-000000000007";
-    const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-desktop-gateway-token": "test-token",
-        },
-        body: JSON.stringify({
-          loopId,
-          command: "EVALUATE_PRD",
-          closedLoopAuthToken: "cl-token",
-          apiBaseUrl,
-          artifacts: [{ type: "PRD", content: "PRD content here" }],
-          repo: { fullName: "org/missing-repo", branch: "main" },
-        }),
-      }
-    );
+    const response = await postToLoopEndpoint(server.getActivePort(), {
+      loopId,
+      command: "EVALUATE_PRD",
+      closedLoopAuthToken: "cl-token",
+      apiBaseUrl,
+      artifacts: [{ type: "PRD", content: "PRD content here" }],
+      repo: { fullName: "org/missing-repo", branch: "main" },
+    });
 
     assert.equal(response.status, 200, `Expected 200, got ${response.status}`);
 
@@ -294,19 +106,9 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
 
   test("EVALUATE_PRD ignores disallowed localRepoPath and still proceeds", async () => {
     const tmpDir = makeTempDir();
-    const fakeBin = path.join(tmpDir, "fake-bin");
-    await fs.mkdir(fakeBin, { recursive: true });
+    await setupStubClaude(tmpDir);
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
-
-    const stubScript = [
-      "#!/bin/sh",
-      'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
-      "exit 0",
-    ].join("\n");
-    await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
-    process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-    resetShellPathCache();
 
     const disallowedRepoPath = path.join(tmpDir, "..", "outside-allowed-dir");
     const server = makeGatewayServer({
@@ -316,24 +118,14 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
     await server.start();
 
     const loopId = "88888888-0000-0000-0000-000000000008";
-    const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-desktop-gateway-token": "test-token",
-        },
-        body: JSON.stringify({
-          loopId,
-          command: "EVALUATE_PRD",
-          closedLoopAuthToken: "cl-token",
-          apiBaseUrl,
-          artifacts: [{ type: "PRD", content: "PRD content here" }],
-          localRepoPath: disallowedRepoPath,
-        }),
-      }
-    );
+    const response = await postToLoopEndpoint(server.getActivePort(), {
+      loopId,
+      command: "EVALUATE_PRD",
+      closedLoopAuthToken: "cl-token",
+      apiBaseUrl,
+      artifacts: [{ type: "PRD", content: "PRD content here" }],
+      localRepoPath: disallowedRepoPath,
+    });
 
     assert.equal(response.status, 200, `Expected 200, got ${response.status}`);
 
@@ -356,16 +148,9 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
     const server = makeGatewayServer();
     await server.start();
 
-    const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
-      {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-desktop-gateway-token": "test-token",
-        },
-        body: JSON.stringify(buildEvaluatePrdBody({ command: "INVALID_COMMAND" })),
-      }
+    const response = await postToLoopEndpoint(
+      server.getActivePort(),
+      buildEvaluatePrdBody({ command: "INVALID_COMMAND" }),
     );
 
     assert.equal(response.status, 400);
@@ -424,6 +209,7 @@ describe("T-5.2: writePrdArtifact", () => {
       "exit 0",
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
+    process.env.SHELL = "/bin/false";
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
     resetShellPathCache();
 
@@ -496,6 +282,7 @@ describe("T-5.2: writePrdArtifact", () => {
       "exit 0",
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
+    process.env.SHELL = "/bin/false";
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
     resetShellPathCache();
 
@@ -618,6 +405,7 @@ describe("T-5.4: Temp dir cleanup after EVALUATE_PRD completes", () => {
       "exit 0",
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
+    process.env.SHELL = "/bin/false";
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
     resetShellPathCache();
 
@@ -681,6 +469,7 @@ describe("T-5.5: BINARY_NOT_FOUND when claude not in PATH", () => {
     const emptyBin = path.join(tmpDir, "empty-bin");
     await fs.mkdir(emptyBin, { recursive: true });
     // No claude binary in emptyBin — PATH points only there
+    process.env.SHELL = "/bin/false";
     process.env.PATH = emptyBin;
     resetShellPathCache();
 

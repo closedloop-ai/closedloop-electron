@@ -30,6 +30,7 @@ const originalSymphonyWorktreeParentDir =
   process.env.SYMPHONY_WORKTREE_PARENT_DIR;
 const originalPath = process.env.PATH;
 const originalHome = process.env.HOME;
+const originalShell = process.env.SHELL;
 
 afterEach(async () => {
   if (originalSymphonyWorktreeParentDir === undefined) {
@@ -43,6 +44,12 @@ afterEach(async () => {
     delete process.env.PATH;
   } else {
     process.env.PATH = originalPath;
+  }
+
+  if (originalShell === undefined) {
+    delete process.env.SHELL;
+  } else {
+    process.env.SHELL = originalShell;
   }
   resetShellPathCache();
 
@@ -167,6 +174,7 @@ test("GENERATE_PRD: accepts valid command and responds 200", async () => {
 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.HOME = tmpDir; // Prevents findStreamFormatter from finding real formatter
+  process.env.SHELL = "/bin/false";
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   resetShellPathCache();
 
@@ -338,6 +346,7 @@ test("GENERATE_PRD: spawns with worktree cwd, writes context pack, no --add-dir"
 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.HOME = tmpDir; // Prevents findStreamFormatter from finding real formatter
+  process.env.SHELL = "/bin/false";
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   resetShellPathCache();
 
@@ -494,6 +503,7 @@ test("GENERATE_PRD: uploads { prd: { content } } when prd.md is written", async 
 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.HOME = tmpDir; // Prevents findStreamFormatter from finding real formatter
+  process.env.SHELL = "/bin/false";
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   resetShellPathCache();
 
@@ -581,6 +591,7 @@ test("GENERATE_PRD: uploads empty artifacts when prd.md is not written", async (
 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.HOME = tmpDir; // Prevents findStreamFormatter from finding real formatter
+  process.env.SHELL = "/bin/false";
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   resetShellPathCache();
 
@@ -663,6 +674,7 @@ test("GENERATE_PRD: cleans up worktree on failure (exit code 1)", async () => {
 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.HOME = tmpDir; // Prevents findStreamFormatter from finding real formatter
+  process.env.SHELL = "/bin/false";
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   resetShellPathCache();
 

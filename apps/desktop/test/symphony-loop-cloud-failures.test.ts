@@ -28,6 +28,7 @@ import {
   restoreEnv,
   saveEnv,
   startMockApiServer,
+  TEST_NOOP_TELEMETRY,
   waitForCompletedEvent,
 } from "./symphony-test-utils.js";
 
@@ -151,6 +152,7 @@ test("EXECUTE: artifact upload failure sets ARTIFACT_UPLOAD_FAILED in completed 
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
     jobStore,
+    telemetry: TEST_NOOP_TELEMETRY,
   });
   serversToClose.push(server);
   await server.start();
@@ -252,6 +254,7 @@ test("EXECUTE: event post failure logged as warning in job store", async () => {
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
     jobStore,
+    telemetry: TEST_NOOP_TELEMETRY,
   });
   serversToClose.push(server);
   await server.start();

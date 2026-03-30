@@ -16,7 +16,6 @@ import path from "node:path";
 import {
   readLogTail,
   readTextFile,
-  redactCredentials,
   sanitizeErrorMessage,
 } from "../../main/diagnostics-helpers.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
@@ -330,6 +329,9 @@ interface RunningLoop {
   stage: "running" | "post-processing";
 }
 const runningLoops = new Map<string, RunningLoop>();
+const NOOP_TELEMETRY: TelemetryEmitter = {
+  emit() {},
+};
 
 export function getActiveLoopPid(loopId: string): number | null {
   const entry = runningLoops.get(loopId);
@@ -885,7 +887,7 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
 } {
   const logPath = path.join(claudeWorkDir, "symphony-loop.log");
   const rawTail = readLogTail(logPath);
-  const logTail = rawTail ? redactCredentials(rawTail) : undefined;
+  const logTail = rawTail ?? undefined;
   const tokenUsage = parseTokenUsage(claudeWorkDir);
   return {
     logTail,
@@ -1619,12 +1621,30 @@ async function handleProcessCompletion(
   // completed-event POST, job status update, and telemetry are all owned
   // by the finalizer.  runningLoops.delete() is called before the finalizer
   // so the loop is no longer considered live during finalization.
+  if (warnings.length > 0 && jobStore) {
+    const current = jobStore.getByLoopId(loopId);
+    if (current) {
+      const existingWarnings = current.warning
+        ? current.warning
+            .split(";")
+            .map((part) => part.trim())
+            .filter((part) => part.length > 0)
+        : [];
+      const mergedWarnings = [...new Set([...existingWarnings, ...warnings])];
+      jobStore.upsert({
+        ...current,
+        warning: mergedWarnings.join("; "),
+        updatedAt: new Date().toISOString(),
+      });
+    }
+  }
+
   const job = jobStore?.getByLoopId(loopId);
   runningLoops.delete(loopId);
-  if (job && jobStore && telemetry) {
+  if (job && jobStore) {
     const finalizerDeps: LoopFinalizerDeps = {
       jobStore,
-      telemetry,
+      telemetry: telemetry ?? NOOP_TELEMETRY,
       assertPathAllowed,
       apiAuthToken: closedLoopAuthToken,
       apiBaseUrl,
@@ -1634,7 +1654,7 @@ async function handleProcessCompletion(
   } else {
     loopLog(
       loopId,
-      "Cannot delegate to LoopFinalizer: missing jobStore, telemetry, or job record",
+      "Cannot delegate to LoopFinalizer: missing jobStore or job record",
     );
   }
 

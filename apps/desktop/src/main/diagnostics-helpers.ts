@@ -66,38 +66,6 @@ export function readLogTail(logPath: string): string | null {
   }
 }
 
-/**
- * Patterns matching common credential / secret formats.
- * Applied to log tail before including in telemetry events.
- * Each entry is a [pattern, replacement] tuple with a string replacement.
- */
-export const CREDENTIAL_PATTERNS: Array<[RegExp, string]> = [
-  // AWS keys: AKIA... style (20 uppercase alphanum after AKIA/ASIA/AROA prefix)
-  [/\b(AKIA|ASIA|AROA)[A-Z0-9]{16}\b/g, "[REDACTED_AWS_KEY]"],
-  // Generic bearer / API tokens: "Bearer <token>"
-  [/\bBearer\s+[A-Za-z0-9\-._~+/]+=*/g, "Bearer [REDACTED]"],
-  // sk- prefixed API keys (OpenAI, Anthropic, etc.)
-  [/\bsk-[A-Za-z0-9\-_]{10,}/g, "[REDACTED_SK_KEY]"],
-  // GitHub personal access tokens: ghp_, gho_, ghs_, ghr_
-  [/\b(ghp|gho|ghs|ghr)_[A-Za-z0-9]{36,}/g, "[REDACTED_GH_TOKEN]"],
-  // Generic "password=..." or "secret=..." in query strings / env
-  [
-    /\b(password|secret|passwd|api_key|apikey|auth_token)=[^\s&"']+/gi,
-    "$1=[REDACTED]",
-  ],
-];
-
-/**
- * Apply credential-pattern filters to redact common secret formats from a string.
- */
-export function redactCredentials(text: string): string {
-  let result = text;
-  for (const [pattern, replacement] of CREDENTIAL_PATTERNS) {
-    result = result.replace(pattern, replacement);
-  }
-  return result;
-}
-
 /** Sanitize an error message by redacting credentials and truncating to 500 chars. */
 export function sanitizeErrorMessage(msg: string): string {
   return msg
