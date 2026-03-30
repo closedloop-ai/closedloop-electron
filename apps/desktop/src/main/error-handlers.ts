@@ -10,7 +10,8 @@ function isSpawnEnoent(err: unknown): boolean {
     "code" in err &&
     "syscall" in err &&
     (err as NodeJS.ErrnoException).code === "ENOENT" &&
-    (err as NodeJS.ErrnoException).syscall === "spawn"
+    typeof (err as NodeJS.ErrnoException).syscall === "string" &&
+    (err as NodeJS.ErrnoException).syscall!.startsWith("spawn")
   );
 }
 

@@ -34,6 +34,20 @@ test("spawn ENOENT (code=ENOENT, syscall=spawn) -- log called, exit NOT called",
   assert.ok(!deps.calls.exit, "exit should NOT be called");
 });
 
+test("spawn ENOENT with syscall='spawn claude' (prefix match) -- suppressed, no exit", () => {
+  const deps = createStubDeps();
+  const error = Object.assign(new Error("spawn claude ENOENT"), {
+    code: "ENOENT",
+    syscall: "spawn claude",
+  });
+
+  handleUncaughtException(error, deps);
+
+  assert.ok(deps.calls.log?.length > 0, "log should be called");
+  assert.match(deps.calls.log[0][0] as string, /suppressed spawn ENOENT/);
+  assert.ok(!deps.calls.exit, "exit should NOT be called");
+});
+
 test("generic Error with no code/syscall -- exit(1) called and log called", () => {
   const deps = createStubDeps();
   const error = new Error("something went wrong");
