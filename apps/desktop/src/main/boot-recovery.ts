@@ -122,18 +122,19 @@ export class BootRecoveryService {
       "boot-recovery",
       `Token source for loopId=${loopId}: LOOP_TOKEN_STORE`,
     );
+
+    // TOCTOU guard: process was alive when liveJobs was built, but may have exited since.
+    if (!isProcessRunning(pid)) {
+      this.finalizeRecoveredJob(loopId, loopAuthToken, effectiveApiBaseUrl, undefined);
+      return;
+    }
+
     registerRecoveredLoop(loopId, pid);
 
     gatewayLog.info(
       "boot-recovery",
       `Reattaching live loop loopId=${loopId} pid=${pid}`,
     );
-
-    if (!isProcessRunning(pid)) {
-      unregisterLoop(loopId);
-      this.finalizeRecoveredJob(loopId, loopAuthToken, effectiveApiBaseUrl, undefined);
-      return;
-    }
 
     let tailer: LiveJobHandle["tailer"] | undefined;
     if (job.jsonlPath) {
