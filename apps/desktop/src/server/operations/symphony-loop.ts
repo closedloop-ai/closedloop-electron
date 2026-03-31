@@ -19,6 +19,7 @@ import {
   readTextFile,
   sanitizeErrorMessage,
 } from "../../main/diagnostics-helpers.js";
+import { persistLoopAuthToken } from "../../main/loop-auth-token.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
 import {
@@ -2571,6 +2572,15 @@ async function handleLoopRequest(
         json(context, 500, { error: "run-loop.sh not found in plugin cache" });
         return;
       }
+    }
+
+    try {
+      persistLoopAuthToken(claudeWorkDir, body.closedLoopAuthToken);
+    } catch (err) {
+      loopLog(
+        body.loopId,
+        `Failed to persist loop auth token: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
 
     // Post "started" event — only after confirming we can proceed

@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import path from "node:path";
 import { startOutputTailer } from "../server/operations/output-tailer.js";
 import {
   registerRecoveredLoop,
@@ -8,6 +8,10 @@ import { isProcessRunning } from "../server/operations/symphony-utils.js";
 import { assertPathAllowed } from "../server/security.js";
 import { gatewayLog } from "./gateway-logger.js";
 import type { JobStore, LocalJob } from "./job-store.js";
+import {
+  persistLoopAuthToken,
+  readPersistedLoopAuthToken,
+} from "./loop-auth-token.js";
 import {
   finalizeLoopFromRuntime,
   type LoopFinalizerDeps,
@@ -28,6 +32,118 @@ interface LiveJobHandle {
 }
 
 const WATCHER_POLL_MS = 3000;
+
+/**
+ * Ask the cloud API for a fresh runner token.  Returns the new token on
+ * success or null when the endpoint is unavailable / returns an error.
+ */
+async function refreshRunnerToken(
+  apiBaseUrl: string,
+  loopId: string,
+  apiKey: string,
+): Promise<string | null> {
+  try {
+    const resp = await fetch(
+      `${apiBaseUrl}/loops/${loopId}/runner-token`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+        },
+      },
+    );
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      gatewayLog.warn(
+        "boot-recovery",
+        `Runner-token refresh failed for loopId=${loopId}: ${resp.status} ${text}`,
+      );
+      return null;
+    }
+    const body = (await resp.json()) as Record<string, unknown>;
+    const token = typeof body.token === "string" ? body.token : null;
+    if (token) {
+      gatewayLog.info("boot-recovery", `Runner-token refreshed for loopId=${loopId}`);
+    }
+    return token;
+  } catch (err) {
+    gatewayLog.warn(
+      "boot-recovery",
+      `Runner-token refresh network error for loopId=${loopId}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+}
+
+/**
+ * Resolve the loop auth token, preferring a freshly issued token from the
+ * cloud API.  Falls back to the persisted on-disk token if refresh fails,
+ * then to the gateway API key as a last resort.
+ */
+async function resolveLoopAuthToken(
+  job: LocalJob,
+  fallbackApiKey: string,
+  apiBaseUrl: string,
+): Promise<string> {
+  const fresh = await refreshRunnerToken(apiBaseUrl, job.loopId, fallbackApiKey);
+  if (fresh) {
+    if (job.claudeWorkDir) {
+      try { persistLoopAuthToken(job.claudeWorkDir, fresh); } catch { /* best effort */ }
+    }
+    gatewayLog.info(
+      "boot-recovery",
+      `Token source for loopId=${job.loopId}: REFRESHED (fresh runner token)`,
+    );
+    return fresh;
+  }
+
+  const persisted = readPersistedLoopAuthToken(job.claudeWorkDir);
+  if (persisted) {
+    gatewayLog.info(
+      "boot-recovery",
+      `Token source for loopId=${job.loopId}: PERSISTED (from ${job.claudeWorkDir ?? "unknown"})`,
+    );
+    return persisted;
+  }
+
+  gatewayLog.warn(
+    "boot-recovery",
+    `Token source for loopId=${job.loopId}: FALLBACK (gateway API key — NOT a runner token!)`,
+  );
+  return fallbackApiKey;
+}
+
+/**
+ * Backfill job metadata paths that live-loop startup persists but older app
+ * versions may not have saved.  Returns the updated job (or the original if
+ * nothing changed).  Persists to JobStore only when at least one field was
+ * derived so subsequent polls/enrichments see them immediately.
+ */
+function backfillJobPaths(job: LocalJob, jobStore: JobStore): LocalJob {
+  if (!job.claudeWorkDir) return job;
+
+  const patches: Partial<LocalJob> = {};
+  if (!job.jsonlPath) {
+    patches.jsonlPath = path.join(job.claudeWorkDir, "claude-output.jsonl");
+  }
+  if (!job.statePath) {
+    patches.statePath = path.join(job.claudeWorkDir, "state.json");
+  }
+  if (!job.logPath) {
+    patches.logPath = path.join(job.claudeWorkDir, "symphony-loop.log");
+  }
+
+  if (Object.keys(patches).length === 0) return job;
+
+  const updated: LocalJob = {
+    ...job,
+    ...patches,
+    updatedAt: new Date().toISOString(),
+  };
+  jobStore.upsert(updated);
+  return updated;
+}
 
 export class BootRecoveryService {
   private readonly deps: BootRecoveryDeps;
@@ -52,18 +168,17 @@ export class BootRecoveryService {
         `Skipping ${unfinalizedDeadJobs.length} dead loop finalization(s): missing API config`,
       );
     } else if (apiKey && apiBaseUrl) {
-      const finalizerDeps: LoopFinalizerDeps = {
-        jobStore,
-        telemetry,
-        assertPathAllowed,
-        apiAuthToken: apiKey,
-        apiBaseUrl,
-        isProcessRunning,
-      };
-
       for (const job of unfinalizedDeadJobs) {
         try {
-          await finalizeLoopFromRuntime(job, "boot-recovery", finalizerDeps);
+          const authToken = await resolveLoopAuthToken(job, apiKey, apiBaseUrl);
+          await finalizeLoopFromRuntime(job, "boot-recovery", {
+            jobStore,
+            telemetry,
+            assertPathAllowed,
+            apiAuthToken: authToken,
+            apiBaseUrl,
+            isProcessRunning,
+          });
         } catch (err) {
           gatewayLog.warn(
             "boot-recovery",
@@ -89,38 +204,54 @@ export class BootRecoveryService {
     }
 
     for (const job of liveJobs) {
-      this.reattachLiveJob(job, apiKey, apiBaseUrl);
+      await this.reattachLiveJob(job, apiKey, apiBaseUrl);
     }
   }
 
-  private reattachLiveJob(job: LocalJob, apiKey: string, apiBaseUrl: string): void {
+  private async reattachLiveJob(job: LocalJob, apiKey: string, apiBaseUrl: string): Promise<void> {
     const { jobStore } = this.deps;
     const { loopId, pid } = job;
     if (pid == null) return;
 
     const effectiveApiBaseUrl = job.apiBaseUrl ?? apiBaseUrl;
+    const loopAuthToken = await resolveLoopAuthToken(job, apiKey, effectiveApiBaseUrl);
     registerRecoveredLoop(loopId, pid);
+
+    const enrichedJob = backfillJobPaths(job, jobStore);
+    gatewayLog.info(
+      "boot-recovery",
+      `Reattaching live loop loopId=${loopId} pid=${pid}`,
+    );
 
     if (!isProcessRunning(pid)) {
       unregisterLoop(loopId);
-      this.finalizeRecoveredJob(loopId, apiKey, effectiveApiBaseUrl, undefined);
+      this.finalizeRecoveredJob(loopId, loopAuthToken, effectiveApiBaseUrl, undefined);
       return;
     }
 
     let tailer: LiveJobHandle["tailer"] | undefined;
-    if (job.jsonlPath && existsSync(job.jsonlPath)) {
+    if (enrichedJob.jsonlPath) {
+      gatewayLog.info(
+        "boot-recovery",
+        `Starting output tailer for loopId=${loopId} jsonlPath=${enrichedJob.jsonlPath} offset=${enrichedJob.lastObservedJsonlOffset ?? 0} api=${effectiveApiBaseUrl}`,
+      );
       tailer = startOutputTailer(
-        job.jsonlPath,
+        enrichedJob.jsonlPath,
         effectiveApiBaseUrl,
         loopId,
-        apiKey,
-        job.lastObservedJsonlOffset ?? 0,
+        loopAuthToken,
+        enrichedJob.lastObservedJsonlOffset ?? 0,
         (offset) => {
           const current = jobStore.getByLoopId(loopId);
           if (current) {
             jobStore.upsert({ ...current, lastObservedJsonlOffset: offset });
           }
         },
+      );
+    } else {
+      gatewayLog.warn(
+        "boot-recovery",
+        `Cannot start output tailer for loopId=${loopId}: no jsonlPath (claudeWorkDir=${enrichedJob.claudeWorkDir ?? "none"})`,
       );
     }
 
@@ -133,7 +264,7 @@ export class BootRecoveryService {
         clearInterval(watcherId);
         this.liveHandles = this.liveHandles.filter((value) => value.loopId !== loopId);
         unregisterLoop(loopId);
-        this.finalizeRecoveredJob(loopId, apiKey, effectiveApiBaseUrl, tailer);
+        this.finalizeRecoveredJob(loopId, loopAuthToken, effectiveApiBaseUrl, tailer);
       }
     }, WATCHER_POLL_MS);
 
@@ -174,6 +305,10 @@ export class BootRecoveryService {
 
       try {
         await finalizeLoopFromRuntime(job, "boot-recovery", finalizerDeps);
+        gatewayLog.info(
+          "boot-recovery",
+          `Finalized recovered loop loopId=${loopId}`,
+        );
       } catch (err) {
         gatewayLog.warn(
           "boot-recovery",

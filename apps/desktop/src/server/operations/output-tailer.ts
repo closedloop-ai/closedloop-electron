@@ -1,5 +1,6 @@
 import { openSync, readSync, closeSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { gatewayLog } from "../../main/gateway-logger.js";
 
 export function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -137,9 +138,10 @@ async function postLoopEvent(
   loopId: string,
   token: string,
   event: { type: string; data: { chunk: string } }
-): Promise<void> {
+): Promise<number | null> {
+  const url = `${apiBaseUrl}/loops/${loopId}/events`;
   try {
-    await fetch(`${apiBaseUrl}/loops/${loopId}/events`, {
+    const resp = await fetch(url, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${token}`,
@@ -152,8 +154,18 @@ async function postLoopEvent(
         timestamp: new Date().toISOString(),
       }),
     });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      gatewayLog.error(
+        "output-tailer",
+        `POST ${event.type} to ${url} failed: ${resp.status} ${resp.statusText} ${text}`,
+      );
+    }
+    return resp.status;
   } catch (err) {
-    console.error("[output-tailer] Failed to post loop event:", err);
+    const msg = err instanceof Error ? err.message : String(err);
+    gatewayLog.error("output-tailer", `POST ${event.type} network error: ${msg}`);
+    return null;
   }
 }
 
@@ -175,12 +187,13 @@ export function startOutputTailer(
   const pollIntervalMs = Number(process.env.CLOSEDLOOP_TAILER_POLL_MS) || DEFAULT_POLL_MS;
   const throttleMs = Number(process.env.CLOSEDLOOP_TAILER_THROTTLE_MS) || DEFAULT_THROTTLE_MS;
   let stopped = false;
+  let authFailed = false;
   let byteOffset = initialByteOffset;
   let pendingRemainder = Buffer.alloc(0);
   let lastSentAt: number | null = null;
 
   async function pollOnce(): Promise<void> {
-    if (stopped) return;
+    if (stopped || authFailed) return;
     if (!existsSync(jsonlPath)) return;
     let fd: number | null = null;
     const offsetBefore = byteOffset;
@@ -228,12 +241,26 @@ export function startOutputTailer(
       const now = Date.now();
       if (lastSentAt === null || now - lastSentAt >= throttleMs) {
         lastSentAt = now;
-        await postLoopEvent(apiBaseUrl, loopId, token, { type: "output", data: { chunk: lastDisplay } });
+        const status = await postLoopEvent(apiBaseUrl, loopId, token, { type: "output", data: { chunk: lastDisplay } });
+        if (status === 401 || status === 403) {
+          gatewayLog.warn(
+            "output-tailer",
+            `Stopping tailer for loopId=${loopId}: auth rejected (${status})`,
+          );
+          authFailed = true;
+        }
       }
     }
   }
 
-  const intervalId = setInterval(() => { pollOnce().catch(() => {}); }, pollIntervalMs);
+  const intervalId = setInterval(() => {
+    pollOnce().catch((err) => {
+      gatewayLog.error(
+        "output-tailer",
+        `Poll error for loopId=${loopId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }, pollIntervalMs);
 
   return {
     stop: () => { stopped = true; clearInterval(intervalId); },

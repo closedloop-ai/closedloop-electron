@@ -7,10 +7,11 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach, test } from "node:test";
 import { BootRecoveryService } from "../src/main/boot-recovery.js";
 import { JobStore, type LocalJob } from "../src/main/job-store.js";
+import { persistLoopAuthToken } from "../src/main/loop-auth-token.js";
 import type { TelemetryEventPayload } from "../src/main/telemetry-protocol.js";
 
 let tempRoot = "";
-let fetchCalls: Array<{ url: string; body: string }> = [];
+let fetchCalls: Array<{ url: string; body: string; authHeader?: string | null }> = [];
 let telemetryEvents: TelemetryEventPayload[] = [];
 const originalFetch = globalThis.fetch;
 const originalPollMs = process.env.CLOSEDLOOP_TAILER_POLL_MS;
@@ -23,10 +24,16 @@ beforeEach(async () => {
   process.env.CLOSEDLOOP_TAILER_POLL_MS = "20";
   process.env.CLOSEDLOOP_TAILER_THROTTLE_MS = "20";
   globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    const url = String(input);
+    const headers = new Headers(init?.headers);
     fetchCalls.push({
-      url: String(input),
+      url,
       body: typeof init?.body === "string" ? init.body : "",
+      authHeader: headers.get("Authorization"),
     });
+    if (url.endsWith("/runner-token")) {
+      return new Response(JSON.stringify({ token: "refreshed-token" }), { status: 200 });
+    }
     return new Response(JSON.stringify({ success: true }), { status: 200 });
   }) as typeof fetch;
 });
@@ -95,7 +102,9 @@ test("finalizes dead jobs returned by reconcile", async () => {
   assert.ok(persisted);
   assert.equal(persisted.status, "COMPLETED");
   assert.ok(persisted.finalStatusPersistedAt);
-  assert.equal(fetchCalls.length, 2);
+  assert.ok(fetchCalls.some((c) => c.url.endsWith("/runner-token")));
+  assert.ok(fetchCalls.some((c) => c.url.includes("/upload-artifacts")));
+  assert.ok(fetchCalls.some((c) => c.body.includes('"type":"completed"')));
 });
 
 test("reattaches to live jobs and persists jsonl offsets", async () => {
@@ -104,6 +113,7 @@ test("reattaches to live jobs and persists jsonl offsets", async () => {
   await fs.mkdir(claudeWorkDir, { recursive: true });
   const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
   await fs.writeFile(jsonlPath, "");
+  persistLoopAuthToken(claudeWorkDir, "loop-token");
 
   const jobStore = createStore("boot-recovery-live-offset");
   const liveJob = createJob({
@@ -125,13 +135,68 @@ test("reattaches to live jobs and persists jsonl offsets", async () => {
 
   await fs.appendFile(
     jsonlPath,
-    '{"type":"assistant","message":{"usage":{"input_tokens":1,"output_tokens":1}}}\n',
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"recovered output"}],"usage":{"input_tokens":1,"output_tokens":1}}}\n',
   );
   await sleep(100);
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
   assert.ok((persisted.lastObservedJsonlOffset ?? 0) > 0);
+  assert.ok(
+    fetchCalls.some(
+      (entry) =>
+        entry.url.endsWith("/loops/loop-1/events") &&
+        entry.authHeader === "Bearer refreshed-token",
+    ),
+  );
+  service.dispose();
+});
+
+test("reattaches legacy live jobs without persisted jsonlPath", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  persistLoopAuthToken(claudeWorkDir, "loop-token");
+
+  const jobStore = createStore("boot-recovery-legacy-live-job");
+  const liveJob = createJob({
+    pid: process.pid,
+    status: "RUNNING",
+    claudeWorkDir,
+    jsonlPath: undefined,
+    lastObservedJsonlOffset: 0,
+  });
+  jobStore.upsert(liveJob);
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: () => {} },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:40115",
+  });
+  await service.run([]);
+
+  const derivedJsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+  await fs.appendFile(
+    derivedJsonlPath,
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"legacy recovered output"}]}}\n',
+  );
+  await sleep(100);
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.jsonlPath, derivedJsonlPath);
+  assert.equal(persisted.statePath, path.join(claudeWorkDir, "state.json"));
+  assert.equal(persisted.logPath, path.join(claudeWorkDir, "symphony-loop.log"));
+  assert.ok((persisted.lastObservedJsonlOffset ?? 0) > 0);
+  assert.ok(
+    fetchCalls.some(
+      (entry) =>
+        entry.url.endsWith("/loops/loop-1/events") &&
+        entry.authHeader === "Bearer refreshed-token" &&
+        entry.body.includes('"type":"output"'),
+    ),
+  );
   service.dispose();
 });
 
@@ -140,6 +205,7 @@ test("finalizes recovered live job after process exits", async () => {
   const claudeWorkDir = path.join(repoDir, "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
   await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
+  persistLoopAuthToken(claudeWorkDir, "loop-token");
 
   const child = spawn("bash", ["-lc", "sleep 0.1"], { detached: false });
   assert.ok(child.pid);
@@ -166,5 +232,19 @@ test("finalizes recovered live job after process exits", async () => {
   assert.equal(persisted.status, "COMPLETED");
   assert.ok(fetchCalls.some((entry) => entry.url.includes("/upload-artifacts")));
   assert.ok(fetchCalls.some((entry) => entry.url.includes("/events")));
+  assert.ok(
+    fetchCalls.some(
+      (entry) =>
+        entry.url.endsWith("/loops/loop-1/upload-artifacts") &&
+        entry.authHeader === "Bearer refreshed-token",
+    ),
+  );
+  assert.ok(
+    fetchCalls.some(
+      (entry) =>
+        entry.url.endsWith("/loops/loop-1/events") &&
+        entry.authHeader === "Bearer refreshed-token",
+    ),
+  );
   service.dispose();
 });
