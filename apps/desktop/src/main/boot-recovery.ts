@@ -18,7 +18,7 @@ export interface BootRecoveryDeps {
   telemetry: TelemetryEmitter;
   getApiKey: () => string | null;
   getApiOrigin: () => string;
-  loopTokenStore?: LoopTokenStore;
+  loopTokenStore: LoopTokenStore;
 }
 
 interface LiveJobHandle {
@@ -55,7 +55,7 @@ export class BootRecoveryService {
     } else if (apiKey && apiBaseUrl) {
       for (const job of unfinalizedDeadJobs) {
         try {
-          const authToken = loopTokenStore?.getLoopToken(job.loopId);
+          const authToken = loopTokenStore.getLoopToken(job.loopId);
           if (!authToken) {
             gatewayLog.warn(
               "boot-recovery",
@@ -110,7 +110,7 @@ export class BootRecoveryService {
     if (pid == null) return;
 
     const effectiveApiBaseUrl = job.apiBaseUrl ?? apiBaseUrl;
-    const loopAuthToken = this.deps.loopTokenStore?.getLoopToken(loopId);
+    const loopAuthToken = this.deps.loopTokenStore.getLoopToken(loopId);
     if (!loopAuthToken) {
       gatewayLog.warn(
         "boot-recovery",
