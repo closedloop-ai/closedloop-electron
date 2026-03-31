@@ -1,17 +1,15 @@
 import { execFileSync, execSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { getShellEnv, getShellPath } from "../shell-path.js";
 import {
   closeSync,
   existsSync,
   mkdirSync,
   openSync,
   readFileSync,
-  readSync,
   renameSync,
   statSync,
   unlinkSync,
-  writeFileSync,
+  writeFileSync
 } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -35,14 +33,15 @@ import type {
 } from "../operation-dispatcher.js";
 import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
+import { getShellEnv, getShellPath } from "../shell-path.js";
 import { startOutputTailer } from "./output-tailer.js";
 import { findPluginScript, findPluginVersions, getPluginCacheRoot } from "./plugin-cache.js";
 import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import {
   expandHome,
+  isProcessRunning,
   resolveWorktreeParentDir,
   tryAssertRepoAllowed,
-  isProcessRunning,
 } from "./symphony-utils.js";
 export { readLogTail } from "../../main/diagnostics-helpers.js";
 
@@ -983,6 +982,55 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
   };
 }
 
+/** Pattern that matches known session/context limit error messages. */
+export const SESSION_LIMIT_PATTERN =
+  /prompt is too long|exceed context limit|context limit reached|conversation too long/i;
+
+/**
+ * Scan claude-output.jsonl for a result record with `is_error: true` whose
+ * message matches a known session/context limit pattern.
+ * Returns the error text (e.g. "Prompt is too long") or null if not found
+ * or if the error is unrelated to context limits.
+ */
+export function detectSessionLimitFromJsonl(claudeWorkDir: string): string | null {
+  const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
+  if (!existsSync(outputFile)) {
+    return null;
+  }
+  try {
+    const content = readFileSync(outputFile, "utf-8");
+    for (const line of content.split("\n")) {
+      if (!line.trim()) {
+        continue;
+      }
+      try {
+        const entry = JSON.parse(line) as Record<string, unknown>;
+        if (
+          entry.type === "result" &&
+          entry.is_error === true &&
+          typeof entry.result === "string" &&
+          SESSION_LIMIT_PATTERN.test(entry.result)
+        ) {
+          return entry.result;
+        }
+      } catch {
+        // skip malformed lines
+      }
+    }
+  } catch {
+    // file read error
+  }
+  return null;
+}
+
+/**
+ * Check whether a log tail string contains Claude Code session/context limit
+ * error patterns. The log file contains both stdout and stderr.
+ */
+export function isSessionLimitError(logTail: string): boolean {
+  return SESSION_LIMIT_PATTERN.test(logTail);
+}
+
 // ---------------------------------------------------------------------------
 // LLM-assisted commit (EXECUTE only)
 // ---------------------------------------------------------------------------
@@ -1552,21 +1600,47 @@ async function handleProcessCompletion(
       );
     }
 
+    // Detect context/session limit errors (exit code 2, JSONL is_error, or
+    // stderr patterns) and surface a specific error code.
+    const jsonlError = detectSessionLimitFromJsonl(claudeWorkDir);
+    const isContextLimit =
+      exitCode === 2 ||
+      jsonlError !== null ||
+      (diagnostics.logTail != null && isSessionLimitError(diagnostics.logTail));
+
     if (!wasCancelled) {
-      loopError(loopId, `Process failed with exit code ${exitCode}`);
-      gatewayLog.error(
-        "loop-harness",
-        `${command} failed with exit code ${exitCode}, loopId=${loopId}`,
-      );
-      await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
-        type: "error",
-        code: "PROCESS_FAILED",
-        message: `Process exited with code ${exitCode}`,
-        loopId,
-        tokenUsage: diagnostics.tokenUsage,
-        logTail: diagnostics.logTail,
-        diagnosticsVersion: diagnostics.diagnosticsVersion,
-      });
+      if (isContextLimit) {
+        const limitMsg = jsonlError ?? "Context limit exceeded";
+        loopError(loopId, `Context limit detected: ${limitMsg}`);
+        gatewayLog.error(
+          "loop-harness",
+          `${command} hit context limit, loopId=${loopId}: ${limitMsg}`,
+        );
+        await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+          type: "error",
+          code: "CONTEXT_LIMIT_EXCEEDED",
+          message: limitMsg,
+          loopId,
+          tokenUsage: diagnostics.tokenUsage,
+          logTail: diagnostics.logTail,
+          diagnosticsVersion: diagnostics.diagnosticsVersion,
+        });
+      } else {
+        loopError(loopId, `Process failed with exit code ${exitCode}`);
+        gatewayLog.error(
+          "loop-harness",
+          `${command} failed with exit code ${exitCode}, loopId=${loopId}`,
+        );
+        await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+          type: "error",
+          code: "PROCESS_FAILED",
+          message: `Process exited with code ${exitCode}`,
+          loopId,
+          tokenUsage: diagnostics.tokenUsage,
+          logTail: diagnostics.logTail,
+          diagnosticsVersion: diagnostics.diagnosticsVersion,
+        });
+      }
     }
 
     if (existingJob && jobStore) {
@@ -1574,6 +1648,10 @@ async function handleProcessCompletion(
       jobStore.upsert({
         ...existingJob,
         status: wasCancelled ? "CANCELLED" : "FAILED",
+        liveActivity:
+          !wasCancelled && isContextLimit
+            ? "Context limit exceeded"
+            : undefined,
         exitCode,
         updatedAt: now,
         completedAt: now,
@@ -1746,6 +1824,123 @@ async function handleProcessCompletion(
     } else if (command === "GENERATE_PRD") {
       artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
     }
+
+    // Read session ID if available
+    const sessionFile = path.join(claudeWorkDir, "session-id.txt");
+    const sessionId = readTextFile(sessionFile);
+    if (sessionId) {
+      metadata.sessionId = sessionId.trim();
+    }
+
+    // Upload artifacts
+    const artifactKeys = Object.keys(artifacts);
+    loopLog(loopId, "Artifact keys:", artifactKeys);
+    gatewayLog.info(
+      "loop-harness",
+      `Uploading artifacts for ${command} loopId=${loopId}: [${artifactKeys.join(", ")}]`,
+    );
+    const uploadResult = await uploadArtifacts(
+      apiBaseUrl,
+      loopId,
+      closedLoopAuthToken,
+      {
+        artifacts,
+        metadata,
+      },
+    );
+    if (!uploadResult.success) {
+      gatewayLog.warn(
+        "loop-harness",
+        "Artifact upload failed: " +
+          (uploadResult.error ?? "unknown error") +
+          ", loopId=" +
+          loopId,
+      );
+      warnings.push("ARTIFACT_UPLOAD_FAILED");
+    }
+
+    // Parse token usage from claude output
+    const tokensUsed = parseTokenUsage(claudeWorkDir);
+    loopLog(
+      loopId,
+      `Tokens used: input=${tokensUsed.inputTokens}, output=${tokensUsed.outputTokens}`,
+    );
+
+    // Detect 0-token EXECUTE completions as failures (ghost loop)
+    if (
+      command === "EXECUTE" &&
+      tokensUsed.inputTokens === 0 &&
+      tokensUsed.outputTokens === 0
+    ) {
+      const noWorkMsg =
+        "EXECUTE loop completed with 0 tokens -- no work was done";
+      loopError(loopId, noWorkMsg);
+      gatewayLog.error("loop-harness", `${noWorkMsg}, loopId=${loopId}`);
+      runningLoops.delete(loopId);
+      await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+        type: "error",
+        code: "NO_WORK_PRODUCED",
+        message: noWorkMsg,
+        loopId,
+      });
+      if (jobStore) {
+        const existingJob = jobStore.getByLoopId(loopId);
+        if (existingJob) {
+          const now = new Date().toISOString();
+          jobStore.upsert({
+            ...existingJob,
+            status: "FAILED",
+            liveActivity: "Error: Loop produced no output (0 tokens)",
+            exitCode: 0,
+            updatedAt: now,
+            completedAt: now,
+          });
+        }
+      }
+      if (usedTempDir) {
+        fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+      }
+      return;
+    }
+
+    // Post completed event — shape matches ECS harness reportFinalStatus()
+    const result: Record<string, unknown> = {
+      exitCode,
+      subtype: command.toLowerCase(),
+    };
+
+    if (command === "EXECUTE" && artifacts.executionResult) {
+      const execResult = artifacts.executionResult as Record<string, unknown>;
+      result.prUrl = execResult.pr_url;
+      result.prNumber = execResult.pr_number;
+      result.branchName = execResult.branch_name;
+      result.has_changes = execResult.has_changes ?? false;
+    }
+
+    // Include worktree branch name for all commands that use a worktree.
+    // The server persists this on the loop record for display/debugging.
+    if (worktreeDir && !result.branchName) {
+      const branch = wt.getCurrentBranch(worktreeDir);
+      if (branch) {
+        result.branchName = branch;
+      }
+    }
+
+    // sessionId inside result (matches harness)
+    if (metadata.sessionId) {
+      result.sessionId = metadata.sessionId;
+    }
+
+    const completedEvent: Record<string, unknown> = {
+      type: "completed",
+      result,
+      tokensUsed: {
+        input: tokensUsed.inputTokens,
+        output: tokensUsed.outputTokens,
+      },
+      loopId,
+      ...(warnings.length > 0 ? { warnings } : {}),
+    };
 
     // Cancellation gate: skip completed event if cancelled during post-processing
     if (isCancelled(jobStore, loopId)) {

@@ -65,12 +65,10 @@ import pkg from "electron-updater";
 const { autoUpdater } = pkg;
 import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
 import { BootRecoveryService } from "./boot-recovery.js";
-import type { TelemetryEmitter } from "./telemetry-protocol.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
 const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
-const NOOP_TELEMETRY: TelemetryEmitter = { emit() {} };
 
 export class DesktopApplication {
   private readonly settingsStore: SettingsStore;
@@ -258,7 +256,7 @@ export class DesktopApplication {
     });
     this.bootRecovery = new BootRecoveryService({
       jobStore: this.jobStore,
-      telemetry: NOOP_TELEMETRY,
+      telemetry: Observability.getTelemetryEmitter(),
       getApiKey: () => this.apiKeyStore.getApiKey(),
       getApiOrigin: () => this.settingsStore.getApiOrigin(),
     });

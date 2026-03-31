@@ -187,9 +187,25 @@ export async function startMockApiServer(failUrls?: Map<string, number>): Promis
  * Create the fake plugin cache structure so findPluginScript("code", "run-loop.sh")
  * finds the provided script content.
  */
+/**
+ * Minimal JSONL snippet that gives parseTokenUsage() non-zero tokens.
+ * Without this, the 0-token EXECUTE guard (NO_WORK_PRODUCED) fires and
+ * tests that expect a normal "completed" event will time out.
+ */
+const FAKE_TOKEN_JSONL =
+  '{"type":"assistant","message":{"usage":{"input_tokens":10,"output_tokens":5}}}';
+
+/**
+ * Wraps a fake run-loop.sh script body so it writes a claude-output.jsonl
+ * with minimal token data before executing the original body. This prevents
+ * the 0-token EXECUTE guard from converting the completed event into an error.
+ * Pass `skipTokens: true` to keep the original script as-is (for tests that
+ * intentionally exercise the 0-token path).
+ */
 export async function createFakeRunLoopScript(
   homeDir: string,
-  scriptContent: string
+  scriptContent: string,
+  opts?: { skipTokens?: boolean }
 ): Promise<string> {
   const scriptDir = path.join(
     homeDir,
@@ -203,7 +219,20 @@ export async function createFakeRunLoopScript(
   );
   await fs.mkdir(scriptDir, { recursive: true });
   const scriptPath = path.join(scriptDir, "run-loop.sh");
-  await fs.writeFile(scriptPath, scriptContent, { mode: 0o755 });
+
+  let finalContent = scriptContent;
+  if (!opts?.skipTokens) {
+    // Inject a line that writes fake token data so parseTokenUsage() returns
+    // non-zero, preventing the NO_WORK_PRODUCED guard from firing.
+    const tokenLine = `mkdir -p "$CLOSEDLOOP_WORKDIR" 2>/dev/null; echo '${FAKE_TOKEN_JSONL}' >> "$CLOSEDLOOP_WORKDIR/claude-output.jsonl"\n`;
+    // Insert after the shebang line
+    finalContent = scriptContent.replace(
+      /^(#!\/bin\/sh\n)/,
+      `$1${tokenLine}`
+    );
+  }
+
+  await fs.writeFile(scriptPath, finalContent, { mode: 0o755 });
   return scriptPath;
 }
 
