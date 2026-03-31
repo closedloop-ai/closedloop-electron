@@ -17,6 +17,10 @@ let telemetryEvents: TelemetryEventPayload[] = [];
 const originalFetch = globalThis.fetch;
 const originalPollMs = process.env.CLOSEDLOOP_TAILER_POLL_MS;
 const originalThrottleMs = process.env.CLOSEDLOOP_TAILER_THROTTLE_MS;
+const originalWatcherPollMs = process.env.CLOSEDLOOP_WATCHER_POLL_MS;
+
+/** Fast PID watcher poll for tests (boot-recovery live-job reattach). */
+const WATCHER_TEST_POLL_MS = 50;
 
 beforeEach(async () => {
   tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "boot-recovery-test-"));
@@ -24,6 +28,7 @@ beforeEach(async () => {
   telemetryEvents = [];
   process.env.CLOSEDLOOP_TAILER_POLL_MS = "20";
   process.env.CLOSEDLOOP_TAILER_THROTTLE_MS = "20";
+  process.env.CLOSEDLOOP_WATCHER_POLL_MS = String(WATCHER_TEST_POLL_MS);
   globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
     const url = String(input);
     const headers = new Headers(init?.headers);
@@ -47,6 +52,11 @@ afterEach(async () => {
     delete process.env.CLOSEDLOOP_TAILER_THROTTLE_MS;
   } else {
     process.env.CLOSEDLOOP_TAILER_THROTTLE_MS = originalThrottleMs;
+  }
+  if (originalWatcherPollMs === undefined) {
+    delete process.env.CLOSEDLOOP_WATCHER_POLL_MS;
+  } else {
+    process.env.CLOSEDLOOP_WATCHER_POLL_MS = originalWatcherPollMs;
   }
   if (tempRoot) {
     await fs.rm(tempRoot, { recursive: true, force: true });
@@ -526,7 +536,8 @@ test("finalizes recovered live job after process exits", async () => {
   });
   await service.reattachLiveJobs();
 
-  await sleep(3400);
+  // Child exits ~100ms; allow several watcher ticks + async finalization (not real-time 3s poll).
+  await sleep(WATCHER_TEST_POLL_MS * 8);
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
   assert.equal(persisted.status, "COMPLETED");

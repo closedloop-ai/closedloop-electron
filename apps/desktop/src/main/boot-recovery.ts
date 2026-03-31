@@ -27,7 +27,7 @@ interface LiveJobHandle {
   watcherId: ReturnType<typeof setInterval>;
 }
 
-const WATCHER_POLL_MS = 3000;
+const DEFAULT_WATCHER_POLL_MS = 3000;
 
 export class BootRecoveryService {
   private readonly deps: BootRecoveryDeps;
@@ -213,6 +213,8 @@ export class BootRecoveryService {
       );
     }
 
+    const watcherPollMs =
+      Number(process.env.CLOSEDLOOP_WATCHER_POLL_MS) || DEFAULT_WATCHER_POLL_MS;
     const watcherId = setInterval(() => {
       if (this.disposed) {
         clearInterval(watcherId);
@@ -224,7 +226,7 @@ export class BootRecoveryService {
         unregisterLoop(loopId);
         this.finalizeRecoveredJob(loopId, loopAuthToken, effectiveApiBaseUrl, tailer);
       }
-    }, WATCHER_POLL_MS);
+    }, watcherPollMs);
 
     this.liveHandles.push({ loopId, tailer, watcherId });
   }
