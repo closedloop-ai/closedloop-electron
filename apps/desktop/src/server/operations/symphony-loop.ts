@@ -1066,11 +1066,17 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
   };
 }
 
+/** Pattern that matches known session/context limit error messages. */
+export const SESSION_LIMIT_PATTERN =
+  /prompt is too long|exceed context limit|context limit reached|conversation too long/i;
+
 /**
- * Scan claude-output.jsonl for a result record with `is_error: true`.
- * Returns the error text (e.g. "Prompt is too long") or null if not found.
+ * Scan claude-output.jsonl for a result record with `is_error: true` whose
+ * message matches a known session/context limit pattern.
+ * Returns the error text (e.g. "Prompt is too long") or null if not found
+ * or if the error is unrelated to context limits.
  */
-function detectSessionLimitFromJsonl(claudeWorkDir: string): string | null {
+export function detectSessionLimitFromJsonl(claudeWorkDir: string): string | null {
   const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
   if (!existsSync(outputFile)) {
     return null;
@@ -1083,8 +1089,13 @@ function detectSessionLimitFromJsonl(claudeWorkDir: string): string | null {
       }
       try {
         const entry = JSON.parse(line) as Record<string, unknown>;
-        if (entry.type === "result" && entry.is_error === true) {
-          return typeof entry.result === "string" ? entry.result : "Unknown session error";
+        if (
+          entry.type === "result" &&
+          entry.is_error === true &&
+          typeof entry.result === "string" &&
+          SESSION_LIMIT_PATTERN.test(entry.result)
+        ) {
+          return entry.result;
         }
       } catch {
         // skip malformed lines
@@ -1100,10 +1111,8 @@ function detectSessionLimitFromJsonl(claudeWorkDir: string): string | null {
  * Check whether a log tail string contains Claude Code session/context limit
  * error patterns. The log file contains both stdout and stderr.
  */
-function isSessionLimitError(logTail: string): boolean {
-  return /prompt is too long|exceed context limit|context limit reached|conversation too long/i.test(
-    logTail,
-  );
+export function isSessionLimitError(logTail: string): boolean {
+  return SESSION_LIMIT_PATTERN.test(logTail);
 }
 
 // ---------------------------------------------------------------------------
