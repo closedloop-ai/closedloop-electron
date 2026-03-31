@@ -16,13 +16,19 @@ import {
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import {
+  readLogTail,
+  readTextFile,
+  sanitizeErrorMessage,
+} from "../../main/diagnostics-helpers.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
 import {
-  TELEMETRY_LOG_TAIL_LINES,
-  TELEMETRY_LOG_TAIL_MAX_BYTES,
-} from "../../main/telemetry-protocol.js";
+  finalizeLoopFromRuntime,
+  type LoopFinalizerDeps,
+} from "../../main/loop-finalizer.js";
 import { Observability } from "../../main/observability.js";
+import { parseTokenUsage } from "../../main/token-usage.js";
 import type {
   OperationDispatcher,
   OperationRequestContext,
@@ -36,7 +42,9 @@ import {
   expandHome,
   resolveWorktreeParentDir,
   tryAssertRepoAllowed,
+  isProcessRunning,
 } from "./symphony-utils.js";
+export { readLogTail } from "../../main/diagnostics-helpers.js";
 
 // ---------------------------------------------------------------------------
 // WorktreeProvider: abstraction over git worktree operations for testability
@@ -323,7 +331,7 @@ function isExecutionResult(value: unknown): value is ExecutionResult {
 /** Track running loop processes for cancellation and to prevent GC of ChildProcess. */
 interface RunningLoop {
   pid: number;
-  child: ReturnType<typeof spawn>;
+  child?: ReturnType<typeof spawn>;
   stage: "running" | "post-processing";
 }
 const runningLoops = new Map<string, RunningLoop>();
@@ -331,6 +339,14 @@ const runningLoops = new Map<string, RunningLoop>();
 export function getActiveLoopPid(loopId: string): number | null {
   const entry = runningLoops.get(loopId);
   return entry?.pid ?? null;
+}
+
+export function registerRecoveredLoop(loopId: string, pid: number): void {
+  runningLoops.set(loopId, { pid, stage: "running" });
+}
+
+export function unregisterLoop(loopId: string): void {
+  runningLoops.delete(loopId);
 }
 
 function loopLog(loopId: string, ...args: unknown[]): void {
@@ -589,10 +605,7 @@ async function uploadArtifacts(
       };
     }
     loopLog(loopId, `Upload success: ${resp.status}`);
-    gatewayLog.debug(
-      "loop-upload",
-      `Artifact upload to ${url}: ${resp.status}`,
-    );
+    gatewayLog.debug("loop-upload", `Artifact upload to ${url}: ${resp.status}`);
     return { success: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -876,17 +889,6 @@ async function writeArtifactsForGeneratePrd(
 // Per-command output reading
 // ---------------------------------------------------------------------------
 
-function readTextFile(filePath: string): string | null {
-  try {
-    if (!existsSync(filePath)) {
-      return null;
-    }
-    return readFileSync(filePath, "utf-8");
-  } catch {
-    return null;
-  }
-}
-
 function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
   const plan = readJsonFileSync(path.join(claudeWorkDir, "plan.json"));
   const openQuestions = readTextFile(
@@ -925,94 +927,9 @@ function readGeneratePrdOutputs(worktreeDir: string): Record<string, unknown> {
   return { prd: prdContent ? { content: prdContent } : undefined };
 }
 
-/** Parse token usage from claude-output.jsonl (JSONL stream output). */
-function parseTokenUsage(claudeWorkDir: string): {
-  inputTokens: number;
-  outputTokens: number;
-} {
-  const totals = { inputTokens: 0, outputTokens: 0 };
-  const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
-  if (!existsSync(outputFile)) {
-    return totals;
-  }
-  try {
-    const content = readFileSync(outputFile, "utf-8");
-    for (const line of content.split("\n")) {
-      if (!line.trim()) {
-        continue;
-      }
-      try {
-        const entry = JSON.parse(line) as Record<string, unknown>;
-        if (entry.type === "assistant") {
-          const message = entry.message as Record<string, unknown> | undefined;
-          const usage = message?.usage as Record<string, number> | undefined;
-          if (usage) {
-            totals.inputTokens +=
-              (usage.input_tokens ?? 0) +
-              (usage.cache_creation_input_tokens ?? 0) +
-              (usage.cache_read_input_tokens ?? 0);
-            totals.outputTokens += usage.output_tokens ?? 0;
-          }
-        }
-      } catch {
-        // skip malformed lines
-      }
-    }
-  } catch {
-    // file read error
-  }
-  return totals;
-}
-
 // ---------------------------------------------------------------------------
 // Failure diagnostics helpers
 // ---------------------------------------------------------------------------
-
-/** Maximum bytes to read from the tail of a log file for diagnostics. */
-const LOG_TAIL_MAX_BYTES = TELEMETRY_LOG_TAIL_MAX_BYTES;
-
-/**
- * Read up to LOG_TAIL_MAX_BYTES from the tail of a log file synchronously.
- * Exported so that edge-case tests can import it directly.
- */
-export function readLogTail(logPath: string): string | null {
-  if (!existsSync(logPath)) {
-    return null;
-  }
-  try {
-    const stat = statSync(logPath);
-    const fileSize = stat.size;
-    if (fileSize === 0) {
-      return null;
-    }
-    const readBytes = Math.min(fileSize, LOG_TAIL_MAX_BYTES);
-    const offset = fileSize - readBytes;
-    const buf = Buffer.alloc(readBytes);
-    const fd = openSync(logPath, "r");
-    try {
-      readSync(fd, buf, 0, readBytes, offset);
-    } finally {
-      closeSync(fd);
-    }
-    const raw = buf.toString("utf-8");
-    // If we started mid-file, drop any partial first line to avoid garbled output
-    let tail: string;
-    if (offset > 0) {
-      const newlineIdx = raw.indexOf("\n");
-      tail = newlineIdx === -1 ? raw : raw.slice(newlineIdx + 1);
-    } else {
-      tail = raw;
-    }
-    // Cap to the last TELEMETRY_LOG_TAIL_LINES lines (AC-002: "last 50 lines / 32KB")
-    const lines = tail.split("\n");
-    if (lines.length > TELEMETRY_LOG_TAIL_LINES) {
-      return lines.slice(-TELEMETRY_LOG_TAIL_LINES).join("\n");
-    }
-    return tail;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Patterns matching common credential / secret formats.
@@ -1576,18 +1493,6 @@ function executeGitOperations(
 }
 
 // ---------------------------------------------------------------------------
-// Sanitize error messages before persisting to job store
-// ---------------------------------------------------------------------------
-
-function sanitizeErrorMessage(msg: string): string {
-  return msg
-    .replace(/:\/\/[^@]+@/g, "://***@")
-    .replace(/\b[0-9a-f]{20,}\b/gi, "[REDACTED]")
-    .replace(/\b[A-Za-z0-9+/]{40,}={0,2}\b/g, "[REDACTED]")
-    .slice(0, 500);
-}
-
-// ---------------------------------------------------------------------------
 // Process completion handler (async, runs after spawn)
 // ---------------------------------------------------------------------------
 
@@ -1805,6 +1710,15 @@ async function handleProcessCompletion(
           execResult.base_branch = baseBranch;
           artifacts.executionResult = execResult;
           metadata.branchName = gitResult.branchName;
+          // Persist merged execute metadata for reboot-time finalization replay.
+          try {
+            writeFileSync(
+              path.join(claudeWorkDir, "execution-result.json"),
+              JSON.stringify(execResult),
+            );
+          } catch (err) {
+            loopLog(loopId, "Failed to persist execution-result.json:", err);
+          }
         } else if (gitResult.status === "no-changes") {
           gatewayLog.info(
             "loop-harness",
@@ -1833,86 +1747,6 @@ async function handleProcessCompletion(
       artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
     }
 
-    // Read session ID if available
-    const sessionFile = path.join(claudeWorkDir, "session-id.txt");
-    const sessionId = readTextFile(sessionFile);
-    if (sessionId) {
-      metadata.sessionId = sessionId.trim();
-    }
-
-    // Upload artifacts
-    const artifactKeys = Object.keys(artifacts);
-    loopLog(loopId, "Artifact keys:", artifactKeys);
-    gatewayLog.info(
-      "loop-harness",
-      `Uploading artifacts for ${command} loopId=${loopId}: [${artifactKeys.join(", ")}]`,
-    );
-    const uploadResult = await uploadArtifacts(
-      apiBaseUrl,
-      loopId,
-      closedLoopAuthToken,
-      {
-        artifacts,
-        metadata,
-      },
-    );
-    if (!uploadResult.success) {
-      gatewayLog.warn(
-        "loop-harness",
-        "Artifact upload failed: " +
-          (uploadResult.error ?? "unknown error") +
-          ", loopId=" +
-          loopId,
-      );
-      warnings.push("ARTIFACT_UPLOAD_FAILED");
-    }
-
-    // Parse token usage from claude output
-    const tokensUsed = parseTokenUsage(claudeWorkDir);
-    loopLog(
-      loopId,
-      `Tokens used: input=${tokensUsed.inputTokens}, output=${tokensUsed.outputTokens}`,
-    );
-
-    // Post completed event — shape matches ECS harness reportFinalStatus()
-    const result: Record<string, unknown> = {
-      exitCode,
-      subtype: command.toLowerCase(),
-    };
-
-    if (command === "EXECUTE" && artifacts.executionResult) {
-      const execResult = artifacts.executionResult as Record<string, unknown>;
-      result.prUrl = execResult.pr_url;
-      result.prNumber = execResult.pr_number;
-      result.branchName = execResult.branch_name;
-      result.has_changes = execResult.has_changes ?? false;
-    }
-
-    // Include worktree branch name for all commands that use a worktree.
-    // The server persists this on the loop record for display/debugging.
-    if (worktreeDir && !result.branchName) {
-      const branch = wt.getCurrentBranch(worktreeDir);
-      if (branch) {
-        result.branchName = branch;
-      }
-    }
-
-    // sessionId inside result (matches harness)
-    if (metadata.sessionId) {
-      result.sessionId = metadata.sessionId;
-    }
-
-    const completedEvent: Record<string, unknown> = {
-      type: "completed",
-      result,
-      tokensUsed: {
-        input: tokensUsed.inputTokens,
-        output: tokensUsed.outputTokens,
-      },
-      loopId,
-      ...(warnings.length > 0 ? { warnings } : {}),
-    };
-
     // Cancellation gate: skip completed event if cancelled during post-processing
     if (isCancelled(jobStore, loopId)) {
       const cancelJob = jobStore?.getByLoopId(loopId);
@@ -1937,51 +1771,119 @@ async function handleProcessCompletion(
       return;
     }
 
-    loopLog(loopId, "Posting completed event...");
-    const eventResult = await postLoopEvent(
-      apiBaseUrl,
-      loopId,
-      closedLoopAuthToken,
-      completedEvent,
-    );
-    if (!eventResult.success) {
-      gatewayLog.warn(
-        "loop-harness",
-        "Completed event POST failed: " +
-          (eventResult.error ?? "unknown error") +
-          ", loopId=" +
-          loopId,
-      );
-      warnings.push("EVENT_POST_FAILED");
-    }
-    loopLog(loopId, "Loop completed successfully");
-
-    if (jobStore) {
+    if (warnings.length > 0 && jobStore) {
       const existingJob = jobStore.getByLoopId(loopId);
       if (existingJob) {
-        const now = new Date().toISOString();
+        const existingWarnings = existingJob.warning
+          ? existingJob.warning
+              .split(";")
+              .map((value) => value.trim())
+              .filter((value) => value.length > 0)
+          : [];
+        const mergedWarnings = [...new Set([...existingWarnings, ...warnings])];
         jobStore.upsert({
           ...existingJob,
-          status: "COMPLETED",
-          exitCode: 0,
-          updatedAt: now,
-          completedAt: now,
-          warning:
-            warnings.length > 0
-              ? warnings.map(sanitizeErrorMessage).join("; ")
-              : undefined,
+          warning: mergedWarnings.map(sanitizeErrorMessage).join("; "),
+          updatedAt: new Date().toISOString(),
         });
       }
     }
 
-    const completedJob = jobStore?.getByLoopId(loopId);
-    Observability.jobCompleted(
-      commandId ?? completedJob?.commandId,
-      operationId ?? completedJob?.operationId,
-      loopId,
-      undefined,
-      typeof metadata.sessionId === "string" ? metadata.sessionId : undefined,
-    );
+    runningLoops.delete(loopId);
+    const existingJob = jobStore?.getByLoopId(loopId);
+    if (existingJob && jobStore) {
+      const finalizerDeps: LoopFinalizerDeps = {
+        jobStore,
+        telemetry: { emit: () => {} },
+        assertPathAllowed,
+        apiAuthToken: closedLoopAuthToken,
+        apiBaseUrl,
+        isProcessRunning,
+      };
+      await finalizeLoopFromRuntime(existingJob, "live-exit", finalizerDeps);
+      const sessionId = readTextFile(path.join(claudeWorkDir, "session-id.txt"));
+      const normalizedSessionId = sessionId?.trim();
+      Observability.jobCompleted(
+        commandId ?? existingJob.commandId,
+        operationId ?? existingJob.operationId,
+        loopId,
+        undefined,
+        normalizedSessionId && normalizedSessionId.length > 0
+          ? normalizedSessionId
+          : undefined,
+      );
+    } else {
+      // Legacy completion path: route-level behavior when no JobStore is present.
+      const sessionIdRaw = readTextFile(path.join(claudeWorkDir, "session-id.txt"));
+      const sessionId = sessionIdRaw?.trim();
+      if (sessionId) {
+        metadata.sessionId = sessionId;
+      }
+
+      const uploadResult = await uploadArtifacts(
+        apiBaseUrl,
+        loopId,
+        closedLoopAuthToken,
+        {
+          artifacts,
+          metadata,
+        },
+      );
+      if (!uploadResult.success) {
+        warnings.push("ARTIFACT_UPLOAD_FAILED");
+      }
+
+      const tokensUsed = parseTokenUsage(claudeWorkDir);
+      const result: Record<string, unknown> = {
+        exitCode,
+        subtype: command.toLowerCase(),
+      };
+      if (command === "EXECUTE" && artifacts.executionResult) {
+        const execResult = artifacts.executionResult as Record<string, unknown>;
+        result.prUrl = execResult.pr_url;
+        result.prNumber = execResult.pr_number;
+        result.branchName = execResult.branch_name;
+        result.has_changes = execResult.has_changes ?? false;
+      }
+      if (worktreeDir && !result.branchName) {
+        const branch = wt.getCurrentBranch(worktreeDir);
+        if (branch) {
+          result.branchName = branch;
+        }
+      }
+      if (sessionId) {
+        result.sessionId = sessionId;
+      }
+
+      const completedEvent: Record<string, unknown> = {
+        type: "completed",
+        result,
+        tokensUsed: {
+          input: tokensUsed.inputTokens,
+          output: tokensUsed.outputTokens,
+        },
+        loopId,
+        ...(warnings.length > 0 ? { warnings } : {}),
+      };
+
+      const eventResult = await postLoopEvent(
+        apiBaseUrl,
+        loopId,
+        closedLoopAuthToken,
+        completedEvent,
+      );
+      if (!eventResult.success) {
+        warnings.push("EVENT_POST_FAILED");
+      }
+
+      Observability.jobCompleted(
+        commandId,
+        operationId,
+        loopId,
+        undefined,
+        sessionId,
+      );
+    }
 
     // Clean up temp claude workdir after all reads and uploads are complete
     if (usedTempDir) {
@@ -2742,6 +2644,16 @@ async function handleLoopRequest(
       return;
     }
 
+    const spawnedAt = new Date().toISOString();
+    try {
+      writeFileSync(
+        path.join(claudeWorkDir, "runtime.json"),
+        JSON.stringify({ pid, spawnedAt }),
+      );
+    } catch {
+      loopLog(body.loopId, "Failed to write runtime.json");
+    }
+
     // Replace sentinel with real entry — storing `child` prevents GC of the
     // ChildProcess handle which would silently drop the exit listener.
     runningLoops.set(body.loopId, { pid, child, stage: "running" });
@@ -2751,6 +2663,14 @@ async function handleLoopRequest(
       body.loopId,
       body.closedLoopAuthToken,
       jsonlPreSpawnOffset,
+      jobStore
+        ? (offset) => {
+            const job = jobStore.getByLoopId(body.loopId);
+            if (job) {
+              jobStore.upsert({ ...job, lastObservedJsonlOffset: offset });
+            }
+          }
+        : undefined,
     );
     spawnedSuccessfully = true;
     loopLog(body.loopId, `Spawned pid=${pid}, worktree=${worktreeDir}`);
@@ -2784,6 +2704,9 @@ async function handleLoopRequest(
         status: "RUNNING",
         updatedAt: now,
         startedAt: existing?.startedAt ?? now,
+        pidStartedAt: spawnedAt,
+        apiBaseUrl,
+        lastObservedJsonlOffset: existing?.lastObservedJsonlOffset ?? jsonlPreSpawnOffset,
       });
     }
 

@@ -13,6 +13,7 @@ export type TelemetryCategory =
   | "command.gateway_error"
   | "job.started"
   | "job.completed"
+  | "job.recovery.finalize_replayed"
   | "job.failed"
   | "job.cancelled"
   | "preflight.binary_not_found"
@@ -47,6 +48,10 @@ export interface TelemetryEventPayload {
   timestamp?: string;
   trace?: TelemetryTraceContext;
   diagnostics?: TelemetryDiagnostics;
+}
+
+export interface TelemetryEmitter {
+  emit(event: TelemetryEventPayload): void;
 }
 
 /** Full wire-format event including protocol envelope (used by transport layer). */

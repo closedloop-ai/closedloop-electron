@@ -46,7 +46,7 @@ import { shouldAutoApprove, OPERATION_RISK_TIERS } from "./approval-policy.js";
 import { gatewayLog, isNetworkError } from "./gateway-logger.js";
 import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
-import { JobStore, isTerminalJobStatus } from "./job-store.js";
+import { JobStore, isTerminalJobStatus, type LocalJob } from "./job-store.js";
 import { Observability } from "./observability.js";
 import type {
   GatewayApprovalRequest,
@@ -64,10 +64,13 @@ import type { ShutdownResult } from "./shutdown.js";
 import pkg from "electron-updater";
 const { autoUpdater } = pkg;
 import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
+import { BootRecoveryService } from "./boot-recovery.js";
+import type { TelemetryEmitter } from "./telemetry-protocol.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
 const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const NOOP_TELEMETRY: TelemetryEmitter = { emit() {} };
 
 export class DesktopApplication {
   private readonly settingsStore: SettingsStore;
@@ -81,6 +84,7 @@ export class DesktopApplication {
   private readonly approvalStore: ApprovalStore;
   private readonly jobStore: JobStore;
   private readonly recovery: GatewayRecoveryManager;
+  private readonly bootRecovery: BootRecoveryService;
   private readonly gatewayAuthToken: string;
   private readonly sessionStore: LocalSessionStore;
   private shuttingDown = false;
@@ -252,6 +256,12 @@ export class DesktopApplication {
       isShuttingDown: () => this.shuttingDown,
       isPaused: () => this.cloudCommandsPaused,
     });
+    this.bootRecovery = new BootRecoveryService({
+      jobStore: this.jobStore,
+      telemetry: NOOP_TELEMETRY,
+      getApiKey: () => this.apiKeyStore.getApiKey(),
+      getApiOrigin: () => this.settingsStore.getApiOrigin(),
+    });
     this.registerIpcHandlers();
   }
 
@@ -276,7 +286,8 @@ export class DesktopApplication {
 
     gatewayLog.setVerbose(this.settingsStore.getAll().verboseLogging);
     this.migrateLegacyData();
-    this.reconcileJobStore();
+    const deadJobs = this.reconcileJobStore();
+    await this.bootRecovery.run(deadJobs);
 
     const bootSandbox = this.settingsStore.getSandboxBaseDirectory();
     if (bootSandbox?.trim()) {
@@ -377,6 +388,7 @@ export class DesktopApplication {
     }
 
     this.shuttingDown = true;
+    this.bootRecovery.dispose();
     await Observability.shutdown();
     return runShutdownSequence({
       updateCheckTimer: this.updateCheckTimer,
@@ -852,8 +864,8 @@ export class DesktopApplication {
     app.exit(0);
   }
 
-  private reconcileJobStore(): void {
-    this.jobStore.reconcile((job) => {
+  private reconcileJobStore(): LocalJob[] {
+    return this.jobStore.reconcile((job) => {
       const now = new Date().toISOString();
 
       // If no PID, we cannot verify liveness
