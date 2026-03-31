@@ -31,9 +31,6 @@ beforeEach(async () => {
       body: typeof init?.body === "string" ? init.body : "",
       authHeader: headers.get("Authorization"),
     });
-    if (url.endsWith("/runner-token")) {
-      return new Response(JSON.stringify({ token: "refreshed-token" }), { status: 200 });
-    }
     return new Response(JSON.stringify({ success: true }), { status: 200 });
   }) as typeof fetch;
 });
@@ -81,6 +78,7 @@ test("finalizes dead jobs returned by reconcile", async () => {
   const claudeWorkDir = path.join(repoDir, "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
   await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
+  persistLoopAuthToken(claudeWorkDir, "loop-token");
 
   const jobStore = createStore("boot-recovery-dead");
   const deadJob = createJob({
@@ -102,9 +100,8 @@ test("finalizes dead jobs returned by reconcile", async () => {
   assert.ok(persisted);
   assert.equal(persisted.status, "COMPLETED");
   assert.ok(persisted.finalStatusPersistedAt);
-  assert.ok(fetchCalls.some((c) => c.url.endsWith("/runner-token")));
-  assert.ok(fetchCalls.some((c) => c.url.includes("/upload-artifacts")));
-  assert.ok(fetchCalls.some((c) => c.body.includes('"type":"completed"')));
+  assert.ok(fetchCalls.some((c) => c.url.includes("/upload-artifacts") && c.authHeader === "Bearer loop-token"));
+  assert.ok(fetchCalls.some((c) => c.body.includes('"type":"completed"') && c.authHeader === "Bearer loop-token"));
 });
 
 test("reattaches to live jobs and persists jsonl offsets", async () => {
@@ -146,7 +143,7 @@ test("reattaches to live jobs and persists jsonl offsets", async () => {
     fetchCalls.some(
       (entry) =>
         entry.url.endsWith("/loops/loop-1/events") &&
-        entry.authHeader === "Bearer refreshed-token",
+        entry.authHeader === "Bearer loop-token",
     ),
   );
   service.dispose();
@@ -193,7 +190,7 @@ test("reattaches legacy live jobs without persisted jsonlPath", async () => {
     fetchCalls.some(
       (entry) =>
         entry.url.endsWith("/loops/loop-1/events") &&
-        entry.authHeader === "Bearer refreshed-token" &&
+        entry.authHeader === "Bearer loop-token" &&
         entry.body.includes('"type":"output"'),
     ),
   );
@@ -236,14 +233,14 @@ test("finalizes recovered live job after process exits", async () => {
     fetchCalls.some(
       (entry) =>
         entry.url.endsWith("/loops/loop-1/upload-artifacts") &&
-        entry.authHeader === "Bearer refreshed-token",
+        entry.authHeader === "Bearer loop-token",
     ),
   );
   assert.ok(
     fetchCalls.some(
       (entry) =>
         entry.url.endsWith("/loops/loop-1/events") &&
-        entry.authHeader === "Bearer refreshed-token",
+        entry.authHeader === "Bearer loop-token",
     ),
   );
   service.dispose();

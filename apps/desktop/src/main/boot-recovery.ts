@@ -8,10 +8,7 @@ import { isProcessRunning } from "../server/operations/symphony-utils.js";
 import { assertPathAllowed } from "../server/security.js";
 import { gatewayLog } from "./gateway-logger.js";
 import type { JobStore, LocalJob } from "./job-store.js";
-import {
-  persistLoopAuthToken,
-  readPersistedLoopAuthToken,
-} from "./loop-auth-token.js";
+import { readPersistedLoopAuthToken } from "./loop-auth-token.js";
 import {
   finalizeLoopFromRuntime,
   type LoopFinalizerDeps,
@@ -34,75 +31,18 @@ interface LiveJobHandle {
 const WATCHER_POLL_MS = 3000;
 
 /**
- * Ask the cloud API for a fresh runner token.  Returns the new token on
- * success or null when the endpoint is unavailable / returns an error.
+ * Resolve the loop auth token from the persisted on-disk file, falling back
+ * to the gateway API key as a last resort.
  */
-async function refreshRunnerToken(
-  apiBaseUrl: string,
-  loopId: string,
-  apiKey: string,
-): Promise<string | null> {
-  try {
-    const resp = await fetch(
-      `${apiBaseUrl}/loops/${loopId}/runner-token`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-        },
-      },
-    );
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      gatewayLog.warn(
-        "boot-recovery",
-        `Runner-token refresh failed for loopId=${loopId}: ${resp.status} ${text}`,
-      );
-      return null;
-    }
-    const body = (await resp.json()) as Record<string, unknown>;
-    const token = typeof body.token === "string" ? body.token : null;
-    if (token) {
-      gatewayLog.info("boot-recovery", `Runner-token refreshed for loopId=${loopId}`);
-    }
-    return token;
-  } catch (err) {
-    gatewayLog.warn(
-      "boot-recovery",
-      `Runner-token refresh network error for loopId=${loopId}: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return null;
-  }
-}
-
-/**
- * Resolve the loop auth token, preferring a freshly issued token from the
- * cloud API.  Falls back to the persisted on-disk token if refresh fails,
- * then to the gateway API key as a last resort.
- */
-async function resolveLoopAuthToken(
+function resolveLoopAuthToken(
   job: LocalJob,
   fallbackApiKey: string,
-  apiBaseUrl: string,
-): Promise<string> {
-  const fresh = await refreshRunnerToken(apiBaseUrl, job.loopId, fallbackApiKey);
-  if (fresh) {
-    if (job.claudeWorkDir) {
-      try { persistLoopAuthToken(job.claudeWorkDir, fresh); } catch { /* best effort */ }
-    }
-    gatewayLog.info(
-      "boot-recovery",
-      `Token source for loopId=${job.loopId}: REFRESHED (fresh runner token)`,
-    );
-    return fresh;
-  }
-
+): string {
   const persisted = readPersistedLoopAuthToken(job.claudeWorkDir);
   if (persisted) {
     gatewayLog.info(
       "boot-recovery",
-      `Token source for loopId=${job.loopId}: PERSISTED (from ${job.claudeWorkDir ?? "unknown"})`,
+      `Token source for loopId=${job.loopId}: PERSISTED`,
     );
     return persisted;
   }
@@ -170,7 +110,7 @@ export class BootRecoveryService {
     } else if (apiKey && apiBaseUrl) {
       for (const job of unfinalizedDeadJobs) {
         try {
-          const authToken = await resolveLoopAuthToken(job, apiKey, apiBaseUrl);
+          const authToken = resolveLoopAuthToken(job, apiKey);
           await finalizeLoopFromRuntime(job, "boot-recovery", {
             jobStore,
             telemetry,
@@ -214,7 +154,7 @@ export class BootRecoveryService {
     if (pid == null) return;
 
     const effectiveApiBaseUrl = job.apiBaseUrl ?? apiBaseUrl;
-    const loopAuthToken = await resolveLoopAuthToken(job, apiKey, effectiveApiBaseUrl);
+    const loopAuthToken = resolveLoopAuthToken(job, apiKey);
     registerRecoveredLoop(loopId, pid);
 
     const enrichedJob = backfillJobPaths(job, jobStore);
