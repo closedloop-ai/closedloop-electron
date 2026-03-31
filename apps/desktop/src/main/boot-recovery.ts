@@ -32,6 +32,7 @@ const WATCHER_POLL_MS = 3000;
 export class BootRecoveryService {
   private readonly deps: BootRecoveryDeps;
   private liveHandles: LiveJobHandle[] = [];
+  // Prevents new recovery work and stops background watchers after shutdown begins.
   private disposed = false;
 
   constructor(deps: BootRecoveryDeps) {
