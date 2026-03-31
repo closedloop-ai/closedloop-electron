@@ -293,56 +293,6 @@ test("skips live job reattach when loop token is missing", async () => {
   service.dispose();
 });
 
-test("reattaches legacy live jobs without persisted jsonlPath", async () => {
-  const repoDir = path.join(tempRoot, "repo");
-  const claudeWorkDir = path.join(repoDir, "workdir");
-  await fs.mkdir(claudeWorkDir, { recursive: true });
-  const loopTokenStore = createLoopTokenStore("boot-recovery-legacy-live-loop-tokens");
-  loopTokenStore.setLoopToken("loop-1", "loop-token");
-
-  const jobStore = createStore("boot-recovery-legacy-live-job");
-  const liveJob = createJob({
-    pid: process.pid,
-    status: "RUNNING",
-    claudeWorkDir,
-    jsonlPath: undefined,
-    lastObservedJsonlOffset: 0,
-  });
-  jobStore.upsert(liveJob);
-
-  const service = new BootRecoveryService({
-    jobStore,
-    telemetry: { emit: () => {} },
-    getApiKey: () => "test-key",
-    getApiOrigin: () => "http://127.0.0.1:40115",
-    loopTokenStore,
-  });
-  await service.run([]);
-
-  const derivedJsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
-  await fs.appendFile(
-    derivedJsonlPath,
-    '{"type":"assistant","message":{"content":[{"type":"text","text":"legacy recovered output"}]}}\n',
-  );
-  await sleep(100);
-
-  const persisted = jobStore.getByLoopId("loop-1");
-  assert.ok(persisted);
-  assert.equal(persisted.jsonlPath, derivedJsonlPath);
-  assert.equal(persisted.statePath, path.join(claudeWorkDir, "state.json"));
-  assert.equal(persisted.logPath, path.join(claudeWorkDir, "symphony-loop.log"));
-  assert.ok((persisted.lastObservedJsonlOffset ?? 0) > 0);
-  assert.ok(
-    fetchCalls.some(
-      (entry) =>
-        entry.url.endsWith("/loops/loop-1/events") &&
-        entry.authHeader === "Bearer loop-token" &&
-        entry.body.includes('"type":"output"'),
-    ),
-  );
-  service.dispose();
-});
-
 test("finalizes recovered live job after process exits", async () => {
   const repoDir = path.join(tempRoot, "repo");
   const claudeWorkDir = path.join(repoDir, "workdir");

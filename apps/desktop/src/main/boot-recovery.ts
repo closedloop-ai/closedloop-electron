@@ -1,4 +1,3 @@
-import path from "node:path";
 import { startOutputTailer } from "../server/operations/output-tailer.js";
 import {
   registerRecoveredLoop,
@@ -29,37 +28,6 @@ interface LiveJobHandle {
 }
 
 const WATCHER_POLL_MS = 3000;
-
-/**
- * Backfill job metadata paths that live-loop startup persists but older app
- * versions may not have saved.  Returns the updated job (or the original if
- * nothing changed).  Persists to JobStore only when at least one field was
- * derived so subsequent polls/enrichments see them immediately.
- */
-function backfillJobPaths(job: LocalJob, jobStore: JobStore): LocalJob {
-  if (!job.claudeWorkDir) return job;
-
-  const patches: Partial<LocalJob> = {};
-  if (!job.jsonlPath) {
-    patches.jsonlPath = path.join(job.claudeWorkDir, "claude-output.jsonl");
-  }
-  if (!job.statePath) {
-    patches.statePath = path.join(job.claudeWorkDir, "state.json");
-  }
-  if (!job.logPath) {
-    patches.logPath = path.join(job.claudeWorkDir, "symphony-loop.log");
-  }
-
-  if (Object.keys(patches).length === 0) return job;
-
-  const updated: LocalJob = {
-    ...job,
-    ...patches,
-    updatedAt: new Date().toISOString(),
-  };
-  jobStore.upsert(updated);
-  return updated;
-}
 
 export class BootRecoveryService {
   private readonly deps: BootRecoveryDeps;
@@ -155,7 +123,6 @@ export class BootRecoveryService {
     );
     registerRecoveredLoop(loopId, pid);
 
-    const enrichedJob = backfillJobPaths(job, jobStore);
     gatewayLog.info(
       "boot-recovery",
       `Reattaching live loop loopId=${loopId} pid=${pid}`,
@@ -168,17 +135,17 @@ export class BootRecoveryService {
     }
 
     let tailer: LiveJobHandle["tailer"] | undefined;
-    if (enrichedJob.jsonlPath) {
+    if (job.jsonlPath) {
       gatewayLog.info(
         "boot-recovery",
-        `Starting output tailer for loopId=${loopId} jsonlPath=${enrichedJob.jsonlPath} offset=${enrichedJob.lastObservedJsonlOffset ?? 0} api=${effectiveApiBaseUrl}`,
+        `Starting output tailer for loopId=${loopId} jsonlPath=${job.jsonlPath} offset=${job.lastObservedJsonlOffset ?? 0} api=${effectiveApiBaseUrl}`,
       );
       tailer = startOutputTailer(
-        enrichedJob.jsonlPath,
+        job.jsonlPath,
         effectiveApiBaseUrl,
         loopId,
         loopAuthToken,
-        enrichedJob.lastObservedJsonlOffset ?? 0,
+        job.lastObservedJsonlOffset ?? 0,
         (offset) => {
           const current = jobStore.getByLoopId(loopId);
           if (current) {
@@ -189,7 +156,7 @@ export class BootRecoveryService {
     } else {
       gatewayLog.warn(
         "boot-recovery",
-        `Cannot start output tailer for loopId=${loopId}: no jsonlPath (claudeWorkDir=${enrichedJob.claudeWorkDir ?? "none"})`,
+        `Cannot start output tailer for loopId=${loopId}: no jsonlPath (claudeWorkDir=${job.claudeWorkDir ?? "none"})`,
       );
     }
 
