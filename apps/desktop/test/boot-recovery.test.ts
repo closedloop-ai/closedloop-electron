@@ -7,10 +7,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach, test } from "node:test";
 import { BootRecoveryService } from "../src/main/boot-recovery.js";
 import { JobStore, type LocalJob } from "../src/main/job-store.js";
-import {
-  type SafeStorageLike,
-  LoopTokenStore,
-} from "../src/main/loop-token-store.js";
+import { LoopTokenStore } from "../src/main/loop-token-store.js";
+import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
 import type { TelemetryEventPayload } from "../src/main/telemetry-protocol.js";
 
 let tempRoot = "";
@@ -65,19 +63,6 @@ function createLoopTokenStore(name: string): LoopTokenStore {
     name,
     safeStorage: createTestLoopTokenSafeStorage(),
   });
-}
-
-function createTestLoopTokenSafeStorage(): SafeStorageLike {
-  return {
-    isEncryptionAvailable: () => true,
-    encryptString(plainText: string) {
-      return Buffer.from(`stub:${plainText}`, "utf-8");
-    },
-    decryptString(encrypted: Buffer) {
-      const s = encrypted.toString("utf-8");
-      return s.startsWith("stub:") ? s.slice(5) : s;
-    },
-  };
 }
 
 function createJob(overrides?: Partial<LocalJob>): LocalJob {

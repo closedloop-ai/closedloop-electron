@@ -3,23 +3,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import {
-  type SafeStorageLike,
-  LoopTokenStore,
-} from "../src/main/loop-token-store.js";
-
-function createTestSafeStorage(): SafeStorageLike {
-  return {
-    isEncryptionAvailable: () => true,
-    encryptString(plainText: string) {
-      return Buffer.from(`stub:${plainText}`, "utf-8");
-    },
-    decryptString(encrypted: Buffer) {
-      const s = encrypted.toString("utf-8");
-      return s.startsWith("stub:") ? s.slice(5) : s;
-    },
-  };
-}
+import { LoopTokenStore } from "../src/main/loop-token-store.js";
+import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
 
 let tempRoot = "";
 
@@ -39,7 +24,7 @@ test("LoopTokenStore roundtrip and delete", () => {
   const store = new LoopTokenStore({
     cwd: tempRoot,
     name: "lt-store",
-    safeStorage: createTestSafeStorage(),
+    safeStorage: createTestLoopTokenSafeStorage(),
   });
   assert.equal(store.getLoopToken("loop-a"), null);
   store.setLoopToken("loop-a", "runner-secret");
@@ -52,7 +37,7 @@ test("LoopTokenStore delete is idempotent", () => {
   const store = new LoopTokenStore({
     cwd: tempRoot,
     name: "lt-idem",
-    safeStorage: createTestSafeStorage(),
+    safeStorage: createTestLoopTokenSafeStorage(),
   });
   store.deleteLoopToken("missing");
   assert.equal(store.getLoopToken("missing"), null);
