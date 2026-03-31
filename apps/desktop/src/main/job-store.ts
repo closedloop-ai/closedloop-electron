@@ -51,7 +51,6 @@ export type LocalJob = {
   completedAt?: string;
   warning?: string;
   exitCode?: number | null;
-  pidStartedAt?: string;
   lastObservedJsonlOffset?: number;
   artifactsUploadedAt?: string;
   completedEventPostedAt?: string;

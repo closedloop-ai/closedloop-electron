@@ -14,7 +14,6 @@ import { parseTokenUsage } from "./token-usage.js";
 export interface LoopFinalizerDeps {
   jobStore: JobStore;
   telemetry: TelemetryEmitter;
-  assertPathAllowed: (targetPath: string, allowedDirectories: string[]) => void;
   apiAuthToken: string;
   apiBaseUrl: string;
   isProcessRunning: (pid: number) => boolean;

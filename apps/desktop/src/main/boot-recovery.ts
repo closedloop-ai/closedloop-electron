@@ -5,7 +5,6 @@ import {
   unregisterLoop,
 } from "../server/operations/symphony-loop.js";
 import { isProcessRunning } from "../server/operations/symphony-utils.js";
-import { assertPathAllowed } from "../server/security.js";
 import { gatewayLog } from "./gateway-logger.js";
 import type { JobStore, LocalJob } from "./job-store.js";
 import { readPersistedLoopAuthToken } from "./loop-auth-token.js";
@@ -114,7 +113,6 @@ export class BootRecoveryService {
           await finalizeLoopFromRuntime(job, "boot-recovery", {
             jobStore,
             telemetry,
-            assertPathAllowed,
             apiAuthToken: authToken,
             apiBaseUrl,
             isProcessRunning,
@@ -237,7 +235,6 @@ export class BootRecoveryService {
       const finalizerDeps: LoopFinalizerDeps = {
         jobStore,
         telemetry,
-        assertPathAllowed,
         apiAuthToken: apiKey,
         apiBaseUrl,
         isProcessRunning,

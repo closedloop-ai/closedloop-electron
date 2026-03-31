@@ -1833,31 +1833,33 @@ async function handleProcessCompletion(
       metadata.sessionId = sessionId.trim();
     }
 
-    // Upload artifacts
-    const artifactKeys = Object.keys(artifacts);
-    loopLog(loopId, "Artifact keys:", artifactKeys);
-    gatewayLog.info(
-      "loop-harness",
-      `Uploading artifacts for ${command} loopId=${loopId}: [${artifactKeys.join(", ")}]`,
-    );
-    const uploadResult = await uploadArtifacts(
-      apiBaseUrl,
-      loopId,
-      closedLoopAuthToken,
-      {
-        artifacts,
-        metadata,
-      },
-    );
-    if (!uploadResult.success) {
-      gatewayLog.warn(
+    // JobStore-backed loops: `finalizeLoopFromRuntime` owns artifact upload + completed event.
+    if (!jobStore) {
+      const artifactKeys = Object.keys(artifacts);
+      loopLog(loopId, "Artifact keys:", artifactKeys);
+      gatewayLog.info(
         "loop-harness",
-        "Artifact upload failed: " +
-          (uploadResult.error ?? "unknown error") +
-          ", loopId=" +
-          loopId,
+        `Uploading artifacts for ${command} loopId=${loopId}: [${artifactKeys.join(", ")}]`,
       );
-      warnings.push("ARTIFACT_UPLOAD_FAILED");
+      const uploadResult = await uploadArtifacts(
+        apiBaseUrl,
+        loopId,
+        closedLoopAuthToken,
+        {
+          artifacts,
+          metadata,
+        },
+      );
+      if (!uploadResult.success) {
+        gatewayLog.warn(
+          "loop-harness",
+          "Artifact upload failed: " +
+            (uploadResult.error ?? "unknown error") +
+            ", loopId=" +
+            loopId,
+        );
+        warnings.push("ARTIFACT_UPLOAD_FAILED");
+      }
     }
 
     // Parse token usage from claude output
@@ -1903,45 +1905,6 @@ async function handleProcessCompletion(
       }
       return;
     }
-
-    // Post completed event — shape matches ECS harness reportFinalStatus()
-    const result: Record<string, unknown> = {
-      exitCode,
-      subtype: command.toLowerCase(),
-    };
-
-    if (command === "EXECUTE" && artifacts.executionResult) {
-      const execResult = artifacts.executionResult as Record<string, unknown>;
-      result.prUrl = execResult.pr_url;
-      result.prNumber = execResult.pr_number;
-      result.branchName = execResult.branch_name;
-      result.has_changes = execResult.has_changes ?? false;
-    }
-
-    // Include worktree branch name for all commands that use a worktree.
-    // The server persists this on the loop record for display/debugging.
-    if (worktreeDir && !result.branchName) {
-      const branch = wt.getCurrentBranch(worktreeDir);
-      if (branch) {
-        result.branchName = branch;
-      }
-    }
-
-    // sessionId inside result (matches harness)
-    if (metadata.sessionId) {
-      result.sessionId = metadata.sessionId;
-    }
-
-    const completedEvent: Record<string, unknown> = {
-      type: "completed",
-      result,
-      tokensUsed: {
-        input: tokensUsed.inputTokens,
-        output: tokensUsed.outputTokens,
-      },
-      loopId,
-      ...(warnings.length > 0 ? { warnings } : {}),
-    };
 
     // Cancellation gate: skip completed event if cancelled during post-processing
     if (isCancelled(jobStore, loopId)) {
@@ -1991,7 +1954,6 @@ async function handleProcessCompletion(
       const finalizerDeps: LoopFinalizerDeps = {
         jobStore,
         telemetry: { emit: () => {} },
-        assertPathAllowed,
         apiAuthToken: closedLoopAuthToken,
         apiBaseUrl,
         isProcessRunning,
@@ -2010,26 +1972,7 @@ async function handleProcessCompletion(
       );
     } else {
       // Legacy completion path: route-level behavior when no JobStore is present.
-      const sessionIdRaw = readTextFile(path.join(claudeWorkDir, "session-id.txt"));
-      const sessionId = sessionIdRaw?.trim();
-      if (sessionId) {
-        metadata.sessionId = sessionId;
-      }
-
-      const uploadResult = await uploadArtifacts(
-        apiBaseUrl,
-        loopId,
-        closedLoopAuthToken,
-        {
-          artifacts,
-          metadata,
-        },
-      );
-      if (!uploadResult.success) {
-        warnings.push("ARTIFACT_UPLOAD_FAILED");
-      }
-
-      const tokensUsed = parseTokenUsage(claudeWorkDir);
+      // Upload already ran above (no jobStore branch).
       const result: Record<string, unknown> = {
         exitCode,
         subtype: command.toLowerCase(),
@@ -2047,8 +1990,9 @@ async function handleProcessCompletion(
           result.branchName = branch;
         }
       }
-      if (sessionId) {
-        result.sessionId = sessionId;
+      const legacySessionId = sessionId?.trim();
+      if (legacySessionId) {
+        result.sessionId = legacySessionId;
       }
 
       const completedEvent: Record<string, unknown> = {
@@ -2077,7 +2021,7 @@ async function handleProcessCompletion(
         operationId,
         loopId,
         undefined,
-        sessionId,
+        legacySessionId,
       );
     }
 
@@ -2849,16 +2793,6 @@ async function handleLoopRequest(
       return;
     }
 
-    const spawnedAt = new Date().toISOString();
-    try {
-      writeFileSync(
-        path.join(claudeWorkDir, "runtime.json"),
-        JSON.stringify({ pid, spawnedAt }),
-      );
-    } catch {
-      loopLog(body.loopId, "Failed to write runtime.json");
-    }
-
     // Replace sentinel with real entry — storing `child` prevents GC of the
     // ChildProcess handle which would silently drop the exit listener.
     runningLoops.set(body.loopId, { pid, child, stage: "running" });
@@ -2909,7 +2843,6 @@ async function handleLoopRequest(
         status: "RUNNING",
         updatedAt: now,
         startedAt: existing?.startedAt ?? now,
-        pidStartedAt: spawnedAt,
         apiBaseUrl,
         lastObservedJsonlOffset: existing?.lastObservedJsonlOffset ?? jsonlPreSpawnOffset,
       });

@@ -68,7 +68,6 @@ test("finalizeLoopFromRuntime uploads, posts completion, and persists terminal s
   await finalizeLoopFromRuntime(job, "live-exit", {
     jobStore,
     telemetry: { emit: (event) => telemetryEvents.push(event) },
-    assertPathAllowed: () => {},
     apiAuthToken: "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
@@ -96,7 +95,6 @@ test("finalizeLoopFromRuntime is idempotent after timestamps are set", async () 
   await finalizeLoopFromRuntime(job, "live-exit", {
     jobStore,
     telemetry: { emit: () => {} },
-    assertPathAllowed: () => {},
     apiAuthToken: "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
@@ -108,7 +106,6 @@ test("finalizeLoopFromRuntime is idempotent after timestamps are set", async () 
   await finalizeLoopFromRuntime(finalized, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    assertPathAllowed: () => {},
     apiAuthToken: "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
@@ -131,7 +128,6 @@ test("finalizeLoopFromRuntime skips CANCEL_PENDING while PID remains alive", asy
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    assertPathAllowed: () => {},
     apiAuthToken: "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => true,
