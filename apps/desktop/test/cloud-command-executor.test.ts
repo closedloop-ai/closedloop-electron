@@ -9,13 +9,16 @@ import type {
   DesktopCommandEvent,
   DesktopCommandStreamEvent,
 } from "../src/main/cloud-protocol.js";
-import type { TelemetryEventPayload } from "../src/main/telemetry-protocol.js";
+import { Observability } from "../src/main/observability.js";
+
+Observability.initNoOp();
 
 let gatewayServer: http.Server | null = null;
 let gatewayPort = 0;
 let executor: CloudCommandExecutor | null = null;
 
 afterEach(async () => {
+  Observability.reset();
   executor?.dispose();
   executor = null;
   if (!gatewayServer) {
@@ -438,120 +441,131 @@ test("omits x-desktop-operation-id header when operationId contains CRLF", async
   assert.equal(receivedHeaders["x-injected"], undefined);
 });
 
-test("emitTelemetry is called with severity=error and category=command.timeout on timeout", async () => {
+test("Observability.commandTimedOut is called on timeout", async () => {
   await startGateway(async () => {
     await sleep(250);
   });
 
-  const telemetryEvents: TelemetryEventPayload[] = [];
-  const commandEvents: Array<
-    Omit<
-      DesktopCommandStreamEvent,
-      "protocolVersion" | "messageId" | "timestamp"
-    >
-  > = [];
+  const calls: Array<{ commandId: string; operationId: string }> = [];
+  const origMethod = Observability.commandTimedOut;
+  try {
+    Observability.commandTimedOut = (commandId: string, operationId: string) => {
+      calls.push({ commandId, operationId });
+      origMethod.call(Observability, commandId, operationId);
+    };
 
-  executor = createExecutor({
-    maxInFlightCommands: 1,
-    onEvent: (event) => commandEvents.push(event),
-    emitTelemetry: (event) => telemetryEvents.push(event),
-  });
-  executor.setConnected(true);
+    const commandEvents: Array<
+      Omit<
+        DesktopCommandStreamEvent,
+        "protocolVersion" | "messageId" | "timestamp"
+      >
+    > = [];
 
-  const commandId = "a1b2c3d4-e5f6-7890-abcd-111111111111";
-  executor.enqueue(
-    buildCommand(
-      commandId,
-      { command: commandId },
-      { repoPath: "/repo/a", timeoutMs: 30 },
-    ),
-  );
+    executor = createExecutor({
+      maxInFlightCommands: 1,
+      onEvent: (event) => commandEvents.push(event),
+    });
+    executor.setConnected(true);
 
-  await waitFor(() => telemetryEvents.length > 0, 2000);
+    const commandId = "a1b2c3d4-e5f6-7890-abcd-111111111111";
+    executor.enqueue(
+      buildCommand(
+        commandId,
+        { command: commandId },
+        { repoPath: "/repo/a", timeoutMs: 30 },
+      ),
+    );
 
-  const telemetry = telemetryEvents[0];
-  assert.ok(telemetry !== undefined);
-  assert.equal(telemetry.severity, "error");
-  assert.equal(telemetry.category, "command.timeout");
-  assert.equal(telemetry.trace?.commandId, commandId);
+    await waitFor(() => calls.length > 0, 2000);
+    assert.equal(calls[0].commandId, commandId);
+  } finally {
+    Observability.commandTimedOut = origMethod;
+  }
 });
 
-test("emitTelemetry is called with severity=warn and category=command.cancelled on cancel", async () => {
+test("Observability.commandCancelled is called on cancel", async () => {
   await startGateway(async () => {
     await sleep(300);
   });
 
-  const telemetryEvents: TelemetryEventPayload[] = [];
-  const commandEvents: Array<
-    Omit<
-      DesktopCommandStreamEvent,
-      "protocolVersion" | "messageId" | "timestamp"
-    >
-  > = [];
+  const calls: Array<{ commandId: string }> = [];
+  const origMethod = Observability.commandCancelled;
+  try {
+    Observability.commandCancelled = (commandId: string, _operationId: string) => {
+      calls.push({ commandId });
+      origMethod.call(Observability, commandId, _operationId);
+    };
 
-  executor = createExecutor({
-    maxInFlightCommands: 1,
-    onEvent: (event) => commandEvents.push(event),
-    emitTelemetry: (event) => telemetryEvents.push(event),
-  });
-  executor.setConnected(true);
+    const commandEvents: Array<
+      Omit<
+        DesktopCommandStreamEvent,
+        "protocolVersion" | "messageId" | "timestamp"
+      >
+    > = [];
 
-  const commandId = "a1b2c3d4-e5f6-7890-abcd-222222222222";
-  executor.enqueue(
-    buildCommand(commandId, { command: commandId }, { repoPath: "/repo/a" }),
-  );
+    executor = createExecutor({
+      maxInFlightCommands: 1,
+      onEvent: (event) => commandEvents.push(event),
+    });
+    executor.setConnected(true);
 
-  // Wait for the command to be in-flight before cancelling
-  await waitFor(() =>
-    commandEvents.some(
-      (e) => e.commandId === commandId && e.eventType === "status",
-    ),
-  );
-  executor.cancel(buildCancel(commandId, "user requested cancel"));
+    const commandId = "a1b2c3d4-e5f6-7890-abcd-222222222222";
+    executor.enqueue(
+      buildCommand(commandId, { command: commandId }, { repoPath: "/repo/a" }),
+    );
 
-  await waitFor(() => telemetryEvents.length > 0, 2000);
+    await waitFor(() =>
+      commandEvents.some(
+        (e) => e.commandId === commandId && e.eventType === "status",
+      ),
+    );
+    executor.cancel(buildCancel(commandId, "user requested cancel"));
 
-  const telemetry = telemetryEvents[0];
-  assert.ok(telemetry !== undefined);
-  assert.equal(telemetry.severity, "warn");
-  assert.equal(telemetry.category, "command.cancelled");
-  assert.equal(telemetry.trace?.commandId, commandId);
+    await waitFor(() => calls.length > 0, 2000);
+    assert.equal(calls[0].commandId, commandId);
+  } finally {
+    Observability.commandCancelled = origMethod;
+  }
 });
 
-test("emitTelemetry is called with severity=error and category=command.gateway_error on gateway error", async () => {
+test("Observability.commandFailed is called on gateway error", async () => {
   await startGateway(async (_request, response) => {
     response.statusCode = 500;
     response.setHeader("content-type", "application/json");
     response.end(JSON.stringify({ error: "internal server error" }));
   });
 
-  const telemetryEvents: TelemetryEventPayload[] = [];
-  const commandEvents: Array<
-    Omit<
-      DesktopCommandStreamEvent,
-      "protocolVersion" | "messageId" | "timestamp"
-    >
-  > = [];
+  const calls: Array<{ commandId: string }> = [];
+  const origMethod = Observability.commandFailed;
+  try {
+    Observability.commandFailed = (commandId: string, _operationId: string, _errorClass: string) => {
+      calls.push({ commandId });
+      origMethod.call(Observability, commandId, _operationId, _errorClass);
+    };
 
-  executor = createExecutor({
-    maxInFlightCommands: 1,
-    onEvent: (event) => commandEvents.push(event),
-    emitTelemetry: (event) => telemetryEvents.push(event),
-  });
-  executor.setConnected(true);
+    const commandEvents: Array<
+      Omit<
+        DesktopCommandStreamEvent,
+        "protocolVersion" | "messageId" | "timestamp"
+      >
+    > = [];
 
-  const commandId = "a1b2c3d4-e5f6-7890-abcd-333333333333";
-  executor.enqueue(
-    buildCommand(commandId, { command: commandId }, { repoPath: "/repo/a" }),
-  );
+    executor = createExecutor({
+      maxInFlightCommands: 1,
+      onEvent: (event) => commandEvents.push(event),
+    });
+    executor.setConnected(true);
 
-  await waitFor(() => telemetryEvents.length > 0, 2000);
+    const commandId = "a1b2c3d4-e5f6-7890-abcd-333333333333";
+    executor.enqueue(
+      buildCommand(commandId, { command: commandId }, { repoPath: "/repo/a" }),
+    );
 
-  const telemetry = telemetryEvents[0];
-  assert.ok(telemetry !== undefined);
-  assert.equal(telemetry.severity, "error");
-  assert.equal(telemetry.category, "command.gateway_error");
-  assert.equal(telemetry.trace?.commandId, commandId);
+    await waitFor(() => calls.length > 0, 2000);
+    assert.equal(calls[0].commandId, commandId);
+  } finally {
+    Observability.commandFailed = origMethod;
+  }
 });
 
 function createExecutor(options: {
@@ -562,7 +576,6 @@ function createExecutor(options: {
       "protocolVersion" | "messageId" | "timestamp"
     >,
   ) => void;
-  emitTelemetry?: (event: TelemetryEventPayload) => void;
 }): CloudCommandExecutor {
   return new CloudCommandExecutor({
     getGatewayPort: () => gatewayPort,
@@ -570,7 +583,6 @@ function createExecutor(options: {
     maxInFlightCommands: options.maxInFlightCommands,
     sendCommandAck: () => {},
     sendCommandEvent: options.onEvent,
-    emitTelemetry: options.emitTelemetry,
   });
 }
 

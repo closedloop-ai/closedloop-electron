@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import { getShellPath } from "../shell-path.js";
 import { isPluginInstalled } from "./plugin-cache.js";
 import type { ProcessManager } from "../process-manager.js";
 
@@ -53,30 +54,6 @@ export function registerHealthCheckRoutes(
     const allRequiredPassed = checks.filter((check) => check.required).every((check) => check.passed);
     json(context, 200, { checks, allRequiredPassed });
   });
-}
-
-/**
- * Resolve the user's login-shell PATH.
- * Electron on macOS inherits a minimal PATH that excludes /opt/homebrew/bin,
- * nvm paths, etc.  Spawning the user's shell with -ilc gives us the real PATH.
- */
-let resolvedPathPromise: Promise<string> | undefined;
-async function getShellPath(): Promise<string> {
-  if (resolvedPathPromise) {
-    return resolvedPathPromise;
-  }
-  resolvedPathPromise = (async () => {
-    try {
-      const shell = process.env.SHELL || "/bin/zsh";
-      const { stdout } = await execFileAsync(shell, ["-ilc", "echo $PATH"], {
-        timeout: 3000,
-      });
-      return stdout.trim();
-    } catch {
-      return `${process.env.PATH ?? ""}:/opt/homebrew/bin:/usr/local/bin`;
-    }
-  })();
-  return resolvedPathPromise;
 }
 
 async function runCommand(_processManager: ProcessManager, cmd: string, args: string[]): Promise<string> {

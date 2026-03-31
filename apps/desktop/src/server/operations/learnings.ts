@@ -5,9 +5,10 @@ import os from "node:os";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
+import { getShellEnv } from "../shell-path.js";
 import { findPluginScript } from "./plugin-cache.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
-import { assertRepoAllowed, findFirstExisting, resolveWorktreeDir } from "./symphony-utils.js";
+import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
 
 type ParsedLearningPattern = {
   id: string;
@@ -75,14 +76,8 @@ export function registerLearningsRoutes(
       return;
     }
 
-    const newLearningsWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
-    const oldLearningsWorkDir = path.join(worktreeDir, ".claude", "work");
-    // Per-file resolution: find chat history wherever it exists
-    const chatHistoryPath = findFirstExisting(
-      path.join(newLearningsWorkDir, chatFile),
-      path.join(oldLearningsWorkDir, chatFile)
-    ) ?? path.join(newLearningsWorkDir, chatFile);
-    const claudeWorkDir = chatHistoryPath.startsWith(newLearningsWorkDir) ? newLearningsWorkDir : oldLearningsWorkDir;
+    const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+    const chatHistoryPath = path.join(claudeWorkDir, chatFile);
 
     try {
       assertPathAllowed(claudeWorkDir, getAllowedDirectories());
@@ -154,12 +149,9 @@ export function registerLearningsRoutes(
     }
 
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-    const statusPath = findFirstExisting(
-      path.join(worktreeDir, ".closedloop-ai", "work", ".learnings", "processing-status.json"),
-      path.join(worktreeDir, ".claude", "work", ".learnings", "processing-status.json")
-    );
+    const statusPath = path.join(worktreeDir, ".closedloop-ai", "work", ".learnings", "processing-status.json");
 
-    if (!statusPath) {
+    if (!existsSync(statusPath)) {
       json(context, 200, { status: "none" });
       return;
     }
@@ -205,9 +197,7 @@ export function registerLearningsRoutes(
       return;
     }
 
-    const newProcWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
-    // Always write to the new canonical path; reads may fall back to legacy.
-    const claudeWorkDir = newProcWorkDir;
+    const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
     const learningsDir = path.join(claudeWorkDir, ".learnings");
     const pendingDir = path.join(learningsDir, "pending");
     const processingStatusPath = path.join(learningsDir, "processing-status.json");
@@ -234,21 +224,9 @@ export function registerLearningsRoutes(
       return;
     }
 
-    // Check both new and legacy locations for pending learnings
-    const legacyPendingDir = path.join(worktreeDir, ".claude", "work", ".learnings", "pending");
-    const effectivePendingDir = findFirstExisting(pendingDir, legacyPendingDir);
-    if (!effectivePendingDir) {
+    if (!existsSync(pendingDir)) {
       json(context, 200, { status: "skipped", reason: "No pending learnings directory" });
       return;
-    }
-
-    // If pending learnings are at legacy location, copy them to new location
-    if (effectivePendingDir === legacyPendingDir && !existsSync(pendingDir)) {
-      await fs.mkdir(pendingDir, { recursive: true });
-      const legacyFiles = await fs.readdir(legacyPendingDir).catch(() => []);
-      for (const file of legacyFiles) {
-        await fs.copyFile(path.join(legacyPendingDir, file), path.join(pendingDir, file)).catch(() => {});
-      }
     }
 
     const pendingFiles = await fs
@@ -274,11 +252,7 @@ export function registerLearningsRoutes(
         detached: true,
         stdio: "ignore",
         cwd: worktreeDir,
-        env: {
-          ...process.env,
-          PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
-          CLOSEDLOOP_WORKDIR: claudeWorkDir
-        }
+        env: await getShellEnv({ CLOSEDLOOP_WORKDIR: claudeWorkDir }),
       });
       child.on('error', (err: NodeJS.ErrnoException) => {
         gatewayLog.warn('learnings-launch', `detached-spawn-failed: ${err.message}`);
@@ -325,12 +299,9 @@ export function registerLearningsRoutes(
     }
 
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-    const statusPath = findFirstExisting(
-      path.join(worktreeDir, ".closedloop-ai", "work", ".learnings", "chat-extraction-status.json"),
-      path.join(worktreeDir, ".claude", "work", ".learnings", "chat-extraction-status.json")
-    );
+    const statusPath = path.join(worktreeDir, ".closedloop-ai", "work", ".learnings", "chat-extraction-status.json");
 
-    if (!statusPath) {
+    if (!existsSync(statusPath)) {
       json(context, 200, { status: "none", count: 0 });
       return;
     }
@@ -390,9 +361,7 @@ export function registerLearningsRoutes(
       return;
     }
 
-    const newRecordWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
-    // Always write to the new canonical path; reads may fall back to legacy.
-    const claudeWorkDir = newRecordWorkDir;
+    const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
     const learningsDir = path.join(claudeWorkDir, ".learnings");
 
     try {
@@ -417,7 +386,7 @@ export function registerLearningsRoutes(
     });
 
     await fs.appendFile(outcomesPath, `${lines.join("\n")}\n`, "utf-8");
-    triggerSuccessRateComputation(claudeWorkDir);
+    void triggerSuccessRateComputation(claudeWorkDir);
 
     json(context, 200, {
       status: "recorded",
@@ -443,7 +412,7 @@ function parseToon(content: string): ParsedLearningPattern[] {
   });
 }
 
-function triggerSuccessRateComputation(workDir: string): void {
+async function triggerSuccessRateComputation(workDir: string): Promise<void> {
   const runLoopPath = findPluginScript("code", "run-loop.sh");
   if (!runLoopPath) {
     return;
@@ -458,10 +427,7 @@ function triggerSuccessRateComputation(workDir: string): void {
   const child = spawn("python3", [ratesScript, "--workdir", workDir], {
     stdio: "ignore",
     detached: true,
-    env: {
-      ...process.env,
-      PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`
-    }
+    env: await getShellEnv(),
   });
   child.unref();
 }

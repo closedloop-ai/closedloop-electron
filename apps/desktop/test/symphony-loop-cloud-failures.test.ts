@@ -22,6 +22,7 @@ import { JobStore } from "../src/main/job-store.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
+import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
   restoreEnv,
@@ -56,6 +57,7 @@ const savedEnv = saveEnv();
 
 afterEach(async () => {
   restoreEnv(savedEnv);
+  resetShellPathCache();
 
   for (const server of serversToClose.splice(0)) {
     await server.stop();
@@ -127,6 +129,7 @@ test("EXECUTE: artifact upload failure sets ARTIFACT_UPLOAD_FAILED in completed 
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   // Configure mock server to return 500 for upload-artifacts requests
   const failUrls = new Map<string, number>([["upload-artifacts", 500]]);
@@ -224,6 +227,7 @@ test("EXECUTE: event post failure logged as warning in job store", async () => {
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   // Configure mock server to return 500 for all /events requests.
   // This causes both the "started" event and the "completed" event to fail.

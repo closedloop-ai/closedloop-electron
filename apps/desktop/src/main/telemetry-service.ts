@@ -22,8 +22,8 @@ export interface TelemetryServiceOptions {
  * - logTail truncation to TELEMETRY_MAX_FIELD_BYTES (4 KiB)
  * - try/catch so emit() never throws regardless of callback behavior
  *
- * The TelemetryEmitter interface lives in telemetry-protocol.ts so that
- * callers in the server layer can import only from a types-only module.
+ * Used internally by the Observability facade — not imported directly
+ * by call sites.
  */
 export class TelemetryService {
   private readonly options: TelemetryServiceOptions;

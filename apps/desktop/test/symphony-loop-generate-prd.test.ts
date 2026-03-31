@@ -10,6 +10,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
@@ -43,6 +44,7 @@ afterEach(async () => {
   } else {
     process.env.PATH = originalPath;
   }
+  resetShellPathCache();
 
   if (originalHome === undefined) {
     delete process.env.HOME;
@@ -166,6 +168,7 @@ test("GENERATE_PRD: accepts valid command and responds 200", async () => {
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.HOME = tmpDir; // Prevents findStreamFormatter from finding real formatter
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -336,6 +339,7 @@ test("GENERATE_PRD: spawns with worktree cwd, writes context pack, no --add-dir"
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.HOME = tmpDir; // Prevents findStreamFormatter from finding real formatter
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -491,6 +495,7 @@ test("GENERATE_PRD: uploads { prd: { content } } when prd.md is written", async 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.HOME = tmpDir; // Prevents findStreamFormatter from finding real formatter
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -577,6 +582,7 @@ test("GENERATE_PRD: uploads empty artifacts when prd.md is not written", async (
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.HOME = tmpDir; // Prevents findStreamFormatter from finding real formatter
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -658,6 +664,7 @@ test("GENERATE_PRD: cleans up worktree on failure (exit code 1)", async () => {
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.HOME = tmpDir; // Prevents findStreamFormatter from finding real formatter
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);

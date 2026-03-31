@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { app, dialog, ipcMain, nativeImage, Notification } from "electron";
 import {
   type AlwaysAllowRule,
+  DEFAULT_POSTHOG_HOST,
   DESKTOP_GATEWAY_VERSION,
   EMPTY_CAPABILITIES,
   type DesktopSettings,
@@ -42,11 +43,11 @@ import {
   resolveOperationId,
 } from "./approval-operations.js";
 import { shouldAutoApprove, OPERATION_RISK_TIERS } from "./approval-policy.js";
-import { gatewayLog } from "./gateway-logger.js";
+import { gatewayLog, isNetworkError } from "./gateway-logger.js";
 import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
 import { JobStore, isTerminalJobStatus } from "./job-store.js";
-import { TelemetryService } from "./telemetry-service.js";
+import { Observability } from "./observability.js";
 import type {
   GatewayApprovalRequest,
   GatewayApprovalResult,
@@ -83,7 +84,6 @@ export class DesktopApplication {
   private readonly recovery: GatewayRecoveryManager;
   private readonly gatewayAuthToken: string;
   private readonly sessionStore: LocalSessionStore;
-  private readonly telemetry: TelemetryService;
   private shuttingDown = false;
   private dangerousAutoApprove = false;
   private cloudStatus: CloudSocketStatus = { state: "idle" };
@@ -94,8 +94,12 @@ export class DesktopApplication {
   constructor() {
     this.gatewayAuthToken = randomBytes(24).toString("hex");
     this.sessionStore = new LocalSessionStore();
-    this.telemetry = new TelemetryService({
-      sendTelemetry: (event) => this.cloudSocket?.sendTelemetry(event),
+    Observability.init({
+      telemetrySend: (event) => this.cloudSocket?.sendTelemetry(event),
+      posthog: process.env.CL_POSTHOG_API_KEY
+        ? { apiKey: process.env.CL_POSTHOG_API_KEY, host: DEFAULT_POSTHOG_HOST }
+        : undefined,
+      releaseVersion: DESKTOP_GATEWAY_VERSION,
     });
     this.settingsStore = new SettingsStore();
     this.cloudCommandsPaused = this.settingsStore.getCloudCommandsPaused();
@@ -146,7 +150,6 @@ export class DesktopApplication {
       () => this.settingsStore.getWebAppOrigin(),
       this.isProdOriginsOnly(),
       this.jobStore,
-      this.telemetry,
       () => this.recovery.onUnexpectedClose(),
       retrySpawnDeps,
     );
@@ -156,7 +159,6 @@ export class DesktopApplication {
       maxInFlightCommands: MAX_IN_FLIGHT_COMMANDS,
       sendCommandAck: (event) => this.cloudSocket.sendCommandAck(event),
       sendCommandEvent: (event) => this.cloudSocket.sendCommandEvent(event),
-      emitTelemetry: (event) => this.telemetry.emit(event),
       onQueueStatsChange: (stats) => {
         const presenceState =
           this.cloudStatus.state === "online" &&
@@ -184,13 +186,19 @@ export class DesktopApplication {
       supportedOperations: [...SUPPORTED_OPERATION_IDS],
       onStatusChange: (status) => this.onCloudSocketStatus(status),
       onHelloAck: (event) => {
-        this.telemetry.setTargetId(event.computeTargetId);
+        Observability.setTargetId(event.computeTargetId);
         if (event.sessionId) {
-          this.telemetry.setGatewaySessionId(event.sessionId);
+          Observability.setGatewaySessionId(event.sessionId);
         }
         if (event.resumeFromSequence) {
+          Observability.reconnectionResumed("relay_resume", Object.keys(event.resumeFromSequence).length);
           this.commandExecutor.replayFrom(event.resumeFromSequence);
         }
+        Observability.connectionEstablished(
+          event.computeTargetId,
+          DESKTOP_GATEWAY_VERSION,
+          process.env.NODE_ENV ?? "production",
+        );
       },
       onCommand: (command) => {
         if (!this.settingsStore.getOnboardingCompleted()) {
@@ -307,7 +315,8 @@ export class DesktopApplication {
         autoUpdater.autoDownload = true;
         autoUpdater.autoInstallOnAppQuit = true;
         autoUpdater.on("error", (err) => {
-          gatewayLog.error("auto-update", `Auto-update error: ${err.message}`);
+          const level = isNetworkError(err.message) ? "debug" : "error";
+          gatewayLog[level]("auto-update", `Auto-update error: ${err.message}`);
         });
         autoUpdater.on("update-available", (info) => {
           this.desktopWindow
@@ -328,7 +337,7 @@ export class DesktopApplication {
         this.updateCheckTimer = setInterval(() => {
           void autoUpdater.checkForUpdates().catch((err: unknown) => {
             const msg = err instanceof Error ? err.message : String(err);
-            gatewayLog.error(
+            gatewayLog.debug(
               "auto-update",
               `Failed to check for updates: ${msg}`,
             );
@@ -376,6 +385,7 @@ export class DesktopApplication {
     }
 
     this.shuttingDown = true;
+    await Observability.shutdown();
     return runShutdownSequence({
       updateCheckTimer: this.updateCheckTimer,
       clearUpdateCheckTimer: () => {

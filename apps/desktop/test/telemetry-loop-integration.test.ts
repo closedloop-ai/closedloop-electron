@@ -22,11 +22,16 @@ import path from "node:path";
 import { afterEach, test } from "node:test";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
+import { TELEMETRY_MAX_FIELD_BYTES } from "../src/main/telemetry-protocol.js";
+import { type EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
+import { Observability } from "../src/main/observability.js";
+import {
+  resetShellPathCache,
+  setShellPathForTest,
+} from "../src/server/shell-path.js";
 
 // Use unique high ports to avoid EADDRINUSE with other test files that use PORT_PROBE_ORDER (19432-19435)
 const TELEM_TEST_PORTS = [29432, 29433, 29434, 29435] as const;
-import { TELEMETRY_MAX_FIELD_BYTES } from "../src/main/telemetry-protocol.js";
-import { TelemetryService, type EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
 
 // ---------------------------------------------------------------------------
 // Shared teardown state
@@ -38,7 +43,8 @@ const tempPathsToClean: string[] = [];
 
 const originalPath = process.env.PATH;
 const originalHome = process.env.HOME;
-const originalRawPipeline = process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
+const originalRawPipeline =
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
 const originalWorktreeParentDir = process.env.SYMPHONY_WORKTREE_PARENT_DIR;
 
 afterEach(async () => {
@@ -47,6 +53,7 @@ afterEach(async () => {
   } else {
     process.env.PATH = originalPath;
   }
+  resetShellPathCache();
 
   if (originalHome === undefined) {
     delete process.env.HOME;
@@ -57,7 +64,8 @@ afterEach(async () => {
   if (originalRawPipeline === undefined) {
     delete process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
   } else {
-    process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = originalRawPipeline;
+    process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE =
+      originalRawPipeline;
   }
 
   if (originalWorktreeParentDir === undefined) {
@@ -77,8 +85,15 @@ afterEach(async () => {
   }
 
   for (const tempPath of tempPathsToClean.splice(0)) {
-    await fs.rm(tempPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    await fs.rm(tempPath, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 100,
+    });
   }
+
+  Observability.reset();
 });
 
 // ---------------------------------------------------------------------------
@@ -105,19 +120,24 @@ const fakeWorktreeProvider: WorktreeProvider = {
 };
 
 /**
- * Build a TelemetryService that collects all emitted events.
- * Returns the service and the shared captured events array.
+ * Initialize Observability with a capturing telemetry backend.
+ * Returns the shared captured events array and a waiter helper.
  */
-function buildCapturingTelemetry(): {
-  service: TelemetryService;
+function initCapturingObservability(): {
   captured: EnrichedTelemetryEvent[];
-  waitForCategory: (category: string, timeoutMs?: number) => Promise<EnrichedTelemetryEvent>;
+  waitForCategory: (
+    category: string,
+    timeoutMs?: number,
+  ) => Promise<EnrichedTelemetryEvent>;
 } {
   const captured: EnrichedTelemetryEvent[] = [];
-  const waiters: Array<{ category: string; resolve: (e: EnrichedTelemetryEvent) => void }> = [];
+  const waiters: Array<{
+    category: string;
+    resolve: (e: EnrichedTelemetryEvent) => void;
+  }> = [];
 
-  const service = new TelemetryService({
-    sendTelemetry: (event) => {
+  Observability.init({
+    telemetrySend: (event) => {
       captured.push(event);
       for (let i = waiters.length - 1; i >= 0; i--) {
         if (event.category === waiters[i].category) {
@@ -128,7 +148,10 @@ function buildCapturingTelemetry(): {
     },
   });
 
-  function waitForCategory(category: string, timeoutMs = 20_000): Promise<EnrichedTelemetryEvent> {
+  function waitForCategory(
+    category: string,
+    timeoutMs = 20_000,
+  ): Promise<EnrichedTelemetryEvent> {
     const existing = captured.find((e) => e.category === category);
     if (existing) {
       return Promise.resolve(existing);
@@ -137,8 +160,8 @@ function buildCapturingTelemetry(): {
       const onTimeout = (): void => {
         reject(
           new Error(
-            `Timed out waiting for telemetry category "${category}" after ${timeoutMs}ms. Captured: ${JSON.stringify(captured.map((e) => e.category))}`
-          )
+            `Timed out waiting for telemetry category "${category}" after ${timeoutMs}ms. Captured: ${JSON.stringify(captured.map((e) => e.category))}`,
+          ),
         );
       };
       const timer = setTimeout(onTimeout, timeoutMs);
@@ -150,19 +173,22 @@ function buildCapturingTelemetry(): {
     });
   }
 
-  return { service, captured, waitForCategory };
+  return { captured, waitForCategory };
 }
 
 /**
  * Create a fake claude binary that exits with the given code.
  * DECOMPOSE / EVALUATE_PRD use `which claude` (preflight) then `claude` directly.
  */
-async function createFakeClaudeBin(fakeBin: string, exitCode: number): Promise<void> {
+async function createFakeClaudeBin(
+  fakeBin: string,
+  exitCode: number,
+): Promise<void> {
   await fs.mkdir(fakeBin, { recursive: true });
   await fs.writeFile(
     path.join(fakeBin, "claude"),
     `#!/bin/sh\nexit ${exitCode}\n`,
-    { mode: 0o755 }
+    { mode: 0o755 },
   );
 }
 
@@ -181,11 +207,12 @@ test("telemetry: job.failed emitted with correct category/trace/diagnostics on p
   const fakeBin = path.join(tmpDir, "fake-bin");
   await createFakeClaudeBin(fakeBin, 1);
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
 
-  const { service, waitForCategory } = buildCapturingTelemetry();
+  const { waitForCategory } = initCapturingObservability();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -199,7 +226,6 @@ test("telemetry: job.failed emitted with correct category/trace/diagnostics on p
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
-    telemetry: service,
   });
   serversToClose.push(server);
   await server.start();
@@ -217,13 +243,13 @@ test("telemetry: job.failed emitted with correct category/trace/diagnostics on p
         artifacts: [],
         prompt: "Decompose this feature into tasks",
       }),
-    }
+    },
   );
 
   assert.equal(
     response.status,
     200,
-    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
   );
 
   const event = await waitForCategory("job.failed");
@@ -232,7 +258,7 @@ test("telemetry: job.failed emitted with correct category/trace/diagnostics on p
   assert.equal(event.severity, "error", "severity must be error");
   assert.ok(
     typeof event.message === "string" && event.message.length > 0,
-    "message must be non-empty"
+    "message must be non-empty",
   );
   assert.ok(event.trace, "trace must be present");
   assert.equal(event.trace?.loopId, loopId, "trace.loopId must match");
@@ -240,13 +266,35 @@ test("telemetry: job.failed emitted with correct category/trace/diagnostics on p
   // AC-002: diagnostics must include exitCode, tokenUsage, diagnosticsVersion
   const diag = event.diagnostics;
   assert.ok(diag, "diagnostics must be present on job.failed");
-  assert.equal(typeof diag!.exitCode, "number", "diagnostics.exitCode must be a number");
-  assert.ok(diag!.exitCode !== 0, "diagnostics.exitCode must be non-zero for failures");
-  assert.ok(diag!.tokenUsage, "diagnostics.tokenUsage must be present");
-  assert.equal(typeof diag!.tokenUsage!.inputTokens, "number", "tokenUsage.inputTokens must be a number");
-  assert.equal(typeof diag!.tokenUsage!.outputTokens, "number", "tokenUsage.outputTokens must be a number");
-  assert.equal(typeof diag!.diagnosticsVersion, "number", "diagnostics.diagnosticsVersion must be a number");
-  assert.ok(diag!.diagnosticsVersion! >= 1, "diagnosticsVersion must be >= 1");
+  assert.equal(
+    typeof diag.exitCode,
+    "number",
+    "diagnostics.exitCode must be a number",
+  );
+  assert.ok(
+    diag.exitCode !== 0,
+    "diagnostics.exitCode must be non-zero for failures",
+  );
+  assert.ok(diag.tokenUsage, "diagnostics.tokenUsage must be present");
+  assert.equal(
+    typeof diag.tokenUsage.inputTokens,
+    "number",
+    "tokenUsage.inputTokens must be a number",
+  );
+  assert.equal(
+    typeof diag.tokenUsage.outputTokens,
+    "number",
+    "tokenUsage.outputTokens must be a number",
+  );
+  assert.equal(
+    typeof diag.diagnosticsVersion,
+    "number",
+    "diagnostics.diagnosticsVersion must be a number",
+  );
+  assert.ok(
+    (diag.diagnosticsVersion ?? 0) >= 1,
+    "diagnosticsVersion must be >= 1",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -264,11 +312,12 @@ test("telemetry: job.completed emitted with correct category/trace on process ex
   const fakeBin = path.join(tmpDir, "fake-bin");
   await createFakeClaudeBin(fakeBin, 0);
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
 
-  const { service, waitForCategory } = buildCapturingTelemetry();
+  const { waitForCategory } = initCapturingObservability();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -282,7 +331,6 @@ test("telemetry: job.completed emitted with correct category/trace on process ex
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
-    telemetry: service,
   });
   serversToClose.push(server);
   await server.start();
@@ -300,22 +348,26 @@ test("telemetry: job.completed emitted with correct category/trace on process ex
         artifacts: [],
         prompt: "Decompose this feature into tasks",
       }),
-    }
+    },
   );
 
   assert.equal(
     response.status,
     200,
-    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
   );
 
   const event = await waitForCategory("job.completed");
 
-  assert.equal(event.category, "job.completed", "category must be job.completed");
+  assert.equal(
+    event.category,
+    "job.completed",
+    "category must be job.completed",
+  );
   assert.equal(event.severity, "info", "severity must be info");
   assert.ok(
     typeof event.message === "string" && event.message.length > 0,
-    "message must be non-empty"
+    "message must be non-empty",
   );
   assert.ok(event.trace, "trace must be present");
   assert.equal(event.trace?.loopId, loopId, "trace.loopId must match");
@@ -324,7 +376,7 @@ test("telemetry: job.completed emitted with correct category/trace on process ex
   assert.equal(
     event.diagnostics,
     undefined,
-    "job.completed must not emit diagnostics"
+    "job.completed must not emit diagnostics",
   );
 });
 
@@ -343,11 +395,12 @@ test("telemetry: preflight.binary_not_found emitted when claude is absent from P
   const emptyBin = path.join(tmpDir, "empty-bin");
   await fs.mkdir(emptyBin, { recursive: true });
   process.env.PATH = emptyBin;
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
 
-  const { service, waitForCategory } = buildCapturingTelemetry();
+  const { waitForCategory } = initCapturingObservability();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -361,7 +414,6 @@ test("telemetry: preflight.binary_not_found emitted when claude is absent from P
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
-    telemetry: service,
   });
   serversToClose.push(server);
   await server.start();
@@ -379,23 +431,27 @@ test("telemetry: preflight.binary_not_found emitted when claude is absent from P
         artifacts: [],
         prompt: "Decompose this feature into tasks",
       }),
-    }
+    },
   );
 
   // Handler returns 500 when binary not found
   assert.equal(
     response.status,
     500,
-    `Expected 500 but got ${response.status}: ${await response.text().catch(() => "")}`
+    `Expected 500 but got ${response.status}: ${await response.text().catch(() => "")}`,
   );
 
   const event = await waitForCategory("preflight.binary_not_found");
 
-  assert.equal(event.category, "preflight.binary_not_found", "category must be preflight.binary_not_found");
+  assert.equal(
+    event.category,
+    "preflight.binary_not_found",
+    "category must be preflight.binary_not_found",
+  );
   assert.equal(event.severity, "error", "severity must be error");
   assert.ok(
     typeof event.message === "string" && event.message.includes("claude"),
-    `message must mention "claude", got: ${event.message}`
+    `message must mention "claude", got: ${event.message}`,
   );
   assert.ok(event.trace, "trace must be present");
   assert.equal(event.trace?.loopId, loopId, "trace.loopId must match");
@@ -436,18 +492,19 @@ test("telemetry: preflight.spawn_failed emitted when log file open fails (EISDIR
     "closedloop-ai",
     "code",
     "1.0.0",
-    "scripts"
+    "scripts",
   );
   await fs.mkdir(scriptDir, { recursive: true });
   const runLoopScript = path.join(scriptDir, "run-loop.sh");
   await fs.writeFile(runLoopScript, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
 
-  const { service, waitForCategory } = buildCapturingTelemetry();
+  const { waitForCategory } = initCapturingObservability();
 
   // loopId determines the worktree path — we use a known value to predict the path
   const loopId = "00000000-0000-0000-0000-000000000a04";
@@ -466,10 +523,17 @@ test("telemetry: preflight.spawn_failed emitted when log file open fails (EISDIR
   const slugifiedId = loopId; // UUID has only lowercase hex and dashes
   const predictedWorktreeDir = path.join(
     worktreeParent,
-    `spawn-fail-repo-loop-${slugifiedId}`
+    `spawn-fail-repo-loop-${slugifiedId}`,
   );
-  const predictedClaudeWorkDir = path.join(predictedWorktreeDir, ".closedloop-ai", "work");
-  const predictedLogFile = path.join(predictedClaudeWorkDir, "symphony-loop.log");
+  const predictedClaudeWorkDir = path.join(
+    predictedWorktreeDir,
+    ".closedloop-ai",
+    "work",
+  );
+  const predictedLogFile = path.join(
+    predictedClaudeWorkDir,
+    "symphony-loop.log",
+  );
 
   // Pre-create worktreeDir as a plain directory (not a real git worktree).
   // ensureWorktree calls existsSync(worktreeDir) first and returns early if it exists,
@@ -492,7 +556,6 @@ test("telemetry: preflight.spawn_failed emitted when log file open fails (EISDIR
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
-    telemetry: service,
   });
   serversToClose.push(server);
   await server.start();
@@ -507,25 +570,32 @@ test("telemetry: preflight.spawn_failed emitted when log file open fails (EISDIR
         command: "PLAN",
         closedLoopAuthToken: "tok",
         artifacts: [],
-        repo: { fullName: `spawn-fail/${path.basename(repoPath)}`, branch: "main" },
+        repo: {
+          fullName: `spawn-fail/${path.basename(repoPath)}`,
+          branch: "main",
+        },
       }),
-    }
+    },
   );
 
   // Handler returns 500 when log file cannot be opened
   assert.equal(
     response.status,
     500,
-    `Expected 500 but got ${response.status}: ${await response.text().catch(() => "")}`
+    `Expected 500 but got ${response.status}: ${await response.text().catch(() => "")}`,
   );
 
   const event = await waitForCategory("preflight.spawn_failed");
 
-  assert.equal(event.category, "preflight.spawn_failed", "category must be preflight.spawn_failed");
+  assert.equal(
+    event.category,
+    "preflight.spawn_failed",
+    "category must be preflight.spawn_failed",
+  );
   assert.equal(event.severity, "error", "severity must be error");
   assert.ok(
     typeof event.message === "string" && event.message.length > 0,
-    "message must be non-empty"
+    "message must be non-empty",
   );
 });
 
@@ -544,11 +614,12 @@ test("telemetry: commandId and operationId from request headers appear in trace 
   const fakeBin = path.join(tmpDir, "fake-bin");
   await createFakeClaudeBin(fakeBin, 1);
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
 
-  const { service, waitForCategory } = buildCapturingTelemetry();
+  const { waitForCategory } = initCapturingObservability();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -562,7 +633,6 @@ test("telemetry: commandId and operationId from request headers appear in trace 
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
-    telemetry: service,
   });
   serversToClose.push(server);
   await server.start();
@@ -587,13 +657,13 @@ test("telemetry: commandId and operationId from request headers appear in trace 
         artifacts: [],
         prompt: "Decompose this feature into tasks",
       }),
-    }
+    },
   );
 
   assert.equal(
     response.status,
     200,
-    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
   );
 
   // Wait for job.failed which is emitted after process exits non-zero
@@ -603,12 +673,12 @@ test("telemetry: commandId and operationId from request headers appear in trace 
   assert.equal(
     event.trace?.commandId,
     testCommandId,
-    `trace.commandId must match header value, got: ${event.trace?.commandId}`
+    `trace.commandId must match header value, got: ${event.trace?.commandId}`,
   );
   assert.equal(
     event.trace?.operationId,
     testOperationId,
-    `trace.operationId must match header value, got: ${event.trace?.operationId}`
+    `trace.operationId must match header value, got: ${event.trace?.operationId}`,
   );
   assert.equal(event.trace?.loopId, loopId, "trace.loopId must match");
 });
@@ -617,29 +687,32 @@ test("telemetry: commandId and operationId from request headers appear in trace 
 // Test 6: logTail truncation — diagnostics.logTail capped at TELEMETRY_MAX_FIELD_BYTES
 // ---------------------------------------------------------------------------
 
-test("telemetry: TelemetryService truncates logTail to TELEMETRY_MAX_FIELD_BYTES", () => {
-  const { service, captured } = buildCapturingTelemetry();
+test("telemetry: Observability truncates logTail to TELEMETRY_MAX_FIELD_BYTES via TelemetryService", () => {
+  const { captured } = initCapturingObservability();
 
   // Build a string longer than TELEMETRY_MAX_FIELD_BYTES (4096 bytes)
   // Use ASCII lines so byte count == char count
   const lineCount = 200;
   const lineContent = "A".repeat(100);
-  const largeTail = Array.from({ length: lineCount }, (_, i) => `line-${i}: ${lineContent}`).join("\n");
+  const largeTail = Array.from(
+    { length: lineCount },
+    (_, i) => `line-${i}: ${lineContent}`,
+  ).join("\n");
 
   // Verify our test data is actually over the limit
   const encoder = new TextEncoder();
   assert.ok(
     encoder.encode(largeTail).length > TELEMETRY_MAX_FIELD_BYTES,
-    "Test data must exceed TELEMETRY_MAX_FIELD_BYTES for this test to be meaningful"
+    "Test data must exceed TELEMETRY_MAX_FIELD_BYTES for this test to be meaningful",
   );
 
-  service.emit({
-    severity: "error",
-    category: "job.failed",
-    message: "test truncation",
-    trace: { loopId: "00000000-0000-0000-0000-000000000b01" },
-    diagnostics: { logTail: largeTail },
-  });
+  Observability.jobFailed(
+    "cmd-trunc",
+    "OP_TRUNC",
+    "00000000-0000-0000-0000-000000000b01",
+    1,
+    { logTail: largeTail },
+  );
 
   assert.equal(captured.length, 1, "Expected exactly one captured event");
   const event = captured[0];
@@ -649,11 +722,11 @@ test("telemetry: TelemetryService truncates logTail to TELEMETRY_MAX_FIELD_BYTES
   const truncatedBytes = encoder.encode(logTail).length;
   assert.ok(
     truncatedBytes <= TELEMETRY_MAX_FIELD_BYTES,
-    `logTail must be <= ${TELEMETRY_MAX_FIELD_BYTES} bytes after truncation, got ${truncatedBytes}`
+    `logTail must be <= ${TELEMETRY_MAX_FIELD_BYTES} bytes after truncation, got ${truncatedBytes}`,
   );
   // Verify that the original large string was actually truncated
   assert.ok(
     logTail.length < largeTail.length,
-    "truncated logTail must be shorter than the original"
+    "truncated logTail must be shorter than the original",
   );
 });

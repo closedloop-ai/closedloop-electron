@@ -36,9 +36,7 @@ export function registerSymphonyJudgesRoutes(
       }
 
       const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-      const newJudgesPath = path.join(worktreeDir, ".closedloop-ai", "work", "judges.json");
-      const oldJudgesPath = path.join(worktreeDir, ".claude", "work", "judges.json");
-      const judgesPath = existsSync(newJudgesPath) ? newJudgesPath : oldJudgesPath;
+      const judgesPath = path.join(worktreeDir, ".closedloop-ai", "work", "judges.json");
 
       if (!existsSync(worktreeDir)) {
         json(context, 404, {

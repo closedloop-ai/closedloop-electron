@@ -9,7 +9,7 @@ import type {
   DesktopCommandStreamEvent,
   ProtocolEnvelope,
 } from "./cloud-protocol.js";
-import type { TelemetryEventPayload } from "./telemetry-protocol.js";
+import { Observability } from "./observability.js";
 
 const COMMAND_RETENTION_MS = 10 * 60_000;
 const MAX_RETAINED_TERMINAL_COMMANDS = 200;
@@ -28,7 +28,6 @@ export interface CloudCommandExecutorOptions {
     activeCommands: number;
     queueDepth: number;
   }) => void;
-  emitTelemetry?: (event: TelemetryEventPayload) => void;
 }
 
 export class CloudCommandExecutor {
@@ -89,6 +88,7 @@ export class CloudCommandExecutor {
     const tracked: TrackedCommand = {
       command,
       state: "queued",
+      enqueuedAt: Date.now(),
       lastEmittedSequence: 0,
       buffered: {
         lastAckedSequence: 0,
@@ -102,6 +102,7 @@ export class CloudCommandExecutor {
       accepted: true,
       state: "accepted",
     });
+    Observability.commandInitiated(command.commandId, command.operationId);
     this.schedule();
   }
 
@@ -242,11 +243,17 @@ export class CloudCommandExecutor {
       status: "running",
       operationId: command.operationId,
     });
+    Observability.commandStarted(command.commandId, command.operationId);
 
     try {
       await this.executeViaGateway(command, abortController.signal);
       if (!isTerminalState(tracked.terminalState)) {
         this.emitTrackedEvent(command.commandId, "done", { type: "done" });
+        Observability.commandCompleted(
+          command.commandId,
+          command.operationId,
+          Date.now() - tracked.enqueuedAt,
+        );
         this.markTerminal(command.commandId, "done");
       }
     } catch (error) {
@@ -254,11 +261,6 @@ export class CloudCommandExecutor {
         this.markTerminal(command.commandId, "failed");
         return;
       }
-
-      const trace = {
-        commandId: command.commandId,
-        operationId: command.operationId,
-      };
 
       if (running.cancelRequested) {
         this.emitTrackedEvent(command.commandId, "done", {
@@ -270,12 +272,7 @@ export class CloudCommandExecutor {
           "command-executor",
           `Command ${command.commandId} cancelled`,
         );
-        this.emitCommandTelemetry(
-          "warn",
-          "command.cancelled",
-          "Command cancelled",
-          trace,
-        );
+        Observability.commandCancelled(command.commandId, command.operationId);
         this.markTerminal(command.commandId, "cancelled");
       } else if (running.timedOut) {
         this.emitTrackedEvent(command.commandId, "error", {
@@ -288,12 +285,7 @@ export class CloudCommandExecutor {
           "command-executor",
           `Command ${command.commandId} timed out`,
         );
-        this.emitCommandTelemetry(
-          "error",
-          "command.timeout",
-          "Command timed out",
-          trace,
-        );
+        Observability.commandTimedOut(command.commandId, command.operationId);
         this.markTerminal(command.commandId, "failed");
       } else {
         const msg =
@@ -307,7 +299,7 @@ export class CloudCommandExecutor {
           "command-executor",
           `Command ${command.commandId} failed: ${msg}`,
         );
-        this.emitCommandTelemetry("error", "command.gateway_error", msg, trace);
+        Observability.commandFailed(command.commandId, command.operationId, msg);
         this.markTerminal(command.commandId, "failed");
       }
     } finally {
@@ -513,20 +505,6 @@ export class CloudCommandExecutor {
     this.options.onQueueStatsChange?.(this.getStats());
   }
 
-  private emitCommandTelemetry(
-    severity: TelemetryEventPayload["severity"],
-    category: "command.timeout" | "command.cancelled" | "command.gateway_error",
-    message: string,
-    trace: { commandId: string; operationId?: string },
-  ): void {
-    this.options.emitTelemetry?.({
-      severity,
-      category,
-      message,
-      trace,
-    });
-  }
-
   private pruneTerminalCommands(): void {
     const now = Date.now();
     const terminalEntries = [...this.trackedByCommandId.entries()].filter(
@@ -570,6 +548,7 @@ interface TrackedCommand {
   state: "queued" | "running" | "terminal";
   terminalState?: TerminalCommandState;
   completedAt?: number;
+  enqueuedAt: number;
   lastEmittedSequence: number;
   buffered: BufferedCommandEvents;
 }

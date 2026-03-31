@@ -1,8 +1,9 @@
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError } from "../security.js";
-import { assertRepoAllowed, findFirstExisting, resolveWorktreeDir } from "./symphony-utils.js";
+import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
 
 const CONTENT_TYPES: Record<string, string> = {
   ".png": "image/png",
@@ -52,24 +53,20 @@ export function registerSymphonyAttachmentsRoutes(
         .map((segment) => decodeURIComponent(segment))
         .join(path.sep);
 
-      // Resolve both candidate absolute paths and verify neither escapes its attachments dir
-      const newAttachmentsDir = path.resolve(path.join(worktreeDir, ".closedloop-ai", "work", "attachments"));
-      const oldAttachmentsDir = path.resolve(path.join(worktreeDir, ".claude", "work", "attachments"));
-      const newFilePath = path.resolve(newAttachmentsDir, normalizedAttachmentPath);
-      const oldFilePath = path.resolve(oldAttachmentsDir, normalizedAttachmentPath);
+      const attachmentsDir = path.resolve(path.join(worktreeDir, ".closedloop-ai", "work", "attachments"));
+      const filePath = path.resolve(attachmentsDir, normalizedAttachmentPath);
 
       const isUnderDir = (file: string, dir: string): boolean => {
         const prefix = dir.endsWith(path.sep) ? dir : `${dir}${path.sep}`;
         return file === dir || file.startsWith(prefix);
       };
 
-      if (!isUnderDir(newFilePath, newAttachmentsDir) && !isUnderDir(oldFilePath, oldAttachmentsDir)) {
+      if (!isUnderDir(filePath, attachmentsDir)) {
         json(context, 403, { error: "Invalid path" });
         return;
       }
 
-      const filePath = findFirstExisting(newFilePath, oldFilePath);
-      if (!filePath) {
+      if (!existsSync(filePath)) {
         json(context, 404, { error: "File not found" });
         return;
       }

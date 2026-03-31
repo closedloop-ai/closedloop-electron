@@ -49,10 +49,6 @@ export interface TelemetryEventPayload {
   diagnostics?: TelemetryDiagnostics;
 }
 
-export interface TelemetryEmitter {
-  emit(event: TelemetryEventPayload): void;
-}
-
 /** Full wire-format event including protocol envelope (used by transport layer). */
 export interface DesktopTelemetryEvent extends ProtocolEnvelope {
   severity: TelemetrySeverity;

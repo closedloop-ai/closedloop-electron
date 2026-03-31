@@ -11,6 +11,7 @@ import {
   readEvaluatePrdOutputs,
   writePrdArtifact,
 } from "../src/server/operations/symphony-loop.js";
+import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { setupStubClaude } from "./symphony-test-utils.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
@@ -43,6 +44,7 @@ afterEach(async () => {
   } else {
     process.env.PATH = originalPath;
   }
+  resetShellPathCache();
 
   for (const server of serversToClose.splice(0)) {
     await server.stop();
@@ -245,6 +247,7 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+    setShellPathForTest();
 
     const server = makeGatewayServer({
       allowedDirs: [tmpDir],
@@ -303,6 +306,7 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+    setShellPathForTest();
 
     const disallowedRepoPath = path.join(tmpDir, "..", "outside-allowed-dir");
     const server = makeGatewayServer({
@@ -421,6 +425,7 @@ describe("T-5.2: writePrdArtifact", () => {
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+    setShellPathForTest();
 
     const server = makeGatewayServer({ getApiOrigin: () => apiBaseUrl });
     await server.start();
@@ -492,6 +497,7 @@ describe("T-5.2: writePrdArtifact", () => {
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+    setShellPathForTest();
 
     // Create a fake repo dir with the expected naming for findLocalRepo
     // findLocalRepo looks for a dir matching the repo's base name inside allowed dirs
@@ -613,6 +619,7 @@ describe("T-5.4: Temp dir cleanup after EVALUATE_PRD completes", () => {
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+    setShellPathForTest();
 
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
@@ -675,6 +682,7 @@ describe("T-5.5: BINARY_NOT_FOUND when claude not in PATH", () => {
     await fs.mkdir(emptyBin, { recursive: true });
     // No claude binary in emptyBin — PATH points only there
     process.env.PATH = emptyBin;
+    setShellPathForTest();
 
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
