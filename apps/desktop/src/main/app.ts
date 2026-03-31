@@ -290,7 +290,7 @@ export class DesktopApplication {
     gatewayLog.setVerbose(this.settingsStore.getAll().verboseLogging);
     this.migrateLegacyData();
     const deadJobs = this.reconcileJobStore();
-    await this.bootRecovery.run(deadJobs);
+    await this.bootRecovery.reattachLiveJobs();
 
     const bootSandbox = this.settingsStore.getSandboxBaseDirectory();
     if (bootSandbox?.trim()) {
@@ -307,6 +307,14 @@ export class DesktopApplication {
       this.refreshTrayState(
         `Serving on localhost:${this.server.getActivePort()} | relay=${configuredOrigins.relayOrigin} api=${configuredOrigins.apiOrigin} web=${configuredOrigins.webAppOrigin}`,
       );
+      void this.bootRecovery
+        .startDeadJobFinalization(deadJobs)
+        .catch((err: unknown) => {
+          gatewayLog.warn(
+            "boot-recovery",
+            `Background dead-loop finalization failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
 
       if (this.cloudConnectionEnabled) {
         void this.cloudSocket.start();
@@ -392,6 +400,7 @@ export class DesktopApplication {
 
     this.shuttingDown = true;
     this.bootRecovery.dispose();
+    await this.bootRecovery.quiesce(1_000);
     await Observability.shutdown();
     return runShutdownSequence({
       updateCheckTimer: this.updateCheckTimer,

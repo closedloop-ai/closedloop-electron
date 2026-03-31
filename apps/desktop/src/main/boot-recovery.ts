@@ -32,6 +32,8 @@ const WATCHER_POLL_MS = 3000;
 export class BootRecoveryService {
   private readonly deps: BootRecoveryDeps;
   private liveHandles: LiveJobHandle[] = [];
+  private readonly backgroundTasks = new Set<Promise<void>>();
+  private deadJobFinalizationTask: Promise<void> | null = null;
   // Prevents new recovery work and stops background watchers after shutdown begins.
   private disposed = false;
 
@@ -41,49 +43,16 @@ export class BootRecoveryService {
 
   async run(deadJobs: LocalJob[]): Promise<void> {
     if (this.disposed) return;
+    await this.finalizeDeadJobs(deadJobs);
+    await this.reattachLiveJobs();
+  }
 
-    const { jobStore, telemetry, getApiKey, getApiOrigin, loopTokenStore } = this.deps;
+  async reattachLiveJobs(): Promise<void> {
+    if (this.disposed) return;
+
+    const { jobStore, getApiKey, getApiOrigin } = this.deps;
     const apiKey = getApiKey();
     const apiBaseUrl = getApiOrigin();
-
-    const unfinalizedDeadJobs = deadJobs.filter((job) => !job.finalStatusPersistedAt);
-    if (unfinalizedDeadJobs.length > 0 && (!apiKey || !apiBaseUrl)) {
-      gatewayLog.warn(
-        "boot-recovery",
-        `Skipping ${unfinalizedDeadJobs.length} dead loop finalization(s): missing API config`,
-      );
-    } else if (apiKey && apiBaseUrl) {
-      for (const job of unfinalizedDeadJobs) {
-        try {
-          const authToken = loopTokenStore.getLoopToken(job.loopId);
-          if (!authToken) {
-            gatewayLog.warn(
-              "boot-recovery",
-              `Skipping dead loop finalization: missing loop token for loopId=${job.loopId} (phase=dead-finalization)`,
-            );
-            continue;
-          }
-          gatewayLog.info(
-            "boot-recovery",
-            `Token source for loopId=${job.loopId}: LOOP_TOKEN_STORE`,
-          );
-          await finalizeLoopFromRuntime(job, "boot-recovery", {
-            jobStore,
-            telemetry,
-            apiAuthToken: authToken,
-            apiBaseUrl,
-            isProcessRunning,
-            loopTokenStore,
-          });
-        } catch (err) {
-          gatewayLog.warn(
-            "boot-recovery",
-            `Dead loop finalization failed for loopId=${job.loopId}: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
-    }
-
     const liveJobs = jobStore
       .listRunning()
       .filter((job) => job.pid != null && isProcessRunning(job.pid));
@@ -101,6 +70,87 @@ export class BootRecoveryService {
 
     for (const job of liveJobs) {
       await this.reattachLiveJob(job, apiBaseUrl);
+    }
+  }
+
+  startDeadJobFinalization(deadJobs: LocalJob[]): Promise<void> {
+    if (this.disposed) {
+      return Promise.resolve();
+    }
+    if (this.deadJobFinalizationTask) {
+      return this.deadJobFinalizationTask;
+    }
+    const task = this.trackBackgroundTask(this.finalizeDeadJobs(deadJobs));
+    this.deadJobFinalizationTask = task;
+    void task.finally(() => {
+      if (this.deadJobFinalizationTask === task) {
+        this.deadJobFinalizationTask = null;
+      }
+    });
+    return task;
+  }
+
+  async quiesce(timeoutMs: number): Promise<void> {
+    const pending = [...this.backgroundTasks];
+    if (pending.length === 0) {
+      return;
+    }
+    await Promise.race([
+      Promise.allSettled(pending).then(() => undefined),
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  }
+
+  private async finalizeDeadJobs(deadJobs: LocalJob[]): Promise<void> {
+    if (this.disposed) return;
+
+    const { jobStore, telemetry, getApiKey, getApiOrigin, loopTokenStore } = this.deps;
+    const apiKey = getApiKey();
+    const apiBaseUrl = getApiOrigin();
+    const unfinalizedDeadJobs = deadJobs.filter((job) => !job.finalStatusPersistedAt);
+    if (unfinalizedDeadJobs.length > 0 && (!apiKey || !apiBaseUrl)) {
+      gatewayLog.warn(
+        "boot-recovery",
+        `Skipping ${unfinalizedDeadJobs.length} dead loop finalization(s): missing API config`,
+      );
+      return;
+    }
+    if (!apiKey || !apiBaseUrl) {
+      return;
+    }
+    for (const job of unfinalizedDeadJobs) {
+      if (this.disposed) {
+        return;
+      }
+      try {
+        const authToken = loopTokenStore.getLoopToken(job.loopId);
+        if (!authToken) {
+          gatewayLog.warn(
+            "boot-recovery",
+            `Skipping dead loop finalization: missing loop token for loopId=${job.loopId} (phase=dead-finalization)`,
+          );
+          continue;
+        }
+        gatewayLog.info(
+          "boot-recovery",
+          `Token source for loopId=${job.loopId}: LOOP_TOKEN_STORE`,
+        );
+        await finalizeLoopFromRuntime(job, "boot-recovery", {
+          jobStore,
+          telemetry,
+          apiAuthToken: authToken,
+          apiBaseUrl,
+          isProcessRunning,
+          loopTokenStore,
+        });
+      } catch (err) {
+        gatewayLog.warn(
+          "boot-recovery",
+          `Dead loop finalization failed for loopId=${job.loopId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
   }
 
@@ -188,12 +238,18 @@ export class BootRecoveryService {
     const { jobStore, telemetry, loopTokenStore } = this.deps;
 
     const run = async () => {
+      if (this.disposed) {
+        return;
+      }
       if (tailer) {
         try {
           await tailer.flush();
         } catch {
           // best effort
         }
+      }
+      if (this.disposed) {
+        return;
       }
 
       const job = jobStore.getByLoopId(loopId);
@@ -225,7 +281,7 @@ export class BootRecoveryService {
       }
     };
 
-    run().catch(() => {});
+    void this.trackBackgroundTask(run()).catch(() => {});
   }
 
   dispose(): void {
@@ -235,5 +291,13 @@ export class BootRecoveryService {
       handle.tailer?.stop();
     }
     this.liveHandles = [];
+  }
+
+  private trackBackgroundTask(task: Promise<void>): Promise<void> {
+    this.backgroundTasks.add(task);
+    void task.finally(() => {
+      this.backgroundTasks.delete(task);
+    });
+    return task;
   }
 }

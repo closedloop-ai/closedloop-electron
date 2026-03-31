@@ -243,6 +243,128 @@ test("skips dead job finalization when loop token is missing", async () => {
   assert.equal(fetchCalls.length, 0);
 });
 
+test("starts dead job finalization in the background", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
+  const loopTokenStore = createLoopTokenStore("boot-recovery-background-dead-finalize-tokens");
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
+
+  const jobStore = createStore("boot-recovery-background-dead-finalize");
+  const deadJob = createJob({
+    status: "UNKNOWN",
+    claudeWorkDir,
+  });
+  jobStore.upsert(deadJob);
+
+  let releaseFetch: (() => void) | null = null;
+  const fetchGate = new Promise<void>((resolve) => {
+    releaseFetch = resolve;
+  });
+  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    const url = String(input);
+    const headers = new Headers(init?.headers);
+    fetchCalls.push({
+      url,
+      body: typeof init?.body === "string" ? init.body : "",
+      authHeader: headers.get("Authorization"),
+    });
+    await fetchGate;
+    return new Response(JSON.stringify({ success: true }), { status: 200 });
+  }) as typeof fetch;
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: () => {} },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4010",
+    loopTokenStore,
+  });
+
+  let completed = false;
+  const background = service.startDeadJobFinalization([deadJob]).then(() => {
+    completed = true;
+  });
+  await sleep(20);
+  assert.equal(completed, false);
+  assert.equal(jobStore.getByLoopId("loop-1")?.finalStatusPersistedAt, undefined);
+  const unblockFetch = releaseFetch;
+  assert.ok(unblockFetch);
+  unblockFetch();
+  await background;
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.ok(persisted.finalStatusPersistedAt);
+  service.dispose();
+});
+
+test("dispose stops queued dead-job finalization after in-flight request", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const firstWorkDir = path.join(repoDir, "workdir-1");
+  const secondWorkDir = path.join(repoDir, "workdir-2");
+  await fs.mkdir(firstWorkDir, { recursive: true });
+  await fs.mkdir(secondWorkDir, { recursive: true });
+  await fs.writeFile(path.join(firstWorkDir, "plan.json"), JSON.stringify({ ok: true }));
+  await fs.writeFile(path.join(secondWorkDir, "plan.json"), JSON.stringify({ ok: true }));
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-dispose-dead-finalize-tokens");
+  loopTokenStore.setLoopToken("loop-1", "loop-token-1");
+  loopTokenStore.setLoopToken("loop-2", "loop-token-2");
+
+  const jobStore = createStore("boot-recovery-dispose-dead-finalize");
+  const deadJobOne = createJob({ status: "UNKNOWN", claudeWorkDir: firstWorkDir });
+  const deadJobTwo = createJob({
+    id: "loop-2",
+    loopId: "loop-2",
+    status: "UNKNOWN",
+    claudeWorkDir: secondWorkDir,
+  });
+  jobStore.upsert(deadJobOne);
+  jobStore.upsert(deadJobTwo);
+
+  let releaseFetch: (() => void) | null = null;
+  const firstFetchStarted = new Promise<void>((resolve) => {
+    globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+      const url = String(input);
+      const headers = new Headers(init?.headers);
+      fetchCalls.push({
+        url,
+        body: typeof init?.body === "string" ? init.body : "",
+        authHeader: headers.get("Authorization"),
+      });
+      resolve();
+      await new Promise<void>((innerResolve) => {
+        releaseFetch = innerResolve;
+      });
+      return new Response(JSON.stringify({ success: true }), { status: 200 });
+    }) as typeof fetch;
+  });
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: () => {} },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4010",
+    loopTokenStore,
+  });
+
+  const completion = service.startDeadJobFinalization([deadJobOne, deadJobTwo]);
+  await firstFetchStarted;
+  service.dispose();
+  const unblockFetch = releaseFetch;
+  assert.ok(unblockFetch);
+  unblockFetch();
+  await completion;
+
+  const finalizedOne = jobStore.getByLoopId("loop-1");
+  const finalizedTwo = jobStore.getByLoopId("loop-2");
+  assert.ok(finalizedOne?.finalStatusPersistedAt);
+  assert.equal(finalizedTwo?.finalStatusPersistedAt, undefined);
+  assert.equal(fetchCalls.filter((entry) => entry.url.endsWith("/events")).length, 1);
+});
+
 test("reattaches to live jobs and persists jsonl offsets", async () => {
   const repoDir = path.join(tempRoot, "repo");
   const claudeWorkDir = path.join(repoDir, "workdir");
@@ -269,7 +391,7 @@ test("reattaches to live jobs and persists jsonl offsets", async () => {
     getApiOrigin: () => "http://127.0.0.1:4011",
     loopTokenStore,
   });
-  await service.run([]);
+  await service.reattachLiveJobs();
 
   await fs.appendFile(
     jsonlPath,
@@ -316,7 +438,7 @@ test("live reattach does not persist jsonl offset past incomplete trailing line"
     getApiOrigin: () => "http://127.0.0.1:4011",
     loopTokenStore,
   });
-  await service.run([]);
+  await service.reattachLiveJobs();
 
   const incomplete = '{"type":"assistant","message":{"content":[{"type":"text","text":"par';
   await fs.appendFile(jsonlPath, incomplete);
@@ -376,7 +498,7 @@ test("skips live job reattach when loop token is missing", async () => {
     getApiOrigin: () => "http://127.0.0.1:4011",
     loopTokenStore,
   });
-  await service.run([]);
+  await service.reattachLiveJobs();
 
   await fs.appendFile(
     jsonlPath,
@@ -417,7 +539,7 @@ test("finalizes recovered live job after process exits", async () => {
     getApiOrigin: () => "http://127.0.0.1:4012",
     loopTokenStore,
   });
-  await service.run([]);
+  await service.reattachLiveJobs();
 
   await sleep(3400);
   const persisted = jobStore.getByLoopId("loop-1");
