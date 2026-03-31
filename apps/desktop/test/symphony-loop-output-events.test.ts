@@ -465,6 +465,101 @@ describe("T-5.2: Output events arrive before completed event", () => {
 // ---------------------------------------------------------------------------
 
 describe("T-5.3: Partial JSONL writes", () => {
+  test("incomplete line does not call onOffset; resume from last commit still delivers output", async () => {
+    const tmpDir = makeTempDir();
+    const jsonlPath = path.join(tmpDir, "claude-output.jsonl");
+
+    const eventSrv = await startEventServer();
+    const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+    const committedOffsets: number[] = [];
+    const tailer = startOutputTailer(
+      jsonlPath,
+      apiBaseUrl,
+      "partial-offset-loop",
+      "token",
+      0,
+      (o) => {
+        committedOffsets.push(o);
+      },
+    );
+
+    const incompleteLine = '{"type":"assistant","message":{"content":[{"type":"text","text":"hel';
+    writeFileSync(jsonlPath, incompleteLine);
+
+    await tailer.flush();
+
+    assert.equal(
+      committedOffsets.length,
+      0,
+      `Expected no replay-safe offset for partial line, got ${JSON.stringify(committedOffsets)}`,
+    );
+
+    const rest = 'lo"}]}}\n';
+    writeFileSync(jsonlPath, incompleteLine + rest);
+
+    const resumeFrom = committedOffsets[committedOffsets.length - 1] ?? 0;
+    const tailer2 = startOutputTailer(
+      jsonlPath,
+      apiBaseUrl,
+      "partial-offset-loop",
+      "token",
+      resumeFrom,
+      (o) => {
+        committedOffsets.push(o);
+      },
+    );
+    await tailer2.flush();
+
+    const outputEvents = eventSrv.getCollected().filter((e) => e.type === "output");
+    assert.equal(
+      outputEvents.length,
+      1,
+      `Expected 1 output event after resume, got ${outputEvents.length}`,
+    );
+    assert.ok(
+      committedOffsets.length > 0,
+      "Expected at least one committed offset after delivering a framed line",
+    );
+  });
+
+  test("HTTP 403 for output events does not advance onOffset", async () => {
+    const tmpDir = makeTempDir();
+    const jsonlPath = path.join(tmpDir, "claude-output.jsonl");
+
+    const eventSrv = await startEventServer({ outputStatusCode: 403 });
+    const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+    const committedOffsets: number[] = [];
+    const tailer = startOutputTailer(
+      jsonlPath,
+      apiBaseUrl,
+      "auth-reject-loop",
+      "token",
+      0,
+      (o) => {
+        committedOffsets.push(o);
+      },
+    );
+
+    const line =
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"should not commit offset"}]}}';
+    writeFileSync(jsonlPath, `${line}\n`);
+
+    await tailer.flush();
+
+    assert.equal(
+      committedOffsets.length,
+      0,
+      `onOffset should not run on auth failure, got ${JSON.stringify(committedOffsets)}`,
+    );
+    const outputEvents = eventSrv.getCollected().filter((e) => e.type === "output");
+    assert.ok(
+      outputEvents.length >= 1,
+      "Stub server should still record the POST attempt for diagnostics",
+    );
+  });
+
   test("incomplete line does not emit; completed line emits one event", async () => {
     const tmpDir = makeTempDir();
     const jsonlPath = path.join(tmpDir, "claude-output.jsonl");

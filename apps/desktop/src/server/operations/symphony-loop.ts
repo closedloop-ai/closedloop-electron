@@ -2810,6 +2810,7 @@ async function handleLoopRequest(
       jsonlPreSpawnOffset,
       jobStore
         ? (offset) => {
+            // Persist replay-safe JSONL offset (framed + POST ok when output is emitted).
             const job = jobStore.getByLoopId(body.loopId);
             if (job) {
               jobStore.upsert({ ...job, lastObservedJsonlOffset: offset });

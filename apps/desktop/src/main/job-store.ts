@@ -51,6 +51,11 @@ export type LocalJob = {
   completedAt?: string;
   warning?: string;
   exitCode?: number | null;
+  /**
+   * Replay-safe byte offset into `jsonlPath` (claude-output.jsonl).
+   * Updated by the output tailer only after newline-delimited bytes are committed:
+   * either summarized with no cloud `output` event, or after a successful (2xx) POST.
+   */
   lastObservedJsonlOffset?: number;
   artifactsUploadedAt?: string;
   completedEventPostedAt?: string;

@@ -142,6 +142,7 @@ export class BootRecoveryService {
         "boot-recovery",
         `Starting output tailer for loopId=${loopId} jsonlPath=${job.jsonlPath} offset=${job.lastObservedJsonlOffset ?? 0} api=${effectiveApiBaseUrl}`,
       );
+      // `onOffset` is replay-safe (framed + delivered when a POST is required); see output-tailer.
       tailer = startOutputTailer(
         job.jsonlPath,
         effectiveApiBaseUrl,

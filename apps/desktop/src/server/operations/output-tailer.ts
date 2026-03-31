@@ -176,6 +176,14 @@ async function postLoopEvent(
 const DEFAULT_POLL_MS = 2000;
 const DEFAULT_THROTTLE_MS = 5000;
 
+/**
+ * Tail Claude JSONL output and POST summarized `output` events.
+ *
+ * `onOffset` receives only **replay-safe** byte offsets: after a full newline-delimited
+ * frame is consumed, and — when an `output` POST is required — only after the server
+ * accepts it (2xx). Partial tail bytes and rejected auth (401/403) never advance the
+ * reported offset. Transient POST failures keep the frame buffered for retry.
+ */
 export function startOutputTailer(
   jsonlPath: string,
   apiBaseUrl: string,
@@ -188,22 +196,32 @@ export function startOutputTailer(
   const throttleMs = Number(process.env.CLOSEDLOOP_TAILER_THROTTLE_MS) || DEFAULT_THROTTLE_MS;
   let stopped = false;
   let authFailed = false;
-  let byteOffset = initialByteOffset;
+  /** Next byte to read from the JSONL file (may point past uncommitted tail in `pendingRemainder`). */
+  let readByteOffset = initialByteOffset;
+  /** Bytes read from disk not yet removed from `pendingRemainder` (no successful commit for that prefix). */
   let pendingRemainder = Buffer.alloc(0);
   let lastSentAt: number | null = null;
+  /** Largest replay-safe offset reported via `onOffset` (exclusive end of committed prefix). */
+  let committedByteOffset = initialByteOffset;
+
+  function reportCommit(framedEndExclusive: number): void {
+    if (framedEndExclusive > committedByteOffset) {
+      committedByteOffset = framedEndExclusive;
+      onOffset?.(committedByteOffset);
+    }
+  }
 
   async function pollOnce(): Promise<void> {
     if (stopped || authFailed) return;
     if (!existsSync(jsonlPath)) return;
     let fd: number | null = null;
-    const offsetBefore = byteOffset;
     try {
       fd = openSync(jsonlPath, "r");
       const chunkSize = 65536;
       const chunk = Buffer.alloc(chunkSize);
       let bytesRead: number;
-      while ((bytesRead = readSync(fd, chunk, 0, chunkSize, byteOffset)) > 0) {
-        byteOffset += bytesRead;
+      while ((bytesRead = readSync(fd, chunk, 0, chunkSize, readByteOffset)) > 0) {
+        readByteOffset += bytesRead;
         pendingRemainder = Buffer.concat([pendingRemainder, chunk.subarray(0, bytesRead)]);
       }
     } catch {
@@ -212,44 +230,59 @@ export function startOutputTailer(
       if (fd !== null) closeSync(fd);
     }
 
-    if (byteOffset > offsetBefore) {
-      onOffset?.(byteOffset);
-    }
+    while (!stopped && !authFailed) {
+      const newlineIndex = pendingRemainder.lastIndexOf(10); // 0x0a
+      if (newlineIndex === -1) break;
 
-    const newlineIndex = pendingRemainder.lastIndexOf(10); // 0x0a = newline
-    if (newlineIndex === -1) return;
-    const completeLines = pendingRemainder.subarray(0, newlineIndex).toString("utf8");
-    pendingRemainder = pendingRemainder.subarray(newlineIndex + 1);
+      const baseInFile = readByteOffset - pendingRemainder.length;
+      const framedEndExclusive = baseInFile + newlineIndex + 1;
 
-    let lastDisplay: string | null = null;
-    for (const line of completeLines.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(trimmed);
-      } catch {
+      const completeLines = pendingRemainder.subarray(0, newlineIndex).toString("utf8");
+      const suffix = pendingRemainder.subarray(newlineIndex + 1);
+
+      let lastDisplay: string | null = null;
+      for (const line of completeLines.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(trimmed);
+        } catch {
+          continue;
+        }
+        if (!isRecord(parsed)) continue;
+        const display = summarizeJsonlRecord(parsed);
+        if (!display) continue;
+        lastDisplay = display;
+      }
+
+      if (lastDisplay === null) {
+        pendingRemainder = suffix;
+        reportCommit(framedEndExclusive);
         continue;
       }
-      if (!isRecord(parsed)) continue;
-      const display = summarizeJsonlRecord(parsed);
-      if (!display) continue;
-      lastDisplay = display;
-    }
 
-    if (lastDisplay !== null) {
       const now = Date.now();
-      if (lastSentAt === null || now - lastSentAt >= throttleMs) {
-        lastSentAt = now;
-        const status = await postLoopEvent(apiBaseUrl, loopId, token, { type: "output", data: { chunk: lastDisplay } });
-        if (status === 401 || status === 403) {
-          gatewayLog.warn(
-            "output-tailer",
-            `Stopping tailer for loopId=${loopId}: auth rejected (${status})`,
-          );
-          authFailed = true;
-        }
+      if (lastSentAt !== null && now - lastSentAt < throttleMs) {
+        break;
       }
+
+      const status = await postLoopEvent(apiBaseUrl, loopId, token, { type: "output", data: { chunk: lastDisplay } });
+      if (status === 401 || status === 403) {
+        gatewayLog.warn(
+          "output-tailer",
+          `Stopping tailer for loopId=${loopId}: auth rejected (${status})`,
+        );
+        authFailed = true;
+        break;
+      }
+      if (status !== null && status >= 200 && status < 300) {
+        pendingRemainder = suffix;
+        lastSentAt = now;
+        reportCommit(framedEndExclusive);
+        continue;
+      }
+      break;
     }
   }
 

@@ -290,6 +290,66 @@ test("reattaches to live jobs and persists jsonl offsets", async () => {
   service.dispose();
 });
 
+test("live reattach does not persist jsonl offset past incomplete trailing line", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+  await fs.writeFile(jsonlPath, "");
+  const loopTokenStore = createLoopTokenStore("boot-recovery-partial-jsonl-loop-tokens");
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
+
+  const jobStore = createStore("boot-recovery-partial-jsonl");
+  const liveJob = createJob({
+    pid: process.pid,
+    status: "RUNNING",
+    claudeWorkDir,
+    jsonlPath,
+    lastObservedJsonlOffset: 0,
+  });
+  jobStore.upsert(liveJob);
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: () => {} },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4011",
+    loopTokenStore,
+  });
+  await service.run([]);
+
+  const incomplete = '{"type":"assistant","message":{"content":[{"type":"text","text":"par';
+  await fs.appendFile(jsonlPath, incomplete);
+  await sleep(120);
+
+  let persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(
+    persisted.lastObservedJsonlOffset ?? 0,
+    0,
+    "partial JSONL tail must not advance persisted offset",
+  );
+
+  const rest = 'tial"}]}}\n';
+  await fs.appendFile(jsonlPath, rest);
+  await sleep(120);
+
+  persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.ok(
+    (persisted.lastObservedJsonlOffset ?? 0) > 0,
+    "expected offset after a complete newline-delimited record and successful POST",
+  );
+  assert.ok(
+    fetchCalls.some(
+      (entry) =>
+        entry.url.endsWith("/loops/loop-1/events") &&
+        entry.authHeader === "Bearer loop-token",
+    ),
+  );
+  service.dispose();
+});
+
 test("skips live job reattach when loop token is missing", async () => {
   const repoDir = path.join(tempRoot, "repo");
   const claudeWorkDir = path.join(repoDir, "workdir");
