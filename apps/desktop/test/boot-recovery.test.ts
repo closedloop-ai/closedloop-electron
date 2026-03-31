@@ -90,7 +90,7 @@ function createJob(overrides?: Partial<LocalJob>): LocalJob {
   };
 }
 
-test("finalizes dead jobs returned by reconcile", async () => {
+test("finalizes dead jobs without promoting UNKNOWN status to completed", async () => {
   const repoDir = path.join(tempRoot, "repo");
   const claudeWorkDir = path.join(repoDir, "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
@@ -115,13 +115,24 @@ test("finalizes dead jobs returned by reconcile", async () => {
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
-  assert.equal(persisted.status, "COMPLETED");
+  assert.equal(persisted.status, "UNKNOWN");
   assert.ok(persisted.finalStatusPersistedAt);
-  assert.ok(fetchCalls.some((c) => c.url.includes("/upload-artifacts") && c.authHeader === "Bearer loop-token"));
-  assert.ok(fetchCalls.some((c) => c.body.includes('"type":"completed"') && c.authHeader === "Bearer loop-token"));
+  assert.ok(
+    !fetchCalls.some(
+      (c) => c.url.includes("/upload-artifacts") && c.authHeader === "Bearer loop-token",
+    ),
+  );
+  assert.ok(
+    fetchCalls.some(
+      (c) =>
+        c.body.includes('"type":"error"') &&
+        c.body.includes('"code":"PROCESS_STOPPED"') &&
+        c.authHeader === "Bearer loop-token",
+    ),
+  );
 });
 
-test("finalizes dead jobs using LoopTokenStore and clears token after success", async () => {
+test("finalizes dead jobs using LoopTokenStore and clears token after UNKNOWN replay", async () => {
   const repoDir = path.join(tempRoot, "repo");
   const claudeWorkDir = path.join(repoDir, "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
@@ -153,9 +164,9 @@ test("finalizes dead jobs using LoopTokenStore and clears token after success", 
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
-  assert.equal(persisted.status, "COMPLETED");
+  assert.equal(persisted.status, "UNKNOWN");
   assert.equal(loopTokenStore.getLoopToken("loop-1"), null);
-  assert.ok(fetchCalls.some((c) => c.authHeader === "Bearer loop-token"));
+  assert.ok(fetchCalls.some((c) => c.body.includes('"type":"error"') && c.authHeader === "Bearer loop-token"));
 });
 
 test("reattaches to live jobs and persists jsonl offsets", async () => {

@@ -138,3 +138,97 @@ test("finalizeLoopFromRuntime skips CANCEL_PENDING while PID remains alive", asy
   assert.ok(persisted);
   assert.equal(persisted.status, "CANCEL_PENDING");
 });
+
+test("finalizeLoopFromRuntime preserves FAILED jobs and posts an error event", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jobStore = createStore("finalizer-failed");
+  const job = createBaseJob({
+    claudeWorkDir,
+    status: "FAILED",
+    exitCode: 42,
+  });
+  jobStore.upsert(job);
+
+  await finalizeLoopFromRuntime(job, "boot-recovery", {
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+  });
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.status, "FAILED");
+  assert.equal(persisted.artifactsUploadedAt, undefined);
+  assert.ok(persisted.completedEventPostedAt);
+  assert.ok(persisted.finalStatusPersistedAt);
+  assert.equal(fetchCalls.length, 1);
+  assert.match(fetchCalls[0]?.body ?? "", /"type":"error"/);
+  assert.match(fetchCalls[0]?.body ?? "", /"code":"PROCESS_FAILED"/);
+  assert.equal(telemetryEvents[0]?.category, "job.recovery.finalize_replayed");
+  assert.equal(telemetryEvents[0]?.severity, "error");
+});
+
+test("finalizeLoopFromRuntime preserves CANCELLED jobs without posting loop events", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jobStore = createStore("finalizer-cancelled");
+  const job = createBaseJob({
+    claudeWorkDir,
+    status: "CANCELLED",
+    exitCode: 130,
+  });
+  jobStore.upsert(job);
+
+  await finalizeLoopFromRuntime(job, "boot-recovery", {
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+  });
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.status, "CANCELLED");
+  assert.equal(persisted.artifactsUploadedAt, undefined);
+  assert.equal(persisted.completedEventPostedAt, undefined);
+  assert.ok(persisted.finalStatusPersistedAt);
+  assert.equal(fetchCalls.length, 0);
+  assert.equal(telemetryEvents[0]?.category, "job.recovery.finalize_replayed");
+  assert.equal(telemetryEvents[0]?.severity, "info");
+});
+
+test("finalizeLoopFromRuntime preserves STOPPED jobs and posts a stopped error event", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jobStore = createStore("finalizer-stopped");
+  const job = createBaseJob({
+    claudeWorkDir,
+    status: "STOPPED",
+    exitCode: 137,
+  });
+  jobStore.upsert(job);
+
+  await finalizeLoopFromRuntime(job, "boot-recovery", {
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+  });
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.status, "STOPPED");
+  assert.equal(persisted.artifactsUploadedAt, undefined);
+  assert.ok(persisted.completedEventPostedAt);
+  assert.ok(persisted.finalStatusPersistedAt);
+  assert.equal(fetchCalls.length, 1);
+  assert.match(fetchCalls[0]?.body ?? "", /"type":"error"/);
+  assert.match(fetchCalls[0]?.body ?? "", /"code":"PROCESS_STOPPED"/);
+  assert.equal(telemetryEvents[0]?.category, "job.recovery.finalize_replayed");
+  assert.equal(telemetryEvents[0]?.severity, "error");
+});
