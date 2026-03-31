@@ -8,6 +8,7 @@ import {
 } from "./diagnostics-helpers.js";
 import { gatewayLog } from "./gateway-logger.js";
 import type { JobStore, LocalJob } from "./job-store.js";
+import type { LoopTokenStore } from "./loop-token-store.js";
 import type { TelemetryEmitter } from "./telemetry-protocol.js";
 import { parseTokenUsage } from "./token-usage.js";
 
@@ -17,6 +18,8 @@ export interface LoopFinalizerDeps {
   apiAuthToken: string;
   apiBaseUrl: string;
   isProcessRunning: (pid: number) => boolean;
+  /** When set, successful finalization removes the persisted loop runner token. */
+  loopTokenStore?: LoopTokenStore;
 }
 
 export type LoopFinalizationReason =
@@ -146,7 +149,8 @@ export async function finalizeLoopFromRuntime(
   reason: LoopFinalizationReason,
   deps: LoopFinalizerDeps,
 ): Promise<void> {
-  const { jobStore, telemetry, apiAuthToken, apiBaseUrl, isProcessRunning } = deps;
+  const { jobStore, telemetry, apiAuthToken, apiBaseUrl, isProcessRunning, loopTokenStore } =
+    deps;
 
   if (job.status === "CANCEL_PENDING" && job.pid != null && isProcessRunning(job.pid)) {
     gatewayLog.info(
@@ -172,6 +176,8 @@ export async function finalizeLoopFromRuntime(
     : [];
 
   let artifacts: Record<string, unknown> = {};
+  let artifactUploadFailedThisRun = false;
+  let completedEventFailedThisRun = false;
 
   if (!job.artifactsUploadedAt) {
     artifacts = readArtifacts(command, claudeWorkDir, worktreeDir);
@@ -184,6 +190,7 @@ export async function finalizeLoopFromRuntime(
     });
     if (!uploadResult.success) {
       warnings.push("ARTIFACT_UPLOAD_FAILED");
+      artifactUploadFailedThisRun = true;
     } else {
       const now = new Date().toISOString();
       const current = jobStore.getByLoopId(job.loopId) ?? job;
@@ -231,6 +238,7 @@ export async function finalizeLoopFromRuntime(
     );
     if (!eventResult.success) {
       warnings.push("EVENT_POST_FAILED");
+      completedEventFailedThisRun = true;
     } else {
       const now = new Date().toISOString();
       const current = jobStore.getByLoopId(job.loopId) ?? job;
@@ -292,4 +300,12 @@ export async function finalizeLoopFromRuntime(
     },
     ...(diagnostics ? { diagnostics } : {}),
   });
+
+  if (
+    loopTokenStore &&
+    !artifactUploadFailedThisRun &&
+    !completedEventFailedThisRun
+  ) {
+    loopTokenStore.deleteLoopToken(job.loopId);
+  }
 }

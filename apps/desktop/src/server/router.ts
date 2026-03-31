@@ -3,6 +3,7 @@ import { timingSafeEqual } from "node:crypto";
 import type { ComputeTargetCapabilities, HealthResponse } from "../shared/contracts.js";
 import { isLoopbackIPv4 } from "../shared/network-utils.js";
 import type { JobStore } from "../main/job-store.js";
+import type { LoopTokenStore } from "../main/loop-token-store.js";
 import type { LocalSessionStore } from "../main/local-session-store.js";
 import { verifyChallenge } from "../main/local-auth-verifier.js";
 import { OperationDispatcher } from "./operation-dispatcher.js";
@@ -59,6 +60,7 @@ export interface GatewayRouterOptions {
   prodOriginsOnly?: boolean;
   jobStore?: JobStore;
   worktreeProvider?: WorktreeProvider;
+  loopTokenStore?: LoopTokenStore;
 }
 
 export interface GatewayActivityEvent {
@@ -158,7 +160,8 @@ export class GatewayRouter {
       this.options.getApiOrigin,
       this.options.jobStore,
       this.options.getWebAppOrigin ?? (() => this.options.webAppOrigin),
-      this.options.worktreeProvider
+      this.options.worktreeProvider,
+      this.options.loopTokenStore
     );
     registerSymphonyLogsRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerSymphonyPlanRoutes(this.operationDispatcher, this.options.getAllowedDirectories);

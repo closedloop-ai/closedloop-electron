@@ -8,6 +8,7 @@ import { isProcessRunning } from "../server/operations/symphony-utils.js";
 import { gatewayLog } from "./gateway-logger.js";
 import type { JobStore, LocalJob } from "./job-store.js";
 import { readPersistedLoopAuthToken } from "./loop-auth-token.js";
+import type { LoopTokenStore } from "./loop-token-store.js";
 import {
   finalizeLoopFromRuntime,
   type LoopFinalizerDeps,
@@ -19,6 +20,7 @@ export interface BootRecoveryDeps {
   telemetry: TelemetryEmitter;
   getApiKey: () => string | null;
   getApiOrigin: () => string;
+  loopTokenStore?: LoopTokenStore;
 }
 
 interface LiveJobHandle {
@@ -30,18 +32,28 @@ interface LiveJobHandle {
 const WATCHER_POLL_MS = 3000;
 
 /**
- * Resolve the loop auth token from the persisted on-disk file, falling back
- * to the gateway API key as a last resort.
+ * Resolve the loop auth token from the encrypted app store, then a legacy
+ * workdir file, falling back to the gateway API key as a last resort.
  */
 function resolveLoopAuthToken(
   job: LocalJob,
   fallbackApiKey: string,
+  loopTokenStore?: LoopTokenStore,
 ): string {
+  const fromStore = loopTokenStore?.getLoopToken(job.loopId);
+  if (fromStore) {
+    gatewayLog.info(
+      "boot-recovery",
+      `Token source for loopId=${job.loopId}: LOOP_TOKEN_STORE`,
+    );
+    return fromStore;
+  }
+
   const persisted = readPersistedLoopAuthToken(job.claudeWorkDir);
   if (persisted) {
     gatewayLog.info(
       "boot-recovery",
-      `Token source for loopId=${job.loopId}: PERSISTED`,
+      `Token source for loopId=${job.loopId}: LEGACY_FILE`,
     );
     return persisted;
   }
@@ -96,7 +108,7 @@ export class BootRecoveryService {
   async run(deadJobs: LocalJob[]): Promise<void> {
     if (this.disposed) return;
 
-    const { jobStore, telemetry, getApiKey, getApiOrigin } = this.deps;
+    const { jobStore, telemetry, getApiKey, getApiOrigin, loopTokenStore } = this.deps;
     const apiKey = getApiKey();
     const apiBaseUrl = getApiOrigin();
 
@@ -109,13 +121,14 @@ export class BootRecoveryService {
     } else if (apiKey && apiBaseUrl) {
       for (const job of unfinalizedDeadJobs) {
         try {
-          const authToken = resolveLoopAuthToken(job, apiKey);
+          const authToken = resolveLoopAuthToken(job, apiKey, loopTokenStore);
           await finalizeLoopFromRuntime(job, "boot-recovery", {
             jobStore,
             telemetry,
             apiAuthToken: authToken,
             apiBaseUrl,
             isProcessRunning,
+            loopTokenStore,
           });
         } catch (err) {
           gatewayLog.warn(
@@ -152,7 +165,7 @@ export class BootRecoveryService {
     if (pid == null) return;
 
     const effectiveApiBaseUrl = job.apiBaseUrl ?? apiBaseUrl;
-    const loopAuthToken = resolveLoopAuthToken(job, apiKey);
+    const loopAuthToken = resolveLoopAuthToken(job, apiKey, this.deps.loopTokenStore);
     registerRecoveredLoop(loopId, pid);
 
     const enrichedJob = backfillJobPaths(job, jobStore);
@@ -215,7 +228,7 @@ export class BootRecoveryService {
     apiBaseUrl: string,
     tailer: LiveJobHandle["tailer"] | undefined,
   ): void {
-    const { jobStore, telemetry } = this.deps;
+    const { jobStore, telemetry, loopTokenStore } = this.deps;
 
     const run = async () => {
       if (tailer) {
@@ -238,6 +251,7 @@ export class BootRecoveryService {
         apiAuthToken: apiKey,
         apiBaseUrl,
         isProcessRunning,
+        loopTokenStore,
       };
 
       try {

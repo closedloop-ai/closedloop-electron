@@ -22,6 +22,7 @@ import {
 import { persistLoopAuthToken } from "../../main/loop-auth-token.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
+import type { LoopTokenStore } from "../../main/loop-token-store.js";
 import {
   finalizeLoopFromRuntime,
   type LoopFinalizerDeps,
@@ -1564,6 +1565,7 @@ async function handleProcessCompletion(
   commandId?: string,
   operationId?: string,
   wt: WorktreeProvider = defaultWorktreeProvider,
+  loopTokenStore?: LoopTokenStore,
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
 
@@ -1957,6 +1959,7 @@ async function handleProcessCompletion(
         apiAuthToken: closedLoopAuthToken,
         apiBaseUrl,
         isProcessRunning,
+        loopTokenStore,
       };
       await finalizeLoopFromRuntime(existingJob, "live-exit", finalizerDeps);
       const sessionId = readTextFile(path.join(claudeWorkDir, "session-id.txt"));
@@ -2047,6 +2050,7 @@ async function handleLoopRequest(
   jobStore?: JobStore,
   getWebAppOrigin?: () => string,
   worktreeProvider?: WorktreeProvider,
+  loopTokenStore?: LoopTokenStore,
 ): Promise<void> {
   const wt = worktreeProvider ?? defaultWorktreeProvider;
   // Derive the callback URL from the gateway's trusted configuration.
@@ -2519,7 +2523,11 @@ async function handleLoopRequest(
     }
 
     try {
-      persistLoopAuthToken(claudeWorkDir, body.closedLoopAuthToken);
+      if (loopTokenStore) {
+        loopTokenStore.setLoopToken(body.loopId, body.closedLoopAuthToken);
+      } else {
+        persistLoopAuthToken(claudeWorkDir, body.closedLoopAuthToken);
+      }
     } catch (err) {
       loopLog(
         body.loopId,
@@ -2761,6 +2769,7 @@ async function handleLoopRequest(
         commandId,
         operationId,
         wt,
+        loopTokenStore,
       ).catch((err) => {
         loopError(body.loopId, "Completion handler error:", err);
         gatewayLog.error(
@@ -2974,6 +2983,7 @@ export function registerSymphonyLoopRoutes(
   jobStore?: JobStore,
   getWebAppOrigin?: () => string,
   worktreeProvider?: WorktreeProvider,
+  loopTokenStore?: LoopTokenStore,
 ): void {
   dispatcher.register(
     "POST",
@@ -2986,6 +2996,7 @@ export function registerSymphonyLoopRoutes(
         jobStore,
         getWebAppOrigin,
         worktreeProvider,
+        loopTokenStore,
       );
     },
   );

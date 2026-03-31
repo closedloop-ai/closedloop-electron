@@ -65,6 +65,7 @@ import pkg from "electron-updater";
 const { autoUpdater } = pkg;
 import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
 import { BootRecoveryService } from "./boot-recovery.js";
+import { LoopTokenStore } from "./loop-token-store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -73,6 +74,7 @@ const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 export class DesktopApplication {
   private readonly settingsStore: SettingsStore;
   private readonly apiKeyStore: ApiKeyStore;
+  private readonly loopTokenStore: LoopTokenStore;
   private readonly tray: DesktopTray;
   private readonly desktopWindow: DesktopWindow;
   private readonly server: DesktopGatewayServer;
@@ -107,6 +109,7 @@ export class DesktopApplication {
     this.cloudConnectionEnabled =
       this.settingsStore.getCloudConnectionEnabled();
     this.apiKeyStore = new ApiKeyStore();
+    this.loopTokenStore = new LoopTokenStore();
     this.tray = new DesktopTray();
     this.desktopWindow = new DesktopWindow();
     this.activityLog = new ActivityLogStore();
@@ -146,6 +149,7 @@ export class DesktopApplication {
       this.isProdOriginsOnly(),
       this.jobStore,
       () => this.recovery.onUnexpectedClose(),
+      this.loopTokenStore,
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -259,6 +263,7 @@ export class DesktopApplication {
       telemetry: Observability.getTelemetryEmitter(),
       getApiKey: () => this.apiKeyStore.getApiKey(),
       getApiOrigin: () => this.settingsStore.getApiOrigin(),
+      loopTokenStore: this.loopTokenStore,
     });
     this.registerIpcHandlers();
   }

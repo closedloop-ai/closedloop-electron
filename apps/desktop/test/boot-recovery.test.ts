@@ -8,6 +8,10 @@ import { afterEach, beforeEach, test } from "node:test";
 import { BootRecoveryService } from "../src/main/boot-recovery.js";
 import { JobStore, type LocalJob } from "../src/main/job-store.js";
 import { persistLoopAuthToken } from "../src/main/loop-auth-token.js";
+import {
+  type SafeStorageLike,
+  LoopTokenStore,
+} from "../src/main/loop-token-store.js";
 import type { TelemetryEventPayload } from "../src/main/telemetry-protocol.js";
 
 let tempRoot = "";
@@ -56,6 +60,19 @@ function createStore(name: string): JobStore {
   return new JobStore({ cwd: tempRoot, name });
 }
 
+function createTestLoopTokenSafeStorage(): SafeStorageLike {
+  return {
+    isEncryptionAvailable: () => true,
+    encryptString(plainText: string) {
+      return Buffer.from(`stub:${plainText}`, "utf-8");
+    },
+    decryptString(encrypted: Buffer) {
+      const s = encrypted.toString("utf-8");
+      return s.startsWith("stub:") ? s.slice(5) : s;
+    },
+  };
+}
+
 function createJob(overrides?: Partial<LocalJob>): LocalJob {
   const now = new Date().toISOString();
   const repoDir = path.join(tempRoot, "repo");
@@ -102,6 +119,43 @@ test("finalizes dead jobs returned by reconcile", async () => {
   assert.ok(persisted.finalStatusPersistedAt);
   assert.ok(fetchCalls.some((c) => c.url.includes("/upload-artifacts") && c.authHeader === "Bearer loop-token"));
   assert.ok(fetchCalls.some((c) => c.body.includes('"type":"completed"') && c.authHeader === "Bearer loop-token"));
+});
+
+test("finalizes dead jobs using LoopTokenStore and clears token after success", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
+
+  const loopTokenStore = new LoopTokenStore({
+    cwd: tempRoot,
+    name: "boot-recovery-loop-tokens",
+    safeStorage: createTestLoopTokenSafeStorage(),
+  });
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
+
+  const jobStore = createStore("boot-recovery-dead-store");
+  const deadJob = createJob({
+    status: "UNKNOWN",
+    claudeWorkDir,
+  });
+  jobStore.upsert(deadJob);
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4010",
+    loopTokenStore,
+  });
+  await service.run([deadJob]);
+  service.dispose();
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.status, "COMPLETED");
+  assert.equal(loopTokenStore.getLoopToken("loop-1"), null);
+  assert.ok(fetchCalls.some((c) => c.authHeader === "Bearer loop-token"));
 });
 
 test("reattaches to live jobs and persists jsonl offsets", async () => {

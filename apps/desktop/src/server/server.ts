@@ -11,6 +11,7 @@ import {
 import { gatewayLog } from "../main/gateway-logger.js";
 import type { LocalSessionStore } from "../main/local-session-store.js";
 import type { JobStore } from "../main/job-store.js";
+import type { LoopTokenStore } from "../main/loop-token-store.js";
 import {
   GatewayRouter,
   type GatewayActivityEvent,
@@ -44,6 +45,7 @@ export interface DesktopGatewayServerOptions {
   jobStore?: JobStore;
   worktreeProvider?: WorktreeProvider;
   onUnexpectedClose?: () => void;
+  loopTokenStore?: LoopTokenStore;
 }
 
 export class DesktopGatewayServer {
@@ -80,6 +82,7 @@ export class DesktopGatewayServer {
       prodOriginsOnly: this.options.prodOriginsOnly,
       jobStore: this.options.jobStore,
       worktreeProvider: this.options.worktreeProvider,
+      loopTokenStore: this.options.loopTokenStore,
     });
   }
 
@@ -102,6 +105,7 @@ export class DesktopGatewayServer {
     prodOriginsOnly?: boolean,
     jobStore?: JobStore,
     onUnexpectedClose?: () => void,
+    loopTokenStore?: LoopTokenStore,
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -124,6 +128,7 @@ export class DesktopGatewayServer {
       prodOriginsOnly,
       jobStore,
       onUnexpectedClose,
+      loopTokenStore,
     });
   }
 
