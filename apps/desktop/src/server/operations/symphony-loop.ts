@@ -19,7 +19,6 @@ import {
   readTextFile,
   sanitizeErrorMessage,
 } from "../../main/diagnostics-helpers.js";
-import { persistLoopAuthToken } from "../../main/loop-auth-token.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
 import type { LoopTokenStore } from "../../main/loop-token-store.js";
@@ -2525,8 +2524,6 @@ async function handleLoopRequest(
     try {
       if (loopTokenStore) {
         loopTokenStore.setLoopToken(body.loopId, body.closedLoopAuthToken);
-      } else {
-        persistLoopAuthToken(claudeWorkDir, body.closedLoopAuthToken);
       }
     } catch (err) {
       loopLog(

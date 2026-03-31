@@ -7,7 +7,6 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach, test } from "node:test";
 import { BootRecoveryService } from "../src/main/boot-recovery.js";
 import { JobStore, type LocalJob } from "../src/main/job-store.js";
-import { persistLoopAuthToken } from "../src/main/loop-auth-token.js";
 import {
   type SafeStorageLike,
   LoopTokenStore,
@@ -60,6 +59,14 @@ function createStore(name: string): JobStore {
   return new JobStore({ cwd: tempRoot, name });
 }
 
+function createLoopTokenStore(name: string): LoopTokenStore {
+  return new LoopTokenStore({
+    cwd: tempRoot,
+    name,
+    safeStorage: createTestLoopTokenSafeStorage(),
+  });
+}
+
 function createTestLoopTokenSafeStorage(): SafeStorageLike {
   return {
     isEncryptionAvailable: () => true,
@@ -95,7 +102,8 @@ test("finalizes dead jobs without promoting UNKNOWN status to completed", async 
   const claudeWorkDir = path.join(repoDir, "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
   await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
-  persistLoopAuthToken(claudeWorkDir, "loop-token");
+  const loopTokenStore = createLoopTokenStore("boot-recovery-dead-loop-tokens");
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
 
   const jobStore = createStore("boot-recovery-dead");
   const deadJob = createJob({
@@ -109,6 +117,7 @@ test("finalizes dead jobs without promoting UNKNOWN status to completed", async 
     telemetry: { emit: (event) => telemetryEvents.push(event) },
     getApiKey: () => "test-key",
     getApiOrigin: () => "http://127.0.0.1:4010",
+    loopTokenStore,
   });
   await service.run([deadJob]);
   service.dispose();
@@ -138,11 +147,7 @@ test("finalizes dead jobs using LoopTokenStore and clears token after UNKNOWN re
   await fs.mkdir(claudeWorkDir, { recursive: true });
   await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
 
-  const loopTokenStore = new LoopTokenStore({
-    cwd: tempRoot,
-    name: "boot-recovery-loop-tokens",
-    safeStorage: createTestLoopTokenSafeStorage(),
-  });
+  const loopTokenStore = createLoopTokenStore("boot-recovery-loop-tokens");
   loopTokenStore.setLoopToken("loop-1", "loop-token");
 
   const jobStore = createStore("boot-recovery-dead-store");
@@ -169,13 +174,45 @@ test("finalizes dead jobs using LoopTokenStore and clears token after UNKNOWN re
   assert.ok(fetchCalls.some((c) => c.body.includes('"type":"error"') && c.authHeader === "Bearer loop-token"));
 });
 
+test("skips dead job finalization when loop token is missing", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-dead-missing-token");
+
+  const jobStore = createStore("boot-recovery-dead-missing-token");
+  const deadJob = createJob({
+    status: "UNKNOWN",
+    claudeWorkDir,
+  });
+  jobStore.upsert(deadJob);
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: () => {} },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4010",
+    loopTokenStore,
+  });
+  await service.run([deadJob]);
+  service.dispose();
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.finalStatusPersistedAt, undefined);
+  assert.equal(fetchCalls.length, 0);
+});
+
 test("reattaches to live jobs and persists jsonl offsets", async () => {
   const repoDir = path.join(tempRoot, "repo");
   const claudeWorkDir = path.join(repoDir, "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
   const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
   await fs.writeFile(jsonlPath, "");
-  persistLoopAuthToken(claudeWorkDir, "loop-token");
+  const loopTokenStore = createLoopTokenStore("boot-recovery-live-offset-loop-tokens");
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
 
   const jobStore = createStore("boot-recovery-live-offset");
   const liveJob = createJob({
@@ -192,6 +229,7 @@ test("reattaches to live jobs and persists jsonl offsets", async () => {
     telemetry: { emit: () => {} },
     getApiKey: () => "test-key",
     getApiOrigin: () => "http://127.0.0.1:4011",
+    loopTokenStore,
   });
   await service.run([]);
 
@@ -214,11 +252,53 @@ test("reattaches to live jobs and persists jsonl offsets", async () => {
   service.dispose();
 });
 
+test("skips live job reattach when loop token is missing", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+  await fs.writeFile(jsonlPath, "");
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-live-missing-token");
+
+  const jobStore = createStore("boot-recovery-live-missing-token");
+  const liveJob = createJob({
+    pid: process.pid,
+    status: "RUNNING",
+    claudeWorkDir,
+    jsonlPath,
+    lastObservedJsonlOffset: 0,
+  });
+  jobStore.upsert(liveJob);
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: () => {} },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4011",
+    loopTokenStore,
+  });
+  await service.run([]);
+
+  await fs.appendFile(
+    jsonlPath,
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"should not be tailed"}]}}\n',
+  );
+  await sleep(100);
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.lastObservedJsonlOffset, 0);
+  assert.equal(fetchCalls.length, 0);
+  service.dispose();
+});
+
 test("reattaches legacy live jobs without persisted jsonlPath", async () => {
   const repoDir = path.join(tempRoot, "repo");
   const claudeWorkDir = path.join(repoDir, "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
-  persistLoopAuthToken(claudeWorkDir, "loop-token");
+  const loopTokenStore = createLoopTokenStore("boot-recovery-legacy-live-loop-tokens");
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
 
   const jobStore = createStore("boot-recovery-legacy-live-job");
   const liveJob = createJob({
@@ -235,6 +315,7 @@ test("reattaches legacy live jobs without persisted jsonlPath", async () => {
     telemetry: { emit: () => {} },
     getApiKey: () => "test-key",
     getApiOrigin: () => "http://127.0.0.1:40115",
+    loopTokenStore,
   });
   await service.run([]);
 
@@ -267,7 +348,8 @@ test("finalizes recovered live job after process exits", async () => {
   const claudeWorkDir = path.join(repoDir, "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
   await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
-  persistLoopAuthToken(claudeWorkDir, "loop-token");
+  const loopTokenStore = createLoopTokenStore("boot-recovery-live-exit-loop-tokens");
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
 
   const child = spawn("bash", ["-lc", "sleep 0.1"], { detached: false });
   assert.ok(child.pid);
@@ -285,6 +367,7 @@ test("finalizes recovered live job after process exits", async () => {
     telemetry: { emit: () => {} },
     getApiKey: () => "test-key",
     getApiOrigin: () => "http://127.0.0.1:4012",
+    loopTokenStore,
   });
   await service.run([]);
 

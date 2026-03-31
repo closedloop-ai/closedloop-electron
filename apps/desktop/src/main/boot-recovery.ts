@@ -7,7 +7,6 @@ import {
 import { isProcessRunning } from "../server/operations/symphony-utils.js";
 import { gatewayLog } from "./gateway-logger.js";
 import type { JobStore, LocalJob } from "./job-store.js";
-import { readPersistedLoopAuthToken } from "./loop-auth-token.js";
 import type { LoopTokenStore } from "./loop-token-store.js";
 import {
   finalizeLoopFromRuntime,
@@ -30,40 +29,6 @@ interface LiveJobHandle {
 }
 
 const WATCHER_POLL_MS = 3000;
-
-/**
- * Resolve the loop auth token from the encrypted app store, then a legacy
- * workdir file, falling back to the gateway API key as a last resort.
- */
-function resolveLoopAuthToken(
-  job: LocalJob,
-  fallbackApiKey: string,
-  loopTokenStore?: LoopTokenStore,
-): string {
-  const fromStore = loopTokenStore?.getLoopToken(job.loopId);
-  if (fromStore) {
-    gatewayLog.info(
-      "boot-recovery",
-      `Token source for loopId=${job.loopId}: LOOP_TOKEN_STORE`,
-    );
-    return fromStore;
-  }
-
-  const persisted = readPersistedLoopAuthToken(job.claudeWorkDir);
-  if (persisted) {
-    gatewayLog.info(
-      "boot-recovery",
-      `Token source for loopId=${job.loopId}: LEGACY_FILE`,
-    );
-    return persisted;
-  }
-
-  gatewayLog.warn(
-    "boot-recovery",
-    `Token source for loopId=${job.loopId}: FALLBACK (gateway API key — NOT a runner token!)`,
-  );
-  return fallbackApiKey;
-}
 
 /**
  * Backfill job metadata paths that live-loop startup persists but older app
@@ -121,7 +86,18 @@ export class BootRecoveryService {
     } else if (apiKey && apiBaseUrl) {
       for (const job of unfinalizedDeadJobs) {
         try {
-          const authToken = resolveLoopAuthToken(job, apiKey, loopTokenStore);
+          const authToken = loopTokenStore?.getLoopToken(job.loopId);
+          if (!authToken) {
+            gatewayLog.warn(
+              "boot-recovery",
+              `Skipping dead loop finalization: missing loop token for loopId=${job.loopId} (phase=dead-finalization)`,
+            );
+            continue;
+          }
+          gatewayLog.info(
+            "boot-recovery",
+            `Token source for loopId=${job.loopId}: LOOP_TOKEN_STORE`,
+          );
           await finalizeLoopFromRuntime(job, "boot-recovery", {
             jobStore,
             telemetry,
@@ -155,17 +131,28 @@ export class BootRecoveryService {
     }
 
     for (const job of liveJobs) {
-      await this.reattachLiveJob(job, apiKey, apiBaseUrl);
+      await this.reattachLiveJob(job, apiBaseUrl);
     }
   }
 
-  private async reattachLiveJob(job: LocalJob, apiKey: string, apiBaseUrl: string): Promise<void> {
+  private async reattachLiveJob(job: LocalJob, apiBaseUrl: string): Promise<void> {
     const { jobStore } = this.deps;
     const { loopId, pid } = job;
     if (pid == null) return;
 
     const effectiveApiBaseUrl = job.apiBaseUrl ?? apiBaseUrl;
-    const loopAuthToken = resolveLoopAuthToken(job, apiKey, this.deps.loopTokenStore);
+    const loopAuthToken = this.deps.loopTokenStore?.getLoopToken(loopId);
+    if (!loopAuthToken) {
+      gatewayLog.warn(
+        "boot-recovery",
+        `Skipping live loop reattach: missing loop token for loopId=${loopId} (phase=live-reattach)`,
+      );
+      return;
+    }
+    gatewayLog.info(
+      "boot-recovery",
+      `Token source for loopId=${loopId}: LOOP_TOKEN_STORE`,
+    );
     registerRecoveredLoop(loopId, pid);
 
     const enrichedJob = backfillJobPaths(job, jobStore);
@@ -224,7 +211,7 @@ export class BootRecoveryService {
 
   private finalizeRecoveredJob(
     loopId: string,
-    apiKey: string,
+    loopAuthToken: string,
     apiBaseUrl: string,
     tailer: LiveJobHandle["tailer"] | undefined,
   ): void {
@@ -248,7 +235,7 @@ export class BootRecoveryService {
       const finalizerDeps: LoopFinalizerDeps = {
         jobStore,
         telemetry,
-        apiAuthToken: apiKey,
+        apiAuthToken: loopAuthToken,
         apiBaseUrl,
         isProcessRunning,
         loopTokenStore,
