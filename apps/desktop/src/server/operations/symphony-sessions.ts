@@ -23,6 +23,8 @@ type SessionsConfig = {
   sessions: ActiveSession[];
 };
 
+const ROUTE_TIMEOUT_MS = 10_000;
+
 function asString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
 }
@@ -96,103 +98,137 @@ export function registerSymphonySessionRoutes(
 ): void {
 
   dispatcher.register("GET", "/api/engineer/symphony/sessions/unread-count", async (context) => {
-    const dir = getSymphonyDir();
-    const config = await loadSessions(dir);
+    await withRouteTimeout(context, "GET /api/engineer/symphony/sessions/unread-count", async () => {
+      const dir = getSymphonyDir();
+      const config = await loadSessions(dir);
 
-    let count = 0;
-    for (const session of config.sessions) {
-      const worktreePath = expandHome(session.worktreePath);
-      if (!existsSync(worktreePath)) {
-        continue;
-      }
-      const workDir = path.join(worktreePath, ".closedloop-ai", "work");
-      const candidates = [chatHistoryFilename(), ...[...VALID_PROVIDERS].map((p) => chatHistoryFilename(p))];
-      const chatPath = candidates.map((f) => path.join(workDir, f)).find((p) => existsSync(p));
-      if (!chatPath) {
-        continue;
-      }
-      try {
-        const raw = await fs.readFile(chatPath, "utf-8");
-        const history = JSON.parse(raw) as { messages?: { role: string }[] };
-        if (history.messages?.at(-1)?.role === "assistant") {
-          count++;
+      let count = 0;
+      for (const session of config.sessions) {
+        const worktreePath = expandHome(session.worktreePath);
+        if (!existsSync(worktreePath)) {
+          continue;
         }
-      } catch {
-        // Corrupt or unreadable chat history — skip
+        const workDir = path.join(worktreePath, ".closedloop-ai", "work");
+        const candidates = [chatHistoryFilename(), ...[...VALID_PROVIDERS].map((p) => chatHistoryFilename(p))];
+        const chatPath = candidates.map((f) => path.join(workDir, f)).find((p) => existsSync(p));
+        if (!chatPath) {
+          continue;
+        }
+        try {
+          const raw = await fs.readFile(chatPath, "utf-8");
+          const history = JSON.parse(raw) as { messages?: { role: string }[] };
+          if (history.messages?.at(-1)?.role === "assistant") {
+            count++;
+          }
+        } catch {
+          // Corrupt or unreadable chat history — skip
+        }
       }
-    }
 
-    json(context, 200, { count });
+      json(context, 200, { count });
+    });
   });
 
   dispatcher.register("GET", "/api/engineer/symphony/sessions", async (context) => {
-    const dir = getSymphonyDir();
-    const config = await loadSessions(dir);
+    await withRouteTimeout(context, "GET /api/engineer/symphony/sessions", async () => {
+      const dir = getSymphonyDir();
+      const config = await loadSessions(dir);
 
-    const validSessions = config.sessions.filter((session) => {
-      const expandedWorktreePath = expandHome(session.worktreePath);
-      return existsSync(expandedWorktreePath);
+      const validSessions = config.sessions.filter((session) => {
+        const expandedWorktreePath = expandHome(session.worktreePath);
+        return existsSync(expandedWorktreePath);
+      });
+
+      if (validSessions.length !== config.sessions.length) {
+        await saveSessions(dir, { sessions: validSessions });
+      }
+
+      json(context, 200, { sessions: validSessions });
     });
-
-    if (validSessions.length !== config.sessions.length) {
-      await saveSessions(dir, { sessions: validSessions });
-    }
-
-    json(context, 200, { sessions: validSessions });
   });
 
   dispatcher.register("POST", "/api/engineer/symphony/sessions", async (context) => {
-    const body = parseBody(context);
-    if (!body) {
-      json(context, 400, { error: "Invalid JSON body" });
-      return;
-    }
+    await withRouteTimeout(context, "POST /api/engineer/symphony/sessions", async () => {
+      const body = parseBody(context);
+      if (!body) {
+        json(context, 400, { error: "Invalid JSON body" });
+        return;
+      }
 
-    const fields = parseSessionBody(body);
+      const fields = parseSessionBody(body);
 
-    if (!(fields.ticketId && fields.repoPath && fields.worktreePath)) {
-      json(context, 400, { error: "ticketId, repoPath, and worktreePath are required" });
-      return;
-    }
+      if (!(fields.ticketId && fields.repoPath && fields.worktreePath)) {
+        json(context, 400, { error: "ticketId, repoPath, and worktreePath are required" });
+        return;
+      }
 
-    const pathsToCheck = [fields.repoPath, fields.worktreePath, ...(fields.contextRepoPaths ?? [])];
-    const pathError = assertAllPathsAllowed(pathsToCheck, getAllowedDirectories());
-    if (pathError) {
-      json(context, pathError.status, { error: pathError.error });
-      return;
-    }
+      const pathsToCheck = [fields.repoPath, fields.worktreePath, ...(fields.contextRepoPaths ?? [])];
+      const pathError = assertAllPathsAllowed(pathsToCheck, getAllowedDirectories());
+      if (pathError) {
+        json(context, pathError.status, { error: pathError.error });
+        return;
+      }
 
-    const dir = getSymphonyDir();
-    const config = await loadSessions(dir);
-    upsertSession(config, {
-      ticketId: fields.ticketId,
-      repoPath: fields.repoPath,
-      worktreePath: fields.worktreePath,
-      pid: fields.pid,
-      contextRepoPaths: fields.contextRepoPaths,
-      baseBranch: fields.baseBranch,
-      parentTicketId: fields.parentTicketId,
-      loopId: fields.loopId,
-      artifactId: fields.artifactId,
+      const dir = getSymphonyDir();
+      const config = await loadSessions(dir);
+      upsertSession(config, {
+        ticketId: fields.ticketId,
+        repoPath: fields.repoPath,
+        worktreePath: fields.worktreePath,
+        pid: fields.pid,
+        contextRepoPaths: fields.contextRepoPaths,
+        baseBranch: fields.baseBranch,
+        parentTicketId: fields.parentTicketId,
+        loopId: fields.loopId,
+        artifactId: fields.artifactId,
+      });
+
+      await saveSessions(dir, config);
+      json(context, 200, { success: true });
     });
-
-    await saveSessions(dir, config);
-    json(context, 200, { success: true });
   });
 
   dispatcher.register("DELETE", "/api/engineer/symphony/sessions", async (context) => {
-    const ticketId = context.query.get("ticketId");
-    if (!ticketId) {
-      json(context, 400, { error: "ticketId parameter is required" });
+    await withRouteTimeout(context, "DELETE /api/engineer/symphony/sessions", async () => {
+      const ticketId = context.query.get("ticketId");
+      if (!ticketId) {
+        json(context, 400, { error: "ticketId parameter is required" });
+        return;
+      }
+
+      const dir = getSymphonyDir();
+      const config = await loadSessions(dir);
+      config.sessions = config.sessions.filter((session) => session.ticketId !== ticketId);
+      await saveSessions(dir, config);
+      json(context, 200, { success: true });
+    });
+  });
+}
+
+async function withRouteTimeout(
+  context: OperationRequestContext,
+  label: string,
+  run: () => Promise<void>
+): Promise<void> {
+  console.log(`[route] start ${label}`);
+  let completed = false;
+  const timeout = setTimeout(() => {
+    if (completed || context.response.writableEnded) {
       return;
     }
+    console.error(`[route] timeout ${label}`);
+    context.response.statusCode = 504;
+    context.response.setHeader("content-type", "application/json");
+    context.response.end(JSON.stringify({ error: "Route timed out", route: label }));
+  }, ROUTE_TIMEOUT_MS);
 
-    const dir = getSymphonyDir();
-    const config = await loadSessions(dir);
-    config.sessions = config.sessions.filter((session) => session.ticketId !== ticketId);
-    await saveSessions(dir, config);
-    json(context, 200, { success: true });
-  });
+  try {
+    await run();
+    completed = true;
+    console.log(`[route] done ${label}`);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function assertAllPathsAllowed(

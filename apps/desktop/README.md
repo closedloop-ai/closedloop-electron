@@ -2,6 +2,22 @@
 
 Electron desktop app providing a localhost HTTP gateway for the ClosedLoop platform.
 
+## Prerequisites
+
+### GitHub CLI (gh)
+
+**Minimum version: 2.88.0**
+
+macOS Tahoe 26.4+ broke the `security` CLI that older `gh` versions use to read tokens from the Keychain. This causes all `gh` commands to hang indefinitely when spawned from Electron (which lacks a SecurityAgent session). Version 2.88.0+ uses native Security framework bindings that bypass the broken CLI.
+
+The desktop app includes a fallback that resolves the gh token via the user's login shell at startup, but upgrading `gh` is the recommended fix:
+
+```bash
+brew upgrade gh
+```
+
+The health check will report "GitHub Auth: Not authenticated" if `gh` is not installed or the token cannot be resolved.
+
 ## Updating App Icons
 
 The source of truth for the app icon is `app-icon.svg`. All other icon assets are derived from it. To regenerate after updating the SVG:

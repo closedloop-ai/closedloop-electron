@@ -188,6 +188,36 @@ export class ProcessManager {
     }
   }
 
+  async execWithTimeout(
+    command: string,
+    args: string[] = [],
+    cwd?: string,
+    timeoutMs = 15_000
+  ): Promise<ExecResult> {
+    this.assertOperationPath(cwd);
+
+    try {
+      const { stdout, stderr } = await execFileAsync(command, args, {
+        cwd,
+        encoding: "utf-8",
+        timeout: timeoutMs
+      });
+      return { stdout, stderr, exitCode: 0 };
+    } catch (error) {
+      const execError = error as NodeJS.ErrnoException & {
+        stdout?: string;
+        stderr?: string;
+        code?: string | number;
+      };
+
+      return {
+        stdout: execError.stdout ?? "",
+        stderr: execError.stderr ?? execError.message,
+        exitCode: typeof execError.code === "number" ? execError.code : 1
+      };
+    }
+  }
+
   async killProcessGroup(pid: number, gracePeriodMs = DEFAULT_RESULT_KILL_GRACE_MS): Promise<void> {
     if (!pid || pid < 1) {
       return;

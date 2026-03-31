@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
-import { getShellPath } from "../shell-path.js";
+import { getGhToken, getShellPath } from "../shell-path.js";
 import { isPluginInstalled } from "./plugin-cache.js";
 import type { ProcessManager } from "../process-manager.js";
 
@@ -130,20 +130,22 @@ async function checkGhCli(processManager: ProcessManager): Promise<CheckResult> 
   }
 }
 
-async function checkGhAuth(processManager: ProcessManager): Promise<CheckResult> {
-  try {
-    await runCommand(processManager, "gh", ["auth", "status"]);
+async function checkGhAuth(_processManager: ProcessManager): Promise<CheckResult> {
+  // macOS Tahoe 26.x broke the security CLI -- gh auth token hangs when
+  // the process lacks a SecurityAgent session (Electron from Dock).
+  // Use the token resolved at startup via the login shell instead.
+  const token = await getGhToken();
+  if (token) {
     return { id: "gh-auth", label: "GitHub Auth", required: true, passed: true };
-  } catch {
-    return {
-      id: "gh-auth",
-      label: "GitHub Auth",
-      required: true,
-      passed: false,
-      error: "Not authenticated",
-      remediation: "Run: gh auth login"
-    };
   }
+  return {
+    id: "gh-auth",
+    label: "GitHub Auth",
+    required: true,
+    passed: false,
+    error: "Not authenticated",
+    remediation: "Run: gh auth login"
+  };
 }
 
 function checkPlugin(name: string, label: string, required: boolean): CheckResult {

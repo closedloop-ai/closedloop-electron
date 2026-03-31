@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
 import os from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -28,23 +30,73 @@ export function expandTildes(rawPath: string): string {
  */
 const PATH_SENTINEL_START = "__CLPATH_START__";
 const PATH_SENTINEL_END = "__CLPATH_END__";
+const GH_TOKEN_SENTINEL_START = "__CLGHTOKEN_START__";
+const GH_TOKEN_SENTINEL_END = "__CLGHTOKEN_END__";
 
-let resolvedPathPromise: Promise<string> | undefined;
+type ShellBootstrap = { path: string; ghToken: string | null };
 
-export async function getShellPath(): Promise<string> {
-  resolvedPathPromise ??= (async () => {
+let resolvedBootstrapPromise: Promise<ShellBootstrap> | undefined;
+let resolvedGhConfigDirPromise: Promise<string> | undefined;
+
+/**
+ * Resolve PATH and gh auth token in a single login-shell invocation.
+ *
+ * macOS Tahoe 26.x broke the `security` CLI — `security find-generic-password`
+ * hangs for processes without a SecurityAgent session (i.e. Electron launched
+ * from the Dock).  The login shell spawned via `-ilc` retains the session, so
+ * we capture the gh token here and expose it via `getGhToken()` for callers
+ * that need to inject it into gh-specific child processes.
+ */
+function resolveShellBootstrap(): Promise<ShellBootstrap> {
+  resolvedBootstrapPromise ??= (async () => {
     try {
       const shell = process.env.SHELL || "/bin/zsh";
-      const cmd = `echo ${PATH_SENTINEL_START}\${PATH}${PATH_SENTINEL_END}`;
+      const cmd = [
+        `echo ${PATH_SENTINEL_START}\${PATH}${PATH_SENTINEL_END}`,
+        `echo ${GH_TOKEN_SENTINEL_START}$(gh auth token 2>/dev/null)${GH_TOKEN_SENTINEL_END}`,
+      ].join("; ");
       const { stdout } = await execFileAsync(shell, ["-ilc", cmd], {
-        timeout: 3000,
+        timeout: 5000,
       });
-      return expandTildes(extractPathFromOutput(stdout));
+      const path = expandTildes(extractPathFromOutput(stdout));
+      const ghToken = extractBetweenSentinels(stdout, GH_TOKEN_SENTINEL_START, GH_TOKEN_SENTINEL_END);
+      cachedGhToken = ghToken;
+
+      return { path, ghToken };
     } catch {
-      return expandTildes(`${process.env.PATH ?? ""}:/opt/homebrew/bin:/usr/local/bin`);
+      return {
+        path: expandTildes(`${process.env.PATH ?? ""}:/opt/homebrew/bin:/usr/local/bin`),
+        ghToken: null,
+      };
     }
   })();
-  return resolvedPathPromise;
+  return resolvedBootstrapPromise;
+}
+
+export async function getShellPath(): Promise<string> {
+  const { path } = await resolveShellBootstrap();
+  return path;
+}
+
+/**
+ * Return the cached gh auth token resolved from the user's login shell.
+ * Returns null if gh is not installed or not authenticated.
+ */
+export async function getGhToken(): Promise<string | null> {
+  const { ghToken } = await resolveShellBootstrap();
+  return ghToken;
+}
+
+/**
+ * Synchronous accessor for the cached gh token.
+ * Only returns a value after resolveShellBootstrap() has completed (i.e.
+ * after the first await of getShellPath/getGhToken). Safe to call in
+ * synchronous code paths that run after server startup.
+ */
+let cachedGhToken: string | null = null;
+
+export function getGhTokenSync(): string | null {
+  return cachedGhToken;
 }
 
 /**
@@ -60,6 +112,24 @@ export function extractPathFromOutput(stdout: string): string {
   // Fallback: take the last non-empty line (most likely the PATH value)
   const lines = stdout.split("\n").filter((l) => l.trim().length > 0);
   return lines.at(-1)?.trim() ?? "";
+}
+
+/**
+ * Extract a value between sentinel markers in shell output.
+ * Returns null if the sentinels are missing or the value is empty.
+ */
+function extractBetweenSentinels(
+  stdout: string,
+  startSentinel: string,
+  endSentinel: string
+): string | null {
+  const startIdx = stdout.indexOf(startSentinel);
+  const endIdx = stdout.indexOf(endSentinel);
+  if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) {
+    return null;
+  }
+  const value = stdout.slice(startIdx + startSentinel.length, endIdx).trim();
+  return value.length > 0 ? value : null;
 }
 
 /**
@@ -79,10 +149,124 @@ export async function getShellEnv(
 }
 
 /**
+ * Build a hardened environment for gh child processes launched from Electron.
+ *
+ * We avoid inheriting the full Electron environment because newer macOS/Electron
+ * combinations have shown non-deterministic hangs in networked gh commands.
+ * Keeping this env minimal also prevents gh from consulting interactive helpers.
+ */
+export async function getGhEnv(extra?: Record<string, string>): Promise<Record<string, string>> {
+  const [shellPath, ghToken, ghConfigDir] = await Promise.all([
+    getShellPath(),
+    getGhToken(),
+    getGhConfigDir(),
+  ]);
+
+  const env: Record<string, string> = {
+    PATH: shellPath,
+    HOME: process.env.HOME ?? os.homedir(),
+    SHELL: process.env.SHELL ?? "/bin/zsh",
+    TMPDIR: process.env.TMPDIR ?? os.tmpdir(),
+    LANG: process.env.LANG ?? "en_US.UTF-8",
+    GH_CONFIG_DIR: ghConfigDir,
+    GH_NO_UPDATE_NOTIFIER: "1",
+    GH_PROMPT_DISABLED: "1",
+    GH_PAGER: "",
+    GIT_TERMINAL_PROMPT: "0",
+    GCM_INTERACTIVE: "never",
+    GIT_ASKPASS: "",
+    SSH_ASKPASS: "",
+    BROWSER: "",
+    GH_BROWSER: "",
+  };
+
+  for (const key of [
+    "LC_ALL",
+    "LC_CTYPE",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NO_PROXY",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+  ]) {
+    const value = process.env[key];
+    if (value) {
+      env[key] = value;
+    }
+  }
+
+  if (ghToken) {
+    env.GH_TOKEN = ghToken;
+  }
+
+  return {
+    ...env,
+    ...extra,
+  };
+}
+
+export function getGhEnvSync(extra?: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = {
+    PATH: process.env.PATH ?? "",
+    HOME: process.env.HOME ?? os.homedir(),
+    SHELL: process.env.SHELL ?? "/bin/zsh",
+    TMPDIR: process.env.TMPDIR ?? os.tmpdir(),
+    LANG: process.env.LANG ?? "en_US.UTF-8",
+    GH_CONFIG_DIR: path.join(os.tmpdir(), "closedloop-gh"),
+    GH_NO_UPDATE_NOTIFIER: "1",
+    GH_PROMPT_DISABLED: "1",
+    GH_PAGER: "",
+    GIT_TERMINAL_PROMPT: "0",
+    GCM_INTERACTIVE: "never",
+    GIT_ASKPASS: "",
+    SSH_ASKPASS: "",
+    BROWSER: "",
+    GH_BROWSER: "",
+  };
+
+  for (const key of [
+    "LC_ALL",
+    "LC_CTYPE",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NO_PROXY",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+  ]) {
+    const value = process.env[key];
+    if (value) {
+      env[key] = value;
+    }
+  }
+
+  if (cachedGhToken) {
+    env.GH_TOKEN = cachedGhToken;
+  }
+
+  return {
+    ...env,
+    ...extra,
+  };
+}
+
+function getGhConfigDir(): Promise<string> {
+  resolvedGhConfigDirPromise ??= (async () => {
+    const ghConfigDir = path.join(os.tmpdir(), "closedloop-gh");
+    await fs.mkdir(ghConfigDir, { recursive: true });
+    return ghConfigDir;
+  })();
+  return resolvedGhConfigDirPromise;
+}
+
+/**
  * Reset the cached shell PATH.  Only needed in tests.
  */
 export function resetShellPathCache(): void {
-  resolvedPathPromise = undefined;
+  resolvedBootstrapPromise = undefined;
+  resolvedGhConfigDirPromise = undefined;
+  cachedGhToken = null;
 }
 
 /**
@@ -93,5 +277,9 @@ export function resetShellPathCache(): void {
  * rebuild PATH via macOS path_helper.
  */
 export function setShellPathForTest(): void {
-  resolvedPathPromise = Promise.resolve(process.env.PATH ?? "");
+  resolvedBootstrapPromise = Promise.resolve({
+    path: process.env.PATH ?? "",
+    ghToken: null,
+  });
+  resolvedGhConfigDirPromise = Promise.resolve(path.join(os.tmpdir(), "closedloop-gh-test"));
 }

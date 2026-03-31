@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { ServerResponse } from "node:http";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
-import { getShellEnv } from "../shell-path.js";
+import { getGhEnvSync, getShellEnv } from "../shell-path.js";
 import { DirectoryNotAllowedError } from "../security.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
@@ -1621,8 +1621,12 @@ function applyMergedPrDiff(
   }
   console.log("[codex-review] Merged PR detected. Applying gh pr diff.");
 
+  // Inject GH_TOKEN for gh commands -- macOS Tahoe 26.x broke keychain
+  // access for non-terminal processes (security CLI hangs indefinitely).
+  const ghEnv = getGhEnvSync();
+
   const diffResult = spawnSync("gh", ["pr", "diff", prNum], {
-    cwd: worktreeDir, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024, timeout: 30_000,
+    cwd: worktreeDir, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024, timeout: 30_000, env: ghEnv,
   });
   const diff = (diffResult.stdout as string) ?? "";
   if (!diff.trim()) {
@@ -1633,7 +1637,7 @@ function applyMergedPrDiff(
   // Checkout the merge commit's parent so the diff applies cleanly
   const mergeOidResult = spawnSync(
     "gh", ["pr", "view", prNum, "--json", "mergeCommit", "--jq", ".mergeCommit.oid"],
-    { cwd: worktreeDir, encoding: "utf-8", timeout: 30_000 }
+    { cwd: worktreeDir, encoding: "utf-8", timeout: 30_000, env: ghEnv }
   );
   const mergeOid = (mergeOidResult.stdout as string).trim();
   if (mergeOid) {
