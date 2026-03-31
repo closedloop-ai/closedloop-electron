@@ -27,6 +27,238 @@ export type LoopFinalizationReason =
   | "boot-recovery"
   | "manual-repair";
 
+export function parseJobWarnings(job: Pick<LocalJob, "warning">): string[] {
+  if (!job.warning) {
+    return [];
+  }
+  return job.warning
+    .split(";")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+}
+
+type ArtifactUploadDeps = Pick<LoopFinalizerDeps, "jobStore" | "apiAuthToken" | "apiBaseUrl">;
+
+export async function tryUploadArtifacts(
+  job: LocalJob,
+  command: string,
+  claudeWorkDir: string,
+  worktreeDir: string | undefined,
+  warnings: string[],
+  deps: ArtifactUploadDeps,
+): Promise<{ artifacts: Record<string, unknown>; failed: boolean }> {
+  const artifacts = readArtifacts(command, claudeWorkDir, worktreeDir);
+  if (job.artifactsUploadedAt) {
+    return { artifacts, failed: false };
+  }
+
+  const uploadResult = await uploadArtifacts(deps.apiBaseUrl, job.loopId, deps.apiAuthToken, {
+    artifacts,
+    metadata: {
+      finishedAt: new Date().toISOString(),
+      command: command.toLowerCase(),
+    },
+  });
+  if (!uploadResult.success) {
+    warnings.push("ARTIFACT_UPLOAD_FAILED");
+    return { artifacts, failed: true };
+  }
+
+  const now = new Date().toISOString();
+  const current = deps.jobStore.getByLoopId(job.loopId) ?? job;
+  deps.jobStore.upsert({
+    ...current,
+    artifactsUploadedAt: now,
+    updatedAt: now,
+  });
+  return { artifacts, failed: false };
+}
+
+export async function tryPostCompletedEvent(
+  job: LocalJob,
+  command: string,
+  claudeWorkDir: string,
+  artifacts: Record<string, unknown>,
+  warnings: string[],
+  deps: ArtifactUploadDeps,
+): Promise<boolean> {
+  if (job.completedEventPostedAt) {
+    return false;
+  }
+
+  const tokensUsed = parseTokenUsage(claudeWorkDir);
+  const result: Record<string, unknown> = {
+    exitCode: job.exitCode ?? 0,
+    subtype: command.toLowerCase(),
+  };
+
+  if (command === "EXECUTE" && artifacts.executionResult) {
+    const execResult = artifacts.executionResult as Record<string, unknown>;
+    result.prUrl = execResult.pr_url;
+    result.prNumber = execResult.pr_number;
+    result.branchName = execResult.branch_name;
+    result.has_changes = execResult.has_changes ?? false;
+  }
+
+  const completedEvent: Record<string, unknown> = {
+    type: "completed",
+    result,
+    tokensUsed: {
+      input: tokensUsed.inputTokens,
+      output: tokensUsed.outputTokens,
+    },
+    loopId: job.loopId,
+    ...(warnings.length > 0 ? { warnings } : {}),
+  };
+
+  const eventResult = await postLoopEvent(
+    deps.apiBaseUrl,
+    job.loopId,
+    deps.apiAuthToken,
+    completedEvent,
+  );
+  if (!eventResult.success) {
+    warnings.push("EVENT_POST_FAILED");
+    return true;
+  }
+
+  const now = new Date().toISOString();
+  const current = deps.jobStore.getByLoopId(job.loopId) ?? job;
+  deps.jobStore.upsert({
+    ...current,
+    completedEventPostedAt: now,
+    updatedAt: now,
+  });
+  return false;
+}
+
+export async function tryPostErrorEvent(
+  job: LocalJob,
+  claudeWorkDir: string,
+  warnings: string[],
+  deps: ArtifactUploadDeps,
+): Promise<boolean> {
+  if (job.completedEventPostedAt) {
+    return false;
+  }
+
+  const tokenUsage = parseTokenUsage(claudeWorkDir);
+  const logTail = readLogTail(path.join(claudeWorkDir, "symphony-loop.log")) ?? undefined;
+  const errorCode = job.status === "FAILED" ? "PROCESS_FAILED" : "PROCESS_STOPPED";
+  const errorMessage =
+    job.status === "FAILED"
+      ? `Process exited with code ${job.exitCode ?? 1}`
+      : `Process ended with terminal status ${job.status}`;
+  const errorEvent: Record<string, unknown> = {
+    type: "error",
+    code: errorCode,
+    message: errorMessage,
+    loopId: job.loopId,
+    ...(tokenUsage.inputTokens > 0 || tokenUsage.outputTokens > 0 ? { tokenUsage } : {}),
+    ...(logTail ? { logTail } : {}),
+    ...(warnings.length > 0 ? { warnings } : {}),
+  };
+
+  const eventResult = await postLoopEvent(
+    deps.apiBaseUrl,
+    job.loopId,
+    deps.apiAuthToken,
+    errorEvent,
+  );
+  if (!eventResult.success) {
+    warnings.push("EVENT_POST_FAILED");
+    return true;
+  }
+
+  const now = new Date().toISOString();
+  const current = deps.jobStore.getByLoopId(job.loopId) ?? job;
+  deps.jobStore.upsert({
+    ...current,
+    completedEventPostedAt: now,
+    updatedAt: now,
+  });
+  return false;
+}
+
+export function persistFinalJobStatus(
+  job: LocalJob,
+  isSuccessStatus: boolean,
+  warnings: string[],
+  jobStore: JobStore,
+): void {
+  if (job.finalStatusPersistedAt) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const current = jobStore.getByLoopId(job.loopId) ?? job;
+  jobStore.upsert({
+    ...current,
+    status: isSuccessStatus ? "COMPLETED" : job.status,
+    exitCode: job.exitCode ?? 0,
+    updatedAt: now,
+    completedAt: current.completedAt ?? now,
+    finalStatusPersistedAt: now,
+    warning:
+      warnings.length > 0
+        ? warnings.map((value) => sanitizeErrorMessage(value)).join("; ")
+        : undefined,
+  });
+}
+
+export function emitFinalizationTelemetry(
+  job: LocalJob,
+  reason: LoopFinalizationReason,
+  claudeWorkDir: string,
+  isSuccessStatus: boolean,
+  telemetry: TelemetryEmitter,
+  jobStore: JobStore,
+): void {
+  const finalJob = jobStore.getByLoopId(job.loopId) ?? job;
+  const telemetryCategory =
+    reason === "live-exit"
+      ? ("job.completed" as const)
+      : ("job.recovery.finalize_replayed" as const);
+
+  let diagnostics:
+    | { logTail?: string; tokenUsage?: { inputTokens: number; outputTokens: number } }
+    | undefined;
+  if (reason !== "live-exit") {
+    const logPath = path.join(claudeWorkDir, "symphony-loop.log");
+    const logTail = readLogTail(logPath) ?? undefined;
+    const tokenUsage = parseTokenUsage(claudeWorkDir);
+    if (logTail || tokenUsage.inputTokens > 0 || tokenUsage.outputTokens > 0) {
+      diagnostics = { logTail, tokenUsage };
+    }
+  }
+
+  const telemetrySeverity =
+    reason === "live-exit" || isSuccessStatus || job.status === "CANCELLED"
+      ? "info"
+      : "error";
+  const telemetryMessage =
+    reason === "live-exit"
+      ? "Job completed successfully"
+      : isSuccessStatus
+        ? `Job finalized via ${reason}`
+        : job.status === "CANCELLED"
+          ? `Job cancellation finalized via ${reason}`
+          : `Job finalized with status ${job.status} via ${reason}`;
+
+  telemetry.emit({
+    severity: telemetrySeverity,
+    category: telemetryCategory,
+    message: telemetryMessage,
+    trace: {
+      commandId: finalJob.commandId,
+      operationId: finalJob.operationId,
+      loopId: job.loopId,
+      jobId: job.loopId,
+    },
+    ...(diagnostics ? { diagnostics } : {}),
+  });
+}
+
 function readJsonFileSync(filePath: string): unknown | null {
   try {
     if (!existsSync(filePath)) {
@@ -168,12 +400,7 @@ export async function finalizeLoopFromRuntime(
 
   const command = String(job.command);
   const worktreeDir = job.worktreeDir;
-  const warnings: string[] = job.warning
-    ? job.warning
-        .split(";")
-        .map((value) => value.trim())
-        .filter((value) => value.length > 0)
-    : [];
+  const warnings = parseJobWarnings(job);
 
   const isSuccessStatus = job.status === "COMPLETED" || job.status === "RUNNING";
   const shouldPostErrorEvent =
@@ -181,181 +408,47 @@ export async function finalizeLoopFromRuntime(
     job.status === "STOPPED" ||
     job.status === "UNKNOWN";
 
-  let artifacts: Record<string, unknown> = {};
+  const artifactDeps = { jobStore, apiAuthToken, apiBaseUrl };
   let artifactUploadFailedThisRun = false;
   let completedEventFailedThisRun = false;
 
   if (isSuccessStatus) {
-    if (!job.artifactsUploadedAt) {
-      artifacts = readArtifacts(command, claudeWorkDir, worktreeDir);
-      const uploadResult = await uploadArtifacts(apiBaseUrl, job.loopId, apiAuthToken, {
-        artifacts,
-        metadata: {
-          finishedAt: new Date().toISOString(),
-          command: command.toLowerCase(),
-        },
-      });
-      if (!uploadResult.success) {
-        warnings.push("ARTIFACT_UPLOAD_FAILED");
-        artifactUploadFailedThisRun = true;
-      } else {
-        const now = new Date().toISOString();
-        const current = jobStore.getByLoopId(job.loopId) ?? job;
-        jobStore.upsert({
-          ...current,
-          artifactsUploadedAt: now,
-          updatedAt: now,
-        });
-      }
-    } else {
-      artifacts = readArtifacts(command, claudeWorkDir, worktreeDir);
-    }
-
-    if (!job.completedEventPostedAt) {
-      const tokensUsed = parseTokenUsage(claudeWorkDir);
-      const result: Record<string, unknown> = {
-        exitCode: job.exitCode ?? 0,
-        subtype: command.toLowerCase(),
-      };
-
-      if (command === "EXECUTE" && artifacts.executionResult) {
-        const execResult = artifacts.executionResult as Record<string, unknown>;
-        result.prUrl = execResult.pr_url;
-        result.prNumber = execResult.pr_number;
-        result.branchName = execResult.branch_name;
-        result.has_changes = execResult.has_changes ?? false;
-      }
-
-      const completedEvent: Record<string, unknown> = {
-        type: "completed",
-        result,
-        tokensUsed: {
-          input: tokensUsed.inputTokens,
-          output: tokensUsed.outputTokens,
-        },
-        loopId: job.loopId,
-        ...(warnings.length > 0 ? { warnings } : {}),
-      };
-
-      const eventResult = await postLoopEvent(
-        apiBaseUrl,
-        job.loopId,
-        apiAuthToken,
-        completedEvent,
-      );
-      if (!eventResult.success) {
-        warnings.push("EVENT_POST_FAILED");
-        completedEventFailedThisRun = true;
-      } else {
-        const now = new Date().toISOString();
-        const current = jobStore.getByLoopId(job.loopId) ?? job;
-        jobStore.upsert({
-          ...current,
-          completedEventPostedAt: now,
-          updatedAt: now,
-        });
-      }
-    }
-  } else if (shouldPostErrorEvent && !job.completedEventPostedAt) {
-    const tokenUsage = parseTokenUsage(claudeWorkDir);
-    const logTail = readLogTail(path.join(claudeWorkDir, "symphony-loop.log")) ?? undefined;
-    const errorCode = job.status === "FAILED" ? "PROCESS_FAILED" : "PROCESS_STOPPED";
-    const errorMessage =
-      job.status === "FAILED"
-        ? `Process exited with code ${job.exitCode ?? 1}`
-        : `Process ended with terminal status ${job.status}`;
-    const errorEvent: Record<string, unknown> = {
-      type: "error",
-      code: errorCode,
-      message: errorMessage,
-      loopId: job.loopId,
-      ...(tokenUsage.inputTokens > 0 || tokenUsage.outputTokens > 0
-        ? { tokenUsage }
-        : {}),
-      ...(logTail ? { logTail } : {}),
-      ...(warnings.length > 0 ? { warnings } : {}),
-    };
-
-    const eventResult = await postLoopEvent(
-      apiBaseUrl,
-      job.loopId,
-      apiAuthToken,
-      errorEvent,
+    const { artifacts, failed } = await tryUploadArtifacts(
+      job,
+      command,
+      claudeWorkDir,
+      worktreeDir,
+      warnings,
+      artifactDeps,
     );
-    if (!eventResult.success) {
-      warnings.push("EVENT_POST_FAILED");
-      completedEventFailedThisRun = true;
-    } else {
-      const now = new Date().toISOString();
-      const current = jobStore.getByLoopId(job.loopId) ?? job;
-      jobStore.upsert({
-        ...current,
-        completedEventPostedAt: now,
-        updatedAt: now,
-      });
-    }
+    artifactUploadFailedThisRun = failed;
+    const eventFailed = await tryPostCompletedEvent(
+      job,
+      command,
+      claudeWorkDir,
+      artifacts,
+      warnings,
+      artifactDeps,
+    );
+    completedEventFailedThisRun = eventFailed;
+  } else if (shouldPostErrorEvent) {
+    completedEventFailedThisRun = await tryPostErrorEvent(
+      job,
+      claudeWorkDir,
+      warnings,
+      artifactDeps,
+    );
   }
 
-  if (!job.finalStatusPersistedAt) {
-    const now = new Date().toISOString();
-    const current = jobStore.getByLoopId(job.loopId) ?? job;
-    jobStore.upsert({
-      ...current,
-      status: isSuccessStatus ? "COMPLETED" : job.status,
-      exitCode: job.exitCode ?? 0,
-      updatedAt: now,
-      completedAt: current.completedAt ?? now,
-      finalStatusPersistedAt: now,
-      warning:
-        warnings.length > 0
-          ? warnings.map((value) => sanitizeErrorMessage(value)).join("; ")
-          : undefined,
-    });
-  }
-
-  const finalJob = jobStore.getByLoopId(job.loopId) ?? job;
-  const telemetryCategory =
-    reason === "live-exit"
-      ? ("job.completed" as const)
-      : ("job.recovery.finalize_replayed" as const);
-
-  let diagnostics:
-    | { logTail?: string; tokenUsage?: { inputTokens: number; outputTokens: number } }
-    | undefined;
-  if (reason !== "live-exit") {
-    const logPath = path.join(claudeWorkDir, "symphony-loop.log");
-    const logTail = readLogTail(logPath) ?? undefined;
-    const tokenUsage = parseTokenUsage(claudeWorkDir);
-    if (logTail || tokenUsage.inputTokens > 0 || tokenUsage.outputTokens > 0) {
-      diagnostics = { logTail, tokenUsage };
-    }
-  }
-
-  const telemetrySeverity =
-    reason === "live-exit" || isSuccessStatus || job.status === "CANCELLED"
-      ? "info"
-      : "error";
-  const telemetryMessage =
-    reason === "live-exit"
-      ? "Job completed successfully"
-      : isSuccessStatus
-        ? `Job finalized via ${reason}`
-        : job.status === "CANCELLED"
-          ? `Job cancellation finalized via ${reason}`
-          : `Job finalized with status ${job.status} via ${reason}`;
-
-  telemetry.emit({
-    severity: telemetrySeverity,
-    category: telemetryCategory,
-    message: telemetryMessage,
-    trace: {
-      commandId: finalJob.commandId,
-      operationId: finalJob.operationId,
-      loopId: job.loopId,
-      jobId: job.loopId,
-    },
-    ...(diagnostics ? { diagnostics } : {}),
-  });
+  persistFinalJobStatus(job, isSuccessStatus, warnings, jobStore);
+  emitFinalizationTelemetry(
+    job,
+    reason,
+    claudeWorkDir,
+    isSuccessStatus,
+    telemetry,
+    jobStore,
+  );
 
   if (
     loopTokenStore &&
