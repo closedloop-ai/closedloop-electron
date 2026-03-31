@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "version": "0.9.9",
+  "version": "0.9.10",
   "description": "ClosedLoop Desktop",
   "author": "ClosedLoop AI <support@closedloop.ai>",
   "private": true,
@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "pnpm build && ELECTRON_BIN=$(bash scripts/patch-electron-plist.sh | tail -1) && \"$ELECTRON_BIN\" dist/main/index.js",
     "start": "ELECTRON_BIN=$(bash scripts/patch-electron-plist.sh | tail -1) && \"$ELECTRON_BIN\" dist/main/index.js",
-    "prebuild": "node -e \"const{execSync:e}=require('child_process'),{writeFileSync:w}=require('fs');const h=e('git rev-parse HEAD').toString().trim();w('src/shared/build-info.ts','// AUTO-GENERATED — do not edit\\nexport const BUILD_COMMIT_HASH = \\\"'+h+'\\\";\\n');\"",
+    "prebuild": "node -e \"const{execSync:e}=require('child_process'),{writeFileSync:w}=require('fs');const h=e('git rev-parse HEAD').toString().trim();w('src/shared/build-info.ts','// AUTO-GENERATED \u2014 do not edit\\nexport const BUILD_COMMIT_HASH = \\\"'+h+'\\\";\\n');\"",
     "build": "pnpm prebuild && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src/",

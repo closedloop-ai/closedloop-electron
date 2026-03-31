@@ -2325,6 +2325,11 @@ test("invokes plugin cache discovery when pending learnings exist", async () => 
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-learnings-plugin-"));
   tempPathsToClean.push(tmpDir);
 
+  // Isolate HOME so a developer's real ~/.claude/plugins/cache never spawns a real wrapper.
+  const isolatedHome = path.join(tmpDir, "isolated-home");
+  await fs.mkdir(isolatedHome, { recursive: true });
+  process.env.HOME = isolatedHome;
+
   const repoPath = path.join(tmpDir, "repo-plugin");
   const worktreeParent = path.join(tmpDir, "worktrees");
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
@@ -2367,8 +2372,7 @@ test("invokes plugin cache discovery when pending learnings exist", async () => 
   assert.equal(response.status, 200);
   const body = await response.json() as Record<string, unknown>;
   assert.equal(body.status, "processing");
-  // pid is null (no plugin cache) or a number (plugin found and script spawned)
-  assert.ok(body.pid === null || typeof body.pid === "number", "pid should be null or a number");
+  assert.equal(body.pid, null, "with isolated HOME and no plugin cache, no real script should spawn");
 
   // Allow the fire-and-forget status write to complete before cleanup
   await new Promise((resolve) => setTimeout(resolve, 400));
@@ -2811,6 +2815,11 @@ test("symphony launch invokes plugin cache discovery for run-loop script", async
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-launch-plugin-"));
   tempPathsToClean.push(tmpDir);
 
+  // Isolate HOME so a developer's real ~/.claude/plugins/cache never spawns real run-loop.sh.
+  const isolatedHome = path.join(tmpDir, "isolated-home");
+  await fs.mkdir(isolatedHome, { recursive: true });
+  process.env.HOME = isolatedHome;
+
   const repoPath = path.join(tmpDir, "repo-launch");
   const worktreeParent = path.join(tmpDir, "worktrees");
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
@@ -2849,8 +2858,7 @@ test("symphony launch invokes plugin cache discovery for run-loop script", async
   const body = await response.json() as Record<string, unknown>;
   assert.equal(body.success, true);
   assert.equal(body.ticketId, "LAUNCH-01");
-  // pid is null (no plugin cache) or a number (plugin found and script spawned)
-  assert.ok(body.pid === null || typeof body.pid === "number", "pid should be null or a number");
+  assert.equal(body.pid, null, "with isolated HOME and no plugin cache, no real run-loop should spawn");
 });
 
 test("symphony launch passes .closedloop-ai/work path (not ticket ID) as first arg to run-loop.sh", async () => {

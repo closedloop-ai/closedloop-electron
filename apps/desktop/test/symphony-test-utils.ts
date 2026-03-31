@@ -13,7 +13,10 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { resetShellPathCache } from "../src/server/shell-path.js";
+import {
+  resetShellPathCache,
+  setShellPathForTest,
+} from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 
@@ -286,7 +289,9 @@ export async function setupStubClaude(tmpDir: string, scriptLines?: string[]): P
   ]).join("\n");
   await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  resetShellPathCache();
+  // Lock shell-path resolution to the stubbed PATH so tests never fall back to
+  // a developer's real login-shell PATH and accidentally spawn real Claude.
+  setShellPathForTest();
 }
 
 // ---------------------------------------------------------------------------
