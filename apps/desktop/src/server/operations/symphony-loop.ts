@@ -1066,6 +1066,55 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
   };
 }
 
+/** Pattern that matches known session/context limit error messages. */
+export const SESSION_LIMIT_PATTERN =
+  /prompt is too long|exceed context limit|context limit reached|conversation too long/i;
+
+/**
+ * Scan claude-output.jsonl for a result record with `is_error: true` whose
+ * message matches a known session/context limit pattern.
+ * Returns the error text (e.g. "Prompt is too long") or null if not found
+ * or if the error is unrelated to context limits.
+ */
+export function detectSessionLimitFromJsonl(claudeWorkDir: string): string | null {
+  const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
+  if (!existsSync(outputFile)) {
+    return null;
+  }
+  try {
+    const content = readFileSync(outputFile, "utf-8");
+    for (const line of content.split("\n")) {
+      if (!line.trim()) {
+        continue;
+      }
+      try {
+        const entry = JSON.parse(line) as Record<string, unknown>;
+        if (
+          entry.type === "result" &&
+          entry.is_error === true &&
+          typeof entry.result === "string" &&
+          SESSION_LIMIT_PATTERN.test(entry.result)
+        ) {
+          return entry.result;
+        }
+      } catch {
+        // skip malformed lines
+      }
+    }
+  } catch {
+    // file read error
+  }
+  return null;
+}
+
+/**
+ * Check whether a log tail string contains Claude Code session/context limit
+ * error patterns. The log file contains both stdout and stderr.
+ */
+export function isSessionLimitError(logTail: string): boolean {
+  return SESSION_LIMIT_PATTERN.test(logTail);
+}
+
 // ---------------------------------------------------------------------------
 // LLM-assisted commit (EXECUTE only)
 // ---------------------------------------------------------------------------
@@ -1647,21 +1696,47 @@ async function handleProcessCompletion(
       );
     }
 
+    // Detect context/session limit errors (exit code 2, JSONL is_error, or
+    // stderr patterns) and surface a specific error code.
+    const jsonlError = detectSessionLimitFromJsonl(claudeWorkDir);
+    const isContextLimit =
+      exitCode === 2 ||
+      jsonlError !== null ||
+      (diagnostics.logTail != null && isSessionLimitError(diagnostics.logTail));
+
     if (!wasCancelled) {
-      loopError(loopId, `Process failed with exit code ${exitCode}`);
-      gatewayLog.error(
-        "loop-harness",
-        `${command} failed with exit code ${exitCode}, loopId=${loopId}`,
-      );
-      await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
-        type: "error",
-        code: "PROCESS_FAILED",
-        message: `Process exited with code ${exitCode}`,
-        loopId,
-        tokenUsage: diagnostics.tokenUsage,
-        logTail: diagnostics.logTail,
-        diagnosticsVersion: diagnostics.diagnosticsVersion,
-      });
+      if (isContextLimit) {
+        const limitMsg = jsonlError ?? "Context limit exceeded";
+        loopError(loopId, `Context limit detected: ${limitMsg}`);
+        gatewayLog.error(
+          "loop-harness",
+          `${command} hit context limit, loopId=${loopId}: ${limitMsg}`,
+        );
+        await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+          type: "error",
+          code: "CONTEXT_LIMIT_EXCEEDED",
+          message: limitMsg,
+          loopId,
+          tokenUsage: diagnostics.tokenUsage,
+          logTail: diagnostics.logTail,
+          diagnosticsVersion: diagnostics.diagnosticsVersion,
+        });
+      } else {
+        loopError(loopId, `Process failed with exit code ${exitCode}`);
+        gatewayLog.error(
+          "loop-harness",
+          `${command} failed with exit code ${exitCode}, loopId=${loopId}`,
+        );
+        await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+          type: "error",
+          code: "PROCESS_FAILED",
+          message: `Process exited with code ${exitCode}`,
+          loopId,
+          tokenUsage: diagnostics.tokenUsage,
+          logTail: diagnostics.logTail,
+          diagnosticsVersion: diagnostics.diagnosticsVersion,
+        });
+      }
     }
 
     if (existingJob && jobStore) {
@@ -1669,6 +1744,10 @@ async function handleProcessCompletion(
       jobStore.upsert({
         ...existingJob,
         status: wasCancelled ? "CANCELLED" : "FAILED",
+        liveActivity:
+          !wasCancelled && isContextLimit
+            ? "Context limit exceeded"
+            : undefined,
         exitCode,
         updatedAt: now,
         completedAt: now,
@@ -1873,6 +1952,43 @@ async function handleProcessCompletion(
       loopId,
       `Tokens used: input=${tokensUsed.inputTokens}, output=${tokensUsed.outputTokens}`,
     );
+
+    // Detect 0-token EXECUTE completions as failures (ghost loop)
+    if (
+      command === "EXECUTE" &&
+      tokensUsed.inputTokens === 0 &&
+      tokensUsed.outputTokens === 0
+    ) {
+      const noWorkMsg =
+        "EXECUTE loop completed with 0 tokens -- no work was done";
+      loopError(loopId, noWorkMsg);
+      gatewayLog.error("loop-harness", `${noWorkMsg}, loopId=${loopId}`);
+      runningLoops.delete(loopId);
+      await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+        type: "error",
+        code: "NO_WORK_PRODUCED",
+        message: noWorkMsg,
+        loopId,
+      });
+      if (jobStore) {
+        const existingJob = jobStore.getByLoopId(loopId);
+        if (existingJob) {
+          const now = new Date().toISOString();
+          jobStore.upsert({
+            ...existingJob,
+            status: "FAILED",
+            liveActivity: "Error: Loop produced no output (0 tokens)",
+            exitCode: 0,
+            updatedAt: now,
+            completedAt: now,
+          });
+        }
+      }
+      if (usedTempDir) {
+        fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+      }
+      return;
+    }
 
     // Post completed event — shape matches ECS harness reportFinalStatus()
     const result: Record<string, unknown> = {
