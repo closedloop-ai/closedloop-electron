@@ -147,6 +147,64 @@ test("finalizeLoopFromRuntime skips CANCEL_PENDING while PID remains alive", asy
   assert.equal(persisted.status, "CANCEL_PENDING");
 });
 
+test("finalizeLoopFromRuntime maps dead CANCEL_PENDING to CANCELLED without posting loop events", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jobStore = createStore("finalizer-cancel-pending-dead-pid");
+  const job = createBaseJob({
+    claudeWorkDir,
+    status: "CANCEL_PENDING",
+    exitCode: 130,
+    pid: 9_999_999,
+  });
+  jobStore.upsert(job);
+
+  await finalizeLoopFromRuntime(job, "boot-recovery", {
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+  });
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.status, "CANCELLED");
+  assert.equal(persisted.artifactsUploadedAt, undefined);
+  assert.equal(persisted.completedEventPostedAt, undefined);
+  assert.ok(persisted.finalStatusPersistedAt);
+  assert.equal(fetchCalls.length, 0);
+  assert.equal(telemetryEvents[0]?.severity, "info");
+  assert.match(String(telemetryEvents[0]?.message ?? ""), /cancellation finalized/);
+});
+
+test("finalizeLoopFromRuntime maps PID-less CANCEL_PENDING to CANCELLED without posting loop events", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jobStore = createStore("finalizer-cancel-pending-null-pid");
+  const job = createBaseJob({
+    claudeWorkDir,
+    status: "CANCEL_PENDING",
+    exitCode: 130,
+    pid: undefined,
+  });
+  jobStore.upsert(job);
+
+  await finalizeLoopFromRuntime(job, "boot-recovery", {
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+  });
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.status, "CANCELLED");
+  assert.ok(persisted.finalStatusPersistedAt);
+  assert.equal(fetchCalls.length, 0);
+});
+
 test("finalizeLoopFromRuntime preserves FAILED jobs and posts an error event", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
@@ -529,6 +587,18 @@ test("persistFinalJobStatus preserves FAILED when not success", () => {
   persistFinalJobStatus(job, false, [], jobStore);
 
   assert.equal(jobStore.getByLoopId("loop-1")?.status, "FAILED");
+});
+
+test("persistFinalJobStatus maps CANCEL_PENDING to CANCELLED when not success", () => {
+  const jobStore = createStore("step-persist-cancel-pending");
+  const job = createBaseJob({ status: "CANCEL_PENDING", exitCode: 130 });
+  jobStore.upsert(job);
+
+  persistFinalJobStatus(job, false, [], jobStore);
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.equal(persisted?.status, "CANCELLED");
+  assert.ok(persisted?.finalStatusPersistedAt);
 });
 
 test("persistFinalJobStatus is a no-op when finalStatusPersistedAt already set", () => {

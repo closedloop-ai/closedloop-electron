@@ -192,9 +192,14 @@ export function persistFinalJobStatus(
 
   const now = new Date().toISOString();
   const current = jobStore.getByLoopId(job.loopId) ?? job;
+  const resolvedStatus: LocalJob["status"] = isSuccessStatus
+    ? "COMPLETED"
+    : job.status === "CANCEL_PENDING"
+      ? "CANCELLED"
+      : job.status;
   jobStore.upsert({
     ...current,
-    status: isSuccessStatus ? "COMPLETED" : job.status,
+    status: resolvedStatus,
     exitCode: job.exitCode ?? 0,
     updatedAt: now,
     completedAt: current.completedAt ?? now,
@@ -398,15 +403,20 @@ export async function finalizeLoopFromRuntime(
     return;
   }
 
-  const command = String(job.command);
-  const worktreeDir = job.worktreeDir;
-  const warnings = parseJobWarnings(job);
+  // After the live-PID early return above, cancellation is confirmed: persist as terminal CANCELLED.
+  const effectiveJob: LocalJob =
+    job.status === "CANCEL_PENDING" ? { ...job, status: "CANCELLED" } : job;
 
-  const isSuccessStatus = job.status === "COMPLETED" || job.status === "RUNNING";
+  const command = String(effectiveJob.command);
+  const worktreeDir = effectiveJob.worktreeDir;
+  const warnings = parseJobWarnings(effectiveJob);
+
+  const isSuccessStatus =
+    effectiveJob.status === "COMPLETED" || effectiveJob.status === "RUNNING";
   const shouldPostErrorEvent =
-    job.status === "FAILED" ||
-    job.status === "STOPPED" ||
-    job.status === "UNKNOWN";
+    effectiveJob.status === "FAILED" ||
+    effectiveJob.status === "STOPPED" ||
+    effectiveJob.status === "UNKNOWN";
 
   const artifactDeps = { jobStore, apiAuthToken, apiBaseUrl };
   let artifactUploadFailedThisRun = false;
@@ -414,7 +424,7 @@ export async function finalizeLoopFromRuntime(
 
   if (isSuccessStatus) {
     const { artifacts, failed } = await tryUploadArtifacts(
-      job,
+      effectiveJob,
       command,
       claudeWorkDir,
       worktreeDir,
@@ -423,7 +433,7 @@ export async function finalizeLoopFromRuntime(
     );
     artifactUploadFailedThisRun = failed;
     const eventFailed = await tryPostCompletedEvent(
-      job,
+      effectiveJob,
       command,
       claudeWorkDir,
       artifacts,
@@ -433,16 +443,16 @@ export async function finalizeLoopFromRuntime(
     completedEventFailedThisRun = eventFailed;
   } else if (shouldPostErrorEvent) {
     completedEventFailedThisRun = await tryPostErrorEvent(
-      job,
+      effectiveJob,
       claudeWorkDir,
       warnings,
       artifactDeps,
     );
   }
 
-  persistFinalJobStatus(job, isSuccessStatus, warnings, jobStore);
+  persistFinalJobStatus(effectiveJob, isSuccessStatus, warnings, jobStore);
   emitFinalizationTelemetry(
-    job,
+    effectiveJob,
     reason,
     claudeWorkDir,
     isSuccessStatus,
@@ -455,6 +465,6 @@ export async function finalizeLoopFromRuntime(
     !artifactUploadFailedThisRun &&
     !completedEventFailedThisRun
   ) {
-    loopTokenStore.deleteLoopToken(job.loopId);
+    loopTokenStore.deleteLoopToken(effectiveJob.loopId);
   }
 }

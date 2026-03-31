@@ -97,6 +97,44 @@ function createJob(overrides?: Partial<LocalJob>): LocalJob {
   };
 }
 
+test("finalizes dead CANCEL_PENDING jobs to CANCELLED without loop events", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
+  const loopTokenStore = createLoopTokenStore("boot-recovery-cancel-pending-tokens");
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
+
+  const jobStore = createStore("boot-recovery-cancel-pending");
+  const deadJob = createJob({
+    status: "CANCEL_PENDING",
+    exitCode: 130,
+    pid: 9_999_999,
+    claudeWorkDir,
+  });
+  jobStore.upsert(deadJob);
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4010",
+    loopTokenStore,
+  });
+  await service.run([deadJob]);
+  service.dispose();
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.status, "CANCELLED");
+  assert.ok(persisted.finalStatusPersistedAt);
+  assert.equal(loopTokenStore.getLoopToken("loop-1"), null);
+  assert.equal(
+    fetchCalls.filter((c) => c.url.includes("/loops/loop-1/events")).length,
+    0,
+  );
+});
+
 test("finalizes dead jobs without promoting UNKNOWN status to completed", async () => {
   const repoDir = path.join(tempRoot, "repo");
   const claudeWorkDir = path.join(repoDir, "workdir");
