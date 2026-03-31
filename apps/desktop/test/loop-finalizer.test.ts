@@ -13,7 +13,24 @@ import {
   tryPostErrorEvent,
   tryUploadArtifacts,
 } from "../src/main/loop-finalizer.js";
+import {
+  type SafeStorageLike,
+  LoopTokenStore,
+} from "../src/main/loop-token-store.js";
 import type { TelemetryEventPayload } from "../src/main/telemetry-protocol.js";
+
+function createTestSafeStorage(): SafeStorageLike {
+  return {
+    isEncryptionAvailable: () => true,
+    encryptString(plainText: string) {
+      return Buffer.from(`stub:${plainText}`, "utf-8");
+    },
+    decryptString(encrypted: Buffer) {
+      const s = encrypted.toString("utf-8");
+      return s.startsWith("stub:") ? s.slice(5) : s;
+    },
+  };
+}
 
 let tempRoot = "";
 let fetchCalls: Array<{ url: string; body: string }> = [];
@@ -89,6 +106,51 @@ test("finalizeLoopFromRuntime uploads, posts completion, and persists terminal s
   assert.ok(persisted.finalStatusPersistedAt);
   assert.equal(fetchCalls.length, 2);
   assert.equal(telemetryEvents.length, 1);
+});
+
+test("finalizeLoopFromRuntime clears loop token after persist even when artifact upload fails", async () => {
+  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    const url = String(input);
+    fetchCalls.push({
+      url,
+      body: typeof init?.body === "string" ? init.body : "",
+    });
+    if (url.includes("upload-artifacts")) {
+      return new Response("nope", { status: 500 });
+    }
+    return new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ tasks: [] }));
+  await fs.writeFile(path.join(claudeWorkDir, "open-questions.md"), "none");
+
+  const jobStore = createStore("finalizer-upload-fail-token");
+  const job = createBaseJob({ claudeWorkDir });
+  jobStore.upsert(job);
+
+  const loopTokenStore = new LoopTokenStore({
+    cwd: tempRoot,
+    name: "finalizer-upload-fail-lt",
+    safeStorage: createTestSafeStorage(),
+  });
+  loopTokenStore.setLoopToken("loop-1", "runner-token");
+
+  await finalizeLoopFromRuntime(job, "live-exit", {
+    jobStore,
+    telemetry: { emit: () => {} },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+    loopTokenStore,
+  });
+
+  assert.equal(jobStore.getByLoopId("loop-1")?.status, "COMPLETED");
+  assert.equal(loopTokenStore.getLoopToken("loop-1"), null);
 });
 
 test("finalizeLoopFromRuntime is idempotent after timestamps are set", async () => {

@@ -18,7 +18,7 @@ export interface LoopFinalizerDeps {
   apiAuthToken: string;
   apiBaseUrl: string;
   isProcessRunning: (pid: number) => boolean;
-  /** When set, successful finalization removes the persisted loop runner token. */
+  /** When set, persisted loop runner token is cleared after terminal status is written. */
   loopTokenStore?: LoopTokenStore;
 }
 
@@ -419,11 +419,9 @@ export async function finalizeLoopFromRuntime(
     effectiveJob.status === "UNKNOWN";
 
   const artifactDeps = { jobStore, apiAuthToken, apiBaseUrl };
-  let artifactUploadFailedThisRun = false;
-  let completedEventFailedThisRun = false;
 
   if (isSuccessStatus) {
-    const { artifacts, failed } = await tryUploadArtifacts(
+    const { artifacts } = await tryUploadArtifacts(
       effectiveJob,
       command,
       claudeWorkDir,
@@ -431,8 +429,7 @@ export async function finalizeLoopFromRuntime(
       warnings,
       artifactDeps,
     );
-    artifactUploadFailedThisRun = failed;
-    const eventFailed = await tryPostCompletedEvent(
+    await tryPostCompletedEvent(
       effectiveJob,
       command,
       claudeWorkDir,
@@ -440,9 +437,8 @@ export async function finalizeLoopFromRuntime(
       warnings,
       artifactDeps,
     );
-    completedEventFailedThisRun = eventFailed;
   } else if (shouldPostErrorEvent) {
-    completedEventFailedThisRun = await tryPostErrorEvent(
+    await tryPostErrorEvent(
       effectiveJob,
       claudeWorkDir,
       warnings,
@@ -460,11 +456,5 @@ export async function finalizeLoopFromRuntime(
     jobStore,
   );
 
-  if (
-    loopTokenStore &&
-    !artifactUploadFailedThisRun &&
-    !completedEventFailedThisRun
-  ) {
-    loopTokenStore.deleteLoopToken(effectiveJob.loopId);
-  }
+  loopTokenStore?.deleteLoopToken(effectiveJob.loopId);
 }
