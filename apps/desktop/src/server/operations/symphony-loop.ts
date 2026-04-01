@@ -1129,7 +1129,7 @@ async function attemptLlmCommit(
     : "No artifact slug is available — use a descriptive title without a prefix.";
 
   const prompt = [
-    `You are a commit assistant finalizing work from a Symphony ${command} loop.`,
+    `You are a commit assistant finalizing work from a ClosedLoop.AI ${command} loop.`,
     "",
     slugInstruction,
     "",
@@ -1140,7 +1140,7 @@ async function attemptLlmCommit(
     "2. Stage all changed/new files EXCEPT the .claude/ and .closedloop-ai/ directories:",
     "   git add -- . ':!.claude' ':!.closedloop-ai'",
     "3. Write a clear, descriptive commit message based on the actual code changes",
-    "   - Summarize WHAT changed and WHY (not just 'Symphony loop output')",
+    "   - Summarize WHAT changed and WHY (not just 'ClosedLoop.AI loop output')",
     "   - Use conventional commit style if the changes have a clear category",
     "   - If an artifact slug is provided, prefix the commit message with it",
     "4. Run `git commit` (do NOT use --no-verify). If pre-commit hooks fail, attempt to fix",
@@ -1149,13 +1149,17 @@ async function attemptLlmCommit(
     "5. Push to origin with: git push -u origin HEAD",
     "6. Check if a PR already exists for this branch: gh pr list --head <branch>",
     "   - If NO PR exists:",
-    "     a. Write a file called pr-body.md with:",
-    "        - A summary section describing what changed and why (2-4 sentences)",
-    "        - Then the following metadata footer on its own lines:",
+    "     a. Check if the repo has a PR template at .github/pull_request_template.md",
+    "        If a template exists, use it as the base for the PR body — fill in every section appropriately.",
+    "        If no template exists, write a summary of what changed and why.",
+    "     b. Append the following metadata footer on its own lines at the end:",
     `        ${footer}`,
-    `     b. Create the PR: gh pr create --label symphony --base ${shellEscape(safeBranch)} --title '<slug-prefixed descriptive title>' --body-file pr-body.md`,
+    "     c. Write the complete PR body to pr-body.md",
+    `     d. Create the PR: gh pr create --label symphony --base ${shellEscape(safeBranch)} --title '<slug-prefixed descriptive title>' --body-file pr-body.md`,
     "   - If a PR already exists, get its URL with: gh pr view --json url,number",
-    `     Then ensure the metadata footer is present: write pr-body.md with the footer above and run gh pr edit <number> --body-file pr-body.md`,
+    "     Fetch the current body: gh pr view <number> --json body --jq .body",
+    "     If any required template sections are missing, append them.",
+    `     Write the full updated body to pr-body.md and run: gh pr edit <number> --body-file pr-body.md`,
     "7. ONLY after a successful commit AND push, write this EXACT JSON file:",
     "   File path: execution-result.json",
     "   ```json",
@@ -1483,13 +1487,40 @@ function executeGitOperations(
       timeout: 10_000,
     }).trim();
 
-    // Build PR body with metadata footer, written to a temp file to avoid
+    // Build PR body using the repo's PR template if one exists, otherwise
+    // fall back to a simple metadata body. Written to a temp file to avoid
     // shell escaping issues with special characters (--body-file approach).
     const artifactLine =
       artifactSlug && webAppOrigin
         ? `\nArtifact: ${webAppOrigin}/implementation-plans/${artifactSlug}`
         : "";
-    const prBody = `Loop ID: ${loopId}\nCommand: ${command}${artifactLine}`;
+    const metadataFooter = `---\nLoop ID: ${loopId}\nCommand: ${command}${artifactLine}`;
+
+    let prBody: string;
+    const templatePath = path.join(worktreeDir, ".github", "pull_request_template.md");
+    try {
+      const template = readFileSync(templatePath, "utf-8");
+      prBody = [
+        `Automated PR created by ClosedLoop.AI loop runner.`,
+        "",
+        `**Loop:** \`${loopId}\``,
+        `**Command:** \`${command}\``,
+        "",
+        template,
+        "",
+        metadataFooter,
+      ].join("\n");
+    } catch {
+      // No template found — use simple metadata body
+      prBody = [
+        `Automated PR created by ClosedLoop.AI loop runner.`,
+        "",
+        `**Loop:** \`${loopId}\``,
+        `**Command:** \`${command}\``,
+        "",
+        metadataFooter,
+      ].join("\n");
+    }
     const bodyFile = path.join(
       worktreeDir,
       ".closedloop-ai",
@@ -1571,10 +1602,11 @@ function executeGitOperations(
           timeout: 15_000,
         },
       ).trim();
-      // Only update if the footer isn't already present
+      // Only update if the footer isn't already present — append only the
+      // metadata footer, not the full template body, to avoid duplication.
       if (!currentBody.includes(`Loop ID: ${loopId}`)) {
         const updatedBody = currentBody
-          ? `${currentBody}\n\n---\n${prBody}`
+          ? `${currentBody}\n\n${metadataFooter}`
           : prBody;
         writeFileSync(bodyFile, updatedBody);
         execSync(
