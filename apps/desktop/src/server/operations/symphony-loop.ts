@@ -1633,10 +1633,11 @@ function executeGitOperations(
           timeout: 15_000,
         },
       ).trim();
-      // Only update if the footer isn't already present
+      // Only update if the footer isn't already present — append only the
+      // metadata footer, not the full template body, to avoid duplication.
       if (!currentBody.includes(`Loop ID: ${loopId}`)) {
         const updatedBody = currentBody
-          ? `${currentBody}\n\n---\n${prBody}`
+          ? `${currentBody}\n\n${metadataFooter}`
           : prBody;
         writeFileSync(bodyFile, updatedBody);
         execSync(
