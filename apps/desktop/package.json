@@ -1,10 +1,6 @@
 {
   "name": "desktop",
-<<<<<<< fix/auth-challenge-detection
-  "version": "0.9.12",
-=======
-  "version": "0.10.0",
->>>>>>> main
+  "version": "0.10.1",
   "description": "ClosedLoop Desktop",
   "author": "ClosedLoop AI <support@closedloop.ai>",
   "private": true,
