@@ -28,6 +28,7 @@ interface LiveJobHandle {
 }
 
 const DEFAULT_WATCHER_POLL_MS = 3000;
+const MAX_RECOVERY_ATTEMPTS = 3;
 
 export class BootRecoveryService {
   private readonly deps: BootRecoveryDeps;
@@ -109,20 +110,27 @@ export class BootRecoveryService {
     const { jobStore, telemetry, getApiKey, getApiOrigin, loopTokenStore } = this.deps;
     const apiKey = getApiKey();
     const apiBaseUrl = getApiOrigin();
-    const unfinalizedDeadJobs = deadJobs.filter((job) => !job.finalStatusPersistedAt);
-    if (unfinalizedDeadJobs.length > 0 && (!apiKey || !apiBaseUrl)) {
+    const recoveryCandidates = this.buildRecoveryCandidates(deadJobs);
+    if (recoveryCandidates.length > 0 && (!apiKey || !apiBaseUrl)) {
       gatewayLog.warn(
         "boot-recovery",
-        `Skipping ${unfinalizedDeadJobs.length} dead loop finalization(s): missing API config`,
+        `Skipping ${recoveryCandidates.length} dead loop finalization(s): missing API config`,
       );
       return;
     }
     if (!apiKey || !apiBaseUrl) {
       return;
     }
-    for (const job of unfinalizedDeadJobs) {
+    for (const candidate of recoveryCandidates) {
       if (this.disposed) {
         return;
+      }
+      const job = jobStore.getByLoopId(candidate.loopId) ?? candidate;
+      const attempts = job.recoveryAttempts ?? 0;
+      if (attempts >= MAX_RECOVERY_ATTEMPTS) {
+        this.markRecoveryGiveUp(job, `Exceeded retry cap (${MAX_RECOVERY_ATTEMPTS})`);
+        loopTokenStore.deleteLoopToken(job.loopId);
+        continue;
       }
       try {
         const authToken = loopTokenStore.getLoopToken(job.loopId);
@@ -137,7 +145,12 @@ export class BootRecoveryService {
           "boot-recovery",
           `Token source for loopId=${job.loopId}: LOOP_TOKEN_STORE`,
         );
-        await finalizeLoopFromRuntime(job, "boot-recovery", {
+        jobStore.upsert({
+          ...job,
+          recoveryAttempts: attempts + 1,
+          updatedAt: new Date().toISOString(),
+        });
+        const outcome = await finalizeLoopFromRuntime(job, "boot-recovery", {
           jobStore,
           telemetry,
           apiAuthToken: authToken,
@@ -145,13 +158,62 @@ export class BootRecoveryService {
           isProcessRunning,
           loopTokenStore,
         });
+        if (!outcome.cloudFinalized && outcome.retryableFailure) {
+          const latest = jobStore.getByLoopId(job.loopId);
+          if ((latest?.recoveryAttempts ?? 0) >= MAX_RECOVERY_ATTEMPTS) {
+            this.markRecoveryGiveUp(job, `Exceeded retry cap (${MAX_RECOVERY_ATTEMPTS})`);
+            loopTokenStore.deleteLoopToken(job.loopId);
+          }
+        }
       } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.markRecoveryFailure(job, message);
         gatewayLog.warn(
           "boot-recovery",
-          `Dead loop finalization failed for loopId=${job.loopId}: ${err instanceof Error ? err.message : String(err)}`,
+          `Dead loop finalization failed for loopId=${job.loopId}: ${message}`,
         );
       }
     }
+  }
+
+  private buildRecoveryCandidates(deadJobs: LocalJob[]): LocalJob[] {
+    const { jobStore } = this.deps;
+    const byLoopId = new Map<string, LocalJob>();
+    for (const job of deadJobs) {
+      byLoopId.set(job.loopId, job);
+    }
+    for (const terminalJob of jobStore.listCompleted()) {
+      if (terminalJob.finalStatusPersistedAt && !terminalJob.cloudFinalizedAt) {
+        byLoopId.set(terminalJob.loopId, terminalJob);
+      }
+    }
+    return [...byLoopId.values()].filter((job) => {
+      if (job.cloudFinalizedAt) {
+        return false;
+      }
+      return (job.recoveryAttempts ?? 0) < MAX_RECOVERY_ATTEMPTS;
+    });
+  }
+
+  private markRecoveryFailure(job: LocalJob, error: string): void {
+    const { jobStore } = this.deps;
+    const current = jobStore.getByLoopId(job.loopId) ?? job;
+    jobStore.upsert({
+      ...current,
+      lastRecoveryError: error,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  private markRecoveryGiveUp(job: LocalJob, error: string): void {
+    const { jobStore } = this.deps;
+    const current = jobStore.getByLoopId(job.loopId) ?? job;
+    jobStore.upsert({
+      ...current,
+      lastRecoveryError: error,
+      updatedAt: new Date().toISOString(),
+      cloudFinalizedAt: current.cloudFinalizedAt ?? new Date().toISOString(),
+    });
   }
 
   private async reattachLiveJob(job: LocalJob, apiBaseUrl: string): Promise<void> {

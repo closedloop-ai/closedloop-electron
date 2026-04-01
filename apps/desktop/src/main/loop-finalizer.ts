@@ -27,6 +27,12 @@ export type LoopFinalizationReason =
   | "boot-recovery"
   | "manual-repair";
 
+export interface LoopFinalizationOutcome {
+  cloudFinalized: boolean;
+  retryableFailure: boolean;
+  error?: string;
+}
+
 export function parseJobWarnings(job: Pick<LocalJob, "warning">): string[] {
   if (!job.warning) {
     return [];
@@ -46,7 +52,7 @@ export async function tryUploadArtifacts(
   worktreeDir: string | undefined,
   warnings: string[],
   deps: ArtifactUploadDeps,
-): Promise<{ artifacts: Record<string, unknown>; failed: boolean }> {
+): Promise<{ artifacts: Record<string, unknown>; failed: boolean; error?: string }> {
   const artifacts = readArtifacts(command, claudeWorkDir, worktreeDir);
   if (job.artifactsUploadedAt) {
     return { artifacts, failed: false };
@@ -61,7 +67,7 @@ export async function tryUploadArtifacts(
   });
   if (!uploadResult.success) {
     warnings.push("ARTIFACT_UPLOAD_FAILED");
-    return { artifacts, failed: true };
+    return { artifacts, failed: true, error: uploadResult.error };
   }
 
   const now = new Date().toISOString();
@@ -81,9 +87,9 @@ export async function tryPostCompletedEvent(
   artifacts: Record<string, unknown>,
   warnings: string[],
   deps: ArtifactUploadDeps,
-): Promise<boolean> {
+): Promise<{ failed: boolean; error?: string }> {
   if (job.completedEventPostedAt) {
-    return false;
+    return { failed: false };
   }
 
   const tokensUsed = parseTokenUsage(claudeWorkDir);
@@ -119,7 +125,7 @@ export async function tryPostCompletedEvent(
   );
   if (!eventResult.success) {
     warnings.push("EVENT_POST_FAILED");
-    return true;
+    return { failed: true, error: eventResult.error };
   }
 
   const now = new Date().toISOString();
@@ -129,7 +135,7 @@ export async function tryPostCompletedEvent(
     completedEventPostedAt: now,
     updatedAt: now,
   });
-  return false;
+  return { failed: false };
 }
 
 export async function tryPostErrorEvent(
@@ -137,9 +143,9 @@ export async function tryPostErrorEvent(
   claudeWorkDir: string,
   warnings: string[],
   deps: ArtifactUploadDeps,
-): Promise<boolean> {
+): Promise<{ failed: boolean; error?: string }> {
   if (job.completedEventPostedAt) {
-    return false;
+    return { failed: false };
   }
 
   const tokenUsage = parseTokenUsage(claudeWorkDir);
@@ -167,7 +173,7 @@ export async function tryPostErrorEvent(
   );
   if (!eventResult.success) {
     warnings.push("EVENT_POST_FAILED");
-    return true;
+    return { failed: true, error: eventResult.error };
   }
 
   const now = new Date().toISOString();
@@ -177,7 +183,7 @@ export async function tryPostErrorEvent(
     completedEventPostedAt: now,
     updatedAt: now,
   });
-  return false;
+  return { failed: false };
 }
 
 export function persistFinalJobStatus(
@@ -381,11 +387,29 @@ async function uploadArtifacts(
   }
 }
 
+function isRetryableFinalizationError(error?: string): boolean {
+  if (!error) {
+    return false;
+  }
+  const statusMatch = /HTTP\s+(\d{3})\b/.exec(error);
+  if (!statusMatch) {
+    return true;
+  }
+  const status = Number(statusMatch[1]);
+  if (status === 429) {
+    return true;
+  }
+  if (status >= 500) {
+    return true;
+  }
+  return false;
+}
+
 export async function finalizeLoopFromRuntime(
   job: LocalJob,
   reason: LoopFinalizationReason,
   deps: LoopFinalizerDeps,
-): Promise<void> {
+): Promise<LoopFinalizationOutcome> {
   const { jobStore, telemetry, apiAuthToken, apiBaseUrl, isProcessRunning, loopTokenStore } =
     deps;
 
@@ -394,13 +418,13 @@ export async function finalizeLoopFromRuntime(
       "loop-finalizer",
       `loopId=${job.loopId} cancellation pending and PID still alive; skip`,
     );
-    return;
+    return { cloudFinalized: false, retryableFailure: false };
   }
 
   const claudeWorkDir = job.claudeWorkDir;
   if (!claudeWorkDir) {
     gatewayLog.warn("loop-finalizer", `loopId=${job.loopId} missing claudeWorkDir`);
-    return;
+    return { cloudFinalized: false, retryableFailure: false };
   }
 
   // After the live-PID early return above, cancellation is confirmed: persist as terminal CANCELLED.
@@ -419,9 +443,19 @@ export async function finalizeLoopFromRuntime(
     effectiveJob.status === "UNKNOWN";
 
   const artifactDeps = { jobStore, apiAuthToken, apiBaseUrl };
+  const now = new Date().toISOString();
+  const persistBeforeCloud = reason !== "live-exit";
+
+  if (persistBeforeCloud) {
+    persistFinalJobStatus(effectiveJob, isSuccessStatus, warnings, jobStore);
+  }
+
+  let remoteError: string | undefined;
+  let retryableFailure = false;
+  let cloudFinalized = false;
 
   if (isSuccessStatus) {
-    const { artifacts } = await tryUploadArtifacts(
+    const uploadResult = await tryUploadArtifacts(
       effectiveJob,
       command,
       claudeWorkDir,
@@ -429,24 +463,62 @@ export async function finalizeLoopFromRuntime(
       warnings,
       artifactDeps,
     );
-    await tryPostCompletedEvent(
+    const postResult = await tryPostCompletedEvent(
       effectiveJob,
       command,
       claudeWorkDir,
-      artifacts,
+      uploadResult.artifacts,
       warnings,
       artifactDeps,
     );
+    if (uploadResult.failed || postResult.failed) {
+      remoteError = uploadResult.error ?? postResult.error ?? "Cloud finalization failed";
+      retryableFailure = isRetryableFinalizationError(remoteError);
+    } else {
+      cloudFinalized = true;
+    }
   } else if (shouldPostErrorEvent) {
-    await tryPostErrorEvent(
+    const postResult = await tryPostErrorEvent(
       effectiveJob,
       claudeWorkDir,
       warnings,
       artifactDeps,
     );
+    if (postResult.failed) {
+      remoteError = postResult.error ?? "Cloud finalization failed";
+      retryableFailure = isRetryableFinalizationError(remoteError);
+    } else {
+      cloudFinalized = true;
+    }
+  } else {
+    // No remote calls needed for statuses without cloud events.
+    cloudFinalized = true;
   }
 
-  persistFinalJobStatus(effectiveJob, isSuccessStatus, warnings, jobStore);
+  const currentAfterCloud = jobStore.getByLoopId(effectiveJob.loopId) ?? effectiveJob;
+  const warningText =
+    warnings.length > 0
+      ? warnings.map((value) => sanitizeErrorMessage(value)).join("; ")
+      : undefined;
+  if (cloudFinalized) {
+    jobStore.upsert({
+      ...currentAfterCloud,
+      cloudFinalizedAt: currentAfterCloud.cloudFinalizedAt ?? now,
+      lastRecoveryError: undefined,
+      warning: warningText,
+      updatedAt: now,
+    });
+  } else {
+    jobStore.upsert({
+      ...currentAfterCloud,
+      lastRecoveryError: remoteError,
+      warning: warningText,
+      updatedAt: now,
+    });
+  }
+  if (!persistBeforeCloud) {
+    persistFinalJobStatus(effectiveJob, isSuccessStatus, warnings, jobStore);
+  }
   emitFinalizationTelemetry(
     effectiveJob,
     reason,
@@ -456,5 +528,8 @@ export async function finalizeLoopFromRuntime(
     jobStore,
   );
 
-  loopTokenStore?.deleteLoopToken(effectiveJob.loopId);
+  if (cloudFinalized || !retryableFailure) {
+    loopTokenStore?.deleteLoopToken(effectiveJob.loopId);
+  }
+  return { cloudFinalized, retryableFailure, error: remoteError };
 }

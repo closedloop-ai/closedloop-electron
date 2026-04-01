@@ -207,6 +207,123 @@ test("finalizes dead jobs using LoopTokenStore and clears token after UNKNOWN re
   assert.ok(fetchCalls.some((c) => c.body.includes('"type":"error"') && c.authHeader === "Bearer loop-token"));
 });
 
+test("retries cloud finalization across boots and resumes from partial progress", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
+  await fs.writeFile(path.join(claudeWorkDir, "open-questions.md"), "none");
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-retry-across-boots-tokens");
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
+
+  let uploadCalls = 0;
+  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    const url = String(input);
+    const headers = new Headers(init?.headers);
+    fetchCalls.push({
+      url,
+      body: typeof init?.body === "string" ? init.body : "",
+      authHeader: headers.get("Authorization"),
+    });
+    if (url.includes("/upload-artifacts")) {
+      uploadCalls += 1;
+      if (uploadCalls === 1) {
+        return new Response("nope", { status: 500 });
+      }
+    }
+    return new Response(JSON.stringify({ success: true }), { status: 200 });
+  }) as typeof fetch;
+
+  const jobStore = createStore("boot-recovery-retry-across-boots");
+  const deadJob = createJob({
+    status: "RUNNING",
+    claudeWorkDir,
+  });
+  jobStore.upsert(deadJob);
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: () => {} },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4010",
+    loopTokenStore,
+  });
+
+  await service.run([deadJob]);
+  let persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.ok(persisted.finalStatusPersistedAt);
+  assert.equal(persisted.cloudFinalizedAt, undefined);
+  assert.equal(persisted.recoveryAttempts, 1);
+  assert.ok(persisted.completedEventPostedAt);
+  assert.equal(loopTokenStore.getLoopToken("loop-1"), "loop-token");
+
+  await service.run([]);
+  persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.ok(persisted.cloudFinalizedAt);
+  assert.equal(persisted.recoveryAttempts, 2);
+  assert.equal(loopTokenStore.getLoopToken("loop-1"), null);
+  assert.equal(fetchCalls.filter((entry) => entry.url.endsWith("/upload-artifacts")).length, 2);
+  assert.equal(fetchCalls.filter((entry) => entry.url.endsWith("/events")).length, 1);
+  service.dispose();
+});
+
+test("gives up after three retryable failures and stops future attempts", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-retry-cap-tokens");
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
+
+  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    const url = String(input);
+    const headers = new Headers(init?.headers);
+    fetchCalls.push({
+      url,
+      body: typeof init?.body === "string" ? init.body : "",
+      authHeader: headers.get("Authorization"),
+    });
+    return new Response("still down", { status: 502 });
+  }) as typeof fetch;
+
+  const jobStore = createStore("boot-recovery-retry-cap");
+  const deadJob = createJob({
+    status: "UNKNOWN",
+    claudeWorkDir,
+  });
+  jobStore.upsert(deadJob);
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: () => {} },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4010",
+    loopTokenStore,
+  });
+
+  await service.run([deadJob]);
+  await service.run([]);
+  await service.run([]);
+
+  let persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.recoveryAttempts, 3);
+  assert.ok(persisted.cloudFinalizedAt);
+  assert.match(persisted.lastRecoveryError ?? "", /Exceeded retry cap/);
+  assert.equal(loopTokenStore.getLoopToken("loop-1"), null);
+  const attemptsBeforeExtraRun = fetchCalls.length;
+
+  await service.run([]);
+  persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(fetchCalls.length, attemptsBeforeExtraRun);
+  service.dispose();
+});
+
 test("skips dead job finalization when loop token is missing", async () => {
   const repoDir = path.join(tempRoot, "repo");
   const claudeWorkDir = path.join(repoDir, "workdir");
@@ -283,7 +400,8 @@ test("starts dead job finalization in the background", async () => {
   });
   await sleep(20);
   assert.equal(completed, false);
-  assert.equal(jobStore.getByLoopId("loop-1")?.finalStatusPersistedAt, undefined);
+  assert.ok(jobStore.getByLoopId("loop-1")?.finalStatusPersistedAt);
+  assert.equal(jobStore.getByLoopId("loop-1")?.cloudFinalizedAt, undefined);
   const unblockFetch = releaseFetch;
   assert.ok(unblockFetch);
   unblockFetch();

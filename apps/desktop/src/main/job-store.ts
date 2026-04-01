@@ -60,6 +60,12 @@ export type LocalJob = {
   artifactsUploadedAt?: string;
   completedEventPostedAt?: string;
   finalStatusPersistedAt?: string;
+  /** Set once cloud-side finalization is fully persisted. */
+  cloudFinalizedAt?: string;
+  /** Number of boot/live finalization attempts after local terminal persistence. */
+  recoveryAttempts?: number;
+  /** Last cloud finalization error for diagnostics and retry decisions. */
+  lastRecoveryError?: string;
   apiBaseUrl?: string;
 };
 

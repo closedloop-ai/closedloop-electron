@@ -104,11 +104,12 @@ test("finalizeLoopFromRuntime uploads, posts completion, and persists terminal s
   assert.ok(persisted.artifactsUploadedAt);
   assert.ok(persisted.completedEventPostedAt);
   assert.ok(persisted.finalStatusPersistedAt);
+  assert.ok(persisted.cloudFinalizedAt);
   assert.equal(fetchCalls.length, 2);
   assert.equal(telemetryEvents.length, 1);
 });
 
-test("finalizeLoopFromRuntime clears loop token after persist even when artifact upload fails", async () => {
+test("finalizeLoopFromRuntime keeps loop token when cloud finalization fails retryably", async () => {
   globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
     const url = String(input);
     fetchCalls.push({
@@ -149,7 +150,47 @@ test("finalizeLoopFromRuntime clears loop token after persist even when artifact
     loopTokenStore,
   });
 
-  assert.equal(jobStore.getByLoopId("loop-1")?.status, "COMPLETED");
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.equal(persisted?.status, "COMPLETED");
+  assert.equal(persisted?.cloudFinalizedAt, undefined);
+  assert.ok(persisted?.lastRecoveryError);
+  assert.equal(loopTokenStore.getLoopToken("loop-1"), "runner-token");
+});
+
+test("finalizeLoopFromRuntime clears loop token for non-retryable cloud failure", async () => {
+  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    const url = String(input);
+    fetchCalls.push({
+      url,
+      body: typeof init?.body === "string" ? init.body : "",
+    });
+    return new Response("denied", { status: 401 });
+  }) as typeof fetch;
+
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ tasks: [] }));
+
+  const jobStore = createStore("finalizer-non-retryable-token-clear");
+  const job = createBaseJob({ claudeWorkDir });
+  jobStore.upsert(job);
+
+  const loopTokenStore = new LoopTokenStore({
+    cwd: tempRoot,
+    name: "finalizer-non-retryable-lt",
+    safeStorage: createTestSafeStorage(),
+  });
+  loopTokenStore.setLoopToken("loop-1", "runner-token");
+
+  await finalizeLoopFromRuntime(job, "live-exit", {
+    jobStore,
+    telemetry: { emit: () => {} },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+    loopTokenStore,
+  });
+
   assert.equal(loopTokenStore.getLoopToken("loop-1"), null);
 });
 
@@ -463,7 +504,7 @@ test("tryPostCompletedEvent posts completed event and sets completedEventPostedA
   jobStore.upsert(job);
 
   const warnings: string[] = [];
-  const failed = await tryPostCompletedEvent(
+  const result = await tryPostCompletedEvent(
     job,
     "PLAN",
     claudeWorkDir,
@@ -472,7 +513,7 @@ test("tryPostCompletedEvent posts completed event and sets completedEventPostedA
     artifactDeps(jobStore),
   );
 
-  assert.equal(failed, false);
+  assert.equal(result.failed, false);
   assert.equal(
     fetchCalls.filter((c) => c.url.includes("/loops/loop-1/events")).length,
     1,
@@ -490,7 +531,7 @@ test("tryPostCompletedEvent skips when completedEventPostedAt is set", async () 
   const job = createBaseJob({ claudeWorkDir, completedEventPostedAt: postedAt });
   jobStore.upsert(job);
 
-  const failed = await tryPostCompletedEvent(
+  const result = await tryPostCompletedEvent(
     job,
     "PLAN",
     claudeWorkDir,
@@ -499,7 +540,7 @@ test("tryPostCompletedEvent skips when completedEventPostedAt is set", async () 
     artifactDeps(jobStore),
   );
 
-  assert.equal(failed, false);
+  assert.equal(result.failed, false);
   assert.equal(fetchCalls.length, 0);
 });
 
@@ -560,7 +601,7 @@ test("tryPostCompletedEvent records EVENT_POST_FAILED when HTTP fails", async ()
   jobStore.upsert(job);
 
   const warnings: string[] = [];
-  const failed = await tryPostCompletedEvent(
+  const result = await tryPostCompletedEvent(
     job,
     "PLAN",
     claudeWorkDir,
@@ -569,7 +610,7 @@ test("tryPostCompletedEvent records EVENT_POST_FAILED when HTTP fails", async ()
     artifactDeps(jobStore),
   );
 
-  assert.equal(failed, true);
+  assert.equal(result.failed, true);
   assert.ok(warnings.includes("EVENT_POST_FAILED"));
   assert.equal(jobStore.getByLoopId("loop-1")?.completedEventPostedAt, undefined);
 });
@@ -587,9 +628,9 @@ test("tryPostErrorEvent uses PROCESS_FAILED for FAILED status", async () => {
   jobStore.upsert(job);
 
   const warnings: string[] = [];
-  const failed = await tryPostErrorEvent(job, claudeWorkDir, warnings, artifactDeps(jobStore));
+  const result = await tryPostErrorEvent(job, claudeWorkDir, warnings, artifactDeps(jobStore));
 
-  assert.equal(failed, false);
+  assert.equal(result.failed, false);
   assert.match(fetchCalls[0]?.body ?? "", /"code":"PROCESS_FAILED"/);
   assert.match(fetchCalls[0]?.body ?? "", /"message":"Process exited with code 7"/);
 });
@@ -623,9 +664,9 @@ test("tryPostErrorEvent skips when completedEventPostedAt is set", async () => {
   });
   jobStore.upsert(job);
 
-  const failed = await tryPostErrorEvent(job, claudeWorkDir, [], artifactDeps(jobStore));
+  const result = await tryPostErrorEvent(job, claudeWorkDir, [], artifactDeps(jobStore));
 
-  assert.equal(failed, false);
+  assert.equal(result.failed, false);
   assert.equal(fetchCalls.length, 0);
 });
 
