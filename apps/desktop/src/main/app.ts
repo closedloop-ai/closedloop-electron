@@ -46,7 +46,7 @@ import { shouldAutoApprove, OPERATION_RISK_TIERS } from "./approval-policy.js";
 import { gatewayLog, isNetworkError } from "./gateway-logger.js";
 import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
-import { JobStore, isTerminalJobStatus } from "./job-store.js";
+import { JobStore, isTerminalJobStatus, type LocalJob } from "./job-store.js";
 import { Observability } from "./observability.js";
 import type {
   GatewayApprovalRequest,
@@ -65,6 +65,8 @@ import type { RetrySpawnDeps } from "./spawn-retry.js";
 import pkg from "electron-updater";
 const { autoUpdater } = pkg;
 import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
+import { BootRecoveryService } from "./boot-recovery.js";
+import { LoopTokenStore } from "./loop-token-store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -73,6 +75,7 @@ const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 export class DesktopApplication {
   private readonly settingsStore: SettingsStore;
   private readonly apiKeyStore: ApiKeyStore;
+  private readonly loopTokenStore: LoopTokenStore;
   private readonly tray: DesktopTray;
   private readonly desktopWindow: DesktopWindow;
   private readonly server: DesktopGatewayServer;
@@ -82,6 +85,7 @@ export class DesktopApplication {
   private readonly approvalStore: ApprovalStore;
   private readonly jobStore: JobStore;
   private readonly recovery: GatewayRecoveryManager;
+  private readonly bootRecovery: BootRecoveryService;
   private readonly gatewayAuthToken: string;
   private readonly sessionStore: LocalSessionStore;
   private shuttingDown = false;
@@ -106,6 +110,7 @@ export class DesktopApplication {
     this.cloudConnectionEnabled =
       this.settingsStore.getCloudConnectionEnabled();
     this.apiKeyStore = new ApiKeyStore();
+    this.loopTokenStore = new LoopTokenStore();
     this.tray = new DesktopTray();
     this.desktopWindow = new DesktopWindow();
     this.activityLog = new ActivityLogStore();
@@ -151,6 +156,7 @@ export class DesktopApplication {
       this.isProdOriginsOnly(),
       this.jobStore,
       () => this.recovery.onUnexpectedClose(),
+      this.loopTokenStore,
       retrySpawnDeps,
     );
     this.commandExecutor = new CloudCommandExecutor({
@@ -260,6 +266,13 @@ export class DesktopApplication {
       isShuttingDown: () => this.shuttingDown,
       isPaused: () => this.cloudCommandsPaused,
     });
+    this.bootRecovery = new BootRecoveryService({
+      jobStore: this.jobStore,
+      telemetry: Observability.getTelemetryEmitter(),
+      getApiKey: () => this.apiKeyStore.getApiKey(),
+      getApiOrigin: () => this.settingsStore.getApiOrigin(),
+      loopTokenStore: this.loopTokenStore,
+    });
     this.registerIpcHandlers();
   }
 
@@ -284,7 +297,8 @@ export class DesktopApplication {
 
     gatewayLog.setVerbose(this.settingsStore.getAll().verboseLogging);
     this.migrateLegacyData();
-    this.reconcileJobStore();
+    const deadJobs = this.reconcileJobStore();
+    await this.bootRecovery.reattachLiveJobs();
 
     const bootSandbox = this.settingsStore.getSandboxBaseDirectory();
     if (bootSandbox?.trim()) {
@@ -301,6 +315,14 @@ export class DesktopApplication {
       this.refreshTrayState(
         `Serving on localhost:${this.server.getActivePort()} | relay=${configuredOrigins.relayOrigin} api=${configuredOrigins.apiOrigin} web=${configuredOrigins.webAppOrigin}`,
       );
+      void this.bootRecovery
+        .startDeadJobFinalization(deadJobs)
+        .catch((err: unknown) => {
+          gatewayLog.warn(
+            "boot-recovery",
+            `Background dead-loop finalization failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
 
       if (this.cloudConnectionEnabled) {
         void this.cloudSocket.start();
@@ -385,6 +407,8 @@ export class DesktopApplication {
     }
 
     this.shuttingDown = true;
+    this.bootRecovery.dispose();
+    await this.bootRecovery.quiesce(1_000);
     await Observability.shutdown();
     return runShutdownSequence({
       updateCheckTimer: this.updateCheckTimer,
@@ -860,8 +884,8 @@ export class DesktopApplication {
     app.exit(0);
   }
 
-  private reconcileJobStore(): void {
-    this.jobStore.reconcile((job) => {
+  private reconcileJobStore(): LocalJob[] {
+    return this.jobStore.reconcile((job) => {
       const now = new Date().toISOString();
 
       // If no PID, we cannot verify liveness
