@@ -1033,6 +1033,58 @@ export function isSessionLimitError(logTail: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Auth challenge detection
+// ---------------------------------------------------------------------------
+
+/** Pattern that matches known auth/rate-limit/billing error messages from Claude CLI. */
+export const AUTH_CHALLENGE_PATTERN =
+  /authentication_error|invalid bearer token|rate_limit_error|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|token.*expired/i;
+
+/**
+ * Scan claude-output.jsonl for a result record with `is_error: true` whose
+ * message matches a known auth/rate-limit/billing pattern.
+ * Returns the error text or null if not found.
+ */
+export function detectAuthChallengeFromJsonl(claudeWorkDir: string): string | null {
+  const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
+  if (!existsSync(outputFile)) {
+    return null;
+  }
+  try {
+    const content = readFileSync(outputFile, "utf-8");
+    for (const line of content.split("\n")) {
+      if (!line.trim()) {
+        continue;
+      }
+      try {
+        const entry = JSON.parse(line) as Record<string, unknown>;
+        if (
+          entry.type === "result" &&
+          entry.is_error === true &&
+          typeof entry.result === "string" &&
+          AUTH_CHALLENGE_PATTERN.test(entry.result)
+        ) {
+          return entry.result;
+        }
+      } catch {
+        // skip malformed lines
+      }
+    }
+  } catch {
+    // file read error
+  }
+  return null;
+}
+
+/**
+ * Check whether a log tail string contains Claude CLI auth/rate-limit/billing
+ * error patterns.
+ */
+export function isAuthChallengeError(logTail: string): boolean {
+  return AUTH_CHALLENGE_PATTERN.test(logTail);
+}
+
+// ---------------------------------------------------------------------------
 // LLM-assisted commit (EXECUTE only)
 // ---------------------------------------------------------------------------
 
@@ -1610,6 +1662,14 @@ async function handleProcessCompletion(
       jsonlError !== null ||
       (diagnostics.logTail != null && isSessionLimitError(diagnostics.logTail));
 
+    // Detect auth/rate-limit/billing errors from JSONL or stderr.
+    const jsonlAuthError = detectAuthChallengeFromJsonl(claudeWorkDir);
+    const isAuthChallenge =
+      !isContextLimit &&
+      (jsonlAuthError !== null ||
+        (diagnostics.logTail != null &&
+          isAuthChallengeError(diagnostics.logTail)));
+
     if (!wasCancelled) {
       if (isContextLimit) {
         const limitMsg = jsonlError ?? "Context limit exceeded";
@@ -1622,6 +1682,30 @@ async function handleProcessCompletion(
           type: "error",
           code: "CONTEXT_LIMIT_EXCEEDED",
           message: limitMsg,
+          loopId,
+          tokenUsage: diagnostics.tokenUsage,
+          logTail: diagnostics.logTail,
+          diagnosticsVersion: diagnostics.diagnosticsVersion,
+        });
+      } else if (isAuthChallenge) {
+        const authMsg = jsonlAuthError ?? "Claude auth challenge detected";
+        loopError(loopId, `Auth challenge detected: ${authMsg}`);
+        gatewayLog.error(
+          "loop-harness",
+          `${command} hit auth challenge, loopId=${loopId}: ${authMsg}`,
+        );
+        Observability.jobAuthChallenge(
+          commandId ?? existingJob?.commandId,
+          operationId ?? existingJob?.operationId,
+          loopId,
+          exitCode,
+          diagnostics,
+          failureSessionId,
+        );
+        await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+          type: "error",
+          code: "AUTH_CHALLENGE",
+          message: authMsg,
           loopId,
           tokenUsage: diagnostics.tokenUsage,
           logTail: diagnostics.logTail,
@@ -1653,7 +1737,9 @@ async function handleProcessCompletion(
         liveActivity:
           !wasCancelled && isContextLimit
             ? "Context limit exceeded"
-            : undefined,
+            : !wasCancelled && isAuthChallenge
+              ? `Auth challenge: ${jsonlAuthError ?? "authentication error"}`
+              : undefined,
         exitCode,
         updatedAt: now,
         completedAt: now,
