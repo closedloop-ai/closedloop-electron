@@ -51,6 +51,22 @@ export type LocalJob = {
   completedAt?: string;
   warning?: string;
   exitCode?: number | null;
+  /**
+   * Replay-safe byte offset into `jsonlPath` (claude-output.jsonl).
+   * Updated by the output tailer only after newline-delimited bytes are committed:
+   * either summarized with no cloud `output` event, or after a successful (2xx) POST.
+   */
+  lastObservedJsonlOffset?: number;
+  artifactsUploadedAt?: string;
+  completedEventPostedAt?: string;
+  finalStatusPersistedAt?: string;
+  /** Set once cloud-side finalization is fully persisted. */
+  cloudFinalizedAt?: string;
+  /** Number of boot/live finalization attempts after local terminal persistence. */
+  recoveryAttempts?: number;
+  /** Last cloud finalization error for diagnostics and retry decisions. */
+  lastRecoveryError?: string;
+  apiBaseUrl?: string;
 };
 
 const TERMINAL_STATUSES: ReadonlySet<LocalJobStatus> = new Set([

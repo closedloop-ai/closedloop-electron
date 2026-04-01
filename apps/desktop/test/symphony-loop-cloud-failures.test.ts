@@ -19,6 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
 import { JobStore } from "../src/main/job-store.js";
+import { LoopTokenStore } from "../src/main/loop-token-store.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
@@ -29,7 +30,9 @@ import {
   saveEnv,
   startMockApiServer,
   waitForCompletedEvent,
+  waitForTerminalEvent,
 } from "./symphony-test-utils.js";
+import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
 
 const fakeWorktreeProvider: WorktreeProvider = {
   async ensureWorktree(_repoPath, worktreeDir) {
@@ -298,5 +301,180 @@ test("EXECUTE: event post failure logged as warning in job store", async () => {
   assert.ok(
     typeof job.warning === "string" && job.warning.includes("EVENT_POST_FAILED"),
     `Expected job store warning to contain EVENT_POST_FAILED, got: ${JSON.stringify(job.warning)}`
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 3: Pre-spawn failure cleans up persisted loop token (Layer 2)
+// ---------------------------------------------------------------------------
+
+test("PLAN: pre-spawn log-file failure cleans up persisted loop token", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cloud-fail-prespawn-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-prespawn");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const loopId = "00000000-0000-0000-0000-000000000700";
+  const repoName = path.basename(repoPath);
+
+  // Custom worktree provider that blocks the log file by creating a
+  // directory at its path, causing openSync to fail with EISDIR.
+  const blockingWorktreeProvider: WorktreeProvider = {
+    async ensureWorktree(_repoPath, worktreeDir) {
+      await fs.mkdir(worktreeDir, { recursive: true });
+      const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
+      await fs.mkdir(workDir, { recursive: true });
+      await fs.mkdir(path.join(workDir, "symphony-loop.log"), { recursive: true });
+    },
+    findWorktreeForBranch() {
+      return null;
+    },
+    async removeWorktree(worktreeDir) {
+      await fs.rm(worktreeDir, { recursive: true, force: true });
+    },
+    getCurrentBranch() {
+      return "symphony/prespawn-test";
+    },
+  };
+
+  const loopTokenStore = new LoopTokenStore({
+    cwd: tmpDir,
+    name: "test-prespawn-tokens",
+    safeStorage: createTestLoopTokenSafeStorage(),
+  });
+
+  const jobStore = new JobStore({ cwd: tmpDir, name: "test-jobs-prespawn" });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "prespawn-fail-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: blockingWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    jobStore,
+    loopTokenStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "PLAN",
+        closedLoopAuthToken: "prespawn-token",
+        artifacts: [],
+        repo: { fullName: `prespawn-fail/${repoName}`, branch: "main" },
+      }),
+    }
+  );
+
+  assert.equal(response.status, 500, "Expected 500 for log-file open failure");
+
+  assert.equal(
+    loopTokenStore.getLoopToken(loopId),
+    null,
+    "Persisted loop token should be cleaned up after pre-spawn failure"
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 4: Non-zero exit cleans up persisted loop token (Layer 1)
+// ---------------------------------------------------------------------------
+
+test("PLAN: non-zero exit cleans up persisted loop token", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cloud-fail-nonzero-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-nonzero");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+  // run-loop.sh exits with code 1 to trigger the non-zero exit path
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 1\n", { skipTokens: true });
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const loopId = "00000000-0000-0000-0000-000000000800";
+
+  const loopTokenStore = new LoopTokenStore({
+    cwd: tmpDir,
+    name: "test-nonzero-tokens",
+    safeStorage: createTestLoopTokenSafeStorage(),
+  });
+
+  const jobStore = new JobStore({ cwd: tmpDir, name: "test-jobs-nonzero" });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "nonzero-exit-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    jobStore,
+    loopTokenStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "PLAN",
+        closedLoopAuthToken: "nonzero-token",
+        artifacts: [],
+        repo: { fullName: `nonzero-fail/${path.basename(repoPath)}`, branch: "main" },
+      }),
+    }
+  );
+
+  assert.equal(response.status, 200, "Spawn should succeed (non-zero exit happens later)");
+
+  // Wait for the error event indicating the process failed
+  await waitForTerminalEvent(mock.requests, loopId);
+
+  assert.equal(
+    loopTokenStore.getLoopToken(loopId),
+    null,
+    "Persisted loop token should be cleaned up after non-zero exit"
   );
 });

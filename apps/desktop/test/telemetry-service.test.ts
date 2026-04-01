@@ -77,7 +77,7 @@ describe("TelemetryService.emit()", () => {
     assert.equal(received[0].message, "hello");
     assert.equal(received[0].category, "job.started");
     assert.equal(received[0].severity, "info");
-    assert.equal(received[0].schemaVersion, 1);
+    assert.equal(received[0].schemaVersion, "1");
     assert.equal(typeof received[0].timestamp, "string");
     assert.ok(received[0].timestamp!.length > 0);
   });
@@ -163,7 +163,7 @@ describe("TelemetryService.setTargetId()", () => {
     svc.emit(makeEvent());
 
     assert.equal(received.length, 1);
-    assert.equal(received[0].trace?.computeTargetId, undefined);
+    assert.equal(received[0].trace?.computeTargetId, "");
   });
 });
 

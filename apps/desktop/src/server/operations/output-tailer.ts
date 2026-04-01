@@ -1,5 +1,6 @@
 import { openSync, readSync, closeSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { gatewayLog } from "../../main/gateway-logger.js";
 
 export function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -137,9 +138,10 @@ async function postLoopEvent(
   loopId: string,
   token: string,
   event: { type: string; data: { chunk: string } }
-): Promise<void> {
+): Promise<number | null> {
+  const url = `${apiBaseUrl}/loops/${loopId}/events`;
   try {
-    await fetch(`${apiBaseUrl}/loops/${loopId}/events`, {
+    const resp = await fetch(url, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${token}`,
@@ -152,8 +154,18 @@ async function postLoopEvent(
         timestamp: new Date().toISOString(),
       }),
     });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      gatewayLog.error(
+        "output-tailer",
+        `POST ${event.type} to ${url} failed: ${resp.status} ${resp.statusText} ${text}`,
+      );
+    }
+    return resp.status;
   } catch (err) {
-    console.error("[output-tailer] Failed to post loop event:", err);
+    const msg = err instanceof Error ? err.message : String(err);
+    gatewayLog.error("output-tailer", `POST ${event.type} network error: ${msg}`);
+    return null;
   }
 }
 
@@ -163,23 +175,93 @@ async function postLoopEvent(
 
 const DEFAULT_POLL_MS = 2000;
 const DEFAULT_THROTTLE_MS = 5000;
+const DEFAULT_AUTH_RETRY_BASE_MS = 1000;
+const DEFAULT_AUTH_RETRY_MAX_MS = 30000;
+const DEFAULT_AUTH_RETRY_MAX_COUNT = 8;
 
+type PollOptions = {
+  ignoreBackoff?: boolean;
+  forceAttempt?: boolean;
+};
+
+/**
+ * Tail Claude JSONL output and POST summarized `output` events.
+ *
+ * `onOffset` receives only **replay-safe** byte offsets: after a full newline-delimited
+ * frame is consumed, and — when an `output` POST is required — only after the server
+ * accepts it (2xx). Partial tail bytes and rejected auth (401/403) never advance the
+ * reported offset. Transient POST failures keep the frame buffered for retry.
+ */
 export function startOutputTailer(
   jsonlPath: string,
   apiBaseUrl: string,
   loopId: string,
   token: string,
-  initialByteOffset: number
+  initialByteOffset: number,
+  onOffset?: (offset: number) => void,
 ): { stop: () => void; flush: () => Promise<void> } {
   const pollIntervalMs = Number(process.env.CLOSEDLOOP_TAILER_POLL_MS) || DEFAULT_POLL_MS;
   const throttleMs = Number(process.env.CLOSEDLOOP_TAILER_THROTTLE_MS) || DEFAULT_THROTTLE_MS;
+  const authRetryBaseMs =
+    Number(process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_BASE_MS) || DEFAULT_AUTH_RETRY_BASE_MS;
+  const authRetryMaxMs =
+    Number(process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_MAX_MS) || DEFAULT_AUTH_RETRY_MAX_MS;
+  const authRetryMaxCount =
+    Number(process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_MAX_COUNT) || DEFAULT_AUTH_RETRY_MAX_COUNT;
   let stopped = false;
-  let byteOffset = initialByteOffset;
+  let authRetriesExhausted = false;
+  let authRetryAttempt = 0;
+  let nextAuthRetryAt = 0;
+  /** Next byte to read from the JSONL file (may point past uncommitted tail in `pendingRemainder`). */
+  let readByteOffset = initialByteOffset;
+  /** Bytes read from disk not yet removed from `pendingRemainder` (no successful commit for that prefix). */
   let pendingRemainder = Buffer.alloc(0);
   let lastSentAt: number | null = null;
+  /** Largest replay-safe offset reported via `onOffset` (exclusive end of committed prefix). */
+  let committedByteOffset = initialByteOffset;
 
-  async function pollOnce(): Promise<void> {
+  function reportCommit(framedEndExclusive: number): void {
+    if (framedEndExclusive > committedByteOffset) {
+      committedByteOffset = framedEndExclusive;
+      onOffset?.(committedByteOffset);
+    }
+  }
+
+  function resetAuthRetryState(): void {
+    authRetryAttempt = 0;
+    nextAuthRetryAt = 0;
+  }
+
+  function shouldRetryAuthStatus(status: number | null): boolean {
+    if (status === null) return true;
+    if (status === 401 || status === 403) return true;
+    return status >= 500;
+  }
+
+  function scheduleAuthRetry(status: number | null): void {
+    authRetryAttempt += 1;
+    if (authRetryAttempt > authRetryMaxCount) {
+      authRetriesExhausted = true;
+      gatewayLog.warn(
+        "output-tailer",
+        `Stopping tailer for loopId=${loopId}: exhausted auth retries after ${authRetryMaxCount} attempts (last status=${status ?? "network"})`,
+      );
+      return;
+    }
+    const delayMs = Math.min(authRetryMaxMs, authRetryBaseMs * 2 ** (authRetryAttempt - 1));
+    nextAuthRetryAt = Date.now() + delayMs;
+    gatewayLog.warn(
+      "output-tailer",
+      `Retrying output tailer for loopId=${loopId}: attempt=${authRetryAttempt}/${authRetryMaxCount} status=${status ?? "network"} backoffMs=${delayMs}`,
+    );
+  }
+
+  async function pollOnce(options?: PollOptions): Promise<void> {
+    const ignoreBackoff = options?.ignoreBackoff === true;
+    const forceAttempt = options?.forceAttempt === true;
     if (stopped) return;
+    if (authRetriesExhausted && !forceAttempt) return;
+    if (!ignoreBackoff && nextAuthRetryAt > Date.now()) return;
     if (!existsSync(jsonlPath)) return;
     let fd: number | null = null;
     try {
@@ -187,8 +269,8 @@ export function startOutputTailer(
       const chunkSize = 65536;
       const chunk = Buffer.alloc(chunkSize);
       let bytesRead: number;
-      while ((bytesRead = readSync(fd, chunk, 0, chunkSize, byteOffset)) > 0) {
-        byteOffset += bytesRead;
+      while ((bytesRead = readSync(fd, chunk, 0, chunkSize, readByteOffset)) > 0) {
+        readByteOffset += bytesRead;
         pendingRemainder = Buffer.concat([pendingRemainder, chunk.subarray(0, bytesRead)]);
       }
     } catch {
@@ -197,43 +279,73 @@ export function startOutputTailer(
       if (fd !== null) closeSync(fd);
     }
 
-    const newlineIndex = pendingRemainder.lastIndexOf(10); // 0x0a = newline
-    if (newlineIndex === -1) return;
-    const completeLines = pendingRemainder.subarray(0, newlineIndex).toString("utf8");
-    pendingRemainder = pendingRemainder.subarray(newlineIndex + 1);
+    while (!stopped && (!authRetriesExhausted || forceAttempt)) {
+      const newlineIndex = pendingRemainder.lastIndexOf(10); // 0x0a
+      if (newlineIndex === -1) break;
 
-    let lastDisplay: string | null = null;
-    for (const line of completeLines.split("\n")) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(trimmed);
-      } catch {
+      const baseInFile = readByteOffset - pendingRemainder.length;
+      const framedEndExclusive = baseInFile + newlineIndex + 1;
+
+      const completeLines = pendingRemainder.subarray(0, newlineIndex).toString("utf8");
+      const suffix = pendingRemainder.subarray(newlineIndex + 1);
+
+      let lastDisplay: string | null = null;
+      for (const line of completeLines.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(trimmed);
+        } catch {
+          continue;
+        }
+        if (!isRecord(parsed)) continue;
+        const display = summarizeJsonlRecord(parsed);
+        if (!display) continue;
+        lastDisplay = display;
+      }
+
+      if (lastDisplay === null) {
+        pendingRemainder = suffix;
+        reportCommit(framedEndExclusive);
         continue;
       }
-      if (!isRecord(parsed)) continue;
-      const display = summarizeJsonlRecord(parsed);
-      if (!display) continue;
-      lastDisplay = display;
-    }
 
-    if (lastDisplay !== null) {
       const now = Date.now();
-      if (lastSentAt === null || now - lastSentAt >= throttleMs) {
-        lastSentAt = now;
-        await postLoopEvent(apiBaseUrl, loopId, token, { type: "output", data: { chunk: lastDisplay } });
+      if (lastSentAt !== null && now - lastSentAt < throttleMs) {
+        break;
       }
+
+      const status = await postLoopEvent(apiBaseUrl, loopId, token, { type: "output", data: { chunk: lastDisplay } });
+      if (status !== null && status >= 200 && status < 300) {
+        resetAuthRetryState();
+        authRetriesExhausted = false;
+        pendingRemainder = suffix;
+        lastSentAt = now;
+        reportCommit(framedEndExclusive);
+        continue;
+      }
+      if (shouldRetryAuthStatus(status)) {
+        scheduleAuthRetry(status);
+      }
+      break;
     }
   }
 
-  const intervalId = setInterval(() => { pollOnce().catch(() => {}); }, pollIntervalMs);
+  const intervalId = setInterval(() => {
+    pollOnce().catch((err) => {
+      gatewayLog.error(
+        "output-tailer",
+        `Poll error for loopId=${loopId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  }, pollIntervalMs);
 
   return {
     stop: () => { stopped = true; clearInterval(intervalId); },
     flush: async () => {
       clearInterval(intervalId);
-      await pollOnce();
+      await pollOnce({ ignoreBackoff: true, forceAttempt: true });
       stopped = true;
     },
   };
