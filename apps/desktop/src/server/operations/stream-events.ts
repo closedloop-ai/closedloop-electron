@@ -1,6 +1,4 @@
-/** Matches known auth/rate-limit/billing error messages from Claude CLI. */
-const AUTH_CHALLENGE_RE =
-  /authentication_error|invalid bearer token|rate_limit_error|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|token.*expired/i;
+import { AUTH_CHALLENGE_PATTERN } from "./symphony-loop.js";
 
 export type ContentBlock = {
   type: "text" | "tool_use" | "tool_result" | "thinking";
@@ -170,7 +168,7 @@ export function processStreamEvent(
     if (event.is_error) {
       const errorText =
         typeof event.result === "string" ? event.result : "Claude encountered an error";
-      if (AUTH_CHALLENGE_RE.test(errorText)) {
+      if (AUTH_CHALLENGE_PATTERN.test(errorText)) {
         state.authChallengeDetected = true;
       }
       enqueue(JSON.stringify({ type: "error", error: errorText }));
