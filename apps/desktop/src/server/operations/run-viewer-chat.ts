@@ -148,6 +148,7 @@ export function registerRunViewerChatRoutes(
           onExit: (exitCode) => {
             if (exitCode !== 0 && streamState.authChallengeDetected && history.claudeSessionId) {
               history.claudeSessionId = undefined;
+              void saveChatHistory(dir, history);
             }
             writeEvent(context.response, {
               type: "result",

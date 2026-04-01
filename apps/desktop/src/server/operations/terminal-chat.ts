@@ -160,6 +160,7 @@ async function streamClaude(
         onExit: (exitCode) => {
           if (exitCode !== 0 && streamState.authChallengeDetected && history.claudeSessionId) {
             history.claudeSessionId = undefined;
+            void saveChatHistory(symphonyDir, history);
           }
           writeEvent(response, {
             type: "result",

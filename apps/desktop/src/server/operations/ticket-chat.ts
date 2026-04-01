@@ -172,6 +172,7 @@ export function registerTicketChatRoutes(
           onExit: (exitCode) => {
             if (exitCode !== 0 && streamState.authChallengeDetected && history.sessionId) {
               history.sessionId = undefined;
+              void saveChatHistory(dir, ticketId, history);
             }
             writeEvent(context.response, {
               type: "result",
