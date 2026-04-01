@@ -71,6 +71,7 @@ Override the default service URLs. Useful for local development or staging envir
 |---|---|
 | `CLOSEDLOOP_TAILER_POLL_MS` | Poll interval in milliseconds for the output tailer (default determined at runtime). |
 | `CLOSEDLOOP_TAILER_THROTTLE_MS` | Throttle interval in milliseconds for the output tailer (default determined at runtime). |
+| `CLOSEDLOOP_WATCHER_POLL_MS` | Poll interval in milliseconds for the boot-recovery live-loop PID watcher (default 3000). |
 
 ### Passed to Child Processes
 

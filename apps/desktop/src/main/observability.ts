@@ -4,6 +4,7 @@ import { gatewayLog } from "./gateway-logger.js";
 import type {
   TelemetryCategory,
   TelemetryDiagnostics,
+  TelemetryEmitter,
   TelemetrySeverity,
   TelemetryTraceContext,
 } from "./telemetry-protocol.js";
@@ -64,6 +65,14 @@ export class Observability {
 
   static setGatewaySessionId(id: string): void {
     Observability.telemetry?.setGatewaySessionId(id);
+  }
+
+  static getTelemetryEmitter(): TelemetryEmitter {
+    return {
+      emit(event) {
+        Observability.telemetry?.emit(event);
+      },
+    };
   }
 
   // --- Command lifecycle ---

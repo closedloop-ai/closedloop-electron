@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import { gatewayLog } from "../../main/gateway-logger.js";
 import { getShellEnv } from "../shell-path.js";
 import { findPluginScript } from "./plugin-cache.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
@@ -252,6 +253,9 @@ export function registerLearningsRoutes(
         stdio: "ignore",
         cwd: worktreeDir,
         env: await getShellEnv({ CLOSEDLOOP_WORKDIR: claudeWorkDir }),
+      });
+      child.on('error', (err: NodeJS.ErrnoException) => {
+        gatewayLog.warn('learnings-launch', `detached-spawn-failed: ${err.message}`);
       });
       child.unref();
       json(context, 200, { status: "processing", pid: child.pid, logFile });
