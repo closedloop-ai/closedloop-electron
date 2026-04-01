@@ -53,6 +53,7 @@ import { test } from "node:test";
 import { promisify } from "node:util";
 import { GatewayLogger } from "../src/main/gateway-logger.js";
 import { OperationDispatcher } from "../src/server/operation-dispatcher.js";
+import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { registerSymphonyInteractiveRoutes } from "../src/server/operations/symphony-interactive.js";
 import {
   buildMockChildProcess,
@@ -429,6 +430,7 @@ test(
 
       // Set PATH so fake-bin is first.
       process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+      setShellPathForTest();
 
       // --- Create a real git repo so getGitDiff() returns a non-empty string ---
       const repoName = "myrepo";
@@ -544,6 +546,7 @@ test(
         `Expected source 'default', got: ${parsed.source}`
       );
     } finally {
+      resetShellPathCache();
       // Restore environment.
       if (savedPath === undefined) {
         delete process.env.PATH;

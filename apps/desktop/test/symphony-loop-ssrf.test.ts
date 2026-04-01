@@ -6,7 +6,10 @@
  * URL from its own settings, not from the relay command payload.
  */
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
 import http from "node:http";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 
 // ---------------------------------------------------------------------------
@@ -22,6 +25,10 @@ type RecordedRequest = {
 let gatewayServer: http.Server | null = null;
 let gatewayPort = 0;
 const recordedRequests: RecordedRequest[] = [];
+
+/** Per-test isolated allowlist root — avoids matching /tmp/repo or other local checkouts. */
+let ssrfAllowDir: string;
+const ssrfTempDirsToClean: string[] = [];
 
 async function startGateway(): Promise<void> {
   gatewayServer = http.createServer((req, res) => {
@@ -127,6 +134,12 @@ function buildContext(body: Record<string, unknown>): OperationRequestContext {
   } as OperationRequestContext & { _responseStatus: number; _responseBody: string };
 }
 
+/** Repo fullName whose basename does not exist under ssrfAllowDir — PLAN exits before run-loop spawn. */
+const SSRF_PLAN_REPO = {
+  fullName: "ssrf-test-org/ssrf-nonexistent-repo-7f3a1b2c",
+  branch: "main",
+} as const;
+
 // ---------------------------------------------------------------------------
 // Setup / teardown
 // ---------------------------------------------------------------------------
@@ -136,13 +149,16 @@ beforeEach(async () => {
   capturedRoutes.length = 0;
   await startGateway();
 
+  ssrfAllowDir = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-ssrf-"));
+  ssrfTempDirsToClean.push(ssrfAllowDir);
+
   // Register routes with a trusted origin pointing at our test server
   const { registerSymphonyLoopRoutes } = await import(
     "../src/server/operations/symphony-loop.js"
   );
   registerSymphonyLoopRoutes(
     fakeDispatcher as never,
-    () => ["/tmp"],
+    () => [ssrfAllowDir],
     () => `http://127.0.0.1:${gatewayPort}`,
     undefined // no jobStore
   );
@@ -150,6 +166,9 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await stopGateway();
+  for (const dir of ssrfTempDirsToClean.splice(0)) {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -157,22 +176,27 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 
 test("returns 503 when getApiOrigin is absent", async () => {
-  // Register with no getApiOrigin
-  const freshRoutes: CapturedRoute[] = [];
-  const { registerSymphonyLoopRoutes } = await import(
-    "../src/server/operations/symphony-loop.js"
-  );
-  registerSymphonyLoopRoutes(
-    { register: (m: string, p: string, h: OperationHandler) => freshRoutes.push({ method: m, path: p, handler: h }) } as never,
-    () => ["/tmp"],
-    undefined, // no getApiOrigin
-    undefined
-  );
-  const handler = freshRoutes.find((r) => r.path.includes("/loop") && !r.path.includes("kill"))!.handler;
-  const ctx = buildContext({ loopId: "test", command: "PLAN", closedLoopAuthToken: "tok" }) as OperationRequestContext & { _responseStatus: number; _responseBody: string };
-  await handler(ctx);
-  assert.equal(ctx._responseStatus, 503);
-  assert.ok(ctx._responseBody.includes("API origin not configured"));
+  const allowDir = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-ssrf-no-origin-"));
+  try {
+    // Register with no getApiOrigin
+    const freshRoutes: CapturedRoute[] = [];
+    const { registerSymphonyLoopRoutes } = await import(
+      "../src/server/operations/symphony-loop.js"
+    );
+    registerSymphonyLoopRoutes(
+      { register: (m: string, p: string, h: OperationHandler) => freshRoutes.push({ method: m, path: p, handler: h }) } as never,
+      () => [allowDir],
+      undefined, // no getApiOrigin
+      undefined
+    );
+    const handler = freshRoutes.find((r) => r.path.includes("/loop") && !r.path.includes("kill"))!.handler;
+    const ctx = buildContext({ loopId: "test", command: "PLAN", closedLoopAuthToken: "tok" }) as OperationRequestContext & { _responseStatus: number; _responseBody: string };
+    await handler(ctx);
+    assert.equal(ctx._responseStatus, 503);
+    assert.ok(ctx._responseBody.includes("API origin not configured"));
+  } finally {
+    await fs.rm(allowDir, { recursive: true, force: true });
+  }
 });
 
 test("works with no apiBaseUrl field in body when getApiOrigin is configured", async () => {
@@ -183,7 +207,7 @@ test("works with no apiBaseUrl field in body when getApiOrigin is configured", a
     closedLoopAuthToken: "tok",
     // No apiBaseUrl at all
     artifacts: [],
-    repo: { fullName: "org/repo", branch: "main" },
+    repo: { ...SSRF_PLAN_REPO },
   }) as OperationRequestContext & { _responseStatus: number; _responseBody: string };
 
   await handler(ctx);
@@ -202,7 +226,7 @@ test("ignores caller-supplied apiBaseUrl -- events go to configured origin", asy
     closedLoopAuthToken: "tok",
     apiBaseUrl: "http://169.254.169.254", // attacker-controlled
     artifacts: [],
-    repo: { fullName: "org/repo", branch: "main" },
+    repo: { ...SSRF_PLAN_REPO },
   }) as OperationRequestContext & { _responseStatus: number };
 
   await handler(ctx);
@@ -223,7 +247,7 @@ test("ignores caller-supplied localhost apiBaseUrl", async () => {
     closedLoopAuthToken: "tok",
     apiBaseUrl: "http://localhost:9999", // different port than configured
     artifacts: [],
-    repo: { fullName: "org/repo", branch: "main" },
+    repo: { ...SSRF_PLAN_REPO },
   });
 
   await handler(ctx);
@@ -241,7 +265,7 @@ test("ignores caller-supplied private IP apiBaseUrl", async () => {
     closedLoopAuthToken: "tok",
     apiBaseUrl: "http://10.0.0.1:3002",
     artifacts: [],
-    repo: { fullName: "org/repo", branch: "main" },
+    repo: { ...SSRF_PLAN_REPO },
   });
 
   await handler(ctx);

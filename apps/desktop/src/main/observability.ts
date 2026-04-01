@@ -4,6 +4,7 @@ import { gatewayLog } from "./gateway-logger.js";
 import type {
   TelemetryCategory,
   TelemetryDiagnostics,
+  TelemetryEmitter,
   TelemetrySeverity,
   TelemetryTraceContext,
 } from "./telemetry-protocol.js";
@@ -64,6 +65,14 @@ export class Observability {
 
   static setGatewaySessionId(id: string): void {
     Observability.telemetry?.setGatewaySessionId(id);
+  }
+
+  static getTelemetryEmitter(): TelemetryEmitter {
+    return {
+      emit(event) {
+        Observability.telemetry?.emit(event);
+      },
+    };
   }
 
   // --- Command lifecycle ---
@@ -230,6 +239,23 @@ export class Observability {
       "info",
       "job.cancelled",
       `Process cancelled (exit code ${exitCode})`,
+      { commandId, operationId, loopId, jobId: loopId, loopSessionId },
+      diagnostics ? { ...diagnostics, exitCode } : { exitCode },
+    );
+  }
+
+  static jobAuthChallenge(
+    commandId: string | undefined,
+    operationId: string | undefined,
+    loopId: string,
+    exitCode: number,
+    diagnostics?: TelemetryDiagnostics,
+    loopSessionId?: string,
+  ): void {
+    Observability.emitTelemetry(
+      "error",
+      "job.auth_challenge",
+      `Auth challenge detected (exit code ${exitCode})`,
       { commandId, operationId, loopId, jobId: loopId, loopSessionId },
       diagnostics ? { ...diagnostics, exitCode } : { exitCode },
     );

@@ -130,4 +130,27 @@ describe("Observability", () => {
 
     assert.equal(telemetryEvents[0].trace?.computeTargetId, "target-abc");
   });
+
+  test("getTelemetryEmitter emits through the configured telemetry service", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.getTelemetryEmitter().emit({
+      severity: "info",
+      category: "job.recovery.finalize_replayed",
+      message: "Job finalized via boot-recovery",
+      trace: { loopId: "loop-1", jobId: "loop-1" },
+      diagnostics: {
+        logTail: "boot recovered",
+        tokenUsage: { inputTokens: 1, outputTokens: 2 },
+      },
+    });
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "job.recovery.finalize_replayed");
+    assert.equal(telemetryEvents[0].trace?.loopId, "loop-1");
+    assert.equal(telemetryEvents[0].diagnostics?.tokenUsage?.outputTokens, 2);
+  });
 });
