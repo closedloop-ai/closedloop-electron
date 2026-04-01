@@ -235,6 +235,23 @@ export class Observability {
     );
   }
 
+  static jobAuthChallenge(
+    commandId: string | undefined,
+    operationId: string | undefined,
+    loopId: string,
+    exitCode: number,
+    diagnostics?: TelemetryDiagnostics,
+    loopSessionId?: string,
+  ): void {
+    Observability.emitTelemetry(
+      "error",
+      "job.auth_challenge",
+      `Auth challenge detected (exit code ${exitCode})`,
+      { commandId, operationId, loopId, jobId: loopId, loopSessionId },
+      diagnostics ? { ...diagnostics, exitCode } : { exitCode },
+    );
+  }
+
   // --- Preflight (telemetry only) ---
 
   static preflightBinaryNotFound(commandId: string | undefined, operationId: string | undefined, loopId: string): void {

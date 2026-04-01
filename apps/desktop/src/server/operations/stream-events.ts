@@ -1,3 +1,7 @@
+/** Matches known auth/rate-limit/billing error messages from Claude CLI. */
+const AUTH_CHALLENGE_RE =
+  /authentication_error|invalid bearer token|rate_limit_error|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|token.*expired/i;
+
 export type ContentBlock = {
   type: "text" | "tool_use" | "tool_result" | "thinking";
   text?: string;
@@ -45,6 +49,7 @@ export type StreamState = {
   capturedSessionId: string | null;
   usedEditTools: boolean;
   contextPercent: number | null;
+  authChallengeDetected: boolean;
   onSessionId?: (sessionId: string) => void;
 };
 
@@ -55,6 +60,7 @@ export function createStreamState(onSessionId?: (sessionId: string) => void): St
     capturedSessionId: null,
     usedEditTools: false,
     contextPercent: null,
+    authChallengeDetected: false,
     onSessionId
   };
 }
@@ -164,6 +170,9 @@ export function processStreamEvent(
     if (event.is_error) {
       const errorText =
         typeof event.result === "string" ? event.result : "Claude encountered an error";
+      if (AUTH_CHALLENGE_RE.test(errorText)) {
+        state.authChallengeDetected = true;
+      }
       enqueue(JSON.stringify({ type: "error", error: errorText }));
       return;
     }

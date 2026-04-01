@@ -158,6 +158,9 @@ async function streamClaude(
           writeEvent(response, { type: "error", error: error.message });
         },
         onExit: (exitCode) => {
+          if (exitCode !== 0 && streamState.authChallengeDetected && history.claudeSessionId) {
+            history.claudeSessionId = undefined;
+          }
           writeEvent(response, {
             type: "result",
             success: exitCode === 0

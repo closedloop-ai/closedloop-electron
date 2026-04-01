@@ -170,6 +170,9 @@ export function registerTicketChatRoutes(
             writeEvent(context.response, { type: "error", error: error.message });
           },
           onExit: (exitCode) => {
+            if (exitCode !== 0 && streamState.authChallengeDetected && history.sessionId) {
+              history.sessionId = undefined;
+            }
             writeEvent(context.response, {
               type: "result",
               success: exitCode === 0
