@@ -175,6 +175,14 @@ async function postLoopEvent(
 
 const DEFAULT_POLL_MS = 2000;
 const DEFAULT_THROTTLE_MS = 5000;
+const DEFAULT_AUTH_RETRY_BASE_MS = 1000;
+const DEFAULT_AUTH_RETRY_MAX_MS = 30000;
+const DEFAULT_AUTH_RETRY_MAX_COUNT = 8;
+
+type PollOptions = {
+  ignoreBackoff?: boolean;
+  forceAttempt?: boolean;
+};
 
 /**
  * Tail Claude JSONL output and POST summarized `output` events.
@@ -194,8 +202,16 @@ export function startOutputTailer(
 ): { stop: () => void; flush: () => Promise<void> } {
   const pollIntervalMs = Number(process.env.CLOSEDLOOP_TAILER_POLL_MS) || DEFAULT_POLL_MS;
   const throttleMs = Number(process.env.CLOSEDLOOP_TAILER_THROTTLE_MS) || DEFAULT_THROTTLE_MS;
+  const authRetryBaseMs =
+    Number(process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_BASE_MS) || DEFAULT_AUTH_RETRY_BASE_MS;
+  const authRetryMaxMs =
+    Number(process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_MAX_MS) || DEFAULT_AUTH_RETRY_MAX_MS;
+  const authRetryMaxCount =
+    Number(process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_MAX_COUNT) || DEFAULT_AUTH_RETRY_MAX_COUNT;
   let stopped = false;
-  let authFailed = false;
+  let authRetriesExhausted = false;
+  let authRetryAttempt = 0;
+  let nextAuthRetryAt = 0;
   /** Next byte to read from the JSONL file (may point past uncommitted tail in `pendingRemainder`). */
   let readByteOffset = initialByteOffset;
   /** Bytes read from disk not yet removed from `pendingRemainder` (no successful commit for that prefix). */
@@ -211,8 +227,41 @@ export function startOutputTailer(
     }
   }
 
-  async function pollOnce(): Promise<void> {
-    if (stopped || authFailed) return;
+  function resetAuthRetryState(): void {
+    authRetryAttempt = 0;
+    nextAuthRetryAt = 0;
+  }
+
+  function shouldRetryAuthStatus(status: number | null): boolean {
+    if (status === null) return true;
+    if (status === 401 || status === 403) return true;
+    return status >= 500;
+  }
+
+  function scheduleAuthRetry(status: number | null): void {
+    authRetryAttempt += 1;
+    if (authRetryAttempt > authRetryMaxCount) {
+      authRetriesExhausted = true;
+      gatewayLog.warn(
+        "output-tailer",
+        `Stopping tailer for loopId=${loopId}: exhausted auth retries after ${authRetryMaxCount} attempts (last status=${status ?? "network"})`,
+      );
+      return;
+    }
+    const delayMs = Math.min(authRetryMaxMs, authRetryBaseMs * 2 ** (authRetryAttempt - 1));
+    nextAuthRetryAt = Date.now() + delayMs;
+    gatewayLog.warn(
+      "output-tailer",
+      `Retrying output tailer for loopId=${loopId}: attempt=${authRetryAttempt}/${authRetryMaxCount} status=${status ?? "network"} backoffMs=${delayMs}`,
+    );
+  }
+
+  async function pollOnce(options?: PollOptions): Promise<void> {
+    const ignoreBackoff = options?.ignoreBackoff === true;
+    const forceAttempt = options?.forceAttempt === true;
+    if (stopped) return;
+    if (authRetriesExhausted && !forceAttempt) return;
+    if (!ignoreBackoff && nextAuthRetryAt > Date.now()) return;
     if (!existsSync(jsonlPath)) return;
     let fd: number | null = null;
     try {
@@ -230,7 +279,7 @@ export function startOutputTailer(
       if (fd !== null) closeSync(fd);
     }
 
-    while (!stopped && !authFailed) {
+    while (!stopped && (!authRetriesExhausted || forceAttempt)) {
       const newlineIndex = pendingRemainder.lastIndexOf(10); // 0x0a
       if (newlineIndex === -1) break;
 
@@ -268,19 +317,16 @@ export function startOutputTailer(
       }
 
       const status = await postLoopEvent(apiBaseUrl, loopId, token, { type: "output", data: { chunk: lastDisplay } });
-      if (status === 401 || status === 403) {
-        gatewayLog.warn(
-          "output-tailer",
-          `Stopping tailer for loopId=${loopId}: auth rejected (${status})`,
-        );
-        authFailed = true;
-        break;
-      }
       if (status !== null && status >= 200 && status < 300) {
+        resetAuthRetryState();
+        authRetriesExhausted = false;
         pendingRemainder = suffix;
         lastSentAt = now;
         reportCommit(framedEndExclusive);
         continue;
+      }
+      if (shouldRetryAuthStatus(status)) {
+        scheduleAuthRetry(status);
       }
       break;
     }
@@ -299,7 +345,7 @@ export function startOutputTailer(
     stop: () => { stopped = true; clearInterval(intervalId); },
     flush: async () => {
       clearInterval(intervalId);
-      await pollOnce();
+      await pollOnce({ ignoreBackoff: true, forceAttempt: true });
       stopped = true;
     },
   };

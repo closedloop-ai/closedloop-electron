@@ -43,6 +43,9 @@ afterEach(async () => {
   delete process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE;
   delete process.env.CLOSEDLOOP_TAILER_POLL_MS;
   delete process.env.CLOSEDLOOP_TAILER_THROTTLE_MS;
+  delete process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_BASE_MS;
+  delete process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_MAX_MS;
+  delete process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_MAX_COUNT;
 
   for (const server of serversToClose.splice(0)) {
     await server.stop();
@@ -79,6 +82,23 @@ function makeTempDir(): string {
   return dir;
 }
 
+async function waitForCondition(
+  predicate: () => boolean,
+  timeoutMs = 3000,
+  intervalMs = 10,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, intervalMs);
+    });
+  }
+  throw new Error(`waitForCondition timed out after ${timeoutMs}ms`);
+}
+
 function makeGatewayServer(options?: {
   allowedDirs?: string[];
   tmpDir?: string;
@@ -105,9 +125,12 @@ function makeGatewayServer(options?: {
 /**
  * Start an event-capture HTTP server on a random port (port 0).
  * The `collected` array tracks events in sequence order.
- * Pass `outputStatusCode` to simulate the server returning non-200 for output events.
+ * Pass `outputStatusCode` or `outputStatusCodes` to simulate non-200 output event responses.
  */
-async function startEventServer(options?: { outputStatusCode?: number }): Promise<{
+async function startEventServer(options?: {
+  outputStatusCode?: number;
+  outputStatusCodes?: number[];
+}): Promise<{
   port: number;
   getCollected: () => Array<{ seq: number; type: string } & Record<string, unknown>>;
   waitForEvent: (
@@ -121,6 +144,7 @@ async function startEventServer(options?: { outputStatusCode?: number }): Promis
     resolve: (b: Record<string, unknown>) => void;
     reject: (e: Error) => void;
   }> = [];
+  let outputStatusIndex = 0;
 
   const server = http.createServer((req, res) => {
     let raw = "";
@@ -137,10 +161,15 @@ async function startEventServer(options?: { outputStatusCode?: number }): Promis
 
       // Decide status code
       const isOutputEvent = typeof body.type === "string" && body.type === "output";
-      const statusCode =
-        isOutputEvent && options?.outputStatusCode !== undefined
-          ? options.outputStatusCode
-          : 200;
+      let statusCode = 200;
+      if (isOutputEvent) {
+        if (options?.outputStatusCodes && outputStatusIndex < options.outputStatusCodes.length) {
+          statusCode = options.outputStatusCodes[outputStatusIndex];
+          outputStatusIndex += 1;
+        } else if (options?.outputStatusCode !== undefined) {
+          statusCode = options.outputStatusCode;
+        }
+      }
 
       res.statusCode = statusCode;
       res.end("{}");
@@ -557,6 +586,95 @@ describe("T-5.3: Partial JSONL writes", () => {
     assert.ok(
       outputEvents.length >= 1,
       "Stub server should still record the POST attempt for diagnostics",
+    );
+  });
+
+  test("transient auth rejection retries and commits offset after recovery", async () => {
+    process.env.CLOSEDLOOP_TAILER_POLL_MS = "20";
+    process.env.CLOSEDLOOP_TAILER_THROTTLE_MS = "1";
+    process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_BASE_MS = "10";
+    process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_MAX_MS = "10";
+    process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_MAX_COUNT = "4";
+
+    const tmpDir = makeTempDir();
+    const jsonlPath = path.join(tmpDir, "claude-output.jsonl");
+    const eventSrv = await startEventServer({ outputStatusCodes: [403, 200] });
+    const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+    const committedOffsets: number[] = [];
+    const tailer = startOutputTailer(
+      jsonlPath,
+      apiBaseUrl,
+      "auth-retry-loop",
+      "token",
+      0,
+      (o) => {
+        committedOffsets.push(o);
+      },
+    );
+
+    const line =
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"recovered offset commit"}]}}';
+    writeFileSync(jsonlPath, `${line}\n`);
+    try {
+      await eventSrv.waitForEvent(
+        (b) => b.type === "output" && Number((b as { seq?: unknown }).seq) === 1,
+        3_000,
+      );
+      await waitForCondition(() => committedOffsets.length === 1, 3_000);
+
+      const outputEvents = eventSrv.getCollected().filter((e) => e.type === "output");
+      assert.equal(outputEvents.length, 2, `Expected 2 output POSTs, got ${outputEvents.length}`);
+      assert.equal(
+        committedOffsets.length,
+        1,
+        `Expected one replay-safe offset commit after recovery, got ${JSON.stringify(committedOffsets)}`,
+      );
+    } finally {
+      tailer.stop();
+    }
+  });
+
+  test("flush bypasses auth retry backoff and delivers buffered output", async () => {
+    process.env.CLOSEDLOOP_TAILER_POLL_MS = "20";
+    process.env.CLOSEDLOOP_TAILER_THROTTLE_MS = "1";
+    process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_BASE_MS = "1000";
+    process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_MAX_MS = "1000";
+    process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_MAX_COUNT = "4";
+
+    const tmpDir = makeTempDir();
+    const jsonlPath = path.join(tmpDir, "claude-output.jsonl");
+    const eventSrv = await startEventServer({ outputStatusCodes: [403, 200] });
+    const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+    const committedOffsets: number[] = [];
+    const tailer = startOutputTailer(
+      jsonlPath,
+      apiBaseUrl,
+      "flush-auth-retry-loop",
+      "token",
+      0,
+      (o) => {
+        committedOffsets.push(o);
+      },
+    );
+
+    const line =
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"flush should bypass backoff"}]}}';
+    writeFileSync(jsonlPath, `${line}\n`);
+
+    await eventSrv.waitForEvent(
+      (b) => b.type === "output" && Number((b as { seq?: unknown }).seq) === 0,
+      3_000,
+    );
+    await tailer.flush();
+
+    const outputEvents = eventSrv.getCollected().filter((e) => e.type === "output");
+    assert.equal(outputEvents.length, 2, `Expected flush to trigger second output POST, got ${outputEvents.length}`);
+    assert.equal(
+      committedOffsets.length,
+      1,
+      `Expected one replay-safe offset commit after flush recovery, got ${JSON.stringify(committedOffsets)}`,
     );
   });
 
