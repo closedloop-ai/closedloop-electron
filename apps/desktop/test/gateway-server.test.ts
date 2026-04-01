@@ -3557,6 +3557,330 @@ test("plan-loop cancel uses JobStore PID fallback when pid file is stale (post-r
   assert.equal(processAlive, false, "sleeper process should be killed via JobStore PID fallback");
 });
 
+// Helper: create a minimal passing environment for health-check tests
+// (fake binaries, plugin registry, repos config) and return the tmpDir.
+async function createHealthCheckFixture(
+  pythonBinaryContent: string | null
+): Promise<{ tmpDir: string; binDir: string; symphonyDir: string }> {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-python-hc-"));
+  tempPathsToClean.push(tmpDir);
+
+  // Create fake home dir structure
+  const homeDir = path.join(tmpDir, "home");
+  const binDir = path.join(tmpDir, "bin");
+  const symphonyDir = path.join(tmpDir, "symphony-home");
+  await fs.mkdir(homeDir, { recursive: true });
+  await fs.mkdir(binDir, { recursive: true });
+  await fs.mkdir(symphonyDir, { recursive: true });
+
+  // Write fake binaries for git, claude, gh
+  const fakeBinaries: Array<[string, string]> = [
+    ["git", '#!/bin/sh\necho "git version 2.40.0"'],
+    ["claude", '#!/bin/sh\necho "1.5.0"'],
+    [
+      "gh",
+      '#!/bin/sh\nif [ "$1" = "auth" ]; then\n  exit 0\nfi\necho "gh version 2.40.0 (2024-01-01)"\n',
+    ],
+    ["codex", '#!/bin/sh\necho "0.1.0"'],
+  ];
+  for (const [name, content] of fakeBinaries) {
+    const binPath = path.join(binDir, name);
+    await fs.writeFile(binPath, content, { mode: 0o755 });
+  }
+
+  // Optionally write the python3 binary
+  if (pythonBinaryContent !== null) {
+    const pythonPath = path.join(binDir, "python3");
+    await fs.writeFile(pythonPath, pythonBinaryContent, { mode: 0o755 });
+  }
+
+  // Write installed_plugins.json so all plugin checks pass
+  const pluginsDir = path.join(homeDir, ".claude", "plugins");
+  await fs.mkdir(pluginsDir, { recursive: true });
+
+  const pluginNames = ["code", "platform", "judges", "code-review", "self-learning"];
+  const pluginsRecord: Record<string, Array<{ installPath: string; version: string }>> = {};
+  for (const name of pluginNames) {
+    const installPath = path.join(tmpDir, `plugin-${name}`);
+    await fs.mkdir(installPath, { recursive: true });
+    pluginsRecord[`${name}@closedloop-ai`] = [{ installPath, version: "1.0.0" }];
+  }
+  await fs.writeFile(
+    path.join(pluginsDir, "installed_plugins.json"),
+    JSON.stringify({ version: 1, plugins: pluginsRecord }),
+    "utf-8"
+  );
+
+  // Write repos.json so worktree-dir check passes
+  const configDir = path.join(symphonyDir, "config");
+  await fs.mkdir(configDir, { recursive: true });
+  await fs.writeFile(
+    path.join(configDir, "repos.json"),
+    JSON.stringify({
+      settings: { worktreeParentDir: "/tmp/worktrees", worktreeParentDirConfirmed: true },
+    }),
+    "utf-8"
+  );
+
+  return { tmpDir, binDir, symphonyDir };
+}
+
+test("python3 health check: passes for version 3.11.0 (control)", async () => {
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.11.0"\n'
+  );
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "python-hc-control-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; required: boolean; passed: boolean; remediation?: string }>;
+    allRequiredPassed: boolean;
+  };
+
+  const pythonCheck = body.checks.find((c) => c.id === "python3");
+  assert.ok(pythonCheck, "python3 check should be present");
+  assert.equal(pythonCheck.passed, true, "python3 3.11.0 should pass");
+  assert.equal(pythonCheck.required, true, "python3 check should be required");
+  assert.equal(pythonCheck.remediation, undefined, "no remediation on passing check");
+  assert.equal(body.allRequiredPassed, true, "all required checks should pass");
+});
+
+test("python3 health check: fails when python3 not found", async () => {
+  // Pass null to skip writing the python3 binary
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(null);
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "python-hc-notfound-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; required: boolean; passed: boolean; remediation?: string }>;
+    allRequiredPassed: boolean;
+  };
+
+  const pythonCheck = body.checks.find((c) => c.id === "python3");
+  assert.ok(pythonCheck, "python3 check should be present");
+  assert.equal(pythonCheck.passed, false, "python3 not found should fail");
+  assert.equal(pythonCheck.required, true, "python3 check should be required");
+  assert.ok(
+    pythonCheck.remediation?.includes("Install Python 3.10 or later"),
+    "remediation should mention Install Python 3.10 or later"
+  );
+  assert.equal(body.allRequiredPassed, false, "allRequiredPassed should be false when python3 missing");
+});
+
+test("python3 health check: fails for version below floor (3.9.7)", async () => {
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.9.7"\n'
+  );
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "python-hc-belowfloor-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; required: boolean; passed: boolean; remediation?: string }>;
+    allRequiredPassed: boolean;
+  };
+
+  const pythonCheck = body.checks.find((c) => c.id === "python3");
+  assert.ok(pythonCheck, "python3 check should be present");
+  assert.equal(pythonCheck.passed, false, "python3 3.9.7 should fail");
+  assert.equal(pythonCheck.required, true, "python3 check should be required");
+  assert.ok(
+    (pythonCheck as { error?: string }).error?.includes("below the required minimum"),
+    "error should indicate version is below minimum"
+  );
+  assert.ok(
+    pythonCheck.remediation?.includes("Install Python 3.10 or later"),
+    "remediation should mention Install Python 3.10 or later"
+  );
+  assert.equal(body.allRequiredPassed, false, "allRequiredPassed should be false for below-floor python");
+});
+
+test("python3 health check: fails for suffixed below-floor version (3.9rc1)", async () => {
+  // This exercises the NaN-via-split path that the regex fix closes:
+  // VERSION_REGEX captures "3.9rc1" as a valid version, but Number("9rc1") === NaN
+  // and NaN < 10 is false, so the old split(".").map(Number) code would have passed this.
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.9rc1"\n'
+  );
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "python-hc-suffixed-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; required: boolean; passed: boolean; remediation?: string }>;
+    allRequiredPassed: boolean;
+  };
+
+  const pythonCheck = body.checks.find((c) => c.id === "python3");
+  assert.ok(pythonCheck, "python3 check should be present");
+  assert.equal(pythonCheck.passed, false, "python3 3.9rc1 should fail");
+  assert.equal(pythonCheck.required, true, "python3 check should be required");
+  assert.ok(
+    (pythonCheck as { error?: string }).error?.includes("below the required minimum"),
+    "error should indicate version is below minimum, not 'Unable to determine'"
+  );
+  assert.ok(
+    pythonCheck.remediation?.includes("Install Python 3.10 or later"),
+    "remediation should mention Install Python 3.10 or later"
+  );
+  assert.equal(body.allRequiredPassed, false, "allRequiredPassed should be false for suffixed below-floor version");
+});
+
+test("python3 health check: passes for version with extra suffix (3.10.1.post1)", async () => {
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.10.1.post1"\n'
+  );
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "python-hc-extrasuffix-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; required: boolean; passed: boolean; error?: string; remediation?: string }>;
+    allRequiredPassed: boolean;
+  };
+
+  const pythonCheck = body.checks.find((c) => c.id === "python3");
+  assert.ok(pythonCheck, "python3 check should be present");
+  assert.equal(pythonCheck.passed, true, "python3 3.10.1.post1 should pass");
+  assert.equal(pythonCheck.required, true, "python3 check should be required");
+  assert.equal(pythonCheck.error, undefined, "no error on passing check");
+  assert.equal(body.allRequiredPassed, true, "all required checks should pass");
+});
+
+test("python3 health check: fails for unparseable version string", async () => {
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "custom-build"\n'
+  );
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "python-hc-unparseable-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; required: boolean; passed: boolean; error?: string; remediation?: string }>;
+    allRequiredPassed: boolean;
+  };
+
+  const pythonCheck = body.checks.find((c) => c.id === "python3");
+  assert.ok(pythonCheck, "python3 check should be present");
+  assert.equal(pythonCheck.passed, false, "unparseable python version should fail");
+  assert.equal(pythonCheck.required, true, "python3 check should be required");
+  assert.ok(
+    (pythonCheck as { error?: string }).error?.includes("Unable to determine Python version"),
+    "error should indicate unable to determine version"
+  );
+  assert.equal(body.allRequiredPassed, false, "allRequiredPassed should be false for unparseable version");
+});
+
 async function findAvailablePort(excluded: number[] = []): Promise<number> {
   return await new Promise<number>((resolve, reject) => {
     const probe = net.createServer();

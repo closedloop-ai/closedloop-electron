@@ -215,17 +215,44 @@ async function checkCodex(processManager: ProcessManager): Promise<CheckResult> 
 }
 
 async function checkPython3(processManager: ProcessManager): Promise<CheckResult> {
+  const REMEDIATION = "Install Python 3.10 or later: brew install python@3.13";
   try {
     const output = await runCommand(processManager, "python3", ["--version"]);
-    return { id: "python3", label: "python3", required: false, passed: true, version: parseVersion(output) };
+    const version = parseVersion(output);
+    if (!version) {
+      return {
+        id: "python3",
+        label: "python3",
+        required: true,
+        passed: false,
+        error: "Unable to determine Python version",
+        remediation: REMEDIATION,
+      };
+    }
+    // parseVersion guarantees \d+\.\d+ so this always matches
+    const m = /^(\d+)\.(\d+)/.exec(version)!;
+    const major = Number(m[1]);
+    const minor = Number(m[2]);
+    if (major < 3 || (major === 3 && minor < 10)) {
+      return {
+        id: "python3",
+        label: "python3",
+        required: true,
+        passed: false,
+        version,
+        error: `Python ${version} is below the required minimum of 3.10`,
+        remediation: REMEDIATION,
+      };
+    }
+    return { id: "python3", label: "python3", required: true, passed: true, version };
   } catch {
     return {
       id: "python3",
       label: "python3",
-      required: false,
+      required: true,
       passed: false,
       error: "Not found",
-      remediation: "Optional — enables learnings processing"
+      remediation: REMEDIATION,
     };
   }
 }
