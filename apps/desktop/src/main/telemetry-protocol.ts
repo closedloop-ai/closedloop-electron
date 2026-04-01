@@ -43,7 +43,7 @@ export interface TelemetryEventPayload {
   severity: TelemetrySeverity;
   category: TelemetryCategory;
   message: string;
-  schemaVersion?: number;
+  schemaVersion?: string;
   timestamp?: string;
   trace?: TelemetryTraceContext;
   diagnostics?: TelemetryDiagnostics;
@@ -54,7 +54,7 @@ export interface DesktopTelemetryEvent extends ProtocolEnvelope {
   severity: TelemetrySeverity;
   category: TelemetryCategory;
   message: string;
-  schemaVersion: number;
+  schemaVersion: string;
   timestamp: string;
   trace?: TelemetryTraceContext;
   diagnostics?: TelemetryDiagnostics;
