@@ -1664,6 +1664,7 @@ async function handleProcessCompletion(
     } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
       await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
+    loopTokenStore?.deleteLoopToken(loopId);
     return;
   }
 
@@ -1704,6 +1705,7 @@ async function handleProcessCompletion(
               () => {},
             );
           }
+          loopTokenStore?.deleteLoopToken(loopId);
           return;
         }
 
@@ -1761,6 +1763,7 @@ async function handleProcessCompletion(
               () => {},
             );
           }
+          loopTokenStore?.deleteLoopToken(loopId);
           return;
         }
 
@@ -1904,6 +1907,7 @@ async function handleProcessCompletion(
       if (usedTempDir) {
         fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
       }
+      loopTokenStore?.deleteLoopToken(loopId);
       return;
     }
 
@@ -1928,6 +1932,7 @@ async function handleProcessCompletion(
       ) {
         await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
       }
+      loopTokenStore?.deleteLoopToken(loopId);
       return;
     }
 
@@ -2025,6 +2030,7 @@ async function handleProcessCompletion(
         undefined,
         legacySessionId,
       );
+      loopTokenStore?.deleteLoopToken(loopId);
     }
 
     // Clean up temp claude workdir after all reads and uploads are complete
@@ -2867,9 +2873,10 @@ async function handleLoopRequest(
       worktreePath: worktreeDir,
     });
   } finally {
-    // Clean up sentinel if we never reached a successful spawn
+    // Clean up sentinel and persisted token if we never reached a successful spawn
     if (!spawnedSuccessfully) {
       runningLoops.delete(body.loopId);
+      loopTokenStore?.deleteLoopToken(body.loopId);
     }
   }
 }

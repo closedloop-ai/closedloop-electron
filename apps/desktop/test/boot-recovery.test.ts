@@ -677,3 +677,52 @@ test("finalizes recovered live job after process exits", async () => {
   );
   service.dispose();
 });
+
+test("sweepOrphanedTokens removes tokens for finalized and unknown loops, keeps active", async () => {
+  const jobStore = createStore("boot-recovery-sweep");
+  const loopTokenStore = createLoopTokenStore("boot-recovery-sweep-tokens");
+
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  // (a) Cloud-finalized terminal job — token should be swept
+  const finalizedJob = createJob({
+    id: "loop-finalized",
+    loopId: "loop-finalized",
+    status: "COMPLETED",
+    claudeWorkDir,
+    cloudFinalizedAt: new Date().toISOString(),
+    finalStatusPersistedAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+  });
+  jobStore.upsert(finalizedJob);
+  loopTokenStore.setLoopToken("loop-finalized", "token-finalized");
+
+  // (b) Loop ID not in job store at all — token should be swept
+  loopTokenStore.setLoopToken("loop-unknown", "token-unknown");
+
+  // (c) Still-running job — token must be preserved
+  const runningJob = createJob({
+    id: "loop-active",
+    loopId: "loop-active",
+    status: "RUNNING",
+    pid: process.pid,
+    claudeWorkDir,
+  });
+  jobStore.upsert(runningJob);
+  loopTokenStore.setLoopToken("loop-active", "token-active");
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: () => {} },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4010",
+    loopTokenStore,
+  });
+  await service.run([]);
+  service.dispose();
+
+  assert.equal(loopTokenStore.getLoopToken("loop-finalized"), null);
+  assert.equal(loopTokenStore.getLoopToken("loop-unknown"), null);
+  assert.equal(loopTokenStore.getLoopToken("loop-active"), "token-active");
+});

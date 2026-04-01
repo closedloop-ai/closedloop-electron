@@ -5,7 +5,7 @@ import {
 } from "../server/operations/symphony-loop.js";
 import { isProcessRunning } from "../server/operations/symphony-utils.js";
 import { gatewayLog } from "./gateway-logger.js";
-import type { JobStore, LocalJob } from "./job-store.js";
+import { isTerminalJobStatus, type JobStore, type LocalJob } from "./job-store.js";
 import type { LoopTokenStore } from "./loop-token-store.js";
 import {
   finalizeLoopFromRuntime,
@@ -46,6 +46,7 @@ export class BootRecoveryService {
     if (this.disposed) return;
     await this.finalizeDeadJobs(deadJobs);
     await this.reattachLiveJobs();
+    this.sweepOrphanedTokens();
   }
 
   async reattachLiveJobs(): Promise<void> {
@@ -355,6 +356,17 @@ export class BootRecoveryService {
       handle.tailer?.stop();
     }
     this.liveHandles = [];
+  }
+
+  private sweepOrphanedTokens(): void {
+    const { jobStore, loopTokenStore } = this.deps;
+    const tokenLoopIds = loopTokenStore.listLoopIds();
+    for (const loopId of tokenLoopIds) {
+      const job = jobStore.getByLoopId(loopId);
+      if (!job || (isTerminalJobStatus(job.status) && job.cloudFinalizedAt)) {
+        loopTokenStore.deleteLoopToken(loopId);
+      }
+    }
   }
 
   private trackBackgroundTask(task: Promise<void>): Promise<void> {

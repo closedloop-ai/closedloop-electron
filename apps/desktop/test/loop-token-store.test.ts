@@ -42,3 +42,17 @@ test("LoopTokenStore delete is idempotent", () => {
   store.deleteLoopToken("missing");
   assert.equal(store.getLoopToken("missing"), null);
 });
+
+test("LoopTokenStore listLoopIds reflects set and delete", () => {
+  const store = new LoopTokenStore({
+    cwd: tempRoot,
+    name: "lt-list",
+    safeStorage: createTestLoopTokenSafeStorage(),
+  });
+  assert.deepEqual(store.listLoopIds(), []);
+  store.setLoopToken("loop-a", "token-a");
+  store.setLoopToken("loop-b", "token-b");
+  assert.deepEqual(store.listLoopIds().sort(), ["loop-a", "loop-b"]);
+  store.deleteLoopToken("loop-a");
+  assert.deepEqual(store.listLoopIds(), ["loop-b"]);
+});

@@ -119,4 +119,8 @@ export class LoopTokenStore {
     delete map[loopId];
     this.setEncryptedMap(map);
   }
+
+  listLoopIds(): string[] {
+    return Object.keys(this.getEncryptedMap());
+  }
 }
