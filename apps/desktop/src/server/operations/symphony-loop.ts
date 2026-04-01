@@ -1531,23 +1531,13 @@ function executeGitOperations(
     const templatePath = path.join(worktreeDir, ".github", "pull_request_template.md");
     try {
       const template = readFileSync(templatePath, "utf-8");
-      // Auto-fill checkboxes for automated loop PRs
-      const filled = template
-        .replace(
-          /- \[ \] No new functionality introduced.*/,
-          "- [x] No new functionality introduced (bug fix, refactor, docs, tests only)",
-        )
-        .replace(
-          /- \[ \] Backend only change.*/,
-          "- [x] Backend only change",
-        );
       prBody = [
         `Automated PR created by ClosedLoop.AI loop runner.`,
         "",
         `**Loop:** \`${loopId}\``,
         `**Command:** \`${command}\``,
         "",
-        filled,
+        template,
         "",
         metadataFooter,
       ].join("\n");
