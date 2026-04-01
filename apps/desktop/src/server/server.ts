@@ -18,6 +18,7 @@ import {
   type GatewayApprovalResult,
 } from "./router.js";
 import type { WorktreeProvider } from "./operations/symphony-loop.js";
+import type { RetrySpawnDeps } from "../main/spawn-retry.js";
 
 export interface DesktopGatewayServerOptions {
   host: string;
@@ -43,6 +44,7 @@ export interface DesktopGatewayServerOptions {
   prodOriginsOnly?: boolean;
   jobStore?: JobStore;
   worktreeProvider?: WorktreeProvider;
+  retrySpawnDeps?: RetrySpawnDeps;
   onUnexpectedClose?: () => void;
 }
 
@@ -80,6 +82,7 @@ export class DesktopGatewayServer {
       prodOriginsOnly: this.options.prodOriginsOnly,
       jobStore: this.options.jobStore,
       worktreeProvider: this.options.worktreeProvider,
+      retrySpawnDeps: this.options.retrySpawnDeps,
     });
   }
 
@@ -102,6 +105,7 @@ export class DesktopGatewayServer {
     prodOriginsOnly?: boolean,
     jobStore?: JobStore,
     onUnexpectedClose?: () => void,
+    retrySpawnDeps?: RetrySpawnDeps,
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -124,6 +128,7 @@ export class DesktopGatewayServer {
       prodOriginsOnly,
       jobStore,
       onUnexpectedClose,
+      retrySpawnDeps,
     });
   }
 
