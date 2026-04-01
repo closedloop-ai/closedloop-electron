@@ -6,7 +6,7 @@ import {
 
 /** Enriched event with schemaVersion and timestamp always populated by TelemetryService. */
 export type EnrichedTelemetryEvent = TelemetryEventPayload & {
-  schemaVersion: number;
+  schemaVersion: string;
   timestamp: string;
 };
 
@@ -93,9 +93,17 @@ export class TelemetryService {
 
     return {
       ...event,
-      schemaVersion: 1,
+      schemaVersion: "1",
       timestamp: new Date().toISOString(),
-      trace,
+      trace: {
+        commandId: "",
+        operationId: "",
+        computeTargetId: this.computeTargetId ?? "",
+        ...(this.gatewaySessionId
+          ? { gatewaySessionId: this.gatewaySessionId }
+          : {}),
+        ...trace,
+      },
       diagnostics,
     };
   }
