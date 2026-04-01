@@ -1,4 +1,6 @@
+import { execSync } from "node:child_process";
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -419,6 +421,18 @@ const artifactDeps = (jobStore: JobStore) => ({
   apiBaseUrl: "http://127.0.0.1:12345",
 });
 
+/** Minimal git repo for branchName fallback tests (requires git on PATH). */
+function initGitRepoAt(dir: string, branchName: string): void {
+  execSync("git init", { cwd: dir, stdio: "pipe" });
+  execSync("git config user.email test@example.com", { cwd: dir, stdio: "pipe" });
+  execSync("git config user.name Test", { cwd: dir, stdio: "pipe" });
+  execSync("git config commit.gpgsign false", { cwd: dir, stdio: "pipe" });
+  writeFileSync(path.join(dir, "README.md"), "init\n", "utf-8");
+  execSync("git add README.md", { cwd: dir, stdio: "pipe" });
+  execSync("git commit -m init", { cwd: dir, stdio: "pipe" });
+  execSync(`git branch -M ${branchName}`, { cwd: dir, stdio: "pipe" });
+}
+
 test("tryUploadArtifacts POSTs artifacts and sets artifactsUploadedAt on success", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
@@ -578,6 +592,130 @@ test("tryPostCompletedEvent adds EXECUTE PR fields from artifacts", async () => 
   assert.match(body, /"prNumber":1/);
   assert.match(body, /"branchName":"feat\/x"/);
   assert.match(body, /"has_changes":true/);
+});
+
+test("tryPostCompletedEvent includes sessionId from session-id.txt", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "session-id.txt"), "claude-sess-abc\n", "utf-8");
+
+  const jobStore = createStore("step-complete-session");
+  const job = createBaseJob({ claudeWorkDir });
+  jobStore.upsert(job);
+
+  await tryPostCompletedEvent(job, "PLAN", claudeWorkDir, { plan: {} }, [], artifactDeps(jobStore));
+
+  const body = fetchCalls[0]?.body ?? "";
+  assert.match(body, /"sessionId":"claude-sess-abc"/);
+});
+
+test("tryPostCompletedEvent adds branchName from worktree git for non-EXECUTE", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const worktreeDir = path.join(tempRoot, "repo", "wt-plan");
+  await fs.mkdir(worktreeDir, { recursive: true });
+  initGitRepoAt(worktreeDir, "plan-worktree-branch");
+
+  const jobStore = createStore("step-complete-branch-plan");
+  const job = createBaseJob({ claudeWorkDir, worktreeDir });
+  jobStore.upsert(job);
+
+  await tryPostCompletedEvent(job, "PLAN", claudeWorkDir, { plan: {} }, [], artifactDeps(jobStore));
+
+  const body = fetchCalls[0]?.body ?? "";
+  assert.match(body, /"branchName":"plan-worktree-branch"/);
+});
+
+test("tryPostCompletedEvent EXECUTE uses git branch when executionResult omits branch_name", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const worktreeDir = path.join(tempRoot, "repo", "wt-exec");
+  await fs.mkdir(worktreeDir, { recursive: true });
+  initGitRepoAt(worktreeDir, "execute-git-fallback");
+
+  const jobStore = createStore("step-complete-exec-fallback");
+  const job = createBaseJob({
+    claudeWorkDir,
+    worktreeDir,
+    command: "EXECUTE",
+  });
+  jobStore.upsert(job);
+
+  const artifacts = {
+    executionResult: {
+      pr_url: "https://example.com/pr/2",
+      pr_number: 2,
+      has_changes: true,
+    },
+  };
+
+  await tryPostCompletedEvent(job, "EXECUTE", claudeWorkDir, artifacts, [], artifactDeps(jobStore));
+
+  const body = fetchCalls[0]?.body ?? "";
+  assert.match(body, /"branchName":"execute-git-fallback"/);
+});
+
+test("tryPostCompletedEvent EXECUTE prefers executionResult branch_name over git HEAD", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const worktreeDir = path.join(tempRoot, "repo", "wt-exec-pref");
+  await fs.mkdir(worktreeDir, { recursive: true });
+  initGitRepoAt(worktreeDir, "git-head-branch");
+
+  const jobStore = createStore("step-complete-exec-prefer-artifact");
+  const job = createBaseJob({
+    claudeWorkDir,
+    worktreeDir,
+    command: "EXECUTE",
+  });
+  jobStore.upsert(job);
+
+  const artifacts = {
+    executionResult: {
+      pr_url: "https://example.com/pr/3",
+      pr_number: 3,
+      branch_name: "feat/from-artifact",
+      has_changes: true,
+    },
+  };
+
+  await tryPostCompletedEvent(job, "EXECUTE", claudeWorkDir, artifacts, [], artifactDeps(jobStore));
+
+  const body = fetchCalls[0]?.body ?? "";
+  assert.match(body, /"branchName":"feat\/from-artifact"/);
+  assert.ok(!body.includes('"branchName":"git-head-branch"'));
+});
+
+test("tryUploadArtifacts sends sessionId and branchName in metadata", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ tasks: [] }));
+  await fs.writeFile(path.join(claudeWorkDir, "session-id.txt"), "upload-sess-xyz\n", "utf-8");
+
+  const worktreeDir = path.join(tempRoot, "repo", "wt-upload");
+  await fs.mkdir(worktreeDir, { recursive: true });
+  initGitRepoAt(worktreeDir, "upload-md-branch");
+
+  const jobStore = createStore("step-upload-metadata");
+  const job = createBaseJob({ claudeWorkDir, worktreeDir });
+  jobStore.upsert(job);
+
+  const warnings: string[] = [];
+  const { failed } = await tryUploadArtifacts(
+    job,
+    "PLAN",
+    claudeWorkDir,
+    worktreeDir,
+    warnings,
+    artifactDeps(jobStore),
+  );
+
+  assert.equal(failed, false);
+  const uploadCall = fetchCalls.find((c) => c.url.includes("/upload-artifacts"));
+  assert.ok(uploadCall);
+  const parsed = JSON.parse(uploadCall.body) as { metadata?: Record<string, unknown> };
+  assert.equal(parsed.metadata?.sessionId, "upload-sess-xyz");
+  assert.equal(parsed.metadata?.branchName, "upload-md-branch");
 });
 
 test("tryPostCompletedEvent records EVENT_POST_FAILED when HTTP fails", async () => {

@@ -1,3 +1,4 @@
+import { execSync } from "node:child_process";
 import crypto from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -45,6 +46,120 @@ export function parseJobWarnings(job: Pick<LocalJob, "warning">): string[] {
 
 type ArtifactUploadDeps = Pick<LoopFinalizerDeps, "jobStore" | "apiAuthToken" | "apiBaseUrl">;
 
+/** Read Claude session id from the loop workdir (matches legacy symphony-loop completion path). */
+function readLoopSessionId(claudeWorkDir: string): string | undefined {
+  const raw = readTextFile(path.join(claudeWorkDir, "session-id.txt"));
+  const trimmed = raw?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : undefined;
+}
+
+/** Best-effort current branch for a git worktree (matches symphony-loop getCurrentBranchImpl). */
+function getCurrentBranchFromWorktree(worktreeDir: string): string | null {
+  try {
+    const branch = execSync("git rev-parse --abbrev-ref HEAD", {
+      cwd: worktreeDir,
+      encoding: "utf-8",
+      stdio: "pipe",
+      timeout: 5_000,
+    }).trim();
+    return branch || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Session + branch fields shared by artifact upload metadata and completed-event `result`
+ * so reboot replay and live exit stay compatible with the pre-finalizer desktop shape.
+ */
+function getCompletionCorrelationFields(
+  job: LocalJob,
+  command: string,
+  claudeWorkDir: string,
+  artifacts: Record<string, unknown>,
+): { sessionId?: string; branchName?: string } {
+  const sessionId = readLoopSessionId(claudeWorkDir);
+  let branchName: string | undefined;
+
+  if (command === "EXECUTE" && artifacts.executionResult) {
+    const execResult = artifacts.executionResult as Record<string, unknown>;
+    const fromArtifact = execResult.branch_name;
+    if (typeof fromArtifact === "string" && fromArtifact.trim().length > 0) {
+      branchName = fromArtifact.trim();
+    }
+  }
+
+  if (!branchName && job.worktreeDir) {
+    const fromGit = getCurrentBranchFromWorktree(job.worktreeDir);
+    if (fromGit) {
+      branchName = fromGit;
+    }
+  }
+
+  return { sessionId, branchName };
+}
+
+/** Build `completed` event `result` object (legacy JobStore + desktop compatibility). */
+function buildCompletedEventResult(
+  job: LocalJob,
+  command: string,
+  claudeWorkDir: string,
+  artifacts: Record<string, unknown>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {
+    exitCode: job.exitCode ?? 0,
+    subtype: command.toLowerCase(),
+  };
+
+  if (command === "EXECUTE" && artifacts.executionResult) {
+    const execResult = artifacts.executionResult as Record<string, unknown>;
+    result.prUrl = execResult.pr_url;
+    result.prNumber = execResult.pr_number;
+    result.branchName = execResult.branch_name;
+    result.has_changes = execResult.has_changes ?? false;
+  }
+
+  const { sessionId, branchName } = getCompletionCorrelationFields(
+    job,
+    command,
+    claudeWorkDir,
+    artifacts,
+  );
+
+  const missingBranch =
+    result.branchName == null ||
+    (typeof result.branchName === "string" && result.branchName.trim().length === 0);
+  if (missingBranch && branchName) {
+    result.branchName = branchName;
+  }
+
+  if (sessionId) {
+    result.sessionId = sessionId;
+  }
+
+  return result;
+}
+
+function buildArtifactUploadMetadata(
+  job: LocalJob,
+  command: string,
+  claudeWorkDir: string,
+  artifacts: Record<string, unknown>,
+): Record<string, unknown> {
+  const { sessionId, branchName } = getCompletionCorrelationFields(
+    job,
+    command,
+    claudeWorkDir,
+    artifacts,
+  );
+  return {
+    finishedAt: new Date().toISOString(),
+    command: command.toLowerCase(),
+    ...(sessionId ? { sessionId } : {}),
+    ...(branchName ? { branchName } : {}),
+  };
+}
+
 export async function tryUploadArtifacts(
   job: LocalJob,
   command: string,
@@ -60,10 +175,7 @@ export async function tryUploadArtifacts(
 
   const uploadResult = await uploadArtifacts(deps.apiBaseUrl, job.loopId, deps.apiAuthToken, {
     artifacts,
-    metadata: {
-      finishedAt: new Date().toISOString(),
-      command: command.toLowerCase(),
-    },
+    metadata: buildArtifactUploadMetadata(job, command, claudeWorkDir, artifacts),
   });
   if (!uploadResult.success) {
     warnings.push("ARTIFACT_UPLOAD_FAILED");
@@ -93,18 +205,7 @@ export async function tryPostCompletedEvent(
   }
 
   const tokensUsed = parseTokenUsage(claudeWorkDir);
-  const result: Record<string, unknown> = {
-    exitCode: job.exitCode ?? 0,
-    subtype: command.toLowerCase(),
-  };
-
-  if (command === "EXECUTE" && artifacts.executionResult) {
-    const execResult = artifacts.executionResult as Record<string, unknown>;
-    result.prUrl = execResult.pr_url;
-    result.prNumber = execResult.pr_number;
-    result.branchName = execResult.branch_name;
-    result.has_changes = execResult.has_changes ?? false;
-  }
+  const result = buildCompletedEventResult(job, command, claudeWorkDir, artifacts);
 
   const completedEvent: Record<string, unknown> = {
     type: "completed",
