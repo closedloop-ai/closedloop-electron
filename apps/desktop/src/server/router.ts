@@ -32,6 +32,7 @@ import { registerSymphonyPlanRoutes } from "./operations/symphony-plan.js";
 import { registerSymphonySessionRoutes } from "./operations/symphony-sessions.js";
 import { registerSymphonyStatusRoutes } from "./operations/symphony-status.js";
 import { registerSymphonyInteractiveRoutes } from "./operations/symphony-interactive.js";
+import type { RetrySpawnDeps } from "../main/spawn-retry.js";
 import { registerSymphonyPlanLoopRoutes } from "./operations/symphony-plan-loop.js";
 import { registerSymphonyUploadRoutes } from "./operations/symphony-upload.js";
 import { registerTerminalChatRoutes } from "./operations/terminal-chat.js";
@@ -61,6 +62,7 @@ export interface GatewayRouterOptions {
   jobStore?: JobStore;
   worktreeProvider?: WorktreeProvider;
   loopTokenStore?: LoopTokenStore;
+  retrySpawnDeps?: RetrySpawnDeps;
 }
 
 export interface GatewayActivityEvent {
@@ -169,7 +171,13 @@ export class GatewayRouter {
     registerSymphonyStatusRoutes(this.operationDispatcher, this.options.getAllowedDirectories, this.options.jobStore);
     registerSymphonyInteractiveRoutes(
       this.operationDispatcher,
-      this.options.getAllowedDirectories
+      this.options.getAllowedDirectories,
+      this.options.retrySpawnDeps ?? {
+        log: (_level, msg) => console.warn('[spawn-retry fallback]', msg),
+        refreshTray: () => {},
+        isShuttingDown: () => false,
+        delay: (ms) => new Promise((r) => setTimeout(r, ms)),
+      }
     );
     if (this.options.getApiKey && this.options.getApiOrigin) {
       const getApiKey = this.options.getApiKey;

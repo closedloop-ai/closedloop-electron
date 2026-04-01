@@ -1,7 +1,23 @@
 import { app, nativeTheme } from "electron";
 import { DesktopApplication } from "./app.js";
+import { handleUncaughtException, handleUnhandledRejection } from "./error-handlers.js";
+import { gatewayLog } from "./gateway-logger.js";
 
 app.setName("ClosedLoop");
+
+process.on("uncaughtException", (err) =>
+  handleUncaughtException(err, {
+    log: (msg) => gatewayLog.error("uncaught", msg),
+    exit: (code) => app.exit(code),
+  })
+);
+
+process.on("unhandledRejection", (reason) =>
+  handleUnhandledRejection(reason, {
+    log: (msg) => gatewayLog.warn("unhandled-rejection", msg),
+    exit: (code) => app.exit(code),
+  })
+);
 
 const desktopApplication = new DesktopApplication();
 
