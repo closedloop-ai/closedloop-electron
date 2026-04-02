@@ -9,7 +9,7 @@ import {
   renameSync,
   statSync,
   unlinkSync,
-  writeFileSync
+  writeFileSync,
 } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -36,7 +36,11 @@ import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { getShellEnv, getShellPath } from "../shell-path.js";
 import { startOutputTailer } from "./output-tailer.js";
-import { findPluginScript, findPluginVersions, getPluginCacheRoot } from "./plugin-cache.js";
+import {
+  findPluginScript,
+  findPluginVersions,
+  getPluginCacheRoot,
+} from "./plugin-cache.js";
 import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import {
   expandHome,
@@ -57,10 +61,7 @@ export interface WorktreeProvider {
     branchName: string,
     baseBranch: string,
   ): Promise<void>;
-  findWorktreeForBranch(
-    repoPath: string,
-    branchName: string,
-  ): string | null;
+  findWorktreeForBranch(repoPath: string, branchName: string): string | null;
   removeWorktree(
     worktreeDir: string,
     repoPath: string,
@@ -196,25 +197,29 @@ export const PLAN_ARTIFACT_TYPES = ["IMPLEMENTATION_PLAN", "plan"] as const;
 
 /**
  * Write prd.md to a work directory from a list of artifacts and an optional
- * explicit prompt. Priority: prompt > PRD artifact > FEATURE artifact.
+ * explicit prompt.
+ *
+ * The PRD artifact content is always preferred for prd.md when present.
+ * Fallback priority: PRD artifact > FEATURE artifact > prompt.
+ *
+ * When a prompt is provided alongside a PRD artifact, both are written:
+ * - prd.md  ← artifact content (what Claude needs to read)
+ * - prompt.md ← decompose/evaluate instructions (written by caller)
  */
 export async function writePrdArtifact(
   workDir: string,
   artifacts: LoopArtifact[],
-  prompt?: string
+  prompt?: string,
 ): Promise<void> {
-  let prdContent = prompt ?? null;
+  const prdArtifact = artifacts.find(
+    (a) => a.type === "PRD" || a.type === "prd",
+  );
+  const featureArtifact = prdArtifact
+    ? null
+    : artifacts.find((a) => a.type === "FEATURE" || a.type === "artifact");
+  const source = prdArtifact ?? featureArtifact;
 
-  if (!prdContent) {
-    const prdArtifact = artifacts.find((a) => a.type === "PRD" || a.type === "prd");
-    const featureArtifact = prdArtifact
-      ? null
-      : artifacts.find((a) => a.type === "FEATURE" || a.type === "artifact");
-    const source = prdArtifact ?? featureArtifact;
-    if (source?.content) {
-      prdContent = source.content;
-    }
-  }
+  const prdContent = source?.content || prompt || "";
 
   if (prdContent) {
     await fs.writeFile(path.join(workDir, "prd.md"), prdContent);
@@ -224,10 +229,10 @@ export async function writePrdArtifact(
 /** Internal helper: writes plan.md to workDir from the first matching plan artifact. */
 async function writePlanFileToWorkDir(
   workDir: string,
-  artifacts: LoopArtifact[]
+  artifacts: LoopArtifact[],
 ): Promise<void> {
   const artifact = artifacts.find((a) =>
-    (PLAN_ARTIFACT_TYPES as readonly string[]).includes(a.type)
+    (PLAN_ARTIFACT_TYPES as readonly string[]).includes(a.type),
   );
   if (artifact?.content) {
     await fs.writeFile(path.join(workDir, "plan.md"), artifact.content);
@@ -238,7 +243,7 @@ async function writePlanFileToWorkDir(
 export async function writePlanArtifact(
   workDir: string,
   artifacts: LoopArtifact[],
-  prompt?: string
+  prompt?: string,
 ): Promise<void> {
   await writePrdArtifact(workDir, artifacts, prompt);
   await writePlanFileToWorkDir(workDir, artifacts);
@@ -247,7 +252,7 @@ export async function writePlanArtifact(
 /** Write plan.md to a work directory from a list of artifacts. */
 export async function writeCodeArtifact(
   workDir: string,
-  artifacts: LoopArtifact[]
+  artifacts: LoopArtifact[],
 ): Promise<void> {
   await writePlanFileToWorkDir(workDir, artifacts);
 }
@@ -256,20 +261,31 @@ export async function writeCodeArtifact(
  * Read outputs produced by an EVALUATE_{type} loop iteration.
  * Returns undefined values for missing or unreadable files.
  */
-function readEvaluateOutputs(workDir: string, artifactType: string): Record<string, unknown> {
-  const judges = readJsonFileSync(path.join(workDir, `${artifactType}-judges.json`));
+function readEvaluateOutputs(
+  workDir: string,
+  artifactType: string,
+): Record<string, unknown> {
+  const judges = readJsonFileSync(
+    path.join(workDir, `${artifactType}-judges.json`),
+  );
   return { [`${artifactType}Judges`]: judges ?? undefined };
 }
 
-export function readEvaluatePrdOutputs(workDir: string): Record<string, unknown> {
+export function readEvaluatePrdOutputs(
+  workDir: string,
+): Record<string, unknown> {
   return readEvaluateOutputs(workDir, "prd");
 }
 
-export function readEvaluatePlanOutputs(workDir: string): Record<string, unknown> {
+export function readEvaluatePlanOutputs(
+  workDir: string,
+): Record<string, unknown> {
   return readEvaluateOutputs(workDir, "plan");
 }
 
-export function readEvaluateCodeOutputs(workDir: string): Record<string, unknown> {
+export function readEvaluateCodeOutputs(
+  workDir: string,
+): Record<string, unknown> {
   return readEvaluateOutputs(workDir, "code");
 }
 
@@ -617,7 +633,10 @@ async function uploadArtifacts(
       };
     }
     loopLog(loopId, `Upload success: ${resp.status}`);
-    gatewayLog.debug("loop-upload", `Artifact upload to ${url}: ${resp.status}`);
+    gatewayLog.debug(
+      "loop-upload",
+      `Artifact upload to ${url}: ${resp.status}`,
+    );
     return { success: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -747,12 +766,14 @@ async function removeWorktreeImpl(
 /** Read the current branch name from a worktree directory. */
 function getCurrentBranchImpl(worktreeDir: string): string | null {
   try {
-    return execSync("git rev-parse --abbrev-ref HEAD", {
-      cwd: worktreeDir,
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 5_000,
-    }).trim() || null;
+    return (
+      execSync("git rev-parse --abbrev-ref HEAD", {
+        cwd: worktreeDir,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 5_000,
+      }).trim() || null
+    );
   } catch {
     return null;
   }
@@ -793,7 +814,10 @@ async function downloadAttachmentsToDisk(
       const diskName = `${attachment.id}-${safeName}`;
       const diskPath = path.resolve(attachmentsDir, diskName);
 
-      if (!diskPath.startsWith(attachmentsDir + path.sep) && diskPath !== attachmentsDir) {
+      if (
+        !diskPath.startsWith(attachmentsDir + path.sep) &&
+        diskPath !== attachmentsDir
+      ) {
         console.warn(
           `[downloadAttachmentsToDisk] Attachment ${attachment.id} resolved path escapes attachmentsDir, skipping`,
         );
@@ -1082,7 +1106,9 @@ export const SESSION_LIMIT_PATTERN =
  * Returns the error text (e.g. "Prompt is too long") or null if not found
  * or if the error is unrelated to context limits.
  */
-export function detectSessionLimitFromJsonl(claudeWorkDir: string): string | null {
+export function detectSessionLimitFromJsonl(
+  claudeWorkDir: string,
+): string | null {
   const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
   if (!existsSync(outputFile)) {
     return null;
@@ -1134,7 +1160,9 @@ export const AUTH_CHALLENGE_PATTERN =
  * message matches a known auth/rate-limit/billing pattern.
  * Returns the error text or null if not found.
  */
-export function detectAuthChallengeFromJsonl(claudeWorkDir: string): string | null {
+export function detectAuthChallengeFromJsonl(
+  claudeWorkDir: string,
+): string | null {
   const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
   if (!existsSync(outputFile)) {
     return null;
@@ -1303,25 +1331,36 @@ async function attemptLlmCommit(
   // nvm/homebrew/local bin directories. getResolvedClaudePath() caches the
   // result for the process lifetime.
   const claudeBinary = getResolvedClaudePath();
-  const spawnArgs = ["-p", prompt, "--allowedTools", "Bash,Read,Write,Glob,Grep"];
+  const spawnArgs = [
+    "-p",
+    prompt,
+    "--allowedTools",
+    "Bash,Read,Write,Glob,Grep",
+  ];
   loopLog(
     loopId,
-    `LLM commit spawn: binary=${claudeBinary} args=["-p", "<prompt omitted>", "--allowedTools", "Bash,Read,Write,Glob,Grep"] cwd=${worktreeDir} PATH=${spawnEnv.PATH ?? "(unset)"}`
+    `LLM commit spawn: binary=${claudeBinary} args=["-p", "<prompt omitted>", "--allowedTools", "Bash,Read,Write,Glob,Grep"] cwd=${worktreeDir} PATH=${spawnEnv.PATH ?? "(unset)"}`,
   );
 
   let child: ReturnType<typeof spawn>;
   try {
-    child = spawn(
-      claudeBinary,
-      spawnArgs,
-      { cwd: worktreeDir, detached: true, stdio: "pipe", env: spawnEnv },
-    );
+    child = spawn(claudeBinary, spawnArgs, {
+      cwd: worktreeDir,
+      detached: true,
+      stdio: "pipe",
+      env: spawnEnv,
+    });
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code ?? "unknown";
-    const enoentDetail = code === "ENOENT"
-      ? ` — '${claudeBinary}' binary not found; PATH=${spawnEnv.PATH ?? "(unset)"}`
-      : "";
-    loopError(loopId, `LLM commit spawn failed [code=${code}${enoentDetail}]`, err);
+    const enoentDetail =
+      code === "ENOENT"
+        ? ` — '${claudeBinary}' binary not found; PATH=${spawnEnv.PATH ?? "(unset)"}`
+        : "";
+    loopError(
+      loopId,
+      `LLM commit spawn failed [code=${code}${enoentDetail}]`,
+      err,
+    );
     return null;
   }
 
@@ -1466,10 +1505,15 @@ async function attemptLlmCommit(
     child.on("error", (err: Error) => {
       clearTimeout(killTimer);
       const code = (err as NodeJS.ErrnoException).code ?? "unknown";
-      const enoentDetail = code === "ENOENT"
-        ? ` — '${claudeBinary}' binary not found; PATH=${spawnEnv.PATH ?? "(unset)"}`
-        : "";
-      loopError(loopId, `LLM commit process error [code=${code}${enoentDetail}]:`, err);
+      const enoentDetail =
+        code === "ENOENT"
+          ? ` — '${claudeBinary}' binary not found; PATH=${spawnEnv.PATH ?? "(unset)"}`
+          : "";
+      loopError(
+        loopId,
+        `LLM commit process error [code=${code}${enoentDetail}]:`,
+        err,
+      );
       resolve(null);
     });
 
@@ -1586,7 +1630,11 @@ function executeGitOperations(
     const metadataFooter = `---\nLoop ID: ${loopId}\nCommand: ${command}${artifactLine}`;
 
     let prBody: string;
-    const templatePath = path.join(worktreeDir, ".github", "pull_request_template.md");
+    const templatePath = path.join(
+      worktreeDir,
+      ".github",
+      "pull_request_template.md",
+    );
     try {
       const template = readFileSync(templatePath, "utf-8");
       prBody = [
@@ -2173,7 +2221,9 @@ async function handleProcessCompletion(
         loopTokenStore,
       };
       await finalizeLoopFromRuntime(existingJob, "live-exit", finalizerDeps);
-      const sessionId = readTextFile(path.join(claudeWorkDir, "session-id.txt"));
+      const sessionId = readTextFile(
+        path.join(claudeWorkDir, "session-id.txt"),
+      );
       const normalizedSessionId = sessionId?.trim();
       Observability.jobCompleted(
         commandId ?? existingJob.commandId,
@@ -2333,31 +2383,42 @@ async function handleLoopRequest(
 
   if (body.command === "EVALUATE_PLAN") {
     const hasPrdArtifact = body.artifacts.some((a: LoopArtifact) =>
-      ["PRD", "prd", "FEATURE", "artifact"].includes(a.type)
+      ["PRD", "prd", "FEATURE", "artifact"].includes(a.type),
     );
     const hasPlanArtifact = body.artifacts.some((a: LoopArtifact) =>
-      (PLAN_ARTIFACT_TYPES as readonly string[]).includes(a.type)
+      (PLAN_ARTIFACT_TYPES as readonly string[]).includes(a.type),
     );
     if ((!hasPrdArtifact && !body.prompt) || !hasPlanArtifact) {
-      json(context, 400, { error: "EVALUATE_PLAN requires a PRD artifact (or prompt) and an implementation plan artifact" });
+      json(context, 400, {
+        error:
+          "EVALUATE_PLAN requires a PRD artifact (or prompt) and an implementation plan artifact",
+      });
       return;
     }
     if (!body.localRepoPath && !body.repo?.fullName) {
-      json(context, 400, { error: "EVALUATE_PLAN requires a repository (repo.fullName or localRepoPath)" });
+      json(context, 400, {
+        error:
+          "EVALUATE_PLAN requires a repository (repo.fullName or localRepoPath)",
+      });
       return;
     }
   }
 
   if (body.command === "EVALUATE_CODE") {
     const hasPlanArtifact = body.artifacts.some((a: LoopArtifact) =>
-      (PLAN_ARTIFACT_TYPES as readonly string[]).includes(a.type)
+      (PLAN_ARTIFACT_TYPES as readonly string[]).includes(a.type),
     );
     if (!hasPlanArtifact) {
-      json(context, 400, { error: "EVALUATE_CODE requires an implementation plan artifact" });
+      json(context, 400, {
+        error: "EVALUATE_CODE requires an implementation plan artifact",
+      });
       return;
     }
     if (!body.localRepoPath && !body.repo?.fullName) {
-      json(context, 400, { error: "EVALUATE_CODE requires a repository (repo.fullName or localRepoPath)" });
+      json(context, 400, {
+        error:
+          "EVALUATE_CODE requires a repository (repo.fullName or localRepoPath)",
+      });
       return;
     }
   }
@@ -2489,7 +2550,10 @@ async function handleLoopRequest(
         await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
           type: "error",
           code: "ARTIFACT_WRITE_FAILED",
-          message: artifactErr instanceof Error ? artifactErr.message : String(artifactErr),
+          message:
+            artifactErr instanceof Error
+              ? artifactErr.message
+              : String(artifactErr),
         });
         json(context, 500, { error: "Failed to write artifacts to workdir" });
         return;
@@ -2556,7 +2620,10 @@ async function handleLoopRequest(
         } else if (body.parentLoopId) {
           // Fallback: try parent's loopId-based branch (pre-slug deployments or missing slug)
           const parentBranch = `symphony/loop-${slugifyLoopId(body.parentLoopId)}`;
-          const parentWorktree = wt.findWorktreeForBranch(repoPath, parentBranch);
+          const parentWorktree = wt.findWorktreeForBranch(
+            repoPath,
+            parentBranch,
+          );
           if (parentWorktree) {
             worktreeDir = parentWorktree;
             loopLog(
@@ -2596,9 +2663,20 @@ async function handleLoopRequest(
       await fs.mkdir(claudeWorkDir, { recursive: true });
 
       if (body.command === "PLAN") {
-        await writeArtifactsForPlan(claudeWorkDir, body.artifacts, body.prompt, body.userContext, body.attachments);
+        await writeArtifactsForPlan(
+          claudeWorkDir,
+          body.artifacts,
+          body.prompt,
+          body.userContext,
+          body.attachments,
+        );
       } else if (body.command === "EXECUTE") {
-        await writeArtifactsForExecuteOrAmend(claudeWorkDir, body.artifacts, undefined, body.attachments);
+        await writeArtifactsForExecuteOrAmend(
+          claudeWorkDir,
+          body.artifacts,
+          undefined,
+          body.attachments,
+        );
       } else {
         // REQUEST_CHANGES
         await writeArtifactsForExecuteOrAmend(
@@ -2686,11 +2764,7 @@ async function handleLoopRequest(
           .catch(() => {});
       }
       if (body.command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
-        await wt.removeWorktree(
-          worktreeDir,
-          expandedRepoPath,
-          body.loopId,
-        );
+        await wt.removeWorktree(worktreeDir, expandedRepoPath, body.loopId);
       }
     };
 
@@ -2709,14 +2783,22 @@ async function handleLoopRequest(
     if (usesClaude) {
       try {
         const whichEnv = { ...process.env, PATH: await getShellPath() };
-        execSync("which claude", { stdio: "pipe", timeout: 5000, env: whichEnv });
+        execSync("which claude", {
+          stdio: "pipe",
+          timeout: 5000,
+          env: whichEnv,
+        });
       } catch {
         await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
           type: "error",
           code: "BINARY_NOT_FOUND",
           message: "claude CLI not found in PATH",
         });
-        Observability.preflightBinaryNotFound(commandId, operationId, body.loopId);
+        Observability.preflightBinaryNotFound(
+          commandId,
+          operationId,
+          body.loopId,
+        );
         await cleanupOnError();
         json(context, 500, { error: "claude CLI not found in PATH" });
         return;
@@ -2729,7 +2811,11 @@ async function handleLoopRequest(
           code: "SCRIPT_NOT_FOUND",
           message: "run-loop.sh not found in plugin cache",
         });
-        Observability.preflightScriptNotFound(commandId, operationId, body.loopId);
+        Observability.preflightScriptNotFound(
+          commandId,
+          operationId,
+          body.loopId,
+        );
         json(context, 500, { error: "run-loop.sh not found in plugin cache" });
         return;
       }
@@ -2764,7 +2850,12 @@ async function handleLoopRequest(
         code: "SPAWN_FAILED",
         message: `Cannot open log file: ${msg}`,
       });
-      Observability.preflightSpawnFailed(commandId, operationId, body.loopId, `Cannot open log file: ${msg}`);
+      Observability.preflightSpawnFailed(
+        commandId,
+        operationId,
+        body.loopId,
+        `Cannot open log file: ${msg}`,
+      );
       await cleanupOnError();
       json(context, 500, { error: `Cannot open log file: ${msg}` });
       return;
@@ -2833,7 +2924,10 @@ async function handleLoopRequest(
           env: spawnEnv,
         });
         child.unref();
-      } else if (body.command === "EVALUATE_PLAN" || body.command === "EVALUATE_CODE") {
+      } else if (
+        body.command === "EVALUATE_PLAN" ||
+        body.command === "EVALUATE_CODE"
+      ) {
         // EVALUATE_PLAN and EVALUATE_CODE share identical spawn logic,
         // differing only in the artifact type passed to run-judges.
         // Unlike EVALUATE_PRD (where REPO_PATH is optional—only added when a repo is linked),
@@ -2847,7 +2941,11 @@ async function handleLoopRequest(
         const promptFile = path.join(claudeWorkDir, `${label}-prompt.txt`);
         await fs.writeFile(promptFile, prompt);
 
-        const pipeline = buildClaudePipeline(stdinClaudeArgs, claudeWorkDir, promptFile);
+        const pipeline = buildClaudePipeline(
+          stdinClaudeArgs,
+          claudeWorkDir,
+          promptFile,
+        );
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: claudeWorkDir,
           detached: true,
@@ -2939,7 +3037,12 @@ async function handleLoopRequest(
         code: "SPAWN_FAILED",
         message: msg,
       });
-      Observability.preflightSpawnFailed(commandId, operationId, body.loopId, msg);
+      Observability.preflightSpawnFailed(
+        commandId,
+        operationId,
+        body.loopId,
+        msg,
+      );
       await cleanupOnError();
       json(context, 500, { error: `Failed to spawn process: ${msg}` });
       return;
@@ -3065,7 +3168,8 @@ async function handleLoopRequest(
         updatedAt: now,
         startedAt: existing?.startedAt ?? now,
         apiBaseUrl,
-        lastObservedJsonlOffset: existing?.lastObservedJsonlOffset ?? jsonlPreSpawnOffset,
+        lastObservedJsonlOffset:
+          existing?.lastObservedJsonlOffset ?? jsonlPreSpawnOffset,
       });
     }
 
