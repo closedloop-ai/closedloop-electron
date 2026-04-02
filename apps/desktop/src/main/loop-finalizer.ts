@@ -408,7 +408,8 @@ function readArtifacts(
     };
   }
   if (command === "DECOMPOSE") {
-    const features = readJsonFileSync(path.join(claudeWorkDir, "features.json"));
+    const featuresDir = worktreeDir ?? claudeWorkDir;
+    const features = readJsonFileSync(path.join(featuresDir, "features.json"));
     return { features: features ?? undefined };
   }
   if (command === "EVALUATE_PRD") {

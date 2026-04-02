@@ -407,6 +407,28 @@ describe("T-5.2: writePrdArtifact", () => {
     assert.equal(content, "Fallback PRD content");
   });
 
+  test("(d) PRD artifact takes priority over prompt", async () => {
+    const tmpDir = makeTempDir();
+    await writePrdArtifact(
+      tmpDir,
+      [{ type: "PRD", content: "The real PRD content" }],
+      "This is the prompt, not the PRD",
+    );
+    const prdPath = path.join(tmpDir, "prd.md");
+    assert.ok(existsSync(prdPath), "prd.md should exist");
+    const content = await fs.readFile(prdPath, "utf-8");
+    assert.equal(content, "The real PRD content", "Artifact content should win over prompt");
+  });
+
+  test("(e) prompt used as fallback when no artifact present", async () => {
+    const tmpDir = makeTempDir();
+    await writePrdArtifact(tmpDir, [], "Prompt-as-fallback content");
+    const prdPath = path.join(tmpDir, "prd.md");
+    assert.ok(existsSync(prdPath), "prd.md should exist");
+    const content = await fs.readFile(prdPath, "utf-8");
+    assert.equal(content, "Prompt-as-fallback content");
+  });
+
   test("prompt without repo contains skill --workdir runDir but not REPO_PATH=", async () => {
     // Verify evaluate-prd-prompt.txt matches harness-agent EVALUATE_PRD when no target repo.
     const tmpDir = makeTempDir();
