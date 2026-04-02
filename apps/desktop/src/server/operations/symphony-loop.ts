@@ -1412,7 +1412,7 @@ async function attemptLlmCommit(
     const killTimer = setTimeout(() => {
       if (!killed) {
         killed = true;
-        loopError(loopId, "LLM commit timed out after 90s — sending SIGTERM");
+        loopError(loopId, "LLM commit timed out after 30m — sending SIGTERM");
         onTimeout?.();
         try {
           process.kill(-pid, "SIGTERM");
@@ -1429,7 +1429,7 @@ async function attemptLlmCommit(
           }
         }, 5_000);
       }
-    }, 90_000);
+    }, 30 * 60_000);
 
     const stdoutChunks: Buffer[] = [];
     const stderrChunks: Buffer[] = [];
@@ -1977,7 +1977,7 @@ async function handleProcessCompletion(
           getAllowedDirectories,
           () => {
             warnings.push(
-              sanitizeErrorMessage("LLM commit timed out after 90s"),
+              sanitizeErrorMessage("LLM commit timed out after 30m"),
             );
           },
           jobStore,
