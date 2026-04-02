@@ -1458,7 +1458,7 @@ function executeGitOperations(
     });
 
     const commitPrefix = artifactSlug ? `${artifactSlug}: ` : "";
-    const fallbackTitle = `${commitPrefix}Automated changes from loop ${shortId}`;
+    const fallbackTitle = `${commitPrefix}Symphony: ${command} -- loop ${shortId}`;
     execSync(`git commit -m ${shellEscape(fallbackTitle)}`, {
       cwd: worktreeDir,
       stdio: "pipe",
@@ -1497,9 +1497,25 @@ function executeGitOperations(
     const metadataFooter = `---\nLoop ID: ${loopId}\nCommand: ${command}${artifactLine}`;
 
     let prBody: string;
-    const templatePath = path.join(worktreeDir, ".github", "pull_request_template.md");
+    // Read the PR template from the target repo's base branch (not the
+    // worktree branch which may not have .github/ checked out).
+    let template: string | null = null;
     try {
-      const template = readFileSync(templatePath, "utf-8");
+      template = execSync(
+        `git show origin/${shellEscape(baseBranch)}:.github/pull_request_template.md`,
+        { cwd: worktreeDir, encoding: "utf-8", stdio: "pipe", timeout: 5_000 },
+      );
+    } catch {
+      // No template in the base branch — fall through
+    }
+    try {
+      // Fall back to worktree filesystem if git show failed
+      if (!template) {
+        template = readFileSync(
+          path.join(worktreeDir, ".github", "pull_request_template.md"),
+          "utf-8",
+        );
+      }
       prBody = [
         `Automated PR created by ClosedLoop.AI loop runner.`,
         "",
