@@ -68,3 +68,30 @@ export function isPluginInstalled(pluginName: string, registryPath?: string): bo
     return false;
   }
 }
+
+/**
+ * Read installed plugin versions from the manifest.
+ * Returns a map of "name@closedloop-ai" -> version string.
+ */
+export function getInstalledPluginVersions(registryPath?: string): Record<string, string> {
+  registryPath ??= path.join(os.homedir(), ".claude", "plugins", "installed_plugins.json");
+  try {
+    const data = JSON.parse(readFileSync(registryPath, "utf-8")) as InstalledPluginsFile;
+    const result: Record<string, string> = {};
+    if (!data.plugins) {
+      return result;
+    }
+    for (const [key, entries] of Object.entries(data.plugins)) {
+      if (!key.endsWith("@closedloop-ai") || !entries || entries.length === 0) {
+        continue;
+      }
+      const lastEntry = entries.at(-1);
+      if (lastEntry) {
+        result[key] = lastEntry.version ?? "installed";
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
