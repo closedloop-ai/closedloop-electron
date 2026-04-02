@@ -1788,6 +1788,8 @@ async function handleProcessCompletion(
   loopTokenStore?: LoopTokenStore,
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
+  // Temp-dir commands (DECOMPOSE, EVALUATE_*) need the entire temp tree removed on cleanup.
+  const tempCleanupDir = usedTempDir ? (worktreeDir ?? claudeWorkDir) : null;
 
   loopLog(loopId, `Process exited with code ${exitCode}, command=${command}`);
 
@@ -1914,8 +1916,8 @@ async function handleProcessCompletion(
         completedAt: now,
       });
     }
-    if (usedTempDir) {
-      fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+    if (tempCleanupDir) {
+      fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(() => {});
     } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
       await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
@@ -1955,8 +1957,8 @@ async function handleProcessCompletion(
               completedAt: now,
             });
           }
-          if (usedTempDir) {
-            fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(
+          if (tempCleanupDir) {
+            fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(
               () => {},
             );
           }
@@ -2013,8 +2015,8 @@ async function handleProcessCompletion(
               completedAt: now,
             });
           }
-          if (usedTempDir) {
-            fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(
+          if (tempCleanupDir) {
+            fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(
               () => {},
             );
           }
@@ -2074,7 +2076,7 @@ async function handleProcessCompletion(
         }
       }
     } else if (command === "DECOMPOSE") {
-      artifacts = readDecomposeOutputs(claudeWorkDir);
+      artifacts = readDecomposeOutputs(worktreeDir ?? claudeWorkDir);
     } else if (command === "EVALUATE_PRD") {
       artifacts = readEvaluatePrdOutputs(claudeWorkDir);
     } else if (command === "EVALUATE_PLAN") {
@@ -2159,8 +2161,8 @@ async function handleProcessCompletion(
           });
         }
       }
-      if (usedTempDir) {
-        fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+      if (tempCleanupDir) {
+        fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(() => {});
       }
       loopTokenStore?.deleteLoopToken(loopId);
       return;
@@ -2178,8 +2180,8 @@ async function handleProcessCompletion(
           completedAt: now,
         });
       }
-      if (usedTempDir) {
-        fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+      if (tempCleanupDir) {
+        fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(() => {});
       } else if (
         command === "GENERATE_PRD" &&
         worktreeDir &&
@@ -2291,8 +2293,8 @@ async function handleProcessCompletion(
     }
 
     // Clean up temp claude workdir after all reads and uploads are complete
-    if (usedTempDir) {
-      fs.rm(claudeWorkDir, { recursive: true, force: true }).catch(() => {});
+    if (tempCleanupDir) {
+      fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(() => {});
     } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
       await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
@@ -2520,13 +2522,44 @@ async function handleLoopRequest(
     let claudeWorkDir: string;
     let usedTempDir = false;
 
-    if (
-      body.command === "DECOMPOSE" ||
+    if (body.command === "DECOMPOSE") {
+      // DECOMPOSE uses a single temp dir for everything: context pack, logs, and output.
+      // No repo/worktree needed — artifacts go to .closedloop-ai/context/artifacts/
+      // so Claude's prompt can reference them by relative path.
+      usedTempDir = true;
+      const tmpDir = path.join(
+        os.tmpdir(),
+        `symphony-decompose-${body.loopId.slice(0, 8)}`,
+      );
+      await fs.rm(tmpDir, { recursive: true, force: true });
+      await fs.mkdir(tmpDir, { recursive: true });
+      claudeWorkDir = tmpDir;
+      try {
+        await writeArtifactsForGeneratePrd(
+          tmpDir,
+          body.artifacts,
+          body.prompt ?? "Decompose the PRD into features.",
+          body.repo,
+        );
+      } catch (artifactErr) {
+        await fs.rm(tmpDir, { recursive: true, force: true });
+        await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+          type: "error",
+          code: "ARTIFACT_WRITE_FAILED",
+          message:
+            artifactErr instanceof Error
+              ? artifactErr.message
+              : String(artifactErr),
+        });
+        json(context, 500, { error: "Failed to write artifacts to workdir" });
+        return;
+      }
+    } else if (
       body.command === "EVALUATE_PRD" ||
       body.command === "EVALUATE_PLAN" ||
       body.command === "EVALUATE_CODE"
     ) {
-      // DECOMPOSE, EVALUATE_PRD, EVALUATE_PLAN, and EVALUATE_CODE: use temp dir, no worktree needed.
+      // EVALUATE_PRD, EVALUATE_PLAN, and EVALUATE_CODE: use temp dir, no worktree needed.
       // Temp dir is intentionally exempt from assertPathAllowed.
       usedTempDir = true;
       const label = body.command.toLowerCase().replace(/_/g, "-");
@@ -2538,7 +2571,7 @@ async function handleLoopRequest(
       await fs.mkdir(tmpDir, { recursive: true });
       claudeWorkDir = tmpDir;
       try {
-        if (body.command === "DECOMPOSE" || body.command === "EVALUATE_PRD") {
+        if (body.command === "EVALUATE_PRD") {
           await writePrdArtifact(claudeWorkDir, body.artifacts, body.prompt);
         } else if (body.command === "EVALUATE_PLAN") {
           await writePlanArtifact(claudeWorkDir, body.artifacts, body.prompt);
@@ -2757,10 +2790,11 @@ async function handleLoopRequest(
     }
 
     /** Clean up temporary resources on early-return error paths. */
+    const tempRootDir = usedTempDir ? (worktreeDir ?? claudeWorkDir) : null;
     const cleanupOnError = async (): Promise<void> => {
-      if (usedTempDir) {
+      if (tempRootDir) {
         await fs
-          .rm(claudeWorkDir, { recursive: true, force: true })
+          .rm(tempRootDir, { recursive: true, force: true })
           .catch(() => {});
       }
       if (body.command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
@@ -2882,14 +2916,13 @@ async function handleLoopRequest(
       const stdinClaudeArgs = ["-p", "-", ...baseClaudeArgs.slice(1)];
 
       if (body.command === "DECOMPOSE") {
-        // DECOMPOSE: write prompt to file and pass via stdin to avoid E2BIG
-        const prdContent =
-          readTextFile(path.join(claudeWorkDir, "prd.md")) ?? "";
-        const decomposePrompt =
-          body.prompt ??
-          `Decompose the following PRD into features:\n\n${prdContent}`;
+        // DECOMPOSE: prompt piped via stdin, cwd is the temp dir which contains
+        // .closedloop-ai/context/artifacts/ so Claude can find them by relative path.
         const promptFile = path.join(claudeWorkDir, "decompose-prompt.txt");
-        await fs.writeFile(promptFile, decomposePrompt);
+        await fs.writeFile(
+          promptFile,
+          body.prompt ?? "Decompose the PRD into features.",
+        );
 
         const pipeline = buildClaudePipeline(
           stdinClaudeArgs,
