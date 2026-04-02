@@ -1122,6 +1122,58 @@ export function isSessionLimitError(logTail: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Auth challenge detection
+// ---------------------------------------------------------------------------
+
+/** Pattern that matches known auth/rate-limit/billing error messages from Claude CLI. */
+export const AUTH_CHALLENGE_PATTERN =
+  /authentication_error|invalid bearer token|rate_limit_error|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|token.*expired/i;
+
+/**
+ * Scan claude-output.jsonl for a result record with `is_error: true` whose
+ * message matches a known auth/rate-limit/billing pattern.
+ * Returns the error text or null if not found.
+ */
+export function detectAuthChallengeFromJsonl(claudeWorkDir: string): string | null {
+  const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
+  if (!existsSync(outputFile)) {
+    return null;
+  }
+  try {
+    const content = readFileSync(outputFile, "utf-8");
+    for (const line of content.split("\n")) {
+      if (!line.trim()) {
+        continue;
+      }
+      try {
+        const entry = JSON.parse(line) as Record<string, unknown>;
+        if (
+          entry.type === "result" &&
+          entry.is_error === true &&
+          typeof entry.result === "string" &&
+          AUTH_CHALLENGE_PATTERN.test(entry.result)
+        ) {
+          return entry.result;
+        }
+      } catch {
+        // skip malformed lines
+      }
+    }
+  } catch {
+    // file read error
+  }
+  return null;
+}
+
+/**
+ * Check whether a log tail string contains Claude CLI auth/rate-limit/billing
+ * error patterns.
+ */
+export function isAuthChallengeError(logTail: string): boolean {
+  return AUTH_CHALLENGE_PATTERN.test(logTail);
+}
+
+// ---------------------------------------------------------------------------
 // LLM-assisted commit (EXECUTE only)
 // ---------------------------------------------------------------------------
 
@@ -1166,7 +1218,7 @@ async function attemptLlmCommit(
     : "No artifact slug is available — use a descriptive title without a prefix.";
 
   const prompt = [
-    `You are a commit assistant finalizing work from a Symphony ${command} loop.`,
+    `You are a commit assistant finalizing work from a ClosedLoop.AI ${command} loop.`,
     "",
     slugInstruction,
     "",
@@ -1177,7 +1229,7 @@ async function attemptLlmCommit(
     "2. Stage all changed/new files EXCEPT the .claude/ and .closedloop-ai/ directories:",
     "   git add -- . ':!.claude' ':!.closedloop-ai'",
     "3. Write a clear, descriptive commit message based on the actual code changes",
-    "   - Summarize WHAT changed and WHY (not just 'Symphony loop output')",
+    "   - Summarize WHAT changed and WHY (not just 'ClosedLoop.AI loop output')",
     "   - Use conventional commit style if the changes have a clear category",
     "   - If an artifact slug is provided, prefix the commit message with it",
     "4. Run `git commit` (do NOT use --no-verify). If pre-commit hooks fail, attempt to fix",
@@ -1186,13 +1238,17 @@ async function attemptLlmCommit(
     "5. Push to origin with: git push -u origin HEAD",
     "6. Check if a PR already exists for this branch: gh pr list --head <branch>",
     "   - If NO PR exists:",
-    "     a. Write a file called pr-body.md with:",
-    "        - A summary section describing what changed and why (2-4 sentences)",
-    "        - Then the following metadata footer on its own lines:",
+    "     a. Check if the repo has a PR template at .github/pull_request_template.md",
+    "        If a template exists, use it as the base for the PR body — fill in every section appropriately.",
+    "        If no template exists, write a summary of what changed and why.",
+    "     b. Append the following metadata footer on its own lines at the end:",
     `        ${footer}`,
-    `     b. Create the PR: gh pr create --label symphony --base ${shellEscape(safeBranch)} --title '<slug-prefixed descriptive title>' --body-file pr-body.md`,
+    "     c. Write the complete PR body to pr-body.md",
+    `     d. Create the PR: gh pr create --label symphony --base ${shellEscape(safeBranch)} --title '<slug-prefixed descriptive title>' --body-file pr-body.md`,
     "   - If a PR already exists, get its URL with: gh pr view --json url,number",
-    `     Then ensure the metadata footer is present: write pr-body.md with the footer above and run gh pr edit <number> --body-file pr-body.md`,
+    "     Fetch the current body: gh pr view <number> --json body --jq .body",
+    "     If any required template sections are missing, append them.",
+    `     Write the full updated body to pr-body.md and run: gh pr edit <number> --body-file pr-body.md`,
     "7. ONLY after a successful commit AND push, write this EXACT JSON file:",
     "   File path: execution-result.json",
     "   ```json",
@@ -1520,13 +1576,40 @@ function executeGitOperations(
       timeout: 10_000,
     }).trim();
 
-    // Build PR body with metadata footer, written to a temp file to avoid
+    // Build PR body using the repo's PR template if one exists, otherwise
+    // fall back to a simple metadata body. Written to a temp file to avoid
     // shell escaping issues with special characters (--body-file approach).
     const artifactLine =
       artifactSlug && webAppOrigin
         ? `\nArtifact: ${webAppOrigin}/implementation-plans/${artifactSlug}`
         : "";
-    const prBody = `Loop ID: ${loopId}\nCommand: ${command}${artifactLine}`;
+    const metadataFooter = `---\nLoop ID: ${loopId}\nCommand: ${command}${artifactLine}`;
+
+    let prBody: string;
+    const templatePath = path.join(worktreeDir, ".github", "pull_request_template.md");
+    try {
+      const template = readFileSync(templatePath, "utf-8");
+      prBody = [
+        `Automated PR created by ClosedLoop.AI loop runner.`,
+        "",
+        `**Loop:** \`${loopId}\``,
+        `**Command:** \`${command}\``,
+        "",
+        template,
+        "",
+        metadataFooter,
+      ].join("\n");
+    } catch {
+      // No template found — use simple metadata body
+      prBody = [
+        `Automated PR created by ClosedLoop.AI loop runner.`,
+        "",
+        `**Loop:** \`${loopId}\``,
+        `**Command:** \`${command}\``,
+        "",
+        metadataFooter,
+      ].join("\n");
+    }
     const bodyFile = path.join(
       worktreeDir,
       ".closedloop-ai",
@@ -1608,10 +1691,11 @@ function executeGitOperations(
           timeout: 15_000,
         },
       ).trim();
-      // Only update if the footer isn't already present
+      // Only update if the footer isn't already present — append only the
+      // metadata footer, not the full template body, to avoid duplication.
       if (!currentBody.includes(`Loop ID: ${loopId}`)) {
         const updatedBody = currentBody
-          ? `${currentBody}\n\n---\n${prBody}`
+          ? `${currentBody}\n\n${metadataFooter}`
           : prBody;
         writeFileSync(bodyFile, updatedBody);
         execSync(
@@ -1699,6 +1783,14 @@ async function handleProcessCompletion(
       jsonlError !== null ||
       (diagnostics.logTail != null && isSessionLimitError(diagnostics.logTail));
 
+    // Detect auth/rate-limit/billing errors from JSONL or stderr.
+    const jsonlAuthError = detectAuthChallengeFromJsonl(claudeWorkDir);
+    const isAuthChallenge =
+      !isContextLimit &&
+      (jsonlAuthError !== null ||
+        (diagnostics.logTail != null &&
+          isAuthChallengeError(diagnostics.logTail)));
+
     if (!wasCancelled) {
       if (isContextLimit) {
         const limitMsg = jsonlError ?? "Context limit exceeded";
@@ -1711,6 +1803,30 @@ async function handleProcessCompletion(
           type: "error",
           code: "CONTEXT_LIMIT_EXCEEDED",
           message: limitMsg,
+          loopId,
+          tokenUsage: diagnostics.tokenUsage,
+          logTail: diagnostics.logTail,
+          diagnosticsVersion: diagnostics.diagnosticsVersion,
+        });
+      } else if (isAuthChallenge) {
+        const authMsg = jsonlAuthError ?? "Claude auth challenge detected";
+        loopError(loopId, `Auth challenge detected: ${authMsg}`);
+        gatewayLog.error(
+          "loop-harness",
+          `${command} hit auth challenge, loopId=${loopId}: ${authMsg}`,
+        );
+        Observability.jobAuthChallenge(
+          commandId ?? existingJob?.commandId,
+          operationId ?? existingJob?.operationId,
+          loopId,
+          exitCode,
+          diagnostics,
+          failureSessionId,
+        );
+        await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+          type: "error",
+          code: "AUTH_CHALLENGE",
+          message: authMsg,
           loopId,
           tokenUsage: diagnostics.tokenUsage,
           logTail: diagnostics.logTail,
@@ -1742,7 +1858,9 @@ async function handleProcessCompletion(
         liveActivity:
           !wasCancelled && isContextLimit
             ? "Context limit exceeded"
-            : undefined,
+            : !wasCancelled && isAuthChallenge
+              ? `Auth challenge: ${jsonlAuthError ?? "authentication error"}`
+              : undefined,
         exitCode,
         updatedAt: now,
         completedAt: now,
