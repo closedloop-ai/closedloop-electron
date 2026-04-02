@@ -1788,8 +1788,7 @@ async function handleProcessCompletion(
   loopTokenStore?: LoopTokenStore,
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
-  // For DECOMPOSE, worktreeDir is the temp root and claudeWorkDir is nested inside it.
-  // Cleanup should remove the temp root to avoid leaving orphaned directories.
+  // Temp-dir commands (DECOMPOSE, EVALUATE_*) need the entire temp tree removed on cleanup.
   const tempCleanupDir = usedTempDir ? (worktreeDir ?? claudeWorkDir) : null;
 
   loopLog(loopId, `Process exited with code ${exitCode}, command=${command}`);
@@ -2920,7 +2919,10 @@ async function handleLoopRequest(
         // DECOMPOSE: prompt piped via stdin, cwd is the temp dir which contains
         // .closedloop-ai/context/artifacts/ so Claude can find them by relative path.
         const promptFile = path.join(claudeWorkDir, "decompose-prompt.txt");
-        await fs.writeFile(promptFile, body.prompt!);
+        await fs.writeFile(
+          promptFile,
+          body.prompt ?? "Decompose the PRD into features.",
+        );
 
         const pipeline = buildClaudePipeline(
           stdinClaudeArgs,

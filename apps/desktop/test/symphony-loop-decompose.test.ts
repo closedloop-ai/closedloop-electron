@@ -99,8 +99,6 @@ test("DECOMPOSE: writes context pack with artifacts in .closedloop-ai/context/ar
     `echo "PROMPT_MD=$(cat .closedloop-ai/context/prompt.md 2>/dev/null || echo MISSING)" >> ${JSON.stringify(captureFile)}`,
     `echo "ARTIFACTS=$(find .closedloop-ai/context/artifacts -maxdepth 1 -type f 2>/dev/null | sort | tr '\\n' ',')" >> ${JSON.stringify(captureFile)}`,
     `echo "REPO_INFO=$(test -f .closedloop-ai/context/repo-info.json && echo yes || echo no)" >> ${JSON.stringify(captureFile)}`,
-    // Capture what was piped via stdin (the -p - flag reads from stdin)
-    `echo "STDIN=$(cat)" >> ${JSON.stringify(captureFile)}`,
     'echo \'{"type":"result"}\'',
     "exit 0",
   ].join("\n");
