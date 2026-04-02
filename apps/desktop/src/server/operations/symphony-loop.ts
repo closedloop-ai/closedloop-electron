@@ -219,7 +219,7 @@ export async function writePrdArtifact(
     : artifacts.find((a) => a.type === "FEATURE" || a.type === "artifact");
   const source = prdArtifact ?? featureArtifact;
 
-  const prdContent = source?.content ?? prompt ?? null;
+  const prdContent = source?.content || prompt || "";
 
   if (prdContent) {
     await fs.writeFile(path.join(workDir, "prd.md"), prdContent);
@@ -299,6 +299,17 @@ interface LoopCommitter {
   email: string;
 }
 
+// Structural copy of ContextPackAttachment from symphony-alpha/apps/api/lib/loops/loop-state.ts
+// Keep in sync when fields change.
+type ContextPackAttachment = {
+  id: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  signedUrl: string;
+  signedUrlExpiresAt: string;
+};
+
 interface LoopRequestBody {
   loopId: string;
   command: LoopCommand;
@@ -317,6 +328,7 @@ interface LoopRequestBody {
   localRepoPath?: string;
   /** User-supplied Additional Context from ArtifactVersion v1. Written to additional-context.md for PLAN commands. */
   userContext?: string;
+  attachments?: ContextPackAttachment[];
 }
 
 interface ExecutionResult {
@@ -772,6 +784,80 @@ function getCurrentBranchImpl(worktreeDir: string): string | null {
 // ---------------------------------------------------------------------------
 
 /**
+ * Download attachment files to {claudeWorkDir}/attachments/{attachmentId}-{sanitizedFilename}.
+ * Non-fatal: logs warnings and skips individual failures without aborting.
+ */
+async function downloadAttachmentsToDisk(
+  claudeWorkDir: string,
+  attachments?: ContextPackAttachment[],
+): Promise<void> {
+  if (!attachments || attachments.length === 0) {
+    return;
+  }
+
+  const attachmentsDir = path.join(claudeWorkDir, "attachments");
+  mkdirSync(attachmentsDir, { recursive: true });
+
+  for (const attachment of attachments) {
+    try {
+      const expiresAt = new Date(attachment.signedUrlExpiresAt);
+      if (expiresAt <= new Date()) {
+        console.warn(
+          `[downloadAttachmentsToDisk] Attachment ${attachment.id} signedUrl expired at ${attachment.signedUrlExpiresAt}, skipping`,
+        );
+        continue;
+      }
+
+      const safeName = path
+        .basename(attachment.filename)
+        .replaceAll(/[^a-zA-Z0-9._-]/g, "_");
+      const diskName = `${attachment.id}-${safeName}`;
+      const diskPath = path.resolve(attachmentsDir, diskName);
+
+      if (
+        !diskPath.startsWith(attachmentsDir + path.sep) &&
+        diskPath !== attachmentsDir
+      ) {
+        console.warn(
+          `[downloadAttachmentsToDisk] Attachment ${attachment.id} resolved path escapes attachmentsDir, skipping`,
+        );
+        continue;
+      }
+
+      const response = await fetch(attachment.signedUrl);
+      if (!response.ok) {
+        console.warn(
+          `[downloadAttachmentsToDisk] Attachment ${attachment.id} fetch failed: ${response.status} ${response.statusText}, skipping`,
+        );
+        continue;
+      }
+
+      const arrayBuffer = await response.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+
+      if (buffer.length > attachment.sizeBytes) {
+        console.warn(
+          `[downloadAttachmentsToDisk] Attachment ${attachment.id} buffer size ${buffer.length} exceeds declared sizeBytes ${attachment.sizeBytes}, skipping`,
+        );
+        continue;
+      }
+      if (buffer.length < attachment.sizeBytes) {
+        console.warn(
+          `[downloadAttachmentsToDisk] Attachment ${attachment.id} downloaded ${buffer.length} bytes but expected ${attachment.sizeBytes}, may be truncated — writing anyway`,
+        );
+      }
+
+      writeFileSync(diskPath, buffer);
+    } catch (err) {
+      console.warn(
+        `[downloadAttachmentsToDisk] Failed to download attachment ${attachment.id}:`,
+        err,
+      );
+    }
+  }
+}
+
+/**
  * Write PRD for PLAN command.
  * Matches ECS harness writePrdFile(): prompt first, then PRD artifact, then FEATURE.
  */
@@ -780,6 +866,7 @@ async function writeArtifactsForPlan(
   artifacts: LoopArtifact[],
   prdContent: string | null = null,
   userContext?: string,
+  attachments?: ContextPackAttachment[],
 ): Promise<void> {
   // Priority: explicit prompt > PRD artifact > FEATURE artifact (matches harness)
 
@@ -812,12 +899,15 @@ async function writeArtifactsForPlan(
   if (prdContent) {
     await fs.writeFile(path.join(claudeWorkDir, "prd.md"), prdContent);
   }
+
+  await downloadAttachmentsToDisk(claudeWorkDir, attachments);
 }
 
 async function writeArtifactsForExecuteOrAmend(
   claudeWorkDir: string,
   artifacts: LoopArtifact[],
   prompt?: string,
+  attachments?: ContextPackAttachment[],
 ): Promise<void> {
   for (const artifact of artifacts) {
     if (artifact.type === "IMPLEMENTATION_PLAN" || artifact.type === "plan") {
@@ -862,6 +952,8 @@ async function writeArtifactsForExecuteOrAmend(
   if (prompt) {
     await fs.writeFile(path.join(claudeWorkDir, "prompt.md"), prompt);
   }
+
+  await downloadAttachmentsToDisk(claudeWorkDir, attachments);
 }
 
 /**
@@ -2576,15 +2668,22 @@ async function handleLoopRequest(
           body.artifacts,
           body.prompt,
           body.userContext,
+          body.attachments,
         );
       } else if (body.command === "EXECUTE") {
-        await writeArtifactsForExecuteOrAmend(claudeWorkDir, body.artifacts);
+        await writeArtifactsForExecuteOrAmend(
+          claudeWorkDir,
+          body.artifacts,
+          undefined,
+          body.attachments,
+        );
       } else {
         // REQUEST_CHANGES
         await writeArtifactsForExecuteOrAmend(
           claudeWorkDir,
           body.artifacts,
           body.prompt,
+          body.attachments,
         );
       }
     } else if (body.command === "GENERATE_PRD") {
