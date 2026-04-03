@@ -27,7 +27,7 @@ import {
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
 import { Observability } from "../../main/observability.js";
-import { parseApiKeySource, parseTokenUsage } from "../../main/token-usage.js";
+import { parseTokenUsage } from "../../main/token-usage.js";
 import type {
   OperationDispatcher,
   OperationRequestContext,
