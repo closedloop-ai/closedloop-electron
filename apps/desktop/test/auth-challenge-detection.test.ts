@@ -6,9 +6,9 @@
  * - isAuthChallengeError: log-tail-based detection
  * - AUTH_CHALLENGE_PATTERN: shared regex correctness
  *
- * These tests verify that only genuine auth challenge / session expiry errors
- * are classified as AUTH_CHALLENGE, and that unrelated errors (session/context
- * limit errors, generic crashes) are NOT misclassified.
+ * These tests verify that only the phrases covered by the shared auth/rate
+ * limit matcher are classified as AUTH_CHALLENGE, and that unrelated errors
+ * (session/context limit errors, generic crashes) are NOT misclassified.
  */
 
 import assert from "node:assert/strict";
@@ -88,44 +88,44 @@ describe("detectAuthChallengeFromJsonl", () => {
       JSON.stringify({
         type: "result",
         subtype: "error",
-        result: "login required",
+        result: "Please log in",
         is_error: true,
       }),
     ].join("\n");
     fs.writeFileSync(path.join(tmpDir, "claude-output.jsonl"), content);
     assert.strictEqual(
       detectAuthChallengeFromJsonl(tmpDir),
-      "login required",
+      "Please log in",
     );
   });
 
-  test('detects "login required" as auth challenge', () => {
+  test('detects "invalid bearer token" as auth challenge', () => {
     writeJsonl([
       {
         type: "result",
         subtype: "error",
-        result: "login required",
+        result: "invalid bearer token",
         is_error: true,
       },
     ]);
     assert.strictEqual(
       detectAuthChallengeFromJsonl(tmpDir),
-      "login required",
+      "invalid bearer token",
     );
   });
 
-  test('detects "authentication failed" as auth challenge', () => {
+  test('detects "token expired" as auth challenge', () => {
     writeJsonl([
       {
         type: "result",
         subtype: "error",
-        result: "authentication failed: invalid credentials",
+        result: "token expired",
         is_error: true,
       },
     ]);
     assert.strictEqual(
       detectAuthChallengeFromJsonl(tmpDir),
-      "authentication failed: invalid credentials",
+      "token expired",
     );
   });
 
@@ -144,18 +144,18 @@ describe("detectAuthChallengeFromJsonl", () => {
     );
   });
 
-  test('detects "session expired" as auth challenge', () => {
+  test('detects "unauthorized" as auth challenge', () => {
     writeJsonl([
       {
         type: "result",
         subtype: "error",
-        result: "session expired, please re-authenticate",
+        result: "unauthorized",
         is_error: true,
       },
     ]);
     assert.strictEqual(
       detectAuthChallengeFromJsonl(tmpDir),
-      "session expired, please re-authenticate",
+      "unauthorized",
     );
   });
 
@@ -164,13 +164,13 @@ describe("detectAuthChallengeFromJsonl", () => {
       {
         type: "result",
         subtype: "error",
-        result: "LOGIN REQUIRED",
+        result: "PLEASE LOG IN",
         is_error: true,
       },
     ]);
     assert.strictEqual(
       detectAuthChallengeFromJsonl(tmpDir),
-      "LOGIN REQUIRED",
+      "PLEASE LOG IN",
     );
   });
 
@@ -181,13 +181,13 @@ describe("detectAuthChallengeFromJsonl", () => {
       {
         type: "result",
         subtype: "error",
-        result: "login required",
+        result: "Please log in",
         is_error: true,
       },
     ]);
     assert.strictEqual(
       detectAuthChallengeFromJsonl(tmpDir),
-      "login required",
+      "Please log in",
     );
   });
 
@@ -197,7 +197,7 @@ describe("detectAuthChallengeFromJsonl", () => {
       JSON.stringify({
         type: "result",
         subtype: "error",
-        result: "session expired",
+        result: "token expired",
         is_error: true,
       }),
       "",
@@ -205,7 +205,7 @@ describe("detectAuthChallengeFromJsonl", () => {
     fs.writeFileSync(path.join(tmpDir, "claude-output.jsonl"), content);
     assert.strictEqual(
       detectAuthChallengeFromJsonl(tmpDir),
-      "session expired",
+      "token expired",
     );
   });
 
@@ -270,12 +270,12 @@ describe("detectAuthChallengeFromJsonl", () => {
     assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
   });
 
-  test('does not detect "unauthorized" alone as auth challenge', () => {
+  test('does not detect "login required" as auth challenge', () => {
     writeJsonl([
       {
         type: "result",
         subtype: "error",
-        result: "unauthorized",
+        result: "login required",
         is_error: true,
       },
     ]);
@@ -306,14 +306,14 @@ describe("isAuthChallengeError", () => {
     );
   });
 
-  test('detects "login required"', () => {
+  test('detects "invalid bearer token"', () => {
     assert.strictEqual(
-      isAuthChallengeError("Error: login required, please authenticate"),
+      isAuthChallengeError("Error: invalid bearer token"),
       true,
     );
   });
 
-  test('detects "authentication failed"', () => {
+  test('detects "token expired"', () => {
     assert.strictEqual(
       isAuthChallengeError("authentication failed: token expired"),
       true,
@@ -327,16 +327,16 @@ describe("isAuthChallengeError", () => {
     );
   });
 
-  test('detects "session expired"', () => {
+  test('detects "unauthorized"', () => {
     assert.strictEqual(
-      isAuthChallengeError("session expired"),
+      isAuthChallengeError("unauthorized"),
       true,
     );
   });
 
   test("detection is case-insensitive", () => {
     assert.strictEqual(
-      isAuthChallengeError("LOGIN REQUIRED"),
+      isAuthChallengeError("PLEASE LOG IN"),
       true,
     );
   });
@@ -345,7 +345,7 @@ describe("isAuthChallengeError", () => {
     const logTail = [
       "Running claude code...",
       "Processing files...",
-      "Error: session expired",
+      "Error: token expired",
       "Process exited with code 2",
     ].join("\n");
     assert.strictEqual(isAuthChallengeError(logTail), true);
@@ -372,8 +372,8 @@ describe("isAuthChallengeError", () => {
     assert.strictEqual(isAuthChallengeError("session limit reached"), false);
   });
 
-  test('does not match "unauthorized" alone', () => {
-    assert.strictEqual(isAuthChallengeError("unauthorized"), false);
+  test('does not match "login required"', () => {
+    assert.strictEqual(isAuthChallengeError("login required"), false);
   });
 });
 
@@ -383,14 +383,13 @@ describe("isAuthChallengeError", () => {
 
 describe("AUTH_CHALLENGE_PATTERN", () => {
   const positives = [
-    "login required",
-    "Login required to continue",
-    "authentication failed",
-    "Authentication failed: invalid token",
+    "invalid bearer token",
+    "token expired",
+    "Authentication failed: token expired",
     "Please log in",
     "Please log in to access this resource",
-    "session expired",
-    "Session expired, please re-authenticate",
+    "unauthorized",
+    "Rate limit reached",
   ];
 
   // SESSION_LIMIT_PATTERN positive inputs must NOT match AUTH_CHALLENGE_PATTERN
@@ -405,7 +404,7 @@ describe("AUTH_CHALLENGE_PATTERN", () => {
     "The conversation too long to continue",
     // Additional explicit negatives
     "session limit reached",
-    "unauthorized",
+    "login required",
     "Rate limit exceeded",
     "Command failed with exit code 1",
     "Something went wrong",

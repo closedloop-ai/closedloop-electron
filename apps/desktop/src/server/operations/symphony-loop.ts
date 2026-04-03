@@ -1173,7 +1173,7 @@ export function isSessionLimitError(logTail: string): boolean {
 
 /** Pattern that matches known auth/rate-limit/billing error messages from Claude CLI. */
 export const AUTH_CHALLENGE_PATTERN =
-  /authentication_error|invalid bearer token|rate_limit_error|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|token.*expired/i;
+  /authentication_error|invalid bearer token|please log in|rate_limit_error|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|token.*expired/i;
 
 /**
  * Check whether a log tail string contains Claude CLI auth/rate-limit/billing
@@ -1843,7 +1843,7 @@ async function handleProcessCompletion(
         );
         await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
           type: "error",
-          code: LoopErrorCode.CONTEXT_LIMIT_EXCEEDED,
+          code: errorCode,
           message: limitMsg,
           loopId,
           tokenUsage: diagnostics.tokenUsage,
@@ -1852,6 +1852,7 @@ async function handleProcessCompletion(
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
         });
       } else if (isAuthChallenge) {
+        errorCode = LoopErrorCode.AUTH_CHALLENGE;
         const authMsg = jsonlAuthError ?? "Claude auth challenge detected";
         loopError(loopId, `Auth challenge detected: ${authMsg}`);
         gatewayLog.error(
@@ -1868,7 +1869,7 @@ async function handleProcessCompletion(
         );
         await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
           type: "error",
-          code: "AUTH_CHALLENGE",
+          code: errorCode,
           message: authMsg,
           loopId,
           tokenUsage: diagnostics.tokenUsage,
@@ -1876,24 +1877,8 @@ async function handleProcessCompletion(
           logTail: diagnostics.logTail,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
         });
-      } else if (isAuthChallenge) {
-        errorCode = LoopErrorCode.AUTH_CHALLENGE;
-        const authMsg = jsonlAuthError ?? "Authentication required";
-        loopError(loopId, `Auth challenge detected: ${authMsg}`);
-        gatewayLog.error(
-          "loop-harness",
-          `${command} hit auth challenge, loopId=${loopId}: ${authMsg}`,
-        );
-        await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
-          type: "error",
-          code: LoopErrorCode.AUTH_CHALLENGE,
-          message: authMsg,
-          loopId,
-          tokenUsage: diagnostics.tokenUsage,
-          logTail: diagnostics.logTail,
-          diagnosticsVersion: diagnostics.diagnosticsVersion,
-        });
       } else {
+        errorCode = LoopErrorCode.PROCESS_FAILED;
         loopError(loopId, `Process failed with exit code ${exitCode}`);
         gatewayLog.error(
           "loop-harness",
@@ -1901,7 +1886,7 @@ async function handleProcessCompletion(
         );
         await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
           type: "error",
-          code: LoopErrorCode.PROCESS_FAILED,
+          code: errorCode,
           message: `Process exited with code ${exitCode}`,
           loopId,
           tokenUsage: diagnostics.tokenUsage,
@@ -3028,7 +3013,11 @@ async function handleLoopRequest(
         const previousJob = jobStore?.getByLoopId(body.loopId);
         if (
           body.parentSessionId &&
-          !(previousJob?.status === "FAILED" && previousJob?.lastErrorCode === LoopErrorCode.AUTH_CHALLENGE)
+          !(
+            previousJob?.status === "FAILED" &&
+            (previousJob?.lastErrorCode === LoopErrorCode.AUTH_CHALLENGE ||
+              previousJob?.lastErrorCode === LoopErrorCode.CONTEXT_LIMIT_EXCEEDED)
+          )
         ) {
           claudeArgs.push("--resume", body.parentSessionId);
         }

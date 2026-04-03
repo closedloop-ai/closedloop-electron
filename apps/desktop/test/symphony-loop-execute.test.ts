@@ -25,11 +25,11 @@ import path from "node:path";
 import { afterEach, test } from "node:test";
 import { JobStore, LoopErrorCode } from "../src/main/job-store.js";
 import { tryPostErrorEvent } from "../src/main/loop-finalizer.js";
-import { DesktopGatewayServer } from "../src/server/server.js";
-import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
-import { resetResolvedClaudePath } from "../src/server/operations/symphony-loop.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
+import { resetResolvedClaudePath } from "../src/server/operations/symphony-loop.js";
+import { DesktopGatewayServer } from "../src/server/server.js";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
+import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import {
   createFakeRunLoopScript,
   initGitRepo,
@@ -1859,12 +1859,13 @@ test("boot-recovery: tryPostErrorEvent posts AUTH_CHALLENGE (not PROCESS_FAILED)
 // ---------------------------------------------------------------------------
 // Tests T-4.3a/b/c: REQUEST_CHANGES --resume suppression
 //
-// The REQUEST_CHANGES command adds --resume <parentSessionId> to the claude
-// args unless the previous job for that loopId had lastErrorCode === 'AUTH_CHALLENGE'.
+// The REQUEST_CHANGES command should suppress --resume <parentSessionId> when
+// the previous job for that loopId failed with an error code that should start
+// a fresh Claude session.
 //
 // Three cases:
 //   T-4.3a: lastErrorCode === 'AUTH_CHALLENGE' → --resume OMITTED
-//   T-4.3b: lastErrorCode === 'CONTEXT_LIMIT_EXCEEDED' → --resume INCLUDED
+//   T-4.3b: lastErrorCode === 'CONTEXT_LIMIT_EXCEEDED' → --resume OMITTED
 //   T-4.3c: lastErrorCode is undefined (field absent) → --resume INCLUDED
 // ---------------------------------------------------------------------------
 
@@ -1946,127 +1947,97 @@ async function setupRequestChangesTest(opts: {
   return { mock, server, jobStore, claudeArgvCapture, repoPath };
 }
 
-test("REQUEST_CHANGES: --resume is omitted when previous job has lastErrorCode=AUTH_CHALLENGE", async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "rc-resume-auth-"));
-  tempPathsToClean.push(tmpDir);
+const requestChangesResumeSuppressionScenarios = [
+  {
+    name: "AUTH_CHALLENGE",
+    tmpPrefix: "rc-resume-auth-",
+    loopId: "00000000-0000-0000-0000-000000001600",
+    machineName: "rc-resume-auth-machine",
+    previousJobId: "rc-resume-auth-seed",
+    previousErrorCode: LoopErrorCode.AUTH_CHALLENGE,
+    parentSessionId: "session-abc-123",
+    artifactSlug: "PLAN-160",
+    repoOwner: "rc-auth",
+  },
+  {
+    name: "CONTEXT_LIMIT_EXCEEDED",
+    tmpPrefix: "rc-resume-ctx-",
+    loopId: "00000000-0000-0000-0000-000000001700",
+    machineName: "rc-resume-ctx-machine",
+    previousJobId: "rc-resume-ctx-seed",
+    previousErrorCode: LoopErrorCode.CONTEXT_LIMIT_EXCEEDED,
+    parentSessionId: "session-ctx-456",
+    artifactSlug: "PLAN-170",
+    repoOwner: "rc-ctx",
+  },
+] as const;
 
-  const loopId = "00000000-0000-0000-0000-000000001600";
-  const { mock, server, jobStore, claudeArgvCapture, repoPath } =
-    await setupRequestChangesTest({ tmpDir, loopId, machineName: "rc-resume-auth-machine" });
+for (const scenario of requestChangesResumeSuppressionScenarios) {
+  test(
+    `REQUEST_CHANGES: --resume is omitted when previous job has lastErrorCode=${scenario.name}`,
+    async () => {
+      const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), scenario.tmpPrefix));
+      tempPathsToClean.push(tmpDir);
 
-  // Pre-seed a FAILED job for this loopId with lastErrorCode=AUTH_CHALLENGE.
-  // This is what the real system sets when a previous run hits an auth wall.
-  jobStore.upsert({
-    id: "rc-resume-auth-seed",
-    kind: "SYMPHONY_LOOP",
-    loopId,
-    command: "REQUEST_CHANGES",
-    status: "FAILED",
-    lastErrorCode: LoopErrorCode.AUTH_CHALLENGE,
-    startedAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  });
+      const { mock, server, jobStore, claudeArgvCapture, repoPath } = await setupRequestChangesTest({
+        tmpDir,
+        loopId: scenario.loopId,
+        machineName: scenario.machineName,
+      });
 
-  const parentSessionId = "session-abc-123";
-  const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        loopId,
+      jobStore.upsert({
+        id: scenario.previousJobId,
+        kind: "SYMPHONY_LOOP",
+        loopId: scenario.loopId,
         command: "REQUEST_CHANGES",
-        closedLoopAuthToken: "tok",
-        artifacts: [],
-        artifactSlug: "PLAN-160",
-        parentSessionId,
-        repo: { fullName: `rc-auth/${path.basename(repoPath)}`, branch: "main" },
-      }),
+        status: "FAILED",
+        lastErrorCode: scenario.previousErrorCode,
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+
+      const response = await fetch(
+        `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            loopId: scenario.loopId,
+            command: "REQUEST_CHANGES",
+            closedLoopAuthToken: "tok",
+            artifacts: [],
+            artifactSlug: scenario.artifactSlug,
+            parentSessionId: scenario.parentSessionId,
+            repo: {
+              fullName: `${scenario.repoOwner}/${path.basename(repoPath)}`,
+              branch: "main",
+            },
+          }),
+        }
+      );
+
+      assert.equal(
+        response.status,
+        200,
+        `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
+      );
+
+      await waitForCompletedEvent(mock.requests, scenario.loopId);
+
+      const capturedArgv = await fs.readFile(claudeArgvCapture, "utf-8").catch(() => "");
+      const argLines = capturedArgv.split("\n").filter(Boolean);
+
+      assert.ok(
+        !argLines.includes("--resume"),
+        `Expected --resume to be OMITTED when lastErrorCode=${scenario.name}, but got args: ${argLines.join(" ")}`
+      );
+      assert.ok(
+        !argLines.includes(scenario.parentSessionId),
+        `Expected parentSessionId to be OMITTED when lastErrorCode=${scenario.name}, but got args: ${argLines.join(" ")}`
+      );
     }
   );
-
-  assert.equal(
-    response.status,
-    200,
-    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
-  );
-
-  // Wait for the completed event to confirm claude ran
-  await waitForCompletedEvent(mock.requests, loopId);
-
-  // Read the captured args written by the fake claude
-  const capturedArgv = await fs.readFile(claudeArgvCapture, "utf-8").catch(() => "");
-  const argLines = capturedArgv.split("\n").filter(Boolean);
-
-  assert.ok(
-    !argLines.includes("--resume"),
-    `Expected --resume to be OMITTED when lastErrorCode=AUTH_CHALLENGE, but got args: ${argLines.join(" ")}`
-  );
-  assert.ok(
-    !argLines.includes(parentSessionId),
-    `Expected parentSessionId to be OMITTED when lastErrorCode=AUTH_CHALLENGE, but got args: ${argLines.join(" ")}`
-  );
-});
-
-test("REQUEST_CHANGES: --resume is included when previous job has lastErrorCode=CONTEXT_LIMIT_EXCEEDED", async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "rc-resume-ctx-"));
-  tempPathsToClean.push(tmpDir);
-
-  const loopId = "00000000-0000-0000-0000-000000001700";
-  const { mock, server, jobStore, claudeArgvCapture, repoPath } =
-    await setupRequestChangesTest({ tmpDir, loopId, machineName: "rc-resume-ctx-machine" });
-
-  // Pre-seed a FAILED job with lastErrorCode=CONTEXT_LIMIT_EXCEEDED.
-  // The suppress-resume guard does NOT fire for this code → --resume should appear.
-  jobStore.upsert({
-    id: "rc-resume-ctx-seed",
-    kind: "SYMPHONY_LOOP",
-    loopId,
-    command: "REQUEST_CHANGES",
-    status: "FAILED",
-    lastErrorCode: LoopErrorCode.CONTEXT_LIMIT_EXCEEDED,
-    startedAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  });
-
-  const parentSessionId = "session-ctx-456";
-  const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        loopId,
-        command: "REQUEST_CHANGES",
-        closedLoopAuthToken: "tok",
-        artifacts: [],
-        artifactSlug: "PLAN-170",
-        parentSessionId,
-        repo: { fullName: `rc-ctx/${path.basename(repoPath)}`, branch: "main" },
-      }),
-    }
-  );
-
-  assert.equal(
-    response.status,
-    200,
-    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
-  );
-
-  await waitForCompletedEvent(mock.requests, loopId);
-
-  const capturedArgv = await fs.readFile(claudeArgvCapture, "utf-8").catch(() => "");
-  const argLines = capturedArgv.split("\n").filter(Boolean);
-
-  assert.ok(
-    argLines.includes("--resume"),
-    `Expected --resume to be INCLUDED when lastErrorCode=CONTEXT_LIMIT_EXCEEDED, but got args: ${argLines.join(" ")}`
-  );
-  assert.ok(
-    argLines.includes(parentSessionId),
-    `Expected parentSessionId=${parentSessionId} to appear in args when --resume is included, but got args: ${argLines.join(" ")}`
-  );
-});
+}
 
 test("REQUEST_CHANGES: --resume is included when no previous job exists (lastErrorCode absent, backward compat)", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "rc-resume-nonjob-"));
