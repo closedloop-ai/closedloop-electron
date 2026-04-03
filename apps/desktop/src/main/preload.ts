@@ -55,7 +55,8 @@ const desktopApi = {
   getJobLogTail: (jobId: string, lines?: number) =>
     ipcRenderer.invoke("desktop:get-job-log-tail", jobId, lines) as Promise<unknown>,
   getLogs: () => ipcRenderer.invoke("desktop:get-logs") as Promise<unknown>,
-  clearLogs: () => ipcRenderer.invoke("desktop:clear-logs") as Promise<unknown>
+  clearLogs: () => ipcRenderer.invoke("desktop:clear-logs") as Promise<unknown>,
+  getAppVersion: () => ipcRenderer.invoke("desktop:get-app-version") as Promise<string>
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);
