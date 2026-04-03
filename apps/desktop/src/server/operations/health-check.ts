@@ -4,7 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { getShellPath } from "../shell-path.js";
-import { isPluginInstalled } from "./plugin-cache.js";
+import { getInstalledPluginVersions, isPluginInstalled } from "./plugin-cache.js";
 import type { ProcessManager } from "../process-manager.js";
 
 const execFileAsync = promisify(execFile);
@@ -51,6 +51,18 @@ export function registerHealthCheckRoutes(
       checkPython3(processManager)
     ]);
 
+    // Check plugin versions if all plugins are installed
+    const allPluginsInstalled = checks
+      .filter((c) => c.id.startsWith("plugin-"))
+      .every((c) => c.passed);
+    if (allPluginsInstalled) {
+      const installed = getInstalledPluginVersions();
+      const versionResult = await checkPluginVersions(installed);
+      if (versionResult !== undefined) {
+        checks.push(versionResult);
+      }
+    }
+
     const allRequiredPassed = checks.filter((check) => check.required).every((check) => check.passed);
     json(context, 200, { checks, allRequiredPassed });
   });
@@ -81,7 +93,9 @@ async function checkGit(processManager: ProcessManager): Promise<CheckResult> {
       required: true,
       passed: false,
       error: "Not found",
-      remediation: "Install via Xcode CLT: xcode-select --install"
+      remediation: process.platform === "darwin"
+        ? "Install via Xcode CLT: xcode-select --install"
+        : "Install: sudo apt-get install git (or your distro's package manager)"
     };
   }
 }
@@ -125,7 +139,9 @@ async function checkGhCli(processManager: ProcessManager): Promise<CheckResult> 
       required: true,
       passed: false,
       error: "Not found",
-      remediation: "Install: brew install gh"
+      remediation: process.platform === "darwin"
+        ? "Install: brew install gh"
+        : "Install: see https://github.com/cli/cli/blob/trunk/docs/install_linux.md"
     };
   }
 }
@@ -215,19 +231,171 @@ async function checkCodex(processManager: ProcessManager): Promise<CheckResult> 
 }
 
 async function checkPython3(processManager: ProcessManager): Promise<CheckResult> {
+  const REMEDIATION = process.platform === "darwin"
+    ? "Install Python 3.10 or later: brew install python@3.13"
+    : "Install Python 3.10 or later: sudo apt-get install python3 (or your distro's package manager)";
   try {
     const output = await runCommand(processManager, "python3", ["--version"]);
-    return { id: "python3", label: "python3", required: false, passed: true, version: parseVersion(output) };
+    const version = parseVersion(output);
+    if (!version) {
+      return {
+        id: "python3",
+        label: "python3",
+        required: true,
+        passed: false,
+        error: "Unable to determine Python version",
+        remediation: REMEDIATION,
+      };
+    }
+    // parseVersion guarantees \d+\.\d+ so this always matches
+    const m = /^(\d+)\.(\d+)/.exec(version)!;
+    const major = Number(m[1]);
+    const minor = Number(m[2]);
+    if (major < 3 || (major === 3 && minor < 10)) {
+      return {
+        id: "python3",
+        label: "python3",
+        required: true,
+        passed: false,
+        version,
+        error: `Python ${version} is below the required minimum of 3.10`,
+        remediation: REMEDIATION,
+      };
+    }
+    return { id: "python3", label: "python3", required: true, passed: true, version };
   } catch {
     return {
       id: "python3",
       label: "python3",
-      required: false,
+      required: true,
       passed: false,
       error: "Not found",
-      remediation: "Optional — enables learnings processing"
+      remediation: REMEDIATION,
     };
   }
+}
+
+const PLUGIN_VERSION_MAP: Record<string, string> = {
+  "code@closedloop-ai": "code",
+  "self-learning@closedloop-ai": "self-learning",
+  "judges@closedloop-ai": "judges",
+  "code-review@closedloop-ai": "code-review",
+  "platform@closedloop-ai": "platform",
+};
+
+function parseStrictSemver(version: string): [number, number, number] | undefined {
+  const parts = version.split(".");
+  if (parts.length !== 3) {
+    return undefined;
+  }
+  const numericOnly = /^\d+$/;
+  const [majorStr, minorStr, patchStr] = parts;
+  if (!(numericOnly.test(majorStr) && numericOnly.test(minorStr) && numericOnly.test(patchStr))) {
+    return undefined;
+  }
+  return [Number(majorStr), Number(minorStr), Number(patchStr)];
+}
+
+function compareStrictSemver(installed: string, latest: string): boolean | undefined {
+  const installedTuple = parseStrictSemver(installed);
+  const latestTuple = parseStrictSemver(latest);
+  if (installedTuple === undefined || latestTuple === undefined) {
+    return undefined;
+  }
+  for (let i = 0; i < 3; i++) {
+    if (installedTuple[i] > latestTuple[i]) {
+      return true;
+    }
+    if (installedTuple[i] < latestTuple[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+async function checkPluginVersions(installed: Record<string, string>): Promise<CheckResult | undefined> {
+  const entries = Object.entries(PLUGIN_VERSION_MAP);
+
+  const results = await Promise.allSettled(
+    entries.map(([, folder]) =>
+      fetch(
+        `https://raw.githubusercontent.com/closedloop-ai/claude-plugins/main/plugins/${folder}/.claude-plugin/plugin.json`,
+        { signal: AbortSignal.timeout(3000) }
+      )
+    )
+  );
+
+  const outdated: { key: string; installed: string; latest: string }[] = [];
+  const upToDate: string[] = [];
+  let unverified = 0;
+
+  for (let i = 0; i < entries.length; i++) {
+    const [pluginKey] = entries[i];
+    const result = results[i];
+
+    if (result.status === "rejected") {
+      unverified++;
+      continue;
+    }
+
+    const response = result.value;
+    if (!response.ok) {
+      unverified++;
+      continue;
+    }
+
+    let latestVer: string;
+    try {
+      const body = (await response.json()) as { version?: unknown };
+      if (typeof body.version !== "string") {
+        unverified++;
+        continue;
+      }
+      latestVer = body.version;
+    } catch {
+      unverified++;
+      continue;
+    }
+
+    const installedVer = installed[pluginKey] ?? "";
+    const cmp = compareStrictSemver(installedVer, latestVer);
+
+    if (cmp === undefined) {
+      unverified++;
+    } else if (cmp === false) {
+      outdated.push({ key: pluginKey, installed: installedVer, latest: latestVer });
+    } else {
+      upToDate.push(pluginKey);
+    }
+  }
+
+  if (outdated.length > 0) {
+    return {
+      id: "plugin-versions",
+      label: "Plugin Versions (@closedloop-ai)",
+      required: false,
+      passed: false,
+      error: "Outdated: " + outdated.map((p) => `${p.key} (${p.installed} -> ${p.latest})`).join(", "),
+      remediation: outdated.map((p) => `claude plugin install ${p.key}`).join(" && "),
+    };
+  }
+
+  if (unverified > 0) {
+    return {
+      id: "plugin-versions",
+      label: "Plugin Versions (@closedloop-ai)",
+      required: false,
+      passed: false,
+      error: `${unverified}/${entries.length} plugin manifest(s) could not be verified`,
+    };
+  }
+
+  return {
+    id: "plugin-versions",
+    label: "Plugin Versions (@closedloop-ai)",
+    required: false,
+    passed: true,
+  };
 }
 
 async function loadReposConfig(configDir: string): Promise<ReposConfig> {

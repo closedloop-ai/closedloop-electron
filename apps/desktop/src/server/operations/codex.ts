@@ -1179,6 +1179,9 @@ export function registerCodexRoutes(
         });
       }
       history.contextPercent = streamState.contextPercent;
+      if (exitCode !== 0 && streamState.authChallengeDetected && history.sessionId) {
+        history.sessionId = undefined;
+      }
       await saveJsonFile(historyPath, history);
 
       writeEvent(context.response, {

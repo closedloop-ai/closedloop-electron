@@ -977,6 +977,7 @@ export class DesktopApplication {
   }
 
   private registerIpcHandlers(): void {
+    ipcMain.handle("desktop:get-app-version", () => app.getVersion());
     ipcMain.handle("desktop:get-logs", () => gatewayLog.getEntries());
     ipcMain.handle("desktop:clear-logs", () => {
       gatewayLog.clear();

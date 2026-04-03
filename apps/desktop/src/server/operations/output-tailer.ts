@@ -137,7 +137,18 @@ async function postLoopEvent(
   apiBaseUrl: string,
   loopId: string,
   token: string,
-  event: { type: string; data: { chunk: string } }
+  event: {
+    type: string;
+    data: {
+      chunk: string;
+      tokenUsage?: {
+        inputTokens: number;
+        outputTokens: number;
+        cacheCreationInputTokens?: number;
+        cacheReadInputTokens?: number;
+      };
+    };
+  }
 ): Promise<number | null> {
   const url = `${apiBaseUrl}/loops/${loopId}/events`;
   try {
@@ -150,7 +161,7 @@ async function postLoopEvent(
       },
       body: JSON.stringify({
         type: event.type,
-        data: { chunk: event.data.chunk },
+        data: event.data,
         timestamp: new Date().toISOString(),
       }),
     });
@@ -219,6 +230,15 @@ export function startOutputTailer(
   let lastSentAt: number | null = null;
   /** Largest replay-safe offset reported via `onOffset` (exclusive end of committed prefix). */
   let committedByteOffset = initialByteOffset;
+  /** Running token totals, committed only after a successful POST. */
+  let tokenTotals = {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheCreationInputTokens: 0,
+    cacheReadInputTokens: 0,
+  };
+  /** Single-flight guard: prevents overlapping pollOnce executions. */
+  let inFlightPoll: Promise<void> | null = null;
 
   function reportCommit(framedEndExclusive: number): void {
     if (framedEndExclusive > committedByteOffset) {
@@ -290,6 +310,12 @@ export function startOutputTailer(
       const suffix = pendingRemainder.subarray(newlineIndex + 1);
 
       let lastDisplay: string | null = null;
+      const frameDelta = {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheCreationInputTokens: 0,
+        cacheReadInputTokens: 0,
+      };
       for (const line of completeLines.split("\n")) {
         const trimmed = line.trim();
         if (!trimmed) continue;
@@ -300,13 +326,36 @@ export function startOutputTailer(
           continue;
         }
         if (!isRecord(parsed)) continue;
+        if (parsed.type === "assistant") {
+          const message = isRecord(parsed.message) ? parsed.message : null;
+          const usage = message !== null && isRecord(message.usage) ? message.usage : null;
+          if (usage !== null) {
+            frameDelta.inputTokens += typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
+            frameDelta.outputTokens += typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
+            frameDelta.cacheCreationInputTokens +=
+              typeof usage.cache_creation_input_tokens === "number"
+                ? usage.cache_creation_input_tokens
+                : 0;
+            frameDelta.cacheReadInputTokens +=
+              typeof usage.cache_read_input_tokens === "number" ? usage.cache_read_input_tokens : 0;
+          }
+        }
         const display = summarizeJsonlRecord(parsed);
         if (!display) continue;
         lastDisplay = display;
       }
 
+      const candidateTotals = {
+        inputTokens: tokenTotals.inputTokens + frameDelta.inputTokens,
+        outputTokens: tokenTotals.outputTokens + frameDelta.outputTokens,
+        cacheCreationInputTokens:
+          tokenTotals.cacheCreationInputTokens + frameDelta.cacheCreationInputTokens,
+        cacheReadInputTokens: tokenTotals.cacheReadInputTokens + frameDelta.cacheReadInputTokens,
+      };
+
       if (lastDisplay === null) {
         pendingRemainder = suffix;
+        tokenTotals = candidateTotals;
         reportCommit(framedEndExclusive);
         continue;
       }
@@ -316,11 +365,24 @@ export function startOutputTailer(
         break;
       }
 
-      const status = await postLoopEvent(apiBaseUrl, loopId, token, { type: "output", data: { chunk: lastDisplay } });
+      const hasAnyTokens =
+        candidateTotals.inputTokens > 0 ||
+        candidateTotals.outputTokens > 0 ||
+        candidateTotals.cacheCreationInputTokens > 0 ||
+        candidateTotals.cacheReadInputTokens > 0;
+
+      const status = await postLoopEvent(apiBaseUrl, loopId, token, {
+        type: "output",
+        data: {
+          chunk: lastDisplay,
+          tokenUsage: hasAnyTokens ? candidateTotals : undefined,
+        },
+      });
       if (status !== null && status >= 200 && status < 300) {
         resetAuthRetryState();
         authRetriesExhausted = false;
         pendingRemainder = suffix;
+        tokenTotals = candidateTotals;
         lastSentAt = now;
         reportCommit(framedEndExclusive);
         continue;
@@ -333,7 +395,11 @@ export function startOutputTailer(
   }
 
   const intervalId = setInterval(() => {
-    pollOnce().catch((err) => {
+    if (inFlightPoll !== null) return;
+    inFlightPoll = pollOnce().finally(() => {
+      inFlightPoll = null;
+    });
+    inFlightPoll.catch((err) => {
       gatewayLog.error(
         "output-tailer",
         `Poll error for loopId=${loopId}: ${err instanceof Error ? err.message : String(err)}`,
@@ -345,6 +411,9 @@ export function startOutputTailer(
     stop: () => { stopped = true; clearInterval(intervalId); },
     flush: async () => {
       clearInterval(intervalId);
+      if (inFlightPoll !== null) {
+        await inFlightPoll;
+      }
       await pollOnce({ ignoreBackoff: true, forceAttempt: true });
       stopped = true;
     },

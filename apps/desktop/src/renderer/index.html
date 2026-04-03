@@ -1322,6 +1322,8 @@
 
       .onboarding-card {
         width: min(760px, 100%);
+        max-height: calc(100vh - 40px);
+        overflow-y: auto;
         background: var(--panel);
         border: 1px solid var(--border);
         border-radius: 14px;
@@ -1417,7 +1419,7 @@
     <header>
       <div class="header-main">
         <div>
-          <h1>ClosedLoop Gateway</h1>
+          <h1>ClosedLoop Gateway <span id="appVersion" style="font-size: 12px; font-weight: 400; color: var(--muted)"></span></h1>
           <div class="sub">
             <span id="runtimeStatus" class="runtime-health unhealthy">
               <span class="dot"></span>
@@ -2952,6 +2954,10 @@
         } catch (error) {
           debugTokenOutput.textContent = `Error: ${error.message}`;
         }
+      });
+
+      api.getAppVersion().then((v) => {
+        document.getElementById("appVersion").textContent = `v${v}`;
       });
 
       Promise.all([
