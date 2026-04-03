@@ -23,7 +23,8 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
-import { JobStore } from "../src/main/job-store.js";
+import { JobStore, LoopErrorCode } from "../src/main/job-store.js";
+import { tryPostErrorEvent } from "../src/main/loop-finalizer.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { resetResolvedClaudePath } from "../src/server/operations/symphony-loop.js";
@@ -36,6 +37,7 @@ import {
   saveEnv,
   startMockApiServer,
   waitForCompletedEvent,
+  waitForTerminalEvent,
 } from "./symphony-test-utils.js";
 
 const fakeWorktreeProvider: WorktreeProvider = {
@@ -1538,7 +1540,7 @@ test("EXECUTE: non-zero exit with CANCEL_PENDING skips PROCESS_FAILED and ends a
     if (!r.url.includes(eventsUrl)) return false;
     try {
       const body = JSON.parse(r.body) as Record<string, unknown>;
-      return body.type === "error" && body.code === "PROCESS_FAILED";
+      return body.type === "error" && body.code === LoopErrorCode.PROCESS_FAILED;
     } catch {
       return false;
     }
@@ -1547,5 +1549,571 @@ test("EXECUTE: non-zero exit with CANCEL_PENDING skips PROCESS_FAILED and ends a
     errorEvents.length,
     0,
     `Expected no PROCESS_FAILED event when cancelled, got ${errorEvents.length}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 12 (T-4.2a): AUTH_CHALLENGE event posted when run-loop.sh writes a
+//   "Please log in" error result record to claude-output.jsonl and exits 1.
+//   Verifies:
+//   - The posted error event has code === 'AUTH_CHALLENGE'
+//   - The posted error event message includes 'Please log in'
+//   - No CONTEXT_LIMIT_EXCEEDED event is posted
+// ---------------------------------------------------------------------------
+
+test("PLAN: run-loop.sh auth-challenge JSONL record causes AUTH_CHALLENGE error event", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-auth-challenge-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-auth-challenge");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  // fake run-loop.sh: writes an AUTH_CHALLENGE error result then exits 1.
+  // Using skipTokens: true so the 0-token path is exercised (no fake token injection).
+  // The script writes the error JSONL directly to $CLOSEDLOOP_WORKDIR/claude-output.jsonl.
+  const authErrorJsonl = JSON.stringify({
+    type: "result",
+    subtype: "error",
+    result: "Please log in to continue",
+    is_error: true,
+  });
+  const scriptBody = [
+    "#!/bin/sh",
+    `mkdir -p "$CLOSEDLOOP_WORKDIR"`,
+    `echo '${authErrorJsonl}' >> "$CLOSEDLOOP_WORKDIR/claude-output.jsonl"`,
+    "exit 1",
+  ].join("\n");
+  await createFakeRunLoopScript(tmpDir, scriptBody, { skipTokens: true });
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-auth-challenge-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000001300";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "PLAN",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        repo: {
+          fullName: `auth-challenge/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  // Wait for a terminal event (error expected here)
+  const terminalEvent = await waitForTerminalEvent(mock.requests, loopId);
+
+  // Assert the event has code === 'AUTH_CHALLENGE'
+  assert.equal(
+    terminalEvent.type,
+    "error",
+    `Expected event type 'error', got: ${String(terminalEvent.type)}`,
+  );
+  assert.equal(
+    terminalEvent.code,
+    LoopErrorCode.AUTH_CHALLENGE,
+    `Expected error code AUTH_CHALLENGE, got: ${String(terminalEvent.code)}`,
+  );
+
+  // Assert the message contains 'Please log in'
+  assert.ok(
+    typeof terminalEvent.message === "string" &&
+      terminalEvent.message.includes("Please log in"),
+    `Expected message to include 'Please log in', got: ${String(terminalEvent.message)}`,
+  );
+
+  // Assert no CONTEXT_LIMIT_EXCEEDED event was posted
+  const eventsUrl = `/loops/${loopId}/events`;
+  const contextLimitEvents = mock.requests.filter((r) => {
+    if (!r.url.includes(eventsUrl)) return false;
+    try {
+      const body = JSON.parse(r.body) as Record<string, unknown>;
+      return body.code === LoopErrorCode.CONTEXT_LIMIT_EXCEEDED;
+    } catch {
+      return false;
+    }
+  });
+  assert.equal(
+    contextLimitEvents.length,
+    0,
+    `Expected no CONTEXT_LIMIT_EXCEEDED event, got ${contextLimitEvents.length}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 13 (T-4.2b): Precedence — when the JSONL result contains both a
+//   SESSION_LIMIT_PATTERN match ('context limit reached') and an
+//   AUTH_CHALLENGE_PATTERN match ('Please log in'), the error code must be
+//   CONTEXT_LIMIT_EXCEEDED (SESSION_LIMIT has higher precedence).
+// ---------------------------------------------------------------------------
+
+test("PLAN: CONTEXT_LIMIT_EXCEEDED takes precedence over AUTH_CHALLENGE when both patterns match", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-precedence-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-precedence");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  // Write a JSONL record whose `result` contains both a SESSION_LIMIT_PATTERN
+  // match ("context limit reached") and an AUTH_CHALLENGE_PATTERN match
+  // ("Please log in"). The process exits with code 2.
+  const combinedErrorJsonl = JSON.stringify({
+    type: "result",
+    subtype: "error",
+    result: "context limit reached — Please log in to continue",
+    is_error: true,
+  });
+  const scriptBody = [
+    "#!/bin/sh",
+    `mkdir -p "$CLOSEDLOOP_WORKDIR"`,
+    `echo '${combinedErrorJsonl}' >> "$CLOSEDLOOP_WORKDIR/claude-output.jsonl"`,
+    "exit 2",
+  ].join("\n");
+  await createFakeRunLoopScript(tmpDir, scriptBody, { skipTokens: true });
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-precedence-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000001400";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "PLAN",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        repo: {
+          fullName: `precedence/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  // Wait for a terminal event
+  const terminalEvent = await waitForTerminalEvent(mock.requests, loopId);
+
+  // SESSION_LIMIT has higher precedence (checked first in the live-exit error path),
+  // so the error code must be CONTEXT_LIMIT_EXCEEDED.
+  assert.equal(
+    terminalEvent.code,
+    LoopErrorCode.CONTEXT_LIMIT_EXCEEDED,
+    `Expected error code CONTEXT_LIMIT_EXCEEDED (precedence over AUTH_CHALLENGE), got: ${String(terminalEvent.code)}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 14 (T-4.2c): Boot-recovery — a persisted job with status='FAILED' and
+//   lastErrorCode='AUTH_CHALLENGE' causes tryPostErrorEvent to post an error
+//   event with code='AUTH_CHALLENGE', not 'PROCESS_FAILED'.
+// ---------------------------------------------------------------------------
+
+test("boot-recovery: tryPostErrorEvent posts AUTH_CHALLENGE (not PROCESS_FAILED) for job with lastErrorCode=AUTH_CHALLENGE", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-boot-recovery-auth-"));
+  tempPathsToClean.push(tmpDir);
+
+  // Create a workdir with a log file for the job
+  const claudeWorkDir = path.join(tmpDir, "work");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  // Set up a JobStore with the FAILED + AUTH_CHALLENGE job
+  const jobStore = new JobStore({ cwd: tmpDir, name: "boot-recovery-auth-jobs" });
+  const job = {
+    id: "boot-recovery-auth-1",
+    kind: "SYMPHONY_LOOP" as const,
+    loopId: "00000000-0000-0000-0000-000000001500",
+    command: "PLAN" as const,
+    claudeWorkDir,
+    status: "FAILED" as const,
+    exitCode: 1,
+    lastErrorCode: LoopErrorCode.AUTH_CHALLENGE,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  jobStore.upsert(job);
+
+  // Mock the API server to capture posted events
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  // Call tryPostErrorEvent directly (simulating boot-recovery finalization)
+  const result = await tryPostErrorEvent(
+    job,
+    claudeWorkDir,
+    [],
+    {
+      jobStore,
+      apiAuthToken: "tok",
+      apiBaseUrl: `http://127.0.0.1:${mock.port}`,
+    },
+  );
+
+  assert.equal(
+    result.failed,
+    false,
+    `Expected tryPostErrorEvent to succeed, got error: ${String(result.error)}`,
+  );
+
+  // Find the event posted to the mock server
+  const eventsUrl = `/loops/${job.loopId}/events`;
+  const postedEvent = mock.requests.find((r) => r.url.includes(eventsUrl));
+  assert.ok(postedEvent, "Expected an event to be posted to /loops/.../events");
+
+  const eventBody = JSON.parse(postedEvent.body) as Record<string, unknown>;
+
+  // Assert code is AUTH_CHALLENGE, not PROCESS_FAILED
+  assert.equal(
+    eventBody.code,
+    LoopErrorCode.AUTH_CHALLENGE,
+    `Expected event code AUTH_CHALLENGE (from lastErrorCode), got: ${String(eventBody.code)}`,
+  );
+  assert.notEqual(
+    eventBody.code,
+    LoopErrorCode.PROCESS_FAILED,
+    `Event code must not be PROCESS_FAILED when lastErrorCode=AUTH_CHALLENGE`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Tests T-4.3a/b/c: REQUEST_CHANGES --resume suppression
+//
+// The REQUEST_CHANGES command adds --resume <parentSessionId> to the claude
+// args unless the previous job for that loopId had lastErrorCode === 'AUTH_CHALLENGE'.
+//
+// Three cases:
+//   T-4.3a: lastErrorCode === 'AUTH_CHALLENGE' → --resume OMITTED
+//   T-4.3b: lastErrorCode === 'CONTEXT_LIMIT_EXCEEDED' → --resume INCLUDED
+//   T-4.3c: lastErrorCode is undefined (field absent) → --resume INCLUDED
+// ---------------------------------------------------------------------------
+
+/**
+ * Helper: creates the shared infrastructure for a REQUEST_CHANGES --resume test.
+ * Returns the server port, mock, jobStore, and the path to the claude args capture file.
+ */
+async function setupRequestChangesTest(opts: {
+  tmpDir: string;
+  loopId: string;
+  machineName: string;
+}): Promise<{
+  mock: Awaited<ReturnType<typeof startMockApiServer>>;
+  server: DesktopGatewayServer;
+  jobStore: JobStore;
+  claudeArgvCapture: string;
+  repoPath: string;
+}> {
+  const { tmpDir, loopId, machineName } = opts;
+
+  process.env.HOME = tmpDir;
+
+  const repoPath = path.join(tmpDir, "repo-rc");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+
+  const claudeArgvCapture = path.join(tmpDir, "claude-argv-capture.txt");
+
+  // Fake claude: writes all args (one per line) to capture file, then exits 0.
+  // Must also write a minimal JSONL result to prevent NO_WORK_PRODUCED guard.
+  const tokenJsonl = JSON.stringify({
+    type: "assistant",
+    message: { usage: { input_tokens: 10, output_tokens: 5 } },
+  });
+  const claudeScript = [
+    "#!/bin/sh",
+    `printf '%s\n' "$@" > ${JSON.stringify(claudeArgvCapture)}`,
+    // Write a result record so the loop does not fire the 0-token guard
+    `mkdir -p "$CLOSEDLOOP_WORKDIR" 2>/dev/null`,
+    `echo '${tokenJsonl}' >> "$CLOSEDLOOP_WORKDIR/claude-output.jsonl"`,
+    `echo '{"type":"result","subtype":"success","result":"","is_error":false}' >> "$CLOSEDLOOP_WORKDIR/claude-output.jsonl"`,
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "claude"), claudeScript, { mode: 0o755 });
+
+  resetResolvedClaudePath();
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const jobStore = new JobStore({ cwd: tmpDir, name: `test-jobs-rc-${loopId.slice(-4)}` });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName,
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  return { mock, server, jobStore, claudeArgvCapture, repoPath };
+}
+
+test("REQUEST_CHANGES: --resume is omitted when previous job has lastErrorCode=AUTH_CHALLENGE", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "rc-resume-auth-"));
+  tempPathsToClean.push(tmpDir);
+
+  const loopId = "00000000-0000-0000-0000-000000001600";
+  const { mock, server, jobStore, claudeArgvCapture, repoPath } =
+    await setupRequestChangesTest({ tmpDir, loopId, machineName: "rc-resume-auth-machine" });
+
+  // Pre-seed a FAILED job for this loopId with lastErrorCode=AUTH_CHALLENGE.
+  // This is what the real system sets when a previous run hits an auth wall.
+  jobStore.upsert({
+    id: "rc-resume-auth-seed",
+    kind: "SYMPHONY_LOOP",
+    loopId,
+    command: "REQUEST_CHANGES",
+    status: "FAILED",
+    lastErrorCode: LoopErrorCode.AUTH_CHALLENGE,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+
+  const parentSessionId = "session-abc-123";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "REQUEST_CHANGES",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        artifactSlug: "PLAN-160",
+        parentSessionId,
+        repo: { fullName: `rc-auth/${path.basename(repoPath)}`, branch: "main" },
+      }),
+    }
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
+  );
+
+  // Wait for the completed event to confirm claude ran
+  await waitForCompletedEvent(mock.requests, loopId);
+
+  // Read the captured args written by the fake claude
+  const capturedArgv = await fs.readFile(claudeArgvCapture, "utf-8").catch(() => "");
+  const argLines = capturedArgv.split("\n").filter(Boolean);
+
+  assert.ok(
+    !argLines.includes("--resume"),
+    `Expected --resume to be OMITTED when lastErrorCode=AUTH_CHALLENGE, but got args: ${argLines.join(" ")}`
+  );
+  assert.ok(
+    !argLines.includes(parentSessionId),
+    `Expected parentSessionId to be OMITTED when lastErrorCode=AUTH_CHALLENGE, but got args: ${argLines.join(" ")}`
+  );
+});
+
+test("REQUEST_CHANGES: --resume is included when previous job has lastErrorCode=CONTEXT_LIMIT_EXCEEDED", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "rc-resume-ctx-"));
+  tempPathsToClean.push(tmpDir);
+
+  const loopId = "00000000-0000-0000-0000-000000001700";
+  const { mock, server, jobStore, claudeArgvCapture, repoPath } =
+    await setupRequestChangesTest({ tmpDir, loopId, machineName: "rc-resume-ctx-machine" });
+
+  // Pre-seed a FAILED job with lastErrorCode=CONTEXT_LIMIT_EXCEEDED.
+  // The suppress-resume guard does NOT fire for this code → --resume should appear.
+  jobStore.upsert({
+    id: "rc-resume-ctx-seed",
+    kind: "SYMPHONY_LOOP",
+    loopId,
+    command: "REQUEST_CHANGES",
+    status: "FAILED",
+    lastErrorCode: LoopErrorCode.CONTEXT_LIMIT_EXCEEDED,
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+
+  const parentSessionId = "session-ctx-456";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "REQUEST_CHANGES",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        artifactSlug: "PLAN-170",
+        parentSessionId,
+        repo: { fullName: `rc-ctx/${path.basename(repoPath)}`, branch: "main" },
+      }),
+    }
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
+  );
+
+  await waitForCompletedEvent(mock.requests, loopId);
+
+  const capturedArgv = await fs.readFile(claudeArgvCapture, "utf-8").catch(() => "");
+  const argLines = capturedArgv.split("\n").filter(Boolean);
+
+  assert.ok(
+    argLines.includes("--resume"),
+    `Expected --resume to be INCLUDED when lastErrorCode=CONTEXT_LIMIT_EXCEEDED, but got args: ${argLines.join(" ")}`
+  );
+  assert.ok(
+    argLines.includes(parentSessionId),
+    `Expected parentSessionId=${parentSessionId} to appear in args when --resume is included, but got args: ${argLines.join(" ")}`
+  );
+});
+
+test("REQUEST_CHANGES: --resume is included when no previous job exists (lastErrorCode absent, backward compat)", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "rc-resume-nonjob-"));
+  tempPathsToClean.push(tmpDir);
+
+  const loopId = "00000000-0000-0000-0000-000000001800";
+  // No job pre-seeded — getByLoopId() returns undefined, previousJob is undefined.
+  // The condition `previousJob?.lastErrorCode !== 'AUTH_CHALLENGE'` is true (undefined !== 'AUTH_CHALLENGE'),
+  // so --resume should be added for backward compatibility.
+  const { mock, server, claudeArgvCapture, repoPath } =
+    await setupRequestChangesTest({ tmpDir, loopId, machineName: "rc-resume-nojob-machine" });
+
+  const parentSessionId = "session-nojob-789";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "REQUEST_CHANGES",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        artifactSlug: "PLAN-180",
+        parentSessionId,
+        repo: { fullName: `rc-nojob/${path.basename(repoPath)}`, branch: "main" },
+      }),
+    }
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
+  );
+
+  await waitForCompletedEvent(mock.requests, loopId);
+
+  const capturedArgv = await fs.readFile(claudeArgvCapture, "utf-8").catch(() => "");
+  const argLines = capturedArgv.split("\n").filter(Boolean);
+
+  assert.ok(
+    argLines.includes("--resume"),
+    `Expected --resume to be INCLUDED when no previous job exists (backward compat), but got args: ${argLines.join(" ")}`
+  );
+  assert.ok(
+    argLines.includes(parentSessionId),
+    `Expected parentSessionId=${parentSessionId} to appear in args when no previous job, but got args: ${argLines.join(" ")}`
   );
 });

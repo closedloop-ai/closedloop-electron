@@ -16,6 +16,14 @@ export type LocalJobKind = "SYMPHONY_LOOP";
 
 export type LocalJobCommand = "PLAN" | "EXECUTE" | "REQUEST_CHANGES" | "DECOMPOSE" | "GENERATE_PRD";
 
+/** Loop terminal error codes (SSOT for type, values, and runtime sets). */
+export enum LoopErrorCode {
+  CONTEXT_LIMIT_EXCEEDED = "CONTEXT_LIMIT_EXCEEDED",
+  AUTH_CHALLENGE = "AUTH_CHALLENGE",
+  PROCESS_FAILED = "PROCESS_FAILED",
+  PROCESS_STOPPED = "PROCESS_STOPPED",
+}
+
 export type TaskProgress = {
   pending: number;
   completed: number;
@@ -51,6 +59,7 @@ export type LocalJob = {
   completedAt?: string;
   warning?: string;
   exitCode?: number | null;
+  lastErrorCode?: LoopErrorCode;
   /**
    * Replay-safe byte offset into `jsonlPath` (claude-output.jsonl).
    * Updated by the output tailer only after newline-delimited bytes are committed:

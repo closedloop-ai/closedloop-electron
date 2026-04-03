@@ -20,7 +20,7 @@ import {
   sanitizeErrorMessage,
 } from "../../main/diagnostics-helpers.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
-import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
+import { LoopErrorCode, type JobStore, type LocalJobCommand } from "../../main/job-store.js";
 import type { LoopTokenStore } from "../../main/loop-token-store.js";
 import {
   finalizeLoopFromRuntime,
@@ -987,13 +987,15 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
 export const SESSION_LIMIT_PATTERN =
   /prompt is too long|exceed context limit|context limit reached|conversation too long/i;
 
+/** Pattern that matches known authentication challenge / session expiry error messages. */
+export const AUTH_CHALLENGE_PATTERN =
+  /login required|authentication failed|Please log in|session expired/i;
+
 /**
- * Scan claude-output.jsonl for a result record with `is_error: true` whose
- * message matches a known session/context limit pattern.
- * Returns the error text (e.g. "Prompt is too long") or null if not found
- * or if the error is unrelated to context limits.
+ * Scan claude-output.jsonl for the first error result record whose message
+ * matches `pattern`. Returns the error text or null if no match is found.
  */
-export function detectSessionLimitFromJsonl(claudeWorkDir: string): string | null {
+function detectErrorFromJsonl(claudeWorkDir: string, pattern: RegExp): string | null {
   const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
   if (!existsSync(outputFile)) {
     return null;
@@ -1010,7 +1012,7 @@ export function detectSessionLimitFromJsonl(claudeWorkDir: string): string | nul
           entry.type === "result" &&
           entry.is_error === true &&
           typeof entry.result === "string" &&
-          SESSION_LIMIT_PATTERN.test(entry.result)
+          pattern.test(entry.result)
         ) {
           return entry.result;
         }
@@ -1022,6 +1024,30 @@ export function detectSessionLimitFromJsonl(claudeWorkDir: string): string | nul
     // file read error
   }
   return null;
+}
+
+/**
+ * Scan claude-output.jsonl for a result record with `is_error: true` whose
+ * message matches a known session/context limit pattern.
+ */
+export function detectSessionLimitFromJsonl(claudeWorkDir: string): string | null {
+  return detectErrorFromJsonl(claudeWorkDir, SESSION_LIMIT_PATTERN);
+}
+
+/**
+ * Scan claude-output.jsonl for a result record with `is_error: true` whose
+ * message matches a known authentication challenge / session expiry pattern.
+ */
+export function detectAuthChallengeFromJsonl(claudeWorkDir: string): string | null {
+  return detectErrorFromJsonl(claudeWorkDir, AUTH_CHALLENGE_PATTERN);
+}
+
+/**
+ * Check whether a log tail string contains Claude Code authentication challenge
+ * / session expiry error patterns. The log file contains both stdout and stderr.
+ */
+export function isAuthChallengeError(logTail: string): boolean {
+  return AUTH_CHALLENGE_PATTERN.test(logTail);
 }
 
 /**
@@ -1610,8 +1636,15 @@ async function handleProcessCompletion(
       jsonlError !== null ||
       (diagnostics.logTail != null && isSessionLimitError(diagnostics.logTail));
 
+    const jsonlAuthError = detectAuthChallengeFromJsonl(claudeWorkDir);
+    const isAuthChallenge =
+      jsonlAuthError !== null ||
+      (diagnostics.logTail != null && isAuthChallengeError(diagnostics.logTail));
+
+    let errorCode: LoopErrorCode | undefined;
     if (!wasCancelled) {
       if (isContextLimit) {
+        errorCode = LoopErrorCode.CONTEXT_LIMIT_EXCEEDED;
         const limitMsg = jsonlError ?? "Context limit exceeded";
         loopError(loopId, `Context limit detected: ${limitMsg}`);
         gatewayLog.error(
@@ -1620,8 +1653,25 @@ async function handleProcessCompletion(
         );
         await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
           type: "error",
-          code: "CONTEXT_LIMIT_EXCEEDED",
+          code: LoopErrorCode.CONTEXT_LIMIT_EXCEEDED,
           message: limitMsg,
+          loopId,
+          tokenUsage: diagnostics.tokenUsage,
+          logTail: diagnostics.logTail,
+          diagnosticsVersion: diagnostics.diagnosticsVersion,
+        });
+      } else if (isAuthChallenge) {
+        errorCode = LoopErrorCode.AUTH_CHALLENGE;
+        const authMsg = jsonlAuthError ?? "Authentication required";
+        loopError(loopId, `Auth challenge detected: ${authMsg}`);
+        gatewayLog.error(
+          "loop-harness",
+          `${command} hit auth challenge, loopId=${loopId}: ${authMsg}`,
+        );
+        await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+          type: "error",
+          code: LoopErrorCode.AUTH_CHALLENGE,
+          message: authMsg,
           loopId,
           tokenUsage: diagnostics.tokenUsage,
           logTail: diagnostics.logTail,
@@ -1635,7 +1685,7 @@ async function handleProcessCompletion(
         );
         await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
           type: "error",
-          code: "PROCESS_FAILED",
+          code: LoopErrorCode.PROCESS_FAILED,
           message: `Process exited with code ${exitCode}`,
           loopId,
           tokenUsage: diagnostics.tokenUsage,
@@ -1647,14 +1697,18 @@ async function handleProcessCompletion(
 
     if (existingJob && jobStore) {
       const now = new Date().toISOString();
+      let liveActivity: string | undefined;
+      if (!wasCancelled && isContextLimit) {
+        liveActivity = "Context limit exceeded";
+      } else if (!wasCancelled && isAuthChallenge) {
+        liveActivity = "Authentication required";
+      }
       jobStore.upsert({
         ...existingJob,
         status: wasCancelled ? "CANCELLED" : "FAILED",
-        liveActivity:
-          !wasCancelled && isContextLimit
-            ? "Context limit exceeded"
-            : undefined,
+        liveActivity,
         exitCode,
+        lastErrorCode: errorCode,
         updatedAt: now,
         completedAt: now,
       });
@@ -2654,7 +2708,11 @@ async function handleLoopRequest(
         const claudeArgs = [...baseClaudeArgs];
 
         // Resume from parent session if available (matches harness --resume)
-        if (body.parentSessionId) {
+        const previousJob = jobStore?.getByLoopId(body.loopId);
+        if (
+          body.parentSessionId &&
+          !(previousJob?.status === "FAILED" && previousJob?.lastErrorCode === LoopErrorCode.AUTH_CHALLENGE)
+        ) {
           claudeArgs.push("--resume", body.parentSessionId);
         }
 
@@ -2854,6 +2912,7 @@ async function handleLoopRequest(
         statePath,
         pid,
         status: "RUNNING",
+        lastErrorCode: undefined,
         updatedAt: now,
         startedAt: existing?.startedAt ?? now,
         apiBaseUrl,

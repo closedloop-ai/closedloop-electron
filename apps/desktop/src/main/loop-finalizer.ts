@@ -8,7 +8,7 @@ import {
   sanitizeErrorMessage,
 } from "./diagnostics-helpers.js";
 import { gatewayLog } from "./gateway-logger.js";
-import type { JobStore, LocalJob } from "./job-store.js";
+import { LoopErrorCode, type JobStore, type LocalJob } from "./job-store.js";
 import type { LoopTokenStore } from "./loop-token-store.js";
 import type { TelemetryEmitter } from "./telemetry-protocol.js";
 import { parseTokenUsage } from "./token-usage.js";
@@ -251,7 +251,9 @@ export async function tryPostErrorEvent(
 
   const tokenUsage = parseTokenUsage(claudeWorkDir);
   const logTail = readLogTail(path.join(claudeWorkDir, "symphony-loop.log")) ?? undefined;
-  const errorCode = job.status === "FAILED" ? "PROCESS_FAILED" : "PROCESS_STOPPED";
+  const fallbackCode: LoopErrorCode =
+    job.status === "FAILED" ? LoopErrorCode.PROCESS_FAILED : LoopErrorCode.PROCESS_STOPPED;
+  const errorCode: LoopErrorCode = job.lastErrorCode ?? fallbackCode;
   const errorMessage =
     job.status === "FAILED"
       ? `Process exited with code ${job.exitCode ?? 1}`
