@@ -421,6 +421,41 @@ test("finalizeLoopFromRuntime boot-recovery RUNNING without snapshot resolves to
   assert.ok(fetchCalls.some((c) => c.body.includes('"code":"PROCESS_FAILED"')));
 });
 
+test("finalizeLoopFromRuntime boot-recovery RUNNING with COMPLETED snapshot preserves success exitCode", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ tasks: [] }));
+
+  const statePath = path.join(tempRoot, "state.json");
+  await fs.writeFile(statePath, JSON.stringify({ status: "COMPLETED" }), "utf-8");
+
+  const jobStore = createStore("finalizer-boot-running-completed-snapshot");
+  const job = createBaseJob({ claudeWorkDir, status: "RUNNING", statePath });
+  jobStore.upsert(job);
+
+  await finalizeLoopFromRuntime(job, "boot-recovery", {
+    jobStore,
+    telemetry: { emit: () => {} },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+  });
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.status, "COMPLETED");
+  assert.equal(persisted.exitCode ?? 0, 0);
+
+  const completedCall = fetchCalls.find((c) => c.body.includes('"type":"completed"'));
+  assert.ok(completedCall, "completed event must be posted");
+  const completedPayload = JSON.parse(completedCall.body) as {
+    result?: { exitCode?: number };
+  };
+  assert.equal(completedPayload.result?.exitCode, 0);
+
+  assert.equal(fetchCalls.filter((c) => c.body.includes('"type":"error"')).length, 0);
+});
+
 test("finalizeLoopFromRuntime boot-recovery error event includes diagnostics payload", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });

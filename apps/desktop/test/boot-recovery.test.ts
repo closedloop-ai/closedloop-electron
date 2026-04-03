@@ -9,6 +9,7 @@ import { BootRecoveryService } from "../src/main/boot-recovery.js";
 import { JobStore, type LocalJob } from "../src/main/job-store.js";
 import { LoopTokenStore } from "../src/main/loop-token-store.js";
 import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
+import { restoreEnv } from "./symphony-test-utils.js";
 import type { TelemetryEventPayload } from "../src/main/telemetry-protocol.js";
 
 let tempRoot = "";
@@ -41,19 +42,13 @@ beforeEach(async () => {
   }) as typeof fetch;
 });
 
-function restoreEnvVar(key: string, original: string | undefined): void {
-  if (original === undefined) {
-    delete process.env[key];
-  } else {
-    process.env[key] = original;
-  }
-}
-
 afterEach(async () => {
   globalThis.fetch = originalFetch;
-  restoreEnvVar("CLOSEDLOOP_TAILER_POLL_MS", originalPollMs);
-  restoreEnvVar("CLOSEDLOOP_TAILER_THROTTLE_MS", originalThrottleMs);
-  restoreEnvVar("CLOSEDLOOP_WATCHER_POLL_MS", originalWatcherPollMs);
+  restoreEnv({
+    CLOSEDLOOP_TAILER_POLL_MS: originalPollMs,
+    CLOSEDLOOP_TAILER_THROTTLE_MS: originalThrottleMs,
+    CLOSEDLOOP_WATCHER_POLL_MS: originalWatcherPollMs,
+  });
   if (tempRoot) {
     await fs.rm(tempRoot, { recursive: true, force: true });
   }
@@ -712,6 +707,7 @@ test("preserves COMPLETED status when terminal snapshot is available during boot
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
   assert.equal(persisted.status, "COMPLETED");
+  assert.equal(persisted.exitCode ?? 0, 0);
 
   // upload-artifacts should have been called for a COMPLETED job
   assert.ok(
@@ -720,10 +716,12 @@ test("preserves COMPLETED status when terminal snapshot is available during boot
   );
 
   // A completed-type event should have been posted
-  assert.ok(
-    fetchCalls.some((c) => c.body.includes('"type":"completed"')),
-    "expected type:completed event to be posted",
-  );
+  const completedEventCall = fetchCalls.find((c) => c.body.includes('"type":"completed"'));
+  assert.ok(completedEventCall, "expected type:completed event to be posted");
+  const completedEvent = JSON.parse(completedEventCall.body) as {
+    result?: { exitCode?: number };
+  };
+  assert.equal(completedEvent.result?.exitCode, 0);
 
   // No error event should have been emitted
   assert.ok(

@@ -531,6 +531,8 @@ export async function finalizeLoopFromRuntime(
 
   let resolvedJob: LocalJob = effectiveJob;
   if (reason === "boot-recovery" && effectiveJob.status === "RUNNING") {
+    // Intentionally treat unresolved dead-RUNNING recovery as FAILED so cloud replay
+    // emits PROCESS_FAILED for a process that died mid-run.
     let derivedStatus: LocalJob["status"] = "FAILED";
     if (effectiveJob.statePath) {
       const snapshot = await readEffectiveStatusFromState(effectiveJob.statePath);
@@ -538,7 +540,13 @@ export async function finalizeLoopFromRuntime(
         derivedStatus = snapshot.status;
       }
     }
-    resolvedJob = { ...effectiveJob, status: derivedStatus, exitCode: effectiveJob.exitCode ?? 1 };
+    const shouldDefaultExitCode =
+      derivedStatus === "FAILED" || derivedStatus === "STOPPED" || derivedStatus === "UNKNOWN";
+    resolvedJob = {
+      ...effectiveJob,
+      status: derivedStatus,
+      exitCode: shouldDefaultExitCode ? (effectiveJob.exitCode ?? 1) : effectiveJob.exitCode,
+    };
     gatewayLog.info(
       "loop-finalizer",
       `loopId=${effectiveJob.loopId} boot-recovery RUNNING resolved to ${derivedStatus} (statePath=${effectiveJob.statePath ?? "none"})`,
