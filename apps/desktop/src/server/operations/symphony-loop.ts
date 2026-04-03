@@ -583,9 +583,9 @@ async function postLoopEvent(
       };
     }
     loopLog(loopId, `Event POST success: ${resp.status}`);
-    gatewayLog.debug(
+    gatewayLog.info(
       "loop-event",
-      `POST ${payload.type} to ${url}: ${resp.status}`,
+      `POST ${payload.type} for loopId=${loopId}: ${resp.status}`,
     );
     return { success: true };
   } catch (err) {
@@ -633,9 +633,9 @@ async function uploadArtifacts(
       };
     }
     loopLog(loopId, `Upload success: ${resp.status}`);
-    gatewayLog.debug(
+    gatewayLog.info(
       "loop-upload",
-      `Artifact upload to ${url}: ${resp.status}`,
+      `Artifact upload for loopId=${loopId}: ${resp.status}`,
     );
     return { success: true };
   } catch (err) {
@@ -2224,6 +2224,10 @@ async function handleProcessCompletion(
     runningLoops.delete(loopId);
     const existingJob = jobStore?.getByLoopId(loopId);
     if (existingJob && jobStore) {
+      gatewayLog.info(
+        "loop-harness",
+        `Finalizing ${command} via JobStore, loopId=${loopId}`,
+      );
       const finalizerDeps: LoopFinalizerDeps = {
         jobStore,
         telemetry: { emit: () => {} },
@@ -2232,7 +2236,13 @@ async function handleProcessCompletion(
         isProcessRunning,
         loopTokenStore,
       };
-      await finalizeLoopFromRuntime(existingJob, "live-exit", finalizerDeps);
+      const outcome = await finalizeLoopFromRuntime(existingJob, "live-exit", finalizerDeps);
+      if (!outcome.cloudFinalized) {
+        gatewayLog.error(
+          "loop-harness",
+          `Cloud finalization failed for ${command} loopId=${loopId}: ${outcome.error ?? "unknown"}, retryable=${outcome.retryableFailure}`,
+        );
+      }
       const sessionId = readTextFile(
         path.join(claudeWorkDir, "session-id.txt"),
       );
