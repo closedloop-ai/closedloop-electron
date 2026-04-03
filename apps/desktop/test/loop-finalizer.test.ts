@@ -1,5 +1,5 @@
-import { execSync } from "node:child_process";
 import assert from "node:assert/strict";
+import { execSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -15,24 +15,9 @@ import {
   tryPostErrorEvent,
   tryUploadArtifacts,
 } from "../src/main/loop-finalizer.js";
-import {
-  type SafeStorageLike,
-  LoopTokenStore,
-} from "../src/main/loop-token-store.js";
+import { LoopTokenStore } from "../src/main/loop-token-store.js";
 import type { TelemetryEventPayload } from "../src/main/telemetry-protocol.js";
-
-function createTestSafeStorage(): SafeStorageLike {
-  return {
-    isEncryptionAvailable: () => true,
-    encryptString(plainText: string) {
-      return Buffer.from(`stub:${plainText}`, "utf-8");
-    },
-    decryptString(encrypted: Buffer) {
-      const s = encrypted.toString("utf-8");
-      return s.startsWith("stub:") ? s.slice(5) : s;
-    },
-  };
-}
+import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
 
 let tempRoot = "";
 let fetchCalls: Array<{ url: string; body: string }> = [];
@@ -139,7 +124,7 @@ test("finalizeLoopFromRuntime keeps loop token when cloud finalization fails ret
   const loopTokenStore = new LoopTokenStore({
     cwd: tempRoot,
     name: "finalizer-upload-fail-lt",
-    safeStorage: createTestSafeStorage(),
+    safeStorage: createTestLoopTokenSafeStorage(),
   });
   loopTokenStore.setLoopToken("loop-1", "runner-token");
 
@@ -180,7 +165,7 @@ test("finalizeLoopFromRuntime clears loop token for non-retryable cloud failure"
   const loopTokenStore = new LoopTokenStore({
     cwd: tempRoot,
     name: "finalizer-non-retryable-lt",
-    safeStorage: createTestSafeStorage(),
+    safeStorage: createTestLoopTokenSafeStorage(),
   });
   loopTokenStore.setLoopToken("loop-1", "runner-token");
 
@@ -402,6 +387,147 @@ test("finalizeLoopFromRuntime preserves STOPPED jobs and posts a stopped error e
   assert.match(fetchCalls[0]?.body ?? "", /"code":"PROCESS_STOPPED"/);
   assert.equal(telemetryEvents[0]?.category, "job.recovery.finalize_replayed");
   assert.equal(telemetryEvents[0]?.severity, "error");
+});
+
+test("finalizeLoopFromRuntime boot-recovery RUNNING without snapshot resolves to FAILED", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const jobStore = createStore("finalizer-boot-running-no-snapshot");
+  // No statePath, no state.json file
+  const loopId = "loop-1";
+  const job = createBaseJob({ claudeWorkDir, status: "RUNNING" });
+  jobStore.upsert(job);
+
+  await finalizeLoopFromRuntime(job, "boot-recovery", {
+    jobStore,
+    telemetry: { emit: () => {} },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+  });
+
+  const persisted = jobStore.getByLoopId(loopId);
+  assert.ok(persisted);
+  assert.equal(persisted.status, "FAILED");
+  // Job moved out of active (listRunning should not contain it)
+  assert.equal(jobStore.listRunning().find((j) => j.loopId === loopId), undefined);
+  // Non-zero exit code
+  assert.ok((persisted.exitCode ?? 0) !== 0);
+  // No upload-artifacts call
+  assert.equal(fetchCalls.filter((c) => c.url.includes("/upload-artifacts")).length, 0);
+  // Error event with PROCESS_FAILED (not PROCESS_STOPPED)
+  assert.ok(fetchCalls.some((c) => c.body.includes('"type":"error"')));
+  assert.ok(fetchCalls.some((c) => c.body.includes('"code":"PROCESS_FAILED"')));
+});
+
+test("finalizeLoopFromRuntime boot-recovery error event includes diagnostics payload", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  await fs.writeFile(
+    path.join(claudeWorkDir, "symphony-loop.log"),
+    "Loop started\nProcess running\nProcess exiting\n",
+  );
+
+  await fs.writeFile(
+    path.join(claudeWorkDir, "claude-output.jsonl"),
+    JSON.stringify({ type: "assistant", message: { content: [], usage: { input_tokens: 100, output_tokens: 50 } } }) + "\n",
+  );
+
+  const jobStore = createStore("finalizer-boot-error-diagnostics");
+  // No statePath, so RUNNING resolves to FAILED via boot-recovery
+  const job = createBaseJob({ claudeWorkDir, status: "RUNNING" });
+  jobStore.upsert(job);
+
+  await finalizeLoopFromRuntime(job, "boot-recovery", {
+    jobStore,
+    telemetry: { emit: () => {} },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+  });
+
+  const errorCall = fetchCalls.find((c) => c.body.includes('"type":"error"'));
+  assert.ok(errorCall, "error event must be posted");
+  const parsed = JSON.parse(errorCall.body) as Record<string, unknown>;
+  // logTail should be present and non-empty
+  assert.ok(parsed.logTail, "logTail must be present");
+  assert.ok(
+    typeof parsed.logTail === "string" && parsed.logTail.length > 0,
+    "logTail must be non-empty string",
+  );
+  // tokenUsage should be present and non-null
+  assert.ok(parsed.tokenUsage, "tokenUsage must be present");
+  const tokenUsage = parsed.tokenUsage as { inputTokens: number; outputTokens: number };
+  assert.ok(
+    tokenUsage.inputTokens > 0 || tokenUsage.outputTokens > 0,
+    "tokenUsage must have non-zero values",
+  );
+});
+
+test("finalizeLoopFromRuntime boot-recovery RUNNING is idempotent on second call", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const jobStore = createStore("finalizer-boot-running-idempotent");
+  const loopId = "loop-1";
+  const job = createBaseJob({ claudeWorkDir, status: "RUNNING" });
+  jobStore.upsert(job);
+
+  // First call: RUNNING -> FAILED
+  await finalizeLoopFromRuntime(job, "boot-recovery", {
+    jobStore,
+    telemetry: { emit: () => {} },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+  });
+
+  const fetchCountAfterFirst = fetchCalls.length;
+  const persistedJob = jobStore.getByLoopId(loopId);
+  assert.ok(persistedJob);
+
+  // Second call with the already-finalized job: completedEventPostedAt guard prevents re-posting
+  await finalizeLoopFromRuntime(persistedJob, "boot-recovery", {
+    jobStore,
+    telemetry: { emit: () => {} },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+  });
+
+  assert.equal(fetchCalls.length, fetchCountAfterFirst);
+});
+
+test("finalizeLoopFromRuntime boot-recovery RUNNING with CANCELLED snapshot resolves to CANCELLED", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  // Write a state.json with CANCELLED status
+  const statePath = path.join(tempRoot, "state.json");
+  await fs.writeFile(statePath, JSON.stringify({ status: "CANCELLED" }), "utf-8");
+
+  const jobStore = createStore("finalizer-boot-running-cancelled-snapshot");
+  const loopId = "loop-1";
+  const job = createBaseJob({ claudeWorkDir, status: "RUNNING", statePath });
+  jobStore.upsert(job);
+
+  await finalizeLoopFromRuntime(job, "boot-recovery", {
+    jobStore,
+    telemetry: { emit: () => {} },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+  });
+
+  const persisted = jobStore.getByLoopId(loopId);
+  assert.ok(persisted);
+  assert.equal(persisted.status, "CANCELLED");
+  // CANCELLED routes to no-cloud-event branch: no error event, no upload
+  assert.equal(fetchCalls.length, 0);
+  // finalStatusPersistedAt is set
+  assert.ok(persisted.finalStatusPersistedAt);
 });
 
 // --- Step functions (minimal scenarios per step)
