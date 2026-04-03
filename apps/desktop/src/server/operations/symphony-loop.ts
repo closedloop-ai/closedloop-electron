@@ -844,6 +844,28 @@ async function writeArtifactsForExecuteOrAmend(
 }
 
 /**
+ * Stage DECOMPOSE inputs under the same relative paths as GENERATE_PRD context pack
+ * (prd.md under .closedloop-ai/context/artifacts/).
+ *
+ * With cwd set to claudeWorkDir at spawn, skills that glob that artifacts directory find the PRD.
+ * Output (features.json) remains at the top-level claudeWorkDir.
+ */
+export async function writeArtifactsForDecompose(
+  claudeWorkDir: string,
+  artifacts: LoopArtifact[],
+  prompt?: string,
+): Promise<{ stagedPrdPath: string; artifactsDir: string }> {
+  const contextDir = path.join(claudeWorkDir, ".closedloop-ai", "context");
+  const artifactsDir = path.join(contextDir, "artifacts");
+  await fs.mkdir(artifactsDir, { recursive: true });
+  await writePrdArtifact(artifactsDir, artifacts, prompt);
+  return {
+    stagedPrdPath: path.join(artifactsDir, "prd.md"),
+    artifactsDir,
+  };
+}
+
+/**
  * Write context pack files for GENERATE_PRD command.
  * Mirrors writeContextPackFiles in harness-agent.mjs (lines 744-816).
  * Files go under worktreeDir/.claude/context/ (NOT claudeWorkDir).
@@ -2388,7 +2410,17 @@ async function handleLoopRequest(
       await fs.mkdir(tmpDir, { recursive: true });
       claudeWorkDir = tmpDir;
       try {
-        if (body.command === "DECOMPOSE" || body.command === "EVALUATE_PRD") {
+        if (body.command === "DECOMPOSE") {
+          const decomposeStage = await writeArtifactsForDecompose(
+            claudeWorkDir,
+            body.artifacts,
+            body.prompt,
+          );
+          loopLog(
+            body.loopId,
+            `DECOMPOSE staged PRD: ${decomposeStage.stagedPrdPath} (artifacts dir: ${decomposeStage.artifactsDir})`,
+          );
+        } else if (body.command === "EVALUATE_PRD") {
           await writePrdArtifact(claudeWorkDir, body.artifacts, body.prompt);
         } else if (body.command === "EVALUATE_PLAN") {
           await writePlanArtifact(claudeWorkDir, body.artifacts, body.prompt);
@@ -2702,8 +2734,14 @@ async function handleLoopRequest(
 
       if (body.command === "DECOMPOSE") {
         // DECOMPOSE: write prompt to file and pass via stdin to avoid E2BIG
-        const prdContent =
-          readTextFile(path.join(claudeWorkDir, "prd.md")) ?? "";
+        const stagedPrdPath = path.join(
+          claudeWorkDir,
+          ".closedloop-ai",
+          "context",
+          "artifacts",
+          "prd.md",
+        );
+        const prdContent = readTextFile(stagedPrdPath) ?? "";
         const decomposePrompt =
           body.prompt ??
           `Decompose the following PRD into features:\n\n${prdContent}`;
