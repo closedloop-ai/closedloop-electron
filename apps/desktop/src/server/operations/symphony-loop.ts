@@ -27,7 +27,7 @@ import {
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
 import { Observability } from "../../main/observability.js";
-import { parseTokenUsage } from "../../main/token-usage.js";
+import { parseTokenUsage, type ModelTokenUsage } from "../../main/token-usage.js";
 import type {
   OperationDispatcher,
   OperationRequestContext,
@@ -1088,16 +1088,18 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
     cacheCreationInputTokens: number;
     cacheReadInputTokens: number;
   };
+  tokensByModel: Record<string, ModelTokenUsage>;
   diagnosticsVersion: number;
 } {
   const logPath = path.join(claudeWorkDir, "symphony-loop.log");
   const rawTail = readLogTail(logPath);
   const logTail = rawTail ? redactCredentials(rawTail) : undefined;
-  const { inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens } =
+  const { inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, tokensByModel } =
     parseTokenUsage(claudeWorkDir);
   return {
     logTail,
     tokenUsage: { inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens },
+    tokensByModel,
     diagnosticsVersion: 1,
   };
 }
@@ -1820,6 +1822,16 @@ async function handleProcessCompletion(
         diagnostics,
         failureSessionId,
       );
+      await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+        type: "error",
+        code: "CANCELLED",
+        message: "Loop cancelled",
+        loopId,
+        tokenUsage: diagnostics.tokenUsage,
+        tokensByModel: diagnostics.tokensByModel,
+        logTail: diagnostics.logTail,
+        diagnosticsVersion: String(diagnostics.diagnosticsVersion),
+      });
     } else {
       Observability.jobFailed(
         commandId ?? existingJob?.commandId,
@@ -1861,6 +1873,7 @@ async function handleProcessCompletion(
           message: limitMsg,
           loopId,
           tokenUsage: diagnostics.tokenUsage,
+          tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
         });
@@ -1885,6 +1898,7 @@ async function handleProcessCompletion(
           message: authMsg,
           loopId,
           tokenUsage: diagnostics.tokenUsage,
+          tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
         });
@@ -1900,6 +1914,7 @@ async function handleProcessCompletion(
           message: `Process exited with code ${exitCode}`,
           loopId,
           tokenUsage: diagnostics.tokenUsage,
+          tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
         });

@@ -7,7 +7,7 @@ Electron desktop app for the [ClosedLoop](https://closedloop.ai) platform. Provi
 - **Node.js** 22+
 - **pnpm** 9.15+ (`corepack enable && corepack prepare pnpm@9.15.0 --activate`)
 - **just** command runner (`brew install just`)
-- **macOS** (Electron desktop builds target macOS only)
+- **macOS** or **Linux** (packaging currently macOS-only; Linux runs via `just desktop-dev`)
 
 ## Getting Started
 
