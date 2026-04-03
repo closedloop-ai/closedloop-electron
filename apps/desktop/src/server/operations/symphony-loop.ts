@@ -1828,8 +1828,9 @@ async function handleProcessCompletion(
     const jsonlAuthError = detectAuthChallengeFromJsonl(claudeWorkDir);
     const isAuthChallenge =
       !isContextLimit &&
-      jsonlAuthError !== null ||
-      (diagnostics.logTail != null && isAuthChallengeError(diagnostics.logTail));
+      (jsonlAuthError !== null ||
+        (diagnostics.logTail != null &&
+          isAuthChallengeError(diagnostics.logTail)));
 
     let errorCode: LoopErrorCode | undefined;
     if (!wasCancelled) {

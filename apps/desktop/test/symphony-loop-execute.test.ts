@@ -1701,6 +1701,7 @@ const planErrorScenarios = [
     errorMessage: "context limit reached -- Please log in to continue",
     exitCode: 2,
     expectedCode: LoopErrorCode.CONTEXT_LIMIT_EXCEEDED,
+    unexpectedCode: LoopErrorCode.AUTH_CHALLENGE,
   },
 ] as const;
 
