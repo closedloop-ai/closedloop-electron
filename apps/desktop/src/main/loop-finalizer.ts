@@ -208,12 +208,21 @@ export async function tryPostCompletedEvent(
   const tokensUsed = parseTokenUsage(claudeWorkDir);
   const result = buildCompletedEventResult(job, command, claudeWorkDir, artifacts);
 
+  gatewayLog.info(
+    "loop-finalizer",
+    `loopId=${job.loopId} tokens: input=${tokensUsed.inputTokens}, output=${tokensUsed.outputTokens}, cacheCreation=${tokensUsed.cacheCreationInputTokens}, cacheRead=${tokensUsed.cacheReadInputTokens}, turns=${tokensUsed.turns}`,
+  );
+
   const completedEvent: Record<string, unknown> = {
     type: "completed",
     result,
     tokensUsed: {
       input: tokensUsed.inputTokens,
       output: tokensUsed.outputTokens,
+      cacheCreationInputTokens: tokensUsed.cacheCreationInputTokens,
+      cacheReadInputTokens: tokensUsed.cacheReadInputTokens,
+      turns: tokensUsed.turns,
+      models: tokensUsed.models,
     },
     loopId: job.loopId,
     ...(warnings.length > 0 ? { warnings } : {}),
@@ -257,12 +266,26 @@ export async function tryPostErrorEvent(
     job.status === "FAILED"
       ? `Process exited with code ${job.exitCode ?? 1}`
       : `Process ended with terminal status ${job.status}`;
+  const hasTokenActivity =
+    tokenUsage.inputTokens > 0 ||
+    tokenUsage.outputTokens > 0 ||
+    tokenUsage.cacheCreationInputTokens > 0 ||
+    tokenUsage.cacheReadInputTokens > 0;
   const errorEvent: Record<string, unknown> = {
     type: "error",
     code: errorCode,
     message: errorMessage,
     loopId: job.loopId,
-    ...(tokenUsage.inputTokens > 0 || tokenUsage.outputTokens > 0 ? { tokenUsage } : {}),
+    ...(hasTokenActivity
+      ? {
+          tokenUsage: {
+            inputTokens: tokenUsage.inputTokens,
+            outputTokens: tokenUsage.outputTokens,
+            cacheCreationInputTokens: tokenUsage.cacheCreationInputTokens,
+            cacheReadInputTokens: tokenUsage.cacheReadInputTokens,
+          },
+        }
+      : {}),
     ...(logTail ? { logTail } : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
   };
@@ -334,14 +357,37 @@ export function emitFinalizationTelemetry(
       : ("job.recovery.finalize_replayed" as const);
 
   let diagnostics:
-    | { logTail?: string; tokenUsage?: { inputTokens: number; outputTokens: number } }
+    | {
+        logTail?: string;
+        tokenUsage?: {
+          inputTokens: number;
+          outputTokens: number;
+          cacheCreationInputTokens: number;
+          cacheReadInputTokens: number;
+        };
+      }
     | undefined;
   if (reason !== "live-exit") {
     const logPath = path.join(claudeWorkDir, "symphony-loop.log");
     const logTail = readLogTail(logPath) ?? undefined;
-    const tokenUsage = parseTokenUsage(claudeWorkDir);
-    if (logTail || tokenUsage.inputTokens > 0 || tokenUsage.outputTokens > 0) {
-      diagnostics = { logTail, tokenUsage };
+    const parsed = parseTokenUsage(claudeWorkDir);
+    const hasTokenActivity =
+      parsed.inputTokens > 0 ||
+      parsed.outputTokens > 0 ||
+      parsed.cacheCreationInputTokens > 0 ||
+      parsed.cacheReadInputTokens > 0;
+    if (logTail || hasTokenActivity) {
+      diagnostics = {
+        logTail,
+        tokenUsage: hasTokenActivity
+          ? {
+              inputTokens: parsed.inputTokens,
+              outputTokens: parsed.outputTokens,
+              cacheCreationInputTokens: parsed.cacheCreationInputTokens,
+              cacheReadInputTokens: parsed.cacheReadInputTokens,
+            }
+          : undefined,
+      };
     }
   }
 

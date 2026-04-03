@@ -674,6 +674,35 @@ test("tryPostCompletedEvent posts completed event and sets completedEventPostedA
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
 
+  // Write JSONL with cache tokens and multiple turns
+  const jsonlLines = [
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        model: "claude-opus-4",
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5,
+          cache_creation_input_tokens: 200,
+          cache_read_input_tokens: 300,
+        },
+      },
+    }),
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        model: "claude-opus-4",
+        usage: {
+          input_tokens: 20,
+          output_tokens: 8,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 150,
+        },
+      },
+    }),
+  ].join("\n") + "\n";
+  await fs.writeFile(path.join(claudeWorkDir, "claude-output.jsonl"), jsonlLines, "utf-8");
+
   const jobStore = createStore("step-complete-ok");
   const job = createBaseJob({ claudeWorkDir });
   jobStore.upsert(job);
@@ -695,6 +724,16 @@ test("tryPostCompletedEvent posts completed event and sets completedEventPostedA
   );
   assert.match(fetchCalls[0]?.body ?? "", /"type":"completed"/);
   assert.ok(jobStore.getByLoopId("loop-1")?.completedEventPostedAt);
+
+  const parsed = JSON.parse(fetchCalls[0]?.body ?? "{}") as Record<string, unknown>;
+  const tokensUsed = parsed.tokensUsed as Record<string, unknown>;
+  assert.ok(tokensUsed !== null && typeof tokensUsed === "object", "tokensUsed must be present");
+  assert.equal(tokensUsed.input, 30, "input must be sum of input_tokens only");
+  assert.equal(tokensUsed.output, 13);
+  assert.equal(tokensUsed.cacheCreationInputTokens, 200);
+  assert.equal(tokensUsed.cacheReadInputTokens, 450);
+  assert.equal(tokensUsed.turns, 2);
+  assert.deepEqual(tokensUsed.models, ["claude-opus-4"]);
 });
 
 test("tryPostCompletedEvent skips when completedEventPostedAt is set", async () => {
@@ -918,6 +957,21 @@ test("tryPostErrorEvent uses PROCESS_FAILED for FAILED status", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
 
+  // Write JSONL with cache tokens
+  const jsonlLine = JSON.stringify({
+    type: "assistant",
+    message: {
+      model: "claude-opus-4",
+      usage: {
+        input_tokens: 5,
+        output_tokens: 3,
+        cache_creation_input_tokens: 100,
+        cache_read_input_tokens: 200,
+      },
+    },
+  });
+  await fs.writeFile(path.join(claudeWorkDir, "claude-output.jsonl"), jsonlLine + "\n", "utf-8");
+
   const jobStore = createStore("step-error-failed");
   const job = createBaseJob({
     claudeWorkDir,
@@ -932,6 +986,16 @@ test("tryPostErrorEvent uses PROCESS_FAILED for FAILED status", async () => {
   assert.equal(result.failed, false);
   assert.match(fetchCalls[0]?.body ?? "", /"code":"PROCESS_FAILED"/);
   assert.match(fetchCalls[0]?.body ?? "", /"message":"Process exited with code 7"/);
+
+  const parsed = JSON.parse(fetchCalls[0]?.body ?? "{}") as Record<string, unknown>;
+  const tokenUsage = parsed.tokenUsage as Record<string, unknown>;
+  assert.ok(tokenUsage !== null && typeof tokenUsage === "object", "tokenUsage must be present");
+  assert.equal(tokenUsage.inputTokens, 5);
+  assert.equal(tokenUsage.outputTokens, 3);
+  assert.equal(tokenUsage.cacheCreationInputTokens, 100);
+  assert.equal(tokenUsage.cacheReadInputTokens, 200);
+  assert.equal(tokenUsage.turns, undefined, "turns must NOT be present in error event");
+  assert.equal(tokenUsage.models, undefined, "models must NOT be present in error event");
 });
 
 test("tryPostErrorEvent uses PROCESS_STOPPED for STOPPED status", async () => {
@@ -967,6 +1031,47 @@ test("tryPostErrorEvent skips when completedEventPostedAt is set", async () => {
 
   assert.equal(result.failed, false);
   assert.equal(fetchCalls.length, 0);
+});
+
+test("tryPostErrorEvent includes tokenUsage when only cache tokens are non-zero", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  // Write JSONL with zero input/output but non-zero cache tokens
+  const jsonlLine = JSON.stringify({
+    type: "assistant",
+    message: {
+      model: "claude-opus-4",
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 500,
+      },
+    },
+  });
+  await fs.writeFile(path.join(claudeWorkDir, "claude-output.jsonl"), jsonlLine + "\n", "utf-8");
+
+  const jobStore = createStore("step-error-cache-only");
+  const job = createBaseJob({
+    claudeWorkDir,
+    status: "FAILED",
+    exitCode: 1,
+  });
+  jobStore.upsert(job);
+
+  const result = await tryPostErrorEvent(job, claudeWorkDir, [], artifactDeps(jobStore));
+
+  assert.equal(result.failed, false);
+  const parsed = JSON.parse(fetchCalls[0]?.body ?? "{}") as Record<string, unknown>;
+  const tokenUsage = parsed.tokenUsage as Record<string, unknown> | undefined;
+  assert.ok(
+    tokenUsage !== null && typeof tokenUsage === "object",
+    "tokenUsage must be present when cache-only activity exists",
+  );
+  assert.equal(tokenUsage.cacheReadInputTokens, 500);
+  assert.equal(tokenUsage.inputTokens, 0);
+  assert.equal(tokenUsage.outputTokens, 0);
 });
 
 test("persistFinalJobStatus sets COMPLETED when isSuccessStatus", () => {
