@@ -636,6 +636,20 @@ export async function finalizeLoopFromRuntime(
       warnings,
       artifactDeps,
     );
+    const artifactKeys = Object.keys(uploadResult.artifacts).filter(
+      (k) => uploadResult.artifacts[k] !== undefined,
+    );
+    if (uploadResult.failed) {
+      gatewayLog.error(
+        "loop-finalizer",
+        `Artifact upload failed for ${command} loopId=${effectiveJob.loopId}: ${uploadResult.error}`,
+      );
+    } else {
+      gatewayLog.info(
+        "loop-finalizer",
+        `Artifacts uploaded for ${command} loopId=${effectiveJob.loopId}: [${artifactKeys.join(", ")}]`,
+      );
+    }
     const postResult = await tryPostCompletedEvent(
       resolvedJob,
       command,
@@ -644,6 +658,12 @@ export async function finalizeLoopFromRuntime(
       warnings,
       artifactDeps,
     );
+    if (postResult.failed) {
+      gatewayLog.error(
+        "loop-finalizer",
+        `Completed event failed for ${command} loopId=${effectiveJob.loopId}: ${postResult.error}`,
+      );
+    }
     if (uploadResult.failed || postResult.failed) {
       remoteError = uploadResult.error ?? postResult.error ?? "Cloud finalization failed";
       retryableFailure = isRetryableFinalizationError(remoteError);
