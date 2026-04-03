@@ -8,13 +8,13 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import {
-  readEvaluatePrdOutputs,
-  writePrdArtifact,
+    readEvaluatePrdOutputs,
+    writePrdArtifact,
 } from "../src/server/operations/symphony-loop.js";
-import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
-import { setupStubClaude } from "./symphony-test-utils.js";
+import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
+import { setupStubClaude } from "./symphony-test-utils.js";
 
 // ---------------------------------------------------------------------------
 // Shared cleanup state
@@ -405,6 +405,28 @@ describe("T-5.2: writePrdArtifact", () => {
     assert.ok(existsSync(prdPath), "prd.md should exist for artifact type");
     const content = await fs.readFile(prdPath, "utf-8");
     assert.equal(content, "Fallback PRD content");
+  });
+
+  test("(d) PRD artifact takes priority over prompt", async () => {
+    const tmpDir = makeTempDir();
+    await writePrdArtifact(
+      tmpDir,
+      [{ type: "PRD", content: "The real PRD content" }],
+      "This is the prompt, not the PRD",
+    );
+    const prdPath = path.join(tmpDir, "prd.md");
+    assert.ok(existsSync(prdPath), "prd.md should exist");
+    const content = await fs.readFile(prdPath, "utf-8");
+    assert.equal(content, "The real PRD content", "Artifact content should win over prompt");
+  });
+
+  test("(e) prompt used as fallback when no artifact present", async () => {
+    const tmpDir = makeTempDir();
+    await writePrdArtifact(tmpDir, [], "Prompt-as-fallback content");
+    const prdPath = path.join(tmpDir, "prd.md");
+    assert.ok(existsSync(prdPath), "prd.md should exist");
+    const content = await fs.readFile(prdPath, "utf-8");
+    assert.equal(content, "Prompt-as-fallback content");
   });
 
   test("prompt without repo contains skill --workdir runDir but not REPO_PATH=", async () => {

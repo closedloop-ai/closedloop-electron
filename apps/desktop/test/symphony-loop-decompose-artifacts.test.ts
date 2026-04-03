@@ -20,28 +20,24 @@ test("writeArtifactsForDecompose writes prd.md under .closedloop-ai/context/arti
   const base = await fs.mkdtemp(path.join(os.tmpdir(), "decompose-stage-"));
   tempPathsToClean.push(base);
 
-  const { stagedPrdPath, artifactsDir } = await writeArtifactsForDecompose(base, [
-    { type: "PRD", content: "Actual PRD markdown body" },
-  ]);
+  await writeArtifactsForDecompose(base, [{ type: "PRD", content: "Actual PRD markdown body" }]);
 
   const expected = path.join(base, ".closedloop-ai", "context", "artifacts", "prd.md");
-  assert.equal(stagedPrdPath, expected);
-  assert.equal(artifactsDir, path.join(base, ".closedloop-ai", "context", "artifacts"));
-
   const content = await fs.readFile(expected, "utf8");
   assert.equal(content, "Actual PRD markdown body");
 });
 
-test("writeArtifactsForDecompose prefers request prompt over artifacts", async () => {
-  const base = await fs.mkdtemp(path.join(os.tmpdir(), "decompose-prompt-"));
+test("writeArtifactsForDecompose prefers PRD artifact over request prompt for prd.md", async () => {
+  const base = await fs.mkdtemp(path.join(os.tmpdir(), "decompose-stage-"));
   tempPathsToClean.push(base);
 
   await writeArtifactsForDecompose(
     base,
-    [{ type: "PRD", content: "from artifact" }],
-    "from prompt wins",
+    [{ type: "PRD", content: "from PRD artifact" }],
+    "from request prompt",
   );
 
-  const p = path.join(base, ".closedloop-ai", "context", "artifacts", "prd.md");
-  assert.equal(await fs.readFile(p, "utf8"), "from prompt wins");
+  const prdPath = path.join(base, ".closedloop-ai", "context", "artifacts", "prd.md");
+  const content = await fs.readFile(prdPath, "utf8");
+  assert.equal(content, "from PRD artifact");
 });

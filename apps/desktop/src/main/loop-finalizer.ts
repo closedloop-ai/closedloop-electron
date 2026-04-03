@@ -8,10 +8,11 @@ import {
   sanitizeErrorMessage,
 } from "./diagnostics-helpers.js";
 import { gatewayLog } from "./gateway-logger.js";
-import type { JobStore, LocalJob } from "./job-store.js";
+import { isTerminalJobStatus, type JobStore, type LocalJob } from "./job-store.js";
 import type { LoopTokenStore } from "./loop-token-store.js";
 import type { TelemetryEmitter } from "./telemetry-protocol.js";
-import { parseTokenUsage } from "./token-usage.js";
+import { parseApiKeySource, parseTokenUsage } from "./token-usage.js";
+import { readEffectiveStatusFromState } from "../server/operations/symphony-job-snapshot.js";
 
 export interface LoopFinalizerDeps {
   jobStore: JobStore;
@@ -207,13 +208,25 @@ export async function tryPostCompletedEvent(
   const tokensUsed = parseTokenUsage(claudeWorkDir);
   const result = buildCompletedEventResult(job, command, claudeWorkDir, artifacts);
 
+  gatewayLog.info(
+    "loop-finalizer",
+    `loopId=${job.loopId} tokens: input=${tokensUsed.inputTokens}, output=${tokensUsed.outputTokens}, cacheCreation=${tokensUsed.cacheCreationInputTokens}, cacheRead=${tokensUsed.cacheReadInputTokens}, turns=${tokensUsed.turns}`,
+  );
+
+  const apiKeySource = parseApiKeySource(claudeWorkDir);
+
   const completedEvent: Record<string, unknown> = {
     type: "completed",
     result,
     tokensUsed: {
       input: tokensUsed.inputTokens,
       output: tokensUsed.outputTokens,
+      cacheCreationInputTokens: tokensUsed.cacheCreationInputTokens,
+      cacheReadInputTokens: tokensUsed.cacheReadInputTokens,
+      turns: tokensUsed.turns,
+      models: tokensUsed.models,
     },
+    ...(apiKeySource != null ? { apiKeySource } : {}),
     loopId: job.loopId,
     ...(warnings.length > 0 ? { warnings } : {}),
   };
@@ -250,19 +263,35 @@ export async function tryPostErrorEvent(
   }
 
   const tokenUsage = parseTokenUsage(claudeWorkDir);
+  const apiKeySource = parseApiKeySource(claudeWorkDir);
   const logTail = readLogTail(path.join(claudeWorkDir, "symphony-loop.log")) ?? undefined;
   const errorCode = job.status === "FAILED" ? "PROCESS_FAILED" : "PROCESS_STOPPED";
   const errorMessage =
     job.status === "FAILED"
       ? `Process exited with code ${job.exitCode ?? 1}`
       : `Process ended with terminal status ${job.status}`;
+  const hasTokenActivity =
+    tokenUsage.inputTokens > 0 ||
+    tokenUsage.outputTokens > 0 ||
+    tokenUsage.cacheCreationInputTokens > 0 ||
+    tokenUsage.cacheReadInputTokens > 0;
   const errorEvent: Record<string, unknown> = {
     type: "error",
     code: errorCode,
     message: errorMessage,
     loopId: job.loopId,
-    ...(tokenUsage.inputTokens > 0 || tokenUsage.outputTokens > 0 ? { tokenUsage } : {}),
+    ...(hasTokenActivity
+      ? {
+          tokenUsage: {
+            inputTokens: tokenUsage.inputTokens,
+            outputTokens: tokenUsage.outputTokens,
+            cacheCreationInputTokens: tokenUsage.cacheCreationInputTokens,
+            cacheReadInputTokens: tokenUsage.cacheReadInputTokens,
+          },
+        }
+      : {}),
     ...(logTail ? { logTail } : {}),
+    ...(apiKeySource != null ? { apiKeySource } : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
   };
 
@@ -333,14 +362,37 @@ export function emitFinalizationTelemetry(
       : ("job.recovery.finalize_replayed" as const);
 
   let diagnostics:
-    | { logTail?: string; tokenUsage?: { inputTokens: number; outputTokens: number } }
+    | {
+        logTail?: string;
+        tokenUsage?: {
+          inputTokens: number;
+          outputTokens: number;
+          cacheCreationInputTokens: number;
+          cacheReadInputTokens: number;
+        };
+      }
     | undefined;
   if (reason !== "live-exit") {
     const logPath = path.join(claudeWorkDir, "symphony-loop.log");
     const logTail = readLogTail(logPath) ?? undefined;
-    const tokenUsage = parseTokenUsage(claudeWorkDir);
-    if (logTail || tokenUsage.inputTokens > 0 || tokenUsage.outputTokens > 0) {
-      diagnostics = { logTail, tokenUsage };
+    const parsed = parseTokenUsage(claudeWorkDir);
+    const hasTokenActivity =
+      parsed.inputTokens > 0 ||
+      parsed.outputTokens > 0 ||
+      parsed.cacheCreationInputTokens > 0 ||
+      parsed.cacheReadInputTokens > 0;
+    if (logTail || hasTokenActivity) {
+      diagnostics = {
+        logTail,
+        tokenUsage: hasTokenActivity
+          ? {
+              inputTokens: parsed.inputTokens,
+              outputTokens: parsed.outputTokens,
+              cacheCreationInputTokens: parsed.cacheCreationInputTokens,
+              cacheReadInputTokens: parsed.cacheReadInputTokens,
+            }
+          : undefined,
+      };
     }
   }
 
@@ -348,14 +400,16 @@ export function emitFinalizationTelemetry(
     reason === "live-exit" || isSuccessStatus || job.status === "CANCELLED"
       ? "info"
       : "error";
-  const telemetryMessage =
-    reason === "live-exit"
-      ? "Job completed successfully"
-      : isSuccessStatus
-        ? `Job finalized via ${reason}`
-        : job.status === "CANCELLED"
-          ? `Job cancellation finalized via ${reason}`
-          : `Job finalized with status ${job.status} via ${reason}`;
+  let telemetryMessage: string;
+  if (reason === "live-exit") {
+    telemetryMessage = "Job completed successfully";
+  } else if (isSuccessStatus) {
+    telemetryMessage = `Job finalized via ${reason}`;
+  } else if (job.status === "CANCELLED") {
+    telemetryMessage = `Job cancellation finalized via ${reason}`;
+  } else {
+    telemetryMessage = `Job finalized with status ${job.status} via ${reason}`;
+  }
 
   telemetry.emit({
     severity: telemetrySeverity,
@@ -497,13 +551,7 @@ function isRetryableFinalizationError(error?: string): boolean {
     return true;
   }
   const status = Number(statusMatch[1]);
-  if (status === 429) {
-    return true;
-  }
-  if (status >= 500) {
-    return true;
-  }
-  return false;
+  return status === 429 || status >= 500;
 }
 
 export async function finalizeLoopFromRuntime(
@@ -532,23 +580,47 @@ export async function finalizeLoopFromRuntime(
   const effectiveJob: LocalJob =
     job.status === "CANCEL_PENDING" ? { ...job, status: "CANCELLED" } : job;
 
-  const command = String(effectiveJob.command);
-  const worktreeDir = effectiveJob.worktreeDir;
-  const warnings = parseJobWarnings(effectiveJob);
+  let resolvedJob: LocalJob = effectiveJob;
+  if (reason === "boot-recovery" && effectiveJob.status === "RUNNING") {
+    // Intentionally treat unresolved dead-RUNNING recovery as FAILED so cloud replay
+    // emits PROCESS_FAILED for a process that died mid-run.
+    let derivedStatus: LocalJob["status"] = "FAILED";
+    if (effectiveJob.statePath) {
+      const snapshot = await readEffectiveStatusFromState(effectiveJob.statePath);
+      if (snapshot.status !== null && isTerminalJobStatus(snapshot.status)) {
+        derivedStatus = snapshot.status;
+      }
+    }
+    const shouldDefaultExitCode =
+      derivedStatus === "FAILED" || derivedStatus === "STOPPED" || derivedStatus === "UNKNOWN";
+    resolvedJob = {
+      ...effectiveJob,
+      status: derivedStatus,
+      exitCode: shouldDefaultExitCode ? (effectiveJob.exitCode ?? 1) : effectiveJob.exitCode,
+    };
+    gatewayLog.info(
+      "loop-finalizer",
+      `loopId=${effectiveJob.loopId} boot-recovery RUNNING resolved to ${derivedStatus} (statePath=${effectiveJob.statePath ?? "none"})`,
+    );
+  }
+
+  const command = String(resolvedJob.command);
+  const worktreeDir = resolvedJob.worktreeDir;
+  const warnings = parseJobWarnings(resolvedJob);
 
   const isSuccessStatus =
-    effectiveJob.status === "COMPLETED" || effectiveJob.status === "RUNNING";
+    resolvedJob.status === "COMPLETED" || resolvedJob.status === "RUNNING";
   const shouldPostErrorEvent =
-    effectiveJob.status === "FAILED" ||
-    effectiveJob.status === "STOPPED" ||
-    effectiveJob.status === "UNKNOWN";
+    resolvedJob.status === "FAILED" ||
+    resolvedJob.status === "STOPPED" ||
+    resolvedJob.status === "UNKNOWN";
 
   const artifactDeps = { jobStore, apiAuthToken, apiBaseUrl };
   const now = new Date().toISOString();
   const persistBeforeCloud = reason !== "live-exit";
 
   if (persistBeforeCloud) {
-    persistFinalJobStatus(effectiveJob, isSuccessStatus, warnings, jobStore);
+    persistFinalJobStatus(resolvedJob, isSuccessStatus, warnings, jobStore);
   }
 
   let remoteError: string | undefined;
@@ -557,7 +629,7 @@ export async function finalizeLoopFromRuntime(
 
   if (isSuccessStatus) {
     const uploadResult = await tryUploadArtifacts(
-      effectiveJob,
+      resolvedJob,
       command,
       claudeWorkDir,
       worktreeDir,
@@ -565,7 +637,7 @@ export async function finalizeLoopFromRuntime(
       artifactDeps,
     );
     const postResult = await tryPostCompletedEvent(
-      effectiveJob,
+      resolvedJob,
       command,
       claudeWorkDir,
       uploadResult.artifacts,
@@ -580,7 +652,7 @@ export async function finalizeLoopFromRuntime(
     }
   } else if (shouldPostErrorEvent) {
     const postResult = await tryPostErrorEvent(
-      effectiveJob,
+      resolvedJob,
       claudeWorkDir,
       warnings,
       artifactDeps,
@@ -596,7 +668,7 @@ export async function finalizeLoopFromRuntime(
     cloudFinalized = true;
   }
 
-  const currentAfterCloud = jobStore.getByLoopId(effectiveJob.loopId) ?? effectiveJob;
+  const currentAfterCloud = jobStore.getByLoopId(resolvedJob.loopId) ?? resolvedJob;
   const warningText =
     warnings.length > 0
       ? warnings.map((value) => sanitizeErrorMessage(value)).join("; ")
@@ -618,10 +690,10 @@ export async function finalizeLoopFromRuntime(
     });
   }
   if (!persistBeforeCloud) {
-    persistFinalJobStatus(effectiveJob, isSuccessStatus, warnings, jobStore);
+    persistFinalJobStatus(resolvedJob, isSuccessStatus, warnings, jobStore);
   }
   emitFinalizationTelemetry(
-    effectiveJob,
+    resolvedJob,
     reason,
     claudeWorkDir,
     isSuccessStatus,
@@ -630,7 +702,7 @@ export async function finalizeLoopFromRuntime(
   );
 
   if (cloudFinalized || !retryableFailure) {
-    loopTokenStore?.deleteLoopToken(effectiveJob.loopId);
+    loopTokenStore?.deleteLoopToken(resolvedJob.loopId);
   }
   return { cloudFinalized, retryableFailure, error: remoteError };
 }

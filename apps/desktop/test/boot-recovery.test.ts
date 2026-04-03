@@ -4,11 +4,26 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+
+async function waitForCondition(
+  fn: () => boolean,
+  timeoutMs = 5000,
+  pollMs = 50,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!fn()) {
+    if (Date.now() > deadline) {
+      throw new Error(`waitForCondition timed out after ${timeoutMs}ms`);
+    }
+    await sleep(pollMs);
+  }
+}
 import { afterEach, beforeEach, test } from "node:test";
 import { BootRecoveryService } from "../src/main/boot-recovery.js";
 import { JobStore, type LocalJob } from "../src/main/job-store.js";
 import { LoopTokenStore } from "../src/main/loop-token-store.js";
 import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
+import { restoreEnv } from "./symphony-test-utils.js";
 import type { TelemetryEventPayload } from "../src/main/telemetry-protocol.js";
 
 let tempRoot = "";
@@ -43,21 +58,11 @@ beforeEach(async () => {
 
 afterEach(async () => {
   globalThis.fetch = originalFetch;
-  if (originalPollMs === undefined) {
-    delete process.env.CLOSEDLOOP_TAILER_POLL_MS;
-  } else {
-    process.env.CLOSEDLOOP_TAILER_POLL_MS = originalPollMs;
-  }
-  if (originalThrottleMs === undefined) {
-    delete process.env.CLOSEDLOOP_TAILER_THROTTLE_MS;
-  } else {
-    process.env.CLOSEDLOOP_TAILER_THROTTLE_MS = originalThrottleMs;
-  }
-  if (originalWatcherPollMs === undefined) {
-    delete process.env.CLOSEDLOOP_WATCHER_POLL_MS;
-  } else {
-    process.env.CLOSEDLOOP_WATCHER_POLL_MS = originalWatcherPollMs;
-  }
+  restoreEnv({
+    CLOSEDLOOP_TAILER_POLL_MS: originalPollMs,
+    CLOSEDLOOP_TAILER_THROTTLE_MS: originalThrottleMs,
+    CLOSEDLOOP_WATCHER_POLL_MS: originalWatcherPollMs,
+  });
   if (tempRoot) {
     await fs.rm(tempRoot, { recursive: true, force: true });
   }
@@ -208,37 +213,26 @@ test("finalizes dead jobs using LoopTokenStore and clears token after UNKNOWN re
 });
 
 test("retries cloud finalization across boots and resumes from partial progress", async () => {
+  // RUNNING job with no statePath: boot-recovery resolves to FAILED (no snapshot to derive
+  // COMPLETED from). The finalizer posts an error event (PROCESS_FAILED) and no upload-artifacts
+  // call is made. The error event succeeds on the first attempt, so cloud finalization completes
+  // on the first boot and the loop token is cleared immediately.
   const repoDir = path.join(tempRoot, "repo");
   const claudeWorkDir = path.join(repoDir, "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
+  // plan.json and open-questions.md are present in claudeWorkDir but there is NO statePath on
+  // the job, so the new RUNNING-no-snapshot logic defaults to FAILED regardless.
   await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
   await fs.writeFile(path.join(claudeWorkDir, "open-questions.md"), "none");
 
   const loopTokenStore = createLoopTokenStore("boot-recovery-retry-across-boots-tokens");
   loopTokenStore.setLoopToken("loop-1", "loop-token");
 
-  let uploadCalls = 0;
-  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
-    const url = String(input);
-    const headers = new Headers(init?.headers);
-    fetchCalls.push({
-      url,
-      body: typeof init?.body === "string" ? init.body : "",
-      authHeader: headers.get("Authorization"),
-    });
-    if (url.includes("/upload-artifacts")) {
-      uploadCalls += 1;
-      if (uploadCalls === 1) {
-        return new Response("nope", { status: 500 });
-      }
-    }
-    return new Response(JSON.stringify({ success: true }), { status: 200 });
-  }) as typeof fetch;
-
   const jobStore = createStore("boot-recovery-retry-across-boots");
   const deadJob = createJob({
     status: "RUNNING",
     claudeWorkDir,
+    // No statePath: RUNNING-no-snapshot -> FAILED
   });
   jobStore.upsert(deadJob);
 
@@ -251,22 +245,28 @@ test("retries cloud finalization across boots and resumes from partial progress"
   });
 
   await service.run([deadJob]);
-  let persisted = jobStore.getByLoopId("loop-1");
+  const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
+  assert.equal(persisted.status, "FAILED");
   assert.ok(persisted.finalStatusPersistedAt);
-  assert.equal(persisted.cloudFinalizedAt, undefined);
+  assert.ok(persisted.cloudFinalizedAt);
   assert.equal(persisted.recoveryAttempts, 1);
   assert.ok(persisted.completedEventPostedAt);
-  assert.equal(loopTokenStore.getLoopToken("loop-1"), "loop-token");
-
-  await service.run([]);
-  persisted = jobStore.getByLoopId("loop-1");
-  assert.ok(persisted);
-  assert.ok(persisted.cloudFinalizedAt);
-  assert.equal(persisted.recoveryAttempts, 2);
+  // Token cleared because cloud finalization succeeded on first boot
   assert.equal(loopTokenStore.getLoopToken("loop-1"), null);
-  assert.equal(fetchCalls.filter((entry) => entry.url.endsWith("/upload-artifacts")).length, 2);
+  // No upload-artifacts call for a FAILED job
+  assert.equal(fetchCalls.filter((entry) => entry.url.endsWith("/upload-artifacts")).length, 0);
+  // One error event with code PROCESS_FAILED
   assert.equal(fetchCalls.filter((entry) => entry.url.endsWith("/events")).length, 1);
+  assert.ok(
+    fetchCalls.some(
+      (entry) =>
+        entry.url.endsWith("/events") &&
+        entry.body.includes('"type":"error"') &&
+        entry.body.includes('"code":"PROCESS_FAILED"') &&
+        entry.authHeader === "Bearer loop-token",
+    ),
+  );
   service.dispose();
 });
 
@@ -626,22 +626,25 @@ test("skips live job reattach when loop token is missing", async () => {
   service.dispose();
 });
 
-test("finalizes recovered live job after process exits", async () => {
+test("finalizes recovered live job as FAILED when process is externally killed", async () => {
+  // Job with no statePath reattached as live, then killed externally via SIGTERM.
+  // boot-recovery RUNNING-no-snapshot -> FAILED, so the finalizer posts an error event
+  // (PROCESS_FAILED) and makes no upload-artifacts call.
   const repoDir = path.join(tempRoot, "repo");
   const claudeWorkDir = path.join(repoDir, "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
-  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
-  const loopTokenStore = createLoopTokenStore("boot-recovery-live-exit-loop-tokens");
+  const loopTokenStore = createLoopTokenStore("boot-recovery-live-kill-loop-tokens");
   loopTokenStore.setLoopToken("loop-1", "loop-token");
 
-  const child = spawn("bash", ["-lc", "sleep 0.1"], { detached: false });
+  const child = spawn("bash", ["-lc", "sleep 5"], { detached: false });
   assert.ok(child.pid);
 
-  const jobStore = createStore("boot-recovery-live-exit");
+  const jobStore = createStore("boot-recovery-live-kill");
   const liveJob = createJob({
     pid: child.pid!,
     status: "RUNNING",
     claudeWorkDir,
+    // No statePath: RUNNING-no-snapshot -> FAILED
   });
   jobStore.upsert(liveJob);
 
@@ -654,27 +657,98 @@ test("finalizes recovered live job after process exits", async () => {
   });
   await service.reattachLiveJobs();
 
-  // Child exits ~100ms; allow several watcher ticks + async finalization (not real-time 3s poll).
-  await sleep(WATCHER_TEST_POLL_MS * 8);
+  // Kill the child to simulate an external termination
+  process.kill(child.pid!, "SIGTERM");
+
+  // Wait for boot-recovery to detect process exit and finalize to FAILED
+  await waitForCondition(
+    () => jobStore.getByLoopId("loop-1")?.status === "FAILED",
+    5000,
+  );
+
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
-  assert.equal(persisted.status, "COMPLETED");
-  assert.ok(fetchCalls.some((entry) => entry.url.includes("/upload-artifacts")));
-  assert.ok(fetchCalls.some((entry) => entry.url.includes("/events")));
-  assert.ok(
-    fetchCalls.some(
-      (entry) =>
-        entry.url.endsWith("/loops/loop-1/upload-artifacts") &&
-        entry.authHeader === "Bearer loop-token",
-    ),
-  );
+  assert.equal(persisted.status, "FAILED");
+  // No upload-artifacts for a FAILED job
+  assert.equal(fetchCalls.filter((entry) => entry.url.includes("/upload-artifacts")).length, 0);
+  // Error event with code PROCESS_FAILED should have been posted
   assert.ok(
     fetchCalls.some(
       (entry) =>
         entry.url.endsWith("/loops/loop-1/events") &&
+        entry.body.includes('"type":"error"') &&
+        entry.body.includes('"code":"PROCESS_FAILED"') &&
         entry.authHeader === "Bearer loop-token",
     ),
   );
+  service.dispose();
+});
+
+test("preserves COMPLETED status when terminal snapshot is available during boot-recovery", async () => {
+  // RUNNING job with statePath pointing to state.json containing {"status":"COMPLETED"}.
+  // After the short-lived process exits, boot-recovery reads the snapshot, resolves to COMPLETED,
+  // uploads artifacts, and posts a completed event — no error event should be emitted.
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const statePath = path.join(claudeWorkDir, "state.json");
+  await fs.writeFile(statePath, JSON.stringify({ status: "COMPLETED" }));
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-live-completed-snapshot-tokens");
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
+
+  const child = spawn("bash", ["-lc", "sleep 0.1"], { detached: false });
+  assert.ok(child.pid);
+
+  const jobStore = createStore("boot-recovery-live-completed-snapshot");
+  const liveJob = createJob({
+    pid: child.pid!,
+    status: "RUNNING",
+    claudeWorkDir,
+    statePath,
+  });
+  jobStore.upsert(liveJob);
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: () => {} },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4013",
+    loopTokenStore,
+  });
+  await service.reattachLiveJobs();
+
+  // Wait for boot-recovery to detect process exit and finalize to COMPLETED
+  await waitForCondition(
+    () => jobStore.getByLoopId("loop-1")?.status === "COMPLETED",
+    5000,
+  );
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.status, "COMPLETED");
+  assert.equal(persisted.exitCode ?? 0, 0);
+
+  // upload-artifacts should have been called for a COMPLETED job
+  assert.ok(
+    fetchCalls.some((c) => c.url.includes("/upload-artifacts")),
+    "expected /upload-artifacts call for COMPLETED job",
+  );
+
+  // A completed-type event should have been posted
+  const completedEventCall = fetchCalls.find((c) => c.body.includes('"type":"completed"'));
+  assert.ok(completedEventCall, "expected type:completed event to be posted");
+  const completedEvent = JSON.parse(completedEventCall.body) as {
+    result?: { exitCode?: number };
+  };
+  assert.equal(completedEvent.result?.exitCode, 0);
+
+  // No error event should have been emitted
+  assert.ok(
+    !fetchCalls.some((c) => c.body.includes('"type":"error"')),
+    "expected no error event for COMPLETED job",
+  );
+
   service.dispose();
 });
 

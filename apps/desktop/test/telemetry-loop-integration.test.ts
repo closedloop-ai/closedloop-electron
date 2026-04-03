@@ -20,15 +20,15 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
-import { DesktopGatewayServer } from "../src/server/server.js";
-import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
+import { Observability } from "../src/main/observability.js";
 import { TELEMETRY_MAX_FIELD_BYTES } from "../src/main/telemetry-protocol.js";
 import { type EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
-import { Observability } from "../src/main/observability.js";
+import { DesktopGatewayServer } from "../src/server/server.js";
 import {
-  resetShellPathCache,
-  setShellPathForTest,
+    resetShellPathCache,
+    setShellPathForTest,
 } from "../src/server/shell-path.js";
+import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 
 // Use unique high ports to avoid EADDRINUSE with other test files that use PORT_PROBE_ORDER (19432-19435)
 const TELEM_TEST_PORTS = [29432, 29433, 29434, 29435] as const;
@@ -101,8 +101,8 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 
 // Shared test helpers — see test/helpers/mock-api-server.ts
-import { startMockApiServer } from "./symphony-test-utils.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
+import { startMockApiServer } from "./symphony-test-utils.js";
 
 const fakeWorktreeProvider: WorktreeProvider = {
   async ensureWorktree(_repoPath, worktreeDir) {
