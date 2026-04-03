@@ -27,7 +27,7 @@ import {
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
 import { Observability } from "../../main/observability.js";
-import { parseTokenUsage } from "../../main/token-usage.js";
+import { parseTokenUsage, type ModelTokenUsage } from "../../main/token-usage.js";
 import type {
   OperationDispatcher,
   OperationRequestContext,
@@ -1088,7 +1088,7 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
     cacheCreationInputTokens: number;
     cacheReadInputTokens: number;
   };
-  tokensByModel: Record<string, { input: number; output: number; cacheCreation: number; cacheRead: number }>;
+  tokensByModel: Record<string, ModelTokenUsage>;
   diagnosticsVersion: number;
 } {
   const logPath = path.join(claudeWorkDir, "symphony-loop.log");
@@ -1829,6 +1829,8 @@ async function handleProcessCompletion(
         loopId,
         tokenUsage: diagnostics.tokenUsage,
         tokensByModel: diagnostics.tokensByModel,
+        logTail: diagnostics.logTail,
+        diagnosticsVersion: String(diagnostics.diagnosticsVersion),
       });
     } else {
       Observability.jobFailed(
