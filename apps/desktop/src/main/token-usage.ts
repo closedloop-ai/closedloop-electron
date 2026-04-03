@@ -1,6 +1,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
+/** Per-model token breakdown. */
+export interface ModelTokenUsage {
+  input: number;
+  output: number;
+  cacheCreation: number;
+  cacheRead: number;
+}
+
 /** Parse token usage from claude-output.jsonl (JSONL stream output). */
 export function parseTokenUsage(claudeWorkDir: string): {
   inputTokens: number;
@@ -9,6 +17,7 @@ export function parseTokenUsage(claudeWorkDir: string): {
   cacheReadInputTokens: number;
   turns: number;
   models: string[];
+  tokensByModel: Record<string, ModelTokenUsage>;
 } {
   const totals = {
     inputTokens: 0,
@@ -17,8 +26,10 @@ export function parseTokenUsage(claudeWorkDir: string): {
     cacheReadInputTokens: 0,
     turns: 0,
     models: [] as string[],
+    tokensByModel: {} as Record<string, ModelTokenUsage>,
   };
   const modelSet = new Set<string>();
+  const perModel = new Map<string, ModelTokenUsage>();
   const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
   if (!existsSync(outputFile)) {
     return totals;
@@ -34,15 +45,39 @@ export function parseTokenUsage(claudeWorkDir: string): {
         if (entry.type === "assistant") {
           totals.turns += 1;
           const message = entry.message as Record<string, unknown> | undefined;
-          if (typeof message?.model === "string" && message.model.length > 0) {
-            modelSet.add(message.model);
+          const model =
+            typeof message?.model === "string" && message.model.length > 0
+              ? message.model
+              : undefined;
+          if (model) {
+            modelSet.add(model);
           }
           const usage = message?.usage as Record<string, number> | undefined;
           if (usage) {
-            totals.inputTokens += usage.input_tokens ?? 0;
-            totals.outputTokens += usage.output_tokens ?? 0;
-            totals.cacheCreationInputTokens += usage.cache_creation_input_tokens ?? 0;
-            totals.cacheReadInputTokens += usage.cache_read_input_tokens ?? 0;
+            const inputTk = usage.input_tokens ?? 0;
+            const outputTk = usage.output_tokens ?? 0;
+            const cacheCreationTk = usage.cache_creation_input_tokens ?? 0;
+            const cacheReadTk = usage.cache_read_input_tokens ?? 0;
+            totals.inputTokens += inputTk;
+            totals.outputTokens += outputTk;
+            totals.cacheCreationInputTokens += cacheCreationTk;
+            totals.cacheReadInputTokens += cacheReadTk;
+            if (model) {
+              const existing = perModel.get(model);
+              if (existing) {
+                existing.input += inputTk;
+                existing.output += outputTk;
+                existing.cacheCreation += cacheCreationTk;
+                existing.cacheRead += cacheReadTk;
+              } else {
+                perModel.set(model, {
+                  input: inputTk,
+                  output: outputTk,
+                  cacheCreation: cacheCreationTk,
+                  cacheRead: cacheReadTk,
+                });
+              }
+            }
           }
         }
       } catch {
@@ -53,6 +88,7 @@ export function parseTokenUsage(claudeWorkDir: string): {
     // Ignore read errors
   }
   totals.models = [...modelSet];
+  totals.tokensByModel = Object.fromEntries(perModel);
   return totals;
 }
 

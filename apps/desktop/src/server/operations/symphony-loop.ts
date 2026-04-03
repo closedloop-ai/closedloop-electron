@@ -1088,16 +1088,18 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
     cacheCreationInputTokens: number;
     cacheReadInputTokens: number;
   };
+  tokensByModel: Record<string, { input: number; output: number; cacheCreation: number; cacheRead: number }>;
   diagnosticsVersion: number;
 } {
   const logPath = path.join(claudeWorkDir, "symphony-loop.log");
   const rawTail = readLogTail(logPath);
   const logTail = rawTail ? redactCredentials(rawTail) : undefined;
-  const { inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens } =
+  const { inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, tokensByModel } =
     parseTokenUsage(claudeWorkDir);
   return {
     logTail,
     tokenUsage: { inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens },
+    tokensByModel,
     diagnosticsVersion: 1,
   };
 }
@@ -1820,6 +1822,14 @@ async function handleProcessCompletion(
         diagnostics,
         failureSessionId,
       );
+      await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+        type: "error",
+        code: "CANCELLED",
+        message: "Loop cancelled",
+        loopId,
+        tokenUsage: diagnostics.tokenUsage,
+        tokensByModel: diagnostics.tokensByModel,
+      });
     } else {
       Observability.jobFailed(
         commandId ?? existingJob?.commandId,
@@ -1861,6 +1871,7 @@ async function handleProcessCompletion(
           message: limitMsg,
           loopId,
           tokenUsage: diagnostics.tokenUsage,
+          tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
         });
@@ -1885,6 +1896,7 @@ async function handleProcessCompletion(
           message: authMsg,
           loopId,
           tokenUsage: diagnostics.tokenUsage,
+          tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
         });
@@ -1900,6 +1912,7 @@ async function handleProcessCompletion(
           message: `Process exited with code ${exitCode}`,
           loopId,
           tokenUsage: diagnostics.tokenUsage,
+          tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
         });

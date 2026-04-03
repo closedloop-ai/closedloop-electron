@@ -153,3 +153,107 @@ test("(e) duplicate model names are deduplicated", () => {
   assert.equal(result.models.length, 1);
   assert.deepEqual(result.models, ["claude-opus-4"]);
 });
+
+test("(f) tokensByModel: single model accumulates per-model counts", () => {
+  const dir = makeTempDir();
+  writeJsonl(dir, [
+    {
+      type: "assistant",
+      message: {
+        model: "claude-opus-4",
+        usage: {
+          input_tokens: 100,
+          output_tokens: 50,
+          cache_creation_input_tokens: 200,
+          cache_read_input_tokens: 300,
+        },
+      },
+    },
+    {
+      type: "assistant",
+      message: {
+        model: "claude-opus-4",
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5,
+          cache_creation_input_tokens: 20,
+          cache_read_input_tokens: 30,
+        },
+      },
+    },
+  ]);
+
+  const result = parseTokenUsage(dir);
+  assert.deepEqual(result.tokensByModel, {
+    "claude-opus-4": {
+      input: 110,
+      output: 55,
+      cacheCreation: 220,
+      cacheRead: 330,
+    },
+  });
+});
+
+test("(g) tokensByModel: multiple models have independent counts", () => {
+  const dir = makeTempDir();
+  writeJsonl(dir, [
+    {
+      type: "assistant",
+      message: {
+        model: "claude-opus-4",
+        usage: {
+          input_tokens: 100,
+          output_tokens: 50,
+          cache_creation_input_tokens: 200,
+          cache_read_input_tokens: 300,
+        },
+      },
+    },
+    {
+      type: "assistant",
+      message: {
+        model: "claude-sonnet-4",
+        usage: {
+          input_tokens: 1,
+          output_tokens: 2,
+          cache_creation_input_tokens: 3,
+          cache_read_input_tokens: 4,
+        },
+      },
+    },
+    {
+      type: "assistant",
+      message: {
+        model: "claude-opus-4",
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5,
+          cache_creation_input_tokens: 20,
+          cache_read_input_tokens: 30,
+        },
+      },
+    },
+  ]);
+
+  const result = parseTokenUsage(dir);
+  assert.deepEqual(result.tokensByModel, {
+    "claude-opus-4": {
+      input: 110,
+      output: 55,
+      cacheCreation: 220,
+      cacheRead: 330,
+    },
+    "claude-sonnet-4": {
+      input: 1,
+      output: 2,
+      cacheCreation: 3,
+      cacheRead: 4,
+    },
+  });
+});
+
+test("(h) tokensByModel: missing JSONL returns empty object", () => {
+  const dir = makeTempDir();
+  const result = parseTokenUsage(dir);
+  assert.deepEqual(result.tokensByModel, {});
+});
