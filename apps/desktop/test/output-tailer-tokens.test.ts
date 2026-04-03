@@ -141,17 +141,17 @@ async function startEventServer(options?: {
 // ---------------------------------------------------------------------------
 
 test("token totals only advance after successful POST commit, not on throttle/retry", async () => {
-  process.env.CLOSEDLOOP_TAILER_POLL_MS = "20";
-  // Long throttle so second flush is throttled on first pollOnce, then bypassed on second flush
-  process.env.CLOSEDLOOP_TAILER_THROTTLE_MS = "10000";
-  process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_BASE_MS = "5";
-  process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_MAX_MS = "5";
+  // Use very long poll interval so the interval never fires -- we control timing via flush()
+  process.env.CLOSEDLOOP_TAILER_POLL_MS = "600000";
+  process.env.CLOSEDLOOP_TAILER_THROTTLE_MS = "0";
+  process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_BASE_MS = "600000";
+  process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_MAX_MS = "600000";
   process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_MAX_COUNT = "4";
 
   const tmpDir = makeTempDir();
   const jsonlPath = path.join(tmpDir, "claude-output.jsonl");
 
-  // First POST returns 429 (throttle/server-side), second returns 200
+  // First POST returns 429 (fail), second returns 200 (success)
   const eventSrv = await startEventServer({ outputStatusCodes: [429, 200] });
   const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
 
@@ -181,15 +181,17 @@ test("token totals only advance after successful POST commit, not on throttle/re
     },
   );
 
-  // Wait for first POST attempt (429 - fails)
-  await waitForCondition(() => eventSrv.getCollected().filter((e) => e.type === "output").length >= 1, 3000);
-
-  // After first failed POST, tokenTotals should NOT have advanced (committed offset also not set)
+  // Flush: POST gets 429, fails, tailer stops. tokenTotals should NOT advance.
+  await tailer.flush();
   assert.equal(committedOffsets.length, 0, "No committed offset expected after failed POST");
+  assert.equal(
+    eventSrv.getCollected().filter((e) => e.type === "output").length,
+    1,
+    "Expected exactly 1 POST attempt after first flush",
+  );
 
-  tailer.stop();
-
-  // Start a new tailer to simulate retry from same position
+  // Start a fresh tailer from offset 0 (simulates restart after failure).
+  // Flush gets the 200 response.
   const tailer2 = startOutputTailer(
     jsonlPath,
     apiBaseUrl,
@@ -200,8 +202,6 @@ test("token totals only advance after successful POST commit, not on throttle/re
       committedOffsets.push(o);
     },
   );
-
-  // Flush triggers a forceAttempt poll which will get the 200 response
   await tailer2.flush();
 
   const outputEvents = eventSrv.getCollected().filter((e) => e.type === "output");

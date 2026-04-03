@@ -4,6 +4,20 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+
+async function waitForCondition(
+  fn: () => boolean,
+  timeoutMs = 5000,
+  pollMs = 50,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!fn()) {
+    if (Date.now() > deadline) {
+      throw new Error(`waitForCondition timed out after ${timeoutMs}ms`);
+    }
+    await sleep(pollMs);
+  }
+}
 import { afterEach, beforeEach, test } from "node:test";
 import { BootRecoveryService } from "../src/main/boot-recovery.js";
 import { JobStore, type LocalJob } from "../src/main/job-store.js";
@@ -646,8 +660,11 @@ test("finalizes recovered live job as FAILED when process is externally killed",
   // Kill the child to simulate an external termination
   process.kill(child.pid!, "SIGTERM");
 
-  // Allow several watcher ticks + async finalization to complete
-  await sleep(WATCHER_TEST_POLL_MS * 8);
+  // Wait for boot-recovery to detect process exit and finalize to FAILED
+  await waitForCondition(
+    () => jobStore.getByLoopId("loop-1")?.status === "FAILED",
+    5000,
+  );
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
@@ -701,8 +718,11 @@ test("preserves COMPLETED status when terminal snapshot is available during boot
   });
   await service.reattachLiveJobs();
 
-  // Wait for the process to exit and for several watcher ticks + async finalization to complete
-  await sleep(WATCHER_TEST_POLL_MS * 8);
+  // Wait for boot-recovery to detect process exit and finalize to COMPLETED
+  await waitForCondition(
+    () => jobStore.getByLoopId("loop-1")?.status === "COMPLETED",
+    5000,
+  );
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
