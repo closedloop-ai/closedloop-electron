@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import { JobStore, type LocalJob } from "../src/main/job-store.js";
+import { JobStore, LoopErrorCode, type LocalJob } from "../src/main/job-store.js";
 import {
   emitFinalizationTelemetry,
   finalizeLoopFromRuntime,
@@ -1013,6 +1013,27 @@ test("tryPostErrorEvent uses PROCESS_STOPPED for STOPPED status", async () => {
 
   assert.match(fetchCalls[0]?.body ?? "", /"code":"PROCESS_STOPPED"/);
   assert.match(fetchCalls[0]?.body ?? "", /STOPPED/);
+});
+
+test("tryPostErrorEvent prefers lastErrorCode over PROCESS_FAILED fallback", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const jobStore = createStore("step-error-auth-challenge");
+  const job = createBaseJob({
+    claudeWorkDir,
+    status: "FAILED",
+    exitCode: 1,
+    lastErrorCode: LoopErrorCode.AUTH_CHALLENGE,
+  });
+  jobStore.upsert(job);
+
+  const result = await tryPostErrorEvent(job, claudeWorkDir, [], artifactDeps(jobStore));
+
+  assert.equal(result.failed, false);
+  const parsed = JSON.parse(fetchCalls[0]?.body ?? "{}") as Record<string, unknown>;
+  assert.equal(parsed.code, LoopErrorCode.AUTH_CHALLENGE);
+  assert.notEqual(parsed.code, LoopErrorCode.PROCESS_FAILED);
 });
 
 test("tryPostErrorEvent skips when completedEventPostedAt is set", async () => {

@@ -348,7 +348,12 @@ describe("AUTH_CHALLENGE_PATTERN", () => {
   const positives = [
     "authentication_error",
     "Invalid bearer token",
+    "token expired",
+    "Authentication failed: token expired",
+    "Please log in",
+    "Please log in to access this resource",
     "rate_limit_error",
+    "Rate limit reached",
     "Rate limit reached for model claude-3-5-sonnet",
     "Claude usage limit reached. Your limit will reset at 2pm.",
     "Usage limit exceeded",
@@ -364,9 +369,11 @@ describe("AUTH_CHALLENGE_PATTERN", () => {
     "Prompt is too long",
     "context limit reached",
     "conversation too long",
+    "session limit reached",
     "Command failed with exit code 1",
     "ENOENT: no such file or directory",
     "File content exceeds maximum allowed tokens",
+    "login required",
     "",
   ];
 
@@ -392,6 +399,11 @@ describe("detectAuthChallengeFromJsonl", () => {
     assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
   });
 
+  test("returns null for empty JSONL file", () => {
+    fs.writeFileSync(path.join(tmpDir, "claude-output.jsonl"), "");
+    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
+  });
+
   test("returns null for successful result", () => {
     writeJsonl([
       { type: "result", subtype: "success", result: "", is_error: false },
@@ -399,49 +411,83 @@ describe("detectAuthChallengeFromJsonl", () => {
     assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
   });
 
-  test("returns null for context limit error (not auth)", () => {
-    writeJsonl([
-      { type: "result", subtype: "error", result: "Prompt is too long", is_error: true },
-    ]);
-    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
+  const positiveJsonlScenarios = [
+    {
+      name: "authentication error",
+      message: "authentication_error: Invalid bearer token",
+      expected: "authentication_error",
+    },
+    {
+      name: "please log in",
+      message: "Please log in to continue",
+      expected: "Please log in to continue",
+    },
+    {
+      name: "token expired",
+      message: "token expired",
+      expected: "token expired",
+    },
+    {
+      name: "rate limit error",
+      message: "rate_limit_error: Rate limit reached",
+      expected: "rate_limit_error",
+    },
+    {
+      name: "billing error",
+      message: "billing_error: payment required",
+      expected: "billing_error",
+    },
+  ] as const;
+
+  for (const scenario of positiveJsonlScenarios) {
+    test(`detects ${scenario.name}`, () => {
+      writeJsonl([
+        {
+          type: "result",
+          subtype: "error",
+          result: scenario.message,
+          is_error: true,
+        },
+      ]);
+      const result = detectAuthChallengeFromJsonl(tmpDir);
+      assert.ok(result);
+      assert.ok(result.includes(scenario.expected));
+    });
+  }
+
+  test("skips malformed lines and continues scanning", () => {
+    const content = [
+      "not valid json",
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "hello" }] },
+      }),
+      "",
+      JSON.stringify({
+        type: "result",
+        subtype: "error",
+        result: "Please log in",
+        is_error: true,
+      }),
+    ].join("\n");
+    fs.writeFileSync(path.join(tmpDir, "claude-output.jsonl"), content);
+    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), "Please log in");
   });
 
-  test("detects authentication_error", () => {
-    writeJsonl([
-      { type: "result", subtype: "error", result: "authentication_error: Invalid bearer token", is_error: true },
-    ]);
-    const result = detectAuthChallengeFromJsonl(tmpDir);
-    assert.ok(result);
-    assert.ok(result.includes("authentication_error"));
-  });
-
-  test("detects rate limit error", () => {
-    writeJsonl([
-      { type: "result", subtype: "error", result: "rate_limit_error: Rate limit reached", is_error: true },
-    ]);
-    assert.ok(detectAuthChallengeFromJsonl(tmpDir));
-  });
-
-  test("detects usage limit", () => {
-    writeJsonl([
-      { type: "result", subtype: "error", result: "Claude usage limit reached", is_error: true },
-    ]);
-    assert.ok(detectAuthChallengeFromJsonl(tmpDir));
-  });
-
-  test("detects billing error", () => {
-    writeJsonl([
-      { type: "result", subtype: "error", result: "billing_error: payment required", is_error: true },
-    ]);
-    assert.ok(detectAuthChallengeFromJsonl(tmpDir));
-  });
-
-  test("no overlap: session limit errors are not detected as auth", () => {
-    writeJsonl([
-      { type: "result", subtype: "error", result: "Error: context limit reached, please start a new conversation", is_error: true },
-    ]);
-    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
-  });
+  for (const input of [
+    "Prompt is too long",
+    "Error: context limit reached, please start a new conversation",
+    "session limit reached",
+    "login required",
+    "Command failed with exit code 1",
+  ]) {
+    test(`returns null for non-auth message: "${input}"`, () => {
+      writeJsonl([
+        { type: "result", subtype: "error", result: input, is_error: true },
+      ]);
+      assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -453,20 +499,33 @@ describe("isAuthChallengeError", () => {
     assert.strictEqual(isAuthChallengeError(""), false);
   });
 
-  test("returns false for context limit", () => {
-    assert.strictEqual(isAuthChallengeError("Prompt is too long"), false);
-  });
+  for (const input of [
+    "Error: authentication_error - Invalid bearer token",
+    "authentication failed: token expired",
+    "Please log in to access this resource",
+    "unauthorized",
+    "RATE_LIMIT_ERROR",
+  ]) {
+    test(`matches auth error in log tail: "${input}"`, () => {
+      assert.ok(isAuthChallengeError(input));
+    });
+  }
 
-  test("detects auth error in log tail", () => {
-    assert.ok(isAuthChallengeError("Error: authentication_error - Invalid bearer token"));
-  });
-
-  test("detects rate limit in multiline log", () => {
-    const logTail = "Starting...\nProcessing...\nrate_limit_error: Rate limit reached\nExiting";
+  test("detects pattern embedded in multiline log tail", () => {
+    const logTail = "Starting...\nProcessing...\nError: token expired\nExiting";
     assert.ok(isAuthChallengeError(logTail));
   });
 
-  test("detection is case-insensitive", () => {
-    assert.ok(isAuthChallengeError("RATE_LIMIT_ERROR"));
-  });
+  for (const input of [
+    "Prompt is too long",
+    "context limit reached",
+    "conversation too long",
+    "session limit reached",
+    "login required",
+    "ENOENT: no such file or directory",
+  ]) {
+    test(`does not match non-auth log tail: "${input}"`, () => {
+      assert.strictEqual(isAuthChallengeError(input), false);
+    });
+  }
 });
