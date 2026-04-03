@@ -11,7 +11,7 @@ import { gatewayLog } from "./gateway-logger.js";
 import { isTerminalJobStatus, type JobStore, type LocalJob } from "./job-store.js";
 import type { LoopTokenStore } from "./loop-token-store.js";
 import type { TelemetryEmitter } from "./telemetry-protocol.js";
-import { parseTokenUsage } from "./token-usage.js";
+import { parseApiKeySource, parseTokenUsage } from "./token-usage.js";
 import { readEffectiveStatusFromState } from "../server/operations/symphony-job-snapshot.js";
 
 export interface LoopFinalizerDeps {
@@ -213,6 +213,8 @@ export async function tryPostCompletedEvent(
     `loopId=${job.loopId} tokens: input=${tokensUsed.inputTokens}, output=${tokensUsed.outputTokens}, cacheCreation=${tokensUsed.cacheCreationInputTokens}, cacheRead=${tokensUsed.cacheReadInputTokens}, turns=${tokensUsed.turns}`,
   );
 
+  const apiKeySource = parseApiKeySource(claudeWorkDir);
+
   const completedEvent: Record<string, unknown> = {
     type: "completed",
     result,
@@ -224,6 +226,7 @@ export async function tryPostCompletedEvent(
       turns: tokensUsed.turns,
       models: tokensUsed.models,
     },
+    ...(apiKeySource != null ? { apiKeySource } : {}),
     loopId: job.loopId,
     ...(warnings.length > 0 ? { warnings } : {}),
   };
@@ -260,6 +263,7 @@ export async function tryPostErrorEvent(
   }
 
   const tokenUsage = parseTokenUsage(claudeWorkDir);
+  const apiKeySource = parseApiKeySource(claudeWorkDir);
   const logTail = readLogTail(path.join(claudeWorkDir, "symphony-loop.log")) ?? undefined;
   const errorCode = job.status === "FAILED" ? "PROCESS_FAILED" : "PROCESS_STOPPED";
   const errorMessage =
@@ -287,6 +291,7 @@ export async function tryPostErrorEvent(
         }
       : {}),
     ...(logTail ? { logTail } : {}),
+    ...(apiKeySource != null ? { apiKeySource } : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
   };
 
