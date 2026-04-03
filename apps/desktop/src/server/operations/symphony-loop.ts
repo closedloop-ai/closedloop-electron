@@ -1082,16 +1082,22 @@ function redactCredentials(text: string): string {
  */
 function collectFailureDiagnostics(claudeWorkDir: string): {
   logTail: string | undefined;
-  tokenUsage: { inputTokens: number; outputTokens: number };
+  tokenUsage: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheCreationInputTokens: number;
+    cacheReadInputTokens: number;
+  };
   diagnosticsVersion: number;
 } {
   const logPath = path.join(claudeWorkDir, "symphony-loop.log");
   const rawTail = readLogTail(logPath);
   const logTail = rawTail ? redactCredentials(rawTail) : undefined;
-  const tokenUsage = parseTokenUsage(claudeWorkDir);
+  const { inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens } =
+    parseTokenUsage(claudeWorkDir);
   return {
     logTail,
-    tokenUsage,
+    tokenUsage: { inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens },
     diagnosticsVersion: 1,
   };
 }
@@ -1856,7 +1862,7 @@ async function handleProcessCompletion(
           loopId,
           tokenUsage: diagnostics.tokenUsage,
           logTail: diagnostics.logTail,
-          diagnosticsVersion: diagnostics.diagnosticsVersion,
+          diagnosticsVersion: String(diagnostics.diagnosticsVersion),
         });
       } else if (isAuthChallenge) {
         const authMsg = jsonlAuthError ?? "Claude auth challenge detected";
@@ -1880,7 +1886,7 @@ async function handleProcessCompletion(
           loopId,
           tokenUsage: diagnostics.tokenUsage,
           logTail: diagnostics.logTail,
-          diagnosticsVersion: diagnostics.diagnosticsVersion,
+          diagnosticsVersion: String(diagnostics.diagnosticsVersion),
         });
       } else {
         loopError(loopId, `Process failed with exit code ${exitCode}`);
@@ -1895,7 +1901,7 @@ async function handleProcessCompletion(
           loopId,
           tokenUsage: diagnostics.tokenUsage,
           logTail: diagnostics.logTail,
-          diagnosticsVersion: diagnostics.diagnosticsVersion,
+          diagnosticsVersion: String(diagnostics.diagnosticsVersion),
         });
       }
     }
@@ -2124,17 +2130,21 @@ async function handleProcessCompletion(
     }
 
     // Parse token usage from claude output
-    const tokensUsed = parseTokenUsage(claudeWorkDir);
+    const { inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, turns, models } =
+      parseTokenUsage(claudeWorkDir);
+    const tokensUsed = { inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, turns, models };
     loopLog(
       loopId,
-      `Tokens used: input=${tokensUsed.inputTokens}, output=${tokensUsed.outputTokens}`,
+      `Tokens used: input=${tokensUsed.inputTokens}, output=${tokensUsed.outputTokens}, cacheCreation=${tokensUsed.cacheCreationInputTokens}, cacheRead=${tokensUsed.cacheReadInputTokens}, turns=${tokensUsed.turns}`,
     );
 
     // Detect 0-token EXECUTE completions as failures (ghost loop)
     if (
       command === "EXECUTE" &&
       tokensUsed.inputTokens === 0 &&
-      tokensUsed.outputTokens === 0
+      tokensUsed.outputTokens === 0 &&
+      tokensUsed.cacheCreationInputTokens === 0 &&
+      tokensUsed.cacheReadInputTokens === 0
     ) {
       const noWorkMsg =
         "EXECUTE loop completed with 0 tokens -- no work was done";
@@ -2267,6 +2277,10 @@ async function handleProcessCompletion(
         tokensUsed: {
           input: tokensUsed.inputTokens,
           output: tokensUsed.outputTokens,
+          cacheCreationInputTokens: tokensUsed.cacheCreationInputTokens,
+          cacheReadInputTokens: tokensUsed.cacheReadInputTokens,
+          turns: tokensUsed.turns,
+          models: tokensUsed.models,
         },
         loopId,
         ...(warnings.length > 0 ? { warnings } : {}),

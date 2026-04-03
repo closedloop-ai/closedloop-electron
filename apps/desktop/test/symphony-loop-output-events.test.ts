@@ -1022,4 +1022,89 @@ describe("T-5.7: tokensUsed shape in completed event", () => {
     assert.equal(tokensUsed.input, 30, `Expected input=30, got ${tokensUsed.input}`);
     assert.equal(tokensUsed.output, 12, `Expected output=12, got ${tokensUsed.output}`);
   });
+
+  test("(c) cache tokens are preserved separately; input equals raw input_tokens only", async () => {
+    process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+
+    const tmpDir = makeTempDir();
+    const fakeBin = path.join(tmpDir, "fake-bin");
+    await fs.mkdir(fakeBin, { recursive: true });
+
+    const eventSrv = await startEventServer();
+    const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+    // Single turn with all four token types
+    const assistantEntry = JSON.stringify({
+      type: "assistant",
+      message: {
+        model: "claude-opus-4",
+        content: [{ type: "text", text: "work" }],
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5,
+          cache_creation_input_tokens: 200,
+          cache_read_input_tokens: 300,
+        },
+      },
+    });
+    const stubScript = [
+      "#!/bin/sh",
+      `echo '${assistantEntry}'`,
+      `echo '{"type":"result","subtype":"success","result":"","is_error":false}'`,
+      "exit 0",
+    ].join("\n");
+    await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
+    process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+    setShellPathForTest();
+
+    const loopId = "ffffffff-0000-0000-0000-000000000003";
+    const server = makeGatewayServer({
+      allowedDirs: [tmpDir],
+      getApiOrigin: () => apiBaseUrl,
+    });
+    await server.start();
+
+    const response = await fetch(
+      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-desktop-gateway-token": "test-token",
+        },
+        body: JSON.stringify(buildLoopBody({ loopId, apiBaseUrl })),
+      }
+    );
+
+    assert.equal(response.status, 200, `Expected 200, got ${response.status}`);
+
+    const completedEvent = await eventSrv.waitForEvent(
+      (b) => b.type === "completed" || b.type === "error",
+      15_000
+    );
+
+    assert.equal(
+      completedEvent.type,
+      "completed",
+      `Expected completed event, got: ${JSON.stringify(completedEvent)}`,
+    );
+    const tokensUsed = completedEvent.tokensUsed as Record<string, unknown>;
+    assert.ok(tokensUsed !== null && typeof tokensUsed === "object", "tokensUsed must be an object");
+    // input must equal raw input_tokens only (NOT the sum of all cache types)
+    assert.equal(tokensUsed.input, 10, `Expected input=10 (raw only), got ${tokensUsed.input}`);
+    assert.equal(tokensUsed.output, 5, `Expected output=5, got ${tokensUsed.output}`);
+    assert.equal(
+      tokensUsed.cacheCreationInputTokens,
+      200,
+      `Expected cacheCreationInputTokens=200, got ${tokensUsed.cacheCreationInputTokens}`,
+    );
+    assert.equal(
+      tokensUsed.cacheReadInputTokens,
+      300,
+      `Expected cacheReadInputTokens=300, got ${tokensUsed.cacheReadInputTokens}`,
+    );
+    assert.equal(typeof tokensUsed.turns, "number", "turns must be a number");
+    assert.equal(tokensUsed.turns, 1, `Expected turns=1, got ${tokensUsed.turns}`);
+    assert.ok(Array.isArray(tokensUsed.models), "models must be an array");
+  });
 });
