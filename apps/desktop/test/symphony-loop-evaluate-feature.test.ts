@@ -131,15 +131,15 @@ describe("T-6.1: writeFeatureArtifact", () => {
     assert.ok(!existsSync(path.join(tmpDir, "prd.md")), "prd.md should not exist when no artifacts");
   });
 
-  test("(7) writeFeatureArtifact accepts lowercase feature type", async () => {
+  test("(7) writeFeatureArtifact ignores lowercase feature type", async () => {
     const tmpDir = makeTempDir("ef-lowercase");
     await writeFeatureArtifact(tmpDir, [
       { type: "feature", content: "Lowercase feature content" },
     ]);
-    const prdPath = path.join(tmpDir, "prd.md");
-    assert.ok(existsSync(prdPath), "prd.md should exist for lowercase feature type");
-    const content = await fs.readFile(prdPath, "utf-8");
-    assert.equal(content, "Lowercase feature content");
+    assert.ok(
+      !existsSync(path.join(tmpDir, "prd.md")),
+      "prd.md should not exist for lowercase feature type",
+    );
   });
 });
 

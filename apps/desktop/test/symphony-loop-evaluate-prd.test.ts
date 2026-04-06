@@ -396,18 +396,7 @@ describe("T-5.2: writePrdArtifact", () => {
     assert.ok(!existsSync(path.join(tmpDir, "prd.md")), "prd.md should not exist");
   });
 
-  test("(c) artifact fallback type ('artifact') writes prd.md", async () => {
-    const tmpDir = makeTempDir();
-    await writePrdArtifact(tmpDir, [
-      { type: "artifact", content: "Fallback PRD content" },
-    ]);
-    const prdPath = path.join(tmpDir, "prd.md");
-    assert.ok(existsSync(prdPath), "prd.md should exist for artifact type");
-    const content = await fs.readFile(prdPath, "utf-8");
-    assert.equal(content, "Fallback PRD content");
-  });
-
-  test("(d) PRD artifact takes priority over prompt", async () => {
+  test("(c) PRD artifact takes priority over prompt", async () => {
     const tmpDir = makeTempDir();
     await writePrdArtifact(
       tmpDir,
@@ -420,7 +409,7 @@ describe("T-5.2: writePrdArtifact", () => {
     assert.equal(content, "The real PRD content", "Artifact content should win over prompt");
   });
 
-  test("(e) prompt used as fallback when no artifact present", async () => {
+  test("(d) prompt used as fallback when no artifact present", async () => {
     const tmpDir = makeTempDir();
     await writePrdArtifact(tmpDir, [], "Prompt-as-fallback content");
     const prdPath = path.join(tmpDir, "prd.md");

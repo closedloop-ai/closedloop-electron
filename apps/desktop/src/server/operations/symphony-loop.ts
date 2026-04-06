@@ -217,6 +217,10 @@ export const PLAN_ARTIFACT_TYPES = ["IMPLEMENTATION_PLAN", "plan"] as const;
  * The PRD artifact content is always preferred for prd.md when present.
  * Fallback priority: PRD artifact > FEATURE artifact > prompt.
  *
+ * We intentionally do not accept the legacy generic "artifact" type here.
+ * The current symphony-alpha backend emits typed context-pack entries:
+ * PRD/IMPLEMENTATION_PLAN for artifacts and FEATURE for feature refs.
+ *
  * When a prompt is provided alongside a PRD artifact, both are written:
  * - prd.md  ← artifact content (what Claude needs to read)
  * - prompt.md ← decompose/evaluate instructions (written by caller)
@@ -231,7 +235,7 @@ export async function writePrdArtifact(
   );
   const featureArtifact = prdArtifact
     ? null
-    : artifacts.find((a) => a.type === "FEATURE" || a.type === "artifact");
+    : artifacts.find((a) => a.type === "FEATURE");
   const source = prdArtifact ?? featureArtifact;
 
   const prdContent = source?.content || prompt || "";
@@ -269,10 +273,7 @@ export async function writeFeatureArtifact(
   workDir: string,
   artifacts: LoopArtifact[],
 ): Promise<void> {
-  const featureArtifact = artifacts.find(
-    (a) =>
-      a.type === "FEATURE" || a.type === "feature" || a.type === "artifact",
-  );
+  const featureArtifact = artifacts.find((a) => a.type === "FEATURE");
   if (featureArtifact?.content) {
     await fs.writeFile(path.join(workDir, "prd.md"), featureArtifact.content);
   }
@@ -912,7 +913,7 @@ async function writeArtifactsForPlan(
     );
     const featureArtifact = prdArtifact
       ? null
-      : artifacts.find((a) => a.type === "FEATURE" || a.type === "artifact");
+      : artifacts.find((a) => a.type === "FEATURE");
     const source = prdArtifact ?? featureArtifact;
     if (source?.content) {
       prdContent = source.content;
@@ -978,7 +979,6 @@ async function writeArtifactsForExecuteOrAmend(
       }
     } else if (
       artifact.type === "prd" ||
-      artifact.type === "artifact" ||
       artifact.type === "PRD" ||
       artifact.type === "FEATURE"
     ) {
@@ -2465,7 +2465,7 @@ async function handleLoopRequest(
 
   if (body.command === "EVALUATE_PLAN") {
     const hasPrdArtifact = body.artifacts.some((a: LoopArtifact) =>
-      ["PRD", "prd", "FEATURE", "artifact"].includes(a.type),
+      ["PRD", "prd", "FEATURE"].includes(a.type),
     );
     const hasPlanArtifact = body.artifacts.some((a: LoopArtifact) =>
       (PLAN_ARTIFACT_TYPES as readonly string[]).includes(a.type),
