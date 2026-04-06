@@ -1,12 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-} from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -296,7 +290,6 @@ export class DesktopApplication {
     this.desktopWindow.init();
 
     gatewayLog.setVerbose(this.settingsStore.getAll().verboseLogging);
-    this.migrateLegacyData();
     const deadJobs = this.reconcileJobStore();
     await this.bootRecovery.reattachLiveJobs();
 
@@ -546,61 +539,6 @@ export class DesktopApplication {
       throw new SymphonyDirNotConfiguredError();
     }
     return computeSymphonyDir(sandboxBase);
-  }
-
-  private migrateLegacyData(): void {
-    const sandboxBase = normalizeScopePath(
-      this.settingsStore.getSandboxBaseDirectory(),
-    );
-    if (!sandboxBase?.trim()) {
-      return;
-    }
-
-    const newDir = computeSymphonyDir(sandboxBase);
-
-    const copyIfMissing = (src: string, dest: string): void => {
-      if (existsSync(src) && !existsSync(dest)) {
-        mkdirSync(path.dirname(dest), { recursive: true });
-        copyFileSync(src, dest);
-      }
-    };
-
-    const copyDirIfMissing = (srcDir: string, destDir: string): void => {
-      if (!existsSync(srcDir)) return;
-      try {
-        for (const entry of readdirSync(srcDir, { withFileTypes: true })) {
-          if (entry.isDirectory()) {
-            copyDirIfMissing(
-              path.join(srcDir, entry.name),
-              path.join(destDir, entry.name),
-            );
-          } else {
-            copyIfMissing(
-              path.join(srcDir, entry.name),
-              path.join(destDir, entry.name),
-            );
-          }
-        }
-      } catch {
-        // Best effort — skip unreadable entries
-      }
-    };
-
-    try {
-      // sessions.json — try newer path first, then legacy
-      copyIfMissing(
-        path.join(os.homedir(), ".closedloop-ai", "sessions.json"),
-        path.join(newDir, "sessions.json"),
-      );
-
-      // chats from ~/.closedloop-ai/chats/
-      copyDirIfMissing(
-        path.join(os.homedir(), ".closedloop-ai", "chats"),
-        path.join(newDir, "chats"),
-      );
-    } catch {
-      // Migration is best-effort — don't block startup
-    }
   }
 
   private isDebugAuthEnabled(): boolean {
