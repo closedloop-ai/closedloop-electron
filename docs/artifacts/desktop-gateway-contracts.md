@@ -81,7 +81,7 @@ This artifact tracks the Desktop -> Relay contract checkpoints from the desktop 
 | `git_action` | `/api/engineer/git` | `POST` | `implemented` | Multi-action git envelope (`status/branch/commit/push/pull/branch-diff/sync-status`). |
 | `git_pr` | `/api/engineer/git/pr*`, `/api/engineer/git/user` | `GET, POST` | `implemented` | PR create/list/comments/reviews/reply/files/head-sha/inline-comment/user parity routes. |
 | `health_check` | `/api/engineer/health-check` | `GET` | `implemented` | Tool/auth/script readiness check bundle with remediation metadata. |
-| `repos_config` | `/api/engineer/repos` | `GET, POST, DELETE, PATCH` | `implemented` | Repo config CRUD/settings persistence in `~/.claude/closedloop/repos.json`. |
+| `repos_config` | `/api/engineer/repos` | `GET, POST, DELETE, PATCH` | `implemented` | Repo config CRUD/settings persistence in `~/.closedloop-ai/config/repos.json`. |
 | `deploy` | `/api/engineer/deploy*` | `GET, POST` | `implemented` | Deploy detect/start/status/health/kill/teardown/check-existing/extract-info route family. |
 | `learnings` | `/api/engineer/learnings`, `/api/engineer/symphony/*learnings*` | `GET, POST` | `implemented` | Learnings read/extract/process/status/usage-record endpoints with filesystem contracts. |
 | `filesystem` | `/api/engineer/directories`, `/api/engineer/files/search`, `/api/engineer/run-viewer-extract` | `GET, POST, DELETE` | `implemented` | Directory/search + run-viewer zip extract/list/cleanup contracts. |
