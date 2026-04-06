@@ -35,8 +35,7 @@ import {
   restoreEnv,
   saveEnv,
   startMockApiServer,
-  waitForCompletedEvent,
-  waitForTerminalEvent,
+  waitForCompletedEvent
 } from "./symphony-test-utils.js";
 
 const fakeWorktreeProvider: WorktreeProvider = {
@@ -1551,134 +1550,6 @@ test("EXECUTE: non-zero exit with CANCEL_PENDING skips PROCESS_FAILED and ends a
   );
 });
 
-async function runPlanErrorScenario(scenario: {
-  name: string;
-  tmpPrefix: string;
-  repoOwner: string;
-  machineName: string;
-  loopId: string;
-  errorMessage: string;
-  exitCode: number;
-  expectedCode: LoopErrorCode;
-  expectedMessageIncludes?: string;
-  unexpectedCode?: LoopErrorCode;
-}): Promise<void> {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), scenario.tmpPrefix));
-  tempPathsToClean.push(tmpDir);
-
-  const repoPath = path.join(tmpDir, `repo-${scenario.name}`);
-  await fs.mkdir(repoPath, { recursive: true });
-
-  const worktreeParent = path.join(tmpDir, "worktrees");
-  await fs.mkdir(worktreeParent, { recursive: true });
-
-  process.env.HOME = tmpDir;
-
-  const errorJsonl = JSON.stringify({
-    type: "result",
-    subtype: "error",
-    result: scenario.errorMessage,
-    is_error: true,
-  });
-  const scriptBody = [
-    "#!/bin/sh",
-    `mkdir -p "$CLOSEDLOOP_WORKDIR"`,
-    `echo '${errorJsonl}' >> "$CLOSEDLOOP_WORKDIR/claude-output.jsonl"`,
-    `exit ${scenario.exitCode}`,
-  ].join("\n");
-  await createFakeRunLoopScript(tmpDir, scriptBody, { skipTokens: true });
-
-  const fakeBin = path.join(tmpDir, "fake-bin");
-  await fs.mkdir(fakeBin, { recursive: true });
-  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-
-  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
-  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
-  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest();
-
-  const mock = await startMockApiServer();
-  mockServersToClose.push(mock.server);
-
-  const server = new DesktopGatewayServer({
-    host: "127.0.0.1",
-    preferredPort: 0,
-    fallbackPorts: [0],
-    webAppOrigin: "https://app.symphony.com",
-    getAllowedDirectories: () => [tmpDir],
-    machineName: scenario.machineName,
-    version: "0.1.0-test",
-    capabilities: EMPTY_CAPABILITIES,
-    worktreeProvider: fakeWorktreeProvider,
-    discoveryFilePath: path.join(tmpDir, "electron-port"),
-    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
-  });
-  serversToClose.push(server);
-  await server.start();
-
-  const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        loopId: scenario.loopId,
-        command: "PLAN",
-        closedLoopAuthToken: "tok",
-        artifacts: [],
-        repo: {
-          fullName: `${scenario.repoOwner}/${path.basename(repoPath)}`,
-          branch: "main",
-        },
-      }),
-    },
-  );
-
-  assert.equal(
-    response.status,
-    200,
-    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
-  );
-
-  const terminalEvent = await waitForTerminalEvent(mock.requests, scenario.loopId);
-  assert.equal(
-    terminalEvent.type,
-    "error",
-    `Expected event type 'error', got: ${String(terminalEvent.type)}`,
-  );
-  assert.equal(
-    terminalEvent.code,
-    scenario.expectedCode,
-    `Expected error code ${scenario.expectedCode}, got: ${String(terminalEvent.code)}`,
-  );
-
-  if (scenario.expectedMessageIncludes) {
-    assert.ok(
-      typeof terminalEvent.message === "string" &&
-        terminalEvent.message.includes(scenario.expectedMessageIncludes),
-      `Expected message to include "${scenario.expectedMessageIncludes}", got: ${String(terminalEvent.message)}`,
-    );
-  }
-
-  if (scenario.unexpectedCode) {
-    const eventsUrl = `/loops/${scenario.loopId}/events`;
-    const matchingEvents = mock.requests.filter((r) => {
-      if (!r.url.includes(eventsUrl)) return false;
-      try {
-        const body = JSON.parse(r.body) as Record<string, unknown>;
-        return body.code === scenario.unexpectedCode;
-      } catch {
-        return false;
-      }
-    });
-    assert.equal(
-      matchingEvents.length,
-      0,
-      `Expected no ${scenario.unexpectedCode} events, got ${matchingEvents.length}`,
-    );
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Tests T-4.3a/b/c: REQUEST_CHANGES --resume suppression
 //
@@ -1796,11 +1667,11 @@ const requestChangesResumeSuppressionScenarios = [
     expectResume: false,
   },
   {
-    name: "no previous job",
+    name: "FAILED job without lastErrorCode",
     tmpPrefix: "rc-resume-nojob-",
     loopId: "00000000-0000-0000-0000-000000001800",
     machineName: "rc-resume-nojob-machine",
-    previousJobId: undefined,
+    previousJobId: "rc-resume-nocode-seed",
     previousErrorCode: undefined,
     parentSessionId: "session-nojob-789",
     artifactSlug: "PLAN-180",
@@ -1822,14 +1693,16 @@ for (const scenario of requestChangesResumeSuppressionScenarios) {
         machineName: scenario.machineName,
       });
 
-      if (scenario.previousJobId && scenario.previousErrorCode) {
+      if (scenario.previousJobId) {
         jobStore.upsert({
           id: scenario.previousJobId,
           kind: "SYMPHONY_LOOP",
           loopId: scenario.loopId,
           command: "REQUEST_CHANGES",
           status: "FAILED",
-          lastErrorCode: scenario.previousErrorCode,
+          ...(scenario.previousErrorCode
+            ? { lastErrorCode: scenario.previousErrorCode }
+            : {}),
           startedAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         });
