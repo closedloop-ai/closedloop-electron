@@ -599,6 +599,24 @@ async function postLoopEvent(
   }
 }
 
+async function postLoopEventBounded(
+  apiBaseUrl: string,
+  loopId: string,
+  token: string,
+  eventBody: Record<string, unknown>,
+  timeoutMs = 1000,
+): Promise<{ success: boolean; error?: string }> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<{ success: boolean; error?: string }>((resolve) => {
+    timer = setTimeout(() => resolve({ success: false, error: "timeout" }), timeoutMs);
+  });
+  try {
+    return await Promise.race([postLoopEvent(apiBaseUrl, loopId, token, eventBody), timeout]);
+  } finally {
+    clearTimeout(timer!);
+  }
+}
+
 async function uploadArtifacts(
   apiBaseUrl: string,
   loopId: string,
@@ -2503,6 +2521,12 @@ async function handleLoopRequest(
         );
         if ("error" in repoResult) {
           if (repoRequirement === "REQUIRED") {
+            await postLoopEventBounded(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+              type: "error",
+              code: "REPO_NOT_ALLOWED",
+              message: "Repository path not allowed by sandbox policy",
+            });
+            // runningLoops.delete handled by finally block
             json(context, repoResult.status, { error: repoResult.error });
             return;
           }
@@ -2531,6 +2555,12 @@ async function handleLoopRequest(
         } catch (err) {
           if (err instanceof DirectoryNotAllowedError) {
             if (repoRequirement === "REQUIRED") {
+              await postLoopEventBounded(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+                type: "error",
+                code: "REPO_NOT_ALLOWED",
+                message: "Repository path not allowed by sandbox policy",
+              });
+              // runningLoops.delete handled by finally block
               json(context, 403, { error: "Repository path not allowed" });
               return;
             }
@@ -2545,6 +2575,12 @@ async function handleLoopRequest(
         }
       } else {
         if (repoRequirement === "REQUIRED") {
+          await postLoopEventBounded(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+            type: "error",
+            code: "REPO_NOT_FOUND",
+            message: `Repository not found locally: ${body.repo.fullName}`,
+          });
+          // runningLoops.delete handled by finally block (spawnedSuccessfully remains false)
           json(context, 404, {
             error: `Repository not found locally: ${body.repo.fullName}`,
           });

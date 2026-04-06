@@ -478,3 +478,339 @@ test("PLAN: non-zero exit cleans up persisted loop token", async () => {
     "Persisted loop token should be cleaned up after non-zero exit"
   );
 });
+
+// ---------------------------------------------------------------------------
+// Test 5: Repo not found emits REPO_NOT_FOUND error event and returns 404
+// ---------------------------------------------------------------------------
+
+test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cloud-fail-repo-not-found-"));
+  tempPathsToClean.push(tmpDir);
+
+  // No repo directory is created inside tmpDir for org/nonexistent-repo
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const jobStore = new JobStore({ cwd: tmpDir, name: "test-jobs-repo-not-found" });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "repo-not-found-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000001001";
+
+  const responsePromise = fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        repo: { fullName: "org/nonexistent-repo", branch: "main" },
+      }),
+    }
+  );
+  const eventReq = await mock.waitForRequest(`/loops/${loopId}/events`);
+  const response = await responsePromise;
+
+  const event = JSON.parse(eventReq.body) as Record<string, unknown>;
+  assert.equal(event.type, "error");
+  assert.equal(event.code, "REPO_NOT_FOUND");
+  assert.ok(
+    typeof event.message === "string" && event.message.includes("org/nonexistent-repo"),
+    `Expected message to include 'org/nonexistent-repo', got: ${JSON.stringify(event.message)}`
+  );
+  assert.ok(
+    typeof event.timestamp === "string" && /^\d{4}-\d{2}-\d{2}T/.test(event.timestamp),
+    `Expected ISO timestamp, got: ${JSON.stringify(event.timestamp)}`
+  );
+
+  assert.equal(response.status, 404);
+
+  // Verify the runningLoops slot was released: a second identical request should
+  // also return 404 (not 409 Conflict).
+  const response2 = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        repo: { fullName: "org/nonexistent-repo", branch: "main" },
+      }),
+    }
+  );
+  assert.equal(
+    response2.status,
+    404,
+    `Expected second request to return 404 (slot released), got ${response2.status}`
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 6: localRepoPath outside sandbox emits REPO_NOT_ALLOWED error event
+// ---------------------------------------------------------------------------
+
+test("EXECUTE: localRepoPath outside sandbox emits REPO_NOT_ALLOWED error event", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cloud-fail-localrepo-denied-"));
+  tempPathsToClean.push(tmpDir);
+
+  const loopId = "00000000-0000-0000-0000-000000001002";
+
+  // outsidePath is NOT inside tmpDir -- it lives directly in os.tmpdir()
+  const outsidePath = path.join(os.tmpdir(), "outside-sandbox-" + loopId);
+  await fs.mkdir(outsidePath, { recursive: true });
+  tempPathsToClean.push(outsidePath);
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const jobStore = new JobStore({ cwd: tmpDir, name: "test-jobs-repo-not-allowed" });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "repo-not-allowed-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const responsePromise = fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        localRepoPath: outsidePath,
+        repo: { fullName: "org/test-repo", branch: "main" },
+      }),
+    }
+  );
+  const eventReq = await mock.waitForRequest(`/loops/${loopId}/events`);
+  const response = await responsePromise;
+
+  const event = JSON.parse(eventReq.body) as Record<string, unknown>;
+  assert.equal(event.type, "error");
+  assert.equal(event.code, "REPO_NOT_ALLOWED");
+  assert.ok(
+    typeof event.message === "string" && event.message.length > 0,
+    `Expected non-empty message, got: ${JSON.stringify(event.message)}`
+  );
+  assert.ok(
+    !event.message.startsWith("/"),
+    "message must not contain filesystem path"
+  );
+  assert.ok(
+    typeof event.timestamp === "string" && /^\d{4}-\d{2}-\d{2}T/.test(event.timestamp),
+    `Expected ISO timestamp, got: ${JSON.stringify(event.timestamp)}`
+  );
+
+  assert.equal(response.status, 403);
+});
+
+// ---------------------------------------------------------------------------
+// Test 7: fullName-resolved path outside allowedDirs emits REPO_NOT_ALLOWED error event
+// ---------------------------------------------------------------------------
+
+test("EXECUTE: fullName-resolved path outside allowedDirs emits REPO_NOT_ALLOWED error event", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cloud-fail-fullname-denied-"));
+  tempPathsToClean.push(tmpDir);
+
+  const loopId = "00000000-0000-0000-0000-000000001003";
+
+  // repoDir lives inside tmpDir but outside allowedDir.
+  // assertPathAllowed uses realpathSync.native, so a symlink from inside
+  // allowedDir pointing to repoDir will resolve to repoDir (outside allowedDir).
+  const allowedDir = path.join(tmpDir, "allowed");
+  await fs.mkdir(allowedDir, { recursive: true });
+
+  const repoDir = path.join(tmpDir, "outside-repo");
+  await fs.mkdir(repoDir, { recursive: true });
+
+  const repoBasename = path.basename(repoDir);
+
+  // Create a symlink inside allowedDir pointing to the actual repoDir.
+  // findLocalRepo will find path.join(allowedDir, repoBasename) via existsSync,
+  // but assertPathAllowed resolves the symlink to repoDir which is outside allowedDir.
+  const symlinkPath = path.join(allowedDir, repoBasename);
+  await fs.symlink(repoDir, symlinkPath);
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const jobStore = new JobStore({ cwd: tmpDir, name: "test-jobs-fullname-denied" });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [allowedDir],
+    machineName: "fullname-denied-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const responsePromise = fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        repo: { fullName: `org/${repoBasename}`, branch: "main" },
+      }),
+    }
+  );
+  const eventReq = await mock.waitForRequest(`/loops/${loopId}/events`);
+  const response = await responsePromise;
+
+  const event = JSON.parse(eventReq.body) as Record<string, unknown>;
+  assert.equal(event.type, "error");
+  assert.equal(event.code, "REPO_NOT_ALLOWED");
+  assert.ok(
+    !String(event.message ?? "").includes(repoDir),
+    `message must not contain absolute repoDir path, got: ${JSON.stringify(event.message)}`
+  );
+  assert.ok(
+    typeof event.timestamp === "string" && /^\d{4}-\d{2}-\d{2}T/.test(event.timestamp),
+    `Expected ISO timestamp, got: ${JSON.stringify(event.timestamp)}`
+  );
+
+  assert.equal(response.status, 403);
+});
+
+// ---------------------------------------------------------------------------
+// Test 8: postLoopEventBounded times out after 1000ms when API server hangs
+// ---------------------------------------------------------------------------
+
+test("EXECUTE: postLoopEventBounded times out after 1000ms when API server hangs", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cloud-fail-hanging-"));
+  tempPathsToClean.push(tmpDir);
+
+  // Create an inline hanging HTTP server that accepts TCP connections and
+  // reads request bodies but never calls res.end() -- hangs indefinitely.
+  let hangingRequestCount = 0;
+  const hangingSockets = new Set<import("net").Socket>();
+  const hangingServer = http.createServer((req) => {
+    hangingRequestCount++;
+    req.resume(); // drain incoming data -- never responds, hangs indefinitely
+  });
+  hangingServer.on("connection", (socket) => {
+    hangingSockets.add(socket);
+    socket.once("close", () => hangingSockets.delete(socket));
+  });
+  await new Promise<void>((resolve, reject) => {
+    hangingServer.listen(0, "127.0.0.1", resolve);
+    hangingServer.once("error", reject);
+  });
+  const hangingPort = (hangingServer.address() as import("net").AddressInfo).port;
+
+  const jobStore = new JobStore({ cwd: tmpDir, name: "test-jobs-hanging" });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "hanging-server-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${hangingPort}`,
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  // Use a nonexistent repo fullName to trigger REPO_NOT_FOUND, which calls
+  // postLoopEventBounded -- the bounded wait should timeout after 1000ms.
+  const loopId = "00000000-0000-0000-0000-000000001005";
+  const responsePromise = fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        repo: { fullName: "org/nonexistent-repo-1005", branch: "main" },
+      }),
+    }
+  );
+
+  // 2000ms deadline = T-1.4 timeoutMs (1000ms) + 1000ms buffer -- update if T-1.4 timeout changes
+  const response = await Promise.race([
+    responsePromise,
+    new Promise<never>((_, reject) =>
+      setTimeout(
+        () => reject(new Error("Response took longer than 2000ms -- bounded wait may have failed")),
+        2000
+      )
+    ),
+  ]);
+
+  assert.equal(response.status, 404); // response settled correctly despite hanging server
+
+  // Assert hanging server received at least one request
+  assert.ok(
+    hangingRequestCount >= 1,
+    `Expected hanging server to receive at least one request, got: ${hangingRequestCount}`
+  );
+
+  // Socket cleanup: destroy all sockets BEFORE closing the server so
+  // hangingServer.close() can resolve promptly.
+  for (const socket of hangingSockets) {
+    socket.destroy();
+  }
+  hangingSockets.clear();
+  await new Promise<void>((resolve, reject) => {
+    hangingServer.close((err) => (err ? reject(err) : resolve()));
+  });
+});
