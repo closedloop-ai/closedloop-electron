@@ -1,5 +1,5 @@
 # Cloud Command Executor Architecture
 
-Not applicable -- this feature does not require changes to the command execution layer.
+Not applicable — this feature does not require changes to the command execution layer.
 
-**Rationale**: The feature adds a file-tailing side channel in `symphony-loop.ts` that reads `claude-output.jsonl` and posts `output` events via the existing `postLoopEvent()` helper; no cloud-dispatched command routing, queue scheduling, lock-key serialization, cancel/timeout handling, replay buffering, or retention pruning is affected.
+**Rationale**: The fix adds `postLoopEvent()` calls inside `handleLoopRequest()` in `symphony-loop.ts` before repo-validation early returns; the executor's role is unchanged — it dispatches the HTTP request to the gateway, receives the 403/404 response, and emits it as a terminal error event exactly as it does today.
