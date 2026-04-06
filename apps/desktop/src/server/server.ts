@@ -38,6 +38,7 @@ export interface DesktopGatewayServerOptions {
   machineName: string;
   version: string;
   capabilities: ComputeTargetCapabilities;
+  getCapabilities?: () => ComputeTargetCapabilities;
   discoveryFilePath?: string;
   sessionStore?: LocalSessionStore;
   getApiKey?: () => string | null;
@@ -72,6 +73,7 @@ export class DesktopGatewayServer {
       machineName: this.options.machineName,
       version: this.options.version,
       capabilities: this.options.capabilities,
+      getCapabilities: this.options.getCapabilities,
       getActivePort: () => this.activePort,
       getAllowedDirectories: this.options.getAllowedDirectories,
       getSymphonyDir: this.options.getSymphonyDir,
@@ -96,6 +98,7 @@ export class DesktopGatewayServer {
     machineName: string,
     version: string,
     capabilities: ComputeTargetCapabilities,
+    getCapabilities?: () => ComputeTargetCapabilities,
     onActivityEvent?: (event: GatewayActivityEvent) => void,
     evaluateApproval?: (
       request: GatewayApprovalRequest,
@@ -126,6 +129,7 @@ export class DesktopGatewayServer {
       machineName,
       version,
       capabilities,
+      getCapabilities,
       sessionStore,
       getApiKey,
       getApiOrigin,
@@ -146,10 +150,11 @@ export class DesktopGatewayServer {
   }
 
   getHealthResponse(): HealthResponse {
+    const capabilities = this.options.getCapabilities?.() ?? this.options.capabilities;
     return {
       status: "ok",
       machineName: this.options.machineName,
-      capabilities: this.options.capabilities,
+      capabilities,
       version: this.options.version,
       port: this.activePort,
     };

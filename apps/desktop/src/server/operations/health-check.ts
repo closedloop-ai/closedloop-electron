@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import type { ComputeTargetCapabilities, LoopProviderName } from "../../shared/contracts.js";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { getShellPath } from "../shell-path.js";
 import { isPluginInstalled } from "./plugin-cache.js";
@@ -20,6 +21,10 @@ type CheckResult = {
   remediation?: string;
 };
 
+const REQUIRED_CHECK_IDS = ["git", "gh-cli", "gh-auth", "python3", "worktree-dir"] as const;
+const CLAUDE_LOOP_CHECK_IDS = ["claude-cli", "plugin-code"] as const;
+const CODEX_LOOP_CHECK_IDS = ["codex"] as const;
+
 type ReposConfig = {
   repos?: Array<{ path: string; description?: string }>;
   settings?: {
@@ -36,24 +41,64 @@ export function registerHealthCheckRoutes(
   const configDir = () => path.join(getSymphonyDir(), "config");
 
   dispatcher.register("GET", "/api/engineer/health-check", async (context) => {
-    const checks = await Promise.all([
-      checkGit(processManager),
-      checkClaudeCli(processManager),
-      checkGhCli(processManager),
-      checkGhAuth(processManager),
-      Promise.resolve(checkPlugin("code", "Symphony Plugin", true)),
-      Promise.resolve(checkPlugin("platform", "Platform Plugin", true)),
-      Promise.resolve(checkPlugin("judges", "Judges Plugin", true)),
-      Promise.resolve(checkPlugin("code-review", "Code Review Plugin", true)),
-      Promise.resolve(checkPlugin("self-learning", "Self-Learning Plugin", true)),
-      Promise.resolve(await checkWorktreeDir(configDir)),
-      checkCodex(processManager),
-      checkPython3(processManager)
-    ]);
+    const checks = await getHealthChecks(processManager, configDir);
+    const capabilities = deriveComputeTargetCapabilities(checks);
 
     const allRequiredPassed = checks.filter((check) => check.required).every((check) => check.passed);
-    json(context, 200, { checks, allRequiredPassed });
+    json(context, 200, { checks, allRequiredPassed, capabilities });
   });
+}
+
+export async function getHealthChecks(
+  processManager: ProcessManager,
+  getConfigDir: () => string,
+): Promise<CheckResult[]> {
+  return Promise.all([
+    checkGit(processManager),
+    checkClaudeCli(processManager),
+    checkGhCli(processManager),
+    checkGhAuth(processManager),
+    Promise.resolve(checkPlugin("code", "Symphony Plugin", true)),
+    Promise.resolve(checkPlugin("platform", "Platform Plugin", true)),
+    Promise.resolve(checkPlugin("judges", "Judges Plugin", true)),
+    Promise.resolve(checkPlugin("code-review", "Code Review Plugin", true)),
+    Promise.resolve(checkPlugin("self-learning", "Self-Learning Plugin", true)),
+    Promise.resolve(await checkWorktreeDir(getConfigDir)),
+    checkCodex(processManager),
+    checkPython3(processManager),
+  ]);
+}
+
+export function deriveComputeTargetCapabilities(checks: readonly CheckResult[]): ComputeTargetCapabilities {
+  const byId = new Map(checks.map((check) => [check.id, check] as const));
+  const hasPassed = (id: string): boolean => byId.get(id)?.passed === true;
+  const getVersion = (id: string): string | undefined => byId.get(id)?.version;
+
+  const tools: ComputeTargetCapabilities["tools"] = {
+    claude: hasPassed("claude-cli"),
+    codex: hasPassed("codex"),
+    git: hasPassed("git"),
+    gh: hasPassed("gh-cli"),
+    python3: hasPassed("python3"),
+  };
+
+  const versions: ComputeTargetCapabilities["versions"] = {
+    ...(getVersion("claude-cli") ? { claude: getVersion("claude-cli") } : {}),
+    ...(getVersion("codex") ? { codex: getVersion("codex") } : {}),
+    ...(getVersion("git") ? { git: getVersion("git") } : {}),
+    ...(getVersion("gh-cli") ? { gh: getVersion("gh-cli") } : {}),
+    ...(getVersion("python3") ? { python3: getVersion("python3") } : {}),
+  };
+
+  const supportedLoopProviders: LoopProviderName[] = [];
+  if (REQUIRED_CHECK_IDS.every(hasPassed) && CLAUDE_LOOP_CHECK_IDS.every(hasPassed)) {
+    supportedLoopProviders.push("claude");
+  }
+  if (REQUIRED_CHECK_IDS.every(hasPassed) && CODEX_LOOP_CHECK_IDS.every(hasPassed)) {
+    supportedLoopProviders.push("codex");
+  }
+
+  return { tools, versions, supportedLoopProviders };
 }
 
 async function runCommand(_processManager: ProcessManager, cmd: string, args: string[]): Promise<string> {

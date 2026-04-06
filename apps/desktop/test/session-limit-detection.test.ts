@@ -148,6 +148,21 @@ describe("detectSessionLimitFromJsonl", () => {
     );
   });
 
+  test('detects "context window exhausted" as session limit', () => {
+    writeJsonl([
+      {
+        type: "result",
+        subtype: "error",
+        result: "Codex failed because the context window was exhausted",
+        is_error: true,
+      },
+    ]);
+    assert.strictEqual(
+      detectSessionLimitFromJsonl(tmpDir),
+      "Codex failed because the context window was exhausted",
+    );
+  });
+
   test('detects "exceed context limit" as session limit', () => {
     writeJsonl([
       {
@@ -282,6 +297,13 @@ describe("isSessionLimitError", () => {
     );
   });
 
+  test('detects "context window exhausted"', () => {
+    assert.strictEqual(
+      isSessionLimitError("Codex failed because the context window was exhausted"),
+      true,
+    );
+  });
+
   test("detection is case-insensitive", () => {
     assert.strictEqual(
       isSessionLimitError("PROMPT IS TOO LONG"),
@@ -314,6 +336,8 @@ describe("SESSION_LIMIT_PATTERN", () => {
     "Context limit reached, please start a new conversation",
     "conversation too long",
     "The conversation too long to continue",
+    "context window exhausted",
+    "Ran out of room in the context window",
   ];
 
   const negatives = [
@@ -425,6 +449,13 @@ describe("detectAuthChallengeFromJsonl", () => {
   test("detects usage limit", () => {
     writeJsonl([
       { type: "result", subtype: "error", result: "Claude usage limit reached", is_error: true },
+    ]);
+    assert.ok(detectAuthChallengeFromJsonl(tmpDir));
+  });
+
+  test("detects codex usage limit", () => {
+    writeJsonl([
+      { type: "result", subtype: "error", result: "Codex usage limit reached", is_error: true },
     ]);
     assert.ok(detectAuthChallengeFromJsonl(tmpDir));
   });

@@ -42,6 +42,29 @@ type ResultRecord = {
 
 export type JsonlRecord = AssistantRecord | UserRecord | ContentBlockDeltaRecord | ResultRecord;
 
+function summarizeCodexRecord(record: Record<string, unknown>): string | null {
+  if (typeof record.output_text === "string" && record.output_text.trim()) {
+    return redactSensitive(truncate(record.output_text, 200));
+  }
+  if (typeof record.text === "string" && record.text.trim()) {
+    return redactSensitive(truncate(record.text, 200));
+  }
+  if (record.type === "error" && typeof record.error === "string") {
+    return redactSensitive(`Error: ${truncate(record.error, 200)}`);
+  }
+
+  const item = isRecord(record.item) ? record.item : null;
+  if (item && typeof item.text === "string" && item.text.trim()) {
+    return redactSensitive(truncate(item.text, 200));
+  }
+
+  if (record.type === "done") {
+    return "Turn complete";
+  }
+
+  return null;
+}
+
 function truncate(s: string, n: number): string {
   return s.length > n ? s.slice(0, n) + "..." : s;
 }
@@ -79,6 +102,11 @@ function summarizeToolResult(block: ToolResultBlock): string {
 
 /** Accepts a parsed JSONL record (untrusted) and returns a display summary, or null to skip. */
 export function summarizeJsonlRecord(record: Record<string, unknown>): string | null {
+  const codexSummary = summarizeCodexRecord(record);
+  if (codexSummary) {
+    return codexSummary;
+  }
+
   const typed = record as JsonlRecord;
 
   switch (typed.type) {

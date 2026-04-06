@@ -10,11 +10,14 @@ import { DesktopGatewayServer } from "../src/server/server.js";
 import { saveCodexChatSession } from "../src/server/operations/codex.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
+import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 import { SymphonyDirNotConfiguredError, tryAssertRepoAllowed, tryAssertPathAllowed } from "../src/server/operations/symphony-utils.js";
 import { JobStore } from "../src/main/job-store.js";
 import type { LocalJob, LocalJobStatus } from "../src/main/job-store.js";
+import { startMockApiServer } from "./symphony-test-utils.js";
 
 const serversToClose: DesktopGatewayServer[] = [];
+const mockServersToClose: http.Server[] = [];
 const blockersToClose: net.Server[] = [];
 const tempPathsToClean: string[] = [];
 const childPidsToKill: number[] = [];
@@ -44,6 +47,18 @@ afterEach(async () => {
 
   for (const server of serversToClose.splice(0)) {
     await server.stop();
+  }
+
+  for (const mockServer of mockServersToClose.splice(0)) {
+    await new Promise<void>((resolve, reject) => {
+      mockServer.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      });
+    });
   }
 
   for (const blocker of blockersToClose.splice(0)) {
@@ -1432,6 +1447,10 @@ test("returns health-check response envelope with required check structure", asy
   const body = (await response.json()) as {
     checks: Array<{ id: string; label: string; required: boolean; passed: boolean }>;
     allRequiredPassed: boolean;
+    capabilities: {
+      tools: Record<string, boolean>;
+      supportedLoopProviders: string[];
+    };
   };
 
   assert.equal(Array.isArray(body.checks), true);
@@ -1439,6 +1458,8 @@ test("returns health-check response envelope with required check structure", asy
   assert.equal(body.checks.some((check) => check.id === "git"), true);
   assert.equal(body.checks.some((check) => check.id === "claude-cli"), true);
   assert.equal(body.checks.every((check) => typeof check.passed === "boolean"), true);
+  assert.equal(typeof body.capabilities.tools.claude, "boolean");
+  assert.equal(Array.isArray(body.capabilities.supportedLoopProviders), true);
 });
 
 test("health-check returns 200 with worktree-dir failed when getSymphonyDir throws", async () => {
@@ -2950,6 +2971,144 @@ test("symphony launch passes .closedloop-ai/work path (not ticket ID) as first a
   );
 });
 
+test("validates provider field for symphony loop requests", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-loop-provider-validate-"));
+  tempPathsToClean.push(tmpDir);
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "loop-provider-validate-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        loopId: "11111111-1111-4111-8111-111111111111",
+        command: "PLAN",
+        provider: "openai",
+        closedLoopAuthToken: "loop-token",
+        localRepoPath: path.join(tmpDir, "repo"),
+        artifacts: [],
+      }),
+    },
+  );
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), { error: "unsupported provider" });
+});
+
+test("runs symphony PLAN loop with codex provider", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-loop-codex-"));
+  tempPathsToClean.push(tmpDir);
+
+  const fakeBin = path.join(tmpDir, "bin");
+  const repoPath = path.join(tmpDir, "repo");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.mkdir(repoPath, { recursive: true });
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  await fs.writeFile(
+    path.join(fakeBin, "codex"),
+    [
+      "#!/bin/sh",
+      'echo \'{"output_text":"planning started","session_id":"22222222-2222-4222-8222-222222222222"}\'',
+      'echo \'{"type":"done"}\'',
+      "exit 0",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const fakeWorktreeProvider: WorktreeProvider = {
+    async ensureWorktree(_repoPath, worktreeDir) {
+      await fs.mkdir(worktreeDir, { recursive: true });
+    },
+    findWorktreeForBranch() {
+      return null;
+    },
+    async removeWorktree(worktreeDir) {
+      await fs.rm(worktreeDir, { recursive: true, force: true });
+    },
+    getCurrentBranch() {
+      return "symphony/codex-provider-test";
+    },
+  };
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "loop-provider-codex-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    worktreeProvider: fakeWorktreeProvider,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        loopId: "33333333-3333-4333-8333-333333333333",
+        command: "PLAN",
+        provider: "codex",
+        closedLoopAuthToken: "loop-token",
+        localRepoPath: repoPath,
+        prompt: "Plan the feature",
+        artifacts: [{ type: "PRD", content: "Feature requirements" }],
+      }),
+    },
+  );
+
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as { pid: number; loopId: string };
+  assert.equal(body.loopId, "33333333-3333-4333-8333-333333333333");
+  assert.equal(typeof body.pid, "number");
+
+  let requests = mock.requests.filter((request) =>
+    request.url.includes("/loops/33333333-3333-4333-8333-333333333333/")
+  );
+  for (let attempt = 0; attempt < 40; attempt++) {
+    if (requests.some((request) => request.body.includes('"type":"completed"'))) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    requests = mock.requests.filter((request) =>
+      request.url.includes("/loops/33333333-3333-4333-8333-333333333333/")
+    );
+  }
+
+  assert.ok(requests.some((request) => request.body.includes('"type":"started"')));
+  assert.ok(requests.some((request) => request.body.includes('"type":"completed"')));
+  assert.ok(requests.some((request) => request.body.includes('"sessionId":"22222222-2222-4222-8222-222222222222"')));
+});
+
 test("validates required fields for codex chat route", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-codex-chat-validate-"));
   tempPathsToClean.push(tmpDir);
@@ -3654,6 +3813,7 @@ test("python3 health check: passes for version 3.11.0 (control)", async () => {
   const body = (await response.json()) as {
     checks: Array<{ id: string; required: boolean; passed: boolean; remediation?: string }>;
     allRequiredPassed: boolean;
+    capabilities: { supportedLoopProviders: string[] };
   };
 
   const pythonCheck = body.checks.find((c) => c.id === "python3");
@@ -3662,6 +3822,7 @@ test("python3 health check: passes for version 3.11.0 (control)", async () => {
   assert.equal(pythonCheck.required, true, "python3 check should be required");
   assert.equal(pythonCheck.remediation, undefined, "no remediation on passing check");
   assert.equal(body.allRequiredPassed, true, "all required checks should pass");
+  assert.deepEqual(body.capabilities.supportedLoopProviders.sort(), ["claude", "codex"]);
 });
 
 test("python3 health check: fails when python3 not found", async () => {

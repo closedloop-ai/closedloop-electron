@@ -11,10 +11,12 @@ export const DEFAULT_AUTH_API_ORIGIN = process.env.CL_AUTH_API_ORIGIN ?? "https:
 export const DEFAULT_POSTHOG_HOST = process.env.CL_POSTHOG_HOST ?? "https://us.i.posthog.com";
 
 export type CapabilityToolName = "claude" | "codex" | "git" | "gh" | "python3";
+export type LoopProviderName = "claude" | "codex";
 
 export interface ComputeTargetCapabilities {
   tools: Record<CapabilityToolName, boolean>;
   versions: Partial<Record<CapabilityToolName, string>>;
+  supportedLoopProviders: LoopProviderName[];
 }
 
 export const EMPTY_CAPABILITIES: ComputeTargetCapabilities = {
@@ -25,7 +27,8 @@ export const EMPTY_CAPABILITIES: ComputeTargetCapabilities = {
     gh: false,
     python3: false
   },
-  versions: {}
+  versions: {},
+  supportedLoopProviders: []
 };
 
 export interface HealthResponse {

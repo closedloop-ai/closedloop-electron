@@ -2,6 +2,7 @@ import { execFileSync, execSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import {
   closeSync,
+  createWriteStream,
   existsSync,
   mkdirSync,
   openSync,
@@ -161,6 +162,7 @@ type LoopCommand =
   | "GENERATE_PRD"
   | "EVALUATE_PLAN"
   | "EVALUATE_CODE";
+type LoopProvider = "claude" | "codex";
 
 const VALID_COMMANDS = new Set<LoopCommand>([
   "PLAN",
@@ -183,6 +185,7 @@ const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
   EVALUATE_PLAN: "REQUIRED",
   EVALUATE_CODE: "REQUIRED",
 };
+const VALID_LOOP_PROVIDERS = new Set<LoopProvider>(["claude", "codex"]);
 
 interface LoopArtifact {
   id?: string;
@@ -286,6 +289,8 @@ interface LoopCommitter {
 interface LoopRequestBody {
   loopId: string;
   command: LoopCommand;
+  provider?: LoopProvider;
+  fallbackProvider?: LoopProvider;
   closedLoopAuthToken: string;
   /** @deprecated Ignored. The gateway uses its configured API origin instead. */
   apiBaseUrl?: string;
@@ -301,6 +306,194 @@ interface LoopRequestBody {
   localRepoPath?: string;
   /** User-supplied Additional Context from ArtifactVersion v1. Written to additional-context.md for PLAN commands. */
   userContext?: string;
+}
+
+function asLoopProvider(value: unknown): LoopProvider | null {
+  if (value === "claude" || value === "codex") {
+    return value;
+  }
+  return null;
+}
+
+function resolveLoopProvider(body: LoopRequestBody): LoopProvider {
+  return asLoopProvider(body.provider) ?? "claude";
+}
+
+function extractCodexSessionId(line: string): string | null {
+  try {
+    const parsed = JSON.parse(line) as Record<string, unknown>;
+    const item =
+      typeof parsed.item === "object" && parsed.item !== null
+        ? (parsed.item as Record<string, unknown>)
+        : null;
+    const candidates = [
+      parsed.session_id,
+      item?.session_id,
+      item?.sessionId,
+    ];
+    for (const candidate of candidates) {
+      if (typeof candidate === "string" && candidate.trim()) {
+        return candidate;
+      }
+    }
+  } catch {
+    const match = /session id:\s*([0-9a-f-]{36})/i.exec(line);
+    if (match?.[1]) {
+      return match[1];
+    }
+  }
+  return null;
+}
+
+function buildCodexLoopPrompt(
+  body: LoopRequestBody,
+  workDir: string,
+  worktreeDir: string | null,
+  expandedRepoPath: string | null,
+): string {
+  const command = body.command;
+  const repoLocation = worktreeDir ?? expandedRepoPath;
+  const repoLine = repoLocation
+    ? `Repository root: ${repoLocation}`
+    : "There is no repository checkout for this loop.";
+  const workDirLine = `Loop work directory: ${workDir}`;
+  const common = [
+    `You are running a ClosedLoop.AI ${command} loop on the desktop gateway.`,
+    repoLine,
+    workDirLine,
+    "Read and write files directly in the provided paths.",
+    "Do not ask for confirmation. Complete the task and leave outputs on disk.",
+    "Do not create commits, branches, or pull requests during the main loop run.",
+  ];
+
+  switch (command) {
+    case "PLAN":
+      return [
+        ...common,
+        `Read ${path.join(workDir, "prd.md")} and any supporting files in ${workDir}.`,
+        `Write ${path.join(workDir, "plan.json")} as valid JSON with at least a top-level "content" field containing the implementation plan in markdown.`,
+        `Write ${path.join(workDir, "open-questions.md")} with any unresolved questions, or an empty file if there are none.`,
+        "Inspect the repository for relevant implementation context before drafting the plan.",
+      ].join("\n");
+    case "EXECUTE":
+      return [
+        ...common,
+        `Read ${path.join(workDir, "plan.json")} and ${path.join(workDir, "prd.md")} when present.`,
+        "Implement the requested code changes in the repository.",
+        "Leave the working tree updated but uncommitted. Another step will handle commit and PR creation.",
+      ].join("\n");
+    case "REQUEST_CHANGES":
+      return [
+        ...common,
+        `Read ${path.join(workDir, "plan.json")}, ${path.join(workDir, "prd.md")}, and ${path.join(workDir, "prompt.md")} if it exists.`,
+        `Update ${path.join(workDir, "plan.json")} in place, preserving existing JSON fields where practical while revising the "content" plan.`,
+        `Update ${path.join(workDir, "open-questions.md")} to reflect the revised plan.`,
+      ].join("\n");
+    case "DECOMPOSE":
+      return [
+        ...common,
+        `Read ${path.join(workDir, "prd.md")} and write ${path.join(workDir, "features.json")} as valid JSON describing the decomposed features.`,
+      ].join("\n");
+    case "EVALUATE_PRD":
+      return [
+        ...common,
+        `Read ${path.join(workDir, "prd.md")} and evaluate it against the implementation context.`,
+        `Write ${path.join(workDir, "prd-judges.json")} as valid JSON containing the evaluation output.`,
+      ].join("\n");
+    case "EVALUATE_PLAN":
+      return [
+        ...common,
+        `Read ${path.join(workDir, "prd.md")} and ${path.join(workDir, "plan.json")}.`,
+        `Write ${path.join(workDir, "plan-judges.json")} as valid JSON containing the plan evaluation.`,
+      ].join("\n");
+    case "EVALUATE_CODE":
+      return [
+        ...common,
+        `Read ${path.join(workDir, "plan.json")} and inspect the repository implementation.`,
+        `Write ${path.join(workDir, "code-judges.json")} as valid JSON containing the code evaluation.`,
+      ].join("\n");
+    case "GENERATE_PRD":
+      return [
+        ...common,
+        `Read ${path.join(workDir, "generate-prd-prompt.txt")} and any context files in ${workDir}.`,
+        `Write the final PRD markdown to ${path.join(worktreeDir ?? workDir, "prd.md")}.`,
+      ].join("\n");
+  }
+}
+
+async function setupCodexLoopOutput(
+  child: ReturnType<typeof spawn>,
+  workDir: string,
+): Promise<void> {
+  const logPath = path.join(workDir, "symphony-loop.log");
+  const jsonlPath = path.join(workDir, "claude-output.jsonl");
+  const sessionIdPath = path.join(workDir, "session-id.txt");
+  const logStream = createWriteStream(logPath, { flags: "a", encoding: "utf-8" });
+  const jsonlStream = createWriteStream(jsonlPath, { flags: "a", encoding: "utf-8" });
+  let stdoutBuffer = "";
+  let sessionPersisted = false;
+
+  const persistSessionId = (sessionId: string): void => {
+    if (sessionPersisted) {
+      return;
+    }
+    sessionPersisted = true;
+    try {
+      writeFileSync(sessionIdPath, `${sessionId}\n`);
+    } catch {
+      // Best effort.
+    }
+  };
+
+  child.stdout?.setEncoding("utf-8");
+  child.stdout?.on("data", (chunk: string | Buffer) => {
+    const text = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
+    logStream.write(text);
+    stdoutBuffer += text;
+    const lines = stdoutBuffer.split("\n");
+    stdoutBuffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.trim()) {
+        continue;
+      }
+      jsonlStream.write(`${line}\n`);
+      const sessionId = extractCodexSessionId(line);
+      if (sessionId) {
+        persistSessionId(sessionId);
+      }
+    }
+  });
+
+  child.stderr?.setEncoding("utf-8");
+  child.stderr?.on("data", (chunk: string | Buffer) => {
+    const text = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
+    logStream.write(text);
+    for (const line of text.split("\n")) {
+      if (!line.trim()) {
+        continue;
+      }
+      jsonlStream.write(`${JSON.stringify({ type: "result", subtype: "error", is_error: true, result: line })}\n`);
+    }
+  });
+
+  return new Promise<void>((resolve, reject) => {
+    const finish = (): void => {
+      if (stdoutBuffer.trim()) {
+        jsonlStream.write(`${stdoutBuffer}\n`);
+        const sessionId = extractCodexSessionId(stdoutBuffer);
+        if (sessionId) {
+          persistSessionId(sessionId);
+        }
+      }
+      jsonlStream.end();
+      logStream.end();
+    };
+
+    child.once("close", finish);
+    logStream.once("finish", resolve);
+    logStream.once("error", reject);
+    jsonlStream.once("error", reject);
+  });
 }
 
 interface ExecutionResult {
@@ -985,7 +1178,7 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
 
 /** Pattern that matches known session/context limit error messages. */
 export const SESSION_LIMIT_PATTERN =
-  /prompt is too long|exceed context limit|context limit reached|conversation too long/i;
+  /prompt is too long|exceed context limit|context limit reached|conversation too long|context window|out of room/i;
 
 /**
  * Scan claude-output.jsonl for a result record with `is_error: true` whose
@@ -1093,6 +1286,7 @@ async function attemptLlmCommit(
   baseBranch: string,
   loopId: string,
   command: string,
+  provider: LoopProvider,
   artifactSlug: string | undefined,
   webAppOrigin: string,
   committer: LoopCommitter | undefined,
@@ -1206,31 +1400,26 @@ async function attemptLlmCommit(
     spawnEnv.GIT_COMMITTER_EMAIL = committer.email;
   }
 
-  // Resolve the absolute path to the `claude` binary once at first use.
-  // Electron strips PATH to a minimal system set when launching via the .app
-  // bundle or launchd (macOS) / systemd (Linux), so the bare name "claude"
-  // typically resolves to ENOENT even though it works in a terminal. Running
-  // `which claude` in a login shell picks up the full user PATH including
-  // nvm/homebrew/local bin directories. getResolvedClaudePath() caches the
-  // result for the process lifetime.
-  const claudeBinary = getResolvedClaudePath();
-  const spawnArgs = ["-p", prompt, "--allowedTools", "Bash,Read,Write,Glob,Grep"];
+  const spawnBinary = provider === "codex" ? "codex" : getResolvedClaudePath();
+  const spawnArgs = provider === "codex"
+    ? ["exec", "--full-auto", "--json", prompt]
+    : ["-p", prompt, "--allowedTools", "Bash,Read,Write,Glob,Grep"];
   loopLog(
     loopId,
-    `LLM commit spawn: binary=${claudeBinary} args=["-p", "<prompt omitted>", "--allowedTools", "Bash,Read,Write,Glob,Grep"] cwd=${worktreeDir} PATH=${spawnEnv.PATH ?? "(unset)"}`
+    `LLM commit spawn: binary=${spawnBinary} cwd=${worktreeDir} PATH=${spawnEnv.PATH ?? "(unset)"}`
   );
 
   let child: ReturnType<typeof spawn>;
   try {
     child = spawn(
-      claudeBinary,
+      spawnBinary,
       spawnArgs,
       { cwd: worktreeDir, detached: true, stdio: "pipe", env: spawnEnv },
     );
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code ?? "unknown";
     const enoentDetail = code === "ENOENT"
-      ? ` — '${claudeBinary}' binary not found; PATH=${spawnEnv.PATH ?? "(unset)"}`
+      ? ` — '${spawnBinary}' binary not found; PATH=${spawnEnv.PATH ?? "(unset)"}`
       : "";
     loopError(loopId, `LLM commit spawn failed [code=${code}${enoentDetail}]`, err);
     return null;
@@ -1378,7 +1567,7 @@ async function attemptLlmCommit(
       clearTimeout(killTimer);
       const code = (err as NodeJS.ErrnoException).code ?? "unknown";
       const enoentDetail = code === "ENOENT"
-        ? ` — '${claudeBinary}' binary not found; PATH=${spawnEnv.PATH ?? "(unset)"}`
+        ? ` — '${spawnBinary}' binary not found; PATH=${spawnEnv.PATH ?? "(unset)"}`
         : "";
       loopError(loopId, `LLM commit process error [code=${code}${enoentDetail}]:`, err);
       resolve(null);
@@ -1667,6 +1856,7 @@ async function handleProcessCompletion(
   loopTokenStore?: LoopTokenStore,
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
+  const provider = resolveLoopProvider(body);
 
   loopLog(loopId, `Process exited with code ${exitCode}, command=${command}`);
 
@@ -1736,7 +1926,7 @@ async function handleProcessCompletion(
           diagnosticsVersion: diagnostics.diagnosticsVersion,
         });
       } else if (isAuthChallenge) {
-        const authMsg = jsonlAuthError ?? "Claude auth challenge detected";
+        const authMsg = jsonlAuthError ?? `${provider} auth challenge detected`;
         loopError(loopId, `Auth challenge detected: ${authMsg}`);
         gatewayLog.error(
           "loop-harness",
@@ -1850,6 +2040,7 @@ async function handleProcessCompletion(
           baseBranch,
           loopId,
           command,
+          provider,
           body.artifactSlug,
           webAppOrigin ?? "",
           committer,
@@ -2209,6 +2400,20 @@ async function handleLoopRequest(
   }
 
   const body = rawBody as unknown as LoopRequestBody;
+  const requestedProvider = rawBody.provider;
+  if (requestedProvider !== undefined && !VALID_LOOP_PROVIDERS.has(requestedProvider as LoopProvider)) {
+    json(context, 400, { error: "unsupported provider" });
+    return;
+  }
+  const requestedFallbackProvider = rawBody.fallbackProvider;
+  if (
+    requestedFallbackProvider !== undefined &&
+    !VALID_LOOP_PROVIDERS.has(requestedFallbackProvider as LoopProvider)
+  ) {
+    json(context, 400, { error: "unsupported fallback provider" });
+    return;
+  }
+  const provider = resolveLoopProvider(body);
 
   // Extract tracing headers forwarded by the cloud command executor.
   // Use typeof guards because IncomingMessage headers values are string | string[] | undefined.
@@ -2307,11 +2512,11 @@ async function handleLoopRequest(
       : "local";
   loopLog(
     body.loopId,
-    `Received ${body.command} request, repo=${body.repo?.fullName ?? "none"}, stableId=${pickStableId(body)}, parentSessionId=${body.parentSessionId ?? "none"}`,
+    `Received ${body.command} request, provider=${provider}, repo=${body.repo?.fullName ?? "none"}, stableId=${pickStableId(body)}, parentSessionId=${body.parentSessionId ?? "none"}`,
   );
   gatewayLog.info(
     "loop-harness",
-    `${body.command} request via ${requestSource}, loopId=${body.loopId}, repo=${body.repo?.fullName ?? "none"}`,
+    `${body.command} request via ${requestSource}, provider=${provider}, loopId=${body.loopId}, repo=${body.repo?.fullName ?? "none"}`,
   );
 
   let spawnedSuccessfully = false;
@@ -2620,19 +2825,15 @@ async function handleLoopRequest(
       }
     };
 
-    // Pre-flight: verify required binary exists BEFORE posting 'started' event.
-    // PLAN and EXECUTE use run-loop.sh; REQUEST_CHANGES and DECOMPOSE use claude CLI directly.
-    const usesRunLoop = body.command === "PLAN" || body.command === "EXECUTE";
-    const usesClaude =
-      body.command === "REQUEST_CHANGES" ||
-      body.command === "DECOMPOSE" ||
-      body.command === "EVALUATE_PRD" ||
-      body.command === "GENERATE_PRD" ||
-      body.command === "EVALUATE_PLAN" ||
-      body.command === "EVALUATE_CODE";
+    // Pre-flight: verify the provider-specific binary exists BEFORE posting 'started' event.
+    const usesRunLoop =
+      provider === "claude" &&
+      (body.command === "PLAN" || body.command === "EXECUTE");
+    const usesClaudeCli = provider === "claude" && !usesRunLoop;
+    const usesCodexCli = provider === "codex";
     let scriptPath: string | null = null;
 
-    if (usesClaude) {
+    if (usesClaudeCli) {
       try {
         const whichEnv = { ...process.env, PATH: await getShellPath() };
         execSync("which claude", { stdio: "pipe", timeout: 5000, env: whichEnv });
@@ -2645,6 +2846,21 @@ async function handleLoopRequest(
         Observability.preflightBinaryNotFound(commandId, operationId, body.loopId);
         await cleanupOnError();
         json(context, 500, { error: "claude CLI not found in PATH" });
+        return;
+      }
+    } else if (usesCodexCli) {
+      try {
+        const whichEnv = { ...process.env, PATH: await getShellPath() };
+        execSync("which codex", { stdio: "pipe", timeout: 5000, env: whichEnv });
+      } catch {
+        await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+          type: "error",
+          code: "BINARY_NOT_FOUND",
+          message: "codex CLI not found in PATH",
+        });
+        Observability.preflightBinaryNotFound(commandId, operationId, body.loopId);
+        await cleanupOnError();
+        json(context, 500, { error: "codex CLI not found in PATH" });
         return;
       }
     } else if (usesRunLoop) {
@@ -2678,24 +2894,8 @@ async function handleLoopRequest(
       type: "started",
     });
 
-    // Spawn process
-    const logFile = path.join(claudeWorkDir, "symphony-loop.log");
-    let logFd: number;
-    try {
-      logFd = openSync(logFile, "a");
-    } catch (logErr) {
-      const msg = logErr instanceof Error ? logErr.message : String(logErr);
-      await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-        type: "error",
-        code: "SPAWN_FAILED",
-        message: `Cannot open log file: ${msg}`,
-      });
-      Observability.preflightSpawnFailed(commandId, operationId, body.loopId, `Cannot open log file: ${msg}`);
-      await cleanupOnError();
-      json(context, 500, { error: `Cannot open log file: ${msg}` });
-      return;
-    }
     let child: ReturnType<typeof spawn>;
+    let providerOutputDrain: Promise<void> = Promise.resolve();
 
     try {
       const spawnEnv: Record<string, string> = await getShellEnv({
@@ -2716,7 +2916,27 @@ async function handleLoopRequest(
       ];
       const stdinClaudeArgs = ["-p", "-", ...baseClaudeArgs.slice(1)];
 
-      if (body.command === "DECOMPOSE") {
+      if (provider === "codex") {
+        const prompt = buildCodexLoopPrompt(
+          body,
+          claudeWorkDir,
+          worktreeDir,
+          expandedRepoPath,
+        );
+        await fs.writeFile(path.join(claudeWorkDir, "codex-loop-prompt.md"), prompt);
+        const codexArgs =
+          body.command === "REQUEST_CHANGES" && body.parentSessionId
+            ? ["exec", "resume", body.parentSessionId, prompt, "--full-auto", "--json"]
+            : ["exec", "--full-auto", "--json", prompt];
+        child = spawn("codex", codexArgs, {
+          cwd: worktreeDir ?? claudeWorkDir,
+          detached: true,
+          stdio: ["ignore", "pipe", "pipe"],
+          env: { ...spawnEnv, FORCE_COLOR: "0" },
+        });
+        providerOutputDrain = setupCodexLoopOutput(child, claudeWorkDir);
+        child.unref();
+      } else if (body.command === "DECOMPOSE") {
         // DECOMPOSE: write prompt to file and pass via stdin to avoid E2BIG
         const prdContent =
           readTextFile(path.join(claudeWorkDir, "prd.md")) ?? "";
@@ -2731,12 +2951,14 @@ async function handleLoopRequest(
           claudeWorkDir,
           promptFile,
         );
+        const logFd = openSync(path.join(claudeWorkDir, "symphony-loop.log"), "a");
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: claudeWorkDir,
           detached: true,
           stdio: ["ignore", logFd, logFd],
           env: spawnEnv,
         });
+        closeSync(logFd);
         child.unref();
       } else if (body.command === "EVALUATE_PRD") {
         // REPO_PATH only when a target repo is linked (expandedRepoPath).
@@ -2752,12 +2974,14 @@ async function handleLoopRequest(
           claudeWorkDir,
           promptFile,
         );
+        const logFd = openSync(path.join(claudeWorkDir, "symphony-loop.log"), "a");
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: claudeWorkDir,
           detached: true,
           stdio: ["ignore", logFd, logFd],
           env: spawnEnv,
         });
+        closeSync(logFd);
         child.unref();
       } else if (body.command === "EVALUATE_PLAN" || body.command === "EVALUATE_CODE") {
         // EVALUATE_PLAN and EVALUATE_CODE share identical spawn logic,
@@ -2774,12 +2998,14 @@ async function handleLoopRequest(
         await fs.writeFile(promptFile, prompt);
 
         const pipeline = buildClaudePipeline(stdinClaudeArgs, claudeWorkDir, promptFile);
+        const logFd = openSync(path.join(claudeWorkDir, "symphony-loop.log"), "a");
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: claudeWorkDir,
           detached: true,
           stdio: ["ignore", logFd, logFd],
           env: spawnEnv,
         });
+        closeSync(logFd);
         child.unref();
       } else if (body.command === "REQUEST_CHANGES") {
         // REQUEST_CHANGES: use claude directly with /code:amend-plan.
@@ -2809,12 +3035,14 @@ async function handleLoopRequest(
         );
 
         const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir);
+        const logFd = openSync(path.join(claudeWorkDir, "symphony-loop.log"), "a");
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: worktreeDir!,
           detached: true,
           stdio: ["ignore", logFd, logFd],
           env: spawnEnv,
         });
+        closeSync(logFd);
         child.unref();
       } else if (body.command === "GENERATE_PRD") {
         const promptFile = path.join(claudeWorkDir, "generate-prd-prompt.txt");
@@ -2825,12 +3053,14 @@ async function handleLoopRequest(
           claudeWorkDir,
           promptFile,
         );
+        const logFd = openSync(path.join(claudeWorkDir, "symphony-loop.log"), "a");
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: worktreeDir!,
           detached: true,
           stdio: ["ignore", logFd, logFd],
           env: spawnEnv,
         });
+        closeSync(logFd);
         child.unref();
       } else {
         // PLAN, EXECUTE: spawn run-loop.sh
@@ -2848,16 +3078,17 @@ async function handleLoopRequest(
           scriptArgs.push("--prd", prdPath);
         }
 
+        const logFd = openSync(path.join(claudeWorkDir, "symphony-loop.log"), "a");
         child = spawn(scriptPath!, scriptArgs, {
           cwd: worktreeDir!,
           detached: true,
           stdio: ["ignore", logFd, logFd],
           env: spawnEnv,
         });
+        closeSync(logFd);
         child.unref();
       }
     } catch (spawnErr) {
-      closeSync(logFd);
       const msg =
         spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
       await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
@@ -2870,7 +3101,6 @@ async function handleLoopRequest(
       json(context, 500, { error: `Failed to spawn process: ${msg}` });
       return;
     }
-    closeSync(logFd);
 
     const tailerJsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
     const jsonlPreSpawnOffset = existsSync(tailerJsonlPath)
@@ -2888,6 +3118,7 @@ async function handleLoopRequest(
       completionHandled = true;
       loopLog(body.loopId, `onceComplete fired, code=${code}`);
       try {
+        await providerOutputDrain;
         await stopTailer.flush();
       } catch (err) {
         loopError(body.loopId, "Tailer flush error:", err);

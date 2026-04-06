@@ -46,6 +46,7 @@ export interface GatewayRouterOptions {
   machineName: string;
   version: string;
   capabilities: ComputeTargetCapabilities;
+  getCapabilities?: () => ComputeTargetCapabilities;
   getActivePort: () => number;
   getAllowedDirectories: () => string[];
   getSymphonyDir?: () => string;
@@ -298,7 +299,7 @@ export class GatewayRouter {
       const health: HealthResponse = {
         status: "ok",
         machineName: this.options.machineName,
-        capabilities: this.options.capabilities,
+        capabilities: this.options.getCapabilities?.() ?? this.options.capabilities,
         version: this.options.version,
         port: this.options.getActivePort()
       };
@@ -720,6 +721,5 @@ function isLoopbackOrigin(originValue: string): boolean {
     return false;
   }
 }
-
 
 

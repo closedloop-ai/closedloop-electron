@@ -18,6 +18,7 @@ import {
   DEFAULT_POSTHOG_HOST,
   DESKTOP_GATEWAY_VERSION,
   EMPTY_CAPABILITIES,
+  type ComputeTargetCapabilities,
   type DesktopSettings,
   type RiskTier,
 } from "../shared/contracts.js";
@@ -67,6 +68,8 @@ const { autoUpdater } = pkg;
 import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
 import { BootRecoveryService } from "./boot-recovery.js";
 import { LoopTokenStore } from "./loop-token-store.js";
+import { ProcessManager } from "../server/process-manager.js";
+import { deriveComputeTargetCapabilities, getHealthChecks } from "../server/operations/health-check.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -91,6 +94,7 @@ export class DesktopApplication {
   private shuttingDown = false;
   private dangerousAutoApprove = false;
   private cloudStatus: CloudSocketStatus = { state: "idle" };
+  private capabilities: ComputeTargetCapabilities = EMPTY_CAPABILITIES;
   private cloudCommandsPaused: boolean;
   private cloudConnectionEnabled: boolean;
   private updateCheckTimer: NodeJS.Timeout | null = null;
@@ -144,6 +148,7 @@ export class DesktopApplication {
       os.hostname(),
       DESKTOP_GATEWAY_VERSION,
       EMPTY_CAPABILITIES,
+      () => this.capabilities,
       (event) => {
         this.activityLog.add(event);
       },
@@ -186,6 +191,7 @@ export class DesktopApplication {
       getRelayOrigin: () => this.settingsStore.getRelayOrigin(),
       getApiKey: () => this.apiKeyStore.getApiKey(),
       getAllowedDirectories: () => this.getAllowedDirectoriesFromSandbox(),
+      getCapabilities: () => this.refreshCapabilities(),
       getMaxInFlightCommands: () => MAX_IN_FLIGHT_COMMANDS,
       machineName: os.hostname(),
       pluginVersion: DESKTOP_GATEWAY_VERSION,
@@ -306,6 +312,7 @@ export class DesktopApplication {
     }
 
     try {
+      await this.refreshCapabilities();
       await this.server.start();
       const configuredOrigins = {
         relayOrigin: this.settingsStore.getRelayOrigin(),
@@ -697,6 +704,23 @@ export class DesktopApplication {
       explicitDetails ??
         `Serving on localhost:${this.server.getActivePort()} | cloud: connecting`,
     );
+  }
+
+  private async refreshCapabilities(): Promise<ComputeTargetCapabilities> {
+    try {
+      const processManager = new ProcessManager({
+        getAllowedDirectories: () => this.getAllowedDirectoriesFromSandbox(),
+      });
+      const checks = await getHealthChecks(processManager, () => path.join(this.getSymphonyDir(), "config"));
+      this.capabilities = deriveComputeTargetCapabilities(checks);
+    } catch (error) {
+      gatewayLog.warn(
+        "capabilities",
+        `Failed to refresh compute target capabilities: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      this.capabilities = EMPTY_CAPABILITIES;
+    }
+    return this.capabilities;
   }
 
   private async evaluateApproval(

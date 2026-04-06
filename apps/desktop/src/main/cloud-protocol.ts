@@ -1,3 +1,5 @@
+import type { ComputeTargetCapabilities } from "../shared/contracts.js";
+
 export type CloudSocketStatus =
   | { state: "idle" }
   | { state: "online"; targetId: string }
@@ -18,6 +20,7 @@ export interface DesktopHelloEvent extends ProtocolEnvelope {
   machineName: string;
   platform: NodeJS.Platform;
   pluginVersion: string;
+  capabilities?: ComputeTargetCapabilities;
   supportedOperations: string[];
   maxInFlightCommands: number;
   allowedDirectoriesHash: string;

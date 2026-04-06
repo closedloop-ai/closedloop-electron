@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { gatewayLog } from "./gateway-logger.js";
 import { io, type Socket } from "socket.io-client";
+import type { ComputeTargetCapabilities } from "../shared/contracts.js";
 import {
   PROTOCOL_VERSION,
   type CloudSocketStatus,
@@ -22,6 +23,7 @@ export interface CloudSocketOptions {
   getRelayOrigin: () => string;
   getApiKey: () => string | null;
   getAllowedDirectories: () => string[];
+  getCapabilities?: () => Promise<ComputeTargetCapabilities> | ComputeTargetCapabilities;
   getMaxInFlightCommands: () => number;
   machineName: string;
   pluginVersion: string;
@@ -144,7 +146,7 @@ export class CloudSocketService {
       }
       gatewayLog.info("cloud-socket", "Connected to relay, sending hello handshake");
       this.awaitingHelloAck = true;
-      this.emitHello();
+      void this.emitHello();
       this.scheduleHelloAckTimeout();
     });
 
@@ -246,13 +248,15 @@ export class CloudSocketService {
     socket.connect();
   }
 
-  private emitHello(): void {
+  private async emitHello(): Promise<void> {
+    const capabilities = await this.options.getCapabilities?.();
     const hello: DesktopHelloEvent = {
       ...createEnvelope(),
       computeTargetId: this.targetId ?? undefined,
       machineName: this.options.machineName,
       platform: process.platform,
       pluginVersion: this.options.pluginVersion,
+      capabilities,
       supportedOperations: this.options.supportedOperations,
       maxInFlightCommands: Math.max(1, this.options.getMaxInFlightCommands()),
       allowedDirectoriesHash: hashAllowedDirectories(this.options.getAllowedDirectories())
