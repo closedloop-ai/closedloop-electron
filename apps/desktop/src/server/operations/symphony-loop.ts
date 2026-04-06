@@ -3012,15 +3012,19 @@ async function handleLoopRequest(
 
         // Resume from parent session if available (matches harness --resume)
         const previousJob = jobStore?.getByLoopId(body.loopId);
-        if (
-          body.parentSessionId &&
-          !(
+        if (body.parentSessionId) {
+          const shouldSuppressResume =
             previousJob?.status === "FAILED" &&
             (previousJob?.lastErrorCode === LoopErrorCode.AUTH_CHALLENGE ||
-              previousJob?.lastErrorCode === LoopErrorCode.CONTEXT_LIMIT_EXCEEDED)
-          )
-        ) {
-          claudeArgs.push("--resume", body.parentSessionId);
+              previousJob?.lastErrorCode === LoopErrorCode.CONTEXT_LIMIT_EXCEEDED);
+          if (shouldSuppressResume) {
+            gatewayLog.warn(
+              "loop-harness",
+              `REQUEST_CHANGES will run without --resume for loopId=${body.loopId} because previous job failed with ${previousJob.lastErrorCode}`,
+            );
+          } else {
+            claudeArgs.push("--resume", body.parentSessionId);
+          }
         }
 
         // Build /code:amend-plan invocation matching harness

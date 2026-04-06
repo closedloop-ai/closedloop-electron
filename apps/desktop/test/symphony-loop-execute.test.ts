@@ -23,6 +23,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import { gatewayLog } from "../src/main/gateway-logger.js";
 import { JobStore, LoopErrorCode } from "../src/main/job-store.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 import { resetResolvedClaudePath } from "../src/server/operations/symphony-loop.js";
@@ -65,6 +66,7 @@ const savedEnv = saveEnv();
 afterEach(async () => {
   restoreEnv(savedEnv);
   resetShellPathCache();
+  gatewayLog.clear();
 
   for (const server of serversToClose.splice(0)) {
     await server.stop();
@@ -1747,6 +1749,28 @@ for (const scenario of requestChangesResumeSuppressionScenarios) {
         argLines.includes(scenario.parentSessionId) === scenario.expectResume,
         `Expected parentSessionId presence=${String(scenario.expectResume)} for ${scenario.name}, but got args: ${argLines.join(" ")}`
       );
+
+      const suppressResumeLog = gatewayLog
+        .getEntries()
+        .find((entry) =>
+          entry.tag === "loop-harness" &&
+          entry.message.includes(
+            `REQUEST_CHANGES will run without --resume for loopId=${scenario.loopId}`,
+          )
+        );
+
+      assert.equal(
+        Boolean(suppressResumeLog),
+        !scenario.expectResume,
+        `Expected suppress-resume gateway log presence=${String(!scenario.expectResume)} for ${scenario.name}`,
+      );
+
+      if (!scenario.expectResume) {
+        assert.ok(
+          suppressResumeLog?.message.includes(String(scenario.previousErrorCode)),
+          `Expected suppress-resume gateway log to mention ${String(scenario.previousErrorCode)} for ${scenario.name}`,
+        );
+      }
     }
   );
 }
