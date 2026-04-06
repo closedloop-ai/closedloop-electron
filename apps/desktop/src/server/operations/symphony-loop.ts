@@ -548,6 +548,7 @@ async function postLoopEvent(
   loopId: string,
   token: string,
   eventBody: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<{ success: boolean; error?: string }> {
   const url = `${apiBaseUrl}/loops/${loopId}/events`;
   // Auto-inject timestamp on every event (matches ECS harness reportEvent())
@@ -565,6 +566,7 @@ async function postLoopEvent(
         "x-loop-event-nonce": crypto.randomUUID(),
       },
       body: JSON.stringify(payload),
+      signal,
     });
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
@@ -606,14 +608,14 @@ async function postLoopEventBounded(
   eventBody: Record<string, unknown>,
   timeoutMs = 1000,
 ): Promise<{ success: boolean; error?: string }> {
-  let timer: ReturnType<typeof setTimeout>;
-  const timeout = new Promise<{ success: boolean; error?: string }>((resolve) => {
-    timer = setTimeout(() => resolve({ success: false, error: "timeout" }), timeoutMs);
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await Promise.race([postLoopEvent(apiBaseUrl, loopId, token, eventBody), timeout]);
+    return await postLoopEvent(apiBaseUrl, loopId, token, eventBody, controller.signal);
+  } catch {
+    return { success: false, error: "timeout" };
   } finally {
-    clearTimeout(timer!);
+    clearTimeout(timer);
   }
 }
 

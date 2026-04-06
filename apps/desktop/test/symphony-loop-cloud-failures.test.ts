@@ -724,6 +724,7 @@ test("EXECUTE: fullName-resolved path outside allowedDirs emits REPO_NOT_ALLOWED
 
 // ---------------------------------------------------------------------------
 // Test 8: postLoopEventBounded times out after 1000ms when API server hangs
+//         and aborts the underlying fetch (no leaked connections)
 // ---------------------------------------------------------------------------
 
 test("EXECUTE: postLoopEventBounded times out after 1000ms when API server hangs", async () => {
@@ -734,13 +735,17 @@ test("EXECUTE: postLoopEventBounded times out after 1000ms when API server hangs
   // reads request bodies but never calls res.end() -- hangs indefinitely.
   let hangingRequestCount = 0;
   const hangingSockets = new Set<import("net").Socket>();
+  const closedSocketCount = { value: 0 };
   const hangingServer = http.createServer((req) => {
     hangingRequestCount++;
     req.resume(); // drain incoming data -- never responds, hangs indefinitely
   });
   hangingServer.on("connection", (socket) => {
     hangingSockets.add(socket);
-    socket.once("close", () => hangingSockets.delete(socket));
+    socket.once("close", () => {
+      hangingSockets.delete(socket);
+      closedSocketCount.value++;
+    });
   });
   await new Promise<void>((resolve, reject) => {
     hangingServer.listen(0, "127.0.0.1", resolve);
@@ -804,7 +809,20 @@ test("EXECUTE: postLoopEventBounded times out after 1000ms when API server hangs
     `Expected hanging server to receive at least one request, got: ${hangingRequestCount}`
   );
 
-  // Socket cleanup: destroy all sockets BEFORE closing the server so
+  // Verify the AbortController actually cancelled the fetch: the client-side
+  // abort tears down the TCP socket, which the hanging server observes as a
+  // socket close event. Wait briefly for the close event to propagate.
+  const socketCloseDeadline = Date.now() + 2000;
+  while (closedSocketCount.value === 0 && Date.now() < socketCloseDeadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  }
+  assert.ok(
+    closedSocketCount.value >= 1,
+    `Expected aborted fetch to close the socket, but no sockets were closed (still ${hangingSockets.size} open). ` +
+    "This means postLoopEventBounded is not aborting the underlying fetch."
+  );
+
+  // Socket cleanup: destroy any remaining sockets BEFORE closing the server so
   // hangingServer.close() can resolve promptly.
   for (const socket of hangingSockets) {
     socket.destroy();
