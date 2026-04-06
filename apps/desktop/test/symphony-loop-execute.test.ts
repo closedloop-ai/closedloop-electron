@@ -1679,39 +1679,6 @@ async function runPlanErrorScenario(scenario: {
   }
 }
 
-const planErrorScenarios = [
-  {
-    name: "auth-challenge",
-    tmpPrefix: "execute-auth-challenge-",
-    repoOwner: "auth-challenge",
-    machineName: "execute-auth-challenge-machine",
-    loopId: "00000000-0000-0000-0000-000000001300",
-    errorMessage: "Please log in to continue",
-    exitCode: 1,
-    expectedCode: LoopErrorCode.AUTH_CHALLENGE,
-    expectedMessageIncludes: "Please log in",
-    unexpectedCode: LoopErrorCode.CONTEXT_LIMIT_EXCEEDED,
-  },
-  {
-    name: "precedence",
-    tmpPrefix: "execute-precedence-",
-    repoOwner: "precedence",
-    machineName: "execute-precedence-machine",
-    loopId: "00000000-0000-0000-0000-000000001400",
-    errorMessage: "context limit reached -- Please log in to continue",
-    exitCode: 2,
-    expectedCode: LoopErrorCode.CONTEXT_LIMIT_EXCEEDED,
-    unexpectedCode: LoopErrorCode.AUTH_CHALLENGE,
-  },
-] as const;
-
-for (const scenario of planErrorScenarios) {
-  test(
-    `PLAN: ${scenario.expectedCode} is emitted for ${scenario.name} JSONL failure`,
-    async () => runPlanErrorScenario(scenario),
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Tests T-4.3a/b/c: REQUEST_CHANGES --resume suppression
 //

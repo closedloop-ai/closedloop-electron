@@ -1173,7 +1173,7 @@ export function isSessionLimitError(logTail: string): boolean {
 
 /** Pattern that matches known auth/rate-limit/billing error messages from Claude CLI. */
 export const AUTH_CHALLENGE_PATTERN =
-  /authentication_error|invalid bearer token|please log in|rate_limit_error|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|token.*expired/i;
+  /authentication_error|invalid bearer token|rate_limit_error|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|token.*expired/i;
 
 /**
  * Check whether a log tail string contains Claude CLI auth/rate-limit/billing

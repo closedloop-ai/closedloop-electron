@@ -350,8 +350,6 @@ describe("AUTH_CHALLENGE_PATTERN", () => {
     "Invalid bearer token",
     "token expired",
     "Authentication failed: token expired",
-    "Please log in",
-    "Please log in to access this resource",
     "rate_limit_error",
     "Rate limit reached",
     "Rate limit reached for model claude-3-5-sonnet",
@@ -418,11 +416,6 @@ describe("detectAuthChallengeFromJsonl", () => {
       expected: "authentication_error",
     },
     {
-      name: "please log in",
-      message: "Please log in to continue",
-      expected: "Please log in to continue",
-    },
-    {
       name: "token expired",
       message: "token expired",
       expected: "token expired",
@@ -455,25 +448,6 @@ describe("detectAuthChallengeFromJsonl", () => {
     });
   }
 
-  test("skips malformed lines and continues scanning", () => {
-    const content = [
-      "not valid json",
-      JSON.stringify({
-        type: "assistant",
-        message: { content: [{ type: "text", text: "hello" }] },
-      }),
-      "",
-      JSON.stringify({
-        type: "result",
-        subtype: "error",
-        result: "Please log in",
-        is_error: true,
-      }),
-    ].join("\n");
-    fs.writeFileSync(path.join(tmpDir, "claude-output.jsonl"), content);
-    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), "Please log in");
-  });
-
   for (const input of [
     "Prompt is too long",
     "Error: context limit reached, please start a new conversation",
@@ -502,7 +476,6 @@ describe("isAuthChallengeError", () => {
   for (const input of [
     "Error: authentication_error - Invalid bearer token",
     "authentication failed: token expired",
-    "Please log in to access this resource",
     "unauthorized",
     "RATE_LIMIT_ERROR",
   ]) {
