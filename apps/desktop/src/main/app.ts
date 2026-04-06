@@ -592,26 +592,10 @@ export class DesktopApplication {
         path.join(os.homedir(), ".closedloop-ai", "sessions.json"),
         path.join(newDir, "sessions.json"),
       );
-      copyIfMissing(
-        path.join(os.homedir(), ".symphony", "sessions.json"),
-        path.join(newDir, "sessions.json"),
-      );
-
-      // repos.json
-      copyIfMissing(
-        path.join(os.homedir(), ".claude", "closedloop", "repos.json"),
-        path.join(newDir, "config", "repos.json"),
-      );
 
       // chats from ~/.closedloop-ai/chats/
       copyDirIfMissing(
         path.join(os.homedir(), ".closedloop-ai", "chats"),
-        path.join(newDir, "chats"),
-      );
-
-      // chats from ~/.claude/.symphony/chats/
-      copyDirIfMissing(
-        path.join(os.homedir(), ".claude", ".symphony", "chats"),
         path.join(newDir, "chats"),
       );
     } catch {

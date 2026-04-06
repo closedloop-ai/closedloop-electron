@@ -1,6 +1,5 @@
-import os from "node:os";
 import path from "node:path";
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { normalizeScopePath } from "../shared/sandbox-policy.js";
 import { computeSymphonyDir } from "../server/operations/symphony-utils.js";
 import { loadReposConfig, saveReposConfig } from "../server/operations/repos-config-utils.js";
@@ -8,7 +7,6 @@ import { loadReposConfig, saveReposConfig } from "../server/operations/repos-con
 /**
  * Seeds repos.json within the symphony config directory for the given sandbox.
  *
- * - Preserves legacy repos.json from ~/.claude/closedloop/ if dest doesn't exist
  * - Sets worktreeParentDir + worktreeParentDirConfirmed
  *
  * Repos are added explicitly by the user via POST /api/engineer/repos — this
@@ -26,16 +24,6 @@ export async function seedReposConfig(rawSandboxBaseDirectory: string): Promise<
     const symphonyDir = computeSymphonyDir(sandboxBaseDirectory);
     const configDir = path.join(symphonyDir, "config");
     mkdirSync(configDir, { recursive: true });
-
-    // Preserve legacy repos.json if it exists and dest doesn't yet.
-    // migrateLegacyData() only runs at boot when sandboxBaseDirectory is
-    // already set. On first-time onboarding it exits early, so this copy
-    // must happen before we seed to avoid blocking future migration.
-    const legacyRepos = path.join(os.homedir(), ".claude", "closedloop", "repos.json");
-    const destRepos = path.join(configDir, "repos.json");
-    if (existsSync(legacyRepos) && !existsSync(destRepos)) {
-      copyFileSync(legacyRepos, destRepos);
-    }
 
     // Ensure worktreeParentDir + worktreeParentDirConfirmed are both set.
     // The health check (health-check.ts:176) requires BOTH to be truthy.

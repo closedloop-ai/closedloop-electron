@@ -979,7 +979,7 @@ async function writeArtifactsForExecuteOrAmend(
 /**
  * Write context pack files for GENERATE_PRD command.
  * Mirrors writeContextPackFiles in harness-agent.mjs (lines 744-816).
- * Files go under worktreeDir/.claude/context/ (NOT claudeWorkDir).
+ * Files go under worktreeDir/.closedloop-ai/context/ (NOT claudeWorkDir).
  */
 async function writeArtifactsForGeneratePrd(
   worktreeDir: string,

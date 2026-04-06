@@ -443,7 +443,7 @@ Notable persisted settings include:
 - cloud command pause toggle
 - cloud connect/disconnect toggle
 
-Other persisted operational files are managed by route handlers under `~/.symphony`, `~/.claude`, and worktree-local `.claude/work` paths.
+Other persisted operational files are managed by route handlers under `~/.symphony`, `~/.closedloop-ai`, and worktree-local `.closedloop-ai/work` paths.
 
 ## Tray and UX Behavior
 
