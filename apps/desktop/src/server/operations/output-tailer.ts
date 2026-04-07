@@ -1,5 +1,6 @@
 import { openSync, readSync, closeSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { LoopEventType } from "@closedloop-ai/loops-api/events";
 import { gatewayLog } from "../../main/gateway-logger.js";
 
 export function isRecord(v: unknown): v is Record<string, unknown> {
@@ -372,7 +373,7 @@ export function startOutputTailer(
         candidateTotals.cacheReadInputTokens > 0;
 
       const status = await postLoopEvent(apiBaseUrl, loopId, token, {
-        type: "output",
+        type: LoopEventType.Output,
         data: {
           chunk: lastDisplay,
           tokenUsage: hasAnyTokens ? candidateTotals : undefined,

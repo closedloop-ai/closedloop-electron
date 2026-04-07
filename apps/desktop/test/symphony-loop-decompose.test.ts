@@ -272,7 +272,9 @@ test("DECOMPOSE: uploads empty artifacts when features.json is not written", asy
         loopId,
         command: "DECOMPOSE",
         closedLoopAuthToken: "tok",
-        artifacts: [],
+        artifacts: [
+          { id: "prd-1", type: "PRD", title: "PRD", content: "PRD content" },
+        ],
         prompt: "Decompose into features",
       }),
     },

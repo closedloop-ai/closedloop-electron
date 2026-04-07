@@ -248,7 +248,7 @@ function buildLoopBody(overrides?: Partial<Record<string, unknown>>): Record<str
     command: "EVALUATE_PRD",
     closedLoopAuthToken: "cl-token",
     apiBaseUrl: "https://api.example.com",
-    artifacts: [],
+    artifacts: [{ type: "PRD", content: "PRD content for output test" }],
     ...overrides,
   };
 }
