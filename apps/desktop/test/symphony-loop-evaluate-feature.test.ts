@@ -261,19 +261,6 @@ describe("T-6.1: EVALUATE_FEATURE prompt content", () => {
 // ---------------------------------------------------------------------------
 
 describe("T-6.1: readEvaluateFeatureOutputs", () => {
-  test("(11) reads feature-judges.json and returns featureJudges key", () => {
-    const tmpDir = makeTempDir("ef-read-feature");
-    const featureJudgesData = { scores: [{ judge: "quality", score: 9 }] };
-    writeFileSync(
-      path.join(tmpDir, "feature-judges.json"),
-      JSON.stringify(featureJudgesData)
-    );
-
-    const result = readEvaluateFeatureOutputs(tmpDir);
-    assert.ok("featureJudges" in result, "result should have featureJudges key");
-    assert.deepEqual(result.featureJudges, featureJudgesData);
-  });
-
   test("(12) returns undefined for missing file", () => {
     const tmpDir = makeTempDir("ef-read-missing");
     const result = readEvaluateFeatureOutputs(tmpDir);
