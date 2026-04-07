@@ -1064,6 +1064,36 @@ function readGeneratePrdOutputs(worktreeDir: string): Record<string, unknown> {
 }
 
 // ---------------------------------------------------------------------------
+// Shared amend helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Build Claude CLI args for amend-style commands (REQUEST_CHANGES, REQUEST_PRD_CHANGES).
+ * Extracts the shared scaffolding: base args, session resume, prompt read + sanitize.
+ */
+function buildAmendClaudeArgs(
+  baseClaudeArgs: string[],
+  parentSessionId: string | undefined,
+  claudeWorkDir: string,
+  defaultPrompt: string,
+): { claudeArgs: string[]; sanitizedPrompt: string } {
+  const claudeArgs = [...baseClaudeArgs];
+  if (parentSessionId) {
+    claudeArgs.push("--resume", parentSessionId);
+  }
+  const promptFile = path.join(claudeWorkDir, "prompt.md");
+  let amendPrompt = defaultPrompt;
+  if (existsSync(promptFile)) {
+    amendPrompt = readFileSync(promptFile, "utf-8");
+  }
+  const sanitizedPrompt = amendPrompt
+    .replaceAll(/[\n\r]+/g, " ")
+    .replaceAll(/\s{2,}/g, " ")
+    .replaceAll(/"/g, '\\"');
+  return { claudeArgs, sanitizedPrompt };
+}
+
+// ---------------------------------------------------------------------------
 // Failure diagnostics helpers
 // ---------------------------------------------------------------------------
 
@@ -1983,7 +2013,7 @@ async function handleProcessCompletion(
     if (command === "PLAN" || command === "REQUEST_CHANGES") {
       artifacts = readPlanOutputs(claudeWorkDir);
     } else if (command === "REQUEST_PRD_CHANGES") {
-      artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
+      artifacts = readGeneratePrdOutputs(claudeWorkDir);
     } else if (command === "EXECUTE") {
       artifacts = readExecuteOutputs(claudeWorkDir);
 
@@ -3072,29 +3102,14 @@ async function handleLoopRequest(
         child.unref();
       } else if (body.command === "REQUEST_CHANGES") {
         // REQUEST_CHANGES: use claude directly with /code:amend-plan.
-        // Must use -p (headless mode) so --allowedTools grants full permission
-        // without prompting. Pipes through stream_formatter.py for readable logs.
-        const claudeArgs = [...baseClaudeArgs];
-
-        // Resume from parent session if available (matches harness --resume)
-        if (body.parentSessionId) {
-          claudeArgs.push("--resume", body.parentSessionId);
-        }
-
-        // Build /code:amend-plan invocation matching harness
-        const promptFile = path.join(claudeWorkDir, "prompt.md");
-        let amendPrompt =
-          "Please amend the plan based on the requested changes.";
-        if (existsSync(promptFile)) {
-          amendPrompt = readFileSync(promptFile, "utf-8");
-        }
-        // Sanitize prompt matching harness's prepare-message step
-        const sanitized = amendPrompt
-          .replaceAll(/[\n\r]+/g, " ")
-          .replaceAll(/\s{2,}/g, " ")
-          .replaceAll(/"/g, '\\"');
+        const { claudeArgs, sanitizedPrompt } = buildAmendClaudeArgs(
+          baseClaudeArgs,
+          body.parentSessionId,
+          claudeWorkDir,
+          "Please amend the plan based on the requested changes.",
+        );
         claudeArgs.push(
-          `/code:amend-plan --workdir ${claudeWorkDir} --message "${sanitized}"`,
+          `/code:amend-plan --workdir ${claudeWorkDir} --message "${sanitizedPrompt}"`,
         );
 
         const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir);
@@ -3106,28 +3121,17 @@ async function handleLoopRequest(
         });
         child.unref();
       } else if (body.command === "REQUEST_PRD_CHANGES") {
-        // REQUEST_PRD_CHANGES: same pattern as REQUEST_CHANGES but amends the PRD.
-        // Reads prd.md + prompt.md, writes updated prd.md to worktreeDir root.
-        const claudeArgs = [...baseClaudeArgs];
-
-        if (body.parentSessionId) {
-          claudeArgs.push("--resume", body.parentSessionId);
-        }
-
-        const promptFile = path.join(claudeWorkDir, "prompt.md");
-        let amendPrompt =
-          "Please amend the PRD based on the requested changes.";
-        if (existsSync(promptFile)) {
-          amendPrompt = readFileSync(promptFile, "utf-8");
-        }
-        const sanitized = amendPrompt
-          .replaceAll(/[\n\r]+/g, " ")
-          .replaceAll(/\s{2,}/g, " ")
-          .replaceAll(/"/g, '\\"');
+        // REQUEST_PRD_CHANGES: amend the PRD. Output to claudeWorkDir (not worktreeDir)
+        // to avoid leaking prd.md into git operations for EXECUTE/REQUEST_CHANGES.
+        const { claudeArgs, sanitizedPrompt } = buildAmendClaudeArgs(
+          baseClaudeArgs,
+          body.parentSessionId,
+          claudeWorkDir,
+          "Please amend the PRD based on the requested changes.",
+        );
         const prdPath = path.join(claudeWorkDir, "prd.md");
-        const outputPath = path.join(worktreeDir!, "prd.md");
         claudeArgs.push(
-          `Read the PRD at ${prdPath} and the change request. Update the PRD and write the result to ${outputPath}. Change request: "${sanitized}"`,
+          `Read the PRD at ${prdPath} and the change request. Update the PRD in place at ${prdPath}. Change request: "${sanitizedPrompt}"`,
         );
 
         const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir);

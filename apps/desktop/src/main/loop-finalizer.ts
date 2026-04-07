@@ -482,6 +482,10 @@ function readArtifacts(
     const prdContent = readTextFile(path.join(baseDir, "prd.md"));
     return { prd: prdContent ? { content: prdContent } : undefined };
   }
+  if (command === "REQUEST_PRD_CHANGES") {
+    const prdContent = readTextFile(path.join(claudeWorkDir, "prd.md"));
+    return { prd: prdContent ? { content: prdContent } : undefined };
+  }
   return {};
 }
 
