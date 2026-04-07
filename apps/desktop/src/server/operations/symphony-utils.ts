@@ -139,23 +139,24 @@ function fetchOrigin(repoPath: string): void {
 }
 
 type SavedWorktreeState = {
-  savedClaudeDir: string | null;
+  savedClaudeAgentsDir: string | null;
   savedClosedloopDir: string | null;
 };
 
 /**
- * Save .claude/ and .closedloop-ai/ from a non-git directory to temp locations.
- * Returns the saved paths (null if nothing was saved for that dir).
+ * Save accepted worktree state to temp locations.
+ * - Preserve .claude/agents/ (project agents still live there)
+ * - Preserve .closedloop-ai/
  */
-function saveWorktreeState(worktreeDir: string): SavedWorktreeState {
-  const claudeDir = path.join(worktreeDir, ".claude");
+export function saveWorktreeState(worktreeDir: string): SavedWorktreeState {
+  const claudeAgentsDir = path.join(worktreeDir, ".claude", "agents");
   const closedloopDir = path.join(worktreeDir, ".closedloop-ai");
   const ts = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
-  let savedClaudeDir: string | null = null;
-  if (existsSync(claudeDir)) {
-    savedClaudeDir = path.join(os.tmpdir(), `worktree-claude-${ts}`);
-    renameSync(claudeDir, savedClaudeDir);
+  let savedClaudeAgentsDir: string | null = null;
+  if (existsSync(claudeAgentsDir)) {
+    savedClaudeAgentsDir = path.join(os.tmpdir(), `worktree-claude-agents-${ts}`);
+    renameSync(claudeAgentsDir, savedClaudeAgentsDir);
   }
 
   let savedClosedloopDir: string | null = null;
@@ -164,48 +165,46 @@ function saveWorktreeState(worktreeDir: string): SavedWorktreeState {
     renameSync(closedloopDir, savedClosedloopDir);
   }
 
-  return { savedClaudeDir, savedClosedloopDir };
+  return { savedClaudeAgentsDir, savedClosedloopDir };
 }
 
 /**
- * Restore previously saved state directories into worktreeDir.
- * - .claude/: if absent in new worktree, rename straight in. If exists (git recreated),
- *   destination-precedence merge using cpSync.
- * - .closedloop-ai/: always merge using cpSync.
+ * Restore previously saved .claude/agents/ and .closedloop-ai/ state into worktreeDir.
  */
-function restoreWorktreeState(
+export function restoreWorktreeState(
   saved: SavedWorktreeState,
   worktreeDir: string
 ): void {
-  const { savedClaudeDir, savedClosedloopDir } = saved;
+  const { savedClaudeAgentsDir, savedClosedloopDir } = saved;
 
-  if (savedClaudeDir) {
-    const destClaude = path.join(worktreeDir, ".claude");
-    if (!existsSync(destClaude)) {
-      renameSync(savedClaudeDir, destClaude);
-    } else {
-      // Destination-precedence merge: only restore children absent in destination
-      for (const child of readdirSync(savedClaudeDir)) {
-        const savedChild = path.join(savedClaudeDir, child);
-        const destChild = path.join(destClaude, child);
+  if (savedClaudeAgentsDir) {
+    const destClaudeAgents = path.join(worktreeDir, ".claude", "agents");
+    try {
+      mkdirSync(destClaudeAgents, { recursive: true });
+      for (const child of readdirSync(savedClaudeAgentsDir)) {
+        const destChild = path.join(destClaudeAgents, child);
         if (!existsSync(destChild)) {
-          const st = statSync(savedChild);
-          if (st.isDirectory()) {
-            cpSync(savedChild, destChild, { recursive: true });
-          } else {
-            copyFileSync(savedChild, destChild);
-          }
+          cpSync(path.join(savedClaudeAgentsDir, child), destChild, {
+            recursive: true,
+            force: false,
+          });
         }
       }
-      rmSync(savedClaudeDir, { recursive: true, force: true });
+      rmSync(savedClaudeAgentsDir, { recursive: true, force: true });
+    } catch {
+      // Best effort -- backup preserved if restore failed
     }
   }
 
   if (savedClosedloopDir) {
     const destClosedloop = path.join(worktreeDir, ".closedloop-ai");
-    mkdirSync(destClosedloop, { recursive: true });
-    cpSync(savedClosedloopDir, destClosedloop, { recursive: true });
-    rmSync(savedClosedloopDir, { recursive: true, force: true });
+    try {
+      mkdirSync(destClosedloop, { recursive: true });
+      cpSync(savedClosedloopDir, destClosedloop, { recursive: true });
+      rmSync(savedClosedloopDir, { recursive: true, force: true });
+    } catch {
+      // Best effort -- backup preserved if restore failed
+    }
   }
 }
 
@@ -216,7 +215,7 @@ function restoreWorktreeState(
 function addWorktree(repoPath: string, worktreeDir: string, ref: string): void {
   // If the directory exists but isn't a git worktree (e.g. state files were
   // written there by a "use base repo" review), remove it so git worktree add
-  // can create it cleanly. Preserve .claude/ and .closedloop-ai/ (review state files).
+  // can create it cleanly. Preserve .claude/agents/ and .closedloop-ai/.
   let savedState: ReturnType<typeof saveWorktreeState> | null = null;
   if (existsSync(worktreeDir) && !existsSync(path.join(worktreeDir, ".git"))) {
     savedState = saveWorktreeState(worktreeDir);

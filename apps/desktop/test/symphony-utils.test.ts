@@ -18,7 +18,9 @@ import {
   readLaunchMetadata,
   readProcessPidSync,
   releaseLaunchLock,
+  restoreWorktreeState,
   sanitizeTicketId,
+  saveWorktreeState,
   writeLaunchMetadata,
 } from "../src/server/operations/symphony-utils.js";
 
@@ -39,6 +41,64 @@ function makeTempDir(): string {
   tempPaths.push(dir);
   return dir;
 }
+
+// --- worktree state save/restore ---
+
+describe("worktree state save/restore", () => {
+  test("preserves .closedloop-ai state across worktree recreation", () => {
+    const dir = makeTempDir();
+    const workDir = path.join(dir, ".closedloop-ai", "work");
+    mkdirSync(workDir, { recursive: true });
+    writeFileSync(path.join(workDir, "state.json"), '{"status":"RUNNING"}');
+
+    const saved = saveWorktreeState(dir);
+    restoreWorktreeState(saved, dir);
+
+    assert.equal(
+      readFileSync(path.join(dir, ".closedloop-ai", "work", "state.json"), "utf-8"),
+      '{"status":"RUNNING"}'
+    );
+  });
+
+  test("ignores legacy .claude/work state", () => {
+    const dir = makeTempDir();
+    const attachmentsDir = path.join(dir, ".claude", "work", "attachments");
+    mkdirSync(attachmentsDir, { recursive: true });
+    writeFileSync(path.join(attachmentsDir, "image.png"), "binary-data");
+
+    const saved = saveWorktreeState(dir);
+    restoreWorktreeState(saved, dir);
+
+    assert.equal(
+      existsSync(path.join(dir, ".closedloop-ai", "work", "attachments", "image.png")),
+      false
+    );
+  });
+
+  test("preserves .claude/agents without restoring unrelated .claude state", () => {
+    const dir = makeTempDir();
+    const agentsDir = path.join(dir, ".claude", "agents");
+    mkdirSync(agentsDir, { recursive: true });
+    writeFileSync(path.join(agentsDir, "custom-agent.md"), "# custom agent");
+    writeFileSync(path.join(dir, ".claude", "settings.json"), '{"legacy":true}');
+
+    const saved = saveWorktreeState(dir);
+
+    mkdirSync(path.join(dir, ".claude"), { recursive: true });
+    writeFileSync(path.join(dir, ".claude", "settings.json"), '{"tracked":true}');
+
+    restoreWorktreeState(saved, dir);
+
+    assert.equal(
+      readFileSync(path.join(dir, ".claude", "agents", "custom-agent.md"), "utf-8"),
+      "# custom agent"
+    );
+    assert.equal(
+      readFileSync(path.join(dir, ".claude", "settings.json"), "utf-8"),
+      '{"tracked":true}'
+    );
+  });
+});
 
 // --- readProcessPidSync ---
 
