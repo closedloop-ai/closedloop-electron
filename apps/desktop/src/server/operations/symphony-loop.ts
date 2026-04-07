@@ -157,6 +157,7 @@ type LoopCommand =
   | "PLAN"
   | "EXECUTE"
   | "REQUEST_CHANGES"
+  | "REQUEST_PRD_CHANGES"
   | "DECOMPOSE"
   | "EVALUATE_PRD"
   | "GENERATE_PRD"
@@ -167,6 +168,7 @@ const VALID_COMMANDS = new Set<LoopCommand>([
   "PLAN",
   "EXECUTE",
   "REQUEST_CHANGES",
+  "REQUEST_PRD_CHANGES",
   "DECOMPOSE",
   "EVALUATE_PRD",
   "GENERATE_PRD",
@@ -178,6 +180,7 @@ const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
   PLAN: "REQUIRED",
   EXECUTE: "REQUIRED",
   REQUEST_CHANGES: "REQUIRED",
+  REQUEST_PRD_CHANGES: "REQUIRED",
   EVALUATE_PRD: "OPTIONAL",
   GENERATE_PRD: "REQUIRED",
   DECOMPOSE: "NOT_REQUIRED",
@@ -744,7 +747,7 @@ function findWorktreeForBranchImpl(
 
 // findExistingLoopWorktree was removed — it greedy-matched ANY loop worktree
 // from ANY prior loop, causing new PLAN loops to reuse stale worktrees.
-// PLAN always creates a fresh worktree. EXECUTE/REQUEST_CHANGES reuse via
+// PLAN always creates a fresh worktree. EXECUTE/REQUEST_CHANGES/REQUEST_PRD_CHANGES reuse via
 // findWorktreeForBranch(parentBranchName) which matches the specific parent.
 
 /**
@@ -1979,6 +1982,8 @@ async function handleProcessCompletion(
 
     if (command === "PLAN" || command === "REQUEST_CHANGES") {
       artifacts = readPlanOutputs(claudeWorkDir);
+    } else if (command === "REQUEST_PRD_CHANGES") {
+      artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
     } else if (command === "EXECUTE") {
       artifacts = readExecuteOutputs(claudeWorkDir);
 
@@ -2671,20 +2676,21 @@ async function handleLoopRequest(
     } else if (repoRequirement === "REQUIRED" && !expandedRepoPath) {
       json(context, 400, {
         error:
-          "Repository required for PLAN, EXECUTE, REQUEST_CHANGES, and GENERATE_PRD commands",
+          "Repository required for PLAN, EXECUTE, REQUEST_CHANGES, REQUEST_PRD_CHANGES, and GENERATE_PRD commands",
       });
       return;
     } else if (
       body.command === "PLAN" ||
       body.command === "EXECUTE" ||
-      body.command === "REQUEST_CHANGES"
+      body.command === "REQUEST_CHANGES" ||
+      body.command === "REQUEST_PRD_CHANGES"
     ) {
       // expandedRepoPath is guaranteed non-null here: the repoRequirement === "REQUIRED"
       // guard above already returned 400 when it was missing.
       const repoPath = expandedRepoPath!;
 
       // Worktree keyed by artifact slug (e.g., symphony/PLAN-5).
-      // PLAN always creates fresh; EXECUTE/REQUEST_CHANGES reuse.
+      // PLAN always creates fresh; EXECUTE/REQUEST_CHANGES/REQUEST_PRD_CHANGES reuse.
       // Sanitize slug the same way we sanitize loopId to prevent path traversal.
       const sanitizedSlug = body.artifactSlug
         ? slugifyLoopId(body.artifactSlug)
@@ -2718,7 +2724,7 @@ async function handleLoopRequest(
           `Created fresh worktree for PLAN: ${worktreeDir} (branch: ${branchName})`,
         );
       } else {
-        // EXECUTE/REQUEST_CHANGES: reuse existing worktree.
+        // EXECUTE/REQUEST_CHANGES/REQUEST_PRD_CHANGES: reuse existing worktree.
         // Try artifact slug first, then parentLoopId fallback, then create new.
         const existingWorktree = wt.findWorktreeForBranch(repoPath, branchName);
         if (existingWorktree) {
@@ -2788,7 +2794,7 @@ async function handleLoopRequest(
           body.attachments,
         );
       } else {
-        // REQUEST_CHANGES
+        // REQUEST_CHANGES / REQUEST_PRD_CHANGES
         await writeArtifactsForExecuteOrAmend(
           claudeWorkDir,
           body.artifacts,
@@ -2880,10 +2886,11 @@ async function handleLoopRequest(
     };
 
     // Pre-flight: verify required binary exists BEFORE posting 'started' event.
-    // PLAN and EXECUTE use run-loop.sh; REQUEST_CHANGES and DECOMPOSE use claude CLI directly.
+    // PLAN and EXECUTE use run-loop.sh; REQUEST_CHANGES, REQUEST_PRD_CHANGES, and DECOMPOSE use claude CLI directly.
     const usesRunLoop = body.command === "PLAN" || body.command === "EXECUTE";
     const usesClaude =
       body.command === "REQUEST_CHANGES" ||
+      body.command === "REQUEST_PRD_CHANGES" ||
       body.command === "DECOMPOSE" ||
       body.command === "EVALUATE_PRD" ||
       body.command === "GENERATE_PRD" ||
@@ -2979,7 +2986,7 @@ async function handleLoopRequest(
       });
 
       // Shared claude CLI args for commands that run claude directly.
-      // REQUEST_CHANGES omits "-" (stdin) because it passes the prompt as a CLI argument.
+      // REQUEST_CHANGES/REQUEST_PRD_CHANGES omit "-" (stdin) because they pass the prompt as a CLI argument.
       const baseClaudeArgs: string[] = [
         "-p",
         "--output-format",
@@ -3088,6 +3095,39 @@ async function handleLoopRequest(
           .replaceAll(/"/g, '\\"');
         claudeArgs.push(
           `/code:amend-plan --workdir ${claudeWorkDir} --message "${sanitized}"`,
+        );
+
+        const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir);
+        child = spawn(pipeline.cmd, pipeline.args, {
+          cwd: worktreeDir!,
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: spawnEnv,
+        });
+        child.unref();
+      } else if (body.command === "REQUEST_PRD_CHANGES") {
+        // REQUEST_PRD_CHANGES: same pattern as REQUEST_CHANGES but amends the PRD.
+        // Reads prd.md + prompt.md, writes updated prd.md to worktreeDir root.
+        const claudeArgs = [...baseClaudeArgs];
+
+        if (body.parentSessionId) {
+          claudeArgs.push("--resume", body.parentSessionId);
+        }
+
+        const promptFile = path.join(claudeWorkDir, "prompt.md");
+        let amendPrompt =
+          "Please amend the PRD based on the requested changes.";
+        if (existsSync(promptFile)) {
+          amendPrompt = readFileSync(promptFile, "utf-8");
+        }
+        const sanitized = amendPrompt
+          .replaceAll(/[\n\r]+/g, " ")
+          .replaceAll(/\s{2,}/g, " ")
+          .replaceAll(/"/g, '\\"');
+        const prdPath = path.join(claudeWorkDir, "prd.md");
+        const outputPath = path.join(worktreeDir!, "prd.md");
+        claudeArgs.push(
+          `Read the PRD at ${prdPath} and the change request. Update the PRD and write the result to ${outputPath}. Change request: "${sanitized}"`,
         );
 
         const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir);
