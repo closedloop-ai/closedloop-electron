@@ -25,7 +25,9 @@ export function registerLearningsRoutes(
   getAllowedDirectories: () => string[]
 ): void {
   dispatcher.register("GET", "/api/engineer/learnings", async (context) => {
-    const filePath = path.join(os.homedir(), ".claude", ".learnings", "org-patterns.toon");
+    const newPath = path.join(os.homedir(), ".closedloop-ai", "learnings", "org-patterns.toon");
+    const legacyPath = path.join(os.homedir(), ".claude", ".learnings", "org-patterns.toon");
+    const filePath = existsSync(newPath) ? newPath : legacyPath;
 
     try {
       const content = await fs.readFile(filePath, "utf-8");
@@ -402,8 +404,15 @@ function parseToon(content: string): ParsedLearningPattern[] {
     .filter(Boolean);
 
   return chunks.map((chunk, index) => {
-    const firstLine = chunk.split("\n")[0]?.trim() ?? "";
-    const summary = firstLine.replaceAll(/^[-*#\s]+/, "").slice(0, 240);
+    const lines = chunk
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    const candidateLine =
+      lines[0]?.startsWith("patterns[") && lines.length > 1 ? lines[1] : (lines[0] ?? "");
+    const csvSummaryMatch = candidateLine.match(/^[^,]+,[^,]+,\"([^\"]+)\"/);
+    const summary = (csvSummaryMatch?.[1] ?? candidateLine.replace(/^[-*#\s]+/, "")).slice(0, 240);
     return {
       id: `pattern-${index + 1}`,
       summary: summary || `Pattern ${index + 1}`,
