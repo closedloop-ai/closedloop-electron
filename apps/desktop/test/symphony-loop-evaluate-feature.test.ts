@@ -415,12 +415,12 @@ describe("T-6.1: BINARY_NOT_FOUND when claude not in PATH", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T-6.1: completed event payload
+// T-6.1: artifact upload payload (mirrors EVALUATE_PRD — judges on upload, not on completed)
 // ---------------------------------------------------------------------------
 
-describe("T-6.1: completed event payload", () => {
-  test("(16) completed event payload contains featureJudges key", async () => {
-    const tmpDir = makeTempDir("ef-completed-payload");
+describe("T-6.1: artifact upload payload", () => {
+  test("(16) upload-artifacts payload includes featureJudges (not on completed event)", async () => {
+    const tmpDir = makeTempDir("ef-upload-payload");
     const fakeBin = path.join(tmpDir, "fake-bin");
     await fs.mkdir(fakeBin, { recursive: true });
 
@@ -454,15 +454,28 @@ describe("T-6.1: completed event payload", () => {
 
     assert.equal(response.status, 200, `Expected 200 on spawn, got ${response.status}`);
 
+    const uploadBody = await eventSrv.waitForEvent(
+      (b) =>
+        typeof b === "object" &&
+        b !== null &&
+        "artifacts" in b &&
+        typeof (b as { artifacts: unknown }).artifacts === "object" &&
+        (b as { artifacts: Record<string, unknown> }).artifacts !== null &&
+        "featureJudges" in (b as { artifacts: Record<string, unknown> }).artifacts,
+      15_000
+    );
+
+    const artifacts = (uploadBody as { artifacts: { featureJudges: unknown } }).artifacts;
+    assert.deepEqual(artifacts.featureJudges, JSON.parse(featureJudgesData));
+
     const completedEvent = await eventSrv.waitForEvent(
       (b) => b.type === "completed",
       15_000
     );
-
     assert.equal(completedEvent.type, "completed");
     assert.ok(
-      "featureJudges" in completedEvent,
-      `completed event should contain featureJudges key, got: ${JSON.stringify(Object.keys(completedEvent))}`
+      !("featureJudges" in completedEvent),
+      "completed event should not carry top-level featureJudges (parity with EVALUATE_PRD)"
     );
   });
 });

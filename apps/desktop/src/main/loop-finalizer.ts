@@ -469,6 +469,10 @@ function readArtifacts(
     const judges = readJsonFileSync(path.join(claudeWorkDir, "prd-judges.json"));
     return { prdJudges: judges ?? undefined };
   }
+  if (command === "EVALUATE_FEATURE") {
+    const judges = readJsonFileSync(path.join(claudeWorkDir, "feature-judges.json"));
+    return { featureJudges: judges ?? undefined };
+  }
   if (command === "EVALUATE_PLAN") {
     const judges = readJsonFileSync(path.join(claudeWorkDir, "plan-judges.json"));
     return { planJudges: judges ?? undefined };

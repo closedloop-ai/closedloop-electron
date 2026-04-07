@@ -2346,9 +2346,6 @@ async function handleProcessCompletion(
           models: tokensUsed.models,
         },
         loopId,
-        ...(command === "EVALUATE_FEATURE" && "featureJudges" in artifacts
-          ? { featureJudges: artifacts.featureJudges }
-          : {}),
         ...(warnings.length > 0 ? { warnings } : {}),
       };
 
