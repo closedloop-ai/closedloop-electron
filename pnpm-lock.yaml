@@ -10,6 +10,9 @@ importers:
 
   apps/desktop:
     dependencies:
+      '@closedloop-ai/loops-api':
+        specifier: ^0.2.1
+        version: 0.2.1(zod@4.3.6)
       busboy:
         specifier: ^1.6.0
         version: 1.6.0
@@ -28,6 +31,9 @@ importers:
       socket.io-client:
         specifier: ^4.8.1
         version: 4.8.3
+      zod:
+        specifier: ^4.0.0
+        version: 4.3.6
     devDependencies:
       '@types/busboy':
         specifier: ^1.5.4
@@ -64,6 +70,11 @@ packages:
 
   7zip-bin@5.2.0:
     resolution: {integrity: sha512-ukTPVhqG4jNzMro2qA9HSCSSVJN3aN7tlb+hfqYCt3ER0yWroeA2VR38MNrOHLQ/cVj+DaIMad0kFCtWWowh/A==}
+
+  '@closedloop-ai/loops-api@0.2.1':
+    resolution: {integrity: sha512-XFqbgTtisXplpTJ+xQOpL2AxupkYUHolBr940uRAhf7JVnvIU8ttbOO3pHQmkGd4GgfMOgVeqVilj0IcuG1rMw==, tarball: https://npm.pkg.github.com/download/@closedloop-ai/loops-api/0.2.1/08d48b712f19c18e2910e5c05adb6e1e8e8ceacd}
+    peerDependencies:
+      zod: ^4.0.0
 
   '@develar/schema-utils@2.6.5':
     resolution: {integrity: sha512-0cp4PsWQ/9avqTVMCtZ+GirikIA36ikvjtHweU4/j8yLtgObI0+JUPhYFScgwlteveGB1rt3Cm8UhN04XayDig==}
@@ -1891,9 +1902,16 @@ packages:
     resolution: {integrity: sha512-rVksvsnNCdJ/ohGc6xgPwyN8eheCxsiLM8mxuE/t/mOVqJewPuO1miLpTHQiRgTKCLexL4MeAFVagts7HmNZ2Q==}
     engines: {node: '>=10'}
 
+  zod@4.3.6:
+    resolution: {integrity: sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg==}
+
 snapshots:
 
   7zip-bin@5.2.0: {}
+
+  '@closedloop-ai/loops-api@0.2.1(zod@4.3.6)':
+    dependencies:
+      zod: 4.3.6
 
   '@develar/schema-utils@2.6.5':
     dependencies:
@@ -3913,3 +3931,5 @@ snapshots:
       fd-slicer: 1.1.0
 
   yocto-queue@0.1.0: {}
+
+  zod@4.3.6: {}

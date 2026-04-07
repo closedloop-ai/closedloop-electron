@@ -160,6 +160,7 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
         loopId,
         command: "EXECUTE",
         closedLoopAuthToken: "tok",
+        prompt: "test",
         artifacts: [],
         repo: {
           fullName: `nochange/${path.basename(repoPath)}`,
@@ -308,6 +309,7 @@ test("EXECUTE: handleProcessCompletion reads pre-written execution-result.json a
         loopId,
         command: "EXECUTE",
         closedLoopAuthToken: "tok",
+        prompt: "test",
         artifacts: [],
         repo: {
           fullName: `llmresult/${path.basename(repoPath)}`,
@@ -456,6 +458,7 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
         loopId,
         command: "EXECUTE",
         closedLoopAuthToken: "tok",
+        prompt: "test",
         artifacts: [],
         repo: {
           fullName: `existingpr/${path.basename(repoPath)}`,
@@ -585,6 +588,7 @@ test("EXECUTE: git status failure sets GIT_PUSH_FAILED in completed event warnin
         loopId,
         command: "EXECUTE",
         closedLoopAuthToken: "tok",
+        prompt: "test",
         artifacts: [],
         repo: {
           fullName: `gitstatus-fail/${path.basename(repoPath)}`,
@@ -736,6 +740,7 @@ test("EXECUTE: cancel before attemptLlmCommit ends job as CANCELLED with no uplo
         loopId,
         command: "EXECUTE",
         closedLoopAuthToken: "tok",
+        prompt: "test",
         artifacts: [],
         repo: {
           fullName: `cancel-gate1/${path.basename(repoPath)}`,
@@ -871,6 +876,7 @@ test("EXECUTE: cancel during attemptLlmCommit ends job as CANCELLED with no comp
         loopId,
         command: "EXECUTE",
         closedLoopAuthToken: "tok",
+        prompt: "test",
         artifacts: [],
         repo: {
           fullName: `cancel-gate2/${path.basename(repoPath)}`,
@@ -1069,6 +1075,7 @@ test("EXECUTE: artifact links use /implementation-plans/ in PR body and LLM prom
         loopId,
         command: "EXECUTE",
         closedLoopAuthToken: "tok",
+        prompt: "test",
         artifacts: [],
         artifactSlug,
         repo: { fullName: `artifactlink/${path.basename(repoPath)}`, branch: "main" },
@@ -1225,6 +1232,7 @@ test("EXECUTE: SAFETY commit PR title uses '<slug>: Automated changes from loop 
         loopId,
         command: "EXECUTE",
         closedLoopAuthToken: "tok",
+        prompt: "test",
         artifacts: [],
         artifactSlug,
         repo: { fullName: `prtitle/${path.basename(repoPath)}`, branch: "main" },
@@ -1360,6 +1368,7 @@ test("EXECUTE: LLM commit spawns claude via resolved absolute path and writes PI
         loopId,
         command: "EXECUTE",
         closedLoopAuthToken: "tok",
+        prompt: "test",
         artifacts: [],
         repo: { fullName: `llmspawn/${path.basename(repoPath)}`, branch: "main" },
       }),
@@ -1500,6 +1509,7 @@ test("EXECUTE: non-zero exit with CANCEL_PENDING skips PROCESS_FAILED and ends a
         loopId,
         command: "EXECUTE",
         closedLoopAuthToken: "tok",
+        prompt: "test",
         artifacts: [],
         repo: {
           fullName: `cancel-nonzero/${path.basename(repoPath)}`,

@@ -11,6 +11,7 @@ import {
   readEvaluatePrdOutputs,
   writePrdArtifact,
 } from "../src/server/operations/symphony-loop.js";
+import { LoopArtifactType } from "@closedloop-ai/loops-api/artifacts";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { setupStubClaude } from "./symphony-test-utils.js";
@@ -199,7 +200,7 @@ function buildEvaluatePrdBody(overrides?: Partial<Record<string, unknown>>): Rec
     command: "EVALUATE_PRD",
     closedLoopAuthToken: "cl-token",
     apiBaseUrl: "https://api.example.com",
-    artifacts: [],
+    artifacts: [{ type: "PRD", content: "PRD content for evaluation" }],
     ...overrides,
   };
 }
@@ -396,13 +397,13 @@ describe("T-5.2: writePrdArtifact", () => {
     assert.ok(!existsSync(path.join(tmpDir, "prd.md")), "prd.md should not exist");
   });
 
-  test("(c) artifact fallback type ('artifact') writes prd.md", async () => {
+  test("(c) FEATURE fallback type writes prd.md", async () => {
     const tmpDir = makeTempDir();
     await writePrdArtifact(tmpDir, [
-      { type: "artifact", content: "Fallback PRD content" },
+      { type: LoopArtifactType.Feature, content: "Fallback PRD content" },
     ]);
     const prdPath = path.join(tmpDir, "prd.md");
-    assert.ok(existsSync(prdPath), "prd.md should exist for artifact type");
+    assert.ok(existsSync(prdPath), "prd.md should exist for FEATURE type");
     const content = await fs.readFile(prdPath, "utf-8");
     assert.equal(content, "Fallback PRD content");
   });
@@ -663,7 +664,7 @@ describe("T-5.4: Temp dir cleanup after EVALUATE_PRD completes", () => {
           command: "EVALUATE_PRD",
           closedLoopAuthToken: "cl-token",
           apiBaseUrl,
-          artifacts: [],
+          artifacts: [{ type: "PRD", content: "PRD content for cleanup test" }],
         }),
       }
     );
@@ -726,7 +727,7 @@ describe("T-5.5: BINARY_NOT_FOUND when claude not in PATH", () => {
           command: "EVALUATE_PRD",
           closedLoopAuthToken: "cl-token",
           apiBaseUrl,
-          artifacts: [],
+          artifacts: [{ type: "PRD", content: "PRD content for binary test" }],
         }),
       }
     );

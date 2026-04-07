@@ -2,13 +2,20 @@ import { execSync } from "node:child_process";
 import crypto from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
+import { LoopEventType } from "@closedloop-ai/loops-api/events";
+import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
 import {
   readLogTail,
   readTextFile,
   sanitizeErrorMessage,
 } from "./diagnostics-helpers.js";
 import { gatewayLog } from "./gateway-logger.js";
-import { isTerminalJobStatus, type JobStore, type LocalJob } from "./job-store.js";
+import {
+  isTerminalJobStatus,
+  type JobStore,
+  type LocalJob,
+} from "./job-store.js";
 import type { LoopTokenStore } from "./loop-token-store.js";
 import type { TelemetryEmitter } from "./telemetry-protocol.js";
 import { parseApiKeySource, parseTokenUsage } from "./token-usage.js";
@@ -45,7 +52,10 @@ export function parseJobWarnings(job: Pick<LocalJob, "warning">): string[] {
     .filter((value) => value.length > 0);
 }
 
-type ArtifactUploadDeps = Pick<LoopFinalizerDeps, "jobStore" | "apiAuthToken" | "apiBaseUrl">;
+type ArtifactUploadDeps = Pick<
+  LoopFinalizerDeps,
+  "jobStore" | "apiAuthToken" | "apiBaseUrl"
+>;
 
 /** Read Claude session id from the loop workdir (matches legacy symphony-loop completion path). */
 function readLoopSessionId(claudeWorkDir: string): string | undefined {
@@ -83,10 +93,9 @@ function getCompletionCorrelationFields(
   let branchName: string | undefined;
 
   if (command === "EXECUTE" && artifacts.executionResult) {
-    const execResult = artifacts.executionResult as Record<string, unknown>;
-    const fromArtifact = execResult.branch_name;
-    if (typeof fromArtifact === "string" && fromArtifact.trim().length > 0) {
-      branchName = fromArtifact.trim();
+    const parsed = parseExecutionResultFile(artifacts.executionResult);
+    if (parsed?.branchName) {
+      branchName = parsed.branchName;
     }
   }
 
@@ -129,7 +138,8 @@ function buildCompletedEventResult(
 
   const missingBranch =
     result.branchName == null ||
-    (typeof result.branchName === "string" && result.branchName.trim().length === 0);
+    (typeof result.branchName === "string" &&
+      result.branchName.trim().length === 0);
   if (missingBranch && branchName) {
     result.branchName = branchName;
   }
@@ -168,16 +178,30 @@ export async function tryUploadArtifacts(
   worktreeDir: string | undefined,
   warnings: string[],
   deps: ArtifactUploadDeps,
-): Promise<{ artifacts: Record<string, unknown>; failed: boolean; error?: string }> {
+): Promise<{
+  artifacts: Record<string, unknown>;
+  failed: boolean;
+  error?: string;
+}> {
   const artifacts = readArtifacts(command, claudeWorkDir, worktreeDir);
   if (job.artifactsUploadedAt) {
     return { artifacts, failed: false };
   }
 
-  const uploadResult = await uploadArtifacts(deps.apiBaseUrl, job.loopId, deps.apiAuthToken, {
-    artifacts,
-    metadata: buildArtifactUploadMetadata(job, command, claudeWorkDir, artifacts),
-  });
+  const uploadResult = await uploadArtifacts(
+    deps.apiBaseUrl,
+    job.loopId,
+    deps.apiAuthToken,
+    {
+      artifacts,
+      metadata: buildArtifactUploadMetadata(
+        job,
+        command,
+        claudeWorkDir,
+        artifacts,
+      ),
+    },
+  );
   if (!uploadResult.success) {
     warnings.push("ARTIFACT_UPLOAD_FAILED");
     return { artifacts, failed: true, error: uploadResult.error };
@@ -206,7 +230,12 @@ export async function tryPostCompletedEvent(
   }
 
   const tokensUsed = parseTokenUsage(claudeWorkDir);
-  const result = buildCompletedEventResult(job, command, claudeWorkDir, artifacts);
+  const result = buildCompletedEventResult(
+    job,
+    command,
+    claudeWorkDir,
+    artifacts,
+  );
 
   gatewayLog.info(
     "loop-finalizer",
@@ -216,7 +245,7 @@ export async function tryPostCompletedEvent(
   const apiKeySource = parseApiKeySource(claudeWorkDir);
 
   const completedEvent: Record<string, unknown> = {
-    type: "completed",
+    type: LoopEventType.Completed,
     result,
     tokensUsed: {
       input: tokensUsed.inputTokens,
@@ -264,8 +293,12 @@ export async function tryPostErrorEvent(
 
   const tokenUsage = parseTokenUsage(claudeWorkDir);
   const apiKeySource = parseApiKeySource(claudeWorkDir);
-  const logTail = readLogTail(path.join(claudeWorkDir, "symphony-loop.log")) ?? undefined;
-  const errorCode = job.status === "FAILED" ? "PROCESS_FAILED" : "PROCESS_STOPPED";
+  const logTail =
+    readLogTail(path.join(claudeWorkDir, "symphony-loop.log")) ?? undefined;
+  const errorCode =
+    job.status === "FAILED"
+      ? LoopErrorCode.ProcessFailed
+      : LoopErrorCode.ProcessStopped;
   const errorMessage =
     job.status === "FAILED"
       ? `Process exited with code ${job.exitCode ?? 1}`
@@ -276,7 +309,7 @@ export async function tryPostErrorEvent(
     tokenUsage.cacheCreationInputTokens > 0 ||
     tokenUsage.cacheReadInputTokens > 0;
   const errorEvent: Record<string, unknown> = {
-    type: "error",
+    type: LoopEventType.Error,
     code: errorCode,
     message: errorMessage,
     loopId: job.loopId,
@@ -443,7 +476,9 @@ function readArtifacts(
 ): Record<string, unknown> {
   if (command === "PLAN" || command === "REQUEST_CHANGES") {
     const plan = readJsonFileSync(path.join(claudeWorkDir, "plan.json"));
-    const openQuestions = readTextFile(path.join(claudeWorkDir, "open-questions.md"));
+    const openQuestions = readTextFile(
+      path.join(claudeWorkDir, "open-questions.md"),
+    );
     const judges = readJsonFileSync(path.join(claudeWorkDir, "judges.json"));
     return {
       plan: plan ?? undefined,
@@ -455,26 +490,36 @@ function readArtifacts(
     const executionResult = readJsonFileSync(
       path.join(claudeWorkDir, "execution-result.json"),
     );
-    const codeJudges = readJsonFileSync(path.join(claudeWorkDir, "code-judges.json"));
+    const codeJudges = readJsonFileSync(
+      path.join(claudeWorkDir, "code-judges.json"),
+    );
     return {
       executionResult: executionResult ?? undefined,
       codeJudges: codeJudges ?? undefined,
     };
   }
   if (command === "DECOMPOSE") {
-    const features = readJsonFileSync(path.join(claudeWorkDir, "features.json"));
+    const features = readJsonFileSync(
+      path.join(claudeWorkDir, "features.json"),
+    );
     return { features: features ?? undefined };
   }
   if (command === "EVALUATE_PRD") {
-    const judges = readJsonFileSync(path.join(claudeWorkDir, "prd-judges.json"));
+    const judges = readJsonFileSync(
+      path.join(claudeWorkDir, "prd-judges.json"),
+    );
     return { prdJudges: judges ?? undefined };
   }
   if (command === "EVALUATE_PLAN") {
-    const judges = readJsonFileSync(path.join(claudeWorkDir, "plan-judges.json"));
+    const judges = readJsonFileSync(
+      path.join(claudeWorkDir, "plan-judges.json"),
+    );
     return { planJudges: judges ?? undefined };
   }
   if (command === "EVALUATE_CODE") {
-    const judges = readJsonFileSync(path.join(claudeWorkDir, "code-judges.json"));
+    const judges = readJsonFileSync(
+      path.join(claudeWorkDir, "code-judges.json"),
+    );
     return { codeJudges: judges ?? undefined };
   }
   if (command === "GENERATE_PRD") {
@@ -508,11 +553,17 @@ async function postLoopEvent(
     });
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
-      return { success: false, error: `HTTP ${resp.status} ${resp.statusText} ${text}` };
+      return {
+        success: false,
+        error: `HTTP ${resp.status} ${resp.statusText} ${text}`,
+      };
     }
     return { success: true };
   } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 
@@ -534,11 +585,17 @@ async function uploadArtifacts(
     });
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
-      return { success: false, error: `HTTP ${resp.status} ${resp.statusText} ${text}` };
+      return {
+        success: false,
+        error: `HTTP ${resp.status} ${resp.statusText} ${text}`,
+      };
     }
     return { success: true };
   } catch (err) {
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 
@@ -559,10 +616,20 @@ export async function finalizeLoopFromRuntime(
   reason: LoopFinalizationReason,
   deps: LoopFinalizerDeps,
 ): Promise<LoopFinalizationOutcome> {
-  const { jobStore, telemetry, apiAuthToken, apiBaseUrl, isProcessRunning, loopTokenStore } =
-    deps;
+  const {
+    jobStore,
+    telemetry,
+    apiAuthToken,
+    apiBaseUrl,
+    isProcessRunning,
+    loopTokenStore,
+  } = deps;
 
-  if (job.status === "CANCEL_PENDING" && job.pid != null && isProcessRunning(job.pid)) {
+  if (
+    job.status === "CANCEL_PENDING" &&
+    job.pid != null &&
+    isProcessRunning(job.pid)
+  ) {
     gatewayLog.info(
       "loop-finalizer",
       `loopId=${job.loopId} cancellation pending and PID still alive; skip`,
@@ -572,7 +639,10 @@ export async function finalizeLoopFromRuntime(
 
   const claudeWorkDir = job.claudeWorkDir;
   if (!claudeWorkDir) {
-    gatewayLog.warn("loop-finalizer", `loopId=${job.loopId} missing claudeWorkDir`);
+    gatewayLog.warn(
+      "loop-finalizer",
+      `loopId=${job.loopId} missing claudeWorkDir`,
+    );
     return { cloudFinalized: false, retryableFailure: false };
   }
 
@@ -586,17 +656,23 @@ export async function finalizeLoopFromRuntime(
     // emits PROCESS_FAILED for a process that died mid-run.
     let derivedStatus: LocalJob["status"] = "FAILED";
     if (effectiveJob.statePath) {
-      const snapshot = await readEffectiveStatusFromState(effectiveJob.statePath);
+      const snapshot = await readEffectiveStatusFromState(
+        effectiveJob.statePath,
+      );
       if (snapshot.status !== null && isTerminalJobStatus(snapshot.status)) {
         derivedStatus = snapshot.status;
       }
     }
     const shouldDefaultExitCode =
-      derivedStatus === "FAILED" || derivedStatus === "STOPPED" || derivedStatus === "UNKNOWN";
+      derivedStatus === "FAILED" ||
+      derivedStatus === "STOPPED" ||
+      derivedStatus === "UNKNOWN";
     resolvedJob = {
       ...effectiveJob,
       status: derivedStatus,
-      exitCode: shouldDefaultExitCode ? (effectiveJob.exitCode ?? 1) : effectiveJob.exitCode,
+      exitCode: shouldDefaultExitCode
+        ? (effectiveJob.exitCode ?? 1)
+        : effectiveJob.exitCode,
     };
     gatewayLog.info(
       "loop-finalizer",
@@ -665,7 +741,8 @@ export async function finalizeLoopFromRuntime(
       );
     }
     if (uploadResult.failed || postResult.failed) {
-      remoteError = uploadResult.error ?? postResult.error ?? "Cloud finalization failed";
+      remoteError =
+        uploadResult.error ?? postResult.error ?? "Cloud finalization failed";
       retryableFailure = isRetryableFinalizationError(remoteError);
     } else {
       cloudFinalized = true;
@@ -688,7 +765,8 @@ export async function finalizeLoopFromRuntime(
     cloudFinalized = true;
   }
 
-  const currentAfterCloud = jobStore.getByLoopId(resolvedJob.loopId) ?? resolvedJob;
+  const currentAfterCloud =
+    jobStore.getByLoopId(resolvedJob.loopId) ?? resolvedJob;
   const warningText =
     warnings.length > 0
       ? warnings.map((value) => sanitizeErrorMessage(value)).join("; ")

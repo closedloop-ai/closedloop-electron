@@ -266,7 +266,7 @@ test("GENERATE_PRD: rejects with 400 when prompt is missing", async () => {
   const body1 = await response1.json();
   assert.ok(
     (body1 as { error: string }).error.includes(
-      "No prompt found for GENERATE_PRD",
+      "GENERATE_PRD requires a non-empty prompt",
     ),
     `Expected specific error message, got: ${(body1 as { error: string }).error}`,
   );
@@ -292,7 +292,7 @@ test("GENERATE_PRD: rejects with 400 when prompt is missing", async () => {
   const body2 = await response2.json();
   assert.ok(
     (body2 as { error: string }).error.includes(
-      "No prompt found for GENERATE_PRD",
+      "GENERATE_PRD requires a non-empty prompt",
     ),
     `Expected specific error message for empty prompt, got: ${(body2 as { error: string }).error}`,
   );

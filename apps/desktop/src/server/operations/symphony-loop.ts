@@ -27,7 +27,10 @@ import {
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
 import { Observability } from "../../main/observability.js";
-import { parseTokenUsage, type ModelTokenUsage } from "../../main/token-usage.js";
+import {
+  parseTokenUsage,
+  type ModelTokenUsage,
+} from "../../main/token-usage.js";
 import type {
   OperationDispatcher,
   OperationRequestContext,
@@ -150,20 +153,24 @@ export function getResolvedClaudePath(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Types
+// Types — shared contract from @closedloop-ai/loops-api
 // ---------------------------------------------------------------------------
 
-type LoopCommand =
-  | "PLAN"
-  | "EXECUTE"
-  | "REQUEST_CHANGES"
-  | "DECOMPOSE"
-  | "EVALUATE_PRD"
-  | "GENERATE_PRD"
-  | "EVALUATE_PLAN"
-  | "EVALUATE_CODE";
+import type { LoopCommand } from "@closedloop-ai/loops-api/commands";
+import { validateCommandInputs } from "@closedloop-ai/loops-api/commands";
+import type { ContextPackAttachment as SharedContextPackAttachment } from "@closedloop-ai/loops-api/context-pack";
+import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
+import { LoopEventType } from "@closedloop-ai/loops-api/events";
+import type { LoopRequestBody } from "@closedloop-ai/loops-api/desktop-request";
+import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
+import {
+  LoopArtifactFile,
+  LoopArtifactType,
+} from "@closedloop-ai/loops-api/artifacts";
+import { validateResultBundle } from "@closedloop-ai/loops-api/bundles";
 
-const VALID_COMMANDS = new Set<LoopCommand>([
+/** Commands that have full spawn/dispatch support in this gateway version. */
+const SUPPORTED_COMMANDS = new Set<LoopCommand>([
   "PLAN",
   "EXECUTE",
   "REQUEST_CHANGES",
@@ -173,11 +180,15 @@ const VALID_COMMANDS = new Set<LoopCommand>([
   "EVALUATE_PLAN",
   "EVALUATE_CODE",
 ]);
+const VALID_COMMANDS = SUPPORTED_COMMANDS;
 type RepoRequirement = "REQUIRED" | "OPTIONAL" | "NOT_REQUIRED";
 const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
   PLAN: "REQUIRED",
   EXECUTE: "REQUIRED",
+  CHAT: "NOT_REQUIRED",
+  EXPLORE: "NOT_REQUIRED",
   REQUEST_CHANGES: "REQUIRED",
+  REQUEST_PRD_CHANGES: "REQUIRED",
   EVALUATE_PRD: "OPTIONAL",
   GENERATE_PRD: "REQUIRED",
   DECOMPOSE: "NOT_REQUIRED",
@@ -187,13 +198,15 @@ const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
 
 interface LoopArtifact {
   id?: string;
-  type: string;
+  type: LoopArtifactType;
   title?: string;
   content: string;
 }
 
 /** Artifact types that represent an implementation plan. */
-export const PLAN_ARTIFACT_TYPES = ["IMPLEMENTATION_PLAN", "plan"] as const;
+export const PLAN_ARTIFACT_TYPES: readonly LoopArtifactType[] = [
+  LoopArtifactType.ImplementationPlan,
+] as const;
 
 /**
  * Write prd.md to a work directory from a list of artifacts and an optional
@@ -211,18 +224,16 @@ export async function writePrdArtifact(
   artifacts: LoopArtifact[],
   prompt?: string,
 ): Promise<void> {
-  const prdArtifact = artifacts.find(
-    (a) => a.type === "PRD" || a.type === "prd",
-  );
+  const prdArtifact = artifacts.find((a) => a.type === LoopArtifactType.Prd);
   const featureArtifact = prdArtifact
     ? null
-    : artifacts.find((a) => a.type === "FEATURE" || a.type === "artifact");
+    : artifacts.find((a) => a.type === LoopArtifactType.Feature);
   const source = prdArtifact ?? featureArtifact;
 
   const prdContent = source?.content || prompt || "";
 
   if (prdContent) {
-    await fs.writeFile(path.join(workDir, "prd.md"), prdContent);
+    await fs.writeFile(path.join(workDir, LoopArtifactFile.Prd), prdContent);
   }
 }
 
@@ -235,7 +246,10 @@ async function writePlanFileToWorkDir(
     (PLAN_ARTIFACT_TYPES as readonly string[]).includes(a.type),
   );
   if (artifact?.content) {
-    await fs.writeFile(path.join(workDir, "plan.md"), artifact.content);
+    await fs.writeFile(
+      path.join(workDir, LoopArtifactFile.PlanMarkdown),
+      artifact.content,
+    );
   }
 }
 
@@ -289,47 +303,12 @@ export function readEvaluateCodeOutputs(
   return readEvaluateOutputs(workDir, "code");
 }
 
-interface LoopRepo {
-  fullName: string;
-  branch: string;
-}
-
 interface LoopCommitter {
   name: string;
   email: string;
 }
 
-// Structural copy of ContextPackAttachment from symphony-alpha/apps/api/lib/loops/loop-state.ts
-// Keep in sync when fields change.
-type ContextPackAttachment = {
-  id: string;
-  filename: string;
-  mimeType: string;
-  sizeBytes: number;
-  signedUrl: string;
-  signedUrlExpiresAt: string;
-};
-
-interface LoopRequestBody {
-  loopId: string;
-  command: LoopCommand;
-  closedLoopAuthToken: string;
-  /** @deprecated Ignored. The gateway uses its configured API origin instead. */
-  apiBaseUrl?: string;
-  artifacts: LoopArtifact[];
-  repo?: LoopRepo;
-  committer?: LoopCommitter;
-  artifactSlug?: string;
-  parentLoopId?: string;
-  parentBranchName?: string;
-  parentSessionId?: string;
-  prompt?: string;
-  /** Local filesystem checkout root. When present and sandbox-allowed, used as checkout root for worktree creation/reuse instead of repo.fullName lookup. */
-  localRepoPath?: string;
-  /** User-supplied Additional Context from ArtifactVersion v1. Written to additional-context.md for PLAN commands. */
-  userContext?: string;
-  attachments?: ContextPackAttachment[];
-}
+type ContextPackAttachment = SharedContextPackAttachment;
 
 interface ExecutionResult {
   prUrl: string;
@@ -611,7 +590,13 @@ async function postLoopEventBounded(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await postLoopEvent(apiBaseUrl, loopId, token, eventBody, controller.signal);
+    return await postLoopEvent(
+      apiBaseUrl,
+      loopId,
+      token,
+      eventBody,
+      controller.signal,
+    );
   } catch {
     return { success: false, error: "timeout" };
   } finally {
@@ -891,12 +876,10 @@ async function writeArtifactsForPlan(
   // Priority: explicit prompt > PRD artifact > FEATURE artifact (matches harness)
 
   if (!prdContent) {
-    const prdArtifact = artifacts.find(
-      (a) => a.type === "PRD" || a.type === "prd",
-    );
+    const prdArtifact = artifacts.find((a) => a.type === LoopArtifactType.Prd);
     const featureArtifact = prdArtifact
       ? null
-      : artifacts.find((a) => a.type === "FEATURE" || a.type === "artifact");
+      : artifacts.find((a) => a.type === LoopArtifactType.Feature);
     const source = prdArtifact ?? featureArtifact;
     if (source?.content) {
       prdContent = source.content;
@@ -917,7 +900,10 @@ async function writeArtifactsForPlan(
   }
 
   if (prdContent) {
-    await fs.writeFile(path.join(claudeWorkDir, "prd.md"), prdContent);
+    await fs.writeFile(
+      path.join(claudeWorkDir, LoopArtifactFile.Prd),
+      prdContent,
+    );
   }
 
   await downloadAttachmentsToDisk(claudeWorkDir, attachments);
@@ -930,12 +916,12 @@ async function writeArtifactsForExecuteOrAmend(
   attachments?: ContextPackAttachment[],
 ): Promise<void> {
   for (const artifact of artifacts) {
-    if (artifact.type === "IMPLEMENTATION_PLAN" || artifact.type === "plan") {
+    if (artifact.type === LoopArtifactType.ImplementationPlan) {
       // Sync plan content like ECS harness's syncPlanFromContextPack():
       // If plan.json already exists (from parent PLAN loop), update only the
       // .content field — preserving tasks, openQuestions, metadata, etc.
       // This picks up manual edits the user made in the Liveblocks editor.
-      const planJsonPath = path.join(claudeWorkDir, "plan.json");
+      const planJsonPath = path.join(claudeWorkDir, LoopArtifactFile.Plan);
       if (existsSync(planJsonPath)) {
         try {
           const existing = JSON.parse(
@@ -961,12 +947,13 @@ async function writeArtifactsForExecuteOrAmend(
         }
       }
     } else if (
-      artifact.type === "prd" ||
-      artifact.type === "artifact" ||
-      artifact.type === "PRD" ||
-      artifact.type === "FEATURE"
+      artifact.type === LoopArtifactType.Prd ||
+      artifact.type === LoopArtifactType.Feature
     ) {
-      await fs.writeFile(path.join(claudeWorkDir, "prd.md"), artifact.content);
+      await fs.writeFile(
+        path.join(claudeWorkDir, LoopArtifactFile.Prd),
+        artifact.content,
+      );
     }
   }
   if (prompt) {
@@ -1023,11 +1010,15 @@ async function writeArtifactsForGeneratePrd(
 // ---------------------------------------------------------------------------
 
 function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
-  const plan = readJsonFileSync(path.join(claudeWorkDir, "plan.json"));
-  const openQuestions = readTextFile(
-    path.join(claudeWorkDir, "open-questions.md"),
+  const plan = readJsonFileSync(
+    path.join(claudeWorkDir, LoopArtifactFile.Plan),
   );
-  const judges = readJsonFileSync(path.join(claudeWorkDir, "judges.json"));
+  const openQuestions = readTextFile(
+    path.join(claudeWorkDir, LoopArtifactFile.OpenQuestions),
+  );
+  const judges = readJsonFileSync(
+    path.join(claudeWorkDir, LoopArtifactFile.Judges),
+  );
 
   return {
     plan: plan ?? undefined,
@@ -1038,10 +1029,10 @@ function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
 
 function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
   const executionResult = readJsonFileSync(
-    path.join(claudeWorkDir, "execution-result.json"),
+    path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
   );
   const codeJudges = readJsonFileSync(
-    path.join(claudeWorkDir, "code-judges.json"),
+    path.join(claudeWorkDir, LoopArtifactFile.CodeJudges),
   );
 
   return {
@@ -1051,12 +1042,14 @@ function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
 }
 
 function readDecomposeOutputs(workDir: string): Record<string, unknown> {
-  const features = readJsonFileSync(path.join(workDir, "features.json"));
+  const features = readJsonFileSync(
+    path.join(workDir, LoopArtifactFile.Features),
+  );
   return { features: features ?? undefined };
 }
 
 function readGeneratePrdOutputs(worktreeDir: string): Record<string, unknown> {
-  const prdContent = readTextFile(path.join(worktreeDir, "prd.md"));
+  const prdContent = readTextFile(path.join(worktreeDir, LoopArtifactFile.Prd));
   return { prd: prdContent ? { content: prdContent } : undefined };
 }
 
@@ -1114,11 +1107,21 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
   const logPath = path.join(claudeWorkDir, "symphony-loop.log");
   const rawTail = readLogTail(logPath);
   const logTail = rawTail ? redactCredentials(rawTail) : undefined;
-  const { inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, tokensByModel } =
-    parseTokenUsage(claudeWorkDir);
+  const {
+    inputTokens,
+    outputTokens,
+    cacheCreationInputTokens,
+    cacheReadInputTokens,
+    tokensByModel,
+  } = parseTokenUsage(claudeWorkDir);
   return {
     logTail,
-    tokenUsage: { inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens },
+    tokenUsage: {
+      inputTokens,
+      outputTokens,
+      cacheCreationInputTokens,
+      cacheReadInputTokens,
+    },
     tokensByModel,
     diagnosticsVersion: 1,
   };
@@ -1491,7 +1494,10 @@ async function attemptLlmCommit(
 
       // Read execution-result.json written by the LLM, then clean up scratch
       // files unconditionally so they never leak into subsequent worktree runs.
-      const resultFilePath = path.join(worktreeDir, "execution-result.json");
+      const resultFilePath = path.join(
+        worktreeDir,
+        LoopArtifactFile.ExecutionResult,
+      );
       const prBodyFilePath = path.join(worktreeDir, "pr-body.md");
       let result: ExecutionResult | null = null;
       try {
@@ -1843,10 +1849,11 @@ async function handleProcessCompletion(
         failureSessionId,
       );
       await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
-        type: "error",
-        code: "CANCELLED",
+        type: LoopEventType.Error,
+        code: LoopErrorCode.Cancelled,
         message: "Loop cancelled",
         loopId,
+        sessionId: failureSessionId,
         tokenUsage: diagnostics.tokenUsage,
         tokensByModel: diagnostics.tokensByModel,
         logTail: diagnostics.logTail,
@@ -1888,10 +1895,11 @@ async function handleProcessCompletion(
           `${command} hit context limit, loopId=${loopId}: ${limitMsg}`,
         );
         await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
-          type: "error",
-          code: "CONTEXT_LIMIT_EXCEEDED",
+          type: LoopEventType.Error,
+          code: LoopErrorCode.ContextLimitExceeded,
           message: limitMsg,
           loopId,
+          sessionId: failureSessionId,
           tokenUsage: diagnostics.tokenUsage,
           tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
@@ -1913,10 +1921,11 @@ async function handleProcessCompletion(
           failureSessionId,
         );
         await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
-          type: "error",
-          code: "AUTH_CHALLENGE",
+          type: LoopEventType.Error,
+          code: LoopErrorCode.AuthChallenge,
           message: authMsg,
           loopId,
+          sessionId: failureSessionId,
           tokenUsage: diagnostics.tokenUsage,
           tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
@@ -1929,10 +1938,11 @@ async function handleProcessCompletion(
           `${command} failed with exit code ${exitCode}, loopId=${loopId}`,
         );
         await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
-          type: "error",
-          code: "PROCESS_FAILED",
+          type: LoopEventType.Error,
+          code: LoopErrorCode.ProcessFailed,
           message: `Process exited with code ${exitCode}`,
           loopId,
+          sessionId: failureSessionId,
           tokenUsage: diagnostics.tokenUsage,
           tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
@@ -2033,7 +2043,9 @@ async function handleProcessCompletion(
         // the process was killed before the cleanup ran.
         if (!llmResult) {
           try {
-            unlinkSync(path.join(worktreeDir, "execution-result.json"));
+            unlinkSync(
+              path.join(worktreeDir, LoopArtifactFile.ExecutionResult),
+            );
           } catch {
             /* may not exist */
           }
@@ -2088,13 +2100,13 @@ async function handleProcessCompletion(
           execResult.branch_name = gitResult.branchName;
           execResult.commit_sha = gitResult.commitSha;
           execResult.has_changes = true;
-          execResult.base_branch = baseBranch;
+          execResult.base_ref = baseBranch;
           artifacts.executionResult = execResult;
           metadata.branchName = gitResult.branchName;
           // Persist merged execute metadata for reboot-time finalization replay.
           try {
             writeFileSync(
-              path.join(claudeWorkDir, "execution-result.json"),
+              path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
               JSON.stringify(execResult),
             );
           } catch (err) {
@@ -2126,6 +2138,21 @@ async function handleProcessCompletion(
       artifacts = readEvaluateCodeOutputs(claudeWorkDir);
     } else if (command === "GENERATE_PRD") {
       artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
+    }
+
+    // Validate result bundle — warn if required artifacts are missing for this command
+    const artifactDir = worktreeDir ?? claudeWorkDir;
+    const presentFiles = Object.values(LoopArtifactFile).filter(
+      (f) =>
+        existsSync(path.join(artifactDir, f)) ||
+        existsSync(path.join(claudeWorkDir, f)),
+    );
+    const missingRequired = validateResultBundle(command, presentFiles);
+    if (missingRequired.length > 0) {
+      gatewayLog.warn(
+        "loop-harness",
+        `Missing required artifacts for ${command}: ${missingRequired.join(", ")}, loopId=${loopId}`,
+      );
     }
 
     // Read session ID if available
@@ -2165,9 +2192,23 @@ async function handleProcessCompletion(
     }
 
     // Parse token usage from claude output
-    const { inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, turns, models } =
-      parseTokenUsage(claudeWorkDir);
-    const tokensUsed = { inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens, turns, models };
+    const {
+      inputTokens,
+      outputTokens,
+      cacheCreationInputTokens,
+      cacheReadInputTokens,
+      turns,
+      models,
+      tokensByModel,
+    } = parseTokenUsage(claudeWorkDir);
+    const tokensUsed = {
+      inputTokens,
+      outputTokens,
+      cacheCreationInputTokens,
+      cacheReadInputTokens,
+      turns,
+      models,
+    };
     loopLog(
       loopId,
       `Tokens used: input=${tokensUsed.inputTokens}, output=${tokensUsed.outputTokens}, cacheCreation=${tokensUsed.cacheCreationInputTokens}, cacheRead=${tokensUsed.cacheReadInputTokens}, turns=${tokensUsed.turns}`,
@@ -2187,8 +2228,8 @@ async function handleProcessCompletion(
       gatewayLog.error("loop-harness", `${noWorkMsg}, loopId=${loopId}`);
       runningLoops.delete(loopId);
       await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
-        type: "error",
-        code: "NO_WORK_PRODUCED",
+        type: LoopEventType.Error,
+        code: LoopErrorCode.NoWorkProduced,
         message: noWorkMsg,
         loopId,
       });
@@ -2271,7 +2312,11 @@ async function handleProcessCompletion(
         isProcessRunning,
         loopTokenStore,
       };
-      const outcome = await finalizeLoopFromRuntime(existingJob, "live-exit", finalizerDeps);
+      const outcome = await finalizeLoopFromRuntime(
+        existingJob,
+        "live-exit",
+        finalizerDeps,
+      );
       if (!outcome.cloudFinalized) {
         gatewayLog.error(
           "loop-harness",
@@ -2299,11 +2344,13 @@ async function handleProcessCompletion(
         subtype: command.toLowerCase(),
       };
       if (command === "EXECUTE" && artifacts.executionResult) {
-        const execResult = artifacts.executionResult as Record<string, unknown>;
-        result.prUrl = execResult.pr_url;
-        result.prNumber = execResult.pr_number;
-        result.branchName = execResult.branch_name;
-        result.has_changes = execResult.has_changes ?? false;
+        const parsed = parseExecutionResultFile(artifacts.executionResult);
+        if (parsed) {
+          result.prUrl = parsed.prUrl;
+          result.prNumber = parsed.prNumber;
+          result.branchName = parsed.branchName;
+          result.has_changes = parsed.hasChanges;
+        }
       }
       if (worktreeDir && !result.branchName) {
         const branch = wt.getCurrentBranch(worktreeDir);
@@ -2317,7 +2364,7 @@ async function handleProcessCompletion(
       }
 
       const completedEvent: Record<string, unknown> = {
-        type: "completed",
+        type: LoopEventType.Completed,
         result,
         tokensUsed: {
           input: tokensUsed.inputTokens,
@@ -2327,6 +2374,7 @@ async function handleProcessCompletion(
           turns: tokensUsed.turns,
           models: tokensUsed.models,
         },
+        tokensByModel,
         loopId,
         ...(warnings.length > 0 ? { warnings } : {}),
       };
@@ -2434,20 +2482,27 @@ async function handleLoopRequest(
     return;
   }
 
-  if (
-    body.command === "GENERATE_PRD" &&
-    (typeof body.prompt !== "string" || !body.prompt.trim())
-  ) {
-    json(context, 400, { error: "No prompt found for GENERATE_PRD" });
+  // Shared input validation (prompt/artifacts requirements per command)
+  const hasPrompt =
+    typeof body.prompt === "string" && body.prompt.trim().length > 0;
+  const hasArtifacts = body.artifacts.length > 0;
+  const inputError = validateCommandInputs(
+    body.command,
+    hasPrompt,
+    hasArtifacts,
+  );
+  if (inputError) {
+    json(context, 400, { error: inputError });
     return;
   }
 
   if (body.command === "EVALUATE_PLAN") {
-    const hasPrdArtifact = body.artifacts.some((a: LoopArtifact) =>
-      ["PRD", "prd", "FEATURE", "artifact"].includes(a.type),
+    const hasPrdArtifact = body.artifacts.some(
+      (a) =>
+        a.type === LoopArtifactType.Prd || a.type === LoopArtifactType.Feature,
     );
-    const hasPlanArtifact = body.artifacts.some((a: LoopArtifact) =>
-      (PLAN_ARTIFACT_TYPES as readonly string[]).includes(a.type),
+    const hasPlanArtifact = body.artifacts.some((a) =>
+      PLAN_ARTIFACT_TYPES.includes(a.type),
     );
     if ((!hasPrdArtifact && !body.prompt) || !hasPlanArtifact) {
       json(context, 400, {
@@ -2466,8 +2521,8 @@ async function handleLoopRequest(
   }
 
   if (body.command === "EVALUATE_CODE") {
-    const hasPlanArtifact = body.artifacts.some((a: LoopArtifact) =>
-      (PLAN_ARTIFACT_TYPES as readonly string[]).includes(a.type),
+    const hasPlanArtifact = body.artifacts.some((a) =>
+      PLAN_ARTIFACT_TYPES.includes(a.type),
     );
     if (!hasPlanArtifact) {
       json(context, 400, {
@@ -2523,11 +2578,16 @@ async function handleLoopRequest(
         );
         if ("error" in repoResult) {
           if (repoRequirement === "REQUIRED") {
-            await postLoopEventBounded(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-              type: "error",
-              code: "REPO_NOT_ALLOWED",
-              message: "Repository path not allowed by sandbox policy",
-            });
+            await postLoopEventBounded(
+              apiBaseUrl,
+              body.loopId,
+              body.closedLoopAuthToken,
+              {
+                type: LoopEventType.Error,
+                code: LoopErrorCode.RepoNotAllowed,
+                message: "Repository path not allowed by sandbox policy",
+              },
+            );
             // runningLoops.delete handled by finally block
             json(context, repoResult.status, { error: repoResult.error });
             return;
@@ -2557,11 +2617,16 @@ async function handleLoopRequest(
         } catch (err) {
           if (err instanceof DirectoryNotAllowedError) {
             if (repoRequirement === "REQUIRED") {
-              await postLoopEventBounded(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-                type: "error",
-                code: "REPO_NOT_ALLOWED",
-                message: "Repository path not allowed by sandbox policy",
-              });
+              await postLoopEventBounded(
+                apiBaseUrl,
+                body.loopId,
+                body.closedLoopAuthToken,
+                {
+                  type: LoopEventType.Error,
+                  code: LoopErrorCode.RepoNotAllowed,
+                  message: "Repository path not allowed by sandbox policy",
+                },
+              );
               // runningLoops.delete handled by finally block
               json(context, 403, { error: "Repository path not allowed" });
               return;
@@ -2577,11 +2642,16 @@ async function handleLoopRequest(
         }
       } else {
         if (repoRequirement === "REQUIRED") {
-          await postLoopEventBounded(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-            type: "error",
-            code: "REPO_NOT_FOUND",
-            message: `Repository not found locally: ${body.repo.fullName}`,
-          });
+          await postLoopEventBounded(
+            apiBaseUrl,
+            body.loopId,
+            body.closedLoopAuthToken,
+            {
+              type: LoopEventType.Error,
+              code: LoopErrorCode.RepoNotFound,
+              message: `Repository not found locally: ${body.repo.fullName}`,
+            },
+          );
           // runningLoops.delete handled by finally block (spawnedSuccessfully remains false)
           json(context, 404, {
             error: `Repository not found locally: ${body.repo.fullName}`,
@@ -2621,8 +2691,8 @@ async function handleLoopRequest(
       } catch (artifactErr) {
         await fs.rm(tmpDir, { recursive: true, force: true });
         await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-          type: "error",
-          code: "ARTIFACT_WRITE_FAILED",
+          type: LoopEventType.Error,
+          code: LoopErrorCode.ArtifactWriteFailed,
           message:
             artifactErr instanceof Error
               ? artifactErr.message
@@ -2658,8 +2728,8 @@ async function handleLoopRequest(
       } catch (artifactErr) {
         await fs.rm(claudeWorkDir, { recursive: true, force: true });
         await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-          type: "error",
-          code: "ARTIFACT_WRITE_FAILED",
+          type: LoopEventType.Error,
+          code: LoopErrorCode.ArtifactWriteFailed,
           message:
             artifactErr instanceof Error
               ? artifactErr.message
@@ -2901,8 +2971,8 @@ async function handleLoopRequest(
         });
       } catch {
         await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-          type: "error",
-          code: "BINARY_NOT_FOUND",
+          type: LoopEventType.Error,
+          code: LoopErrorCode.BinaryNotFound,
           message: "claude CLI not found in PATH",
         });
         Observability.preflightBinaryNotFound(
@@ -2918,8 +2988,8 @@ async function handleLoopRequest(
       scriptPath = findPluginScript("code", "run-loop.sh");
       if (!scriptPath) {
         await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-          type: "error",
-          code: "SCRIPT_NOT_FOUND",
+          type: LoopEventType.Error,
+          code: LoopErrorCode.ScriptNotFound,
           message: "run-loop.sh not found in plugin cache",
         });
         Observability.preflightScriptNotFound(
@@ -2946,7 +3016,7 @@ async function handleLoopRequest(
     // Post "started" event — only after confirming we can proceed
     loopLog(body.loopId, "Posting started event...");
     await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-      type: "started",
+      type: LoopEventType.Started,
     });
 
     // Spawn process
@@ -2957,8 +3027,8 @@ async function handleLoopRequest(
     } catch (logErr) {
       const msg = logErr instanceof Error ? logErr.message : String(logErr);
       await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-        type: "error",
-        code: "SPAWN_FAILED",
+        type: LoopEventType.Error,
+        code: LoopErrorCode.SpawnFailed,
         message: `Cannot open log file: ${msg}`,
       });
       Observability.preflightSpawnFailed(
@@ -3125,7 +3195,7 @@ async function handleLoopRequest(
         const maxIterations = body.command === "EXECUTE" ? "150" : "50";
         scriptArgs.push("--max-iterations", maxIterations);
 
-        const prdPath = path.join(claudeWorkDir, "prd.md");
+        const prdPath = path.join(claudeWorkDir, LoopArtifactFile.Prd);
         if (existsSync(prdPath)) {
           scriptArgs.push("--prd", prdPath);
         }
@@ -3143,8 +3213,8 @@ async function handleLoopRequest(
       const msg =
         spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
       await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-        type: "error",
-        code: "SPAWN_FAILED",
+        type: LoopEventType.Error,
+        code: LoopErrorCode.SpawnFailed,
         message: msg,
       });
       Observability.preflightSpawnFailed(
