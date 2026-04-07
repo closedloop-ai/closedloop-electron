@@ -55,7 +55,23 @@ describe("T-6.1: EVALUATE_FEATURE dispatch validation", () => {
     );
 
     assert.notEqual(response.status, 400, `Expected non-400, got ${response.status}`);
-  });});
+  });
+
+  test("(6) EVALUATE_FEATURE without FEATURE artifact returns 400", async () => {
+    await setupStubClaude(makeTempDir("ef-missing-feature"));
+    const server = makeGatewayServer();
+    await server.start();
+
+    const response = await postToLoopEndpoint(server.getActivePort(), {
+      loopId: "ef000006-0000-0000-0000-000000000006",
+      command: "EVALUATE_FEATURE",
+      closedLoopAuthToken: "cl-token",
+      artifacts: [],
+    });
+
+    assert.equal(response.status, 400, `Expected 400, got ${response.status}`);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // T-6.1: writeFeatureArtifact unit tests
@@ -91,21 +107,6 @@ describe("T-6.1: writeFeatureArtifact", () => {
       { type: "PRD", content: "PRD-only content" },
     ]);
     assert.ok(!existsSync(path.join(tmpDir, "prd.md")), "prd.md should not exist for PRD-only artifact");
-  });
-
-  test("(6) EVALUATE_FEATURE without FEATURE artifact returns 400", async () => {
-    await setupStubClaude(makeTempDir("ef-missing-feature"));
-    const server = makeGatewayServer();
-    await server.start();
-
-    const response = await postToLoopEndpoint(server.getActivePort(), {
-      loopId: "ef000006-0000-0000-0000-000000000006",
-      command: "EVALUATE_FEATURE",
-      closedLoopAuthToken: "cl-token",
-      artifacts: [],
-    });
-
-    assert.equal(response.status, 400, `Expected 400, got ${response.status}`);
   });
 
   test("(7) writeFeatureArtifact ignores lowercase feature type", async () => {
@@ -286,22 +287,13 @@ describe("T-6.1: readEvaluateFeatureOutputs", () => {
 describe("T-6.1: artifact upload payload", () => {
   test("(16) upload-artifacts payload includes featureJudges (not on completed event)", async () => {
     const tmpDir = makeTempDir("ef-upload-payload");
-    const fakeBin = path.join(tmpDir, "fake-bin");
-    await fs.mkdir(fakeBin, { recursive: true });
-
-    // stub claude: writes feature-judges.json and exits 0
     const featureJudgesData = JSON.stringify({ scores: [{ judge: "coherence", score: 7 }] });
-    const stubScript = [
+    await setupStubClaude(tmpDir, [
       "#!/bin/sh",
       `echo '${featureJudgesData}' > "$CLOSEDLOOP_WORKDIR/feature-judges.json"`,
       'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
       "exit 0",
-    ].join("\n");
-    await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
-
-    const { setShellPathForTest } = await import("../src/server/shell-path.js");
-    process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-    setShellPathForTest();
+    ]);
 
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
