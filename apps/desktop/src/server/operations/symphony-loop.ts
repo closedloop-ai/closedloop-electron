@@ -21,11 +21,11 @@ import {
 } from "../../main/diagnostics-helpers.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
-import type { LoopTokenStore } from "../../main/loop-token-store.js";
 import {
   finalizeLoopFromRuntime,
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
+import type { LoopTokenStore } from "../../main/loop-token-store.js";
 import { Observability } from "../../main/observability.js";
 import { parseTokenUsage, type ModelTokenUsage } from "../../main/token-usage.js";
 import type {
@@ -3055,14 +3055,17 @@ async function handleLoopRequest(
           env: spawnEnv,
         });
         child.unref();
-      } else if (body.command === "EVALUATE_PRD") {
+      } else if (body.command === "EVALUATE_FEATURE") {
         // REPO_PATH only when a target repo is linked (expandedRepoPath).
-        let evaluatePrdPrompt = `Activate judges:run-judges skill --artifact-type prd --workdir ${claudeWorkDir}.\n`;
+        let evaluateFeaturePrompt = `Activate judges:run-judges skill --artifact-type feature --workdir ${claudeWorkDir}.\n`;
         if (expandedRepoPath) {
-          evaluatePrdPrompt += `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`;
+          evaluateFeaturePrompt += `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`;
         }
-        const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
-        await fs.writeFile(promptFile, evaluatePrdPrompt);
+        const promptFile = path.join(
+          claudeWorkDir,
+          "evaluate-feature-prompt.txt",
+        );
+        await fs.writeFile(promptFile, evaluateFeaturePrompt);
 
         const pipeline = buildClaudePipeline(
           stdinClaudeArgs,
@@ -3076,17 +3079,14 @@ async function handleLoopRequest(
           env: spawnEnv,
         });
         child.unref();
-      } else if (body.command === "EVALUATE_FEATURE") {
+      } else if (body.command === "EVALUATE_PRD") {
         // REPO_PATH only when a target repo is linked (expandedRepoPath).
-        let evaluateFeaturePrompt = `Activate judges:run-judges skill --artifact-type feature --workdir ${claudeWorkDir}.\n`;
+        let evaluatePrdPrompt = `Activate judges:run-judges skill --artifact-type prd --workdir ${claudeWorkDir}.\n`;
         if (expandedRepoPath) {
-          evaluateFeaturePrompt += `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`;
+          evaluatePrdPrompt += `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`;
         }
-        const promptFile = path.join(
-          claudeWorkDir,
-          "evaluate-feature-prompt.txt",
-        );
-        await fs.writeFile(promptFile, evaluateFeaturePrompt);
+        const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
+        await fs.writeFile(promptFile, evaluatePrdPrompt);
 
         const pipeline = buildClaudePipeline(
           stdinClaudeArgs,
