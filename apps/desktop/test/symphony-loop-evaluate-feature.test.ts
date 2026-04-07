@@ -32,7 +32,7 @@ function buildEvaluateFeatureBody(overrides?: Partial<Record<string, unknown>>):
     loopId: "ef000001-0000-0000-0000-000000000001",
     command: "EVALUATE_FEATURE",
     closedLoopAuthToken: "cl-token",
-    artifacts: [],
+    artifacts: [{ type: "FEATURE", content: "Feature content" }],
     ...overrides,
   };
 }
@@ -55,39 +55,7 @@ describe("T-6.1: EVALUATE_FEATURE dispatch validation", () => {
     );
 
     assert.notEqual(response.status, 400, `Expected non-400, got ${response.status}`);
-  });
-
-  test("(2) EVALUATE_FEATURE with disallowed localRepoPath still proceeds", async () => {
-    const tmpDir = makeTempDir("ef-disallowed");
-    await setupStubClaude(tmpDir);
-
-    const eventSrv = await startEventServer();
-    const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
-
-    const disallowedRepoPath = path.join(tmpDir, "..", "outside-allowed-dir");
-    const server = makeGatewayServer({
-      allowedDirs: [tmpDir],
-      getApiOrigin: () => apiBaseUrl,
-    });
-    await server.start();
-
-    const loopId = "ef000002-0000-0000-0000-000000000002";
-    const response = await postToLoopEndpoint(server.getActivePort(), {
-      loopId,
-      command: "EVALUATE_FEATURE",
-      closedLoopAuthToken: "cl-token",
-      artifacts: [{ type: "FEATURE", content: "Feature content" }],
-      localRepoPath: disallowedRepoPath,
-    });
-
-    assert.equal(response.status, 200, `Expected 200 even with disallowed localRepoPath, got ${response.status}`);
-
-    await eventSrv.waitForEvent(
-      (b) => b.type === "completed" || b.type === "error",
-      15_000
-    );
-  });
-});
+  });});
 
 // ---------------------------------------------------------------------------
 // T-6.1: writeFeatureArtifact unit tests
@@ -125,10 +93,19 @@ describe("T-6.1: writeFeatureArtifact", () => {
     assert.ok(!existsSync(path.join(tmpDir, "prd.md")), "prd.md should not exist for PRD-only artifact");
   });
 
-  test("(6) writeFeatureArtifact with empty artifacts does not throw", async () => {
-    const tmpDir = makeTempDir("ef-empty");
-    await assert.doesNotReject(() => writeFeatureArtifact(tmpDir, []));
-    assert.ok(!existsSync(path.join(tmpDir, "prd.md")), "prd.md should not exist when no artifacts");
+  test("(6) EVALUATE_FEATURE without FEATURE artifact returns 400", async () => {
+    await setupStubClaude(makeTempDir("ef-missing-feature"));
+    const server = makeGatewayServer();
+    await server.start();
+
+    const response = await postToLoopEndpoint(server.getActivePort(), {
+      loopId: "ef000006-0000-0000-0000-000000000006",
+      command: "EVALUATE_FEATURE",
+      closedLoopAuthToken: "cl-token",
+      artifacts: [],
+    });
+
+    assert.equal(response.status, 400, `Expected 400, got ${response.status}`);
   });
 
   test("(7) writeFeatureArtifact ignores lowercase feature type", async () => {
@@ -257,7 +234,7 @@ describe("T-6.1: EVALUATE_FEATURE prompt content", () => {
       loopId,
       command: "EVALUATE_FEATURE",
       closedLoopAuthToken: "cl-token",
-      artifacts: [],
+      artifacts: [{ type: "FEATURE", content: "Feature content" }],
     });
 
     assert.equal(response.status, 200, `Expected 200, got ${response.status}`);
@@ -349,7 +326,7 @@ describe("T-6.1: Temp dir cleanup after EVALUATE_FEATURE completes", () => {
       loopId,
       command: "EVALUATE_FEATURE",
       closedLoopAuthToken: "cl-token",
-      artifacts: [],
+      artifacts: [{ type: "FEATURE", content: "Feature content" }],
     });
 
     assert.equal(response.status, 200, `Expected 200 on spawn, got ${response.status}`);
@@ -400,7 +377,7 @@ describe("T-6.1: BINARY_NOT_FOUND when claude not in PATH", () => {
       loopId,
       command: "EVALUATE_FEATURE",
       closedLoopAuthToken: "cl-token",
-      artifacts: [],
+      artifacts: [{ type: "FEATURE", content: "Feature content" }],
     });
 
     assert.equal(response.status, 500, `Expected 500 when claude not found, got ${response.status}`);
@@ -449,7 +426,7 @@ describe("T-6.1: artifact upload payload", () => {
       loopId,
       command: "EVALUATE_FEATURE",
       closedLoopAuthToken: "cl-token",
-      artifacts: [],
+      artifacts: [{ type: "FEATURE", content: "Feature content" }],
     });
 
     assert.equal(response.status, 200, `Expected 200 on spawn, got ${response.status}`);

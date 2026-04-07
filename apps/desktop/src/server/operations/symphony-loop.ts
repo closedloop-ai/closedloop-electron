@@ -2480,6 +2480,18 @@ async function handleLoopRequest(
     return;
   }
 
+  if (body.command === "EVALUATE_FEATURE") {
+    const hasFeatureArtifact = body.artifacts.some(
+      (a: LoopArtifact) => a.type === "FEATURE",
+    );
+    if (!hasFeatureArtifact) {
+      json(context, 400, {
+        error: "EVALUATE_FEATURE requires a FEATURE artifact",
+      });
+      return;
+    }
+  }
+
   if (body.command === "EVALUATE_PLAN") {
     const hasPrdArtifact = body.artifacts.some((a: LoopArtifact) =>
       ["PRD", "prd", "FEATURE"].includes(a.type),
