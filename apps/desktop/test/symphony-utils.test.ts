@@ -66,14 +66,6 @@ describe("readProcessPidSync", () => {
     assert.equal(readProcessPidSync(dir), null);
   });
 
-  test("returns null when only legacy .claude/work exists (no fallback)", () => {
-    const dir = makeTempDir();
-    const legacyWorkDir = path.join(dir, ".claude", "work");
-    mkdirSync(legacyWorkDir, { recursive: true });
-    writeFileSync(path.join(legacyWorkDir, "process.pid"), "99999");
-
-    assert.equal(readProcessPidSync(dir), null);
-  });
 });
 
 // --- isProcessRunning ---

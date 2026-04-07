@@ -585,6 +585,7 @@ async function postLoopEvent(
   loopId: string,
   token: string,
   eventBody: Record<string, unknown>,
+  signal?: AbortSignal,
 ): Promise<{ success: boolean; error?: string }> {
   const url = `${apiBaseUrl}/loops/${loopId}/events`;
   // Auto-inject timestamp on every event (matches ECS harness reportEvent())
@@ -602,6 +603,7 @@ async function postLoopEvent(
         "x-loop-event-nonce": crypto.randomUUID(),
       },
       body: JSON.stringify(payload),
+      signal,
     });
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
@@ -633,6 +635,24 @@ async function postLoopEvent(
       `POST ${payload.type} network error: ${msg}`,
     );
     return { success: false, error: msg };
+  }
+}
+
+async function postLoopEventBounded(
+  apiBaseUrl: string,
+  loopId: string,
+  token: string,
+  eventBody: Record<string, unknown>,
+  timeoutMs = 1000,
+): Promise<{ success: boolean; error?: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await postLoopEvent(apiBaseUrl, loopId, token, eventBody, controller.signal);
+  } catch {
+    return { success: false, error: "timeout" };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -995,7 +1015,7 @@ async function writeArtifactsForExecuteOrAmend(
 /**
  * Write context pack files for GENERATE_PRD command.
  * Mirrors writeContextPackFiles in harness-agent.mjs (lines 744-816).
- * Files go under worktreeDir/.claude/context/ (NOT claudeWorkDir).
+ * Files go under worktreeDir/.closedloop-ai/context/ (NOT claudeWorkDir).
  */
 async function writeArtifactsForGeneratePrd(
   worktreeDir: string,
@@ -2541,6 +2561,12 @@ async function handleLoopRequest(
         );
         if ("error" in repoResult) {
           if (repoRequirement === "REQUIRED") {
+            await postLoopEventBounded(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+              type: "error",
+              code: "REPO_NOT_ALLOWED",
+              message: "Repository path not allowed by sandbox policy",
+            });
+            // runningLoops.delete handled by finally block
             json(context, repoResult.status, { error: repoResult.error });
             return;
           }
@@ -2569,6 +2595,12 @@ async function handleLoopRequest(
         } catch (err) {
           if (err instanceof DirectoryNotAllowedError) {
             if (repoRequirement === "REQUIRED") {
+              await postLoopEventBounded(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+                type: "error",
+                code: "REPO_NOT_ALLOWED",
+                message: "Repository path not allowed by sandbox policy",
+              });
+              // runningLoops.delete handled by finally block
               json(context, 403, { error: "Repository path not allowed" });
               return;
             }
@@ -2583,6 +2615,12 @@ async function handleLoopRequest(
         }
       } else {
         if (repoRequirement === "REQUIRED") {
+          await postLoopEventBounded(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+            type: "error",
+            code: "REPO_NOT_FOUND",
+            message: `Repository not found locally: ${body.repo.fullName}`,
+          });
+          // runningLoops.delete handled by finally block (spawnedSuccessfully remains false)
           json(context, 404, {
             error: `Repository not found locally: ${body.repo.fullName}`,
           });
