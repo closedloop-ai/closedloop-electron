@@ -477,13 +477,9 @@ function readArtifacts(
     const judges = readJsonFileSync(path.join(claudeWorkDir, "code-judges.json"));
     return { codeJudges: judges ?? undefined };
   }
-  if (command === "GENERATE_PRD") {
+  if (command === "GENERATE_PRD" || command === "REQUEST_PRD_CHANGES") {
     const baseDir = worktreeDir ?? claudeWorkDir;
     const prdContent = readTextFile(path.join(baseDir, "prd.md"));
-    return { prd: prdContent ? { content: prdContent } : undefined };
-  }
-  if (command === "REQUEST_PRD_CHANGES") {
-    const prdContent = readTextFile(path.join(claudeWorkDir, "prd.md"));
     return { prd: prdContent ? { content: prdContent } : undefined };
   }
   return {};

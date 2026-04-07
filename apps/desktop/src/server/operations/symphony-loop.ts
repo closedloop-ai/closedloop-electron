@@ -2013,7 +2013,7 @@ async function handleProcessCompletion(
     if (command === "PLAN" || command === "REQUEST_CHANGES") {
       artifacts = readPlanOutputs(claudeWorkDir);
     } else if (command === "REQUEST_PRD_CHANGES") {
-      artifacts = readGeneratePrdOutputs(claudeWorkDir);
+      artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
     } else if (command === "EXECUTE") {
       artifacts = readExecuteOutputs(claudeWorkDir);
 
@@ -3121,8 +3121,7 @@ async function handleLoopRequest(
         });
         child.unref();
       } else if (body.command === "REQUEST_PRD_CHANGES") {
-        // REQUEST_PRD_CHANGES: amend the PRD. Output to claudeWorkDir (not worktreeDir)
-        // to avoid leaking prd.md into git operations for EXECUTE/REQUEST_CHANGES.
+        // REQUEST_PRD_CHANGES: amend the PRD. Output to worktreeDir root (same as GENERATE_PRD).
         const { claudeArgs, sanitizedPrompt } = buildAmendClaudeArgs(
           baseClaudeArgs,
           body.parentSessionId,
@@ -3130,8 +3129,9 @@ async function handleLoopRequest(
           "Please amend the PRD based on the requested changes.",
         );
         const prdPath = path.join(claudeWorkDir, "prd.md");
+        const outputPath = path.join(worktreeDir!, "prd.md");
         claudeArgs.push(
-          `Read the PRD at ${prdPath} and the change request. Update the PRD in place at ${prdPath}. Change request: "${sanitizedPrompt}"`,
+          `Read the PRD at ${prdPath} and the change request. Update the PRD and write the result to ${outputPath}. Change request: "${sanitizedPrompt}"`,
         );
 
         const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir);
