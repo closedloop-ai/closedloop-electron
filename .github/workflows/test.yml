@@ -168,7 +168,7 @@ jobs:
         id: quarantine
         shell: bash
         run: |
-          set +e
+          set -o pipefail
           shopt -s nullglob
           files=(apps/desktop/test/quarantine/*.test.ts)
           if [ ${#files[@]} -eq 0 ]; then
@@ -176,8 +176,11 @@ jobs:
             exit 0
           fi
           echo "### Quarantined tests" >> "$GITHUB_STEP_SUMMARY"
+          # Job has continue-on-error: true, so a real failure here surfaces as
+          # a yellow non-blocking warning rather than blocking the merge. Do
+          # NOT mask the exit code with `exit 0` -- that would render real
+          # quarantine breakages as silent green checks.
           pnpm -C apps/desktop test:quarantine 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
-          exit 0
 
   pr-gates:
     name: PR gates
