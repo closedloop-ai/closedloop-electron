@@ -3125,38 +3125,22 @@ async function handleLoopRequest(
           env: spawnEnv,
         });
         child.unref();
-      } else if (body.command === "EVALUATE_PRD") {
-        // REPO_PATH only when a target repo is linked (expandedRepoPath).
-        let evaluatePrdPrompt = `Activate judges:run-judges skill --artifact-type prd --workdir ${claudeWorkDir}.\n`;
+      } else if (
+        body.command === "EVALUATE_PRD" ||
+        body.command === "EVALUATE_FEATURE"
+      ) {
+        // EVALUATE_PRD and EVALUATE_FEATURE share identical spawn logic,
+        // differing only in the artifact type passed to run-judges.
+        // REPO_PATH is optional for these — only added when a target repo is linked.
+        const artifactType =
+          body.command === "EVALUATE_PRD" ? "prd" : "feature";
+        const label = `evaluate-${artifactType}`;
+        let prompt = `Activate judges:run-judges skill --artifact-type ${artifactType} --workdir ${claudeWorkDir}.\n`;
         if (expandedRepoPath) {
-          evaluatePrdPrompt += `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`;
+          prompt += `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`;
         }
-        const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
-        await fs.writeFile(promptFile, evaluatePrdPrompt);
-
-        const pipeline = buildClaudePipeline(
-          stdinClaudeArgs,
-          claudeWorkDir,
-          promptFile,
-        );
-        child = spawn(pipeline.cmd, pipeline.args, {
-          cwd: claudeWorkDir,
-          detached: true,
-          stdio: ["ignore", logFd, logFd],
-          env: spawnEnv,
-        });
-        child.unref();
-      } else if (body.command === "EVALUATE_FEATURE") {
-        // REPO_PATH only when a target repo is linked (expandedRepoPath).
-        let evaluateFeaturePrompt = `Activate judges:run-judges skill --artifact-type feature --workdir ${claudeWorkDir}.\n`;
-        if (expandedRepoPath) {
-          evaluateFeaturePrompt += `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`;
-        }
-        const promptFile = path.join(
-          claudeWorkDir,
-          "evaluate-feature-prompt.txt",
-        );
-        await fs.writeFile(promptFile, evaluateFeaturePrompt);
+        const promptFile = path.join(claudeWorkDir, `${label}-prompt.txt`);
+        await fs.writeFile(promptFile, prompt);
 
         const pipeline = buildClaudePipeline(
           stdinClaudeArgs,
