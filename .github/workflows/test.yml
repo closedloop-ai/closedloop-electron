@@ -11,13 +11,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
       packages: read
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -42,8 +42,155 @@ jobs:
       - name: Lint
         run: pnpm -C apps/desktop lint
 
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate build info
+        run: pnpm -r prebuild
+
       - name: Typecheck
         run: pnpm typecheck
 
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate build info
+        run: pnpm -r prebuild
+
       - name: Run tests
         run: pnpm test
+
+  contract-tests:
+    name: Contract tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate build info
+        run: pnpm -r prebuild
+
+      - name: Run contract tests
+        run: pnpm -C apps/desktop test:contract
+
+  quarantine:
+    name: Quarantined tests (non-blocking)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate build info
+        run: pnpm -r prebuild
+
+      - name: Run quarantined tests
+        id: quarantine
+        shell: bash
+        run: |
+          set +e
+          shopt -s nullglob
+          files=(apps/desktop/test/quarantine/*.test.ts)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No quarantined tests." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "### Quarantined tests" >> "$GITHUB_STEP_SUMMARY"
+          pnpm -C apps/desktop test:quarantine 2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          exit 0
+
+  pr-gates:
+    name: PR gates
+    needs: [lint, typecheck, test, contract-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate required gate results
+        run: |
+          for result in "${{ needs.lint.result }}" "${{ needs.typecheck.result }}" "${{ needs.test.result }}" "${{ needs.contract-tests.result }}"; do
+            if [ "$result" != "success" ]; then
+              echo "A required gate failed: $result"
+              exit 1
+            fi
+          done
+          echo "All required gates passed."
