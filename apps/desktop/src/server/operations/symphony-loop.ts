@@ -176,6 +176,7 @@ const SUPPORTED_COMMANDS = new Set<LoopCommand>([
   "REQUEST_CHANGES",
   "DECOMPOSE",
   "EVALUATE_PRD",
+  "EVALUATE_FEATURE",
   "GENERATE_PRD",
   "EVALUATE_PLAN",
   "EVALUATE_CODE",
@@ -190,6 +191,7 @@ const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
   REQUEST_CHANGES: "REQUIRED",
   REQUEST_PRD_CHANGES: "REQUIRED",
   EVALUATE_PRD: "OPTIONAL",
+  EVALUATE_FEATURE: "OPTIONAL",
   GENERATE_PRD: "REQUIRED",
   DECOMPOSE: "NOT_REQUIRED",
   EVALUATE_PLAN: "REQUIRED",
@@ -263,6 +265,22 @@ export async function writePlanArtifact(
   await writePlanFileToWorkDir(workDir, artifacts);
 }
 
+/** Write prd.md to a work directory from a FEATURE-type artifact. */
+export async function writeFeatureArtifact(
+  workDir: string,
+  artifacts: LoopArtifact[],
+): Promise<void> {
+  const featureArtifact = artifacts.find(
+    (a) => a.type === LoopArtifactType.Feature,
+  );
+  if (featureArtifact?.content) {
+    await fs.writeFile(
+      path.join(workDir, LoopArtifactFile.Prd),
+      featureArtifact.content,
+    );
+  }
+}
+
 /** Write plan.md to a work directory from a list of artifacts. */
 export async function writeCodeArtifact(
   workDir: string,
@@ -301,6 +319,12 @@ export function readEvaluateCodeOutputs(
   workDir: string,
 ): Record<string, unknown> {
   return readEvaluateOutputs(workDir, "code");
+}
+
+export function readEvaluateFeatureOutputs(
+  workDir: string,
+): Record<string, unknown> {
+  return readEvaluateOutputs(workDir, "feature");
 }
 
 interface LoopCommitter {
@@ -2132,6 +2156,8 @@ async function handleProcessCompletion(
       artifacts = readDecomposeOutputs(worktreeDir ?? claudeWorkDir);
     } else if (command === "EVALUATE_PRD") {
       artifacts = readEvaluatePrdOutputs(claudeWorkDir);
+    } else if (command === "EVALUATE_FEATURE") {
+      artifacts = readEvaluateFeatureOutputs(claudeWorkDir);
     } else if (command === "EVALUATE_PLAN") {
       artifacts = readEvaluatePlanOutputs(claudeWorkDir);
     } else if (command === "EVALUATE_CODE") {
@@ -2496,6 +2522,18 @@ async function handleLoopRequest(
     return;
   }
 
+  if (body.command === "EVALUATE_FEATURE") {
+    const hasFeatureArtifact = body.artifacts.some(
+      (a) => a.type === LoopArtifactType.Feature,
+    );
+    if (!hasFeatureArtifact) {
+      json(context, 400, {
+        error: "EVALUATE_FEATURE requires a FEATURE artifact",
+      });
+      return;
+    }
+  }
+
   if (body.command === "EVALUATE_PLAN") {
     const hasPrdArtifact = body.artifacts.some(
       (a) =>
@@ -2703,10 +2741,11 @@ async function handleLoopRequest(
       }
     } else if (
       body.command === "EVALUATE_PRD" ||
+      body.command === "EVALUATE_FEATURE" ||
       body.command === "EVALUATE_PLAN" ||
       body.command === "EVALUATE_CODE"
     ) {
-      // EVALUATE_PRD, EVALUATE_PLAN, and EVALUATE_CODE: use temp dir, no worktree needed.
+      // EVALUATE_PRD, EVALUATE_FEATURE, EVALUATE_PLAN, and EVALUATE_CODE: use temp dir, no worktree needed.
       // Temp dir is intentionally exempt from assertPathAllowed.
       usedTempDir = true;
       const label = body.command.toLowerCase().replace(/_/g, "-");
@@ -2724,6 +2763,8 @@ async function handleLoopRequest(
           await writePlanArtifact(claudeWorkDir, body.artifacts, body.prompt);
         } else if (body.command === "EVALUATE_CODE") {
           await writeCodeArtifact(claudeWorkDir, body.artifacts);
+        } else if (body.command === "EVALUATE_FEATURE") {
+          await writeFeatureArtifact(claudeWorkDir, body.artifacts ?? []);
         }
       } catch (artifactErr) {
         await fs.rm(claudeWorkDir, { recursive: true, force: true });
@@ -2956,6 +2997,7 @@ async function handleLoopRequest(
       body.command === "REQUEST_CHANGES" ||
       body.command === "DECOMPOSE" ||
       body.command === "EVALUATE_PRD" ||
+      body.command === "EVALUATE_FEATURE" ||
       body.command === "GENERATE_PRD" ||
       body.command === "EVALUATE_PLAN" ||
       body.command === "EVALUATE_CODE";
@@ -3091,6 +3133,30 @@ async function handleLoopRequest(
         }
         const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
         await fs.writeFile(promptFile, evaluatePrdPrompt);
+
+        const pipeline = buildClaudePipeline(
+          stdinClaudeArgs,
+          claudeWorkDir,
+          promptFile,
+        );
+        child = spawn(pipeline.cmd, pipeline.args, {
+          cwd: claudeWorkDir,
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: spawnEnv,
+        });
+        child.unref();
+      } else if (body.command === "EVALUATE_FEATURE") {
+        // REPO_PATH only when a target repo is linked (expandedRepoPath).
+        let evaluateFeaturePrompt = `Activate judges:run-judges skill --artifact-type feature --workdir ${claudeWorkDir}.\n`;
+        if (expandedRepoPath) {
+          evaluateFeaturePrompt += `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`;
+        }
+        const promptFile = path.join(
+          claudeWorkDir,
+          "evaluate-feature-prompt.txt",
+        );
+        await fs.writeFile(promptFile, evaluateFeaturePrompt);
 
         const pipeline = buildClaudePipeline(
           stdinClaudeArgs,

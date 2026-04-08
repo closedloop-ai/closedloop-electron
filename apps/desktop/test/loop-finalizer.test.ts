@@ -620,6 +620,40 @@ test("tryUploadArtifacts POSTs artifacts and sets artifactsUploadedAt on success
   assert.ok(persisted?.artifactsUploadedAt);
 });
 
+test("tryUploadArtifacts includes featureJudges for EVALUATE_FEATURE", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const featureJudgesData = { scores: [{ judge: "coherence", score: 7 }] };
+  await fs.writeFile(
+    path.join(claudeWorkDir, "feature-judges.json"),
+    JSON.stringify(featureJudgesData),
+    "utf-8",
+  );
+
+  const jobStore = createStore("step-upload-evaluate-feature");
+  const job = createBaseJob({ claudeWorkDir });
+  jobStore.upsert(job);
+
+  const warnings: string[] = [];
+  const { failed } = await tryUploadArtifacts(
+    job,
+    "EVALUATE_FEATURE",
+    claudeWorkDir,
+    undefined,
+    warnings,
+    artifactDeps(jobStore),
+  );
+
+  assert.equal(failed, false);
+  assert.equal(warnings.length, 0);
+  const uploadCall = fetchCalls.find((c) => c.url.includes("/upload-artifacts"));
+  assert.ok(uploadCall);
+  const body = JSON.parse(uploadCall.body) as {
+    artifacts?: { featureJudges?: unknown };
+  };
+  assert.deepEqual(body.artifacts?.featureJudges, featureJudgesData);
+});
+
 test("tryUploadArtifacts skips upload when artifactsUploadedAt already set", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
