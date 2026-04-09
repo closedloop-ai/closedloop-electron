@@ -323,6 +323,50 @@ export async function setupStubClaude(tmpDir: string, scriptLines?: string[]): P
   setShellPathForTest();
 }
 
+/**
+ * Create a fake `claude` binary that emits one stream-json line, then blocks
+ * polling for `releaseSentinel` to appear. Tests use this to eliminate the race
+ * between (a) the loop handler returning HTTP 200 after spawn and (b) the
+ * post-completion cleanup that removes claudeWorkDir. The test can safely read
+ * files from claudeWorkDir while the stub is blocked, then create the sentinel
+ * to let the stub exit and trigger the normal completion path.
+ *
+ * Returns a `release()` callback that creates the sentinel file (call this
+ * from the test once you've finished asserting on files in claudeWorkDir).
+ */
+export async function setupStubClaudeBlocking(
+  tmpDir: string,
+  releaseSentinel: string,
+): Promise<{ release: () => Promise<void> }> {
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  // Shell-quote the sentinel path so paths with spaces or special chars work.
+  const quoted = `'${releaseSentinel.replaceAll("'", "'\\''")}'`;
+  const stubScript = [
+    "#!/bin/sh",
+    // One stream-json line so any stdout consumer (grep in buildClaudePipeline,
+    // tailer, etc.) sees output before we block.
+    'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
+    // Bounded poll loop: wait up to ~10s for the test to release us. The test
+    // should always release within milliseconds; the cap exists so a test bug
+    // can't hang the suite indefinitely.
+    "i=0",
+    `while [ ! -f ${quoted} ] && [ $i -lt 500 ]; do`,
+    "  sleep 0.02",
+    "  i=$((i+1))",
+    "done",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+  return {
+    release: async () => {
+      await fs.writeFile(releaseSentinel, "");
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Evaluate-test infrastructure (shared by evaluate-plan, evaluate-code, etc.)
 // ---------------------------------------------------------------------------

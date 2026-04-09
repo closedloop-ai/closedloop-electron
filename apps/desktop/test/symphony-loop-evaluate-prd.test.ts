@@ -14,7 +14,10 @@ import {
 import { LoopArtifactType } from "@closedloop-ai/loops-api/artifacts";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
-import { setupStubClaude } from "./symphony-test-utils.js";
+import {
+  setupStubClaude,
+  setupStubClaudeBlocking,
+} from "./symphony-test-utils.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 
 // ---------------------------------------------------------------------------
@@ -236,19 +239,14 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
 
   test("EVALUATE_PRD ignores stale repo.fullName and still proceeds", async () => {
     const tmpDir = makeTempDir();
-    const fakeBin = path.join(tmpDir, "fake-bin");
-    await fs.mkdir(fakeBin, { recursive: true });
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
 
-    const stubScript = [
-      "#!/bin/sh",
-      'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
-      "exit 0",
-    ].join("\n");
-    await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
-    process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-    setShellPathForTest();
+    // Blocking stub keeps the child process alive until we release it, so the
+    // post-completion cleanup that removes claudeWorkDir cannot race with the
+    // file assertions below.
+    const releaseSentinel = path.join(tmpDir, "release-stub");
+    const stub = await setupStubClaudeBlocking(tmpDir, releaseSentinel);
 
     const server = makeGatewayServer({
       allowedDirs: [tmpDir],
@@ -287,6 +285,9 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
       `Prompt should not include REPO_PATH for stale repo metadata, got: ${promptContent}`
     );
 
+    // Release the stub now that we've finished asserting on claudeWorkDir.
+    await stub.release();
+
     await eventSrv.waitForEvent(
       (b) => b.type === "completed" || b.type === "error",
       15_000
@@ -295,19 +296,11 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
 
   test("EVALUATE_PRD ignores disallowed localRepoPath and still proceeds", async () => {
     const tmpDir = makeTempDir();
-    const fakeBin = path.join(tmpDir, "fake-bin");
-    await fs.mkdir(fakeBin, { recursive: true });
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
 
-    const stubScript = [
-      "#!/bin/sh",
-      'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
-      "exit 0",
-    ].join("\n");
-    await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
-    process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-    setShellPathForTest();
+    const releaseSentinel = path.join(tmpDir, "release-stub");
+    const stub = await setupStubClaudeBlocking(tmpDir, releaseSentinel);
 
     const disallowedRepoPath = path.join(tmpDir, "..", "outside-allowed-dir");
     const server = makeGatewayServer({
@@ -346,6 +339,8 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
       !promptContent.includes("REPO_PATH"),
       `Prompt should not include REPO_PATH for disallowed localRepoPath, got: ${promptContent}`
     );
+
+    await stub.release();
 
     await eventSrv.waitForEvent(
       (b) => b.type === "completed" || b.type === "error",
@@ -433,22 +428,11 @@ describe("T-5.2: writePrdArtifact", () => {
   test("prompt without repo contains skill --workdir runDir but not REPO_PATH=", async () => {
     // Verify evaluate-prd-prompt.txt matches harness-agent EVALUATE_PRD when no target repo.
     const tmpDir = makeTempDir();
-    const fakeBin = path.join(tmpDir, "fake-bin");
-    await fs.mkdir(fakeBin, { recursive: true });
-
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
 
-    // stub claude: reads stdin (the prompt), exits 0
-    const stubScript = [
-      "#!/bin/sh",
-      // One stream-json line starting with { so grep in buildClaudePipeline succeeds.
-      'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
-      "exit 0",
-    ].join("\n");
-    await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
-    process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-    setShellPathForTest();
+    const releaseSentinel = path.join(tmpDir, "release-stub");
+    const stub = await setupStubClaudeBlocking(tmpDir, releaseSentinel);
 
     const server = makeGatewayServer({ getApiOrigin: () => apiBaseUrl });
     await server.start();
@@ -475,15 +459,14 @@ describe("T-5.2: writePrdArtifact", () => {
 
     assert.equal(response.status, 200, `Expected 200, got ${response.status}`);
 
-    // Read the prompt file before waiting for the completed event.
-    // The file is written before the HTTP 200 response is sent, so it is safe
-    // to read here. After the completed event fires, production code calls
-    // fs.rm(claudeWorkDir) fire-and-forget, which races with async readFile.
+    // Stub is blocked, so claudeWorkDir cannot be cleaned up while we read here.
     const claudeWorkDir = path.join(os.tmpdir(), `symphony-evaluate-prd-${loopId.slice(0, 8)}`);
     const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
 
     assert.ok(existsSync(promptFile), `Prompt file should exist at ${promptFile}`);
     const promptContent = await fs.readFile(promptFile, "utf-8");
+
+    await stub.release();
 
     // Wait for completed or error event
     await eventSrv.waitForEvent(
@@ -506,21 +489,11 @@ describe("T-5.2: writePrdArtifact", () => {
   test("prompt with repo contains --workdir runDir and REPO_PATH=", async () => {
     // Use a real local repo directory to test repo-present prompt
     const tmpDir = makeTempDir();
-    const fakeBin = path.join(tmpDir, "fake-bin");
-    await fs.mkdir(fakeBin, { recursive: true });
-
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
 
-    const stubScript = [
-      "#!/bin/sh",
-      // One stream-json line starting with { so grep in buildClaudePipeline succeeds.
-      'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
-      "exit 0",
-    ].join("\n");
-    await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
-    process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-    setShellPathForTest();
+    const releaseSentinel = path.join(tmpDir, "release-stub");
+    const stub = await setupStubClaudeBlocking(tmpDir, releaseSentinel);
 
     // Create a fake repo dir with the expected naming for findLocalRepo
     // findLocalRepo looks for a dir matching the repo's base name inside allowed dirs
@@ -556,15 +529,14 @@ describe("T-5.2: writePrdArtifact", () => {
 
     assert.equal(response.status, 200, `Expected 200, got ${response.status}`);
 
-    // Read the prompt file before waiting for the completed event.
-    // The file is written before the HTTP 200 response is sent, so it is safe
-    // to read here. After the completed event fires, production code calls
-    // fs.rm(claudeWorkDir) fire-and-forget, which races with async readFile.
+    // Stub is blocked, so claudeWorkDir cannot be cleaned up while we read here.
     const claudeWorkDir = path.join(os.tmpdir(), `symphony-evaluate-prd-${loopId.slice(0, 8)}`);
     const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
 
     assert.ok(existsSync(promptFile), `Prompt file should exist at ${promptFile}`);
     const promptContent = await fs.readFile(promptFile, "utf-8");
+
+    await stub.release();
 
     await eventSrv.waitForEvent(
       (b) => b.type === "completed" || b.type === "error",
