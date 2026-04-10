@@ -35,17 +35,14 @@ const NETWORK_GIT_TIMEOUT = 30_000;
 // Logging helpers (shared with symphony-loop.ts)
 // ---------------------------------------------------------------------------
 
-export function loopLog(loopId: string | undefined, ...args: unknown[]): void {
-  const short = (loopId ?? "????????").slice(0, 8);
+export function loopLog(loopId: string, ...args: unknown[]): void {
+  const short = loopId.slice(0, 8);
   const ts = new Date().toISOString().slice(11, 23);
   console.log(`[symphony-loop][${ts}][${short}]`, ...args);
 }
 
-export function loopError(
-  loopId: string | undefined,
-  ...args: unknown[]
-): void {
-  const short = (loopId ?? "????????").slice(0, 8);
+export function loopError(loopId: string, ...args: unknown[]): void {
+  const short = loopId.slice(0, 8);
   const ts = new Date().toISOString().slice(11, 23);
   console.error(`[symphony-loop][${ts}][${short}]`, ...args);
 }
@@ -80,19 +77,19 @@ export function sanitizeTicketId(ticketId: string): string {
 
 export function resolveWorktreeDir(
   expandedRepoPath: string,
-  ticketId: string
+  ticketId: string,
 ): string {
   const sanitizedTicket = sanitizeTicketId(ticketId);
   const repoName = path.basename(expandedRepoPath);
   return path.join(
     resolveWorktreeParentDir(expandedRepoPath),
-    `${repoName}-${sanitizedTicket}`
+    `${repoName}-${sanitizedTicket}`,
   );
 }
 
 export function assertRepoAllowed(
   repoPath: string,
-  allowedDirectories: string[]
+  allowedDirectories: string[],
 ): string {
   const expandedRepoPath = expandHome(repoPath);
   try {
@@ -161,11 +158,7 @@ export async function runLoopsSetupScript(
   worktreeDir: string,
   loopId: string,
 ): Promise<void> {
-  const scriptPath = path.join(
-    worktreeDir,
-    ".closedloop-ai",
-    "loops-setup.sh",
-  );
+  const scriptPath = path.join(worktreeDir, ".closedloop-ai", "loops-setup.sh");
   if (!existsSync(scriptPath)) return;
 
   loopLog(loopId, `Running loops-setup.sh in ${worktreeDir}`);
@@ -215,7 +208,10 @@ export function saveWorktreeState(worktreeDir: string): SavedWorktreeState {
 
   let savedClaudeAgentsDir: string | null = null;
   if (existsSync(claudeAgentsDir)) {
-    savedClaudeAgentsDir = path.join(os.tmpdir(), `worktree-claude-agents-${ts}`);
+    savedClaudeAgentsDir = path.join(
+      os.tmpdir(),
+      `worktree-claude-agents-${ts}`,
+    );
     renameSync(claudeAgentsDir, savedClaudeAgentsDir);
   }
 
@@ -233,7 +229,7 @@ export function saveWorktreeState(worktreeDir: string): SavedWorktreeState {
  */
 export function restoreWorktreeState(
   saved: SavedWorktreeState,
-  worktreeDir: string
+  worktreeDir: string,
 ): void {
   const { savedClaudeAgentsDir, savedClosedloopDir } = saved;
 
@@ -335,7 +331,7 @@ function checkoutBranch(worktreeDir: string, branchName: string): void {
         cwd: worktreeDir,
         stdio: "pipe",
         timeout: LOCAL_GIT_TIMEOUT,
-      }
+      },
     );
     return;
   } catch {
@@ -416,7 +412,7 @@ function ensureWorktree(
   repoPath: string,
   worktreeDir: string,
   branchName?: string,
-  baseBranch?: string
+  baseBranch?: string,
 ): void {
   fetchOrigin(repoPath);
 
@@ -431,7 +427,7 @@ function ensureWorktree(
       const fallbackRef = resolveRef(repoPath, baseBranch ?? "main");
       if (!fallbackRef) {
         throw new Error(
-          `Branch '${branchName}' not found (may have been deleted after merge) and base branch '${baseBranch ?? "main"}' also not found`
+          `Branch '${branchName}' not found (may have been deleted after merge) and base branch '${baseBranch ?? "main"}' also not found`,
         );
       }
       addWorktree(repoPath, worktreeDir, fallbackRef);
@@ -456,7 +452,7 @@ export function ensureWorktreeForReview(
   worktreeDir: string,
   branchName: string | undefined,
   useBaseRepo: boolean,
-  baseBranch?: string
+  baseBranch?: string,
 ): { status: number; message: string } | null {
   if (useBaseRepo) {
     return null;
@@ -486,7 +482,7 @@ export function ensureWorktreeForReview(
 
 export function tryAssertRepoAllowed(
   repoPath: string,
-  allowedDirs: string[]
+  allowedDirs: string[],
 ): { path: string } | { error: string; status: 403 } {
   try {
     return { path: assertRepoAllowed(repoPath, allowedDirs) };
@@ -500,7 +496,7 @@ export function tryAssertRepoAllowed(
 
 export function tryAssertPathAllowed(
   dirPath: string,
-  allowedDirs: string[]
+  allowedDirs: string[],
 ): true | { error: string; status: 403 } {
   try {
     assertPathAllowed(dirPath, allowedDirs);
@@ -528,7 +524,12 @@ export function chatHistoryFilename(provider?: string | null): string {
  * Returns null if file doesn't exist or is invalid.
  */
 export function readProcessPidSync(worktreeDir: string): number | null {
-  const pidPath = path.join(worktreeDir, ".closedloop-ai", "work", "process.pid");
+  const pidPath = path.join(
+    worktreeDir,
+    ".closedloop-ai",
+    "work",
+    "process.pid",
+  );
 
   try {
     const pidContent = readFileSync(pidPath, "utf-8");
@@ -564,20 +565,23 @@ export type LaunchMetadata = {
  * Read launch metadata from {worktreeDir}/.closedloop-ai/work/launch-metadata.json.
  */
 export function readLaunchMetadata(worktreeDir: string): LaunchMetadata | null {
-  const metaPath = path.join(worktreeDir, ".closedloop-ai", "work", "launch-metadata.json");
+  const metaPath = path.join(
+    worktreeDir,
+    ".closedloop-ai",
+    "work",
+    "launch-metadata.json",
+  );
 
   try {
     const content = readFileSync(metaPath, "utf-8");
     const parsed = JSON.parse(content) as Record<string, unknown>;
     return {
-      issueId:
-        typeof parsed.issueId === "string" ? parsed.issueId : undefined,
+      issueId: typeof parsed.issueId === "string" ? parsed.issueId : undefined,
       ticketTitle:
         typeof parsed.ticketTitle === "string" ? parsed.ticketTitle : undefined,
       artifactId:
         typeof parsed.artifactId === "string" ? parsed.artifactId : undefined,
-      loopId:
-        typeof parsed.loopId === "string" ? parsed.loopId : undefined,
+      loopId: typeof parsed.loopId === "string" ? parsed.loopId : undefined,
       baseBranch:
         typeof parsed.baseBranch === "string" ? parsed.baseBranch : undefined,
       parentTicketId:
@@ -595,7 +599,7 @@ export function readLaunchMetadata(worktreeDir: string): LaunchMetadata | null {
  */
 export function writeLaunchMetadata(
   worktreeDir: string,
-  meta: LaunchMetadata
+  meta: LaunchMetadata,
 ): void {
   const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
   mkdirSync(claudeWorkDir, { recursive: true });
@@ -632,8 +636,8 @@ export function acquireLaunchLock(lockDir: string): { fd: number } | null {
       writeSync(
         fd,
         Buffer.from(
-          JSON.stringify({ pid: process.pid, timestamp: Date.now() })
-        )
+          JSON.stringify({ pid: process.pid, timestamp: Date.now() }),
+        ),
       );
     } catch (writeErr) {
       try {
@@ -725,12 +729,12 @@ function isLockFileOld(lockPath: string): boolean {
 export function getLockDir(
   worktreeParentDir: string,
   repoName: string,
-  sanitizedTicket: string
+  sanitizedTicket: string,
 ): string {
   return path.join(
     worktreeParentDir,
     ".closedloop-ai",
     "locks",
-    `${repoName}-${sanitizedTicket}`
+    `${repoName}-${sanitizedTicket}`,
   );
 }
