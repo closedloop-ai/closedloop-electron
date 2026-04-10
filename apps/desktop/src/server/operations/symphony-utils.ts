@@ -1,4 +1,4 @@
-import { execFileSync, execSync } from "node:child_process";
+import { execFile, execFileSync, execSync } from "node:child_process";
 import {
   closeSync,
   constants,
@@ -18,14 +18,37 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { expandHomePath } from "../../shared/path-utils.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
+import { getShellEnv } from "../shell-path.js";
+
+const execFileAsync = promisify(execFile);
 
 /** Timeout for local-only git commands (rev-parse, checkout, diff, worktree list/prune). */
 const LOCAL_GIT_TIMEOUT = 10_000;
 
 /** Timeout for network-touching git commands (fetch, pull, rebase) and worktree add. */
 const NETWORK_GIT_TIMEOUT = 30_000;
+
+// ---------------------------------------------------------------------------
+// Logging helpers (shared with symphony-loop.ts)
+// ---------------------------------------------------------------------------
+
+export function loopLog(loopId: string | undefined, ...args: unknown[]): void {
+  const short = (loopId ?? "????????").slice(0, 8);
+  const ts = new Date().toISOString().slice(11, 23);
+  console.log(`[symphony-loop][${ts}][${short}]`, ...args);
+}
+
+export function loopError(
+  loopId: string | undefined,
+  ...args: unknown[]
+): void {
+  const short = (loopId ?? "????????").slice(0, 8);
+  const ts = new Date().toISOString().slice(11, 23);
+  console.error(`[symphony-loop][${ts}][${short}]`, ...args);
+}
 
 export class SymphonyDirNotConfiguredError extends Error {
   constructor() {
@@ -122,6 +145,43 @@ function copyEnvLocalFiles(repoPath: string, worktreePath: string): void {
     } catch {
       // Can't copy file (dest dir may not exist in worktree, permission issue, etc.)
     }
+  }
+}
+
+/**
+ * Run the customer's `.closedloop-ai/loops-setup.sh` bootstrap script if it
+ * exists in the worktree.  Non-fatal: failures are logged but never block the
+ * loop from proceeding.
+ *
+ * Async to avoid blocking the Node event loop during long-running setup scripts
+ * (e.g. dependency installs).  Uses getShellEnv() so that the script inherits
+ * the user's full PATH (Electron strips it on launch).
+ */
+export async function runLoopsSetupScript(
+  worktreeDir: string,
+  loopId: string,
+): Promise<void> {
+  const scriptPath = path.join(
+    worktreeDir,
+    ".closedloop-ai",
+    "loops-setup.sh",
+  );
+  if (!existsSync(scriptPath)) return;
+
+  loopLog(loopId, `Running loops-setup.sh in ${worktreeDir}`);
+  try {
+    const env = await getShellEnv();
+    await execFileAsync("bash", [scriptPath], {
+      cwd: worktreeDir,
+      timeout: 600_000, // 10 minutes — enough for dependency installs
+      env,
+    });
+    loopLog(loopId, "loops-setup.sh completed successfully");
+  } catch (err) {
+    loopError(
+      loopId,
+      `loops-setup.sh failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
 
