@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
-import { getShellPath } from "../shell-path.js";
+import { getShellEnv } from "../shell-path.js";
 import { getInstalledPluginVersions, isPluginInstalled } from "./plugin-cache.js";
 import type { ProcessManager } from "../process-manager.js";
 
@@ -69,10 +69,10 @@ export function registerHealthCheckRoutes(
 }
 
 async function runCommand(_processManager: ProcessManager, cmd: string, args: string[]): Promise<string> {
-  const shellPath = await getShellPath();
+  const env = await getShellEnv();
   const { stdout } = await execFileAsync(cmd, args, {
     timeout: 3000,
-    env: { ...process.env, PATH: shellPath },
+    env,
   });
   return stdout.trim();
 }
