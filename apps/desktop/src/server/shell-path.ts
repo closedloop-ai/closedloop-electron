@@ -38,6 +38,7 @@ export async function getShellPath(): Promise<string> {
       const cmd = `echo ${PATH_SENTINEL_START}\${PATH}${PATH_SENTINEL_END}`;
       const { stdout } = await execFileAsync(shell, ["-ilc", cmd], {
         timeout: 3000,
+        env: sanitizeSpawnEnv(process.env),
       });
       return expandTildes(extractPathFromOutput(stdout));
     } catch {
@@ -45,6 +46,20 @@ export async function getShellPath(): Promise<string> {
     }
   })();
   return resolvedPathPromise;
+}
+
+/**
+ * Strip env vars that break nvm and other tooling when the desktop app is
+ * launched via pnpm.  pnpm sets `npm_config_prefix` to the project dir when
+ * running scripts; nvm refuses to initialize in its presence and skips adding
+ * the default node version to PATH.  Always sanitize before spawning shells
+ * or Node-based CLIs (claude, codex, gh, etc.).
+ */
+export function sanitizeSpawnEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const copy = { ...env };
+  delete copy.npm_config_prefix;
+  delete copy.NPM_CONFIG_PREFIX;
+  return copy;
 }
 
 /**
@@ -72,7 +87,7 @@ export async function getShellEnv(
 ): Promise<Record<string, string>> {
   const shellPath = await getShellPath();
   return {
-    ...(process.env as Record<string, string>),
+    ...(sanitizeSpawnEnv(process.env) as Record<string, string>),
     PATH: shellPath,
     ...extra,
   };
