@@ -41,6 +41,9 @@ export class CloudSocketService {
   private helloAckTimer: NodeJS.Timeout | null = null;
   private awaitingHelloAck = false;
   private lastPresenceState: string | null = null;
+  private hadSuccessfulConnection = false;
+  private degradedSince: number | null = null;
+  private recoveryTimer: NodeJS.Timeout | null = null;
 
   constructor(options: CloudSocketOptions) {
     this.options = options;
@@ -77,7 +80,10 @@ export class CloudSocketService {
     this.targetId = null;
     this.awaitingHelloAck = false;
     this.lastPresenceState = null;
+    this.hadSuccessfulConnection = false;
+    this.degradedSince = null;
     this.clearHelloAckTimer();
+    this.clearRecoveryTimer();
     this.disconnectSocket();
   }
 
@@ -155,16 +161,17 @@ export class CloudSocketService {
       this.awaitingHelloAck = false;
       this.clearHelloAckTimer();
       const message = error instanceof Error ? error.message : "connection failed";
-      if (looksLikeAuthError(error)) {
+      if (!this.hadSuccessfulConnection && looksLikeAuthError(error)) {
         gatewayLog.error("cloud-socket", "Authentication failed on connect");
         this.notifyStatus({
           state: "degraded",
-          error: "Authentication failed — verify your API key in Settings"
+          error: "Authentication failed -- verify your API key in Settings"
         });
       } else {
         gatewayLog.error("cloud-socket", `Connection error: ${message}`);
         this.notifyStatus({ state: "degraded", error: `Cloud socket connection failed: ${message}` });
       }
+      this.degradedSince ??= Date.now();
     });
 
     socket.on("disconnect", (reason) => {
@@ -175,6 +182,7 @@ export class CloudSocketService {
       this.awaitingHelloAck = false;
       this.clearHelloAckTimer();
       this.notifyStatus({ state: "degraded", error: `Cloud socket disconnected: ${reason}` });
+      this.degradedSince ??= Date.now();
     });
 
     socket.on("desktop.hello.ack", (payload: unknown) => {
@@ -187,6 +195,8 @@ export class CloudSocketService {
 
       this.targetId = computeTargetId;
       this.awaitingHelloAck = false;
+      this.hadSuccessfulConnection = true;
+      this.degradedSince = null;
       this.clearHelloAckTimer();
       gatewayLog.info("cloud-socket", `Hello ack received, targetId=${computeTargetId}`);
       const ackEvent: DesktopHelloAckEvent = {
@@ -244,6 +254,7 @@ export class CloudSocketService {
     });
 
     socket.connect();
+    this.startRecoveryTimer();
   }
 
   private emitHello(): void {
@@ -308,6 +319,28 @@ export class CloudSocketService {
     this.helloAckTimer = null;
   }
 
+  private startRecoveryTimer(): void {
+    this.clearRecoveryTimer();
+    this.recoveryTimer = setInterval(() => {
+      if (this.stopped || !this.degradedSince) {
+        return;
+      }
+      const elapsed = Date.now() - this.degradedSince;
+      if (elapsed >= RECOVERY_TIMEOUT_MS) {
+        gatewayLog.warn("cloud-socket", `Degraded for ${Math.round(elapsed / 1000)}s, forcing reconnect`);
+        this.restart();
+      }
+    }, RECOVERY_CHECK_INTERVAL_MS);
+  }
+
+  private clearRecoveryTimer(): void {
+    if (!this.recoveryTimer) {
+      return;
+    }
+    clearInterval(this.recoveryTimer);
+    this.recoveryTimer = null;
+  }
+
   private notifyStatus(status: CloudSocketStatus): void {
     this.options.onStatusChange?.(status);
   }
@@ -316,6 +349,8 @@ export class CloudSocketService {
 type EnvelopeOnlyFields = ProtocolEnvelope;
 
 const HELLO_ACK_TIMEOUT_MS = 10_000;
+const RECOVERY_TIMEOUT_MS = 2 * 60_000;
+const RECOVERY_CHECK_INTERVAL_MS = 30_000;
 
 function createEnvelope() {
   return {
@@ -427,29 +462,33 @@ function asQueryRecord(value: unknown): Record<string, string | string[]> | null
   return out;
 }
 
-const AUTH_ERROR_PATTERNS = /\b(auth|unauthorized|forbidden|credentials?|api[_ ]?key|token|401|403)\b/i;
+const AUTH_ERROR_MESSAGE_PATTERN = /\b(unauthorized|forbidden)\b/i;
 
 function looksLikeAuthError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
   }
-  if (AUTH_ERROR_PATTERNS.test(error.message)) {
-    return true;
-  }
   const data = (error as Error & { data?: unknown }).data;
-  if (typeof data === "string" && AUTH_ERROR_PATTERNS.test(data)) {
-    return true;
-  }
+  // Structured status codes from the server are the most reliable signal
   if (data && typeof data === "object") {
     const record = data as Record<string, unknown>;
-    const status = typeof record.status === "number" ? record.status : 0;
-    if (status === 401 || status === 403) {
+    const statusCode =
+      typeof record.statusCode === "number"
+        ? record.statusCode
+        : typeof record.status === "number"
+          ? record.status
+          : 0;
+    if (statusCode === 401 || statusCode === 403) {
       return true;
     }
-    const msg = typeof record.message === "string" ? record.message : "";
-    if (AUTH_ERROR_PATTERNS.test(msg)) {
-      return true;
-    }
+  }
+  // Fall back to message matching, but only for explicit auth keywords
+  // (excludes "token" which appears in engine.io transport messages)
+  if (AUTH_ERROR_MESSAGE_PATTERN.test(error.message)) {
+    return true;
+  }
+  if (typeof data === "string" && AUTH_ERROR_MESSAGE_PATTERN.test(data)) {
+    return true;
   }
   return false;
 }

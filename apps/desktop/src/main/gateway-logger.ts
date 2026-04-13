@@ -68,7 +68,8 @@ export class GatewayLogger {
     if (key === this.lastMessage) return;
     this.lastMessage = key;
 
-    const ts = new Date().toISOString();
+    const now = new Date();
+    const ts = now.toISOString();
     const entry: LogEntry = { timestamp: ts, level, tag, message };
 
     this.buffer.push(entry);
@@ -76,7 +77,13 @@ export class GatewayLogger {
       this.buffer.splice(0, this.buffer.length - MAX_BUFFER_SIZE);
     }
 
-    const short = ts.slice(11, 23);
+    const short = now.toLocaleTimeString('en-US', {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      fractionalSecondDigits: 3,
+    });
     const prefix = `[${tag}][${short}]`;
     if (level === "error") {
       console.error(prefix, message);
