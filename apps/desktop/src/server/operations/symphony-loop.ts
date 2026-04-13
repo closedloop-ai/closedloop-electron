@@ -47,7 +47,9 @@ import {
 import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import {
   expandHome,
+  fetchOrigin,
   isProcessRunning,
+  resolveRef,
   resolveWorktreeParentDir,
   tryAssertRepoAllowed,
 } from "./symphony-utils.js";
@@ -71,7 +73,6 @@ export interface WorktreeProvider {
     loopId?: string,
   ): Promise<void>;
   getCurrentBranch(worktreeDir: string): string | null;
-  checkoutWorktree(repoPath: string, dir: string, branch: string): Promise<void>;
   branchExists(repoPath: string, branch: string): Promise<boolean>;
 }
 
@@ -80,7 +81,6 @@ export const defaultWorktreeProvider: WorktreeProvider = {
   findWorktreeForBranch: findWorktreeForBranchImpl,
   removeWorktree: removeWorktreeImpl,
   getCurrentBranch: getCurrentBranchImpl,
-  checkoutWorktree: checkoutWorktreeImpl,
   branchExists: branchExistsImpl,
 };
 
@@ -880,74 +880,20 @@ async function ensureWorktreeImpl(
   );
 }
 
-/** Check whether a branch ref exists locally. */
-function hasLocalBranch(repoPath: string, branch: string): boolean {
-  try {
-    execSync(
-      `git rev-parse --verify ${shellEscape(`refs/heads/${branch}`)}`,
-      { cwd: repoPath, stdio: "pipe", timeout: 10_000 },
-    );
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Fetch a branch from origin (best-effort, never throws). */
-function fetchBranchFromOrigin(repoPath: string, branch: string): void {
-  try {
-    execSync(`git fetch origin ${shellEscape(branch)}`, {
-      cwd: repoPath,
-      stdio: "pipe",
-      timeout: 30_000,
-    });
-  } catch {
-    // non-fatal
-  }
-}
-
-/**
- * Check out an existing branch into a new worktree directory.
- * Ensures the parent directory exists, checks for a local branch first,
- * fetches from origin only if not found locally, then runs
- * `git worktree add <dir> <branch>`.
- */
-async function checkoutWorktreeImpl(
-  repoPath: string,
-  dir: string,
-  branch: string,
-): Promise<void> {
-  await fs.mkdir(path.dirname(dir), { recursive: true });
-
-  if (!hasLocalBranch(repoPath, branch)) {
-    fetchBranchFromOrigin(repoPath, branch);
-  }
-
-  execSync(
-    `git worktree add ${shellEscape(dir)} ${shellEscape(branch)}`,
-    { cwd: repoPath, stdio: "pipe", timeout: 30_000 },
-  );
-}
-
 /**
  * Check whether a branch exists locally or on the remote.
- * Strategy:
- *   1. Check local ref `refs/heads/<branch>`.
- *   2. If not found, fetch from origin and recheck locally.
- *   3. As a last resort, check `git ls-remote --heads origin <branch>`.
+ * Uses fetchOrigin + resolveRef from symphony-utils (the SSOT for git ref
+ * resolution), with a ls-remote fallback for edge cases where fetch didn't
+ * pull the ref.
  */
 async function branchExistsImpl(repoPath: string, branch: string): Promise<boolean> {
-  if (hasLocalBranch(repoPath, branch)) {
+  fetchOrigin(repoPath);
+
+  if (resolveRef(repoPath, branch) !== null) {
     return true;
   }
 
-  // Fetch from origin and recheck locally
-  fetchBranchFromOrigin(repoPath, branch);
-  if (hasLocalBranch(repoPath, branch)) {
-    return true;
-  }
-
-  // Last resort: ls-remote
+  // Last resort: ls-remote (covers repos with partial fetch refspecs)
   try {
     const output = execSync(
       `git ls-remote --heads origin ${shellEscape(branch)}`,
@@ -3098,10 +3044,10 @@ async function handleLoopRequest(
             worktreeKey + "-" + addRepo.slugifiedBranch,
           );
           try {
-            await wt.checkoutWorktree(addRepo.repoPath, addWorktreeDir, addRepo.branch);
+            await wt.ensureWorktree(addRepo.repoPath, addWorktreeDir, addRepo.branch, addRepo.branch);
           } catch (checkoutErr) {
             const msg = checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr);
-            loopError(body.loopId, `checkoutWorktree failed for additional repo ${addRepo.repoPath}:`, checkoutErr);
+            loopError(body.loopId, `ensureWorktree failed for additional repo ${addRepo.repoPath}:`, checkoutErr);
             await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
             await postLoopEventBounded(
               apiBaseUrl,

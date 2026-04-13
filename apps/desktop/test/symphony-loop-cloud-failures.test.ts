@@ -47,7 +47,6 @@ const fakeWorktreeProvider: WorktreeProvider = {
   getCurrentBranch() {
     return "symphony/cloud-failures-test";
   },
-  checkoutWorktree: async () => {},
   branchExists: async () => true,
 };
 

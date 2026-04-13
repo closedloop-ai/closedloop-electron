@@ -40,7 +40,7 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
- * Extended fakeWorktreeProvider with checkoutWorktree that creates the
+ * Extended fakeWorktreeProvider with ensureWorktree that creates the
  * worktree directory (simulating what the real impl does) and branchExists
  * that always returns true.
  */
@@ -56,9 +56,6 @@ const fakeWorktreeProvider: WorktreeProvider = {
   },
   getCurrentBranch() {
     return "symphony/multi-repo-spawn-test";
-  },
-  checkoutWorktree: async (_rp, worktreeDir) => {
-    await fs.mkdir(worktreeDir, { recursive: true });
   },
   branchExists: async () => true,
 };

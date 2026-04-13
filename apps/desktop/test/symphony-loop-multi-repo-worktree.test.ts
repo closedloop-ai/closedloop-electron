@@ -4,10 +4,10 @@
  * T-7.3: Verify that the worktree provider lifecycle methods are called
  * correctly for PLAN commands with additionalRepos:
  *
- * 1. checkoutWorktree called per additional repo before spawn with correct branch
+ * 1. ensureWorktree called per additional repo before spawn with correct branch
  * 2. removeWorktree called for all additional worktree dirs after successful run
  * 3. removeWorktree called on process failure (run-loop.sh exits 1)
- * 4. checkoutWorktree throws — assert HTTP 400/500 and error event posted
+ * 4. ensureWorktree throws — assert HTTP 400/500 and error event posted
  * 5. assertPathAllowed triggered — worktreeDirs placed outside allowedDirs result in HTTP 403
  */
 
@@ -37,17 +37,21 @@ import {
 /**
  * Build a call-recording WorktreeProvider. Each test should create its own
  * instance so recorded calls don't bleed across tests.
+ *
+ * Records all ensureWorktree calls. For additional-repo tests, filter by
+ * repoPath to distinguish primary from additional repo calls.
  */
 function makeRecordingWorktreeProvider(): {
   provider: WorktreeProvider;
-  checkoutCalls: Array<{ repoPath: string; worktreeDir: string; branch: string }>;
+  ensureWorktreeCalls: Array<{ repoPath: string; worktreeDir: string; branchName: string; baseBranch: string }>;
   removeCalls: Array<{ worktreeDir: string }>;
 } {
-  const checkoutCalls: Array<{ repoPath: string; worktreeDir: string; branch: string }> = [];
+  const ensureWorktreeCalls: Array<{ repoPath: string; worktreeDir: string; branchName: string; baseBranch: string }> = [];
   const removeCalls: Array<{ worktreeDir: string }> = [];
 
   const provider: WorktreeProvider = {
-    async ensureWorktree(_repoPath, worktreeDir) {
+    async ensureWorktree(repoPath, worktreeDir, branchName, baseBranch) {
+      ensureWorktreeCalls.push({ repoPath, worktreeDir, branchName, baseBranch });
       await fs.mkdir(worktreeDir, { recursive: true });
     },
     findWorktreeForBranch() {
@@ -60,14 +64,10 @@ function makeRecordingWorktreeProvider(): {
     getCurrentBranch() {
       return "symphony/worktree-lifecycle-test";
     },
-    async checkoutWorktree(repoPath, worktreeDir, branch) {
-      checkoutCalls.push({ repoPath, worktreeDir, branch });
-      await fs.mkdir(worktreeDir, { recursive: true });
-    },
     branchExists: async () => true,
   };
 
-  return { provider, checkoutCalls, removeCalls };
+  return { provider, ensureWorktreeCalls, removeCalls };
 }
 
 // ---------------------------------------------------------------------------
@@ -121,10 +121,10 @@ async function createTestGateway(
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: checkoutWorktree called per additional repo before spawn
+// Test 1: ensureWorktree called per additional repo before spawn
 // ---------------------------------------------------------------------------
 
-test("checkoutWorktree called for each additional repo with correct branch before spawn", async () => {
+test("ensureWorktree called for each additional repo with correct branch before spawn", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "wt-lifecycle-checkout-"));
   tempPathsToClean.push(tmpDir);
 
@@ -151,7 +151,7 @@ test("checkoutWorktree called for each additional repo with correct branch befor
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
 
-  const { provider, checkoutCalls } = makeRecordingWorktreeProvider();
+  const { provider, ensureWorktreeCalls } = makeRecordingWorktreeProvider();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -182,29 +182,35 @@ test("checkoutWorktree called for each additional repo with correct branch befor
 
   assert.equal(response.status, 200, "PLAN with additionalRepos should return HTTP 200");
 
-  // Wait for the loop to complete so checkoutWorktree calls are captured
+  // Wait for the loop to complete so ensureWorktree calls are captured
   await waitForCompletedEvent(mock.requests, loopId);
 
+  // Filter out the primary repo call — additional repo calls pass the same
+  // branch as both branchName and baseBranch.
+  const additionalCalls = ensureWorktreeCalls.filter(
+    (c) => c.repoPath !== primaryRepo,
+  );
+
   assert.equal(
-    checkoutCalls.length,
+    additionalCalls.length,
     2,
-    `Expected checkoutWorktree called 2 times (once per additional repo), got ${checkoutCalls.length}`,
+    `Expected ensureWorktree called 2 times for additional repos, got ${additionalCalls.length}`,
   );
 
-  const callForA = checkoutCalls.find((c) => c.repoPath === additionalRepoA);
-  assert.ok(callForA, "checkoutWorktree should be called with additionalRepoA path");
+  const callForA = additionalCalls.find((c) => c.repoPath === additionalRepoA);
+  assert.ok(callForA, "ensureWorktree should be called with additionalRepoA path");
   assert.equal(
-    callForA.branch,
+    callForA.branchName,
     "feature-a",
-    `Expected branch 'feature-a' for additionalRepoA, got '${callForA.branch}'`,
+    `Expected branch 'feature-a' for additionalRepoA, got '${callForA.branchName}'`,
   );
 
-  const callForB = checkoutCalls.find((c) => c.repoPath === additionalRepoB);
-  assert.ok(callForB, "checkoutWorktree should be called with additionalRepoB path");
+  const callForB = additionalCalls.find((c) => c.repoPath === additionalRepoB);
+  assert.ok(callForB, "ensureWorktree should be called with additionalRepoB path");
   assert.equal(
-    callForB.branch,
+    callForB.branchName,
     "feature-b",
-    `Expected branch 'feature-b' for additionalRepoB, got '${callForB.branch}'`,
+    `Expected branch 'feature-b' for additionalRepoB, got '${callForB.branchName}'`,
   );
 });
 
@@ -239,18 +245,7 @@ test("removeWorktree called for all additional worktree dirs after successful ru
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
 
-  // Track worktree dirs that were checked out so we can verify they are removed
-  const checkedOutDirs: string[] = [];
-  const { provider: baseProvider, removeCalls } = makeRecordingWorktreeProvider();
-  const provider: WorktreeProvider = {
-    ...baseProvider,
-    async checkoutWorktree(repoPath, worktreeDir, branch) {
-      checkedOutDirs.push(worktreeDir);
-      await fs.mkdir(worktreeDir, { recursive: true });
-      // Also record in the base provider's calls for branch verification
-      void repoPath; void branch;
-    },
-  };
+  const { provider, ensureWorktreeCalls, removeCalls } = makeRecordingWorktreeProvider();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -284,24 +279,29 @@ test("removeWorktree called for all additional worktree dirs after successful ru
   // Wait for the completed event first
   await waitForCompletedEvent(mock.requests, loopId);
 
+  // Additional repo worktree dirs (filter out the primary repo call)
+  const additionalWorktreeDirs = ensureWorktreeCalls
+    .filter((c) => c.repoPath !== primaryRepo)
+    .map((c) => c.worktreeDir);
+
   assert.equal(
-    checkedOutDirs.length,
+    additionalWorktreeDirs.length,
     2,
-    `Expected 2 additional worktrees to be checked out, got ${checkedOutDirs.length}`,
+    `Expected 2 additional worktrees to be created, got ${additionalWorktreeDirs.length}`,
   );
 
   // Cleanup of additional worktrees is async and happens after the completed event is posted.
-  // Poll until both checked-out dirs appear in removeCalls, or timeout.
+  // Poll until both dirs appear in removeCalls, or timeout.
   const deadline = Date.now() + 5_000;
   while (
     Date.now() < deadline &&
-    !checkedOutDirs.every((dir) => removeCalls.some((c) => c.worktreeDir === dir))
+    !additionalWorktreeDirs.every((dir) => removeCalls.some((c) => c.worktreeDir === dir))
   ) {
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
   }
 
-  // Each checked-out additional worktree dir should appear in removeCalls
-  for (const dir of checkedOutDirs) {
+  // Each additional worktree dir should appear in removeCalls
+  for (const dir of additionalWorktreeDirs) {
     const removed = removeCalls.some((c) => c.worktreeDir === dir);
     assert.ok(
       removed,
@@ -340,16 +340,7 @@ test("removeWorktree called for additional worktree dirs when process fails", as
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
 
-  const checkedOutDirs: string[] = [];
-  const { provider: baseProvider, removeCalls } = makeRecordingWorktreeProvider();
-  const provider: WorktreeProvider = {
-    ...baseProvider,
-    async checkoutWorktree(repoPath, worktreeDir, branch) {
-      checkedOutDirs.push(worktreeDir);
-      await fs.mkdir(worktreeDir, { recursive: true });
-      void repoPath; void branch;
-    },
-  };
+  const { provider, ensureWorktreeCalls, removeCalls } = makeRecordingWorktreeProvider();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -387,15 +378,20 @@ test("removeWorktree called for additional worktree dirs when process fails", as
     `Expected terminal event type 'error', got '${terminalEvent.type}'`,
   );
 
+  // Additional repo worktree dirs (filter out the primary repo call)
+  const additionalWorktreeDirs = ensureWorktreeCalls
+    .filter((c) => c.repoPath !== primaryRepo)
+    .map((c) => c.worktreeDir);
+
   assert.equal(
-    checkedOutDirs.length,
+    additionalWorktreeDirs.length,
     1,
-    `Expected 1 additional worktree to be checked out, got ${checkedOutDirs.length}`,
+    `Expected 1 additional worktree to be created, got ${additionalWorktreeDirs.length}`,
   );
 
   // Cleanup of additional worktrees is async and happens after the error event is posted.
   // Poll until removeWorktree is called for the additional worktree dir, or timeout.
-  const expectedDir = checkedOutDirs[0];
+  const expectedDir = additionalWorktreeDirs[0];
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline && !removeCalls.some((c) => c.worktreeDir === expectedDir)) {
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
@@ -410,10 +406,10 @@ test("removeWorktree called for additional worktree dirs when process fails", as
 });
 
 // ---------------------------------------------------------------------------
-// Test 4: checkoutWorktree throws — assert HTTP 400/500 and error event posted
+// Test 4: ensureWorktree throws for additional repo — assert HTTP 400/500 and error event posted
 // ---------------------------------------------------------------------------
 
-test("checkoutWorktree throws — error event posted and request returns non-200", async () => {
+test("ensureWorktree throws for additional repo — error event posted and request returns non-200", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "wt-lifecycle-throw-"));
   tempPathsToClean.push(tmpDir);
 
@@ -436,12 +432,20 @@ test("checkoutWorktree throws — error event posted and request returns non-200
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
 
-  // Provider whose checkoutWorktree always throws
+  // Provider whose ensureWorktree succeeds for the primary repo but throws
+  // for additional repos (detected by branchName === baseBranch pattern).
+  let primaryCreated = false;
   const { provider: baseProvider } = makeRecordingWorktreeProvider();
   const throwingProvider: WorktreeProvider = {
     ...baseProvider,
-    checkoutWorktree: async () => {
-      throw new Error("Simulated checkoutWorktree failure");
+    async ensureWorktree(repoPath, worktreeDir, branchName, baseBranch) {
+      if (!primaryCreated) {
+        // First call is the primary repo — let it succeed
+        primaryCreated = true;
+        await fs.mkdir(worktreeDir, { recursive: true });
+        return;
+      }
+      throw new Error("Simulated ensureWorktree failure");
     },
   };
 
@@ -471,10 +475,10 @@ test("checkoutWorktree throws — error event posted and request returns non-200
     },
   );
 
-  // The server should return a non-200 status (400 or 500) when checkoutWorktree throws
+  // The server should return a non-200 status (400 or 500) when ensureWorktree throws
   assert.ok(
     response.status >= 400,
-    `Expected non-200 status when checkoutWorktree throws, got ${response.status}`,
+    `Expected non-200 status when ensureWorktree throws, got ${response.status}`,
   );
 
   // An error event should be posted to the API
@@ -515,7 +519,7 @@ test("worktreeDirs placed outside allowedDirs result in HTTP 403", async () => {
   setShellPathForTest();
 
   // The recording provider creates worktree dirs inside outsideWorktreeParent
-  // (because checkoutWorktree uses the dir param passed by the loop handler,
+  // (because ensureWorktree uses the dir param passed by the loop handler,
   // which is derived from resolveLoopWorktreeDir → SYMPHONY_WORKTREE_PARENT_DIR).
   const { provider } = makeRecordingWorktreeProvider();
 
