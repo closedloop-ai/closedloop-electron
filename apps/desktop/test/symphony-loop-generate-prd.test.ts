@@ -89,6 +89,8 @@ const fakeWorktreeProvider: WorktreeProvider = {
   getCurrentBranch() {
     return "symphony/generate-prd-test";
   },
+  checkoutWorktree: async () => {},
+  branchExists: async () => true,
 };
 
 // ---------------------------------------------------------------------------

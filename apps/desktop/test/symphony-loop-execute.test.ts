@@ -51,6 +51,8 @@ const fakeWorktreeProvider: WorktreeProvider = {
   getCurrentBranch() {
     return "symphony/execute-test";
   },
+  checkoutWorktree: async () => {},
+  branchExists: async () => true,
 };
 
 // ---------------------------------------------------------------------------

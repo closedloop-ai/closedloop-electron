@@ -47,6 +47,8 @@ const fakeWorktreeProvider: WorktreeProvider = {
   getCurrentBranch() {
     return "symphony/cloud-failures-test";
   },
+  checkoutWorktree: async () => {},
+  branchExists: async () => true,
 };
 
 // ---------------------------------------------------------------------------
@@ -350,6 +352,8 @@ test("PLAN: pre-spawn log-file failure cleans up persisted loop token", async ()
     getCurrentBranch() {
       return "symphony/prespawn-test";
     },
+    checkoutWorktree: async () => {},
+    branchExists: async () => true,
   };
 
   const loopTokenStore = new LoopTokenStore({

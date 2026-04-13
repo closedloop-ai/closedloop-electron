@@ -117,6 +117,8 @@ const fakeWorktreeProvider: WorktreeProvider = {
   getCurrentBranch() {
     return "symphony/telemetry-test";
   },
+  checkoutWorktree: async () => {},
+  branchExists: async () => true,
 };
 
 /**

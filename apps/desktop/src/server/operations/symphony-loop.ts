@@ -36,7 +36,7 @@ import type {
   OperationRequestContext,
 } from "../operation-dispatcher.js";
 import { readJsonFileSync } from "../read-json-file-sync.js";
-import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
+import { assertPathAllowed, DirectoryNotAllowedError, isPathAllowed } from "../security.js";
 import { getShellEnv, getShellPath } from "../shell-path.js";
 import { startOutputTailer } from "./output-tailer.js";
 import {
@@ -71,6 +71,8 @@ export interface WorktreeProvider {
     loopId?: string,
   ): Promise<void>;
   getCurrentBranch(worktreeDir: string): string | null;
+  checkoutWorktree(repoPath: string, dir: string, branch: string): Promise<void>;
+  branchExists(repoPath: string, branch: string): Promise<boolean>;
 }
 
 export const defaultWorktreeProvider: WorktreeProvider = {
@@ -78,6 +80,8 @@ export const defaultWorktreeProvider: WorktreeProvider = {
   findWorktreeForBranch: findWorktreeForBranchImpl,
   removeWorktree: removeWorktreeImpl,
   getCurrentBranch: getCurrentBranchImpl,
+  checkoutWorktree: checkoutWorktreeImpl,
+  branchExists: branchExistsImpl,
 };
 
 // ---------------------------------------------------------------------------
@@ -161,7 +165,17 @@ import { validateCommandInputs } from "@closedloop-ai/loops-api/commands";
 import type { ContextPackAttachment as SharedContextPackAttachment } from "@closedloop-ai/loops-api/context-pack";
 import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
-import type { LoopRequestBody } from "@closedloop-ai/loops-api/desktop-request";
+import type { LoopRequestBody as BaseLoopRequestBody } from "@closedloop-ai/loops-api/desktop-request";
+
+// Extend LoopRequestBody with additionalRepos until the field is published
+// in @closedloop-ai/loops-api. Remove this once loops-api includes it.
+type LoopRequestBody = BaseLoopRequestBody & {
+  additionalRepos?: Array<{
+    fullName?: string;
+    localRepoPath?: string;
+    branch: string;
+  }>;
+};
 import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
 import {
   LoopArtifactFile,
@@ -484,6 +498,173 @@ function findLocalRepo(fullName: string, allowedDirs: string[]): string | null {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Additional repos: helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Best-effort cleanup of additional repo worktree directories.
+ * Errors are logged but never re-thrown so callers can use this in
+ * both success and error teardown paths without try/catch.
+ */
+async function cleanupAdditionalWorktrees(
+  entries: readonly { dir: string; repoPath: string }[],
+  loopId: string,
+  wt: WorktreeProvider,
+  logPrefix = "cleanup additional worktree failed:",
+): Promise<void> {
+  for (const entry of entries) {
+    await wt.removeWorktree(entry.dir, entry.repoPath, loopId).catch((err) =>
+      loopError(loopId, logPrefix, err),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Additional repos resolution
+// ---------------------------------------------------------------------------
+
+/** Shape returned by resolveAdditionalRepos for each validated entry. */
+export interface ResolvedAdditionalRepo {
+  readonly repoPath: string;
+  readonly branch: string;          // raw git branch name for git operations
+  readonly slugifiedBranch: string; // slugifyLoopId(branch) for path construction only
+}
+
+/** Typed error thrown when an additional repo entry fails validation. */
+export class AdditionalRepoError extends Error {
+  constructor(
+    public readonly code: LoopErrorCode,
+    public readonly repoRef: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "AdditionalRepoError";
+  }
+}
+
+const ADDITIONAL_REPOS_MAX = 5;
+
+/** Resolve an additional repo entry to a validated local path, or throw. */
+function resolveAndValidateRepoPath(
+  entry: { localRepoPath?: string; fullName?: string },
+  allowedDirs: string[],
+  repoRef: string,
+): string {
+  let candidate: string;
+  if (entry.localRepoPath) {
+    candidate = expandHome(entry.localRepoPath);
+  } else if (entry.fullName) {
+    const found = findLocalRepo(entry.fullName, allowedDirs);
+    if (!found) {
+      throw new AdditionalRepoError(
+        LoopErrorCode.RepoNotFound,
+        entry.fullName,
+        `Additional repo not found locally: ${entry.fullName}`,
+      );
+    }
+    candidate = found;
+  } else {
+    throw new AdditionalRepoError(
+      LoopErrorCode.RepoNotFound,
+      repoRef,
+      "Additional repo entry must have localRepoPath or fullName",
+    );
+  }
+
+  const result = tryAssertRepoAllowed(candidate, allowedDirs);
+  if ("error" in result) {
+    throw new AdditionalRepoError(
+      LoopErrorCode.RepoNotAllowed,
+      repoRef,
+      `Additional repo path not allowed: ${repoRef}`,
+    );
+  }
+  return result.path;
+}
+
+/**
+ * Validate, resolve, and deduplicate the `additionalRepos` entries from the
+ * loop request body.
+ *
+ * Steps:
+ *   1. Guard — return [] for undefined/empty input.
+ *   2. Enforce hard limit of 5 entries.
+ *   3. For each entry:
+ *      a. If `localRepoPath` is provided, validate it via tryAssertRepoAllowed.
+ *      b. If only `fullName` is provided, resolve via findLocalRepo then validate.
+ *   4. Validate branch existence via wt.branchExists().
+ *   5. Store raw branch AND slugifyLoopId(branch) separately.
+ *   6. Deduplicate by resolved local path (first occurrence wins).
+ *   7. Remove entries matching primaryRepoPath after path.resolve() normalization.
+ *   8. Return the deduplicated array.
+ */
+export async function resolveAdditionalRepos(
+  entries: NonNullable<LoopRequestBody["additionalRepos"]>,
+  primaryRepoPath: string | null,
+  allowedDirs: string[],
+  loopId: string,
+  wt: WorktreeProvider,
+): Promise<ResolvedAdditionalRepo[]> {
+  if (entries.length === 0) {
+    return [];
+  }
+
+  if (entries.length > ADDITIONAL_REPOS_MAX) {
+    throw new AdditionalRepoError(
+      LoopErrorCode.RepoNotFound,
+      "",
+      `additionalRepos exceeds maximum of ${ADDITIONAL_REPOS_MAX} entries (got ${entries.length})`,
+    );
+  }
+
+  const seen = new Map<string, ResolvedAdditionalRepo>();
+
+  for (const entry of entries) {
+    const repoRef = entry.localRepoPath ?? entry.fullName ?? "";
+    const resolvedPath = resolveAndValidateRepoPath(entry, allowedDirs, repoRef);
+
+    // Remove entries matching primaryRepoPath (normalized)
+    if (
+      primaryRepoPath !== null &&
+      path.resolve(resolvedPath) === path.resolve(primaryRepoPath)
+    ) {
+      loopLog(
+        loopId,
+        `Skipping additionalRepo that matches primaryRepoPath: ${resolvedPath}`,
+      );
+      continue;
+    }
+
+    if (seen.has(resolvedPath)) {
+      loopLog(
+        loopId,
+        `Duplicate additional repo resolved to same path, skipping: ${resolvedPath}`,
+      );
+      continue;
+    }
+
+    // Validate branch exists
+    const branchFound = await wt.branchExists(resolvedPath, entry.branch);
+    if (!branchFound) {
+      throw new AdditionalRepoError(
+        LoopErrorCode.RepoNotFound,
+        repoRef,
+        `Branch "${entry.branch}" not found in additional repo: ${resolvedPath}`,
+      );
+    }
+
+    const slugifiedBranch = slugifyLoopId(entry.branch);
+    seen.set(resolvedPath, {
+      repoPath: resolvedPath,
+      branch: entry.branch,
+      slugifiedBranch,
+    });
+  }
+
+  return Array.from(seen.values());
+}
+
 /**
  * Resolve worktree directory for a loop.
  * Uses full untruncated stable ID for directory naming.
@@ -697,6 +878,90 @@ async function ensureWorktreeImpl(
       timeout: 30_000,
     },
   );
+}
+
+/** Check whether a branch ref exists locally. */
+function hasLocalBranch(repoPath: string, branch: string): boolean {
+  try {
+    execSync(
+      `git rev-parse --verify ${shellEscape(`refs/heads/${branch}`)}`,
+      { cwd: repoPath, stdio: "pipe", timeout: 10_000 },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Fetch a branch from origin (best-effort, never throws). */
+function fetchBranchFromOrigin(repoPath: string, branch: string): void {
+  try {
+    execSync(`git fetch origin ${shellEscape(branch)}`, {
+      cwd: repoPath,
+      stdio: "pipe",
+      timeout: 30_000,
+    });
+  } catch {
+    // non-fatal
+  }
+}
+
+/**
+ * Check out an existing branch into a new worktree directory.
+ * Ensures the parent directory exists, checks for a local branch first,
+ * fetches from origin only if not found locally, then runs
+ * `git worktree add <dir> <branch>`.
+ */
+async function checkoutWorktreeImpl(
+  repoPath: string,
+  dir: string,
+  branch: string,
+): Promise<void> {
+  await fs.mkdir(path.dirname(dir), { recursive: true });
+
+  if (!hasLocalBranch(repoPath, branch)) {
+    fetchBranchFromOrigin(repoPath, branch);
+  }
+
+  execSync(
+    `git worktree add ${shellEscape(dir)} ${shellEscape(branch)}`,
+    { cwd: repoPath, stdio: "pipe", timeout: 30_000 },
+  );
+}
+
+/**
+ * Check whether a branch exists locally or on the remote.
+ * Strategy:
+ *   1. Check local ref `refs/heads/<branch>`.
+ *   2. If not found, fetch from origin and recheck locally.
+ *   3. As a last resort, check `git ls-remote --heads origin <branch>`.
+ */
+async function branchExistsImpl(repoPath: string, branch: string): Promise<boolean> {
+  if (hasLocalBranch(repoPath, branch)) {
+    return true;
+  }
+
+  // Fetch from origin and recheck locally
+  fetchBranchFromOrigin(repoPath, branch);
+  if (hasLocalBranch(repoPath, branch)) {
+    return true;
+  }
+
+  // Last resort: ls-remote
+  try {
+    const output = execSync(
+      `git ls-remote --heads origin ${shellEscape(branch)}`,
+      {
+        cwd: repoPath,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 15_000,
+      },
+    );
+    return output.trim().length > 0;
+  } catch {
+    return false;
+  }
 }
 
 /** Find existing worktree for a branch name. */
@@ -1820,6 +2085,7 @@ async function handleProcessCompletion(
   operationId?: string,
   wt: WorktreeProvider = defaultWorktreeProvider,
   loopTokenStore?: LoopTokenStore,
+  additionalWorktreeDirs: { dir: string; repoPath: string }[] = [],
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
   // Temp-dir commands (DECOMPOSE, EVALUATE_*) need the entire temp tree removed on cleanup.
@@ -1972,6 +2238,7 @@ async function handleProcessCompletion(
     } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
       await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
+    await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt, "cleanup additional worktree failed (on error):");
     loopTokenStore?.deleteLoopToken(loopId);
     return;
   }
@@ -2405,6 +2672,8 @@ async function handleProcessCompletion(
     } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
       await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
+
+    await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt);
   } finally {
     runningLoops.delete(loopId);
   }
@@ -2565,9 +2834,10 @@ async function handleLoopRequest(
   );
 
   let spawnedSuccessfully = false;
+  let expandedRepoPath: string | null = null;
+  const additionalWorktreeDirs: { dir: string; repoPath: string }[] = [];
   try {
     const allowedDirs = getAllowedDirectories();
-    let expandedRepoPath: string | null = null;
 
     if (repoRequirement !== "NOT_REQUIRED" && body.localRepoPath) {
       // localRepoPath takes precedence over repo.fullName lookup when present
@@ -2662,6 +2932,39 @@ async function handleLoopRequest(
           body.loopId,
           `Ignoring repo.fullName for ${body.command}: not found locally (${body.repo.fullName})`,
         );
+      }
+    }
+
+    let resolvedAdditionalRepos: ResolvedAdditionalRepo[] = [];
+    if (body.command === "PLAN" && body.additionalRepos && body.additionalRepos.length > 0) {
+      try {
+        resolvedAdditionalRepos = await resolveAdditionalRepos(
+          body.additionalRepos,
+          expandedRepoPath,
+          allowedDirs,
+          body.loopId,
+          wt,
+        );
+      } catch (err) {
+        if (err instanceof AdditionalRepoError) {
+          await postLoopEventBounded(
+            apiBaseUrl,
+            body.loopId,
+            body.closedLoopAuthToken,
+            {
+              type: LoopEventType.Error,
+              code: err.code,
+              message: err.message,
+            },
+          );
+          gatewayLog.error(
+            "loop-harness",
+            `additionalRepo validation failed for loopId=${body.loopId}: ${err.repoRef} — ${err.message}`,
+          );
+          json(context, 400, { error: err.message });
+          return;
+        }
+        throw err;
       }
     }
 
@@ -2787,6 +3090,46 @@ async function handleLoopRequest(
           body.loopId,
           `Created fresh worktree for PLAN: ${worktreeDir} (branch: ${branchName})`,
         );
+
+        // Create additional repo worktrees for PLAN command
+        for (const addRepo of resolvedAdditionalRepos) {
+          const addWorktreeDir = resolveLoopWorktreeDir(
+            addRepo.repoPath,
+            worktreeKey + "-" + addRepo.slugifiedBranch,
+          );
+          try {
+            await wt.checkoutWorktree(addRepo.repoPath, addWorktreeDir, addRepo.branch);
+          } catch (checkoutErr) {
+            const msg = checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr);
+            loopError(body.loopId, `checkoutWorktree failed for additional repo ${addRepo.repoPath}:`, checkoutErr);
+            await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
+            await postLoopEventBounded(
+              apiBaseUrl,
+              body.loopId,
+              body.closedLoopAuthToken,
+              {
+                type: LoopEventType.Error,
+                code: LoopErrorCode.ArtifactWriteFailed,
+                message: `Failed to checkout additional repo worktree: ${msg}`,
+              },
+            );
+            json(context, 500, { error: `Failed to checkout additional repo worktree: ${msg}` });
+            return;
+          }
+          try {
+            assertPathAllowed(addWorktreeDir, allowedDirs);
+          } catch (e) {
+            if (e instanceof DirectoryNotAllowedError) {
+              await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
+              await wt.removeWorktree(addWorktreeDir, addRepo.repoPath, body.loopId).catch(() => {});
+              json(context, 403, { error: `Additional repo worktree path not allowed: ${addWorktreeDir}` });
+              return;
+            }
+            throw e;
+          }
+          additionalWorktreeDirs.push({ dir: addWorktreeDir, repoPath: addRepo.repoPath });
+          loopLog(body.loopId, `Created additional repo worktree: ${addWorktreeDir} (branch: ${addRepo.branch})`);
+        }
       } else {
         // EXECUTE/REQUEST_CHANGES: reuse existing worktree.
         // Try artifact slug first, then parentLoopId fallback, then create new.
@@ -2947,6 +3290,7 @@ async function handleLoopRequest(
       if (body.command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
         await wt.removeWorktree(worktreeDir, expandedRepoPath, body.loopId);
       }
+      await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
     };
 
     // Pre-flight: verify required binary exists BEFORE posting 'started' event.
@@ -3200,6 +3544,19 @@ async function handleLoopRequest(
           scriptArgs.push("--prd", prdPath);
         }
 
+        if (body.command === "PLAN") {
+          for (const addEntry of additionalWorktreeDirs) {
+            if (isPathAllowed(addEntry.dir, allowedDirs)) {
+              scriptArgs.push("--add-dir", addEntry.dir);
+            } else {
+              loopLog(
+                body.loopId,
+                "Skipping --add-dir for disallowed path: " + addEntry.dir,
+              );
+            }
+          }
+        }
+
         child = spawn(scriptPath!, scriptArgs, {
           cwd: worktreeDir!,
           detached: true,
@@ -3264,6 +3621,7 @@ async function handleLoopRequest(
         operationId,
         wt,
         loopTokenStore,
+        additionalWorktreeDirs,
       ).catch((err) => {
         loopError(body.loopId, "Completion handler error:", err);
         gatewayLog.error(
@@ -3338,6 +3696,14 @@ async function handleLoopRequest(
         ...existing,
         ...(commandId ? { commandId } : {}),
         ...(operationId ? { operationId } : {}),
+        ...(resolvedAdditionalRepos.length > 0
+          ? {
+              additionalRepos: resolvedAdditionalRepos.map((r) => ({
+                repoPath: r.repoPath,
+                branch: r.branch,
+              })),
+            }
+          : {}),
         worktreeDir: worktreeDir ?? undefined,
         claudeWorkDir,
         logPath,
@@ -3369,6 +3735,8 @@ async function handleLoopRequest(
     if (!spawnedSuccessfully) {
       runningLoops.delete(body.loopId);
       loopTokenStore?.deleteLoopToken(body.loopId);
+      // Best-effort cleanup of any additional repo worktrees created before spawn failed
+      void cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt, "finally: cleanup additional worktree failed:");
     }
   }
 }
