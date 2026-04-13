@@ -61,7 +61,7 @@ describe("shellEscape", () => {
   });
 
   test("escapes single quotes within the string", () => {
-    assert.strictEqual(shellEscape("it's"), "'it'\"'\"'s'");
+    assert.strictEqual(shellEscape("it's"), "'" + "it" + String.raw`'\''` + "s" + "'");
   });
 
   test("handles empty string", () => {
