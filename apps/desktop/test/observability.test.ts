@@ -274,4 +274,113 @@ describe("Observability", () => {
     Observability.connectionLost("reason");
     // Test passes if no errors are thrown
   });
+
+  function initWithDualBackends(): {
+    telemetryEvents: EnrichedTelemetryEvent[];
+    captureCalls: Array<{ event: string; properties: Record<string, unknown> }>;
+  } {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    const captureCalls: Array<{ event: string; properties: Record<string, unknown> }> = [];
+    mock.method(PostHogAnalytics.prototype, "capture", (
+      _distinctId: string,
+      event: string,
+      properties: Record<string, unknown>,
+    ) => {
+      captureCalls.push({ event, properties });
+    });
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+      posthog: { apiKey: "phc_test", host: "https://us.i.posthog.com" },
+    });
+    return { telemetryEvents, captureCalls };
+  }
+
+  test("commandInitiated emits telemetry and PostHog events", () => {
+    const { telemetryEvents, captureCalls } = initWithDualBackends();
+
+    Observability.commandInitiated("cmd-1", "GENERATE_PRD");
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "command.initiated");
+    assert.equal(telemetryEvents[0].severity, "info");
+    assert.equal(telemetryEvents[0].trace?.commandId, "cmd-1");
+    assert.equal(telemetryEvents[0].trace?.operationId, "GENERATE_PRD");
+    assert.equal(captureCalls.length, 1);
+    assert.equal(captureCalls[0].event, "command_initiated");
+    assert.equal(captureCalls[0].properties.command_id, "cmd-1");
+    assert.equal(captureCalls[0].properties.operation_type, "GENERATE_PRD");
+  });
+
+  test("commandStarted emits telemetry and PostHog events", () => {
+    const { telemetryEvents, captureCalls } = initWithDualBackends();
+
+    Observability.commandStarted("cmd-1", "GENERATE_PRD");
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "command.started");
+    assert.equal(telemetryEvents[0].severity, "info");
+    assert.equal(telemetryEvents[0].trace?.commandId, "cmd-1");
+    assert.equal(telemetryEvents[0].trace?.operationId, "GENERATE_PRD");
+    assert.equal(captureCalls.length, 1);
+    assert.equal(captureCalls[0].event, "command_started");
+    assert.equal(captureCalls[0].properties.command_id, "cmd-1");
+    assert.equal(captureCalls[0].properties.operation_type, "GENERATE_PRD");
+  });
+
+  test("commandCompleted emits telemetry and PostHog events with latencyMs", () => {
+    const { telemetryEvents, captureCalls } = initWithDualBackends();
+
+    Observability.commandCompleted("cmd-1", "GENERATE_PRD", 1234);
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "command.completed");
+    assert.equal(telemetryEvents[0].severity, "info");
+    assert.equal(telemetryEvents[0].trace?.commandId, "cmd-1");
+    assert.equal(telemetryEvents[0].trace?.operationId, "GENERATE_PRD");
+    assert.equal(telemetryEvents[0].diagnostics?.extra?.latencyMs, 1234);
+    assert.equal(captureCalls.length, 1);
+    assert.equal(captureCalls[0].event, "command_completed");
+    assert.equal(captureCalls[0].properties.command_id, "cmd-1");
+    assert.equal(captureCalls[0].properties.operation_type, "GENERATE_PRD");
+    assert.equal(captureCalls[0].properties.latency_ms, 1234);
+  });
+
+  test("commandCancelled emits warn telemetry", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.commandCancelled("cmd-1", "GENERATE_PRD");
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "command.cancelled");
+    assert.equal(telemetryEvents[0].severity, "warn");
+    assert.equal(telemetryEvents[0].trace?.commandId, "cmd-1");
+    assert.equal(telemetryEvents[0].trace?.operationId, "GENERATE_PRD");
+  });
+
+  test("commandFailed emits error telemetry", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.commandFailed("cmd-1", "GENERATE_PRD", "gateway error");
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "command.gateway_error");
+    assert.equal(telemetryEvents[0].severity, "error");
+    assert.equal(telemetryEvents[0].trace?.commandId, "cmd-1");
+  });
+
+  test("telemetry emission never throws even if telemetrySend throws", () => {
+    Observability.init({
+      telemetrySend: () => { throw new Error("socket disconnected"); },
+    });
+
+    assert.doesNotThrow(() => Observability.commandInitiated("cmd-1", "GENERATE_PRD"));
+    assert.doesNotThrow(() => Observability.commandStarted("cmd-1", "GENERATE_PRD"));
+    assert.doesNotThrow(() => Observability.commandCompleted("cmd-1", "GENERATE_PRD", 100));
+  });
 });

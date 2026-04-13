@@ -78,6 +78,10 @@ export class Observability {
   // --- Command lifecycle ---
 
   static commandInitiated(commandId: string, operationId: string): void {
+    Observability.emitTelemetry("info", "command.initiated", "Command initiated", {
+      commandId,
+      operationId,
+    });
     Observability.capturePostHog("command_initiated", {
       command_id: commandId,
       operation_type: operationId,
@@ -85,6 +89,10 @@ export class Observability {
   }
 
   static commandStarted(commandId: string, operationId: string): void {
+    Observability.emitTelemetry("info", "command.started", "Command started", {
+      commandId,
+      operationId,
+    });
     Observability.capturePostHog("command_started", {
       command_id: commandId,
       operation_type: operationId,
@@ -92,6 +100,10 @@ export class Observability {
   }
 
   static commandCompleted(commandId: string, operationId: string, latencyMs: number): void {
+    Observability.emitTelemetry("info", "command.completed", "Command completed", {
+      commandId,
+      operationId,
+    }, { extra: { latencyMs } });
     Observability.capturePostHog("command_completed", {
       command_id: commandId,
       operation_type: operationId,
@@ -301,6 +313,7 @@ export class Observability {
 
   // --- Internal helpers ---
 
+  // commandId is a log/event attribute for correlation only — must not be promoted to a Datadog metric tag dimension
   private static emitTelemetry(
     severity: TelemetrySeverity,
     category: TelemetryCategory,
