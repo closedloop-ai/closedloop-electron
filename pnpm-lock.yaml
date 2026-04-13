@@ -6,13 +6,17 @@ settings:
 
 importers:
 
-  .: {}
+  .:
+    dependencies:
+      '@closedloop-ai/loops-api':
+        specifier: file:/Users/alex.ponamarev/Projects/closed_loop/symphony-alpha/packages/loops-api/closedloop-ai-loops-api-0.2.4.tgz
+        version: file:../symphony-alpha/packages/loops-api/closedloop-ai-loops-api-0.2.4.tgz(zod@4.3.6)
 
   apps/desktop:
     dependencies:
       '@closedloop-ai/loops-api':
-        specifier: ^0.2.1
-        version: 0.2.1(zod@4.3.6)
+        specifier: file:/Users/alex.ponamarev/Projects/closed_loop/symphony-alpha/packages/loops-api/closedloop-ai-loops-api-0.2.4.tgz
+        version: file:../symphony-alpha/packages/loops-api/closedloop-ai-loops-api-0.2.4.tgz(zod@4.3.6)
       busboy:
         specifier: ^1.6.0
         version: 1.6.0
@@ -71,8 +75,9 @@ packages:
   7zip-bin@5.2.0:
     resolution: {integrity: sha512-ukTPVhqG4jNzMro2qA9HSCSSVJN3aN7tlb+hfqYCt3ER0yWroeA2VR38MNrOHLQ/cVj+DaIMad0kFCtWWowh/A==}
 
-  '@closedloop-ai/loops-api@0.2.1':
-    resolution: {integrity: sha512-XFqbgTtisXplpTJ+xQOpL2AxupkYUHolBr940uRAhf7JVnvIU8ttbOO3pHQmkGd4GgfMOgVeqVilj0IcuG1rMw==, tarball: https://npm.pkg.github.com/download/@closedloop-ai/loops-api/0.2.1/08d48b712f19c18e2910e5c05adb6e1e8e8ceacd}
+  '@closedloop-ai/loops-api@file:../symphony-alpha/packages/loops-api/closedloop-ai-loops-api-0.2.4.tgz':
+    resolution: {integrity: sha512-WymnqVmo71yfBFgoac4b36tUmmnEgNZ6BBggfgSqT5Pg4jd0vRlrXb32qowEVEwvKgNtBQHf7qHnJlf7JsrB6g==, tarball: file:../symphony-alpha/packages/loops-api/closedloop-ai-loops-api-0.2.4.tgz}
+    version: 0.2.4
     peerDependencies:
       zod: ^4.0.0
 
@@ -1909,7 +1914,7 @@ snapshots:
 
   7zip-bin@5.2.0: {}
 
-  '@closedloop-ai/loops-api@0.2.1(zod@4.3.6)':
+  '@closedloop-ai/loops-api@file:../symphony-alpha/packages/loops-api/closedloop-ai-loops-api-0.2.4.tgz(zod@4.3.6)':
     dependencies:
       zod: 4.3.6
 

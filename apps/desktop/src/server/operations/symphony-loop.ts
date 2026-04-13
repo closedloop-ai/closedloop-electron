@@ -165,17 +165,7 @@ import { validateCommandInputs } from "@closedloop-ai/loops-api/commands";
 import type { ContextPackAttachment as SharedContextPackAttachment } from "@closedloop-ai/loops-api/context-pack";
 import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
-import type { LoopRequestBody as BaseLoopRequestBody } from "@closedloop-ai/loops-api/desktop-request";
-
-// Extend LoopRequestBody with additionalRepos until the field is published
-// in @closedloop-ai/loops-api. Remove this once loops-api includes it.
-type LoopRequestBody = BaseLoopRequestBody & {
-  additionalRepos?: Array<{
-    fullName?: string;
-    localRepoPath?: string;
-    branch: string;
-  }>;
-};
+import type { LoopRequestBody } from "@closedloop-ai/loops-api/desktop-request";
 import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
 import {
   LoopArtifactFile,
