@@ -78,6 +78,10 @@ export class Observability {
   // --- Command lifecycle ---
 
   static commandInitiated(commandId: string, operationId: string): void {
+    Observability.emitTelemetry("info", "command.initiated", "Command initiated", {
+      commandId,
+      operationId,
+    });
     Observability.capturePostHog("command_initiated", {
       command_id: commandId,
       operation_type: operationId,
@@ -85,6 +89,10 @@ export class Observability {
   }
 
   static commandStarted(commandId: string, operationId: string): void {
+    Observability.emitTelemetry("info", "command.started", "Command started", {
+      commandId,
+      operationId,
+    });
     Observability.capturePostHog("command_started", {
       command_id: commandId,
       operation_type: operationId,
@@ -92,6 +100,10 @@ export class Observability {
   }
 
   static commandCompleted(commandId: string, operationId: string, latencyMs: number): void {
+    Observability.emitTelemetry("info", "command.completed", "Command completed", {
+      commandId,
+      operationId,
+    }, { extra: { latencyMs } });
     Observability.capturePostHog("command_completed", {
       command_id: commandId,
       operation_type: operationId,
@@ -158,9 +170,10 @@ export class Observability {
     });
   }
 
-  // --- Connection lifecycle (PostHog only) ---
+  // --- Connection lifecycle ---
 
   static connectionEstablished(desktopId: string, version: string, environment: string): void {
+    Observability.emitTelemetry("info", "connection.established", "Connection established", { computeTargetId: desktopId });
     Observability.capturePostHog("desktop_connection_established", {
       desktop_id: desktopId,
       version,
@@ -169,10 +182,21 @@ export class Observability {
   }
 
   static reconnectionResumed(reason: string, replayCommandCount: number): void {
+    Observability.emitTelemetry("info", "connection.reconnection_resumed", "Reconnection resumed", {}, { extra: { reason, replayCommandCount } });
     Observability.capturePostHog("desktop_reconnection_resume", {
       reason,
       replay_command_count: replayCommandCount,
     });
+  }
+
+  static connectionDegraded(error: string): void {
+    Observability.emitTelemetry("warn", "connection.degraded", error, {});
+    Observability.capturePostHog("desktop_connection_degraded", { error });
+  }
+
+  static connectionLost(reason?: string): void {
+    Observability.emitTelemetry("warn", "connection.lost", reason ?? "Connection lost", {});
+    Observability.capturePostHog("desktop_connection_lost", { reason });
   }
 
   // --- Sandbox (PostHog only) ---
@@ -289,6 +313,7 @@ export class Observability {
 
   // --- Internal helpers ---
 
+  // commandId is a log/event attribute for correlation only — must not be promoted to a Datadog metric tag dimension
   private static emitTelemetry(
     severity: TelemetrySeverity,
     category: TelemetryCategory,

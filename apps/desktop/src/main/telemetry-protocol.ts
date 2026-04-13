@@ -19,7 +19,15 @@ export type TelemetryCategory =
   | "job.auth_challenge"
   | "preflight.binary_not_found"
   | "preflight.script_not_found"
-  | "preflight.spawn_failed";
+  | "preflight.spawn_failed"
+  | "connection.established"
+  | "connection.reconnection_resumed"
+  | "connection.degraded"
+  | "connection.lost"
+  | "command.initiated"
+  | "command.started"
+  | "command.completed"
+  | "queue.stats_changed";
 
 export interface TelemetryTraceContext {
   computeTargetId?: string;
