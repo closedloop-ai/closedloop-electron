@@ -21,11 +21,11 @@ import {
 } from "../../main/diagnostics-helpers.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
-import type { LoopTokenStore } from "../../main/loop-token-store.js";
 import {
   finalizeLoopFromRuntime,
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
+import type { LoopTokenStore } from "../../main/loop-token-store.js";
 import { Observability } from "../../main/observability.js";
 import {
   parseTokenUsage,
@@ -38,6 +38,7 @@ import type {
 import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { getShellEnv, getShellPath } from "../shell-path.js";
+import { withMcpTools } from "./chat-tools.js";
 import { startOutputTailer } from "./output-tailer.js";
 import {
   findPluginScript,
@@ -1245,6 +1246,7 @@ async function attemptLlmCommit(
   webAppOrigin: string,
   committer: LoopCommitter | undefined,
   getAllowedDirectories: () => string[],
+  expectedMcpUrl?: string,
   onTimeout?: () => void,
   jobStore?: JobStore,
   claudeWorkDir?: string,
@@ -1362,15 +1364,19 @@ async function attemptLlmCommit(
   // nvm/homebrew/local bin directories. getResolvedClaudePath() caches the
   // result for the process lifetime.
   const claudeBinary = getResolvedClaudePath();
+  const allowedTools = await withMcpTools(
+    "Bash,Read,Write,Glob,Grep",
+    expectedMcpUrl,
+  );
   const spawnArgs = [
     "-p",
     prompt,
     "--allowedTools",
-    "Bash,Read,Write,Glob,Grep",
+    allowedTools,
   ];
   loopLog(
     loopId,
-    `LLM commit spawn: binary=${claudeBinary} args=["-p", "<prompt omitted>", "--allowedTools", "Bash,Read,Write,Glob,Grep"] cwd=${worktreeDir} PATH=${spawnEnv.PATH ?? "(unset)"}`,
+    `LLM commit spawn: binary=${claudeBinary} args=["-p", "<prompt omitted>", "--allowedTools", "${allowedTools}"] cwd=${worktreeDir} PATH=${spawnEnv.PATH ?? "(unset)"}`,
   );
 
   let child: ReturnType<typeof spawn>;
@@ -1814,6 +1820,7 @@ async function handleProcessCompletion(
   usedTempDir: boolean,
   expandedRepoPath: string | null,
   getAllowedDirectories: () => string[],
+  expectedMcpUrl?: string,
   jobStore?: JobStore,
   webAppOrigin?: string,
   commandId?: string,
@@ -2028,6 +2035,7 @@ async function handleProcessCompletion(
           webAppOrigin ?? "",
           committer,
           getAllowedDirectories,
+          expectedMcpUrl,
           () => {
             warnings.push(
               sanitizeErrorMessage("LLM commit timed out after 30m"),
@@ -2441,6 +2449,10 @@ async function handleLoopRequest(
   }
 
   const body = rawBody as unknown as LoopRequestBody;
+  const expectedMcpUrl =
+    typeof rawBody.expectedMcpUrl === "string"
+      ? rawBody.expectedMcpUrl
+      : undefined;
 
   // Extract tracing headers forwarded by the cloud command executor.
   // Use typeof guards because IncomingMessage headers values are string | string[] | undefined.
@@ -3050,13 +3062,17 @@ async function handleLoopRequest(
 
       // Shared claude CLI args for commands that run claude directly.
       // REQUEST_CHANGES omits "-" (stdin) because it passes the prompt as a CLI argument.
+      const allowedTools = await withMcpTools(
+        "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
+        expectedMcpUrl,
+      );
       const baseClaudeArgs: string[] = [
         "-p",
         "--output-format",
         "stream-json",
         "--verbose",
         "--allowedTools",
-        "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
+        allowedTools,
         "--max-turns",
         "200",
       ];
@@ -3258,6 +3274,7 @@ async function handleLoopRequest(
         usedTempDir,
         expandedRepoPath,
         getAllowedDirectories,
+        expectedMcpUrl,
         jobStore,
         webAppOrigin,
         commandId,

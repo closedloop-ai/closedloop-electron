@@ -177,7 +177,7 @@ export function registerSymphonyInteractiveRoutes(
         history,
         historyPath: historyReadPath,
         prompt: buildSymphonyPrompt(message, contextRepoPaths),
-        tools: withMcpTools(ENGINEER_CHAT_TOOLS),
+        tools: await withMcpTools(ENGINEER_CHAT_TOOLS),
       });
     }
   );
@@ -306,7 +306,7 @@ export function registerSymphonyInteractiveRoutes(
         history,
         historyPath,
         prompt: buildCommentPrompt(message, history.commentContext),
-        tools: withMcpTools(ENGINEER_CHAT_TOOLS),
+        tools: await withMcpTools(ENGINEER_CHAT_TOOLS),
       });
     }
   );

@@ -6,7 +6,7 @@ import type { ProcessManager } from "../process-manager.js";
 import { getShellEnv } from "../shell-path.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
-import { READONLY_CODEBASE_TOOLS, WEB_ONLY_TOOLS } from "./chat-tools.js";
+import { getReadonlyCodebaseTools, getWebOnlyTools } from "./chat-tools.js";
 import { createStreamState, processStreamEvent } from "./stream-events.js";
 
 type ChatMessage = {
@@ -46,6 +46,8 @@ export function registerRunViewerChatRoutes(
     }
 
     const message = typeof body.message === "string" ? body.message : null;
+    const expectedMcpUrl =
+      typeof body.expectedMcpUrl === "string" ? body.expectedMcpUrl : undefined;
     const runDir = typeof body.runDir === "string" ? body.runDir : undefined;
     if (!message) {
       json(context, 400, { error: "message is required" });
@@ -77,7 +79,9 @@ export function registerRunViewerChatRoutes(
     await saveChatHistory(dir, history);
 
     const isResuming = Boolean(history.claudeSessionId);
-    const allowedTools = validatedRunDir ? READONLY_CODEBASE_TOOLS : WEB_ONLY_TOOLS;
+    const allowedTools = validatedRunDir
+      ? await getReadonlyCodebaseTools(expectedMcpUrl)
+      : await getWebOnlyTools(expectedMcpUrl);
     const systemPrompt = buildRunViewerSystemPrompt(validatedRunDir);
     const prompt = isResuming ? message : `${systemPrompt}\n\n---\n\nUser: ${message}`;
 
@@ -229,4 +233,3 @@ function json(context: OperationRequestContext, status: number, payload: unknown
   context.response.setHeader("content-type", "application/json");
   context.response.end(JSON.stringify(payload));
 }
-

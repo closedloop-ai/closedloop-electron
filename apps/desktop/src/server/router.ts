@@ -19,6 +19,7 @@ import { registerGitWorktreeRoutes } from "./operations/git-worktree.js";
 import { registerHealthCheckRoutes } from "./operations/health-check.js";
 import { registerLearningsRoutes } from "./operations/learnings.js";
 import { registerMetadataRoutes } from "./operations/metadata-routes.js";
+import { configureMcpDetectionCwdResolver } from "./operations/mcp-detection.js";
 import { registerReposConfigRoutes } from "./operations/repos-config.js";
 import { registerRunViewerChatRoutes } from "./operations/run-viewer-chat.js";
 import { registerRunViewerExtractRoutes } from "./operations/run-viewer-extract.js";
@@ -37,6 +38,8 @@ import { registerSymphonyPlanLoopRoutes } from "./operations/symphony-plan-loop.
 import { registerSymphonyUploadRoutes } from "./operations/symphony-upload.js";
 import { registerTerminalChatRoutes } from "./operations/terminal-chat.js";
 import { registerTicketChatRoutes } from "./operations/ticket-chat.js";
+import { registerGenericChatRoutes } from "./operations/generic-chat.js";
+import { ClaudeProvider, CodexProvider, ProviderRegistry } from "./operations/chat-providers.js";
 import { ProcessManager } from "./process-manager.js";
 import { SymphonyDirNotConfiguredError } from "./operations/symphony-utils.js";
 
@@ -63,6 +66,7 @@ export interface GatewayRouterOptions {
   worktreeProvider?: WorktreeProvider;
   loopTokenStore?: LoopTokenStore;
   retrySpawnDeps?: RetrySpawnDeps;
+  getGatewayId: () => string;
 }
 
 export interface GatewayActivityEvent {
@@ -104,6 +108,10 @@ export class GatewayRouter {
     this.operationDispatcher = operationDispatcher;
     this.processManager = new ProcessManager({
       getAllowedDirectories: this.options.getAllowedDirectories
+    });
+    configureMcpDetectionCwdResolver(() => {
+      const [sandboxRoot] = this.options.getAllowedDirectories();
+      return sandboxRoot?.trim() || undefined;
     });
     const getSymphonyDir = this.options.getSymphonyDir ?? (() => { throw new SymphonyDirNotConfiguredError(); });
     registerFilesystemDirectoriesRoutes(
@@ -202,6 +210,17 @@ export class GatewayRouter {
       this.processManager,
       this.options.getAllowedDirectories,
       getSymphonyDir
+    );
+    const providerRegistry = new ProviderRegistry();
+    providerRegistry.register(new ClaudeProvider(this.processManager));
+    providerRegistry.register(
+      new CodexProvider(this.options.getAllowedDirectories)
+    );
+    registerGenericChatRoutes(
+      this.operationDispatcher,
+      this.processManager,
+      providerRegistry,
+      this.options.getGatewayId
     );
   }
 
@@ -720,6 +739,5 @@ function isLoopbackOrigin(originValue: string): boolean {
     return false;
   }
 }
-
 
 
