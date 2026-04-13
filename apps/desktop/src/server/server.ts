@@ -18,6 +18,7 @@ import {
   type GatewayApprovalRequest,
   type GatewayApprovalResult,
 } from "./router.js";
+import { initTerminalAttachWebSocket } from "./operations/terminal-attach.js";
 import type { WorktreeProvider } from "./operations/symphony-loop.js";
 import type { RetrySpawnDeps } from "../main/spawn-retry.js";
 
@@ -201,6 +202,7 @@ export class DesktopGatewayServer {
             this.options.onUnexpectedClose?.();
           }
         });
+        initTerminalAttachWebSocket(candidateServer);
         await this.writeDiscoveryFile();
         return;
       } catch (error) {

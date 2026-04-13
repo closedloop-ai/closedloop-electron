@@ -54,6 +54,8 @@ const desktopApi = {
   getJob: (jobId: string) => ipcRenderer.invoke("desktop:get-job", jobId) as Promise<unknown>,
   getJobLogTail: (jobId: string, lines?: number) =>
     ipcRenderer.invoke("desktop:get-job-log-tail", jobId, lines) as Promise<unknown>,
+  openJobTerminal: (jobId: string) =>
+    ipcRenderer.invoke("desktop:open-job-terminal", jobId) as Promise<unknown>,
   getLogs: () => ipcRenderer.invoke("desktop:get-logs") as Promise<unknown>,
   clearLogs: () => ipcRenderer.invoke("desktop:clear-logs") as Promise<unknown>,
   getAppVersion: () => ipcRenderer.invoke("desktop:get-app-version") as Promise<string>,

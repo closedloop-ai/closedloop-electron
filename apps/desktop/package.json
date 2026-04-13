@@ -15,6 +15,7 @@
     "lint": "eslint src/",
     "test": "tsx --test test/*.test.ts",
     "package": "pnpm build && electron-builder --mac --config electron-builder.yml",
+    "postinstall": "electron-rebuild -o node-pty",
     "release": "pnpm build && electron-builder --mac --publish always --config electron-builder.yml"
   },
   "dependencies": {
@@ -23,16 +24,20 @@
     "electron-store": "^8.2.0",
     "electron-updater": "^6.8.3",
     "glob": "^11.0.1",
+    "node-pty": "^1.0.0",
     "posthog-node": "^5.28.8",
     "socket.io-client": "^4.8.1",
+    "ws": "^8.18.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/busboy": "^1.5.4",
+    "@types/ws": "^8.5.13",
     "@types/node": "^22.13.8",
     "@typescript-eslint/eslint-plugin": "^8.57.1",
     "@typescript-eslint/parser": "^8.57.1",
     "electron": "^35.0.2",
+    "@electron/rebuild": "^4.0.0",
     "electron-builder": "^26.8.1",
     "eslint": "^10.0.3",
     "tsx": "^4.19.3",

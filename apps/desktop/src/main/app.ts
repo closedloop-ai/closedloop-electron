@@ -6,7 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { app, dialog, ipcMain, nativeImage, Notification, safeStorage } from "electron";
+import { BrowserWindow, app, dialog, ipcMain, nativeImage, Notification, safeStorage } from "electron";
 import {
   type AlwaysAllowRule,
   DEFAULT_DESKTOP_SETTINGS,
@@ -1114,6 +1114,30 @@ export class DesktopApplication {
         }
       },
     );
+    ipcMain.handle("desktop:open-job-terminal", (_event, jobId: string) => {
+      if (typeof jobId !== "string" || !jobId.trim()) {
+        throw new Error("jobId is required");
+      }
+      const job = this.jobStore.getById(jobId.trim());
+      const port = this.server?.getActivePort() ?? 19432;
+      const command = job?.command ?? "";
+
+      // Resolve terminal.html path
+      const htmlPath = app.isPackaged
+        ? path.join(__dirname, "..", "..", "src", "renderer", "terminal.html")
+        : path.join(process.cwd(), "src", "renderer", "terminal.html");
+
+      const win = new BrowserWindow({
+        width: 900,
+        height: 600,
+        title: `Terminal — ${command} ${jobId.slice(0, 8)}`,
+        webPreferences: { contextIsolation: true, sandbox: true },
+      });
+      void win.loadFile(htmlPath, {
+        query: { loopId: jobId.trim(), port: String(port), command },
+      });
+      return { opened: true };
+    });
     ipcMain.handle("desktop:get-activity-events", () =>
       this.activityLog.list(),
     );
