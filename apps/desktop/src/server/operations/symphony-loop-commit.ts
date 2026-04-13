@@ -1,6 +1,5 @@
 import { execSync, spawn } from "node:child_process";
 import {
-  existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -8,7 +7,6 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
-import { gatewayLog } from "../../main/gateway-logger.js";
 import type { JobStore } from "../../main/job-store.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { getShellEnv } from "../shell-path.js";
