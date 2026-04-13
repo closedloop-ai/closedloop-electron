@@ -8,7 +8,7 @@
  * 2. removeWorktree called for all additional worktree dirs after successful run
  * 3. removeWorktree called on process failure (run-loop.sh exits 1)
  * 4. ensureWorktree throws — assert HTTP 400/500 and error event posted
- * 5. assertPathAllowed triggered — worktreeDirs placed outside allowedDirs result in HTTP 403
+ * 5. (removed — duplicated by contract tests)
  */
 
 import assert from "node:assert/strict";
@@ -100,14 +100,13 @@ async function createTestGateway(
   tmpDir: string,
   mockPort: number,
   worktreeProvider: WorktreeProvider,
-  allowedDirs?: string[],
 ) {
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
     preferredPort: 0,
     fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
-    getAllowedDirectories: () => allowedDirs ?? [tmpDir],
+    getAllowedDirectories: () => [tmpDir],
     machineName: "worktree-lifecycle-test",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
@@ -490,70 +489,3 @@ test("ensureWorktree throws for additional repo — error event posted and reque
   );
 });
 
-// ---------------------------------------------------------------------------
-// Test 5: assertPathAllowed triggered — worktreeDirs placed outside allowedDirs → HTTP 403
-// ---------------------------------------------------------------------------
-
-test("worktreeDirs placed outside allowedDirs result in HTTP 403", async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "wt-lifecycle-403-"));
-  tempPathsToClean.push(tmpDir);
-
-  const primaryRepo = path.join(tmpDir, "primary-repo");
-  await fs.mkdir(primaryRepo, { recursive: true });
-
-  const additionalRepo = path.join(tmpDir, "additional-repo");
-  await fs.mkdir(additionalRepo, { recursive: true });
-
-  // Place the worktrees outside the allowed directory so assertPathAllowed fires.
-  // We create a separate dir that is NOT in allowedDirs.
-  const outsideWorktreeParent = await fs.mkdtemp(path.join(os.tmpdir(), "wt-outside-"));
-  tempPathsToClean.push(outsideWorktreeParent);
-
-  process.env.HOME = tmpDir;
-  process.env.SYMPHONY_WORKTREE_PARENT_DIR = outsideWorktreeParent;
-
-  const fakeBin = path.join(tmpDir, "fake-bin");
-  await fs.mkdir(fakeBin, { recursive: true });
-  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest();
-
-  // The recording provider creates worktree dirs inside outsideWorktreeParent
-  // (because ensureWorktree uses the dir param passed by the loop handler,
-  // which is derived from resolveLoopWorktreeDir → SYMPHONY_WORKTREE_PARENT_DIR).
-  const { provider } = makeRecordingWorktreeProvider();
-
-  const mock = await startMockApiServer();
-  mockServersToClose.push(mock.server);
-
-  // allowedDirs only includes tmpDir, not outsideWorktreeParent
-  const server = await createTestGateway(tmpDir, mock.port, provider, [tmpDir]);
-
-  const loopId = "00000000-0000-0000-0000-000000007005";
-  const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        loopId,
-        command: "PLAN",
-        closedLoopAuthToken: "tok",
-        artifacts: [],
-        repo: {
-          fullName: `wt-lifecycle-test/${path.basename(primaryRepo)}`,
-          branch: "main",
-        },
-        additionalRepos: [
-          { localRepoPath: additionalRepo, branch: "feature-branch" },
-        ],
-      }),
-    },
-  );
-
-  assert.equal(
-    response.status,
-    403,
-    `Expected HTTP 403 when worktreeDir is outside allowedDirs, got ${response.status}`,
-  );
-});

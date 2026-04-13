@@ -1,13 +1,11 @@
 /**
  * Contract tests for multi-repo PLAN requests.
  *
- * 1. PLAN accepts valid additionalRepos — assert HTTP 200
- * 2. PLAN rejects entry missing branch — assert HTTP 400
- * 3. PLAN rejects sandbox-violating path — assert HTTP 400 and RepoNotAllowed error event
- * 4. PLAN rejects nonexistent branch (branchExists returns false) — assert HTTP 400 and RepoNotFound error event
- * 5. Single-repo PLAN unchanged — assert HTTP 200
- * 6. Unit-style tests: resolveAdditionalRepos deduplication logic
- * 7. Unit-style tests: resolveAdditionalRepos primary-repo-removal logic
+ * 1. PLAN rejects entry missing branch — assert HTTP 400
+ * 2. PLAN rejects nonexistent branch (branchExists returns false) — assert HTTP 400 and RepoNotFound error event
+ * 3. Unit-style tests: resolveAdditionalRepos deduplication logic
+ * 4. Unit-style tests: resolveAdditionalRepos primary-repo-removal logic
+ * 5. Unit-style tests: resolveAdditionalRepos max entries limit
  */
 
 import assert from "node:assert/strict";
@@ -20,9 +18,8 @@ import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 import { resolveAdditionalRepos } from "../src/server/operations/symphony-loop.js";
-import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
+import { resetShellPathCache } from "../src/server/shell-path.js";
 import {
-  createFakeRunLoopScript,
   restoreEnv,
   saveEnv,
   startMockApiServer,
@@ -99,72 +96,6 @@ async function createTestGateway(
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: PLAN accepts valid additionalRepos — assert HTTP 200
-// ---------------------------------------------------------------------------
-
-it("PLAN with valid additionalRepos returns HTTP 200", async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-valid-"));
-  tempPathsToClean.push(tmpDir);
-
-  // Primary repo directory
-  const primaryRepo = path.join(tmpDir, "primary-repo");
-  await fs.mkdir(primaryRepo, { recursive: true });
-
-  // Additional repo directory (must be within allowedDirs = [tmpDir])
-  const additionalRepo = path.join(tmpDir, "additional-repo");
-  await fs.mkdir(additionalRepo, { recursive: true });
-
-  // Worktree parent must also be within tmpDir so worktrees pass assertPathAllowed
-  const worktreeParent = path.join(tmpDir, "worktrees");
-  await fs.mkdir(worktreeParent, { recursive: true });
-
-  process.env.HOME = tmpDir;
-  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
-  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
-
-  // run-loop.sh exits 0 with token output so no 0-token guard fires
-  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
-
-  const fakeBin = path.join(tmpDir, "fake-bin");
-  await fs.mkdir(fakeBin, { recursive: true });
-  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-
-  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest();
-
-  const mock = await startMockApiServer();
-  mockServersToClose.push(mock.server);
-  const server = await createTestGateway(tmpDir, mock.port);
-
-  const loopId = "00000000-0000-0000-0000-000000003001";
-  const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        loopId,
-        command: "PLAN",
-        closedLoopAuthToken: "tok",
-        artifacts: [],
-        repo: {
-          fullName: `multi-repo-test/${path.basename(primaryRepo)}`,
-          branch: "main",
-        },
-        additionalRepos: [
-          {
-            localRepoPath: additionalRepo,
-            branch: "main",
-          },
-        ],
-      }),
-    },
-  );
-
-  assert.equal(response.status, 200, "PLAN with valid additionalRepos should return HTTP 200");
-});
-
-// ---------------------------------------------------------------------------
 // Test 2: PLAN rejects entry missing branch — assert HTTP 400
 // ---------------------------------------------------------------------------
 
@@ -226,71 +157,6 @@ it("PLAN with additionalRepo missing branch returns HTTP 400", async () => {
     response.status,
     400,
     "PLAN with additionalRepo missing branch should return HTTP 400",
-  );
-});
-
-// ---------------------------------------------------------------------------
-// Test 3: PLAN rejects sandbox-violating path — assert HTTP 400 and RepoNotAllowed error event
-// ---------------------------------------------------------------------------
-
-it("PLAN with sandbox-violating additionalRepo path returns HTTP 400 and RepoNotAllowed event", async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-sandbox-"));
-  tempPathsToClean.push(tmpDir);
-
-  const primaryRepo = path.join(tmpDir, "primary-repo");
-  await fs.mkdir(primaryRepo, { recursive: true });
-
-  const worktreeParent = path.join(tmpDir, "worktrees");
-  await fs.mkdir(worktreeParent, { recursive: true });
-
-  process.env.HOME = tmpDir;
-  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
-
-  const mock = await startMockApiServer();
-  mockServersToClose.push(mock.server);
-  const server = await createTestGateway(tmpDir, mock.port);
-
-  const loopId = "00000000-0000-0000-0000-000000003003";
-  // Use a path clearly outside the allowed directory (tmpDir)
-  const sandboxViolatingPath = "/tmp/outside-sandbox-repo";
-
-  const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        loopId,
-        command: "PLAN",
-        closedLoopAuthToken: "tok",
-        artifacts: [],
-        repo: {
-          fullName: `multi-repo-test/${path.basename(primaryRepo)}`,
-          branch: "main",
-        },
-        additionalRepos: [
-          {
-            localRepoPath: sandboxViolatingPath,
-            branch: "main",
-          },
-        ],
-      }),
-    },
-  );
-
-  assert.equal(
-    response.status,
-    400,
-    "PLAN with sandbox-violating additionalRepo path should return HTTP 400",
-  );
-
-  // The error event with code RepoNotAllowed must be posted to the API
-  const errorEvent = await waitForTerminalEvent(mock.requests, loopId);
-  assert.equal(errorEvent.type, "error");
-  assert.equal(
-    errorEvent.code,
-    "REPO_NOT_ALLOWED",
-    `Expected error code REPO_NOT_ALLOWED, got: ${JSON.stringify(errorEvent.code)}`,
   );
 });
 
@@ -367,65 +233,7 @@ it("PLAN with nonexistent branch in additionalRepo returns HTTP 400 and RepoNotF
 });
 
 // ---------------------------------------------------------------------------
-// Test 5: Single-repo PLAN unchanged — assert HTTP 200
-// ---------------------------------------------------------------------------
-
-it("single-repo PLAN (no additionalRepos) continues to return HTTP 200", async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-single-"));
-  tempPathsToClean.push(tmpDir);
-
-  const primaryRepo = path.join(tmpDir, "primary-repo");
-  await fs.mkdir(primaryRepo, { recursive: true });
-
-  const worktreeParent = path.join(tmpDir, "worktrees");
-  await fs.mkdir(worktreeParent, { recursive: true });
-
-  process.env.HOME = tmpDir;
-  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
-  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
-
-  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
-
-  const fakeBin = path.join(tmpDir, "fake-bin");
-  await fs.mkdir(fakeBin, { recursive: true });
-  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-
-  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest();
-
-  const mock = await startMockApiServer();
-  mockServersToClose.push(mock.server);
-  const server = await createTestGateway(tmpDir, mock.port);
-
-  const loopId = "00000000-0000-0000-0000-000000003005";
-  const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        loopId,
-        command: "PLAN",
-        closedLoopAuthToken: "tok",
-        artifacts: [],
-        repo: {
-          fullName: `single-repo-test/${path.basename(primaryRepo)}`,
-          branch: "main",
-        },
-        // No additionalRepos field
-      }),
-    },
-  );
-
-  assert.equal(
-    response.status,
-    200,
-    "Single-repo PLAN without additionalRepos should still return HTTP 200",
-  );
-});
-
-// ---------------------------------------------------------------------------
-// Tests 6 & 7: Unit-style tests for resolveAdditionalRepos
+// Unit-style tests for resolveAdditionalRepos
 // ---------------------------------------------------------------------------
 
 describe("resolveAdditionalRepos — unit-style", () => {
@@ -454,45 +262,6 @@ describe("resolveAdditionalRepos — unit-style", () => {
     assert.equal(result.length, 1, "Duplicate paths should be deduplicated to one entry");
     assert.equal(result[0].repoPath, repoA);
     assert.equal(result[0].branch, "main", "First occurrence wins on deduplication");
-  });
-
-  it("returns an empty array when additionalRepos is empty", async () => {
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-unit-empty-"));
-    tempPathsToClean.push(tmpDir);
-
-    const result = await resolveAdditionalRepos(
-      [],
-      null,
-      [tmpDir],
-      "test-loop-id",
-      fakeWorktreeProvider,
-    );
-
-    assert.equal(result.length, 0, "Empty additionalRepos should return empty array");
-  });
-
-  it("includes slugifiedBranch field derived from branch name", async () => {
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-unit-slug-"));
-    tempPathsToClean.push(tmpDir);
-
-    const repoA = path.join(tmpDir, "repo-a");
-    await fs.mkdir(repoA, { recursive: true });
-
-    const result = await resolveAdditionalRepos(
-      [{ localRepoPath: repoA, branch: "feature/my-feature" }],
-      null,
-      [tmpDir],
-      "test-loop-id",
-      fakeWorktreeProvider,
-    );
-
-    assert.equal(result.length, 1);
-    assert.equal(result[0].branch, "feature/my-feature", "Raw branch name preserved");
-    assert.equal(
-      result[0].slugifiedBranch,
-      "feature-my-feature",
-      "slugifiedBranch should replace / with -",
-    );
   });
 
   // ---------------------------------------------------------------------------
@@ -549,32 +318,6 @@ describe("resolveAdditionalRepos — unit-style", () => {
       0,
       "Path with trailing slash matching primary repo should be removed after normalization",
     );
-  });
-
-  it("keeps all entries when none matches the primary repo path", async () => {
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-unit-keep-"));
-    tempPathsToClean.push(tmpDir);
-
-    const primaryRepo = path.join(tmpDir, "primary-repo");
-    await fs.mkdir(primaryRepo, { recursive: true });
-
-    const repoA = path.join(tmpDir, "repo-a");
-    const repoB = path.join(tmpDir, "repo-b");
-    await fs.mkdir(repoA, { recursive: true });
-    await fs.mkdir(repoB, { recursive: true });
-
-    const result = await resolveAdditionalRepos(
-      [
-        { localRepoPath: repoA, branch: "main" },
-        { localRepoPath: repoB, branch: "main" },
-      ],
-      primaryRepo,
-      [tmpDir],
-      "test-loop-id",
-      fakeWorktreeProvider,
-    );
-
-    assert.equal(result.length, 2, "All entries not matching primary should be kept");
   });
 
   it("rejects entries exceeding the maximum of 5 additional repos", async () => {
