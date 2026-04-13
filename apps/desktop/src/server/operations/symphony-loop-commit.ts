@@ -17,8 +17,7 @@ import {
 } from "@closedloop-ai/loops-api/artifacts";
 import type { ExecutionResult, LoopCommitter } from "./symphony-loop-types.js";
 import { isExecutionResult } from "./symphony-loop-types.js";
-import { getResolvedClaudePath } from "./symphony-loop-pipeline.js";
-import { shellEscape } from "./symphony-loop-pipeline.js";
+import { getResolvedClaudePath, shellEscape } from "./symphony-loop-pipeline.js";
 import { runningLoops } from "./symphony-loop-process.js";
 
 // ---------------------------------------------------------------------------

@@ -2,8 +2,7 @@ import { execSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { loopLog } from "./symphony-utils.js";
-import { runLoopsSetupScript } from "./symphony-utils.js";
+import { loopLog, runLoopsSetupScript } from "./symphony-utils.js";
 import type { WorktreeProvider } from "./symphony-loop-types.js";
 import { shellEscape } from "./symphony-loop-pipeline.js";
 

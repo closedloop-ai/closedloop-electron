@@ -256,8 +256,17 @@ export async function writeArtifactsForExecuteOrAmend(
           existing.content = artifact.content;
           await fs.writeFile(planJsonPath, JSON.stringify(existing, null, 2));
         } catch {
-          // If existing plan.json is corrupt, overwrite entirely
-          await fs.writeFile(planJsonPath, artifact.content);
+          // If existing plan.json is corrupt, overwrite entirely.
+          // Apply same JSON validation as the no-existing-file path.
+          try {
+            JSON.parse(artifact.content);
+            await fs.writeFile(planJsonPath, artifact.content);
+          } catch {
+            await fs.writeFile(
+              planJsonPath,
+              JSON.stringify({ content: artifact.content }, null, 2),
+            );
+          }
         }
       } else {
         // No existing plan.json -- write the content as-is.

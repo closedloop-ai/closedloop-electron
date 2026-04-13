@@ -55,6 +55,8 @@ export async function postLoopEvent(
     );
     return { success: true };
   } catch (err) {
+    // Re-throw AbortError so postLoopEventBounded's catch can label it "timeout"
+    if (err instanceof DOMException && err.name === "AbortError") throw err;
     const msg = err instanceof Error ? err.message : String(err);
     loopError(loopId, "Failed to post event:", err);
     gatewayLog.error(

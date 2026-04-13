@@ -1,6 +1,6 @@
 import type { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import type { ContextPackAttachment as SharedContextPackAttachment } from "@closedloop-ai/loops-api/context-pack";
-import type { LoopArtifactType } from "@closedloop-ai/loops-api/artifacts";
+import { LoopArtifactType } from "@closedloop-ai/loops-api/artifacts";
 import type { spawn } from "node:child_process";
 
 // ---------------------------------------------------------------------------
@@ -107,9 +107,7 @@ export const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> =
     EVALUATE_CODE: "REQUIRED",
   };
 
-import { LoopArtifactType as LAT } from "@closedloop-ai/loops-api/artifacts";
-
 /** Artifact types that represent an implementation plan. */
 export const PLAN_ARTIFACT_TYPES: readonly LoopArtifactType[] = [
-  LAT.ImplementationPlan,
+  LoopArtifactType.ImplementationPlan,
 ] as const;
