@@ -185,6 +185,7 @@ export class DesktopApplication {
       pluginVersion: DESKTOP_GATEWAY_VERSION,
       supportedOperations: [...SUPPORTED_OPERATION_IDS],
       onStatusChange: (status) => this.onCloudSocketStatus(status),
+      onDisconnect: (reason) => { Observability.connectionLost(reason); },
       onHelloAck: (event) => {
         Observability.setTargetId(event.computeTargetId);
         if (event.sessionId) {
@@ -464,6 +465,7 @@ export class DesktopApplication {
     this.commandExecutor.setConnected(false);
 
     if (status.state === "degraded") {
+      Observability.connectionDegraded(status.error);
       this.cloudSocket.sendPresence({
         state: "degraded",
         error: status.error,

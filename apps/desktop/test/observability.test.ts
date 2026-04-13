@@ -153,4 +153,125 @@ describe("Observability", () => {
     assert.equal(telemetryEvents[0].trace?.loopId, "loop-1");
     assert.equal(telemetryEvents[0].diagnostics?.tokenUsage?.outputTokens, 2);
   });
+
+  test("connectionEstablished emits telemetry and PostHog", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    const captureCalls: Array<{ event: string; properties: Record<string, unknown> }> = [];
+    mock.method(PostHogAnalytics.prototype, "capture", (
+      _distinctId: string,
+      event: string,
+      properties: Record<string, unknown>,
+    ) => {
+      captureCalls.push({ event, properties });
+    });
+
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+      posthog: { apiKey: "phc_test", host: "https://us.i.posthog.com" },
+    });
+
+    Observability.connectionEstablished("desktop-1", "0.9.6", "production");
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "connection.established");
+    assert.equal(telemetryEvents[0].severity, "info");
+    assert.equal(telemetryEvents[0].trace?.computeTargetId, "desktop-1");
+    assert.ok(!telemetryEvents[0].trace?.commandId); // no commandId injected
+    assert.equal(captureCalls.length, 1);
+    assert.equal(captureCalls[0].event, "desktop_connection_established");
+  });
+
+  test("reconnectionResumed emits telemetry and PostHog", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    const captureCalls: Array<{ event: string; properties: Record<string, unknown> }> = [];
+    mock.method(PostHogAnalytics.prototype, "capture", (
+      _distinctId: string,
+      event: string,
+      properties: Record<string, unknown>,
+    ) => {
+      captureCalls.push({ event, properties });
+    });
+
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+      posthog: { apiKey: "phc_test", host: "https://us.i.posthog.com" },
+    });
+
+    Observability.setTargetId("target-x");
+    Observability.reconnectionResumed("relay_resume", 3);
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "connection.reconnection_resumed");
+    assert.equal(telemetryEvents[0].severity, "info");
+    assert.equal(telemetryEvents[0].diagnostics?.extra?.replayCommandCount, 3);
+    assert.ok(!telemetryEvents[0].trace?.commandId); // no commandId injected
+    assert.equal(captureCalls.length, 1);
+    assert.equal(captureCalls[0].event, "desktop_reconnection_resume");
+  });
+
+  test("connectionDegraded emits telemetry and PostHog", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    const captureCalls: Array<{ event: string; properties: Record<string, unknown> }> = [];
+    mock.method(PostHogAnalytics.prototype, "capture", (
+      _distinctId: string,
+      event: string,
+      properties: Record<string, unknown>,
+    ) => {
+      captureCalls.push({ event, properties });
+    });
+
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+      posthog: { apiKey: "phc_test", host: "https://us.i.posthog.com" },
+    });
+
+    Observability.connectionDegraded("Cloud socket disconnected: transport close");
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "connection.degraded");
+    assert.equal(telemetryEvents[0].severity, "warn");
+    assert.equal(telemetryEvents[0].message, "Cloud socket disconnected: transport close");
+    assert.ok(!telemetryEvents[0].trace?.commandId); // no commandId injected
+    assert.equal(captureCalls.length, 1);
+    assert.equal(captureCalls[0].event, "desktop_connection_degraded");
+  });
+
+  test("connectionLost emits telemetry and PostHog", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    const captureCalls: Array<{ event: string; properties: Record<string, unknown> }> = [];
+    mock.method(PostHogAnalytics.prototype, "capture", (
+      _distinctId: string,
+      event: string,
+      properties: Record<string, unknown>,
+    ) => {
+      captureCalls.push({ event, properties });
+    });
+
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+      posthog: { apiKey: "phc_test", host: "https://us.i.posthog.com" },
+    });
+
+    Observability.connectionLost("transport close");
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "connection.lost");
+    assert.equal(telemetryEvents[0].severity, "warn");
+    assert.ok(!telemetryEvents[0].trace?.commandId); // no commandId injected
+    assert.equal(captureCalls.length, 1);
+    assert.equal(captureCalls[0].event, "desktop_connection_lost");
+
+    // Also test connectionLost with no argument
+    telemetryEvents.length = 0;
+    captureCalls.length = 0;
+    Observability.connectionLost();
+    assert.equal(telemetryEvents[0].message, "Connection lost");
+  });
+
+  test("connectionDegraded and connectionLost no-op with initNoOp", () => {
+    Observability.initNoOp();
+    Observability.connectionDegraded("err");
+    Observability.connectionLost("reason");
+    // Test passes if no errors are thrown
+  });
 });

@@ -158,9 +158,10 @@ export class Observability {
     });
   }
 
-  // --- Connection lifecycle (PostHog only) ---
+  // --- Connection lifecycle ---
 
   static connectionEstablished(desktopId: string, version: string, environment: string): void {
+    Observability.emitTelemetry("info", "connection.established", "Connection established", { computeTargetId: desktopId });
     Observability.capturePostHog("desktop_connection_established", {
       desktop_id: desktopId,
       version,
@@ -169,10 +170,21 @@ export class Observability {
   }
 
   static reconnectionResumed(reason: string, replayCommandCount: number): void {
+    Observability.emitTelemetry("info", "connection.reconnection_resumed", "Reconnection resumed", {}, { extra: { reason, replayCommandCount } });
     Observability.capturePostHog("desktop_reconnection_resume", {
       reason,
       replay_command_count: replayCommandCount,
     });
+  }
+
+  static connectionDegraded(error: string): void {
+    Observability.emitTelemetry("warn", "connection.degraded", error, {});
+    Observability.capturePostHog("desktop_connection_degraded", { error });
+  }
+
+  static connectionLost(reason?: string): void {
+    Observability.emitTelemetry("warn", "connection.lost", reason ?? "Connection lost", {});
+    Observability.capturePostHog("desktop_connection_lost", { reason });
   }
 
   // --- Sandbox (PostHog only) ---
