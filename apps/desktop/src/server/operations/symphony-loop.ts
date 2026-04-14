@@ -3668,9 +3668,13 @@ async function handleLoopRequest(
     );
     spawnedSuccessfully = true;
     loopLog(body.loopId, `Spawned pid=${pid}, worktree=${worktreeDir}`);
+    const additionalDirsLogSuffix =
+      additionalWorktreeDirs.length > 0
+        ? `, additionalDirs=${additionalWorktreeDirs.map(({ dir }) => dir).join(",")}`
+        : "";
     gatewayLog.debug(
       "loop-harness",
-      `Spawned ${body.command} pid=${pid}, loopId=${body.loopId}, worktree=${worktreeDir}`,
+      `Spawned ${body.command} pid=${pid}, loopId=${body.loopId}, worktree=${worktreeDir}${additionalDirsLogSuffix}`,
     );
 
     // Bind runtime details to an existing LocalJob or create a new one for this loop
