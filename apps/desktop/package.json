@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "version": "0.13.0",
+  "version": "0.13.2",
   "description": "ClosedLoop Desktop",
   "author": "ClosedLoop AI <support@closedloop.ai>",
   "private": true,
@@ -18,7 +18,7 @@
     "release": "pnpm build && electron-builder --mac --publish always --config electron-builder.yml"
   },
   "dependencies": {
-    "@closedloop-ai/loops-api": "^0.2.1",
+    "@closedloop-ai/loops-api": "^0.2.3",
     "busboy": "^1.6.0",
     "zod": "^4.0.0",
     "electron-store": "^8.2.0",

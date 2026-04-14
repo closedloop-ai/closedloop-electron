@@ -49,7 +49,10 @@ import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import {
   expandHome,
   isProcessRunning,
+  loopError,
+  loopLog,
   resolveWorktreeParentDir,
+  runLoopsSetupScript,
   tryAssertRepoAllowed,
 } from "./symphony-utils.js";
 export { readLogTail } from "../../main/diagnostics-helpers.js";
@@ -64,6 +67,7 @@ export interface WorktreeProvider {
     worktreeDir: string,
     branchName: string,
     baseBranch: string,
+    loopId: string,
   ): Promise<void>;
   findWorktreeForBranch(repoPath: string, branchName: string): string | null;
   removeWorktree(
@@ -355,18 +359,6 @@ export function registerRecoveredLoop(loopId: string, pid: number): void {
 
 export function unregisterLoop(loopId: string): void {
   runningLoops.delete(loopId);
-}
-
-function loopLog(loopId: string, ...args: unknown[]): void {
-  const short = loopId.slice(0, 8);
-  const ts = new Date().toISOString().slice(11, 23);
-  console.log(`[symphony-loop][${ts}][${short}]`, ...args);
-}
-
-function loopError(loopId: string, ...args: unknown[]): void {
-  const short = loopId.slice(0, 8);
-  const ts = new Date().toISOString().slice(11, 23);
-  console.error(`[symphony-loop][${ts}][${short}]`, ...args);
 }
 
 // ---------------------------------------------------------------------------
@@ -661,6 +653,7 @@ async function ensureWorktreeImpl(
   worktreeDir: string,
   branchName: string,
   baseBranch: string,
+  loopId: string,
 ): Promise<void> {
   if (existsSync(worktreeDir)) {
     return;
@@ -698,6 +691,8 @@ async function ensureWorktreeImpl(
       timeout: 30_000,
     },
   );
+
+  await runLoopsSetupScript(worktreeDir, loopId);
 }
 
 /** Find existing worktree for a branch name. */
@@ -2794,6 +2789,7 @@ async function handleLoopRequest(
           worktreeDir,
           branchName,
           body.repo?.branch ?? "main",
+          body.loopId,
         );
         loopLog(
           body.loopId,
@@ -2832,6 +2828,7 @@ async function handleLoopRequest(
             worktreeDir,
             branchName,
             body.repo?.branch ?? "main",
+            body.loopId,
           );
           loopLog(
             body.loopId,
@@ -2913,6 +2910,7 @@ async function handleLoopRequest(
         worktreeDir,
         branchName,
         body.repo?.branch ?? "main",
+        body.loopId,
       );
       loopLog(
         body.loopId,
