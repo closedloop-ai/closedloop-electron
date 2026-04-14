@@ -21,11 +21,11 @@ import {
 } from "../../main/diagnostics-helpers.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
-import type { LoopTokenStore } from "../../main/loop-token-store.js";
 import {
   finalizeLoopFromRuntime,
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
+import type { LoopTokenStore } from "../../main/loop-token-store.js";
 import { Observability } from "../../main/observability.js";
 import {
   parseTokenUsage,
@@ -160,18 +160,18 @@ export function getResolvedClaudePath(): string {
 // Types — shared contract from @closedloop-ai/loops-api
 // ---------------------------------------------------------------------------
 
-import type { LoopCommand } from "@closedloop-ai/loops-api/commands";
-import { validateCommandInputs } from "@closedloop-ai/loops-api/commands";
-import type { ContextPackAttachment as SharedContextPackAttachment } from "@closedloop-ai/loops-api/context-pack";
-import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
-import { LoopEventType } from "@closedloop-ai/loops-api/events";
-import type { LoopRequestBody } from "@closedloop-ai/loops-api/desktop-request";
-import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
 import {
   LoopArtifactFile,
   LoopArtifactType,
 } from "@closedloop-ai/loops-api/artifacts";
 import { validateResultBundle } from "@closedloop-ai/loops-api/bundles";
+import type { LoopCommand } from "@closedloop-ai/loops-api/commands";
+import { validateCommandInputs } from "@closedloop-ai/loops-api/commands";
+import type { ContextPackAttachment as SharedContextPackAttachment } from "@closedloop-ai/loops-api/context-pack";
+import type { LoopRequestBody } from "@closedloop-ai/loops-api/desktop-request";
+import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
+import { LoopEventType } from "@closedloop-ai/loops-api/events";
+import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
 
 /** Commands that have full spawn/dispatch support in this gateway version. */
 const SUPPORTED_COMMANDS = new Set<LoopCommand>([
@@ -521,57 +521,118 @@ export interface ResolvedAdditionalRepo {
   readonly slugifiedBranch: string; // slugifyLoopId(branch) for path construction only
 }
 
-/** Typed error thrown when an additional repo entry fails validation. */
-export class AdditionalRepoError extends Error {
-  constructor(
-    public readonly code: LoopErrorCode,
-    public readonly repoRef: string,
-    message: string,
-  ) {
-    super(message);
-    this.name = "AdditionalRepoError";
-  }
-}
+type RepoPathResolutionSuccess = {
+  ok: true;
+  path: string;
+  repoRef: string;
+};
+
+type RepoPathResolutionFailure = {
+  ok: false;
+  code: LoopErrorCode;
+  repoRef: string;
+  message: string;
+  status: 400 | 403 | 404;
+};
+
+type RepoPathResolutionResult =
+  | RepoPathResolutionSuccess
+  | RepoPathResolutionFailure;
+
+type RepoPathResolutionMessages = {
+  missingRepoRefMessage: string;
+  notFoundMessage: (repoRef: string) => string;
+  notAllowedMessage: (repoRef: string) => string;
+  missingRepoRefStatus: 400 | 403 | 404;
+  notFoundStatus: 400 | 403 | 404;
+  notAllowedStatus: 400 | 403 | 404;
+};
 
 const ADDITIONAL_REPOS_MAX = 5;
 
-/** Resolve an additional repo entry to a validated local path, or throw. */
-function resolveAndValidateRepoPath(
+/** Resolve a repo reference to a validated local path. */
+function resolveRepoPath(
   entry: { localRepoPath?: string; fullName?: string },
   allowedDirs: string[],
-  repoRef: string,
-): string {
-  let candidate: string;
+  messages: RepoPathResolutionMessages,
+): RepoPathResolutionResult {
+  const repoRef = entry.localRepoPath ?? entry.fullName ?? "";
+
   if (entry.localRepoPath) {
-    candidate = expandHome(entry.localRepoPath);
-  } else if (entry.fullName) {
-    const found = findLocalRepo(entry.fullName, allowedDirs);
-    if (!found) {
-      throw new AdditionalRepoError(
-        LoopErrorCode.RepoNotFound,
-        entry.fullName,
-        `Additional repo not found locally: ${entry.fullName}`,
-      );
+    const result = tryAssertRepoAllowed(entry.localRepoPath, allowedDirs);
+    if ("error" in result) {
+      return {
+        ok: false,
+        code: LoopErrorCode.RepoNotAllowed,
+        repoRef,
+        message: messages.notAllowedMessage(repoRef),
+        status: messages.notAllowedStatus,
+      };
     }
-    candidate = found;
-  } else {
-    throw new AdditionalRepoError(
-      LoopErrorCode.RepoNotFound,
-      repoRef,
-      "Additional repo entry must have localRepoPath or fullName",
-    );
+    return { ok: true, path: result.path, repoRef };
   }
 
-  const result = tryAssertRepoAllowed(candidate, allowedDirs);
-  if ("error" in result) {
-    throw new AdditionalRepoError(
-      LoopErrorCode.RepoNotAllowed,
-      repoRef,
-      `Additional repo path not allowed: ${repoRef}`,
-    );
+  if (entry.fullName) {
+    const found = findLocalRepo(entry.fullName, allowedDirs);
+    if (!found) {
+      return {
+        ok: false,
+        code: LoopErrorCode.RepoNotFound,
+        repoRef: entry.fullName,
+        message: messages.notFoundMessage(entry.fullName),
+        status: messages.notFoundStatus,
+      };
+    }
+
+    const result = tryAssertRepoAllowed(found, allowedDirs);
+    if ("error" in result) {
+      return {
+        ok: false,
+        code: LoopErrorCode.RepoNotAllowed,
+        repoRef,
+        message: messages.notAllowedMessage(repoRef),
+        status: messages.notAllowedStatus,
+      };
+    }
+
+    return { ok: true, path: result.path, repoRef };
   }
-  return result.path;
+
+  return {
+    ok: false,
+    code: LoopErrorCode.RepoNotFound,
+    repoRef,
+    message: messages.missingRepoRefMessage,
+    status: messages.missingRepoRefStatus,
+  };
 }
+
+const PRIMARY_REPO_PATH_MESSAGES: RepoPathResolutionMessages = {
+  missingRepoRefMessage: "Repository must have localRepoPath or fullName",
+  notFoundMessage: (repoRef) => `Repository not found locally: ${repoRef}`,
+  notAllowedMessage: () => "directory not allowed",
+  missingRepoRefStatus: 400,
+  notFoundStatus: 404,
+  notAllowedStatus: 403,
+};
+
+const ADDITIONAL_REPO_PATH_MESSAGES: RepoPathResolutionMessages = {
+  missingRepoRefMessage: "Additional repo entry must have localRepoPath or fullName",
+  notFoundMessage: (repoRef) => `Additional repo not found locally: ${repoRef}`,
+  notAllowedMessage: (repoRef) => `Additional repo path not allowed: ${repoRef}`,
+  missingRepoRefStatus: 400,
+  notFoundStatus: 400,
+  notAllowedStatus: 400,
+};
+
+type ResolveAdditionalReposResult =
+  | { repos: ResolvedAdditionalRepo[] }
+  | {
+    error: string;
+    code: LoopErrorCode;
+    repoRef: string;
+    status: 400;
+  };
 
 /**
  * Validate, resolve, and deduplicate the `additionalRepos` entries from the
@@ -579,7 +640,7 @@ function resolveAndValidateRepoPath(
  *
  * Steps:
  *   1. Guard — return [] for undefined/empty input.
- *   2. Enforce hard limit of 5 entries.
+ *   2. Enforce hard limit of ADDITIONAL_REPOS_MAX entries.
  *   3. For each entry:
  *      a. If `localRepoPath` is provided, validate it via tryAssertRepoAllowed.
  *      b. If only `fullName` is provided, resolve via findLocalRepo then validate.
@@ -595,24 +656,38 @@ export async function resolveAdditionalRepos(
   allowedDirs: string[],
   loopId: string,
   wt: WorktreeProvider,
-): Promise<ResolvedAdditionalRepo[]> {
+): Promise<ResolveAdditionalReposResult> {
   if (entries.length === 0) {
-    return [];
+    return { repos: [] };
   }
 
   if (entries.length > ADDITIONAL_REPOS_MAX) {
-    throw new AdditionalRepoError(
-      LoopErrorCode.RepoNotFound,
-      "",
-      `additionalRepos exceeds maximum of ${ADDITIONAL_REPOS_MAX} entries (got ${entries.length})`,
-    );
+    return {
+      error: `additionalRepos exceeds maximum of ${ADDITIONAL_REPOS_MAX} entries (got ${entries.length})`,
+      code: LoopErrorCode.RepoNotFound,
+      repoRef: "",
+      status: 400,
+    };
   }
 
   const seen = new Map<string, ResolvedAdditionalRepo>();
 
   for (const entry of entries) {
-    const repoRef = entry.localRepoPath ?? entry.fullName ?? "";
-    const resolvedPath = resolveAndValidateRepoPath(entry, allowedDirs, repoRef);
+    const resolvedRepo = resolveRepoPath(
+      entry,
+      allowedDirs,
+      ADDITIONAL_REPO_PATH_MESSAGES,
+    );
+    if (!resolvedRepo.ok) {
+      return {
+        error: resolvedRepo.message,
+        code: resolvedRepo.code,
+        repoRef: resolvedRepo.repoRef,
+        status: 400,
+      };
+    }
+    const resolvedPath = resolvedRepo.path;
+    const repoRef = resolvedRepo.repoRef;
 
     // Remove entries matching primaryRepoPath (normalized)
     if (
@@ -637,11 +712,12 @@ export async function resolveAdditionalRepos(
     // Validate branch exists
     const branchFound = await wt.branchExists(resolvedPath, entry.branch);
     if (!branchFound) {
-      throw new AdditionalRepoError(
-        LoopErrorCode.RepoNotFound,
+      return {
+        error: `Branch "${entry.branch}" not found in additional repo: ${resolvedPath}`,
+        code: LoopErrorCode.RepoNotFound,
         repoRef,
-        `Branch "${entry.branch}" not found in additional repo: ${resolvedPath}`,
-      );
+        status: 400,
+      };
     }
 
     const slugifiedBranch = slugifyLoopId(entry.branch);
@@ -652,7 +728,7 @@ export async function resolveAdditionalRepos(
     });
   }
 
-  return Array.from(seen.values());
+  return { repos: Array.from(seen.values()) };
 }
 
 /**
@@ -2778,11 +2854,12 @@ async function handleLoopRequest(
     if (repoRequirement !== "NOT_REQUIRED" && body.localRepoPath) {
       // localRepoPath takes precedence over repo.fullName lookup when present
       try {
-        const repoResult = tryAssertRepoAllowed(
-          body.localRepoPath,
+        const repoResult = resolveRepoPath(
+          { localRepoPath: body.localRepoPath },
           allowedDirs,
+          PRIMARY_REPO_PATH_MESSAGES,
         );
-        if ("error" in repoResult) {
+        if (!repoResult.ok) {
           if (repoRequirement === "REQUIRED") {
             await postLoopEventBounded(
               apiBaseUrl,
@@ -2790,17 +2867,20 @@ async function handleLoopRequest(
               body.closedLoopAuthToken,
               {
                 type: LoopEventType.Error,
-                code: LoopErrorCode.RepoNotAllowed,
-                message: "Repository path not allowed by sandbox policy",
+                code: repoResult.code,
+                message:
+                  repoResult.code === LoopErrorCode.RepoNotAllowed
+                    ? "Repository path not allowed by sandbox policy"
+                    : repoResult.message,
               },
             );
             // runningLoops.delete handled by finally block
-            json(context, repoResult.status, { error: repoResult.error });
+            json(context, repoResult.status, { error: repoResult.message });
             return;
           }
           loopLog(
             body.loopId,
-            `Ignoring localRepoPath for ${body.command}: ${repoResult.error}`,
+            `Ignoring localRepoPath for ${body.command}: ${repoResult.message}`,
           );
         } else {
           expandedRepoPath = repoResult.path;
@@ -2816,37 +2896,12 @@ async function handleLoopRequest(
         );
       }
     } else if (repoRequirement !== "NOT_REQUIRED" && body.repo?.fullName) {
-      expandedRepoPath = findLocalRepo(body.repo.fullName, allowedDirs);
-      if (expandedRepoPath) {
-        try {
-          assertPathAllowed(expandedRepoPath, allowedDirs);
-        } catch (err) {
-          if (err instanceof DirectoryNotAllowedError) {
-            if (repoRequirement === "REQUIRED") {
-              await postLoopEventBounded(
-                apiBaseUrl,
-                body.loopId,
-                body.closedLoopAuthToken,
-                {
-                  type: LoopEventType.Error,
-                  code: LoopErrorCode.RepoNotAllowed,
-                  message: "Repository path not allowed by sandbox policy",
-                },
-              );
-              // runningLoops.delete handled by finally block
-              json(context, 403, { error: "Repository path not allowed" });
-              return;
-            }
-            loopLog(
-              body.loopId,
-              `Ignoring repo.fullName for ${body.command}: repository path not allowed (${expandedRepoPath})`,
-            );
-            expandedRepoPath = null;
-          } else {
-            throw err;
-          }
-        }
-      } else {
+      const repoResult = resolveRepoPath(
+        { fullName: body.repo.fullName },
+        allowedDirs,
+        PRIMARY_REPO_PATH_MESSAGES,
+      );
+      if (!repoResult.ok) {
         if (repoRequirement === "REQUIRED") {
           await postLoopEventBounded(
             apiBaseUrl,
@@ -2854,54 +2909,56 @@ async function handleLoopRequest(
             body.closedLoopAuthToken,
             {
               type: LoopEventType.Error,
-              code: LoopErrorCode.RepoNotFound,
-              message: `Repository not found locally: ${body.repo.fullName}`,
+              code: repoResult.code,
+              message:
+                repoResult.code === LoopErrorCode.RepoNotAllowed
+                  ? "Repository path not allowed by sandbox policy"
+                  : repoResult.message,
             },
           );
           // runningLoops.delete handled by finally block (spawnedSuccessfully remains false)
-          json(context, 404, {
-            error: `Repository not found locally: ${body.repo.fullName}`,
+          json(context, repoResult.status, {
+            error: repoResult.message,
           });
           return;
         }
         loopLog(
           body.loopId,
-          `Ignoring repo.fullName for ${body.command}: not found locally (${body.repo.fullName})`,
+          `Ignoring repo.fullName for ${body.command}: ${repoResult.message}`,
         );
+      } else {
+        expandedRepoPath = repoResult.path;
       }
     }
 
     let resolvedAdditionalRepos: ResolvedAdditionalRepo[] = [];
     if (body.command === "PLAN" && body.additionalRepos && body.additionalRepos.length > 0) {
-      try {
-        resolvedAdditionalRepos = await resolveAdditionalRepos(
-          body.additionalRepos,
-          expandedRepoPath,
-          allowedDirs,
+      const additionalRepoResult = await resolveAdditionalRepos(
+        body.additionalRepos,
+        expandedRepoPath,
+        allowedDirs,
+        body.loopId,
+        wt,
+      );
+      if ("error" in additionalRepoResult) {
+        await postLoopEventBounded(
+          apiBaseUrl,
           body.loopId,
-          wt,
+          body.closedLoopAuthToken,
+          {
+            type: LoopEventType.Error,
+            code: additionalRepoResult.code,
+            message: additionalRepoResult.error,
+          },
         );
-      } catch (err) {
-        if (err instanceof AdditionalRepoError) {
-          await postLoopEventBounded(
-            apiBaseUrl,
-            body.loopId,
-            body.closedLoopAuthToken,
-            {
-              type: LoopEventType.Error,
-              code: err.code,
-              message: err.message,
-            },
-          );
-          gatewayLog.error(
-            "loop-harness",
-            `additionalRepo validation failed for loopId=${body.loopId}: ${err.repoRef} — ${err.message}`,
-          );
-          json(context, 400, { error: err.message });
-          return;
-        }
-        throw err;
+        gatewayLog.error(
+          "loop-harness",
+          `additionalRepo validation failed for loopId=${body.loopId}: ${additionalRepoResult.repoRef} — ${additionalRepoResult.error}`,
+        );
+        json(context, additionalRepoResult.status, { error: additionalRepoResult.error });
+        return;
       }
+      resolvedAdditionalRepos = additionalRepoResult.repos;
     }
 
     let worktreeDir: string | null = null;

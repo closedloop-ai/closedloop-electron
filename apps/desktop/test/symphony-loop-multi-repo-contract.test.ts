@@ -50,6 +50,15 @@ const fakeWorktreeProvider: WorktreeProvider = {
   branchExists: async () => true,
 };
 
+function expectResolvedAdditionalRepos(
+  result: Awaited<ReturnType<typeof resolveAdditionalRepos>>,
+) {
+  if ("error" in result) {
+    assert.fail(`Expected resolved additional repos, got error: ${result.error}`);
+  }
+  return result.repos;
+}
+
 const serversToClose: DesktopGatewayServer[] = [];
 const mockServersToClose: http.Server[] = [];
 const tempPathsToClean: string[] = [];
@@ -248,7 +257,7 @@ describe("resolveAdditionalRepos — unit-style", () => {
     const repoA = path.join(tmpDir, "repo-a");
     await fs.mkdir(repoA, { recursive: true });
 
-    const result = await resolveAdditionalRepos(
+    const result = expectResolvedAdditionalRepos(await resolveAdditionalRepos(
       [
         { localRepoPath: repoA, branch: "main" },
         { localRepoPath: repoA, branch: "feature-branch" }, // same path, different branch
@@ -257,7 +266,7 @@ describe("resolveAdditionalRepos — unit-style", () => {
       [tmpDir],
       "test-loop-id",
       fakeWorktreeProvider,
-    );
+    ));
 
     assert.equal(result.length, 1, "Duplicate paths should be deduplicated to one entry");
     assert.equal(result[0].repoPath, repoA);
@@ -278,7 +287,7 @@ describe("resolveAdditionalRepos — unit-style", () => {
     const secondaryRepo = path.join(tmpDir, "secondary-repo");
     await fs.mkdir(secondaryRepo, { recursive: true });
 
-    const result = await resolveAdditionalRepos(
+    const result = expectResolvedAdditionalRepos(await resolveAdditionalRepos(
       [
         { localRepoPath: primaryRepo, branch: "main" }, // same as primary — should be removed
         { localRepoPath: secondaryRepo, branch: "main" }, // different — should be kept
@@ -287,7 +296,7 @@ describe("resolveAdditionalRepos — unit-style", () => {
       [tmpDir],
       "test-loop-id",
       fakeWorktreeProvider,
-    );
+    ));
 
     assert.equal(result.length, 1, "Entry matching primary repo path should be removed");
     assert.equal(
@@ -305,13 +314,13 @@ describe("resolveAdditionalRepos — unit-style", () => {
     await fs.mkdir(primaryRepo, { recursive: true });
 
     // Use a trailing slash variant — path.resolve should normalize both sides
-    const result = await resolveAdditionalRepos(
+    const result = expectResolvedAdditionalRepos(await resolveAdditionalRepos(
       [{ localRepoPath: primaryRepo + "/", branch: "main" }],
       primaryRepo,
       [tmpDir],
       "test-loop-id",
       fakeWorktreeProvider,
-    );
+    ));
 
     assert.equal(
       result.length,
@@ -327,23 +336,18 @@ describe("resolveAdditionalRepos — unit-style", () => {
     const repos = Array.from({ length: 6 }, (_, i) => path.join(tmpDir, `repo-${i}`));
     await Promise.all(repos.map((r) => fs.mkdir(r, { recursive: true })));
 
-    await assert.rejects(
-      () =>
-        resolveAdditionalRepos(
-          repos.map((r) => ({ localRepoPath: r, branch: "main" })),
-          null,
-          [tmpDir],
-          "test-loop-id",
-          fakeWorktreeProvider,
-        ),
-      (err: unknown) => {
-        assert.ok(err instanceof Error, "Should throw an Error");
-        assert.ok(
-          err.message.includes("exceeds maximum"),
-          `Expected 'exceeds maximum' in error message, got: ${err.message}`,
-        );
-        return true;
-      },
+    const result = await resolveAdditionalRepos(
+      repos.map((r) => ({ localRepoPath: r, branch: "main" })),
+      null,
+      [tmpDir],
+      "test-loop-id",
+      fakeWorktreeProvider,
+    );
+
+    assert.ok("error" in result, "Expected max-entry validation to return an error result");
+    assert.ok(
+      result.error.includes("exceeds maximum"),
+      `Expected 'exceeds maximum' in error message, got: ${result.error}`,
     );
   });
 });
