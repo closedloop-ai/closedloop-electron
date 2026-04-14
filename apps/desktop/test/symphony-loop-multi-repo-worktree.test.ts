@@ -184,8 +184,9 @@ test("ensureWorktree called for each additional repo with correct branch before 
   // Wait for the loop to complete so ensureWorktree calls are captured
   await waitForCompletedEvent(mock.requests, loopId);
 
-  // Filter out the primary repo call — additional repo calls pass the same
-  // branch as both branchName and baseBranch.
+  // Filter out the primary repo call — additional repo calls use a scratch
+  // branch (symphony/<worktreeKey>-<addRepoSlug>) based on the user-specified
+  // branch, mirroring the primary-repo pattern.
   const additionalCalls = ensureWorktreeCalls.filter(
     (c) => c.repoPath !== primaryRepo,
   );
@@ -199,17 +200,37 @@ test("ensureWorktree called for each additional repo with correct branch before 
   const callForA = additionalCalls.find((c) => c.repoPath === additionalRepoA);
   assert.ok(callForA, "ensureWorktree should be called with additionalRepoA path");
   assert.equal(
-    callForA.branchName,
+    callForA.baseBranch,
     "feature-a",
-    `Expected branch 'feature-a' for additionalRepoA, got '${callForA.branchName}'`,
+    `Expected baseBranch 'feature-a' for additionalRepoA, got '${callForA.baseBranch}'`,
+  );
+  assert.match(
+    callForA.branchName,
+    /^symphony\/.+-feature-a$/,
+    `Expected scratch branch name 'symphony/<slug>-feature-a' for additionalRepoA, got '${callForA.branchName}'`,
+  );
+  assert.notEqual(
+    callForA.branchName,
+    callForA.baseBranch,
+    "Scratch branch name must differ from baseBranch to avoid mutating the user's branch",
   );
 
   const callForB = additionalCalls.find((c) => c.repoPath === additionalRepoB);
   assert.ok(callForB, "ensureWorktree should be called with additionalRepoB path");
   assert.equal(
-    callForB.branchName,
+    callForB.baseBranch,
     "feature-b",
-    `Expected branch 'feature-b' for additionalRepoB, got '${callForB.branchName}'`,
+    `Expected baseBranch 'feature-b' for additionalRepoB, got '${callForB.baseBranch}'`,
+  );
+  assert.match(
+    callForB.branchName,
+    /^symphony\/.+-feature-b$/,
+    `Expected scratch branch name 'symphony/<slug>-feature-b' for additionalRepoB, got '${callForB.branchName}'`,
+  );
+  assert.notEqual(
+    callForB.branchName,
+    callForB.baseBranch,
+    "Scratch branch name must differ from baseBranch to avoid mutating the user's branch",
   );
 });
 
@@ -432,7 +453,7 @@ test("ensureWorktree throws for additional repo — error event posted and reque
   setShellPathForTest();
 
   // Provider whose ensureWorktree succeeds for the primary repo but throws
-  // for additional repos (detected by branchName === baseBranch pattern).
+  // for additional repos (simulates checkout failure on a secondary repo).
   let primaryCreated = false;
   const { provider: baseProvider } = makeRecordingWorktreeProvider();
   const throwingProvider: WorktreeProvider = {

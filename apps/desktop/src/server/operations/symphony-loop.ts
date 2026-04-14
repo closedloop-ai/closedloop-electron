@@ -3084,14 +3084,26 @@ async function handleLoopRequest(
           `Created fresh worktree for PLAN: ${worktreeDir} (branch: ${branchName})`,
         );
 
-        // Create additional repo worktrees for PLAN command
+        // Create additional repo worktrees for PLAN command.
+        // Mirror the primary-repo pattern: create a fresh scratch branch
+        // (symphony/<worktreeKey>-<addRepoSlug>) based on the user-specified
+        // branch, so loop work does not mutate the user's actual branch.
         for (const addRepo of resolvedAdditionalRepos) {
           const addWorktreeDir = resolveLoopWorktreeDir(
             addRepo.repoPath,
             worktreeKey + "-" + addRepo.slugifiedBranch,
           );
+          const addBranchName = `symphony/${worktreeKey}-${addRepo.slugifiedBranch}`;
           try {
-            await wt.ensureWorktree(addRepo.repoPath, addWorktreeDir, addRepo.branch, addRepo.branch);
+            const staleAddWorktree = wt.findWorktreeForBranch(addRepo.repoPath, addBranchName);
+            if (staleAddWorktree) {
+              loopLog(
+                body.loopId,
+                `Removing stale additional-repo worktree for fresh PLAN: ${staleAddWorktree}`,
+              );
+              await wt.removeWorktree(staleAddWorktree, addRepo.repoPath, body.loopId);
+            }
+            await wt.ensureWorktree(addRepo.repoPath, addWorktreeDir, addBranchName, addRepo.branch);
           } catch (checkoutErr) {
             const msg = checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr);
             loopError(body.loopId, `ensureWorktree failed for additional repo ${addRepo.repoPath}:`, checkoutErr);
@@ -3121,7 +3133,7 @@ async function handleLoopRequest(
             throw e;
           }
           additionalWorktreeDirs.push({ dir: addWorktreeDir, repoPath: addRepo.repoPath });
-          loopLog(body.loopId, `Created additional repo worktree: ${addWorktreeDir} (branch: ${addRepo.branch})`);
+          loopLog(body.loopId, `Created additional repo worktree: ${addWorktreeDir} (branch: ${addBranchName} based on ${addRepo.branch})`);
         }
       } else {
         // EXECUTE/REQUEST_CHANGES: reuse existing worktree.
