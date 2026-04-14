@@ -108,6 +108,7 @@ async function createTestGateway(
     worktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mockPort}`,
+    getGatewayId: () => "test-gateway-id",
   });
   serversToClose.push(server);
   await server.start();
@@ -328,7 +329,7 @@ test("removeWorktree called for additional worktree dirs when process fails", as
 // Test 3: ensureWorktree throws for additional repo — assert HTTP 400/500 and error event posted
 // ---------------------------------------------------------------------------
 
-test("ensureWorktree throws for additional repo — error event posted and request returns non-200", async () => {
+test("ensureWorktree throws for additional repo — cleans leaked worktree, posts error event, and returns non-200", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "wt-lifecycle-throw-"));
   tempPathsToClean.push(tmpDir);
 
@@ -351,19 +352,25 @@ test("ensureWorktree throws for additional repo — error event posted and reque
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
 
-  // Provider whose ensureWorktree succeeds for the primary repo but throws
-  // for additional repos (simulates checkout failure on a secondary repo).
+  // Provider whose ensureWorktree succeeds for the primary repo but creates
+  // then fails the additional repo worktree (simulates checkout failure after
+  // git worktree creation, before the dir is tracked for bulk cleanup).
   let primaryCreated = false;
-  const { provider: baseProvider } = makeRecordingWorktreeProvider();
+  const {
+    provider: baseProvider,
+    ensureWorktreeCalls,
+    removeCalls,
+  } = makeRecordingWorktreeProvider();
   const throwingProvider: WorktreeProvider = {
     ...baseProvider,
-    async ensureWorktree(repoPath, worktreeDir, branchName, baseBranch) {
+    async ensureWorktree(repoPath, worktreeDir, branchName, baseBranch, loopId) {
       if (!primaryCreated) {
         // First call is the primary repo — let it succeed
         primaryCreated = true;
         await fs.mkdir(worktreeDir, { recursive: true });
         return;
       }
+      await baseProvider.ensureWorktree(repoPath, worktreeDir, branchName, baseBranch, loopId);
       throw new Error("Simulated ensureWorktree failure");
     },
   };
@@ -406,6 +413,16 @@ test("ensureWorktree throws for additional repo — error event posted and reque
     errorEvent.type,
     "error",
     `Expected error event type, got '${errorEvent.type}'`,
+  );
+
+  const additionalWorktreeDir = ensureWorktreeCalls.find(
+    (call) => call.repoPath === additionalRepo,
+  )?.worktreeDir;
+  assert.ok(additionalWorktreeDir, "Expected an additional repo worktree dir to be created before failure");
+
+  assert.ok(
+    removeCalls.some((call) => call.worktreeDir === additionalWorktreeDir),
+    `Expected removeWorktree to be called for leaked additional worktree dir ${additionalWorktreeDir}`,
   );
 });
 

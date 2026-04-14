@@ -3002,6 +3002,7 @@ async function handleLoopRequest(
             const msg = checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr);
             loopError(body.loopId, `ensureWorktree failed for additional repo ${addRepo.repoPath}:`, checkoutErr);
             await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
+            await wt.removeWorktree(addWorktreeDir, addRepo.repoPath, body.loopId).catch(() => {});
             await postLoopEventBounded(
               apiBaseUrl,
               body.loopId,
