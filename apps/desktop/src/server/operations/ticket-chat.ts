@@ -6,7 +6,7 @@ import type { ProcessManager } from "../process-manager.js";
 import { getShellEnv } from "../shell-path.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
-import { READONLY_CODEBASE_TOOLS, WEB_ONLY_TOOLS } from "./chat-tools.js";
+import { getReadonlyCodebaseTools, getWebOnlyTools } from "./chat-tools.js";
 import { createStreamState, processStreamEvent } from "./stream-events.js";
 import { expandHome } from "./symphony-utils.js";
 
@@ -67,6 +67,8 @@ export function registerTicketChatRoutes(
 
     const ticketId = typeof body.ticketId === "string" ? body.ticketId : null;
     const message = typeof body.message === "string" ? body.message : null;
+    const expectedMcpUrl =
+      typeof body.expectedMcpUrl === "string" ? body.expectedMcpUrl : undefined;
     const ticketContext = isTicketContext(body.ticketContext) ? body.ticketContext : null;
     const repoPath = typeof body.repoPath === "string" ? body.repoPath : undefined;
 
@@ -102,7 +104,9 @@ export function registerTicketChatRoutes(
     const isResuming = Boolean(history.sessionId);
     const contextPrompt = buildTicketContextPrompt(ticketContext, expandedRepoPath);
     const prompt = isResuming ? message : `${contextPrompt}\n\n---\n\nUser: ${message}`;
-    const allowedTools = expandedRepoPath ? READONLY_CODEBASE_TOOLS : WEB_ONLY_TOOLS;
+    const allowedTools = expandedRepoPath
+      ? await getReadonlyCodebaseTools(expectedMcpUrl)
+      : await getWebOnlyTools(expectedMcpUrl);
 
     setStreamingHeaders(context.response);
     writeEvent(context.response, { type: "status", status: "spawning", resuming: isResuming });
@@ -276,4 +280,3 @@ function json(context: OperationRequestContext, status: number, payload: unknown
   context.response.setHeader("content-type", "application/json");
   context.response.end(JSON.stringify(payload));
 }
-

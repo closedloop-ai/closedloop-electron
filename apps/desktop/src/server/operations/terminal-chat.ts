@@ -54,6 +54,8 @@ export function registerTerminalChatRoutes(
     }
 
     const { mode, cleanMessage } = parseMessageMode(message);
+    const expectedMcpUrl =
+      typeof body.expectedMcpUrl === "string" ? body.expectedMcpUrl : undefined;
     const dir = getSymphonyDir();
     const history = await loadChatHistory(dir);
     history.messages.push({
@@ -82,7 +84,15 @@ export function registerTerminalChatRoutes(
     });
 
     if (mode === "claude") {
-      await streamClaude(context.response, processManager, cleanMessage, history, terminalCwd, dir);
+      await streamClaude(
+        context.response,
+        processManager,
+        cleanMessage,
+        history,
+        terminalCwd,
+        dir,
+        expectedMcpUrl
+      );
       return;
     }
 
@@ -96,7 +106,8 @@ async function streamClaude(
   message: string,
   history: TerminalChatHistory,
   terminalCwd: string,
-  symphonyDir: string
+  symphonyDir: string,
+  expectedMcpUrl?: string
 ): Promise<void> {
   const streamState = createStreamState(async (sessionId) => {
     if (!history.claudeSessionId) {
@@ -106,6 +117,10 @@ async function streamClaude(
   });
 
   const shellEnv = await getShellEnv();
+  const allowedTools = await withMcpTools(
+    "WebSearch,WebFetch,Bash",
+    expectedMcpUrl
+  );
 
   await new Promise<void>((resolve) => {
     let handled = false;
@@ -140,7 +155,7 @@ async function streamClaude(
           "--verbose",
           "--output-format",
           "stream-json",
-          `--allowedTools=${withMcpTools("WebSearch,WebFetch,Bash")}`,
+          `--allowedTools=${allowedTools}`,
           ...(history.claudeSessionId ? ["--resume", history.claudeSessionId] : [])
         ],
         cwd: terminalCwd,
