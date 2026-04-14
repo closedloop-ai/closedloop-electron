@@ -18,7 +18,7 @@
     "release": "pnpm build && electron-builder --mac --publish always --config electron-builder.yml"
   },
   "dependencies": {
-    "@closedloop-ai/loops-api": "file:/Users/alex.ponamarev/Projects/closed_loop/symphony-alpha/packages/loops-api/closedloop-ai-loops-api-0.2.4.tgz",
+    "@closedloop-ai/loops-api": "0.2.4",
     "busboy": "^1.6.0",
     "electron-store": "^8.2.0",
     "electron-updater": "^6.8.3",
