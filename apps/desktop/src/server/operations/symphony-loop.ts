@@ -630,6 +630,14 @@ function resolveLoopWorktreeDir(
   );
 }
 
+function additionalRepoDisambiguator(repoPath: string): string {
+  return crypto
+    .createHash("sha1")
+    .update(path.resolve(repoPath))
+    .digest("hex")
+    .slice(0, 8);
+}
+
 /**
  * Slugify a loop ID for worktree/branch naming.
  * Matches ECS harness convention: lowercase, non-alnum to dashes, max 50 chars.
@@ -2983,11 +2991,12 @@ async function handleLoopRequest(
         // based on the user-specified branch so loop work does not mutate it.
         for (const addRepo of resolvedAdditionalRepos) {
           const addRepoSlug = slugifyLoopId(addRepo.branch);
+          const addRepoKey = `${worktreeKey}-${addRepoSlug}-${additionalRepoDisambiguator(addRepo.repoPath)}`;
           const addWorktreeDir = resolveLoopWorktreeDir(
             addRepo.repoPath,
-            `${worktreeKey}-${addRepoSlug}`,
+            addRepoKey,
           );
-          const addBranchName = `symphony/${worktreeKey}-${addRepoSlug}`;
+          const addBranchName = `symphony/${addRepoKey}`;
           try {
             const staleAddWorktree = wt.findWorktreeForBranch(addRepo.repoPath, addBranchName);
             if (staleAddWorktree) {

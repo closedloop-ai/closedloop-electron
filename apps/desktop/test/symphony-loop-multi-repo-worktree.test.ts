@@ -181,8 +181,8 @@ test("ensureWorktree called for each additional repo with correct branch before 
   await waitForCompletedEvent(mock.requests, loopId);
 
   // Filter out the primary repo call — additional repo calls use a scratch
-  // branch (symphony/<worktreeKey>-<addRepoSlug>) based on the user-specified
-  // branch, mirroring the primary-repo pattern.
+  // branch (symphony/<worktreeKey>-<addRepoSlug>-<repoHash>) based on the
+  // user-specified branch, mirroring the primary-repo pattern.
   const additionalCalls = ensureWorktreeCalls.filter(
     (c) => c.repoPath !== primaryRepo,
   );
@@ -202,8 +202,8 @@ test("ensureWorktree called for each additional repo with correct branch before 
   );
   assert.match(
     callForA.branchName,
-    /^symphony\/.+-feature-a$/,
-    `Expected scratch branch name 'symphony/<slug>-feature-a' for additionalRepoA, got '${callForA.branchName}'`,
+    /^symphony\/.+-feature-a-[a-f0-9]{8}$/,
+    `Expected scratch branch name 'symphony/<slug>-feature-a-<repoHash>' for additionalRepoA, got '${callForA.branchName}'`,
   );
   assert.notEqual(
     callForA.branchName,
@@ -220,13 +220,83 @@ test("ensureWorktree called for each additional repo with correct branch before 
   );
   assert.match(
     callForB.branchName,
-    /^symphony\/.+-feature-b$/,
-    `Expected scratch branch name 'symphony/<slug>-feature-b' for additionalRepoB, got '${callForB.branchName}'`,
+    /^symphony\/.+-feature-b-[a-f0-9]{8}$/,
+    `Expected scratch branch name 'symphony/<slug>-feature-b-<repoHash>' for additionalRepoB, got '${callForB.branchName}'`,
   );
   assert.notEqual(
     callForB.branchName,
     callForB.baseBranch,
     "Scratch branch name must differ from baseBranch to avoid mutating the user's branch",
+  );
+});
+
+test("additional repos with same basename get unique worktree dirs", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "wt-lifecycle-collision-"));
+  tempPathsToClean.push(tmpDir);
+
+  const primaryRepo = path.join(tmpDir, "primary-repo");
+  await fs.mkdir(primaryRepo, { recursive: true });
+
+  const additionalRepoA = path.join(tmpDir, "work", "api");
+  const additionalRepoB = path.join(tmpDir, "oss", "api");
+  await fs.mkdir(additionalRepoA, { recursive: true });
+  await fs.mkdir(additionalRepoB, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const { provider, ensureWorktreeCalls } = makeRecordingWorktreeProvider();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+  const server = await createTestGateway(tmpDir, mock.port, provider);
+
+  const loopId = "00000000-0000-0000-0000-000000007002";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "PLAN",
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        repo: {
+          fullName: `wt-lifecycle-test/${path.basename(primaryRepo)}`,
+          branch: "main",
+        },
+        additionalRepos: [
+          { localRepoPath: additionalRepoA, branch: "feature-shared" },
+          { localRepoPath: additionalRepoB, branch: "feature-shared" },
+        ],
+      }),
+    },
+  );
+
+  assert.equal(response.status, 200, "PLAN with colliding-basename additionalRepos should return HTTP 200");
+  await waitForCompletedEvent(mock.requests, loopId);
+
+  const additionalCalls = ensureWorktreeCalls.filter((c) => c.repoPath !== primaryRepo);
+  assert.equal(additionalCalls.length, 2, "Expected ensureWorktree to be called for both additional repos");
+
+  const uniqueDirs = new Set(additionalCalls.map((c) => c.worktreeDir));
+  assert.equal(
+    uniqueDirs.size,
+    2,
+    `Expected distinct additional worktree dirs, got: ${additionalCalls.map((c) => c.worktreeDir).join(", ")}`,
   );
 });
 
