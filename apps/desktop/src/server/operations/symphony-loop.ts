@@ -630,7 +630,7 @@ function resolveLoopWorktreeDir(
   );
 }
 
-function additionalRepoDisambiguator(repoPath: string): string {
+export function additionalRepoDisambiguator(repoPath: string): string {
   return crypto
     .createHash("sha1")
     .update(path.resolve(repoPath))

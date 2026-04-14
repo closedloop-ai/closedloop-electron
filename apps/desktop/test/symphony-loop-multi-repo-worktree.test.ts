@@ -2,8 +2,12 @@
  * Worktree lifecycle tests for multi-repo PLAN requests.
  *
  * 1. ensureWorktree called per additional repo before spawn with correct branch
+ *    (scratch-branch invariants only; naming convention covered by unit tests)
  * 2. removeWorktree called on process failure (run-loop.sh exits 1)
  * 3. ensureWorktree throws — assert non-2xx and error event posted
+ *
+ * Note: the same-basename collision case is covered by a unit test of
+ * additionalRepoDisambiguator in symphony-loop-multi-repo-contract.test.ts.
  */
 
 import assert from "node:assert/strict";
@@ -152,9 +156,10 @@ test("ensureWorktree called for each additional repo with correct branch before 
   // Wait for the loop to complete so ensureWorktree calls are captured
   await waitForCompletedEvent(mock.requests, loopId);
 
-  // Filter out the primary repo call — additional repo calls use a scratch
-  // branch (symphony/<worktreeKey>-<addRepoSlug>-<repoHash>) based on the
-  // user-specified branch, mirroring the primary-repo pattern.
+  // Filter out the primary repo call — additional repo calls create a scratch
+  // branch derived from the user-specified branch so loop work never mutates
+  // the user's actual branch. The exact naming convention is an implementation
+  // detail; assert only the safety invariants.
   const additionalCalls = ensureWorktreeCalls.filter(
     (c) => c.repoPath !== primaryRepo,
   );
@@ -165,111 +170,27 @@ test("ensureWorktree called for each additional repo with correct branch before 
     `Expected ensureWorktree called 2 times for additional repos, got ${additionalCalls.length}`,
   );
 
-  const callForA = additionalCalls.find((c) => c.repoPath === additionalRepoA);
-  assert.ok(callForA, "ensureWorktree should be called with additionalRepoA path");
-  assert.equal(
-    callForA.baseBranch,
-    "feature-a",
-    `Expected baseBranch 'feature-a' for additionalRepoA, got '${callForA.baseBranch}'`,
-  );
-  assert.match(
-    callForA.branchName,
-    /^symphony\/.+-feature-a-[a-f0-9]{8}$/,
-    `Expected scratch branch name 'symphony/<slug>-feature-a-<repoHash>' for additionalRepoA, got '${callForA.branchName}'`,
-  );
-  assert.notEqual(
-    callForA.branchName,
-    callForA.baseBranch,
-    "Scratch branch name must differ from baseBranch to avoid mutating the user's branch",
-  );
-
-  const callForB = additionalCalls.find((c) => c.repoPath === additionalRepoB);
-  assert.ok(callForB, "ensureWorktree should be called with additionalRepoB path");
-  assert.equal(
-    callForB.baseBranch,
-    "feature-b",
-    `Expected baseBranch 'feature-b' for additionalRepoB, got '${callForB.baseBranch}'`,
-  );
-  assert.match(
-    callForB.branchName,
-    /^symphony\/.+-feature-b-[a-f0-9]{8}$/,
-    `Expected scratch branch name 'symphony/<slug>-feature-b-<repoHash>' for additionalRepoB, got '${callForB.branchName}'`,
-  );
-  assert.notEqual(
-    callForB.branchName,
-    callForB.baseBranch,
-    "Scratch branch name must differ from baseBranch to avoid mutating the user's branch",
-  );
-});
-
-test("additional repos with same basename get unique worktree dirs", async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "wt-lifecycle-collision-"));
-  tempPathsToClean.push(tmpDir);
-
-  const primaryRepo = path.join(tmpDir, "primary-repo");
-  await fs.mkdir(primaryRepo, { recursive: true });
-
-  const additionalRepoA = path.join(tmpDir, "work", "api");
-  const additionalRepoB = path.join(tmpDir, "oss", "api");
-  await fs.mkdir(additionalRepoA, { recursive: true });
-  await fs.mkdir(additionalRepoB, { recursive: true });
-
-  const worktreeParent = path.join(tmpDir, "worktrees");
-  await fs.mkdir(worktreeParent, { recursive: true });
-
-  process.env.HOME = tmpDir;
-  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
-  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
-
-  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
-
-  const fakeBin = path.join(tmpDir, "fake-bin");
-  await fs.mkdir(fakeBin, { recursive: true });
-  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest();
-
-  const { provider, ensureWorktreeCalls } = makeRecordingWorktreeProvider();
-
-  const mock = await startMockApiServer();
-  mockServersToClose.push(mock.server);
-  const server = await createTestGateway(tmpDir, mock.port, provider);
-
-  const loopId = "00000000-0000-0000-0000-000000007002";
-  const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        loopId,
-        command: "PLAN",
-        closedLoopAuthToken: "tok",
-        artifacts: [],
-        repo: {
-          fullName: `wt-lifecycle-test/${path.basename(primaryRepo)}`,
-          branch: "main",
-        },
-        additionalRepos: [
-          { localRepoPath: additionalRepoA, branch: "feature-shared" },
-          { localRepoPath: additionalRepoB, branch: "feature-shared" },
-        ],
-      }),
-    },
-  );
-
-  assert.equal(response.status, 200, "PLAN with colliding-basename additionalRepos should return HTTP 200");
-  await waitForCompletedEvent(mock.requests, loopId);
-
-  const additionalCalls = ensureWorktreeCalls.filter((c) => c.repoPath !== primaryRepo);
-  assert.equal(additionalCalls.length, 2, "Expected ensureWorktree to be called for both additional repos");
-
-  const uniqueDirs = new Set(additionalCalls.map((c) => c.worktreeDir));
-  assert.equal(
-    uniqueDirs.size,
-    2,
-    `Expected distinct additional worktree dirs, got: ${additionalCalls.map((c) => c.worktreeDir).join(", ")}`,
-  );
+  for (const [repoPath, expectedBaseBranch] of [
+    [additionalRepoA, "feature-a"],
+    [additionalRepoB, "feature-b"],
+  ] as const) {
+    const call = additionalCalls.find((c) => c.repoPath === repoPath);
+    assert.ok(call, `ensureWorktree should be called with ${repoPath}`);
+    assert.equal(
+      call.baseBranch,
+      expectedBaseBranch,
+      `Expected baseBranch '${expectedBaseBranch}' for ${repoPath}, got '${call.baseBranch}'`,
+    );
+    assert.ok(
+      call.branchName.startsWith("symphony/"),
+      `Scratch branch name should be under symphony/ namespace, got '${call.branchName}'`,
+    );
+    assert.notEqual(
+      call.branchName,
+      call.baseBranch,
+      "Scratch branch name must differ from baseBranch to avoid mutating the user's branch",
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------

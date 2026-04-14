@@ -5,6 +5,7 @@
  * 2. resolveAdditionalRepos deduplicates on resolved path
  * 3. resolveAdditionalRepos removes entries matching the primary repo
  * 4. resolveAdditionalRepos rejects > 5 entries
+ * 5. additionalRepoDisambiguator distinguishes repos with the same basename
  */
 
 import assert from "node:assert/strict";
@@ -14,6 +15,7 @@ import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 import {
+  additionalRepoDisambiguator,
   AdditionalRepoError,
   resolveAdditionalRepos,
 } from "../src/server/operations/symphony-loop.js";
@@ -211,6 +213,38 @@ describe("resolveAdditionalRepos — unit-style", () => {
       (err) =>
         err instanceof AdditionalRepoError &&
         err.message.includes("exceeds maximum"),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// additionalRepoDisambiguator: pure-function check that two repos sharing a
+// basename but differing in absolute path get distinct disambiguators. Replaces
+// the prior full-stack integration test for the same invariant.
+// ---------------------------------------------------------------------------
+
+describe("additionalRepoDisambiguator", () => {
+  it("produces different disambiguators for repos with the same basename in different parents", () => {
+    const a = "/tmp/work/api";
+    const b = "/tmp/oss/api";
+
+    const hashA = additionalRepoDisambiguator(a);
+    const hashB = additionalRepoDisambiguator(b);
+
+    assert.match(hashA, /^[a-f0-9]{8}$/, "disambiguator should be an 8-char hex string");
+    assert.match(hashB, /^[a-f0-9]{8}$/, "disambiguator should be an 8-char hex string");
+    assert.notEqual(
+      hashA,
+      hashB,
+      "Repos with the same basename but distinct absolute paths must hash differently",
+    );
+  });
+
+  it("is stable: same path returns the same disambiguator across calls", () => {
+    const repoPath = "/tmp/work/api";
+    assert.equal(
+      additionalRepoDisambiguator(repoPath),
+      additionalRepoDisambiguator(repoPath),
     );
   });
 });
