@@ -575,7 +575,7 @@ export async function resolveAdditionalRepos(
 
   if (entries.length > ADDITIONAL_REPOS_MAX) {
     throw new AdditionalRepoError(
-      LoopErrorCode.RepoNotFound,
+      LoopErrorCode.PreRunValidationFailed,
       "",
       `additionalRepos exceeds maximum of ${ADDITIONAL_REPOS_MAX} entries (got ${entries.length})`,
     );
