@@ -11,12 +11,13 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
-import { DesktopGatewayServer } from "../src/server/server.js";
-import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
+import { JobStore } from "../src/main/job-store.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
+import { handleProcessCompletion } from "../src/server/operations/symphony-loop.js";
 import { setShellPathForTest } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
+  makeMultiRepoGateway,
   makeMultiRepoTestHarness,
   startMockApiServer,
   waitForCompletedEvent,
@@ -72,28 +73,18 @@ const { serversToClose, mockServersToClose, tempPathsToClean, cleanup } =
 afterEach(cleanup);
 
 /** Create a gateway server with a mock API backend and a given worktree provider. */
-async function createTestGateway(
+function createTestGateway(
   tmpDir: string,
   mockPort: number,
   worktreeProvider: WorktreeProvider,
 ) {
-  const server = new DesktopGatewayServer({
-    host: "127.0.0.1",
-    preferredPort: 0,
-    fallbackPorts: [0],
-    webAppOrigin: "https://app.symphony.com",
-    getAllowedDirectories: () => [tmpDir],
+  return makeMultiRepoGateway({
+    tmpDir,
+    mockPort,
     machineName: "worktree-lifecycle-test",
-    version: "0.1.0-test",
-    capabilities: EMPTY_CAPABILITIES,
     worktreeProvider,
-    discoveryFilePath: path.join(tmpDir, "electron-port"),
-    getApiOrigin: () => `http://127.0.0.1:${mockPort}`,
-    getGatewayId: () => "test-gateway-id",
+    serversToClose,
   });
-  serversToClose.push(server);
-  await server.start();
-  return server;
 }
 
 // ---------------------------------------------------------------------------
@@ -475,5 +466,116 @@ test("ensureWorktree throws for additional repo — cleans leaked worktree, post
     removeCalls.some((call) => call.worktreeDir === additionalWorktreeDir),
     `Expected removeWorktree to be called for leaked additional worktree dir ${additionalWorktreeDir}`,
   );
+});
+
+test("handleProcessCompletion cleans additional worktrees when PLAN is cancelled during post-processing", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "wt-lifecycle-cancel-"));
+  tempPathsToClean.push(tmpDir);
+
+  const claudeWorkDir = path.join(tmpDir, "claude-workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(
+    path.join(claudeWorkDir, "claude-output.jsonl"),
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        model: "claude-test",
+        usage: { input_tokens: 10, output_tokens: 5 },
+      },
+    }) + "\n",
+  );
+
+  const now = new Date().toISOString();
+  const loopId = "00000000-0000-0000-0000-000000007005";
+  const jobStore = new JobStore({
+    cwd: tmpDir,
+    name: "test-jobs-wt-lifecycle-cancel",
+  });
+  jobStore.upsert({
+    id: "job-wt-lifecycle-cancel",
+    kind: "SYMPHONY_LOOP",
+    loopId,
+    command: "PLAN",
+    status: "CANCEL_PENDING",
+    startedAt: now,
+    updatedAt: now,
+  });
+
+  const additionalWorktrees = [
+    {
+      dir: path.join(tmpDir, "worktrees", "repo-a"),
+      repoPath: path.join(tmpDir, "repos", "repo-a"),
+    },
+    {
+      dir: path.join(tmpDir, "worktrees", "repo-b"),
+      repoPath: path.join(tmpDir, "repos", "repo-b"),
+    },
+  ];
+  await Promise.all(
+    additionalWorktrees.map(async ({ dir, repoPath }) => {
+      await fs.mkdir(dir, { recursive: true });
+      await fs.mkdir(repoPath, { recursive: true });
+    }),
+  );
+
+  const removeCalls: Array<{
+    worktreeDir: string;
+    repoPath: string;
+    loopId?: string;
+  }> = [];
+  const worktreeProvider: WorktreeProvider = {
+    async ensureWorktree() {},
+    findWorktreeForBranch() {
+      return null;
+    },
+    async removeWorktree(worktreeDir, repoPath, removeLoopId) {
+      removeCalls.push({ worktreeDir, repoPath, loopId: removeLoopId });
+      await fs.rm(worktreeDir, { recursive: true, force: true });
+    },
+    getCurrentBranch() {
+      return "symphony/worktree-lifecycle-test";
+    },
+    branchExists: async () => true,
+  };
+
+  await handleProcessCompletion(
+    0,
+    {
+      loopId,
+      command: "PLAN",
+      closedLoopAuthToken: "tok",
+    } as Parameters<typeof handleProcessCompletion>[1],
+    "http://127.0.0.1:9",
+    null,
+    claudeWorkDir,
+    false,
+    null,
+    () => [tmpDir],
+    undefined,
+    jobStore,
+    undefined,
+    undefined,
+    undefined,
+    worktreeProvider,
+    undefined,
+    additionalWorktrees,
+  );
+
+  assert.deepEqual(
+    removeCalls.map((call) => ({
+      worktreeDir: call.worktreeDir,
+      repoPath: call.repoPath,
+      loopId: call.loopId,
+    })),
+    additionalWorktrees.map(({ dir, repoPath }) => ({
+      worktreeDir: dir,
+      repoPath,
+      loopId,
+    })),
+    "Expected cancellation gate to clean every additional repo worktree",
+  );
+
+  const finalJob = jobStore.getByLoopId(loopId);
+  assert.equal(finalJob?.status, "CANCELLED");
 });
 

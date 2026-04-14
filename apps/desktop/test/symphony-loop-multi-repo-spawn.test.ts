@@ -19,12 +19,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
-import { DesktopGatewayServer } from "../src/server/server.js";
-import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 import { setShellPathForTest } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
+  makeMultiRepoGateway,
   makeMultiRepoTestHarness,
   startMockApiServer,
   waitForCompletedEvent,
@@ -60,23 +59,14 @@ const { serversToClose, mockServersToClose, tempPathsToClean, cleanup } =
 afterEach(cleanup);
 
 /** Create a gateway server with a mock API backend and the worktreeProvider. */
-async function createTestGateway(tmpDir: string, mockPort: number) {
-  const server = new DesktopGatewayServer({
-    host: "127.0.0.1",
-    preferredPort: 0,
-    fallbackPorts: [0],
-    webAppOrigin: "https://app.symphony.com",
-    getAllowedDirectories: () => [tmpDir],
+function createTestGateway(tmpDir: string, mockPort: number) {
+  return makeMultiRepoGateway({
+    tmpDir,
+    mockPort,
     machineName: "multi-repo-spawn-test",
-    version: "0.1.0-test",
-    capabilities: EMPTY_CAPABILITIES,
     worktreeProvider: fakeWorktreeProvider,
-    discoveryFilePath: path.join(tmpDir, "electron-port"),
-    getApiOrigin: () => `http://127.0.0.1:${mockPort}`,
+    serversToClose,
   });
-  serversToClose.push(server);
-  await server.start();
-  return server;
 }
 
 /**

@@ -18,6 +18,7 @@ import {
   setShellPathForTest,
 } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
+import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 
 const execFileAsync = promisify(execFile);
@@ -415,6 +416,39 @@ export function makeMultiRepoTestHarness(): MultiRepoTestHarness {
   }
 
   return { serversToClose, mockServersToClose, tempPathsToClean, cleanup };
+}
+
+/**
+ * Create and start a DesktopGatewayServer configured for a multi-repo test.
+ * Pushes the server onto `serversToClose` so the harness cleans it up.
+ *
+ * All three multi-repo tests (`-contract`, `-spawn`, `-worktree`) share this
+ * configuration; only `machineName` and the optional `worktreeProvider` differ.
+ */
+export async function makeMultiRepoGateway(options: {
+  tmpDir: string;
+  mockPort: number;
+  machineName: string;
+  worktreeProvider: WorktreeProvider;
+  serversToClose: DesktopGatewayServer[];
+}): Promise<DesktopGatewayServer> {
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [options.tmpDir],
+    machineName: options.machineName,
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: options.worktreeProvider,
+    discoveryFilePath: path.join(options.tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${options.mockPort}`,
+    getGatewayId: () => "test-gateway-id",
+  });
+  options.serversToClose.push(server);
+  await server.start();
+  return server;
 }
 
 // ---------------------------------------------------------------------------

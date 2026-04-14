@@ -1958,7 +1958,7 @@ function isCancelled(jobStore: JobStore | undefined, loopId: string): boolean {
   return status === "CANCEL_PENDING" || status === "CANCELLED";
 }
 
-async function handleProcessCompletion(
+export async function handleProcessCompletion(
   exitCode: number,
   body: LoopRequestBody,
   apiBaseUrl: string,
@@ -2432,6 +2432,7 @@ async function handleProcessCompletion(
       ) {
         await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
       }
+      await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt);
       loopTokenStore?.deleteLoopToken(loopId);
       return;
     }
@@ -3018,7 +3019,7 @@ async function handleLoopRequest(
               body.closedLoopAuthToken,
               {
                 type: LoopEventType.Error,
-                code: LoopErrorCode.ArtifactWriteFailed,
+                code: LoopErrorCode.BranchCreateFailed,
                 message: `Failed to checkout additional repo worktree: ${msg}`,
               },
             );
@@ -3031,6 +3032,16 @@ async function handleLoopRequest(
             if (e instanceof DirectoryNotAllowedError) {
               await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
               await wt.removeWorktree(addWorktreeDir, addRepo.repoPath, body.loopId).catch(() => {});
+              await postLoopEventBounded(
+                apiBaseUrl,
+                body.loopId,
+                body.closedLoopAuthToken,
+                {
+                  type: LoopEventType.Error,
+                  code: LoopErrorCode.RepoNotAllowed,
+                  message: `Additional repo worktree path not allowed: ${addWorktreeDir}`,
+                },
+              );
               json(context, 403, { error: `Additional repo worktree path not allowed: ${addWorktreeDir}` });
               return;
             }
