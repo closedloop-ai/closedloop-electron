@@ -56,7 +56,14 @@ type PersistOutcome =
 
 type EventForwarder = {
   readonly onEvent: (event: StreamEvent) => void;
+  // Discards any events buffered during the current spawn attempt. Called
+  // between the first spawn and the lazy-fallback retry so errors from the
+  // failed attempt never reach the client when the retry ultimately succeeds.
   readonly reset: () => void;
+  // Flushes any events buffered during the current spawn attempt to the
+  // response. Called after the final spawn attempt (happy path or retry)
+  // resolves, so errors from a non-retryable failure are still surfaced.
+  readonly commit: () => void;
   readonly textEventsEmitted: number;
   readonly accumulatedText: string;
 };
@@ -120,6 +127,10 @@ export function registerGenericChatRoutes(
       const retryParams: SpawnParams = { ...initialParams, sessionId: undefined };
       spawnResult = await chatProvider.spawn(retryParams, forwarder.onEvent);
     }
+
+    // Flush buffered error events now that the final spawn has resolved.
+    // Errors from a retried-away attempt were already dropped by reset().
+    forwarder.commit();
 
     const assistantMessage: ChatMessage = {
       id: `assistant-${randomUUID()}`,
@@ -299,8 +310,19 @@ function buildSessionFields(
 function makeEventForwarder(response: ServerResponse): EventForwarder {
   let text = "";
   let textCount = 0;
+  // Error events are buffered instead of streamed directly so that a failed
+  // first attempt followed by a successful lazy-fallback retry does not ship
+  // a spurious error to the client. The buffer is dropped on reset() (first
+  // attempt's errors are superseded by the retry's output) and flushed on
+  // commit() (final attempt's errors surface alongside result/done).
+  let pendingErrors: Record<string, unknown>[] = [];
+
   const onEvent = (event: StreamEvent): void => {
     if (event.type === "result" || event.type === "done") {
+      return;
+    }
+    if (event.type === "error") {
+      pendingErrors.push(event as Record<string, unknown>);
       return;
     }
     if (event.type === "text") {
@@ -312,13 +334,24 @@ function makeEventForwarder(response: ServerResponse): EventForwarder {
     }
     writeEvent(response, event as Record<string, unknown>);
   };
+
   const reset = (): void => {
     text = "";
     textCount = 0;
+    pendingErrors = [];
   };
+
+  const commit = (): void => {
+    for (const event of pendingErrors) {
+      writeEvent(response, event);
+    }
+    pendingErrors = [];
+  };
+
   return {
     onEvent,
     reset,
+    commit,
     get textEventsEmitted(): number {
       return textCount;
     },

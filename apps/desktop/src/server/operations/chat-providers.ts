@@ -323,6 +323,13 @@ export class CodexProvider implements ChatProvider {
       }
     }
 
+    // Resolve the login-shell PATH so `codex` installed via nvm/Homebrew is
+    // discoverable in packaged Electron builds. Without this the minimal PATH
+    // inherited from launchd misses ~/.nvm/versions/node/*/bin and
+    // /opt/homebrew/bin and spawn fails with ENOENT. Mirrors how ClaudeProvider
+    // and every other codex spawn site in the repo resolves its environment.
+    const shellEnv = await getShellEnv();
+
     return new Promise<SpawnResult>((resolve) => {
       let settled = false;
       const settle = (result: SpawnResult): void => {
@@ -338,7 +345,7 @@ export class CodexProvider implements ChatProvider {
         child = spawn("codex", args, {
           cwd: resolvedCwd,
           stdio: ["ignore", "pipe", "pipe"],
-          env: { ...process.env, FORCE_COLOR: "0" },
+          env: { ...shellEnv, FORCE_COLOR: "0" },
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

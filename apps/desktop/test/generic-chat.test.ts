@@ -529,6 +529,50 @@ describe("registerGenericChatRoutes POST /api/engineer/chat — lazy fallback re
     assert.equal(events.filter((event) => event.type === "done").length, 1);
   });
 
+  test("suppresses first-attempt error events when lazy retry succeeds", async () => {
+    // Regression for the "stale error events before lazy retry" bug: the
+    // first spawn attempt emits an error (as both providers do on stderr),
+    // the retry succeeds, and the client must NOT see the first attempt's
+    // error in the final event stream. Without forwarder buffering + commit
+    // the error would already be on the wire before the retry even starts.
+    installFetch([successfulUpsert("sess-stale"), successfulComplete()]);
+    const provider = new FakeProvider("claude", [
+      async (_params, onEvent) => {
+        onEvent({ type: "error", error: "session id not found" });
+        return {
+          sessionId: undefined,
+          exitCode: 1,
+          retryableSessionMissing: true,
+        };
+      },
+      async (_params, onEvent) => {
+        onEvent({ type: "text", content: "retry-ok" });
+        return {
+          sessionId: "sess-new",
+          exitCode: 0,
+          retryableSessionMissing: false,
+        };
+      },
+    ]);
+    const dispatcher = makeDispatcher(provider);
+
+    const { chunks } = await dispatchPost(dispatcher, requestBody());
+
+    assert.equal(provider.spawnCount, 2);
+    const events = parseEvents(chunks);
+    const errorEvents = events.filter((event) => event.type === "error");
+    assert.equal(
+      errorEvents.length,
+      0,
+      `expected no error events after successful retry, got ${errorEvents.length}`
+    );
+    assert.equal(
+      events.filter((event) => event.type === "result")[0]?.success,
+      true
+    );
+    assert.equal(events.filter((event) => event.type === "done").length, 1);
+  });
+
   test("does NOT retry when text was already emitted", async () => {
     installFetch([successfulUpsert("sess-stale"), successfulComplete()]);
     const provider = new FakeProvider("claude", [
