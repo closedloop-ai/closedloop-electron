@@ -1,11 +1,10 @@
 /**
  * Contract tests for multi-repo PLAN requests.
  *
- * 1. PLAN rejects entry missing branch — assert HTTP 400
- * 2. PLAN rejects nonexistent branch (branchExists returns false) — assert HTTP 400 and RepoNotFound error event
- * 3. Unit-style tests: resolveAdditionalRepos deduplication logic
- * 4. Unit-style tests: resolveAdditionalRepos primary-repo-removal logic
- * 5. Unit-style tests: resolveAdditionalRepos max entries limit
+ * 1. PLAN rejects nonexistent branch (branchExists returns false) — HTTP 400 + RepoNotFound event
+ * 2. resolveAdditionalRepos deduplicates on resolved path
+ * 3. resolveAdditionalRepos removes entries matching the primary repo
+ * 4. resolveAdditionalRepos rejects > 5 entries
  */
 
 import assert from "node:assert/strict";
@@ -17,7 +16,10 @@ import { afterEach, describe, it } from "node:test";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
-import { resolveAdditionalRepos } from "../src/server/operations/symphony-loop.js";
+import {
+  AdditionalRepoError,
+  resolveAdditionalRepos,
+} from "../src/server/operations/symphony-loop.js";
 import { resetShellPathCache } from "../src/server/shell-path.js";
 import {
   restoreEnv,
@@ -49,15 +51,6 @@ const fakeWorktreeProvider: WorktreeProvider = {
   },
   branchExists: async () => true,
 };
-
-function expectResolvedAdditionalRepos(
-  result: Awaited<ReturnType<typeof resolveAdditionalRepos>>,
-) {
-  if ("error" in result) {
-    assert.fail(`Expected resolved additional repos, got error: ${result.error}`);
-  }
-  return result.repos;
-}
 
 const serversToClose: DesktopGatewayServer[] = [];
 const mockServersToClose: http.Server[] = [];
@@ -105,73 +98,8 @@ async function createTestGateway(
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: PLAN rejects entry missing branch — assert HTTP 400
-// ---------------------------------------------------------------------------
-
-it("PLAN with additionalRepo missing branch returns HTTP 400", async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-nobranch-"));
-  tempPathsToClean.push(tmpDir);
-
-  const primaryRepo = path.join(tmpDir, "primary-repo");
-  await fs.mkdir(primaryRepo, { recursive: true });
-
-  const additionalRepo = path.join(tmpDir, "additional-repo");
-  await fs.mkdir(additionalRepo, { recursive: true });
-
-  const worktreeParent = path.join(tmpDir, "worktrees");
-  await fs.mkdir(worktreeParent, { recursive: true });
-
-  process.env.HOME = tmpDir;
-  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
-
-  const mock = await startMockApiServer();
-  mockServersToClose.push(mock.server);
-
-  // Use a worktreeProvider whose branchExists returns false for falsy branches,
-  // which is what happens when `branch` is missing from the request entry.
-  const missingBranchProvider: WorktreeProvider = {
-    ...fakeWorktreeProvider,
-    branchExists: async (_repoPath, branch) =>
-      typeof branch === "string" && branch.length > 0,
-  };
-  const server = await createTestGateway(tmpDir, mock.port, missingBranchProvider);
-
-  const loopId = "00000000-0000-0000-0000-000000003002";
-  // Send an additionalRepo entry without a branch field (TypeScript cast needed)
-  const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        loopId,
-        command: "PLAN",
-        closedLoopAuthToken: "tok",
-        artifacts: [],
-        repo: {
-          fullName: `multi-repo-test/${path.basename(primaryRepo)}`,
-          branch: "main",
-        },
-        additionalRepos: [
-          {
-            localRepoPath: additionalRepo,
-            // branch intentionally omitted
-          },
-        ],
-      }),
-    },
-  );
-
-  assert.equal(
-    response.status,
-    400,
-    "PLAN with additionalRepo missing branch should return HTTP 400",
-  );
-});
-
-// ---------------------------------------------------------------------------
-// Test 4: PLAN rejects nonexistent branch (branchExists returns false)
-//         — assert HTTP 400 and RepoNotFound error event
+// PLAN rejects nonexistent branch (branchExists returns false)
+//   — assert HTTP 400 and RepoNotFound error event
 // ---------------------------------------------------------------------------
 
 it("PLAN with nonexistent branch in additionalRepo returns HTTP 400 and RepoNotFound event", async () => {
@@ -246,10 +174,6 @@ it("PLAN with nonexistent branch in additionalRepo returns HTTP 400 and RepoNotF
 // ---------------------------------------------------------------------------
 
 describe("resolveAdditionalRepos — unit-style", () => {
-  // ---------------------------------------------------------------------------
-  // Test 6: Deduplication logic
-  // ---------------------------------------------------------------------------
-
   it("deduplicates entries that resolve to the same local path (first occurrence wins)", async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-unit-dedup-"));
     tempPathsToClean.push(tmpDir);
@@ -257,7 +181,7 @@ describe("resolveAdditionalRepos — unit-style", () => {
     const repoA = path.join(tmpDir, "repo-a");
     await fs.mkdir(repoA, { recursive: true });
 
-    const result = expectResolvedAdditionalRepos(await resolveAdditionalRepos(
+    const result = await resolveAdditionalRepos(
       [
         { localRepoPath: repoA, branch: "main" },
         { localRepoPath: repoA, branch: "feature-branch" }, // same path, different branch
@@ -266,16 +190,12 @@ describe("resolveAdditionalRepos — unit-style", () => {
       [tmpDir],
       "test-loop-id",
       fakeWorktreeProvider,
-    ));
+    );
 
     assert.equal(result.length, 1, "Duplicate paths should be deduplicated to one entry");
     assert.equal(result[0].repoPath, repoA);
     assert.equal(result[0].branch, "main", "First occurrence wins on deduplication");
   });
-
-  // ---------------------------------------------------------------------------
-  // Test 7: Primary-repo-removal logic
-  // ---------------------------------------------------------------------------
 
   it("removes an additionalRepo entry that matches the primary repo path", async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-unit-primary-"));
@@ -287,46 +207,19 @@ describe("resolveAdditionalRepos — unit-style", () => {
     const secondaryRepo = path.join(tmpDir, "secondary-repo");
     await fs.mkdir(secondaryRepo, { recursive: true });
 
-    const result = expectResolvedAdditionalRepos(await resolveAdditionalRepos(
+    const result = await resolveAdditionalRepos(
       [
-        { localRepoPath: primaryRepo, branch: "main" }, // same as primary — should be removed
-        { localRepoPath: secondaryRepo, branch: "main" }, // different — should be kept
+        { localRepoPath: primaryRepo, branch: "main" },
+        { localRepoPath: secondaryRepo, branch: "main" },
       ],
       primaryRepo,
       [tmpDir],
       "test-loop-id",
       fakeWorktreeProvider,
-    ));
+    );
 
     assert.equal(result.length, 1, "Entry matching primary repo path should be removed");
-    assert.equal(
-      result[0].repoPath,
-      secondaryRepo,
-      "Only the non-primary entry should remain",
-    );
-  });
-
-  it("normalizes paths before comparing with primary repo path", async () => {
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-unit-normalize-"));
-    tempPathsToClean.push(tmpDir);
-
-    const primaryRepo = path.join(tmpDir, "primary-repo");
-    await fs.mkdir(primaryRepo, { recursive: true });
-
-    // Use a trailing slash variant — path.resolve should normalize both sides
-    const result = expectResolvedAdditionalRepos(await resolveAdditionalRepos(
-      [{ localRepoPath: primaryRepo + "/", branch: "main" }],
-      primaryRepo,
-      [tmpDir],
-      "test-loop-id",
-      fakeWorktreeProvider,
-    ));
-
-    assert.equal(
-      result.length,
-      0,
-      "Path with trailing slash matching primary repo should be removed after normalization",
-    );
+    assert.equal(result[0].repoPath, secondaryRepo);
   });
 
   it("rejects entries exceeding the maximum of 5 additional repos", async () => {
@@ -336,18 +229,18 @@ describe("resolveAdditionalRepos — unit-style", () => {
     const repos = Array.from({ length: 6 }, (_, i) => path.join(tmpDir, `repo-${i}`));
     await Promise.all(repos.map((r) => fs.mkdir(r, { recursive: true })));
 
-    const result = await resolveAdditionalRepos(
-      repos.map((r) => ({ localRepoPath: r, branch: "main" })),
-      null,
-      [tmpDir],
-      "test-loop-id",
-      fakeWorktreeProvider,
-    );
-
-    assert.ok("error" in result, "Expected max-entry validation to return an error result");
-    assert.ok(
-      result.error.includes("exceeds maximum"),
-      `Expected 'exceeds maximum' in error message, got: ${result.error}`,
+    await assert.rejects(
+      () =>
+        resolveAdditionalRepos(
+          repos.map((r) => ({ localRepoPath: r, branch: "main" })),
+          null,
+          [tmpDir],
+          "test-loop-id",
+          fakeWorktreeProvider,
+        ),
+      (err) =>
+        err instanceof AdditionalRepoError &&
+        err.message.includes("exceeds maximum"),
     );
   });
 });

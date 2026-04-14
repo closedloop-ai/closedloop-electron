@@ -34,7 +34,6 @@ export type LocalJob = {
   artifactSlug?: string;
   issueId?: string;
   repoPath?: string;
-  additionalRepos?: Array<{ readonly repoPath: string; readonly branch: string }>;
   localRepoPath?: string;
   worktreeDir?: string;
   claudeWorkDir?: string;

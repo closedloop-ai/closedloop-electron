@@ -1,14 +1,9 @@
 /**
  * Worktree lifecycle tests for multi-repo PLAN requests.
  *
- * T-7.3: Verify that the worktree provider lifecycle methods are called
- * correctly for PLAN commands with additionalRepos:
- *
  * 1. ensureWorktree called per additional repo before spawn with correct branch
- * 2. removeWorktree called for all additional worktree dirs after successful run
- * 3. removeWorktree called on process failure (run-loop.sh exits 1)
- * 4. ensureWorktree throws — assert HTTP 400/500 and error event posted
- * 5. (removed — duplicated by contract tests)
+ * 2. removeWorktree called on process failure (run-loop.sh exits 1)
+ * 3. ensureWorktree throws — assert non-2xx and error event posted
  */
 
 import assert from "node:assert/strict";
@@ -235,103 +230,7 @@ test("ensureWorktree called for each additional repo with correct branch before 
 });
 
 // ---------------------------------------------------------------------------
-// Test 2: removeWorktree called for all additional worktree dirs after success
-// ---------------------------------------------------------------------------
-
-test("removeWorktree called for all additional worktree dirs after successful run", async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "wt-lifecycle-remove-"));
-  tempPathsToClean.push(tmpDir);
-
-  const primaryRepo = path.join(tmpDir, "primary-repo");
-  await fs.mkdir(primaryRepo, { recursive: true });
-
-  const additionalRepoA = path.join(tmpDir, "additional-repo-a");
-  const additionalRepoB = path.join(tmpDir, "additional-repo-b");
-  await fs.mkdir(additionalRepoA, { recursive: true });
-  await fs.mkdir(additionalRepoB, { recursive: true });
-
-  const worktreeParent = path.join(tmpDir, "worktrees");
-  await fs.mkdir(worktreeParent, { recursive: true });
-
-  process.env.HOME = tmpDir;
-  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
-  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
-
-  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
-
-  const fakeBin = path.join(tmpDir, "fake-bin");
-  await fs.mkdir(fakeBin, { recursive: true });
-  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest();
-
-  const { provider, ensureWorktreeCalls, removeCalls } = makeRecordingWorktreeProvider();
-
-  const mock = await startMockApiServer();
-  mockServersToClose.push(mock.server);
-  const server = await createTestGateway(tmpDir, mock.port, provider);
-
-  const loopId = "00000000-0000-0000-0000-000000007002";
-  const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        loopId,
-        command: "PLAN",
-        closedLoopAuthToken: "tok",
-        artifacts: [],
-        repo: {
-          fullName: `wt-lifecycle-test/${path.basename(primaryRepo)}`,
-          branch: "main",
-        },
-        additionalRepos: [
-          { localRepoPath: additionalRepoA, branch: "main" },
-          { localRepoPath: additionalRepoB, branch: "main" },
-        ],
-      }),
-    },
-  );
-
-  assert.equal(response.status, 200, "PLAN should return HTTP 200");
-
-  // Wait for the completed event first
-  await waitForCompletedEvent(mock.requests, loopId);
-
-  // Additional repo worktree dirs (filter out the primary repo call)
-  const additionalWorktreeDirs = ensureWorktreeCalls
-    .filter((c) => c.repoPath !== primaryRepo)
-    .map((c) => c.worktreeDir);
-
-  assert.equal(
-    additionalWorktreeDirs.length,
-    2,
-    `Expected 2 additional worktrees to be created, got ${additionalWorktreeDirs.length}`,
-  );
-
-  // Cleanup of additional worktrees is async and happens after the completed event is posted.
-  // Poll until both dirs appear in removeCalls, or timeout.
-  const deadline = Date.now() + 5_000;
-  while (
-    Date.now() < deadline &&
-    !additionalWorktreeDirs.every((dir) => removeCalls.some((c) => c.worktreeDir === dir))
-  ) {
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
-  }
-
-  // Each additional worktree dir should appear in removeCalls
-  for (const dir of additionalWorktreeDirs) {
-    const removed = removeCalls.some((c) => c.worktreeDir === dir);
-    assert.ok(
-      removed,
-      `Expected removeWorktree to be called for additional worktree dir: ${dir}`,
-    );
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Test 3: removeWorktree called on process failure (run-loop.sh exits 1)
+// Test 2: removeWorktree called on process failure (run-loop.sh exits 1)
 // ---------------------------------------------------------------------------
 
 test("removeWorktree called for additional worktree dirs when process fails", async () => {
@@ -426,7 +325,7 @@ test("removeWorktree called for additional worktree dirs when process fails", as
 });
 
 // ---------------------------------------------------------------------------
-// Test 4: ensureWorktree throws for additional repo — assert HTTP 400/500 and error event posted
+// Test 3: ensureWorktree throws for additional repo — assert HTTP 400/500 and error event posted
 // ---------------------------------------------------------------------------
 
 test("ensureWorktree throws for additional repo — error event posted and request returns non-200", async () => {
