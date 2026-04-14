@@ -198,7 +198,7 @@ describe("Observability", () => {
     });
 
     Observability.setTargetId("target-x");
-    Observability.reconnectionResumed("relay_resume", 3);
+    Observability.reconnectionResumed("relay_resumed", 3);
 
     assert.equal(telemetryEvents.length, 1);
     assert.equal(telemetryEvents[0].category, "connection.reconnection_resumed");
@@ -206,7 +206,9 @@ describe("Observability", () => {
     assert.equal(telemetryEvents[0].diagnostics?.extra?.replayCommandCount, 3);
     assert.ok(!telemetryEvents[0].trace?.commandId); // no commandId injected
     assert.equal(captureCalls.length, 1);
-    assert.equal(captureCalls[0].event, "desktop_reconnection_resume");
+    assert.equal(captureCalls[0].event, "desktop_reconnection_resumed");
+    assert.equal(captureCalls[0].properties.reason, "relay_resumed");
+    assert.equal(captureCalls[0].properties.replay_command_count, 3);
   });
 
   test("connectionDegraded emits telemetry and PostHog", () => {

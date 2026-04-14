@@ -192,7 +192,7 @@ export class DesktopApplication {
           Observability.setGatewaySessionId(event.sessionId);
         }
         if (event.resumeFromSequence) {
-          Observability.reconnectionResumed("relay_resume", Object.keys(event.resumeFromSequence).length);
+          Observability.reconnectionResumed("relay_resumed", Object.keys(event.resumeFromSequence).length);
           this.commandExecutor.replayFrom(event.resumeFromSequence);
         }
         Observability.connectionEstablished(

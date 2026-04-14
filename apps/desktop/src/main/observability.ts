@@ -183,7 +183,7 @@ export class Observability {
 
   static reconnectionResumed(reason: string, replayCommandCount: number): void {
     Observability.emitTelemetry("info", "connection.reconnection_resumed", "Reconnection resumed", {}, { extra: { reason, replayCommandCount } });
-    Observability.capturePostHog("desktop_reconnection_resume", {
+    Observability.capturePostHog("desktop_reconnection_resumed", {
       reason,
       replay_command_count: replayCommandCount,
     });
