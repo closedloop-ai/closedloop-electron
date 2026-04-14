@@ -18,8 +18,8 @@ import {
   type SpawnResult,
   type StreamEvent,
 } from "../src/server/operations/chat-providers.js";
-import type { GenericChatRow } from "../src/server/operations/chat-backend-client.js";
-import { registerGenericChatRoutes } from "../src/server/operations/generic-chat.js";
+import type { ChatSessionRow } from "../src/server/operations/chat-backend-client.js";
+import { registerChatSessionRoutes } from "../src/server/operations/chat-session.js";
 
 type CapturedResponse = {
   response: ServerResponse;
@@ -184,7 +184,7 @@ const SAMPLE_USER_MESSAGE = {
   timestamp: "2024-01-01T00:00:00Z",
 };
 
-const SAMPLE_CHAT_ROW: GenericChatRow = {
+const SAMPLE_CHAT_ROW: ChatSessionRow = {
   id: "chat-1",
   chatKey: "chat-key-1",
   provider: "claude",
@@ -210,7 +210,7 @@ function makeDispatcher(
   gatewayId = DEFAULT_GATEWAY_ID
 ): OperationDispatcher {
   const dispatcher = new OperationDispatcher();
-  registerGenericChatRoutes(
+  registerChatSessionRoutes(
     dispatcher,
     {} as unknown as ProcessManager,
     makeRegistry(provider),
@@ -232,7 +232,7 @@ function requestBody(overrides: Record<string, unknown> = {}): Record<string, un
 
 function successfulUpsert(
   resumeSessionId: string | null = null,
-  row: GenericChatRow = SAMPLE_CHAT_ROW
+  row: ChatSessionRow = SAMPLE_CHAT_ROW
 ): MockResponse {
   return {
     status: 200,
@@ -266,7 +266,7 @@ describe("ProviderRegistry", () => {
   });
 });
 
-describe("registerGenericChatRoutes POST /api/engineer/chat — body validation", () => {
+describe("registerChatSessionRoutes POST /api/engineer/chat — body validation", () => {
   test("returns 400 when apiAuthToken is missing", async () => {
     const dispatcher = makeDispatcher(new FakeProvider());
     const { statusCode } = await dispatchPost(
@@ -322,7 +322,7 @@ describe("registerGenericChatRoutes POST /api/engineer/chat — body validation"
   });
 });
 
-describe("registerGenericChatRoutes POST /api/engineer/chat — happy path", () => {
+describe("registerChatSessionRoutes POST /api/engineer/chat — happy path", () => {
   test("upserts, spawns, completes, emits exactly one result + one done", async () => {
     installFetch([successfulUpsert(null), successfulComplete()]);
     const provider = new FakeProvider("claude", [
@@ -349,11 +349,11 @@ describe("registerGenericChatRoutes POST /api/engineer/chat — happy path", () 
     assert.equal(results[0]?.sessionId, "sess-new");
     assert.equal(ended, true);
     assert.equal(fetchCalls.length, 2);
-    assert.match(fetchCalls[0].url, /\/generic-chats\/turn$/);
-    assert.match(fetchCalls[1].url, /\/generic-chats\/turn\/complete$/);
+    assert.match(fetchCalls[0].url, /\/chat-sessions\/turn$/);
+    assert.match(fetchCalls[1].url, /\/chat-sessions\/turn\/complete$/);
   });
 
-  test("never calls PATCH /generic-chats on the happy path", async () => {
+  test("never calls PATCH /chat-sessions on the happy path", async () => {
     installFetch([successfulUpsert(null), successfulComplete()]);
     const dispatcher = makeDispatcher(new FakeProvider());
 
@@ -361,7 +361,7 @@ describe("registerGenericChatRoutes POST /api/engineer/chat — happy path", () 
 
     for (const call of fetchCalls) {
       assert.notEqual(call.init.method, "PATCH");
-      assert.doesNotMatch(call.url, /\/generic-chats(?:\?|$)/);
+      assert.doesNotMatch(call.url, /\/chat-sessions(?:\?|$)/);
     }
   });
 
@@ -434,7 +434,7 @@ describe("registerGenericChatRoutes POST /api/engineer/chat — happy path", () 
   });
 });
 
-describe("registerGenericChatRoutes POST /api/engineer/chat — upsert errors", () => {
+describe("registerChatSessionRoutes POST /api/engineer/chat — upsert errors", () => {
   test("emits phase:upsert PROVIDER_MISMATCH on 409 and does not spawn", async () => {
     installFetch([
       { status: 409, body: { error: "mismatch", boundProvider: "codex" } },
@@ -492,7 +492,7 @@ describe("registerGenericChatRoutes POST /api/engineer/chat — upsert errors", 
   });
 });
 
-describe("registerGenericChatRoutes POST /api/engineer/chat — lazy fallback retry", () => {
+describe("registerChatSessionRoutes POST /api/engineer/chat — lazy fallback retry", () => {
   test("retries once when retryable and no text was emitted", async () => {
     installFetch([successfulUpsert("sess-stale"), successfulComplete()]);
     const provider = new FakeProvider("claude", [
@@ -666,7 +666,7 @@ describe("registerGenericChatRoutes POST /api/engineer/chat — lazy fallback re
   });
 });
 
-describe("registerGenericChatRoutes POST /api/engineer/chat — complete errors", () => {
+describe("registerChatSessionRoutes POST /api/engineer/chat — complete errors", () => {
   test("PERSISTENCE_FAILED when complete fails twice on transient 500", async () => {
     installFetch([
       successfulUpsert(null),
@@ -760,7 +760,7 @@ describe("registerGenericChatRoutes POST /api/engineer/chat — complete errors"
     assert.equal(fetchCalls.length, 2);
   });
 
-  test("never calls PATCH /generic-chats on any error path", async () => {
+  test("never calls PATCH /chat-sessions on any error path", async () => {
     installFetch([
       successfulUpsert(null),
       { status: 500, body: { error: "boom" } },

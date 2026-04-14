@@ -4,7 +4,7 @@ import type { ChatMessage } from "../src/server/operations/chat-providers.js";
 import {
   completeTurnViaBackend,
   upsertTurnViaBackend,
-  type GenericChatRow,
+  type ChatSessionRow,
 } from "../src/server/operations/chat-backend-client.js";
 
 type FetchCall = {
@@ -63,7 +63,7 @@ const SAMPLE_ASSISTANT_MESSAGE: ChatMessage = {
   timestamp: "2026-01-01T00:00:01.000Z",
 };
 
-const SAMPLE_CHAT_ROW: GenericChatRow = {
+const SAMPLE_CHAT_ROW: ChatSessionRow = {
   id: "chat-1",
   chatKey: "chat-key-1",
   provider: "claude",
@@ -77,7 +77,7 @@ const SAMPLE_CHAT_ROW: GenericChatRow = {
 };
 
 describe("upsertTurnViaBackend", () => {
-  test("sends POST to /generic-chats/turn with bearer token and body", async () => {
+  test("sends POST to /chat-sessions/turn with bearer token and body", async () => {
     installMockFetch([
       {
         status: 200,
@@ -107,7 +107,7 @@ describe("upsertTurnViaBackend", () => {
       assert.equal(result.resumeSessionId, "session-abc");
     }
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].url, "https://api.example.com/generic-chats/turn");
+    assert.equal(calls[0].url, "https://api.example.com/chat-sessions/turn");
     assert.equal(calls[0].init.method, "POST");
     const headers = calls[0].init.headers as Record<string, string>;
     assert.equal(headers.authorization, "Bearer token-xyz");
@@ -287,7 +287,7 @@ describe("upsertTurnViaBackend", () => {
 });
 
 describe("completeTurnViaBackend", () => {
-  test("sends POST to /generic-chats/turn/complete on success", async () => {
+  test("sends POST to /chat-sessions/turn/complete on success", async () => {
     installMockFetch([
       {
         status: 200,
@@ -314,7 +314,7 @@ describe("completeTurnViaBackend", () => {
     assert.equal(calls.length, 1);
     assert.equal(
       calls[0].url,
-      "https://api.example.com/generic-chats/turn/complete",
+      "https://api.example.com/chat-sessions/turn/complete",
     );
     assert.equal(calls[0].init.method, "POST");
     const headers = calls[0].init.headers as Record<string, string>;
