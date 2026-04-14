@@ -1,15 +1,15 @@
 import { execSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createWriteStream, existsSync, unlinkSync, writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
-import path from "node:path";
 import type { ServerResponse } from "node:http";
+import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
-import { getShellEnv } from "../shell-path.js";
 import { DirectoryNotAllowedError } from "../security.js";
-import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
+import { getShellEnv } from "../shell-path.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
-import { createStreamState, processStreamEvent, type ContentBlock } from "./stream-events.js";
-import { assertRepoAllowed, ensureWorktreeForReview, resolveWorktreeDir, resolveWorktreeParentDir, tryAssertRepoAllowed, tryAssertPathAllowed } from "./symphony-utils.js";
+import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
+import { type ContentBlock, createStreamState, processStreamEvent } from "./stream-events.js";
+import { assertRepoAllowed, ensureWorktreeForReview, resolveWorktreeDir, resolveWorktreeParentDir, tryAssertPathAllowed, tryAssertRepoAllowed } from "./symphony-utils.js";
 
 const CODEX_SESSION_ID_REGEX = /session id:\s*([0-9a-f-]{36})/i;
 const FINDINGS_CODE_BLOCK_REGEX = /```json\s*\n([\s\S]*?)\n\s*```/;
@@ -62,6 +62,13 @@ type FindingsFile = {
   findings: PersistedFinding[];
   declined?: boolean;
   declineReason?: string;
+};
+
+type ReviewVerdictRequest = {
+  repoPath?: unknown;
+  sessionId?: unknown;
+  provider?: unknown;
+  expectedMcpUrl?: unknown;
 };
 
 type CodexChatState = {
@@ -681,9 +688,11 @@ export function registerCodexRoutes(
       return;
     }
 
-    const repoPath = asString(body.repoPath);
-    const sessionId = asString(body.sessionId);
-    const provider = asProvider(body.provider);
+    const requestBody = body as ReviewVerdictRequest;
+    const repoPath = asString(requestBody.repoPath);
+    const sessionId = asString(requestBody.sessionId);
+    const provider = asProvider(requestBody.provider);
+    const expectedMcpUrl = asString(requestBody.expectedMcpUrl) ?? undefined;
 
     if (!(repoPath && sessionId && provider)) {
       json(context, 400, { error: "repoPath, sessionId, and provider are required" });
@@ -714,7 +723,7 @@ export function registerCodexRoutes(
       );
       const collected = provider === "codex"
         ? await runCodexVerdict(worktreeDir, sessionId)
-        : await runClaudeVerdict(worktreeDir, sessionId);
+        : await runClaudeVerdict(worktreeDir, sessionId, expectedMcpUrl);
 
       console.log(`[review-verdict] Collected ${collected.length} chars of output`);
 
@@ -803,7 +812,7 @@ export function registerCodexRoutes(
     try {
       const child = provider === "claude"
         ? await resolveClaudeReviewProcess(reviewCwd, model, ticketId.slice(3), logPath)
-        : spawnCodexReviewProcess({ cwd: reviewCwd, model, reasoningEffort, reviewMode: effectiveReviewMode, baseBranch, instructions });
+        : await spawnCodexReviewProcess({ cwd: reviewCwd, model, reasoningEffort, reviewMode: effectiveReviewMode, baseBranch, instructions });
 
       if (!child.pid) {
         throw new Error("failed to start review process");
@@ -1113,7 +1122,7 @@ export function registerCodexRoutes(
       "--output-format",
       "stream-json",
       "--allowedTools",
-      withMcpTools(ENGINEER_CHAT_TOOLS),
+      await withMcpTools(ENGINEER_CHAT_TOOLS),
       ...(history.sessionId ? ["--resume", history.sessionId] : [])
     ];
 
@@ -1464,6 +1473,7 @@ function similarityScore(messageA: string, messageB: string, fileA: string, file
 }
 
 async function spawnClaudeReview(cwd: string, model: string): Promise<ChildProcess> {
+  const allowedTools = await withMcpTools("Bash,Read,Glob,Grep,Task,TodoWrite");
   return spawn(
     "claude",
     [
@@ -1474,7 +1484,7 @@ async function spawnClaudeReview(cwd: string, model: string): Promise<ChildProce
       "--model",
       model,
       "--allowedTools",
-      withMcpTools("Bash,Read,Glob,Grep,Task,TodoWrite"),
+      allowedTools,
       "--append-system-prompt",
       REVIEW_SYSTEM_PROMPT
     ],
@@ -1671,14 +1681,14 @@ function applyMergedPrDiff(
   return "uncommitted";
 }
 
-function spawnCodexReviewProcess(options: {
+async function spawnCodexReviewProcess(options: {
   cwd: string;
   model: string;
   reasoningEffort: string;
   reviewMode: "uncommitted" | "base";
   baseBranch: string;
   instructions?: string;
-}): ChildProcess {
+}): Promise<ChildProcess> {
   const args: string[] = ["review"];
   if (options.reviewMode === "uncommitted") {
     args.push("--uncommitted");
@@ -1692,10 +1702,7 @@ function spawnCodexReviewProcess(options: {
     cwd: options.cwd,
     detached: false,
     stdio: ["ignore", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      FORCE_COLOR: "0"
-    }
+    env: await getShellEnv({ FORCE_COLOR: "0" }),
   });
 }
 
@@ -1809,10 +1816,7 @@ async function streamCodexConversation(
     const child = spawn("codex", args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        FORCE_COLOR: "0"
-      }
+      env: await getShellEnv({ FORCE_COLOR: "0" }),
     });
 
     if (!child.pid) {
@@ -2253,19 +2257,34 @@ function extractClaudeVerdictLine(trimmedLine: string): string | null {
   }
 }
 
-function runCodexVerdict(worktreeDir: string, sessionId: string): Promise<string> {
+async function runCodexVerdict(worktreeDir: string, sessionId: string): Promise<string> {
   return runVerdictProcess(
     "codex",
     ["exec", "resume", sessionId, VERDICT_PROMPT, "--full-auto", "--json"],
-    { cwd: worktreeDir, env: { FORCE_COLOR: "0" } },
+    { cwd: worktreeDir, env: await getShellEnv({ FORCE_COLOR: "0" }) },
     extractCodexVerdictLine
   );
 }
 
-async function runClaudeVerdict(worktreeDir: string, sessionId: string): Promise<string> {
+async function runClaudeVerdict(
+  worktreeDir: string,
+  sessionId: string,
+  expectedMcpUrl?: string
+): Promise<string> {
+  const allowedTools = await withMcpTools("Read,Glob,Grep", expectedMcpUrl);
   return runVerdictProcess(
     "claude",
-    ["-p", "--resume", sessionId, "--output-format", "stream-json", "--model", "sonnet", "--allowedTools", "Read,Glob,Grep"],
+    [
+      "-p",
+      "--resume",
+      sessionId,
+      "--output-format",
+      "stream-json",
+      "--model",
+      "sonnet",
+      "--allowedTools",
+      allowedTools,
+    ],
     { cwd: worktreeDir, stdin: VERDICT_PROMPT, env: await getShellEnv() },
     extractClaudeVerdictLine
   );

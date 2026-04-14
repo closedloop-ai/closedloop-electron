@@ -48,6 +48,7 @@ export interface DesktopGatewayServerOptions {
   retrySpawnDeps?: RetrySpawnDeps;
   onUnexpectedClose?: () => void;
   loopTokenStore?: LoopTokenStore;
+  getGatewayId: () => string;
 }
 
 export class DesktopGatewayServer {
@@ -86,6 +87,7 @@ export class DesktopGatewayServer {
       worktreeProvider: this.options.worktreeProvider,
       loopTokenStore: this.options.loopTokenStore,
       retrySpawnDeps: this.options.retrySpawnDeps,
+      getGatewayId: this.options.getGatewayId,
     });
   }
 
@@ -110,6 +112,7 @@ export class DesktopGatewayServer {
     onUnexpectedClose?: () => void,
     loopTokenStore?: LoopTokenStore,
     retrySpawnDeps?: RetrySpawnDeps,
+    getGatewayId: () => string = () => "",
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -134,6 +137,7 @@ export class DesktopGatewayServer {
       onUnexpectedClose,
       loopTokenStore,
       retrySpawnDeps,
+      getGatewayId,
     });
   }
 

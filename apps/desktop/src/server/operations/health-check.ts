@@ -4,6 +4,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { getShellEnv } from "../shell-path.js";
+import { detectMcpAvailability, type McpDetectionResult } from "./mcp-detection.js";
 import { getInstalledPluginVersions, isPluginInstalled } from "./plugin-cache.js";
 import type { ProcessManager } from "../process-manager.js";
 
@@ -31,24 +32,33 @@ type ReposConfig = {
 export function registerHealthCheckRoutes(
   dispatcher: OperationDispatcher,
   processManager: ProcessManager,
-  getSymphonyDir: () => string
+  getSymphonyDir: () => string,
+  detectMcp: (
+    provider: "claude" | "codex",
+    expectedMcpUrl?: string
+  ) => Promise<McpDetectionResult> = detectMcpAvailability
 ): void {
   const configDir = () => path.join(getSymphonyDir(), "config");
 
   dispatcher.register("GET", "/api/engineer/health-check", async (context) => {
-    const checks = await Promise.all([
-      checkGit(processManager),
-      checkClaudeCli(processManager),
-      checkGhCli(processManager),
-      checkGhAuth(processManager),
-      Promise.resolve(checkPlugin("code", "Symphony Plugin", true)),
-      Promise.resolve(checkPlugin("platform", "Platform Plugin", true)),
-      Promise.resolve(checkPlugin("judges", "Judges Plugin", true)),
-      Promise.resolve(checkPlugin("code-review", "Code Review Plugin", true)),
-      Promise.resolve(checkPlugin("self-learning", "Self-Learning Plugin", true)),
-      Promise.resolve(await checkWorktreeDir(configDir)),
-      checkCodex(processManager),
-      checkPython3(processManager)
+    const expectedMcpUrl = context.query.get("expectedMcpUrl")?.trim() || undefined;
+    const [checks, claudeMcp, codexMcp] = await Promise.all([
+      Promise.all([
+        checkGit(processManager),
+        checkClaudeCli(processManager),
+        checkGhCli(processManager),
+        checkGhAuth(processManager),
+        Promise.resolve(checkPlugin("code", "Symphony Plugin", true)),
+        Promise.resolve(checkPlugin("platform", "Platform Plugin", true)),
+        Promise.resolve(checkPlugin("judges", "Judges Plugin", true)),
+        Promise.resolve(checkPlugin("code-review", "Code Review Plugin", true)),
+        Promise.resolve(checkPlugin("self-learning", "Self-Learning Plugin", true)),
+        Promise.resolve(await checkWorktreeDir(configDir)),
+        checkCodex(processManager),
+        checkPython3(processManager)
+      ]),
+      detectMcp("claude", expectedMcpUrl),
+      detectMcp("codex", expectedMcpUrl),
     ]);
 
     // Check plugin versions if all plugins are installed
@@ -64,7 +74,11 @@ export function registerHealthCheckRoutes(
     }
 
     const allRequiredPassed = checks.filter((check) => check.required).every((check) => check.passed);
-    json(context, 200, { checks, allRequiredPassed });
+    const mcpServers = {
+      claude: claudeMcp,
+      codex: codexMcp,
+    };
+    json(context, 200, { checks, allRequiredPassed, mcpServers });
   });
 }
 

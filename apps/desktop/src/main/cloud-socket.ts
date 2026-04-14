@@ -31,6 +31,7 @@ export interface CloudSocketOptions {
   onCommand?: (event: DesktopCommandEvent) => void;
   onCancel?: (event: DesktopCancelEvent) => void;
   onCommandEventAck?: (event: DesktopCommandStreamAckEvent) => void;
+  onDisconnect?: (reason: string) => void;
 }
 
 export class CloudSocketService {
@@ -183,6 +184,7 @@ export class CloudSocketService {
       this.clearHelloAckTimer();
       this.notifyStatus({ state: "degraded", error: `Cloud socket disconnected: ${reason}` });
       this.degradedSince ??= Date.now();
+      this.options.onDisconnect?.(reason);
     });
 
     socket.on("desktop.hello.ack", (payload: unknown) => {

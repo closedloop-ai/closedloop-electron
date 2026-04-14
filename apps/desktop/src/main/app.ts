@@ -61,6 +61,7 @@ const { autoUpdater } = pkg;
 import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
 import { BootRecoveryService } from "./boot-recovery.js";
 import { LoopTokenStore } from "./loop-token-store.js";
+import { GatewayIdentityStore } from "./gateway-identity.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -81,6 +82,7 @@ export class DesktopApplication {
   private readonly recovery: GatewayRecoveryManager;
   private readonly bootRecovery: BootRecoveryService;
   private readonly gatewayAuthToken: string;
+  private readonly gatewayId: string;
   private readonly sessionStore: LocalSessionStore;
   private shuttingDown = false;
   private dangerousAutoApprove = false;
@@ -131,6 +133,10 @@ export class DesktopApplication {
       isShuttingDown: () => this.shuttingDown,
       delay: (ms) => new Promise((r) => setTimeout(r, ms)),
     };
+    const gatewayIdentityStore = new GatewayIdentityStore(
+      app.getPath("userData"),
+    );
+    this.gatewayId = gatewayIdentityStore.loadSync();
     this.server = DesktopGatewayServer.createDefault(
       this.settingsStore.getWebAppOrigin(),
       () => (this.isNoAuthMode() ? undefined : this.gatewayAuthToken),
@@ -152,6 +158,7 @@ export class DesktopApplication {
       () => this.recovery.onUnexpectedClose(),
       this.loopTokenStore,
       retrySpawnDeps,
+      () => this.gatewayId,
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -185,6 +192,7 @@ export class DesktopApplication {
       pluginVersion: DESKTOP_GATEWAY_VERSION,
       supportedOperations: [...SUPPORTED_OPERATION_IDS],
       onStatusChange: (status) => this.onCloudSocketStatus(status),
+      onDisconnect: (reason) => { Observability.connectionLost(reason); },
       onHelloAck: (event) => {
         Observability.setTargetId(event.computeTargetId);
         if (event.sessionId) {
@@ -464,6 +472,7 @@ export class DesktopApplication {
     this.commandExecutor.setConnected(false);
 
     if (status.state === "degraded") {
+      Observability.connectionDegraded(status.error);
       this.cloudSocket.sendPresence({
         state: "degraded",
         error: status.error,
