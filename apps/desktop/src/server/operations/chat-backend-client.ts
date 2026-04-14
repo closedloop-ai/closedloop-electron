@@ -1,6 +1,6 @@
 import type { ChatMessage } from "./chat-providers.js";
 
-export type GenericChatRow = {
+export type ChatSessionRow = {
   id: string;
   chatKey: string;
   provider: "claude" | "codex";
@@ -23,7 +23,7 @@ export type UpsertTurnInput = {
 };
 
 export type UpsertTurnResult =
-  | { ok: true; chat: GenericChatRow; resumeSessionId: string | null }
+  | { ok: true; chat: ChatSessionRow; resumeSessionId: string | null }
   | { ok: false; conflict: true; boundProvider: string }
   | { ok: false; error: string };
 
@@ -36,15 +36,15 @@ export type CompleteTurnInput = {
 };
 
 export type CompleteTurnResult =
-  | { ok: true; chat: GenericChatRow }
+  | { ok: true; chat: ChatSessionRow }
   | { ok: false; kind: "conflict"; boundProvider: string }
   | { ok: false; kind: "auth_expired"; message: string }
   | { ok: false; kind: "transient"; message: string }
   | { ok: false; kind: "permanent"; message: string };
 
 const REQUEST_TIMEOUT_MS = 15_000;
-const UPSERT_PATH = "/generic-chats/turn";
-const COMPLETE_PATH = "/generic-chats/turn/complete";
+const UPSERT_PATH = "/chat-sessions/turn";
+const COMPLETE_PATH = "/chat-sessions/turn/complete";
 
 export async function upsertTurnViaBackend(
   apiBaseUrl: string,
@@ -68,7 +68,7 @@ export async function upsertTurnViaBackend(
       const parsed = (await response.json()) as {
         success?: boolean;
         data?: {
-          chat: GenericChatRow;
+          chat: ChatSessionRow;
           resumeSessionId: string | null;
         };
       };
@@ -127,7 +127,7 @@ export async function completeTurnViaBackend(
     try {
       const parsed = (await response.json()) as {
         success?: boolean;
-        data?: { chat: GenericChatRow };
+        data?: { chat: ChatSessionRow };
       };
       if (parsed.success !== true || !parsed.data) {
         return {

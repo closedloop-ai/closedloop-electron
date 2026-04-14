@@ -7,7 +7,7 @@ import {
   upsertTurnViaBackend,
   type CompleteTurnInput,
   type CompleteTurnResult,
-  type GenericChatRow,
+  type ChatSessionRow,
   type UpsertTurnResult,
 } from "./chat-backend-client.js";
 import type {
@@ -68,7 +68,7 @@ type EventForwarder = {
   readonly accumulatedText: string;
 };
 
-export function registerGenericChatRoutes(
+export function registerChatSessionRoutes(
   dispatcher: OperationDispatcher,
   _processManager: ProcessManager,
   registry: ProviderRegistry,
@@ -170,7 +170,7 @@ export function registerGenericChatRoutes(
 }
 
 type UpsertOutcome =
-  | { kind: "ok"; row: GenericChatRow; resumeSessionId: string | null }
+  | { kind: "ok"; row: ChatSessionRow; resumeSessionId: string | null }
   | { kind: "error"; error: StreamErrorPayload };
 
 async function runUpsert(
@@ -284,7 +284,7 @@ function shouldLazyFallback(
 function buildSpawnParams(
   body: ResolvedBody,
   chatProvider: ChatProvider,
-  row: GenericChatRow,
+  row: ChatSessionRow,
   resumeSessionId: string | null
 ): SpawnParams {
   return {

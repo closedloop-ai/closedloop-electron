@@ -38,7 +38,7 @@ import { registerSymphonyPlanLoopRoutes } from "./operations/symphony-plan-loop.
 import { registerSymphonyUploadRoutes } from "./operations/symphony-upload.js";
 import { registerTerminalChatRoutes } from "./operations/terminal-chat.js";
 import { registerTicketChatRoutes } from "./operations/ticket-chat.js";
-import { registerGenericChatRoutes } from "./operations/generic-chat.js";
+import { registerChatSessionRoutes } from "./operations/chat-session.js";
 import { ClaudeProvider, CodexProvider, ProviderRegistry } from "./operations/chat-providers.js";
 import { ProcessManager } from "./process-manager.js";
 import { SymphonyDirNotConfiguredError } from "./operations/symphony-utils.js";
@@ -216,7 +216,7 @@ export class GatewayRouter {
     providerRegistry.register(
       new CodexProvider(this.options.getAllowedDirectories)
     );
-    registerGenericChatRoutes(
+    registerChatSessionRoutes(
       this.operationDispatcher,
       this.processManager,
       providerRegistry,

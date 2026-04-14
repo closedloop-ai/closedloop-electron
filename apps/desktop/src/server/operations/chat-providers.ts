@@ -22,7 +22,7 @@ export type SpawnParams = {
   cwd?: string;
 };
 
-// Providers emit non-terminal events only. The generic-chat route owns the
+// Providers emit non-terminal events only. The chat-session route owns the
 // single `{ type: "result" }` and `{ type: "done" }` events that follow the
 // provider's `spawn` resolution.
 export type StreamEvent = { readonly type: string } & Record<string, unknown>;
