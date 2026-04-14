@@ -16,18 +16,16 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
-import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
-import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
+import { setShellPathForTest } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
-  restoreEnv,
-  saveEnv,
+  makeMultiRepoTestHarness,
   startMockApiServer,
   waitForCompletedEvent,
 } from "./symphony-test-utils.js";
@@ -57,26 +55,9 @@ const fakeWorktreeProvider: WorktreeProvider = {
   branchExists: async () => true,
 };
 
-const serversToClose: DesktopGatewayServer[] = [];
-const mockServersToClose: http.Server[] = [];
-const tempPathsToClean: string[] = [];
-const savedEnv = saveEnv();
-
-afterEach(async () => {
-  restoreEnv(savedEnv);
-  resetShellPathCache();
-  for (const server of serversToClose.splice(0)) {
-    await server.stop();
-  }
-  for (const ms of mockServersToClose.splice(0)) {
-    await new Promise<void>((resolve, reject) => {
-      ms.close((err) => (err ? reject(err) : resolve()));
-    });
-  }
-  for (const tempPath of tempPathsToClean.splice(0)) {
-    await fs.rm(tempPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
-  }
-});
+const { serversToClose, mockServersToClose, tempPathsToClean, cleanup } =
+  makeMultiRepoTestHarness();
+afterEach(cleanup);
 
 /** Create a gateway server with a mock API backend and the worktreeProvider. */
 async function createTestGateway(tmpDir: string, mockPort: number) {

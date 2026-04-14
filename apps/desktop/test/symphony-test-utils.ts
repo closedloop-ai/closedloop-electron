@@ -368,6 +368,56 @@ export async function setupStubClaudeBlocking(
 }
 
 // ---------------------------------------------------------------------------
+// Multi-repo test harness (shared by multi-repo-worktree, -contract, -spawn)
+// ---------------------------------------------------------------------------
+
+/**
+ * Shared fixture state for multi-repo integration tests. Call
+ * `makeMultiRepoTestHarness()` at module scope, destructure the arrays to
+ * push resources into, then wire `cleanup` into your `afterEach`.
+ */
+export interface MultiRepoTestHarness {
+  serversToClose: DesktopGatewayServer[];
+  mockServersToClose: http.Server[];
+  tempPathsToClean: string[];
+  /** Call from node:test afterEach to restore env, cache, servers, and temp dirs. */
+  cleanup: () => Promise<void>;
+}
+
+/**
+ * Build shared arrays and a cleanup function for multi-repo integration tests.
+ *
+ * Usage (module scope):
+ *   const { serversToClose, mockServersToClose, tempPathsToClean, cleanup } =
+ *     makeMultiRepoTestHarness();
+ *   afterEach(cleanup);
+ */
+export function makeMultiRepoTestHarness(): MultiRepoTestHarness {
+  const serversToClose: DesktopGatewayServer[] = [];
+  const mockServersToClose: http.Server[] = [];
+  const tempPathsToClean: string[] = [];
+  const savedEnv = saveEnv();
+
+  async function cleanup(): Promise<void> {
+    restoreEnv(savedEnv);
+    resetShellPathCache();
+    for (const server of serversToClose.splice(0)) {
+      await server.stop();
+    }
+    for (const ms of mockServersToClose.splice(0)) {
+      await new Promise<void>((resolve, reject) => {
+        ms.close((err) => (err ? reject(err) : resolve()));
+      });
+    }
+    for (const tempPath of tempPathsToClean.splice(0)) {
+      await fs.rm(tempPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    }
+  }
+
+  return { serversToClose, mockServersToClose, tempPathsToClean, cleanup };
+}
+
+// ---------------------------------------------------------------------------
 // Evaluate-test infrastructure (shared by evaluate-plan, evaluate-code, etc.)
 // ---------------------------------------------------------------------------
 
