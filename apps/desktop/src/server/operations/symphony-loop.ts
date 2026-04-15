@@ -564,7 +564,6 @@ function resolveAndValidateRepoPath(
 /** Validate and resolve additionalRepos entries. Throws AdditionalRepoError on failure. */
 export async function resolveAdditionalRepos(
   entries: NonNullable<LoopRequestBody["additionalRepos"]>,
-  primaryRepoPath: string | null,
   allowedDirs: string[],
   loopId: string,
   wt: WorktreeProvider,
@@ -587,14 +586,6 @@ export async function resolveAdditionalRepos(
     const repoRef = entry.localRepoPath ?? entry.fullName ?? "";
     const resolvedPath = resolveAndValidateRepoPath(entry, allowedDirs, repoRef);
     const canonicalPath = path.resolve(resolvedPath);
-
-    if (
-      primaryRepoPath !== null &&
-      canonicalPath === path.resolve(primaryRepoPath)
-    ) {
-      loopLog(loopId, `Skipping additionalRepo that matches primaryRepoPath: ${resolvedPath}`);
-      continue;
-    }
 
     const branchFound = await wt.branchExists(canonicalPath, entry.branch);
     if (!branchFound) {
@@ -2831,7 +2822,6 @@ async function handleLoopRequest(
       try {
         resolvedAdditionalRepos = await resolveAdditionalRepos(
           body.additionalRepos,
-          expandedRepoPath,
           allowedDirs,
           body.loopId,
           wt,

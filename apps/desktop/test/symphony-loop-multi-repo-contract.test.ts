@@ -2,9 +2,8 @@
  * Contract tests for multi-repo PLAN requests.
  *
  * 1. PLAN rejects nonexistent branch (branchExists returns false) — HTTP 400 + RepoNotFound event
- * 2. resolveAdditionalRepos removes entries matching the primary repo
- * 3. resolveAdditionalRepos rejects > 5 entries
- * 4. additionalRepoDisambiguator distinguishes repos with the same basename
+ * 2. resolveAdditionalRepos rejects > 5 entries
+ * 3. additionalRepoDisambiguator distinguishes repos with the same basename
  */
 
 import assert from "node:assert/strict";
@@ -128,31 +127,6 @@ it("PLAN with nonexistent branch in additionalRepo returns HTTP 400 and RepoNotF
 // ---------------------------------------------------------------------------
 
 describe("resolveAdditionalRepos — unit-style", () => {
-  it("removes an additionalRepo entry that matches the primary repo path", async () => {
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-unit-primary-"));
-    tempPathsToClean.push(tmpDir);
-
-    const primaryRepo = path.join(tmpDir, "primary-repo");
-    await fs.mkdir(primaryRepo, { recursive: true });
-
-    const secondaryRepo = path.join(tmpDir, "secondary-repo");
-    await fs.mkdir(secondaryRepo, { recursive: true });
-
-    const result = await resolveAdditionalRepos(
-      [
-        { localRepoPath: primaryRepo, branch: "main" },
-        { localRepoPath: secondaryRepo, branch: "main" },
-      ],
-      primaryRepo,
-      [tmpDir],
-      "test-loop-id",
-      fakeWorktreeProvider,
-    );
-
-    assert.equal(result.length, 1, "Entry matching primary repo path should be removed");
-    assert.equal(result[0].repoPath, secondaryRepo);
-  });
-
   it("rejects entries exceeding the maximum of 5 additional repos", async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-unit-max-"));
     tempPathsToClean.push(tmpDir);
@@ -164,7 +138,6 @@ describe("resolveAdditionalRepos — unit-style", () => {
       () =>
         resolveAdditionalRepos(
           repos.map((r) => ({ localRepoPath: r, branch: "main" })),
-          null,
           [tmpDir],
           "test-loop-id",
           fakeWorktreeProvider,
