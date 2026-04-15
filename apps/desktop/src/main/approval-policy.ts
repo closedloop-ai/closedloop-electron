@@ -15,6 +15,7 @@ export const OPERATION_RISK_TIERS: Record<OperationId, Exclude<RiskTier, "none">
   symphony_chat_history:   "medium",
   git_action:              "medium",
   git_pr:                  "medium",
+  git_branch_worktree:     "low",
   symphony_launch:         "medium",
   symphony_loop:           "medium",
   symphony_loop_kill:      "medium",

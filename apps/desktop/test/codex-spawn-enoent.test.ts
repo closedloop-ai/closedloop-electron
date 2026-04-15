@@ -9,7 +9,7 @@
  *       line 1228 writes { type: 'error', error: ... } to the SSE response
  *       stream without any uncaughtException escaping.
  *
- *   (b) runCommand() at lines 2087-2116 (used by GET /api/engineer/codex/available
+ *   (b) runCommand() at lines 2087-2116 (used by GET /api/gateway/codex/available
  *       at line 296) has child.once('error', reject) at line 2107, and its
  *       caller wraps in try/catch (lines 294-305) returning { available: false }
  *       on any error, so ENOENT does not escape.
@@ -183,7 +183,7 @@ test(
       });
     }
 
-    // Replicate the GET /api/engineer/codex/available handler
+    // Replicate the GET /api/gateway/codex/available handler
     // (codex.ts lines 294-305): calls runCommand, catches all errors.
     async function simulateAvailableRoute(
       mockChild: ReturnType<typeof buildMockChildProcess>

@@ -62,23 +62,23 @@ test("OPERATION_RISK_TIERS keys exactly match SUPPORTED_OPERATION_IDS", () => {
 // --- resolveOperationId routing ---
 
 test("resolveOperationId maps known paths correctly", () => {
-  assert.equal(resolveOperationId("/api/engineer/health-check"), "health_check");
-  assert.equal(resolveOperationId("/api/engineer/symphony/launch"), "symphony_launch");
-  assert.equal(resolveOperationId("/api/engineer/deploy/anything"), "deploy");
+  assert.equal(resolveOperationId("/api/gateway/health-check"), "health_check");
+  assert.equal(resolveOperationId("/api/gateway/symphony/launch"), "symphony_launch");
+  assert.equal(resolveOperationId("/api/gateway/deploy/anything"), "deploy");
 });
 
 test("resolveOperationId maps previously unmapped routes", () => {
-  assert.equal(resolveOperationId("/api/engineer/version"), "health_check");
-  assert.equal(resolveOperationId("/api/engineer/symphony/status"), "symphony_status");
-  assert.equal(resolveOperationId("/api/engineer/symphony/status/FEAT-1"), "symphony_status");
-  assert.equal(resolveOperationId("/api/engineer/symphony/attachments/FEAT-1/img.png"), "filesystem");
-  assert.equal(resolveOperationId("/api/engineer/symphony/upload/FEAT-1"), "filesystem");
+  assert.equal(resolveOperationId("/api/gateway/version"), "health_check");
+  assert.equal(resolveOperationId("/api/gateway/symphony/status"), "symphony_status");
+  assert.equal(resolveOperationId("/api/gateway/symphony/status/FEAT-1"), "symphony_status");
+  assert.equal(resolveOperationId("/api/gateway/symphony/attachments/FEAT-1/img.png"), "filesystem");
+  assert.equal(resolveOperationId("/api/gateway/symphony/upload/FEAT-1"), "filesystem");
 });
 
-test("resolveOperationId returns null for truly unknown engineer paths", () => {
-  assert.equal(resolveOperationId("/api/engineer/does-not-exist"), null);
+test("resolveOperationId returns null for truly unknown gateway paths", () => {
+  assert.equal(resolveOperationId("/api/gateway/does-not-exist"), null);
 });
 
-test("resolveOperationId returns null for paths outside /api/engineer/", () => {
+test("resolveOperationId returns null for paths outside /api/gateway/", () => {
   assert.equal(resolveOperationId("/health"), null);
 });

@@ -27,18 +27,18 @@ export function registerRunViewerChatRoutes(
   getAllowedDirectories: () => string[],
   getSymphonyDir: () => string
 ): void {
-  dispatcher.register("GET", "/api/engineer/run-viewer-chat", async (context) => {
+  dispatcher.register("GET", "/api/gateway/run-viewer-chat", async (context) => {
     const dir = getSymphonyDir();
     const history = await loadChatHistory(dir);
     json(context, 200, history);
   });
 
-  dispatcher.register("DELETE", "/api/engineer/run-viewer-chat", async (context) => {
+  dispatcher.register("DELETE", "/api/gateway/run-viewer-chat", async (context) => {
     await saveChatHistory(getSymphonyDir(), { messages: [] });
     json(context, 200, { success: true });
   });
 
-  dispatcher.register("POST", "/api/engineer/run-viewer-chat", async (context) => {
+  dispatcher.register("POST", "/api/gateway/run-viewer-chat", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });

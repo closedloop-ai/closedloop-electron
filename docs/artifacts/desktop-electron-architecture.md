@@ -25,7 +25,7 @@ The desktop app has three major planes:
 - Uses preload IPC APIs to communicate with main process
 
 2. Local gateway plane (Electron main + embedded HTTP server)
-- Serves `GET /health` and all `/api/engineer/*` routes on localhost
+- Serves `GET /health` and all `/api/gateway/*` routes on localhost
 - Enforces CORS using configured Web App origin
 - Executes tools/processes and streams NDJSON events
 
@@ -184,7 +184,7 @@ sequenceDiagram
 1. API sends `desktop.command`.
 2. `CloudCommandExecutor` validates and queues command.
 3. Executor sends `desktop.command.ack`.
-4. Executor dispatches HTTP request to local gateway (`http://127.0.0.1:<activePort>/api/engineer/...`).
+4. Executor dispatches HTTP request to local gateway (`http://127.0.0.1:<activePort>/api/gateway/...`).
 5. Local gateway runs existing route handlers with normal AC-049 checks.
 6. Executor maps gateway output to socket `desktop.command.event` stream.
 7. API acks stream sequence via `desktop.command.event.ack`.
@@ -211,7 +211,7 @@ sequenceDiagram
 
     Exec->>API: desktop.command.ack
 
-    Exec->>GW: HTTP POST /api/engineer/...<br/>+ x-desktop-gateway-token
+    Exec->>GW: HTTP POST /api/gateway/...<br/>+ x-desktop-gateway-token
 
     GW->>Router: Dispatch request
     Router->>Router: CORS check
@@ -419,7 +419,7 @@ graph TB
 ### Local Gateway Authentication
 
 - CORS is not treated as authentication.
-- Engineer routes can require a process-local gateway token (`x-desktop-gateway-token`).
+- Gateway routes can require a process-local gateway token (`x-desktop-gateway-token`).
 - Cloud-dispatched commands include this token automatically when calling local gateway routes.
 - Browser requests from trusted origins are allowed on loopback without the gateway token:
 1. exact configured `webAppOrigin`
@@ -535,5 +535,5 @@ Hosted API handoff details are maintained in `symphony-alpha`.
 
 - API-side durable command/event persistence is currently outside this repo and tracked in `symphony-alpha`.
 - Legacy documentation sections describing HTTP register/heartbeat are historical; current desktop runtime uses Socket.IO cloud control path.
-- Local gateway route parity and NDJSON behavior remain compatible with existing engineer route expectations.
+- Local gateway route parity and NDJSON behavior remain compatible with the pre-rename route expectations.
 - Local gateway token auth primarily protects against opportunistic localhost access; endpoint compromise on the host can still read local process memory or user files.

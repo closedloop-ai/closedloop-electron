@@ -40,7 +40,7 @@ export function registerHealthCheckRoutes(
 ): void {
   const configDir = () => path.join(getSymphonyDir(), "config");
 
-  dispatcher.register("GET", "/api/engineer/health-check", async (context) => {
+  dispatcher.register("GET", "/api/gateway/health-check", async (context) => {
     const expectedMcpUrl = context.query.get("expectedMcpUrl")?.trim() || undefined;
     const [checks, claudeMcp, codexMcp] = await Promise.all([
       Promise.all([

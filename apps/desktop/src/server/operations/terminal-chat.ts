@@ -30,17 +30,17 @@ export function registerTerminalChatRoutes(
   getAllowedDirectories: () => string[],
   getSymphonyDir: () => string
 ): void {
-  dispatcher.register("GET", "/api/engineer/terminal-chat", async (context) => {
+  dispatcher.register("GET", "/api/gateway/terminal-chat", async (context) => {
     const history = await loadChatHistory(getSymphonyDir());
     json(context, 200, history);
   });
 
-  dispatcher.register("DELETE", "/api/engineer/terminal-chat", async (context) => {
+  dispatcher.register("DELETE", "/api/gateway/terminal-chat", async (context) => {
     await saveChatHistory(getSymphonyDir(), { messages: [] });
     json(context, 200, { success: true });
   });
 
-  dispatcher.register("POST", "/api/engineer/terminal-chat", async (context) => {
+  dispatcher.register("POST", "/api/gateway/terminal-chat", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });

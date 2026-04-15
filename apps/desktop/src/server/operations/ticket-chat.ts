@@ -36,7 +36,7 @@ export function registerTicketChatRoutes(
   getAllowedDirectories: () => string[],
   getSymphonyDir: () => string
 ): void {
-  dispatcher.register("GET", "/api/engineer/ticket-chat", async (context) => {
+  dispatcher.register("GET", "/api/gateway/ticket-chat", async (context) => {
     const ticketId = context.query.get("ticketId");
     if (!ticketId) {
       json(context, 400, { error: "ticketId parameter is required" });
@@ -47,7 +47,7 @@ export function registerTicketChatRoutes(
     json(context, 200, history);
   });
 
-  dispatcher.register("DELETE", "/api/engineer/ticket-chat", async (context) => {
+  dispatcher.register("DELETE", "/api/gateway/ticket-chat", async (context) => {
     const ticketId = context.query.get("ticketId");
     if (!ticketId) {
       json(context, 400, { error: "ticketId parameter is required" });
@@ -58,7 +58,7 @@ export function registerTicketChatRoutes(
     json(context, 200, { success: true });
   });
 
-  dispatcher.register("POST", "/api/engineer/ticket-chat", async (context) => {
+  dispatcher.register("POST", "/api/gateway/ticket-chat", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });

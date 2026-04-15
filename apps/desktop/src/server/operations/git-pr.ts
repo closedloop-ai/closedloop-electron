@@ -28,7 +28,7 @@ export function registerGitPrRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[]
 ): void {
-  dispatcher.register("POST", "/api/engineer/git/pr", async (context) => {
+  dispatcher.register("POST", "/api/gateway/git/pr", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -120,7 +120,7 @@ export function registerGitPrRoutes(
     }
   });
 
-  dispatcher.register("GET", "/api/engineer/git/pr/list", async (context) => {
+  dispatcher.register("GET", "/api/gateway/git/pr/list", async (context) => {
     const repoPath = context.query.get("repo");
     const state = context.query.get("state") ?? "open";
 
@@ -181,7 +181,7 @@ export function registerGitPrRoutes(
     }
   });
 
-  dispatcher.register("GET", "/api/engineer/git/pr/comments", async (context) => {
+  dispatcher.register("GET", "/api/gateway/git/pr/comments", async (context) => {
     const repoPath = context.query.get("repo");
     const prNumber = context.query.get("pr");
 
@@ -359,7 +359,7 @@ export function registerGitPrRoutes(
     }
   });
 
-  dispatcher.register("GET", "/api/engineer/git/pr/reviews", async (context) => {
+  dispatcher.register("GET", "/api/gateway/git/pr/reviews", async (context) => {
     const owner = context.query.get("owner");
     const repo = context.query.get("repo");
     const number = context.query.get("number");
@@ -425,7 +425,7 @@ export function registerGitPrRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/git/pr/reply", async (context) => {
+  dispatcher.register("POST", "/api/gateway/git/pr/reply", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -511,7 +511,7 @@ export function registerGitPrRoutes(
     }
   });
 
-  dispatcher.register("GET", "/api/engineer/git/pr/files", async (context) => {
+  dispatcher.register("GET", "/api/gateway/git/pr/files", async (context) => {
     const repoPath = context.query.get("repo");
     const prNumber = context.query.get("pr");
 
@@ -556,7 +556,7 @@ export function registerGitPrRoutes(
     }
   });
 
-  dispatcher.register("GET", "/api/engineer/git/pr/head-sha", async (context) => {
+  dispatcher.register("GET", "/api/gateway/git/pr/head-sha", async (context) => {
     const repoPath = context.query.get("repo");
     const prNumber = context.query.get("pr");
 
@@ -601,7 +601,7 @@ export function registerGitPrRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/git/pr/inline-comment", async (context) => {
+  dispatcher.register("POST", "/api/gateway/git/pr/inline-comment", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -699,7 +699,7 @@ export function registerGitPrRoutes(
     }
   });
 
-  dispatcher.register("GET", "/api/engineer/git/user", async (context) => {
+  dispatcher.register("GET", "/api/gateway/git/user", async (context) => {
     try {
       const login = await runRead(undefined, "gh", ["api", "user", "--jq", ".login"]);
       if (!login) {

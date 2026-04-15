@@ -117,7 +117,7 @@ test("DECOMPOSE: writes context pack with artifacts in .closedloop-ai/context/ar
 
   const loopId = "00000000-0000-0000-0000-aaaaaaaaaaaa";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -204,7 +204,7 @@ test("DECOMPOSE: uploads { features: ... } when features.json is written", async
 
   const loopId = "00000000-0000-0000-0000-bbbbbbbbbbbb";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -264,7 +264,7 @@ test("DECOMPOSE: uploads empty artifacts when features.json is not written", asy
 
   const loopId = "00000000-0000-0000-0000-cccccccccccc";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

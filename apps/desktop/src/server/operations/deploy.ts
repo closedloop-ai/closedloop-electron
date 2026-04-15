@@ -24,7 +24,7 @@ export function registerDeployRoutes(
   getSymphonyDir: () => string
 ): void {
   const configDir = () => path.join(getSymphonyDir(), "config");
-  dispatcher.register("POST", "/api/engineer/deploy", async (context) => {
+  dispatcher.register("POST", "/api/gateway/deploy", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -164,7 +164,7 @@ export function registerDeployRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/deploy/health", async (context) => {
+  dispatcher.register("POST", "/api/gateway/deploy/health", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -194,7 +194,7 @@ export function registerDeployRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/deploy/kill", async (context) => {
+  dispatcher.register("POST", "/api/gateway/deploy/kill", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -250,7 +250,7 @@ export function registerDeployRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/deploy/teardown", async (context) => {
+  dispatcher.register("POST", "/api/gateway/deploy/teardown", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -318,7 +318,7 @@ export function registerDeployRoutes(
     });
   });
 
-  dispatcher.register("GET", "/api/engineer/deploy/status/:ticketId", async (context) => {
+  dispatcher.register("GET", "/api/gateway/deploy/status/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const pidRaw = context.query.get("pid");
@@ -375,7 +375,7 @@ export function registerDeployRoutes(
     });
   });
 
-  dispatcher.register("POST", "/api/engineer/deploy/check-existing", async (context) => {
+  dispatcher.register("POST", "/api/gateway/deploy/check-existing", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -425,7 +425,7 @@ export function registerDeployRoutes(
     json(context, 200, { active: false });
   });
 
-  dispatcher.register("POST", "/api/engineer/deploy/detect", async (context) => {
+  dispatcher.register("POST", "/api/gateway/deploy/detect", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -459,7 +459,7 @@ export function registerDeployRoutes(
     json(context, 200, { detected: true, config: detected });
   });
 
-  dispatcher.register("POST", "/api/engineer/deploy/redetect", async (context) => {
+  dispatcher.register("POST", "/api/gateway/deploy/redetect", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -504,7 +504,7 @@ export function registerDeployRoutes(
     json(context, 200, { redetected: false });
   });
 
-  dispatcher.register("POST", "/api/engineer/deploy/extract-info", async (context) => {
+  dispatcher.register("POST", "/api/gateway/deploy/extract-info", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });

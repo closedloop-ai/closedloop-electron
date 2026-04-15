@@ -44,7 +44,7 @@ These only take effect when `app.isPackaged` is false (i.e., running from source
 | Variable | Description |
 |---|---|
 | `CL_LOCAL_GATEWAY_DEBUG_AUTH=1` | Enable debug token minting in the Electron UI. Allows generating short-lived session tokens for manual `curl` testing. |
-| `CL_LOCAL_GATEWAY_NO_AUTH=1` | Disable all gateway authentication. All engineer routes become open. |
+| `CL_LOCAL_GATEWAY_NO_AUTH=1` | Disable all gateway authentication. All gateway routes become open. |
 | `CL_LOCAL_GATEWAY_PROD_ORIGINS_ONLY=1` | Restrict gateway requests to the configured production `webAppOrigin` only. Blocks dev-origin traffic. |
 
 ### Origin Overrides
@@ -61,7 +61,7 @@ Override the default service URLs. Useful for local development or staging envir
 
 | Variable | Description |
 |---|---|
-| `SYMPHONY_ENGINEER_FALLBACK_ORIGIN` | Fallback origin for the engineer service, used when the primary is unavailable. |
+| `SYMPHONY_GATEWAY_FALLBACK_ORIGIN` | Fallback origin for the gateway service, used when the primary is unavailable. |
 | `SYMPHONY_WORKTREE_PARENT_DIR` | Custom parent directory for git worktrees created by Symphony sessions. Defaults to a sibling directory of the repo. |
 | `CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE=1` | Test mode flag that bypasses the normal Symphony pipeline and runs raw Claude instead. |
 

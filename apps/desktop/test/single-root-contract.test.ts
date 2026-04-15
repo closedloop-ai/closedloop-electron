@@ -87,7 +87,7 @@ describe("single-root: symphony-status", () => {
 
     const { baseUrl } = await startServer(tmpDir);
     const response = await fetch(
-      `${baseUrl}/api/engineer/symphony/status/SR-1?repo=${encodeURIComponent(repoPath)}`
+      `${baseUrl}/api/gateway/symphony/status/SR-1?repo=${encodeURIComponent(repoPath)}`
     );
     assert.equal(response.status, 200);
     const body = await response.json() as { status: string; phase: string };
@@ -104,7 +104,7 @@ describe("single-root: symphony-kill", () => {
     const { repoPath, worktreeDir } = setupWorktree(tmpDir, "repo", "SR-4");
 
     const { baseUrl } = await startServer(tmpDir);
-    await fetch(`${baseUrl}/api/engineer/symphony/kill`, {
+    await fetch(`${baseUrl}/api/gateway/symphony/kill`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ticketId: "SR-4", repoPath })
@@ -130,7 +130,7 @@ describe("single-root: deploy", () => {
 
     const { baseUrl } = await startServer(tmpDir);
     const response = await fetch(
-      `${baseUrl}/api/engineer/deploy/status/SR-5?repo=${encodeURIComponent(repoPath)}&worktree=${encodeURIComponent(worktreeDir)}`
+      `${baseUrl}/api/gateway/deploy/status/SR-5?repo=${encodeURIComponent(repoPath)}&worktree=${encodeURIComponent(worktreeDir)}`
     );
     assert.equal(response.status, 200);
     const body = await response.json() as { logs?: string };
@@ -151,7 +151,7 @@ describe("single-root: symphony-attachments", () => {
 
     const { baseUrl } = await startServer(tmpDir);
     const response = await fetch(
-      `${baseUrl}/api/engineer/symphony/attachments/SR-9/screenshot.png?repo=${encodeURIComponent(repoPath)}`
+      `${baseUrl}/api/gateway/symphony/attachments/SR-9/screenshot.png?repo=${encodeURIComponent(repoPath)}`
     );
     assert.equal(response.status, 200);
     const body = await response.text();
@@ -174,7 +174,7 @@ describe("single-root: symphony-chat-history", () => {
 
     const { baseUrl } = await startServer(tmpDir);
     const response = await fetch(
-      `${baseUrl}/api/engineer/symphony/chat-history/SR-11?repo=${encodeURIComponent(repoPath)}`
+      `${baseUrl}/api/gateway/symphony/chat-history/SR-11?repo=${encodeURIComponent(repoPath)}`
     );
     assert.equal(response.status, 200);
     const body = await response.json() as { messages: Array<{ content: string }> };
@@ -194,7 +194,7 @@ describe("single-root: symphony-logs", () => {
 
     const { baseUrl } = await startServer(tmpDir);
     const response = await fetch(
-      `${baseUrl}/api/engineer/symphony/logs/SR-12?repo=${encodeURIComponent(repoPath)}`
+      `${baseUrl}/api/gateway/symphony/logs/SR-12?repo=${encodeURIComponent(repoPath)}`
     );
     assert.equal(response.status, 200);
     const body = await response.json() as { exists: boolean; format: string; lines: string[] };
@@ -219,7 +219,7 @@ describe("single-root: symphony-plan", () => {
 
     const { baseUrl } = await startServer(tmpDir);
     const response = await fetch(
-      `${baseUrl}/api/engineer/symphony/plan/SR-13?repo=${encodeURIComponent(repoPath)}`
+      `${baseUrl}/api/gateway/symphony/plan/SR-13?repo=${encodeURIComponent(repoPath)}`
     );
     assert.equal(response.status, 200);
     const body = await response.json() as { raw: { title: string } };
@@ -242,7 +242,7 @@ describe("single-root: metadata-routes", () => {
 
     const { baseUrl } = await startServer(tmpDir);
     const response = await fetch(
-      `${baseUrl}/api/engineer/symphony/status?workDir=${encodeURIComponent(workDir)}`
+      `${baseUrl}/api/gateway/symphony/status?workDir=${encodeURIComponent(workDir)}`
     );
     assert.equal(response.status, 200);
     const body = await response.json() as { isRunning: boolean; status: string };
@@ -265,7 +265,7 @@ describe("single-root: symphony-judges", () => {
 
     const { baseUrl } = await startServer(tmpDir);
     const response = await fetch(
-      `${baseUrl}/api/engineer/symphony/judges/SR-15?repo=${encodeURIComponent(repoPath)}`
+      `${baseUrl}/api/gateway/symphony/judges/SR-15?repo=${encodeURIComponent(repoPath)}`
     );
     assert.equal(response.status, 200);
     const body = await response.json() as { exists: boolean; data: { source: string } };
@@ -288,7 +288,7 @@ describe("single-root: codex", () => {
 
     const { baseUrl } = await startServer(tmpDir);
     const response = await fetch(
-      `${baseUrl}/api/engineer/codex/status/SR-18?repo=${encodeURIComponent(repoPath)}`
+      `${baseUrl}/api/gateway/codex/status/SR-18?repo=${encodeURIComponent(repoPath)}`
     );
     assert.equal(response.status, 200);
     const body = await response.json() as { hasReview: boolean; provider: string };

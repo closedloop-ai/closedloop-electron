@@ -232,7 +232,7 @@ test("telemetry: job.failed emitted with correct category/trace/diagnostics on p
 
   const loopId = "00000000-0000-0000-0000-000000000a01";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -337,7 +337,7 @@ test("telemetry: job.completed emitted with correct category/trace on process ex
 
   const loopId = "00000000-0000-0000-0000-000000000a02";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -420,7 +420,7 @@ test("telemetry: preflight.binary_not_found emitted when claude is absent from P
 
   const loopId = "00000000-0000-0000-0000-000000000a03";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -561,7 +561,7 @@ test("telemetry: preflight.spawn_failed emitted when log file open fails (EISDIR
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -642,7 +642,7 @@ test("telemetry: commandId and operationId from request headers appear in trace 
   const testOperationId = "op-test-xyz789";
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: {

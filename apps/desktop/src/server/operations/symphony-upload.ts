@@ -29,7 +29,7 @@ export function registerSymphonyUploadRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[]
 ): void {
-  dispatcher.register("POST", "/api/engineer/symphony/upload/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/symphony/upload/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
 
@@ -117,7 +117,7 @@ export function registerSymphonyUploadRoutes(
 
       await fs.writeFile(savedPath, file.buffer);
 
-      const apiUrl = `/api/engineer/symphony/attachments/${encodeURIComponent(
+      const apiUrl = `/api/gateway/symphony/attachments/${encodeURIComponent(
         ticketId
       )}/${encodeURIComponent(savedName)}?repo=${encodeURIComponent(repoPath)}`;
       savedFiles.push({

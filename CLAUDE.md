@@ -15,6 +15,13 @@ Run `just` to see all available recipes. Key ones:
 - `just desktop-typecheck` -- run TypeScript type checking
 - `just desktop-test` -- run tests
 
+## Breaking Changes
+
+Any breaking change to APIs, contracts, or interfaces (HTTP gateway routes, cloud relay messages, IPC bridge, persisted store schemas, etc.) requires both of the following before merging:
+
+1. **Legacy migration logic** so existing users are not broken on upgrade. Detect the old shape and translate it to the new shape at the boundary; do not assume users have already migrated.
+2. **A ClosedLoop ticket** created via the ClosedLoop MCP (`mcp__closedloop__create-feature`) to track removing the legacy migration code at a later date. Reference the ticket ID in a comment next to the migration logic so it can be found and deleted when the ticket is worked.
+
 ## Commit Messages
 
 Follow the format in `.gitmessage`. The subject line must be `<TICKET>: <description>` where TICKET is extracted from the branch name (e.g. `FEAT-68: add no-auth dev mode`). Include bullet-point body, Testing, and Risks sections.

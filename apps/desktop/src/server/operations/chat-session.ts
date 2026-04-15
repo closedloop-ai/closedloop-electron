@@ -74,7 +74,7 @@ export function registerChatSessionRoutes(
   registry: ProviderRegistry,
   getGatewayId: () => string
 ): void {
-  dispatcher.register("POST", "/api/engineer/chat", async (context) => {
+  dispatcher.register("POST", "/api/gateway/chat", async (context) => {
     const parsed = parseJsonBody(context);
     if (parsed == null) {
       json(context, 400, { error: "Invalid JSON body" });

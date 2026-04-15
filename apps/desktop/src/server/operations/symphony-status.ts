@@ -32,7 +32,7 @@ export function registerSymphonyStatusRoutes(
   getAllowedDirectories: () => string[],
   jobStore?: JobStore
 ): void {
-  dispatcher.register("GET", "/api/engineer/symphony/status/:ticketId", async (context) => {
+  dispatcher.register("GET", "/api/gateway/symphony/status/:ticketId", async (context) => {
     try {
       const ticketId = context.params.ticketId;
       const repoPath = context.query.get("repo");

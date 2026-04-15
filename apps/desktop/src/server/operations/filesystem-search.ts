@@ -24,7 +24,7 @@ export function registerFilesystemSearchRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[]
 ): void {
-  dispatcher.register("GET", "/api/engineer/files/search", async (context) => {
+  dispatcher.register("GET", "/api/gateway/files/search", async (context) => {
     try {
       const repoPath = context.query.get("repo");
       const ticketId = context.query.get("ticket");

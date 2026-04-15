@@ -25,7 +25,7 @@ export function registerGitBranchesRoutes(
   processManager: ProcessManager,
   getAllowedDirectories: () => string[]
 ): void {
-  dispatcher.register("GET", "/api/engineer/git/branches", async (context) => {
+  dispatcher.register("GET", "/api/gateway/git/branches", async (context) => {
     const repoPath = context.query.get("repo");
     if (!repoPath) {
       json(context, 400, { error: "repo parameter is required" });
