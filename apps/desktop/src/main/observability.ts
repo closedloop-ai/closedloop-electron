@@ -399,6 +399,12 @@ export class Observability {
     });
   }
 
+  // --- Queue stats (telemetry only) ---
+
+  static queueStatsChanged(activeCommands: number, queueDepth: number): void {
+    Observability.emitTelemetry("info", "queue.stats_changed", "Queue stats changed", {}, { extra: { activeCommands, queueDepth } });
+  }
+
   // --- Internal helpers ---
 
   // commandId is a log/event attribute for correlation only — must not be promoted to a Datadog metric tag dimension

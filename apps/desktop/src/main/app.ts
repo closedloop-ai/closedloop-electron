@@ -94,6 +94,7 @@ export class DesktopApplication {
   private cloudCommandsPaused: boolean;
   private cloudConnectionEnabled: boolean;
   private updateCheckTimer: NodeJS.Timeout | null = null;
+  private queueStatsChangedTimer: NodeJS.Timeout | null = null;
 
   constructor() {
     this.gatewayAuthToken = randomBytes(24).toString("hex");
@@ -187,6 +188,13 @@ export class DesktopApplication {
           activeCommands: stats.activeCommands,
           queueDepth: stats.queueDepth,
         });
+        // Debounce telemetry at 1 second trailing-edge to avoid flooding
+        // observability with high-frequency queue stat changes during bursts.
+        // The presence update above fires immediately; telemetry is batched.
+        if (this.queueStatsChangedTimer) clearTimeout(this.queueStatsChangedTimer);
+        this.queueStatsChangedTimer = setTimeout(() => {
+          Observability.queueStatsChanged(stats.activeCommands, stats.queueDepth);
+        }, 1000);
       },
     });
     this.cloudSocket = new CloudSocketService({
@@ -420,6 +428,10 @@ export class DesktopApplication {
     this.shuttingDown = true;
     this.bootRecovery.dispose();
     await this.bootRecovery.quiesce(1_000);
+    if (this.queueStatsChangedTimer) {
+      clearTimeout(this.queueStatsChangedTimer);
+      this.queueStatsChangedTimer = null;
+    }
     return runShutdownSequence({
       observability: Observability,
       updateCheckTimer: this.updateCheckTimer,
