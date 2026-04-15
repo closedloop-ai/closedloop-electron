@@ -1,7 +1,6 @@
 name: Release Desktop
 
 on:
-  push:
   workflow_dispatch:
 
 concurrency:
