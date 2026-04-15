@@ -586,16 +586,17 @@ export async function resolveAdditionalRepos(
   for (const entry of entries) {
     const repoRef = entry.localRepoPath ?? entry.fullName ?? "";
     const resolvedPath = resolveAndValidateRepoPath(entry, allowedDirs, repoRef);
+    const canonicalPath = path.resolve(resolvedPath);
 
     if (
       primaryRepoPath !== null &&
-      path.resolve(resolvedPath) === path.resolve(primaryRepoPath)
+      canonicalPath === path.resolve(primaryRepoPath)
     ) {
       loopLog(loopId, `Skipping additionalRepo that matches primaryRepoPath: ${resolvedPath}`);
       continue;
     }
 
-    if (seen.has(resolvedPath)) {
+    if (seen.has(canonicalPath)) {
       loopLog(loopId, `Duplicate additional repo, skipping: ${resolvedPath}`);
       continue;
     }
@@ -609,7 +610,7 @@ export async function resolveAdditionalRepos(
       );
     }
 
-    seen.set(resolvedPath, { repoPath: resolvedPath, branch: entry.branch });
+    seen.set(canonicalPath, { repoPath: canonicalPath, branch: entry.branch });
   }
 
   return Array.from(seen.values());
