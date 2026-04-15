@@ -834,34 +834,6 @@ async function branchExistsImpl(repoPath: string, branch: string): Promise<boole
   return resolveRef(repoPath, branch) !== null;
 }
 
-/** Find existing worktree for a branch name. */
-function findWorktreeForBranchImpl(
-  expandedRepoPath: string,
-  branchName: string,
-): string | null {
-  try {
-    const output = execSync("git worktree list --porcelain", {
-      cwd: expandedRepoPath,
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 10_000,
-    });
-
-    let currentWorktree: string | null = null;
-    for (const line of output.split("\n")) {
-      if (line.startsWith("worktree ")) {
-        currentWorktree = line.slice("worktree ".length);
-      }
-      if (line.startsWith("branch ") && line.endsWith(`/${branchName}`)) {
-        return currentWorktree;
-      }
-    }
-  } catch {
-    // fall through
-  }
-  return null;
-}
-
 // findExistingLoopWorktree was removed — it greedy-matched ANY loop worktree
 // from ANY prior loop, causing new PLAN loops to reuse stale worktrees.
 // PLAN always creates a fresh worktree. EXECUTE/REQUEST_CHANGES reuse via
