@@ -561,7 +561,7 @@ function resolveAndValidateRepoPath(
   return result.path;
 }
 
-/** Validate, resolve, and deduplicate additionalRepos entries. Throws AdditionalRepoError on failure. */
+/** Validate and resolve additionalRepos entries. Throws AdditionalRepoError on failure. */
 export async function resolveAdditionalRepos(
   entries: NonNullable<LoopRequestBody["additionalRepos"]>,
   primaryRepoPath: string | null,
@@ -581,7 +581,7 @@ export async function resolveAdditionalRepos(
     );
   }
 
-  const seen = new Map<string, ResolvedAdditionalRepo>();
+  const resolved: ResolvedAdditionalRepo[] = [];
 
   for (const entry of entries) {
     const repoRef = entry.localRepoPath ?? entry.fullName ?? "";
@@ -596,12 +596,7 @@ export async function resolveAdditionalRepos(
       continue;
     }
 
-    if (seen.has(canonicalPath)) {
-      loopLog(loopId, `Duplicate additional repo, skipping: ${resolvedPath}`);
-      continue;
-    }
-
-    const branchFound = await wt.branchExists(resolvedPath, entry.branch);
+    const branchFound = await wt.branchExists(canonicalPath, entry.branch);
     if (!branchFound) {
       throw new AdditionalRepoError(
         LoopErrorCode.RepoNotFound,
@@ -610,10 +605,10 @@ export async function resolveAdditionalRepos(
       );
     }
 
-    seen.set(canonicalPath, { repoPath: canonicalPath, branch: entry.branch });
+    resolved.push({ repoPath: canonicalPath, branch: entry.branch });
   }
 
-  return Array.from(seen.values());
+  return resolved;
 }
 
 /**

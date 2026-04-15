@@ -2,10 +2,9 @@
  * Contract tests for multi-repo PLAN requests.
  *
  * 1. PLAN rejects nonexistent branch (branchExists returns false) — HTTP 400 + RepoNotFound event
- * 2. resolveAdditionalRepos deduplicates on resolved path
- * 3. resolveAdditionalRepos removes entries matching the primary repo
- * 4. resolveAdditionalRepos rejects > 5 entries
- * 5. additionalRepoDisambiguator distinguishes repos with the same basename
+ * 2. resolveAdditionalRepos removes entries matching the primary repo
+ * 3. resolveAdditionalRepos rejects > 5 entries
+ * 4. additionalRepoDisambiguator distinguishes repos with the same basename
  */
 
 import assert from "node:assert/strict";
@@ -129,29 +128,6 @@ it("PLAN with nonexistent branch in additionalRepo returns HTTP 400 and RepoNotF
 // ---------------------------------------------------------------------------
 
 describe("resolveAdditionalRepos — unit-style", () => {
-  it("deduplicates entries that resolve to the same local path (first occurrence wins)", async () => {
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-unit-dedup-"));
-    tempPathsToClean.push(tmpDir);
-
-    const repoA = path.join(tmpDir, "repo-a");
-    await fs.mkdir(repoA, { recursive: true });
-
-    const result = await resolveAdditionalRepos(
-      [
-        { localRepoPath: repoA, branch: "main" },
-        { localRepoPath: repoA, branch: "feature-branch" }, // same path, different branch
-      ],
-      null,
-      [tmpDir],
-      "test-loop-id",
-      fakeWorktreeProvider,
-    );
-
-    assert.equal(result.length, 1, "Duplicate paths should be deduplicated to one entry");
-    assert.equal(result[0].repoPath, repoA);
-    assert.equal(result[0].branch, "main", "First occurrence wins on deduplication");
-  });
-
   it("removes an additionalRepo entry that matches the primary repo path", async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-unit-primary-"));
     tempPathsToClean.push(tmpDir);
