@@ -17,7 +17,7 @@ export function registerGitActionRoutes(
   processManager: ProcessManager,
   getAllowedDirectories: () => string[]
 ): void {
-  dispatcher.register("POST", "/api/engineer/git", async (context) => {
+  dispatcher.register("POST", "/api/gateway/git", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });

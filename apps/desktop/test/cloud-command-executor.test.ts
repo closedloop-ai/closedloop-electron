@@ -252,7 +252,7 @@ test("forwards request body for DELETE commands", async () => {
     commandId: "delete-body",
     operationId: "git_worktree_delete",
     method: "DELETE",
-    path: "/api/engineer/git/worktree",
+    path: "/api/gateway/git/worktree",
     query: {},
     body: {
       worktreePath: "/repo/my-worktree",
@@ -297,7 +297,7 @@ test("does not forward body for GET commands", async () => {
     commandId: "get-nobody",
     operationId: "status_check",
     method: "GET",
-    path: "/api/engineer/symphony/status/TICKET-1",
+    path: "/api/gateway/symphony/status/TICKET-1",
     query: { repo: "/repo/a" },
     body: { shouldNotBeSent: true },
   });
@@ -345,7 +345,7 @@ test("sends x-desktop-command-id and x-desktop-operation-id headers in gateway r
     commandId,
     operationId,
     method: "GET",
-    path: "/api/engineer/git",
+    path: "/api/gateway/git",
     query: {},
   });
 
@@ -386,7 +386,7 @@ test("omits x-desktop-command-id header when commandId is not a valid UUID", asy
     commandId: injectedCommandId,
     operationId: "git_action",
     method: "GET",
-    path: "/api/engineer/git",
+    path: "/api/gateway/git",
     query: {},
   });
 
@@ -429,7 +429,7 @@ test("omits x-desktop-operation-id header when operationId contains CRLF", async
     commandId,
     operationId: "evil\r\nX-Injected: pwned",
     method: "GET",
-    path: "/api/engineer/git",
+    path: "/api/gateway/git",
     query: {},
   });
 
@@ -601,7 +601,7 @@ function buildCommand(
     commandId,
     operationId: "git_action",
     method: "POST",
-    path: "/api/engineer/git",
+    path: "/api/gateway/git",
     query,
     body: {
       action: "status",

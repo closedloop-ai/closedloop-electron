@@ -60,7 +60,7 @@ function makeServer(
   return server;
 }
 
-test("engineer route rejects spoofed origin without session token (401)", async () => {
+test("gateway route rejects spoofed origin without session token (401)", async () => {
   const tmpDir = await makeTempDir("no-session");
   const store = new LocalSessionStore();
   const server = makeServer(tmpDir, store);
@@ -68,7 +68,7 @@ test("engineer route rejects spoofed origin without session token (401)", async 
 
   // No session token was created for this origin — browser-style request with Origin only
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/directories?path=${tmpDir}`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/directories?path=${tmpDir}`,
     { headers: { Origin: "http://localhost" } }
   );
 
@@ -77,7 +77,7 @@ test("engineer route rejects spoofed origin without session token (401)", async 
   assert.equal(body.error, "unauthorized");
 });
 
-test("engineer route rejects missing origin even with browser-like headers (401)", async () => {
+test("gateway route rejects missing origin even with browser-like headers (401)", async () => {
   const tmpDir = await makeTempDir("no-origin");
   const store = new LocalSessionStore();
   const server = makeServer(tmpDir, store);
@@ -85,7 +85,7 @@ test("engineer route rejects missing origin even with browser-like headers (401)
 
   // Browser-like headers but no Origin and no session token
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/directories?path=${tmpDir}`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/directories?path=${tmpDir}`,
     {
       headers: {
         "User-Agent":
@@ -100,7 +100,7 @@ test("engineer route rejects missing origin even with browser-like headers (401)
   assert.equal(body.error, "unauthorized");
 });
 
-test("engineer route accepts valid session token with matching origin (200)", async () => {
+test("gateway route accepts valid session token with matching origin (200)", async () => {
   const tmpDir = await makeTempDir("valid-session");
   const store = new LocalSessionStore();
   const { sessionToken } = store.create("http://localhost:3000");
@@ -108,7 +108,7 @@ test("engineer route accepts valid session token with matching origin (200)", as
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/directories?path=${tmpDir}`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/directories?path=${tmpDir}`,
     {
       headers: {
         Origin: "http://localhost:3000",
@@ -120,7 +120,7 @@ test("engineer route accepts valid session token with matching origin (200)", as
   assert.equal(response.status, 200);
 });
 
-test("engineer route rejects expired session token (401)", async () => {
+test("gateway route rejects expired session token (401)", async () => {
   const tmpDir = await makeTempDir("expired-session");
   const store = new LocalSessionStore(0.05); // 50 ms TTL
   const { sessionToken } = store.create("http://localhost:3000");
@@ -130,7 +130,7 @@ test("engineer route rejects expired session token (401)", async () => {
   await new Promise((resolve) => setTimeout(resolve, 100));
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/directories?path=${tmpDir}`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/directories?path=${tmpDir}`,
     {
       headers: {
         Origin: "http://localhost:3000",
@@ -144,7 +144,7 @@ test("engineer route rejects expired session token (401)", async () => {
   assert.equal(body.error, "unauthorized");
 });
 
-test("engineer route rejects session token with mismatched origin (401)", async () => {
+test("gateway route rejects session token with mismatched origin (401)", async () => {
   const tmpDir = await makeTempDir("origin-mismatch");
   const store = new LocalSessionStore();
   const { sessionToken } = store.create("http://localhost:3000");
@@ -153,7 +153,7 @@ test("engineer route rejects session token with mismatched origin (401)", async 
 
   // Send the valid token but with a different origin
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/directories?path=${tmpDir}`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/directories?path=${tmpDir}`,
     {
       headers: {
         Origin: "http://localhost:4000",
@@ -195,7 +195,7 @@ test("internal cloud token path still works (200)", async () => {
 
   // Cloud executor uses the internal gateway token directly — no session needed
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/directories?path=${tmpDir}`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/directories?path=${tmpDir}`,
     {
       headers: {
         "X-Desktop-Gateway-Token": "test-gateway-token-hex",
@@ -255,9 +255,9 @@ test("local-electron mode fails closed: no session token obtainable without API 
   await server.start();
 
   // Without an API key, a browser cannot obtain a session token via exchange.
-  // Direct request to an engineer route with only an Origin header is rejected.
+  // Direct request to an gateway route with only an Origin header is rejected.
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/directories?path=${tmpDir}`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/directories?path=${tmpDir}`,
     {
       headers: {
         Origin: "http://localhost:3000",
@@ -279,7 +279,7 @@ test("hosted relay path (cloud gateway token) unaffected by missing API key", as
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/directories?path=${tmpDir}`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/directories?path=${tmpDir}`,
     {
       headers: {
         "X-Desktop-Gateway-Token": "test-gateway-token-hex",
@@ -364,7 +364,7 @@ test("CORS preflight includes X-Desktop-Session-Token in Access-Control-Allow-He
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/directories`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/directories`,
     {
       method: "OPTIONS",
       headers: {
@@ -419,7 +419,7 @@ test("prodOriginsOnly: no-auth mode + loopback origin engineer request returns 4
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/directories?path=${tmpDir}`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/directories?path=${tmpDir}`,
     {
       headers: { Origin: "http://localhost:3000" },
     }
@@ -464,7 +464,7 @@ test("prodOriginsOnly: gateway token request (no Origin) succeeds", async () => 
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/directories?path=${tmpDir}`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/directories?path=${tmpDir}`,
     {
       headers: {
         "X-Desktop-Gateway-Token": "test-gateway-token-hex",
@@ -484,7 +484,7 @@ test("prodOriginsOnly: gateway token + blocked Origin header still succeeds", as
   // Relayed cloud commands may carry an Origin header forwarded from the browser.
   // The gateway token must take precedence over the origin gate.
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/directories?path=${tmpDir}`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/directories?path=${tmpDir}`,
     {
       headers: {
         "X-Desktop-Gateway-Token": "test-gateway-token-hex",

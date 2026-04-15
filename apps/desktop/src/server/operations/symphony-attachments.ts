@@ -20,7 +20,7 @@ export function registerSymphonyAttachmentsRoutes(
 ): void {
   dispatcher.register(
     "GET",
-    "/api/engineer/symphony/attachments/:ticketId/*attachmentPath",
+    "/api/gateway/symphony/attachments/:ticketId/*attachmentPath",
     async (context) => {
       const ticketId = context.params.ticketId;
       const repoPath = context.query.get("repo");

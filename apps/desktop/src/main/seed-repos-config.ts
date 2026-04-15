@@ -9,7 +9,7 @@ import { loadReposConfig, saveReposConfig } from "../server/operations/repos-con
  *
  * - Sets worktreeParentDir + worktreeParentDirConfirmed
  *
- * Repos are added explicitly by the user via POST /api/engineer/repos — this
+ * Repos are added explicitly by the user via POST /api/gateway/repos — this
  * function never auto-discovers repos from the filesystem.
  *
  * Best-effort — logs errors but never throws.

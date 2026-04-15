@@ -407,7 +407,7 @@ export async function postToLoopEndpoint(
   body: Record<string, unknown>
 ): Promise<Response> {
   return fetch(
-    `http://127.0.0.1:${serverPort}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${serverPort}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: {

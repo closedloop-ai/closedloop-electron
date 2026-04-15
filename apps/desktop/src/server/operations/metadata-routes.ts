@@ -33,7 +33,7 @@ export function registerMetadataRoutes(
   getAllowedDirectories: () => string[],
   getSymphonyDir: () => string
 ): void {
-  dispatcher.register("GET", "/api/engineer/version", async (context) => {
+  dispatcher.register("GET", "/api/gateway/version", async (context) => {
     try {
       const version = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
         cwd: process.cwd(),
@@ -68,7 +68,7 @@ export function registerMetadataRoutes(
     }
   });
 
-  dispatcher.register("GET", "/api/engineer/symphony/status", async (context) => {
+  dispatcher.register("GET", "/api/gateway/symphony/status", async (context) => {
     const workDir = context.query.get("workDir");
     if (!workDir) {
       json(context, 400, { error: "workDir parameter is required" });
@@ -123,7 +123,7 @@ export function registerMetadataRoutes(
     }
   });
 
-  dispatcher.register("GET", "/api/engineer/work-directory/:ticketId", async (context) => {
+  dispatcher.register("GET", "/api/gateway/work-directory/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     if (!ticketId || typeof ticketId !== "string") {
       json(context, 400, { error: "ticketId is required and must be a string" });

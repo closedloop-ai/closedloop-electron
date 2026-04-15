@@ -33,7 +33,7 @@ export function registerGitDiffRoutes(
   processManager: ProcessManager,
   getAllowedDirectories: () => string[]
 ): void {
-  dispatcher.register("POST", "/api/engineer/git/diff", async (context) => {
+  dispatcher.register("POST", "/api/gateway/git/diff", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });

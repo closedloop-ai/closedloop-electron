@@ -19,7 +19,7 @@
  *
  *   (b-integration) Integration-level smoke test: imports and exercises the
  *       real registerSymphonyInteractiveRoutes for
- *       GET /api/engineer/symphony/commit-message/:ticketId with PATH pointing
+ *       GET /api/gateway/symphony/commit-message/:ticketId with PATH pointing
  *       to a temp bin dir that has git but not claude, so that the spawn of
  *       claude fails with ENOENT and the outer catch returns the default commit
  *       message.  Removing the child.on('error') handler attachment from
@@ -371,7 +371,7 @@ test(
 /**
  * Integration-level smoke test.  Imports and exercises the actual production
  * registerSymphonyInteractiveRoutes for
- *   GET /api/engineer/symphony/commit-message/:ticketId
+ *   GET /api/gateway/symphony/commit-message/:ticketId
  *
  * Setup:
  *   - Creates a real git worktree directory with a committed file and a staged
@@ -505,7 +505,7 @@ test(
 
       const dispatched = await dispatcher.dispatch({
         method: "GET",
-        pathname: `/api/engineer/symphony/commit-message/${ticketId}`,
+        pathname: `/api/gateway/symphony/commit-message/${ticketId}`,
         params: {},
         query: searchParams,
         rawBody: Buffer.alloc(0),

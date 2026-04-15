@@ -373,7 +373,7 @@ function parseDesktopCommand(payload: unknown): DesktopCommandEvent | null {
   const operationId = asNonEmptyString(event.operationId);
   const method = asMethod(event.method);
   const path = asNonEmptyString(event.path);
-  if (!commandId || !operationId || !method || !path || !path.startsWith("/api/engineer/")) {
+  if (!commandId || !operationId || !method || !path || !path.startsWith("/api/gateway/")) {
     return null;
   }
 

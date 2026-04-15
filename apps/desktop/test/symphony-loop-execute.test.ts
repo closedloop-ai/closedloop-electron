@@ -152,7 +152,7 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
 
   const loopId = "00000000-0000-0000-0000-000000000100";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -301,7 +301,7 @@ test("EXECUTE: handleProcessCompletion reads pre-written execution-result.json a
 
   const loopId = "00000000-0000-0000-0000-000000000200";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -450,7 +450,7 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
 
   const loopId = "00000000-0000-0000-0000-000000000300";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -580,7 +580,7 @@ test("EXECUTE: git status failure sets GIT_PUSH_FAILED in completed event warnin
 
   const loopId = "00000000-0000-0000-0000-000000000400";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -732,7 +732,7 @@ test("EXECUTE: cancel before attemptLlmCommit ends job as CANCELLED with no uplo
 
   const loopId = "00000000-0000-0000-0000-000000000700";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -868,7 +868,7 @@ test("EXECUTE: cancel during attemptLlmCommit ends job as CANCELLED with no comp
 
   const loopId = "00000000-0000-0000-0000-000000000800";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1067,7 +1067,7 @@ test("EXECUTE: artifact links use /implementation-plans/ in PR body and LLM prom
   const loopId = "00000000-0000-0000-0000-000000001000";
   const artifactSlug = "PLAN-42";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1224,7 +1224,7 @@ test("EXECUTE: SAFETY commit PR title uses '<slug>: Automated changes from loop 
   const shortId = loopId.slice(0, 8); // "00000000"
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1360,7 +1360,7 @@ test("EXECUTE: LLM commit spawns claude via resolved absolute path and writes PI
 
   const loopId = "00000000-0000-0000-0000-000000001200";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1501,7 +1501,7 @@ test("EXECUTE: non-zero exit with CANCEL_PENDING skips PROCESS_FAILED and ends a
 
   const loopId = "00000000-0000-0000-0000-000000000900";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

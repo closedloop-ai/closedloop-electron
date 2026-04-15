@@ -84,7 +84,7 @@ async function dispatchPost(
   const bodyString = typeof body === "string" ? body : JSON.stringify(body);
   await dispatcher.dispatch({
     method: "POST",
-    pathname: "/api/engineer/chat",
+    pathname: "/api/gateway/chat",
     params: {},
     query: new URLSearchParams(),
     rawBody: Buffer.from(bodyString),
@@ -266,7 +266,7 @@ describe("ProviderRegistry", () => {
   });
 });
 
-describe("registerChatSessionRoutes POST /api/engineer/chat — body validation", () => {
+describe("registerChatSessionRoutes POST /api/gateway/chat — body validation", () => {
   test("returns 400 when apiAuthToken is missing", async () => {
     const dispatcher = makeDispatcher(new FakeProvider());
     const { statusCode } = await dispatchPost(
@@ -322,7 +322,7 @@ describe("registerChatSessionRoutes POST /api/engineer/chat — body validation"
   });
 });
 
-describe("registerChatSessionRoutes POST /api/engineer/chat — happy path", () => {
+describe("registerChatSessionRoutes POST /api/gateway/chat — happy path", () => {
   test("upserts, spawns, completes, emits exactly one result + one done", async () => {
     installFetch([successfulUpsert(null), successfulComplete()]);
     const provider = new FakeProvider("claude", [
@@ -434,7 +434,7 @@ describe("registerChatSessionRoutes POST /api/engineer/chat — happy path", () 
   });
 });
 
-describe("registerChatSessionRoutes POST /api/engineer/chat — upsert errors", () => {
+describe("registerChatSessionRoutes POST /api/gateway/chat — upsert errors", () => {
   test("emits phase:upsert PROVIDER_MISMATCH on 409 and does not spawn", async () => {
     installFetch([
       { status: 409, body: { error: "mismatch", boundProvider: "codex" } },
@@ -492,7 +492,7 @@ describe("registerChatSessionRoutes POST /api/engineer/chat — upsert errors", 
   });
 });
 
-describe("registerChatSessionRoutes POST /api/engineer/chat — lazy fallback retry", () => {
+describe("registerChatSessionRoutes POST /api/gateway/chat — lazy fallback retry", () => {
   test("retries once when retryable and no text was emitted", async () => {
     installFetch([successfulUpsert("sess-stale"), successfulComplete()]);
     const provider = new FakeProvider("claude", [
@@ -666,7 +666,7 @@ describe("registerChatSessionRoutes POST /api/engineer/chat — lazy fallback re
   });
 });
 
-describe("registerChatSessionRoutes POST /api/engineer/chat — complete errors", () => {
+describe("registerChatSessionRoutes POST /api/gateway/chat — complete errors", () => {
   test("PERSISTENCE_FAILED when complete fails twice on transient 500", async () => {
     installFetch([
       successfulUpsert(null),
