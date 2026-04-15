@@ -565,7 +565,6 @@ function resolveAndValidateRepoPath(
 export async function resolveAdditionalRepos(
   entries: NonNullable<LoopRequestBody["additionalRepos"]>,
   allowedDirs: string[],
-  loopId: string,
   wt: WorktreeProvider,
 ): Promise<ResolvedAdditionalRepo[]> {
   if (entries.length === 0) {
@@ -2823,7 +2822,6 @@ async function handleLoopRequest(
         resolvedAdditionalRepos = await resolveAdditionalRepos(
           body.additionalRepos,
           allowedDirs,
-          body.loopId,
           wt,
         );
       } catch (err) {
@@ -2997,8 +2995,8 @@ async function handleLoopRequest(
           } catch (checkoutErr) {
             const msg = checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr);
             loopError(body.loopId, `ensureWorktree failed for additional repo ${addRepo.repoPath}:`, checkoutErr);
-            await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
             await wt.removeWorktree(addWorktreeDir, addRepo.repoPath, body.loopId).catch(() => {});
+            await wt.removeWorktree(worktreeDir, repoPath, body.loopId).catch(() => {});
             await postLoopEventBounded(
               apiBaseUrl,
               body.loopId,
@@ -3016,8 +3014,8 @@ async function handleLoopRequest(
             assertPathAllowed(addWorktreeDir, allowedDirs);
           } catch (e) {
             if (e instanceof DirectoryNotAllowedError) {
-              await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
               await wt.removeWorktree(addWorktreeDir, addRepo.repoPath, body.loopId).catch(() => {});
+              await wt.removeWorktree(worktreeDir, repoPath, body.loopId).catch(() => {});
               await postLoopEventBounded(
                 apiBaseUrl,
                 body.loopId,

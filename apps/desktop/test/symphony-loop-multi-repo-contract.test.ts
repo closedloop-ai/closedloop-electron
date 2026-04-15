@@ -139,7 +139,6 @@ describe("resolveAdditionalRepos — unit-style", () => {
         resolveAdditionalRepos(
           repos.map((r) => ({ localRepoPath: r, branch: "main" })),
           [tmpDir],
-          "test-loop-id",
           fakeWorktreeProvider,
         ),
       (err) =>
