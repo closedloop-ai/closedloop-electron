@@ -13,7 +13,6 @@ import { afterEach, test } from "node:test";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
-import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 
 // Use a file-local port range so this suite does not collide with other
 // integration test files that still use the default gateway probe order.
@@ -72,25 +71,11 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 
 // Shared test helpers
-import { startMockApiServer, waitForTerminalEvent } from "./symphony-test-utils.js";
+import { makeFakeWorktreeProvider, startMockApiServer, waitForTerminalEvent } from "./symphony-test-utils.js";
 
 const LOOP_UUID = "00000000-0000-0000-0000-000000000099";
 
-const fakeWorktreeProvider: WorktreeProvider = {
-  async ensureWorktree(_repoPath, worktreeDir) {
-    await fs.mkdir(worktreeDir, { recursive: true });
-  },
-  findWorktreeForBranch() {
-    return null;
-  },
-  async removeWorktree(worktreeDir) {
-    await fs.rm(worktreeDir, { recursive: true, force: true });
-  },
-  getCurrentBranch() {
-    return "symphony/generate-prd-test";
-  },
-  branchExists: async () => true,
-};
+const fakeWorktreeProvider = makeFakeWorktreeProvider("symphony/generate-prd-test");
 
 // ---------------------------------------------------------------------------
 // Test 1: Repo-required rejection

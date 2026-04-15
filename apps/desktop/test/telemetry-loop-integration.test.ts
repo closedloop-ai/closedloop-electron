@@ -101,24 +101,9 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 
 // Shared test helpers — see test/helpers/mock-api-server.ts
-import { startMockApiServer } from "./symphony-test-utils.js";
-import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
+import { makeFakeWorktreeProvider, startMockApiServer } from "./symphony-test-utils.js";
 
-const fakeWorktreeProvider: WorktreeProvider = {
-  async ensureWorktree(_repoPath, worktreeDir) {
-    await fs.mkdir(worktreeDir, { recursive: true });
-  },
-  findWorktreeForBranch() {
-    return null;
-  },
-  async removeWorktree(worktreeDir) {
-    await fs.rm(worktreeDir, { recursive: true, force: true });
-  },
-  getCurrentBranch() {
-    return "symphony/telemetry-test";
-  },
-  branchExists: async () => true,
-};
+const fakeWorktreeProvider = makeFakeWorktreeProvider("symphony/telemetry-test");
 
 /**
  * Initialize Observability with a capturing telemetry backend.

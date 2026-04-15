@@ -42,10 +42,10 @@ import {
 function makeRecordingWorktreeProvider(): {
   provider: WorktreeProvider;
   ensureWorktreeCalls: Array<{ repoPath: string; worktreeDir: string; branchName: string; baseBranch: string }>;
-  removeCalls: Array<{ worktreeDir: string }>;
+  removeCalls: Array<{ worktreeDir: string; repoPath: string; loopId?: string }>;
 } {
   const ensureWorktreeCalls: Array<{ repoPath: string; worktreeDir: string; branchName: string; baseBranch: string }> = [];
-  const removeCalls: Array<{ worktreeDir: string }> = [];
+  const removeCalls: Array<{ worktreeDir: string; repoPath: string; loopId?: string }> = [];
 
   const provider: WorktreeProvider = {
     async ensureWorktree(repoPath, worktreeDir, branchName, baseBranch) {
@@ -55,8 +55,8 @@ function makeRecordingWorktreeProvider(): {
     findWorktreeForBranch() {
       return null;
     },
-    async removeWorktree(worktreeDir) {
-      removeCalls.push({ worktreeDir });
+    async removeWorktree(worktreeDir, repoPath, loopId) {
+      removeCalls.push({ worktreeDir, repoPath, loopId });
       await fs.rm(worktreeDir, { recursive: true, force: true });
     },
     getCurrentBranch() {

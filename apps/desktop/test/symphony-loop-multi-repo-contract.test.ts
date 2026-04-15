@@ -20,6 +20,7 @@ import {
   resolveAdditionalRepos,
 } from "../src/server/operations/symphony-loop.js";
 import {
+  makeFakeWorktreeProvider,
   makeMultiRepoGateway,
   makeMultiRepoTestHarness,
   startMockApiServer,
@@ -30,25 +31,7 @@ import {
 // Shared fixtures
 // ---------------------------------------------------------------------------
 
-/**
- * Extended fakeWorktreeProvider that includes branchExists (always returns
- * true) in addition to the base methods.
- */
-const fakeWorktreeProvider: WorktreeProvider = {
-  async ensureWorktree(_repoPath, worktreeDir) {
-    await fs.mkdir(worktreeDir, { recursive: true });
-  },
-  findWorktreeForBranch() {
-    return null;
-  },
-  async removeWorktree(worktreeDir) {
-    await fs.rm(worktreeDir, { recursive: true, force: true });
-  },
-  getCurrentBranch() {
-    return "symphony/multi-repo-contract-test";
-  },
-  branchExists: async () => true,
-};
+const fakeWorktreeProvider = makeFakeWorktreeProvider("symphony/multi-repo-contract-test");
 
 const { serversToClose, mockServersToClose, tempPathsToClean, cleanup } =
   makeMultiRepoTestHarness();

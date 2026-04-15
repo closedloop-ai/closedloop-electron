@@ -27,6 +27,7 @@ import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
 import {
   createFakeRunLoopScript,
+  makeFakeWorktreeProvider,
   restoreEnv,
   saveEnv,
   startMockApiServer,
@@ -34,21 +35,7 @@ import {
   waitForTerminalEvent,
 } from "./symphony-test-utils.js";
 
-const fakeWorktreeProvider: WorktreeProvider = {
-  async ensureWorktree(_repoPath, worktreeDir) {
-    await fs.mkdir(worktreeDir, { recursive: true });
-  },
-  findWorktreeForBranch() {
-    return null;
-  },
-  async removeWorktree(worktreeDir) {
-    await fs.rm(worktreeDir, { recursive: true, force: true });
-  },
-  getCurrentBranch() {
-    return "symphony/cloud-failures-test";
-  },
-  branchExists: async () => true,
-};
+const fakeWorktreeProvider = makeFakeWorktreeProvider("symphony/cloud-failures-test");
 
 // ---------------------------------------------------------------------------
 // Shared state and cleanup

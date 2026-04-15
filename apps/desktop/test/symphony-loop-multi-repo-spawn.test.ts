@@ -19,10 +19,10 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
-import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 import { setShellPathForTest } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
+  makeFakeWorktreeProvider,
   makeMultiRepoGateway,
   makeMultiRepoTestHarness,
   startMockApiServer,
@@ -33,26 +33,7 @@ import {
 // Shared fixtures
 // ---------------------------------------------------------------------------
 
-/**
- * Extended fakeWorktreeProvider with ensureWorktree that creates the
- * worktree directory (simulating what the real impl does) and branchExists
- * that always returns true.
- */
-const fakeWorktreeProvider: WorktreeProvider = {
-  async ensureWorktree(_repoPath, worktreeDir) {
-    await fs.mkdir(worktreeDir, { recursive: true });
-  },
-  findWorktreeForBranch() {
-    return null;
-  },
-  async removeWorktree(worktreeDir) {
-    await fs.rm(worktreeDir, { recursive: true, force: true });
-  },
-  getCurrentBranch() {
-    return "symphony/multi-repo-spawn-test";
-  },
-  branchExists: async () => true,
-};
+const fakeWorktreeProvider = makeFakeWorktreeProvider("symphony/multi-repo-spawn-test");
 
 const { serversToClose, mockServersToClose, tempPathsToClean, cleanup } =
   makeMultiRepoTestHarness();

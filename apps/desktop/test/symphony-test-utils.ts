@@ -369,6 +369,36 @@ export async function setupStubClaudeBlocking(
 }
 
 // ---------------------------------------------------------------------------
+// Fake WorktreeProvider factory
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a minimal stub `WorktreeProvider` for tests that don't need real git.
+ * `ensureWorktree` creates the directory, `removeWorktree` rm's it,
+ * `findWorktreeForBranch` returns null, `branchExists` always returns true,
+ * and `getCurrentBranch` returns `currentBranchLabel` verbatim.
+ *
+ * Tests that need to record call arguments should build their own provider.
+ */
+export function makeFakeWorktreeProvider(currentBranchLabel: string): WorktreeProvider {
+  return {
+    async ensureWorktree(_repoPath, worktreeDir) {
+      await fs.mkdir(worktreeDir, { recursive: true });
+    },
+    findWorktreeForBranch() {
+      return null;
+    },
+    async removeWorktree(worktreeDir) {
+      await fs.rm(worktreeDir, { recursive: true, force: true });
+    },
+    getCurrentBranch() {
+      return currentBranchLabel;
+    },
+    branchExists: async () => true,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Multi-repo test harness (shared by multi-repo-worktree, -contract, -spawn)
 // ---------------------------------------------------------------------------
 
