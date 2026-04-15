@@ -149,7 +149,7 @@ test("EXECUTE: artifact upload failure sets ARTIFACT_UPLOAD_FAILED in completed 
 
   const loopId = "00000000-0000-0000-0000-000000000500";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -251,7 +251,7 @@ test("EXECUTE: event post failure logged as warning in job store", async () => {
 
   const loopId = "00000000-0000-0000-0000-000000000600";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -368,7 +368,7 @@ test("PLAN: pre-spawn log-file failure cleans up persisted loop token", async ()
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -444,7 +444,7 @@ test("PLAN: non-zero exit cleans up persisted loop token", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -505,7 +505,7 @@ test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async () => {
   const loopId = "00000000-0000-0000-0000-000000001001";
 
   const responsePromise = fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -539,7 +539,7 @@ test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async () => {
   // Verify the runningLoops slot was released: a second identical request should
   // also return 404 (not 409 Conflict).
   const response2 = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -598,7 +598,7 @@ test("EXECUTE: localRepoPath outside sandbox emits REPO_NOT_ALLOWED error event"
   await server.start();
 
   const responsePromise = fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -685,7 +685,7 @@ test("EXECUTE: fullName-resolved path outside allowedDirs emits REPO_NOT_ALLOWED
   await server.start();
 
   const responsePromise = fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -771,7 +771,7 @@ test("EXECUTE: postLoopEventBounded times out after 1000ms when API server hangs
   // postLoopEventBounded -- the bounded wait should timeout after 1000ms.
   const loopId = "00000000-0000-0000-0000-000000001005";
   const responsePromise = fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

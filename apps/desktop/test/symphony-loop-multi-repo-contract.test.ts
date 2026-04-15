@@ -83,7 +83,7 @@ it("PLAN with nonexistent branch in additionalRepo returns HTTP 400 and RepoNotF
 
   const loopId = "00000000-0000-0000-0000-000000003004";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

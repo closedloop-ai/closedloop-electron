@@ -15,7 +15,7 @@ export function registerGitWorktreeRoutes(
 ): void {
   const configDir = () => path.join(getSymphonyDir(), "config");
 
-  dispatcher.register("DELETE", "/api/engineer/git/worktree", async (context) => {
+  dispatcher.register("DELETE", "/api/gateway/git/worktree", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -71,7 +71,7 @@ export function registerGitWorktreeRoutes(
     json(context, 500, { error: `Failed to remove worktree: ${errorText}` });
   });
 
-  dispatcher.register("POST", "/api/engineer/git/worktree", async (context) => {
+  dispatcher.register("POST", "/api/gateway/git/worktree", async (context) => {
     try {
       const worktreeParentDir = await resolveWorktreeParentDir(configDir());
       if (!existsSync(worktreeParentDir)) {

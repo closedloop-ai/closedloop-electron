@@ -569,8 +569,8 @@ function validateCommand(command: DesktopCommandEvent): string | null {
   if (!SUPPORTED_HTTP_METHODS.has(command.method.toUpperCase())) {
     return "unsupported method";
   }
-  if (!command.path.startsWith("/api/engineer/")) {
-    return "path must start with /api/engineer/";
+  if (!command.path.startsWith("/api/gateway/")) {
+    return "path must start with /api/gateway/";
   }
   return null;
 }

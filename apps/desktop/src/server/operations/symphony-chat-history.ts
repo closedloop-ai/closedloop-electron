@@ -25,7 +25,7 @@ export function registerSymphonyChatHistoryRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[]
 ): void {
-  dispatcher.register("GET", "/api/engineer/symphony/chat-history/:ticketId", async (context) => {
+  dispatcher.register("GET", "/api/gateway/symphony/chat-history/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const provider = context.query.get("provider");
@@ -77,7 +77,7 @@ export function registerSymphonyChatHistoryRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/symphony/chat-history/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/symphony/chat-history/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const provider = context.query.get("provider");
@@ -168,7 +168,7 @@ export function registerSymphonyChatHistoryRoutes(
     }
   });
 
-  dispatcher.register("DELETE", "/api/engineer/symphony/chat-history/:ticketId", async (context) => {
+  dispatcher.register("DELETE", "/api/gateway/symphony/chat-history/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const indexParam = context.query.get("index");

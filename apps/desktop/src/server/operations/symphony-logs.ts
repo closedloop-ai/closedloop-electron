@@ -9,7 +9,7 @@ export function registerSymphonyLogsRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[]
 ): void {
-  dispatcher.register("GET", "/api/engineer/symphony/logs/:ticketId", async (context) => {
+  dispatcher.register("GET", "/api/gateway/symphony/logs/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const lines = Number.parseInt(context.query.get("lines") ?? "100", 10);

@@ -138,7 +138,7 @@ test("PLAN with 2 additionalRepos passes --add-dir for each worktree to run-loop
 
   const loopId = "00000000-0000-0000-0000-000000007001";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

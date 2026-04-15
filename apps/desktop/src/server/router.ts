@@ -13,6 +13,7 @@ import { registerDeployRoutes } from "./operations/deploy.js";
 import { registerCodexRoutes } from "./operations/codex.js";
 import { registerGitActionRoutes } from "./operations/git-action.js";
 import { registerGitBranchesRoutes } from "./operations/git-branches.js";
+import { registerGitBranchWorktreeRoutes } from "./operations/git-branch-worktree.js";
 import { registerGitDiffRoutes } from "./operations/git-diff.js";
 import { registerGitPrRoutes } from "./operations/git-pr.js";
 import { registerGitWorktreeRoutes } from "./operations/git-worktree.js";
@@ -52,7 +53,7 @@ export interface GatewayRouterOptions {
   getActivePort: () => number;
   getAllowedDirectories: () => string[];
   getSymphonyDir?: () => string;
-  fallbackEngineerOrigin?: string;
+  fallbackGatewayOrigin?: string;
   onActivityEvent?: (event: GatewayActivityEvent) => void;
   getGatewayAuthToken?: () => string | undefined;
   evaluateApproval?: (
@@ -131,6 +132,7 @@ export class GatewayRouter {
       this.processManager,
       this.options.getAllowedDirectories
     );
+    registerGitBranchWorktreeRoutes(this.operationDispatcher, getSymphonyDir);
     registerGitDiffRoutes(
       this.operationDispatcher,
       this.processManager,
@@ -144,7 +146,11 @@ export class GatewayRouter {
       getSymphonyDir
     );
     registerHealthCheckRoutes(this.operationDispatcher, this.processManager, getSymphonyDir);
-    registerLearningsRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
+    registerLearningsRoutes(
+      this.operationDispatcher,
+      this.options.getAllowedDirectories,
+      getSymphonyDir
+    );
     registerMetadataRoutes(this.operationDispatcher, this.options.getAllowedDirectories, getSymphonyDir);
     registerReposConfigRoutes(this.operationDispatcher, getSymphonyDir);
     registerRunViewerChatRoutes(
@@ -229,7 +235,7 @@ export class GatewayRouter {
 
     const method = request.method?.toUpperCase() ?? "GET";
     const url = new URL(request.url ?? "/", "http://localhost");
-    const isEngineerRoute = url.pathname.startsWith("/api/engineer/");
+    const isGatewayRoute = url.pathname.startsWith("/api/gateway/");
     const isExchangeRoute = method === "POST" && url.pathname === "/gateway-auth/exchange";
     const startedAt = Date.now();
     let activityType: GatewayActivityEvent["type"] = "request";
@@ -237,7 +243,7 @@ export class GatewayRouter {
     let capturedRequestBody: string | undefined;
     let capturedResponseBody = "";
 
-    if ((isEngineerRoute || isExchangeRoute) && method !== "OPTIONS") {
+    if ((isGatewayRoute || isExchangeRoute) && method !== "OPTIONS") {
       const origWrite = response.write.bind(response) as typeof response.write;
       const origEnd = response.end.bind(response) as typeof response.end;
 
@@ -303,8 +309,8 @@ export class GatewayRouter {
       return;
     }
 
-    const authResult = this.isAuthorizedEngineerRequest(request);
-    if (isEngineerRoute && !authResult.authorized) {
+    const authResult = this.isAuthorizedGatewayRequest(request);
+    if (isGatewayRoute && !authResult.authorized) {
       activityType = "security";
       activityDetail = authResult.reason ?? "unauthorized";
       response.statusCode = 401;
@@ -327,7 +333,7 @@ export class GatewayRouter {
       return;
     }
 
-    if (isEngineerRoute) {
+    if (isGatewayRoute) {
       const rawBody = await this.readBody(request);
       const body = rawBody.toString("utf-8");
       capturedRequestBody = body || undefined;
@@ -369,7 +375,7 @@ export class GatewayRouter {
         return;
       }
 
-      if (this.options.fallbackEngineerOrigin) {
+      if (this.options.fallbackGatewayOrigin) {
         await this.proxyToFallback(request, response, url.pathname + url.search, rawBody);
         return;
       }
@@ -429,7 +435,7 @@ export class GatewayRouter {
     return false;
   }
 
-  private isAuthorizedEngineerRequest(
+  private isAuthorizedGatewayRequest(
     request: IncomingMessage
   ): { authorized: true } | { authorized: false; reason: string } {
     const expectedToken = this.options.getGatewayAuthToken?.();
@@ -628,7 +634,7 @@ export class GatewayRouter {
     requestPath: string,
     rawBody: Buffer
   ): Promise<void> {
-    const targetUrl = new URL(requestPath, this.options.fallbackEngineerOrigin);
+    const targetUrl = new URL(requestPath, this.options.fallbackGatewayOrigin);
     const headers = new Headers();
     for (const [name, value] of Object.entries(request.headers)) {
       if (!value) {

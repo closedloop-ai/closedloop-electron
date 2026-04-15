@@ -223,7 +223,7 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
     await server.start();
 
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -256,7 +256,7 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
 
     const loopId = "77777777-0000-0000-0000-000000000007";
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -311,7 +311,7 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
 
     const loopId = "88888888-0000-0000-0000-000000000008";
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -353,7 +353,7 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
     await server.start();
 
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -439,7 +439,7 @@ describe("T-5.2: writePrdArtifact", () => {
 
     const loopId = "22222222-0000-0000-0000-000000000002";
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -509,7 +509,7 @@ describe("T-5.2: writePrdArtifact", () => {
 
     const loopId = "66666666-0000-0000-0000-000000000006";
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -624,7 +624,7 @@ describe("T-5.4: Temp dir cleanup after EVALUATE_PRD completes", () => {
 
     const loopId = "44444444-0000-0000-0000-000000000004";
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -687,7 +687,7 @@ describe("T-5.5: BINARY_NOT_FOUND when claude not in PATH", () => {
 
     const loopId = "55555555-0000-0000-0000-000000000005";
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {

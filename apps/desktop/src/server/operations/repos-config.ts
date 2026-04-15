@@ -9,7 +9,7 @@ export function registerReposConfigRoutes(
 ): void {
   const configDir = () => path.join(getSymphonyDir(), "config");
 
-  dispatcher.register("GET", "/api/engineer/repos", async (context) => {
+  dispatcher.register("GET", "/api/gateway/repos", async (context) => {
     try {
       const config = await loadReposConfig(configDir());
       json(context, 200, { repos: config.repos, settings: config.settings });
@@ -20,7 +20,7 @@ export function registerReposConfigRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/repos", async (context) => {
+  dispatcher.register("POST", "/api/gateway/repos", async (context) => {
     try {
       const body = parseBody(context);
       if (!body) {
@@ -49,7 +49,7 @@ export function registerReposConfigRoutes(
     }
   });
 
-  dispatcher.register("DELETE", "/api/engineer/repos", async (context) => {
+  dispatcher.register("DELETE", "/api/gateway/repos", async (context) => {
     try {
       const repoPath = context.query.get("path");
       if (!repoPath) {
@@ -71,7 +71,7 @@ export function registerReposConfigRoutes(
     }
   });
 
-  dispatcher.register("PATCH", "/api/engineer/repos", async (context) => {
+  dispatcher.register("PATCH", "/api/gateway/repos", async (context) => {
     try {
       const body = parseBody(context);
       if (!body) {

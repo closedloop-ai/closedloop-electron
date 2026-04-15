@@ -9,7 +9,7 @@ export function registerSymphonyJudgesRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[]
 ): void {
-  dispatcher.register("GET", "/api/engineer/symphony/judges/:ticketId", async (context) => {
+  dispatcher.register("GET", "/api/gateway/symphony/judges/:ticketId", async (context) => {
     try {
       const ticketId = context.params.ticketId;
       const repoPath = context.query.get("repo");

@@ -61,7 +61,7 @@ async function dispatchHealthCheck(
   const captured = makeResponse();
   await dispatcher.dispatch({
     method: "GET",
-    pathname: "/api/engineer/health-check",
+    pathname: "/api/gateway/health-check",
     params: {},
     query: new URLSearchParams(
       expectedMcpUrl ? [["expectedMcpUrl", expectedMcpUrl]] : []

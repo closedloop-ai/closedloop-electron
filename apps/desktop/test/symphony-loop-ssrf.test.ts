@@ -121,7 +121,7 @@ function buildContext(body: Record<string, unknown>): OperationRequestContext {
 
   return {
     method: "POST",
-    pathname: "/api/engineer/symphony/loop",
+    pathname: "/api/gateway/symphony/loop",
     params: {},
     query: new URLSearchParams(),
     rawBody: Buffer.from(bodyStr),

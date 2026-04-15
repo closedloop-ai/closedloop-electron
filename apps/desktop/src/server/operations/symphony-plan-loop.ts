@@ -14,6 +14,7 @@ import {
   tryAssertRepoAllowed,
   writeLaunchMetadata,
 } from "./symphony-utils.js";
+import { resolveRepoFullName } from "./git-helpers.js";
 
 // ---------------------------------------------------------------------------
 // Shared prepare/confirm handler implementations
@@ -184,30 +185,6 @@ function asString(value: unknown): string | null {
 }
 
 /**
- * Resolve the git remote full name (org/repo) from a local repo path.
- * Returns null if the remote origin URL cannot be parsed.
- */
-function resolveRepoFullName(repoPath: string): string | null {
-  try {
-    const remoteUrl = execSync("git remote get-url origin", {
-      cwd: repoPath,
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 10_000,
-    }).trim();
-
-    // Handle SSH: git@github.com:org/repo.git
-    const sshMatch = /[:/]([^/:]+\/[^/]+?)(?:\.git)?$/.exec(remoteUrl);
-    if (sshMatch) {
-      return sshMatch[1];
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Resolve the current branch name of a repo.
  */
 function resolveCurrentBranch(repoPath: string): string | null {
@@ -273,7 +250,7 @@ export function registerSymphonyPlanLoopRoutes(
   jobStore?: JobStore
 ): void {
   // -----------------------------------------------------------------------
-  // Operation A: POST /api/engineer/symphony/plan-loop/:ticketId/prepare
+  // Operation A: POST /api/gateway/symphony/plan-loop/:ticketId/prepare
   //
   // Filesystem-only: validates repoPath, resolves worktree + git remote info.
   // No API call -- completes instantly. Used for both initial start and
@@ -281,7 +258,7 @@ export function registerSymphonyPlanLoopRoutes(
   // -----------------------------------------------------------------------
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/plan-loop/:ticketId/prepare",
+    "/api/gateway/symphony/plan-loop/:ticketId/prepare",
     (context) => handlePrepare(context, getAllowedDirectories)
   );
 
@@ -289,12 +266,12 @@ export function registerSymphonyPlanLoopRoutes(
   // The prepare step is identical -- only the subsequent API call differs.
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/plan-loop/:ticketId/select-artifact/prepare",
+    "/api/gateway/symphony/plan-loop/:ticketId/select-artifact/prepare",
     (context) => handlePrepare(context, getAllowedDirectories)
   );
 
   // -----------------------------------------------------------------------
-  // Operation B: POST /api/engineer/symphony/plan-loop/:ticketId/confirm
+  // Operation B: POST /api/gateway/symphony/plan-loop/:ticketId/confirm
   //
   // Filesystem-only: writes launch-metadata.json and updates JobStore.
   // Called fire-and-forget by the browser after the API returns the loop.
@@ -302,19 +279,19 @@ export function registerSymphonyPlanLoopRoutes(
   // -----------------------------------------------------------------------
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/plan-loop/:ticketId/confirm",
+    "/api/gateway/symphony/plan-loop/:ticketId/confirm",
     (context) => handleConfirm(context, context.params.ticketId, getAllowedDirectories, jobStore)
   );
 
   // Also register the same confirm handler for the select-artifact path.
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/plan-loop/:ticketId/select-artifact/confirm",
+    "/api/gateway/symphony/plan-loop/:ticketId/select-artifact/confirm",
     (context) => handleConfirm(context, context.params.ticketId, getAllowedDirectories, jobStore)
   );
 
   // -----------------------------------------------------------------------
-  // Operation C: POST /api/engineer/symphony/plan-loop/:ticketId/cancel
+  // Operation C: POST /api/gateway/symphony/plan-loop/:ticketId/cancel
   //
   // Cancels DB loop via API + kills local process. The DELETE /loops/:loopId
   // call is a simple idempotent delete that doesn't dispatch a new relay
@@ -322,7 +299,7 @@ export function registerSymphonyPlanLoopRoutes(
   // -----------------------------------------------------------------------
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/plan-loop/:ticketId/cancel",
+    "/api/gateway/symphony/plan-loop/:ticketId/cancel",
     async (context) => {
       const ticketId = context.params.ticketId;
       const body = parseBody(context);

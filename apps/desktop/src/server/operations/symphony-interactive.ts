@@ -93,7 +93,7 @@ export function registerSymphonyInteractiveRoutes(
 ): void {
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/chat/:ticketId",
+    "/api/gateway/symphony/chat/:ticketId",
     async (context) => {
       const ticketId = context.params.ticketId;
       const body = parseBody(context);
@@ -184,7 +184,7 @@ export function registerSymphonyInteractiveRoutes(
 
   dispatcher.register(
     "GET",
-    "/api/engineer/symphony/comment-chat/:commentId",
+    "/api/gateway/symphony/comment-chat/:commentId",
     async (context) => {
       const commentId = context.params.commentId;
       const ticketId = context.query.get("ticketId");
@@ -226,7 +226,7 @@ export function registerSymphonyInteractiveRoutes(
 
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/comment-chat/:commentId",
+    "/api/gateway/symphony/comment-chat/:commentId",
     async (context) => {
       const commentId = context.params.commentId;
       const ticketId = context.query.get("ticketId");
@@ -313,7 +313,7 @@ export function registerSymphonyInteractiveRoutes(
 
   dispatcher.register(
     "PATCH",
-    "/api/engineer/symphony/comment-chat/:commentId",
+    "/api/gateway/symphony/comment-chat/:commentId",
     async (context) => {
       const commentId = context.params.commentId;
       const ticketId = context.query.get("ticketId");
@@ -381,7 +381,7 @@ export function registerSymphonyInteractiveRoutes(
 
   dispatcher.register(
     "DELETE",
-    "/api/engineer/symphony/comment-chat/:commentId",
+    "/api/gateway/symphony/comment-chat/:commentId",
     async (context) => {
       const commentId = context.params.commentId;
       const ticketId = context.query.get("ticketId");
@@ -417,7 +417,7 @@ export function registerSymphonyInteractiveRoutes(
 
   dispatcher.register(
     "GET",
-    "/api/engineer/symphony/commit-message/:ticketId",
+    "/api/gateway/symphony/commit-message/:ticketId",
     async (context) => {
       const ticketId = context.params.ticketId;
       const repoPath = context.query.get("repo");
@@ -500,7 +500,7 @@ export function registerSymphonyInteractiveRoutes(
 
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/launch",
+    "/api/gateway/symphony/launch",
     async (context) => {
       const body = parseBody(context);
       if (!body) {

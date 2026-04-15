@@ -39,6 +39,7 @@ import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { getShellEnv, getShellPath } from "../shell-path.js";
 import { withMcpTools } from "./chat-tools.js";
+import { findWorktreeForBranch as findWorktreeForBranchImpl } from "./git-helpers.js";
 import { startOutputTailer } from "./output-tailer.js";
 import {
   findPluginScript,
@@ -3751,7 +3752,7 @@ export function registerSymphonyLoopRoutes(
 ): void {
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/loop",
+    "/api/gateway/symphony/loop",
     async (context) => {
       await handleLoopRequest(
         context,
@@ -3767,7 +3768,7 @@ export function registerSymphonyLoopRoutes(
 
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/loop/kill",
+    "/api/gateway/symphony/loop/kill",
     async (context) => {
       await handleLoopKill(context, jobStore);
     },

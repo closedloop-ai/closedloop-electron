@@ -44,7 +44,7 @@ export function registerSymphonyKillRoutes(
   getAllowedDirectories: () => string[],
   jobStore?: JobStore
 ): void {
-  dispatcher.register("POST", "/api/engineer/symphony/kill", async (context) => {
+  dispatcher.register("POST", "/api/gateway/symphony/kill", async (context) => {
     try {
       const body = parseJsonBody(context);
       if (!body) {

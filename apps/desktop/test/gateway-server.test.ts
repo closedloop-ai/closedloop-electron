@@ -135,7 +135,7 @@ test("returns 204 for CORS preflight requests", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/launch`, {
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/launch`, {
     method: "OPTIONS"
   });
 
@@ -165,7 +165,7 @@ test("returns private-network CORS allow header for terminal-chat preflight", as
   serversToClose.push(server);
   await server.start();
 
-  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`, {
     method: "OPTIONS",
     headers: {
       Origin: "https://app.closedloop.ai",
@@ -199,7 +199,7 @@ test("allows loopback origin variants for CORS preflight", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`, {
     method: "OPTIONS",
     headers: {
       Origin: "http://127.0.0.1:3001",
@@ -230,7 +230,7 @@ test("normal mode: 127.0.0.2 loopback variant echoed back in CORS preflight", as
   serversToClose.push(server);
   await server.start();
 
-  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`, {
     method: "OPTIONS",
     headers: {
       Origin: "http://127.0.0.2:8080",
@@ -261,7 +261,7 @@ test("normal mode: DNS name like 127.evil.com is NOT treated as loopback", async
   serversToClose.push(server);
   await server.start();
 
-  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`, {
     method: "OPTIONS",
     headers: {
       Origin: "http://127.evil.com:8080",
@@ -294,7 +294,7 @@ test("prodOriginsOnly: preflight from loopback returns configured origin, no PNA
   serversToClose.push(server);
   await server.start();
 
-  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`, {
     method: "OPTIONS",
     headers: {
       Origin: "http://localhost:3000",
@@ -328,7 +328,7 @@ test("prodOriginsOnly: preflight from configured origin returns correct CORS + P
   serversToClose.push(server);
   await server.start();
 
-  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`, {
     method: "OPTIONS",
     headers: {
       Origin: "https://app.closedloop.ai",
@@ -362,7 +362,7 @@ test("prodOriginsOnly: preflight from random origin returns configured origin", 
   serversToClose.push(server);
   await server.start();
 
-  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`, {
     method: "OPTIONS",
     headers: {
       Origin: "https://random.example",
@@ -394,7 +394,7 @@ test("prodOriginsOnly: loopback webAppOrigin preflight from that origin echoes i
   serversToClose.push(server);
   await server.start();
 
-  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`, {
     method: "OPTIONS",
     headers: {
       Origin: "http://localhost:3000",
@@ -435,12 +435,12 @@ test("requires gateway token when configured", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const unauthorized = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`);
+  const unauthorized = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`);
   assert.equal(unauthorized.status, 401);
   const body = await unauthorized.json() as { error: string; reason?: string };
   assert.equal(body.error, "unauthorized");
 
-  const authorized = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`, {
+  const authorized = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`, {
     headers: {
       "x-desktop-gateway-token": "test-gateway-token"
     }
@@ -450,10 +450,10 @@ test("requires gateway token when configured", async () => {
   assert.equal(activityEvents.length, 2);
   assert.equal(activityEvents[0].type, "security");
   assert.equal(activityEvents[0].statusCode, 401);
-  assert.equal(activityEvents[0].path, "/api/engineer/unimplemented-route");
+  assert.equal(activityEvents[0].path, "/api/gateway/unimplemented-route");
   assert.equal(activityEvents[1].type, "request");
   assert.equal(activityEvents[1].statusCode, 501);
-  assert.equal(activityEvents[1].path, "/api/engineer/unimplemented-route");
+  assert.equal(activityEvents[1].path, "/api/gateway/unimplemented-route");
 });
 
 test("rejects trusted browser origin without session token (origin-only bypass removed)", async () => {
@@ -476,14 +476,14 @@ test("rejects trusted browser origin without session token (origin-only bypass r
   await server.start();
 
   // Trusted origin alone is no longer sufficient — session token required
-  const trusted = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`, {
+  const trusted = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`, {
     headers: {
       Origin: "https://app.closedloop.ai"
     }
   });
   assert.equal(trusted.status, 401);
 
-  const untrusted = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`, {
+  const untrusted = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`, {
     headers: {
       Origin: "https://evil.example"
     }
@@ -511,7 +511,7 @@ test("rejects localhost browser origin without session token", async () => {
   await server.start();
 
   const localhostOrigin = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`,
     {
       headers: {
         Origin: "http://localhost:3000"
@@ -540,7 +540,7 @@ test("rejects loopback browser request without origin or session token", async (
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`, {
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`, {
     headers: {
       "sec-fetch-mode": "cors",
       "sec-fetch-site": "cross-site",
@@ -571,11 +571,11 @@ test("keeps non-browser loopback request unauthorized without token", async () =
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`);
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`);
   assert.equal(response.status, 401);
 });
 
-test("returns approval-required response when approval evaluator blocks engineer route", async () => {
+test("returns approval-required response when approval evaluator blocks gateway route", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-approval-gate-"));
   tempPathsToClean.push(tmpDir);
 
@@ -603,7 +603,7 @@ test("returns approval-required response when approval evaluator blocks engineer
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/health-check`);
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
   assert.equal(response.status, 202);
   assert.deepEqual(await response.json(), {
     approvalRequired: true,
@@ -637,7 +637,7 @@ test("supports async approval evaluation before dispatch", async () => {
   await server.start();
 
   const startedAt = Date.now();
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/sessions`);
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/sessions`);
   const durationMs = Date.now() - startedAt;
   assert.equal(response.status, 200);
   assert.ok(durationMs >= 25);
@@ -677,7 +677,7 @@ test("passes cloud approval headers into approval evaluator context", async () =
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/sessions`, {
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/sessions`, {
     headers: {
       "x-desktop-source": "cloud-socket",
       "x-desktop-force-approval": "1",
@@ -752,7 +752,7 @@ test("supports symphony sessions CRUD with contract-compatible response envelope
   serversToClose.push(server);
   await server.start();
 
-  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/sessions`, {
+  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/sessions`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -765,7 +765,7 @@ test("supports symphony sessions CRUD with contract-compatible response envelope
   assert.equal(postResponse.status, 200);
   assert.deepEqual(await postResponse.json(), { success: true });
 
-  const getResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/sessions`);
+  const getResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/sessions`);
   assert.equal(getResponse.status, 200);
   const getBody = (await getResponse.json()) as { sessions: Array<{ ticketId: string; repoPath: string }> };
   assert.equal(getBody.sessions.length, 1);
@@ -773,7 +773,7 @@ test("supports symphony sessions CRUD with contract-compatible response envelope
   assert.equal(getBody.sessions[0]?.repoPath, repoPath);
 
   const deleteResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/sessions?ticketId=AI-123`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/sessions?ticketId=AI-123`,
     { method: "DELETE" }
   );
   assert.equal(deleteResponse.status, 200);
@@ -804,7 +804,7 @@ test("rejects disallowed directories for symphony sessions writes (AC-049)", asy
   serversToClose.push(server);
   await server.start();
 
-  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/sessions`, {
+  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/sessions`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -862,7 +862,7 @@ test("returns symphony status envelope for existing state file", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/status/AI-321?repo=${encodeURIComponent(repoPath)}`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/status/AI-321?repo=${encodeURIComponent(repoPath)}`
   );
   assert.equal(response.status, 200);
   const body = (await response.json()) as {
@@ -906,7 +906,7 @@ test("rejects disallowed repo paths for symphony status (AC-049)", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/status/AI-777?repo=${encodeURIComponent(repoPath)}`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/status/AI-777?repo=${encodeURIComponent(repoPath)}`
   );
 
   assert.equal(response.status, 403);
@@ -948,7 +948,7 @@ test("marks state as stopped when killing by ticket without PID file", async () 
   serversToClose.push(server);
   await server.start();
 
-  const killResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/kill`, {
+  const killResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/kill`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ ticketId: "AI-444", repoPath })
@@ -991,7 +991,7 @@ test("rejects disallowed repo paths for symphony kill (AC-049)", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const killResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/kill`, {
+  const killResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/kill`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -1041,7 +1041,7 @@ test("returns plan content envelope for symphony plan route", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/plan/AI-777?repo=${encodeURIComponent(repoPath)}`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/plan/AI-777?repo=${encodeURIComponent(repoPath)}`
   );
   assert.equal(response.status, 200);
   const body = (await response.json()) as { exists: boolean; planExists: boolean; content: string; worktreeDir: string };
@@ -1078,7 +1078,7 @@ test("supports chat history CRUD operations", async () => {
   await server.start();
 
   const postSessionResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/chat-history/AI-888?repo=${encodeURIComponent(repoPath)}`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/chat-history/AI-888?repo=${encodeURIComponent(repoPath)}`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1089,7 +1089,7 @@ test("supports chat history CRUD operations", async () => {
   assert.deepEqual(await postSessionResponse.json(), { success: true, sessionId: "session-1" });
 
   const postMessageResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/chat-history/AI-888?repo=${encodeURIComponent(repoPath)}`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/chat-history/AI-888?repo=${encodeURIComponent(repoPath)}`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1106,7 +1106,7 @@ test("supports chat history CRUD operations", async () => {
   assert.equal(postMessageResponse.status, 200);
 
   const getResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/chat-history/AI-888?repo=${encodeURIComponent(repoPath)}`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/chat-history/AI-888?repo=${encodeURIComponent(repoPath)}`
   );
   assert.equal(getResponse.status, 200);
   const getBody = (await getResponse.json()) as { sessionId?: string; messages: Array<{ content: string }> };
@@ -1115,7 +1115,7 @@ test("supports chat history CRUD operations", async () => {
   assert.equal(getBody.messages[0]?.content, "hello");
 
   const deleteResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/chat-history/AI-888?repo=${encodeURIComponent(repoPath)}`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/chat-history/AI-888?repo=${encodeURIComponent(repoPath)}`,
     { method: "DELETE" }
   );
   assert.equal(deleteResponse.status, 200);
@@ -1149,7 +1149,7 @@ test("supports provider-scoped chat history with isolated CRUD", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const base = `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/chat-history/AI-900`;
+  const base = `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/chat-history/AI-900`;
   const repo = `repo=${encodeURIComponent(repoPath)}`;
 
   // POST with provider=claude → writes to chat-history-claude.json
@@ -1266,7 +1266,7 @@ test("returns jsonl log format when claude-output.jsonl exists", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/logs/AI-999?repo=${encodeURIComponent(repoPath)}&lines=1`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/logs/AI-999?repo=${encodeURIComponent(repoPath)}&lines=1`
   );
   assert.equal(response.status, 200);
   const body = (await response.json()) as { format: string; lines?: string[]; returnedLines?: number };
@@ -1308,7 +1308,7 @@ test("returns judges payload when judges.json exists", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/judges/AI-456?repo=${encodeURIComponent(repoPath)}`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/judges/AI-456?repo=${encodeURIComponent(repoPath)}`
   );
   assert.equal(response.status, 200);
   const body = (await response.json()) as { exists: boolean; isMock: boolean; data?: { score: number } };
@@ -1347,7 +1347,7 @@ test("serves attachment binary from wildcard route", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/attachments/AI-111/image.png?repo=${encodeURIComponent(repoPath)}`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/attachments/AI-111/image.png?repo=${encodeURIComponent(repoPath)}`
   );
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("content-type"), "image/png");
@@ -1385,7 +1385,7 @@ test("uploads image attachments and returns file metadata", async () => {
   formData.append("file", new Blob([Uint8Array.from([0x89, 0x50, 0x4e, 0x47])], { type: "image/png" }), "test.png");
 
   const uploadResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/upload/AI-222?repo=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/upload/AI-222?repo=${encodeURIComponent(
       repoPath
     )}`,
     {
@@ -1427,7 +1427,7 @@ test("returns health-check response envelope with required check structure", asy
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/health-check`);
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
   assert.equal(response.status, 200);
   const body = (await response.json()) as {
     checks: Array<{ id: string; label: string; required: boolean; passed: boolean }>;
@@ -1460,7 +1460,7 @@ test("health-check returns 200 with worktree-dir failed when getSymphonyDir thro
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/health-check`);
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
   assert.equal(response.status, 200, "health-check should return 200 even when unconfigured");
   const body = (await response.json()) as {
     checks: Array<{ id: string; passed: boolean; error?: string }>;
@@ -1492,7 +1492,7 @@ test("repos-config returns 503 when getSymphonyDir throws (not 500)", async () =
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/repos`);
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/repos`);
   assert.equal(response.status, 503, "repos should return 503 when symphony dir not configured");
   const body = (await response.json()) as { error: string };
   assert.ok(body.error.includes("not configured"), "error message should mention configuration");
@@ -1548,7 +1548,7 @@ test("supports repos config CRUD and settings patch", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/repos`, {
+  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/repos`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ path: repoPath, description: "test repo" })
@@ -1558,7 +1558,7 @@ test("supports repos config CRUD and settings patch", async () => {
   assert.equal(postBody.success, true);
   assert.equal(postBody.repo?.path.endsWith("repo-configured"), true);
 
-  const patchResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/repos`, {
+  const patchResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/repos`, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ worktreeParentDir: "~/tmp", worktreeParentDirConfirmed: true })
@@ -1566,14 +1566,14 @@ test("supports repos config CRUD and settings patch", async () => {
   assert.equal(patchResponse.status, 200);
   assert.deepEqual(await patchResponse.json(), { success: true });
 
-  const getResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/repos`);
+  const getResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/repos`);
   assert.equal(getResponse.status, 200);
   const getBody = (await getResponse.json()) as { repos: Array<{ path: string }>; settings: { worktreeParentDir?: string } };
   assert.equal(getBody.repos.length, 1);
   assert.equal(getBody.settings.worktreeParentDir, "~/tmp");
 
   const deleteResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/repos?path=${encodeURIComponent(repoPath)}`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/repos?path=${encodeURIComponent(repoPath)}`,
     { method: "DELETE" }
   );
   assert.equal(deleteResponse.status, 200);
@@ -1611,7 +1611,7 @@ test("lists directories and supports file search endpoint", async () => {
   await server.start();
 
   const directoriesResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/directories?path=${encodeURIComponent(tmpDir)}`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/directories?path=${encodeURIComponent(tmpDir)}`
   );
   assert.equal(directoriesResponse.status, 200);
   const directoriesBody = (await directoriesResponse.json()) as {
@@ -1620,7 +1620,7 @@ test("lists directories and supports file search endpoint", async () => {
   assert.equal(directoriesBody.directories.some((entry) => entry.name === "repo-search"), true);
 
   const searchResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/files/search?repo=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/files/search?repo=${encodeURIComponent(
       repoPath
     )}&ticket=AI-121&query=Widget`
   );
@@ -1649,12 +1649,12 @@ test("supports terminal chat history GET and DELETE", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const getResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`);
+  const getResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`);
   assert.equal(getResponse.status, 200);
   const getBody = (await getResponse.json()) as { messages: unknown[] };
   assert.equal(Array.isArray(getBody.messages), true);
 
-  const deleteResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+  const deleteResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`, {
     method: "DELETE"
   });
   assert.equal(deleteResponse.status, 200);
@@ -1681,7 +1681,7 @@ test("supports ticket chat GET and DELETE with ticketId", async () => {
   await server.start();
 
   const getResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/ticket-chat?ticketId=AI-200`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/ticket-chat?ticketId=AI-200`
   );
   assert.equal(getResponse.status, 200);
   const getBody = (await getResponse.json()) as { ticketId?: string; messages: unknown[] };
@@ -1689,7 +1689,7 @@ test("supports ticket chat GET and DELETE with ticketId", async () => {
   assert.equal(Array.isArray(getBody.messages), true);
 
   const deleteResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/ticket-chat?ticketId=AI-200`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/ticket-chat?ticketId=AI-200`,
     { method: "DELETE" }
   );
   assert.equal(deleteResponse.status, 200);
@@ -1718,7 +1718,7 @@ test("rejects disallowed repo path for ticket chat POST before spawn (AC-049)", 
   serversToClose.push(server);
   await server.start();
 
-  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/ticket-chat`, {
+  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/ticket-chat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -1755,13 +1755,13 @@ test("supports run viewer chat history GET and DELETE", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const getResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/run-viewer-chat`);
+  const getResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/run-viewer-chat`);
   assert.equal(getResponse.status, 200);
   const getBody = (await getResponse.json()) as { messages: unknown[] };
   assert.equal(Array.isArray(getBody.messages), true);
 
   const deleteResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/run-viewer-chat`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/run-viewer-chat`,
     { method: "DELETE" }
   );
   assert.equal(deleteResponse.status, 200);
@@ -1790,7 +1790,7 @@ test("rejects disallowed run directory for run viewer chat POST (AC-049)", async
   serversToClose.push(server);
   await server.start();
 
-  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/run-viewer-chat`, {
+  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/run-viewer-chat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -1827,7 +1827,7 @@ test("lists and cleans up extracted run-viewer directories", async () => {
   await server.start();
 
   const getResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/run-viewer-extract?runDir=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/run-viewer-extract?runDir=${encodeURIComponent(
       runDir
     )}`
   );
@@ -1835,7 +1835,7 @@ test("lists and cleans up extracted run-viewer directories", async () => {
   assert.deepEqual(await getResponse.json(), { files: ["nested/trace.log"] });
 
   const deleteResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/run-viewer-extract`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/run-viewer-extract`,
     {
       method: "DELETE",
       headers: { "content-type": "application/json" },
@@ -1865,7 +1865,7 @@ test("validates run-viewer-extract POST multipart payload", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/run-viewer-extract`, {
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/run-viewer-extract`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ file: "bad" })
@@ -1874,7 +1874,7 @@ test("validates run-viewer-extract POST multipart payload", async () => {
   assert.deepEqual(await response.json(), { error: "Invalid form data" });
 });
 
-test("proxies unimplemented engineer routes to fallback origin when configured", async () => {
+test("proxies unimplemented gateway routes to fallback origin when configured", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-fallback-proxy-"));
   tempPathsToClean.push(tmpDir);
 
@@ -1901,7 +1901,7 @@ test("proxies unimplemented engineer routes to fallback origin when configured",
     fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
-    fallbackEngineerOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
+    fallbackGatewayOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
     machineName: "fallback-proxy-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
@@ -1911,7 +1911,7 @@ test("proxies unimplemented engineer routes to fallback origin when configured",
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`
   );
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { proxied: true, source: "upstream" });
@@ -1964,7 +1964,7 @@ test("supports core git action routes", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const statusResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/git`, {
+  const statusResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ action: "status", repoPath })
@@ -1974,7 +1974,7 @@ test("supports core git action routes", async () => {
   assert.equal(statusBody.hasChanges, false);
   assert.equal(typeof statusBody.currentBranch, "string");
 
-  const branchResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/git`, {
+  const branchResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ action: "branch", branchName: "feature/AI-501", repoPath })
@@ -1985,7 +1985,7 @@ test("supports core git action routes", async () => {
   assert.equal(branchBody.branchName, "feature/AI-501");
 
   const branchesResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/git/branches?repo=${encodeURIComponent(repoPath)}`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/git/branches?repo=${encodeURIComponent(repoPath)}`
   );
   assert.equal(branchesResponse.status, 200);
   const branchesBody = (await branchesResponse.json()) as { branches: Array<{ name: string }> };
@@ -2030,7 +2030,7 @@ test("supports git diff route for working tree changes", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const diffResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/git/diff`, {
+  const diffResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git/diff`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -2063,7 +2063,7 @@ test("validates git PR create request payload", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/git/pr`, {
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git/pr`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ title: "Missing repo" })
@@ -2095,7 +2095,7 @@ test("rejects disallowed repo for git PR list endpoint (AC-049)", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/git/pr/list?repo=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/git/pr/list?repo=${encodeURIComponent(
       path.join(tmpDir, "not-allowed", "repo")
     )}`
   );
@@ -2127,7 +2127,7 @@ test("returns empty work-directory result when no session or worktree exists", a
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/work-directory/AI-999`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/work-directory/AI-999`
   );
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), {
@@ -2160,7 +2160,7 @@ test("rejects disallowed workDir on aggregate symphony status route (AC-049)", a
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/status?workDir=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/status?workDir=${encodeURIComponent(
       path.join(tmpDir, "not-allowed")
     )}`
   );
@@ -2195,7 +2195,7 @@ test("detects deploy config from repo scripts", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/deploy/detect`, {
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/deploy/detect`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ repoPath })
@@ -2233,7 +2233,7 @@ test("rejects disallowed repo/worktree for deploy check-existing (AC-049)", asyn
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/deploy/check-existing`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/deploy/check-existing`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2267,7 +2267,7 @@ test("validates required fields for symphony extract-learnings route", async () 
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/extract-learnings`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/extract-learnings`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2306,7 +2306,7 @@ test("returns skipped status when no learnings are pending", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/process-learnings`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/process-learnings`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2361,7 +2361,7 @@ test("invokes plugin cache discovery when pending learnings exist", async () => 
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/process-learnings`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/process-learnings`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2425,7 +2425,7 @@ test("process-learnings launches self-learning wrapper with .closedloop-ai/work 
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/process-learnings`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/process-learnings`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2483,7 +2483,7 @@ test("rejects disallowed repo path for record-learning-use (AC-049)", async () =
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/record-learning-use`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/record-learning-use`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2518,7 +2518,7 @@ test("validates required fields for symphony chat route", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/chat/AI-909`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/chat/AI-909`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2548,7 +2548,7 @@ test("validates required query params for symphony comment-chat GET", async () =
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/comment-chat/c-1`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/comment-chat/c-1`
   );
   assert.equal(response.status, 400);
   assert.deepEqual(await response.json(), { error: "ticketId and repo parameters are required" });
@@ -2577,7 +2577,7 @@ test("returns default commit message when worktree does not exist", async () => 
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/commit-message/AI-123?repo=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/commit-message/AI-123?repo=${encodeURIComponent(
       repoPath
     )}`
   );
@@ -2639,7 +2639,7 @@ test("returns empty description when claude CLI is unavailable", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/commit-message/${ticketId}?repo=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/commit-message/${ticketId}?repo=${encodeURIComponent(
       repoPath
     )}`
   );
@@ -2708,7 +2708,7 @@ test("uses valid JSON from claude stdout even when exit code is non-zero", async
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/commit-message/${ticketId}?repo=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/commit-message/${ticketId}?repo=${encodeURIComponent(
       repoPath
     )}`
   );
@@ -2765,7 +2765,7 @@ test("returns default with empty description when worktree has no diff", async (
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/commit-message/${ticketId}?repo=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/commit-message/${ticketId}?repo=${encodeURIComponent(
       repoPath
     )}`
   );
@@ -2798,7 +2798,7 @@ test("rejects disallowed repo for symphony launch (AC-049)", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/launch`, {
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/launch`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -2843,7 +2843,7 @@ test("symphony launch invokes plugin cache discovery for run-loop script", async
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/launch`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/launch`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2910,7 +2910,7 @@ test("symphony launch passes .closedloop-ai/work path (not ticket ID) as first a
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/launch`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/launch`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2969,7 +2969,7 @@ test("validates required fields for codex chat route", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/codex/chat/AI-111`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/codex/chat/AI-111`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -3003,7 +3003,7 @@ test("rejects disallowed repo for codex status route (AC-049)", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/codex/status/AI-333?repo=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/codex/status/AI-333?repo=${encodeURIComponent(
       path.join(tmpDir, "not-allowed", "repo")
     )}`
   );
@@ -3112,7 +3112,7 @@ test("GET codex status returns sessionId when state file has one", async () => {
   await server.start();
 
   const res = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/codex/status/${ticketId}?repo=${encodeURIComponent(repoDir)}&provider=codex`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/codex/status/${ticketId}?repo=${encodeURIComponent(repoDir)}&provider=codex`
   );
   assert.equal(res.status, 200);
   const data = await res.json() as { hasReview: boolean; sessionId?: string; status: string };
@@ -3140,7 +3140,7 @@ test("POST review-verdict returns 400 when sessionId is missing", async () => {
   await server.start();
 
   const res = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/codex/review-verdict/TICKET-1`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/codex/review-verdict/TICKET-1`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3171,7 +3171,7 @@ test("POST review-verdict returns 400 for invalid provider", async () => {
   await server.start();
 
   const res = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/codex/review-verdict/TICKET-1`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/codex/review-verdict/TICKET-1`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3202,7 +3202,7 @@ test("POST review-verdict returns 403 for disallowed repo", async () => {
   await server.start();
 
   const res = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/codex/review-verdict/TICKET-1`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/codex/review-verdict/TICKET-1`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3264,7 +3264,7 @@ function makeTestJob(overrides: Partial<LocalJob> = {}): LocalJob {
 }
 
 // ---------------------------------------------------------------------------
-// Bug 3: /api/engineer/symphony/kill updates JobStore immediately
+// Bug 3: /api/gateway/symphony/kill updates JobStore immediately
 // ---------------------------------------------------------------------------
 
 test("symphony/kill updates JobStore to STOPPED when killing by ticket", async () => {
@@ -3312,7 +3312,7 @@ test("symphony/kill updates JobStore to STOPPED when killing by ticket", async (
 
   // Kill via ticketId + repoPath (no PID file -> noPidFile branch)
   const killResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/kill`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/kill`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -3370,7 +3370,7 @@ test("loop/kill uses JobStore fallback when runningLoops is empty (post-restart)
   await server.start();
 
   const killResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop/kill`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop/kill`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -3445,7 +3445,7 @@ test("symphony/status returns IN_PROGRESS when state.json says COMPLETED but pro
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/status/AI-555?repo=${encodeURIComponent(repoPath)}`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/status/AI-555?repo=${encodeURIComponent(repoPath)}`
   );
   assert.equal(response.status, 200);
 
@@ -3558,7 +3558,7 @@ test("python3 health check: passes for version 3.11.0 (control)", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/health-check`);
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
   assert.equal(response.status, 200);
   const body = (await response.json()) as {
     checks: Array<{ id: string; required: boolean; passed: boolean; remediation?: string }>;
@@ -3596,7 +3596,7 @@ test("python3 health check: fails when python3 not found", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/health-check`);
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
   assert.equal(response.status, 200);
   const body = (await response.json()) as {
     checks: Array<{ id: string; required: boolean; passed: boolean; remediation?: string }>;
@@ -3638,7 +3638,7 @@ test("python3 health check: fails for version below floor (3.9.7)", async () => 
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/health-check`);
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
   assert.equal(response.status, 200);
   const body = (await response.json()) as {
     checks: Array<{ id: string; required: boolean; passed: boolean; remediation?: string }>;
@@ -3687,7 +3687,7 @@ test("python3 health check: fails for suffixed below-floor version (3.9rc1)", as
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/health-check`);
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
   assert.equal(response.status, 200);
   const body = (await response.json()) as {
     checks: Array<{ id: string; required: boolean; passed: boolean; remediation?: string }>;
@@ -3733,7 +3733,7 @@ test("python3 health check: passes for version with extra suffix (3.10.1.post1)"
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/health-check`);
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
   assert.equal(response.status, 200);
   const body = (await response.json()) as {
     checks: Array<{ id: string; required: boolean; passed: boolean; error?: string; remediation?: string }>;
@@ -3772,7 +3772,7 @@ test("python3 health check: fails for unparseable version string", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/health-check`);
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
   assert.equal(response.status, 200);
   const body = (await response.json()) as {
     checks: Array<{ id: string; required: boolean; passed: boolean; error?: string; remediation?: string }>;

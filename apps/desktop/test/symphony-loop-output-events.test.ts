@@ -382,7 +382,7 @@ describe("T-5.2: Output events arrive before completed event", () => {
     await server.start();
 
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -461,7 +461,7 @@ describe("T-5.2: Output events arrive before completed event", () => {
     await server.start();
 
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -762,7 +762,7 @@ describe("T-5.4: Flush on exit", () => {
       await server.start();
 
       const response = await fetch(
-        `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+        `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
         {
           method: "POST",
           headers: {
@@ -839,7 +839,7 @@ describe("T-5.5: No-formatter fallback", () => {
     await server.start();
 
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -942,7 +942,7 @@ describe("T-5.7: tokensUsed shape in completed event", () => {
     await server.start();
 
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -999,7 +999,7 @@ describe("T-5.7: tokensUsed shape in completed event", () => {
     await server.start();
 
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -1065,7 +1065,7 @@ describe("T-5.7: tokensUsed shape in completed event", () => {
     await server.start();
 
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {

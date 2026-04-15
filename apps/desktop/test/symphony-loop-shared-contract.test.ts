@@ -88,7 +88,7 @@ test("unsupported command CHAT returns 400 Invalid command", async () => {
   const server = await createTestGateway(tmpDir, mock.port);
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -116,7 +116,7 @@ test("unsupported command EXPLORE returns 400 Invalid command", async () => {
   const server = await createTestGateway(tmpDir, mock.port);
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -144,7 +144,7 @@ test("unsupported command REQUEST_PRD_CHANGES returns 400 Invalid command", asyn
   const server = await createTestGateway(tmpDir, mock.port);
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -176,7 +176,7 @@ test("validateCommandInputs: EXECUTE with no prompt and no artifacts returns 400
   const server = await createTestGateway(tmpDir, mock.port);
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -207,7 +207,7 @@ test("validateCommandInputs: DECOMPOSE with no artifacts returns 400", async () 
   const server = await createTestGateway(tmpDir, mock.port);
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -238,7 +238,7 @@ test("validateCommandInputs: REQUEST_CHANGES with no prompt returns 400", async 
   const server = await createTestGateway(tmpDir, mock.port);
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -301,7 +301,7 @@ test("PLAN: completes even when plan.json is missing (validateResultBundle warni
 
   const loopId = "00000000-0000-0000-0000-000000002020";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -380,7 +380,7 @@ test("EXECUTE: malformed execution-result.json yields no PR fields in completed 
 
   const loopId = "00000000-0000-0000-0000-000000002030";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -492,7 +492,7 @@ test("EXECUTE: uploaded execution result contains base_ref (not base_branch)", a
 
   const loopId = "00000000-0000-0000-0000-000000002040";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -568,7 +568,7 @@ test("PLAN: non-zero exit error event includes sessionId from session-id.txt", a
 
   const loopId = "00000000-0000-0000-0000-000000002050";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

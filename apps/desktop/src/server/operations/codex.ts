@@ -292,7 +292,7 @@ export function registerCodexRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[]
 ): void {
-  dispatcher.register("GET", "/api/engineer/codex/available", async (context) => {
+  dispatcher.register("GET", "/api/gateway/codex/available", async (context) => {
     try {
       const output = await runCommand("codex", ["--version"]);
       const match = /codex-cli\s+([\d.]+)/i.exec(output);
@@ -305,7 +305,7 @@ export function registerCodexRoutes(
     }
   });
 
-  dispatcher.register("GET", "/api/engineer/codex/status/:ticketId", async (context) => {
+  dispatcher.register("GET", "/api/gateway/codex/status/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const requestedProvider = context.query.get("provider");
@@ -379,7 +379,7 @@ export function registerCodexRoutes(
     }
   });
 
-  dispatcher.register("DELETE", "/api/engineer/codex/status/:ticketId", async (context) => {
+  dispatcher.register("DELETE", "/api/gateway/codex/status/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const provider = context.query.get("provider");
@@ -417,7 +417,7 @@ export function registerCodexRoutes(
     json(context, 200, { success: true });
   });
 
-  dispatcher.register("POST", "/api/engineer/codex/stop/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/codex/stop/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const body = parseBody(context);
     if (!body) {
@@ -492,7 +492,7 @@ export function registerCodexRoutes(
     }
   });
 
-  dispatcher.register("DELETE", "/api/engineer/codex/stop/:ticketId", async (context) => {
+  dispatcher.register("DELETE", "/api/gateway/codex/stop/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const provider = context.query.get("provider");
@@ -516,7 +516,7 @@ export function registerCodexRoutes(
     json(context, 200, { deleted: results.flat() });
   });
 
-  dispatcher.register("GET", "/api/engineer/codex/review-findings/:ticketId", async (context) => {
+  dispatcher.register("GET", "/api/gateway/codex/review-findings/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const provider = context.query.get("provider") ?? "codex";
@@ -551,7 +551,7 @@ export function registerCodexRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/codex/review-findings/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/codex/review-findings/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const provider = context.query.get("provider") ?? "codex";
@@ -593,7 +593,7 @@ export function registerCodexRoutes(
     await handleSaveFindings(context, findingsPath, body, provider);
   });
 
-  dispatcher.register("POST", "/api/engineer/codex/review-dedup/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/codex/review-dedup/:ticketId", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid or empty JSON body" });
@@ -635,7 +635,7 @@ export function registerCodexRoutes(
     json(context, 200, { duplicates });
   });
 
-  dispatcher.register("POST", "/api/engineer/codex/review-extract/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/codex/review-extract/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const body = parseBody(context);
     if (!body) {
@@ -680,7 +680,7 @@ export function registerCodexRoutes(
     json(context, 200, { findings });
   });
 
-  dispatcher.register("POST", "/api/engineer/codex/review-verdict/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/codex/review-verdict/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const body = parseBody(context);
     if (!body) {
@@ -742,7 +742,7 @@ export function registerCodexRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/codex/review/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/codex/review/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const body = parseBody(context);
 
@@ -879,7 +879,7 @@ export function registerCodexRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/codex/argue/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/codex/argue/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoQuery = context.query.get("repo");
     const body = parseBody(context);
@@ -955,7 +955,7 @@ export function registerCodexRoutes(
     );
   });
 
-  dispatcher.register("POST", "/api/engineer/codex/chat/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/codex/chat/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const body = parseBody(context);
     if (!body) {
@@ -1009,7 +1009,7 @@ export function registerCodexRoutes(
     );
   });
 
-  dispatcher.register("GET", "/api/engineer/codex/finding-chat/:findingId", async (context) => {
+  dispatcher.register("GET", "/api/gateway/codex/finding-chat/:findingId", async (context) => {
     const findingId = context.params.findingId;
     const ticketId = context.query.get("ticketId");
     const repoPath = context.query.get("repo");
@@ -1041,7 +1041,7 @@ export function registerCodexRoutes(
     json(context, 200, history);
   });
 
-  dispatcher.register("POST", "/api/engineer/codex/finding-chat/:findingId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/codex/finding-chat/:findingId", async (context) => {
     const findingId = context.params.findingId;
     const ticketId = context.query.get("ticketId");
     const repoPath = context.query.get("repo");
@@ -1209,7 +1209,7 @@ export function registerCodexRoutes(
     }
   });
 
-  dispatcher.register("PATCH", "/api/engineer/codex/finding-chat/:findingId", async (context) => {
+  dispatcher.register("PATCH", "/api/gateway/codex/finding-chat/:findingId", async (context) => {
     const findingId = context.params.findingId;
     const ticketId = context.query.get("ticketId");
     const repoPath = context.query.get("repo");
@@ -1258,7 +1258,7 @@ export function registerCodexRoutes(
     json(context, 200, { success: true });
   });
 
-  dispatcher.register("DELETE", "/api/engineer/codex/finding-chat/:findingId", async (context) => {
+  dispatcher.register("DELETE", "/api/gateway/codex/finding-chat/:findingId", async (context) => {
     const findingId = context.params.findingId;
     const ticketId = context.query.get("ticketId");
     const repoPath = context.query.get("repo");

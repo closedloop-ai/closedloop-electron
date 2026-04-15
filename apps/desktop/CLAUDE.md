@@ -10,17 +10,17 @@ The desktop Electron app runs a localhost HTTP gateway. To test it manually:
 
 ### Authentication
 
-Engineer routes (`/api/engineer/*`) require one of:
+Gateway routes (`/api/gateway/*`) require one of:
 1. **Internal gateway token** (`X-Desktop-Gateway-Token`) -- used by cloud command executor for internal calls.
 2. **Browser session token** (`X-Desktop-Session-Token`) -- obtained via authenticated challenge-exchange flow. Must be accompanied by an `Origin` header matching the origin bound during exchange.
 
-**Origin-only auth is not supported.** A spoofed `Origin` header alone will not grant access to engineer routes.
+**Origin-only auth is not supported.** A spoofed `Origin` header alone will not grant access to gateway routes.
 
 ### Fail-Closed Behavior (Missing API Key)
 
 The gateway **fails closed** when the desktop API key is not configured:
 - **App startup is unaffected** -- the server binds, the UI opens, health endpoint works, cloud relay works.
-- **Local-electron browser mode becomes unavailable** -- the challenge-exchange route returns HTTP 503 `"Local gateway auth unavailable: API key required"`. Without a session token, all engineer routes return 401.
+- **Local-electron browser mode becomes unavailable** -- the challenge-exchange route returns HTTP 503 `"Local gateway auth unavailable: API key required"`. Without a session token, all gateway routes return 401.
 - **No silent fallback** -- the browser interceptor surfaces the 503 error to the UI rather than silently degrading or falling back to an insecure auth path.
 - **No crashes** -- `getApiKey()` returns `null` safely; no uncaught exceptions.
 
@@ -45,14 +45,14 @@ For manual `curl` testing during development, use the debug auth workflow:
 curl -s \
   -H "X-Desktop-Session-Token: <token>" \
   -H "Origin: http://localhost" \
-  "http://localhost:19432/api/engineer/directories?path=/Users/<you>/Source"
+  "http://localhost:19432/api/gateway/directories?path=/Users/<you>/Source"
 ```
 
 Debug tokens are short-lived (10 minutes), memory-only, and only available when `CL_LOCAL_GATEWAY_DEBUG_AUTH=1` in an unpackaged build.
 
 ### No-Auth Mode for Development
 
-Start with `just desktop-no-auth` to bypass all gateway auth. All engineer routes are open, and the exchange endpoint issues session tokens without challenge verification. Guarded by `!app.isPackaged` -- cannot be enabled in production builds.
+Start with `just desktop-no-auth` to bypass all gateway auth. All gateway routes are open, and the exchange endpoint issues session tokens without challenge verification. Guarded by `!app.isPackaged` -- cannot be enabled in production builds.
 
 ### Production Origins Only Mode
 
@@ -76,18 +76,18 @@ Obtain a debug token first via `just desktop-debug-auth` + UI "Mint Debug Token"
 ```bash
 # Should succeed (with valid session token, sandbox directory)
 curl -s -H "X-Desktop-Session-Token: <TOKEN>" -H "Origin: http://localhost" \
-  "http://localhost:19432/api/engineer/directories?path=/Users/<you>/Source"
+  "http://localhost:19432/api/gateway/directories?path=/Users/<you>/Source"
 
 # Should fail -- no session token (401)
-curl -s -H "Origin: http://localhost" "http://localhost:19432/api/engineer/directories?path=/Users/<you>/Source"
+curl -s -H "Origin: http://localhost" "http://localhost:19432/api/gateway/directories?path=/Users/<you>/Source"
 
 # Should fail -- outside sandbox (403)
 curl -s -H "X-Desktop-Session-Token: <TOKEN>" -H "Origin: http://localhost" \
-  "http://localhost:19432/api/engineer/directories?path=/tmp"
+  "http://localhost:19432/api/gateway/directories?path=/tmp"
 
 # Should fail -- sensitive deny list (403)
 curl -s -H "X-Desktop-Session-Token: <TOKEN>" -H "Origin: http://localhost" \
-  "http://localhost:19432/api/engineer/directories?path=/Users/<you>/.ssh"
+  "http://localhost:19432/api/gateway/directories?path=/Users/<you>/.ssh"
 ```
 
 ## Releasing Desktop Builds

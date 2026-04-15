@@ -130,7 +130,7 @@ test("ensureWorktree called for each additional repo with correct branch before 
 
   const loopId = "00000000-0000-0000-0000-000000007001";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -231,7 +231,7 @@ test("removeWorktree called for additional worktree dirs when process fails", as
 
   const loopId = "00000000-0000-0000-0000-000000007003";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -344,7 +344,7 @@ test("ensureWorktree throws for additional repo — cleans leaked worktree, post
 
   const loopId = "00000000-0000-0000-0000-000000007004";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

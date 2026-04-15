@@ -16,7 +16,7 @@ export function registerFilesystemDirectoriesRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[]
 ): void {
-  dispatcher.register("GET", "/api/engineer/directories", async (context) => {
+  dispatcher.register("GET", "/api/gateway/directories", async (context) => {
     try {
       const pathParam = context.query.get("path") || "~";
       const expandedPath = expandHome(pathParam);

@@ -105,7 +105,7 @@ test("GENERATE_PRD: rejects with 400 when no repo configured", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -176,7 +176,7 @@ test("GENERATE_PRD: accepts valid command and responds 200", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -234,7 +234,7 @@ test("GENERATE_PRD: rejects with 400 when prompt is missing", async () => {
 
   // Test with no prompt field
   const response1 = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -259,7 +259,7 @@ test("GENERATE_PRD: rejects with 400 when prompt is missing", async () => {
 
   // Test with empty string prompt
   const response2 = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -348,7 +348,7 @@ test("GENERATE_PRD: spawns with worktree cwd, writes context pack, no --add-dir"
 
   const loopId = "00000000-0000-0000-0000-000000000030";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -504,7 +504,7 @@ test("GENERATE_PRD: uploads { prd: { content } } when prd.md is written", async 
 
   const loopId = "00000000-0000-0000-0000-000000000040";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -591,7 +591,7 @@ test("GENERATE_PRD: uploads empty artifacts when prd.md is not written", async (
 
   const loopId = "00000000-0000-0000-0000-000000000050";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -673,7 +673,7 @@ test("GENERATE_PRD: cleans up worktree on failure (exit code 1)", async () => {
 
   const loopId = "00000000-0000-0000-0000-000000000060";
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

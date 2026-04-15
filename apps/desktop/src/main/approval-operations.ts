@@ -25,6 +25,7 @@ export const SUPPORTED_OPERATION_IDS = [
   "codex_argue",
   "git_action",
   "git_pr",
+  "git_branch_worktree",
   "health_check",
   "repos_config",
   "deploy",
@@ -35,122 +36,125 @@ export const SUPPORTED_OPERATION_IDS = [
 export type OperationId = (typeof SUPPORTED_OPERATION_IDS)[number];
 
 export function resolveOperationId(pathname: string): string | null {
-  if (!pathname.startsWith("/api/engineer/")) {
+  if (!pathname.startsWith("/api/gateway/")) {
     return null;
   }
 
-  if (pathname === "/api/engineer/symphony/launch") {
+  if (pathname === "/api/gateway/symphony/launch") {
     return "symphony_launch";
   }
-  if (pathname === "/api/engineer/symphony/loop") {
+  if (pathname === "/api/gateway/symphony/loop") {
     return "symphony_loop";
   }
-  if (pathname === "/api/engineer/symphony/loop/kill") {
+  if (pathname === "/api/gateway/symphony/loop/kill") {
     return "symphony_loop_kill";
   }
-  if (pathname.startsWith("/api/engineer/symphony/plan-loop/")) {
+  if (pathname.startsWith("/api/gateway/symphony/plan-loop/")) {
     return "symphony_plan_loop";
   }
-  if (pathname === "/api/engineer/symphony/status" || pathname.startsWith("/api/engineer/symphony/status/")) {
+  if (pathname === "/api/gateway/symphony/status" || pathname.startsWith("/api/gateway/symphony/status/")) {
     return "symphony_status";
   }
-  if (pathname === "/api/engineer/symphony/kill") {
+  if (pathname === "/api/gateway/symphony/kill") {
     return "symphony_kill";
   }
-  if (pathname.startsWith("/api/engineer/symphony/chat/")) {
+  if (pathname.startsWith("/api/gateway/symphony/chat/")) {
     return "symphony_chat";
   }
-  if (pathname.startsWith("/api/engineer/symphony/comment-chat/")) {
+  if (pathname.startsWith("/api/gateway/symphony/comment-chat/")) {
     return "symphony_comment_chat";
   }
-  if (pathname.startsWith("/api/engineer/symphony/commit-message/")) {
+  if (pathname.startsWith("/api/gateway/symphony/commit-message/")) {
     return "symphony_commit_message";
   }
-  if (pathname === "/api/engineer/symphony/sessions") {
+  if (pathname === "/api/gateway/symphony/sessions") {
     return "symphony_sessions";
   }
-  if (pathname.startsWith("/api/engineer/symphony/plan/")) {
+  if (pathname.startsWith("/api/gateway/symphony/plan/")) {
     return "symphony_plan";
   }
-  if (pathname.startsWith("/api/engineer/symphony/judges/")) {
+  if (pathname.startsWith("/api/gateway/symphony/judges/")) {
     return "symphony_judges";
   }
-  if (pathname.startsWith("/api/engineer/symphony/logs/")) {
+  if (pathname.startsWith("/api/gateway/symphony/logs/")) {
     return "symphony_logs";
   }
-  if (pathname.startsWith("/api/engineer/symphony/chat-history/")) {
+  if (pathname.startsWith("/api/gateway/symphony/chat-history/")) {
     return "symphony_chat_history";
   }
-  if (pathname.startsWith("/api/engineer/symphony/pending-learnings")) {
+  if (pathname.startsWith("/api/gateway/symphony/pending-learnings")) {
     return "learnings";
   }
-  if (pathname.startsWith("/api/engineer/symphony/process-learnings")) {
+  if (pathname.startsWith("/api/gateway/symphony/process-learnings")) {
     return "learnings";
   }
-  if (pathname.startsWith("/api/engineer/symphony/process-all-learnings")) {
+  if (pathname.startsWith("/api/gateway/symphony/process-all-learnings")) {
     return "learnings";
   }
-  if (pathname.startsWith("/api/engineer/symphony/extract-learnings")) {
+  if (pathname.startsWith("/api/gateway/symphony/extract-learnings")) {
     return "learnings";
   }
-  if (pathname.startsWith("/api/engineer/symphony/learnings-status/")) {
+  if (pathname.startsWith("/api/gateway/symphony/learnings-status/")) {
     return "learnings";
   }
-  if (pathname === "/api/engineer/symphony/record-learning-use") {
+  if (pathname === "/api/gateway/symphony/record-learning-use") {
     return "learnings";
   }
-  if (pathname === "/api/engineer/terminal-chat") {
+  if (pathname === "/api/gateway/terminal-chat") {
     return "terminal_chat";
   }
-  if (pathname === "/api/engineer/ticket-chat") {
+  if (pathname === "/api/gateway/ticket-chat") {
     return "ticket_chat";
   }
-  if (pathname === "/api/engineer/run-viewer-chat") {
+  if (pathname === "/api/gateway/run-viewer-chat") {
     return "run_viewer_chat";
   }
-  if (pathname.startsWith("/api/engineer/codex/argue/")) {
+  if (pathname.startsWith("/api/gateway/codex/argue/")) {
     return "codex_argue";
   }
-  if (pathname.startsWith("/api/engineer/codex/")) {
+  if (pathname.startsWith("/api/gateway/codex/")) {
     return "codex_review";
   }
-  if (pathname.startsWith("/api/engineer/git/pr") || pathname === "/api/engineer/git/user") {
+  if (pathname === "/api/gateway/git/branch-worktree") {
+    return "git_branch_worktree";
+  }
+  if (pathname.startsWith("/api/gateway/git/pr") || pathname === "/api/gateway/git/user") {
     return "git_pr";
   }
-  if (pathname.startsWith("/api/engineer/git")) {
+  if (pathname.startsWith("/api/gateway/git")) {
     return "git_action";
   }
-  if (pathname === "/api/engineer/health-check") {
+  if (pathname === "/api/gateway/health-check") {
     return "health_check";
   }
-  if (pathname === "/api/engineer/repos") {
+  if (pathname === "/api/gateway/repos") {
     return "repos_config";
   }
-  if (pathname.startsWith("/api/engineer/deploy")) {
+  if (pathname.startsWith("/api/gateway/deploy")) {
     return "deploy";
   }
-  if (pathname === "/api/engineer/learnings") {
+  if (pathname === "/api/gateway/learnings") {
     return "learnings";
   }
-  if (pathname.startsWith("/api/engineer/work-directory/")) {
+  if (pathname.startsWith("/api/gateway/work-directory/")) {
     return "filesystem";
   }
-  if (pathname.startsWith("/api/engineer/symphony/sessions/")) {
+  if (pathname.startsWith("/api/gateway/symphony/sessions/")) {
     return "symphony_sessions";
   }
-  if (pathname.startsWith("/api/engineer/symphony/attachments/")) {
+  if (pathname.startsWith("/api/gateway/symphony/attachments/")) {
     return "filesystem";
   }
-  if (pathname.startsWith("/api/engineer/symphony/upload/")) {
+  if (pathname.startsWith("/api/gateway/symphony/upload/")) {
     return "filesystem";
   }
-  if (pathname === "/api/engineer/version") {
+  if (pathname === "/api/gateway/version") {
     return "health_check";
   }
   if (
-    pathname === "/api/engineer/directories" ||
-    pathname === "/api/engineer/files/search" ||
-    pathname.startsWith("/api/engineer/run-viewer-extract")
+    pathname === "/api/gateway/directories" ||
+    pathname === "/api/gateway/files/search" ||
+    pathname.startsWith("/api/gateway/run-viewer-extract")
   ) {
     return "filesystem";
   }
