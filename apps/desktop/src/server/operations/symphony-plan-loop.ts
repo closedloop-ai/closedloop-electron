@@ -74,8 +74,8 @@ async function handleConfirm(
 
   const repoPath = asString(body.repoPath);
   const loopId = asString(body.loopId);
-  const artifactId = asString(body.artifactId);
-  const artifactSlug = asString(body.artifactSlug);
+  const documentId = asString(body.documentId);
+  const documentSlug = asString(body.documentSlug);
   const issueId = asString(body.issueId);
   const ticketTitle = asString(body.ticketTitle);
   const outcome = asString(body.outcome);
@@ -92,15 +92,15 @@ async function handleConfirm(
   }
   const expandedRepoPath = repoResult.path;
 
-  const worktreeDir = artifactSlug
-    ? resolveLoopWorktreeDir(expandedRepoPath, artifactSlug)
+  const worktreeDir = documentSlug
+    ? resolveLoopWorktreeDir(expandedRepoPath, documentSlug)
     : resolveWorktreeDir(expandedRepoPath, ticketId);
 
-  if (loopId && artifactId) {
+  if (loopId && documentId) {
     writeLaunchMetadata(worktreeDir, {
       issueId: issueId ?? undefined,
       ticketTitle: ticketTitle ?? undefined,
-      artifactId,
+      documentId,
       loopId,
     });
   }
@@ -117,8 +117,8 @@ async function handleConfirm(
           loopId,
           command: "PLAN",
           ticketId: ticketId ?? undefined,
-          artifactId: artifactId ?? undefined,
-          artifactSlug: artifactSlug ?? undefined,
+          documentId: documentId ?? undefined,
+          documentSlug: documentSlug ?? undefined,
           issueId: issueId ?? undefined,
           repoPath: expandedRepoPath,
           localRepoPath: expandedRepoPath,
@@ -136,8 +136,8 @@ async function handleConfirm(
         loopId,
         command: "PLAN",
         ticketId: ticketId ?? undefined,
-        artifactId: artifactId ?? undefined,
-        artifactSlug: artifactSlug ?? undefined,
+        documentId: documentId ?? undefined,
+        documentSlug: documentSlug ?? undefined,
         issueId: issueId ?? undefined,
         repoPath: expandedRepoPath,
         localRepoPath: expandedRepoPath,
@@ -248,9 +248,9 @@ function resolveDefaultBranch(repoPath: string): string {
  */
 function resolveLoopWorktreeDir(
   expandedRepoPath: string,
-  artifactSlug: string
+  documentSlug: string
 ): string {
-  const slugified = artifactSlug
+  const slugified = documentSlug
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, "-")
     .slice(0, 50);
@@ -277,7 +277,7 @@ export function registerSymphonyPlanLoopRoutes(
   //
   // Filesystem-only: validates repoPath, resolves worktree + git remote info.
   // No API call -- completes instantly. Used for both initial start and
-  // select-artifact flows.
+  // select-document flows.
   // -----------------------------------------------------------------------
   dispatcher.register(
     "POST",
@@ -285,11 +285,11 @@ export function registerSymphonyPlanLoopRoutes(
     (context) => handlePrepare(context, getAllowedDirectories)
   );
 
-  // Also register the same prepare handler for the select-artifact path.
+  // Also register the same prepare handler for the select-document path.
   // The prepare step is identical -- only the subsequent API call differs.
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/plan-loop/:ticketId/select-artifact/prepare",
+    "/api/engineer/symphony/plan-loop/:ticketId/select-document/prepare",
     (context) => handlePrepare(context, getAllowedDirectories)
   );
 
@@ -306,10 +306,10 @@ export function registerSymphonyPlanLoopRoutes(
     (context) => handleConfirm(context, context.params.ticketId, getAllowedDirectories, jobStore)
   );
 
-  // Also register the same confirm handler for the select-artifact path.
+  // Also register the same confirm handler for the select-document path.
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/plan-loop/:ticketId/select-artifact/confirm",
+    "/api/engineer/symphony/plan-loop/:ticketId/select-document/confirm",
     (context) => handleConfirm(context, context.params.ticketId, getAllowedDirectories, jobStore)
   );
 

@@ -30,8 +30,8 @@ export type LocalJob = {
   operationId?: string;
   command: LocalJobCommand;
   ticketId?: string;
-  artifactId?: string;
-  artifactSlug?: string;
+  documentId?: string;
+  documentSlug?: string;
   issueId?: string;
   repoPath?: string;
   localRepoPath?: string;

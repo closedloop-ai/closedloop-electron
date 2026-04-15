@@ -173,7 +173,7 @@ describe("readLaunchMetadata", () => {
 
     const meta = readLaunchMetadata(dir);
     assert.deepEqual(meta, {
-      artifactId: undefined,
+      documentId: undefined,
       baseBranch: "main",
       issueId: undefined,
       loopId: undefined,
@@ -202,7 +202,7 @@ describe("readLaunchMetadata", () => {
 
     const meta = readLaunchMetadata(dir);
     assert.deepEqual(meta, {
-      artifactId: undefined,
+      documentId: undefined,
       baseBranch: undefined,
       issueId: undefined,
       loopId: undefined,
@@ -243,7 +243,7 @@ describe("writeLaunchMetadata", () => {
 
     const meta = readLaunchMetadata(dir);
     assert.deepEqual(meta, {
-      artifactId: undefined,
+      documentId: undefined,
       baseBranch: "main",
       issueId: undefined,
       loopId: undefined,
@@ -262,7 +262,7 @@ describe("writeLaunchMetadata", () => {
 
     const meta = readLaunchMetadata(dir);
     assert.deepEqual(meta, {
-      artifactId: undefined,
+      documentId: undefined,
       baseBranch: "develop",
       issueId: undefined,
       loopId: undefined,

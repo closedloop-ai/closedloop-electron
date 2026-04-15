@@ -14,7 +14,7 @@ type ActiveSession = {
   baseBranch?: string;
   parentTicketId?: string;
   loopId?: string;
-  artifactId?: string;
+  documentId?: string;
   startedAt: string;
   lastAccessedAt: string;
 };
@@ -36,7 +36,7 @@ function parseSessionBody(body: Record<string, unknown>): {
   baseBranch: string | undefined;
   parentTicketId: string | undefined;
   loopId: string | undefined;
-  artifactId: string | undefined;
+  documentId: string | undefined;
 } {
   return {
     ticketId: asString(body.ticketId),
@@ -50,13 +50,13 @@ function parseSessionBody(body: Record<string, unknown>): {
     baseBranch: asString(body.baseBranch) ?? undefined,
     parentTicketId: asString(body.parentTicketId) ?? undefined,
     loopId: asString(body.loopId) ?? undefined,
-    artifactId: asString(body.artifactId) ?? undefined,
+    documentId: asString(body.documentId) ?? undefined,
   };
 }
 
 function upsertSession(
   config: SessionsConfig,
-  fields: { ticketId: string; repoPath: string; worktreePath: string; pid?: number; contextRepoPaths?: string[]; baseBranch?: string; parentTicketId?: string; loopId?: string; artifactId?: string }
+  fields: { ticketId: string; repoPath: string; worktreePath: string; pid?: number; contextRepoPaths?: string[]; baseBranch?: string; parentTicketId?: string; loopId?: string; documentId?: string }
 ): void {
   const now = new Date().toISOString();
   const optionals = {
@@ -65,7 +65,7 @@ function upsertSession(
     ...(fields.baseBranch !== undefined && { baseBranch: fields.baseBranch }),
     ...(fields.parentTicketId !== undefined && { parentTicketId: fields.parentTicketId }),
     ...(fields.loopId !== undefined && { loopId: fields.loopId }),
-    ...(fields.artifactId !== undefined && { artifactId: fields.artifactId }),
+    ...(fields.documentId !== undefined && { documentId: fields.documentId }),
   };
   const existingIndex = config.sessions.findIndex((session) => session.ticketId === fields.ticketId);
 
@@ -173,7 +173,7 @@ export function registerSymphonySessionRoutes(
       baseBranch: fields.baseBranch,
       parentTicketId: fields.parentTicketId,
       loopId: fields.loopId,
-      artifactId: fields.artifactId,
+      documentId: fields.documentId,
     });
 
     await saveSessions(dir, config);

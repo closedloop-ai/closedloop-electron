@@ -1237,7 +1237,7 @@ async function attemptLlmCommit(
   baseBranch: string,
   loopId: string,
   command: string,
-  artifactSlug: string | undefined,
+  documentSlug: string | undefined,
   webAppOrigin: string,
   committer: LoopCommitter | undefined,
   getAllowedDirectories: () => string[],
@@ -1250,8 +1250,8 @@ async function attemptLlmCommit(
   // Strip newlines from user-controlled fields to prevent prompt injection
   const safeBranch = baseBranch.replace(/[\r\n]/g, "");
   const safeLoopId = sanitizeCommitMessage(loopId).replace(/[\r\n]/g, "");
-  const safeSlug = artifactSlug
-    ? sanitizeCommitMessage(artifactSlug).replace(/[\r\n]/g, "")
+  const safeSlug = documentSlug
+    ? sanitizeCommitMessage(documentSlug).replace(/[\r\n]/g, "")
     : null;
 
   let footer: string;
@@ -1259,19 +1259,19 @@ async function attemptLlmCommit(
     // safeSlug contains only alphanumerics, hyphens, and underscores after
     // sanitizeCommitMessage() + newline stripping — no backticks that would
     // break shell heredocs or prompt injection via template literals.
-    const artifactLink = `${webAppOrigin}/implementation-plans/${safeSlug}`;
-    footer = `---\nLoop ID: ${safeLoopId}\nArtifact: ${artifactLink}`;
+    const documentLink = `${webAppOrigin}/implementation-plans/${safeSlug}`;
+    footer = `---\nLoop ID: ${safeLoopId}\nDocument: ${documentLink}`;
   } else {
     footer = `---\nLoop ID: ${safeLoopId}`;
   }
 
   // Build slug instruction for the prompt
   const slugInstruction = safeSlug
-    ? `The artifact slug is ${safeSlug}. ` +
+    ? `The document slug is ${safeSlug}. ` +
       `You MUST prefix the PR title with "${safeSlug}: " ` +
       `(e.g., "${safeSlug}: Add feature X"). ` +
       `Also prefix the commit message the same way.`
-    : "No artifact slug is available — use a descriptive title without a prefix.";
+    : "No document slug is available — use a descriptive title without a prefix.";
 
   const prompt = [
     `You are a commit assistant finalizing work from a ClosedLoop.AI ${command} loop.`,
@@ -1579,7 +1579,7 @@ function executeGitOperations(
   baseBranch: string,
   loopId: string,
   command: string,
-  artifactSlug?: string,
+  documentSlug?: string,
   webAppOrigin?: string,
   shellPath?: string,
 ): GitOperationResult {
@@ -1625,7 +1625,7 @@ function executeGitOperations(
       timeout: 10_000,
     });
 
-    const commitPrefix = artifactSlug ? `${artifactSlug}: ` : "";
+    const commitPrefix = documentSlug ? `${documentSlug}: ` : "";
     const fallbackTitle = `${commitPrefix}Automated changes from loop ${shortId}`;
     execSync(`git commit -m ${shellEscape(fallbackTitle)}`, {
       cwd: worktreeDir,
@@ -1658,11 +1658,11 @@ function executeGitOperations(
     // Build PR body using the repo's PR template if one exists, otherwise
     // fall back to a simple metadata body. Written to a temp file to avoid
     // shell escaping issues with special characters (--body-file approach).
-    const artifactLine =
-      artifactSlug && webAppOrigin
-        ? `\nArtifact: ${webAppOrigin}/implementation-plans/${artifactSlug}`
+    const documentLine =
+      documentSlug && webAppOrigin
+        ? `\nDocument: ${webAppOrigin}/implementation-plans/${documentSlug}`
         : "";
-    const metadataFooter = `---\nLoop ID: ${loopId}\nCommand: ${command}${artifactLine}`;
+    const metadataFooter = `---\nLoop ID: ${loopId}\nCommand: ${command}${documentLine}`;
 
     let prBody: string;
     const templatePath = path.join(

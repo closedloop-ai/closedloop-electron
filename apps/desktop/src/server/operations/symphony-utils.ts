@@ -555,7 +555,7 @@ export function isProcessRunning(pid: number): boolean {
 export type LaunchMetadata = {
   issueId?: string;
   ticketTitle?: string;
-  artifactId?: string;
+  documentId?: string;
   loopId?: string;
   baseBranch?: string;
   parentTicketId?: string;
@@ -579,8 +579,8 @@ export function readLaunchMetadata(worktreeDir: string): LaunchMetadata | null {
       issueId: typeof parsed.issueId === "string" ? parsed.issueId : undefined,
       ticketTitle:
         typeof parsed.ticketTitle === "string" ? parsed.ticketTitle : undefined,
-      artifactId:
-        typeof parsed.artifactId === "string" ? parsed.artifactId : undefined,
+      documentId:
+        typeof parsed.documentId === "string" ? parsed.documentId : undefined,
       loopId: typeof parsed.loopId === "string" ? parsed.loopId : undefined,
       baseBranch:
         typeof parsed.baseBranch === "string" ? parsed.baseBranch : undefined,
@@ -610,7 +610,7 @@ export function writeLaunchMetadata(
   const merged: LaunchMetadata = {
     issueId: meta.issueId ?? existing?.issueId,
     ticketTitle: meta.ticketTitle ?? existing?.ticketTitle,
-    artifactId: meta.artifactId ?? existing?.artifactId,
+    documentId: meta.documentId ?? existing?.documentId,
     loopId: meta.loopId ?? existing?.loopId,
     baseBranch: meta.baseBranch ?? existing?.baseBranch,
     parentTicketId: meta.parentTicketId ?? existing?.parentTicketId,

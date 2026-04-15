@@ -1973,7 +1973,7 @@
         const title = document.createElement("span");
         title.className = "job-title";
         const cmd = job.command || "(unknown)";
-        const label = job.artifactSlug || job.loopId || job.id;
+        const label = job.documentSlug || job.loopId || job.id;
         title.textContent = `${cmd} — ${label}`;
         top.appendChild(title);
 
