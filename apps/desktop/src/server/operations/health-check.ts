@@ -28,7 +28,8 @@ type CheckResult = {
     resolvedPath?: string;    // PATH string from getShellEnv(), truncated to 1 KiB
     shell?: string;           // basename of process.env.SHELL ("zsh" / "bash" / "fish")
     platform?: NodeJS.Platform;
-    foundAt?: string[];       // every location where the binary was found (PATH sweep + known dirs)
+    foundAt?: string[];       // executable locations where the binary was found (PATH sweep + known dirs)
+    nonExecutableAt?: string[]; // paths that exist but are not executable (drives EACCES diagnostics)
   };
 };
 
@@ -104,11 +105,13 @@ export function registerHealthCheckRoutes(
   });
 }
 
-async function runCommand(
+type RunCommand = (
   cmd: string,
   args: string[],
   options?: { timeoutMs?: number }
-): Promise<{ stdout: string }> {
+) => Promise<{ stdout: string }>;
+
+const defaultRunCommand: RunCommand = async (cmd, args, options) => {
   const env = await getShellEnv();
   try {
     const { stdout } = await execFileAsync(cmd, args, {
@@ -122,6 +125,17 @@ async function runCommand(
     const stderr = (e.stderr ?? "").toString().trim().slice(0, 512);
     throw { code, stderr, message: e.message ?? "command failed" } satisfies CommandError;
   }
+};
+
+let runCommand: RunCommand = defaultRunCommand;
+
+/**
+ * @internal Test-only. Replace the binary command runner with a stub to
+ * simulate ENOENT / EACCES / ETIMEDOUT without spawning real processes.
+ * Call with no argument to restore the real implementation.
+ */
+export function _setRunCommandForTesting(fn?: RunCommand): void {
+  runCommand = fn ?? defaultRunCommand;
 }
 
 function parseVersion(output: string): string | undefined {
@@ -166,13 +180,30 @@ const KNOWN_PYTHON3_LOCATIONS: string[] = [
   "~/.local/bin/python3",
 ];
 
-const INSTALL_REMEDIATION: Record<string, string> = {
-  claude: "Install: npm install -g @anthropic-ai/claude-code",
-  git: "Install via your system package manager (e.g. xcode-select --install on macOS)",
-  gh: "Install: brew install gh (or see https://cli.github.com)",
-  codex: "Install: npm install -g @openai/codex",
-  python3: "Install Python 3.10 or later: brew install python@3.13 (or see https://python.org)",
-};
+function getInstallRemediation(binaryName: string, platform: NodeJS.Platform): string {
+  const isMac = platform === "darwin";
+  const isLinux = platform === "linux";
+  switch (binaryName) {
+    case "claude":
+      return "Install: npm install -g @anthropic-ai/claude-code";
+    case "codex":
+      return "Install: npm install -g @openai/codex";
+    case "git":
+      if (isMac) return "Install: xcode-select --install";
+      if (isLinux) return "Install via your package manager (e.g. apt install git, dnf install git)";
+      return "Install Git: see https://git-scm.com";
+    case "gh":
+      if (isMac) return "Install: brew install gh (or see https://cli.github.com)";
+      if (isLinux) return "Install the GitHub CLI: see https://github.com/cli/cli/blob/trunk/docs/install_linux.md";
+      return "Install the GitHub CLI: see https://cli.github.com";
+    case "python3":
+      if (isMac) return "Install Python 3.10 or later: brew install python@3.13 (or see https://python.org)";
+      if (isLinux) return "Install Python 3.10 or later via your package manager (e.g. apt install python3)";
+      return "Install Python 3.10 or later: see https://python.org";
+    default:
+      return `Install ${binaryName}`;
+  }
+}
 
 function expandTilde(loc: string): string {
   if (loc.startsWith("~/")) {
@@ -193,19 +224,37 @@ async function collectBinaryDebug(
   const shellPath = env.PATH ?? "";
 
   const pathHits = await resolveExecutablesOnPath(binaryName, shellPath);
+  const seen = new Set<string>(pathHits);
+
+  // Sweep PATH directories and known install locations, distinguishing
+  // executable hits from files that exist but are not executable. The
+  // latter drive EACCES diagnostics so remediation points at the actual
+  // broken file rather than some other executable location.
+  const pathSegmentCandidates = shellPath
+    .split(path.delimiter)
+    .map((segment) => segment.trim())
+    .filter(Boolean)
+    .map((segment) => path.join(segment, binaryName));
+  const candidates = [
+    ...pathSegmentCandidates,
+    ...knownLocations.map((loc) => expandTilde(loc)),
+  ];
 
   const knownHits: string[] = [];
-  const pathHitSet = new Set(pathHits);
-  for (const loc of knownLocations) {
-    const expanded = expandTilde(loc);
-    if (pathHitSet.has(expanded)) {
-      continue;
+  const nonExecutableHits: string[] = [];
+  for (const candidate of candidates) {
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
+    try {
+      await fs.access(candidate, constants.F_OK);
+    } catch {
+      continue; // does not exist
     }
     try {
-      await fs.access(expanded, constants.X_OK);
-      knownHits.push(expanded);
+      await fs.access(candidate, constants.X_OK);
+      knownHits.push(candidate);
     } catch {
-      // not found or not executable
+      nonExecutableHits.push(candidate);
     }
   }
 
@@ -216,12 +265,14 @@ async function collectBinaryDebug(
     shell: path.basename(process.env.SHELL ?? ""),
     platform: process.platform,
     foundAt: [...pathHits, ...knownHits],
+    ...(nonExecutableHits.length > 0 ? { nonExecutableAt: nonExecutableHits } : {}),
   };
 }
 
 function classifyBinaryError(binaryName: string, spawnError: CommandError, debug: NonNullable<CheckResult["debug"]>): string {
   const { errorCode } = debug;
   const foundAt = debug.foundAt ?? [];
+  const nonExecutableAt = debug.nonExecutableAt ?? [];
 
   if (errorCode === "ENOENT") {
     if (foundAt.length > 0) {
@@ -231,8 +282,11 @@ function classifyBinaryError(binaryName: string, spawnError: CommandError, debug
   }
 
   if (errorCode === "EACCES" || errorCode === "EPERM") {
-    if (foundAt.length > 0) {
-      return `Found at ${foundAt[0]} but not executable`;
+    // Prefer a path that actually has the permission problem over any
+    // unrelated executable hit, so the error points at the real offender.
+    const brokenPath = nonExecutableAt[0] ?? foundAt[0];
+    if (brokenPath) {
+      return `Found at ${brokenPath} but not executable`;
     }
     return "Permission denied";
   }
@@ -251,18 +305,21 @@ function classifyBinaryError(binaryName: string, spawnError: CommandError, debug
 function classifyBinaryRemediation(binaryName: string, spawnError: CommandError, debug: NonNullable<CheckResult["debug"]>): string {
   const { errorCode } = debug;
   const foundAt = debug.foundAt ?? [];
+  const nonExecutableAt = debug.nonExecutableAt ?? [];
   const shell = debug.shell || "shell";
+  const platform = debug.platform ?? process.platform;
 
   if (errorCode === "ENOENT") {
     if (foundAt.length > 0) {
       return `Add ${path.dirname(foundAt[0])} to PATH in your ${shell} rc, then restart the app`;
     }
-    return INSTALL_REMEDIATION[binaryName] ?? `Install ${binaryName}`;
+    return getInstallRemediation(binaryName, platform);
   }
 
   if (errorCode === "EACCES" || errorCode === "EPERM") {
-    if (foundAt.length > 0) {
-      return `chmod +x ${foundAt[0]}`;
+    const brokenPath = nonExecutableAt[0] ?? foundAt[0];
+    if (brokenPath) {
+      return `chmod +x ${brokenPath}`;
     }
     return `Check executable permissions on your ${binaryName} install`;
   }

@@ -10,6 +10,7 @@ import { DesktopGatewayServer } from "../src/server/server.js";
 import { Observability } from "../src/main/observability.js";
 import type { EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
 import { saveCodexChatSession } from "../src/server/operations/codex.js";
+import { _setRunCommandForTesting } from "../src/server/operations/health-check.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { SymphonyDirNotConfiguredError, tryAssertRepoAllowed, tryAssertPathAllowed } from "../src/server/operations/symphony-utils.js";
@@ -3889,50 +3890,53 @@ test("claude-cli ENOENT with foundAt: error mentions path, remediation mentions 
 });
 
 test("claude-cli ETIMEDOUT: error mentions Timed out, remediation mentions terminal", async () => {
-  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
-    '#!/bin/sh\necho "Python 3.11.0"\n'
-  );
-
-  // Replace claude with a binary that hangs longer than the 3s timeout
-  // Use a shell builtin (read) so no external commands are needed
-  const claudePath = path.join(binDir, "claude");
-  await fs.writeFile(claudePath, '#!/bin/sh\nread -t 60 line\n', { mode: 0o755 });
-
-  process.env.HOME = path.join(tmpDir, "home");
-  process.env.PATH = binDir;
-  setShellPathForTest();
-
-  const server = new DesktopGatewayServer({
-    host: "127.0.0.1",
-    preferredPort: 0,
-    fallbackPorts: [0],
-    webAppOrigin: "https://app.symphony.com",
-    getAllowedDirectories: () => [tmpDir],
-    machineName: "phase1-etimedout",
-    version: "0.1.0-test",
-    capabilities: EMPTY_CAPABILITIES,
-    discoveryFilePath: path.join(tmpDir, "electron-port"),
-    getSymphonyDir: () => symphonyDir,
+  // Mock runCommand so `claude --version` throws ETIMEDOUT immediately.
+  // Avoids spawning a real process or waiting on the 3s command timeout,
+  // and dodges shell-portability issues (dash on Ubuntu rejects `read -t`).
+  _setRunCommandForTesting(async (cmd) => {
+    if (cmd === "claude") {
+      throw { code: "ETIMEDOUT", stderr: "", message: "command timed out" };
+    }
+    throw { code: "ENOENT", stderr: "", message: "not found" };
   });
-  serversToClose.push(server);
-  await server.start();
+  try {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-etimedout-"));
+    tempPathsToClean.push(tmpDir);
+    const symphonyDir = path.join(tmpDir, "symphony-home");
+    await fs.mkdir(symphonyDir, { recursive: true });
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`, {
-    signal: AbortSignal.timeout(10000),
-  });
-  assert.equal(response.status, 200);
-  const body = (await response.json()) as {
-    checks: Array<{ id: string; passed: boolean; error?: string; remediation?: string }>;
-  };
+    const server = new DesktopGatewayServer({
+      host: "127.0.0.1",
+      preferredPort: 0,
+      fallbackPorts: [0],
+      webAppOrigin: "https://app.symphony.com",
+      getAllowedDirectories: () => [tmpDir],
+      machineName: "phase1-etimedout",
+      version: "0.1.0-test",
+      capabilities: EMPTY_CAPABILITIES,
+      discoveryFilePath: path.join(tmpDir, "electron-port"),
+      getSymphonyDir: () => symphonyDir,
+    });
+    serversToClose.push(server);
+    await server.start();
 
-  const check = body.checks.find((c) => c.id === "claude-cli");
-  assert.ok(check, "claude-cli check should be present");
-  assert.equal(check.passed, false);
-  assert.ok(check.error?.includes("Timed out"), `error should mention Timed out, got: ${check.error}`);
-  assert.ok(
-    check.remediation?.includes("terminal"),
-    `remediation should mention terminal, got: ${check.remediation}`
-  );
+    const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      checks: Array<{ id: string; passed: boolean; error?: string; remediation?: string }>;
+    };
+
+    const check = body.checks.find((c) => c.id === "claude-cli");
+    assert.ok(check, "claude-cli check should be present");
+    assert.equal(check.passed, false);
+    assert.ok(check.error?.includes("Timed out"), `error should mention Timed out, got: ${check.error}`);
+    assert.ok(
+      check.remediation?.includes("terminal"),
+      `remediation should mention terminal, got: ${check.remediation}`
+    );
+  } finally {
+    _setRunCommandForTesting();
+  }
 });
 
 test("KNOWN_CLAUDE_LOCATIONS probe: fake binary at known location appears in foundAt", async () => {
@@ -4038,6 +4042,17 @@ test("claude-cli EACCES with foundAt: error mentions not executable, remediation
   assert.ok(
     check.remediation?.includes("chmod +x"),
     `remediation should mention 'chmod +x', got: ${check.remediation}`
+  );
+  // Remediation must point at the actually-broken file (claudeOnPath), not
+  // the unrelated executable at knownClaudePath. Regression guard for the
+  // PR review comment about preserving the failing path in EACCES diagnostics.
+  assert.ok(
+    check.remediation?.includes(claudeOnPath),
+    `remediation should reference the non-executable path ${claudeOnPath}, got: ${check.remediation}`
+  );
+  assert.ok(
+    !check.remediation?.includes(knownClaudePath),
+    `remediation should not reference the working path ${knownClaudePath}, got: ${check.remediation}`
   );
 });
 
