@@ -524,6 +524,18 @@ async function cleanupAdditionalWorktrees(
   }
 }
 
+/**
+ * Default-provider cleanup helper. Exposed so recovery-time callers that do
+ * not own a `WorktreeProvider` (e.g. `boot-recovery.ts`) can reuse the same
+ * best-effort teardown semantics used on the live path.
+ */
+export async function cleanupAdditionalWorktreesWithDefaultProvider(
+  entries: readonly { dir: string; repoPath: string }[],
+  loopId: string,
+): Promise<void> {
+  await cleanupAdditionalWorktrees(entries, loopId, defaultWorktreeProvider);
+}
+
 /** Resolve an additional repo entry to a validated local path, or throw. */
 function resolveAndValidateRepoPath(
   entry: { localRepoPath?: string; fullName?: string },
@@ -2964,6 +2976,15 @@ async function handleLoopRequest(
             assertPathAllowed(addWorktreeDir, allowedDirs);
           } catch (e) {
             if (e instanceof DirectoryNotAllowedError) {
+              // Unwind already-created additional-repo worktrees from prior
+              // iterations of this loop *before* the primary, so a failure on
+              // iteration N doesn't leak iterations 0..N-1 on disk.
+              await cleanupAdditionalWorktrees(
+                additionalWorktreeDirs,
+                body.loopId,
+                wt,
+                "cleanup additional worktree failed (allowlist reject):",
+              );
               await wt.removeWorktree(worktreeDir, repoPath, body.loopId).catch(() => {});
               await postLoopEventBounded(
                 apiBaseUrl,
@@ -2994,7 +3015,17 @@ async function handleLoopRequest(
           } catch (checkoutErr) {
             const msg = checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr);
             loopError(body.loopId, `ensureWorktree failed for additional repo ${addRepo.repoPath}:`, checkoutErr);
+            // Clean up the half-materialized current worktree, then any
+            // successfully-checked-out worktrees from prior iterations, then
+            // the primary worktree. Order matters only for log readability;
+            // all operations are independent best-effort.
             await wt.removeWorktree(addWorktreeDir, addRepo.repoPath, body.loopId).catch(() => {});
+            await cleanupAdditionalWorktrees(
+              additionalWorktreeDirs,
+              body.loopId,
+              wt,
+              "cleanup additional worktree failed (checkout reject):",
+            );
             await wt.removeWorktree(worktreeDir, repoPath, body.loopId).catch(() => {});
             await postLoopEventBounded(
               apiBaseUrl,
@@ -3583,6 +3614,12 @@ async function handleLoopRequest(
         ...(operationId ? { operationId } : {}),
         worktreeDir: worktreeDir ?? undefined,
         claudeWorkDir,
+        // Persist so finalizer/boot-recovery can remove these after a crash
+        // or graceful shutdown; in-process spawn keeps its own local copy for
+        // live cleanup on exit.
+        ...(additionalWorktreeDirs.length > 0
+          ? { additionalWorktreeDirs: [...additionalWorktreeDirs] }
+          : {}),
         logPath,
         jsonlPath,
         statePath,

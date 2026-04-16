@@ -37,6 +37,13 @@ export type LocalJob = {
   localRepoPath?: string;
   worktreeDir?: string;
   claudeWorkDir?: string;
+  /**
+   * Additional-repo worktrees created for multi-repo PLAN runs.
+   * Persisted so boot recovery / finalizer can remove them after an Electron
+   * restart; in-process spawn logic also tracks these locally for immediate
+   * cleanup on live exits.
+   */
+  additionalWorktreeDirs?: { dir: string; repoPath: string }[];
   logPath?: string;
   jsonlPath?: string;
   statePath?: string;

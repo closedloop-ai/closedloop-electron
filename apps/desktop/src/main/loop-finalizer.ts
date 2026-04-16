@@ -29,6 +29,16 @@ export interface LoopFinalizerDeps {
   isProcessRunning: (pid: number) => boolean;
   /** When set, persisted loop runner token is cleared after terminal status is written. */
   loopTokenStore?: LoopTokenStore;
+  /**
+   * Best-effort teardown for any additional-repo worktrees persisted on the
+   * job record (see `LocalJob.additionalWorktreeDirs`). Invoked only on
+   * recovery/manual-repair paths — the live-exit path already cleans these
+   * up in-process via its local reference.
+   */
+  cleanupAdditionalWorktrees?: (
+    entries: readonly { dir: string; repoPath: string }[],
+    loopId: string,
+  ) => Promise<void>;
 }
 
 export type LoopFinalizationReason =
@@ -599,6 +609,40 @@ async function uploadArtifacts(
   }
 }
 
+/**
+ * Remove any persisted additional-repo worktrees for this job and clear the
+ * field so subsequent finalizer retries skip the work. Safe to call with an
+ * absent or missing cleanup callback — in that case the list is simply
+ * cleared without filesystem side-effects.
+ */
+async function cleanupPersistedAdditionalWorktrees(
+  job: LocalJob,
+  jobStore: JobStore,
+  cleanup?: LoopFinalizerDeps["cleanupAdditionalWorktrees"],
+): Promise<void> {
+  const entries = job.additionalWorktreeDirs;
+  if (!entries || entries.length === 0) {
+    return;
+  }
+  if (cleanup) {
+    try {
+      await cleanup(entries, job.loopId);
+    } catch (err) {
+      gatewayLog.warn(
+        "loop-finalizer",
+        `Additional worktree cleanup failed for loopId=${job.loopId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+  const current = jobStore.getByLoopId(job.loopId) ?? job;
+  const { additionalWorktreeDirs: _drop, ...rest } = current;
+  void _drop;
+  jobStore.upsert({
+    ...rest,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
 function isRetryableFinalizationError(error?: string): boolean {
   if (!error) {
     return false;
@@ -623,6 +667,7 @@ export async function finalizeLoopFromRuntime(
     apiBaseUrl,
     isProcessRunning,
     loopTokenStore,
+    cleanupAdditionalWorktrees,
   } = deps;
 
   if (
@@ -802,5 +847,19 @@ export async function finalizeLoopFromRuntime(
   if (cloudFinalized || !retryableFailure) {
     loopTokenStore?.deleteLoopToken(resolvedJob.loopId);
   }
+
+  // Recovery/manual-repair paths own teardown of additional-repo worktrees.
+  // The live-exit path already cleans these up in-process via its local
+  // reference inside handleProcessCompletion; persisted cleanup here is the
+  // safety net for jobs whose spawning process died before that ran.
+  if (reason !== "live-exit") {
+    const latest = jobStore.getByLoopId(resolvedJob.loopId) ?? resolvedJob;
+    await cleanupPersistedAdditionalWorktrees(
+      latest,
+      jobStore,
+      cleanupAdditionalWorktrees,
+    );
+  }
+
   return { cloudFinalized, retryableFailure, error: remoteError };
 }

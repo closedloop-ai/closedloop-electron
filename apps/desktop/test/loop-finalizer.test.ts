@@ -1189,3 +1189,124 @@ test("emitFinalizationTelemetry emits error severity for failed recovery finaliz
   assert.equal(telemetryEvents[0]?.category, "job.recovery.finalize_replayed");
   assert.equal(telemetryEvents[0]?.severity, "error");
 });
+
+test("finalizeLoopFromRuntime cleans up persisted additionalWorktreeDirs on boot-recovery and clears the field", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(
+    path.join(claudeWorkDir, "plan.json"),
+    JSON.stringify({ tasks: [] }),
+  );
+  await fs.writeFile(path.join(claudeWorkDir, "open-questions.md"), "none");
+
+  const jobStore = createStore("finalizer-additional-cleanup");
+  const additional = [
+    { dir: path.join(tempRoot, "wt-a"), repoPath: path.join(tempRoot, "repo-a") },
+    { dir: path.join(tempRoot, "wt-b"), repoPath: path.join(tempRoot, "repo-b") },
+  ];
+  const job = createBaseJob({
+    claudeWorkDir,
+    status: "COMPLETED",
+    additionalWorktreeDirs: additional,
+  });
+  jobStore.upsert(job);
+
+  const cleanupCalls: Array<{
+    entries: readonly { dir: string; repoPath: string }[];
+    loopId: string;
+  }> = [];
+
+  await finalizeLoopFromRuntime(job, "boot-recovery", {
+    jobStore,
+    telemetry: { emit: () => {} },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+    cleanupAdditionalWorktrees: async (entries, loopId) => {
+      cleanupCalls.push({ entries: [...entries], loopId });
+    },
+  });
+
+  assert.equal(cleanupCalls.length, 1);
+  assert.equal(cleanupCalls[0]?.loopId, "loop-1");
+  assert.deepEqual(cleanupCalls[0]?.entries, additional);
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(
+    persisted.additionalWorktreeDirs,
+    undefined,
+    "additionalWorktreeDirs should be cleared after cleanup so retries do not re-run it",
+  );
+});
+
+test("finalizeLoopFromRuntime skips additional worktree cleanup on live-exit (in-process path owns it)", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(
+    path.join(claudeWorkDir, "plan.json"),
+    JSON.stringify({ tasks: [] }),
+  );
+  await fs.writeFile(path.join(claudeWorkDir, "open-questions.md"), "none");
+
+  const jobStore = createStore("finalizer-live-exit-skip-cleanup");
+  const additional = [
+    { dir: path.join(tempRoot, "wt-a"), repoPath: path.join(tempRoot, "repo-a") },
+  ];
+  const job = createBaseJob({
+    claudeWorkDir,
+    additionalWorktreeDirs: additional,
+  });
+  jobStore.upsert(job);
+
+  let cleanupInvocations = 0;
+  await finalizeLoopFromRuntime(job, "live-exit", {
+    jobStore,
+    telemetry: { emit: () => {} },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+    cleanupAdditionalWorktrees: async () => {
+      cleanupInvocations++;
+    },
+  });
+
+  assert.equal(cleanupInvocations, 0);
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.deepEqual(persisted?.additionalWorktreeDirs, additional);
+});
+
+test("finalizeLoopFromRuntime tolerates a throwing cleanup callback and still clears the field", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(
+    path.join(claudeWorkDir, "plan.json"),
+    JSON.stringify({ tasks: [] }),
+  );
+
+  const jobStore = createStore("finalizer-cleanup-throws");
+  const job = createBaseJob({
+    claudeWorkDir,
+    status: "FAILED",
+    exitCode: 1,
+    additionalWorktreeDirs: [
+      { dir: path.join(tempRoot, "wt-x"), repoPath: path.join(tempRoot, "repo-x") },
+    ],
+  });
+  jobStore.upsert(job);
+
+  await finalizeLoopFromRuntime(job, "boot-recovery", {
+    jobStore,
+    telemetry: { emit: () => {} },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+    cleanupAdditionalWorktrees: async () => {
+      throw new Error("boom");
+    },
+  });
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.additionalWorktreeDirs, undefined);
+});
