@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { getResolvedGitPath } from "./symphony-loop.js";
 
 /**
@@ -7,12 +7,16 @@ import { getResolvedGitPath } from "./symphony-loop.js";
  */
 export function resolveRepoFullName(repoPath: string): string | null {
   try {
-    const remoteUrl = execSync(`${getResolvedGitPath()} remote get-url origin`, {
-      cwd: repoPath,
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 10_000,
-    }).trim();
+    const remoteUrl = execFileSync(
+      getResolvedGitPath(),
+      ["remote", "get-url", "origin"],
+      {
+        cwd: repoPath,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 10_000,
+      },
+    ).trim();
 
     const sshMatch = /[:/]([^/:]+\/[^/]+?)(?:\.git)?$/.exec(remoteUrl);
     if (sshMatch) {
@@ -30,12 +34,16 @@ export function findWorktreeForBranch(
   branchName: string,
 ): string | null {
   try {
-    const output = execSync(`${getResolvedGitPath()} worktree list --porcelain`, {
-      cwd: expandedRepoPath,
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 10_000,
-    });
+    const output = execFileSync(
+      getResolvedGitPath(),
+      ["worktree", "list", "--porcelain"],
+      {
+        cwd: expandedRepoPath,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 10_000,
+      },
+    );
 
     let currentWorktree: string | null = null;
     for (const line of output.split("\n")) {
@@ -58,12 +66,16 @@ export function findWorktreeForBranch(
  */
 export function listAllWorktrees(expandedRepoPath: string): string[] {
   try {
-    const output = execSync(`${getResolvedGitPath()} worktree list --porcelain`, {
-      cwd: expandedRepoPath,
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 10_000,
-    });
+    const output = execFileSync(
+      getResolvedGitPath(),
+      ["worktree", "list", "--porcelain"],
+      {
+        cwd: expandedRepoPath,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 10_000,
+      },
+    );
 
     const worktrees: string[] = [];
     for (const line of output.split("\n")) {

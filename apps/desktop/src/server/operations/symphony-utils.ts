@@ -1,4 +1,4 @@
-import { execFile, execFileSync, execSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import {
   closeSync,
   constants,
@@ -182,7 +182,7 @@ export async function runLoopsSetupScript(
 /** Fetch latest refs from origin. No-op if offline. */
 function fetchOrigin(repoPath: string): void {
   try {
-    execSync(`${getResolvedGitPath()} fetch origin`, {
+    execFileSync(getResolvedGitPath(), ["fetch", "origin"], {
       cwd: repoPath,
       stdio: "pipe",
       timeout: NETWORK_GIT_TIMEOUT,
@@ -281,7 +281,7 @@ function addWorktree(repoPath: string, worktreeDir: string, ref: string): void {
 
   // Prune stale worktree entries (directory was removed but git still tracks it)
   try {
-    execSync(`${getResolvedGitPath()} worktree prune`, {
+    execFileSync(getResolvedGitPath(), ["worktree", "prune"], {
       cwd: repoPath,
       stdio: "pipe",
       timeout: LOCAL_GIT_TIMEOUT,
