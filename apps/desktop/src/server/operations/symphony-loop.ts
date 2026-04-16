@@ -2955,6 +2955,32 @@ async function handleLoopRequest(
             addRepoKey,
           );
           const addBranchName = `symphony/${addRepoKey}`;
+
+          // Validate the additional-repo worktree path against the sandbox
+          // roots BEFORE any git checkout is materialized. SYMPHONY_WORKTREE_PARENT_DIR
+          // is untrusted config; if it points outside allowedDirs, we must
+          // refuse to write the checkout at all, not clean it up after the fact.
+          try {
+            assertPathAllowed(addWorktreeDir, allowedDirs);
+          } catch (e) {
+            if (e instanceof DirectoryNotAllowedError) {
+              await wt.removeWorktree(worktreeDir, repoPath, body.loopId).catch(() => {});
+              await postLoopEventBounded(
+                apiBaseUrl,
+                body.loopId,
+                body.closedLoopAuthToken,
+                {
+                  type: LoopEventType.Error,
+                  code: LoopErrorCode.RepoNotAllowed,
+                  message: `Additional repo worktree path not allowed: ${addWorktreeDir}`,
+                },
+              );
+              json(context, 403, { error: `Additional repo worktree path not allowed: ${addWorktreeDir}` });
+              return;
+            }
+            throw e;
+          }
+
           try {
             const staleAddWorktree = wt.findWorktreeForBranch(addRepo.repoPath, addBranchName);
             if (staleAddWorktree) {
@@ -2982,27 +3008,6 @@ async function handleLoopRequest(
             );
             json(context, 500, { error: `Failed to checkout additional repo worktree: ${msg}` });
             return;
-          }
-          try {
-            assertPathAllowed(addWorktreeDir, allowedDirs);
-          } catch (e) {
-            if (e instanceof DirectoryNotAllowedError) {
-              await wt.removeWorktree(addWorktreeDir, addRepo.repoPath, body.loopId).catch(() => {});
-              await wt.removeWorktree(worktreeDir, repoPath, body.loopId).catch(() => {});
-              await postLoopEventBounded(
-                apiBaseUrl,
-                body.loopId,
-                body.closedLoopAuthToken,
-                {
-                  type: LoopEventType.Error,
-                  code: LoopErrorCode.RepoNotAllowed,
-                  message: `Additional repo worktree path not allowed: ${addWorktreeDir}`,
-                },
-              );
-              json(context, 403, { error: `Additional repo worktree path not allowed: ${addWorktreeDir}` });
-              return;
-            }
-            throw e;
           }
           additionalWorktreeDirs.push({ dir: addWorktreeDir, repoPath: addRepo.repoPath });
           loopLog(body.loopId, `Created additional repo worktree: ${addWorktreeDir} (branch: ${addBranchName} based on ${addRepo.branch})`);
