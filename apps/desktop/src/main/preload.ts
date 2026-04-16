@@ -56,7 +56,12 @@ const desktopApi = {
     ipcRenderer.invoke("desktop:get-job-log-tail", jobId, lines) as Promise<unknown>,
   getLogs: () => ipcRenderer.invoke("desktop:get-logs") as Promise<unknown>,
   clearLogs: () => ipcRenderer.invoke("desktop:clear-logs") as Promise<unknown>,
-  getAppVersion: () => ipcRenderer.invoke("desktop:get-app-version") as Promise<string>
+  getAppVersion: () => ipcRenderer.invoke("desktop:get-app-version") as Promise<string>,
+  getBinaryPaths: () => ipcRenderer.invoke("desktop:get-binary-paths") as Promise<unknown>,
+  patchBinaryPaths: (patch: unknown) =>
+    ipcRenderer.invoke("desktop:patch-binary-paths", patch) as Promise<unknown>,
+  detectCliTools: () =>
+    ipcRenderer.invoke("desktop:detect-cli-tools") as Promise<unknown>
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);

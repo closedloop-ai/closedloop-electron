@@ -5,7 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
-import { getShellEnv } from "../shell-path.js";
+import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getOverrideBinaryPaths } from "./symphony-loop.js";
 import { listAllWorktrees } from "./git-helpers.js";
 import { findPluginScript } from "./plugin-cache.js";
 import { loadReposConfig } from "./repos-config-utils.js";
@@ -648,7 +649,7 @@ async function triggerSuccessRateComputation(workDir: string): Promise<void> {
     return;
   }
 
-  const child = spawn("python3", [ratesScript, "--workdir", workDir], {
+  const child = spawn(resolveBinarySync("python3", getOverrideBinaryPaths()?.python3).path, [ratesScript, "--workdir", workDir], {
     stdio: "ignore",
     detached: true,
     env: await getShellEnv(),

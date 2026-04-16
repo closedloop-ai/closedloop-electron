@@ -1,5 +1,8 @@
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
+import { accessSync } from "node:fs";
+import { access, constants } from "node:fs/promises";
 import os from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -109,4 +112,111 @@ export function resetShellPathCache(): void {
  */
 export function setShellPathForTest(): void {
   resolvedPathPromise = Promise.resolve(process.env.PATH ?? "");
+}
+
+/**
+ * Scan every directory in searchPath for an executable named binary.
+ * Returns all hits (not just the first), in PATH order, deduplicated.
+ */
+export async function resolveExecutablesOnPath(
+  binary: string,
+  searchPath: string
+): Promise<string[]> {
+  const segments = searchPath
+    .split(path.delimiter)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  const seen = new Set<string>();
+  const hits: string[] = [];
+  for (const segment of segments) {
+    const candidate = path.join(segment, binary);
+    if (seen.has(candidate)) {
+      continue;
+    }
+    seen.add(candidate);
+    try {
+      await access(candidate, constants.X_OK);
+      hits.push(candidate);
+    } catch {
+      // not found or not executable
+    }
+  }
+  return hits;
+}
+
+export type BinaryName = "claude" | "gh" | "codex" | "python3" | "git";
+
+export type BinaryResolveResult = {
+  path: string;
+  source: "override" | "override_invalid" | "path" | "fallback";
+};
+
+/**
+ * Resolve a binary path asynchronously.
+ * If an override is set and executable, returns it with source "override".
+ * If an override is set but not executable, returns it with source "override_invalid" (no PATH fallthrough).
+ * Otherwise falls back to resolveExecutablesOnPath, then a bare name fallback.
+ */
+export async function resolveBinary(
+  logicalName: BinaryName,
+  override?: string
+): Promise<BinaryResolveResult> {
+  if (override) {
+    try {
+      await access(override, constants.X_OK);
+      return { path: override, source: "override" };
+    } catch {
+      return { path: override, source: "override_invalid" };
+    }
+  }
+
+  const shellPath = await getShellPath();
+  const matches = await resolveExecutablesOnPath(logicalName, shellPath);
+  if (matches.length > 0) {
+    return { path: matches[0], source: "path" };
+  }
+
+  return { path: logicalName, source: "fallback" };
+}
+
+/**
+ * Resolve a binary path synchronously.
+ * If an override is set and executable, returns it with source "override".
+ * If an override is set but not executable, returns it with source "override_invalid" (no PATH fallthrough).
+ * Otherwise tries `which` via execFileSync, then a login shell `which`, then a bare name fallback.
+ */
+export function resolveBinarySync(
+  logicalName: BinaryName,
+  override?: string
+): BinaryResolveResult {
+  if (override) {
+    try {
+      accessSync(override, constants.X_OK);
+      return { path: override, source: "override" };
+    } catch {
+      return { path: override, source: "override_invalid" };
+    }
+  }
+
+  try {
+    const result = execFileSync("which", [logicalName], { encoding: "utf8" }).trim();
+    if (result) {
+      return { path: result, source: "path" };
+    }
+  } catch {
+    // fall through
+  }
+
+  try {
+    const result = execFileSync("bash", ["-lc", `which ${logicalName}`], {
+      encoding: "utf8"
+    }).trim();
+    if (result) {
+      return { path: result, source: "path" };
+    }
+  } catch {
+    // fall through
+  }
+
+  return { path: logicalName, source: "fallback" };
 }

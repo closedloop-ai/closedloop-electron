@@ -5,7 +5,8 @@ import type { ServerResponse } from "node:http";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError } from "../security.js";
-import { getShellEnv } from "../shell-path.js";
+import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getOverrideBinaryPaths, getResolvedGitPath } from "./symphony-loop.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
 import { type ContentBlock, createStreamState, processStreamEvent } from "./stream-events.js";
@@ -1127,7 +1128,7 @@ export function registerCodexRoutes(
     ];
 
     try {
-      const child = spawn("claude", args, {
+      const child = spawn(resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path, args, {
         cwd: worktreeDir,
         stdio: ["pipe", "pipe", "pipe"],
         env: await getShellEnv(),
@@ -1475,7 +1476,7 @@ function similarityScore(messageA: string, messageB: string, fileA: string, file
 async function spawnClaudeReview(cwd: string, model: string): Promise<ChildProcess> {
   const allowedTools = await withMcpTools("Bash,Read,Glob,Grep,Task,TodoWrite");
   return spawn(
-    "claude",
+    resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path,
     [
       "-p",
       "--verbose",
@@ -1605,11 +1606,12 @@ function resolveEffectiveReviewMode(
     if (!SAFE_REF_REGEX.test(baseBranch)) {
       return reviewMode;
     }
-    const headSha = execSync("git rev-parse HEAD", {
+    const gitBin = getResolvedGitPath();
+    const headSha = execSync(`${gitBin} rev-parse HEAD`, {
       cwd: worktreeDir, encoding: "utf-8", timeout: 10_000,
     }).trim();
     const mergeBaseResult = spawnSync(
-      "git", ["merge-base", "HEAD", `origin/${baseBranch}`],
+      gitBin, ["merge-base", "HEAD", `origin/${baseBranch}`],
       { cwd: worktreeDir, encoding: "utf-8", timeout: 10_000 }
     );
     const mergeBase = (mergeBaseResult.stdout as string).trim();
@@ -1634,7 +1636,8 @@ function applyMergedPrDiff(
   }
   console.log("[codex-review] Merged PR detected. Applying gh pr diff.");
 
-  const diffResult = spawnSync("gh", ["pr", "diff", prNum], {
+  const ghBin = resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path;
+  const diffResult = spawnSync(ghBin, ["pr", "diff", prNum], {
     cwd: worktreeDir, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024, timeout: 30_000,
   });
   const diff = (diffResult.stdout as string) ?? "";
@@ -1645,12 +1648,13 @@ function applyMergedPrDiff(
 
   // Checkout the merge commit's parent so the diff applies cleanly
   const mergeOidResult = spawnSync(
-    "gh", ["pr", "view", prNum, "--json", "mergeCommit", "--jq", ".mergeCommit.oid"],
+    ghBin, ["pr", "view", prNum, "--json", "mergeCommit", "--jq", ".mergeCommit.oid"],
     { cwd: worktreeDir, encoding: "utf-8", timeout: 30_000 }
   );
   const mergeOid = (mergeOidResult.stdout as string).trim();
   if (mergeOid) {
-    const baseCommitResult = spawnSync("git", ["rev-parse", `${mergeOid}^1`], {
+    const gitBin = getResolvedGitPath();
+    const baseCommitResult = spawnSync(gitBin, ["rev-parse", `${mergeOid}^1`], {
       cwd: worktreeDir, encoding: "utf-8", timeout: 10_000,
     });
     const baseCommit = (baseCommitResult.stdout as string).trim();
@@ -1658,7 +1662,7 @@ function applyMergedPrDiff(
       console.warn("[codex-review] Failed to resolve base commit for merged PR");
       return "base";
     }
-    const checkoutResult = spawnSync("git", ["checkout", "--detach", baseCommit], {
+    const checkoutResult = spawnSync(gitBin, ["checkout", "--detach", baseCommit], {
       cwd: worktreeDir, stdio: "pipe", timeout: 10_000,
     });
     if (checkoutResult.status !== 0) {
@@ -1667,10 +1671,11 @@ function applyMergedPrDiff(
     }
   }
 
+  const gitBin2 = getResolvedGitPath();
   const patchPath = path.join(worktreeDir, ".pr-review-diff.patch");
   writeFileSync(patchPath, diff);
   try {
-    execSync(`git apply "${patchPath}"`, { cwd: worktreeDir, stdio: "pipe" });
+    execSync(`${gitBin2} apply "${patchPath}"`, { cwd: worktreeDir, stdio: "pipe" });
   } catch (err) {
     console.warn("[codex-review] Failed to apply PR diff:", err);
     unlinkSync(patchPath);
@@ -1698,7 +1703,7 @@ async function spawnCodexReviewProcess(options: {
 
   args.push("-c", `model=${options.model}`, "-c", `model_reasoning_effort=${options.reasoningEffort}`);
 
-  return spawn("codex", args, {
+  return spawn(resolveBinarySync("codex", getOverrideBinaryPaths()?.codex).path, args, {
     cwd: options.cwd,
     detached: false,
     stdio: ["ignore", "pipe", "pipe"],
@@ -1813,7 +1818,7 @@ async function streamCodexConversation(
   onSessionId: (sessionId: string) => Promise<void>
 ): Promise<void> {
   try {
-    const child = spawn("codex", args, {
+    const child = spawn(resolveBinarySync("codex", getOverrideBinaryPaths()?.codex).path, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
       env: await getShellEnv({ FORCE_COLOR: "0" }),
@@ -2259,7 +2264,7 @@ function extractClaudeVerdictLine(trimmedLine: string): string | null {
 
 async function runCodexVerdict(worktreeDir: string, sessionId: string): Promise<string> {
   return runVerdictProcess(
-    "codex",
+    resolveBinarySync("codex", getOverrideBinaryPaths()?.codex).path,
     ["exec", "resume", sessionId, VERDICT_PROMPT, "--full-auto", "--json"],
     { cwd: worktreeDir, env: await getShellEnv({ FORCE_COLOR: "0" }) },
     extractCodexVerdictLine
@@ -2273,7 +2278,7 @@ async function runClaudeVerdict(
 ): Promise<string> {
   const allowedTools = await withMcpTools("Read,Glob,Grep", expectedMcpUrl);
   return runVerdictProcess(
-    "claude",
+    resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path,
     [
       "-p",
       "--resume",
