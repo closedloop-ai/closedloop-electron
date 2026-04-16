@@ -1,7 +1,7 @@
 /**
  * Contract tests for multi-repo PLAN requests.
  *
- * 1. PLAN rejects nonexistent branch (branchExists returns false) — HTTP 400 + RepoNotFound event
+ * 1. PLAN rejects nonexistent branch (branchExists returns false) — HTTP 400 + PreRunValidationFailed event
  * 2. resolveAdditionalRepos rejects > 5 entries
  * 3. additionalRepoDisambiguator distinguishes repos with the same basename
  */
@@ -52,10 +52,10 @@ function createTestGateway(
 
 // ---------------------------------------------------------------------------
 // PLAN rejects nonexistent branch (branchExists returns false)
-//   — assert HTTP 400 and RepoNotFound error event
+//   — assert HTTP 400 and PreRunValidationFailed error event
 // ---------------------------------------------------------------------------
 
-it("PLAN with nonexistent branch in additionalRepo returns HTTP 400 and RepoNotFound event", async () => {
+it("PLAN with nonexistent branch in additionalRepo returns HTTP 400 and PreRunValidationFailed event", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-nobranch-"));
   tempPathsToClean.push(tmpDir);
 
@@ -112,13 +112,13 @@ it("PLAN with nonexistent branch in additionalRepo returns HTTP 400 and RepoNotF
     "PLAN with nonexistent branch in additionalRepo should return HTTP 400",
   );
 
-  // The error event with code RepoNotFound must be posted to the API
+  // The error event with code PRE_RUN_VALIDATION_FAILED must be posted to the API
   const errorEvent = await waitForTerminalEvent(mock.requests, loopId);
   assert.equal(errorEvent.type, "error");
   assert.equal(
     errorEvent.code,
-    "REPO_NOT_FOUND",
-    `Expected error code REPO_NOT_FOUND, got: ${JSON.stringify(errorEvent.code)}`,
+    "PRE_RUN_VALIDATION_FAILED",
+    `Expected error code PRE_RUN_VALIDATION_FAILED, got: ${JSON.stringify(errorEvent.code)}`,
   );
 });
 

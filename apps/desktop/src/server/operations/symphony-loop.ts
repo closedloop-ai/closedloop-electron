@@ -590,7 +590,7 @@ export async function resolveAdditionalRepos(
     const branchFound = await wt.branchExists(canonicalPath, entry.branch);
     if (!branchFound) {
       throw new AdditionalRepoError(
-        LoopErrorCode.RepoNotFound,
+        LoopErrorCode.PreRunValidationFailed,
         repoRef,
         `Branch "${entry.branch}" not found in additional repo: ${resolvedPath}`,
       );
