@@ -1,4 +1,4 @@
-import { execFile, execFileSync, execSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import {
   closeSync,
   constants,
@@ -22,6 +22,7 @@ import { promisify } from "node:util";
 import { expandHomePath } from "../../shared/path-utils.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { getShellEnv } from "../shell-path.js";
+import { getResolvedGitPath } from "./symphony-loop.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -181,7 +182,7 @@ export async function runLoopsSetupScript(
 /** Fetch latest refs from origin. No-op if offline. */
 export function fetchOrigin(repoPath: string): void {
   try {
-    execSync("git fetch origin", {
+    execFileSync(getResolvedGitPath(), ["fetch", "origin"], {
       cwd: repoPath,
       stdio: "pipe",
       timeout: NETWORK_GIT_TIMEOUT,
@@ -280,7 +281,7 @@ function addWorktree(repoPath: string, worktreeDir: string, ref: string): void {
 
   // Prune stale worktree entries (directory was removed but git still tracks it)
   try {
-    execSync("git worktree prune", {
+    execFileSync(getResolvedGitPath(), ["worktree", "prune"], {
       cwd: repoPath,
       stdio: "pipe",
       timeout: LOCAL_GIT_TIMEOUT,
@@ -290,7 +291,7 @@ function addWorktree(repoPath: string, worktreeDir: string, ref: string): void {
   }
 
   try {
-    execFileSync("git", ["worktree", "add", worktreeDir, ref], {
+    execFileSync(getResolvedGitPath(), ["worktree", "add", worktreeDir, ref], {
       cwd: repoPath,
       stdio: "pipe",
       timeout: NETWORK_GIT_TIMEOUT,
@@ -314,7 +315,7 @@ function addWorktree(repoPath: string, worktreeDir: string, ref: string): void {
 /** Check out a branch in an existing worktree, trying multiple fallback strategies. */
 function checkoutBranch(worktreeDir: string, branchName: string): void {
   try {
-    execFileSync("git", ["checkout", branchName], {
+    execFileSync(getResolvedGitPath(), ["checkout", branchName], {
       cwd: worktreeDir,
       stdio: "pipe",
       timeout: LOCAL_GIT_TIMEOUT,
@@ -325,7 +326,7 @@ function checkoutBranch(worktreeDir: string, branchName: string): void {
   }
   try {
     execFileSync(
-      "git",
+      getResolvedGitPath(),
       ["checkout", "-B", branchName, `origin/${branchName}`],
       {
         cwd: worktreeDir,
@@ -338,7 +339,7 @@ function checkoutBranch(worktreeDir: string, branchName: string): void {
     // Branch may be checked out in another worktree
   }
   try {
-    execFileSync("git", ["checkout", "--detach", `origin/${branchName}`], {
+    execFileSync(getResolvedGitPath(), ["checkout", "--detach", `origin/${branchName}`], {
       cwd: worktreeDir,
       stdio: "pipe",
       timeout: LOCAL_GIT_TIMEOUT,
@@ -351,7 +352,7 @@ function checkoutBranch(worktreeDir: string, branchName: string): void {
 /** Fast-forward or rebase an existing worktree to the latest remote branch. */
 function fastForwardBranch(worktreeDir: string, branchName: string): void {
   try {
-    execFileSync("git", ["pull", "--ff-only", "origin", branchName], {
+    execFileSync(getResolvedGitPath(), ["pull", "--ff-only", "origin", branchName], {
       cwd: worktreeDir,
       stdio: "pipe",
       timeout: NETWORK_GIT_TIMEOUT,
@@ -361,17 +362,17 @@ function fastForwardBranch(worktreeDir: string, branchName: string): void {
     // ff-only failed (diverged) — try rebase if working tree is clean
   }
   try {
-    execFileSync("git", ["diff", "--quiet"], {
+    execFileSync(getResolvedGitPath(), ["diff", "--quiet"], {
       cwd: worktreeDir,
       stdio: "pipe",
       timeout: LOCAL_GIT_TIMEOUT,
     });
-    execFileSync("git", ["diff", "--cached", "--quiet"], {
+    execFileSync(getResolvedGitPath(), ["diff", "--cached", "--quiet"], {
       cwd: worktreeDir,
       stdio: "pipe",
       timeout: LOCAL_GIT_TIMEOUT,
     });
-    execFileSync("git", ["rebase", `origin/${branchName}`], {
+    execFileSync(getResolvedGitPath(), ["rebase", `origin/${branchName}`], {
       cwd: worktreeDir,
       stdio: "pipe",
       timeout: NETWORK_GIT_TIMEOUT,
@@ -388,7 +389,7 @@ function fastForwardBranch(worktreeDir: string, branchName: string): void {
 export function resolveRef(repoPath: string, branchName: string): string | null {
   for (const candidate of [`origin/${branchName}`, branchName]) {
     try {
-      execFileSync("git", ["rev-parse", "--verify", candidate], {
+      execFileSync(getResolvedGitPath(), ["rev-parse", "--verify", candidate], {
         cwd: repoPath,
         stdio: "pipe",
         timeout: LOCAL_GIT_TIMEOUT,

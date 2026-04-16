@@ -385,4 +385,187 @@ describe("Observability", () => {
     assert.doesNotThrow(() => Observability.commandStarted("cmd-1", "GENERATE_PRD"));
     assert.doesNotThrow(() => Observability.commandCompleted("cmd-1", "GENERATE_PRD", 100));
   });
+
+  describe("healthCheckResult dedupe state machine", () => {
+    function initWithDualBackendsForHealthCheck(): {
+      telemetryEvents: EnrichedTelemetryEvent[];
+      captureCalls: Array<{ event: string; properties: Record<string, unknown> }>;
+    } {
+      const telemetryEvents: EnrichedTelemetryEvent[] = [];
+      const captureCalls: Array<{ event: string; properties: Record<string, unknown> }> = [];
+      mock.method(PostHogAnalytics.prototype, "capture", (
+        _distinctId: string,
+        event: string,
+        properties: Record<string, unknown>,
+      ) => {
+        captureCalls.push({ event, properties });
+      });
+      Observability.init({
+        telemetrySend: (event) => telemetryEvents.push(event),
+        posthog: { apiKey: "phc_test", host: "https://us.i.posthog.com" },
+      });
+      return { telemetryEvents, captureCalls };
+    }
+
+    const failingCheck = {
+      id: "claude-cli",
+      passed: false,
+      error: "Not found",
+      debug: { errorCode: "ENOENT", foundAt: [] as string[] },
+    };
+
+    const passingCheck = {
+      id: "claude-cli",
+      passed: true,
+    };
+
+    test("first failing call emits failure_detected to both sinks", () => {
+      const { telemetryEvents, captureCalls } = initWithDualBackendsForHealthCheck();
+
+      Observability.healthCheckResult(failingCheck);
+
+      assert.equal(telemetryEvents.length, 1);
+      assert.equal(telemetryEvents[0].category, "healthcheck.failure_detected");
+      assert.equal(telemetryEvents[0].severity, "error");
+      assert.equal(telemetryEvents[0].diagnostics?.extra?.check_id, "claude-cli");
+      assert.equal(captureCalls.length, 1);
+      assert.equal(captureCalls[0].event, "healthcheck.failure_detected");
+      assert.equal(captureCalls[0].properties.check_id, "claude-cli");
+    });
+
+    test("second identical failing call emits nothing (dedupe)", () => {
+      const { telemetryEvents, captureCalls } = initWithDualBackendsForHealthCheck();
+
+      Observability.healthCheckResult(failingCheck);
+      telemetryEvents.length = 0;
+      captureCalls.length = 0;
+
+      Observability.healthCheckResult(failingCheck);
+
+      assert.equal(telemetryEvents.length, 0);
+      assert.equal(captureCalls.length, 0);
+    });
+
+    test("recovery after failure emits healthcheck.recovered", () => {
+      const { telemetryEvents, captureCalls } = initWithDualBackendsForHealthCheck();
+
+      Observability.healthCheckResult(failingCheck);
+      telemetryEvents.length = 0;
+      captureCalls.length = 0;
+
+      Observability.healthCheckResult(passingCheck);
+
+      assert.equal(telemetryEvents.length, 1);
+      assert.equal(telemetryEvents[0].category, "healthcheck.recovered");
+      assert.equal(telemetryEvents[0].severity, "info");
+      assert.equal(captureCalls.length, 1);
+      assert.equal(captureCalls[0].event, "healthcheck.recovered");
+    });
+
+    test("heartbeat after HEARTBEAT_MS emits failure_persistent", () => {
+      const { telemetryEvents, captureCalls } = initWithDualBackendsForHealthCheck();
+
+      // Use mock to control Date.now
+      let fakeNow = 1000000;
+      mock.method(Date, "now", () => fakeNow);
+
+      Observability.healthCheckResult(failingCheck);
+      telemetryEvents.length = 0;
+      captureCalls.length = 0;
+
+      // Advance time past HEARTBEAT_MS (1 hour = 3600000ms)
+      fakeNow += 60 * 60 * 1000 + 1;
+
+      Observability.healthCheckResult(failingCheck);
+
+      assert.equal(telemetryEvents.length, 1);
+      assert.equal(telemetryEvents[0].category, "healthcheck.failure_persistent");
+      assert.equal(captureCalls.length, 1);
+      assert.equal(captureCalls[0].event, "healthcheck.failure_persistent");
+    });
+
+    test("error code drift while failing emits new failure_detected", () => {
+      const { telemetryEvents, captureCalls } = initWithDualBackendsForHealthCheck();
+
+      Observability.healthCheckResult(failingCheck);
+      telemetryEvents.length = 0;
+      captureCalls.length = 0;
+
+      // Same id, still failing, but different errorCode
+      Observability.healthCheckResult({
+        id: "claude-cli",
+        passed: false,
+        error: "Permission denied",
+        debug: { errorCode: "EACCES", foundAt: ["/usr/local/bin/claude"] },
+      });
+
+      assert.equal(telemetryEvents.length, 1);
+      assert.equal(telemetryEvents[0].category, "healthcheck.failure_detected");
+      assert.equal(captureCalls.length, 1);
+    });
+
+    test("reset() clears healthcheck dedupe state", () => {
+      const { telemetryEvents, captureCalls } = initWithDualBackendsForHealthCheck();
+
+      Observability.healthCheckResult(failingCheck);
+      telemetryEvents.length = 0;
+      captureCalls.length = 0;
+
+      // Without reset, second call would be deduped
+      Observability.reset();
+      Observability.init({
+        telemetrySend: (event) => telemetryEvents.push(event),
+        posthog: { apiKey: "phc_test", host: "https://us.i.posthog.com" },
+      });
+
+      Observability.healthCheckResult(failingCheck);
+
+      // Should emit again because state was cleared
+      assert.equal(telemetryEvents.length, 1);
+      assert.equal(telemetryEvents[0].category, "healthcheck.failure_detected");
+    });
+
+    test("init() clears healthcheck dedupe state", () => {
+      const telemetryEvents: EnrichedTelemetryEvent[] = [];
+      Observability.init({ telemetrySend: (event) => telemetryEvents.push(event) });
+
+      Observability.healthCheckResult(failingCheck);
+      telemetryEvents.length = 0;
+
+      // Re-init clears state
+      Observability.init({ telemetrySend: (event) => telemetryEvents.push(event) });
+
+      Observability.healthCheckResult(failingCheck);
+
+      assert.equal(telemetryEvents.length, 1);
+      assert.equal(telemetryEvents[0].category, "healthcheck.failure_detected");
+    });
+
+    test("non-allowlisted check (git) emits nothing", () => {
+      const { telemetryEvents, captureCalls } = initWithDualBackendsForHealthCheck();
+
+      Observability.healthCheckResult({ id: "git", passed: false, error: "Not found" });
+
+      assert.equal(telemetryEvents.length, 0);
+      assert.equal(captureCalls.length, 0);
+    });
+
+    test("non-allowlisted optional check (codex) emits nothing", () => {
+      const { telemetryEvents, captureCalls } = initWithDualBackendsForHealthCheck();
+
+      Observability.healthCheckResult({ id: "codex", passed: false, error: "Not found" });
+
+      assert.equal(telemetryEvents.length, 0);
+      assert.equal(captureCalls.length, 0);
+    });
+
+    test("first passing call for allowlisted check emits nothing", () => {
+      const { telemetryEvents, captureCalls } = initWithDualBackendsForHealthCheck();
+
+      Observability.healthCheckResult(passingCheck);
+
+      assert.equal(telemetryEvents.length, 0);
+      assert.equal(captureCalls.length, 0);
+    });
+  });
 });

@@ -49,6 +49,8 @@ export interface DesktopGatewayServerOptions {
   onUnexpectedClose?: () => void;
   loopTokenStore?: LoopTokenStore;
   getGatewayId: () => string;
+  getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
+  applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
 }
 
 export class DesktopGatewayServer {
@@ -88,6 +90,8 @@ export class DesktopGatewayServer {
       loopTokenStore: this.options.loopTokenStore,
       retrySpawnDeps: this.options.retrySpawnDeps,
       getGatewayId: this.options.getGatewayId,
+      getBinaryPaths: this.options.getBinaryPaths,
+      applyBinaryPathPatch: this.options.applyBinaryPathPatch,
     });
   }
 
@@ -113,6 +117,8 @@ export class DesktopGatewayServer {
     loopTokenStore?: LoopTokenStore,
     retrySpawnDeps?: RetrySpawnDeps,
     getGatewayId: () => string = () => "",
+    getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string },
+    applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string },
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -138,6 +144,8 @@ export class DesktopGatewayServer {
       loopTokenStore,
       retrySpawnDeps,
       getGatewayId,
+      getBinaryPaths,
+      applyBinaryPathPatch,
     });
   }
 

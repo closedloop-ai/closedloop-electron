@@ -1,8 +1,6 @@
 import { execFile } from "node:child_process";
-import { access, constants } from "node:fs/promises";
-import path from "node:path";
 import { promisify } from "node:util";
-import { getShellPath, sanitizeSpawnEnv } from "../shell-path.js";
+import { getShellPath, resolveExecutablesOnPath, sanitizeSpawnEnv } from "../shell-path.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -61,6 +59,13 @@ export function resetMcpDetectionCacheForTests(): void {
   resolvedBinaryCache.clear();
   latestByProvider.clear();
   neutralMcpCwdResolver = null;
+}
+
+export function resetMcpDetectionCache(): void {
+  cache.clear();
+  latestByProvider.clear();
+  resolvedNameCache.clear();
+  resolvedBinaryCache.clear();
 }
 
 export function configureMcpDetectionCwdResolver(
@@ -217,25 +222,8 @@ async function resolveExecutableOnPath(
   binary: string,
   searchPath: string
 ): Promise<string | null> {
-  const segments = searchPath
-    .split(path.delimiter)
-    .map((segment) => segment.trim())
-    .filter(Boolean);
-  const seen = new Set<string>();
-  for (const segment of segments) {
-    const candidate = path.join(segment, binary);
-    if (seen.has(candidate)) {
-      continue;
-    }
-    seen.add(candidate);
-    try {
-      await access(candidate, constants.X_OK);
-      return candidate;
-    } catch {
-      continue;
-    }
-  }
-  return null;
+  const hits = await resolveExecutablesOnPath(binary, searchPath);
+  return hits[0] ?? null;
 }
 
 async function resolveProviderBinary(provider: McpProvider): Promise<string> {

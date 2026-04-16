@@ -37,7 +37,7 @@ import type {
 } from "../operation-dispatcher.js";
 import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
-import { getShellEnv, getShellPath } from "../shell-path.js";
+import { getShellEnv, getShellPath, resolveBinarySync } from "../shell-path.js";
 import { withMcpTools } from "./chat-tools.js";
 import { findWorktreeForBranch as findWorktreeForBranchImpl } from "./git-helpers.js";
 import { startOutputTailer } from "./output-tailer.js";
@@ -109,6 +109,32 @@ export const defaultWorktreeProvider: WorktreeProvider = {
 let resolvedClaudePath: string | null = null;
 
 /**
+ * Module-level binary paths resolver, configured once in GatewayRouter constructor.
+ * When set, getResolvedClaudePath() will check the claude override before falling
+ * back to its existing which/login-shell resolution strategies.
+ */
+let overrideGetBinaryPaths: (() => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string }) | null = null;
+
+export function configureBinaryPathsResolver(
+  resolver: (() => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string }) | null
+): void {
+  overrideGetBinaryPaths = resolver;
+  resetResolvedClaudePath();
+}
+
+export function getOverrideBinaryPaths(): { claude?: string; gh?: string; codex?: string; python3?: string; git?: string } | null {
+  return overrideGetBinaryPaths?.() ?? null;
+}
+
+export function getResolvedGitPath(): string {
+  return resolveBinarySync("git", overrideGetBinaryPaths?.()?.git).path;
+}
+
+export function getResolvedGhPath(): string {
+  return resolveBinarySync("gh", overrideGetBinaryPaths?.()?.gh).path;
+}
+
+/**
  * Reset the cached claude binary path. Intended for use in tests where PATH
  * changes between test cases — production code should not call this.
  */
@@ -125,6 +151,18 @@ export function getResolvedClaudePath(): string {
   }
   // Invalidate stale cache entry before re-resolving
   resolvedClaudePath = null;
+
+  // Strategy 0: check for a user-configured override path first.
+  // resolveBinarySync returns "override" (executable) or "override_invalid"
+  // (set but not executable). Both are returned as-is -- "override_invalid"
+  // lets the spawn produce a descriptive ENOENT rather than silently falling
+  // back to a different binary.
+  const claudeOverride = overrideGetBinaryPaths?.()?.claude;
+  if (claudeOverride !== undefined) {
+    const resolved = resolveBinarySync("claude", claudeOverride);
+    resolvedClaudePath = resolved.path;
+    return resolvedClaudePath;
+  }
 
   // Strategy 1: which via current process PATH (works in tests and dev shells)
   try {
@@ -427,6 +465,7 @@ function findStreamFormatter(): string | null {
 function buildClaudePipeline(
   claudeArgs: string[],
   claudeWorkDir: string,
+  claudeBinary: string,
   stdinFile?: string,
 ): { cmd: string; args: string[] } {
   const formatter = findStreamFormatter();
@@ -435,9 +474,10 @@ function buildClaudePipeline(
 
   // Build the claude command with properly escaped args
   const escapedArgs = claudeArgs.map(shellEscape).join(" ");
+  const escapedBinary = shellEscape(claudeBinary);
   const claudeCmd = stdinFile
-    ? `claude ${escapedArgs} < ${shellEscape(stdinFile)}`
-    : `claude ${escapedArgs}`;
+    ? `${escapedBinary} ${escapedArgs} < ${shellEscape(stdinFile)}`
+    : `${escapedBinary} ${escapedArgs}`;
 
   if (formatter) {
     // Full pipeline matching run-loop.sh:
@@ -806,8 +846,9 @@ async function ensureWorktreeImpl(
 
   await fs.mkdir(path.dirname(worktreeDir), { recursive: true });
 
+  const gitBin = getResolvedGitPath();
   try {
-    execSync("git fetch origin", {
+    execSync(`${shellEscape(gitBin)} fetch origin`, {
       cwd: expandedRepoPath,
       stdio: "pipe",
       timeout: 30_000,
@@ -819,7 +860,7 @@ async function ensureWorktreeImpl(
   // Resolve base ref
   let baseRef = `origin/${baseBranch}`;
   try {
-    execSync(`git rev-parse --verify ${shellEscape(baseRef)}`, {
+    execSync(`${shellEscape(gitBin)} rev-parse --verify ${shellEscape(baseRef)}`, {
       cwd: expandedRepoPath,
       stdio: "pipe",
       timeout: 10_000,
@@ -829,7 +870,7 @@ async function ensureWorktreeImpl(
   }
 
   execSync(
-    `git worktree add -B ${shellEscape(branchName)} ${shellEscape(worktreeDir)} ${shellEscape(baseRef)}`,
+    `${shellEscape(gitBin)} worktree add -B ${shellEscape(branchName)} ${shellEscape(worktreeDir)} ${shellEscape(baseRef)}`,
     {
       cwd: expandedRepoPath,
       stdio: "pipe",
@@ -861,8 +902,9 @@ async function removeWorktreeImpl(
   expandedRepoPath: string,
   loopId?: string,
 ): Promise<void> {
+  const gitBin = getResolvedGitPath();
   try {
-    execSync(`git worktree remove --force ${shellEscape(worktreeDir)}`, {
+    execSync(`${shellEscape(gitBin)} worktree remove --force ${shellEscape(worktreeDir)}`, {
       cwd: expandedRepoPath,
       stdio: "pipe",
       timeout: 15_000,
@@ -876,7 +918,7 @@ async function removeWorktreeImpl(
     }
     await fs.rm(worktreeDir, { recursive: true, force: true });
     try {
-      execSync("git worktree prune", {
+      execSync(`${shellEscape(gitBin)} worktree prune`, {
         cwd: expandedRepoPath,
         stdio: "pipe",
         timeout: 10_000,
@@ -891,7 +933,7 @@ async function removeWorktreeImpl(
 function getCurrentBranchImpl(worktreeDir: string): string | null {
   try {
     return (
-      execSync("git rev-parse --abbrev-ref HEAD", {
+      execSync(`${shellEscape(getResolvedGitPath())} rev-parse --abbrev-ref HEAD`, {
         cwd: worktreeDir,
         encoding: "utf-8",
         stdio: "pipe",
@@ -1720,9 +1762,10 @@ function executeGitOperations(
 
   // Check for changes, excluding .claude/ and .closedloop-ai/ which are written
   // by the gateway itself (work dir, artifacts) and must never be committed.
+  const gitBin = getResolvedGitPath();
   try {
     const status = execSync(
-      "git status --porcelain -- . ':!.claude' ':!.closedloop-ai'",
+      `${shellEscape(gitBin)} status --porcelain -- . ':!.claude' ':!.closedloop-ai'`,
       {
         cwd: worktreeDir,
         encoding: "utf-8",
@@ -1741,7 +1784,7 @@ function executeGitOperations(
 
   // Stage, commit, push
   try {
-    execSync("git add -- . ':!.claude' ':!.closedloop-ai'", {
+    execSync(`${shellEscape(gitBin)} add -- . ':!.claude' ':!.closedloop-ai'`, {
       cwd: worktreeDir,
       stdio: "pipe",
       env,
@@ -1750,28 +1793,28 @@ function executeGitOperations(
 
     const commitPrefix = artifactSlug ? `${artifactSlug}: ` : "";
     const fallbackTitle = `${commitPrefix}Automated changes from loop ${shortId}`;
-    execSync(`git commit -m ${shellEscape(fallbackTitle)}`, {
+    execSync(`${shellEscape(gitBin)} commit -m ${shellEscape(fallbackTitle)}`, {
       cwd: worktreeDir,
       stdio: "pipe",
       env,
       timeout: 30_000,
     });
 
-    const branchName = execSync("git rev-parse --abbrev-ref HEAD", {
+    const branchName = execSync(`${shellEscape(gitBin)} rev-parse --abbrev-ref HEAD`, {
       cwd: worktreeDir,
       encoding: "utf-8",
       stdio: "pipe",
       timeout: 10_000,
     }).trim();
 
-    execSync(`git push -u origin ${shellEscape(branchName)}`, {
+    execSync(`${shellEscape(gitBin)} push -u origin ${shellEscape(branchName)}`, {
       cwd: worktreeDir,
       stdio: "pipe",
       env,
       timeout: 60_000,
     });
 
-    const commitSha = execSync("git rev-parse HEAD", {
+    const commitSha = execSync(`${shellEscape(gitBin)} rev-parse HEAD`, {
       cwd: worktreeDir,
       encoding: "utf-8",
       stdio: "pipe",
@@ -1826,11 +1869,12 @@ function executeGitOperations(
     writeFileSync(bodyFile, prBody);
 
     // Check for existing PR before creating (handles retries gracefully)
+    const ghBin = shellEscape(getResolvedGhPath());
     let prUrl: string;
     let prNumber: number;
     try {
       const existingPr = execSync(
-        `gh pr view --json url,number ${shellEscape(branchName)}`,
+        `${ghBin} pr view --json url,number ${shellEscape(branchName)}`,
         {
           cwd: worktreeDir,
           encoding: "utf-8",
@@ -1856,7 +1900,7 @@ function executeGitOperations(
       // Create without --label first so the PR still succeeds on repos where the
       // 'symphony' label doesn't exist yet, then attach the label best-effort.
       const prOutput = execSync(
-        `gh pr create --title ${shellEscape(fallbackTitle)} --body-file ${shellEscape(bodyFile)} --base ${shellEscape(baseBranch)}`,
+        `${ghBin} pr create --title ${shellEscape(fallbackTitle)} --body-file ${shellEscape(bodyFile)} --base ${shellEscape(baseBranch)}`,
         {
           cwd: worktreeDir,
           encoding: "utf-8",
@@ -1872,7 +1916,7 @@ function executeGitOperations(
       // Best-effort label attachment — non-fatal if the label doesn't exist
       if (prNumber) {
         try {
-          execSync(`gh pr edit ${prNumber} --add-label symphony`, {
+          execSync(`${ghBin} pr edit ${prNumber} --add-label symphony`, {
             cwd: worktreeDir,
             stdio: "pipe",
             env,
@@ -1888,7 +1932,7 @@ function executeGitOperations(
     // fetch the current body and append the metadata instead of replacing it.
     try {
       const currentBody = execSync(
-        `gh pr view ${prNumber} --json body --jq .body`,
+        `${ghBin} pr view ${prNumber} --json body --jq .body`,
         {
           cwd: worktreeDir,
           encoding: "utf-8",
@@ -1905,7 +1949,7 @@ function executeGitOperations(
           : prBody;
         writeFileSync(bodyFile, updatedBody);
         execSync(
-          `gh pr edit ${prNumber} --body-file ${shellEscape(bodyFile)}`,
+          `${ghBin} pr edit ${prNumber} --body-file ${shellEscape(bodyFile)}`,
           { cwd: worktreeDir, stdio: "pipe", env, timeout: 15_000 },
         );
       }
@@ -3221,14 +3265,9 @@ async function handleLoopRequest(
     let scriptPath: string | null = null;
 
     if (usesClaude) {
-      try {
-        const whichEnv = { ...process.env, PATH: await getShellPath() };
-        execSync("which claude", {
-          stdio: "pipe",
-          timeout: 5000,
-          env: whichEnv,
-        });
-      } catch {
+      const resolved = resolveBinarySync("claude", overrideGetBinaryPaths?.()?.claude);
+      if (resolved.source === "fallback") {
+        // Binary not found on PATH and no override set -- abort
         await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
           type: LoopEventType.Error,
           code: LoopErrorCode.BinaryNotFound,
@@ -3243,6 +3282,10 @@ async function handleLoopRequest(
         json(context, 500, { error: "claude CLI not found in PATH" });
         return;
       }
+      // "override", "override_invalid", or "path": all proceed.
+      // "override_invalid" is intentionally allowed -- the user set an explicit
+      // override and should see the resulting ENOENT from the spawn, not a
+      // confusing "not found in PATH" error.
     } else if (usesRunLoop) {
       scriptPath = findPluginScript("code", "run-loop.sh");
       if (!scriptPath) {
@@ -3307,6 +3350,10 @@ async function handleLoopRequest(
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
       });
 
+      // Resolve the claude binary path once for all commands in this spawn block.
+      // getResolvedClaudePath() will use the user-configured override if present.
+      const claudeBinary = getResolvedClaudePath();
+
       // Shared claude CLI args for commands that run claude directly.
       // REQUEST_CHANGES omits "-" (stdin) because it passes the prompt as a CLI argument.
       const allowedTools = await withMcpTools(
@@ -3337,6 +3384,7 @@ async function handleLoopRequest(
         const pipeline = buildClaudePipeline(
           stdinClaudeArgs,
           claudeWorkDir,
+          claudeBinary,
           promptFile,
         );
         child = spawn(pipeline.cmd, pipeline.args, {
@@ -3358,6 +3406,7 @@ async function handleLoopRequest(
         const pipeline = buildClaudePipeline(
           stdinClaudeArgs,
           claudeWorkDir,
+          claudeBinary,
           promptFile,
         );
         child = spawn(pipeline.cmd, pipeline.args, {
@@ -3387,6 +3436,7 @@ async function handleLoopRequest(
         const pipeline = buildClaudePipeline(
           stdinClaudeArgs,
           claudeWorkDir,
+          claudeBinary,
           promptFile,
         );
         child = spawn(pipeline.cmd, pipeline.args, {
@@ -3423,7 +3473,7 @@ async function handleLoopRequest(
           `/code:amend-plan --workdir ${claudeWorkDir} --message "${sanitized}"`,
         );
 
-        const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir);
+        const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir, claudeBinary);
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: worktreeDir!,
           detached: true,
@@ -3438,6 +3488,7 @@ async function handleLoopRequest(
         const pipeline = buildClaudePipeline(
           stdinClaudeArgs,
           claudeWorkDir,
+          claudeBinary,
           promptFile,
         );
         child = spawn(pipeline.cmd, pipeline.args, {

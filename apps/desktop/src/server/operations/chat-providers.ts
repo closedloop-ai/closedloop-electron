@@ -2,7 +2,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { statSync } from "node:fs";
 import type { ProcessManager } from "../process-manager.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
-import { getShellEnv } from "../shell-path.js";
+import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getOverrideBinaryPaths } from "./symphony-loop.js";
 import { createStreamState, processStreamEvent } from "./stream-events.js";
 
 export type ChatMessage = {
@@ -181,7 +182,7 @@ export class ClaudeProvider implements ChatProvider {
 
       this.processManager
         .spawnStreaming({
-          command: "claude",
+          command: resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path,
           args,
           cwd: resolveSpawnCwd(params.cwd),
           env: shellEnv,
@@ -342,7 +343,7 @@ export class CodexProvider implements ChatProvider {
 
       let child: ChildProcess;
       try {
-        child = spawn("codex", args, {
+        child = spawn(resolveBinarySync("codex", getOverrideBinaryPaths()?.codex).path, args, {
           cwd: resolvedCwd,
           stdio: ["ignore", "pipe", "pipe"],
           env: { ...shellEnv, FORCE_COLOR: "0" },

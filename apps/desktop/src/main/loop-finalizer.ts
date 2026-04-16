@@ -1,4 +1,5 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { getResolvedGitPath } from "../server/operations/symphony-loop.js";
 import crypto from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -77,12 +78,16 @@ function readLoopSessionId(claudeWorkDir: string): string | undefined {
 /** Best-effort current branch for a git worktree (matches symphony-loop getCurrentBranchImpl). */
 function getCurrentBranchFromWorktree(worktreeDir: string): string | null {
   try {
-    const branch = execSync("git rev-parse --abbrev-ref HEAD", {
-      cwd: worktreeDir,
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 5_000,
-    }).trim();
+    const branch = execFileSync(
+      getResolvedGitPath(),
+      ["rev-parse", "--abbrev-ref", "HEAD"],
+      {
+        cwd: worktreeDir,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 5_000,
+      },
+    ).trim();
     return branch || null;
   } catch {
     return null;
