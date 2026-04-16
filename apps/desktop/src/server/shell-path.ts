@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
+import { access, constants } from "node:fs/promises";
 import os from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -109,4 +111,34 @@ export function resetShellPathCache(): void {
  */
 export function setShellPathForTest(): void {
   resolvedPathPromise = Promise.resolve(process.env.PATH ?? "");
+}
+
+/**
+ * Scan every directory in searchPath for an executable named binary.
+ * Returns all hits (not just the first), in PATH order, deduplicated.
+ */
+export async function resolveExecutablesOnPath(
+  binary: string,
+  searchPath: string
+): Promise<string[]> {
+  const segments = searchPath
+    .split(path.delimiter)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  const seen = new Set<string>();
+  const hits: string[] = [];
+  for (const segment of segments) {
+    const candidate = path.join(segment, binary);
+    if (seen.has(candidate)) {
+      continue;
+    }
+    seen.add(candidate);
+    try {
+      await access(candidate, constants.X_OK);
+      hits.push(candidate);
+    } catch {
+      // not found or not executable
+    }
+  }
+  return hits;
 }
