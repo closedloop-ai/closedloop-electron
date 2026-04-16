@@ -3,7 +3,8 @@ import os from "node:os";
 import type { ServerResponse } from "node:http";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import type { ProcessManager } from "../process-manager.js";
-import { getShellEnv } from "../shell-path.js";
+import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getOverrideBinaryPaths } from "./symphony-loop.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { getReadonlyCodebaseTools, getWebOnlyTools } from "./chat-tools.js";
@@ -148,7 +149,7 @@ export function registerTicketChatRoutes(
 
       void processManager
         .spawnStreaming({
-          command: "claude",
+          command: resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path,
           args: [
             "-p",
             "--verbose",

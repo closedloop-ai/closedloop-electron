@@ -1,11 +1,11 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import type { JobStore } from "../../main/job-store.js";
 import type {
   OperationDispatcher,
   OperationRequestContext,
 } from "../operation-dispatcher.js";
 import path from "node:path";
-import { getActiveLoopPid } from "./symphony-loop.js";
+import { getActiveLoopPid, getResolvedGitPath } from "./symphony-loop.js";
 import {
   isProcessRunning,
   readProcessPidSync,
@@ -189,12 +189,16 @@ function asString(value: unknown): string | null {
  */
 function resolveCurrentBranch(repoPath: string): string | null {
   try {
-    return execSync("git rev-parse --abbrev-ref HEAD", {
-      cwd: repoPath,
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 10_000,
-    }).trim();
+    return execFileSync(
+      getResolvedGitPath(),
+      ["rev-parse", "--abbrev-ref", "HEAD"],
+      {
+        cwd: repoPath,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 10_000,
+      },
+    ).trim();
   } catch {
     return null;
   }
@@ -205,12 +209,16 @@ function resolveCurrentBranch(repoPath: string): string | null {
  */
 function resolveDefaultBranch(repoPath: string): string {
   try {
-    const ref = execSync("git symbolic-ref refs/remotes/origin/HEAD", {
-      cwd: repoPath,
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 10_000,
-    }).trim();
+    const ref = execFileSync(
+      getResolvedGitPath(),
+      ["symbolic-ref", "refs/remotes/origin/HEAD"],
+      {
+        cwd: repoPath,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 10_000,
+      },
+    ).trim();
     // refs/remotes/origin/main -> main
     return ref.split("/").pop() ?? "main";
   } catch {

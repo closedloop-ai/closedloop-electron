@@ -7,6 +7,14 @@ import {
 } from "../shared/contracts.js";
 import { normalizeAndValidateOrigin } from "./origin-policy.js";
 
+type BinaryPaths = {
+  claude?: string;
+  gh?: string;
+  codex?: string;
+  python3?: string;
+  git?: string;
+};
+
 export interface SettingsStoreOptions {
   cwd?: string;
   name?: string;
@@ -166,6 +174,23 @@ export class SettingsStore {
 
   setAlwaysAllowRules(alwaysAllowRules: AlwaysAllowRule[]): void {
     this.store.set("alwaysAllowRules", alwaysAllowRules);
+  }
+
+  getBinaryPaths(): BinaryPaths {
+    return (this.store.get("binaryPaths" as keyof DesktopSettings) ?? {}) as BinaryPaths;
+  }
+
+  patchBinaryPaths(patch: Record<string, string | null>): BinaryPaths {
+    const merged: BinaryPaths = { ...this.getBinaryPaths() };
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === null) {
+        delete (merged as Record<string, string | undefined>)[key];
+      } else {
+        (merged as Record<string, string>)[key] = value;
+      }
+    }
+    this.store.set("binaryPaths" as keyof DesktopSettings, merged as DesktopSettings["binaryPaths"]);
+    return merged;
   }
 
   update(partial: Partial<DesktopSettings>): DesktopSettings {

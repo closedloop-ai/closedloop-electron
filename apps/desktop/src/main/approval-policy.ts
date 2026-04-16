@@ -32,7 +32,8 @@ export const OPERATION_RISK_TIERS: Record<OperationId, Exclude<RiskTier, "none">
   codex_review:            "medium",
   codex_argue:             "medium",
   deploy:                  "high",
-  learnings:               "medium"
+  learnings:               "medium",
+  binary_paths_settings:   "medium"
 };
 
 /** Converts a RiskTier to a numeric value for threshold comparison. */

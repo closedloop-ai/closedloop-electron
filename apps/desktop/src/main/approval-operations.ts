@@ -30,7 +30,8 @@ export const SUPPORTED_OPERATION_IDS = [
   "repos_config",
   "deploy",
   "learnings",
-  "filesystem"
+  "filesystem",
+  "binary_paths_settings"
 ] as const;
 
 export type OperationId = (typeof SUPPORTED_OPERATION_IDS)[number];
@@ -126,6 +127,9 @@ export function resolveOperationId(pathname: string): string | null {
   }
   if (pathname === "/api/gateway/health-check") {
     return "health_check";
+  }
+  if (pathname.startsWith("/api/gateway/settings/binary-paths")) {
+    return "binary_paths_settings";
   }
   if (pathname === "/api/gateway/repos") {
     return "repos_config";

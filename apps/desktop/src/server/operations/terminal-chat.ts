@@ -3,7 +3,8 @@ import fs from "node:fs/promises";
 import type { ServerResponse } from "node:http";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import type { ProcessManager } from "../process-manager.js";
-import { getShellEnv } from "../shell-path.js";
+import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getOverrideBinaryPaths } from "./symphony-loop.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { createStreamState, processStreamEvent } from "./stream-events.js";
 import { withMcpTools } from "./chat-tools.js";
@@ -149,7 +150,7 @@ async function streamClaude(
 
     void processManager
       .spawnStreaming({
-        command: "claude",
+        command: resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path,
         args: [
           "-p",
           "--verbose",
@@ -237,7 +238,7 @@ async function streamCodex(
 
     void processManager
       .spawnStreaming({
-        command: "codex",
+        command: resolveBinarySync("codex", getOverrideBinaryPaths()?.codex).path,
         args: ["exec", "--full-auto", "--json", "-m", "codex-mini-latest", message],
         cwd: terminalCwd,
         env: codexShellEnv,

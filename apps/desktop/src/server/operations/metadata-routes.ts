@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { getResolvedGitPath } from "./symphony-loop.js";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -35,13 +36,13 @@ export function registerMetadataRoutes(
 ): void {
   dispatcher.register("GET", "/api/gateway/version", async (context) => {
     try {
-      const version = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
+      const version = execFileSync(getResolvedGitPath(), ["rev-parse", "--short", "HEAD"], {
         cwd: process.cwd(),
         encoding: "utf-8"
       }).trim();
 
       const format = "%H|%h|%s|%b|%an|%ci|%cr";
-      const rawLog = execFileSync("git", ["log", "-10", `--pretty=format:${format}---COMMIT_END---`], {
+      const rawLog = execFileSync(getResolvedGitPath(), ["log", "-10", `--pretty=format:${format}---COMMIT_END---`], {
         cwd: process.cwd(),
         encoding: "utf-8"
       });
@@ -212,7 +213,7 @@ function checkPendingClaudeMd(worktreePath: string): string | null {
   }
 
   try {
-    const status = execFileSync("git", ["status", "--porcelain", "--", "CLAUDE.md"], {
+    const status = execFileSync(getResolvedGitPath(), ["status", "--porcelain", "--", "CLAUDE.md"], {
       cwd: worktreePath,
       encoding: "utf-8",
       timeout: 5_000
@@ -228,13 +229,13 @@ function checkBranchStatus(worktreePath: string): {
   remoteMissing: boolean;
 } | null {
   try {
-    const branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+    const branch = execFileSync(getResolvedGitPath(), ["rev-parse", "--abbrev-ref", "HEAD"], {
       cwd: worktreePath,
       encoding: "utf-8",
       timeout: 5_000
     }).trim();
 
-    const remoteExists = execFileSync("git", ["ls-remote", "--heads", "origin", branch], {
+    const remoteExists = execFileSync(getResolvedGitPath(), ["ls-remote", "--heads", "origin", branch], {
       cwd: worktreePath,
       encoding: "utf-8",
       timeout: 5_000
@@ -245,7 +246,7 @@ function checkBranchStatus(worktreePath: string): {
     }
 
     try {
-      const mergedBranches = execFileSync("git", ["branch", "--merged", "origin/main"], {
+      const mergedBranches = execFileSync(getResolvedGitPath(), ["branch", "--merged", "origin/main"], {
         cwd: worktreePath,
         encoding: "utf-8",
         timeout: 5_000

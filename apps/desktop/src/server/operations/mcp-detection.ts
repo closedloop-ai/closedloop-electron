@@ -61,6 +61,13 @@ export function resetMcpDetectionCacheForTests(): void {
   neutralMcpCwdResolver = null;
 }
 
+export function resetMcpDetectionCache(): void {
+  cache.clear();
+  latestByProvider.clear();
+  resolvedNameCache.clear();
+  resolvedBinaryCache.clear();
+}
+
 export function configureMcpDetectionCwdResolver(
   resolver: (() => string | undefined) | null
 ): void {
