@@ -15,11 +15,39 @@ export interface ObservabilityOptions {
   releaseVersion?: string;
 }
 
+type HealthCheckTelemetryInput = {
+  id: string;
+  passed: boolean;
+  error?: string;
+  debug?: {
+    errorCode?: string;
+    stderr?: string;
+    resolvedPath?: string;
+    shell?: string;
+    platform?: NodeJS.Platform;
+    foundAt?: string[];
+  };
+};
+
 export class Observability {
   private static telemetry: TelemetryService | null = null;
   private static posthog: PostHogAnalytics | null = null;
   private static releaseVersion = "";
   private static desktopId = "";
+
+  // Checks for which healthcheck telemetry is emitted. Extend this allowlist in future PRs.
+  private static readonly HEALTH_CHECK_TELEMETRY_IDS = new Set(["claude-cli"]);
+  // Volume math: one stuck user + 30-second poll = ~120 polls/hour.
+  // This design emits: 1x failure_detected on first sighting, then
+  // 7x failure_persistent over an 8-hour session. Negligible Datadog volume.
+  // Clock-backward: negative delta < HEARTBEAT_MS -> heartbeat skipped (correct).
+  // App restart: state is memory-only; re-launch re-emits failure_detected (correct).
+  private static readonly HEARTBEAT_MS = 60 * 60 * 1000; // 1 hour
+
+  private static healthCheckState = new Map<
+    string,
+    { lastState: "passing" | "failing"; lastErrorCode?: string; lastEmittedAt: number }
+  >();
 
   static init(options: ObservabilityOptions): void {
     // Shut down any previous PostHog client to avoid leaking flush timers
@@ -30,6 +58,7 @@ export class Observability {
     });
     Observability.releaseVersion = options.releaseVersion ?? "";
     Observability.desktopId = "";
+    Observability.healthCheckState.clear();
 
     if (options.posthog) {
       Observability.posthog = new PostHogAnalytics(options.posthog);
@@ -50,6 +79,7 @@ export class Observability {
     Observability.posthog = null;
     Observability.releaseVersion = "";
     Observability.desktopId = "";
+    Observability.healthCheckState.clear();
   }
 
   static async shutdown(): Promise<void> {
@@ -308,6 +338,64 @@ export class Observability {
       commandId,
       operationId,
       loopId,
+    });
+  }
+
+  // --- Health check telemetry ---
+
+  static healthCheckResult(check: HealthCheckTelemetryInput): void {
+    if (!Observability.HEALTH_CHECK_TELEMETRY_IDS.has(check.id)) return;
+
+    const state: "passing" | "failing" = check.passed ? "passing" : "failing";
+    const errorCode = check.debug?.errorCode;
+    const prior = Observability.healthCheckState.get(check.id);
+    const now = Date.now();
+
+    let category: TelemetryCategory | null = null;
+    if (!prior) {
+      category = state === "failing" ? "healthcheck.failure_detected" : null;
+    } else if (prior.lastState !== state) {
+      category = state === "failing" ? "healthcheck.failure_detected" : "healthcheck.recovered";
+    } else if (state === "failing" && prior.lastErrorCode !== errorCode) {
+      category = "healthcheck.failure_detected";
+    } else if (
+      state === "failing" &&
+      now - prior.lastEmittedAt >= Observability.HEARTBEAT_MS
+    ) {
+      category = "healthcheck.failure_persistent";
+    }
+
+    Observability.healthCheckState.set(check.id, {
+      lastState: state,
+      lastErrorCode: errorCode,
+      lastEmittedAt: category ? now : prior?.lastEmittedAt ?? now,
+    });
+
+    if (!category) return;
+
+    const message = category === "healthcheck.recovered"
+      ? "recovered"
+      : (check.error ?? "health check failed");
+    const severity: TelemetrySeverity = category === "healthcheck.recovered" ? "info" : "error";
+
+    Observability.emitTelemetry(severity, category, message, {}, {
+      extra: {
+        check_id: check.id,
+        error_code: errorCode,
+        shell: check.debug?.shell,
+        platform: check.debug?.platform,
+        found_elsewhere: (check.debug?.foundAt?.length ?? 0) > 0,
+        resolved_path: check.debug?.resolvedPath,
+        found_at: check.debug?.foundAt,
+        stderr: check.debug?.stderr,
+      },
+    });
+    Observability.capturePostHog(category, {
+      check_id: check.id,
+      error_code: errorCode,
+      found_elsewhere: (check.debug?.foundAt?.length ?? 0) > 0,
+      platform: check.debug?.platform,
+      shell: check.debug?.shell,
     });
   }
 

@@ -5,9 +5,12 @@ import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, test } from "node:test";
+import { afterEach, mock, test } from "node:test";
 import { DesktopGatewayServer } from "../src/server/server.js";
+import { Observability } from "../src/main/observability.js";
+import type { EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
 import { saveCodexChatSession } from "../src/server/operations/codex.js";
+import { _setRunCommandForTesting } from "../src/server/operations/health-check.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { SymphonyDirNotConfiguredError, tryAssertRepoAllowed, tryAssertPathAllowed } from "../src/server/operations/symphony-utils.js";
@@ -65,6 +68,11 @@ afterEach(async () => {
   for (const tempPath of tempPathsToClean.splice(0)) {
     await fs.rm(tempPath, { recursive: true, force: true });
   }
+
+  // Reset Observability singleton so telemetry state does not bleed between tests
+  await Observability.shutdown();
+  Observability.reset();
+  mock.restoreAll();
 });
 
 test("uses closedloop-ai discovery file path by default", () => {
@@ -3607,9 +3615,13 @@ test("python3 health check: fails when python3 not found", async () => {
   assert.ok(pythonCheck, "python3 check should be present");
   assert.equal(pythonCheck.passed, false, "python3 not found should fail");
   assert.equal(pythonCheck.required, true, "python3 check should be required");
+  // Remediation is either an install hint (binary not found anywhere) or a PATH hint
+  // (binary found at a known location like /usr/bin/python3 but not on the test PATH).
+  // Both are valid and informative; accept either.
   assert.ok(
-    pythonCheck.remediation?.includes("Install Python 3.10 or later"),
-    "remediation should mention Install Python 3.10 or later"
+    pythonCheck.remediation?.includes("Install Python 3.10 or later") ||
+      pythonCheck.remediation?.includes("PATH"),
+    `remediation should mention install or PATH, got: ${pythonCheck.remediation}`
   );
   assert.equal(body.allRequiredPassed, false, "allRequiredPassed should be false when python3 missing");
 });
@@ -3788,6 +3800,389 @@ test("python3 health check: fails for unparseable version string", async () => {
     "error should indicate unable to determine version"
   );
   assert.equal(body.allRequiredPassed, false, "allRequiredPassed should be false for unparseable version");
+});
+
+// ---- Phase 1 tests: claude-cli rich diagnostics ----
+
+test("claude-cli ENOENT with no foundAt: error is Not found, remediation mentions npm install", async () => {
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.11.0"\n'
+  );
+
+  // Remove the fake claude binary so ENOENT is triggered
+  await fs.rm(path.join(binDir, "claude"), { force: true });
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "phase1-enoent-no-foundat",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; passed: boolean; error?: string; remediation?: string }>;
+  };
+
+  const check = body.checks.find((c) => c.id === "claude-cli");
+  assert.ok(check, "claude-cli check should be present");
+  assert.equal(check.passed, false);
+  assert.equal(check.error, "Not found");
+  assert.ok(check.remediation?.includes("npm install"), `remediation should mention npm install, got: ${check.remediation}`);
+});
+
+test("claude-cli ENOENT with foundAt: error mentions path, remediation mentions Add to PATH", async () => {
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.11.0"\n'
+  );
+
+  // Remove claude from binDir (PATH) but place it in a known location (~/.claude/local/claude)
+  await fs.rm(path.join(binDir, "claude"), { force: true });
+  const homeDir = path.join(tmpDir, "home");
+  const claudeLocalDir = path.join(homeDir, ".claude", "local");
+  await fs.mkdir(claudeLocalDir, { recursive: true });
+  await fs.writeFile(path.join(claudeLocalDir, "claude"), '#!/bin/sh\necho "1.5.0"', { mode: 0o755 });
+
+  process.env.HOME = homeDir;
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "phase1-enoent-with-foundat",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; passed: boolean; error?: string; remediation?: string; debug?: { foundAt?: string[] } }>;
+  };
+
+  const check = body.checks.find((c) => c.id === "claude-cli");
+  assert.ok(check, "claude-cli check should be present");
+  assert.equal(check.passed, false);
+  assert.ok(check.error?.includes("but not on PATH"), `error should mention 'but not on PATH', got: ${check.error}`);
+  assert.ok(check.remediation?.includes("Add"), `remediation should mention 'Add', got: ${check.remediation}`);
+  assert.ok(check.remediation?.includes("to PATH"), `remediation should mention 'to PATH', got: ${check.remediation}`);
+});
+
+test("claude-cli ETIMEDOUT: error mentions Timed out, remediation mentions terminal", async () => {
+  // Mock runCommand so `claude --version` throws ETIMEDOUT immediately.
+  // Avoids spawning a real process or waiting on the 3s command timeout,
+  // and dodges shell-portability issues (dash on Ubuntu rejects `read -t`).
+  _setRunCommandForTesting(async (cmd) => {
+    if (cmd === "claude") {
+      throw { code: "ETIMEDOUT", stderr: "", message: "command timed out" };
+    }
+    throw { code: "ENOENT", stderr: "", message: "not found" };
+  });
+  try {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-etimedout-"));
+    tempPathsToClean.push(tmpDir);
+    const symphonyDir = path.join(tmpDir, "symphony-home");
+    await fs.mkdir(symphonyDir, { recursive: true });
+
+    const server = new DesktopGatewayServer({
+      host: "127.0.0.1",
+      preferredPort: 0,
+      fallbackPorts: [0],
+      webAppOrigin: "https://app.symphony.com",
+      getAllowedDirectories: () => [tmpDir],
+      machineName: "phase1-etimedout",
+      version: "0.1.0-test",
+      capabilities: EMPTY_CAPABILITIES,
+      discoveryFilePath: path.join(tmpDir, "electron-port"),
+      getSymphonyDir: () => symphonyDir,
+    });
+    serversToClose.push(server);
+    await server.start();
+
+    const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      checks: Array<{ id: string; passed: boolean; error?: string; remediation?: string }>;
+    };
+
+    const check = body.checks.find((c) => c.id === "claude-cli");
+    assert.ok(check, "claude-cli check should be present");
+    assert.equal(check.passed, false);
+    assert.ok(check.error?.includes("Timed out"), `error should mention Timed out, got: ${check.error}`);
+    assert.ok(
+      check.remediation?.includes("terminal"),
+      `remediation should mention terminal, got: ${check.remediation}`
+    );
+  } finally {
+    _setRunCommandForTesting();
+  }
+});
+
+test("KNOWN_CLAUDE_LOCATIONS probe: fake binary at known location appears in foundAt", async () => {
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.11.0"\n'
+  );
+
+  // Remove claude from PATH
+  await fs.rm(path.join(binDir, "claude"), { force: true });
+
+  // Place claude at ~/.volta/bin/claude (a KNOWN_CLAUDE_LOCATIONS entry)
+  const homeDir = path.join(tmpDir, "home");
+  const voltaBinDir = path.join(homeDir, ".volta", "bin");
+  await fs.mkdir(voltaBinDir, { recursive: true });
+  await fs.writeFile(path.join(voltaBinDir, "claude"), '#!/bin/sh\necho "1.5.0"', { mode: 0o755 });
+
+  process.env.HOME = homeDir;
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "phase1-known-locations",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; passed: boolean; debug?: { foundAt?: string[] } }>;
+  };
+
+  const check = body.checks.find((c) => c.id === "claude-cli");
+  assert.ok(check, "claude-cli check should be present");
+  assert.equal(check.passed, false);
+  assert.ok(Array.isArray(check.debug?.foundAt), "debug.foundAt should be an array");
+  assert.ok(
+    check.debug?.foundAt?.some((p) => p.includes(".volta")),
+    `foundAt should include the volta path, got: ${JSON.stringify(check.debug?.foundAt)}`
+  );
+});
+
+test("claude-cli EACCES with foundAt: error mentions not executable, remediation mentions chmod +x", async () => {
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.11.0"\n'
+  );
+
+  // Make the claude binary on PATH non-executable so execFileAsync fails with EACCES.
+  // Note: fs.writeFile({ mode }) only applies when creating a new file; since the fixture
+  // already created claude with 0o755, we must explicitly chmod it.
+  const claudeOnPath = path.join(binDir, "claude");
+  await fs.chmod(claudeOnPath, 0o644);
+
+  // Place an executable claude at ~/.claude/local/claude (a KNOWN_CLAUDE_LOCATIONS entry)
+  // so that collectBinaryDebug finds it and populates foundAt
+  const homeDir = path.join(tmpDir, "home");
+  const claudeLocalDir = path.join(homeDir, ".claude", "local");
+  await fs.mkdir(claudeLocalDir, { recursive: true });
+  const knownClaudePath = path.join(claudeLocalDir, "claude");
+  await fs.writeFile(knownClaudePath, '#!/bin/sh\necho "1.5.0"', { mode: 0o755 });
+
+  process.env.HOME = homeDir;
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "phase1-eacces-with-foundat",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; passed: boolean; error?: string; remediation?: string }>;
+  };
+
+  const check = body.checks.find((c) => c.id === "claude-cli");
+  assert.ok(check, "claude-cli check should be present");
+  assert.equal(check.passed, false);
+  assert.ok(
+    check.error?.includes("not executable"),
+    `error should mention 'not executable', got: ${check.error}`
+  );
+  assert.ok(
+    check.remediation?.includes("chmod +x"),
+    `remediation should mention 'chmod +x', got: ${check.remediation}`
+  );
+  // Remediation must point at the actually-broken file (claudeOnPath), not
+  // the unrelated executable at knownClaudePath. Regression guard for the
+  // PR review comment about preserving the failing path in EACCES diagnostics.
+  assert.ok(
+    check.remediation?.includes(claudeOnPath),
+    `remediation should reference the non-executable path ${claudeOnPath}, got: ${check.remediation}`
+  );
+  assert.ok(
+    !check.remediation?.includes(knownClaudePath),
+    `remediation should not reference the working path ${knownClaudePath}, got: ${check.remediation}`
+  );
+});
+
+// ---- Telemetry dedupe integration tests ----
+
+test("telemetry dedupe: ENOENT health-check emits healthcheck.failure_detected with check_id=claude-cli", async () => {
+  const telemetryEvents: EnrichedTelemetryEvent[] = [];
+  Observability.init({ telemetrySend: (event) => telemetryEvents.push(event) });
+
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.11.0"\n'
+  );
+
+  // Remove claude binary so ENOENT is triggered
+  await fs.rm(path.join(binDir, "claude"), { force: true });
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "telemetry-dedupe-enoent-1",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+
+  const failureEvent = telemetryEvents.find((e) => e.category === "healthcheck.failure_detected");
+  assert.ok(failureEvent, "healthcheck.failure_detected should have been emitted");
+  assert.equal(failureEvent.diagnostics?.extra?.check_id, "claude-cli");
+});
+
+test("telemetry dedupe: second identical ENOENT health-check emits no additional telemetry", async () => {
+  const telemetryEvents: EnrichedTelemetryEvent[] = [];
+  Observability.init({ telemetrySend: (event) => telemetryEvents.push(event) });
+
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.11.0"\n'
+  );
+
+  // Remove claude binary so ENOENT is triggered
+  await fs.rm(path.join(binDir, "claude"), { force: true });
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "telemetry-dedupe-enoent-2",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  // First call emits failure_detected
+  await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  const countAfterFirst = telemetryEvents.filter((e) => e.category === "healthcheck.failure_detected").length;
+  assert.equal(countAfterFirst, 1, "first call should emit exactly one failure_detected");
+
+  // Second call with same failure should be deduped -- no new event
+  await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  const countAfterSecond = telemetryEvents.filter((e) => e.category === "healthcheck.failure_detected").length;
+  assert.equal(countAfterSecond, 1, "second identical call should not emit another failure_detected (dedupe)");
+});
+
+test("telemetry dedupe: health-check recovery emits healthcheck.recovered", async () => {
+  const telemetryEvents: EnrichedTelemetryEvent[] = [];
+  Observability.init({ telemetrySend: (event) => telemetryEvents.push(event) });
+
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.11.0"\n'
+  );
+
+  // Start with no claude binary (ENOENT)
+  const claudePath = path.join(binDir, "claude");
+  await fs.rm(claudePath, { force: true });
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "telemetry-dedupe-recovery",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  // First call: ENOENT -> failure_detected
+  await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  assert.ok(
+    telemetryEvents.some((e) => e.category === "healthcheck.failure_detected"),
+    "failure_detected should have been emitted"
+  );
+
+  // Restore claude binary
+  await fs.writeFile(claudePath, '#!/bin/sh\necho "1.5.0"', { mode: 0o755 });
+
+  // Second call: now passing -> recovered
+  await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  assert.ok(
+    telemetryEvents.some((e) => e.category === "healthcheck.recovered"),
+    "healthcheck.recovered should have been emitted after fix"
+  );
 });
 
 async function findAvailablePort(excluded: number[] = []): Promise<number> {

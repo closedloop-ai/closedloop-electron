@@ -27,7 +27,10 @@ export type TelemetryCategory =
   | "command.initiated"
   | "command.started"
   | "command.completed"
-  | "queue.stats_changed";
+  | "queue.stats_changed"
+  | "healthcheck.failure_detected"
+  | "healthcheck.recovered"
+  | "healthcheck.failure_persistent";
 
 export interface TelemetryTraceContext {
   computeTargetId?: string;
