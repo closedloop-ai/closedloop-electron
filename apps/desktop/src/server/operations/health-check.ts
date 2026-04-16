@@ -6,7 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { Observability } from "../../main/observability.js";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
-import { getShellEnv, resolveExecutablesOnPath } from "../shell-path.js";
+import { getShellEnv, resolveBinary, resolveExecutablesOnPath } from "../shell-path.js";
 import { detectMcpAvailability, type McpDetectionResult } from "./mcp-detection.js";
 import { getInstalledPluginVersions, isPluginInstalled } from "./plugin-cache.js";
 import type { ProcessManager } from "../process-manager.js";
@@ -30,6 +30,7 @@ type CheckResult = {
     platform?: NodeJS.Platform;
     foundAt?: string[];       // executable locations where the binary was found (PATH sweep + known dirs)
     nonExecutableAt?: string[]; // paths that exist but are not executable (drives EACCES diagnostics)
+    overrideUsed?: string;    // populated when a manual override path was tried (see binary-paths settings)
   };
 };
 
@@ -54,27 +55,29 @@ export function registerHealthCheckRoutes(
   detectMcpOverride?: (
     provider: "claude" | "codex",
     expectedMcpUrl?: string
-  ) => Promise<McpDetectionResult>
+  ) => Promise<McpDetectionResult>,
+  getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string }
 ): void {
   const detectMcp = detectMcpOverride ?? detectMcpAvailability;
   const configDir = () => path.join(getSymphonyDir(), "config");
 
   dispatcher.register("GET", "/api/gateway/health-check", async (context) => {
     const expectedMcpUrl = context.query.get("expectedMcpUrl")?.trim() || undefined;
+    const paths = getBinaryPaths?.();
     const [checks, claudeMcp, codexMcp] = await Promise.all([
       Promise.all([
-        checkGit(processManager),
-        checkClaudeCli(processManager),
-        checkGhCli(processManager),
-        checkGhAuth(processManager),
+        checkGit(processManager, paths?.git),
+        checkClaudeCli(processManager, paths?.claude),
+        checkGhCli(processManager, paths?.gh),
+        checkGhAuth(processManager, paths?.gh),
         Promise.resolve(checkPlugin("code", "Symphony Plugin", true)),
         Promise.resolve(checkPlugin("platform", "Platform Plugin", true)),
         Promise.resolve(checkPlugin("judges", "Judges Plugin", true)),
         Promise.resolve(checkPlugin("code-review", "Code Review Plugin", true)),
         Promise.resolve(checkPlugin("self-learning", "Self-Learning Plugin", true)),
         Promise.resolve(await checkWorktreeDir(configDir)),
-        checkCodex(processManager),
-        checkPython3(processManager)
+        checkCodex(processManager, paths?.codex),
+        checkPython3(processManager, paths?.python3)
       ]),
       detectMcp("claude", expectedMcpUrl),
       detectMcp("codex", expectedMcpUrl),
@@ -331,13 +334,28 @@ function classifyBinaryRemediation(binaryName: string, spawnError: CommandError,
   return "See diagnostics tab for details";
 }
 
-async function checkGit(_processManager: ProcessManager): Promise<CheckResult> {
+async function checkGit(_processManager: ProcessManager, override?: string): Promise<CheckResult> {
+  const resolved = await resolveBinary("git", override);
+  if (resolved.source === "override_invalid") {
+    return {
+      id: "git",
+      label: "Git",
+      required: true,
+      passed: false,
+      error: "Override path does not exist or is not executable",
+      remediation: "Update git binary path in Settings, or clear the override",
+      debug: { overrideUsed: override },
+    };
+  }
   try {
-    const { stdout } = await runCommand("git", ["--version"]);
+    const { stdout } = await runCommand(resolved.path, ["--version"]);
     return { id: "git", label: "Git", required: true, passed: true, version: parseVersion(stdout) };
   } catch (err) {
     const spawnError = err as CommandError;
     const debug = await collectBinaryDebug("git", spawnError, KNOWN_GIT_LOCATIONS);
+    if (resolved.source === "override") {
+      debug.overrideUsed = override;
+    }
     return {
       id: "git",
       label: "Git",
@@ -350,9 +368,21 @@ async function checkGit(_processManager: ProcessManager): Promise<CheckResult> {
   }
 }
 
-async function checkClaudeCli(_processManager: ProcessManager): Promise<CheckResult> {
+async function checkClaudeCli(_processManager: ProcessManager, override?: string): Promise<CheckResult> {
+  const resolved = await resolveBinary("claude", override);
+  if (resolved.source === "override_invalid") {
+    return {
+      id: "claude-cli",
+      label: "Claude CLI",
+      required: true,
+      passed: false,
+      error: "Override path does not exist or is not executable",
+      remediation: "Update binary path in Settings, or clear the override",
+      debug: { overrideUsed: override },
+    };
+  }
   try {
-    const { stdout } = await runCommand("claude", ["--version"]);
+    const { stdout } = await runCommand(resolved.path, ["--version"]);
     return {
       id: "claude-cli",
       label: "Claude CLI",
@@ -363,6 +393,9 @@ async function checkClaudeCli(_processManager: ProcessManager): Promise<CheckRes
   } catch (err) {
     const spawnError = err as CommandError;
     const debug = await collectBinaryDebug("claude", spawnError, KNOWN_CLAUDE_LOCATIONS);
+    if (resolved.source === "override") {
+      debug.overrideUsed = override;
+    }
     return {
       id: "claude-cli",
       label: "Claude CLI",
@@ -375,9 +408,21 @@ async function checkClaudeCli(_processManager: ProcessManager): Promise<CheckRes
   }
 }
 
-async function checkGhCli(_processManager: ProcessManager): Promise<CheckResult> {
+async function checkGhCli(_processManager: ProcessManager, override?: string): Promise<CheckResult> {
+  const resolved = await resolveBinary("gh", override);
+  if (resolved.source === "override_invalid") {
+    return {
+      id: "gh-cli",
+      label: "GitHub CLI",
+      required: true,
+      passed: false,
+      error: "Override path does not exist or is not executable",
+      remediation: "Update gh binary path in Settings, or clear the override",
+      debug: { overrideUsed: override },
+    };
+  }
   try {
-    const { stdout } = await runCommand("gh", ["--version"]);
+    const { stdout } = await runCommand(resolved.path, ["--version"]);
     return {
       id: "gh-cli",
       label: "GitHub CLI",
@@ -388,6 +433,9 @@ async function checkGhCli(_processManager: ProcessManager): Promise<CheckResult>
   } catch (err) {
     const spawnError = err as CommandError;
     const debug = await collectBinaryDebug("gh", spawnError, KNOWN_GH_LOCATIONS);
+    if (resolved.source === "override") {
+      debug.overrideUsed = override;
+    }
     return {
       id: "gh-cli",
       label: "GitHub CLI",
@@ -400,9 +448,20 @@ async function checkGhCli(_processManager: ProcessManager): Promise<CheckResult>
   }
 }
 
-async function checkGhAuth(_processManager: ProcessManager): Promise<CheckResult> {
+async function checkGhAuth(_processManager: ProcessManager, override?: string): Promise<CheckResult> {
+  const resolved = await resolveBinary("gh", override);
+  if (resolved.source === "override_invalid") {
+    return {
+      id: "gh-auth",
+      label: "GitHub Auth",
+      required: true,
+      passed: false,
+      error: "Override path does not exist or is not executable",
+      remediation: "Update gh binary path in Settings, or clear the override",
+    };
+  }
   try {
-    await runCommand("gh", ["auth", "status"]);
+    await runCommand(resolved.path, ["auth", "status"]);
     return { id: "gh-auth", label: "GitHub Auth", required: true, passed: true };
   } catch {
     return {
@@ -468,13 +527,28 @@ async function checkWorktreeDir(getConfigDir: () => string): Promise<CheckResult
   };
 }
 
-async function checkCodex(_processManager: ProcessManager): Promise<CheckResult> {
+async function checkCodex(_processManager: ProcessManager, override?: string): Promise<CheckResult> {
+  const resolved = await resolveBinary("codex", override);
+  if (resolved.source === "override_invalid") {
+    return {
+      id: "codex",
+      label: "Codex CLI",
+      required: false,
+      passed: false,
+      error: "Override path does not exist or is not executable",
+      remediation: "Update codex binary path in Settings, or clear the override",
+      debug: { overrideUsed: override },
+    };
+  }
   try {
-    const { stdout } = await runCommand("codex", ["--version"]);
+    const { stdout } = await runCommand(resolved.path, ["--version"]);
     return { id: "codex", label: "Codex CLI", required: false, passed: true, version: parseVersion(stdout) };
   } catch (err) {
     const spawnError = err as CommandError;
     const debug = await collectBinaryDebug("codex", spawnError, KNOWN_CODEX_LOCATIONS);
+    if (resolved.source === "override") {
+      debug.overrideUsed = override;
+    }
     return {
       id: "codex",
       label: "Codex CLI",
@@ -487,12 +561,24 @@ async function checkCodex(_processManager: ProcessManager): Promise<CheckResult>
   }
 }
 
-async function checkPython3(_processManager: ProcessManager): Promise<CheckResult> {
+async function checkPython3(_processManager: ProcessManager, override?: string): Promise<CheckResult> {
   const REMEDIATION = process.platform === "darwin"
     ? "Install Python 3.10 or later: brew install python@3.13"
     : "Install Python 3.10 or later: sudo apt-get install python3 (or your distro's package manager)";
+  const resolved = await resolveBinary("python3", override);
+  if (resolved.source === "override_invalid") {
+    return {
+      id: "python3",
+      label: "python3",
+      required: true,
+      passed: false,
+      error: "Override path does not exist or is not executable",
+      remediation: "Update python3 binary path in Settings, or clear the override",
+      debug: { overrideUsed: override },
+    };
+  }
   try {
-    const { stdout } = await runCommand("python3", ["--version"]);
+    const { stdout } = await runCommand(resolved.path, ["--version"]);
     const version = parseVersion(stdout);
     if (!version) {
       return {
@@ -523,6 +609,9 @@ async function checkPython3(_processManager: ProcessManager): Promise<CheckResul
   } catch (err) {
     const spawnError = err as CommandError;
     const debug = await collectBinaryDebug("python3", spawnError, KNOWN_PYTHON3_LOCATIONS);
+    if (resolved.source === "override") {
+      debug.overrideUsed = override;
+    }
     return {
       id: "python3",
       label: "python3",

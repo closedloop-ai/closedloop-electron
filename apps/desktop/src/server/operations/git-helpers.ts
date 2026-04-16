@@ -1,4 +1,5 @@
 import { execSync } from "node:child_process";
+import { getResolvedGitPath } from "./symphony-loop.js";
 
 /**
  * Resolve the git remote full name (org/repo) from a local repo path.
@@ -6,7 +7,7 @@ import { execSync } from "node:child_process";
  */
 export function resolveRepoFullName(repoPath: string): string | null {
   try {
-    const remoteUrl = execSync("git remote get-url origin", {
+    const remoteUrl = execSync(`${getResolvedGitPath()} remote get-url origin`, {
       cwd: repoPath,
       encoding: "utf-8",
       stdio: "pipe",
@@ -29,7 +30,7 @@ export function findWorktreeForBranch(
   branchName: string,
 ): string | null {
   try {
-    const output = execSync("git worktree list --porcelain", {
+    const output = execSync(`${getResolvedGitPath()} worktree list --porcelain`, {
       cwd: expandedRepoPath,
       encoding: "utf-8",
       stdio: "pipe",
@@ -57,7 +58,7 @@ export function findWorktreeForBranch(
  */
 export function listAllWorktrees(expandedRepoPath: string): string[] {
   try {
-    const output = execSync("git worktree list --porcelain", {
+    const output = execSync(`${getResolvedGitPath()} worktree list --porcelain`, {
       cwd: expandedRepoPath,
       encoding: "utf-8",
       stdio: "pipe",

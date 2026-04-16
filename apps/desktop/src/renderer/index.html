@@ -464,6 +464,228 @@
         border-color: var(--border);
       }
 
+      /* CLI Tools settings tab */
+      .cli-tools-intro {
+        margin-bottom: 18px;
+      }
+
+      .cli-tool-list {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .cli-tool-card {
+        position: relative;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 16px 14px 18px;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+        overflow: hidden;
+      }
+
+      .cli-tool-card::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 3px;
+        background: transparent;
+        transition: background 0.2s ease;
+      }
+
+      .cli-tool-card.state-override::before {
+        background: var(--accent);
+      }
+
+      .cli-tool-card.state-missing::before,
+      .cli-tool-card.state-invalid::before {
+        background: #d97706; /* amber-600 */
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .cli-tool-card.state-missing::before,
+        .cli-tool-card.state-invalid::before {
+          background: #f59e0b; /* amber-500 */
+        }
+      }
+
+      .cli-tool-card:focus-within {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--focus);
+      }
+
+      .cli-tool-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .cli-tool-identity {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        min-width: 0;
+        flex-wrap: wrap;
+      }
+
+      .cli-tool-label {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--ink);
+        letter-spacing: -0.005em;
+      }
+
+      .cli-tool-badge {
+        flex-shrink: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        padding: 3px 9px 3px 8px;
+        border-radius: 999px;
+        background: transparent;
+        color: var(--muted);
+        border: 1px solid var(--border);
+        white-space: nowrap;
+        transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+      }
+
+      .cli-tool-badge::before {
+        content: "";
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: currentColor;
+        opacity: 0.85;
+      }
+
+      .cli-tool-card.state-ok .cli-tool-badge {
+        color: var(--accent);
+        border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+        background: color-mix(in srgb, var(--accent) 8%, transparent);
+      }
+
+      .cli-tool-card.state-override .cli-tool-badge {
+        color: var(--accent);
+        border-color: var(--accent);
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+      }
+
+      .cli-tool-card.state-missing .cli-tool-badge,
+      .cli-tool-card.state-invalid .cli-tool-badge {
+        color: #b45309; /* amber-700 */
+        border-color: color-mix(in srgb, #d97706 40%, var(--border));
+        background: color-mix(in srgb, #d97706 10%, transparent);
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .cli-tool-card.state-missing .cli-tool-badge,
+        .cli-tool-card.state-invalid .cli-tool-badge {
+          color: #fbbf24;
+          border-color: color-mix(in srgb, #f59e0b 50%, var(--border));
+          background: color-mix(in srgb, #f59e0b 15%, transparent);
+        }
+      }
+
+      .cli-tool-hint {
+        margin: 0;
+        font-size: 11px;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+
+      .cli-tool-hint:not(:empty) {
+        margin-top: 8px;
+      }
+
+      .cli-tool-card.state-missing .cli-tool-hint,
+      .cli-tool-card.state-invalid .cli-tool-hint {
+        color: #b45309;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .cli-tool-card.state-missing .cli-tool-hint,
+        .cli-tool-card.state-invalid .cli-tool-hint {
+          color: #fbbf24;
+        }
+      }
+
+      .cli-tool-input-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-top: 10px;
+      }
+
+      .cli-tool-input-row input {
+        flex: 1 1 auto;
+        min-width: 0;
+        padding: 8px 10px;
+        font-family: "Berkeley Mono", "JetBrains Mono", "SF Mono", "Fira Code", monospace;
+        font-size: 12px;
+        transition: color 0.12s ease;
+      }
+
+      /* Auto-detected path displays muted to signal "default, not pinned". */
+      .cli-tool-input-row input[data-mode="detected"] {
+        color: var(--muted);
+      }
+
+      .cli-tool-input-row input[data-mode="detected"]:focus {
+        color: var(--ink);
+      }
+
+      .cli-tool-input-row input::placeholder {
+        color: var(--muted);
+        opacity: 0.55;
+      }
+
+      .cli-tool-actions {
+        display: flex;
+        gap: 6px;
+        flex-shrink: 0;
+      }
+
+      .cli-tool-actions button {
+        padding: 8px 12px;
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 1;
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: var(--accent-ink);
+        border-radius: 8px;
+        cursor: pointer;
+        transition: filter 0.12s ease;
+      }
+
+      .cli-tool-actions button.secondary {
+        background: var(--surface);
+        color: var(--ink);
+        border-color: var(--border);
+      }
+
+      .cli-tool-actions button:hover {
+        filter: brightness(1.05);
+      }
+
+      @media (max-width: 620px) {
+        .cli-tool-input-row {
+          flex-direction: column;
+          align-items: stretch;
+        }
+        .cli-tool-actions {
+          justify-content: flex-end;
+        }
+      }
+
       .approval-card {
         border: 1px solid var(--border);
         border-radius: 10px;
@@ -1485,6 +1707,30 @@
           </div>
           <p class="muted warning-text" id="onboardingSandboxWarning"></p>
         </div>
+        <details id="onboardingBinaryPathsDetails" style="margin: 8px 0;">
+          <summary style="cursor: pointer; font-weight: 600; color: var(--accent); padding: 4px 0; user-select: none;">Configure binary paths (optional)</summary>
+          <p class="field-help" style="margin: 6px 0 12px;">Leave blank to auto-detect. Only set these if the diagnostics check shows a binary as "not found" even though it's installed.</p>
+          <div class="row">
+            <label for="onboardingBinaryPathClaude">claude</label>
+            <input id="onboardingBinaryPathClaude" placeholder="Auto-detect from PATH" />
+          </div>
+          <div class="row">
+            <label for="onboardingBinaryPathGh">gh</label>
+            <input id="onboardingBinaryPathGh" placeholder="Auto-detect from PATH" />
+          </div>
+          <div class="row">
+            <label for="onboardingBinaryPathCodex">codex</label>
+            <input id="onboardingBinaryPathCodex" placeholder="Auto-detect from PATH" />
+          </div>
+          <div class="row">
+            <label for="onboardingBinaryPathPython3">python3</label>
+            <input id="onboardingBinaryPathPython3" placeholder="Auto-detect from PATH" />
+          </div>
+          <div class="row">
+            <label for="onboardingBinaryPathGit">git</label>
+            <input id="onboardingBinaryPathGit" placeholder="Auto-detect from PATH" />
+          </div>
+        </details>
         <div class="actions">
           <button id="completeOnboarding">Complete Setup</button>
         </div>
@@ -1595,6 +1841,7 @@
           <button data-settings-tab="relay-gateway" class="active">Relay / Gateway</button>
           <button data-settings-tab="security">Security</button>
           <button data-settings-tab="policies">Policies</button>
+          <button data-settings-tab="binary-paths">CLI Tools</button>
         </div>
 
         <!-- Relay / Gateway sub-tab -->
@@ -1664,6 +1911,96 @@
             <button id="saveSecurity">Save</button>
             <button class="secondary" id="reloadSecurity">Reload</button>
             <p class="muted" id="securityMessage"></p>
+          </div>
+        </div>
+
+        <!-- CLI Tools sub-tab -->
+        <div id="settings-binary-paths" class="settings-sub-panel">
+          <div class="cli-tools-intro">
+            <h3 class="settings-group-title">Command-Line Tools</h3>
+            <p class="settings-group-desc">ClosedLoop runs these tools on your behalf. They're located automatically on your system. If a tool is missing or the wrong version is being used, set a custom path below.</p>
+          </div>
+          <div class="cli-tool-list">
+            <div class="cli-tool-card" id="binary-path-row-claude">
+              <div class="cli-tool-header">
+                <div class="cli-tool-identity">
+                  <span class="cli-tool-label">Claude Code</span>
+                </div>
+                <span class="cli-tool-badge" data-tool-badge="claude">Checking</span>
+              </div>
+              <div class="cli-tool-input-row">
+                <input id="binaryPathClaude" type="text" placeholder="Enter path to this tool" aria-label="Claude Code path" spellcheck="false" autocomplete="off" />
+                <div class="cli-tool-actions">
+                  <button type="button" data-binary-save="claude">Save</button>
+                  <button type="button" class="secondary" data-binary-clear="claude">Reset</button>
+                </div>
+              </div>
+              <p class="cli-tool-hint" data-tool-hint="claude"></p>
+            </div>
+            <div class="cli-tool-card" id="binary-path-row-gh">
+              <div class="cli-tool-header">
+                <div class="cli-tool-identity">
+                  <span class="cli-tool-label">GitHub CLI</span>
+                </div>
+                <span class="cli-tool-badge" data-tool-badge="gh">Checking</span>
+              </div>
+              <div class="cli-tool-input-row">
+                <input id="binaryPathGh" type="text" placeholder="Enter path to this tool" aria-label="GitHub CLI path" spellcheck="false" autocomplete="off" />
+                <div class="cli-tool-actions">
+                  <button type="button" data-binary-save="gh">Save</button>
+                  <button type="button" class="secondary" data-binary-clear="gh">Reset</button>
+                </div>
+              </div>
+              <p class="cli-tool-hint" data-tool-hint="gh"></p>
+            </div>
+            <div class="cli-tool-card" id="binary-path-row-codex">
+              <div class="cli-tool-header">
+                <div class="cli-tool-identity">
+                  <span class="cli-tool-label">Codex CLI</span>
+                </div>
+                <span class="cli-tool-badge" data-tool-badge="codex">Checking</span>
+              </div>
+              <div class="cli-tool-input-row">
+                <input id="binaryPathCodex" type="text" placeholder="Enter path to this tool" aria-label="Codex CLI path" spellcheck="false" autocomplete="off" />
+                <div class="cli-tool-actions">
+                  <button type="button" data-binary-save="codex">Save</button>
+                  <button type="button" class="secondary" data-binary-clear="codex">Reset</button>
+                </div>
+              </div>
+              <p class="cli-tool-hint" data-tool-hint="codex"></p>
+            </div>
+            <div class="cli-tool-card" id="binary-path-row-python3">
+              <div class="cli-tool-header">
+                <div class="cli-tool-identity">
+                  <span class="cli-tool-label">Python 3</span>
+                </div>
+                <span class="cli-tool-badge" data-tool-badge="python3">Checking</span>
+              </div>
+              <div class="cli-tool-input-row">
+                <input id="binaryPathPython3" type="text" placeholder="Enter path to this tool" aria-label="Python 3 path" spellcheck="false" autocomplete="off" />
+                <div class="cli-tool-actions">
+                  <button type="button" data-binary-save="python3">Save</button>
+                  <button type="button" class="secondary" data-binary-clear="python3">Reset</button>
+                </div>
+              </div>
+              <p class="cli-tool-hint" data-tool-hint="python3"></p>
+            </div>
+            <div class="cli-tool-card" id="binary-path-row-git">
+              <div class="cli-tool-header">
+                <div class="cli-tool-identity">
+                  <span class="cli-tool-label">Git</span>
+                </div>
+                <span class="cli-tool-badge" data-tool-badge="git">Checking</span>
+              </div>
+              <div class="cli-tool-input-row">
+                <input id="binaryPathGit" type="text" placeholder="Enter path to this tool" aria-label="Git path" spellcheck="false" autocomplete="off" />
+                <div class="cli-tool-actions">
+                  <button type="button" data-binary-save="git">Save</button>
+                  <button type="button" class="secondary" data-binary-clear="git">Reset</button>
+                </div>
+              </div>
+              <p class="cli-tool-hint" data-tool-hint="git"></p>
+            </div>
           </div>
         </div>
 
@@ -1756,6 +2093,9 @@
           btn.classList.add("active");
           document.getElementById(`settings-${tabName}`)?.classList.add("active");
         }
+        if (tabName === "binary-paths" && typeof refreshCliToolDetection === "function") {
+          void refreshCliToolDetection();
+        }
       }
 
       settingsSubTabs.forEach((btn) => {
@@ -1778,6 +2118,10 @@
       const relayGatewayMessage = document.getElementById("relayGatewayMessage");
       const securityMessage = document.getElementById("securityMessage");
       const policiesMessage = document.getElementById("policiesMessage");
+      const setCliToolHint = (name, text) => {
+        const hint = document.querySelector(`[data-tool-hint="${name}"]`);
+        if (hint) hint.textContent = text || "";
+      };
       const dashboardPort = document.getElementById("dashboardPort");
       const dashboardCloud = document.getElementById("dashboardCloud");
       const dashboardTarget = document.getElementById("dashboardTarget");
@@ -2496,6 +2840,144 @@
         updateSandboxBaseWarning();
       }
 
+      const binaryPathInputs = {
+        claude: document.getElementById("binaryPathClaude"),
+        gh: document.getElementById("binaryPathGh"),
+        codex: document.getElementById("binaryPathCodex"),
+        python3: document.getElementById("binaryPathPython3"),
+        git: document.getElementById("binaryPathGit"),
+      };
+
+      const CLI_TOOL_LABELS = {
+        claude: "Claude Code",
+        gh: "GitHub CLI",
+        codex: "Codex CLI",
+        python3: "Python 3",
+        git: "Git",
+      };
+
+      const CLI_TOOL_STATE_CLASSES = ["state-ok", "state-override", "state-missing", "state-invalid"];
+
+      function setCardState(name, stateClass) {
+        const card = document.getElementById(`binary-path-row-${name}`);
+        if (!card) return;
+        for (const cls of CLI_TOOL_STATE_CLASSES) card.classList.remove(cls);
+        if (stateClass) card.classList.add(stateClass);
+      }
+
+      function renderCliToolStatus(name, detection) {
+        const card = document.getElementById(`binary-path-row-${name}`);
+        const badge = document.querySelector(`[data-tool-badge="${name}"]`);
+        const hint = document.querySelector(`[data-tool-hint="${name}"]`);
+        const input = binaryPathInputs[name];
+        if (!card || !badge || !hint || !input) return;
+
+        if (!detection) {
+          setCardState(name, "");
+          badge.textContent = "Checking";
+          hint.textContent = "";
+          return;
+        }
+
+        const overrideValue = detection.override || "";
+        const typedValue = input.value.trim();
+        const userDirty = typedValue && typedValue !== overrideValue &&
+          (detection.source !== "path" || typedValue !== (detection.resolvedPath || ""));
+
+        // User is actively editing -- show pending state, don't overwrite their input.
+        if (userDirty) {
+          setCardState(name, "state-override");
+          badge.textContent = "Unsaved";
+          hint.textContent = "Click Save to apply this path.";
+          input.removeAttribute("data-mode");
+          return;
+        }
+
+        if (detection.source === "override") {
+          input.value = overrideValue;
+          input.setAttribute("data-mode", "override");
+          setCardState(name, "state-override");
+          badge.textContent = "Custom path";
+          hint.textContent = "";
+        } else if (detection.source === "override_invalid") {
+          input.value = overrideValue;
+          input.setAttribute("data-mode", "override");
+          setCardState(name, "state-invalid");
+          badge.textContent = "Invalid path";
+          hint.textContent = "This path does not exist or is not executable. Fix it and Save, or Reset to auto-detect.";
+        } else if (detection.source === "path") {
+          input.value = detection.resolvedPath || "";
+          input.setAttribute("data-mode", "detected");
+          setCardState(name, "state-ok");
+          badge.textContent = "Detected";
+          hint.textContent = "";
+        } else {
+          // fallback - not found on PATH
+          input.value = "";
+          input.removeAttribute("data-mode");
+          setCardState(name, "state-missing");
+          badge.textContent = "Not found";
+          hint.textContent = "Not installed or not on your system PATH. Install the tool, or enter a path above.";
+        }
+      }
+
+      let cliToolDetections = {};
+
+      async function refreshCliToolDetection() {
+        try {
+          const detections = await api.detectCliTools();
+          cliToolDetections = detections || {};
+          for (const name of Object.keys(binaryPathInputs)) {
+            renderCliToolStatus(name, cliToolDetections[name]);
+          }
+        } catch (error) {
+          for (const name of Object.keys(binaryPathInputs)) {
+            setCliToolHint(name, `Could not check this tool: ${error.message}`);
+          }
+        }
+      }
+
+      async function loadBinaryPaths() {
+        try {
+          const paths = await api.getBinaryPaths();
+          for (const [name, input] of Object.entries(binaryPathInputs)) {
+            input.value = (paths && paths[name]) ? paths[name] : "";
+          }
+        } catch (error) {
+          for (const name of Object.keys(binaryPathInputs)) {
+            setCliToolHint(name, `Could not load saved path: ${error.message}`);
+          }
+        }
+        await refreshCliToolDetection();
+      }
+
+      async function saveBinaryPath(name) {
+        const input = binaryPathInputs[name];
+        const value = input.value.trim();
+        if (!value) {
+          setCliToolHint(name, "Enter a path above, or press Reset to auto-detect.");
+          return;
+        }
+        try {
+          const updated = await api.patchBinaryPaths({ [name]: value });
+          input.value = updated[name] || value;
+          await refreshCliToolDetection();
+          setCliToolHint(name, "Saved.");
+        } catch (error) {
+          setCliToolHint(name, `Could not save: ${error.message}`);
+        }
+      }
+
+      async function clearBinaryPath(name) {
+        try {
+          await api.patchBinaryPaths({ [name]: null });
+          binaryPathInputs[name].value = "";
+          await refreshCliToolDetection();
+        } catch (error) {
+          setCliToolHint(name, `Could not reset: ${error.message}`);
+        }
+      }
+
       const ALL_OPERATION_IDS = [
         "symphony_launch", "symphony_status", "symphony_kill", "symphony_chat",
         "symphony_comment_chat", "symphony_commit_message", "symphony_sessions",
@@ -2839,13 +3321,28 @@
       async function completeOnboarding() {
         onboardingMessage.textContent = "";
         try {
-          await api.completeOnboarding({
+          const binaryPaths = {};
+          const claudePath = document.getElementById("onboardingBinaryPathClaude").value.trim();
+          const ghPath = document.getElementById("onboardingBinaryPathGh").value.trim();
+          const codexPath = document.getElementById("onboardingBinaryPathCodex").value.trim();
+          const python3Path = document.getElementById("onboardingBinaryPathPython3").value.trim();
+          const gitPath = document.getElementById("onboardingBinaryPathGit").value.trim();
+          if (claudePath) binaryPaths.claude = claudePath;
+          if (ghPath) binaryPaths.gh = ghPath;
+          if (codexPath) binaryPaths.codex = codexPath;
+          if (python3Path) binaryPaths.python3 = python3Path;
+          if (gitPath) binaryPaths.git = gitPath;
+          const payload = {
             relayOrigin: onboardingRelayOrigin.value.trim(),
             apiOrigin: onboardingApiOrigin.value.trim(),
             webAppOrigin: onboardingWebAppOrigin.value.trim(),
             sandboxBaseDirectory: onboardingSandboxDir.value.trim(),
             apiKey: onboardingApiKey.value.trim()
-          });
+          };
+          if (Object.keys(binaryPaths).length > 0) {
+            payload.binaryPaths = binaryPaths;
+          }
+          await api.completeOnboarding(payload);
           onboardingOverlay.classList.add("hidden");
           await Promise.all([loadSettings(), refreshRuntime(), refreshApiKeyStatus(), refreshApprovals()]);
         } catch (error) {
@@ -2911,6 +3408,11 @@
       document.getElementById("reloadSecurity").addEventListener("click", loadSettings);
       document.getElementById("savePolicies").addEventListener("click", savePoliciesSettings);
       document.getElementById("reloadPolicies").addEventListener("click", loadSettings);
+      for (const name of Object.keys(binaryPathInputs)) {
+        document.querySelector(`[data-binary-save="${name}"]`).addEventListener("click", () => void saveBinaryPath(name));
+        document.querySelector(`[data-binary-clear="${name}"]`).addEventListener("click", () => void clearBinaryPath(name));
+        binaryPathInputs[name].addEventListener("input", () => renderCliToolStatus(name, cliToolDetections[name]));
+      }
       document.getElementById("saveApiKey").addEventListener("click", saveApiKeyValue);
       document.getElementById("clearApiKey").addEventListener("click", clearApiKeyValue);
       headerPauseToggle.addEventListener("change", async () => {
@@ -2965,6 +3467,7 @@
       Promise.all([
         loadOnboardingState(),
         loadSettings(),
+        loadBinaryPaths(),
         refreshRuntime(),
         refreshApiKeyStatus(),
         refreshApprovals(),

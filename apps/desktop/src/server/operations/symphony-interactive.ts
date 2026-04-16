@@ -8,7 +8,8 @@ import type {
   OperationRequestContext,
 } from "../operation-dispatcher.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
-import { getShellEnv } from "../shell-path.js";
+import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getOverrideBinaryPaths, getResolvedGitPath } from "./symphony-loop.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { retrySpawn, type RetrySpawnDeps } from "../../main/spawn-retry.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
@@ -985,7 +986,7 @@ async function generateCommitWithClaude(
       "Do NOT include AI or assistant references.",
     ].join("\n");
 
-    const child = spawn("claude", ["--model", "haiku", "-p", prompt], {
+    const child = spawn(resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path, ["--model", "haiku", "-p", prompt], {
       cwd: worktreeDir,
       stdio: ["ignore", "pipe", "pipe"],
       env,
@@ -1063,8 +1064,9 @@ async function createWorktree(
 ): Promise<{ resolvedBaseBranch: string }> {
   await fs.mkdir(path.dirname(worktreeDir), { recursive: true });
 
+  const gitBin = getResolvedGitPath();
   try {
-    execSync("git fetch origin", {
+    execSync(`${gitBin} fetch origin`, {
       cwd: expandedRepoPath,
       stdio: "pipe",
     });
@@ -1074,7 +1076,7 @@ async function createWorktree(
 
   const resolvedBaseRef = resolveBaseRef(expandedRepoPath, baseBranch);
   execSync(
-    `git worktree add -B ${shellEscapeArg(branchName)} ${shellEscapeArg(worktreeDir)} ${shellEscapeArg(resolvedBaseRef)}`,
+    `${shellEscapeArg(gitBin)} worktree add -B ${shellEscapeArg(branchName)} ${shellEscapeArg(worktreeDir)} ${shellEscapeArg(resolvedBaseRef)}`,
     {
       cwd: expandedRepoPath,
       stdio: "pipe",
@@ -1091,8 +1093,9 @@ function resolveBaseRef(
   if (baseBranch) {
     const candidate = baseBranch.trim();
     if (/^[a-zA-Z0-9/_.-]+$/.test(candidate)) {
+      const gitBin = getResolvedGitPath();
       try {
-        execSync(`git rev-parse --verify ${shellEscapeArg(candidate)}`, {
+        execSync(`${shellEscapeArg(gitBin)} rev-parse --verify ${shellEscapeArg(candidate)}`, {
           cwd: expandedRepoPath,
           stdio: "pipe",
         });
@@ -1100,7 +1103,7 @@ function resolveBaseRef(
       } catch {
         try {
           const originRef = `origin/${candidate}`;
-          execSync(`git rev-parse --verify ${shellEscapeArg(originRef)}`, {
+          execSync(`${shellEscapeArg(gitBin)} rev-parse --verify ${shellEscapeArg(originRef)}`, {
             cwd: expandedRepoPath,
             stdio: "pipe",
           });
@@ -1113,7 +1116,7 @@ function resolveBaseRef(
   }
 
   try {
-    const ref = execSync("git symbolic-ref refs/remotes/origin/HEAD", {
+    const ref = execSync(`${shellEscapeArg(getResolvedGitPath())} symbolic-ref refs/remotes/origin/HEAD`, {
       cwd: expandedRepoPath,
       stdio: "pipe",
       encoding: "utf-8",

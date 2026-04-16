@@ -17,10 +17,12 @@ import { registerGitBranchWorktreeRoutes } from "./operations/git-branch-worktre
 import { registerGitDiffRoutes } from "./operations/git-diff.js";
 import { registerGitPrRoutes } from "./operations/git-pr.js";
 import { registerGitWorktreeRoutes } from "./operations/git-worktree.js";
+import { registerBinaryPathsRoutes } from "./operations/binary-paths.js";
 import { registerHealthCheckRoutes } from "./operations/health-check.js";
 import { registerLearningsRoutes } from "./operations/learnings.js";
 import { registerMetadataRoutes } from "./operations/metadata-routes.js";
 import { configureMcpDetectionCwdResolver } from "./operations/mcp-detection.js";
+import { configureBinaryPathsResolver } from "./operations/symphony-loop.js";
 import { registerReposConfigRoutes } from "./operations/repos-config.js";
 import { registerRunViewerChatRoutes } from "./operations/run-viewer-chat.js";
 import { registerRunViewerExtractRoutes } from "./operations/run-viewer-extract.js";
@@ -68,6 +70,8 @@ export interface GatewayRouterOptions {
   loopTokenStore?: LoopTokenStore;
   retrySpawnDeps?: RetrySpawnDeps;
   getGatewayId: () => string;
+  getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
+  applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
 }
 
 export interface GatewayActivityEvent {
@@ -114,6 +118,7 @@ export class GatewayRouter {
       const [sandboxRoot] = this.options.getAllowedDirectories();
       return sandboxRoot?.trim() || undefined;
     });
+    configureBinaryPathsResolver(this.options.getBinaryPaths ?? null);
     const getSymphonyDir = this.options.getSymphonyDir ?? (() => { throw new SymphonyDirNotConfiguredError(); });
     registerFilesystemDirectoriesRoutes(
       this.operationDispatcher,
@@ -145,7 +150,10 @@ export class GatewayRouter {
       this.options.getAllowedDirectories,
       getSymphonyDir
     );
-    registerHealthCheckRoutes(this.operationDispatcher, this.processManager, getSymphonyDir);
+    registerHealthCheckRoutes(this.operationDispatcher, this.processManager, getSymphonyDir, undefined, this.options.getBinaryPaths);
+    if (this.options.getBinaryPaths && this.options.applyBinaryPathPatch) {
+      registerBinaryPathsRoutes(this.operationDispatcher, this.options.getBinaryPaths, this.options.applyBinaryPathPatch);
+    }
     registerLearningsRoutes(
       this.operationDispatcher,
       this.options.getAllowedDirectories,

@@ -3893,8 +3893,10 @@ test("claude-cli ETIMEDOUT: error mentions Timed out, remediation mentions termi
   // Mock runCommand so `claude --version` throws ETIMEDOUT immediately.
   // Avoids spawning a real process or waiting on the 3s command timeout,
   // and dodges shell-portability issues (dash on Ubuntu rejects `read -t`).
+  // Match by basename because resolveBinary() may pass a full resolved path
+  // (e.g. /Users/.../bin/claude) rather than the bare binary name.
   _setRunCommandForTesting(async (cmd) => {
-    if (cmd === "claude") {
+    if (path.basename(cmd) === "claude") {
       throw { code: "ETIMEDOUT", stderr: "", message: "command timed out" };
     }
     throw { code: "ENOENT", stderr: "", message: "not found" };

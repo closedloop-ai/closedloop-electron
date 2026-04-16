@@ -60,6 +60,13 @@ export interface DesktopSettings {
   apiOrigin: string;
   webAppOrigin: string;
   verboseLogging: boolean;
+  binaryPaths?: {
+    claude?: string;
+    gh?: string;
+    codex?: string;
+    python3?: string;
+    git?: string;
+  };
 }
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
@@ -73,5 +80,6 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   relayOrigin: DEFAULT_RELAY_ORIGIN,
   apiOrigin: DEFAULT_AUTH_API_ORIGIN,
   webAppOrigin: DEFAULT_WEB_APP_ORIGIN,
-  verboseLogging: false
+  verboseLogging: false,
+  binaryPaths: {}
 };

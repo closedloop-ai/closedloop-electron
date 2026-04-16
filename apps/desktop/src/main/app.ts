@@ -31,6 +31,9 @@ import {
   computeSymphonyDir,
   SymphonyDirNotConfiguredError,
 } from "../server/operations/symphony-utils.js";
+import { getResolvedGitPath, resetResolvedClaudePath } from "../server/operations/symphony-loop.js";
+import { resetMcpDetectionCache } from "../server/operations/mcp-detection.js";
+import { resolveBinary } from "../server/shell-path.js";
 import { seedReposConfig } from "./seed-repos-config.js";
 import {
   SUPPORTED_OPERATION_IDS,
@@ -159,6 +162,8 @@ export class DesktopApplication {
       this.loopTokenStore,
       retrySpawnDeps,
       () => this.gatewayId,
+      () => this.settingsStore.getBinaryPaths(),
+      (patch) => this.applyBinaryPathPatchAndInvalidateCaches(patch),
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -789,9 +794,9 @@ export class DesktopApplication {
     remoteHash: string;
   }> {
     const repoRoot = path.resolve(__dirname, "../../../..");
-    await execFileAsync("git", ["fetch", "origin", "main"], { cwd: repoRoot });
+    await execFileAsync(getResolvedGitPath(), ["fetch", "origin", "main"], { cwd: repoRoot });
     const { stdout } = await execFileAsync(
-      "git",
+      getResolvedGitPath(),
       ["rev-parse", "origin/main"],
       { cwd: repoRoot },
     );
@@ -805,7 +810,7 @@ export class DesktopApplication {
 
   private async applyUpdate(): Promise<void> {
     const repoRoot = path.resolve(__dirname, "../../../..");
-    await execFileAsync("git", ["pull", "--rebase", "origin", "main"], {
+    await execFileAsync(getResolvedGitPath(), ["pull", "--rebase", "origin", "main"], {
       cwd: repoRoot,
     });
     await execFileAsync("pnpm", ["-C", "apps/desktop", "build"], {
@@ -945,6 +950,9 @@ export class DesktopApplication {
           verboseLogging?: boolean;
         },
       ) => {
+        if ("binaryPaths" in partial) {
+          throw new Error("binaryPaths must be updated via PATCH /api/gateway/settings/binary-paths");
+        }
         const currentSettings = this.settingsStore.getAll();
         const nextPartial = { ...partial };
         // Normalize legacy "auto" tier to "high" (they behave identically)
@@ -1202,6 +1210,7 @@ export class DesktopApplication {
           webAppOrigin: string;
           sandboxBaseDirectory: string;
           apiKey?: string;
+          binaryPaths?: { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
         },
       ) => {
         const relayOrigin =
@@ -1236,11 +1245,52 @@ export class DesktopApplication {
           sandboxBaseDirectory,
           onboardingCompleted: true,
         });
+
+        if (payload.binaryPaths) {
+          const patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>> = {};
+          for (const key of ["claude", "gh", "codex", "python3", "git"] as const) {
+            const value = payload.binaryPaths[key];
+            if (typeof value === "string" && value.trim()) {
+              patch[key] = value.trim();
+            }
+          }
+          if (Object.keys(patch).length > 0) {
+            this.applyBinaryPathPatchAndInvalidateCaches(patch);
+          }
+        }
+
         await seedReposConfig(sandboxBaseDirectory);
         this.restartCloudSocket();
         return this.getOnboardingState();
       },
     );
+    ipcMain.handle("desktop:get-binary-paths", () =>
+      this.settingsStore.getBinaryPaths(),
+    );
+    ipcMain.handle(
+      "desktop:patch-binary-paths",
+      (
+        _event,
+        patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>,
+      ) => this.applyBinaryPathPatchAndInvalidateCaches(patch),
+    );
+    ipcMain.handle("desktop:detect-cli-tools", async () => {
+      const overrides = this.settingsStore.getBinaryPaths();
+      const names = ["claude", "gh", "codex", "python3", "git"] as const;
+      const results = await Promise.all(
+        names.map(async (name) => {
+          const override = overrides[name];
+          const resolved = await resolveBinary(name, override);
+          return {
+            name,
+            override: override ?? null,
+            source: resolved.source,
+            resolvedPath: resolved.source === "fallback" ? null : resolved.path,
+          };
+        }),
+      );
+      return Object.fromEntries(results.map((r) => [r.name, r]));
+    });
     ipcMain.handle("desktop:pick-sandbox-directory", async () => {
       const result = await dialog.showOpenDialog({
         properties: ["openDirectory", "createDirectory"],
@@ -1301,6 +1351,28 @@ export class DesktopApplication {
       }
       await this.applyUpdate();
     });
+  }
+
+  private applyBinaryPathPatchAndInvalidateCaches(
+    patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>
+  ): { claude?: string; gh?: string; codex?: string; python3?: string; git?: string } {
+    for (const [key, value] of Object.entries(patch)) {
+      if (value !== null && value !== undefined) {
+        const expanded = value.replace(/^~/, os.homedir());
+        if (!path.isAbsolute(expanded)) {
+          throw new Error(`Binary path for ${key} must be an absolute path: ${value}`);
+        }
+      }
+    }
+    const expandedPatch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>> = {};
+    for (const [key, value] of Object.entries(patch)) {
+      expandedPatch[key as "claude" | "gh" | "codex" | "python3" | "git"] =
+        value !== null && value !== undefined ? value.replace(/^~/, os.homedir()) : value;
+    }
+    const updated = this.settingsStore.patchBinaryPaths(expandedPatch as Record<string, string | null>);
+    resetResolvedClaudePath();
+    resetMcpDetectionCache();
+    return updated;
   }
 }
 

@@ -5,7 +5,7 @@ import type {
   OperationRequestContext,
 } from "../operation-dispatcher.js";
 import path from "node:path";
-import { getActiveLoopPid } from "./symphony-loop.js";
+import { getActiveLoopPid, getResolvedGitPath } from "./symphony-loop.js";
 import {
   isProcessRunning,
   readProcessPidSync,
@@ -189,7 +189,7 @@ function asString(value: unknown): string | null {
  */
 function resolveCurrentBranch(repoPath: string): string | null {
   try {
-    return execSync("git rev-parse --abbrev-ref HEAD", {
+    return execSync(`${getResolvedGitPath()} rev-parse --abbrev-ref HEAD`, {
       cwd: repoPath,
       encoding: "utf-8",
       stdio: "pipe",
@@ -205,7 +205,7 @@ function resolveCurrentBranch(repoPath: string): string | null {
  */
 function resolveDefaultBranch(repoPath: string): string {
   try {
-    const ref = execSync("git symbolic-ref refs/remotes/origin/HEAD", {
+    const ref = execSync(`${getResolvedGitPath()} symbolic-ref refs/remotes/origin/HEAD`, {
       cwd: repoPath,
       encoding: "utf-8",
       stdio: "pipe",
