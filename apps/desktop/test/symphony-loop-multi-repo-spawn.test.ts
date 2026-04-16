@@ -9,7 +9,7 @@
  *    and --add-dir <worktreeDir2>
  *
  * Strategy: the fake run-loop.sh script writes its arguments to
- * $CLOSEDLOOP_WORKDIR/spawn-args.txt. After waitForCompletedEvent, we search
+ * $CLOSEDLOOP_WORKDIR/spawn-args.txt. After waitForTerminalEvent, we search
  * for spawn-args.txt under the tmpDir and assert on the presence or absence of
  * --add-dir args.
  */
@@ -26,7 +26,7 @@ import {
   makeMultiRepoGateway,
   makeMultiRepoTestHarness,
   startMockApiServer,
-  waitForCompletedEvent,
+  waitForTerminalEvent,
 } from "./symphony-test-utils.js";
 
 // ---------------------------------------------------------------------------
@@ -161,9 +161,15 @@ test("PLAN with 2 additionalRepos passes --add-dir for each worktree to run-loop
 
   assert.equal(response.status, 200);
 
-  // Wait for the loop to complete
-  const completedEvent = await waitForCompletedEvent(mock.requests, loopId);
-  assert.equal(completedEvent.type, "completed");
+  // Wait for the terminal event; assert it is "completed" so an unexpected
+  // "error" event surfaces immediately with its payload rather than an
+  // opaque 20s timeout.
+  const terminalEvent = await waitForTerminalEvent(mock.requests, loopId);
+  assert.equal(
+    terminalEvent.type,
+    "completed",
+    `Expected terminal event type 'completed', got '${terminalEvent.type}': ${JSON.stringify(terminalEvent)}`,
+  );
 
   // Find spawn-args.txt under tmpDir (written to $CLOSEDLOOP_WORKDIR by the fake script)
   const spawnArgsFile = await findSpawnArgsFile(tmpDir);
