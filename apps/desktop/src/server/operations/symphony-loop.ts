@@ -239,6 +239,12 @@ const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
   EVALUATE_PLAN: "REQUIRED",
   EVALUATE_CODE: "REQUIRED",
 };
+const LOCAL_CALLBACK_FAIL_FAST_COMMANDS = new Set<LoopCommand>([
+  "PLAN",
+  "EXECUTE",
+  "REQUEST_CHANGES",
+  "GENERATE_PRD",
+]);
 
 interface LoopArtifact {
   id?: string;
@@ -2575,10 +2581,11 @@ async function handleLoopRequest(
     child: null as unknown as ReturnType<typeof spawn>,
     stage: "running",
   });
-  const requestSource =
-    context.request?.headers?.["x-desktop-source"] === "cloud-socket"
-      ? "relay"
-      : "local";
+  const isRelaySource =
+    context.request?.headers?.["x-desktop-source"] === "cloud-socket";
+  const requestSource = isRelaySource ? "relay" : "local";
+  const shouldFailFastOnCallbackUnavailable =
+    !isRelaySource && LOCAL_CALLBACK_FAIL_FAST_COMMANDS.has(body.command);
   loopLog(
     body.loopId,
     `Received ${body.command} request, repo=${body.repo?.fullName ?? "none"}, stableId=${pickStableId(body)}, parentSessionId=${body.parentSessionId ?? "none"}`,
@@ -3041,9 +3048,36 @@ async function handleLoopRequest(
 
     // Post "started" event — only after confirming we can proceed
     loopLog(body.loopId, "Posting started event...");
-    await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-      type: LoopEventType.Started,
-    });
+    if (shouldFailFastOnCallbackUnavailable) {
+      const startedResult = await postLoopEventBounded(
+        apiBaseUrl,
+        body.loopId,
+        body.closedLoopAuthToken,
+        { type: LoopEventType.Started },
+      );
+      if (!startedResult.success) {
+        const callbackError = startedResult.error ?? "unknown callback error";
+        const errorMessage =
+          "Cannot start local loop: cloud callback path is unavailable. Check connectivity and retry.";
+        loopError(
+          body.loopId,
+          `Failing fast before spawn after started-event callback failure: ${callbackError}`,
+        );
+        gatewayLog.error(
+          "loop-harness",
+          `Fail-fast local launch blocked for loopId=${body.loopId}, command=${body.command}, callbackError=${callbackError}`,
+        );
+        await cleanupOnError();
+        json(context, 503, {
+          error: `${errorMessage} (${callbackError})`,
+        });
+        return;
+      }
+    } else {
+      await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+        type: LoopEventType.Started,
+      });
+    }
 
     // Spawn process
     const logFile = path.join(claudeWorkDir, "symphony-loop.log");
