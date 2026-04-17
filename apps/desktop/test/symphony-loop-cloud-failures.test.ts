@@ -4,7 +4,8 @@
  * T-4.2: Cloud failure scenarios
  *   - Artifact upload failure sets ARTIFACT_UPLOAD_FAILED in job store warning
  *     and in completed event warnings
- *   - Event post failure is reflected in job store warning (EVENT_POST_FAILED)
+ *   - Local-direct EXECUTE fails fast pre-spawn when callback posting fails
+ *   - Relay/cloud-socket EXECUTE still completes and records EVENT_POST_FAILED
  *
  * Tests go through the HTTP gateway, not direct function calls.
  * Fake binaries (run-loop.sh, claude, git, gh) are placed in a temp fake-bin/ dir
@@ -201,14 +202,127 @@ test("EXECUTE: artifact upload failure sets ARTIFACT_UPLOAD_FAILED in completed 
 });
 
 // ---------------------------------------------------------------------------
-// Test 2: Event post failure is reflected in job store warning (EVENT_POST_FAILED)
+// Test 2: Local direct EXECUTE fails fast (no spawn) when callback path fails
 // ---------------------------------------------------------------------------
 
-test("EXECUTE: event post failure logged as warning in job store", async () => {
+test("EXECUTE local-direct: callback failure fails fast before spawn", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cloud-fail-event-"));
   tempPathsToClean.push(tmpDir);
 
   const repoPath = path.join(tmpDir, "repo-event-fail");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  const spawnMarker = path.join(tmpDir, "run-loop-spawned");
+  await createFakeRunLoopScript(
+    tmpDir,
+    `#!/bin/sh\ntouch ${spawnMarker}\nexit 0\n`
+  );
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = "/usr/bin:/bin";
+  setShellPathForTest();
+
+  // Callback path failure is simulated by failing /events.
+  const failUrls = new Map<string, number>([["events", 500]]);
+  const mock = await startMockApiServer(failUrls);
+  mockServersToClose.push(mock.server);
+
+  const loopTokenStore = new LoopTokenStore({
+    cwd: tmpDir,
+    name: "test-local-event-fail-tokens",
+    safeStorage: createTestLoopTokenSafeStorage(),
+  });
+  const jobStore = new JobStore({ cwd: tmpDir, name: "test-jobs-event-fail" });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "cloud-fail-event-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    jobStore,
+    loopTokenStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000000600";
+  const requestBody = {
+    loopId,
+    command: "EXECUTE",
+    closedLoopAuthToken: "tok",
+    prompt: "test",
+    artifacts: [],
+    repo: { fullName: `event-fail/${path.basename(repoPath)}`, branch: "main" },
+  };
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody),
+    }
+  );
+
+  const payload = await response.json().catch(() => ({}));
+  assert.equal(response.status, 503, `Expected 503, got ${response.status}`);
+  assert.ok(
+    typeof (payload as { error?: unknown }).error === "string" &&
+      (payload as { error: string }).error.includes("cloud callback path is unavailable"),
+    `Expected actionable callback-unavailable error, got: ${JSON.stringify(payload)}`
+  );
+
+  // No process should be spawned on local-direct callback failure.
+  await new Promise<void>((resolve) => setTimeout(resolve, 250));
+  let markerExists = true;
+  try {
+    await fs.access(spawnMarker);
+  } catch {
+    markerExists = false;
+  }
+  assert.equal(markerExists, false, "run-loop.sh should not be spawned");
+  assert.equal(
+    mock.requests.some((r) => r.url.includes("upload-artifacts")),
+    false,
+    "upload-artifacts should not be called when launch fails fast pre-spawn"
+  );
+  assert.equal(jobStore.getByLoopId(loopId), undefined, "Job should not be created when spawn is blocked");
+  assert.equal(loopTokenStore.getLoopToken(loopId), null, "Persisted loop token must be cleaned up on fail-fast path");
+
+  // Verify running-loop slot cleanup: second request should fail with 503, not 409.
+  const response2 = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(requestBody),
+    }
+  );
+  assert.equal(response2.status, 503, `Expected second request to return 503, got ${response2.status}`);
+});
+
+// ---------------------------------------------------------------------------
+// Test 3: Relay/cloud-socket behavior stays unchanged on callback post failure
+// ---------------------------------------------------------------------------
+
+test("EXECUTE relay: event post failure logged as warning in job store", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cloud-fail-event-relay-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-event-relay");
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeParent = path.join(tmpDir, "worktrees");
@@ -235,14 +349,13 @@ test("EXECUTE: event post failure logged as warning in job store", async () => {
 
   // Configure mock server to return 500 for all /events requests.
   // This causes both the "started" event and the "completed" event to fail.
-  // The loop should still complete (not crash) and set EVENT_POST_FAILED in
-  // the job store warning field.
+  // Relay requests should still proceed and finalize with EVENT_POST_FAILED.
   const failUrls = new Map<string, number>([["events", 500]]);
   const mock = await startMockApiServer(failUrls);
   mockServersToClose.push(mock.server);
 
   // Provide a real JobStore so we can verify the warning field
-  const jobStore = new JobStore({ cwd: tmpDir, name: "test-jobs-event-fail" });
+  const jobStore = new JobStore({ cwd: tmpDir, name: "test-jobs-event-relay-fail" });
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -250,7 +363,7 @@ test("EXECUTE: event post failure logged as warning in job store", async () => {
     fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
-    machineName: "cloud-fail-event-machine",
+    machineName: "cloud-fail-event-relay-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
     worktreeProvider: fakeWorktreeProvider,
@@ -261,12 +374,15 @@ test("EXECUTE: event post failure logged as warning in job store", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const loopId = "00000000-0000-0000-0000-000000000600";
+  const loopId = "00000000-0000-0000-0000-000000000601";
   const response = await fetch(
     `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-desktop-source": "cloud-socket",
+      },
       body: JSON.stringify({
         loopId,
         command: "EXECUTE",
@@ -307,7 +423,7 @@ test("EXECUTE: event post failure logged as warning in job store", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Test 3: Pre-spawn failure cleans up persisted loop token (Layer 2)
+// Test 4: Pre-spawn failure cleans up persisted loop token (Layer 2)
 // ---------------------------------------------------------------------------
 
 test("PLAN: pre-spawn log-file failure cleans up persisted loop token", async () => {
@@ -403,7 +519,7 @@ test("PLAN: pre-spawn log-file failure cleans up persisted loop token", async ()
 });
 
 // ---------------------------------------------------------------------------
-// Test 4: Non-zero exit cleans up persisted loop token (Layer 1)
+// Test 5: Non-zero exit cleans up persisted loop token (Layer 1)
 // ---------------------------------------------------------------------------
 
 test("PLAN: non-zero exit cleans up persisted loop token", async () => {
@@ -482,7 +598,7 @@ test("PLAN: non-zero exit cleans up persisted loop token", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Test 5: Repo not found emits REPO_NOT_FOUND error event and returns 404
+// Test 6: Repo not found emits REPO_NOT_FOUND error event and returns 404
 // ---------------------------------------------------------------------------
 
 test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async () => {
@@ -572,7 +688,7 @@ test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Test 6: localRepoPath outside sandbox emits REPO_NOT_ALLOWED error event
+// Test 7: localRepoPath outside sandbox emits REPO_NOT_ALLOWED error event
 // ---------------------------------------------------------------------------
 
 test("EXECUTE: localRepoPath outside sandbox emits REPO_NOT_ALLOWED error event", async () => {
@@ -647,7 +763,7 @@ test("EXECUTE: localRepoPath outside sandbox emits REPO_NOT_ALLOWED error event"
 });
 
 // ---------------------------------------------------------------------------
-// Test 7: fullName-resolved path outside allowedDirs emits REPO_NOT_ALLOWED error event
+// Test 8: fullName-resolved path outside allowedDirs emits REPO_NOT_ALLOWED error event
 // ---------------------------------------------------------------------------
 
 test("EXECUTE: fullName-resolved path outside allowedDirs emits REPO_NOT_ALLOWED error event", async () => {
@@ -729,7 +845,7 @@ test("EXECUTE: fullName-resolved path outside allowedDirs emits REPO_NOT_ALLOWED
 });
 
 // ---------------------------------------------------------------------------
-// Test 8: postLoopEventBounded times out after 1000ms when API server hangs
+// Test 9: postLoopEventBounded times out after 1000ms when API server hangs
 //         and aborts the underlying fetch (no leaked connections)
 // ---------------------------------------------------------------------------
 
