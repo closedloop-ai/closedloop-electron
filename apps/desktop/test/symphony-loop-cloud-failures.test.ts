@@ -21,34 +21,22 @@ import path from "node:path";
 import { afterEach, test } from "node:test";
 import { JobStore } from "../src/main/job-store.js";
 import { LoopTokenStore } from "../src/main/loop-token-store.js";
-import { DesktopGatewayServer } from "../src/server/server.js";
-import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
+import { DesktopGatewayServer } from "../src/server/server.js";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
+import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
+import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
 import {
   createFakeRunLoopScript,
+  makeFakeWorktreeProvider,
   restoreEnv,
   saveEnv,
   startMockApiServer,
   waitForCompletedEvent,
   waitForTerminalEvent,
 } from "./symphony-test-utils.js";
-import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
 
-const fakeWorktreeProvider: WorktreeProvider = {
-  async ensureWorktree(_repoPath, worktreeDir) {
-    await fs.mkdir(worktreeDir, { recursive: true });
-  },
-  findWorktreeForBranch() {
-    return null;
-  },
-  async removeWorktree(worktreeDir) {
-    await fs.rm(worktreeDir, { recursive: true, force: true });
-  },
-  getCurrentBranch() {
-    return "symphony/cloud-failures-test";
-  },
-};
+const fakeWorktreeProvider = makeFakeWorktreeProvider("symphony/cloud-failures-test");
 
 // ---------------------------------------------------------------------------
 // Shared state and cleanup
@@ -466,6 +454,7 @@ test("PLAN: pre-spawn log-file failure cleans up persisted loop token", async ()
     getCurrentBranch() {
       return "symphony/prespawn-test";
     },
+    branchExists: async () => true,
   };
 
   const loopTokenStore = new LoopTokenStore({

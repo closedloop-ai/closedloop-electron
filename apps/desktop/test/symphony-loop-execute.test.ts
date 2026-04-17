@@ -27,31 +27,18 @@ import { JobStore } from "../src/main/job-store.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { resetResolvedClaudePath } from "../src/server/operations/symphony-loop.js";
-import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
   initGitRepo,
+  makeFakeWorktreeProvider,
   restoreEnv,
   saveEnv,
   startMockApiServer,
   waitForCompletedEvent,
 } from "./symphony-test-utils.js";
 
-const fakeWorktreeProvider: WorktreeProvider = {
-  async ensureWorktree(_repoPath, worktreeDir) {
-    await fs.mkdir(worktreeDir, { recursive: true });
-  },
-  findWorktreeForBranch() {
-    return null;
-  },
-  async removeWorktree(worktreeDir) {
-    await fs.rm(worktreeDir, { recursive: true, force: true });
-  },
-  getCurrentBranch() {
-    return "symphony/execute-test";
-  },
-};
+const fakeWorktreeProvider = makeFakeWorktreeProvider("symphony/execute-test");
 
 // ---------------------------------------------------------------------------
 // Shared state and cleanup

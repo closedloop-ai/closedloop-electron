@@ -180,7 +180,7 @@ export async function runLoopsSetupScript(
 }
 
 /** Fetch latest refs from origin. No-op if offline. */
-function fetchOrigin(repoPath: string): void {
+export function fetchOrigin(repoPath: string): void {
   try {
     execFileSync(getResolvedGitPath(), ["fetch", "origin"], {
       cwd: repoPath,
@@ -386,7 +386,7 @@ function fastForwardBranch(worktreeDir: string, branchName: string): void {
  * Resolve a branch name to a valid git ref, trying remote then local.
  * Returns the resolved ref string, or null if neither exists.
  */
-function resolveRef(repoPath: string, branchName: string): string | null {
+export function resolveRef(repoPath: string, branchName: string): string | null {
   for (const candidate of [`origin/${branchName}`, branchName]) {
     try {
       execFileSync(getResolvedGitPath(), ["rev-parse", "--verify", candidate], {
