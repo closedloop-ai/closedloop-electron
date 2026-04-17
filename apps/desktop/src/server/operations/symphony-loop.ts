@@ -3049,7 +3049,10 @@ async function handleLoopRequest(
     // Post "started" event — only after confirming we can proceed
     loopLog(body.loopId, "Posting started event...");
     if (shouldFailFastOnCallbackUnavailable) {
-      const startedResult = await postLoopEventBounded(
+      // Use an unbounded POST here so we only fail fast on definitive callback
+      // failures. A short client-side abort can race with a server-side write
+      // and produce an orphaned "started" event with no spawned process.
+      const startedResult = await postLoopEvent(
         apiBaseUrl,
         body.loopId,
         body.closedLoopAuthToken,
