@@ -1051,8 +1051,11 @@ export class DesktopApplication {
           !isTerminalJobStatus(rawJob?.status ?? "UNKNOWN")
         ) {
           if (rawJob && rawJob.exitCode != null) {
-            stillRunning.push(snapshot);
-            continue;
+            const ageMs = Date.now() - new Date(rawJob.updatedAt).getTime();
+            if (ageMs < 60_000) {
+              stillRunning.push(snapshot);
+              continue;
+            }
           }
           this.jobStore.upsert({
             ...rawJob!,
