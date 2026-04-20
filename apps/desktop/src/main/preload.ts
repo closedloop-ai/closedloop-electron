@@ -64,6 +64,8 @@ const desktopApi = {
     ipcRenderer.invoke("desktop:detect-cli-tools") as Promise<unknown>,
   saveConfig: (name: string) =>
     ipcRenderer.invoke("desktop:save-config", { name }) as Promise<unknown>,
+  findMatchingConfig: () =>
+    ipcRenderer.invoke("desktop:find-matching-config") as Promise<unknown>,
   listConfigs: () =>
     ipcRenderer.invoke("desktop:list-configs") as Promise<unknown>,
   deleteConfig: (id: string) =>

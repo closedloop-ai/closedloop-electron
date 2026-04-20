@@ -1,4 +1,7 @@
+import { createRequire } from "node:module";
 import Store from "electron-store";
+
+const require = createRequire(import.meta.url);
 
 type SecretsSchema = {
   encryptedApiKey?: string;

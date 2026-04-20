@@ -93,6 +93,44 @@ test("saveConfig with name longer than 200 chars throws", () => {
   assert.throws(() => store.saveConfig("x".repeat(201)), /200 characters/i);
 });
 
+test("saveConfig rejects duplicate name (case-insensitive, trimmed)", () => {
+  const tmpDir = makeTempDir("saved-configs-dup-name-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.test");
+  store.setApiOrigin("https://api.test");
+  store.setWebAppOrigin("https://app.test");
+
+  store.saveConfig("Production");
+
+  assert.throws(() => store.saveConfig("Production"), /already exists/i);
+  assert.throws(() => store.saveConfig("production"), /already exists/i);
+  assert.throws(() => store.saveConfig("  PRODUCTION  "), /already exists/i);
+  assert.equal(store.listConfigs().length, 1);
+});
+
+test("findConfigByOrigins returns the matching config or null", () => {
+  const tmpDir = makeTempDir("saved-configs-find-origins-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.test");
+  store.setApiOrigin("https://api.test");
+  store.setWebAppOrigin("https://app.test");
+  const prod = store.saveConfig("Production");
+
+  store.setRelayOrigin("https://relay.staging.test");
+  store.setApiOrigin("https://api.staging.test");
+  store.setWebAppOrigin("https://app.staging.test");
+  store.saveConfig("Staging");
+
+  assert.equal(
+    store.findConfigByOrigins("https://relay.test", "https://api.test", "https://app.test")?.id,
+    prod.id
+  );
+  assert.equal(
+    store.findConfigByOrigins("https://relay.test", "https://api.test", "https://different.test"),
+    null
+  );
+});
+
 // --- listConfigs ---
 
 test("listConfigs returns configs in insertion order", () => {
@@ -188,6 +226,22 @@ test("renameConfig with unknown id throws error containing 'Config not found'", 
     () => store.renameConfig("00000000-0000-4000-8000-000000000000", "new-name"),
     /Config not found/
   );
+});
+
+test("renameConfig rejects a name already used by another config (case-insensitive)", () => {
+  const tmpDir = makeTempDir("saved-configs-rename-dup-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.test");
+  store.setApiOrigin("https://api.test");
+  store.setWebAppOrigin("https://app.test");
+
+  const a = store.saveConfig("Production");
+  const b = store.saveConfig("Staging");
+
+  assert.throws(() => store.renameConfig(b.id, "production"), /already exists/i);
+  // Renaming to its own name (even different case / whitespace) is allowed
+  store.renameConfig(a.id, "  Production  ");
+  assert.equal(store.listConfigs().find((c) => c.id === a.id)?.name, "Production");
 });
 
 // --- applyConfig ---

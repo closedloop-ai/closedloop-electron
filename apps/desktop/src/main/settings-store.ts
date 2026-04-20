@@ -231,8 +231,32 @@ export class SettingsStore {
     return trimmed;
   }
 
+  private assertNameAvailable(configs: SavedConfig[], name: string, excludeId?: string): void {
+    const normalized = name.trim().toLocaleLowerCase();
+    const clash = configs.find(
+      (c) => c.id !== excludeId && c.name.trim().toLocaleLowerCase() === normalized
+    );
+    if (clash) {
+      throw new Error(`A config named "${clash.name}" already exists`);
+    }
+  }
+
+  findConfigByOrigins(relayOrigin: string, apiOrigin: string, webAppOrigin: string): SavedConfig | null {
+    const configs = this.getSavedConfigs();
+    return (
+      configs.find(
+        (c) =>
+          c.relayOrigin === relayOrigin &&
+          c.apiOrigin === apiOrigin &&
+          c.webAppOrigin === webAppOrigin
+      ) ?? null
+    );
+  }
+
   saveConfig(name: string): SavedConfig {
     const trimmedName = this.validateConfigName(name);
+    const configs = this.getSavedConfigs();
+    this.assertNameAvailable(configs, trimmedName);
     const config: SavedConfig = {
       id: randomUUID(),
       name: trimmedName,
@@ -240,7 +264,6 @@ export class SettingsStore {
       apiOrigin: this.getApiOrigin(),
       webAppOrigin: this.getWebAppOrigin()
     };
-    const configs = this.getSavedConfigs();
     configs.push(config);
     this.setSavedConfigs(configs);
     return config;
@@ -273,6 +296,7 @@ export class SettingsStore {
     if (index === -1) {
       throw new Error(`Config not found: ${id}`);
     }
+    this.assertNameAvailable(configs, trimmedName, id);
     configs[index] = { ...configs[index], name: trimmedName };
     this.setSavedConfigs(configs);
   }

@@ -1353,6 +1353,14 @@ export class DesktopApplication {
       await this.applyUpdate();
     });
 
+    ipcMain.handle("desktop:find-matching-config", () => {
+      return this.settingsStore.findConfigByOrigins(
+        this.settingsStore.getRelayOrigin(),
+        this.settingsStore.getApiOrigin(),
+        this.settingsStore.getWebAppOrigin()
+      );
+    });
+
     ipcMain.handle("desktop:save-config", (_event, payload: { name: string }) => {
       // Name validation and trimming is performed by settingsStore.saveConfig
       const savedConfig = this.settingsStore.saveConfig(payload?.name ?? "");
