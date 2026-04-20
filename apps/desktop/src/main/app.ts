@@ -420,11 +420,8 @@ export class DesktopApplication {
     this.shuttingDown = true;
     this.bootRecovery.dispose();
     await this.bootRecovery.quiesce(1_000);
-    await Promise.race([
-      Observability.shutdown(),
-      new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
-    ]);
     return runShutdownSequence({
+      observability: Observability,
       updateCheckTimer: this.updateCheckTimer,
       clearUpdateCheckTimer: () => {
         if (this.updateCheckTimer) {
