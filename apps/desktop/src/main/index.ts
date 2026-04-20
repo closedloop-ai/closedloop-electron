@@ -47,9 +47,27 @@ app.on("before-quit", (event) => {
     return;
   }
 
-  quitPromise = desktopApplication.shutdown().then((result) => {
-    app.exit(result === "clean" ? 0 : 1);
-  });
+  // Signal the window to allow close events through, so it doesn't re-hide
+  // itself and block the quit sequence.
+  desktopApplication.setQuitting();
+
+  const hardExit = setTimeout(() => {
+    gatewayLog.error("shutdown", "hard-exit timeout reached; forcing app.exit(1)");
+    app.exit(1);
+  }, 8_000).unref();
+
+  quitPromise = desktopApplication
+    .shutdown()
+    .then((result) => {
+      clearTimeout(hardExit);
+      app.exit(result === "clean" ? 0 : 1);
+    })
+    .catch((err: unknown) => {
+      clearTimeout(hardExit);
+      const message = err instanceof Error ? err.message : String(err);
+      gatewayLog.error("shutdown", `shutdown rejected: ${message}`);
+      app.exit(1);
+    });
 });
 
 app.on("window-all-closed", () => {
