@@ -61,7 +61,17 @@ const desktopApi = {
   patchBinaryPaths: (patch: unknown) =>
     ipcRenderer.invoke("desktop:patch-binary-paths", patch) as Promise<unknown>,
   detectCliTools: () =>
-    ipcRenderer.invoke("desktop:detect-cli-tools") as Promise<unknown>
+    ipcRenderer.invoke("desktop:detect-cli-tools") as Promise<unknown>,
+  saveConfig: (name: string) =>
+    ipcRenderer.invoke("desktop:save-config", { name }) as Promise<unknown>,
+  listConfigs: () =>
+    ipcRenderer.invoke("desktop:list-configs") as Promise<unknown>,
+  deleteConfig: (id: string) =>
+    ipcRenderer.invoke("desktop:delete-config", { id }) as Promise<unknown>,
+  renameConfig: (id: string, name: string) =>
+    ipcRenderer.invoke("desktop:rename-config", { id, name }) as Promise<unknown>,
+  applyConfig: (id: string) =>
+    ipcRenderer.invoke("desktop:apply-config", { id }) as Promise<unknown>
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);

@@ -1891,6 +1891,17 @@
             <button class="secondary" id="reloadRelayGateway">Reload</button>
             <p class="muted" id="relayGatewayMessage"></p>
           </div>
+
+          <!-- Saved Configs section -->
+          <div class="settings-group" style="border-top: 1px solid var(--border); margin-top: 16px; padding-top: 16px;">
+            <h3 class="settings-group-title">Saved Configs</h3>
+            <p class="settings-group-desc">Save the current relay origin, API origin, web app origin, and API key as a named profile. Switch between profiles instantly.</p>
+            <div class="actions" style="margin-bottom: 12px;">
+              <button id="saveCurrentConfig" type="button">Save current config</button>
+            </div>
+            <div id="savedConfigsList"></div>
+            <p class="muted" id="savedConfigsMessage" style="margin-top: 8px;"></p>
+          </div>
         </div>
 
         <!-- Security sub-tab -->
@@ -2095,6 +2106,9 @@
         }
         if (tabName === "binary-paths" && typeof refreshCliToolDetection === "function") {
           void refreshCliToolDetection();
+        }
+        if (tabName === "relay-gateway" && typeof loadSavedConfigs === "function") {
+          void loadSavedConfigs();
         }
       }
 
@@ -3243,6 +3257,119 @@
         }
       }
 
+      const savedConfigsList = document.getElementById("savedConfigsList");
+      const savedConfigsMessage = document.getElementById("savedConfigsMessage");
+
+      function renderSavedConfigs(configs) {
+        savedConfigsList.innerHTML = "";
+        if (!configs || !configs.length) {
+          const empty = document.createElement("p");
+          empty.className = "muted";
+          empty.style.margin = "0";
+          empty.textContent = "No saved configs yet.";
+          savedConfigsList.appendChild(empty);
+          return;
+        }
+        for (const config of configs) {
+          const row = document.createElement("div");
+          row.className = "always-allow-rule";
+          row.style.display = "flex";
+          row.style.alignItems = "center";
+          row.style.gap = "8px";
+          row.style.flexWrap = "wrap";
+          row.style.padding = "8px 0";
+          row.style.borderBottom = "1px solid var(--border)";
+
+          const info = document.createElement("span");
+          info.style.flex = "1";
+          info.style.minWidth = "0";
+          const keyIndicator = config.hasCloudApiKey ? " (with API key)" : " (no API key)";
+          info.textContent = config.name + keyIndicator;
+          row.appendChild(info);
+
+          const switchBtn = document.createElement("button");
+          switchBtn.type = "button";
+          switchBtn.textContent = "Switch";
+          switchBtn.addEventListener("click", async () => {
+            savedConfigsMessage.textContent = "";
+            try {
+              await api.applyConfig(config.id);
+              await Promise.all([loadSettings(), refreshRuntime(), refreshApiKeyStatus(), loadSavedConfigs()]);
+              savedConfigsMessage.textContent = `Switched to "${config.name}".`;
+            } catch (error) {
+              savedConfigsMessage.textContent = `Failed to switch: ${error.message}`;
+            }
+          });
+          row.appendChild(switchBtn);
+
+          const renameBtn = document.createElement("button");
+          renameBtn.type = "button";
+          renameBtn.className = "secondary";
+          renameBtn.textContent = "Rename";
+          renameBtn.addEventListener("click", async () => {
+            savedConfigsMessage.textContent = "";
+            const newName = prompt("Enter a new name for this config:", config.name);
+            if (!newName || !newName.trim()) return;
+            try {
+              await api.renameConfig(config.id, newName.trim());
+              await loadSavedConfigs();
+              savedConfigsMessage.textContent = "Config renamed.";
+            } catch (error) {
+              savedConfigsMessage.textContent = `Failed to rename: ${error.message}`;
+            }
+          });
+          row.appendChild(renameBtn);
+
+          const deleteBtn = document.createElement("button");
+          deleteBtn.type = "button";
+          deleteBtn.className = "secondary";
+          deleteBtn.textContent = "Delete";
+          deleteBtn.style.color = "var(--error, #dc2626)";
+          deleteBtn.addEventListener("click", async () => {
+            savedConfigsMessage.textContent = "";
+            try {
+              const result = await api.deleteConfig(config.id);
+              if (result && result.wasActive) {
+                relayOrigin.value = "";
+                apiOrigin.value = "";
+                webAppOrigin.value = "";
+                apiKey.value = "";
+                await Promise.all([loadSettings(), refreshRuntime(), refreshApiKeyStatus()]);
+              }
+              await loadSavedConfigs();
+              savedConfigsMessage.textContent = `Config "${config.name}" deleted.`;
+            } catch (error) {
+              savedConfigsMessage.textContent = `Failed to delete: ${error.message}`;
+            }
+          });
+          row.appendChild(deleteBtn);
+
+          savedConfigsList.appendChild(row);
+        }
+      }
+
+      async function loadSavedConfigs() {
+        try {
+          const configs = await api.listConfigs();
+          renderSavedConfigs(Array.isArray(configs) ? configs : []);
+        } catch (error) {
+          savedConfigsMessage.textContent = `Failed to load configs: ${error.message}`;
+        }
+      }
+
+      document.getElementById("saveCurrentConfig").addEventListener("click", async () => {
+        savedConfigsMessage.textContent = "";
+        const name = prompt("Enter a name for this config:");
+        if (!name || !name.trim()) return;
+        try {
+          await api.saveConfig(name.trim());
+          await loadSavedConfigs();
+          savedConfigsMessage.textContent = "Config saved.";
+        } catch (error) {
+          savedConfigsMessage.textContent = `Failed to save config: ${error.message}`;
+        }
+      });
+
       async function clearActivity() {
         await api.clearActivityEvents();
         await refreshActivity();
@@ -3403,7 +3530,9 @@
       });
 
       document.getElementById("saveRelayGateway").addEventListener("click", saveRelayGatewaySettings);
-      document.getElementById("reloadRelayGateway").addEventListener("click", loadSettings);
+      document.getElementById("reloadRelayGateway").addEventListener("click", async () => {
+        await Promise.all([loadSettings(), loadSavedConfigs()]);
+      });
       document.getElementById("saveSecurity").addEventListener("click", saveSecuritySettings);
       document.getElementById("reloadSecurity").addEventListener("click", loadSettings);
       document.getElementById("savePolicies").addEventListener("click", savePoliciesSettings);
@@ -3467,6 +3596,7 @@
       Promise.all([
         loadOnboardingState(),
         loadSettings(),
+        loadSavedConfigs(),
         loadBinaryPaths(),
         refreshRuntime(),
         refreshApiKeyStatus(),
