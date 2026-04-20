@@ -408,6 +408,10 @@ export class DesktopApplication {
     this.desktopWindow.show();
   }
 
+  setQuitting(): void {
+    this.desktopWindow.setQuitting();
+  }
+
   async shutdown(): Promise<ShutdownResult> {
     if (this.shuttingDown) {
       return "clean";
@@ -416,7 +420,10 @@ export class DesktopApplication {
     this.shuttingDown = true;
     this.bootRecovery.dispose();
     await this.bootRecovery.quiesce(1_000);
-    await Observability.shutdown();
+    await Promise.race([
+      Observability.shutdown(),
+      new Promise<void>((resolve) => setTimeout(resolve, 2_000)),
+    ]);
     return runShutdownSequence({
       updateCheckTimer: this.updateCheckTimer,
       clearUpdateCheckTimer: () => {
