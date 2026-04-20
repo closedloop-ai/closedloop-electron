@@ -51,9 +51,7 @@ app.on("before-quit", (event) => {
   // itself and block the quit sequence.
   desktopApplication.setQuitting();
 
-  // Hard-exit failsafe: even if shutdown hangs indefinitely, force the
-  // process to exit so CMD+Q is always responsive.
-  setTimeout(() => {
+  const hardExit = setTimeout(() => {
     gatewayLog.error("shutdown", "hard-exit timeout reached; forcing app.exit(1)");
     app.exit(1);
   }, 8_000).unref();
@@ -61,9 +59,11 @@ app.on("before-quit", (event) => {
   quitPromise = desktopApplication
     .shutdown()
     .then((result) => {
+      clearTimeout(hardExit);
       app.exit(result === "clean" ? 0 : 1);
     })
     .catch((err: unknown) => {
+      clearTimeout(hardExit);
       const message = err instanceof Error ? err.message : String(err);
       gatewayLog.error("shutdown", `shutdown rejected: ${message}`);
       app.exit(1);
