@@ -1,0 +1,337 @@
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, test } from "node:test";
+import { ApiKeyStore, type SafeStorageLike } from "../src/main/api-key-store.js";
+import { SettingsStore } from "../src/main/settings-store.js";
+
+const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function makeTempDir(prefix: string): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+function makeSettings(tmpDir: string, name = "settings"): SettingsStore {
+  return new SettingsStore({ cwd: tmpDir, name });
+}
+
+function makeTestSafeStorage(): SafeStorageLike {
+  return {
+    isEncryptionAvailable: () => true,
+    encryptString(plainText: string) {
+      return Buffer.from(`stub:${plainText}`, "utf-8");
+    },
+    decryptString(encrypted: Buffer) {
+      const s = encrypted.toString("utf-8");
+      return s.startsWith("stub:") ? s.slice(5) : s;
+    }
+  };
+}
+
+function makeApiKeyStore(tmpDir: string): ApiKeyStore {
+  return new ApiKeyStore({
+    cwd: tmpDir,
+    name: "secrets",
+    safeStorage: makeTestSafeStorage()
+  });
+}
+
+// --- saveConfig ---
+
+test("saveConfig captures current relayOrigin, apiOrigin, webAppOrigin", () => {
+  const tmpDir = makeTempDir("saved-configs-save-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.test");
+  store.setApiOrigin("https://api.test");
+  store.setWebAppOrigin("https://app.test");
+
+  const config = store.saveConfig("my-config");
+
+  assert.equal(config.relayOrigin, "https://relay.test");
+  assert.equal(config.apiOrigin, "https://api.test");
+  assert.equal(config.webAppOrigin, "https://app.test");
+  assert.equal(config.name, "my-config");
+  assert.match(config.id, UUID_V4_RE, "id should be UUID v4");
+});
+
+test("saveConfig two consecutive saves produce distinct IDs", () => {
+  const tmpDir = makeTempDir("saved-configs-ids-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.test");
+  store.setApiOrigin("https://api.test");
+  store.setWebAppOrigin("https://app.test");
+
+  const a = store.saveConfig("alpha");
+  const b = store.saveConfig("beta");
+
+  assert.notEqual(a.id, b.id);
+});
+
+test("saveConfig with empty string name throws validation error", () => {
+  const tmpDir = makeTempDir("saved-configs-empty-name-");
+  const store = makeSettings(tmpDir);
+
+  assert.throws(() => store.saveConfig(""), /name is required/i);
+  assert.throws(() => store.saveConfig("   "), /name is required/i);
+});
+
+test("saveConfig with name longer than 200 chars throws", () => {
+  const tmpDir = makeTempDir("saved-configs-long-name-");
+  const store = makeSettings(tmpDir);
+
+  assert.throws(() => store.saveConfig("x".repeat(201)), /200 characters/i);
+});
+
+test("saveConfig rejects duplicate name (case-insensitive, trimmed)", () => {
+  const tmpDir = makeTempDir("saved-configs-dup-name-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.test");
+  store.setApiOrigin("https://api.test");
+  store.setWebAppOrigin("https://app.test");
+
+  store.saveConfig("Production");
+
+  assert.throws(() => store.saveConfig("Production"), /already exists/i);
+  assert.throws(() => store.saveConfig("production"), /already exists/i);
+  assert.throws(() => store.saveConfig("  PRODUCTION  "), /already exists/i);
+  assert.equal(store.listConfigs().length, 1);
+});
+
+test("findConfigByOrigins returns the matching config or null", () => {
+  const tmpDir = makeTempDir("saved-configs-find-origins-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.test");
+  store.setApiOrigin("https://api.test");
+  store.setWebAppOrigin("https://app.test");
+  const prod = store.saveConfig("Production");
+
+  store.setRelayOrigin("https://relay.staging.test");
+  store.setApiOrigin("https://api.staging.test");
+  store.setWebAppOrigin("https://app.staging.test");
+  store.saveConfig("Staging");
+
+  assert.equal(
+    store.findConfigByOrigins("https://relay.test", "https://api.test", "https://app.test")?.id,
+    prod.id
+  );
+  assert.equal(
+    store.findConfigByOrigins("https://relay.test", "https://api.test", "https://different.test"),
+    null
+  );
+});
+
+// --- listConfigs ---
+
+test("listConfigs returns configs in insertion order", () => {
+  const tmpDir = makeTempDir("saved-configs-list-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.test");
+  store.setApiOrigin("https://api.test");
+  store.setWebAppOrigin("https://app.test");
+
+  store.saveConfig("A");
+  store.saveConfig("B");
+  store.saveConfig("C");
+
+  const configs = store.listConfigs();
+  assert.equal(configs.length, 3);
+  assert.equal(configs[0].name, "A");
+  assert.equal(configs[1].name, "B");
+  assert.equal(configs[2].name, "C");
+});
+
+// --- deleteConfig ---
+
+test("deleteConfig non-active case returns wasActive: false and removes from listConfigs", () => {
+  const tmpDir = makeTempDir("saved-configs-delete-non-active-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.test");
+  store.setApiOrigin("https://api.test");
+  store.setWebAppOrigin("https://app.test");
+
+  const config = store.saveConfig("to-delete");
+  const result = store.deleteConfig(config.id);
+
+  assert.equal(result.wasActive, false);
+  const remaining = store.listConfigs();
+  assert.equal(remaining.length, 0);
+});
+
+test("deleteConfig active case returns wasActive: true and clears activeConfigId", () => {
+  const tmpDir = makeTempDir("saved-configs-delete-active-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.test");
+  store.setApiOrigin("https://api.test");
+  store.setWebAppOrigin("https://app.test");
+
+  const config = store.saveConfig("active-config");
+  store.applyConfig(config.id);
+  assert.equal(store.getActiveConfigId(), config.id);
+
+  const result = store.deleteConfig(config.id);
+
+  assert.equal(result.wasActive, true);
+  assert.equal(store.getActiveConfigId(), null);
+  assert.equal(store.listConfigs().length, 0);
+  // Note: origin reset on active-config delete is done by the IPC handler (app.ts),
+  // not by the data-layer deleteConfig method.
+});
+
+test("deleteConfig with unknown id returns wasActive: false without throwing", () => {
+  const tmpDir = makeTempDir("saved-configs-delete-unknown-");
+  const store = makeSettings(tmpDir);
+
+  const result = store.deleteConfig("00000000-0000-4000-8000-000000000000");
+
+  assert.equal(result.wasActive, false);
+});
+
+// --- renameConfig ---
+
+test("renameConfig persists to disk and preserves id", () => {
+  const tmpDir = makeTempDir("saved-configs-rename-");
+  const storeName = "rename-settings";
+  const store = makeSettings(tmpDir, storeName);
+  store.setRelayOrigin("https://relay.test");
+  store.setApiOrigin("https://api.test");
+  store.setWebAppOrigin("https://app.test");
+
+  const config = store.saveConfig("original");
+  store.renameConfig(config.id, "renamed");
+
+  // Reconstruct store from same tmpDir to verify disk persistence
+  const store2 = makeSettings(tmpDir, storeName);
+  const configs = store2.listConfigs();
+  assert.equal(configs.length, 1);
+  assert.equal(configs[0].name, "renamed");
+  assert.equal(configs[0].id, config.id);
+});
+
+test("renameConfig with unknown id throws error containing 'Config not found'", () => {
+  const tmpDir = makeTempDir("saved-configs-rename-unknown-");
+  const store = makeSettings(tmpDir);
+
+  assert.throws(
+    () => store.renameConfig("00000000-0000-4000-8000-000000000000", "new-name"),
+    /Config not found/
+  );
+});
+
+test("renameConfig rejects a name already used by another config (case-insensitive)", () => {
+  const tmpDir = makeTempDir("saved-configs-rename-dup-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.test");
+  store.setApiOrigin("https://api.test");
+  store.setWebAppOrigin("https://app.test");
+
+  const a = store.saveConfig("Production");
+  const b = store.saveConfig("Staging");
+
+  assert.throws(() => store.renameConfig(b.id, "production"), /already exists/i);
+  // Renaming to its own name (even different case / whitespace) is allowed
+  store.renameConfig(a.id, "  Production  ");
+  assert.equal(store.listConfigs().find((c) => c.id === a.id)?.name, "Production");
+});
+
+// --- applyConfig ---
+
+test("applyConfig returns config, sets activeConfigId, and updates store origins", () => {
+  const tmpDir = makeTempDir("saved-configs-apply-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.test");
+  store.setApiOrigin("https://api.test");
+  store.setWebAppOrigin("https://app.test");
+
+  const config = store.saveConfig("apply-test");
+
+  // Change current origins before applying
+  store.setRelayOrigin("https://other-relay.test");
+  store.setApiOrigin("https://other-api.test");
+  store.setWebAppOrigin("https://other-app.test");
+
+  const applied = store.applyConfig(config.id);
+
+  assert.equal(applied.id, config.id);
+  assert.equal(store.getActiveConfigId(), config.id);
+  assert.equal(store.getRelayOrigin(), "https://relay.test");
+  assert.equal(store.getApiOrigin(), "https://api.test");
+  assert.equal(store.getWebAppOrigin(), "https://app.test");
+});
+
+test("applyConfig with unknown id throws error containing 'Config not found'", () => {
+  const tmpDir = makeTempDir("saved-configs-apply-unknown-");
+  const store = makeSettings(tmpDir);
+
+  assert.throws(
+    () => store.applyConfig("00000000-0000-4000-8000-000000000000"),
+    /Config not found/
+  );
+});
+
+// --- migration: fresh install initializes savedConfigs and activeConfigId ---
+
+test("migration: fresh install initializes savedConfigs to [] and activeConfigId to null", () => {
+  const tmpDir = makeTempDir("saved-configs-migration-");
+  const storeName = "migration-fresh";
+  // Seed a file with no savedConfigs/activeConfigId (simulates pre-feature install)
+  fs.writeFileSync(
+    path.join(tmpDir, `${storeName}.json`),
+    JSON.stringify({ relayOrigin: "https://relay.example.test" })
+  );
+
+  const store = makeSettings(tmpDir, storeName);
+  const all = store.getAll();
+
+  assert.deepEqual(all.savedConfigs, []);
+  assert.equal(all.activeConfigId, null);
+});
+
+// --- ApiKeyStore profile key methods ---
+
+test("ApiKeyStore.saveProfileKey/getProfileKey/deleteProfileKey roundtrip", () => {
+  const tmpDir = makeTempDir("saved-configs-apikey-");
+  const apiKeyStore = makeApiKeyStore(tmpDir);
+
+  assert.equal(apiKeyStore.getProfileKey("profile-1"), null);
+
+  apiKeyStore.saveProfileKey("profile-1", "sk_live_test_key");
+  assert.equal(apiKeyStore.getProfileKey("profile-1"), "sk_live_test_key");
+
+  apiKeyStore.deleteProfileKey("profile-1");
+  assert.equal(apiKeyStore.getProfileKey("profile-1"), null);
+});
+
+test("ApiKeyStore.deleteProfileKey is a no-op for unknown profileId", () => {
+  const tmpDir = makeTempDir("saved-configs-apikey-noop-");
+  const apiKeyStore = makeApiKeyStore(tmpDir);
+
+  // Should not throw
+  apiKeyStore.deleteProfileKey("nonexistent-id");
+  assert.equal(apiKeyStore.getProfileKey("nonexistent-id"), null);
+});
+
+test("ApiKeyStore profile keys are isolated per profileId", () => {
+  const tmpDir = makeTempDir("saved-configs-apikey-isolation-");
+  const apiKeyStore = makeApiKeyStore(tmpDir);
+
+  apiKeyStore.saveProfileKey("profile-A", "key-for-A");
+  apiKeyStore.saveProfileKey("profile-B", "key-for-B");
+
+  assert.equal(apiKeyStore.getProfileKey("profile-A"), "key-for-A");
+  assert.equal(apiKeyStore.getProfileKey("profile-B"), "key-for-B");
+
+  apiKeyStore.deleteProfileKey("profile-A");
+  assert.equal(apiKeyStore.getProfileKey("profile-A"), null);
+  assert.equal(apiKeyStore.getProfileKey("profile-B"), "key-for-B");
+});
