@@ -1,11 +1,13 @@
+import { randomUUID } from "node:crypto";
 import Store from "electron-store";
 import {
   DEFAULT_DESKTOP_SETTINGS,
   type AlwaysAllowRule,
   type DesktopSettings,
-  type RiskTier
+  type RiskTier,
+  type SavedConfig
 } from "../shared/contracts.js";
-import { normalizeAndValidateOrigin } from "./origin-policy.js";
+import { normalizeAndValidateOrigin, normalizeWebAppOrigin } from "./origin-policy.js";
 
 type BinaryPaths = {
   claude?: string;
@@ -92,6 +94,15 @@ export class SettingsStore {
         this.store.set("autoApprovalRules", rules as unknown as Record<string, RiskTier>);
       }
     }
+
+    // Migration: initialize savedConfigs and activeConfigId for existing installs.
+    // TODO(PLN-116-cleanup): Remove this migration block once all existing installs have been upgraded.
+    if (!("savedConfigs" in raw)) {
+      this.store.set("savedConfigs", []);
+    }
+    if (!("activeConfigId" in raw)) {
+      this.store.set("activeConfigId", null as DesktopSettings["activeConfigId"]);
+    }
   }
 
   getAll(): DesktopSettings {
@@ -99,7 +110,7 @@ export class SettingsStore {
   }
 
   getRelayOrigin(): string {
-    return this.store.get("relayOrigin" as keyof DesktopSettings, DEFAULT_DESKTOP_SETTINGS.relayOrigin) as string;
+    return this.store.get("relayOrigin", DEFAULT_DESKTOP_SETTINGS.relayOrigin);
   }
 
   getApiOrigin(): string {
@@ -151,7 +162,7 @@ export class SettingsStore {
   }
 
   setRelayOrigin(relayOrigin: string): void {
-    this.store.set("relayOrigin" as keyof DesktopSettings, relayOrigin);
+    this.store.set("relayOrigin", relayOrigin);
   }
 
   setApiOrigin(apiOrigin: string): void {
@@ -193,6 +204,119 @@ export class SettingsStore {
     return merged;
   }
 
+  getSavedConfigs(): SavedConfig[] {
+    return this.store.get("savedConfigs", DEFAULT_DESKTOP_SETTINGS.savedConfigs);
+  }
+
+  setSavedConfigs(configs: SavedConfig[]): void {
+    this.store.set("savedConfigs", configs);
+  }
+
+  getActiveConfigId(): string | null {
+    return this.store.get("activeConfigId", DEFAULT_DESKTOP_SETTINGS.activeConfigId);
+  }
+
+  setActiveConfigId(id: string | null): void {
+    this.store.set("activeConfigId", id as DesktopSettings["activeConfigId"]);
+  }
+
+  private validateConfigName(name: string): string {
+    const trimmed = typeof name === "string" ? name.trim() : "";
+    if (!trimmed) {
+      throw new Error("Config name is required");
+    }
+    if (trimmed.length > 200) {
+      throw new Error("Config name must be 200 characters or fewer");
+    }
+    return trimmed;
+  }
+
+  private assertNameAvailable(configs: SavedConfig[], name: string, excludeId?: string): void {
+    const normalized = name.trim().toLocaleLowerCase();
+    const clash = configs.find(
+      (c) => c.id !== excludeId && c.name.trim().toLocaleLowerCase() === normalized
+    );
+    if (clash) {
+      throw new Error(`A config named "${clash.name}" already exists`);
+    }
+  }
+
+  findConfigByOrigins(relayOrigin: string, apiOrigin: string, webAppOrigin: string): SavedConfig | null {
+    const configs = this.getSavedConfigs();
+    return (
+      configs.find(
+        (c) =>
+          c.relayOrigin === relayOrigin &&
+          c.apiOrigin === apiOrigin &&
+          c.webAppOrigin === webAppOrigin
+      ) ?? null
+    );
+  }
+
+  saveConfig(name: string): SavedConfig {
+    const trimmedName = this.validateConfigName(name);
+    const configs = this.getSavedConfigs();
+    this.assertNameAvailable(configs, trimmedName);
+    const config: SavedConfig = {
+      id: randomUUID(),
+      name: trimmedName,
+      relayOrigin: this.getRelayOrigin(),
+      apiOrigin: this.getApiOrigin(),
+      webAppOrigin: this.getWebAppOrigin()
+    };
+    configs.push(config);
+    this.setSavedConfigs(configs);
+    return config;
+  }
+
+  listConfigs(): SavedConfig[] {
+    return this.getSavedConfigs();
+  }
+
+  deleteConfig(id: string): { wasActive: boolean } {
+    const configs = this.getSavedConfigs();
+    const index = configs.findIndex((c) => c.id === id);
+    if (index === -1) {
+      return { wasActive: false };
+    }
+    const activeConfigId = this.getActiveConfigId();
+    const wasActive = activeConfigId === id;
+    configs.splice(index, 1);
+    this.setSavedConfigs(configs);
+    if (wasActive) {
+      this.setActiveConfigId(null);
+    }
+    return { wasActive };
+  }
+
+  renameConfig(id: string, name: string): void {
+    const trimmedName = this.validateConfigName(name);
+    const configs = this.getSavedConfigs();
+    const index = configs.findIndex((c) => c.id === id);
+    if (index === -1) {
+      throw new Error(`Config not found: ${id}`);
+    }
+    this.assertNameAvailable(configs, trimmedName, id);
+    configs[index] = { ...configs[index], name: trimmedName };
+    this.setSavedConfigs(configs);
+  }
+
+  applyConfig(id: string): SavedConfig {
+    const configs = this.getSavedConfigs();
+    const config = configs.find((c) => c.id === id);
+    if (!config) {
+      throw new Error(`Config not found: ${id}`);
+    }
+    const normalizedRelayOrigin = normalizeAndValidateOrigin(config.relayOrigin);
+    const normalizedApiOrigin = normalizeAndValidateOrigin(config.apiOrigin);
+    const normalizedWebAppOrigin = normalizeWebAppOrigin(config.webAppOrigin);
+    this.setRelayOrigin(normalizedRelayOrigin);
+    this.setApiOrigin(normalizedApiOrigin);
+    this.setWebAppOrigin(normalizedWebAppOrigin);
+    this.setActiveConfigId(id);
+    return config;
+  }
+
   update(partial: Partial<DesktopSettings>): DesktopSettings {
     if (typeof partial.sandboxBaseDirectory === "string") {
       this.store.set("sandboxBaseDirectory", partial.sandboxBaseDirectory);
@@ -210,7 +334,7 @@ export class SettingsStore {
       this.store.set("verboseLogging", partial.verboseLogging);
     }
     if (typeof partial.relayOrigin === "string") {
-      this.store.set("relayOrigin" as keyof DesktopSettings, partial.relayOrigin);
+      this.store.set("relayOrigin", partial.relayOrigin);
     }
     if (typeof partial.apiOrigin === "string") {
       this.store.set("apiOrigin", partial.apiOrigin);

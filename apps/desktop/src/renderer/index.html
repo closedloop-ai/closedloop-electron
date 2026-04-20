@@ -1610,6 +1610,221 @@
         border-top: 1px solid var(--border);
       }
 
+      .saved-configs-group {
+        margin-top: 20px;
+      }
+
+      .saved-configs-create {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+
+      .saved-configs-create input {
+        flex: 1;
+        padding: 8px 12px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+        color: var(--ink);
+        font-size: 13px;
+      }
+
+      .saved-configs-create input:focus {
+        outline: none;
+        border-color: var(--accent);
+      }
+
+      .saved-configs-create button {
+        padding: 8px 16px;
+        border-radius: 8px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        background: var(--accent);
+        color: var(--accent-ink);
+        border: 1px solid var(--accent);
+      }
+
+      .saved-configs-create button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .saved-configs-create button.confirming {
+        background: #d97706;
+        border-color: #d97706;
+        color: #fff;
+      }
+
+      .saved-configs-list {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .saved-config-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--surface);
+      }
+
+      .saved-config-row.active {
+        border-color: var(--accent);
+        box-shadow: inset 0 0 0 1px var(--accent);
+      }
+
+      .saved-config-info {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .saved-config-name {
+        font-weight: 600;
+        font-size: 13px;
+        color: var(--ink);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .saved-config-meta {
+        font-size: 11px;
+        color: var(--muted);
+      }
+
+      .saved-config-badge {
+        display: inline-block;
+        margin-left: 6px;
+        padding: 1px 6px;
+        border-radius: 999px;
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        background: var(--accent);
+        color: var(--accent-ink);
+      }
+
+      .saved-config-actions {
+        display: flex;
+        gap: 4px;
+        flex-shrink: 0;
+      }
+
+      .saved-config-actions button {
+        padding: 5px 10px;
+        font-size: 11px;
+        font-weight: 500;
+        background: none;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        color: var(--muted);
+        cursor: pointer;
+        transition: border-color 0.15s, color 0.15s, background 0.15s;
+      }
+
+      .saved-config-actions button:hover {
+        color: var(--ink);
+        border-color: var(--ink);
+      }
+
+      .saved-config-actions button.switch-btn:hover {
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+
+      .saved-config-actions button.delete-btn:hover {
+        color: #dc2626;
+        border-color: #dc2626;
+      }
+
+      .saved-config-actions button.delete-btn.confirming {
+        color: #fff;
+        background: #dc2626;
+        border-color: #dc2626;
+      }
+
+      .saved-config-rename {
+        flex: 1;
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+
+      .saved-config-rename input {
+        flex: 1;
+        padding: 6px 10px;
+        border: 1px solid var(--accent);
+        border-radius: 8px;
+        background: var(--bg);
+        color: var(--ink);
+        font-size: 13px;
+      }
+
+      .saved-configs-status {
+        margin: 12px 0 0;
+        padding: 10px 14px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        font-size: 13px;
+        font-weight: 500;
+        line-height: 1.4;
+        display: none;
+        align-items: flex-start;
+        gap: 10px;
+      }
+
+      .saved-configs-status.visible {
+        display: flex;
+      }
+
+      .saved-configs-status::before {
+        content: "";
+        flex-shrink: 0;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        margin-top: 6px;
+        background: currentColor;
+        box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 25%, transparent);
+      }
+
+      .saved-configs-status.success {
+        background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+        border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+        color: var(--accent);
+      }
+
+      .saved-configs-status.warning {
+        background: color-mix(in srgb, #d97706 14%, var(--surface));
+        border-color: color-mix(in srgb, #d97706 55%, var(--border));
+        color: #d97706;
+      }
+
+      .saved-configs-status.error {
+        background: color-mix(in srgb, #dc2626 14%, var(--surface));
+        border-color: color-mix(in srgb, #dc2626 55%, var(--border));
+        color: #dc2626;
+      }
+
+      .saved-configs-empty {
+        padding: 16px;
+        text-align: center;
+        border: 1px dashed var(--border);
+        border-radius: 10px;
+        color: var(--muted);
+        font-size: 12px;
+        margin: 0;
+      }
+
       .settings-tab-footer .muted {
         margin: 0;
         margin-left: 4px;
@@ -1886,6 +2101,18 @@
               </div>
             </div>
           </div>
+          <!-- Saved Configs section -->
+          <div class="settings-group saved-configs-group">
+            <h3 class="settings-group-title">Saved Configs</h3>
+            <p class="settings-group-desc">Save the current origins and API key as a named profile, then switch between profiles instantly.</p>
+            <div class="saved-configs-create">
+              <input id="newConfigName" type="text" placeholder="Profile name (e.g. Production)" maxlength="60" autocomplete="off" />
+              <button id="saveCurrentConfig" type="button" disabled>Save current</button>
+            </div>
+            <div id="savedConfigsList" class="saved-configs-list"></div>
+            <div id="savedConfigsMessage" class="saved-configs-status" role="status" aria-live="polite"></div>
+          </div>
+
           <div class="settings-tab-footer">
             <button id="saveRelayGateway">Save</button>
             <button class="secondary" id="reloadRelayGateway">Reload</button>
@@ -2095,6 +2322,9 @@
         }
         if (tabName === "binary-paths" && typeof refreshCliToolDetection === "function") {
           void refreshCliToolDetection();
+        }
+        if (tabName === "relay-gateway" && typeof loadSavedConfigs === "function") {
+          void loadSavedConfigs();
         }
       }
 
@@ -3243,6 +3473,258 @@
         }
       }
 
+      const savedConfigsList = document.getElementById("savedConfigsList");
+      const savedConfigsMessage = document.getElementById("savedConfigsMessage");
+      const newConfigNameInput = document.getElementById("newConfigName");
+      const saveCurrentConfigBtn = document.getElementById("saveCurrentConfig");
+
+      let savedConfigsMessageTimer = null;
+      const SAVED_CONFIG_STATUS_TONES = ["success", "warning", "error"];
+      function flashSavedConfigsMessage(text, tone = "success", durationMs = 4000) {
+        if (savedConfigsMessageTimer !== null) {
+          window.clearTimeout(savedConfigsMessageTimer);
+          savedConfigsMessageTimer = null;
+        }
+        savedConfigsMessage.textContent = text;
+        savedConfigsMessage.classList.remove(...SAVED_CONFIG_STATUS_TONES, "visible");
+        if (!text) return;
+        const safeTone = SAVED_CONFIG_STATUS_TONES.includes(tone) ? tone : "success";
+        savedConfigsMessage.classList.add(safeTone, "visible");
+        savedConfigsMessageTimer = window.setTimeout(() => {
+          savedConfigsMessage.textContent = "";
+          savedConfigsMessage.classList.remove(...SAVED_CONFIG_STATUS_TONES, "visible");
+          savedConfigsMessageTimer = null;
+        }, durationMs);
+      }
+
+      function renderSavedConfigs(configs, activeConfigId) {
+        savedConfigsList.innerHTML = "";
+        if (!configs || !configs.length) {
+          const empty = document.createElement("p");
+          empty.className = "saved-configs-empty";
+          empty.textContent = "No saved configs yet. Save your current settings above to create your first profile.";
+          savedConfigsList.appendChild(empty);
+          return;
+        }
+        for (const config of configs) {
+          const row = document.createElement("div");
+          row.className = "saved-config-row";
+          const isActive = config.id === activeConfigId;
+          if (isActive) row.classList.add("active");
+
+          const info = document.createElement("div");
+          info.className = "saved-config-info";
+
+          const nameEl = document.createElement("div");
+          nameEl.className = "saved-config-name";
+          nameEl.textContent = config.name;
+          if (isActive) {
+            const badge = document.createElement("span");
+            badge.className = "saved-config-badge";
+            badge.textContent = "Active";
+            nameEl.appendChild(badge);
+          }
+          info.appendChild(nameEl);
+
+          const meta = document.createElement("div");
+          meta.className = "saved-config-meta";
+          meta.textContent = config.hasCloudApiKey ? "Includes API key" : "No API key stored";
+          info.appendChild(meta);
+          row.appendChild(info);
+
+          const actions = document.createElement("div");
+          actions.className = "saved-config-actions";
+
+          const switchBtn = document.createElement("button");
+          switchBtn.type = "button";
+          switchBtn.className = "switch-btn";
+          switchBtn.textContent = isActive ? "Current" : "Switch";
+          switchBtn.disabled = isActive;
+          switchBtn.addEventListener("click", async () => {
+            flashSavedConfigsMessage("");
+            try {
+              await api.applyConfig(config.id);
+              await Promise.all([loadSettings(), refreshRuntime(), refreshApiKeyStatus(), loadSavedConfigs()]);
+              flashSavedConfigsMessage(`Switched to "${config.name}".`);
+            } catch (error) {
+              flashSavedConfigsMessage(`Failed to switch: ${error.message}`, "error", 6000);
+            }
+          });
+          actions.appendChild(switchBtn);
+
+          const renameBtn = document.createElement("button");
+          renameBtn.type = "button";
+          renameBtn.textContent = "Rename";
+          renameBtn.addEventListener("click", () => beginRename(row, config, info, actions));
+          actions.appendChild(renameBtn);
+
+          const deleteBtn = document.createElement("button");
+          deleteBtn.type = "button";
+          deleteBtn.className = "delete-btn";
+          deleteBtn.textContent = "Delete";
+          let confirmTimer = null;
+          deleteBtn.addEventListener("click", async () => {
+            flashSavedConfigsMessage("");
+            if (!deleteBtn.classList.contains("confirming")) {
+              deleteBtn.classList.add("confirming");
+              deleteBtn.textContent = "Confirm?";
+              confirmTimer = window.setTimeout(() => {
+                deleteBtn.classList.remove("confirming");
+                deleteBtn.textContent = "Delete";
+              }, 3000);
+              return;
+            }
+            if (confirmTimer !== null) window.clearTimeout(confirmTimer);
+            try {
+              const result = await api.deleteConfig(config.id);
+              if (result && result.wasActive) {
+                relayOrigin.value = "";
+                apiOrigin.value = "";
+                webAppOrigin.value = "";
+                apiKey.value = "";
+                await Promise.all([loadSettings(), refreshRuntime(), refreshApiKeyStatus()]);
+              }
+              await loadSavedConfigs();
+              flashSavedConfigsMessage(`Config "${config.name}" deleted.`);
+            } catch (error) {
+              flashSavedConfigsMessage(`Failed to delete: ${error.message}`, "error", 6000);
+            }
+          });
+          actions.appendChild(deleteBtn);
+          row.appendChild(actions);
+
+          savedConfigsList.appendChild(row);
+        }
+      }
+
+      function beginRename(row, config, infoEl, actionsEl) {
+        flashSavedConfigsMessage("");
+
+        const form = document.createElement("div");
+        form.className = "saved-config-rename";
+        const input = document.createElement("input");
+        input.type = "text";
+        input.value = config.name;
+        input.maxLength = 60;
+        form.appendChild(input);
+
+        const saveBtn = document.createElement("button");
+        saveBtn.type = "button";
+        saveBtn.className = "switch-btn";
+        saveBtn.textContent = "Save";
+
+        const cancelBtn = document.createElement("button");
+        cancelBtn.type = "button";
+        cancelBtn.textContent = "Cancel";
+
+        infoEl.replaceWith(form);
+        actionsEl.replaceChildren(saveBtn, cancelBtn);
+
+        input.focus();
+        input.select();
+
+        const commit = async () => {
+          const newName = input.value.trim();
+          if (!newName || newName === config.name) {
+            void loadSavedConfigs();
+            return;
+          }
+          try {
+            await api.renameConfig(config.id, newName);
+            await loadSavedConfigs();
+            flashSavedConfigsMessage("Config renamed.");
+          } catch (error) {
+            flashSavedConfigsMessage(`Failed to rename: ${error.message}`, "error", 6000);
+            void loadSavedConfigs();
+          }
+        };
+
+        saveBtn.addEventListener("click", commit);
+        cancelBtn.addEventListener("click", () => { void loadSavedConfigs(); });
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); void commit(); }
+          else if (e.key === "Escape") { e.preventDefault(); void loadSavedConfigs(); }
+        });
+      }
+
+      async function loadSavedConfigs() {
+        try {
+          const [configs, settings] = await Promise.all([
+            api.listConfigs(),
+            api.getSettings()
+          ]);
+          renderSavedConfigs(
+            Array.isArray(configs) ? configs : [],
+            settings && settings.activeConfigId ? settings.activeConfigId : null
+          );
+        } catch (error) {
+          flashSavedConfigsMessage(`Failed to load configs: ${error.message}`, "error", 6000);
+        }
+      }
+
+      newConfigNameInput.addEventListener("input", () => {
+        saveCurrentConfigBtn.disabled = !newConfigNameInput.value.trim();
+      });
+
+      let pendingDuplicateMatchId = null;
+      function resetSaveButton() {
+        pendingDuplicateMatchId = null;
+        saveCurrentConfigBtn.textContent = "Save current";
+        saveCurrentConfigBtn.classList.remove("confirming");
+        saveCurrentConfigBtn.disabled = !newConfigNameInput.value.trim();
+      }
+
+      async function saveCurrentConfig() {
+        const name = newConfigNameInput.value.trim();
+        if (!name) return;
+        flashSavedConfigsMessage("");
+        saveCurrentConfigBtn.disabled = true;
+
+        if (pendingDuplicateMatchId === null) {
+          try {
+            const match = await api.findMatchingConfig();
+            if (match && match.id) {
+              pendingDuplicateMatchId = match.id;
+              saveCurrentConfigBtn.textContent = "Save anyway";
+              saveCurrentConfigBtn.classList.add("confirming");
+              saveCurrentConfigBtn.disabled = false;
+              flashSavedConfigsMessage(
+                `These origins already match "${match.name}". Save as a new profile anyway?`,
+                "warning",
+                8000
+              );
+              return;
+            }
+          } catch (error) {
+            flashSavedConfigsMessage(`Failed to check for duplicates: ${error.message}`, "error", 6000);
+            saveCurrentConfigBtn.disabled = !newConfigNameInput.value.trim();
+            return;
+          }
+        }
+
+        try {
+          await api.saveConfig(name);
+          newConfigNameInput.value = "";
+          await loadSavedConfigs();
+          flashSavedConfigsMessage(`Config "${name}" saved.`);
+        } catch (error) {
+          flashSavedConfigsMessage(`Failed to save config: ${error.message}`, "error", 6000);
+        } finally {
+          resetSaveButton();
+        }
+      }
+
+      saveCurrentConfigBtn.addEventListener("click", saveCurrentConfig);
+      newConfigNameInput.addEventListener("input", () => {
+        if (pendingDuplicateMatchId !== null) resetSaveButton();
+      });
+      newConfigNameInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && newConfigNameInput.value.trim()) {
+          e.preventDefault();
+          void saveCurrentConfig();
+        }
+      });
+
       async function clearActivity() {
         await api.clearActivityEvents();
         await refreshActivity();
@@ -3403,7 +3885,9 @@
       });
 
       document.getElementById("saveRelayGateway").addEventListener("click", saveRelayGatewaySettings);
-      document.getElementById("reloadRelayGateway").addEventListener("click", loadSettings);
+      document.getElementById("reloadRelayGateway").addEventListener("click", async () => {
+        await Promise.all([loadSettings(), loadSavedConfigs()]);
+      });
       document.getElementById("saveSecurity").addEventListener("click", saveSecuritySettings);
       document.getElementById("reloadSecurity").addEventListener("click", loadSettings);
       document.getElementById("savePolicies").addEventListener("click", savePoliciesSettings);
@@ -3467,6 +3951,7 @@
       Promise.all([
         loadOnboardingState(),
         loadSettings(),
+        loadSavedConfigs(),
         loadBinaryPaths(),
         refreshRuntime(),
         refreshApiKeyStatus(),
