@@ -3376,13 +3376,17 @@ async function handleLoopRequest(
     let child: ReturnType<typeof spawn>;
 
     try {
-      const spawnEnv: Record<string, string> = await getShellEnv({
-        CLOSEDLOOP_WORKDIR: claudeWorkDir,
-      });
-
       // Resolve the claude binary path once for all commands in this spawn block.
       // getResolvedClaudePath() will use the user-configured override if present.
       const claudeBinary = getResolvedClaudePath();
+
+      const spawnEnv: Record<string, string> = await getShellEnv({
+        CLOSEDLOOP_WORKDIR: claudeWorkDir,
+        // Pass resolved claude path so run-loop.sh uses the same binary
+        // the desktop app validated in pre-flight (avoids PATH mismatches
+        // between Electron's env and the user's login shell).
+        CLAUDE_BIN: claudeBinary,
+      });
 
       // Shared claude CLI args for commands that run claude directly.
       // REQUEST_CHANGES omits "-" (stdin) because it passes the prompt as a CLI argument.
