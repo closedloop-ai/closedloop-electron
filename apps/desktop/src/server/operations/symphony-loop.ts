@@ -3259,41 +3259,34 @@ async function handleLoopRequest(
       await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
     };
 
-    // Pre-flight: verify required binary exists BEFORE posting 'started' event.
-    // PLAN and EXECUTE use run-loop.sh; REQUEST_CHANGES and DECOMPOSE use claude CLI directly.
+    // Pre-flight: verify required binaries exist BEFORE posting 'started' event.
+    // All commands need claude CLI. PLAN/EXECUTE additionally need run-loop.sh.
     const usesRunLoop = body.command === "PLAN" || body.command === "EXECUTE";
-    const usesClaude =
-      body.command === "REQUEST_CHANGES" ||
-      body.command === "DECOMPOSE" ||
-      body.command === "EVALUATE_PRD" ||
-      body.command === "GENERATE_PRD" ||
-      body.command === "EVALUATE_PLAN" ||
-      body.command === "EVALUATE_CODE";
     let scriptPath: string | null = null;
 
-    if (usesClaude) {
-      const resolved = resolveBinarySync("claude", overrideGetBinaryPaths?.()?.claude);
-      if (resolved.source === "fallback") {
-        // Binary not found on PATH and no override set -- abort
-        await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-          type: LoopEventType.Error,
-          code: LoopErrorCode.BinaryNotFound,
-          message: "claude CLI not found in PATH",
-        });
-        Observability.preflightBinaryNotFound(
-          commandId,
-          operationId,
-          body.loopId,
-        );
-        await cleanupOnError();
-        json(context, 500, { error: "claude CLI not found in PATH" });
-        return;
-      }
-      // "override", "override_invalid", or "path": all proceed.
-      // "override_invalid" is intentionally allowed -- the user set an explicit
-      // override and should see the resulting ENOENT from the spawn, not a
-      // confusing "not found in PATH" error.
-    } else if (usesRunLoop) {
+    // Every command needs claude — verify it consistently for all paths.
+    const resolved = resolveBinarySync("claude", overrideGetBinaryPaths?.()?.claude);
+    if (resolved.source === "fallback") {
+      await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+        type: LoopEventType.Error,
+        code: LoopErrorCode.BinaryNotFound,
+        message: "claude CLI not found in PATH",
+      });
+      Observability.preflightBinaryNotFound(
+        commandId,
+        operationId,
+        body.loopId,
+      );
+      await cleanupOnError();
+      json(context, 500, { error: "claude CLI not found in PATH" });
+      return;
+    }
+    // "override", "override_invalid", or "path": all proceed.
+    // "override_invalid" is intentionally allowed -- the user set an explicit
+    // override and should see the resulting ENOENT from the spawn, not a
+    // confusing "not found in PATH" error.
+
+    if (usesRunLoop) {
       scriptPath = findPluginScript("code", "run-loop.sh");
       if (!scriptPath) {
         await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
@@ -3383,13 +3376,16 @@ async function handleLoopRequest(
     let child: ReturnType<typeof spawn>;
 
     try {
+      // Reuse the path from pre-flight so validation and execution stay aligned.
+      const claudeBinary = resolved.path;
+
       const spawnEnv: Record<string, string> = await getShellEnv({
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
+        // Pass resolved claude path so run-loop.sh uses the same binary
+        // the desktop app validated in pre-flight (avoids PATH mismatches
+        // between Electron's env and the user's login shell).
+        CLAUDE_BIN: claudeBinary,
       });
-
-      // Resolve the claude binary path once for all commands in this spawn block.
-      // getResolvedClaudePath() will use the user-configured override if present.
-      const claudeBinary = getResolvedClaudePath();
 
       // Shared claude CLI args for commands that run claude directly.
       // REQUEST_CHANGES omits "-" (stdin) because it passes the prompt as a CLI argument.
