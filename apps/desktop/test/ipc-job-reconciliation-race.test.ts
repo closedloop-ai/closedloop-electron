@@ -67,11 +67,8 @@ function simulateIpcReconciliation(
       !isTerminalJobStatus(rawJob?.status ?? "UNKNOWN")
     ) {
       if (rawJob && rawJob.exitCode != null) {
-        const ageMs = Date.now() - new Date(rawJob.updatedAt).getTime();
-        if (ageMs < 60_000) {
-          stillRunning.push(snapshot);
-          continue;
-        }
+        stillRunning.push({ ...snapshot, status: rawJob.status });
+        continue;
       }
       jobStore.upsert({
         ...rawJob!,
@@ -174,20 +171,18 @@ test("IPC reconciliation skips already-terminal jobs", async () => {
   assert.equal(afterReconcile?.status, "COMPLETED");
 });
 
-test("IPC reconciliation falls back to STOPPED when exitCode claim is stale (>60s)", async () => {
-  const { store } = makeTempJobStore("race-stale-exitcode");
-  const staleTime = new Date(Date.now() - 90_000).toISOString();
-  const job = makeRunningJob({ exitCode: 0, updatedAt: staleTime });
+test("IPC reconciliation returns raw RUNNING status for claimed jobs (no UI flicker)", async () => {
+  const { store } = makeTempJobStore("race-no-flicker");
+  const job = makeRunningJob({ exitCode: 0 });
   store.upsert(job);
 
   const snapshot = await enrichJobSnapshot(job);
-  assert.equal(snapshot.status, "STOPPED");
+  assert.equal(snapshot.status, "STOPPED", "enrichment returns STOPPED");
 
-  simulateIpcReconciliation(store, [snapshot]);
-
-  const afterReconcile = store.getByLoopId("loop-race-1");
-  assert.equal(afterReconcile?.status, "STOPPED",
-    "stale exitCode claim (>60s) means completion handler failed — allow reconciliation");
+  const result = simulateIpcReconciliation(store, [snapshot]);
+  assert.equal(result.length, 1);
+  assert.equal(result[0]?.status, "RUNNING",
+    "claimed job should appear as RUNNING in IPC result, not STOPPED");
 });
 
 test("IPC reconciliation passes through non-terminal snapshots", async () => {
