@@ -89,6 +89,7 @@ function makeGatewayServer(options?: {
   allowedDirs?: string[];
   tmpDir?: string;
   getApiOrigin?: () => string;
+  getSymphonyDir?: () => string;
 }): DesktopGatewayServer {
   const tmpDir = options?.tmpDir ?? makeTempDir();
   const server = new DesktopGatewayServer({
@@ -104,6 +105,7 @@ function makeGatewayServer(options?: {
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: options?.getSymphonyDir ?? (() => tmpDir),
   });
   serversToClose.push(server);
   return server;
