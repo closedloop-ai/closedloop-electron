@@ -3376,9 +3376,8 @@ async function handleLoopRequest(
     let child: ReturnType<typeof spawn>;
 
     try {
-      // Resolve the claude binary path once for all commands in this spawn block.
-      // getResolvedClaudePath() will use the user-configured override if present.
-      const claudeBinary = getResolvedClaudePath();
+      // Reuse the path from pre-flight so validation and execution stay aligned.
+      const claudeBinary = resolved.path;
 
       const spawnEnv: Record<string, string> = await getShellEnv({
         CLOSEDLOOP_WORKDIR: claudeWorkDir,

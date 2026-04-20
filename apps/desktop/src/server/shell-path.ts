@@ -199,7 +199,10 @@ export function resolveBinarySync(
   }
 
   try {
-    const result = execFileSync("which", [logicalName], { encoding: "utf8" }).trim();
+    const result = execFileSync("which", [logicalName], {
+      encoding: "utf8",
+      timeout: 5_000,
+    }).trim();
     if (result) {
       return { path: result, source: "path" };
     }
@@ -209,7 +212,8 @@ export function resolveBinarySync(
 
   try {
     const result = execFileSync("bash", ["-lc", `which ${logicalName}`], {
-      encoding: "utf8"
+      encoding: "utf8",
+      timeout: 5_000,
     }).trim();
     if (result) {
       return { path: result, source: "path" };
