@@ -31,6 +31,7 @@ import {
   makeFakeWorktreeProvider,
   restoreEnv,
   saveEnv,
+  setupStubClaude,
   startMockApiServer,
   waitForCompletedEvent,
   waitForTerminalEvent,
@@ -213,8 +214,8 @@ test("EXECUTE local-direct: callback failure fails fast before spawn", async () 
 
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
-  process.env.PATH = "/usr/bin:/bin";
-  setShellPathForTest();
+  // Provide a stub claude binary so the unified pre-flight check passes.
+  await setupStubClaude(tmpDir);
 
   // Callback path failure is simulated by failing /events.
   const failUrls = new Map<string, number>([["events", 500]]);
@@ -524,6 +525,9 @@ test("PLAN: non-zero exit cleans up persisted loop token", async () => {
   process.env.HOME = tmpDir;
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+  // Provide a stub claude binary so the unified pre-flight check passes.
+  await setupStubClaude(tmpDir);
 
   // run-loop.sh exits with code 1 to trigger the non-zero exit path
   await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 1\n", { skipTokens: true });
