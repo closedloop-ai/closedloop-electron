@@ -576,8 +576,9 @@ export async function cloneRepoViaGh(
     // (a) the allowed dir IS the expected repo location — re-create it there
     destPath = expandedAllowedDir;
   } else if (existsSync(path.join(expandedAllowedDir, ".git"))) {
-    // (b) the allowed dir is itself a git repo — clone as a sibling
-    destPath = path.join(path.dirname(expandedAllowedDir), repoName);
+    // (b) the allowed dir is itself a git repo — clone into it as a subdirectory
+    //     (cloning as a sibling would land outside the sandbox in single-allowed-dir configs)
+    destPath = path.join(expandedAllowedDir, repoName);
   } else {
     // (c) normal case — clone into the allowed dir
     destPath = path.join(expandedAllowedDir, repoName);
@@ -608,6 +609,7 @@ export async function cloneRepoViaGh(
       {
         timeout: timeout ?? CLONE_GIT_TIMEOUT,
         maxBuffer: 10 * 1024 * 1024,
+        env: await getShellEnv(),
       },
     );
   } catch (err) {
@@ -2808,7 +2810,9 @@ async function handleLoopRequest(
             throw err;
           }
         }
-      } else {
+      } else if (repoRequirement === "REQUIRED") {
+        // Auto-clone: only attempt for REQUIRED commands to avoid up to CLONE_GIT_TIMEOUT
+        // latency for OPTIONAL commands that can proceed without a repo.
         let configDir: string | null = null;
         if (getSymphonyDir) {
           try {
@@ -2844,28 +2848,28 @@ async function handleLoopRequest(
             body.loopId,
             `clone failed for ${body.repo.fullName}: ${cloneResult.reason}`,
           );
-          if (repoRequirement === "REQUIRED") {
-            await postLoopEventBounded(
-              apiBaseUrl,
-              body.loopId,
-              body.closedLoopAuthToken,
-              {
-                type: LoopEventType.Error,
-                code: LoopErrorCode.RepoNotFound,
-                message: `Repository not found locally: ${body.repo.fullName}`,
-              },
-            );
-            // runningLoops.delete handled by finally block (spawnedSuccessfully remains false)
-            json(context, 404, {
-              error: `Repository not found locally: ${body.repo.fullName}`,
-            });
-            return;
-          }
-          loopLog(
+          await postLoopEventBounded(
+            apiBaseUrl,
             body.loopId,
-            `Ignoring repo.fullName for ${body.command}: not found locally (${body.repo.fullName})`,
+            body.closedLoopAuthToken,
+            {
+              type: LoopEventType.Error,
+              code: LoopErrorCode.RepoNotFound,
+              message: `Repository not found locally: ${body.repo.fullName}`,
+            },
           );
+          // runningLoops.delete handled by finally block (spawnedSuccessfully remains false)
+          json(context, 404, {
+            error: `Repository not found locally: ${body.repo.fullName}`,
+          });
+          return;
         }
+      } else {
+        // OPTIONAL: repo not found locally, skip without auto-clone
+        loopLog(
+          body.loopId,
+          `Ignoring repo.fullName for ${body.command}: not found locally (${body.repo.fullName})`,
+        );
       }
     }
 

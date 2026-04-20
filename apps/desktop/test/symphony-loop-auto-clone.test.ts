@@ -200,8 +200,13 @@ describe("cloneRepoViaGh: integration (DesktopGatewayServer)", () => {
   const serversToClose: DesktopGatewayServer[] = [];
   const mockServersToClose: http.Server[] = [];
   const tempPaths: string[] = [];
+  let savedEnv: Record<string, string | undefined> | undefined;
 
   afterEach(async () => {
+    if (savedEnv !== undefined) {
+      restoreEnv(savedEnv);
+      savedEnv = undefined;
+    }
     configureBinaryPathsResolver(null);
     resetResolvedClaudePath();
     resetShellPathCache();
@@ -222,6 +227,7 @@ describe("cloneRepoViaGh: integration (DesktopGatewayServer)", () => {
   });
 
   test("T-4.1c: EXECUTE loop auto-clones missing repo, spawns loop, persists repos.json", async () => {
+    savedEnv = saveEnv();
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pln284-4.1c-"));
     tempPaths.push(tmpDir);
 
