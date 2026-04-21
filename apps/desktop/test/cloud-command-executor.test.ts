@@ -576,6 +576,10 @@ function createExecutor(options: {
       "protocolVersion" | "messageId" | "timestamp"
     >,
   ) => void;
+  onQueueStatsChange?: (stats: {
+    activeCommands: number;
+    queueDepth: number;
+  }) => void;
 }): CloudCommandExecutor {
   return new CloudCommandExecutor({
     getGatewayPort: () => gatewayPort,
@@ -583,6 +587,7 @@ function createExecutor(options: {
     maxInFlightCommands: options.maxInFlightCommands,
     sendCommandAck: () => {},
     sendCommandEvent: options.onEvent,
+    onQueueStatsChange: options.onQueueStatsChange,
   });
 }
 
@@ -703,3 +708,125 @@ function asRecord(value: unknown): Record<string, unknown> {
   }
   return value as Record<string, unknown>;
 }
+
+// --- onQueueStatsChange dedupe ---
+
+test("onQueueStatsChange: first notification on empty idle executor fires once", () => {
+  const stats: Array<{ activeCommands: number; queueDepth: number }> = [];
+  executor = createExecutor({
+    maxInFlightCommands: 1,
+    onEvent: () => {},
+    onQueueStatsChange: (s) => stats.push(s),
+  });
+  executor.setConnected(true);
+  assert.deepStrictEqual(stats, [{ activeCommands: 0, queueDepth: 0 }]);
+});
+
+test("onQueueStatsChange: idempotent setConnected(true) on idle executor does not re-fire", () => {
+  const stats: Array<{ activeCommands: number; queueDepth: number }> = [];
+  executor = createExecutor({
+    maxInFlightCommands: 1,
+    onEvent: () => {},
+    onQueueStatsChange: (s) => stats.push(s),
+  });
+  executor.setConnected(true);
+  executor.setConnected(false);
+  executor.setConnected(true);
+  assert.strictEqual(
+    stats.length,
+    1,
+    "no-op schedule with unchanged 0/0 counts should not emit twice",
+  );
+});
+
+test("onQueueStatsChange: depth-only change emits (enqueue beyond max in-flight, then cancel)", async () => {
+  let releaseC1: (() => void) | null = null;
+  const c1Blocker = new Promise<void>((resolve) => {
+    releaseC1 = resolve;
+  });
+
+  await startGateway(async (request, response) => {
+    const url = new URL(request.url ?? "/", "http://localhost");
+    const command = url.searchParams.get("command") ?? "unknown";
+    if (command === "c1") {
+      await c1Blocker;
+    }
+    response.statusCode = 200;
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ ok: true }));
+  });
+
+  const stats: Array<{ activeCommands: number; queueDepth: number }> = [];
+  executor = createExecutor({
+    maxInFlightCommands: 1,
+    onEvent: () => {},
+    onQueueStatsChange: (s) => stats.push(s),
+  });
+  executor.setConnected(true); // emits {0,0}
+  executor.enqueue(
+    buildCommand("c1", { command: "c1" }, { repoPath: "/repo/a" }),
+  );
+  // Wait for c1 to enter flight so stats settles at {1,0}.
+  await waitFor(
+    () =>
+      stats.some((s) => s.activeCommands === 1 && s.queueDepth === 0),
+  );
+
+  // c2 enqueued while c1 is in-flight with max=1 → sits in queue; depth grows.
+  executor.enqueue(
+    buildCommand("c2", { command: "c2" }, { repoPath: "/repo/b" }),
+  );
+  await waitFor(
+    () =>
+      stats.some((s) => s.activeCommands === 1 && s.queueDepth === 1),
+  );
+
+  // Cancel the queued c2 → depth drops back; active unchanged.
+  executor.cancel(buildCancel("c2", "user cancel"));
+  await waitFor(
+    () => {
+      const last = stats[stats.length - 1];
+      return last.activeCommands === 1 && last.queueDepth === 0;
+    },
+  );
+
+  // No consecutive duplicates (dedupe guard works).
+  for (let i = 1; i < stats.length; i++) {
+    assert.ok(
+      stats[i].activeCommands !== stats[i - 1].activeCommands ||
+        stats[i].queueDepth !== stats[i - 1].queueDepth,
+      `consecutive duplicate emission at index ${i}: ${JSON.stringify(stats[i])}`,
+    );
+  }
+
+  // Both partial-delta cases observed:
+  //   {1,0} → {1,1}  depth-only (enqueue)
+  //   {1,1} → {1,0}  depth-only (cancel)
+  const pairs = stats.map((s) => `${s.activeCommands}/${s.queueDepth}`);
+  assert.ok(
+    pairs.includes("1/0") && pairs.includes("1/1"),
+    `expected depth-only transitions through 1/0 and 1/1, got: ${pairs.join(", ")}`,
+  );
+
+  releaseC1?.();
+  await waitFor(() => stats.some((s) => s.activeCommands === 0));
+});
+
+test("onQueueStatsChange: dispose resets last-emitted cache", () => {
+  const stats: Array<{ activeCommands: number; queueDepth: number }> = [];
+  executor = createExecutor({
+    maxInFlightCommands: 1,
+    onEvent: () => {},
+    onQueueStatsChange: (s) => stats.push(s),
+  });
+  executor.setConnected(true); // emits {0,0}
+  executor.dispose(); // stats unchanged relative to last; but cache reset means a fresh {0,0} fires
+  // dispose() calls notifyQueueStats after clearing state; with cache reset,
+  // the {0,0} post-dispose emission is distinct from the initial one.
+  assert.strictEqual(stats.length, 2);
+  assert.deepStrictEqual(stats, [
+    { activeCommands: 0, queueDepth: 0 },
+    { activeCommands: 0, queueDepth: 0 },
+  ]);
+  executor = null; // prevent afterEach double-dispose
+});

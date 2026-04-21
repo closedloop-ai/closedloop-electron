@@ -38,6 +38,7 @@ export class CloudCommandExecutor {
   private readonly trackedByCommandId = new Map<string, TrackedCommand>();
   private connected = false;
   private disposed = false;
+  private lastEmittedStats: { activeCommands: number; queueDepth: number } | null = null;
 
   constructor(options: CloudCommandExecutorOptions) {
     this.options = options;
@@ -172,6 +173,7 @@ export class CloudCommandExecutor {
     this.inFlightByCommandId.clear();
     this.lockOwners.clear();
     this.trackedByCommandId.clear();
+    this.lastEmittedStats = null;
     this.notifyQueueStats();
   }
 
@@ -502,7 +504,20 @@ export class CloudCommandExecutor {
   }
 
   private notifyQueueStats(): void {
-    this.options.onQueueStatsChange?.(this.getStats());
+    const stats = this.getStats();
+    // Skip the callback when neither counter changed. schedule() is called on
+    // every setConnected(true) and every execute() boundary, so without this
+    // guard an idle reconnect would emit a spurious 0/0 telemetry event that
+    // does not correspond to a real queue mutation.
+    if (
+      this.lastEmittedStats &&
+      this.lastEmittedStats.activeCommands === stats.activeCommands &&
+      this.lastEmittedStats.queueDepth === stats.queueDepth
+    ) {
+      return;
+    }
+    this.lastEmittedStats = stats;
+    this.options.onQueueStatsChange?.(stats);
   }
 
   private pruneTerminalCommands(): void {
