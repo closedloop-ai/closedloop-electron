@@ -1,11 +1,9 @@
 import path from "node:path";
-import type {
-  OperationDispatcher,
-  OperationRequestContext,
-} from "../operation-dispatcher.js";
+import type { OperationDispatcher } from "../operation-dispatcher.js";
 import { resolveRepoFullName } from "./git-helpers.js";
 import { loadReposConfig } from "./repos-config-utils.js";
 import { expandHome, SymphonyDirNotConfiguredError } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 export function registerGitRepoPathRoutes(
   dispatcher: OperationDispatcher,
@@ -49,14 +47,4 @@ export function registerGitRepoPathRoutes(
       }
     },
   );
-}
-
-function json(
-  context: OperationRequestContext,
-  status: number,
-  payload: unknown,
-): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
 }

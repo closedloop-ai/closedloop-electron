@@ -13,6 +13,7 @@ import {
   type ReposConfig
 } from "./repos-config-utils.js";
 import { expandHome } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 type DeployStatus = "running" | "completed" | "failed" | "not-started";
 
@@ -979,10 +980,4 @@ function asNumber(value: unknown): number | null {
   }
 
   return null;
-}
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
 }

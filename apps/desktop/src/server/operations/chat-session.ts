@@ -18,6 +18,7 @@ import type {
   StreamEvent,
 } from "./chat-providers.js";
 import { getWebOnlyTools } from "./chat-tools.js";
+import { json } from "./response-utils.js";
 
 type ValidatedBody = {
   chatKey: string;
@@ -494,13 +495,6 @@ function writeDone(response: ServerResponse): void {
   writeEvent(response, { type: "done" });
   response.end();
 }
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }

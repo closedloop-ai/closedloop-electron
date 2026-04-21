@@ -4,9 +4,10 @@ import path from "node:path";
 import crypto from "node:crypto";
 import Busboy from "busboy";
 import type { Readable } from "node:stream";
-import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import type { OperationDispatcher } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 const ALLOWED_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -171,10 +172,4 @@ async function parseMultipartFiles(contentType: string, body: Buffer): Promise<U
 
     busboy.end(body);
   });
-}
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
 }

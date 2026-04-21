@@ -20,6 +20,7 @@ import {
   createStreamState,
   processStreamEvent,
 } from "./stream-events.js";
+import { json } from "./response-utils.js";
 import {
   acquireLaunchLock,
   assertRepoAllowed,
@@ -1233,14 +1234,4 @@ function parseBody(
 
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
-}
-
-function json(
-  context: OperationRequestContext,
-  status: number,
-  payload: unknown
-): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
 }
