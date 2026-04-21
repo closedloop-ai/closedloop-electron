@@ -812,7 +812,9 @@ test("onQueueStatsChange: depth-only change emits (enqueue beyond max in-flight,
   await waitFor(() => stats.some((s) => s.activeCommands === 0));
 });
 
-test("onQueueStatsChange: dispose resets last-emitted cache", () => {
+test("onQueueStatsChange: dispose does not fire a final notification", () => {
+  // dispose() must stay silent so it cannot re-arm a shutdown-side debounce
+  // timer that outlives Observability.shutdown().
   const stats: Array<{ activeCommands: number; queueDepth: number }> = [];
   executor = createExecutor({
     maxInFlightCommands: 1,
@@ -820,13 +822,12 @@ test("onQueueStatsChange: dispose resets last-emitted cache", () => {
     onQueueStatsChange: (s) => stats.push(s),
   });
   executor.setConnected(true); // emits {0,0}
-  executor.dispose(); // stats unchanged relative to last; but cache reset means a fresh {0,0} fires
-  // dispose() calls notifyQueueStats after clearing state; with cache reset,
-  // the {0,0} post-dispose emission is distinct from the initial one.
-  assert.strictEqual(stats.length, 2);
-  assert.deepStrictEqual(stats, [
-    { activeCommands: 0, queueDepth: 0 },
-    { activeCommands: 0, queueDepth: 0 },
-  ]);
+  const beforeDispose = stats.length;
+  executor.dispose();
+  assert.strictEqual(
+    stats.length,
+    beforeDispose,
+    "dispose() must not invoke onQueueStatsChange",
+  );
   executor = null; // prevent afterEach double-dispose
 });

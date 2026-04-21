@@ -173,8 +173,11 @@ export class CloudCommandExecutor {
     this.inFlightByCommandId.clear();
     this.lockOwners.clear();
     this.trackedByCommandId.clear();
-    this.lastEmittedStats = null;
-    this.notifyQueueStats();
+    // Intentionally do not call notifyQueueStats() here: dispose() runs during
+    // app shutdown after Observability has already been torn down, and the
+    // app-level debounce has already been cancelled. Emitting a final {0,0}
+    // would re-arm that debounce timer and cause a telemetry call after
+    // Observability.shutdown() has returned.
   }
 
   getStats(): { activeCommands: number; queueDepth: number } {
