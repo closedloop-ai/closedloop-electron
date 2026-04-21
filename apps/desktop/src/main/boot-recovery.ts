@@ -1,5 +1,6 @@
 import { startOutputTailer } from "../server/operations/output-tailer.js";
 import {
+  cleanupAdditionalWorktreesWithDefaultProvider,
   registerRecoveredLoop,
   unregisterLoop,
 } from "../server/operations/symphony-loop.js";
@@ -158,6 +159,8 @@ export class BootRecoveryService {
           apiBaseUrl,
           isProcessRunning,
           loopTokenStore,
+          cleanupAdditionalWorktrees:
+            cleanupAdditionalWorktreesWithDefaultProvider,
         });
         if (!outcome.cloudFinalized && outcome.retryableFailure) {
           const latest = jobStore.getByLoopId(job.loopId);
@@ -330,6 +333,8 @@ export class BootRecoveryService {
         apiBaseUrl,
         isProcessRunning,
         loopTokenStore,
+        cleanupAdditionalWorktrees:
+          cleanupAdditionalWorktreesWithDefaultProvider,
       };
 
       try {

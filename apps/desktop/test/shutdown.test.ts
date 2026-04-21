@@ -13,6 +13,11 @@ function makeStubDeps(overrides?: Partial<ShutdownDeps>) {
     clearUpdateCheckTimer: () => {
       calls.push("clearUpdateCheckTimer");
     },
+    observability: {
+      shutdown: async () => {
+        calls.push("observability.shutdown");
+      },
+    },
     cloudSocket: {
       stop: () => {
         calls.push("cloudSocket.stop");
@@ -52,6 +57,7 @@ describe("runShutdownSequence", () => {
     assert.equal(result, "clean");
     assert.deepEqual(calls, [
       "clearUpdateCheckTimer",
+      "observability.shutdown",
       "cloudSocket.stop",
       "commandExecutor.dispose",
       "server.stop",

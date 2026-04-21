@@ -48,6 +48,15 @@ export interface AlwaysAllowRule {
   expiresAt: string;
 }
 
+export interface SavedConfig {
+  id: string;
+  name: string;
+  relayOrigin: string;
+  apiOrigin: string;
+  webAppOrigin: string;
+  // cloudApiKey is NOT stored here -- stored encrypted in ApiKeyStore keyed by profile UUID
+}
+
 export interface DesktopSettings {
   autoApprovalRules: Record<string, RiskTier>;
   alwaysAllowRules: AlwaysAllowRule[];
@@ -67,6 +76,8 @@ export interface DesktopSettings {
     python3?: string;
     git?: string;
   };
+  savedConfigs: SavedConfig[];
+  activeConfigId: string | null;
 }
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
@@ -81,5 +92,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   apiOrigin: DEFAULT_AUTH_API_ORIGIN,
   webAppOrigin: DEFAULT_WEB_APP_ORIGIN,
   verboseLogging: false,
-  binaryPaths: {}
+  binaryPaths: {},
+  savedConfigs: [],
+  activeConfigId: null
 };

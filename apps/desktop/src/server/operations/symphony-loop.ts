@@ -40,6 +40,7 @@ import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { getShellEnv, getShellPath, resolveBinarySync } from "../shell-path.js";
 import { withMcpTools } from "./chat-tools.js";
+import { findWorktreeForBranch as findWorktreeForBranchImpl } from "./git-helpers.js";
 import { startOutputTailer } from "./output-tailer.js";
 import {
   findPluginScript,
@@ -51,15 +52,16 @@ import { addRepo } from "./repos-config-utils.js";
 import {
   CLONE_GIT_TIMEOUT,
   expandHome,
+  fetchOrigin,
   isProcessRunning,
   loopError,
   loopLog,
+  resolveRef,
   resolveWorktreeParentDir,
   runLoopsSetupScript,
   SymphonyDirNotConfiguredError,
   tryAssertRepoAllowed,
 } from "./symphony-utils.js";
-import { findWorktreeForBranch as findWorktreeForBranchImpl } from "./git-helpers.js";
 export { readLogTail } from "../../main/diagnostics-helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -81,6 +83,7 @@ export interface WorktreeProvider {
     loopId?: string,
   ): Promise<void>;
   getCurrentBranch(worktreeDir: string): string | null;
+  branchExists(repoPath: string, branch: string): Promise<boolean>;
 }
 
 export const defaultWorktreeProvider: WorktreeProvider = {
@@ -88,6 +91,7 @@ export const defaultWorktreeProvider: WorktreeProvider = {
   findWorktreeForBranch: findWorktreeForBranchImpl,
   removeWorktree: removeWorktreeImpl,
   getCurrentBranch: getCurrentBranchImpl,
+  branchExists: branchExistsImpl,
 };
 
 // Promisified execFile for non-blocking subprocess invocations (e.g. gh repo clone).
@@ -207,18 +211,18 @@ export function getResolvedClaudePath(): string {
 // Types — shared contract from @closedloop-ai/loops-api
 // ---------------------------------------------------------------------------
 
-import type { LoopCommand } from "@closedloop-ai/loops-api/commands";
-import { validateCommandInputs } from "@closedloop-ai/loops-api/commands";
-import type { ContextPackAttachment as SharedContextPackAttachment } from "@closedloop-ai/loops-api/context-pack";
-import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
-import { LoopEventType } from "@closedloop-ai/loops-api/events";
-import type { LoopRequestBody } from "@closedloop-ai/loops-api/desktop-request";
-import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
 import {
   LoopArtifactFile,
   LoopArtifactType,
 } from "@closedloop-ai/loops-api/artifacts";
 import { validateResultBundle } from "@closedloop-ai/loops-api/bundles";
+import type { LoopCommand } from "@closedloop-ai/loops-api/commands";
+import { validateCommandInputs } from "@closedloop-ai/loops-api/commands";
+import type { ContextPackAttachment as SharedContextPackAttachment } from "@closedloop-ai/loops-api/context-pack";
+import type { LoopRequestBody } from "@closedloop-ai/loops-api/desktop-request";
+import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
+import { LoopEventType } from "@closedloop-ai/loops-api/events";
+import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
 
 /** Commands that have full spawn/dispatch support in this gateway version. */
 const SUPPORTED_COMMANDS = new Set<LoopCommand>([
@@ -246,6 +250,12 @@ const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
   EVALUATE_PLAN: "REQUIRED",
   EVALUATE_CODE: "REQUIRED",
 };
+const LOCAL_CALLBACK_FAIL_FAST_COMMANDS = new Set<LoopCommand>([
+  "PLAN",
+  "EXECUTE",
+  "REQUEST_CHANGES",
+  "GENERATE_PRD",
+]);
 
 interface LoopArtifact {
   id?: string;
@@ -662,6 +672,138 @@ export async function cloneRepoViaGh(
   return { ok: true, path: destPath };
 }
 
+// ---------------------------------------------------------------------------
+// Additional repos
+// ---------------------------------------------------------------------------
+
+/** Shape returned by resolveAdditionalRepos for each validated entry. */
+export interface ResolvedAdditionalRepo {
+  readonly repoPath: string;
+  readonly branch: string;
+}
+
+/** Typed error thrown when an additional repo entry fails validation. */
+export class AdditionalRepoError extends Error {
+  constructor(
+    public readonly code: LoopErrorCode,
+    public readonly repoRef: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "AdditionalRepoError";
+  }
+}
+
+const ADDITIONAL_REPOS_MAX = 5;
+
+/**
+ * Best-effort cleanup of additional repo worktree directories.
+ * Errors are logged but never re-thrown so callers can use this in
+ * both success and error teardown paths without try/catch.
+ */
+async function cleanupAdditionalWorktrees(
+  entries: readonly { dir: string; repoPath: string }[],
+  loopId: string,
+  wt: WorktreeProvider,
+  logPrefix = "cleanup additional worktree failed:",
+): Promise<void> {
+  for (const entry of entries) {
+    await wt.removeWorktree(entry.dir, entry.repoPath, loopId).catch((err) =>
+      loopError(loopId, logPrefix, err),
+    );
+  }
+}
+
+/**
+ * Default-provider cleanup helper. Exposed so recovery-time callers that do
+ * not own a `WorktreeProvider` (e.g. `boot-recovery.ts`) can reuse the same
+ * best-effort teardown semantics used on the live path.
+ */
+export async function cleanupAdditionalWorktreesWithDefaultProvider(
+  entries: readonly { dir: string; repoPath: string }[],
+  loopId: string,
+): Promise<void> {
+  await cleanupAdditionalWorktrees(entries, loopId, defaultWorktreeProvider);
+}
+
+/** Resolve an additional repo entry to a validated local path, or throw. */
+function resolveAndValidateRepoPath(
+  entry: { localRepoPath?: string; fullName?: string },
+  allowedDirs: string[],
+  repoRef: string,
+): string {
+  let candidate: string;
+  if (entry.localRepoPath) {
+    candidate = expandHome(entry.localRepoPath);
+  } else if (entry.fullName) {
+    const found = findLocalRepo(entry.fullName, allowedDirs);
+    if (!found) {
+      throw new AdditionalRepoError(
+        LoopErrorCode.RepoNotFound,
+        entry.fullName,
+        `Additional repo not found locally: ${entry.fullName}`,
+      );
+    }
+    candidate = found;
+  } else {
+    throw new AdditionalRepoError(
+      LoopErrorCode.RepoNotFound,
+      repoRef,
+      "Additional repo entry must have localRepoPath or fullName",
+    );
+  }
+
+  const result = tryAssertRepoAllowed(candidate, allowedDirs);
+  if ("error" in result) {
+    throw new AdditionalRepoError(
+      LoopErrorCode.RepoNotAllowed,
+      repoRef,
+      `Additional repo path not allowed: ${repoRef}`,
+    );
+  }
+  return result.path;
+}
+
+/** Validate and resolve additionalRepos entries. Throws AdditionalRepoError on failure. */
+export async function resolveAdditionalRepos(
+  entries: NonNullable<LoopRequestBody["additionalRepos"]>,
+  allowedDirs: string[],
+  wt: WorktreeProvider,
+): Promise<ResolvedAdditionalRepo[]> {
+  if (entries.length === 0) {
+    return [];
+  }
+
+  if (entries.length > ADDITIONAL_REPOS_MAX) {
+    throw new AdditionalRepoError(
+      LoopErrorCode.PreRunValidationFailed,
+      "",
+      `additionalRepos exceeds maximum of ${ADDITIONAL_REPOS_MAX} entries (got ${entries.length})`,
+    );
+  }
+
+  const resolved: ResolvedAdditionalRepo[] = [];
+
+  for (const entry of entries) {
+    const repoRef = entry.localRepoPath ?? entry.fullName ?? "";
+    const resolvedPath = resolveAndValidateRepoPath(entry, allowedDirs, repoRef);
+    const canonicalPath = path.resolve(resolvedPath);
+
+    const branchFound = await wt.branchExists(canonicalPath, entry.branch);
+    if (!branchFound) {
+      throw new AdditionalRepoError(
+        LoopErrorCode.PreRunValidationFailed,
+        repoRef,
+        `Branch "${entry.branch}" not found in additional repo: ${resolvedPath}`,
+      );
+    }
+
+    resolved.push({ repoPath: canonicalPath, branch: entry.branch });
+  }
+
+  return resolved;
+}
+
 /**
  * Resolve worktree directory for a loop.
  * Uses full untruncated stable ID for directory naming.
@@ -675,6 +817,14 @@ function resolveLoopWorktreeDir(
     resolveWorktreeParentDir(expandedRepoPath),
     `${repoName}-loop-${stableId}`,
   );
+}
+
+export function additionalRepoDisambiguator(repoPath: string): string {
+  return crypto
+    .createHash("sha1")
+    .update(path.resolve(repoPath))
+    .digest("hex")
+    .slice(0, 8);
 }
 
 /**
@@ -879,6 +1029,12 @@ async function ensureWorktreeImpl(
   );
 
   await runLoopsSetupScript(worktreeDir, loopId);
+}
+
+/** Check whether a branch exists locally or on the remote. */
+async function branchExistsImpl(repoPath: string, branch: string): Promise<boolean> {
+  fetchOrigin(repoPath);
+  return resolveRef(repoPath, branch) !== null;
 }
 
 // findExistingLoopWorktree was removed — it greedy-matched ANY loop worktree
@@ -1967,7 +2123,7 @@ function isCancelled(jobStore: JobStore | undefined, loopId: string): boolean {
   return status === "CANCEL_PENDING" || status === "CANCELLED";
 }
 
-async function handleProcessCompletion(
+export async function handleProcessCompletion(
   exitCode: number,
   body: LoopRequestBody,
   apiBaseUrl: string,
@@ -1983,6 +2139,7 @@ async function handleProcessCompletion(
   operationId?: string,
   wt: WorktreeProvider = defaultWorktreeProvider,
   loopTokenStore?: LoopTokenStore,
+  additionalWorktreeDirs: { dir: string; repoPath: string }[] = [],
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
   // Temp-dir commands (DECOMPOSE, EVALUATE_*) need the entire temp tree removed on cleanup.
@@ -2135,6 +2292,7 @@ async function handleProcessCompletion(
     } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
       await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
+    await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt, "cleanup additional worktree failed (on error):");
     loopTokenStore?.deleteLoopToken(loopId);
     return;
   }
@@ -2439,6 +2597,7 @@ async function handleProcessCompletion(
       ) {
         await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
       }
+      await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt);
       loopTokenStore?.deleteLoopToken(loopId);
       return;
     }
@@ -2569,6 +2728,8 @@ async function handleProcessCompletion(
     } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
       await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
+
+    await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt);
   } finally {
     runningLoops.delete(loopId);
   }
@@ -2720,10 +2881,11 @@ async function handleLoopRequest(
     child: null as unknown as ReturnType<typeof spawn>,
     stage: "running",
   });
-  const requestSource =
-    context.request?.headers?.["x-desktop-source"] === "cloud-socket"
-      ? "relay"
-      : "local";
+  const isRelaySource =
+    context.request?.headers?.["x-desktop-source"] === "cloud-socket";
+  const requestSource = isRelaySource ? "relay" : "local";
+  const shouldFailFastOnCallbackUnavailable =
+    !isRelaySource && LOCAL_CALLBACK_FAIL_FAST_COMMANDS.has(body.command);
   loopLog(
     body.loopId,
     `Received ${body.command} request, repo=${body.repo?.fullName ?? "none"}, stableId=${pickStableId(body)}, parentSessionId=${body.parentSessionId ?? "none"}`,
@@ -2734,9 +2896,10 @@ async function handleLoopRequest(
   );
 
   let spawnedSuccessfully = false;
+  let expandedRepoPath: string | null = null;
+  const additionalWorktreeDirs: { dir: string; repoPath: string }[] = [];
   try {
     const allowedDirs = getAllowedDirectories();
-    let expandedRepoPath: string | null = null;
 
     if (repoRequirement !== "NOT_REQUIRED" && body.localRepoPath) {
       // localRepoPath takes precedence over repo.fullName lookup when present
@@ -2873,6 +3036,37 @@ async function handleLoopRequest(
       }
     }
 
+    let resolvedAdditionalRepos: ResolvedAdditionalRepo[] = [];
+    if (body.command === "PLAN" && body.additionalRepos && body.additionalRepos.length > 0) {
+      try {
+        resolvedAdditionalRepos = await resolveAdditionalRepos(
+          body.additionalRepos,
+          allowedDirs,
+          wt,
+        );
+      } catch (err) {
+        if (err instanceof AdditionalRepoError) {
+          await postLoopEventBounded(
+            apiBaseUrl,
+            body.loopId,
+            body.closedLoopAuthToken,
+            {
+              type: LoopEventType.Error,
+              code: err.code,
+              message: err.message,
+            },
+          );
+          gatewayLog.error(
+            "loop-harness",
+            `additionalRepo validation failed for loopId=${body.loopId}: ${err.repoRef} — ${err.message}`,
+          );
+          json(context, 400, { error: err.message });
+          return;
+        }
+        throw err;
+      }
+    }
+
     let worktreeDir: string | null = null;
     let claudeWorkDir: string;
     let usedTempDir = false;
@@ -2996,6 +3190,94 @@ async function handleLoopRequest(
           body.loopId,
           `Created fresh worktree for PLAN: ${worktreeDir} (branch: ${branchName})`,
         );
+
+        // Create additional repo worktrees for PLAN command.
+        // Mirror the primary-repo pattern: create a fresh scratch branch
+        // based on the user-specified branch so loop work does not mutate it.
+        for (const addRepo of resolvedAdditionalRepos) {
+          const addRepoSlug = slugifyLoopId(addRepo.branch);
+          const addRepoKey = `${worktreeKey}-${addRepoSlug}-${additionalRepoDisambiguator(addRepo.repoPath)}`;
+          const addWorktreeDir = resolveLoopWorktreeDir(
+            addRepo.repoPath,
+            addRepoKey,
+          );
+          const addBranchName = `symphony/${addRepoKey}`;
+
+          // Validate the additional-repo worktree path against the sandbox
+          // roots BEFORE any git checkout is materialized. SYMPHONY_WORKTREE_PARENT_DIR
+          // is untrusted config; if it points outside allowedDirs, we must
+          // refuse to write the checkout at all, not clean it up after the fact.
+          try {
+            assertPathAllowed(addWorktreeDir, allowedDirs);
+          } catch (e) {
+            if (e instanceof DirectoryNotAllowedError) {
+              // Unwind already-created additional-repo worktrees from prior
+              // iterations of this loop *before* the primary, so a failure on
+              // iteration N doesn't leak iterations 0..N-1 on disk.
+              await cleanupAdditionalWorktrees(
+                additionalWorktreeDirs,
+                body.loopId,
+                wt,
+                "cleanup additional worktree failed (allowlist reject):",
+              );
+              await wt.removeWorktree(worktreeDir, repoPath, body.loopId).catch(() => {});
+              await postLoopEventBounded(
+                apiBaseUrl,
+                body.loopId,
+                body.closedLoopAuthToken,
+                {
+                  type: LoopEventType.Error,
+                  code: LoopErrorCode.RepoNotAllowed,
+                  message: `Additional repo worktree path not allowed: ${addWorktreeDir}`,
+                },
+              );
+              json(context, 403, { error: `Additional repo worktree path not allowed: ${addWorktreeDir}` });
+              return;
+            }
+            throw e;
+          }
+
+          try {
+            const staleAddWorktree = wt.findWorktreeForBranch(addRepo.repoPath, addBranchName);
+            if (staleAddWorktree) {
+              loopLog(
+                body.loopId,
+                `Removing stale additional-repo worktree for fresh PLAN: ${staleAddWorktree}`,
+              );
+              await wt.removeWorktree(staleAddWorktree, addRepo.repoPath, body.loopId);
+            }
+            await wt.ensureWorktree(addRepo.repoPath, addWorktreeDir, addBranchName, addRepo.branch, body.loopId);
+          } catch (checkoutErr) {
+            const msg = checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr);
+            loopError(body.loopId, `ensureWorktree failed for additional repo ${addRepo.repoPath}:`, checkoutErr);
+            // Clean up the half-materialized current worktree, then any
+            // successfully-checked-out worktrees from prior iterations, then
+            // the primary worktree. Order matters only for log readability;
+            // all operations are independent best-effort.
+            await wt.removeWorktree(addWorktreeDir, addRepo.repoPath, body.loopId).catch(() => {});
+            await cleanupAdditionalWorktrees(
+              additionalWorktreeDirs,
+              body.loopId,
+              wt,
+              "cleanup additional worktree failed (checkout reject):",
+            );
+            await wt.removeWorktree(worktreeDir, repoPath, body.loopId).catch(() => {});
+            await postLoopEventBounded(
+              apiBaseUrl,
+              body.loopId,
+              body.closedLoopAuthToken,
+              {
+                type: LoopEventType.Error,
+                code: LoopErrorCode.BranchCreateFailed,
+                message: `Failed to checkout additional repo worktree: ${msg}`,
+              },
+            );
+            json(context, 500, { error: `Failed to checkout additional repo worktree: ${msg}` });
+            return;
+          }
+          additionalWorktreeDirs.push({ dir: addWorktreeDir, repoPath: addRepo.repoPath });
+          loopLog(body.loopId, `Created additional repo worktree: ${addWorktreeDir} (branch: ${addBranchName} based on ${addRepo.branch})`);
+        }
       } else {
         // EXECUTE/REQUEST_CHANGES: reuse existing worktree.
         // Try artifact slug first, then parentLoopId fallback, then create new.
@@ -3158,43 +3440,37 @@ async function handleLoopRequest(
       if (body.command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
         await wt.removeWorktree(worktreeDir, expandedRepoPath, body.loopId);
       }
+      await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
     };
 
-    // Pre-flight: verify required binary exists BEFORE posting 'started' event.
-    // PLAN and EXECUTE use run-loop.sh; REQUEST_CHANGES and DECOMPOSE use claude CLI directly.
+    // Pre-flight: verify required binaries exist BEFORE posting 'started' event.
+    // All commands need claude CLI. PLAN/EXECUTE additionally need run-loop.sh.
     const usesRunLoop = body.command === "PLAN" || body.command === "EXECUTE";
-    const usesClaude =
-      body.command === "REQUEST_CHANGES" ||
-      body.command === "DECOMPOSE" ||
-      body.command === "EVALUATE_PRD" ||
-      body.command === "GENERATE_PRD" ||
-      body.command === "EVALUATE_PLAN" ||
-      body.command === "EVALUATE_CODE";
     let scriptPath: string | null = null;
 
-    if (usesClaude) {
-      const resolved = resolveBinarySync("claude", overrideGetBinaryPaths?.()?.claude);
-      if (resolved.source === "fallback") {
-        // Binary not found on PATH and no override set -- abort
-        await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-          type: LoopEventType.Error,
-          code: LoopErrorCode.BinaryNotFound,
-          message: "claude CLI not found in PATH",
-        });
-        Observability.preflightBinaryNotFound(
-          commandId,
-          operationId,
-          body.loopId,
-        );
-        await cleanupOnError();
-        json(context, 500, { error: "claude CLI not found in PATH" });
-        return;
-      }
-      // "override", "override_invalid", or "path": all proceed.
-      // "override_invalid" is intentionally allowed -- the user set an explicit
-      // override and should see the resulting ENOENT from the spawn, not a
-      // confusing "not found in PATH" error.
-    } else if (usesRunLoop) {
+    // Every command needs claude — verify it consistently for all paths.
+    const resolved = resolveBinarySync("claude", overrideGetBinaryPaths?.()?.claude);
+    if (resolved.source === "fallback") {
+      await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+        type: LoopEventType.Error,
+        code: LoopErrorCode.BinaryNotFound,
+        message: "claude CLI not found in PATH",
+      });
+      Observability.preflightBinaryNotFound(
+        commandId,
+        operationId,
+        body.loopId,
+      );
+      await cleanupOnError();
+      json(context, 500, { error: "claude CLI not found in PATH" });
+      return;
+    }
+    // "override", "override_invalid", or "path": all proceed.
+    // "override_invalid" is intentionally allowed -- the user set an explicit
+    // override and should see the resulting ENOENT from the spawn, not a
+    // confusing "not found in PATH" error.
+
+    if (usesRunLoop) {
       scriptPath = findPluginScript("code", "run-loop.sh");
       if (!scriptPath) {
         await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
@@ -3225,9 +3501,39 @@ async function handleLoopRequest(
 
     // Post "started" event — only after confirming we can proceed
     loopLog(body.loopId, "Posting started event...");
-    await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-      type: LoopEventType.Started,
-    });
+    if (shouldFailFastOnCallbackUnavailable) {
+      // Use an unbounded POST here so we only fail fast on definitive callback
+      // failures. A short client-side abort can race with a server-side write
+      // and produce an orphaned "started" event with no spawned process.
+      const startedResult = await postLoopEvent(
+        apiBaseUrl,
+        body.loopId,
+        body.closedLoopAuthToken,
+        { type: LoopEventType.Started },
+      );
+      if (!startedResult.success) {
+        const callbackError = startedResult.error ?? "unknown callback error";
+        const errorMessage =
+          "Cannot start local loop: cloud callback path is unavailable. Check connectivity and retry.";
+        loopError(
+          body.loopId,
+          `Failing fast before spawn after started-event callback failure: ${callbackError}`,
+        );
+        gatewayLog.error(
+          "loop-harness",
+          `Fail-fast local launch blocked for loopId=${body.loopId}, command=${body.command}, callbackError=${callbackError}`,
+        );
+        await cleanupOnError();
+        json(context, 503, {
+          error: `${errorMessage} (${callbackError})`,
+        });
+        return;
+      }
+    } else {
+      await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+        type: LoopEventType.Started,
+      });
+    }
 
     // Spawn process
     const logFile = path.join(claudeWorkDir, "symphony-loop.log");
@@ -3254,13 +3560,16 @@ async function handleLoopRequest(
     let child: ReturnType<typeof spawn>;
 
     try {
+      // Reuse the path from pre-flight so validation and execution stay aligned.
+      const claudeBinary = resolved.path;
+
       const spawnEnv: Record<string, string> = await getShellEnv({
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
+        // Pass resolved claude path so run-loop.sh uses the same binary
+        // the desktop app validated in pre-flight (avoids PATH mismatches
+        // between Electron's env and the user's login shell).
+        CLAUDE_BIN: claudeBinary,
       });
-
-      // Resolve the claude binary path once for all commands in this spawn block.
-      // getResolvedClaudePath() will use the user-configured override if present.
-      const claudeBinary = getResolvedClaudePath();
 
       // Shared claude CLI args for commands that run claude directly.
       // REQUEST_CHANGES omits "-" (stdin) because it passes the prompt as a CLI argument.
@@ -3422,6 +3731,12 @@ async function handleLoopRequest(
           scriptArgs.push("--prd", prdPath);
         }
 
+        if (body.command === "PLAN") {
+          for (const addEntry of additionalWorktreeDirs) {
+            scriptArgs.push("--add-dir", addEntry.dir);
+          }
+        }
+
         child = spawn(scriptPath!, scriptArgs, {
           cwd: worktreeDir!,
           detached: true,
@@ -3487,6 +3802,7 @@ async function handleLoopRequest(
         operationId,
         wt,
         loopTokenStore,
+        additionalWorktreeDirs,
       ).catch((err) => {
         loopError(body.loopId, "Completion handler error:", err);
         gatewayLog.error(
@@ -3542,7 +3858,10 @@ async function handleLoopRequest(
     loopLog(body.loopId, `Spawned pid=${pid}, worktree=${worktreeDir}`);
     gatewayLog.debug(
       "loop-harness",
-      `Spawned ${body.command} pid=${pid}, loopId=${body.loopId}, worktree=${worktreeDir}`,
+      `Spawned ${body.command} pid=${pid}, loopId=${body.loopId}, worktree=${worktreeDir}` +
+        (additionalWorktreeDirs.length > 0
+          ? `, additionalDirs=${additionalWorktreeDirs.map((e) => e.dir).join(",")}`
+          : ""),
     );
 
     // Bind runtime details to an existing LocalJob or create a new one for this loop
@@ -3563,6 +3882,12 @@ async function handleLoopRequest(
         ...(operationId ? { operationId } : {}),
         worktreeDir: worktreeDir ?? undefined,
         claudeWorkDir,
+        // Persist so finalizer/boot-recovery can remove these after a crash
+        // or graceful shutdown; in-process spawn keeps its own local copy for
+        // live cleanup on exit.
+        ...(additionalWorktreeDirs.length > 0
+          ? { additionalWorktreeDirs: [...additionalWorktreeDirs] }
+          : {}),
         logPath,
         jsonlPath,
         statePath,
@@ -3592,6 +3917,8 @@ async function handleLoopRequest(
     if (!spawnedSuccessfully) {
       runningLoops.delete(body.loopId);
       loopTokenStore?.deleteLoopToken(body.loopId);
+      // Best-effort cleanup of any additional repo worktrees created before spawn failed
+      void cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt, "finally: cleanup additional worktree failed:");
     }
   }
 }

@@ -6,9 +6,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { app, dialog, ipcMain, nativeImage, Notification } from "electron";
+import { app, dialog, ipcMain, nativeImage, Notification, safeStorage } from "electron";
 import {
   type AlwaysAllowRule,
+  DEFAULT_DESKTOP_SETTINGS,
   DEFAULT_POSTHOG_HOST,
   DESKTOP_GATEWAY_VERSION,
   EMPTY_CAPABILITIES,
@@ -407,6 +408,10 @@ export class DesktopApplication {
     this.desktopWindow.show();
   }
 
+  setQuitting(): void {
+    this.desktopWindow.setQuitting();
+  }
+
   async shutdown(): Promise<ShutdownResult> {
     if (this.shuttingDown) {
       return "clean";
@@ -415,8 +420,8 @@ export class DesktopApplication {
     this.shuttingDown = true;
     this.bootRecovery.dispose();
     await this.bootRecovery.quiesce(1_000);
-    await Observability.shutdown();
     return runShutdownSequence({
+      observability: Observability,
       updateCheckTimer: this.updateCheckTimer,
       clearUpdateCheckTimer: () => {
         if (this.updateCheckTimer) {
@@ -1350,6 +1355,81 @@ export class DesktopApplication {
         return;
       }
       await this.applyUpdate();
+    });
+
+    ipcMain.handle("desktop:find-matching-config", () => {
+      return this.settingsStore.findConfigByOrigins(
+        this.settingsStore.getRelayOrigin(),
+        this.settingsStore.getApiOrigin(),
+        this.settingsStore.getWebAppOrigin()
+      );
+    });
+
+    ipcMain.handle("desktop:save-config", (_event, payload: { name: string }) => {
+      // Name validation and trimming is performed by settingsStore.saveConfig
+      const savedConfig = this.settingsStore.saveConfig(payload?.name ?? "");
+      const status = this.apiKeyStore.getStatus();
+      if (status.source === "safeStorage") {
+        const currentApiKey = this.apiKeyStore.getApiKey() ?? "";
+        if (currentApiKey) {
+          this.apiKeyStore.saveProfileKey(savedConfig.id, currentApiKey);
+        }
+      }
+      return savedConfig;
+    });
+
+    ipcMain.handle("desktop:list-configs", () => {
+      return this.settingsStore.listConfigs().map((c) => ({
+        ...c,
+        hasCloudApiKey: Boolean(this.apiKeyStore.getProfileKey(c.id))
+      }));
+    });
+
+    ipcMain.handle("desktop:delete-config", (_event, payload: { id: string }) => {
+      const id = typeof payload?.id === "string" ? payload.id : "";
+      if (!id) {
+        throw new Error("id is required");
+      }
+      const { wasActive } = this.settingsStore.deleteConfig(id);
+      if (wasActive) {
+        this.settingsStore.setRelayOrigin(DEFAULT_DESKTOP_SETTINGS.relayOrigin);
+        this.settingsStore.setApiOrigin(DEFAULT_DESKTOP_SETTINGS.apiOrigin);
+        this.settingsStore.setWebAppOrigin(DEFAULT_DESKTOP_SETTINGS.webAppOrigin);
+        this.cloudSocket.stop();
+        this.cloudStatus = { state: "idle" };
+        this.apiKeyStore.clearApiKey();
+        this.refreshTrayState();
+      }
+      this.apiKeyStore.deleteProfileKey(id);
+      return { wasActive };
+    });
+
+    ipcMain.handle("desktop:rename-config", (_event, payload: { id: string; name: string }) => {
+      const id = typeof payload?.id === "string" ? payload.id : "";
+      if (!id) {
+        throw new Error("id is required");
+      }
+      // Name validation and trimming is performed by settingsStore.renameConfig
+      this.settingsStore.renameConfig(id, payload?.name ?? "");
+    });
+
+    ipcMain.handle("desktop:apply-config", async (_event, payload: { id: string }) => {
+      const id = typeof payload?.id === "string" ? payload.id : "";
+      if (!id) {
+        throw new Error("id is required");
+      }
+      if (!safeStorage.isEncryptionAvailable()) {
+        throw new Error("safeStorage is not available -- cannot apply config");
+      }
+      const appliedConfig = this.settingsStore.applyConfig(id);
+      const profileKey = this.apiKeyStore.getProfileKey(id);
+      if (profileKey) {
+        this.apiKeyStore.setApiKey(profileKey);
+      } else {
+        this.apiKeyStore.clearApiKey();
+      }
+      this.restartCloudSocket();
+      return appliedConfig;
     });
   }
 

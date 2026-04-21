@@ -17,10 +17,10 @@ import path from "node:path";
 import { afterEach, test } from "node:test";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
-import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
+  makeFakeWorktreeProvider,
   restoreEnv,
   saveEnv,
   startMockApiServer,
@@ -32,20 +32,7 @@ import {
 // Shared fixtures
 // ---------------------------------------------------------------------------
 
-const fakeWorktreeProvider: WorktreeProvider = {
-  async ensureWorktree(_repoPath, worktreeDir) {
-    await fs.mkdir(worktreeDir, { recursive: true });
-  },
-  findWorktreeForBranch() {
-    return null;
-  },
-  async removeWorktree(worktreeDir) {
-    await fs.rm(worktreeDir, { recursive: true, force: true });
-  },
-  getCurrentBranch() {
-    return "symphony/shared-contract-test";
-  },
-};
+const fakeWorktreeProvider = makeFakeWorktreeProvider("symphony/shared-contract-test");
 
 const serversToClose: DesktopGatewayServer[] = [];
 const mockServersToClose: http.Server[] = [];

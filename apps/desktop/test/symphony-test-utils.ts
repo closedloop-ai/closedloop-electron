@@ -18,6 +18,7 @@ import {
   setShellPathForTest,
 } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
+import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 
 const execFileAsync = promisify(execFile);
@@ -365,6 +366,119 @@ export async function setupStubClaudeBlocking(
       await fs.writeFile(releaseSentinel, "");
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Fake WorktreeProvider factory
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a minimal stub `WorktreeProvider` for tests that don't need real git.
+ * `ensureWorktree` creates the directory, `removeWorktree` rm's it,
+ * `findWorktreeForBranch` returns null, `branchExists` always returns true,
+ * and `getCurrentBranch` returns `currentBranchLabel` verbatim.
+ *
+ * Tests that need to record call arguments should build their own provider.
+ */
+export function makeFakeWorktreeProvider(currentBranchLabel: string): WorktreeProvider {
+  return {
+    async ensureWorktree(_repoPath, worktreeDir) {
+      await fs.mkdir(worktreeDir, { recursive: true });
+    },
+    findWorktreeForBranch() {
+      return null;
+    },
+    async removeWorktree(worktreeDir) {
+      await fs.rm(worktreeDir, { recursive: true, force: true });
+    },
+    getCurrentBranch() {
+      return currentBranchLabel;
+    },
+    branchExists: async () => true,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Multi-repo test harness (shared by multi-repo-worktree, -contract, -spawn)
+// ---------------------------------------------------------------------------
+
+/**
+ * Shared fixture state for multi-repo integration tests. Call
+ * `makeMultiRepoTestHarness()` at module scope, destructure the arrays to
+ * push resources into, then wire `cleanup` into your `afterEach`.
+ */
+export interface MultiRepoTestHarness {
+  serversToClose: DesktopGatewayServer[];
+  mockServersToClose: http.Server[];
+  tempPathsToClean: string[];
+  /** Call from node:test afterEach to restore env, cache, servers, and temp dirs. */
+  cleanup: () => Promise<void>;
+}
+
+/**
+ * Build shared arrays and a cleanup function for multi-repo integration tests.
+ *
+ * Usage (module scope):
+ *   const { serversToClose, mockServersToClose, tempPathsToClean, cleanup } =
+ *     makeMultiRepoTestHarness();
+ *   afterEach(cleanup);
+ */
+export function makeMultiRepoTestHarness(): MultiRepoTestHarness {
+  const serversToClose: DesktopGatewayServer[] = [];
+  const mockServersToClose: http.Server[] = [];
+  const tempPathsToClean: string[] = [];
+  const savedEnv = saveEnv();
+
+  async function cleanup(): Promise<void> {
+    restoreEnv(savedEnv);
+    resetShellPathCache();
+    for (const server of serversToClose.splice(0)) {
+      await server.stop();
+    }
+    for (const ms of mockServersToClose.splice(0)) {
+      await new Promise<void>((resolve, reject) => {
+        ms.close((err) => (err ? reject(err) : resolve()));
+      });
+    }
+    for (const tempPath of tempPathsToClean.splice(0)) {
+      await fs.rm(tempPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    }
+  }
+
+  return { serversToClose, mockServersToClose, tempPathsToClean, cleanup };
+}
+
+/**
+ * Create and start a DesktopGatewayServer configured for a multi-repo test.
+ * Pushes the server onto `serversToClose` so the harness cleans it up.
+ *
+ * All three multi-repo tests (`-contract`, `-spawn`, `-worktree`) share this
+ * configuration; only `machineName` and the optional `worktreeProvider` differ.
+ */
+export async function makeMultiRepoGateway(options: {
+  tmpDir: string;
+  mockPort: number;
+  machineName: string;
+  worktreeProvider: WorktreeProvider;
+  serversToClose: DesktopGatewayServer[];
+}): Promise<DesktopGatewayServer> {
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [options.tmpDir],
+    machineName: options.machineName,
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: options.worktreeProvider,
+    discoveryFilePath: path.join(options.tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${options.mockPort}`,
+    getGatewayId: () => "test-gateway-id",
+  });
+  options.serversToClose.push(server);
+  await server.start();
+  return server;
 }
 
 // ---------------------------------------------------------------------------
