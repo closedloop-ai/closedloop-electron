@@ -2973,9 +2973,8 @@ async function handleLoopRequest(
             throw err;
           }
         }
-      } else if (repoRequirement === "REQUIRED") {
-        // Auto-clone: only attempt for REQUIRED commands to avoid up to CLONE_GIT_TIMEOUT
-        // latency for OPTIONAL commands that can proceed without a repo.
+      } else {
+        // Auto-clone: attempt for any command that uses a repo (REQUIRED or OPTIONAL)
         let configDir: string | null = null;
         if (getSymphonyDir) {
           try {
@@ -3011,28 +3010,28 @@ async function handleLoopRequest(
             body.loopId,
             `clone failed for ${body.repo.fullName}: ${cloneResult.reason}`,
           );
-          await postLoopEventBounded(
-            apiBaseUrl,
+          if (repoRequirement === "REQUIRED") {
+            await postLoopEventBounded(
+              apiBaseUrl,
+              body.loopId,
+              body.closedLoopAuthToken,
+              {
+                type: LoopEventType.Error,
+                code: LoopErrorCode.RepoNotFound,
+                message: `Repository not found locally: ${body.repo.fullName}`,
+              },
+            );
+            // runningLoops.delete handled by finally block (spawnedSuccessfully remains false)
+            json(context, 404, {
+              error: `Repository not found locally: ${body.repo.fullName}`,
+            });
+            return;
+          }
+          loopLog(
             body.loopId,
-            body.closedLoopAuthToken,
-            {
-              type: LoopEventType.Error,
-              code: LoopErrorCode.RepoNotFound,
-              message: `Repository not found locally: ${body.repo.fullName}`,
-            },
+            `Ignoring repo.fullName for ${body.command}: not found locally (${body.repo.fullName})`,
           );
-          // runningLoops.delete handled by finally block (spawnedSuccessfully remains false)
-          json(context, 404, {
-            error: `Repository not found locally: ${body.repo.fullName}`,
-          });
-          return;
         }
-      } else {
-        // OPTIONAL: repo not found locally, skip without auto-clone
-        loopLog(
-          body.loopId,
-          `Ignoring repo.fullName for ${body.command}: not found locally (${body.repo.fullName})`,
-        );
       }
     }
 
