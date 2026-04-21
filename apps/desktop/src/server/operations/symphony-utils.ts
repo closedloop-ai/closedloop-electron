@@ -33,7 +33,7 @@ const LOCAL_GIT_TIMEOUT = 10_000;
 const NETWORK_GIT_TIMEOUT = 30_000;
 
 /** Timeout for git clone operations (may download large repositories). */
-export const CLONE_GIT_TIMEOUT = 120_000;
+export const CLONE_GIT_TIMEOUT = 300_000;
 
 // ---------------------------------------------------------------------------
 // Logging helpers (shared with symphony-loop.ts)
