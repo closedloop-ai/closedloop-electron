@@ -4,6 +4,7 @@ import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { VALID_PROVIDERS, chatHistoryFilename, expandHome } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 type ActiveSession = {
   ticketId: string;
@@ -252,13 +253,6 @@ function parseBody(context: OperationRequestContext): Record<string, unknown> | 
     return null;
   }
 }
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-
 function getSessionsFile(symphonyDir: string): string {
   return path.join(symphonyDir, "sessions.json");
 }

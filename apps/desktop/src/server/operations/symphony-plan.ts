@@ -1,9 +1,10 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import type { OperationDispatcher } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError } from "../security.js";
 import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 type PlanTask = {
   id: string;
@@ -167,10 +168,3 @@ function generateMarkdownFromPlan(plan: Record<string, unknown>): string {
 
   return parts.join("\n");
 }
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-

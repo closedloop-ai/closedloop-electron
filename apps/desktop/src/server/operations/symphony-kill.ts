@@ -4,6 +4,7 @@ import type { OperationDispatcher, OperationRequestContext } from "../operation-
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { expandHome, resolveWorktreeDir } from "./symphony-utils.js";
 import type { JobStore, LocalJob } from "../../main/job-store.js";
+import { json } from "./response-utils.js";
 
 type ResolveResult =
   | { pid: number; pidFilePath: string | null; worktreeDir: string | null }
@@ -253,10 +254,4 @@ function deletePidFile(pidFilePath: string | null): void {
   } catch {
     // Best effort only
   }
-}
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
 }

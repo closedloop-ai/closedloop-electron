@@ -4,6 +4,7 @@ import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { VALID_PROVIDERS, assertRepoAllowed, chatHistoryFilename, resolveWorktreeDir } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 type ChatMessage = {
   id: string;
@@ -312,10 +313,3 @@ function parseMessage(value: unknown): ChatMessage | undefined {
 
   return parsed;
 }
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-

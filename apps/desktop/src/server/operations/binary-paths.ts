@@ -1,16 +1,10 @@
-import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import type { OperationDispatcher } from "../operation-dispatcher.js";
+import { json } from "./response-utils.js";
 
 type BinaryPaths = { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
 type BinaryPathKey = "claude" | "gh" | "codex" | "python3" | "git";
 
 const KNOWN_BINARY_KEYS: ReadonlySet<string> = new Set<BinaryPathKey>(["claude", "gh", "codex", "python3", "git"]);
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-
 export function registerBinaryPathsRoutes(
   dispatcher: OperationDispatcher,
   getBinaryPaths: () => BinaryPaths,
