@@ -3587,6 +3587,15 @@ async function handleLoopRequest(
       if (completionHandled) return;
       completionHandled = true;
       loopLog(body.loopId, `onceComplete fired, code=${code}`);
+      // Persist exitCode synchronously (before any await) so the IPC
+      // desktop:list-running-jobs reconciliation sees the exit handler has
+      // claimed this job and does not race-override the status to STOPPED.
+      if (jobStore) {
+        const j = jobStore.getByLoopId(body.loopId);
+        if (j && j.exitCode == null) {
+          jobStore.upsert({ ...j, exitCode: code, updatedAt: new Date().toISOString() });
+        }
+      }
       try {
         await stopTailer.flush();
       } catch (err) {
@@ -3615,6 +3624,20 @@ async function handleLoopRequest(
           "loop-harness",
           `Completion handler error for loopId=${body.loopId}: ${err instanceof Error ? err.message : err}`,
         );
+        // Safety net: ensure the job reaches a terminal status even when
+        // handleProcessCompletion throws, so the IPC exitCode guard does
+        // not leave the job stuck as RUNNING forever.
+        if (jobStore) {
+          const j = jobStore.getByLoopId(body.loopId);
+          if (j && j.status === "RUNNING") {
+            jobStore.upsert({
+              ...j,
+              status: "FAILED",
+              updatedAt: new Date().toISOString(),
+              completedAt: new Date().toISOString(),
+            });
+          }
+        }
       });
     };
 
