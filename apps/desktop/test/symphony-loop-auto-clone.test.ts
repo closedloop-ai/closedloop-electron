@@ -31,10 +31,10 @@ import {
   configureBinaryPathsResolver,
   resetResolvedClaudePath,
 } from "../src/server/operations/symphony-loop.js";
-import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
+  makeFakeWorktreeProvider,
   restoreEnv,
   saveEnv,
   startMockApiServer,
@@ -62,21 +62,7 @@ function readReposJson(configDir: string): Array<{ path: string }> {
   return parsed.repos ?? [];
 }
 
-/** A fake WorktreeProvider that just creates the worktree dir (no real git). */
-const fakeWorktreeProvider: WorktreeProvider = {
-  async ensureWorktree(_repoPath, worktreeDir) {
-    await fs.mkdir(worktreeDir, { recursive: true });
-  },
-  findWorktreeForBranch() {
-    return null;
-  },
-  async removeWorktree(worktreeDir) {
-    await fs.rm(worktreeDir, { recursive: true, force: true });
-  },
-  getCurrentBranch() {
-    return "symphony/auto-clone-test";
-  },
-};
+const fakeWorktreeProvider = makeFakeWorktreeProvider("symphony/auto-clone-test");
 
 // ---------------------------------------------------------------------------
 // T-4.1: Happy-path tests
@@ -311,6 +297,7 @@ describe("cloneRepoViaGh: integration (DesktopGatewayServer)", () => {
       discoveryFilePath: path.join(tmpDir, "electron-port"),
       getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
       getSymphonyDir: () => symphonyDir,
+      getGatewayId: () => "test-gateway-id",
     });
     serversToClose.push(server);
     await server.start();
@@ -500,6 +487,7 @@ describe("cloneRepoViaGh: failure path", () => {
       discoveryFilePath: path.join(tmpDir, "electron-port"),
       getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
       getSymphonyDir: () => symphonyDir,
+      getGatewayId: () => "test-gateway-id",
     });
     serversToClose.push(server);
     await server.start();
@@ -584,6 +572,7 @@ describe("cloneRepoViaGh: failure path", () => {
       discoveryFilePath: path.join(tmpDir, "electron-port"),
       getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
       getSymphonyDir: () => symphonyDir,
+      getGatewayId: () => "test-gateway-id",
     });
     serversToClose.push(server);
     await server.start();

@@ -550,7 +550,7 @@ export type CloneResult = { ok: true; path: string } | { ok: false; reason: stri
  * @param allowedDirs  List of sandbox-allowed directories (from `getAllowedDirectories()`).
  * @param loopId  The loop request ID, used for scoped log lines.
  * @param configDir  Path to the symphony config directory that holds `repos.json`.
- * @param timeout  Override for the clone timeout (default: `CLONE_GIT_TIMEOUT` = 120 s).
+ * @param timeout  Override for the clone timeout (default: `CLONE_GIT_TIMEOUT` = 300 s).
  */
 export async function cloneRepoViaGh(
   fullName: string,
@@ -581,18 +581,9 @@ export async function cloneRepoViaGh(
     return { ok: false, reason: `allowed directory does not exist or is not a directory: ${expandedAllowedDir}` };
   }
 
-  let destPath: string;
-  if (path.basename(expandedAllowedDir) === repoName) {
-    // (a) the allowed dir IS the expected repo location — re-create it there
-    destPath = expandedAllowedDir;
-  } else if (existsSync(path.join(expandedAllowedDir, ".git"))) {
-    // (b) the allowed dir is itself a git repo — clone into it as a subdirectory
-    //     (cloning as a sibling would land outside the sandbox in single-allowed-dir configs)
-    destPath = path.join(expandedAllowedDir, repoName);
-  } else {
-    // (c) normal case — clone into the allowed dir
-    destPath = path.join(expandedAllowedDir, repoName);
-  }
+  // Clone into the allowed dir as a subdirectory (works whether or not
+  // the allowed dir is itself a git repo).
+  const destPath = path.join(expandedAllowedDir, repoName);
 
   if (existsSync(destPath)) {
     return { ok: false, reason: `clone destination already exists: ${destPath}` };

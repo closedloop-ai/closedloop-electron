@@ -237,6 +237,20 @@ export async function createFakeRunLoopScript(
   return scriptPath;
 }
 
+/**
+ * Write a fake `gh` shell script to the given path and chmod 755.
+ * Returns the absolute path to the script.
+ */
+export async function writeFakeGhScript(
+  dir: string,
+  scriptContent: string,
+): Promise<string> {
+  const ghPath = path.join(dir, "gh");
+  await fs.mkdir(path.dirname(ghPath), { recursive: true });
+  await fs.writeFile(ghPath, scriptContent, { mode: 0o755 });
+  return ghPath;
+}
+
 // ---------------------------------------------------------------------------
 // Polling helpers
 // ---------------------------------------------------------------------------

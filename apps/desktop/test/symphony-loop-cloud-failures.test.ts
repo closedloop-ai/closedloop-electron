@@ -36,6 +36,7 @@ import {
   startMockApiServer,
   waitForCompletedEvent,
   waitForTerminalEvent,
+  writeFakeGhScript,
 } from "./symphony-test-utils.js";
 
 const fakeWorktreeProvider = makeFakeWorktreeProvider("symphony/cloud-failures-test");
@@ -92,10 +93,10 @@ async function waitForJobTerminal(
 }
 
 async function writeFakeFailingGh(dir: string): Promise<string> {
-  const fakeGhPath = path.join(dir, "fake-bin", "gh");
-  await fs.mkdir(path.dirname(fakeGhPath), { recursive: true });
-  await fs.writeFile(fakeGhPath, '#!/bin/sh\necho "not found" >&2\nexit 1\n', { mode: 0o755 });
-  return fakeGhPath;
+  return writeFakeGhScript(
+    path.join(dir, "fake-bin"),
+    '#!/bin/sh\necho "not found" >&2\nexit 1\n',
+  );
 }
 
 // ---------------------------------------------------------------------------
