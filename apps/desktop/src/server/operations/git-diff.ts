@@ -5,6 +5,7 @@ import type { OperationDispatcher, OperationRequestContext } from "../operation-
 import type { ProcessManager } from "../process-manager.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { expandHome } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 const IMAGE_EXTENSIONS = new Set([
   ".png",
@@ -189,10 +190,4 @@ function parseBody(context: OperationRequestContext): Record<string, unknown> | 
   } catch {
     return null;
   }
-}
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
 }

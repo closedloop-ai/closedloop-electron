@@ -216,6 +216,7 @@ import type { LoopRequestBody } from "@closedloop-ai/loops-api/desktop-request";
 import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
 import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
+import { json } from "./response-utils.js";
 
 /** Commands that have full spawn/dispatch support in this gateway version. */
 const SUPPORTED_COMMANDS = new Set<LoopCommand>([
@@ -413,17 +414,6 @@ export function unregisterLoop(loopId: string): void {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function json(
-  context: OperationRequestContext,
-  status: number,
-  payload: unknown,
-): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-
 function parseJsonBody(
   context: OperationRequestContext,
 ): Record<string, unknown> | null {

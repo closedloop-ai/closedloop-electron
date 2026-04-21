@@ -1,9 +1,10 @@
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import type { OperationDispatcher } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { expandHome } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 type DirectoryEntry = {
   name: string;
@@ -77,10 +78,3 @@ export function registerFilesystemDirectoriesRoutes(
     }
   });
 }
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-

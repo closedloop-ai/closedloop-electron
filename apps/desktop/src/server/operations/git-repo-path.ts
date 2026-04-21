@@ -1,11 +1,11 @@
 import path from "node:path";
 import type { OperationDispatcher } from "../operation-dispatcher.js";
-import { findWorktreeForBranch, resolveRepoFullName } from "./git-helpers.js";
+import { resolveRepoFullName } from "./git-helpers.js";
 import { loadReposConfig } from "./repos-config-utils.js";
 import { expandHome, SymphonyDirNotConfiguredError } from "./symphony-utils.js";
 import { json } from "./response-utils.js";
 
-export function registerGitBranchWorktreeRoutes(
+export function registerGitRepoPathRoutes(
   dispatcher: OperationDispatcher,
   getSymphonyDir: () => string,
 ): void {
@@ -13,15 +13,14 @@ export function registerGitBranchWorktreeRoutes(
 
   dispatcher.register(
     "GET",
-    "/api/gateway/git/branch-worktree",
+    "/api/gateway/git/repo-path",
     async (context) => {
       try {
         const repoFullName = context.query.get("repoFullName");
-        const headBranch = context.query.get("headBranch");
 
-        if (!repoFullName || !headBranch) {
+        if (!repoFullName) {
           json(context, 400, {
-            error: "repoFullName and headBranch are required",
+            error: "repoFullName is required",
           });
           return;
         }
@@ -34,23 +33,16 @@ export function registerGitBranchWorktreeRoutes(
           if (fullName !== repoFullName) {
             continue;
           }
-          const worktreePath = findWorktreeForBranch(
-            expandedRepoPath,
-            headBranch,
-          );
-          json(context, 200, {
-            path: worktreePath,
-            repoPath: expandedRepoPath,
-          });
+          json(context, 200, { path: expandedRepoPath });
           return;
         }
 
-        json(context, 200, { path: null, repoPath: null });
+        json(context, 200, { path: null });
       } catch (error) {
         if (error instanceof SymphonyDirNotConfiguredError) throw error;
         const message = error instanceof Error ? error.message : "Unknown error";
         json(context, 500, {
-          error: `Failed to resolve branch worktree: ${message}`,
+          error: `Failed to resolve repo path: ${message}`,
         });
       }
     },

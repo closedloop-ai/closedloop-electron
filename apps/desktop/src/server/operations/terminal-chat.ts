@@ -8,6 +8,7 @@ import { getOverrideBinaryPaths } from "./symphony-loop.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { createStreamState, processStreamEvent } from "./stream-events.js";
 import { withMcpTools } from "./chat-tools.js";
+import { json } from "./response-utils.js";
 
 type MessageMode = "claude" | "codex";
 
@@ -355,13 +356,6 @@ function setStreamingHeaders(response: ServerResponse): void {
 function writeEvent(response: ServerResponse, payload: Record<string, unknown>): void {
   response.write(`${JSON.stringify(payload)}\n`);
 }
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-
 function getChatsRootDir(symphonyDir: string): string {
   return path.join(symphonyDir, "chats");
 }

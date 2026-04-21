@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import Busboy from "busboy";
 import type { Readable } from "node:stream";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import { json } from "./response-utils.js";
 
 const execFileAsync = promisify(execFile);
 const PREFIX = path.join(os.tmpdir(), "run-viewer-");
@@ -199,10 +200,4 @@ function parseBody(context: OperationRequestContext): Record<string, unknown> | 
   } catch {
     return null;
   }
-}
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
 }
