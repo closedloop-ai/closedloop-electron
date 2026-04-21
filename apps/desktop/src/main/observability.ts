@@ -12,7 +12,7 @@ import type {
 export interface ObservabilityOptions {
   telemetrySend: (event: EnrichedTelemetryEvent) => void;
   posthog?: { apiKey: string; host: string };
-  releaseVersion?: string;
+  desktopClientVersion?: string;
 }
 
 type HealthCheckTelemetryInput = {
@@ -32,7 +32,7 @@ type HealthCheckTelemetryInput = {
 export class Observability {
   private static telemetry: TelemetryService | null = null;
   private static posthog: PostHogAnalytics | null = null;
-  private static releaseVersion = "";
+  private static desktopClientVersion = "";
   private static desktopId = "";
 
   // Checks for which healthcheck telemetry is emitted. Extend this allowlist in future PRs.
@@ -56,7 +56,7 @@ export class Observability {
     Observability.telemetry = new TelemetryService({
       sendTelemetry: options.telemetrySend,
     });
-    Observability.releaseVersion = options.releaseVersion ?? "";
+    Observability.desktopClientVersion = options.desktopClientVersion ?? "";
     Observability.desktopId = "";
     Observability.healthCheckState.clear();
 
@@ -77,7 +77,7 @@ export class Observability {
     Observability.posthog?.shutdown().catch(() => {});
     Observability.telemetry = null;
     Observability.posthog = null;
-    Observability.releaseVersion = "";
+    Observability.desktopClientVersion = "";
     Observability.desktopId = "";
     Observability.healthCheckState.clear();
   }
@@ -421,7 +421,7 @@ export class Observability {
   private static capturePostHog(event: string, properties: Record<string, unknown>): void {
     Observability.posthog?.capture(Observability.desktopId || "unknown", event, {
       ...properties,
-      release_version: Observability.releaseVersion,
+      desktop_client_version: Observability.desktopClientVersion,
     });
   }
 }

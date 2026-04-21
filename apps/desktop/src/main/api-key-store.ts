@@ -28,7 +28,7 @@ export interface ApiKeyStoreOptions {
 
 function getDefaultSafeStorage(): SafeStorageLike {
   // Lazy import Electron's safeStorage to allow testing without Electron
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
+   
   const { safeStorage } = require("electron") as { safeStorage: SafeStorageLike };
   return safeStorage;
 }

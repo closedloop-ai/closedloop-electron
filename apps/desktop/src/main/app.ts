@@ -11,7 +11,7 @@ import {
   type AlwaysAllowRule,
   DEFAULT_DESKTOP_SETTINGS,
   DEFAULT_POSTHOG_HOST,
-  DESKTOP_GATEWAY_VERSION,
+  GATEWAY_PROTOCOL_VERSION,
   EMPTY_CAPABILITIES,
   type DesktopSettings,
   type RiskTier,
@@ -35,6 +35,7 @@ import {
 import { getResolvedGitPath, resetResolvedClaudePath } from "../server/operations/symphony-loop.js";
 import { resetMcpDetectionCache } from "../server/operations/mcp-detection.js";
 import { resolveBinary } from "../server/shell-path.js";
+import { getCodePluginVersion } from "../server/operations/plugin-cache.js";
 import { seedReposConfig } from "./seed-repos-config.js";
 import {
   SUPPORTED_OPERATION_IDS,
@@ -103,7 +104,7 @@ export class DesktopApplication {
       posthog: process.env.CL_POSTHOG_API_KEY
         ? { apiKey: process.env.CL_POSTHOG_API_KEY, host: DEFAULT_POSTHOG_HOST }
         : undefined,
-      releaseVersion: DESKTOP_GATEWAY_VERSION,
+      desktopClientVersion: app.getVersion(),
     });
     this.settingsStore = new SettingsStore();
     this.cloudCommandsPaused = this.settingsStore.getCloudCommandsPaused();
@@ -146,7 +147,7 @@ export class DesktopApplication {
       () => (this.isNoAuthMode() ? undefined : this.gatewayAuthToken),
       () => this.getAllowedDirectoriesFromSandbox(),
       os.hostname(),
-      DESKTOP_GATEWAY_VERSION,
+      app.getVersion(),
       EMPTY_CAPABILITIES,
       (event) => {
         this.activityLog.add(event);
@@ -195,7 +196,9 @@ export class DesktopApplication {
       getAllowedDirectories: () => this.getAllowedDirectoriesFromSandbox(),
       getMaxInFlightCommands: () => MAX_IN_FLIGHT_COMMANDS,
       machineName: os.hostname(),
-      pluginVersion: DESKTOP_GATEWAY_VERSION,
+      pluginVersion: getCodePluginVersion(),
+      desktopClientVersion: app.getVersion(),
+      gatewayProtocolVersion: GATEWAY_PROTOCOL_VERSION,
       supportedOperations: [...SUPPORTED_OPERATION_IDS],
       onStatusChange: (status) => this.onCloudSocketStatus(status),
       onDisconnect: (reason) => { Observability.connectionLost(reason); },
@@ -210,7 +213,7 @@ export class DesktopApplication {
         }
         Observability.connectionEstablished(
           event.computeTargetId,
-          DESKTOP_GATEWAY_VERSION,
+          app.getVersion(),
           process.env.NODE_ENV ?? "production",
         );
       },
