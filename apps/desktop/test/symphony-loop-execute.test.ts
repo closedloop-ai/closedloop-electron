@@ -36,6 +36,7 @@ import {
   saveEnv,
   startMockApiServer,
   waitForCompletedEvent,
+  waitForTerminalEvent,
 } from "./symphony-test-utils.js";
 
 const fakeWorktreeProvider = makeFakeWorktreeProvider("symphony/execute-test");
@@ -870,6 +871,113 @@ test("EXECUTE: fresh worktree without raw plan stages plan.md and passes CLOSEDL
     "",
     "Expected plan.json to stay absent before run-loop starts",
   );
+});
+
+test("EXECUTE: imported-plan failure still uploads the staged plan artifact", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-plan-failure-upload-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-plan-failure-upload");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 1\n");
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'if [ "$1" = status ]; then exit 0; fi',
+    'if [ "$1" = push ]; then exit 0; fi',
+    'if [ "$1" = add ]; then exit 0; fi',
+    'if [ "$1" = commit ]; then exit 0; fi',
+    'if [ "$1" = fetch ]; then exit 0; fi',
+    'if [ "$1" = "rev-parse" ]; then',
+    '  if [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+    "  exit 0",
+    "fi",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-plan-failure-upload-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000000454";
+  const sourceMarkdown = "# Hosted plan for failure upload\n\n- preserve me";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [
+          {
+            type: "IMPLEMENTATION_PLAN",
+            content: sourceMarkdown,
+          },
+        ],
+        repo: {
+          fullName: `plan-failure-upload/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  const uploadReq = await mock.waitForRequest("upload-artifacts");
+  const uploadBody = JSON.parse(uploadReq.body) as {
+    artifacts?: {
+      plan?: {
+        content?: string;
+        raw?: Record<string, unknown>;
+      };
+    };
+  };
+  assert.deepEqual(uploadBody.artifacts?.plan, {
+    content: sourceMarkdown,
+  });
+
+  const terminalEvent = await waitForTerminalEvent(mock.requests, loopId);
+  assert.equal(terminalEvent.type, "error");
 });
 
 test("EXECUTE: remote raw plan payload wins over existing local plan.json", async () => {

@@ -699,6 +699,56 @@ test("tryUploadArtifacts includes current plan state on EXECUTE uploads", async 
   assert.deepEqual(uploadBody.artifacts?.codeJudges, { score: 0.9 });
 });
 
+test("tryUploadArtifacts falls back to imported-plan markdown for EXECUTE uploads", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(
+    path.join(claudeWorkDir, "imported-plan.md"),
+    "# Imported fallback plan\n\n- preserve staged markdown",
+  );
+  await fs.writeFile(
+    path.join(claudeWorkDir, "execution-result.json"),
+    JSON.stringify({ has_changes: false }),
+  );
+  await fs.writeFile(
+    path.join(claudeWorkDir, "code-judges.json"),
+    JSON.stringify({ score: 0.9 }),
+  );
+
+  const jobStore = createStore("step-upload-execute-imported-plan");
+  const job = createBaseJob({
+    claudeWorkDir,
+    command: "EXECUTE",
+  });
+  jobStore.upsert(job);
+
+  const warnings: string[] = [];
+  const { failed } = await tryUploadArtifacts(
+    job,
+    "EXECUTE",
+    claudeWorkDir,
+    undefined,
+    warnings,
+    artifactDeps(jobStore),
+  );
+
+  assert.equal(failed, false);
+  const uploadBody = JSON.parse(fetchCalls[0]?.body ?? "{}") as {
+    artifacts?: {
+      plan?: Record<string, unknown>;
+      executionResult?: Record<string, unknown>;
+      codeJudges?: Record<string, unknown>;
+    };
+  };
+  assert.deepEqual(uploadBody.artifacts?.plan, {
+    content: "# Imported fallback plan\n\n- preserve staged markdown",
+  });
+  assert.deepEqual(uploadBody.artifacts?.executionResult, {
+    has_changes: false,
+  });
+  assert.deepEqual(uploadBody.artifacts?.codeJudges, { score: 0.9 });
+});
+
 test("tryUploadArtifacts skips upload when artifactsUploadedAt already set", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });

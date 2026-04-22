@@ -3,6 +3,8 @@ export type UploadedPlanArtifact = {
   raw?: Record<string, unknown>;
 };
 
+export const IMPORTED_PLAN_MARKDOWN_FILE = "imported-plan.md";
+
 export function isRawPlanArtifact(
   value: unknown,
 ): value is Record<string, unknown> {

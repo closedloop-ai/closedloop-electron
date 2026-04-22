@@ -6,7 +6,10 @@ import path from "node:path";
 import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
 import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
-import { toUploadedPlanArtifact } from "../shared/plan-artifact-utils.js";
+import {
+  IMPORTED_PLAN_MARKDOWN_FILE,
+  toUploadedPlanArtifact,
+} from "../shared/plan-artifact-utils.js";
 import {
   readLogTail,
   readTextFile,
@@ -517,9 +520,11 @@ function readArtifacts(
     };
   }
   if (command === "EXECUTE") {
-    const plan = toUploadedPlanArtifact(
-      readJsonFileSync(path.join(claudeWorkDir, "plan.json")),
-    );
+    const plan =
+      toUploadedPlanArtifact(readJsonFileSync(path.join(claudeWorkDir, "plan.json"))) ??
+      toUploadedPlanArtifact(
+        readTextFile(path.join(claudeWorkDir, IMPORTED_PLAN_MARKDOWN_FILE)),
+      );
     const executionResult = readJsonFileSync(
       path.join(claudeWorkDir, "execution-result.json"),
     );

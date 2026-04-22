@@ -41,6 +41,7 @@ import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { getShellEnv, getShellPath, resolveBinarySync } from "../shell-path.js";
 import {
+  IMPORTED_PLAN_MARKDOWN_FILE,
   isRawPlanArtifact,
   toUploadedPlanArtifact,
 } from "../../shared/plan-artifact-utils.js";
@@ -275,6 +276,19 @@ interface LoopArtifact {
 export const PLAN_ARTIFACT_TYPES: readonly LoopArtifactType[] = [
   LoopArtifactType.ImplementationPlan,
 ] as const;
+
+function readExecutePlanArtifact(
+  claudeWorkDir: string,
+): ReturnType<typeof toUploadedPlanArtifact> {
+  return (
+    toUploadedPlanArtifact(
+      readJsonFileSync(path.join(claudeWorkDir, LoopArtifactFile.Plan)),
+    ) ??
+    toUploadedPlanArtifact(
+      readTextFile(path.join(claudeWorkDir, IMPORTED_PLAN_MARKDOWN_FILE)),
+    )
+  );
+}
 
 /**
  * Write prd.md to a work directory from a list of artifacts and an optional
@@ -1232,7 +1246,10 @@ async function writeArtifactsForExecuteOrAmend(
           typeof rawPlanPayload?.content === "string" &&
           rawPlanPayload.content === artifact.content;
         const localPlanJsonPresent = existsSync(planJsonPath);
-        const importedPlanPath = path.join(claudeWorkDir, "imported-plan.md");
+        const importedPlanPath = path.join(
+          claudeWorkDir,
+          IMPORTED_PLAN_MARKDOWN_FILE,
+        );
         await fs.rm(importedPlanPath, { force: true });
 
         if (rawPlanAligned) {
@@ -1398,9 +1415,7 @@ function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
 }
 
 function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
-  const plan = toUploadedPlanArtifact(
-    readJsonFileSync(path.join(claudeWorkDir, LoopArtifactFile.Plan)),
-  );
+  const plan = readExecutePlanArtifact(claudeWorkDir);
   const executionResult = readJsonFileSync(
     path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
   );
