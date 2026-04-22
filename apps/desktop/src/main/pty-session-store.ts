@@ -1,4 +1,11 @@
-import { createWriteStream, openSync, closeSync, type WriteStream } from "node:fs";
+import {
+  createWriteStream,
+  openSync,
+  closeSync,
+  readFileSync,
+  writeFileSync,
+  type WriteStream,
+} from "node:fs";
 import pty, { type IPty } from "node-pty";
 
 // ---------------------------------------------------------------------------
@@ -117,8 +124,29 @@ export function spawnPtySession(opts: SpawnSessionOpts): PtySession {
   ptyProcess.onExit(({ exitCode }: { exitCode: number }) => {
     session.exited = true;
     session.exitCode = exitCode;
+
+    // Flush any remaining partial line from the JSONL buffer
+    if (jsonlStream) {
+      const trimmed = jsonlLineBuf.trim();
+      if (trimmed.startsWith("{")) {
+        jsonlStream.write(trimmed + "\n");
+      }
+      jsonlLineBuf = "";
+    }
+
     logStream.end();
     jsonlStream?.end();
+
+    // After streams close, do a full re-extraction of JSON lines from the
+    // session log into the JSONL file. Interactive mode output may contain
+    // ANSI sequences and interleaved user input that the real-time extractor
+    // missed due to PTY chunking. This complete sweep ensures parseTokenUsage,
+    // output-tailer, and error detection have all available structured data.
+    if (opts.jsonlFile && opts.logFile) {
+      logStream.once("finish", () => {
+        extractJsonlFromLog(opts.logFile, opts.jsonlFile!);
+      });
+    }
 
     for (const listener of session.exitListeners) {
       try {
@@ -171,5 +199,46 @@ export function removeSession(loopId: string): void {
     session.dataListeners.clear();
     session.exitListeners.clear();
     sessions.delete(loopId);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Post-exit JSONL extraction
+// ---------------------------------------------------------------------------
+
+/** Strip ANSI escape sequences so JSON buried in terminal output can be found. */
+function stripAnsi(text: string): string {
+  return text.replaceAll(
+    /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g,
+    "",
+  );
+}
+
+/**
+ * Read the full session log, extract every JSON line, and overwrite the JSONL
+ * file with the complete set. This catches anything the real-time extractor
+ * missed due to PTY chunking or ANSI interleaving in interactive mode.
+ */
+function extractJsonlFromLog(logFile: string, jsonlFile: string): void {
+  try {
+    const raw = readFileSync(logFile, "utf-8");
+    const cleaned = stripAnsi(raw);
+    const extracted: string[] = [];
+    for (const line of cleaned.split("\n")) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+        try {
+          JSON.parse(trimmed);
+          extracted.push(trimmed);
+        } catch {
+          // Not valid JSON — skip
+        }
+      }
+    }
+    if (extracted.length > 0) {
+      writeFileSync(jsonlFile, extracted.join("\n") + "\n");
+    }
+  } catch {
+    // Best effort — don't fail the exit path
   }
 }
