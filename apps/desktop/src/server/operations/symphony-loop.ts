@@ -1389,6 +1389,26 @@ function redactCredentials(text: string): string {
 }
 
 /**
+ * Redact spawn args to avoid leaking user prompt/code content into telemetry.
+ * Replaces long args (likely prompt text) and values following message/prompt flags.
+ */
+function redactSpawnArgs(args: string[]): string[] {
+  return args.map((arg, i) => {
+    if (arg.length > 200) {
+      return "[REDACTED_LONG_ARG]";
+    }
+    // Redact values after --message, --prompt, -p flags
+    if (i > 0) {
+      const prev = args[i - 1];
+      if (prev === "--message" || prev === "--prompt" || prev === "-p") {
+        return "[REDACTED]";
+      }
+    }
+    return arg;
+  });
+}
+
+/**
  * Collect failure diagnostics for a failed loop process.
  * Returns an object suitable for inclusion in the error telemetry event.
  */
@@ -3625,9 +3645,6 @@ async function handleLoopRequest(
         CLAUDE_BIN: claudeBinary,
       });
 
-      // Capture spawn timing and metadata for failure diagnostics
-      spawnStartedAt = Date.now();
-
       // Collect non-sensitive env snapshot: NODE_ENV + CLAUDE_CODE_USE_* keys only
       const envSnapshot: Record<string, string> = {};
       for (const [key, value] of Object.entries(spawnEnv)) {
@@ -3677,7 +3694,8 @@ async function handleLoopRequest(
           promptFile,
         );
         collectedSpawnMeta.command = pipeline.cmd;
-        collectedSpawnMeta.args = pipeline.args;
+        collectedSpawnMeta.args = redactSpawnArgs(pipeline.args);
+        spawnStartedAt = Date.now();
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: claudeWorkDir,
           detached: true,
@@ -3701,7 +3719,8 @@ async function handleLoopRequest(
           promptFile,
         );
         collectedSpawnMeta.command = pipeline.cmd;
-        collectedSpawnMeta.args = pipeline.args;
+        collectedSpawnMeta.args = redactSpawnArgs(pipeline.args);
+        spawnStartedAt = Date.now();
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: claudeWorkDir,
           detached: true,
@@ -3733,7 +3752,8 @@ async function handleLoopRequest(
           promptFile,
         );
         collectedSpawnMeta.command = pipeline.cmd;
-        collectedSpawnMeta.args = pipeline.args;
+        collectedSpawnMeta.args = redactSpawnArgs(pipeline.args);
+        spawnStartedAt = Date.now();
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: claudeWorkDir,
           detached: true,
@@ -3770,8 +3790,9 @@ async function handleLoopRequest(
 
         const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir, claudeBinary);
         collectedSpawnMeta.command = pipeline.cmd;
-        collectedSpawnMeta.args = pipeline.args;
+        collectedSpawnMeta.args = redactSpawnArgs(pipeline.args);
         collectedSpawnMeta.cwd = worktreeDir!;
+        spawnStartedAt = Date.now();
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: worktreeDir!,
           detached: true,
@@ -3790,8 +3811,9 @@ async function handleLoopRequest(
           promptFile,
         );
         collectedSpawnMeta.command = pipeline.cmd;
-        collectedSpawnMeta.args = pipeline.args;
+        collectedSpawnMeta.args = redactSpawnArgs(pipeline.args);
         collectedSpawnMeta.cwd = worktreeDir!;
+        spawnStartedAt = Date.now();
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: worktreeDir!,
           detached: true,
@@ -3822,8 +3844,9 @@ async function handleLoopRequest(
         }
 
         collectedSpawnMeta.command = scriptPath!;
-        collectedSpawnMeta.args = scriptArgs;
+        collectedSpawnMeta.args = redactSpawnArgs(scriptArgs);
         collectedSpawnMeta.cwd = worktreeDir!;
+        spawnStartedAt = Date.now();
         child = spawn(scriptPath!, scriptArgs, {
           cwd: worktreeDir!,
           detached: true,
