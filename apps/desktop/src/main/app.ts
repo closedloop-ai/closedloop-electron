@@ -1043,16 +1043,23 @@ export class DesktopApplication {
 
       // Reconcile: if enrichment detected a terminal status (process dead),
       // persist it so the job moves from active to terminal in the store.
+      // Skip jobs where the live-exit handler has already claimed the job
+      // (exitCode is set but status is not yet terminal) to avoid a race
+      // where this reconciliation overrides to STOPPED before the exit
+      // handler finishes artifact processing and posts the correct status.
       const stillRunning = [];
       for (const snapshot of snapshots) {
+        const rawJob = this.jobStore.getById(snapshot.id);
         if (
           isTerminalJobStatus(snapshot.status) &&
-          !isTerminalJobStatus(
-            this.jobStore.getById(snapshot.id)?.status ?? "UNKNOWN",
-          )
+          !isTerminalJobStatus(rawJob?.status ?? "UNKNOWN")
         ) {
+          if (rawJob && rawJob.exitCode != null) {
+            stillRunning.push({ ...snapshot, status: rawJob.status });
+            continue;
+          }
           this.jobStore.upsert({
-            ...this.jobStore.getById(snapshot.id)!,
+            ...rawJob!,
             status: snapshot.status,
             updatedAt: new Date().toISOString(),
             completedAt: snapshot.completedAt ?? new Date().toISOString(),

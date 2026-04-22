@@ -12,6 +12,7 @@ import { findPluginScript } from "./plugin-cache.js";
 import { loadReposConfig } from "./repos-config-utils.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { assertRepoAllowed, expandHome, resolveWorktreeDir } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 type ParsedLearningPattern = {
   id: string;
@@ -675,10 +676,4 @@ function parseBody(context: OperationRequestContext): Record<string, unknown> | 
 
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
-}
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
 }

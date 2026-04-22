@@ -6,6 +6,7 @@ import { getOverrideBinaryPaths, getResolvedGitPath } from "./symphony-loop.js";
 import { isNetworkError } from "../../main/gateway-logger.js";
 import { DirectoryNotAllowedError } from "../security.js";
 import { assertRepoAllowed } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 const execFileAsync = promisify(execFile);
 const PR_NUMBER_REGEX = /\/pull\/(\d+)/;
@@ -891,10 +892,4 @@ function asNumber(value: unknown): number | null {
     return Number.isNaN(parsed) ? null : parsed;
   }
   return null;
-}
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
 }

@@ -223,6 +223,7 @@ import type { LoopRequestBody } from "@closedloop-ai/loops-api/desktop-request";
 import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
 import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
+import { json } from "./response-utils.js";
 
 /** Commands that have full spawn/dispatch support in this gateway version. */
 const SUPPORTED_COMMANDS = new Set<LoopCommand>([
@@ -420,17 +421,6 @@ export function unregisterLoop(loopId: string): void {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function json(
-  context: OperationRequestContext,
-  status: number,
-  payload: unknown,
-): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-
 function parseJsonBody(
   context: OperationRequestContext,
 ): Record<string, unknown> | null {
@@ -3771,6 +3761,15 @@ async function handleLoopRequest(
       if (completionHandled) return;
       completionHandled = true;
       loopLog(body.loopId, `onceComplete fired, code=${code}`);
+      // Persist exitCode synchronously (before any await) so the IPC
+      // desktop:list-running-jobs reconciliation sees the exit handler has
+      // claimed this job and does not race-override the status to STOPPED.
+      if (jobStore) {
+        const j = jobStore.getByLoopId(body.loopId);
+        if (j && j.exitCode == null) {
+          jobStore.upsert({ ...j, exitCode: code, updatedAt: new Date().toISOString() });
+        }
+      }
       try {
         await stopTailer.flush();
       } catch (err) {
@@ -3799,6 +3798,20 @@ async function handleLoopRequest(
           "loop-harness",
           `Completion handler error for loopId=${body.loopId}: ${err instanceof Error ? err.message : err}`,
         );
+        // Safety net: ensure the job reaches a terminal status even when
+        // handleProcessCompletion throws, so the IPC exitCode guard does
+        // not leave the job stuck as RUNNING forever.
+        if (jobStore) {
+          const j = jobStore.getByLoopId(body.loopId);
+          if (j && j.status === "RUNNING") {
+            jobStore.upsert({
+              ...j,
+              status: "FAILED",
+              updatedAt: new Date().toISOString(),
+              completedAt: new Date().toISOString(),
+            });
+          }
+        }
       });
     };
 
