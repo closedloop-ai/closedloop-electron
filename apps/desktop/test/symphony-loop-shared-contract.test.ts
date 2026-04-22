@@ -4,8 +4,8 @@
  * 1. Unsupported commands (CHAT, EXPLORE, REQUEST_PRD_CHANGES) are rejected
  * 2. validateCommandInputs enforces per-command input requirements
  * 3. validateResultBundle logs warnings for missing required artifacts
- * 4. parseExecutionResultFile null guard — malformed data yields no PR fields
- * 5. base_ref replaces base_branch in execution result
+ * 4. malformed EXECUTE results fall back to an authoritative no-changes result
+ * 5. execution result uploads keep base_ref plus additive base_branch
  * 6. sessionId is included in PROCESS_FAILED error events
  */
 
@@ -334,11 +334,11 @@ test("PLAN: completes even when plan.json is missing (validateResultBundle warni
 });
 
 // ---------------------------------------------------------------------------
-// Test 4: parseExecutionResultFile null guard — malformed execution-result.json
-//         means no PR fields in the completed event result
+// Test 4: malformed execution-result.json is replaced by a synthesized
+//         no-changes result before the completed event is posted
 // ---------------------------------------------------------------------------
 
-test("EXECUTE: malformed execution-result.json yields no PR fields in completed event", async () => {
+test("EXECUTE: malformed execution-result.json falls back to no-changes completed fields", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "contract-parse-"));
   tempPathsToClean.push(tmpDir);
 
@@ -400,25 +400,30 @@ test("EXECUTE: malformed execution-result.json yields no PR fields in completed 
   const completedEvent = await waitForCompletedEvent(mock.requests, loopId);
   const result = completedEvent.result as Record<string, unknown>;
 
-  // parseExecutionResultFile returns null for malformed data, so PR fields
-  // should NOT be set from the execution result.
+  // PLN-338 synthesizes an authoritative no-changes execution result after
+  // malformed LLM output, so PR fields normalize to null and has_changes=false.
   assert.equal(
     result.prUrl,
-    undefined,
-    "prUrl should be absent when execution-result.json is malformed",
+    null,
+    "prUrl should normalize to null when execution-result.json falls back to no-changes",
   );
   assert.equal(
     result.prNumber,
-    undefined,
-    "prNumber should be absent when execution-result.json is malformed",
+    null,
+    "prNumber should normalize to null when execution-result.json falls back to no-changes",
+  );
+  assert.equal(
+    result.has_changes,
+    false,
+    "has_changes should be false when malformed execution-result.json falls back to no-changes",
   );
 });
 
 // ---------------------------------------------------------------------------
-// Test 5: base_ref field in execution result upload (replaces base_branch)
+// Test 5: execution result upload keeps base_ref plus additive base_branch
 // ---------------------------------------------------------------------------
 
-test("EXECUTE: uploaded execution result contains base_ref (not base_branch)", async () => {
+test("EXECUTE: uploaded execution result contains base_ref and additive base_branch", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "contract-baseref-"));
   tempPathsToClean.push(tmpDir);
 
@@ -523,8 +528,8 @@ test("EXECUTE: uploaded execution result contains base_ref (not base_branch)", a
   );
   assert.equal(
     execResult.base_branch,
-    undefined,
-    "base_branch should no longer be set (replaced by base_ref)",
+    "main",
+    "base_branch should remain as an additive compatibility field",
   );
 });
 
