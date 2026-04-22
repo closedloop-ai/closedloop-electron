@@ -319,6 +319,7 @@ export class DesktopApplication {
     gatewayLog.setVerbose(this.settingsStore.getAll().verboseLogging);
     const deadJobs = this.reconcileJobStore();
     await this.bootRecovery.reattachLiveJobs();
+    this.bootRecovery.sweepOrphanedTokens();
 
     const bootSandbox = this.settingsStore.getSandboxBaseDirectory();
     if (bootSandbox?.trim()) {
@@ -1114,13 +1115,14 @@ export class DesktopApplication {
         }
       },
     );
-    ipcMain.handle("desktop:open-job-terminal", (_event, jobId: string) => {
-      if (typeof jobId !== "string" || !jobId.trim()) {
-        throw new Error("jobId is required");
+    ipcMain.handle("desktop:open-job-terminal", (_event, loopId: string) => {
+      if (typeof loopId !== "string" || !loopId.trim()) {
+        throw new Error("loopId is required");
       }
-      const job = this.jobStore.getById(jobId.trim());
+      const job = this.jobStore.getByLoopId(loopId.trim());
       const port = this.server?.getActivePort() ?? 19432;
       const command = job?.command ?? "";
+      const authToken = this.isNoAuthMode() ? "" : this.gatewayAuthToken;
 
       // Resolve terminal.html path
       const htmlPath = app.isPackaged
@@ -1130,11 +1132,11 @@ export class DesktopApplication {
       const win = new BrowserWindow({
         width: 900,
         height: 600,
-        title: `Terminal — ${command} ${jobId.slice(0, 8)}`,
+        title: `Terminal — ${command} ${loopId.slice(0, 8)}`,
         webPreferences: { contextIsolation: true, sandbox: true },
       });
       void win.loadFile(htmlPath, {
-        query: { loopId: jobId.trim(), port: String(port), command },
+        query: { loopId: loopId.trim(), port: String(port), command, token: authToken },
       });
       return { opened: true };
     });

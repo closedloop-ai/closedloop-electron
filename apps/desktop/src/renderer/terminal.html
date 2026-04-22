@@ -63,6 +63,7 @@
       const loopId = params.get("loopId") || "";
       const port = params.get("port") || "19432";
       const command = params.get("command") || "";
+      const authToken = params.get("token") || "";
 
       const statusDot = document.getElementById("status-dot");
       const statusText = document.getElementById("status-text");
@@ -118,8 +119,10 @@
         statusText.textContent = text;
       }
 
-      // WebSocket connection
-      const wsUrl = `ws://127.0.0.1:${port}/api/engineer/jobs/${loopId}/terminal`;
+      // WebSocket connection — pass auth token as query param (browser WebSocket
+      // API does not support custom headers; the upgrade handler reads it).
+      const wsParams = authToken ? `?token=${encodeURIComponent(authToken)}` : "";
+      const wsUrl = `ws://127.0.0.1:${port}/api/engineer/jobs/${loopId}/terminal${wsParams}`;
       let ws = null;
 
       function connect() {

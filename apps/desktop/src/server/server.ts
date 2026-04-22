@@ -202,7 +202,7 @@ export class DesktopGatewayServer {
             this.options.onUnexpectedClose?.();
           }
         });
-        initTerminalAttachWebSocket(candidateServer);
+        initTerminalAttachWebSocket(candidateServer, this.options.getGatewayAuthToken);
         await this.writeDiscoveryFile();
         return;
       } catch (error) {

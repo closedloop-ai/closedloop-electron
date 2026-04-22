@@ -1,4 +1,5 @@
 import type http from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
   getSession,
@@ -9,6 +10,15 @@ import {
 // ---------------------------------------------------------------------------
 // Terminal WebSocket attach endpoint
 // ---------------------------------------------------------------------------
+
+function safeEqualToken(left: string, right: string): boolean {
+  const leftBuf = Buffer.from(left);
+  const rightBuf = Buffer.from(right);
+  if (leftBuf.length !== rightBuf.length) {
+    return false;
+  }
+  return timingSafeEqual(leftBuf, rightBuf);
+}
 
 /**
  * Initialise a WebSocket upgrade handler on the given HTTP server.
@@ -27,21 +37,43 @@ import {
  *   { type: "input",  data: string }   — keyboard input forwarded to PTY
  *   { type: "resize", cols: number, rows: number }
  */
-export function initTerminalAttachWebSocket(server: http.Server): void {
+export function initTerminalAttachWebSocket(
+  server: http.Server,
+  getGatewayAuthToken?: () => string | undefined,
+): void {
   const wss = new WebSocketServer({ noServer: true });
 
   server.on("upgrade", (request, socket, head) => {
     const url = request.url ?? "";
     const match = /^\/api\/engineer\/jobs\/([^/]+)\/terminal/.exec(url);
     if (!match) {
-      // Not our upgrade — let other handlers deal with it (or destroy).
-      socket.destroy();
+      // Not our upgrade — let other handlers deal with it.
       return;
+    }
+
+    // Enforce the same auth that GatewayRouter applies to HTTP requests.
+    // Accept token from Authorization header or query param (browser
+    // WebSocket API cannot set custom headers).
+    const expectedToken = getGatewayAuthToken?.();
+    if (expectedToken) {
+      const authHeader = request.headers.authorization ?? "";
+      let providedToken = authHeader.startsWith("Bearer ")
+        ? authHeader.slice(7)
+        : "";
+      if (!providedToken) {
+        const queryToken = new URL(url, "http://localhost").searchParams.get("token");
+        providedToken = queryToken ?? "";
+      }
+      if (!providedToken || !safeEqualToken(providedToken, expectedToken)) {
+        socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
+        socket.destroy();
+        return;
+      }
     }
 
     const loopId = match[1];
 
-    wss.handleUpgrade(request, socket, head, (ws) => {
+    wss.handleUpgrade(request, socket, head, (ws: WebSocket) => {
       wss.emit("connection", ws, request, loopId);
     });
   });
@@ -91,7 +123,7 @@ export function initTerminalAttachWebSocket(server: http.Server): void {
       session.exitListeners.add(onExit);
 
       // 5. Handle incoming messages from the client
-      ws.on("message", (raw) => {
+      ws.on("message", (raw: Buffer | ArrayBuffer | Buffer[]) => {
         try {
           const msg = JSON.parse(String(raw)) as Record<string, unknown>;
           if (msg.type === "input" && typeof msg.data === "string") {

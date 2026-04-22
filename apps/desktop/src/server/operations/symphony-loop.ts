@@ -909,13 +909,17 @@ async function postLoopEventBounded(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await postLoopEvent(
+    const result = await postLoopEvent(
       apiBaseUrl,
       loopId,
       token,
       eventBody,
       controller.signal,
     );
+    if (controller.signal.aborted) {
+      return { success: false, error: "timeout" };
+    }
+    return result;
   } catch {
     return { success: false, error: "timeout" };
   } finally {
@@ -1108,6 +1112,12 @@ async function downloadAttachmentsToDisk(
   for (const attachment of attachments) {
     try {
       const expiresAt = new Date(attachment.signedUrlExpiresAt);
+      if (Number.isNaN(expiresAt.getTime())) {
+        console.warn(
+          `[downloadAttachmentsToDisk] Attachment ${attachment.id} invalid signedUrlExpiresAt: ${attachment.signedUrlExpiresAt}, skipping`,
+        );
+        continue;
+      }
       if (expiresAt <= new Date()) {
         console.warn(
           `[downloadAttachmentsToDisk] Attachment ${attachment.id} signedUrl expired at ${attachment.signedUrlExpiresAt}, skipping`,
@@ -2396,6 +2406,7 @@ export async function handleProcessCompletion(
     }
     await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt, "cleanup additional worktree failed (on error):");
     loopTokenStore?.deleteLoopToken(loopId);
+    setTimeout(() => removeSession(loopId), 30_000);
     return;
   }
 
@@ -2827,6 +2838,9 @@ export async function handleProcessCompletion(
     await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt);
   } finally {
     runningLoops.delete(loopId);
+    // Clean up PTY session after a short delay so any attached terminal
+    // clients can receive the exit notification before the buffer is freed.
+    setTimeout(() => removeSession(loopId), 30_000);
   }
 }
 
@@ -3659,8 +3673,6 @@ async function handleLoopRequest(
         "--max-turns",
         "200",
       ];
-      // Resolve claude binary path once for all command branches
-      const claudeBinary = getResolvedClaudePath();
       const jsonlFile = path.join(claudeWorkDir, "claude-output.jsonl");
 
       if (body.command === "DECOMPOSE") {
