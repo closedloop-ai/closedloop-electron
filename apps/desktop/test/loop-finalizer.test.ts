@@ -23,6 +23,7 @@ let tempRoot = "";
 let fetchCalls: Array<{ url: string; body: string }> = [];
 let telemetryEvents: TelemetryEventPayload[] = [];
 const originalFetch = globalThis.fetch;
+const originalPath = process.env.PATH;
 
 beforeEach(async () => {
   tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "loop-finalizer-test-"));
@@ -42,6 +43,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   globalThis.fetch = originalFetch;
+  process.env.PATH = originalPath;
   if (tempRoot) {
     await fs.rm(tempRoot, { recursive: true, force: true });
   }
@@ -586,10 +588,14 @@ test("parseJobWarnings splits on semicolon, trims, and drops empty segments", ()
   assert.deepEqual(parseJobWarnings({ warning: "a; b;  ;c" }), ["a", "b", "c"]);
 });
 
-const artifactDeps = (jobStore: JobStore) => ({
+const artifactDeps = (
+  jobStore: JobStore,
+  getAllowedDirectories?: () => string[],
+) => ({
   jobStore,
   apiAuthToken: "token",
   apiBaseUrl: "http://127.0.0.1:12345",
+  getAllowedDirectories,
 });
 
 /** Minimal git repo for branchName fallback tests (requires git on PATH). */
@@ -1140,6 +1146,59 @@ test("tryUploadArtifacts includes execute finalization metadata for EXECUTE jobs
     parsed.metadata?.executeFinalizationReason,
     "existing execution-result.json reused",
   );
+});
+
+test("tryUploadArtifacts omits branchName fallback when worktree is outside allowed directories", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ tasks: [] }));
+  await fs.writeFile(path.join(claudeWorkDir, "session-id.txt"), "upload-sess-xyz\n", "utf-8");
+
+  const worktreeDir = path.join(tempRoot, "blocked", "wt-upload");
+  await fs.mkdir(worktreeDir, { recursive: true });
+
+  const allowedDir = path.join(tempRoot, "allowed");
+  await fs.mkdir(allowedDir, { recursive: true });
+
+  const fakeBin = path.join(tempRoot, "fake-bin");
+  const gitCapture = path.join(tempRoot, "git-capture.txt");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(
+    path.join(fakeBin, "git"),
+    [
+      "#!/bin/sh",
+      `printf '%s\\n' \"$@\" >> ${JSON.stringify(gitCapture)}`,
+      'if [ "$1" = "rev-parse" ] && [ "$2" = "--abbrev-ref" ]; then',
+      '  echo "blocked-branch"',
+      "  exit 0",
+      "fi",
+      "exit 0",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+
+  const jobStore = createStore("step-upload-disallowed-worktree");
+  const job = createBaseJob({ claudeWorkDir, worktreeDir });
+  jobStore.upsert(job);
+
+  const warnings: string[] = [];
+  const { failed } = await tryUploadArtifacts(
+    job,
+    "PLAN",
+    claudeWorkDir,
+    worktreeDir,
+    warnings,
+    artifactDeps(jobStore, () => [allowedDir]),
+  );
+
+  assert.equal(failed, false);
+  const uploadCall = fetchCalls.find((c) => c.url.includes("/upload-artifacts"));
+  assert.ok(uploadCall);
+  const parsed = JSON.parse(uploadCall.body) as { metadata?: Record<string, unknown> };
+  assert.equal(parsed.metadata?.sessionId, "upload-sess-xyz");
+  assert.equal(parsed.metadata?.branchName, undefined);
+  assert.equal(await fs.readFile(gitCapture, "utf-8").catch(() => ""), "");
 });
 
 test("tryPostCompletedEvent records EVENT_POST_FAILED when HTTP fails", async () => {

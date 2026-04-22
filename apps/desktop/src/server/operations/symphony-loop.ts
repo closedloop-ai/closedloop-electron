@@ -2051,6 +2051,26 @@ function getExecuteFinalizationArtifactPresence(claudeWorkDir: string): {
   };
 }
 
+function getExecuteFinalizationSandboxBlockReason(
+  worktreeDir: string,
+  getAllowedDirectories: () => string[],
+  loopId: string,
+): string | undefined {
+  try {
+    assertPathAllowed(worktreeDir, getAllowedDirectories());
+  } catch (sandboxErr) {
+    if (sandboxErr instanceof DirectoryNotAllowedError) {
+      loopError(
+        loopId,
+        `EXECUTE finalization skipped: worktreeDir not in allowed sandbox: ${worktreeDir}`,
+      );
+      return "worktree directory not allowed by current sandbox";
+    }
+    throw sandboxErr;
+  }
+  return undefined;
+}
+
 function buildPersistedExecutionResultArtifact(params: {
   hasChanges: boolean;
   prUrl: string | null;
@@ -2257,6 +2277,28 @@ export async function runExecuteFinalization(
     );
   }
 
+  const sandboxBlockReason = getExecuteFinalizationSandboxBlockReason(
+    params.worktreeDir,
+    params.getAllowedDirectories,
+    params.loopId,
+  );
+  if (sandboxBlockReason) {
+    return completeExecuteFinalization(
+      params.jobStore,
+      params.loopId,
+      params.source,
+      params.claudeWorkDir,
+      startedAt,
+      {
+        status: "skipped",
+        path: "none",
+        reason: sandboxBlockReason,
+        executionResultPersisted: false,
+      },
+      preArtifacts,
+    );
+  }
+
   const llmResult = await attemptLlmCommit(
     params.worktreeDir,
     params.baseBranch,
@@ -2308,6 +2350,28 @@ export async function runExecuteFinalization(
               "failed to persist execution-result.json after LLM commit finalization",
             executionResultPersisted: false,
           },
+      preArtifacts,
+    );
+  }
+
+  const gitFallbackSandboxBlockReason = getExecuteFinalizationSandboxBlockReason(
+    params.worktreeDir,
+    params.getAllowedDirectories,
+    params.loopId,
+  );
+  if (gitFallbackSandboxBlockReason) {
+    return completeExecuteFinalization(
+      params.jobStore,
+      params.loopId,
+      params.source,
+      params.claudeWorkDir,
+      startedAt,
+      {
+        status: "skipped",
+        path: "none",
+        reason: gitFallbackSandboxBlockReason,
+        executionResultPersisted: false,
+      },
       preArtifacts,
     );
   }

@@ -28,6 +28,10 @@ import type { LoopTokenStore } from "./loop-token-store.js";
 import type { TelemetryEmitter } from "./telemetry-protocol.js";
 import { parseApiKeySource, parseTokenUsage } from "./token-usage.js";
 import { readEffectiveStatusFromState } from "../server/operations/symphony-job-snapshot.js";
+import {
+  assertPathAllowed,
+  DirectoryNotAllowedError,
+} from "../server/security.js";
 
 export interface LoopFinalizerDeps {
   jobStore: JobStore;
@@ -73,7 +77,7 @@ export function parseJobWarnings(job: Pick<LocalJob, "warning">): string[] {
 
 type ArtifactUploadDeps = Pick<
   LoopFinalizerDeps,
-  "jobStore" | "apiAuthToken" | "apiBaseUrl"
+  "jobStore" | "apiAuthToken" | "apiBaseUrl" | "getAllowedDirectories"
 >;
 
 function hasTerminalExecuteFinalization(
@@ -136,6 +140,25 @@ function getCurrentBranchFromWorktree(worktreeDir: string): string | null {
   }
 }
 
+function getBranchNameFromAllowedWorktree(
+  worktreeDir: string,
+  getAllowedDirectories?: () => string[],
+): string | undefined {
+  if (getAllowedDirectories) {
+    try {
+      assertPathAllowed(worktreeDir, getAllowedDirectories());
+    } catch (err) {
+      if (err instanceof DirectoryNotAllowedError) {
+        return undefined;
+      }
+      throw err;
+    }
+  }
+
+  const branch = getCurrentBranchFromWorktree(worktreeDir);
+  return branch ?? undefined;
+}
+
 /**
  * Session + branch fields shared by artifact upload metadata and completed-event `result`
  * so reboot replay and live exit stay compatible with the pre-finalizer desktop shape.
@@ -145,6 +168,7 @@ function getCompletionCorrelationFields(
   command: string,
   claudeWorkDir: string,
   artifacts: Record<string, unknown>,
+  getAllowedDirectories?: () => string[],
 ): { sessionId?: string; branchName?: string } {
   const sessionId = readLoopSessionId(claudeWorkDir);
   let branchName: string | undefined;
@@ -157,10 +181,10 @@ function getCompletionCorrelationFields(
   }
 
   if (!branchName && job.worktreeDir) {
-    const fromGit = getCurrentBranchFromWorktree(job.worktreeDir);
-    if (fromGit) {
-      branchName = fromGit;
-    }
+    branchName = getBranchNameFromAllowedWorktree(
+      job.worktreeDir,
+      getAllowedDirectories,
+    );
   }
 
   return { sessionId, branchName };
@@ -172,6 +196,7 @@ function buildCompletedEventResult(
   command: string,
   claudeWorkDir: string,
   artifacts: Record<string, unknown>,
+  getAllowedDirectories?: () => string[],
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {
     exitCode: job.exitCode ?? 0,
@@ -191,6 +216,7 @@ function buildCompletedEventResult(
     command,
     claudeWorkDir,
     artifacts,
+    getAllowedDirectories,
   );
 
   const missingBranch =
@@ -216,12 +242,14 @@ function buildArtifactUploadMetadata(
   command: string,
   claudeWorkDir: string,
   artifacts: Record<string, unknown>,
+  getAllowedDirectories?: () => string[],
 ): Record<string, unknown> {
   const { sessionId, branchName } = getCompletionCorrelationFields(
     job,
     command,
     claudeWorkDir,
     artifacts,
+    getAllowedDirectories,
   );
   return {
     finishedAt: new Date().toISOString(),
@@ -260,6 +288,7 @@ export async function tryUploadArtifacts(
         command,
         claudeWorkDir,
         artifacts,
+        deps.getAllowedDirectories,
       ),
     },
   );
@@ -296,6 +325,7 @@ export async function tryPostCompletedEvent(
     command,
     claudeWorkDir,
     artifacts,
+    deps.getAllowedDirectories,
   );
 
   gatewayLog.info(
@@ -808,7 +838,12 @@ export async function finalizeLoopFromRuntime(
     resolvedJob.status === "STOPPED" ||
     resolvedJob.status === "UNKNOWN";
 
-  const artifactDeps = { jobStore, apiAuthToken, apiBaseUrl };
+  const artifactDeps = {
+    jobStore,
+    apiAuthToken,
+    apiBaseUrl,
+    getAllowedDirectories,
+  };
   const now = new Date().toISOString();
   const persistBeforeCloud = reason !== "live-exit";
 
