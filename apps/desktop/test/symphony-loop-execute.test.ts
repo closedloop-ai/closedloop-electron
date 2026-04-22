@@ -602,6 +602,263 @@ test("EXECUTE: git status failure sets GIT_PUSH_FAILED in completed event warnin
   );
 });
 
+test("EXECUTE: rehydrates raw implementation plan state into a fresh worktree", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-rehydrate-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-rehydrate");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  await createFakeRunLoopScript(
+    tmpDir,
+    [
+      "#!/bin/sh",
+      'cp "$CLOSEDLOOP_WORKDIR/plan.json" "$CLOSEDLOOP_WORKDIR/captured-plan.json"',
+      "exit 0",
+    ].join("\n"),
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'if [ "$1" = status ]; then exit 0; fi',
+    'if [ "$1" = push ]; then exit 0; fi',
+    'if [ "$1" = add ]; then exit 0; fi',
+    'if [ "$1" = commit ]; then exit 0; fi',
+    'if [ "$1" = fetch ]; then exit 0; fi',
+    'if [ "$1" = "rev-parse" ]; then',
+    '  if [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+    "  exit 0",
+    "fi",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, {
+    mode: 0o755,
+  });
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const jobStore = new JobStore({
+    cwd: tmpDir,
+    name: "test-jobs-rehydrate",
+  });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-rehydrate-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000000450";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [
+          {
+            type: "IMPLEMENTATION_PLAN",
+            content: "Updated markdown",
+            raw: {
+              content: "Old markdown",
+              pendingTasks: ["task-1"],
+              completedTasks: ["task-0"],
+              openQuestions: ["question-1"],
+            },
+          },
+        ],
+        repo: {
+          fullName: `rehydrate/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  const terminalJob = await waitForJobTerminal(jobStore, loopId);
+  assert.equal(terminalJob.status, "COMPLETED");
+  assert.ok(terminalJob.claudeWorkDir, "Expected claudeWorkDir on completed job");
+
+  const capturedPlan = JSON.parse(
+    await fs.readFile(
+      path.join(terminalJob.claudeWorkDir!, "captured-plan.json"),
+      "utf-8",
+    ),
+  ) as Record<string, unknown>;
+  assert.equal(capturedPlan.content, "Updated markdown");
+  assert.deepEqual(capturedPlan.pendingTasks, ["task-1"]);
+  assert.deepEqual(capturedPlan.completedTasks, ["task-0"]);
+  assert.deepEqual(capturedPlan.openQuestions, ["question-1"]);
+});
+
+test("EXECUTE: non-cancelled failure uploads current plan state before posting the error event", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-fail-upload-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-fail-upload");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  await createFakeRunLoopScript(
+    tmpDir,
+    [
+      "#!/bin/sh",
+      `printf '%s' '${JSON.stringify({
+        content: "Plan content",
+        pendingTasks: ["task-1"],
+      }).replace(/'/g, String.raw`'\''`)}' > "$CLOSEDLOOP_WORKDIR/plan.json"`,
+      `printf '%s' '${JSON.stringify({ score: 0.5 }).replace(/'/g, String.raw`'\''`)}' > "$CLOSEDLOOP_WORKDIR/code-judges.json"`,
+      "exit 1",
+    ].join("\n"),
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+  await fs.writeFile(path.join(fakeBin, "git"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const jobStore = new JobStore({
+    cwd: tmpDir,
+    name: "test-jobs-fail-upload",
+  });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-fail-upload-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000000451";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [],
+        repo: {
+          fullName: `fail-upload/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  const terminalJob = await waitForJobTerminal(jobStore, loopId);
+  assert.equal(terminalJob.status, "FAILED");
+
+  const uploadRequest = await mock.waitForRequest("upload-artifacts");
+  const uploadBody = JSON.parse(uploadRequest.body) as {
+    artifacts: {
+      plan?: Record<string, unknown>;
+      codeJudges?: Record<string, unknown>;
+    };
+  };
+  assert.deepEqual(uploadBody.artifacts.plan, {
+    content: "Plan content",
+    raw: {
+      content: "Plan content",
+      pendingTasks: ["task-1"],
+    },
+  });
+  assert.deepEqual(uploadBody.artifacts.codeJudges, { score: 0.5 });
+
+  const uploadIndex = mock.requests.findIndex((request) =>
+    request.url.includes("upload-artifacts"),
+  );
+  const errorEventIndex = mock.requests.findIndex((request) => {
+    if (!request.url.includes(`/loops/${loopId}/events`)) {
+      return false;
+    }
+    try {
+      const body = JSON.parse(request.body) as Record<string, unknown>;
+      return body.type === "error";
+    } catch {
+      return false;
+    }
+  });
+  assert.ok(uploadIndex !== -1, "Expected upload-artifacts request");
+  assert.ok(errorEventIndex !== -1, "Expected error event request");
+  assert.ok(
+    uploadIndex < errorEventIndex,
+    `Expected artifact upload before error event, got uploadIndex=${uploadIndex} errorEventIndex=${errorEventIndex}`,
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Cancellation gate helpers
 // ---------------------------------------------------------------------------

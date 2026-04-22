@@ -318,6 +318,12 @@ export async function tryPostErrorEvent(
     job.status === "FAILED"
       ? `Process exited with code ${job.exitCode ?? 1}`
       : `Process ended with terminal status ${job.status}`;
+  const correlationFields = getCompletionCorrelationFields(
+    job,
+    String(job.command),
+    claudeWorkDir,
+    readArtifacts(String(job.command), claudeWorkDir, job.worktreeDir),
+  );
   const hasTokenActivity =
     tokenUsage.inputTokens > 0 ||
     tokenUsage.outputTokens > 0 ||
@@ -340,6 +346,12 @@ export async function tryPostErrorEvent(
       : {}),
     ...(logTail ? { logTail } : {}),
     ...(apiKeySource != null ? { apiKeySource } : {}),
+    ...(correlationFields.sessionId
+      ? { sessionId: correlationFields.sessionId }
+      : {}),
+    ...(correlationFields.branchName
+      ? { branchName: correlationFields.branchName }
+      : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
   };
 
@@ -484,13 +496,39 @@ function readJsonFileSync(filePath: string): unknown | null {
   }
 }
 
+function isRawPlanArtifact(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function toUploadedPlanArtifact(
+  plan: unknown,
+): { content: string; raw?: Record<string, unknown> } | undefined {
+  if (isRawPlanArtifact(plan)) {
+    return {
+      content:
+        typeof plan.content === "string"
+          ? plan.content
+          : JSON.stringify(plan, null, 2),
+      raw: plan,
+    };
+  }
+
+  if (typeof plan === "string") {
+    return { content: plan };
+  }
+
+  return undefined;
+}
+
 function readArtifacts(
   command: string,
   claudeWorkDir: string,
   worktreeDir?: string,
 ): Record<string, unknown> {
   if (command === "PLAN" || command === "REQUEST_CHANGES") {
-    const plan = readJsonFileSync(path.join(claudeWorkDir, "plan.json"));
+    const plan = toUploadedPlanArtifact(
+      readJsonFileSync(path.join(claudeWorkDir, "plan.json")),
+    );
     const openQuestions = readTextFile(
       path.join(claudeWorkDir, "open-questions.md"),
     );
@@ -502,6 +540,9 @@ function readArtifacts(
     };
   }
   if (command === "EXECUTE") {
+    const plan = toUploadedPlanArtifact(
+      readJsonFileSync(path.join(claudeWorkDir, "plan.json")),
+    );
     const executionResult = readJsonFileSync(
       path.join(claudeWorkDir, "execution-result.json"),
     );
@@ -509,6 +550,7 @@ function readArtifacts(
       path.join(claudeWorkDir, "code-judges.json"),
     );
     return {
+      plan: plan ?? undefined,
       executionResult: executionResult ?? undefined,
       codeJudges: codeJudges ?? undefined,
     };
