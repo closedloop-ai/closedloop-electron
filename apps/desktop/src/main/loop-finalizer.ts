@@ -5,7 +5,10 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
-import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
+import {
+  getPrimaryRepoResult,
+  parseExecutionResultFile,
+} from "@closedloop-ai/loops-api/execution-result";
 import {
   readLogTail,
   readTextFile,
@@ -108,9 +111,22 @@ function getCompletionCorrelationFields(
   let branchName: string | undefined;
 
   if (command === "EXECUTE" && artifacts.executionResult) {
+    // Attempt v2 parse. Returns null for v1/missing (unsupported_version).
     const parsed = parseExecutionResultFile(artifacts.executionResult);
-    if (parsed?.branchName) {
-      branchName = parsed.branchName;
+    if (parsed !== null) {
+      // Primary repo is always results[0] in the v2 envelope (T-6.7).
+      const primaryResult =
+        getPrimaryRepoResult(parsed, parsed[0]?.fullName ?? "") ?? parsed[0];
+      if (primaryResult?.status === "success" && primaryResult.branch_name) {
+        branchName = primaryResult.branch_name;
+      }
+    } else {
+      // Backward-compat fallback: legacy v1 flat object (unsupported_version or
+      // missing). Extract branch_name if present.
+      const execResult = artifacts.executionResult as Record<string, unknown>;
+      if (typeof execResult.branch_name === "string" && execResult.branch_name.trim()) {
+        branchName = execResult.branch_name;
+      }
     }
   }
 
@@ -137,11 +153,29 @@ function buildCompletedEventResult(
   };
 
   if (command === "EXECUTE" && artifacts.executionResult) {
-    const execResult = artifacts.executionResult as Record<string, unknown>;
-    result.prUrl = execResult.pr_url;
-    result.prNumber = execResult.pr_number;
-    result.branchName = execResult.branch_name;
-    result.has_changes = execResult.has_changes ?? false;
+    // Attempt v2 parse. Returns null for v1/missing (unsupported_version).
+    const parsed = parseExecutionResultFile(artifacts.executionResult);
+    if (parsed !== null) {
+      // v2 format: primary repo is results[0].
+      const primaryResult =
+        getPrimaryRepoResult(parsed, parsed[0]?.fullName ?? "") ?? parsed[0];
+      if (primaryResult?.status === "success") {
+        result.prUrl = primaryResult.pr_url;
+        result.prNumber = primaryResult.pr_number;
+        result.branchName = primaryResult.branch_name;
+        result.has_changes = primaryResult.has_changes;
+      }
+    } else {
+      // Backward-compat fallback: legacy v1 flat object written by older desktop
+      // builds (code:'unsupported_version' or 'missing').
+      const execResult = artifacts.executionResult as Record<string, unknown>;
+      if (typeof execResult.pr_url === "string") {
+        result.prUrl = execResult.pr_url;
+        result.prNumber = execResult.pr_number;
+        result.branchName = execResult.branch_name;
+        result.has_changes = execResult.has_changes ?? false;
+      }
+    }
   }
 
   const { sessionId, branchName } = getCompletionCorrelationFields(

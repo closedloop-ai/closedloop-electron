@@ -418,11 +418,11 @@ test("EXECUTE: malformed execution-result.json yields no PR fields in completed 
 // Test 5: base_ref field in execution result upload (replaces base_branch)
 // ---------------------------------------------------------------------------
 
-test("EXECUTE: uploaded execution result contains base_ref (not base_branch)", async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "contract-baseref-"));
+test("EXECUTE: uploaded execution result base_branch comes from request branch", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "contract-basebranch-"));
   tempPathsToClean.push(tmpDir);
 
-  const repoPath = path.join(tmpDir, "repo-baseref");
+  const repoPath = path.join(tmpDir, "repo-basebranch");
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeParent = path.join(tmpDir, "worktrees");
@@ -440,12 +440,25 @@ test("EXECUTE: uploaded execution result contains base_ref (not base_branch)", a
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
 
-  // fake claude for attemptLlmCommit: writes execution-result.json relative to cwd
+  // fake claude for attemptLlmCommit: writes v2-envelope execution-result.json
+  // relative to cwd.  fullName / pr_url must match the request's repo.fullName
+  // for the loops-api schema validator to accept the envelope.
+  const primaryFullName = `basebranch/${path.basename(repoPath)}`;
+  const primaryPrUrl = `https://github.com/${primaryFullName}/pull/99`;
   const executionResultContent = JSON.stringify({
-    pr_url: "https://github.com/org/repo/pull/99",
-    pr_number: 99,
-    has_changes: true,
-    branch_name: "symphony/baseref-test",
+    schemaVersion: 2,
+    results: [
+      {
+        status: "success",
+        fullName: primaryFullName,
+        pr_url: primaryPrUrl,
+        pr_number: 99,
+        branch_name: "symphony/basebranch-test",
+        base_branch: "main",
+        has_changes: true,
+        commit_sha: "aabbccddeeff00112233445566778899aabbccdd",
+      },
+    ],
   });
   const claudeScript = [
     "#!/bin/sh",
@@ -470,11 +483,12 @@ test("EXECUTE: uploaded execution result contains base_ref (not base_branch)", a
     "exit 0",
   ].join("\n");
   await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
-  // fake gh: pr view succeeds with existing PR, pr create not called
+  // fake gh: pr view succeeds with existing PR (URL aligned with fullName so the
+  // v2 envelope schema validates), pr create not called
   const fakeGhScript = [
     "#!/bin/sh",
     'if [ "$1" = pr ] && [ "$2" = view ]; then',
-    '  echo \'{"url": "https://github.com/org/repo/pull/99", "number": 99}\'',
+    `  echo '{"url": "${primaryPrUrl}", "number": 99}'`,
     "  exit 0",
     "fi",
     "exit 0",
@@ -502,7 +516,7 @@ test("EXECUTE: uploaded execution result contains base_ref (not base_branch)", a
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
-        repo: { fullName: `baseref/${path.basename(repoPath)}`, branch: "main" },
+        repo: { fullName: primaryFullName, branch: "main" },
       }),
     },
   );
@@ -511,20 +525,25 @@ test("EXECUTE: uploaded execution result contains base_ref (not base_branch)", a
 
   const uploadReq = await mock.waitForRequest("upload-artifacts");
   const uploadBody = JSON.parse(uploadReq.body) as {
-    artifacts: { executionResult?: Record<string, unknown> };
+    artifacts: {
+      executionResult?: {
+        schemaVersion?: number;
+        results?: Array<Record<string, unknown>>;
+      };
+    };
   };
 
-  const execResult = uploadBody.artifacts.executionResult;
-  assert.ok(execResult, "executionResult should be present in upload");
+  const envelope = uploadBody.artifacts.executionResult;
+  assert.ok(envelope, "executionResult envelope should be present in upload");
+  const primary = envelope?.results?.[0];
+  assert.ok(primary, "Expected results[0] in v2 envelope");
+  // base_branch is the canonical field on RepoExecutionResult (loops-api
+  // schema).  The legacy top-level `base_ref` field was replaced when the
+  // harness migrated to the v2 envelope.
   assert.equal(
-    execResult.base_ref,
+    primary?.base_branch,
     "main",
-    "base_ref should be set to the target branch",
-  );
-  assert.equal(
-    execResult.base_branch,
-    undefined,
-    "base_branch should no longer be set (replaced by base_ref)",
+    "base_branch should be set to the target branch",
   );
 });
 

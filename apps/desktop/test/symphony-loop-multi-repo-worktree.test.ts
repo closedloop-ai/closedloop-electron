@@ -500,3 +500,326 @@ test("handleProcessCompletion cleans additional worktrees when PLAN is cancelled
   assert.equal(finalJob?.status, "CANCELLED");
 });
 
+// ---------------------------------------------------------------------------
+// T-6.5: Per-repo commit/push/PR loop using argv (EXECUTE command)
+//
+// Strategy: post an EXECUTE request where the WorktreeProvider's
+// findWorktreeForBranch returns a pre-created additional worktree dir.
+// The fake git binary (in the additional worktree) reports a change
+// (git status returns non-empty), so executeAdditionalRepoCommitPush
+// runs git add/commit/push and gh pr create. A capture file records
+// all gh pr create invocations; the test asserts it was called once
+// for the additional repo.
+// ---------------------------------------------------------------------------
+
+test("EXECUTE per-repo commit/push/PR runs git and gh for each additional worktree (T-6.5)", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "wt-lifecycle-execute-t65-"));
+  tempPathsToClean.push(tmpDir);
+
+  const primaryRepo = path.join(tmpDir, "primary-repo");
+  await fs.mkdir(primaryRepo, { recursive: true });
+
+  const additionalRepo = path.join(tmpDir, "additional-repo");
+  await fs.mkdir(additionalRepo, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  // Pre-create the primary worktree dir so EXECUTE can reuse it via findWorktreeForBranch
+  const primaryWorktreeDir = path.join(worktreeParent, "primary-wt");
+  await fs.mkdir(primaryWorktreeDir, { recursive: true });
+
+  // Pre-create the additional repo worktree dir so EXECUTE finds it
+  const additionalWorktreeDir = path.join(worktreeParent, "additional-wt");
+  await fs.mkdir(additionalWorktreeDir, { recursive: true });
+
+  process.env.HOME = tmpDir;
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+  // fake run-loop.sh: exits 0
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+
+  // fake claude: exits 0 without writing execution-result.json
+  // → attemptLlmCommit returns null → executeGitOperations is called for primary
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+
+  // Capture file for gh pr create invocations
+  const ghCreateCapture = path.join(tmpDir, "gh-pr-create-calls.txt");
+
+  // fake git: for 'git status', return non-empty output (indicating changes) in
+  // both the primary and additional worktree dirs. Other commands succeed.
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'if [ "$1" = status ]; then printf "M changed.txt\\n"; exit 0; fi',
+    'if [ "$1" = add ]; then exit 0; fi',
+    'if [ "$1" = commit ]; then exit 0; fi',
+    'if [ "$1" = push ]; then exit 0; fi',
+    'if [ "$1" = fetch ]; then exit 0; fi',
+    'if [ "$1" = "rev-parse" ] && [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+    'if [ "$1" = "rev-parse" ] && [ "$2" = "HEAD" ]; then echo "abc1234567890"; exit 0; fi',
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  // fake gh: record pr create calls; pr view returns non-zero so pr create is called;
+  // pr view --json returns empty body to skip footer-update step
+  const fakeGhScript = [
+    "#!/bin/sh",
+    'if [ "$1" = pr ] && [ "$2" = view ] && [ "$3" != "--json" ]; then exit 1; fi',
+    'if [ "$1" = pr ] && [ "$2" = view ] && [ "$3" = "--json" ]; then printf \'{"body":""}\\n\'; exit 0; fi',
+    'if [ "$1" = pr ] && [ "$2" = create ]; then',
+    `  echo "pr-create-called" >> ${JSON.stringify(ghCreateCapture)}`,
+    "  printf 'https://github.com/execute-test/additional-repo/pull/1\\n'",
+    "  exit 0",
+    "fi",
+    'if [ "$1" = pr ] && [ "$2" = edit ]; then exit 0; fi',
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "gh"), fakeGhScript, { mode: 0o755 });
+
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  // WorktreeProvider: findWorktreeForBranch returns pre-created dirs;
+  // removeWorktree records calls so we can assert cleanup happened.
+  const removeCalls: Array<{ worktreeDir: string; repoPath: string }> = [];
+  const executeProvider: WorktreeProvider = {
+    async ensureWorktree(_repoPath, worktreeDir) {
+      await fs.mkdir(worktreeDir, { recursive: true });
+    },
+    findWorktreeForBranch(_repoPath: string, _branchName: string): string | null {
+      if (_repoPath === primaryRepo) {
+        return primaryWorktreeDir;
+      }
+      if (_repoPath === additionalRepo) {
+        return additionalWorktreeDir;
+      }
+      return null;
+    },
+    async removeWorktree(worktreeDir, repoPath) {
+      removeCalls.push({ worktreeDir, repoPath });
+      await fs.rm(worktreeDir, { recursive: true, force: true });
+    },
+    getCurrentBranch() {
+      return "symphony/execute-t65-test";
+    },
+    branchExists: async () => true,
+  };
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+  const server = await createTestGateway(tmpDir, mock.port, executeProvider);
+
+  const loopId = "00000000-0000-0000-0000-000000007010";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [],
+        repo: {
+          fullName: `execute-t65-test/${path.basename(primaryRepo)}`,
+          branch: "main",
+        },
+        additionalRepos: [
+          { localRepoPath: additionalRepo, branch: "feature-branch" },
+        ],
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected HTTP 200 for EXECUTE with additionalRepos, got ${response.status}`,
+  );
+
+  // Wait for completion so git ops and additional-repo commit/push/PR runs complete
+  await waitForCompletedEvent(mock.requests, loopId);
+
+  // Assert gh pr create was invoked for the additional repo (T-6.5)
+  const ghCalls = await fs.readFile(ghCreateCapture, "utf-8").catch(() => "");
+  const prCreateCount = ghCalls.split("\n").filter((l) => l.trim() === "pr-create-called").length;
+  assert.ok(
+    prCreateCount >= 1,
+    `Expected gh pr create to be called at least once for the additional repo, got ${prCreateCount} calls`,
+  );
+
+  // Assert removeWorktree was called for the additional worktree (T-6.4 success path)
+  const deadline = Date.now() + 5_000;
+  while (
+    Date.now() < deadline &&
+    !removeCalls.some((c) => c.worktreeDir === additionalWorktreeDir)
+  ) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  }
+  assert.ok(
+    removeCalls.some((c) => c.worktreeDir === additionalWorktreeDir),
+    `Expected removeWorktree to be called for additional worktree ${additionalWorktreeDir} after EXECUTE success`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// T-6.6: Failed additional repo records warning in completed event (EXECUTE)
+//
+// Strategy: post an EXECUTE where the WorktreeProvider's findWorktreeForBranch
+// returns a pre-created additional worktree dir. The fake git binary reports
+// changes for the additional worktree but then fails 'git commit'. The
+// production code calls executeAdditionalRepoCommitPush which returns
+// { status: "error" }; the handler adds ADDITIONAL_REPO_GIT_FAILED:<fullName>
+// to the warnings array and posts a completed event containing those warnings.
+// The test asserts that warning is present and that the additional worktree
+// is still removed (T-6.4 cleanup invariant).
+// ---------------------------------------------------------------------------
+
+test("EXECUTE records ADDITIONAL_REPO_GIT_FAILED warning when additional repo commit fails (T-6.6)", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "wt-lifecycle-execute-t66-"));
+  tempPathsToClean.push(tmpDir);
+
+  const primaryRepo = path.join(tmpDir, "primary-repo");
+  await fs.mkdir(primaryRepo, { recursive: true });
+
+  const additionalRepo = path.join(tmpDir, "additional-repo");
+  await fs.mkdir(additionalRepo, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  const primaryWorktreeDir = path.join(worktreeParent, "primary-wt");
+  await fs.mkdir(primaryWorktreeDir, { recursive: true });
+
+  const additionalWorktreeDir = path.join(worktreeParent, "additional-wt");
+  await fs.mkdir(additionalWorktreeDir, { recursive: true });
+
+  process.env.HOME = tmpDir;
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+
+  // fake claude: exits 0 without execution-result.json
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+
+  // fake git:
+  //   - primary worktree: git status returns empty (no-changes path)
+  //   - additional worktree: git status reports changes; git commit fails (exit 1)
+  // This makes executeAdditionalRepoCommitPush return { status: "error" } for the
+  // additional repo, causing a warning to be added to the completed event.
+  const fakeGitScript = [
+    "#!/bin/sh",
+    "CWD=$(pwd)",
+    `if echo "$CWD" | grep -q "additional-wt"; then`,
+    '  if [ "$1" = status ]; then printf "M changed.txt\\n"; exit 0; fi',
+    '  if [ "$1" = add ]; then exit 0; fi',
+    '  if [ "$1" = commit ]; then echo "simulated commit failure" >&2; exit 1; fi',
+    "fi",
+    'if [ "$1" = status ]; then exit 0; fi',
+    'if [ "$1" = "rev-parse" ] && [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-t66-test"; exit 0; fi',
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  await fs.writeFile(path.join(fakeBin, "gh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const additionalFullName = `execute-t66-test/${path.basename(additionalRepo)}`;
+
+  const removeCalls: Array<{ worktreeDir: string; repoPath: string }> = [];
+  const executeProvider: WorktreeProvider = {
+    async ensureWorktree(_repoPath, worktreeDir) {
+      await fs.mkdir(worktreeDir, { recursive: true });
+    },
+    findWorktreeForBranch(_repoPath: string, _branchName: string): string | null {
+      if (_repoPath === primaryRepo) {
+        return primaryWorktreeDir;
+      }
+      if (_repoPath === additionalRepo) {
+        return additionalWorktreeDir;
+      }
+      return null;
+    },
+    async removeWorktree(worktreeDir, repoPath) {
+      removeCalls.push({ worktreeDir, repoPath });
+      await fs.rm(worktreeDir, { recursive: true, force: true });
+    },
+    getCurrentBranch() {
+      return "symphony/execute-t66-test";
+    },
+    branchExists: async () => true,
+  };
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+  const server = await createTestGateway(tmpDir, mock.port, executeProvider);
+
+  const loopId = "00000000-0000-0000-0000-000000007020";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [],
+        repo: {
+          fullName: `execute-t66-test/${path.basename(primaryRepo)}`,
+          branch: "main",
+        },
+        additionalRepos: [
+          {
+            localRepoPath: additionalRepo,
+            fullName: additionalFullName,
+            branch: "feature-branch",
+          },
+        ],
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected HTTP 200, got ${response.status}`,
+  );
+
+  // Wait for the completed event which carries the warnings array
+  const completedEvent = await waitForCompletedEvent(mock.requests, loopId);
+
+  // Assert the ADDITIONAL_REPO_GIT_FAILED warning is present (T-6.6)
+  const warnings = completedEvent.warnings as string[] | undefined;
+  const expectedWarning = `ADDITIONAL_REPO_GIT_FAILED:${additionalFullName}`;
+  assert.ok(
+    Array.isArray(warnings) && warnings.includes(expectedWarning),
+    `Expected '${expectedWarning}' in completed event warnings, got: ${JSON.stringify(warnings)}`,
+  );
+
+  // Assert the additional worktree was still cleaned up even after the failure (T-6.4)
+  const cleanupDeadline = Date.now() + 5_000;
+  while (
+    Date.now() < cleanupDeadline &&
+    !removeCalls.some((c) => c.worktreeDir === additionalWorktreeDir)
+  ) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  }
+  assert.ok(
+    removeCalls.some((c) => c.worktreeDir === additionalWorktreeDir),
+    `Expected removeWorktree to be called for additional worktree ${additionalWorktreeDir} even after git op failure (T-6.4)`,
+  );
+});

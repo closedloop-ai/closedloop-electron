@@ -126,6 +126,51 @@ export function getOverrideBinaryPaths(): { claude?: string; gh?: string; codex?
   return overrideGetBinaryPaths?.() ?? null;
 }
 
+// ---------------------------------------------------------------------------
+// App version gate for v2 multi-repo execution (T-6.9)
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve the Electron desktop app version at module-load time by reading the
+ * nearest `package.json` above this file. Falls back to `null` if the file
+ * cannot be read — in that case the version gate is disabled (no rejection).
+ *
+ * The Electron `app.getVersion()` API is only available in the main process;
+ * the gateway server (this module) runs in a separate Node.js context so
+ * package.json is the canonical source for the runtime app version.
+ *
+ * TODO(FEA-587): Remove this helper and all callers once legacy desktop
+ * builds below MIN_DESKTOP_VERSION_FOR_V2 are fully sunset. See ClosedLoop
+ * FEA-587 for cleanup criteria (sibling cleanup lives in symphony-alpha at
+ * packages/loops-api/src/execution-result.ts:21).
+ */
+function resolveDesktopAppVersion(): string | null {
+  // Walk up from this file's directory to find package.json
+  // __dirname-equivalent for ESM: use import.meta.url when available,
+  // otherwise fall back to a relative path heuristic.
+  const candidates = [
+    path.join(path.dirname(path.dirname(path.dirname(path.dirname(
+      new URL(import.meta.url).pathname
+    )))), "package.json"),
+    // Fallback: relative to common CWD patterns for the gateway process
+    path.join(process.cwd(), "package.json"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      const raw = readFileSync(candidate, "utf8");
+      const pkg = JSON.parse(raw) as { version?: string; name?: string };
+      if (typeof pkg.version === "string" && pkg.name?.includes("desktop")) {
+        return pkg.version;
+      }
+    } catch {
+      // Non-fatal: try next candidate
+    }
+  }
+  return null;
+}
+
+const DESKTOP_APP_VERSION: string | null = resolveDesktopAppVersion();
+
 export function getResolvedGitPath(): string {
   return resolveBinarySync("git", overrideGetBinaryPaths?.()?.git).path;
 }
@@ -215,7 +260,37 @@ import type { ContextPackAttachment as SharedContextPackAttachment } from "@clos
 import type { LoopRequestBody } from "@closedloop-ai/loops-api/desktop-request";
 import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
-import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
+import {
+  GIT_REF_NAME_REGEX,
+  MAX_ADDITIONAL_REPOS,
+  MIN_DESKTOP_VERSION_FOR_V2,
+  getPrimaryRepoResult,
+  parseExecutionResultFile,
+  isLegacyBuildForV2,
+  type RepoExecutionResult,
+} from "@closedloop-ai/loops-api/execution-result";
+import {
+  buildCommitAssistantPromptV2,
+  scrubSecrets,
+} from "@closedloop-ai/loops-api/prompts";
+
+/** Recursively scrub all string fields in an object/array/primitive. */
+function scrubSecretDeep(value: unknown): unknown {
+  if (typeof value === "string") {
+    return scrubSecrets(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(scrubSecretDeep);
+  }
+  if (value !== null && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] = scrubSecretDeep(v);
+    }
+    return out;
+  }
+  return value;
+}
 
 /** Commands that have full spawn/dispatch support in this gateway version. */
 const SUPPORTED_COMMANDS = new Set<LoopCommand>([
@@ -364,31 +439,6 @@ interface LoopCommitter {
 
 type ContextPackAttachment = SharedContextPackAttachment;
 
-interface ExecutionResult {
-  prUrl: string;
-  prNumber: number;
-  branchName: string;
-  commitSha: string;
-}
-
-function isExecutionResult(value: unknown): value is ExecutionResult {
-  if (typeof value !== "object" || value === null) return false;
-  const v = value as Record<string, unknown>;
-  if (
-    typeof v.prUrl !== "string" ||
-    typeof v.prNumber !== "number" ||
-    typeof v.branchName !== "string" ||
-    typeof v.commitSha !== "string"
-  ) {
-    return false;
-  }
-  // Sanity-check field shapes to reject garbage values from the LLM
-  if (!/^https?:\/\//.test(v.prUrl)) return false;
-  if (!/^[a-f0-9]{7,}$/i.test(v.commitSha)) return false;
-  if (!v.branchName.trim()) return false;
-  return true;
-}
-
 /** Track running loop processes for cancellation and to prevent GC of ChildProcess. */
 interface RunningLoop {
   pid: number;
@@ -536,6 +586,8 @@ function findLocalRepo(fullName: string, allowedDirs: string[]): string | null {
 export interface ResolvedAdditionalRepo {
   readonly repoPath: string;
   readonly branch: string;
+  /** GitHub fullName (owner/repo), when available from the request. */
+  readonly fullName?: string;
 }
 
 /** Typed error thrown when an additional repo entry fails validation. */
@@ -549,8 +601,6 @@ export class AdditionalRepoError extends Error {
     this.name = "AdditionalRepoError";
   }
 }
-
-const ADDITIONAL_REPOS_MAX = 5;
 
 /**
  * Best-effort cleanup of additional repo worktree directories.
@@ -630,11 +680,11 @@ export async function resolveAdditionalRepos(
     return [];
   }
 
-  if (entries.length > ADDITIONAL_REPOS_MAX) {
+  if (entries.length > MAX_ADDITIONAL_REPOS) {
     throw new AdditionalRepoError(
       LoopErrorCode.PreRunValidationFailed,
       "",
-      `additionalRepos exceeds maximum of ${ADDITIONAL_REPOS_MAX} entries (got ${entries.length})`,
+      `additionalRepos exceeds maximum of ${MAX_ADDITIONAL_REPOS} entries (got ${entries.length})`,
     );
   }
 
@@ -642,7 +692,11 @@ export async function resolveAdditionalRepos(
 
   for (const entry of entries) {
     const repoRef = entry.localRepoPath ?? entry.fullName ?? "";
-    const resolvedPath = resolveAndValidateRepoPath(entry, allowedDirs, repoRef);
+    const resolvedPath = resolveAndValidateRepoPath(
+      entry,
+      allowedDirs,
+      repoRef,
+    );
     const canonicalPath = path.resolve(resolvedPath);
 
     const branchFound = await wt.branchExists(canonicalPath, entry.branch);
@@ -654,7 +708,11 @@ export async function resolveAdditionalRepos(
       );
     }
 
-    resolved.push({ repoPath: canonicalPath, branch: entry.branch });
+    resolved.push({
+      repoPath: canonicalPath,
+      branch: entry.branch,
+      fullName: entry.fullName,
+    });
   }
 
   return resolved;
@@ -1405,6 +1463,8 @@ export function isAuthChallengeError(logTail: string): boolean {
 
 async function attemptLlmCommit(
   worktreeDir: string,
+  fullName: string,
+  workingBranch: string,
   baseBranch: string,
   loopId: string,
   command: string,
@@ -1416,85 +1476,32 @@ async function attemptLlmCommit(
   onTimeout?: () => void,
   jobStore?: JobStore,
   claudeWorkDir?: string,
-): Promise<ExecutionResult | null> {
-  // Build metadata footer for PR body
-  // Strip newlines from user-controlled fields to prevent prompt injection
+): Promise<{ prUrl: string; prNumber: number; branchName: string; commitSha: string } | null> {
+  // Strip newlines from user-controlled fields to prevent prompt injection.
+  // `workingBranch` is computed deterministically by the caller from the loop
+  // ID / artifact slug and passes through unchanged to the shared template's
+  // `{{branchName}}` hook.
   const safeBranch = baseBranch.replace(/[\r\n]/g, "");
   const safeLoopId = sanitizeCommitMessage(loopId).replace(/[\r\n]/g, "");
   const safeSlug = artifactSlug
     ? sanitizeCommitMessage(artifactSlug).replace(/[\r\n]/g, "")
-    : null;
+    : undefined;
 
-  let footer: string;
-  if (safeSlug) {
-    // safeSlug contains only alphanumerics, hyphens, and underscores after
-    // sanitizeCommitMessage() + newline stripping — no backticks that would
-    // break shell heredocs or prompt injection via template literals.
-    const artifactLink = `${webAppOrigin}/implementation-plans/${safeSlug}`;
-    footer = `---\nLoop ID: ${safeLoopId}\nArtifact: ${artifactLink}`;
-  } else {
-    footer = `---\nLoop ID: ${safeLoopId}`;
-  }
+  // Metadata footer embedded into the PR body via the shared template's
+  // `metadataFooter` hook.  Links back to the loop and (when available) the
+  // artifact it was executing.
+  const metadataFooter = safeSlug
+    ? `---\nLoop ID: ${safeLoopId}\nArtifact: ${webAppOrigin}/implementation-plans/${safeSlug}`
+    : `---\nLoop ID: ${safeLoopId}`;
 
-  // Build slug instruction for the prompt
-  const slugInstruction = safeSlug
-    ? `The artifact slug is ${safeSlug}. ` +
-      `You MUST prefix the PR title with "${safeSlug}: " ` +
-      `(e.g., "${safeSlug}: Add feature X"). ` +
-      `Also prefix the commit message the same way.`
-    : "No artifact slug is available — use a descriptive title without a prefix.";
-
-  const prompt = [
-    `You are a commit assistant finalizing work from a ClosedLoop.AI ${command} loop.`,
-    "",
-    slugInstruction,
-    "",
-    "Review all uncommitted changes in this repository and create a proper commit, push it, and create a pull request.",
-    "",
-    "STEPS:",
-    "1. Run `git status` and `git diff --stat` to understand what changed",
-    "2. Stage all changed/new files EXCEPT the .claude/ and .closedloop-ai/ directories:",
-    "   git add -- . ':!.claude' ':!.closedloop-ai'",
-    "3. Write a clear, descriptive commit message based on the actual code changes",
-    "   - Summarize WHAT changed and WHY (not just 'ClosedLoop.AI loop output')",
-    "   - Use conventional commit style if the changes have a clear category",
-    "   - If an artifact slug is provided, prefix the commit message with it",
-    "4. Run `git commit` (do NOT use --no-verify). If pre-commit hooks fail, attempt to fix",
-    "   the issue (e.g., run the linter/formatter if the error message tells you how).",
-    "   If you cannot quickly fix it, the commit fails — do not bypass hooks.",
-    "5. Push to origin with: git push -u origin HEAD",
-    "6. Check if a PR already exists for this branch: gh pr list --head <branch>",
-    "   - If NO PR exists:",
-    "     a. Check if the repo has a PR template at .github/pull_request_template.md",
-    "        If a template exists, use it as the base for the PR body — fill in every section appropriately.",
-    "        If no template exists, write a summary of what changed and why.",
-    "     b. Append the following metadata footer on its own lines at the end:",
-    `        ${footer}`,
-    "     c. Write the complete PR body to pr-body.md",
-    `     d. Create the PR: gh pr create --label symphony --base ${shellEscape(safeBranch)} --title '<slug-prefixed descriptive title>' --body-file pr-body.md`,
-    "   - If a PR already exists, get its URL with: gh pr view --json url,number",
-    "     Fetch the current body: gh pr view <number> --json body --jq .body",
-    "     If any required template sections are missing, append them.",
-    `     Write the full updated body to pr-body.md and run: gh pr edit <number> --body-file pr-body.md`,
-    "7. ONLY after a successful commit AND push, write this EXACT JSON file:",
-    "   File path: execution-result.json",
-    "   ```json",
-    "   {",
-    '     "prUrl": "<full GitHub PR URL>",',
-    '     "prNumber": <PR number as integer>,',
-    '     "branchName": "<current branch name>",',
-    '     "commitSha": "<output of git rev-parse HEAD>"',
-    "   }",
-    "   ```",
-    "   Run `git rev-parse HEAD` to get the commit SHA.",
-    "",
-    "RULES:",
-    "- NEVER stage or commit the .claude/ or .closedloop-ai/ directories",
-    "- Do NOT use --no-verify on git commit",
-    "- Do NOT modify any source code except to fix pre-commit hook failures (formatting, lint)",
-    "- Do NOT write execution-result.json unless you successfully committed AND pushed",
-    "- Keep it quick — commit, push, PR, write result file, done",
-  ].join("\n");
+  const prompt = buildCommitAssistantPromptV2({
+    fullName,
+    branchName: workingBranch,
+    baseBranch: safeBranch,
+    command,
+    artifactSlug: safeSlug,
+    metadataFooter,
+  });
 
   loopLog(loopId, "Attempting LLM-assisted commit...");
 
@@ -1603,7 +1610,7 @@ async function attemptLlmCommit(
     }
   }
 
-  return new Promise<ExecutionResult | null>((resolve) => {
+  return new Promise<{ prUrl: string; prNumber: number; branchName: string; commitSha: string } | null>((resolve) => {
     let killed = false;
 
     // Process group kill behavior:
@@ -1666,25 +1673,50 @@ async function attemptLlmCommit(
 
       // Read execution-result.json written by the LLM, then clean up scratch
       // files unconditionally so they never leak into subsequent worktree runs.
+      //
+      // The shared commit-assistant template instructs the LLM to emit the v2
+      // envelope (`{ schemaVersion: 2, results: [...] }`), so parse via the
+      // loops-api helper and pick the entry for this repo.  parseExecutionResultFile
+      // returns null for any schema/shape failure, which trips the fallback to
+      // executeGitOperations above.
       const resultFilePath = path.join(
         worktreeDir,
         LoopArtifactFile.ExecutionResult,
       );
       const prBodyFilePath = path.join(worktreeDir, "pr-body.md");
-      let result: ExecutionResult | null = null;
+      let result: { prUrl: string; prNumber: number; branchName: string; commitSha: string } | null = null;
       try {
         const raw = readFileSync(resultFilePath, "utf-8");
         const parsed: unknown = JSON.parse(raw);
-        if (isExecutionResult(parsed)) {
-          loopLog(
-            loopId,
-            `LLM commit wrote execution-result.json, pr=${parsed.prUrl}`,
-          );
-          result = parsed;
+        const repoResults = parseExecutionResultFile(parsed, loopId);
+        if (repoResults) {
+          const entry = getPrimaryRepoResult(repoResults, fullName);
+          if (!entry) {
+            loopError(
+              loopId,
+              `LLM execution-result.json missing entry for ${fullName}, returning null`,
+            );
+          } else if (entry.status !== "success") {
+            loopError(
+              loopId,
+              `LLM execution-result.json reports status=${entry.status} for ${fullName}, returning null`,
+            );
+          } else {
+            result = {
+              prUrl: entry.pr_url,
+              prNumber: entry.pr_number,
+              branchName: entry.branch_name,
+              commitSha: entry.commit_sha ?? "",
+            };
+            loopLog(
+              loopId,
+              `LLM commit wrote execution-result.json, pr=${result.prUrl}`,
+            );
+          }
         } else {
           loopError(
             loopId,
-            "LLM execution-result.json failed type guard, returning null",
+            "LLM execution-result.json failed v2 envelope validation, returning null",
           );
         }
       } catch (err) {
@@ -1971,6 +2003,265 @@ function executeGitOperations(
 }
 
 // ---------------------------------------------------------------------------
+// Per-additional-repo commit / push / PR (argv-array, no shell:true)
+// ---------------------------------------------------------------------------
+
+/**
+ * Perform commit + push + PR creation for a single additional-repo worktree
+ * after an EXECUTE loop completes.  Uses argv-array execFileSync calls
+ * (never shell:true) so user-controlled values cannot inject shell metacharacters.
+ *
+ * Branch names are validated against GIT_REF_NAME_REGEX before use.
+ *
+ * Returns the same GitOperationResult discriminant as executeGitOperations.
+ */
+function executeAdditionalRepoCommitPush(
+  worktreeDir: string,
+  fullName: string,
+  baseBranch: string,
+  loopId: string,
+  committer: LoopCommitter | undefined,
+  artifactSlug: string | undefined,
+  webAppOrigin: string | undefined,
+  token: string | undefined,
+  shellPath: string | undefined,
+): GitOperationResult {
+  const shortId = loopId.slice(0, 8);
+  const gitBin = getResolvedGitPath();
+  const ghBin = getResolvedGhPath();
+
+  // Validate branch name so we never pass attacker-controlled refs to git
+  if (!GIT_REF_NAME_REGEX.test(baseBranch)) {
+    return {
+      status: "error",
+      reason: `Invalid base branch name: ${baseBranch}`,
+    };
+  }
+
+  const env: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+    ...(shellPath ? { PATH: shellPath } : {}),
+    // Suppress interactive git prompts
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_TRACE: "",
+    GIT_CURL_VERBOSE: "",
+    GIT_TRACE_PACKET: "",
+  };
+  if (committer) {
+    env.GIT_AUTHOR_NAME = committer.name;
+    env.GIT_AUTHOR_EMAIL = committer.email;
+    env.GIT_COMMITTER_NAME = committer.name;
+    env.GIT_COMMITTER_EMAIL = committer.email;
+  }
+
+  // Set up GIT_ASKPASS so the token is never inlined into args or env directly.
+  let askpassDir: string | null = null;
+  if (token) {
+    askpassDir = path.join(os.tmpdir(), `askpass-additional-${crypto.randomUUID()}`);
+    mkdirSync(askpassDir, { recursive: true });
+    const askpassScript = path.join(askpassDir, "askpass.sh");
+    writeFileSync(askpassScript, "#!/bin/sh\necho \"password=$REPO_CLONE_TOKEN\"\n", { mode: 0o700 });
+    env.GIT_ASKPASS = askpassScript;
+    env.REPO_CLONE_TOKEN = token;
+  }
+
+  try {
+    // Detect changes, excluding gateway-internal dirs (.claude, .closedloop-ai)
+    let statusOutput: string;
+    try {
+      statusOutput = execFileSync(gitBin, ["status", "--porcelain", "--", ".", ":!.claude", ":!.closedloop-ai"], {
+        cwd: worktreeDir,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 10_000,
+        env,
+      }).trim();
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return { status: "error", reason: `git status failed: ${reason}` };
+    }
+
+    if (!statusOutput) {
+      return { status: "no-changes" };
+    }
+
+    // Stage all non-gateway files
+    try {
+      execFileSync(gitBin, ["add", "--", ".", ":!.claude", ":!.closedloop-ai"], {
+        cwd: worktreeDir,
+        stdio: "pipe",
+        env,
+        timeout: 10_000,
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return { status: "error", reason: `git add failed: ${reason}` };
+    }
+
+    // Build commit message — strip \r\n as required
+    const commitPrefix = artifactSlug ? `${artifactSlug}: ` : "";
+    const fallbackTitle = `${commitPrefix}Automated changes from loop ${shortId}`
+      .replaceAll("\r", "")
+      .replaceAll("\n", " ");
+
+    try {
+      execFileSync(gitBin, ["commit", "-m", fallbackTitle], {
+        cwd: worktreeDir,
+        stdio: "pipe",
+        env,
+        timeout: 30_000,
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return { status: "error", reason: `git commit failed: ${reason}` };
+    }
+
+    // Get branch name for push
+    let branchName: string;
+    try {
+      branchName = execFileSync(gitBin, ["rev-parse", "--abbrev-ref", "HEAD"], {
+        cwd: worktreeDir,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 10_000,
+        env,
+      }).trim();
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return { status: "error", reason: `git rev-parse HEAD branch failed: ${reason}` };
+    }
+
+    // Validate computed branch name
+    if (!GIT_REF_NAME_REGEX.test(branchName)) {
+      return { status: "error", reason: `Unexpected branch name format: ${branchName}` };
+    }
+
+    // Push
+    try {
+      execFileSync(gitBin, ["push", "-u", "origin", branchName], {
+        cwd: worktreeDir,
+        stdio: "pipe",
+        env,
+        timeout: 60_000,
+      });
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return { status: "error", reason: `git push failed: ${reason}` };
+    }
+
+    // Get commit SHA
+    let commitSha: string;
+    try {
+      commitSha = execFileSync(gitBin, ["rev-parse", "HEAD"], {
+        cwd: worktreeDir,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 10_000,
+        env,
+      }).trim();
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      return { status: "error", reason: `git rev-parse HEAD sha failed: ${reason}` };
+    }
+
+    // Build PR body with metadata footer
+    const artifactLine =
+      artifactSlug && webAppOrigin
+        ? `\nArtifact: ${webAppOrigin}/implementation-plans/${artifactSlug}`
+        : "";
+    const metadataFooter = `---\nLoop ID: ${loopId}\nRepo: ${fullName}${artifactLine}`;
+    // Embed the commit-assistant prompt instructions so reviewers understand the PR origin
+    const commitPrompt = buildCommitAssistantPromptV2({ fullName, branchName, baseBranch });
+    const prBody = [
+      `Automated PR created by ClosedLoop.AI loop runner.`,
+      "",
+      `**Repo:** \`${fullName}\``,
+      `**Loop:** \`${loopId}\``,
+      "",
+      commitPrompt,
+      "",
+      metadataFooter,
+    ].join("\n");
+    const bodyFile = path.join(worktreeDir, ".closedloop-ai", "work", "pr-body-additional.md");
+    mkdirSync(path.dirname(bodyFile), { recursive: true });
+    writeFileSync(bodyFile, prBody);
+
+    // Create or find existing PR
+    let prUrl: string;
+    let prNumber: number;
+    try {
+      const existingPrRaw = execFileSync(
+        ghBin,
+        ["pr", "view", "--json", "url,number", branchName],
+        {
+          cwd: worktreeDir,
+          encoding: "utf-8",
+          stdio: "pipe",
+          env,
+          timeout: 15_000,
+        },
+      ).trim();
+      const parsedPr: unknown = JSON.parse(existingPrRaw);
+      if (
+        typeof parsedPr !== "object" ||
+        parsedPr === null ||
+        typeof (parsedPr as Record<string, unknown>).url !== "string" ||
+        typeof (parsedPr as Record<string, unknown>).number !== "number"
+      ) {
+        throw new Error("Unexpected shape from gh pr view JSON");
+      }
+      const typedPr = parsedPr as { url: string; number: number };
+      prUrl = typedPr.url;
+      prNumber = typedPr.number;
+    } catch {
+      // No existing PR — create one
+      const prOutput = execFileSync(
+        ghBin,
+        [
+          "pr", "create",
+          "--title", fallbackTitle,
+          "--body-file", bodyFile,
+          "--base", baseBranch,
+        ],
+        {
+          cwd: worktreeDir,
+          encoding: "utf-8",
+          stdio: "pipe",
+          env,
+          timeout: 30_000,
+        },
+      ).trim();
+      prUrl = prOutput;
+      const prNumberMatch = /\/pull\/(\d+)/.exec(prUrl);
+      prNumber = prNumberMatch ? Number.parseInt(prNumberMatch[1], 10) : 0;
+
+      // Best-effort symphony label attachment
+      if (prNumber) {
+        try {
+          execFileSync(ghBin, ["pr", "edit", String(prNumber), "--add-label", "symphony"], {
+            cwd: worktreeDir,
+            stdio: "pipe",
+            env,
+            timeout: 15_000,
+          });
+        } catch {
+          // Label may not exist — non-fatal
+        }
+      }
+    }
+
+    return { status: "success", prUrl, prNumber, branchName, commitSha };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return { status: "error", reason };
+  } finally {
+    if (askpassDir) {
+      fs.rm(askpassDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Process completion handler (async, runs after spawn)
 // ---------------------------------------------------------------------------
 
@@ -1995,7 +2286,8 @@ export async function handleProcessCompletion(
   operationId?: string,
   wt: WorktreeProvider = defaultWorktreeProvider,
   loopTokenStore?: LoopTokenStore,
-  additionalWorktreeDirs: { dir: string; repoPath: string }[] = [],
+  additionalWorktreeDirs: { dir: string; repoPath: string; fullName?: string; baseBranch?: string }[] = [],
+  additionalRepoTokens: ReadonlyArray<{ fullName: string; token: string }> = [],
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
   // Temp-dir commands (DECOMPOSE, EVALUATE_*) need the entire temp tree removed on cleanup.
@@ -2194,10 +2486,30 @@ export async function handleProcessCompletion(
           return;
         }
 
+        // Compute the canonical fullName once — both the LLM commit prompt
+        // and the v2 envelope wrap below need it, and falling through to the
+        // basename mirrors the pre-refactor behavior for local-path-only
+        // invocations.
+        const primaryFullName =
+          body.repo?.fullName ??
+          path.basename(expandedRepoPath ?? worktreeDir ?? "");
+
+        // Re-derive the working branch the way handleLoopRequest did when it
+        // created the worktree (`git worktree add -B <branch>`).  Keeping this
+        // deterministic — rather than calling `git rev-parse HEAD` — means the
+        // LLM commit flow does not depend on a working git binary being on
+        // PATH before claude is spawned (important for test harnesses that
+        // stub only `claude`).
+        const workingBranch = body.artifactSlug
+          ? `symphony/${slugifyLoopId(body.artifactSlug)}`
+          : `symphony/loop-${pickStableId(body)}`;
+
         // Try LLM-assisted commit first; fall back to executeGitOperations if it
         // returns null.  Never call both.
         const llmResult = await attemptLlmCommit(
           worktreeDir,
+          primaryFullName,
+          workingBranch,
           baseBranch,
           loopId,
           command,
@@ -2270,22 +2582,31 @@ export async function handleProcessCompletion(
             );
 
         if (gitResult.status === "success") {
-          // Merge git info into execution result
-          const execResult =
-            (artifacts.executionResult as Record<string, unknown>) ?? {};
-          execResult.pr_url = gitResult.prUrl;
-          execResult.pr_number = gitResult.prNumber;
-          execResult.branch_name = gitResult.branchName;
-          execResult.commit_sha = gitResult.commitSha;
-          execResult.has_changes = true;
-          execResult.base_ref = baseBranch;
-          artifacts.executionResult = execResult;
+          // Build v2 envelope: primary repo as results[0] (T-6.7).  Reuses the
+          // primaryFullName computed above for attemptLlmCommit so the envelope
+          // and the LLM-emitted execution-result.json agree on the key.
+          const primaryResult: RepoExecutionResult = {
+            status: "success",
+            fullName: primaryFullName,
+            pr_url: gitResult.prUrl,
+            pr_number: gitResult.prNumber,
+            branch_name: gitResult.branchName,
+            base_branch: baseBranch,
+            has_changes: true,
+            commit_sha: gitResult.commitSha,
+          };
+          // Apply recursive secret scrubbing before serialization (T-6.7).
+          const envelope = scrubSecretDeep({
+            schemaVersion: 2,
+            results: [primaryResult],
+          }) as { schemaVersion: 2; results: RepoExecutionResult[] };
+          artifacts.executionResult = envelope;
           metadata.branchName = gitResult.branchName;
-          // Persist merged execute metadata for reboot-time finalization replay.
+          // Persist v2 envelope for reboot-time finalization replay.
           try {
             writeFileSync(
               path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
-              JSON.stringify(execResult),
+              JSON.stringify(envelope),
             );
           } catch (err) {
             loopLog(loopId, "Failed to persist execution-result.json:", err);
@@ -2304,6 +2625,70 @@ export async function handleProcessCompletion(
               loopId,
           );
           warnings.push("GIT_PUSH_FAILED");
+        }
+      }
+
+      // Per-additional-repo commit/push/PR loop (T-6.4/T-6.5/T-6.6).
+      // Each entry is wrapped in try/finally so the worktree is always removed,
+      // and try/catch so a single-repo failure emits an error event without
+      // blocking the remaining repos or the primary-repo completion flow.
+      if (additionalWorktreeDirs.length > 0) {
+        const tokenMap = new Map<string, string>(
+          additionalRepoTokens.map(({ fullName, token }) => [fullName, token]),
+        );
+        const gitShellPath = await getShellPath();
+
+        for (const addEntry of additionalWorktreeDirs) {
+          const fullName = addEntry.fullName ?? path.basename(addEntry.repoPath);
+          const baseBranch = addEntry.baseBranch ?? "main";
+          try {
+            try {
+              loopLog(loopId, `Additional repo commit/push/PR: ${fullName} dir=${addEntry.dir}`);
+              const addToken = addEntry.fullName ? tokenMap.get(addEntry.fullName) : undefined;
+              const addGitResult = executeAdditionalRepoCommitPush(
+                addEntry.dir,
+                fullName,
+                baseBranch,
+                loopId,
+                committer,
+                body.artifactSlug,
+                webAppOrigin,
+                addToken,
+                gitShellPath,
+              );
+              if (addGitResult.status === "success") {
+                loopLog(
+                  loopId,
+                  `Additional repo PR created: ${fullName} pr=${addGitResult.prUrl}`,
+                );
+              } else if (addGitResult.status === "no-changes") {
+                loopLog(loopId, `Additional repo no changes: ${fullName}`);
+              } else {
+                const scrubbedReason = scrubSecrets(addGitResult.reason);
+                gatewayLog.warn(
+                  "loop-harness",
+                  `Additional repo git ops failed: ${fullName} — ${scrubbedReason}, loopId=${loopId}`,
+                );
+                warnings.push(`ADDITIONAL_REPO_GIT_FAILED:${fullName}`);
+              }
+            } catch (err) {
+              // T-6.6: emit error event for per-repo failures
+              const scrubbedMsg = scrubSecrets(err instanceof Error ? err.message : String(err));
+              loopError(loopId, `Additional repo error for ${fullName}:`, err);
+              await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+                type: LoopEventType.Error,
+                code: LoopErrorCode.RepoNotFound,
+                message: scrubbedMsg,
+                result: { message: scrubbedMsg, repo: fullName },
+                loopId,
+              });
+            }
+          } finally {
+            // T-6.4: always remove the additional worktree regardless of success or error
+            await wt.removeWorktree(addEntry.dir, addEntry.repoPath, loopId).catch((cleanupErr) =>
+              loopError(loopId, `Failed to remove additional repo worktree ${addEntry.dir}:`, cleanupErr),
+            );
+          }
         }
       }
     } else if (command === "DECOMPOSE") {
@@ -2523,12 +2908,14 @@ export async function handleProcessCompletion(
         subtype: command.toLowerCase(),
       };
       if (command === "EXECUTE" && artifacts.executionResult) {
+        // Parse v2 envelope written by T-6.7. primary repo is results[0].
         const parsed = parseExecutionResultFile(artifacts.executionResult);
-        if (parsed) {
-          result.prUrl = parsed.prUrl;
-          result.prNumber = parsed.prNumber;
-          result.branchName = parsed.branchName;
-          result.has_changes = parsed.hasChanges;
+        const primaryResult = parsed?.[0] ?? null;
+        if (primaryResult && primaryResult.status === "success") {
+          result.prUrl = primaryResult.pr_url;
+          result.prNumber = primaryResult.pr_number;
+          result.branchName = primaryResult.branch_name;
+          result.has_changes = primaryResult.has_changes;
         }
       }
       if (worktreeDir && !result.branchName) {
@@ -2653,6 +3040,26 @@ async function handleLoopRequest(
     return;
   }
 
+  // T-6.9: Legacy-build detection gate for EXECUTE command.
+  // If this desktop app version is below MIN_DESKTOP_VERSION_FOR_V2, refuse
+  // EXECUTE requests and return a clear upgrade error. Does NOT write any
+  // execution-result.json payload.
+  // TODO(cleanup-min-desktop-version-for-v2): Remove once legacy builds sunset.
+  if (body.command === "EXECUTE" && DESKTOP_APP_VERSION !== null) {
+    if (isLegacyBuildForV2(DESKTOP_APP_VERSION)) {
+      const upgradeMsg =
+        `This version of ClosedLoop Desktop (${DESKTOP_APP_VERSION}) does not ` +
+        `support the v2 multi-repo EXECUTE protocol. ` +
+        `Please upgrade to version ${MIN_DESKTOP_VERSION_FOR_V2} or later.`;
+      gatewayLog.warn(
+        "loop-harness",
+        `[version-gate] Refusing EXECUTE: app version ${DESKTOP_APP_VERSION} < ${MIN_DESKTOP_VERSION_FOR_V2}`,
+      );
+      json(context, 426, { error: upgradeMsg, upgradeRequired: true });
+      return;
+    }
+  }
+
   if (
     !/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(
       body.loopId,
@@ -2752,7 +3159,7 @@ async function handleLoopRequest(
 
   let spawnedSuccessfully = false;
   let expandedRepoPath: string | null = null;
-  const additionalWorktreeDirs: { dir: string; repoPath: string }[] = [];
+  const additionalWorktreeDirs: { dir: string; repoPath: string; fullName?: string; baseBranch?: string }[] = [];
   try {
     const allowedDirs = getAllowedDirectories();
 
@@ -2852,8 +3259,24 @@ async function handleLoopRequest(
       }
     }
 
+    // Extract optional per-repo tokens forwarded by the API (not in the shared
+    // LoopRequestBody schema yet — read directly from rawBody for forward compat).
+    const additionalRepoTokens = Array.isArray(rawBody.additionalRepoTokens)
+      ? (rawBody.additionalRepoTokens as Array<{ fullName: string; token: string }>).filter(
+          (entry) =>
+            typeof entry === "object" &&
+            entry !== null &&
+            typeof entry.fullName === "string" &&
+            typeof entry.token === "string",
+        )
+      : [];
+
     let resolvedAdditionalRepos: ResolvedAdditionalRepo[] = [];
-    if (body.command === "PLAN" && body.additionalRepos && body.additionalRepos.length > 0) {
+    if (
+      (body.command === "PLAN" || body.command === "EXECUTE") &&
+      body.additionalRepos &&
+      body.additionalRepos.length > 0
+    ) {
       try {
         resolvedAdditionalRepos = await resolveAdditionalRepos(
           body.additionalRepos,
@@ -3091,7 +3514,12 @@ async function handleLoopRequest(
             json(context, 500, { error: `Failed to checkout additional repo worktree: ${msg}` });
             return;
           }
-          additionalWorktreeDirs.push({ dir: addWorktreeDir, repoPath: addRepo.repoPath });
+          additionalWorktreeDirs.push({
+            dir: addWorktreeDir,
+            repoPath: addRepo.repoPath,
+            fullName: addRepo.fullName,
+            baseBranch: addRepo.branch,
+          });
           loopLog(body.loopId, `Created additional repo worktree: ${addWorktreeDir} (branch: ${addBranchName} based on ${addRepo.branch})`);
         }
       } else {
@@ -3133,6 +3561,34 @@ async function handleLoopRequest(
             body.loopId,
             `Created new worktree: ${worktreeDir} (branch: ${branchName})`,
           );
+        }
+
+        // EXECUTE: find additional repo worktrees created by the preceding PLAN.
+        // These were checked out onto symphony/<key> branches during PLAN setup.
+        if (body.command === "EXECUTE" && resolvedAdditionalRepos.length > 0) {
+          for (const addRepo of resolvedAdditionalRepos) {
+            const addRepoSlug = slugifyLoopId(addRepo.branch);
+            const addRepoKey = `${worktreeKey}-${addRepoSlug}-${additionalRepoDisambiguator(addRepo.repoPath)}`;
+            const addBranchName = `symphony/${addRepoKey}`;
+            const existingAddWorktree = wt.findWorktreeForBranch(addRepo.repoPath, addBranchName);
+            if (existingAddWorktree && existsSync(existingAddWorktree)) {
+              additionalWorktreeDirs.push({
+                dir: existingAddWorktree,
+                repoPath: addRepo.repoPath,
+                fullName: addRepo.fullName,
+                baseBranch: addRepo.branch,
+              });
+              loopLog(
+                body.loopId,
+                `Found additional repo worktree for EXECUTE: ${existingAddWorktree} (branch: ${addBranchName})`,
+              );
+            } else {
+              loopLog(
+                body.loopId,
+                `No existing additional repo worktree found for EXECUTE: ${addRepo.repoPath} branch=${addBranchName} — skipping`,
+              );
+            }
+          }
         }
       }
 
@@ -3619,6 +4075,7 @@ async function handleLoopRequest(
         wt,
         loopTokenStore,
         additionalWorktreeDirs,
+        additionalRepoTokens,
       ).catch((err) => {
         loopError(body.loopId, "Completion handler error:", err);
         gatewayLog.error(

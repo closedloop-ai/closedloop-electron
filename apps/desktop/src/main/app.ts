@@ -63,9 +63,10 @@ import type { RetrySpawnDeps } from "./spawn-retry.js";
 import pkg from "electron-updater";
 const { autoUpdater } = pkg;
 import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
-import { BootRecoveryService } from "./boot-recovery.js";
+import { BootRecoveryService, sweepOrphanLoopWorktrees } from "./boot-recovery.js";
 import { LoopTokenStore } from "./loop-token-store.js";
 import { GatewayIdentityStore } from "./gateway-identity.js";
+import { loadReposConfig } from "../server/operations/repos-config-utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -311,6 +312,14 @@ export class DesktopApplication {
     if (bootSandbox?.trim()) {
       await seedReposConfig(bootSandbox);
     }
+
+    // Best-effort startup sweep: remove orphaned loop worktrees from prior runs.
+    void this.runOrphanWorktreeSweep().catch((err: unknown) => {
+      gatewayLog.warn(
+        "boot-recovery",
+        `Orphan worktree sweep failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
 
     try {
       await this.server.start();
@@ -911,6 +920,44 @@ export class DesktopApplication {
       }
       return { ...job, updatedAt: now };
     });
+  }
+
+  /**
+   * Resolve the worktree parent directory from the repos config and run the
+   * startup orphan sweep.  Best-effort — all errors are logged and swallowed.
+   */
+  private async runOrphanWorktreeSweep(): Promise<void> {
+    let symphonyDir: string;
+    try {
+      symphonyDir = this.getSymphonyDir();
+    } catch {
+      // Sandbox not configured yet — nothing to sweep.
+      return;
+    }
+
+    const configDir = path.join(symphonyDir, "config");
+    let worktreeParentDir: string | undefined;
+
+    if (process.env.SYMPHONY_WORKTREE_PARENT_DIR?.trim()) {
+      worktreeParentDir = process.env.SYMPHONY_WORKTREE_PARENT_DIR.trim();
+    } else {
+      try {
+        const config = await loadReposConfig(configDir);
+        worktreeParentDir = config.settings.worktreeParentDir;
+      } catch {
+        return;
+      }
+    }
+
+    if (!worktreeParentDir?.trim()) {
+      return;
+    }
+
+    await sweepOrphanLoopWorktrees(
+      worktreeParentDir.trim(),
+      this.jobStore,
+      getResolvedGitPath(),
+    );
   }
 
   private registerIpcHandlers(): void {

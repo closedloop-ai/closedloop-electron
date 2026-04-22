@@ -228,12 +228,27 @@ test("EXECUTE: handleProcessCompletion reads pre-written execution-result.json a
   //
   // The worktree dir is the cwd when attemptLlmCommit spawns claude.
   // execution-result.json is expected at path.join(worktreeDir, "execution-result.json").
-  const expectedPrUrl = "https://github.com/org/repo-llmresult/pull/77";
+  //
+  // The shared commit-assistant-prompt-v2 template (symphony-alpha
+  // packages/loops-api) tells the LLM to emit the v2 envelope — the Electron
+  // parser now reads that shape via parseExecutionResultFile.  fullName must
+  // match the request body's repo.fullName for schema validation to pass.
+  const primaryFullName = `llmresult/${path.basename(repoPath)}`;
+  const expectedPrUrl = `https://github.com/${primaryFullName}/pull/77`;
   const executionResultContent = JSON.stringify({
-    prUrl: expectedPrUrl,
-    prNumber: 77,
-    branchName: "symphony/loop-test-branch",
-    commitSha: "aabbccdd1122334455667788990011223344556677",
+    schemaVersion: 2,
+    results: [
+      {
+        status: "success",
+        fullName: primaryFullName,
+        pr_url: expectedPrUrl,
+        pr_number: 77,
+        branch_name: "symphony/loop-test-branch",
+        base_branch: "main",
+        has_changes: true,
+        commit_sha: "aabbccdd1122334455667788990011223344556677",
+      },
+    ],
   });
   const claudeScript = [
     "#!/bin/sh",
@@ -316,24 +331,29 @@ test("EXECUTE: handleProcessCompletion reads pre-written execution-result.json a
   const uploadReq = await mock.waitForRequest("upload-artifacts");
   const uploadBody = JSON.parse(uploadReq.body) as {
     artifacts: {
-      executionResult?: Record<string, unknown>;
+      executionResult?: {
+        schemaVersion?: number;
+        results?: Array<Record<string, unknown>>;
+      };
     };
     metadata: Record<string, unknown>;
   };
 
-  // The LLM wrote execution-result.json, so the PR URL should appear in the upload
+  // The LLM wrote the v2 envelope execution-result.json — primary entry is results[0].
+  const primary = uploadBody.artifacts.executionResult?.results?.[0];
+  assert.ok(primary, "Expected results[0] to be present in v2 envelope upload");
   assert.equal(
-    uploadBody.artifacts.executionResult?.pr_url,
+    primary?.pr_url,
     expectedPrUrl,
-    `Expected pr_url=${expectedPrUrl} from pre-written execution-result.json, got: ${String(uploadBody.artifacts.executionResult?.pr_url)}`,
+    `Expected pr_url=${expectedPrUrl} from pre-written execution-result.json, got: ${String(primary?.pr_url)}`,
   );
   assert.equal(
-    uploadBody.artifacts.executionResult?.pr_number,
+    primary?.pr_number,
     77,
     "Expected pr_number=77 from pre-written execution-result.json",
   );
   assert.equal(
-    uploadBody.artifacts.executionResult?.has_changes,
+    primary?.has_changes,
     true,
     "Expected has_changes=true when execution-result.json was written",
   );
@@ -380,11 +400,17 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
   // Capture file to record whether gh pr create was called
   const captureFile = path.join(tmpDir, "gh-calls.txt");
 
+  // The v2 envelope schema validates that pr_url matches
+  // `https://github.com/<fullName>/pull/<pr_number>` exactly, so the fake
+  // `gh pr view` URL must align with the request's repo.fullName below.
+  const existingPrFullName = `existingpr/${path.basename(repoPath)}`;
+  const existingPrUrl = `https://github.com/${existingPrFullName}/pull/42`;
+
   // fake gh: pr view returns existing PR JSON; pr create records a call and exits 1
   const fakeGhScript = [
     "#!/bin/sh",
     'if [ "$1" = pr ] && [ "$2" = view ]; then',
-    '  printf \'{"url":"https://github.com/org/repo-existingpr/pull/42","number":42}\\n\'',
+    `  printf '{"url":"${existingPrUrl}","number":42}\\n'`,
     "  exit 0",
     "fi",
     'if [ "$1" = pr ] && [ "$2" = create ]; then',
@@ -448,7 +474,7 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
         prompt: "test",
         artifacts: [],
         repo: {
-          fullName: `existingpr/${path.basename(repoPath)}`,
+          fullName: existingPrFullName,
           branch: "main",
         },
       }),
@@ -465,19 +491,24 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
   const uploadReq = await mock.waitForRequest("upload-artifacts");
   const uploadBody = JSON.parse(uploadReq.body) as {
     artifacts: {
-      executionResult?: Record<string, unknown>;
+      executionResult?: {
+        schemaVersion?: number;
+        results?: Array<Record<string, unknown>>;
+      };
     };
     metadata: Record<string, unknown>;
   };
 
-  // Existing PR URL should appear in the execution result
+  // Existing PR URL should appear in the v2 envelope's primary entry (results[0])
+  const primary = uploadBody.artifacts.executionResult?.results?.[0];
+  assert.ok(primary, "Expected results[0] to be present in v2 envelope upload");
   assert.equal(
-    uploadBody.artifacts.executionResult?.pr_url,
-    "https://github.com/org/repo-existingpr/pull/42",
-    `Expected existing PR URL in pr_url, got: ${String(uploadBody.artifacts.executionResult?.pr_url)}`,
+    primary?.pr_url,
+    existingPrUrl,
+    `Expected existing PR URL in results[0].pr_url, got: ${String(primary?.pr_url)}`,
   );
   assert.equal(
-    uploadBody.artifacts.executionResult?.pr_number,
+    primary?.pr_number,
     42,
     "Expected pr_number=42 from gh pr view",
   );
