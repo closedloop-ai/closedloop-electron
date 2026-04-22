@@ -109,6 +109,7 @@ describe("Observability", () => {
     Observability.init({
       telemetrySend: () => {},
       posthog: { apiKey: "phc_test", host: "https://us.i.posthog.com" },
+      desktopClientVersion: "0.9.6",
     });
 
     Observability.connectionEstablished("desktop-1", "0.9.6", "production");
@@ -116,7 +117,7 @@ describe("Observability", () => {
     assert.equal(captureCalls.length, 1);
     assert.equal(captureCalls[0].event, "desktop_connection_established");
     assert.equal(captureCalls[0].properties.desktop_id, "desktop-1");
-    assert.equal(captureCalls[0].properties.version, "0.9.6");
+    assert.equal(captureCalls[0].properties.desktop_client_version, "0.9.6");
   });
 
   test("setTargetId injects computeTargetId into telemetry events", () => {
