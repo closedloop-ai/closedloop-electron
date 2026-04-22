@@ -1212,14 +1212,62 @@ async function writeArtifactsForExecuteOrAmend(
   artifacts: LoopArtifact[],
   prompt?: string,
   attachments?: ContextPackAttachment[],
-): Promise<void> {
+  options?: {
+    command: "EXECUTE" | "REQUEST_CHANGES";
+    loopId: string;
+  },
+): Promise<{ importedPlanFile: string | null }> {
+  let importedPlanFile: string | null = null;
   for (const artifact of artifacts) {
     if (artifact.type === LoopArtifactType.ImplementationPlan) {
-      // Sync plan content like ECS harness's syncPlanFromContextPack():
-      // If plan.json already exists (from parent PLAN loop), update only the
-      // .content field — preserving tasks, openQuestions, metadata, etc.
-      // This picks up manual edits the user made in the Liveblocks editor.
+      // For EXECUTE, hosted markdown is canonical. Reuse remote raw plan state
+      // only when it still matches that markdown; otherwise force the
+      // imported-plan compatibility path from the hosted markdown.
       const planJsonPath = path.join(claudeWorkDir, LoopArtifactFile.Plan);
+      if (options?.command === "EXECUTE") {
+        const rawPlanPayload = isRawPlanArtifact(artifact.raw)
+          ? artifact.raw
+          : null;
+        const rawPlanAligned =
+          typeof rawPlanPayload?.content === "string" &&
+          rawPlanPayload.content === artifact.content;
+        const localPlanJsonPresent = existsSync(planJsonPath);
+        const importedPlanPath = path.join(claudeWorkDir, "imported-plan.md");
+        await fs.rm(importedPlanPath, { force: true });
+
+        if (rawPlanAligned) {
+          importedPlanFile = null;
+          await fs.writeFile(
+            planJsonPath,
+            JSON.stringify(
+              { ...rawPlanPayload!, content: artifact.content },
+              null,
+              2,
+            ),
+          );
+          const message =
+            `EXECUTE plan source=raw-artifact ` +
+            `rawPlanPayload=true rawPlanAligned=true ` +
+            `localPlanJsonPresent=${localPlanJsonPresent}`;
+          loopLog(options.loopId, message);
+          gatewayLog.info("loop-harness", `loopId=${options.loopId} ${message}`);
+        } else {
+          if (localPlanJsonPresent) {
+            await fs.rm(planJsonPath, { force: true });
+          }
+          importedPlanFile = importedPlanPath;
+          await fs.writeFile(importedPlanPath, artifact.content);
+          const message =
+            `EXECUTE plan source=imported-plan-compat ` +
+            `rawPlanPayload=${rawPlanPayload !== null} rawPlanAligned=false ` +
+            `localPlanJsonPresent=${localPlanJsonPresent} ` +
+            `importedPlanFile=${importedPlanFile}`;
+          loopLog(options.loopId, message);
+          gatewayLog.info("loop-harness", `loopId=${options.loopId} ${message}`);
+        }
+        continue;
+      }
+
       if (existsSync(planJsonPath)) {
         try {
           const existing = JSON.parse(
@@ -1282,6 +1330,7 @@ async function writeArtifactsForExecuteOrAmend(
   }
 
   await downloadAttachmentsToDisk(claudeWorkDir, attachments);
+  return { importedPlanFile };
 }
 
 /**
@@ -3160,6 +3209,7 @@ async function handleLoopRequest(
     let worktreeDir: string | null = null;
     let claudeWorkDir: string;
     let usedTempDir = false;
+    let executeImportedPlanFile: string | null = null;
 
     if (body.command === "DECOMPOSE") {
       // DECOMPOSE uses a single temp dir for everything: context pack, logs, and output.
@@ -3433,12 +3483,17 @@ async function handleLoopRequest(
           body.attachments,
         );
       } else if (body.command === "EXECUTE") {
-        await writeArtifactsForExecuteOrAmend(
+        const executeArtifacts = await writeArtifactsForExecuteOrAmend(
           claudeWorkDir,
           body.artifacts,
           undefined,
           body.attachments,
+          {
+            command: "EXECUTE",
+            loopId: body.loopId,
+          },
         );
+        executeImportedPlanFile = executeArtifacts.importedPlanFile;
       } else {
         // REQUEST_CHANGES
         await writeArtifactsForExecuteOrAmend(
@@ -3446,6 +3501,10 @@ async function handleLoopRequest(
           body.artifacts,
           body.prompt,
           body.attachments,
+          {
+            command: "REQUEST_CHANGES",
+            loopId: body.loopId,
+          },
         );
       }
     } else if (body.command === "GENERATE_PRD") {
@@ -3653,8 +3712,12 @@ async function handleLoopRequest(
       // Reuse the path from pre-flight so validation and execution stay aligned.
       const claudeBinary = resolved.path;
 
+      const closedLoopPlanFile =
+        body.command === "EXECUTE" ? executeImportedPlanFile ?? "" : "";
+
       const spawnEnv: Record<string, string> = await getShellEnv({
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
+        CLOSEDLOOP_PLAN_FILE: closedLoopPlanFile,
         // Pass resolved claude path so run-loop.sh uses the same binary
         // the desktop app validated in pre-flight (avoids PATH mismatches
         // between Electron's env and the user's login shell).
