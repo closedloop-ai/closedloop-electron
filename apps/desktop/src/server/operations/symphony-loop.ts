@@ -40,6 +40,10 @@ import type {
 import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { getShellEnv, getShellPath, resolveBinarySync } from "../shell-path.js";
+import {
+  isRawPlanArtifact,
+  toUploadedPlanArtifact,
+} from "../../shared/plan-artifact-utils.js";
 import { withMcpTools } from "./chat-tools.js";
 import { findWorktreeForBranch as findWorktreeForBranchImpl } from "./git-helpers.js";
 import { startOutputTailer } from "./output-tailer.js";
@@ -1326,30 +1330,6 @@ async function writeArtifactsForGeneratePrd(
 // Per-command output reading
 // ---------------------------------------------------------------------------
 
-function isRawPlanArtifact(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function toUploadedPlanArtifact(
-  plan: unknown,
-): { content: string; raw?: Record<string, unknown> } | undefined {
-  if (isRawPlanArtifact(plan)) {
-    return {
-      content:
-        typeof plan.content === "string"
-          ? plan.content
-          : JSON.stringify(plan, null, 2),
-      raw: plan,
-    };
-  }
-
-  if (typeof plan === "string") {
-    return { content: plan };
-  }
-
-  return undefined;
-}
-
 function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
   const plan = toUploadedPlanArtifact(
     readJsonFileSync(path.join(claudeWorkDir, LoopArtifactFile.Plan)),
@@ -1384,6 +1364,31 @@ function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
     executionResult: executionResult ?? undefined,
     codeJudges: codeJudges ?? undefined,
   };
+}
+
+function parseWarningEntries(warning: string | undefined): string[] {
+  if (!warning) {
+    return [];
+  }
+
+  return warning
+    .split(";")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+}
+
+function mergeWarningEntries(
+  existingWarning: string | undefined,
+  warnings: readonly string[],
+): string | undefined {
+  if (warnings.length === 0) {
+    return existingWarning;
+  }
+
+  const mergedWarnings = [
+    ...new Set([...parseWarningEntries(existingWarning), ...warnings]),
+  ];
+  return mergedWarnings.map(sanitizeErrorMessage).join("; ");
 }
 
 function readDecomposeOutputs(workDir: string): Record<string, unknown> {
@@ -2375,10 +2380,7 @@ export async function handleProcessCompletion(
               ? `Auth challenge: ${jsonlAuthError ?? "authentication error"}`
               : undefined,
         exitCode,
-        warning:
-          failureWarnings.length > 0
-            ? failureWarnings.map(sanitizeErrorMessage).join("; ")
-            : latestJob.warning,
+        warning: mergeWarningEntries(latestJob.warning, failureWarnings),
         updatedAt: now,
         completedAt: now,
       });
@@ -2701,16 +2703,9 @@ export async function handleProcessCompletion(
     if (warnings.length > 0 && jobStore) {
       const existingJob = jobStore.getByLoopId(loopId);
       if (existingJob) {
-        const existingWarnings = existingJob.warning
-          ? existingJob.warning
-              .split(";")
-              .map((value) => value.trim())
-              .filter((value) => value.length > 0)
-          : [];
-        const mergedWarnings = [...new Set([...existingWarnings, ...warnings])];
         jobStore.upsert({
           ...existingJob,
-          warning: mergedWarnings.map(sanitizeErrorMessage).join("; "),
+          warning: mergeWarningEntries(existingJob.warning, warnings),
           updatedAt: new Date().toISOString(),
         });
       }

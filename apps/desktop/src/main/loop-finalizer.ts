@@ -6,6 +6,7 @@ import path from "node:path";
 import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
 import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
+import { toUploadedPlanArtifact } from "../shared/plan-artifact-utils.js";
 import {
   readLogTail,
   readTextFile,
@@ -494,30 +495,6 @@ function readJsonFileSync(filePath: string): unknown | null {
   } catch {
     return null;
   }
-}
-
-function isRawPlanArtifact(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function toUploadedPlanArtifact(
-  plan: unknown,
-): { content: string; raw?: Record<string, unknown> } | undefined {
-  if (isRawPlanArtifact(plan)) {
-    return {
-      content:
-        typeof plan.content === "string"
-          ? plan.content
-          : JSON.stringify(plan, null, 2),
-      raw: plan,
-    };
-  }
-
-  if (typeof plan === "string") {
-    return { content: plan };
-  }
-
-  return undefined;
 }
 
 function readArtifacts(
