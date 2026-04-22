@@ -239,6 +239,8 @@ export class DesktopGatewayServer {
         }
         resolve();
       });
+      // Force-drop active NDJSON/SSE streams so close() can actually complete.
+      runningServer.closeAllConnections();
     });
   }
 

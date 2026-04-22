@@ -10,6 +10,7 @@ import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { getReadonlyCodebaseTools, getWebOnlyTools } from "./chat-tools.js";
 import { createStreamState, processStreamEvent } from "./stream-events.js";
 import { expandHome } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 type ChatMessage = {
   id: string;
@@ -274,10 +275,4 @@ function setStreamingHeaders(response: ServerResponse): void {
 
 function writeEvent(response: ServerResponse, payload: Record<string, unknown>): void {
   response.write(`${JSON.stringify(payload)}\n`);
-}
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
 }

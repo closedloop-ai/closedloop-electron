@@ -28,7 +28,6 @@ export interface ApiKeyStoreOptions {
 
 function getDefaultSafeStorage(): SafeStorageLike {
   // Lazy import Electron's safeStorage to allow testing without Electron
-   
   const { safeStorage } = require("electron") as { safeStorage: SafeStorageLike };
   return safeStorage;
 }
