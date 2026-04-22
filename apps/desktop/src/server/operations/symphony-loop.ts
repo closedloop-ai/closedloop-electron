@@ -848,6 +848,35 @@ function pickStableId(body: LoopRequestBody): string {
 }
 
 // ---------------------------------------------------------------------------
+// Additional-repo worktree naming
+// ---------------------------------------------------------------------------
+
+/** Naming triplet for an additional-repo worktree directory and branch. */
+interface AdditionalWorktreeNaming {
+  readonly addRepoKey: string;
+  readonly addWorktreeDir: string;
+  readonly addBranchName: string;
+}
+
+/**
+ * Compute the naming triplet (key, worktree dir, branch name) for an
+ * additional repo worktree. Used by both PLAN (always-fresh) and
+ * REQUEST_CHANGES (reuse-or-create) paths to ensure consistent naming.
+ */
+function computeAdditionalWorktreeNaming(
+  addRepo: ResolvedAdditionalRepo,
+  worktreeKey: string,
+): AdditionalWorktreeNaming {
+  const addRepoSlug = slugifyLoopId(addRepo.branch);
+  const addRepoKey = `${worktreeKey}-${addRepoSlug}-${additionalRepoDisambiguator(addRepo.repoPath)}`;
+  return {
+    addRepoKey,
+    addWorktreeDir: resolveLoopWorktreeDir(addRepo.repoPath, addRepoKey),
+    addBranchName: `symphony/${addRepoKey}`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // API communication (events + artifact upload)
 // ---------------------------------------------------------------------------
 
@@ -3191,7 +3220,7 @@ async function handleLoopRequest(
     }
 
     let resolvedAdditionalRepos: ResolvedAdditionalRepo[] = [];
-    if (body.command === "PLAN" && body.additionalRepos && body.additionalRepos.length > 0) {
+    if ((body.command === "PLAN" || body.command === "REQUEST_CHANGES") && body.additionalRepos && body.additionalRepos.length > 0) {
       try {
         resolvedAdditionalRepos = await resolveAdditionalRepos(
           body.additionalRepos,
@@ -3350,13 +3379,8 @@ async function handleLoopRequest(
         // Mirror the primary-repo pattern: create a fresh scratch branch
         // based on the user-specified branch so loop work does not mutate it.
         for (const addRepo of resolvedAdditionalRepos) {
-          const addRepoSlug = slugifyLoopId(addRepo.branch);
-          const addRepoKey = `${worktreeKey}-${addRepoSlug}-${additionalRepoDisambiguator(addRepo.repoPath)}`;
-          const addWorktreeDir = resolveLoopWorktreeDir(
-            addRepo.repoPath,
-            addRepoKey,
-          );
-          const addBranchName = `symphony/${addRepoKey}`;
+          const { addWorktreeDir, addBranchName } =
+            computeAdditionalWorktreeNaming(addRepo, worktreeKey);
 
           // Validate the additional-repo worktree path against the sandbox
           // roots BEFORE any git checkout is materialized. SYMPHONY_WORKTREE_PARENT_DIR
@@ -3472,6 +3496,102 @@ async function handleLoopRequest(
             body.loopId,
             `Created new worktree: ${worktreeDir} (branch: ${branchName})`,
           );
+        }
+
+        // Reuse or create additional repo worktrees for REQUEST_CHANGES.
+        // Unlike PLAN (which always creates fresh), we attempt to reuse an
+        // existing worktree first (artifact-slug key, then parentLoopId
+        // fallback) and only create a new one when neither is found.
+        // The primary worktree is intentionally NOT removed on failure here
+        // because it was not freshly created by this request.
+        if (body.command === "REQUEST_CHANGES" && resolvedAdditionalRepos.length > 0) {
+          for (const addRepo of resolvedAdditionalRepos) {
+            const { addWorktreeDir, addBranchName } =
+              computeAdditionalWorktreeNaming(addRepo, worktreeKey);
+
+            // Validate the additional-repo worktree path against the sandbox
+            // roots BEFORE any git checkout is materialized.
+            try {
+              assertPathAllowed(addWorktreeDir, allowedDirs);
+            } catch (e) {
+              if (e instanceof DirectoryNotAllowedError) {
+                await cleanupAdditionalWorktrees(
+                  additionalWorktreeDirs,
+                  body.loopId,
+                  wt,
+                  "cleanup additional worktree failed (allowlist reject):",
+                );
+                await postLoopEventBounded(
+                  apiBaseUrl,
+                  body.loopId,
+                  body.closedLoopAuthToken,
+                  {
+                    type: LoopEventType.Error,
+                    code: LoopErrorCode.RepoNotAllowed,
+                    message: `Additional repo worktree path not allowed: ${addWorktreeDir}`,
+                  },
+                );
+                json(context, 403, { error: `Additional repo worktree path not allowed: ${addWorktreeDir}` });
+                return;
+              }
+              throw e;
+            }
+
+            // Attempt reuse: artifact-slug key first, then parentLoopId fallback.
+            let resolvedAddWorktreeDir: string | undefined;
+            const existingAddWorktree = wt.findWorktreeForBranch(addRepo.repoPath, addBranchName);
+            if (existingAddWorktree) {
+              resolvedAddWorktreeDir = existingAddWorktree;
+              loopLog(
+                body.loopId,
+                `Reusing additional repo worktree via artifact slug: ${resolvedAddWorktreeDir} (branch: ${addBranchName})`,
+              );
+            } else if (body.parentLoopId) {
+              const { addBranchName: parentAddBranch } =
+                computeAdditionalWorktreeNaming(addRepo, slugifyLoopId(body.parentLoopId));
+              const parentAddWorktree = wt.findWorktreeForBranch(addRepo.repoPath, parentAddBranch);
+              if (parentAddWorktree) {
+                resolvedAddWorktreeDir = parentAddWorktree;
+                loopLog(
+                  body.loopId,
+                  `Reusing additional repo worktree via parentLoopId fallback: ${resolvedAddWorktreeDir} (branch: ${parentAddBranch})`,
+                );
+              }
+            }
+
+            if (!resolvedAddWorktreeDir) {
+              // No existing worktree found — create new.
+              try {
+                await wt.ensureWorktree(addRepo.repoPath, addWorktreeDir, addBranchName, addRepo.branch, body.loopId);
+                resolvedAddWorktreeDir = addWorktreeDir;
+                loopLog(body.loopId, `Created additional repo worktree: ${resolvedAddWorktreeDir} (branch: ${addBranchName} based on ${addRepo.branch})`);
+              } catch (checkoutErr) {
+                const msg = checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr);
+                loopError(body.loopId, `ensureWorktree failed for additional repo ${addRepo.repoPath}:`, checkoutErr);
+                await wt.removeWorktree(addWorktreeDir, addRepo.repoPath, body.loopId).catch(() => {});
+                await cleanupAdditionalWorktrees(
+                  additionalWorktreeDirs,
+                  body.loopId,
+                  wt,
+                  "cleanup additional worktree failed (checkout reject):",
+                );
+                await postLoopEventBounded(
+                  apiBaseUrl,
+                  body.loopId,
+                  body.closedLoopAuthToken,
+                  {
+                    type: LoopEventType.Error,
+                    code: LoopErrorCode.BranchCreateFailed,
+                    message: `Failed to checkout additional repo worktree: ${msg}`,
+                  },
+                );
+                json(context, 500, { error: `Failed to checkout additional repo worktree: ${msg}` });
+                return;
+              }
+            }
+
+            additionalWorktreeDirs.push({ dir: resolvedAddWorktreeDir, repoPath: addRepo.repoPath });
+          }
         }
       }
 
@@ -3859,11 +3979,17 @@ async function handleLoopRequest(
         );
 
         const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir, claudeBinary);
+        const rcEnv: Record<string, string> = { ...spawnEnv };
+        if (additionalWorktreeDirs.length > 0) {
+          rcEnv.CLOSEDLOOP_ADD_DIRS = additionalWorktreeDirs
+            .map((e) => e.dir)
+            .join("|");
+        }
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: worktreeDir!,
           detached: true,
           stdio: ["ignore", logFd, logFd],
-          env: spawnEnv,
+          env: rcEnv,
         });
         child.unref();
       } else if (body.command === "GENERATE_PRD") {
