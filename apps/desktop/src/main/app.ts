@@ -67,6 +67,10 @@ import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
 import { BootRecoveryService } from "./boot-recovery.js";
 import { LoopTokenStore } from "./loop-token-store.js";
 import { GatewayIdentityStore } from "./gateway-identity.js";
+import {
+  createQueueStatsDebounce,
+  type QueueStatsDebounce,
+} from "./queue-stats-debounce.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -95,6 +99,11 @@ export class DesktopApplication {
   private cloudCommandsPaused: boolean;
   private cloudConnectionEnabled: boolean;
   private updateCheckTimer: NodeJS.Timeout | null = null;
+  private readonly queueStatsTelemetryDebounce: QueueStatsDebounce =
+    createQueueStatsDebounce(
+      (active, depth) => Observability.queueStatsChanged(active, depth),
+      QUEUE_STATS_DEBOUNCE_MS,
+    );
 
   constructor() {
     this.gatewayAuthToken = randomBytes(24).toString("hex");
@@ -188,6 +197,7 @@ export class DesktopApplication {
           activeCommands: stats.activeCommands,
           queueDepth: stats.queueDepth,
         });
+        this.queueStatsTelemetryDebounce.trigger(stats);
       },
     });
     this.cloudSocket = new CloudSocketService({
@@ -423,6 +433,7 @@ export class DesktopApplication {
     this.shuttingDown = true;
     this.bootRecovery.dispose();
     await this.bootRecovery.quiesce(1_000);
+    this.queueStatsTelemetryDebounce.cancel();
     return runShutdownSequence({
       observability: Observability,
       updateCheckTimer: this.updateCheckTimer,
@@ -1468,6 +1479,7 @@ export class DesktopApplication {
 
 const APPROVAL_TIMEOUT_MS = 120_000;
 const MAX_IN_FLIGHT_COMMANDS = 2;
+const QUEUE_STATS_DEBOUNCE_MS = 1000;
 const ALWAYS_ALLOW_RULE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 function pruneExpiredAlwaysAllowRules(
