@@ -4003,7 +4003,7 @@ async function handleLoopRequest(
           scriptArgs.push("--prd", prdPath);
         }
 
-        if (body.command === "PLAN") {
+        if (body.command === "PLAN" || body.command === "EXECUTE") {
           for (const addEntry of additionalWorktreeDirs) {
             scriptArgs.push("--add-dir", addEntry.dir);
           }

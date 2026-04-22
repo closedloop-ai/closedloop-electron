@@ -19,6 +19,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 import { setShellPathForTest } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
@@ -40,12 +41,16 @@ const { serversToClose, mockServersToClose, tempPathsToClean, cleanup } =
 afterEach(cleanup);
 
 /** Create a gateway server with a mock API backend and the worktreeProvider. */
-function createTestGateway(tmpDir: string, mockPort: number) {
+function createTestGateway(
+  tmpDir: string,
+  mockPort: number,
+  worktreeProvider: WorktreeProvider = fakeWorktreeProvider,
+) {
   return makeMultiRepoGateway({
     tmpDir,
     mockPort,
     machineName: "multi-repo-spawn-test",
-    worktreeProvider: fakeWorktreeProvider,
+    worktreeProvider,
     serversToClose,
   });
 }
@@ -200,3 +205,137 @@ test("PLAN with 2 additionalRepos passes --add-dir for each worktree to run-loop
   }
 });
 
+// ---------------------------------------------------------------------------
+// Test 2: EXECUTE with 2 additionalRepos — assert args contain
+//         --add-dir <worktreeDir1> and --add-dir <worktreeDir2>.
+//
+// Mirrors the PLAN case: multi-repo EXECUTE must register the additional-repo
+// worktrees with run-loop.sh so claude's sandbox includes them. A pre-created
+// additional worktree dir is returned by findWorktreeForBranch to simulate the
+// worktrees created by the preceding PLAN.
+// ---------------------------------------------------------------------------
+
+test("EXECUTE with 2 additionalRepos passes --add-dir for each worktree to run-loop.sh", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-spawn-execute2-"));
+  tempPathsToClean.push(tmpDir);
+
+  const primaryRepo = path.join(tmpDir, "primary-repo");
+  await fs.mkdir(primaryRepo, { recursive: true });
+
+  const additionalRepo1 = path.join(tmpDir, "additional-repo-1");
+  await fs.mkdir(additionalRepo1, { recursive: true });
+
+  const additionalRepo2 = path.join(tmpDir, "additional-repo-2");
+  await fs.mkdir(additionalRepo2, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  // Pre-create worktree dirs so EXECUTE's findWorktreeForBranch can return them.
+  const primaryWorktreeDir = path.join(worktreeParent, "primary-wt");
+  await fs.mkdir(primaryWorktreeDir, { recursive: true });
+  const additionalWorktreeDir1 = path.join(worktreeParent, "additional-wt-1");
+  await fs.mkdir(additionalWorktreeDir1, { recursive: true });
+  const additionalWorktreeDir2 = path.join(worktreeParent, "additional-wt-2");
+  await fs.mkdir(additionalWorktreeDir2, { recursive: true });
+
+  process.env.HOME = tmpDir;
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+  await createFakeRunLoopScript(
+    tmpDir,
+    '#!/bin/sh\necho "$@" > "$CLOSEDLOOP_WORKDIR/spawn-args.txt"\nexit 0\n',
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  // Custom provider: return a pre-created dir from findWorktreeForBranch for each
+  // repo so EXECUTE reuses them instead of creating fresh ones.
+  const executeProvider: WorktreeProvider = {
+    async ensureWorktree(_repoPath, worktreeDir) {
+      await fs.mkdir(worktreeDir, { recursive: true });
+    },
+    findWorktreeForBranch(repoPath: string): string | null {
+      if (repoPath === primaryRepo) return primaryWorktreeDir;
+      if (repoPath === additionalRepo1) return additionalWorktreeDir1;
+      if (repoPath === additionalRepo2) return additionalWorktreeDir2;
+      return null;
+    },
+    async removeWorktree(worktreeDir) {
+      await fs.rm(worktreeDir, { recursive: true, force: true });
+    },
+    getCurrentBranch() {
+      return "symphony/multi-repo-spawn-execute-test";
+    },
+    branchExists: async () => true,
+  };
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+  const server = await createTestGateway(tmpDir, mock.port, executeProvider);
+
+  const loopId = "00000000-0000-0000-0000-000000007002";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [],
+        repo: {
+          fullName: `spawn-test/${path.basename(primaryRepo)}`,
+          branch: "main",
+        },
+        additionalRepos: [
+          { localRepoPath: additionalRepo1, branch: "main" },
+          { localRepoPath: additionalRepo2, branch: "main" },
+        ],
+      }),
+    },
+  );
+
+  assert.equal(response.status, 200);
+
+  const terminalEvent = await waitForTerminalEvent(mock.requests, loopId);
+  assert.equal(
+    terminalEvent.type,
+    "completed",
+    `Expected terminal event type 'completed', got '${terminalEvent.type}': ${JSON.stringify(terminalEvent)}`,
+  );
+
+  const spawnArgsFile = await findSpawnArgsFile(tmpDir);
+  const spawnArgs = (await fs.readFile(spawnArgsFile, "utf-8")).trim();
+
+  assert.ok(
+    spawnArgs.includes("--add-dir"),
+    `Expected --add-dir in spawn args, got: ${spawnArgs}`,
+  );
+
+  const addDirCount = (spawnArgs.match(/--add-dir/g) ?? []).length;
+  assert.equal(
+    addDirCount,
+    2,
+    `Expected exactly 2 --add-dir flags in spawn args, got ${addDirCount}. Args: ${spawnArgs}`,
+  );
+
+  const addDirMatches = [...spawnArgs.matchAll(/--add-dir\s+(\S+)/g)].map((m) => m[1]);
+  assert.equal(addDirMatches.length, 2, "Should parse 2 --add-dir paths from spawn args");
+
+  const expectedAdditionalDirs = new Set([additionalWorktreeDir1, additionalWorktreeDir2]);
+  for (const addDir of addDirMatches) {
+    assert.ok(
+      expectedAdditionalDirs.has(addDir),
+      `Expected --add-dir path "${addDir}" to match one of the pre-created additional worktrees ${[...expectedAdditionalDirs].join(", ")}`,
+    );
+  }
+});
