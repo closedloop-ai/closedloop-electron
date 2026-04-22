@@ -1,4 +1,4 @@
-import { createWriteStream, type WriteStream } from "node:fs";
+import { createWriteStream, openSync, closeSync, type WriteStream } from "node:fs";
 import pty, { type IPty } from "node-pty";
 
 // ---------------------------------------------------------------------------
@@ -49,6 +49,9 @@ const sessions = new Map<string, PtySession>();
 // ---------------------------------------------------------------------------
 
 export function spawnPtySession(opts: SpawnSessionOpts): PtySession {
+  // Validate log file is writable before spawning (fails fast on EISDIR, EACCES, etc.)
+  const logFd = openSync(opts.logFile, "a");
+  closeSync(logFd);
   const logStream = createWriteStream(opts.logFile, { flags: "a" });
   const jsonlStream = opts.jsonlFile
     ? createWriteStream(opts.jsonlFile, { flags: "a" })

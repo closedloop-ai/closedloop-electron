@@ -212,6 +212,7 @@ test("telemetry: job.failed emitted with correct category/trace/diagnostics on p
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    getGatewayId: () => "test-gateway-id",
   });
   serversToClose.push(server);
   await server.start();
@@ -317,6 +318,7 @@ test("telemetry: job.completed emitted with correct category/trace on process ex
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    getGatewayId: () => "test-gateway-id",
   });
   serversToClose.push(server);
   await server.start();
@@ -400,6 +402,7 @@ test("telemetry: preflight.binary_not_found emitted when claude is absent from P
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    getGatewayId: () => "test-gateway-id",
   });
   serversToClose.push(server);
   await server.start();
@@ -542,6 +545,7 @@ test("telemetry: preflight.spawn_failed emitted when log file open fails (EISDIR
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    getGatewayId: () => "test-gateway-id",
   });
   serversToClose.push(server);
   await server.start();
@@ -619,6 +623,7 @@ test("telemetry: commandId and operationId from request headers appear in trace 
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    getGatewayId: () => "test-gateway-id",
   });
   serversToClose.push(server);
   await server.start();

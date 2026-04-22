@@ -3551,7 +3551,11 @@ async function handleLoopRequest(
       await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
     };
 
-    // Pre-flight: verify claude CLI exists BEFORE posting 'started' event.
+    // Pre-flight: verify required binaries exist BEFORE posting 'started' event.
+    // All commands need claude CLI. PLAN/EXECUTE additionally need run-loop.sh.
+    const usesRunLoop = body.command === "PLAN" || body.command === "EXECUTE";
+    let scriptPath: string | null = null;
+
     const resolved = resolveBinarySync("claude", overrideGetBinaryPaths?.()?.claude);
     if (resolved.source === "fallback") {
       await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
@@ -3572,6 +3576,24 @@ async function handleLoopRequest(
     // "override_invalid" is intentionally allowed -- the user set an explicit
     // override and should see the resulting ENOENT from the spawn, not a
     // confusing "not found in PATH" error.
+
+    if (usesRunLoop) {
+      scriptPath = findPluginScript("code", "run-loop.sh");
+      if (!scriptPath) {
+        await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+          type: LoopEventType.Error,
+          code: LoopErrorCode.ScriptNotFound,
+          message: "run-loop.sh not found in plugin cache",
+        });
+        Observability.preflightScriptNotFound(
+          commandId,
+          operationId,
+          body.loopId,
+        );
+        json(context, 500, { error: "run-loop.sh not found in plugin cache" });
+        return;
+      }
+    }
 
     try {
       if (loopTokenStore) {
@@ -3636,13 +3658,14 @@ async function handleLoopRequest(
         CLAUDE_BIN: claudeBinary,
       });
 
-      // Shared claude CLI args for commands that run claude directly.
+      // Interactive claude args — no -p, no stream-json so the PTY session
+      // supports live keyboard input from attached terminal clients.
+      // The JSONL extractor in pty-session-store captures JSON lines from
+      // Claude's output for downstream token parsing and telemetry.
       const allowedTools = await withMcpTools(
         "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
         expectedMcpUrl,
       );
-      // Interactive args — no -p, no stream-json. Claude runs as a live chat
-      // session that processes the initial prompt then accepts more input via PTY.
       const interactiveClaudeArgs: string[] = [
         "--verbose",
         "--allowedTools",
@@ -3653,7 +3676,6 @@ async function handleLoopRequest(
       const jsonlFile = path.join(claudeWorkDir, "claude-output.jsonl");
 
       if (body.command === "DECOMPOSE") {
-        // DECOMPOSE: prompt as positional arg to claude -p
         const promptContent = body.prompt ?? "Decompose the PRD into features.";
         const promptFile = path.join(claudeWorkDir, "decompose-prompt.txt");
         await fs.writeFile(promptFile, promptContent);
@@ -3706,7 +3728,6 @@ async function handleLoopRequest(
           jsonlFile,
         });
       } else if (body.command === "REQUEST_CHANGES") {
-        // REQUEST_CHANGES: spawn claude directly (no pipeline) for interactive attach.
         const claudeArgs = [...interactiveClaudeArgs];
 
         if (body.parentSessionId) {
@@ -3724,7 +3745,7 @@ async function handleLoopRequest(
           .replaceAll(/\s{2,}/g, " ")
           .replaceAll(/"/g, '\\"');
         claudeArgs.push(
-          `/code:amend-plan --workdir ${claudeWorkDir} --message "${sanitized}"`,
+          `/code:amend-plan --workdir "${claudeWorkDir}" --message "${sanitized}"`,
         );
 
         ptySession = spawnPtySession({
@@ -3750,26 +3771,28 @@ async function handleLoopRequest(
           jsonlFile,
         });
       } else {
-        // PLAN, EXECUTE: spawn claude directly in interactive mode (no run-loop.sh)
-        // so the user can attach and steer the session via the terminal window.
-        // The /code:code skill handles plan/execute orchestration internally.
-        const prompt = `/code:code ${claudeWorkDir}`;
+        // PLAN, EXECUTE: spawn run-loop.sh for multi-iteration execution.
+        // run-loop.sh manages iteration boundaries and context-refresh
+        // relaunching internally; the PTY gives us terminal attach capability.
+        const scriptArgs = [claudeWorkDir];
+        const maxIterations = body.command === "EXECUTE" ? "150" : "50";
+        scriptArgs.push("--max-iterations", maxIterations);
+
         const prdPath = path.join(claudeWorkDir, LoopArtifactFile.Prd);
-        const claudeArgs = [prompt, ...interactiveClaudeArgs];
         if (existsSync(prdPath)) {
-          claudeArgs.push("--add-dir", claudeWorkDir);
+          scriptArgs.push("--prd", prdPath);
         }
 
         if (body.command === "PLAN") {
           for (const addEntry of additionalWorktreeDirs) {
-            claudeArgs.push("--add-dir", addEntry.dir);
+            scriptArgs.push("--add-dir", addEntry.dir);
           }
         }
 
         ptySession = spawnPtySession({
           loopId: body.loopId,
-          file: claudeBinary,
-          args: claudeArgs,
+          file: scriptPath!,
+          args: scriptArgs,
           cwd: worktreeDir!,
           env: spawnEnv,
           logFile,

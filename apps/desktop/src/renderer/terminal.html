@@ -154,6 +154,8 @@
               term.write(msg.data);
             } else if (msg.type === "exit") {
               setStatus("disconnected", `Process exited (code ${msg.exitCode})`);
+              // Close the terminal window shortly after the process exits
+              setTimeout(function () { window.close(); }, 2000);
             } else if (msg.type === "error") {
               setStatus("disconnected", msg.message || "Error");
             }
