@@ -22,6 +22,7 @@ import { afterEach, test } from "node:test";
 import { JobStore } from "../src/main/job-store.js";
 import { LoopTokenStore } from "../src/main/loop-token-store.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
+import { configureBinaryPathsResolver } from "../src/server/operations/symphony-loop.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
@@ -35,6 +36,7 @@ import {
   startMockApiServer,
   waitForCompletedEvent,
   waitForTerminalEvent,
+  writeFakeGhScript,
 } from "./symphony-test-utils.js";
 
 const fakeWorktreeProvider = makeFakeWorktreeProvider("symphony/cloud-failures-test");
@@ -87,6 +89,13 @@ async function waitForJobTerminal(
   }
   throw new Error(
     `Timed out waiting for terminal job status for loopId=${loopId} after ${timeoutMs}ms`
+  );
+}
+
+async function writeFakeFailingGh(dir: string): Promise<string> {
+  return writeFakeGhScript(
+    path.join(dir, "fake-bin"),
+    '#!/bin/sh\necho "not found" >&2\nexit 1\n',
   );
 }
 
@@ -594,11 +603,16 @@ test("PLAN: non-zero exit cleans up persisted loop token", async () => {
 // Test 6: Repo not found emits REPO_NOT_FOUND error event and returns 404
 // ---------------------------------------------------------------------------
 
-test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async () => {
+test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async (t) => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cloud-fail-repo-not-found-"));
   tempPathsToClean.push(tmpDir);
 
   // No repo directory is created inside tmpDir for org/nonexistent-repo
+
+  // Set up a fake gh binary that exits non-zero so the auto-clone attempt
+  // fails immediately rather than invoking the real gh (which would make a
+  // network call and time out).
+  const fakeGhPath = await writeFakeFailingGh(tmpDir);
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -617,10 +631,16 @@ test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async () => {
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    getSymphonyDir: () => tmpDir,
     jobStore,
   });
   serversToClose.push(server);
   await server.start();
+
+  // Configure after server.start() so the router's own configureBinaryPathsResolver
+  // call (which resets to null) doesn't overwrite our fake gh.
+  configureBinaryPathsResolver(() => ({ gh: fakeGhPath }));
+  t.after(() => configureBinaryPathsResolver(null));
 
   const loopId = "00000000-0000-0000-0000-000000001001";
 
@@ -842,7 +862,7 @@ test("EXECUTE: fullName-resolved path outside allowedDirs emits REPO_NOT_ALLOWED
 //         and aborts the underlying fetch (no leaked connections)
 // ---------------------------------------------------------------------------
 
-test("EXECUTE: postLoopEventBounded times out after 1000ms when API server hangs", async () => {
+test("EXECUTE: postLoopEventBounded times out after 1000ms when API server hangs", async (t) => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cloud-fail-hanging-"));
   tempPathsToClean.push(tmpDir);
 
@@ -882,10 +902,19 @@ test("EXECUTE: postLoopEventBounded times out after 1000ms when API server hangs
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${hangingPort}`,
+    getSymphonyDir: () => tmpDir,
     jobStore,
   });
   serversToClose.push(server);
   await server.start();
+
+  // Set up a fake gh binary that exits non-zero so the auto-clone attempt
+  // fails immediately rather than invoking the real gh (which would make a
+  // network call and time out). Must be configured after server.start() so
+  // the router's own configureBinaryPathsResolver call doesn't overwrite it.
+  const fakeGhPath = await writeFakeFailingGh(tmpDir);
+  configureBinaryPathsResolver(() => ({ gh: fakeGhPath }));
+  t.after(() => configureBinaryPathsResolver(null));
 
   // Use a nonexistent repo fullName to trigger REPO_NOT_FOUND, which calls
   // postLoopEventBounded -- the bounded wait should timeout after 1000ms.

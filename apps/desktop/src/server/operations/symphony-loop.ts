@@ -1,5 +1,6 @@
-import { execFileSync, execSync, spawn } from "node:child_process";
+import { execFile, execFileSync, execSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
+import { promisify } from "node:util";
 import {
   closeSync,
   existsSync,
@@ -47,7 +48,9 @@ import {
   getPluginCacheRoot,
 } from "./plugin-cache.js";
 import { sanitizeCommitMessage } from "./symphony-interactive.js";
+import { addRepo } from "./repos-config-utils.js";
 import {
+  CLONE_GIT_TIMEOUT,
   expandHome,
   fetchOrigin,
   isProcessRunning,
@@ -56,6 +59,7 @@ import {
   resolveRef,
   resolveWorktreeParentDir,
   runLoopsSetupScript,
+  SymphonyDirNotConfiguredError,
   tryAssertRepoAllowed,
 } from "./symphony-utils.js";
 export { readLogTail } from "../../main/diagnostics-helpers.js";
@@ -89,6 +93,9 @@ export const defaultWorktreeProvider: WorktreeProvider = {
   getCurrentBranch: getCurrentBranchImpl,
   branchExists: branchExistsImpl,
 };
+
+// Promisified execFile for non-blocking subprocess invocations (e.g. gh repo clone).
+const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Claude binary resolution
@@ -516,6 +523,134 @@ function findLocalRepo(fullName: string, allowedDirs: string[]): string | null {
     }
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Auto-clone helper
+// ---------------------------------------------------------------------------
+
+/** Result of an attempted `gh repo clone` operation. */
+export type CloneResult = { ok: true; path: string } | { ok: false; reason: string };
+
+/**
+ * Attempt to clone a GitHub repository via the authenticated `gh` CLI into an
+ * allowed sandbox directory, then persist the result to `repos.json`.
+ *
+ * @param fullName  GitHub repository full name, e.g. `"org/repo"`.
+ * @param allowedDirs  List of sandbox-allowed directories (from `getAllowedDirectories()`).
+ * @param loopId  The loop request ID, used for scoped log lines.
+ * @param configDir  Path to the symphony config directory that holds `repos.json`.
+ * @param timeout  Override for the clone timeout (default: `CLONE_GIT_TIMEOUT` = 300 s).
+ */
+export async function cloneRepoViaGh(
+  fullName: string,
+  allowedDirs: string[],
+  loopId: string,
+  configDir: string,
+  timeout?: number,
+): Promise<CloneResult> {
+  if (allowedDirs.length === 0) {
+    return { ok: false, reason: 'no allowed directories configured' };
+  }
+
+  // --- compute clone destination ---
+  const repoName = fullName.split("/").pop();
+  if (!repoName) {
+    return { ok: false, reason: `invalid fullName: ${fullName}` };
+  }
+
+  const expandedAllowedDir = expandHome(allowedDirs[0]);
+
+  let allowedDirStat: ReturnType<typeof statSync>;
+  try {
+    allowedDirStat = statSync(expandedAllowedDir);
+  } catch {
+    return { ok: false, reason: `allowed directory does not exist or is not a directory: ${expandedAllowedDir}` };
+  }
+  if (!allowedDirStat.isDirectory()) {
+    return { ok: false, reason: `allowed directory does not exist or is not a directory: ${expandedAllowedDir}` };
+  }
+
+  // Clone into the allowed dir as a subdirectory (works whether or not
+  // the allowed dir is itself a git repo).
+  const destPath = path.join(expandedAllowedDir, repoName);
+
+  if (existsSync(destPath)) {
+    return { ok: false, reason: `clone destination already exists: ${destPath}` };
+  }
+
+  // --- pre-clone path validation (fail-fast before any network I/O) ---
+  try {
+    assertPathAllowed(destPath, allowedDirs);
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    return { ok: false, reason: sanitizeErrorMessage(raw) };
+  }
+
+  // --- log attempt ---
+  const attemptMsg = `repository not found locally, attempting to clone via gh: ${fullName} → ${destPath}`;
+  loopLog(loopId, attemptMsg);
+  gatewayLog.info("loop-auto-clone", `${attemptMsg} loopId=${loopId}`);
+
+  // --- invoke clone ---
+  try {
+    await execFileAsync(
+      getResolvedGhPath(),
+      ["repo", "clone", fullName, destPath],
+      {
+        timeout: timeout ?? CLONE_GIT_TIMEOUT,
+        maxBuffer: 10 * 1024 * 1024,
+        env: await getShellEnv(),
+      },
+    );
+  } catch (err) {
+    const stderrRaw = String(
+      (err as { stderr?: unknown }).stderr ?? (err instanceof Error ? err.message : String(err)),
+    )
+      .trim()
+      .slice(0, 500);
+    const sanitizedReason = sanitizeErrorMessage(stderrRaw);
+    const failMsg = `clone failed: ${sanitizedReason}`;
+    loopError(loopId, failMsg);
+    gatewayLog.warn("loop-auto-clone", `${failMsg} loopId=${loopId} fullName=${fullName} destPath=${destPath}`);
+    return { ok: false, reason: sanitizedReason };
+  }
+
+  // --- post-clone defense-in-depth path check ---
+  try {
+    assertPathAllowed(destPath, allowedDirs);
+  } catch (err) {
+    const raw = err instanceof Error ? err.message : String(err);
+    const sanitizedReason = sanitizeErrorMessage(raw);
+    // Best-effort cleanup: remove the orphaned clone
+    try {
+      await fs.rm(destPath, { recursive: true, force: true });
+    } catch (cleanupErr) {
+      gatewayLog.warn("loop-auto-clone", `orphan cleanup failed for ${destPath}: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`);
+    }
+    loopError(loopId, `post-clone path check failed, cleaned up: ${sanitizedReason}`);
+    gatewayLog.warn(
+      "loop-auto-clone",
+      `post-clone path check failed: ${sanitizedReason} loopId=${loopId} fullName=${fullName} destPath=${destPath}`,
+    );
+    return { ok: false, reason: sanitizedReason };
+  }
+
+  // --- persist to repos.json ---
+  const addResult = await addRepo(destPath, undefined, configDir);
+  if (!addResult.success && addResult.error !== "Repository already configured") {
+    // non-fatal: log but still return success
+    const warnMsg = `addRepo failed after clone (non-fatal): ${addResult.error ?? "unknown error"}`;
+    loopError(loopId, warnMsg);
+    gatewayLog.warn("loop-auto-clone", `${warnMsg} loopId=${loopId} fullName=${fullName} destPath=${destPath}`);
+  }
+
+  // --- log success ---
+  const successMsg = `clone succeeded: ${destPath}`;
+  loopLog(loopId, successMsg);
+  gatewayLog.info("loop-auto-clone", `${successMsg} loopId=${loopId} fullName=${fullName}`);
+
+  return { ok: true, path: destPath };
 }
 
 // ---------------------------------------------------------------------------
@@ -2593,6 +2728,7 @@ async function handleLoopRequest(
   getWebAppOrigin?: () => string,
   worktreeProvider?: WorktreeProvider,
   loopTokenStore?: LoopTokenStore,
+  getSymphonyDir?: () => string,
 ): Promise<void> {
   const wt = worktreeProvider ?? defaultWorktreeProvider;
   // Derive the callback URL from the gateway's trusted configuration.
@@ -2786,6 +2922,7 @@ async function handleLoopRequest(
           `Ignoring localRepoPath for ${body.command} after resolution error: ${repoPathError instanceof Error ? repoPathError.message : String(repoPathError)}`,
         );
       }
+      // localRepoPath takes precedence (handled above); only reach here when body.repo?.fullName is the repo source
     } else if (repoRequirement !== "NOT_REQUIRED" && body.repo?.fullName) {
       expandedRepoPath = findLocalRepo(body.repo.fullName, allowedDirs);
       if (expandedRepoPath) {
@@ -2818,27 +2955,64 @@ async function handleLoopRequest(
           }
         }
       } else {
-        if (repoRequirement === "REQUIRED") {
-          await postLoopEventBounded(
-            apiBaseUrl,
+        // Auto-clone: attempt for any command that uses a repo (REQUIRED or OPTIONAL)
+        let configDir: string | null = null;
+        if (getSymphonyDir) {
+          try {
+            configDir = path.join(getSymphonyDir(), "config");
+          } catch (dirErr) {
+            if (dirErr instanceof SymphonyDirNotConfiguredError) {
+              loopLog(
+                body.loopId,
+                `Skipping auto-clone for ${body.repo.fullName}: symphony directory not configured`,
+              );
+            } else {
+              throw dirErr;
+            }
+          }
+        } else {
+          loopLog(
             body.loopId,
-            body.closedLoopAuthToken,
-            {
-              type: LoopEventType.Error,
-              code: LoopErrorCode.RepoNotFound,
-              message: `Repository not found locally: ${body.repo.fullName}`,
-            },
+            `Skipping auto-clone for ${body.repo.fullName}: symphony directory not configured`,
           );
-          // runningLoops.delete handled by finally block (spawnedSuccessfully remains false)
-          json(context, 404, {
-            error: `Repository not found locally: ${body.repo.fullName}`,
-          });
-          return;
         }
-        loopLog(
-          body.loopId,
-          `Ignoring repo.fullName for ${body.command}: not found locally (${body.repo.fullName})`,
-        );
+        const cloneResult = configDir !== null
+          ? await cloneRepoViaGh(
+              body.repo.fullName,
+              allowedDirs,
+              body.loopId,
+              configDir,
+            )
+          : { ok: false as const, reason: "symphony directory not configured" };
+        if (cloneResult.ok) {
+          expandedRepoPath = cloneResult.path;
+        } else {
+          loopError(
+            body.loopId,
+            `clone failed for ${body.repo.fullName}: ${cloneResult.reason}`,
+          );
+          if (repoRequirement === "REQUIRED") {
+            await postLoopEventBounded(
+              apiBaseUrl,
+              body.loopId,
+              body.closedLoopAuthToken,
+              {
+                type: LoopEventType.Error,
+                code: LoopErrorCode.RepoNotFound,
+                message: `Repository not found locally: ${body.repo.fullName}`,
+              },
+            );
+            // runningLoops.delete handled by finally block (spawnedSuccessfully remains false)
+            json(context, 404, {
+              error: `Repository not found locally: ${body.repo.fullName}`,
+            });
+            return;
+          }
+          loopLog(
+            body.loopId,
+            `Ignoring repo.fullName for ${body.command}: not found locally (${body.repo.fullName})`,
+          );
+        }
       }
     }
 
@@ -3860,6 +4034,7 @@ export function registerSymphonyLoopRoutes(
   getWebAppOrigin?: () => string,
   worktreeProvider?: WorktreeProvider,
   loopTokenStore?: LoopTokenStore,
+  getSymphonyDir?: () => string,
 ): void {
   dispatcher.register(
     "POST",
@@ -3873,6 +4048,7 @@ export function registerSymphonyLoopRoutes(
         getWebAppOrigin,
         worktreeProvider,
         loopTokenStore,
+        getSymphonyDir,
       );
     },
   );
