@@ -1015,6 +1015,51 @@ test("tryPostCompletedEvent EXECUTE prefers executionResult branch_name over git
   assert.ok(!body.includes('"branchName":"git-head-branch"'));
 });
 
+test("tryPostCompletedEvent includes execute finalization metadata for EXECUTE jobs", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const jobStore = createStore("step-complete-exec-finalization-metadata");
+  const job = createBaseJob({
+    claudeWorkDir,
+    command: "EXECUTE",
+    finalizationSource: "boot-recovery",
+    executeFinalizationStatus: "success",
+    executeFinalizationPath: "artifact-existing",
+    executeFinalizationReason: "existing execution-result.json reused",
+  });
+  jobStore.upsert(job);
+
+  const artifacts = {
+    executionResult: {
+      pr_url: "https://example.com/pr/4",
+      pr_number: 4,
+      branch_name: "feat/recovered-complete",
+      has_changes: true,
+    },
+  };
+
+  await tryPostCompletedEvent(
+    job,
+    "EXECUTE",
+    claudeWorkDir,
+    artifacts,
+    [],
+    artifactDeps(jobStore),
+  );
+
+  const parsed = JSON.parse(fetchCalls[0]?.body ?? "{}") as {
+    result?: Record<string, unknown>;
+  };
+  assert.equal(parsed.result?.finalizationSource, "boot-recovery");
+  assert.equal(parsed.result?.executeFinalizationStatus, "success");
+  assert.equal(parsed.result?.executeFinalizationPath, "artifact-existing");
+  assert.equal(
+    parsed.result?.executeFinalizationReason,
+    "existing execution-result.json reused",
+  );
+});
+
 test("tryUploadArtifacts sends sessionId and branchName in metadata", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
@@ -1045,6 +1090,56 @@ test("tryUploadArtifacts sends sessionId and branchName in metadata", async () =
   const parsed = JSON.parse(uploadCall.body) as { metadata?: Record<string, unknown> };
   assert.equal(parsed.metadata?.sessionId, "upload-sess-xyz");
   assert.equal(parsed.metadata?.branchName, "upload-md-branch");
+});
+
+test("tryUploadArtifacts includes execute finalization metadata for EXECUTE jobs", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(
+    path.join(claudeWorkDir, "execution-result.json"),
+    JSON.stringify({
+      has_changes: true,
+      pr_url: "https://example.com/pr/11",
+      pr_number: 11,
+      branch_name: "feat/recovered-upload",
+      base_ref: "main",
+      base_branch: "main",
+      commit_sha: "abc123",
+    }),
+  );
+
+  const jobStore = createStore("step-upload-exec-finalization-metadata");
+  const job = createBaseJob({
+    claudeWorkDir,
+    command: "EXECUTE",
+    finalizationSource: "boot-recovery",
+    executeFinalizationStatus: "success",
+    executeFinalizationPath: "artifact-existing",
+    executeFinalizationReason: "existing execution-result.json reused",
+  });
+  jobStore.upsert(job);
+
+  const warnings: string[] = [];
+  const { failed } = await tryUploadArtifacts(
+    job,
+    "EXECUTE",
+    claudeWorkDir,
+    undefined,
+    warnings,
+    artifactDeps(jobStore),
+  );
+
+  assert.equal(failed, false);
+  const uploadCall = fetchCalls.find((c) => c.url.includes("/upload-artifacts"));
+  assert.ok(uploadCall);
+  const parsed = JSON.parse(uploadCall.body) as { metadata?: Record<string, unknown> };
+  assert.equal(parsed.metadata?.finalizationSource, "boot-recovery");
+  assert.equal(parsed.metadata?.executeFinalizationStatus, "success");
+  assert.equal(parsed.metadata?.executeFinalizationPath, "artifact-existing");
+  assert.equal(
+    parsed.metadata?.executeFinalizationReason,
+    "existing execution-result.json reused",
+  );
 });
 
 test("tryPostCompletedEvent records EVENT_POST_FAILED when HTTP fails", async () => {

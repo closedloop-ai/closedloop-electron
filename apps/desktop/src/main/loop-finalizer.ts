@@ -1,5 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { getResolvedGitPath } from "../server/operations/symphony-loop.js";
+import {
+  getResolvedGitPath,
+  runExecuteFinalization,
+} from "../server/operations/symphony-loop.js";
 import crypto from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -32,6 +35,7 @@ export interface LoopFinalizerDeps {
   apiAuthToken: string;
   apiBaseUrl: string;
   isProcessRunning: (pid: number) => boolean;
+  getAllowedDirectories?: () => string[];
   /** When set, persisted loop runner token is cleared after terminal status is written. */
   loopTokenStore?: LoopTokenStore;
   /**
@@ -71,6 +75,40 @@ type ArtifactUploadDeps = Pick<
   LoopFinalizerDeps,
   "jobStore" | "apiAuthToken" | "apiBaseUrl"
 >;
+
+function hasTerminalExecuteFinalization(
+  status: LocalJob["executeFinalizationStatus"] | undefined,
+): boolean {
+  return (
+    status === "success" ||
+    status === "no-changes" ||
+    status === "error" ||
+    status === "skipped"
+  );
+}
+
+function getExecuteFinalizationMetadata(
+  job: LocalJob,
+  command: string,
+): Record<string, unknown> {
+  if (command !== "EXECUTE") {
+    return {};
+  }
+  return {
+    ...(job.finalizationSource
+      ? { finalizationSource: job.finalizationSource }
+      : {}),
+    ...(job.executeFinalizationStatus
+      ? { executeFinalizationStatus: job.executeFinalizationStatus }
+      : {}),
+    ...(job.executeFinalizationPath
+      ? { executeFinalizationPath: job.executeFinalizationPath }
+      : {}),
+    ...(job.executeFinalizationReason
+      ? { executeFinalizationReason: job.executeFinalizationReason }
+      : {}),
+  };
+}
 
 /** Read Claude session id from the loop workdir (matches legacy symphony-loop completion path). */
 function readLoopSessionId(claudeWorkDir: string): string | undefined {
@@ -167,7 +205,10 @@ function buildCompletedEventResult(
     result.sessionId = sessionId;
   }
 
-  return result;
+  return {
+    ...result,
+    ...getExecuteFinalizationMetadata(job, command),
+  };
 }
 
 function buildArtifactUploadMetadata(
@@ -187,6 +228,7 @@ function buildArtifactUploadMetadata(
     command: command.toLowerCase(),
     ...(sessionId ? { sessionId } : {}),
     ...(branchName ? { branchName } : {}),
+    ...getExecuteFinalizationMetadata(job, command),
   };
 }
 
@@ -698,6 +740,7 @@ export async function finalizeLoopFromRuntime(
     loopTokenStore,
     cleanupAdditionalWorktrees,
   } = deps;
+  const getAllowedDirectories = deps.getAllowedDirectories ?? (() => []);
 
   if (
     job.status === "CANCEL_PENDING" &&
@@ -771,6 +814,34 @@ export async function finalizeLoopFromRuntime(
 
   if (persistBeforeCloud) {
     persistFinalJobStatus(resolvedJob, isSuccessStatus, warnings, jobStore);
+    resolvedJob = jobStore.getByLoopId(resolvedJob.loopId) ?? resolvedJob;
+  }
+
+  if (
+    command === "EXECUTE" &&
+    isSuccessStatus &&
+    !hasTerminalExecuteFinalization(resolvedJob.executeFinalizationStatus)
+  ) {
+    const executeFinalization = await runExecuteFinalization({
+      worktreeDir: resolvedJob.worktreeDir,
+      claudeWorkDir,
+      loopId: resolvedJob.loopId,
+      artifactSlug: resolvedJob.artifactSlug,
+      baseBranch: resolvedJob.baseBranch ?? "main",
+      webAppOrigin: resolvedJob.webAppOrigin ?? "",
+      committer: resolvedJob.committer,
+      getAllowedDirectories,
+      expectedMcpUrl: resolvedJob.expectedMcpUrl,
+      jobStore,
+      source: reason === "live-exit" ? "live-exit" : "boot-recovery",
+    });
+    if (
+      executeFinalization.status === "error" &&
+      !warnings.includes("GIT_PUSH_FAILED")
+    ) {
+      warnings.push("GIT_PUSH_FAILED");
+    }
+    resolvedJob = jobStore.getByLoopId(resolvedJob.loopId) ?? resolvedJob;
   }
 
   let remoteError: string | undefined;

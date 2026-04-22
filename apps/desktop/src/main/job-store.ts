@@ -16,6 +16,26 @@ export type LocalJobKind = "SYMPHONY_LOOP";
 
 export type LocalJobCommand = "PLAN" | "EXECUTE" | "REQUEST_CHANGES" | "DECOMPOSE" | "GENERATE_PRD";
 
+export type LocalJobCommitter = {
+  name: string;
+  email: string;
+};
+
+export type LocalJobFinalizationSource = "live-exit" | "boot-recovery";
+
+export type LocalJobExecuteFinalizationStatus =
+  | "pending"
+  | "success"
+  | "no-changes"
+  | "error"
+  | "skipped";
+
+export type LocalJobExecuteFinalizationPath =
+  | "llm"
+  | "git-fallback"
+  | "artifact-existing"
+  | "none";
+
 export type TaskProgress = {
   pending: number;
   completed: number;
@@ -33,6 +53,10 @@ export type LocalJob = {
   artifactId?: string;
   artifactSlug?: string;
   issueId?: string;
+  baseBranch?: string;
+  webAppOrigin?: string;
+  expectedMcpUrl?: string;
+  committer?: LocalJobCommitter;
   repoPath?: string;
   localRepoPath?: string;
   worktreeDir?: string;
@@ -73,6 +97,16 @@ export type LocalJob = {
   recoveryAttempts?: number;
   /** Last cloud finalization error for diagnostics and retry decisions. */
   lastRecoveryError?: string;
+  finalizationSource?: LocalJobFinalizationSource;
+  executeFinalizationStatus?: LocalJobExecuteFinalizationStatus;
+  executeFinalizationPath?: LocalJobExecuteFinalizationPath;
+  executeFinalizationStartedAt?: string;
+  executeFinalizationCompletedAt?: string;
+  executeFinalizationReason?: string;
+  executeFinalizationPreExecutionResultPresent?: boolean;
+  executeFinalizationPrePrBodyPresent?: boolean;
+  executeFinalizationPostExecutionResultPresent?: boolean;
+  executeFinalizationPostPrBodyPresent?: boolean;
   apiBaseUrl?: string;
 };
 

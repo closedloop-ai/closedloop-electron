@@ -178,22 +178,40 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
     artifacts: {
       executionResult?: {
         pr_url?: string;
+        pr_number?: number | string;
+        branch_name?: string;
         has_changes?: boolean;
       };
     };
     metadata: Record<string, unknown>;
   };
 
-  // No changes → no PR URL in execution result
+  // No changes now persist an explicit execution-result.json so recovery can
+  // replay the same completion metadata after restart.
   assert.equal(
     uploadBody.artifacts.executionResult?.pr_url,
-    undefined,
-    `Expected no pr_url when there are no changes, got: ${uploadBody.artifacts.executionResult?.pr_url}`,
+    "",
+    `Expected empty-string pr_url when there are no changes, got: ${uploadBody.artifacts.executionResult?.pr_url}`,
   );
   assert.equal(
     uploadBody.artifacts.executionResult?.has_changes,
-    undefined,
-    "Expected has_changes to be absent when there are no changes",
+    false,
+    "Expected has_changes=false when there are no changes",
+  );
+  assert.equal(
+    uploadBody.artifacts.executionResult?.pr_number,
+    0,
+    `Expected pr_number=0 when there are no changes, got: ${uploadBody.artifacts.executionResult?.pr_number}`,
+  );
+  assert.equal(
+    uploadBody.metadata.executeFinalizationStatus,
+    "no-changes",
+    `Expected executeFinalizationStatus=no-changes, got: ${String(uploadBody.metadata.executeFinalizationStatus)}`,
+  );
+  assert.equal(
+    uploadBody.metadata.executeFinalizationPath,
+    "git-fallback",
+    `Expected executeFinalizationPath=git-fallback, got: ${String(uploadBody.metadata.executeFinalizationPath)}`,
   );
 
   // Also check the completed event does NOT contain GIT_PUSH_FAILED in warnings.
@@ -204,6 +222,16 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
       "GIT_PUSH_FAILED",
     ),
     `Expected no GIT_PUSH_FAILED warning in completed event for no-changes path, got warnings: ${JSON.stringify(completedEvent.warnings)}`,
+  );
+  assert.equal(
+    completedEvent.result?.executeFinalizationStatus,
+    "no-changes",
+    `Expected completed event executeFinalizationStatus=no-changes, got: ${String(completedEvent.result?.executeFinalizationStatus)}`,
+  );
+  assert.equal(
+    completedEvent.result?.executeFinalizationPath,
+    "git-fallback",
+    `Expected completed event executeFinalizationPath=git-fallback, got: ${String(completedEvent.result?.executeFinalizationPath)}`,
   );
 });
 
