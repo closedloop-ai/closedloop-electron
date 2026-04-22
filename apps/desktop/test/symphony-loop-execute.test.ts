@@ -820,6 +820,10 @@ test("EXECUTE: non-cancelled failure uploads current plan state before posting t
 
   const terminalJob = await waitForJobTerminal(jobStore, loopId);
   assert.equal(terminalJob.status, "FAILED");
+  assert.ok(
+    terminalJob.artifactsUploadedAt,
+    "Expected artifactsUploadedAt to persist after failure upload",
+  );
 
   const uploadRequest = await mock.waitForRequest("upload-artifacts");
   const uploadBody = JSON.parse(uploadRequest.body) as {

@@ -2364,8 +2364,9 @@ export async function handleProcessCompletion(
 
     if (existingJob && jobStore) {
       const now = new Date().toISOString();
+      const latestJob = jobStore.getByLoopId(loopId) ?? existingJob;
       jobStore.upsert({
-        ...existingJob,
+        ...latestJob,
         status: wasCancelled ? "CANCELLED" : "FAILED",
         liveActivity:
           !wasCancelled && isContextLimit
@@ -2377,7 +2378,7 @@ export async function handleProcessCompletion(
         warning:
           failureWarnings.length > 0
             ? failureWarnings.map(sanitizeErrorMessage).join("; ")
-            : existingJob.warning,
+            : latestJob.warning,
         updatedAt: now,
         completedAt: now,
       });
