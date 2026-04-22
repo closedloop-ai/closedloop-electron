@@ -284,4 +284,19 @@ describe("getCodePluginVersion", () => {
 
     assert.equal(getCodePluginVersion(registryPath), "9.9.9");
   });
+
+  test("returns 'unknown' when registry installPath no longer exists (stale manifest)", async () => {
+    const tmpDir = await makeTempDir();
+    delete process.env["CL_PLUGIN_VERSION"];
+    const registry = {
+      version: 2,
+      plugins: {
+        "code@closedloop-ai": [{ installPath: path.join(tmpDir, "gone"), version: "1.2.3" }]
+      }
+    };
+    const registryPath = path.join(tmpDir, "installed_plugins.json");
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+
+    assert.equal(getCodePluginVersion(registryPath), "unknown");
+  });
 });

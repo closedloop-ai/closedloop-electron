@@ -86,7 +86,7 @@ export function getInstalledPluginVersions(registryPath?: string): Record<string
         continue;
       }
       const lastEntry = entries.at(-1);
-      if (lastEntry) {
+      if (lastEntry?.installPath && existsSync(lastEntry.installPath)) {
         result[key] = lastEntry.version ?? "installed";
       }
     }
