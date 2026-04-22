@@ -3551,12 +3551,7 @@ async function handleLoopRequest(
       await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
     };
 
-    // Pre-flight: verify required binaries exist BEFORE posting 'started' event.
-    // All commands need claude CLI. PLAN/EXECUTE additionally need run-loop.sh.
-    const usesRunLoop = body.command === "PLAN" || body.command === "EXECUTE";
-    let scriptPath: string | null = null;
-
-    // Every command needs claude — verify it consistently for all paths.
+    // Pre-flight: verify claude CLI exists BEFORE posting 'started' event.
     const resolved = resolveBinarySync("claude", overrideGetBinaryPaths?.()?.claude);
     if (resolved.source === "fallback") {
       await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
@@ -3577,24 +3572,6 @@ async function handleLoopRequest(
     // "override_invalid" is intentionally allowed -- the user set an explicit
     // override and should see the resulting ENOENT from the spawn, not a
     // confusing "not found in PATH" error.
-
-    if (usesRunLoop) {
-      scriptPath = findPluginScript("code", "run-loop.sh");
-      if (!scriptPath) {
-        await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-          type: LoopEventType.Error,
-          code: LoopErrorCode.ScriptNotFound,
-          message: "run-loop.sh not found in plugin cache",
-        });
-        Observability.preflightScriptNotFound(
-          commandId,
-          operationId,
-          body.loopId,
-        );
-        json(context, 500, { error: "run-loop.sh not found in plugin cache" });
-        return;
-      }
-    }
 
     try {
       if (loopTokenStore) {

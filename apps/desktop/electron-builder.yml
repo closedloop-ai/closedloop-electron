@@ -4,6 +4,7 @@ productName: ClosedLoop
 files:
   - dist/**/*
   - src/renderer/index.html
+  - src/renderer/terminal.html
   - package.json
 
 extraResources:

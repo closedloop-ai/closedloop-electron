@@ -4,6 +4,22 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Terminal</title>
+  <script>
+    // Extract auth token and clear it from the URL before any external scripts load
+    (function () {
+      var p = new URLSearchParams(window.location.search);
+      window.__termParams = {
+        loopId: p.get("loopId") || "",
+        port: p.get("port") || "19432",
+        command: p.get("command") || "",
+        token: p.get("token") || "",
+      };
+      if (p.has("token")) {
+        p.delete("token");
+        history.replaceState(null, "", window.location.pathname + "?" + p.toString());
+      }
+    })();
+  </script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -59,11 +75,8 @@
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
   <script>
     (function () {
-      const params = new URLSearchParams(window.location.search);
-      const loopId = params.get("loopId") || "";
-      const port = params.get("port") || "19432";
-      const command = params.get("command") || "";
-      const authToken = params.get("token") || "";
+      const { loopId, port, command, token: authToken } = window.__termParams;
+      delete window.__termParams;
 
       const statusDot = document.getElementById("status-dot");
       const statusText = document.getElementById("status-text");
