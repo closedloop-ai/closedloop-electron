@@ -4,6 +4,8 @@ import type { ProtocolEnvelope } from "./cloud-protocol.js";
 export const TELEMETRY_LOG_TAIL_LINES = 50;
 export const TELEMETRY_LOG_TAIL_MAX_BYTES = 32_768; // 32 KiB
 export const TELEMETRY_MAX_FIELD_BYTES = 4_096; // 4 KiB
+export const STDERR_TAIL_MAX_BYTES = 4_096; // 4 KiB
+export const STDERR_TAIL_MAX_LINES = 50;
 
 export type TelemetrySeverity = "info" | "warn" | "error";
 
@@ -45,6 +47,20 @@ export interface TelemetryTraceContext {
 export interface TelemetryDiagnostics {
   exitCode?: number;
   logTail?: string;
+  stderrTail?: string;
+  exitSignal?: string;
+  elapsedMs?: number;
+  stdoutBytes?: number;
+  abortReason?: string;
+  spawnMeta?: {
+    command: string;
+    args: string[];
+    cwd: string;
+    claudeVersion?: string;
+    binaryPath: string;
+    authFilesExist: boolean;
+    envSnapshot: Record<string, string>;
+  };
   tokenUsage?: { inputTokens: number; outputTokens: number };
   diagnosticsVersion?: number;
   errorStack?: string;

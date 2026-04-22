@@ -17,8 +17,10 @@ import os from "node:os";
 import path from "node:path";
 import {
   readLogTail,
+  readStderrTail,
   readTextFile,
   sanitizeErrorMessage,
+  stripAnsi,
 } from "../../main/diagnostics-helpers.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
@@ -62,7 +64,12 @@ import {
   SymphonyDirNotConfiguredError,
   tryAssertRepoAllowed,
 } from "./symphony-utils.js";
-export { readLogTail } from "../../main/diagnostics-helpers.js";
+export {
+  readFileTail,
+  readLogTail,
+  readStderrTail,
+  stripAnsi,
+} from "../../main/diagnostics-helpers.js";
 
 // ---------------------------------------------------------------------------
 // WorktreeProvider: abstraction over git worktree operations for testability
@@ -1387,6 +1394,7 @@ function redactCredentials(text: string): string {
  */
 function collectFailureDiagnostics(claudeWorkDir: string): {
   logTail: string | undefined;
+  stderrTail: string | undefined;
   tokenUsage: {
     inputTokens: number;
     outputTokens: number;
@@ -1398,7 +1406,11 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
 } {
   const logPath = path.join(claudeWorkDir, "symphony-loop.log");
   const rawTail = readLogTail(logPath);
-  const logTail = rawTail ? redactCredentials(rawTail) : undefined;
+  const logTail = rawTail ? redactCredentials(stripAnsi(rawTail)) : undefined;
+  const rawStderr = readStderrTail(claudeWorkDir);
+  const stderrTail = rawStderr
+    ? redactCredentials(stripAnsi(rawStderr))
+    : undefined;
   const {
     inputTokens,
     outputTokens,
@@ -1408,6 +1420,7 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
   } = parseTokenUsage(claudeWorkDir);
   return {
     logTail,
+    stderrTail,
     tokenUsage: {
       inputTokens,
       outputTokens,
@@ -1415,7 +1428,7 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
       cacheReadInputTokens,
     },
     tokensByModel,
-    diagnosticsVersion: 1,
+    diagnosticsVersion: 2,
   };
 }
 
@@ -2121,16 +2134,28 @@ export async function handleProcessCompletion(
   wt: WorktreeProvider = defaultWorktreeProvider,
   loopTokenStore?: LoopTokenStore,
   additionalWorktreeDirs: { dir: string; repoPath: string }[] = [],
+  exitSignal?: string,
+  spawnStartedAt?: number,
+  spawnMeta?: {
+    command: string;
+    args: string[];
+    cwd: string;
+    claudeVersion?: string;
+    binaryPath: string;
+    authFilesExist: boolean;
+    envSnapshot: Record<string, string>;
+  },
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
   // Temp-dir commands (DECOMPOSE, EVALUATE_*) need the entire temp tree removed on cleanup.
   const tempCleanupDir = usedTempDir ? (worktreeDir ?? claudeWorkDir) : null;
+  const elapsedMs = spawnStartedAt ? Date.now() - spawnStartedAt : undefined;
 
   loopLog(loopId, `Process exited with code ${exitCode}, command=${command}`);
 
   if (exitCode !== 0) {
-    // Collect diagnostics (log tail + token usage) for the failure event
-    const diagnostics = collectFailureDiagnostics(claudeWorkDir);
+    // Collect diagnostics (log tail + stderr + token usage) for the failure event
+    const baseDiagnostics = collectFailureDiagnostics(claudeWorkDir);
     const sessionFileForTelemetry = path.join(claudeWorkDir, "session-id.txt");
     const rawSessionId = readTextFile(sessionFileForTelemetry);
     const failureSessionId = rawSessionId ? rawSessionId.trim() : undefined;
@@ -2139,6 +2164,20 @@ export async function handleProcessCompletion(
     const wasCancelled =
       existingJob?.status === "CANCEL_PENDING" ||
       existingJob?.status === "CANCELLED";
+
+    // Determine abort reason
+    const abortReason: string | undefined = wasCancelled
+      ? "cancelled"
+      : "process-exit";
+
+    // Build enriched diagnostics with new fields
+    const diagnostics = {
+      ...baseDiagnostics,
+      exitSignal,
+      elapsedMs,
+      abortReason,
+      spawnMeta,
+    };
 
     if (wasCancelled) {
       Observability.jobCancelled(
@@ -2158,6 +2197,10 @@ export async function handleProcessCompletion(
         tokenUsage: diagnostics.tokenUsage,
         tokensByModel: diagnostics.tokensByModel,
         logTail: diagnostics.logTail,
+        stderrTail: diagnostics.stderrTail,
+        exitSignal: diagnostics.exitSignal,
+        elapsedMs: diagnostics.elapsedMs,
+        abortReason: diagnostics.abortReason,
         diagnosticsVersion: String(diagnostics.diagnosticsVersion),
       });
     } else {
@@ -2204,6 +2247,10 @@ export async function handleProcessCompletion(
           tokenUsage: diagnostics.tokenUsage,
           tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
+          stderrTail: diagnostics.stderrTail,
+          exitSignal: diagnostics.exitSignal,
+          elapsedMs: diagnostics.elapsedMs,
+          abortReason: diagnostics.abortReason,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
         });
       } else if (isAuthChallenge) {
@@ -2230,6 +2277,10 @@ export async function handleProcessCompletion(
           tokenUsage: diagnostics.tokenUsage,
           tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
+          stderrTail: diagnostics.stderrTail,
+          exitSignal: diagnostics.exitSignal,
+          elapsedMs: diagnostics.elapsedMs,
+          abortReason: diagnostics.abortReason,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
         });
       } else {
@@ -2247,6 +2298,10 @@ export async function handleProcessCompletion(
           tokenUsage: diagnostics.tokenUsage,
           tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
+          stderrTail: diagnostics.stderrTail,
+          exitSignal: diagnostics.exitSignal,
+          elapsedMs: diagnostics.elapsedMs,
+          abortReason: diagnostics.abortReason,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
         });
       }
@@ -2535,6 +2590,8 @@ export async function handleProcessCompletion(
         code: LoopErrorCode.NoWorkProduced,
         message: noWorkMsg,
         loopId,
+        abortReason: "ghost-loop",
+        elapsedMs,
       });
       if (jobStore) {
         const existingJob = jobStore.getByLoopId(loopId);
@@ -3538,6 +3595,23 @@ async function handleLoopRequest(
       return;
     }
     let child: ReturnType<typeof spawn>;
+    let spawnStartedAt = 0;
+    const collectedSpawnMeta: {
+      command: string;
+      args: string[];
+      cwd: string;
+      claudeVersion?: string;
+      binaryPath: string;
+      authFilesExist: boolean;
+      envSnapshot: Record<string, string>;
+    } = {
+      command: "",
+      args: [],
+      cwd: claudeWorkDir,
+      binaryPath: "",
+      authFilesExist: false,
+      envSnapshot: {},
+    };
 
     try {
       // Reuse the path from pre-flight so validation and execution stay aligned.
@@ -3550,6 +3624,24 @@ async function handleLoopRequest(
         // between Electron's env and the user's login shell).
         CLAUDE_BIN: claudeBinary,
       });
+
+      // Capture spawn timing and metadata for failure diagnostics
+      spawnStartedAt = Date.now();
+
+      // Collect non-sensitive env snapshot: NODE_ENV + CLAUDE_CODE_USE_* keys only
+      const envSnapshot: Record<string, string> = {};
+      for (const [key, value] of Object.entries(spawnEnv)) {
+        if (key === "NODE_ENV" || key.startsWith("CLAUDE_CODE_USE_")) {
+          envSnapshot[key] = value;
+        }
+      }
+
+      collectedSpawnMeta.command = claudeBinary;
+      collectedSpawnMeta.binaryPath = claudeBinary;
+      collectedSpawnMeta.authFilesExist = existsSync(
+        path.join(os.homedir(), ".claude"),
+      );
+      collectedSpawnMeta.envSnapshot = envSnapshot;
 
       // Shared claude CLI args for commands that run claude directly.
       // REQUEST_CHANGES omits "-" (stdin) because it passes the prompt as a CLI argument.
@@ -3584,6 +3676,8 @@ async function handleLoopRequest(
           claudeBinary,
           promptFile,
         );
+        collectedSpawnMeta.command = pipeline.cmd;
+        collectedSpawnMeta.args = pipeline.args;
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: claudeWorkDir,
           detached: true,
@@ -3606,6 +3700,8 @@ async function handleLoopRequest(
           claudeBinary,
           promptFile,
         );
+        collectedSpawnMeta.command = pipeline.cmd;
+        collectedSpawnMeta.args = pipeline.args;
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: claudeWorkDir,
           detached: true,
@@ -3636,6 +3732,8 @@ async function handleLoopRequest(
           claudeBinary,
           promptFile,
         );
+        collectedSpawnMeta.command = pipeline.cmd;
+        collectedSpawnMeta.args = pipeline.args;
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: claudeWorkDir,
           detached: true,
@@ -3671,6 +3769,9 @@ async function handleLoopRequest(
         );
 
         const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir, claudeBinary);
+        collectedSpawnMeta.command = pipeline.cmd;
+        collectedSpawnMeta.args = pipeline.args;
+        collectedSpawnMeta.cwd = worktreeDir!;
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: worktreeDir!,
           detached: true,
@@ -3688,6 +3789,9 @@ async function handleLoopRequest(
           claudeBinary,
           promptFile,
         );
+        collectedSpawnMeta.command = pipeline.cmd;
+        collectedSpawnMeta.args = pipeline.args;
+        collectedSpawnMeta.cwd = worktreeDir!;
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: worktreeDir!,
           detached: true,
@@ -3717,6 +3821,9 @@ async function handleLoopRequest(
           }
         }
 
+        collectedSpawnMeta.command = scriptPath!;
+        collectedSpawnMeta.args = scriptArgs;
+        collectedSpawnMeta.cwd = worktreeDir!;
         child = spawn(scriptPath!, scriptArgs, {
           cwd: worktreeDir!,
           detached: true,
@@ -3757,7 +3864,10 @@ async function handleLoopRequest(
       stop: () => {},
       flush: () => Promise.resolve(),
     };
-    const onceComplete = async (code: number): Promise<void> => {
+    const onceComplete = async (
+      code: number,
+      signal?: string,
+    ): Promise<void> => {
       if (completionHandled) return;
       completionHandled = true;
       loopLog(body.loopId, `onceComplete fired, code=${code}`);
@@ -3792,6 +3902,9 @@ async function handleLoopRequest(
         wt,
         loopTokenStore,
         additionalWorktreeDirs,
+        signal,
+        spawnStartedAt,
+        collectedSpawnMeta,
       ).catch((err) => {
         loopError(body.loopId, "Completion handler error:", err);
         gatewayLog.error(
@@ -3825,9 +3938,12 @@ async function handleLoopRequest(
     // Use 'exit' instead of 'close' — with detached processes using
     // inherited file descriptors (not pipes), 'close' may never fire
     // because there are no Node.js streams to track closure of.
-    child.on("exit", (code) => {
-      loopLog(body.loopId, `Process exit event, code=${code}`);
-      void onceComplete(code ?? 1);
+    child.on("exit", (code, signal) => {
+      loopLog(
+        body.loopId,
+        `Process exit event, code=${code}, signal=${signal ?? "none"}`,
+      );
+      void onceComplete(code ?? 1, signal ?? undefined);
     });
 
     const pid = child.pid ?? null;
