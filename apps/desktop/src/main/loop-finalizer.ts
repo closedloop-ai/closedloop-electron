@@ -6,6 +6,7 @@ import path from "node:path";
 import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
 import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
+import { toUploadedPlanArtifact } from "../shared/plan-artifact-utils.js";
 import {
   readLogTail,
   readTextFile,
@@ -318,6 +319,12 @@ export async function tryPostErrorEvent(
     job.status === "FAILED"
       ? `Process exited with code ${job.exitCode ?? 1}`
       : `Process ended with terminal status ${job.status}`;
+  const correlationFields = getCompletionCorrelationFields(
+    job,
+    String(job.command),
+    claudeWorkDir,
+    readArtifacts(String(job.command), claudeWorkDir, job.worktreeDir),
+  );
   const hasTokenActivity =
     tokenUsage.inputTokens > 0 ||
     tokenUsage.outputTokens > 0 ||
@@ -340,6 +347,12 @@ export async function tryPostErrorEvent(
       : {}),
     ...(logTail ? { logTail } : {}),
     ...(apiKeySource != null ? { apiKeySource } : {}),
+    ...(correlationFields.sessionId
+      ? { sessionId: correlationFields.sessionId }
+      : {}),
+    ...(correlationFields.branchName
+      ? { branchName: correlationFields.branchName }
+      : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
   };
 
@@ -490,7 +503,9 @@ function readArtifacts(
   worktreeDir?: string,
 ): Record<string, unknown> {
   if (command === "PLAN" || command === "REQUEST_CHANGES") {
-    const plan = readJsonFileSync(path.join(claudeWorkDir, "plan.json"));
+    const plan = toUploadedPlanArtifact(
+      readJsonFileSync(path.join(claudeWorkDir, "plan.json")),
+    );
     const openQuestions = readTextFile(
       path.join(claudeWorkDir, "open-questions.md"),
     );
@@ -502,6 +517,9 @@ function readArtifacts(
     };
   }
   if (command === "EXECUTE") {
+    const plan = toUploadedPlanArtifact(
+      readJsonFileSync(path.join(claudeWorkDir, "plan.json")),
+    );
     const executionResult = readJsonFileSync(
       path.join(claudeWorkDir, "execution-result.json"),
     );
@@ -509,6 +527,7 @@ function readArtifacts(
       path.join(claudeWorkDir, "code-judges.json"),
     );
     return {
+      plan: plan ?? undefined,
       executionResult: executionResult ?? undefined,
       codeJudges: codeJudges ?? undefined,
     };

@@ -24,6 +24,7 @@ import { gatewayLog } from "../../main/gateway-logger.js";
 import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
 import {
   finalizeLoopFromRuntime,
+  tryUploadArtifacts,
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
 import type { LoopTokenStore } from "../../main/loop-token-store.js";
@@ -39,6 +40,10 @@ import type {
 import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { getShellEnv, getShellPath, resolveBinarySync } from "../shell-path.js";
+import {
+  isRawPlanArtifact,
+  toUploadedPlanArtifact,
+} from "../../shared/plan-artifact-utils.js";
 import { withMcpTools } from "./chat-tools.js";
 import { findWorktreeForBranch as findWorktreeForBranchImpl } from "./git-helpers.js";
 import { startOutputTailer } from "./output-tailer.js";
@@ -263,6 +268,7 @@ interface LoopArtifact {
   type: LoopArtifactType;
   title?: string;
   content: string;
+  raw?: Record<string, unknown>;
 }
 
 /** Artifact types that represent an implementation plan. */
@@ -1223,19 +1229,42 @@ async function writeArtifactsForExecuteOrAmend(
           await fs.writeFile(planJsonPath, JSON.stringify(existing, null, 2));
         } catch {
           // If existing plan.json is corrupt, overwrite entirely
-          await fs.writeFile(planJsonPath, artifact.content);
+          if (isRawPlanArtifact(artifact.raw)) {
+            await fs.writeFile(
+              planJsonPath,
+              JSON.stringify(
+                { ...artifact.raw, content: artifact.content },
+                null,
+                2,
+              ),
+            );
+          } else {
+            await fs.writeFile(planJsonPath, artifact.content);
+          }
         }
       } else {
-        // No existing plan.json — write the content as-is.
-        // If it's valid JSON, write directly. Otherwise wrap it.
-        try {
-          JSON.parse(artifact.content);
-          await fs.writeFile(planJsonPath, artifact.content);
-        } catch {
+        // No existing plan.json — prefer the uploaded raw plan state when the
+        // worktree was recreated from a later desktop resume.
+        if (isRawPlanArtifact(artifact.raw)) {
           await fs.writeFile(
             planJsonPath,
-            JSON.stringify({ content: artifact.content }, null, 2),
+            JSON.stringify(
+              { ...artifact.raw, content: artifact.content },
+              null,
+              2,
+            ),
           );
+        } else {
+          // If it's valid JSON, write directly. Otherwise wrap it.
+          try {
+            JSON.parse(artifact.content);
+            await fs.writeFile(planJsonPath, artifact.content);
+          } catch {
+            await fs.writeFile(
+              planJsonPath,
+              JSON.stringify({ content: artifact.content }, null, 2),
+            );
+          }
         }
       }
     } else if (
@@ -1302,8 +1331,8 @@ async function writeArtifactsForGeneratePrd(
 // ---------------------------------------------------------------------------
 
 function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
-  const plan = readJsonFileSync(
-    path.join(claudeWorkDir, LoopArtifactFile.Plan),
+  const plan = toUploadedPlanArtifact(
+    readJsonFileSync(path.join(claudeWorkDir, LoopArtifactFile.Plan)),
   );
   const openQuestions = readTextFile(
     path.join(claudeWorkDir, LoopArtifactFile.OpenQuestions),
@@ -1320,6 +1349,9 @@ function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
 }
 
 function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
+  const plan = toUploadedPlanArtifact(
+    readJsonFileSync(path.join(claudeWorkDir, LoopArtifactFile.Plan)),
+  );
   const executionResult = readJsonFileSync(
     path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
   );
@@ -1328,9 +1360,35 @@ function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
   );
 
   return {
+    plan: plan ?? undefined,
     executionResult: executionResult ?? undefined,
     codeJudges: codeJudges ?? undefined,
   };
+}
+
+function parseWarningEntries(warning: string | undefined): string[] {
+  if (!warning) {
+    return [];
+  }
+
+  return warning
+    .split(";")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+}
+
+function mergeWarningEntries(
+  existingWarning: string | undefined,
+  warnings: readonly string[],
+): string | undefined {
+  if (warnings.length === 0) {
+    return existingWarning;
+  }
+
+  const mergedWarnings = [
+    ...new Set([...parseWarningEntries(existingWarning), ...warnings]),
+  ];
+  return mergedWarnings.map(sanitizeErrorMessage).join("; ");
 }
 
 function readDecomposeOutputs(workDir: string): Record<string, unknown> {
@@ -2139,6 +2197,55 @@ export async function handleProcessCompletion(
     const wasCancelled =
       existingJob?.status === "CANCEL_PENDING" ||
       existingJob?.status === "CANCELLED";
+    const failureBranchName = worktreeDir
+      ? wt.getCurrentBranch(worktreeDir) ?? undefined
+      : undefined;
+    const failureWarnings: string[] = [];
+
+    if (!wasCancelled && command === "EXECUTE") {
+      if (existingJob && jobStore) {
+        const uploadResult = await tryUploadArtifacts(
+          existingJob,
+          command,
+          claudeWorkDir,
+          worktreeDir ?? undefined,
+          failureWarnings,
+          {
+            jobStore,
+            apiAuthToken: closedLoopAuthToken,
+            apiBaseUrl,
+          },
+        );
+        if (uploadResult.failed) {
+          gatewayLog.warn(
+            "loop-harness",
+            `EXECUTE failure artifact upload failed for loopId=${loopId}: ${uploadResult.error ?? "unknown error"}`,
+          );
+        }
+      } else {
+        const uploadResult = await uploadArtifacts(
+          apiBaseUrl,
+          loopId,
+          closedLoopAuthToken,
+          {
+            artifacts: readExecuteOutputs(claudeWorkDir),
+            metadata: {
+              finishedAt: new Date().toISOString(),
+              command: command.toLowerCase(),
+              ...(failureSessionId ? { sessionId: failureSessionId } : {}),
+              ...(failureBranchName ? { branchName: failureBranchName } : {}),
+            },
+          },
+        );
+        if (!uploadResult.success) {
+          failureWarnings.push("ARTIFACT_UPLOAD_FAILED");
+          gatewayLog.warn(
+            "loop-harness",
+            `EXECUTE failure artifact upload failed for loopId=${loopId}: ${uploadResult.error ?? "unknown error"}`,
+          );
+        }
+      }
+    }
 
     if (wasCancelled) {
       Observability.jobCancelled(
@@ -2155,10 +2262,12 @@ export async function handleProcessCompletion(
         message: "Loop cancelled",
         loopId,
         sessionId: failureSessionId,
+        ...(failureBranchName ? { branchName: failureBranchName } : {}),
         tokenUsage: diagnostics.tokenUsage,
         tokensByModel: diagnostics.tokensByModel,
         logTail: diagnostics.logTail,
         diagnosticsVersion: String(diagnostics.diagnosticsVersion),
+        ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
       });
     } else {
       Observability.jobFailed(
@@ -2201,10 +2310,12 @@ export async function handleProcessCompletion(
           message: limitMsg,
           loopId,
           sessionId: failureSessionId,
+          ...(failureBranchName ? { branchName: failureBranchName } : {}),
           tokenUsage: diagnostics.tokenUsage,
           tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
+          ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
         });
       } else if (isAuthChallenge) {
         const authMsg = jsonlAuthError ?? "Claude auth challenge detected";
@@ -2227,10 +2338,12 @@ export async function handleProcessCompletion(
           message: authMsg,
           loopId,
           sessionId: failureSessionId,
+          ...(failureBranchName ? { branchName: failureBranchName } : {}),
           tokenUsage: diagnostics.tokenUsage,
           tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
+          ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
         });
       } else {
         loopError(loopId, `Process failed with exit code ${exitCode}`);
@@ -2244,18 +2357,21 @@ export async function handleProcessCompletion(
           message: `Process exited with code ${exitCode}`,
           loopId,
           sessionId: failureSessionId,
+          ...(failureBranchName ? { branchName: failureBranchName } : {}),
           tokenUsage: diagnostics.tokenUsage,
           tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
+          ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
         });
       }
     }
 
     if (existingJob && jobStore) {
       const now = new Date().toISOString();
+      const latestJob = jobStore.getByLoopId(loopId) ?? existingJob;
       jobStore.upsert({
-        ...existingJob,
+        ...latestJob,
         status: wasCancelled ? "CANCELLED" : "FAILED",
         liveActivity:
           !wasCancelled && isContextLimit
@@ -2264,6 +2380,7 @@ export async function handleProcessCompletion(
               ? `Auth challenge: ${jsonlAuthError ?? "authentication error"}`
               : undefined,
         exitCode,
+        warning: mergeWarningEntries(latestJob.warning, failureWarnings),
         updatedAt: now,
         completedAt: now,
       });
@@ -2586,16 +2703,9 @@ export async function handleProcessCompletion(
     if (warnings.length > 0 && jobStore) {
       const existingJob = jobStore.getByLoopId(loopId);
       if (existingJob) {
-        const existingWarnings = existingJob.warning
-          ? existingJob.warning
-              .split(";")
-              .map((value) => value.trim())
-              .filter((value) => value.length > 0)
-          : [];
-        const mergedWarnings = [...new Set([...existingWarnings, ...warnings])];
         jobStore.upsert({
           ...existingJob,
-          warning: mergedWarnings.map(sanitizeErrorMessage).join("; "),
+          warning: mergeWarningEntries(existingJob.warning, warnings),
           updatedAt: new Date().toISOString(),
         });
       }

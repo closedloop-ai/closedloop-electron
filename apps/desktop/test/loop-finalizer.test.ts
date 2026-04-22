@@ -70,7 +70,10 @@ function createBaseJob(overrides?: Partial<LocalJob>): LocalJob {
 test("finalizeLoopFromRuntime uploads, posts completion, and persists terminal state", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
-  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ tasks: [] }));
+  await fs.writeFile(
+    path.join(claudeWorkDir, "plan.json"),
+    JSON.stringify({ content: "Plan content", tasks: [] }),
+  );
   await fs.writeFile(path.join(claudeWorkDir, "open-questions.md"), "none");
 
   const jobStore = createStore("finalizer-success");
@@ -93,6 +96,13 @@ test("finalizeLoopFromRuntime uploads, posts completion, and persists terminal s
   assert.ok(persisted.finalStatusPersistedAt);
   assert.ok(persisted.cloudFinalizedAt);
   assert.equal(fetchCalls.length, 2);
+  const uploadBody = JSON.parse(fetchCalls[0]?.body ?? "{}") as {
+    artifacts?: { plan?: Record<string, unknown> };
+  };
+  assert.deepEqual(uploadBody.artifacts?.plan, {
+    content: "Plan content",
+    raw: { content: "Plan content", tasks: [] },
+  });
   assert.equal(telemetryEvents.length, 1);
 });
 
@@ -597,7 +607,10 @@ function initGitRepoAt(dir: string, branchName: string): void {
 test("tryUploadArtifacts POSTs artifacts and sets artifactsUploadedAt on success", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
-  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ tasks: [] }));
+  await fs.writeFile(
+    path.join(claudeWorkDir, "plan.json"),
+    JSON.stringify({ content: "Plan content", tasks: [] }),
+  );
 
   const jobStore = createStore("step-upload-ok");
   const job = createBaseJob({ claudeWorkDir });
@@ -618,6 +631,72 @@ test("tryUploadArtifacts POSTs artifacts and sets artifactsUploadedAt on success
   assert.equal(fetchCalls.filter((c) => c.url.includes("/upload-artifacts")).length, 1);
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted?.artifactsUploadedAt);
+  const uploadBody = JSON.parse(fetchCalls[0]?.body ?? "{}") as {
+    artifacts?: { plan?: Record<string, unknown> };
+  };
+  assert.deepEqual(uploadBody.artifacts?.plan, {
+    content: "Plan content",
+    raw: { content: "Plan content", tasks: [] },
+  });
+});
+
+test("tryUploadArtifacts includes current plan state on EXECUTE uploads", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(
+    path.join(claudeWorkDir, "plan.json"),
+    JSON.stringify({
+      content: "Plan content",
+      pendingTasks: ["task-1"],
+      completedTasks: ["task-0"],
+    }),
+  );
+  await fs.writeFile(
+    path.join(claudeWorkDir, "execution-result.json"),
+    JSON.stringify({ has_changes: false }),
+  );
+  await fs.writeFile(
+    path.join(claudeWorkDir, "code-judges.json"),
+    JSON.stringify({ score: 0.9 }),
+  );
+
+  const jobStore = createStore("step-upload-execute-plan");
+  const job = createBaseJob({
+    claudeWorkDir,
+    command: "EXECUTE",
+  });
+  jobStore.upsert(job);
+
+  const warnings: string[] = [];
+  const { failed } = await tryUploadArtifacts(
+    job,
+    "EXECUTE",
+    claudeWorkDir,
+    undefined,
+    warnings,
+    artifactDeps(jobStore),
+  );
+
+  assert.equal(failed, false);
+  const uploadBody = JSON.parse(fetchCalls[0]?.body ?? "{}") as {
+    artifacts?: {
+      plan?: Record<string, unknown>;
+      executionResult?: Record<string, unknown>;
+      codeJudges?: Record<string, unknown>;
+    };
+  };
+  assert.deepEqual(uploadBody.artifacts?.plan, {
+    content: "Plan content",
+    raw: {
+      content: "Plan content",
+      pendingTasks: ["task-1"],
+      completedTasks: ["task-0"],
+    },
+  });
+  assert.deepEqual(uploadBody.artifacts?.executionResult, {
+    has_changes: false,
+  });
+  assert.deepEqual(uploadBody.artifacts?.codeJudges, { score: 0.9 });
 });
 
 test("tryUploadArtifacts skips upload when artifactsUploadedAt already set", async () => {
@@ -956,6 +1035,10 @@ test("tryPostCompletedEvent records EVENT_POST_FAILED when HTTP fails", async ()
 test("tryPostErrorEvent uses PROCESS_FAILED for FAILED status", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "session-id.txt"), "session-123\n");
+  const repoDir = path.join(tempRoot, "repo", "git-root");
+  await fs.mkdir(repoDir, { recursive: true });
+  initGitRepoAt(repoDir, "resume-branch");
 
   // Write JSONL with cache tokens
   const jsonlLine = JSON.stringify({
@@ -975,6 +1058,7 @@ test("tryPostErrorEvent uses PROCESS_FAILED for FAILED status", async () => {
   const jobStore = createStore("step-error-failed");
   const job = createBaseJob({
     claudeWorkDir,
+    worktreeDir: repoDir,
     status: "FAILED",
     exitCode: 7,
   });
@@ -996,6 +1080,8 @@ test("tryPostErrorEvent uses PROCESS_FAILED for FAILED status", async () => {
   assert.equal(tokenUsage.cacheReadInputTokens, 200);
   assert.equal(tokenUsage.turns, undefined, "turns must NOT be present in error event");
   assert.equal(tokenUsage.models, undefined, "models must NOT be present in error event");
+  assert.equal(parsed.sessionId, "session-123");
+  assert.equal(parsed.branchName, "resume-branch");
 });
 
 test("tryPostErrorEvent uses PROCESS_STOPPED for STOPPED status", async () => {
