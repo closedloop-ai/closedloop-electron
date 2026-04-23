@@ -65,6 +65,20 @@ export interface LoopFinalizationOutcome {
   error?: string;
 }
 
+export const EXECUTE_NO_WORK_MESSAGE =
+  "EXECUTE loop completed with 0 tokens -- no work was done";
+export const EXECUTE_NO_WORK_LIVE_ACTIVITY =
+  "Error: Loop produced no output (0 tokens)";
+
+type ParsedTokenUsage = ReturnType<typeof parseTokenUsage>;
+type TokenUsageActivity = Pick<
+  ParsedTokenUsage,
+  | "inputTokens"
+  | "outputTokens"
+  | "cacheCreationInputTokens"
+  | "cacheReadInputTokens"
+>;
+
 export function parseJobWarnings(job: Pick<LocalJob, "warning">): string[] {
   if (!job.warning) {
     return [];
@@ -86,8 +100,33 @@ function hasTerminalExecuteFinalization(
   return (
     status === "success" ||
     status === "no-changes" ||
-    status === "error" ||
     status === "skipped"
+  );
+}
+
+function hasTokenUsageActivity(tokenUsage: TokenUsageActivity): boolean {
+  return (
+    tokenUsage.inputTokens > 0 ||
+    tokenUsage.outputTokens > 0 ||
+    tokenUsage.cacheCreationInputTokens > 0 ||
+    tokenUsage.cacheReadInputTokens > 0
+  );
+}
+
+export function isExecuteNoWorkCompletion(
+  command: string,
+  tokenUsage: TokenUsageActivity,
+): boolean {
+  return command === "EXECUTE" && !hasTokenUsageActivity(tokenUsage);
+}
+
+function isExecuteNoWorkFailure(
+  job: Pick<LocalJob, "command" | "status" | "liveActivity">,
+): boolean {
+  return (
+    String(job.command) === "EXECUTE" &&
+    job.status === "FAILED" &&
+    job.liveActivity === EXECUTE_NO_WORK_LIVE_ACTIVITY
   );
 }
 
@@ -386,12 +425,17 @@ export async function tryPostErrorEvent(
   const apiKeySource = parseApiKeySource(claudeWorkDir);
   const logTail =
     readLogTail(path.join(claudeWorkDir, "symphony-loop.log")) ?? undefined;
+  const noWorkProduced = isExecuteNoWorkFailure(job);
   const errorCode =
-    job.status === "FAILED"
+    noWorkProduced
+      ? LoopErrorCode.NoWorkProduced
+      : job.status === "FAILED"
       ? LoopErrorCode.ProcessFailed
       : LoopErrorCode.ProcessStopped;
   const errorMessage =
-    job.status === "FAILED"
+    noWorkProduced
+      ? EXECUTE_NO_WORK_MESSAGE
+      : job.status === "FAILED"
       ? `Process exited with code ${job.exitCode ?? 1}`
       : `Process ended with terminal status ${job.status}`;
   const correlationFields = getCompletionCorrelationFields(
@@ -400,11 +444,7 @@ export async function tryPostErrorEvent(
     claudeWorkDir,
     readArtifacts(String(job.command), claudeWorkDir, job.worktreeDir),
   );
-  const hasTokenActivity =
-    tokenUsage.inputTokens > 0 ||
-    tokenUsage.outputTokens > 0 ||
-    tokenUsage.cacheCreationInputTokens > 0 ||
-    tokenUsage.cacheReadInputTokens > 0;
+  const hasTokenActivity = hasTokenUsageActivity(tokenUsage);
   const errorEvent: Record<string, unknown> = {
     type: LoopEventType.Error,
     code: errorCode,
@@ -473,6 +513,7 @@ export function persistFinalJobStatus(
     ...current,
     status: resolvedStatus,
     exitCode: job.exitCode ?? 0,
+    liveActivity: job.liveActivity ?? current.liveActivity,
     updatedAt: now,
     completedAt: current.completedAt ?? now,
     finalStatusPersistedAt: now,
@@ -830,6 +871,22 @@ export async function finalizeLoopFromRuntime(
   const command = String(resolvedJob.command);
   const worktreeDir = resolvedJob.worktreeDir;
   const warnings = parseJobWarnings(resolvedJob);
+
+  if (
+    (resolvedJob.status === "COMPLETED" || resolvedJob.status === "RUNNING") &&
+    isExecuteNoWorkCompletion(command, parseTokenUsage(claudeWorkDir))
+  ) {
+    gatewayLog.error(
+      "loop-finalizer",
+      `${EXECUTE_NO_WORK_MESSAGE}, loopId=${resolvedJob.loopId}, reason=${reason}`,
+    );
+    resolvedJob = {
+      ...resolvedJob,
+      status: "FAILED",
+      exitCode: 0,
+      liveActivity: EXECUTE_NO_WORK_LIVE_ACTIVITY,
+    };
+  }
 
   const isSuccessStatus =
     resolvedJob.status === "COMPLETED" || resolvedJob.status === "RUNNING";

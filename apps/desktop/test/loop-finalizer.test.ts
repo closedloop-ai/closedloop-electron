@@ -7,6 +7,7 @@ import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { JobStore, type LocalJob } from "../src/main/job-store.js";
 import {
+  EXECUTE_NO_WORK_LIVE_ACTIVITY,
   emitFinalizationTelemetry,
   finalizeLoopFromRuntime,
   parseJobWarnings,
@@ -16,6 +17,11 @@ import {
   tryUploadArtifacts,
 } from "../src/main/loop-finalizer.js";
 import { LoopTokenStore } from "../src/main/loop-token-store.js";
+import { resetResolvedClaudePath } from "../src/server/operations/symphony-loop.js";
+import {
+  resetShellPathCache,
+  setShellPathForTest,
+} from "../src/server/shell-path.js";
 import type { TelemetryEventPayload } from "../src/main/telemetry-protocol.js";
 import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
 
@@ -44,6 +50,8 @@ beforeEach(async () => {
 afterEach(async () => {
   globalThis.fetch = originalFetch;
   process.env.PATH = originalPath;
+  resetResolvedClaudePath();
+  resetShellPathCache();
   if (tempRoot) {
     await fs.rm(tempRoot, { recursive: true, force: true });
   }
@@ -1305,6 +1313,48 @@ test("tryPostErrorEvent uses PROCESS_STOPPED for STOPPED status", async () => {
   assert.match(fetchCalls[0]?.body ?? "", /STOPPED/);
 });
 
+test("tryPostErrorEvent uses NO_WORK_PRODUCED for shared EXECUTE no-work failures", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(
+    path.join(claudeWorkDir, "claude-output.jsonl"),
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+      },
+    }) + "\n",
+    "utf-8",
+  );
+
+  const jobStore = createStore("step-error-no-work-produced");
+  const job = createBaseJob({
+    claudeWorkDir,
+    command: "EXECUTE",
+    status: "FAILED",
+    exitCode: 0,
+    liveActivity: EXECUTE_NO_WORK_LIVE_ACTIVITY,
+  });
+  jobStore.upsert(job);
+
+  await tryPostErrorEvent(job, claudeWorkDir, [], artifactDeps(jobStore));
+
+  assert.match(fetchCalls[0]?.body ?? "", /"code":"NO_WORK_PRODUCED"/);
+  assert.match(
+    fetchCalls[0]?.body ?? "",
+    /"message":"EXECUTE loop completed with 0 tokens -- no work was done"/,
+  );
+  const parsed = JSON.parse(fetchCalls[0]?.body ?? "{}") as {
+    tokenUsage?: Record<string, unknown>;
+  };
+  assert.equal(parsed.tokenUsage, undefined);
+});
+
 test("tryPostErrorEvent skips when completedEventPostedAt is set", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
@@ -1599,4 +1649,165 @@ test("finalizeLoopFromRuntime tolerates a throwing cleanup callback and still cl
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
   assert.equal(persisted.additionalWorktreeDirs, undefined);
+});
+
+test("finalizeLoopFromRuntime retries EXECUTE finalization after a prior error on boot-recovery", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  const worktreeDir = path.join(repoDir, "worktree");
+  const remoteDir = path.join(tempRoot, "remote.git");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.mkdir(worktreeDir, { recursive: true });
+  await fs.mkdir(remoteDir, { recursive: true });
+  await fs.writeFile(
+    path.join(claudeWorkDir, "claude-output.jsonl"),
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        usage: {
+          input_tokens: 12,
+          output_tokens: 6,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+      },
+    }) + "\n",
+    "utf-8",
+  );
+
+  initGitRepoAt(worktreeDir, "feat/retry-finalization");
+  execSync("git init --bare", { cwd: remoteDir, stdio: "pipe" });
+  execSync(`git remote add origin ${JSON.stringify(remoteDir)}`, {
+    cwd: worktreeDir,
+    stdio: "pipe",
+  });
+  execSync("git push -u origin feat/retry-finalization", {
+    cwd: worktreeDir,
+    stdio: "pipe",
+  });
+  await fs.writeFile(path.join(worktreeDir, "feature.txt"), "changed once\n", "utf-8");
+
+  const fakeBin = path.join(tempRoot, "fake-bin");
+  const failOnceMarker = path.join(tempRoot, "git-status-failed-once");
+  const realGit = execSync("which git", { encoding: "utf-8" }).trim();
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+  await fs.writeFile(
+    path.join(fakeBin, "gh"),
+    [
+      "#!/bin/sh",
+      'if [ "$1" = "pr" ] && [ "$2" = "create" ]; then',
+      '  echo "https://example.com/pull/123"',
+      "  exit 0",
+      "fi",
+      'if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then',
+      "  exit 0",
+      "fi",
+      'if [ "$1" = "pr" ] && [ "$2" = "view" ]; then',
+      "  exit 1",
+      "fi",
+      "exit 0",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  await fs.writeFile(
+    path.join(fakeBin, "git"),
+    [
+      "#!/bin/sh",
+      `FAIL_ONCE_MARKER=${JSON.stringify(failOnceMarker)}`,
+      'if [ "$1" = "status" ] && [ ! -f "$FAIL_ONCE_MARKER" ]; then',
+      '  touch "$FAIL_ONCE_MARKER"',
+      '  echo "status failed once" >&2',
+      "  exit 1",
+      "fi",
+      `exec ${JSON.stringify(realGit)} "$@"`,
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  process.env.PATH = `${fakeBin}:${path.dirname(realGit)}:/usr/bin:/bin`;
+  resetResolvedClaudePath();
+  setShellPathForTest();
+
+  let failCloudFinalization = true;
+  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    fetchCalls.push({
+      url: String(input),
+      body: typeof init?.body === "string" ? init.body : "",
+    });
+    if (failCloudFinalization) {
+      return new Response("retry later", { status: 502 });
+    }
+    return new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  const jobStore = createStore("finalizer-execute-retry-after-error");
+  const job = createBaseJob({
+    claudeWorkDir,
+    worktreeDir,
+    command: "EXECUTE",
+    baseBranch: "main",
+    webAppOrigin: "https://app.closedloop.ai",
+    committer: {
+      name: "Test User",
+      email: "test@example.com",
+    },
+  });
+  jobStore.upsert(job);
+
+  await finalizeLoopFromRuntime(job, "live-exit", {
+    jobStore,
+    telemetry: { emit: () => {} },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+    getAllowedDirectories: () => [tempRoot],
+  });
+
+  const afterLiveError = jobStore.getByLoopId("loop-1");
+  assert.ok(afterLiveError);
+  assert.equal(afterLiveError.executeFinalizationStatus, "error");
+  assert.equal(afterLiveError.executeFinalizationPath, "git-fallback");
+  assert.equal(afterLiveError.cloudFinalizedAt, undefined);
+
+  failCloudFinalization = false;
+  fetchCalls = [];
+
+  await finalizeLoopFromRuntime(afterLiveError, "boot-recovery", {
+    jobStore,
+    telemetry: { emit: () => {} },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+    getAllowedDirectories: () => [tempRoot],
+  });
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.executeFinalizationStatus, "success");
+  assert.equal(persisted.executeFinalizationPath, "git-fallback");
+  assert.ok(persisted.cloudFinalizedAt);
+
+  const uploadCall = fetchCalls.find((call) =>
+    call.url.includes("/upload-artifacts"),
+  );
+  assert.ok(uploadCall, "expected upload-artifacts on recovery retry");
+  const uploadBody = JSON.parse(uploadCall.body) as {
+    metadata?: Record<string, unknown>;
+    artifacts?: { executionResult?: Record<string, unknown> };
+  };
+  assert.equal(uploadBody.metadata?.executeFinalizationStatus, "success");
+  assert.equal(
+    uploadBody.artifacts?.executionResult?.pr_url,
+    "https://example.com/pull/123",
+  );
+
+  const completedEventCall = fetchCalls.find((call) =>
+    call.body.includes('"type":"completed"'),
+  );
+  assert.ok(completedEventCall, "expected completed event on recovery retry");
 });

@@ -30,7 +30,9 @@ import type {
   LocalJobFinalizationSource,
 } from "../../main/job-store.js";
 import {
+  EXECUTE_NO_WORK_MESSAGE,
   finalizeLoopFromRuntime,
+  isExecuteNoWorkCompletion,
   tryUploadArtifacts,
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
@@ -3171,15 +3173,8 @@ export async function handleProcessCompletion(
     );
 
     // Detect 0-token EXECUTE completions as failures (ghost loop)
-    if (
-      command === "EXECUTE" &&
-      tokensUsed.inputTokens === 0 &&
-      tokensUsed.outputTokens === 0 &&
-      tokensUsed.cacheCreationInputTokens === 0 &&
-      tokensUsed.cacheReadInputTokens === 0
-    ) {
-      const noWorkMsg =
-        "EXECUTE loop completed with 0 tokens -- no work was done";
+    if (!jobStore && isExecuteNoWorkCompletion(command, tokensUsed)) {
+      const noWorkMsg = EXECUTE_NO_WORK_MESSAGE;
       loopError(loopId, noWorkMsg);
       gatewayLog.error("loop-harness", `${noWorkMsg}, loopId=${loopId}`);
       runningLoops.delete(loopId);
@@ -3189,20 +3184,6 @@ export async function handleProcessCompletion(
         message: noWorkMsg,
         loopId,
       });
-      if (jobStore) {
-        const existingJob = jobStore.getByLoopId(loopId);
-        if (existingJob) {
-          const now = new Date().toISOString();
-          jobStore.upsert({
-            ...existingJob,
-            status: "FAILED",
-            liveActivity: "Error: Loop produced no output (0 tokens)",
-            exitCode: 0,
-            updatedAt: now,
-            completedAt: now,
-          });
-        }
-      }
       if (tempCleanupDir) {
         fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(() => {});
       }
