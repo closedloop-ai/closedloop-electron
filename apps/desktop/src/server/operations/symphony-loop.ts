@@ -1,6 +1,5 @@
 import { execFile, execFileSync, execSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { promisify } from "node:util";
 import {
   closeSync,
   existsSync,
@@ -15,10 +14,13 @@ import {
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import {
   readLogTail,
+  readStderrTail,
   readTextFile,
   sanitizeErrorMessage,
+  stripAnsi,
 } from "../../main/diagnostics-helpers.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import type {
@@ -42,6 +44,11 @@ import {
   parseTokenUsage,
   type ModelTokenUsage,
 } from "../../main/token-usage.js";
+import {
+  IMPORTED_PLAN_MARKDOWN_FILE,
+  isRawPlanArtifact,
+  toUploadedPlanArtifact,
+} from "../../shared/plan-artifact-utils.js";
 import type {
   OperationDispatcher,
   OperationRequestContext,
@@ -49,11 +56,6 @@ import type {
 import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { getShellEnv, getShellPath, resolveBinarySync } from "../shell-path.js";
-import {
-  IMPORTED_PLAN_MARKDOWN_FILE,
-  isRawPlanArtifact,
-  toUploadedPlanArtifact,
-} from "../../shared/plan-artifact-utils.js";
 import { withMcpTools } from "./chat-tools.js";
 import { findWorktreeForBranch as findWorktreeForBranchImpl } from "./git-helpers.js";
 import { startOutputTailer } from "./output-tailer.js";
@@ -62,8 +64,8 @@ import {
   findPluginVersions,
   getPluginCacheRoot,
 } from "./plugin-cache.js";
-import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import { addRepo } from "./repos-config-utils.js";
+import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import {
   CLONE_GIT_TIMEOUT,
   expandHome,
@@ -77,7 +79,12 @@ import {
   SymphonyDirNotConfiguredError,
   tryAssertRepoAllowed,
 } from "./symphony-utils.js";
-export { readLogTail } from "../../main/diagnostics-helpers.js";
+export {
+  readFileTail,
+  readLogTail,
+  readStderrTail,
+  stripAnsi
+} from "../../main/diagnostics-helpers.js";
 
 // ---------------------------------------------------------------------------
 // WorktreeProvider: abstraction over git worktree operations for testability
@@ -238,9 +245,9 @@ import type { LoopRequestBody } from "@closedloop-ai/loops-api/desktop-request";
 import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
 import {
+  getPrimaryRepoResult,
   GIT_REF_NAME_REGEX,
   MAX_ADDITIONAL_REPOS,
-  getPrimaryRepoResult,
   parseExecutionResultFile,
   type RepoExecutionResult,
 } from "@closedloop-ai/loops-api/execution-result";
@@ -1521,11 +1528,32 @@ function redactCredentials(text: string): string {
 }
 
 /**
+ * Redact spawn args to avoid leaking user prompt/code content into telemetry.
+ * Replaces long args (likely prompt text) and values following message/prompt flags.
+ */
+function redactSpawnArgs(args: string[]): string[] {
+  return args.map((arg, i) => {
+    if (arg.length > 200) {
+      return "[REDACTED_LONG_ARG]";
+    }
+    // Redact values after --message, --prompt, -p flags
+    if (i > 0) {
+      const prev = args[i - 1];
+      if (prev === "--message" || prev === "--prompt" || prev === "-p") {
+        return "[REDACTED]";
+      }
+    }
+    return arg;
+  });
+}
+
+/**
  * Collect failure diagnostics for a failed loop process.
  * Returns an object suitable for inclusion in the error telemetry event.
  */
 function collectFailureDiagnostics(claudeWorkDir: string): {
   logTail: string | undefined;
+  stderrTail: string | undefined;
   tokenUsage: {
     inputTokens: number;
     outputTokens: number;
@@ -1537,7 +1565,11 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
 } {
   const logPath = path.join(claudeWorkDir, "symphony-loop.log");
   const rawTail = readLogTail(logPath);
-  const logTail = rawTail ? redactCredentials(rawTail) : undefined;
+  const logTail = rawTail ? redactCredentials(stripAnsi(rawTail)) : undefined;
+  const rawStderr = readStderrTail(claudeWorkDir);
+  const stderrTail = rawStderr
+    ? redactCredentials(stripAnsi(rawStderr))
+    : undefined;
   const {
     inputTokens,
     outputTokens,
@@ -1547,6 +1579,7 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
   } = parseTokenUsage(claudeWorkDir);
   return {
     logTail,
+    stderrTail,
     tokenUsage: {
       inputTokens,
       outputTokens,
@@ -1554,7 +1587,7 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
       cacheReadInputTokens,
     },
     tokensByModel,
-    diagnosticsVersion: 1,
+    diagnosticsVersion: 2,
   };
 }
 
@@ -3055,16 +3088,28 @@ export async function handleProcessCompletion(
   loopTokenStore?: LoopTokenStore,
   additionalWorktreeDirs: { dir: string; repoPath: string; fullName?: string; baseBranch?: string }[] = [],
   additionalRepoTokens: ReadonlyArray<{ fullName: string; token: string }> = [],
+  exitSignal?: string,
+  spawnStartedAt?: number,
+  spawnMeta?: {
+    command: string;
+    args: string[];
+    cwd: string;
+    claudeVersion?: string;
+    binaryPath: string;
+    authFilesExist: boolean;
+    envSnapshot: Record<string, string>;
+  },
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
   // Temp-dir commands (DECOMPOSE, EVALUATE_*) need the entire temp tree removed on cleanup.
   const tempCleanupDir = usedTempDir ? (worktreeDir ?? claudeWorkDir) : null;
+  const elapsedMs = spawnStartedAt ? Date.now() - spawnStartedAt : undefined;
 
   loopLog(loopId, `Process exited with code ${exitCode}, command=${command}`);
 
   if (exitCode !== 0) {
-    // Collect diagnostics (log tail + token usage) for the failure event
-    const diagnostics = collectFailureDiagnostics(claudeWorkDir);
+    // Collect diagnostics (log tail + stderr + token usage) for the failure event
+    const baseDiagnostics = collectFailureDiagnostics(claudeWorkDir);
     const sessionFileForTelemetry = path.join(claudeWorkDir, "session-id.txt");
     const rawSessionId = readTextFile(sessionFileForTelemetry);
     const failureSessionId = rawSessionId ? rawSessionId.trim() : undefined;
@@ -3123,6 +3168,20 @@ export async function handleProcessCompletion(
       }
     }
 
+    // Determine abort reason
+    const abortReason: string | undefined = wasCancelled
+      ? "cancelled"
+      : "process-exit";
+
+    // Build enriched diagnostics with new fields
+    const diagnostics = {
+      ...baseDiagnostics,
+      exitSignal,
+      elapsedMs,
+      abortReason,
+      spawnMeta,
+    };
+
     if (wasCancelled) {
       Observability.jobCancelled(
         commandId ?? existingJob?.commandId,
@@ -3142,6 +3201,10 @@ export async function handleProcessCompletion(
         tokenUsage: diagnostics.tokenUsage,
         tokensByModel: diagnostics.tokensByModel,
         logTail: diagnostics.logTail,
+        stderrTail: diagnostics.stderrTail,
+        exitSignal: diagnostics.exitSignal,
+        elapsedMs: diagnostics.elapsedMs,
+        abortReason: diagnostics.abortReason,
         diagnosticsVersion: String(diagnostics.diagnosticsVersion),
         ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
       });
@@ -3190,6 +3253,10 @@ export async function handleProcessCompletion(
           tokenUsage: diagnostics.tokenUsage,
           tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
+          stderrTail: diagnostics.stderrTail,
+          exitSignal: diagnostics.exitSignal,
+          elapsedMs: diagnostics.elapsedMs,
+          abortReason: diagnostics.abortReason,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
           ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
         });
@@ -3218,6 +3285,10 @@ export async function handleProcessCompletion(
           tokenUsage: diagnostics.tokenUsage,
           tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
+          stderrTail: diagnostics.stderrTail,
+          exitSignal: diagnostics.exitSignal,
+          elapsedMs: diagnostics.elapsedMs,
+          abortReason: diagnostics.abortReason,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
           ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
         });
@@ -3237,6 +3308,10 @@ export async function handleProcessCompletion(
           tokenUsage: diagnostics.tokenUsage,
           tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
+          stderrTail: diagnostics.stderrTail,
+          exitSignal: diagnostics.exitSignal,
+          elapsedMs: diagnostics.elapsedMs,
+          abortReason: diagnostics.abortReason,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
           ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
         });
@@ -3616,6 +3691,8 @@ export async function handleProcessCompletion(
         code: LoopErrorCode.NoWorkProduced,
         message: noWorkMsg,
         loopId,
+        abortReason: "ghost-loop",
+        elapsedMs,
       });
       if (tempCleanupDir) {
         fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(() => {});
@@ -4754,6 +4831,23 @@ async function handleLoopRequest(
       return;
     }
     let child: ReturnType<typeof spawn>;
+    let spawnStartedAt = 0;
+    const collectedSpawnMeta: {
+      command: string;
+      args: string[];
+      cwd: string;
+      claudeVersion?: string;
+      binaryPath: string;
+      authFilesExist: boolean;
+      envSnapshot: Record<string, string>;
+    } = {
+      command: "",
+      args: [],
+      cwd: claudeWorkDir,
+      binaryPath: "",
+      authFilesExist: false,
+      envSnapshot: {},
+    };
 
     try {
       // Reuse the path from pre-flight so validation and execution stay aligned.
@@ -4770,6 +4864,21 @@ async function handleLoopRequest(
         // between Electron's env and the user's login shell).
         CLAUDE_BIN: claudeBinary,
       });
+
+      // Collect non-sensitive env snapshot: NODE_ENV + CLAUDE_CODE_USE_* keys only
+      const envSnapshot: Record<string, string> = {};
+      for (const [key, value] of Object.entries(spawnEnv)) {
+        if (key === "NODE_ENV" || key.startsWith("CLAUDE_CODE_USE_")) {
+          envSnapshot[key] = value;
+        }
+      }
+
+      collectedSpawnMeta.command = claudeBinary;
+      collectedSpawnMeta.binaryPath = claudeBinary;
+      collectedSpawnMeta.authFilesExist = existsSync(
+        path.join(os.homedir(), ".claude"),
+      );
+      collectedSpawnMeta.envSnapshot = envSnapshot;
 
       // Shared claude CLI args for commands that run claude directly.
       // REQUEST_CHANGES omits "-" (stdin) because it passes the prompt as a CLI argument.
@@ -4804,6 +4913,9 @@ async function handleLoopRequest(
           claudeBinary,
           promptFile,
         );
+        collectedSpawnMeta.command = pipeline.cmd;
+        collectedSpawnMeta.args = redactSpawnArgs(pipeline.args);
+        spawnStartedAt = Date.now();
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: claudeWorkDir,
           detached: true,
@@ -4826,6 +4938,9 @@ async function handleLoopRequest(
           claudeBinary,
           promptFile,
         );
+        collectedSpawnMeta.command = pipeline.cmd;
+        collectedSpawnMeta.args = redactSpawnArgs(pipeline.args);
+        spawnStartedAt = Date.now();
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: claudeWorkDir,
           detached: true,
@@ -4856,6 +4971,9 @@ async function handleLoopRequest(
           claudeBinary,
           promptFile,
         );
+        collectedSpawnMeta.command = pipeline.cmd;
+        collectedSpawnMeta.args = redactSpawnArgs(pipeline.args);
+        spawnStartedAt = Date.now();
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: claudeWorkDir,
           detached: true,
@@ -4891,6 +5009,10 @@ async function handleLoopRequest(
         );
 
         const pipeline = buildClaudePipeline(claudeArgs, claudeWorkDir, claudeBinary);
+        collectedSpawnMeta.command = pipeline.cmd;
+        collectedSpawnMeta.args = redactSpawnArgs(pipeline.args);
+        collectedSpawnMeta.cwd = worktreeDir!;
+        spawnStartedAt = Date.now();
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: worktreeDir!,
           detached: true,
@@ -4908,6 +5030,10 @@ async function handleLoopRequest(
           claudeBinary,
           promptFile,
         );
+        collectedSpawnMeta.command = pipeline.cmd;
+        collectedSpawnMeta.args = redactSpawnArgs(pipeline.args);
+        collectedSpawnMeta.cwd = worktreeDir!;
+        spawnStartedAt = Date.now();
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: worktreeDir!,
           detached: true,
@@ -4937,6 +5063,10 @@ async function handleLoopRequest(
           }
         }
 
+        collectedSpawnMeta.command = scriptPath!;
+        collectedSpawnMeta.args = redactSpawnArgs(scriptArgs);
+        collectedSpawnMeta.cwd = worktreeDir!;
+        spawnStartedAt = Date.now();
         child = spawn(scriptPath!, scriptArgs, {
           cwd: worktreeDir!,
           detached: true,
@@ -4977,7 +5107,10 @@ async function handleLoopRequest(
       stop: () => {},
       flush: () => Promise.resolve(),
     };
-    const onceComplete = async (code: number): Promise<void> => {
+    const onceComplete = async (
+      code: number,
+      signal?: string,
+    ): Promise<void> => {
       if (completionHandled) return;
       completionHandled = true;
       loopLog(body.loopId, `onceComplete fired, code=${code}`);
@@ -5013,6 +5146,9 @@ async function handleLoopRequest(
         loopTokenStore,
         additionalWorktreeDirs,
         additionalRepoTokens,
+        signal,
+        spawnStartedAt,
+        collectedSpawnMeta,
       ).catch((err) => {
         loopError(body.loopId, "Completion handler error:", err);
         gatewayLog.error(
@@ -5046,9 +5182,12 @@ async function handleLoopRequest(
     // Use 'exit' instead of 'close' — with detached processes using
     // inherited file descriptors (not pipes), 'close' may never fire
     // because there are no Node.js streams to track closure of.
-    child.on("exit", (code) => {
-      loopLog(body.loopId, `Process exit event, code=${code}`);
-      void onceComplete(code ?? 1);
+    child.on("exit", (code, signal) => {
+      loopLog(
+        body.loopId,
+        `Process exit event, code=${code}, signal=${signal ?? "none"}`,
+      );
+      void onceComplete(code ?? 1, signal ?? undefined);
     });
 
     const pid = child.pid ?? null;
