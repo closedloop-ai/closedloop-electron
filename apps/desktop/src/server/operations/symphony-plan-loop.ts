@@ -15,6 +15,7 @@ import {
   writeLaunchMetadata,
 } from "./symphony-utils.js";
 import { resolveRepoFullName } from "./git-helpers.js";
+import { json } from "./response-utils.js";
 
 // ---------------------------------------------------------------------------
 // Shared prepare/confirm handler implementations
@@ -156,17 +157,6 @@ async function handleConfirm(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function json(
-  context: OperationRequestContext,
-  status: number,
-  payload: unknown
-): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-
 function parseBody(
   context: OperationRequestContext
 ): Record<string, unknown> | null {

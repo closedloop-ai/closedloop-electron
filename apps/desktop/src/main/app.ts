@@ -1,18 +1,35 @@
-import os from "node:os";
-import path from "node:path";
+import { app, dialog, ipcMain, nativeImage, Notification, safeStorage } from "electron";
+import pkg from "electron-updater";
+import { execFile } from "node:child_process";
+import { randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { randomBytes, randomUUID } from "node:crypto";
+import os from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { app, dialog, ipcMain, nativeImage, Notification, safeStorage } from "electron";
+import { promisify } from "node:util";
+import { resetMcpDetectionCache } from "../server/operations/mcp-detection.js";
+import { getCodePluginVersion } from "../server/operations/plugin-cache.js";
+import { loadReposConfig } from "../server/operations/repos-config-utils.js";
+import { enrichJobSnapshot } from "../server/operations/symphony-job-snapshot.js";
+import { getResolvedGitPath, resetResolvedClaudePath } from "../server/operations/symphony-loop.js";
 import {
-  type AlwaysAllowRule,
+  computeSymphonyDir,
+  SymphonyDirNotConfiguredError,
+} from "../server/operations/symphony-utils.js";
+import type {
+  GatewayApprovalRequest,
+  GatewayApprovalResult,
+} from "../server/router.js";
+import { DesktopGatewayServer } from "../server/server.js";
+import { resolveBinary } from "../server/shell-path.js";
+import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
+import {
   DEFAULT_DESKTOP_SETTINGS,
   DEFAULT_POSTHOG_HOST,
-  DESKTOP_GATEWAY_VERSION,
   EMPTY_CAPABILITIES,
+  GATEWAY_PROTOCOL_VERSION,
+  type AlwaysAllowRule,
   type DesktopSettings,
   type RiskTier,
 } from "../shared/contracts.js";
@@ -20,53 +37,41 @@ import {
   buildAllowedDirectories,
   normalizeScopePath,
 } from "../shared/sandbox-policy.js";
+import { ActivityLogStore } from "./activity-log-store.js";
 import { ApiKeyStore } from "./api-key-store.js";
+import {
+  resolveOperationId,
+  SUPPORTED_OPERATION_IDS,
+} from "./approval-operations.js";
+import { OPERATION_RISK_TIERS, shouldAutoApprove } from "./approval-policy.js";
+import { ApprovalStore } from "./approval-store.js";
+import { BootRecoveryService, sweepOrphanLoopWorktrees } from "./boot-recovery.js";
 import { CloudCommandExecutor } from "./cloud-command-executor.js";
 import type { CloudSocketStatus } from "./cloud-protocol.js";
 import { CloudSocketService } from "./cloud-socket.js";
-import { SettingsStore } from "./settings-store.js";
-import { DesktopTray } from "./tray.js";
-import { DesktopWindow } from "./window.js";
-import { DesktopGatewayServer } from "../server/server.js";
-import {
-  computeSymphonyDir,
-  SymphonyDirNotConfiguredError,
-} from "../server/operations/symphony-utils.js";
-import { getResolvedGitPath, resetResolvedClaudePath } from "../server/operations/symphony-loop.js";
-import { resetMcpDetectionCache } from "../server/operations/mcp-detection.js";
-import { resolveBinary } from "../server/shell-path.js";
-import { seedReposConfig } from "./seed-repos-config.js";
-import {
-  SUPPORTED_OPERATION_IDS,
-  resolveOperationId,
-} from "./approval-operations.js";
-import { shouldAutoApprove, OPERATION_RISK_TIERS } from "./approval-policy.js";
+import { GatewayIdentityStore } from "./gateway-identity.js";
 import { gatewayLog, isNetworkError } from "./gateway-logger.js";
-import { ActivityLogStore } from "./activity-log-store.js";
-import { ApprovalStore } from "./approval-store.js";
-import { JobStore, isTerminalJobStatus, type LocalJob } from "./job-store.js";
+import { GatewayRecoveryManager } from "./gateway-recovery.js";
+import { isTerminalJobStatus, JobStore, type LocalJob } from "./job-store.js";
+import { LocalSessionStore } from "./local-session-store.js";
+import { LoopTokenStore } from "./loop-token-store.js";
 import { Observability } from "./observability.js";
-import type {
-  GatewayApprovalRequest,
-  GatewayApprovalResult,
-} from "../server/router.js";
 import {
   normalizeAndValidateOrigin,
   normalizeWebAppOrigin,
 } from "./origin-policy.js";
-import { LocalSessionStore } from "./local-session-store.js";
-import { enrichJobSnapshot } from "../server/operations/symphony-job-snapshot.js";
-import { GatewayRecoveryManager } from "./gateway-recovery.js";
-import { runShutdownSequence } from "./shutdown.js";
+import {
+  createQueueStatsDebounce,
+  type QueueStatsDebounce,
+} from "./queue-stats-debounce.js";
+import { seedReposConfig } from "./seed-repos-config.js";
+import { SettingsStore } from "./settings-store.js";
 import type { ShutdownResult } from "./shutdown.js";
+import { runShutdownSequence } from "./shutdown.js";
 import type { RetrySpawnDeps } from "./spawn-retry.js";
-import pkg from "electron-updater";
+import { DesktopTray } from "./tray.js";
+import { DesktopWindow } from "./window.js";
 const { autoUpdater } = pkg;
-import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
-import { BootRecoveryService, sweepOrphanLoopWorktrees } from "./boot-recovery.js";
-import { LoopTokenStore } from "./loop-token-store.js";
-import { GatewayIdentityStore } from "./gateway-identity.js";
-import { loadReposConfig } from "../server/operations/repos-config-utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -95,6 +100,11 @@ export class DesktopApplication {
   private cloudCommandsPaused: boolean;
   private cloudConnectionEnabled: boolean;
   private updateCheckTimer: NodeJS.Timeout | null = null;
+  private readonly queueStatsTelemetryDebounce: QueueStatsDebounce =
+    createQueueStatsDebounce(
+      (active, depth) => Observability.queueStatsChanged(active, depth),
+      QUEUE_STATS_DEBOUNCE_MS,
+    );
 
   constructor() {
     this.gatewayAuthToken = randomBytes(24).toString("hex");
@@ -104,7 +114,7 @@ export class DesktopApplication {
       posthog: process.env.CL_POSTHOG_API_KEY
         ? { apiKey: process.env.CL_POSTHOG_API_KEY, host: DEFAULT_POSTHOG_HOST }
         : undefined,
-      releaseVersion: DESKTOP_GATEWAY_VERSION,
+      desktopClientVersion: app.getVersion(),
     });
     this.settingsStore = new SettingsStore();
     this.cloudCommandsPaused = this.settingsStore.getCloudCommandsPaused();
@@ -147,7 +157,7 @@ export class DesktopApplication {
       () => (this.isNoAuthMode() ? undefined : this.gatewayAuthToken),
       () => this.getAllowedDirectoriesFromSandbox(),
       os.hostname(),
-      DESKTOP_GATEWAY_VERSION,
+      app.getVersion(),
       EMPTY_CAPABILITIES,
       (event) => {
         this.activityLog.add(event);
@@ -188,6 +198,7 @@ export class DesktopApplication {
           activeCommands: stats.activeCommands,
           queueDepth: stats.queueDepth,
         });
+        this.queueStatsTelemetryDebounce.trigger(stats);
       },
     });
     this.cloudSocket = new CloudSocketService({
@@ -196,7 +207,9 @@ export class DesktopApplication {
       getAllowedDirectories: () => this.getAllowedDirectoriesFromSandbox(),
       getMaxInFlightCommands: () => MAX_IN_FLIGHT_COMMANDS,
       machineName: os.hostname(),
-      pluginVersion: DESKTOP_GATEWAY_VERSION,
+      pluginVersion: getCodePluginVersion(),
+      desktopClientVersion: app.getVersion(),
+      gatewayProtocolVersion: GATEWAY_PROTOCOL_VERSION,
       supportedOperations: [...SUPPORTED_OPERATION_IDS],
       onStatusChange: (status) => this.onCloudSocketStatus(status),
       onDisconnect: (reason) => { Observability.connectionLost(reason); },
@@ -211,7 +224,7 @@ export class DesktopApplication {
         }
         Observability.connectionEstablished(
           event.computeTargetId,
-          DESKTOP_GATEWAY_VERSION,
+          app.getVersion(),
           process.env.NODE_ENV ?? "production",
         );
       },
@@ -280,6 +293,7 @@ export class DesktopApplication {
       telemetry: Observability.getTelemetryEmitter(),
       getApiKey: () => this.apiKeyStore.getApiKey(),
       getApiOrigin: () => this.settingsStore.getApiOrigin(),
+      getAllowedDirectories: () => this.getAllowedDirectoriesFromSandbox(),
       loopTokenStore: this.loopTokenStore,
     });
     this.registerIpcHandlers();
@@ -417,6 +431,10 @@ export class DesktopApplication {
     this.desktopWindow.show();
   }
 
+  setQuitting(): void {
+    this.desktopWindow.setQuitting();
+  }
+
   async shutdown(): Promise<ShutdownResult> {
     if (this.shuttingDown) {
       return "clean";
@@ -425,8 +443,9 @@ export class DesktopApplication {
     this.shuttingDown = true;
     this.bootRecovery.dispose();
     await this.bootRecovery.quiesce(1_000);
-    await Observability.shutdown();
+    this.queueStatsTelemetryDebounce.cancel();
     return runShutdownSequence({
+      observability: Observability,
       updateCheckTimer: this.updateCheckTimer,
       clearUpdateCheckTimer: () => {
         if (this.updateCheckTimer) {
@@ -1086,16 +1105,23 @@ export class DesktopApplication {
 
       // Reconcile: if enrichment detected a terminal status (process dead),
       // persist it so the job moves from active to terminal in the store.
+      // Skip jobs where the live-exit handler has already claimed the job
+      // (exitCode is set but status is not yet terminal) to avoid a race
+      // where this reconciliation overrides to STOPPED before the exit
+      // handler finishes artifact processing and posts the correct status.
       const stillRunning = [];
       for (const snapshot of snapshots) {
+        const rawJob = this.jobStore.getById(snapshot.id);
         if (
           isTerminalJobStatus(snapshot.status) &&
-          !isTerminalJobStatus(
-            this.jobStore.getById(snapshot.id)?.status ?? "UNKNOWN",
-          )
+          !isTerminalJobStatus(rawJob?.status ?? "UNKNOWN")
         ) {
+          if (rawJob && rawJob.exitCode != null) {
+            stillRunning.push({ ...snapshot, status: rawJob.status });
+            continue;
+          }
           this.jobStore.upsert({
-            ...this.jobStore.getById(snapshot.id)!,
+            ...rawJob!,
             status: snapshot.status,
             updatedAt: new Date().toISOString(),
             completedAt: snapshot.completedAt ?? new Date().toISOString(),
@@ -1501,6 +1527,7 @@ export class DesktopApplication {
 
 const APPROVAL_TIMEOUT_MS = 120_000;
 const MAX_IN_FLIGHT_COMMANDS = 2;
+const QUEUE_STATS_DEBOUNCE_MS = 1000;
 const ALWAYS_ALLOW_RULE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 function pruneExpiredAlwaysAllowRules(

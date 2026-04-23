@@ -2,9 +2,10 @@ import { existsSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { isTerminalJobStatus, type JobStore, type LocalJobStatus } from "../../main/job-store.js";
-import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import type { OperationDispatcher } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { expandHome, readProcessPidSync, resolveWorktreeDir } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 type TaskProgress = {
   pending: number;
@@ -290,10 +291,4 @@ async function readActiveAgents(worktreeDir: string): Promise<ActiveAgent[]> {
   }
 
   return agents;
-}
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
 }

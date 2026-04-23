@@ -8,6 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export class DesktopWindow {
   private browserWindow: BrowserWindow | null = null;
   private disposing = false;
+  private quitting = false;
 
   init(): void {
     if (this.browserWindow) {
@@ -28,7 +29,7 @@ export class DesktopWindow {
       this.browserWindow?.show();
     });
     this.browserWindow.on("close", (event) => {
-      if (this.disposing) {
+      if (this.disposing || this.quitting) {
         return;
       }
       event.preventDefault();
@@ -45,6 +46,10 @@ export class DesktopWindow {
   show(): void {
     this.browserWindow?.show();
     this.browserWindow?.focus();
+  }
+
+  setQuitting(): void {
+    this.quitting = true;
   }
 
   dispose(): void {

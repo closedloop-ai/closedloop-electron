@@ -1,7 +1,7 @@
 export const DEFAULT_GATEWAY_PORT = 19432;
 export const FALLBACK_GATEWAY_PORTS = [19433, 19434, 19435] as const;
 export const PORT_PROBE_ORDER = [DEFAULT_GATEWAY_PORT, ...FALLBACK_GATEWAY_PORTS] as const;
-export const DESKTOP_GATEWAY_VERSION = "0.1.0";
+export const GATEWAY_PROTOCOL_VERSION = "0.1.0";
 
 /** WebSocket relay host — the electron app connects here for cloud commands, not the REST API. */
 export const DEFAULT_RELAY_ORIGIN = process.env.CL_RELAY_ORIGIN ?? "https://relay.closedloop.ai";

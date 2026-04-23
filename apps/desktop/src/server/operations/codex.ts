@@ -11,6 +11,7 @@ import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
 import { type ContentBlock, createStreamState, processStreamEvent } from "./stream-events.js";
 import { assertRepoAllowed, ensureWorktreeForReview, resolveWorktreeDir, resolveWorktreeParentDir, tryAssertPathAllowed, tryAssertRepoAllowed } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 const CODEX_SESSION_ID_REGEX = /session id:\s*([0-9a-f-]{36})/i;
 const FINDINGS_CODE_BLOCK_REGEX = /```json\s*\n([\s\S]*?)\n\s*```/;
@@ -2058,13 +2059,6 @@ function asNumber(value: unknown): number | null {
 
   return null;
 }
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-
 // --- Verdict extraction ---
 
 const VERDICT_PROMPT = `Now perform a Premise Review of the changes you just reviewed. Question whether the changes were necessary at all:

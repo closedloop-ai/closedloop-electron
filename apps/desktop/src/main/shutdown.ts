@@ -1,6 +1,7 @@
 export interface ShutdownDeps {
   updateCheckTimer: NodeJS.Timeout | null;
   clearUpdateCheckTimer: () => void;
+  observability: { shutdown: () => Promise<void> };
   cloudSocket: { stop: () => void };
   commandExecutor: { dispose: () => void };
   server: { stop: () => Promise<void> };
@@ -21,6 +22,7 @@ export async function runShutdownSequence(
 
   const cleanup = async (): Promise<"clean"> => {
     deps.clearUpdateCheckTimer();
+    await deps.observability.shutdown().catch(() => {});
     deps.cloudSocket.stop();
     deps.commandExecutor.dispose();
     await deps.server.stop();

@@ -16,6 +16,7 @@ import { registerGitBranchesRoutes } from "./operations/git-branches.js";
 import { registerGitBranchWorktreeRoutes } from "./operations/git-branch-worktree.js";
 import { registerGitDiffRoutes } from "./operations/git-diff.js";
 import { registerGitPrRoutes } from "./operations/git-pr.js";
+import { registerGitRepoPathRoutes } from "./operations/git-repo-path.js";
 import { registerGitWorktreeRoutes } from "./operations/git-worktree.js";
 import { registerBinaryPathsRoutes } from "./operations/binary-paths.js";
 import { registerHealthCheckRoutes } from "./operations/health-check.js";
@@ -144,6 +145,7 @@ export class GatewayRouter {
       this.options.getAllowedDirectories
     );
     registerGitPrRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
+    registerGitRepoPathRoutes(this.operationDispatcher, getSymphonyDir);
     registerGitWorktreeRoutes(
       this.operationDispatcher,
       this.processManager,
@@ -185,7 +187,8 @@ export class GatewayRouter {
       this.options.jobStore,
       this.options.getWebAppOrigin ?? (() => this.options.webAppOrigin),
       this.options.worktreeProvider,
-      this.options.loopTokenStore
+      this.options.loopTokenStore,
+      getSymphonyDir
     );
     registerSymphonyLogsRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerSymphonyPlanRoutes(this.operationDispatcher, this.options.getAllowedDirectories);

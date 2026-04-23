@@ -22,6 +22,7 @@ export interface BootRecoveryDeps {
   telemetry: TelemetryEmitter;
   getApiKey: () => string | null;
   getApiOrigin: () => string;
+  getAllowedDirectories?: () => string[];
   loopTokenStore: LoopTokenStore;
 }
 
@@ -112,7 +113,14 @@ export class BootRecoveryService {
   private async finalizeDeadJobs(deadJobs: LocalJob[]): Promise<void> {
     if (this.disposed) return;
 
-    const { jobStore, telemetry, getApiKey, getApiOrigin, loopTokenStore } = this.deps;
+    const {
+      jobStore,
+      telemetry,
+      getApiKey,
+      getApiOrigin,
+      loopTokenStore,
+    } = this.deps;
+    const getAllowedDirectories = this.deps.getAllowedDirectories ?? (() => []);
     const apiKey = getApiKey();
     const apiBaseUrl = getApiOrigin();
     const recoveryCandidates = this.buildRecoveryCandidates(deadJobs);
@@ -153,6 +161,8 @@ export class BootRecoveryService {
         jobStore.upsert({
           ...job,
           recoveryAttempts: attempts + 1,
+          finalizationSource: "boot-recovery",
+          liveActivity: "Boot recovery replaying finalization after restart",
           updatedAt: new Date().toISOString(),
         });
         const outcome = await finalizeLoopFromRuntime(job, "boot-recovery", {
@@ -161,6 +171,7 @@ export class BootRecoveryService {
           apiAuthToken: authToken,
           apiBaseUrl,
           isProcessRunning,
+          getAllowedDirectories,
           loopTokenStore,
           cleanupAdditionalWorktrees:
             cleanupAdditionalWorktreesWithDefaultProvider,
@@ -249,6 +260,14 @@ export class BootRecoveryService {
     }
 
     registerRecoveredLoop(loopId, pid);
+    const latest = jobStore.getByLoopId(loopId);
+    if (latest) {
+      jobStore.upsert({
+        ...latest,
+        liveActivity: "Boot recovery reattached after desktop restart",
+        updatedAt: new Date().toISOString(),
+      });
+    }
 
     gatewayLog.info(
       "boot-recovery",
@@ -307,6 +326,7 @@ export class BootRecoveryService {
     tailer: LiveJobHandle["tailer"] | undefined,
   ): void {
     const { jobStore, telemetry, loopTokenStore } = this.deps;
+    const getAllowedDirectories = this.deps.getAllowedDirectories ?? (() => []);
 
     const run = async () => {
       if (this.disposed) {
@@ -329,12 +349,20 @@ export class BootRecoveryService {
         return;
       }
 
+      jobStore.upsert({
+        ...job,
+        finalizationSource: "boot-recovery",
+        liveActivity: "Boot recovery took ownership of finalization",
+        updatedAt: new Date().toISOString(),
+      });
+
       const finalizerDeps: LoopFinalizerDeps = {
         jobStore,
         telemetry,
         apiAuthToken: loopAuthToken,
         apiBaseUrl,
         isProcessRunning,
+        getAllowedDirectories,
         loopTokenStore,
         cleanupAdditionalWorktrees:
           cleanupAdditionalWorktreesWithDefaultProvider,

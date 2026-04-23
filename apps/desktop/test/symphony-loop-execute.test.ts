@@ -36,6 +36,7 @@ import {
   saveEnv,
   startMockApiServer,
   waitForCompletedEvent,
+  waitForTerminalEvent,
 } from "./symphony-test-utils.js";
 
 const fakeWorktreeProvider = makeFakeWorktreeProvider("symphony/execute-test");
@@ -48,6 +49,30 @@ const serversToClose: DesktopGatewayServer[] = [];
 const mockServersToClose: http.Server[] = [];
 const tempPathsToClean: string[] = [];
 const savedEnv = saveEnv();
+
+function resolveExecuteWorktreeDir(
+  worktreeParent: string,
+  repoPath: string,
+  loopId: string,
+): string {
+  return path.join(worktreeParent, `${path.basename(repoPath)}-loop-${loopId}`);
+}
+
+async function waitForFile(
+  filePath: string,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await fs.access(filePath);
+      return;
+    } catch {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  throw new Error(`Timed out waiting for file: ${filePath}`);
+}
 
 afterEach(async () => {
   restoreEnv(savedEnv);
@@ -168,23 +193,43 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
   const uploadBody = JSON.parse(uploadReq.body) as {
     artifacts: {
       executionResult?: {
-        pr_url?: string;
-        has_changes?: boolean;
+        schemaVersion?: number;
+        results?: Array<Record<string, unknown>>;
       };
     };
     metadata: Record<string, unknown>;
   };
 
-  // No changes → no PR URL in execution result
+  // No changes persist an explicit v2 execution-result envelope so recovery can
+  // replay the same completion metadata after restart. The no-changes case is
+  // encoded as a "skipped" entry — the v2 "success" discriminant requires a
+  // real PR URL/number and rejects empty sentinels via super-refine.
   assert.equal(
-    uploadBody.artifacts.executionResult?.pr_url,
-    undefined,
-    `Expected no pr_url when there are no changes, got: ${uploadBody.artifacts.executionResult?.pr_url}`,
+    uploadBody.artifacts.executionResult?.schemaVersion,
+    2,
+    "Expected v2 envelope for persisted no-changes execution result",
+  );
+  const primary = uploadBody.artifacts.executionResult?.results?.[0];
+  assert.ok(primary, "Expected results[0] in v2 envelope");
+  assert.equal(
+    primary?.status,
+    "skipped",
+    `Expected status=skipped for no-changes, got: ${String(primary?.status)}`,
   );
   assert.equal(
-    uploadBody.artifacts.executionResult?.has_changes,
-    undefined,
-    "Expected has_changes to be absent when there are no changes",
+    primary?.reason,
+    "no local changes detected",
+    `Expected reason="no local changes detected", got: ${String(primary?.reason)}`,
+  );
+  assert.equal(
+    uploadBody.metadata.executeFinalizationStatus,
+    "no-changes",
+    `Expected executeFinalizationStatus=no-changes, got: ${String(uploadBody.metadata.executeFinalizationStatus)}`,
+  );
+  assert.equal(
+    uploadBody.metadata.executeFinalizationPath,
+    "git-fallback",
+    `Expected executeFinalizationPath=git-fallback, got: ${String(uploadBody.metadata.executeFinalizationPath)}`,
   );
 
   // Also check the completed event does NOT contain GIT_PUSH_FAILED in warnings.
@@ -196,6 +241,151 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
     ),
     `Expected no GIT_PUSH_FAILED warning in completed event for no-changes path, got warnings: ${JSON.stringify(completedEvent.warnings)}`,
   );
+  assert.equal(
+    completedEvent.result?.executeFinalizationStatus,
+    "no-changes",
+    `Expected completed event executeFinalizationStatus=no-changes, got: ${String(completedEvent.result?.executeFinalizationStatus)}`,
+  );
+  assert.equal(
+    completedEvent.result?.executeFinalizationPath,
+    "git-fallback",
+    `Expected completed event executeFinalizationPath=git-fallback, got: ${String(completedEvent.result?.executeFinalizationPath)}`,
+  );
+});
+
+test("EXECUTE: sandbox change during LLM finalization skips git fallback and branch probing", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-sandbox-change-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-sandbox-change");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  const claudeStartedMarker = path.join(tmpDir, "claude-started");
+  const claudeReleaseMarker = path.join(tmpDir, "claude-release");
+  const gitCapture = path.join(tmpDir, "git-capture.txt");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(
+    path.join(fakeBin, "claude"),
+    [
+      "#!/bin/sh",
+      `touch ${JSON.stringify(claudeStartedMarker)}`,
+      `while [ ! -f ${JSON.stringify(claudeReleaseMarker)} ]; do sleep 0.05; done`,
+      "exit 0",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  await fs.writeFile(
+    path.join(fakeBin, "git"),
+    [
+      "#!/bin/sh",
+      `printf '%s\\n' \"$@\" >> ${JSON.stringify(gitCapture)}`,
+      'if [ "$1" = "rev-parse" ] && [ "$2" = "--abbrev-ref" ]; then',
+      '  echo "symphony/execute-test"',
+      "  exit 0",
+      "fi",
+      'if [ "$1" = status ]; then',
+      '  echo " M touched.txt"',
+      "  exit 0",
+      "fi",
+      "exit 0",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  await fs.writeFile(path.join(fakeBin, "gh"), "#!/bin/sh\nexit 1\n", {
+    mode: 0o755,
+  });
+
+  resetResolvedClaudePath();
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  let allowedDirs = [tmpDir];
+  const otherAllowedDir = path.join(tmpDir, "other-allowed");
+  await fs.mkdir(otherAllowedDir, { recursive: true });
+  const jobStore = new JobStore({ cwd: tmpDir, name: "test-jobs-sandbox-change" });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => allowedDirs,
+    machineName: "execute-sandbox-change-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000000101";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [],
+        repo: {
+          fullName: `sandbox/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  await waitForFile(claudeStartedMarker);
+  allowedDirs = [otherAllowedDir];
+  await fs.writeFile(claudeReleaseMarker, "release\n", "utf-8");
+
+  const uploadReq = await mock.waitForRequest("upload-artifacts");
+  const uploadBody = JSON.parse(uploadReq.body) as {
+    artifacts?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+  };
+  assert.equal(uploadBody.metadata?.executeFinalizationStatus, "skipped");
+  assert.equal(uploadBody.metadata?.executeFinalizationPath, "none");
+  assert.equal(
+    uploadBody.metadata?.executeFinalizationReason,
+    "worktree directory not allowed by current sandbox",
+  );
+  assert.equal(uploadBody.metadata?.branchName, undefined);
+  assert.equal(uploadBody.artifacts?.executionResult, undefined);
+
+  const completedEvent = await waitForCompletedEvent(mock.requests, loopId);
+  assert.equal(completedEvent.result?.executeFinalizationStatus, "skipped");
+  assert.equal(completedEvent.result?.executeFinalizationPath, "none");
+  assert.equal(
+    completedEvent.result?.executeFinalizationReason,
+    "worktree directory not allowed by current sandbox",
+  );
+  assert.equal(completedEvent.result?.branchName, undefined);
+  assert.equal(await fs.readFile(gitCapture, "utf-8").catch(() => ""), "");
 });
 
 // ---------------------------------------------------------------------------
@@ -630,6 +820,838 @@ test("EXECUTE: git status failure sets GIT_PUSH_FAILED in completed event warnin
   assert.ok(
     Array.isArray(warnings) && warnings.includes("GIT_PUSH_FAILED"),
     `Expected GIT_PUSH_FAILED in completed event warnings when git status exits 1, got warnings: ${JSON.stringify(warnings)}`,
+  );
+});
+
+test("EXECUTE: rehydrates aligned raw implementation plan state into a fresh worktree", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-rehydrate-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-rehydrate");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  await createFakeRunLoopScript(
+    tmpDir,
+    [
+      "#!/bin/sh",
+      'cp "$CLOSEDLOOP_WORKDIR/plan.json" "$CLOSEDLOOP_WORKDIR/captured-plan.json"',
+      "exit 0",
+    ].join("\n"),
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'if [ "$1" = status ]; then exit 0; fi',
+    'if [ "$1" = push ]; then exit 0; fi',
+    'if [ "$1" = add ]; then exit 0; fi',
+    'if [ "$1" = commit ]; then exit 0; fi',
+    'if [ "$1" = fetch ]; then exit 0; fi',
+    'if [ "$1" = "rev-parse" ]; then',
+    '  if [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+    "  exit 0",
+    "fi",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, {
+    mode: 0o755,
+  });
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const jobStore = new JobStore({
+    cwd: tmpDir,
+    name: "test-jobs-rehydrate",
+  });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-rehydrate-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000000450";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [
+          {
+            type: "IMPLEMENTATION_PLAN",
+            content: "Updated markdown",
+            raw: {
+              content: "Updated markdown",
+              pendingTasks: ["task-1"],
+              completedTasks: ["task-0"],
+              openQuestions: ["question-1"],
+            },
+          },
+        ],
+        repo: {
+          fullName: `rehydrate/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  const terminalJob = await waitForJobTerminal(jobStore, loopId);
+  assert.equal(terminalJob.status, "COMPLETED");
+  assert.ok(terminalJob.claudeWorkDir, "Expected claudeWorkDir on completed job");
+
+  const capturedPlan = JSON.parse(
+    await fs.readFile(
+      path.join(terminalJob.claudeWorkDir!, "captured-plan.json"),
+      "utf-8",
+    ),
+  ) as Record<string, unknown>;
+  assert.equal(capturedPlan.content, "Updated markdown");
+  assert.deepEqual(capturedPlan.pendingTasks, ["task-1"]);
+  assert.deepEqual(capturedPlan.completedTasks, ["task-0"]);
+  assert.deepEqual(capturedPlan.openQuestions, ["question-1"]);
+});
+
+test("EXECUTE: fresh worktree without raw plan stages plan.md and passes CLOSEDLOOP_PLAN_FILE", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-plan-source-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-plan-source");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  const loopId = "00000000-0000-0000-0000-000000000451";
+  const worktreeDir = resolveExecuteWorktreeDir(worktreeParent, repoPath, loopId);
+  const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+
+  await createFakeRunLoopScript(
+    tmpDir,
+    [
+      "#!/bin/sh",
+      'printf "%s" "$CLOSEDLOOP_PLAN_FILE" > "$CLOSEDLOOP_WORKDIR/captured-plan-file.txt"',
+      'if [ -e "$CLOSEDLOOP_WORKDIR/plan.json" ]; then echo "present" > "$CLOSEDLOOP_WORKDIR/prewritten-plan-json.txt"; fi',
+      'cp "$CLOSEDLOOP_PLAN_FILE" "$CLOSEDLOOP_WORKDIR/captured-plan-source.md"',
+      "exit 0",
+    ].join("\n"),
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'if [ "$1" = status ]; then exit 0; fi',
+    'if [ "$1" = push ]; then exit 0; fi',
+    'if [ "$1" = add ]; then exit 0; fi',
+    'if [ "$1" = commit ]; then exit 0; fi',
+    'if [ "$1" = fetch ]; then exit 0; fi',
+    'if [ "$1" = "rev-parse" ]; then',
+    '  if [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+    "  exit 0",
+    "fi",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-plan-source-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const sourceMarkdown = "# Fresh plan\n\n- staged from markdown";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [
+          {
+            type: "IMPLEMENTATION_PLAN",
+            content: sourceMarkdown,
+          },
+        ],
+        repo: {
+          fullName: `plan-source/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  await mock.waitForRequest("upload-artifacts");
+
+  const capturedPlanFile = await fs.readFile(
+    path.join(claudeWorkDir, "captured-plan-file.txt"),
+    "utf-8",
+  );
+  assert.equal(
+    capturedPlanFile.trim(),
+    path.join(claudeWorkDir, "imported-plan.md"),
+    `Expected CLOSEDLOOP_PLAN_FILE to point at imported-plan.md, got: ${capturedPlanFile}`,
+  );
+
+  const capturedPlanSource = await fs.readFile(
+    path.join(claudeWorkDir, "captured-plan-source.md"),
+    "utf-8",
+  );
+  assert.equal(
+    capturedPlanSource,
+    sourceMarkdown,
+    "Expected run-loop to read the staged markdown source file",
+  );
+
+  const prewrittenPlanJson = await fs.readFile(
+    path.join(claudeWorkDir, "prewritten-plan-json.txt"),
+    "utf-8",
+  ).catch(() => "");
+  assert.equal(
+    prewrittenPlanJson,
+    "",
+    "Expected plan.json to stay absent before run-loop starts",
+  );
+});
+
+test("EXECUTE: imported-plan failure still uploads the staged plan artifact", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-plan-failure-upload-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-plan-failure-upload");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 1\n");
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'if [ "$1" = status ]; then exit 0; fi',
+    'if [ "$1" = push ]; then exit 0; fi',
+    'if [ "$1" = add ]; then exit 0; fi',
+    'if [ "$1" = commit ]; then exit 0; fi',
+    'if [ "$1" = fetch ]; then exit 0; fi',
+    'if [ "$1" = "rev-parse" ]; then',
+    '  if [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+    "  exit 0",
+    "fi",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-plan-failure-upload-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000000454";
+  const sourceMarkdown = "# Hosted plan for failure upload\n\n- preserve me";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [
+          {
+            type: "IMPLEMENTATION_PLAN",
+            content: sourceMarkdown,
+          },
+        ],
+        repo: {
+          fullName: `plan-failure-upload/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  const uploadReq = await mock.waitForRequest("upload-artifacts");
+  const uploadBody = JSON.parse(uploadReq.body) as {
+    artifacts?: {
+      plan?: {
+        content?: string;
+        raw?: Record<string, unknown>;
+      };
+    };
+  };
+  assert.deepEqual(uploadBody.artifacts?.plan, {
+    content: sourceMarkdown,
+  });
+
+  const terminalEvent = await waitForTerminalEvent(mock.requests, loopId);
+  assert.equal(terminalEvent.type, "error");
+});
+
+test("EXECUTE: remote raw plan payload wins over existing local plan.json", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-plan-priority-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-plan-priority");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  const loopId = "00000000-0000-0000-0000-000000000452";
+  const worktreeDir = resolveExecuteWorktreeDir(worktreeParent, repoPath, loopId);
+  const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const localPlan = {
+    title: "Local plan",
+    content: "# Local plan\n\n- staged locally",
+    source: "local",
+    tasks: [
+      {
+        id: "local-task",
+        title: "Local task",
+        description: "local description",
+      },
+    ],
+  };
+  await fs.writeFile(
+    path.join(claudeWorkDir, "plan.json"),
+    JSON.stringify(localPlan, null, 2),
+  );
+
+  await createFakeRunLoopScript(
+    tmpDir,
+    [
+      "#!/bin/sh",
+      'printf "%s" "$CLOSEDLOOP_PLAN_FILE" > "$CLOSEDLOOP_WORKDIR/captured-plan-file.txt"',
+      'if [ -e "$CLOSEDLOOP_WORKDIR/imported-plan.md" ]; then echo "present" > "$CLOSEDLOOP_WORKDIR/imported-plan-marker.txt"; fi',
+      'cp "$CLOSEDLOOP_WORKDIR/plan.json" "$CLOSEDLOOP_WORKDIR/captured-plan.json"',
+      "exit 0",
+    ].join("\n"),
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'if [ "$1" = status ]; then exit 0; fi',
+    'if [ "$1" = push ]; then exit 0; fi',
+    'if [ "$1" = add ]; then exit 0; fi',
+    'if [ "$1" = commit ]; then exit 0; fi',
+    'if [ "$1" = fetch ]; then exit 0; fi',
+    'if [ "$1" = "rev-parse" ]; then',
+    '  if [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+    "  exit 0",
+    "fi",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-plan-priority-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const rawPlan = {
+    title: "Raw plan",
+    content: "# Raw plan\n\n- staged from raw payload",
+    source: "raw",
+    tasks: [
+      {
+        id: "raw-task",
+        title: "Raw task",
+        description: "raw description",
+      },
+    ],
+  };
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [
+          {
+            type: "IMPLEMENTATION_PLAN",
+            content: rawPlan.content,
+            raw: rawPlan,
+          },
+        ],
+        repo: {
+          fullName: `plan-priority/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  await mock.waitForRequest("upload-artifacts");
+
+  const capturedPlanFile = await fs.readFile(
+    path.join(claudeWorkDir, "captured-plan-file.txt"),
+    "utf-8",
+  );
+  assert.equal(
+    capturedPlanFile.trim(),
+    "",
+    `Expected CLOSEDLOOP_PLAN_FILE to be empty when a local plan.json is reused, got: ${capturedPlanFile}`,
+  );
+
+  const importedPlanMarker = await fs.readFile(
+    path.join(claudeWorkDir, "imported-plan-marker.txt"),
+    "utf-8",
+  ).catch(() => "");
+  assert.equal(
+    importedPlanMarker,
+    "",
+    "Expected no imported-plan.md source file when aligned remote raw is reused",
+  );
+
+  const capturedPlan = JSON.parse(
+    await fs.readFile(
+      path.join(claudeWorkDir, "captured-plan.json"),
+      "utf-8",
+    ),
+  ) as Record<string, unknown>;
+  assert.equal(
+    capturedPlan.source,
+    "raw",
+    "Expected aligned remote raw plan state to overwrite stale local plan.json",
+  );
+  assert.equal(
+    capturedPlan.content,
+    rawPlan.content,
+    "Expected plan.json content to come from the hosted/remote artifact",
+  );
+});
+
+test("EXECUTE: stale raw plan state falls back to imported-plan compatibility", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-plan-stale-raw-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-plan-stale-raw");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  const loopId = "00000000-0000-0000-0000-000000000453";
+  const worktreeDir = resolveExecuteWorktreeDir(worktreeParent, repoPath, loopId);
+  const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  await fs.writeFile(
+    path.join(claudeWorkDir, "plan.json"),
+    JSON.stringify(
+      {
+        title: "Local stale plan",
+        content: "# Local stale plan\n\n- local snapshot",
+        source: "local",
+      },
+      null,
+      2,
+    ),
+  );
+
+  await createFakeRunLoopScript(
+    tmpDir,
+    [
+      "#!/bin/sh",
+      'printf "%s" "$CLOSEDLOOP_PLAN_FILE" > "$CLOSEDLOOP_WORKDIR/captured-plan-file.txt"',
+      'if [ -e "$CLOSEDLOOP_WORKDIR/plan.json" ]; then echo "present" > "$CLOSEDLOOP_WORKDIR/prewritten-plan-json.txt"; fi',
+      'cp "$CLOSEDLOOP_PLAN_FILE" "$CLOSEDLOOP_WORKDIR/captured-plan-source.md"',
+      "exit 0",
+    ].join("\n"),
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'if [ "$1" = status ]; then exit 0; fi',
+    'if [ "$1" = push ]; then exit 0; fi',
+    'if [ "$1" = add ]; then exit 0; fi',
+    'if [ "$1" = commit ]; then exit 0; fi',
+    'if [ "$1" = fetch ]; then exit 0; fi',
+    'if [ "$1" = "rev-parse" ]; then',
+    '  if [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+    "  exit 0",
+    "fi",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-plan-stale-raw-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const hostedMarkdown = "# Hosted plan\n\n- latest markdown";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [
+          {
+            type: "IMPLEMENTATION_PLAN",
+            content: hostedMarkdown,
+            raw: {
+              content: "# Older raw snapshot\n\n- stale structure",
+              source: "raw",
+            },
+          },
+        ],
+        repo: {
+          fullName: `plan-stale-raw/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  await mock.waitForRequest("upload-artifacts");
+
+  const capturedPlanFile = await fs.readFile(
+    path.join(claudeWorkDir, "captured-plan-file.txt"),
+    "utf-8",
+  );
+  assert.equal(
+    capturedPlanFile.trim(),
+    path.join(claudeWorkDir, "imported-plan.md"),
+    `Expected stale raw state to fall back to imported-plan.md, got: ${capturedPlanFile}`,
+  );
+
+  const capturedPlanSource = await fs.readFile(
+    path.join(claudeWorkDir, "captured-plan-source.md"),
+    "utf-8",
+  );
+  assert.equal(
+    capturedPlanSource,
+    hostedMarkdown,
+    "Expected stale raw fallback to use the hosted markdown content",
+  );
+
+  const prewrittenPlanJson = await fs.readFile(
+    path.join(claudeWorkDir, "prewritten-plan-json.txt"),
+    "utf-8",
+  ).catch(() => "");
+  assert.equal(
+    prewrittenPlanJson,
+    "",
+    "Expected stale local plan.json to be removed before imported-plan execution starts",
+  );
+});
+
+test("EXECUTE: non-cancelled failure uploads current plan state before posting the error event", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-fail-upload-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-fail-upload");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  await createFakeRunLoopScript(
+    tmpDir,
+    [
+      "#!/bin/sh",
+      `printf '%s' '${JSON.stringify({
+        content: "Plan content",
+        pendingTasks: ["task-1"],
+      }).replace(/'/g, String.raw`'\''`)}' > "$CLOSEDLOOP_WORKDIR/plan.json"`,
+      `printf '%s' '${JSON.stringify({ score: 0.5 }).replace(/'/g, String.raw`'\''`)}' > "$CLOSEDLOOP_WORKDIR/code-judges.json"`,
+      "exit 1",
+    ].join("\n"),
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+  await fs.writeFile(path.join(fakeBin, "git"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const jobStore = new JobStore({
+    cwd: tmpDir,
+    name: "test-jobs-fail-upload",
+  });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-fail-upload-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000000451";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [],
+        repo: {
+          fullName: `fail-upload/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  const terminalJob = await waitForJobTerminal(jobStore, loopId);
+  assert.equal(terminalJob.status, "FAILED");
+  assert.ok(
+    terminalJob.artifactsUploadedAt,
+    "Expected artifactsUploadedAt to persist after failure upload",
+  );
+
+  const uploadRequest = await mock.waitForRequest("upload-artifacts");
+  const uploadBody = JSON.parse(uploadRequest.body) as {
+    artifacts: {
+      plan?: Record<string, unknown>;
+      codeJudges?: Record<string, unknown>;
+    };
+  };
+  assert.deepEqual(uploadBody.artifacts.plan, {
+    content: "Plan content",
+    raw: {
+      content: "Plan content",
+      pendingTasks: ["task-1"],
+    },
+  });
+  assert.deepEqual(uploadBody.artifacts.codeJudges, { score: 0.5 });
+
+  const uploadIndex = mock.requests.findIndex((request) =>
+    request.url.includes("upload-artifacts"),
+  );
+  const errorEventIndex = mock.requests.findIndex((request) => {
+    if (!request.url.includes(`/loops/${loopId}/events`)) {
+      return false;
+    }
+    try {
+      const body = JSON.parse(request.body) as Record<string, unknown>;
+      return body.type === "error";
+    } catch {
+      return false;
+    }
+  });
+  assert.ok(uploadIndex !== -1, "Expected upload-artifacts request");
+  assert.ok(errorEventIndex !== -1, "Expected error event request");
+  assert.ok(
+    uploadIndex < errorEventIndex,
+    `Expected artifact upload before error event, got uploadIndex=${uploadIndex} errorEventIndex=${errorEventIndex}`,
   );
 });
 
