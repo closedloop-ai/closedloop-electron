@@ -126,51 +126,6 @@ export function getOverrideBinaryPaths(): { claude?: string; gh?: string; codex?
   return overrideGetBinaryPaths?.() ?? null;
 }
 
-// ---------------------------------------------------------------------------
-// App version gate for v2 multi-repo execution (T-6.9)
-// ---------------------------------------------------------------------------
-
-/**
- * Resolve the Electron desktop app version at module-load time by reading the
- * nearest `package.json` above this file. Falls back to `null` if the file
- * cannot be read — in that case the version gate is disabled (no rejection).
- *
- * The Electron `app.getVersion()` API is only available in the main process;
- * the gateway server (this module) runs in a separate Node.js context so
- * package.json is the canonical source for the runtime app version.
- *
- * TODO(FEA-587): Remove this helper and all callers once legacy desktop
- * builds below MIN_DESKTOP_VERSION_FOR_V2 are fully sunset. See ClosedLoop
- * FEA-587 for cleanup criteria (sibling cleanup lives in symphony-alpha at
- * packages/loops-api/src/execution-result.ts:21).
- */
-function resolveDesktopAppVersion(): string | null {
-  // Walk up from this file's directory to find package.json
-  // __dirname-equivalent for ESM: use import.meta.url when available,
-  // otherwise fall back to a relative path heuristic.
-  const candidates = [
-    path.join(path.dirname(path.dirname(path.dirname(path.dirname(
-      new URL(import.meta.url).pathname
-    )))), "package.json"),
-    // Fallback: relative to common CWD patterns for the gateway process
-    path.join(process.cwd(), "package.json"),
-  ];
-  for (const candidate of candidates) {
-    try {
-      const raw = readFileSync(candidate, "utf8");
-      const pkg = JSON.parse(raw) as { version?: string; name?: string };
-      if (typeof pkg.version === "string" && pkg.name?.includes("desktop")) {
-        return pkg.version;
-      }
-    } catch {
-      // Non-fatal: try next candidate
-    }
-  }
-  return null;
-}
-
-const DESKTOP_APP_VERSION: string | null = resolveDesktopAppVersion();
-
 export function getResolvedGitPath(): string {
   return resolveBinarySync("git", overrideGetBinaryPaths?.()?.git).path;
 }
@@ -263,10 +218,8 @@ import { LoopEventType } from "@closedloop-ai/loops-api/events";
 import {
   GIT_REF_NAME_REGEX,
   MAX_ADDITIONAL_REPOS,
-  MIN_DESKTOP_VERSION_FOR_V2,
   getPrimaryRepoResult,
   parseExecutionResultFile,
-  isLegacyBuildForV2,
   type RepoExecutionResult,
 } from "@closedloop-ai/loops-api/execution-result";
 import {
@@ -3038,26 +2991,6 @@ async function handleLoopRequest(
   if (!VALID_COMMANDS.has(body.command)) {
     json(context, 400, { error: `Invalid command: ${body.command}` });
     return;
-  }
-
-  // T-6.9: Legacy-build detection gate for EXECUTE command.
-  // If this desktop app version is below MIN_DESKTOP_VERSION_FOR_V2, refuse
-  // EXECUTE requests and return a clear upgrade error. Does NOT write any
-  // execution-result.json payload.
-  // TODO(cleanup-min-desktop-version-for-v2): Remove once legacy builds sunset.
-  if (body.command === "EXECUTE" && DESKTOP_APP_VERSION !== null) {
-    if (isLegacyBuildForV2(DESKTOP_APP_VERSION)) {
-      const upgradeMsg =
-        `This version of ClosedLoop Desktop (${DESKTOP_APP_VERSION}) does not ` +
-        `support the v2 multi-repo EXECUTE protocol. ` +
-        `Please upgrade to version ${MIN_DESKTOP_VERSION_FOR_V2} or later.`;
-      gatewayLog.warn(
-        "loop-harness",
-        `[version-gate] Refusing EXECUTE: app version ${DESKTOP_APP_VERSION} < ${MIN_DESKTOP_VERSION_FOR_V2}`,
-      );
-      json(context, 426, { error: upgradeMsg, upgradeRequired: true });
-      return;
-    }
   }
 
   if (
