@@ -3062,6 +3062,157 @@ function executeAdditionalRepoCommitPush(
 }
 
 // ---------------------------------------------------------------------------
+// Additional-repo finalization (shared between live-exit and boot-recovery)
+// ---------------------------------------------------------------------------
+
+/** Minimal additional-repo descriptor needed to run commit/push/PR. */
+export interface AdditionalRepoFinalizationEntry {
+  dir: string;
+  fullName: string;
+  baseBranch: string;
+}
+
+export interface AdditionalRepoFinalizationParams {
+  loopId: string;
+  entries: ReadonlyArray<AdditionalRepoFinalizationEntry>;
+  /** Per-repo auth token lookup. Returning `undefined` falls back to unauthenticated git. */
+  tokenLookup: (fullName: string) => string | undefined;
+  committer: LoopCommitter | undefined;
+  artifactSlug: string | undefined;
+  webAppOrigin: string | undefined;
+  gitShellPath: string | undefined;
+  /**
+   * Current v2 envelope on disk. Entries whose `fullName` is already present
+   * in `existingEnvelope.results[]` are skipped — this keeps boot-recovery
+   * idempotent: a live-exit that partially completed the loop will not cause
+   * double-PR creation on the next boot.
+   */
+  existingEnvelope: { schemaVersion: 2; results: RepoExecutionResult[] };
+}
+
+export interface AdditionalRepoFinalizationOutcome {
+  /** Updated envelope (existingEnvelope spread + any newly-finalized entries). */
+  envelope: { schemaVersion: 2; results: RepoExecutionResult[] };
+  /** Warnings to append to the job-level warnings list. */
+  warnings: string[];
+  /** Per-repo error events the caller should post to the cloud. */
+  errorEvents: Array<{ fullName: string; message: string }>;
+  /** True when the envelope gained entries vs. the input. */
+  changed: boolean;
+}
+
+/**
+ * Run commit/push/PR for any additional repos whose results are not already
+ * present in the persisted v2 envelope, and return the merged envelope. Used
+ * by the live-exit path (symphony-loop.ts) and boot-recovery (loop-finalizer).
+ *
+ * Each entry is wrapped in try/catch: a single-repo failure produces a
+ * "failed" envelope entry and an error event for the caller to post, but
+ * never aborts the remaining repos or the primary-repo completion flow.
+ */
+export function finalizeAdditionalRepos(
+  params: AdditionalRepoFinalizationParams,
+): AdditionalRepoFinalizationOutcome {
+  const warnings: string[] = [];
+  const errorEvents: Array<{ fullName: string; message: string }> = [];
+  const alreadyFinalized = new Set(
+    params.existingEnvelope.results.map((r) => r.fullName),
+  );
+  const newResults: RepoExecutionResult[] = [];
+
+  for (const entry of params.entries) {
+    const { fullName, dir, baseBranch } = entry;
+    if (alreadyFinalized.has(fullName)) {
+      loopLog(
+        params.loopId,
+        `Additional repo already in envelope, skipping: ${fullName}`,
+      );
+      continue;
+    }
+    try {
+      loopLog(
+        params.loopId,
+        `Additional repo commit/push/PR: ${fullName} dir=${dir}`,
+      );
+      const addGitResult = executeAdditionalRepoCommitPush(
+        dir,
+        fullName,
+        baseBranch,
+        params.loopId,
+        params.committer,
+        params.artifactSlug,
+        params.webAppOrigin,
+        params.tokenLookup(fullName),
+        params.gitShellPath,
+      );
+      if (addGitResult.status === "success") {
+        loopLog(
+          params.loopId,
+          `Additional repo PR created: ${fullName} pr=${addGitResult.prUrl}`,
+        );
+        newResults.push({
+          status: "success",
+          fullName,
+          pr_url: addGitResult.prUrl,
+          pr_number: addGitResult.prNumber,
+          branch_name: addGitResult.branchName,
+          base_branch: baseBranch,
+          has_changes: true,
+          commit_sha: addGitResult.commitSha,
+        });
+      } else if (addGitResult.status === "no-changes") {
+        loopLog(params.loopId, `Additional repo no changes: ${fullName}`);
+        // Encoded as "skipped" — the v2 "success" discriminant requires a
+        // real PR URL/number (see buildPersistedExecutionResultArtifact).
+        newResults.push({
+          status: "skipped",
+          fullName,
+          reason: "no local changes detected",
+        });
+      } else {
+        const scrubbedReason = scrubSecrets(addGitResult.reason);
+        gatewayLog.warn(
+          "loop-harness",
+          `Additional repo git ops failed: ${fullName} — ${scrubbedReason}, loopId=${params.loopId}`,
+        );
+        warnings.push(`ADDITIONAL_REPO_GIT_FAILED:${fullName}`);
+        newResults.push({
+          status: "failed",
+          fullName,
+          error: scrubbedReason,
+        });
+      }
+    } catch (err) {
+      const scrubbedMsg = scrubSecrets(
+        err instanceof Error ? err.message : String(err),
+      );
+      loopError(params.loopId, `Additional repo error for ${fullName}:`, err);
+      errorEvents.push({ fullName, message: scrubbedMsg });
+      newResults.push({
+        status: "failed",
+        fullName,
+        error: scrubbedMsg,
+      });
+    }
+  }
+
+  if (newResults.length === 0) {
+    return {
+      envelope: params.existingEnvelope,
+      warnings,
+      errorEvents,
+      changed: false,
+    };
+  }
+
+  const merged = scrubSecretDeep({
+    schemaVersion: 2,
+    results: [...params.existingEnvelope.results, ...newResults],
+  }) as { schemaVersion: 2; results: RepoExecutionResult[] };
+  return { envelope: merged, warnings, errorEvents, changed: true };
+}
+
+// ---------------------------------------------------------------------------
 // Process completion handler (async, runs after spawn)
 // ---------------------------------------------------------------------------
 
@@ -3476,122 +3627,69 @@ export async function handleProcessCompletion(
         }
       }
 
-      // Per-additional-repo commit/push/PR loop. Each entry is wrapped in
-      // try/catch so a single-repo failure emits an error event without
-      // blocking the remaining repos or the primary-repo completion flow.
-      // Worktrees are preserved on success and failure (symmetric with the
-      // primary worktree); the next PLAN on the same loop key stale-prunes
-      // leftovers.
-      //
-      // Per-repo outcomes are collected here and appended to the v2 envelope
-      // after the loop so additional repos are first-class in the uploaded
-      // execution-result, symmetric with the primary entry.
-      const additionalRepoResults: RepoExecutionResult[] = [];
+      // Per-additional-repo commit/push/PR loop via shared helper. Idempotent
+      // against the persisted v2 envelope so a prior partial run (e.g. cloud
+      // finalization crash, boot-recovery) never double-creates PRs. Worktrees
+      // are preserved on success and failure; the next PLAN on the same loop
+      // key stale-prunes leftovers.
       if (additionalWorktreeDirs.length > 0) {
         const tokenMap = new Map<string, string>(
           additionalRepoTokens.map(({ fullName, token }) => [fullName, token]),
         );
         const gitShellPath = await getShellPath();
 
-        for (const addEntry of additionalWorktreeDirs) {
-          const fullName = addEntry.fullName ?? path.basename(addEntry.repoPath);
-          const addBaseBranch = addEntry.baseBranch ?? "main";
-          try {
-            loopLog(loopId, `Additional repo commit/push/PR: ${fullName} dir=${addEntry.dir}`);
-            const addToken = addEntry.fullName ? tokenMap.get(addEntry.fullName) : undefined;
-            const addGitResult = executeAdditionalRepoCommitPush(
-              addEntry.dir,
-              fullName,
-              addBaseBranch,
-              loopId,
-              committer,
-              body.artifactSlug,
-              webAppOrigin,
-              addToken,
-              gitShellPath,
-            );
-            if (addGitResult.status === "success") {
-              loopLog(
-                loopId,
-                `Additional repo PR created: ${fullName} pr=${addGitResult.prUrl}`,
-              );
-              additionalRepoResults.push({
-                status: "success",
-                fullName,
-                pr_url: addGitResult.prUrl,
-                pr_number: addGitResult.prNumber,
-                branch_name: addGitResult.branchName,
-                base_branch: addBaseBranch,
-                has_changes: true,
-                commit_sha: addGitResult.commitSha,
-              });
-            } else if (addGitResult.status === "no-changes") {
-              loopLog(loopId, `Additional repo no changes: ${fullName}`);
-              // Encoded as "skipped" — the v2 "success" discriminant requires a
-              // real PR URL/number (see buildPersistedExecutionResultArtifact).
-              additionalRepoResults.push({
-                status: "skipped",
-                fullName,
-                reason: "no local changes detected",
-              });
-            } else {
-              const scrubbedReason = scrubSecrets(addGitResult.reason);
-              gatewayLog.warn(
-                "loop-harness",
-                `Additional repo git ops failed: ${fullName} — ${scrubbedReason}, loopId=${loopId}`,
-              );
-              warnings.push(`ADDITIONAL_REPO_GIT_FAILED:${fullName}`);
-              additionalRepoResults.push({
-                status: "failed",
-                fullName,
-                error: scrubbedReason,
-              });
-            }
-          } catch (err) {
-            // Emit error event for per-repo failures so they surface without
-            // blocking the remaining repos.
-            const scrubbedMsg = scrubSecrets(err instanceof Error ? err.message : String(err));
-            loopError(loopId, `Additional repo error for ${fullName}:`, err);
-            await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
-              type: LoopEventType.Error,
-              code: LoopErrorCode.RepoNotFound,
-              message: scrubbedMsg,
-              result: { message: scrubbedMsg, repo: fullName },
-              loopId,
-            });
-            additionalRepoResults.push({
-              status: "failed",
-              fullName,
-              error: scrubbedMsg,
-            });
-          }
-        }
-      }
-
-      // Merge additional-repo results into the v2 envelope. runExecuteFinalization
-      // persisted the primary-only envelope; we re-persist here with the full
-      // results[] so readers (cloud upload + reboot replay) see every repo.
-      if (additionalRepoResults.length > 0) {
-        const existing = artifacts.executionResult as
-          | { schemaVersion?: number; results?: RepoExecutionResult[] }
-          | undefined;
-        const primaryResults = existing?.results ?? [];
-        const merged = scrubSecretDeep({
+        const existingEnvelope =
+          (artifacts.executionResult as
+            | { schemaVersion?: number; results?: RepoExecutionResult[] }
+            | undefined);
+        const seedEnvelope: { schemaVersion: 2; results: RepoExecutionResult[] } = {
           schemaVersion: 2,
-          results: [...primaryResults, ...additionalRepoResults],
-        }) as { schemaVersion: 2; results: RepoExecutionResult[] };
-        artifacts.executionResult = merged;
-        try {
-          writeFileSync(
-            path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
-            JSON.stringify(merged),
-          );
-        } catch (err) {
-          loopLog(
+          results: existingEnvelope?.results ?? [],
+        };
+        const entries: AdditionalRepoFinalizationEntry[] = additionalWorktreeDirs.map(
+          (addEntry) => ({
+            dir: addEntry.dir,
+            fullName: addEntry.fullName ?? path.basename(addEntry.repoPath),
+            baseBranch: addEntry.baseBranch ?? "main",
+          }),
+        );
+        const outcome = finalizeAdditionalRepos({
+          loopId,
+          entries,
+          tokenLookup: (fullName) =>
+            tokenMap.get(fullName) ??
+            loopTokenStore?.getAdditionalRepoToken(loopId, fullName) ??
+            undefined,
+          committer,
+          artifactSlug: body.artifactSlug,
+          webAppOrigin,
+          gitShellPath,
+          existingEnvelope: seedEnvelope,
+        });
+        warnings.push(...outcome.warnings);
+        for (const event of outcome.errorEvents) {
+          await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+            type: LoopEventType.Error,
+            code: LoopErrorCode.RepoNotFound,
+            message: event.message,
+            result: { message: event.message, repo: event.fullName },
             loopId,
-            "Failed to re-persist execution-result.json with additional entries:",
-            err,
-          );
+          });
+        }
+        if (outcome.changed) {
+          artifacts.executionResult = outcome.envelope;
+          try {
+            writeFileSync(
+              path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
+              JSON.stringify(outcome.envelope),
+            );
+          } catch (err) {
+            loopLog(
+              loopId,
+              "Failed to re-persist execution-result.json with additional entries:",
+              err,
+            );
+          }
         }
       }
     } else if (command === "DECOMPOSE") {
@@ -4764,6 +4862,19 @@ async function handleLoopRequest(
     try {
       if (loopTokenStore) {
         loopTokenStore.setLoopToken(body.loopId, body.closedLoopAuthToken);
+        // Persist additional-repo tokens so boot-recovery can re-run the
+        // commit/push/PR loop for any additional repos whose entries are
+        // absent from the v2 execution-result envelope after a crash.
+        for (const { fullName, token } of additionalRepoTokens) {
+          try {
+            loopTokenStore.setAdditionalRepoToken(body.loopId, fullName, token);
+          } catch (err) {
+            loopLog(
+              body.loopId,
+              `Failed to persist additional-repo token for ${fullName}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+        }
       }
     } catch (err) {
       loopLog(

@@ -1,18 +1,23 @@
 import { execFileSync } from "node:child_process";
-import {
-  getResolvedGitPath,
-  runExecuteFinalization,
-  slugifyLoopId,
-} from "../server/operations/symphony-loop.js";
 import crypto from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { LoopArtifactFile } from "@closedloop-ai/loops-api/artifacts";
 import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
 import {
   getPrimaryRepoResult,
   parseExecutionResultFile,
+  type RepoExecutionResult,
 } from "@closedloop-ai/loops-api/execution-result";
+import {
+  finalizeAdditionalRepos,
+  getResolvedGitPath,
+  runExecuteFinalization,
+  slugifyLoopId,
+  type AdditionalRepoFinalizationEntry,
+} from "../server/operations/symphony-loop.js";
+import { getShellPath } from "../server/shell-path.js";
 import {
   IMPORTED_PLAN_MARKDOWN_FILE,
   toUploadedPlanArtifact,
@@ -986,6 +991,89 @@ export async function finalizeLoopFromRuntime(
       warnings.push("GIT_PUSH_FAILED");
     }
     resolvedJob = jobStore.getByLoopId(resolvedJob.loopId) ?? resolvedJob;
+
+    // Run the additional-repo commit/push/PR loop for any entries whose
+    // fullName is not already in the persisted v2 envelope. This covers the
+    // case where live-exit finalized the primary but Electron crashed before
+    // the additional-repo loop ran, or where the cloud finalization hit an
+    // error and the job is being retried on boot-recovery.
+    //
+    // Idempotent: finalizeAdditionalRepos skips fullNames already in
+    // existingEnvelope.results[], so re-running this block on repeated
+    // boot-recovery attempts never double-creates PRs.
+    const additionalEntries: AdditionalRepoFinalizationEntry[] = (
+      resolvedJob.additionalWorktreeDirs ?? []
+    )
+      .filter(
+        (entry): entry is {
+          dir: string;
+          repoPath: string;
+          fullName: string;
+          baseBranch?: string;
+        } =>
+          typeof entry.fullName === "string" && entry.fullName.length > 0,
+      )
+      .map((entry) => ({
+        dir: entry.dir,
+        fullName: entry.fullName,
+        baseBranch: entry.baseBranch ?? "main",
+      }));
+
+    if (additionalEntries.length > 0) {
+      const envelopeOnDisk = readJsonFileSync(
+        path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
+      );
+      const existingResults: RepoExecutionResult[] =
+        parseExecutionResultFile(envelopeOnDisk, resolvedJob.loopId) ?? [];
+      const seedEnvelope: {
+        schemaVersion: 2;
+        results: RepoExecutionResult[];
+      } = { schemaVersion: 2, results: existingResults };
+
+      const gitShellPath = await getShellPath();
+      const outcome = finalizeAdditionalRepos({
+        loopId: resolvedJob.loopId,
+        entries: additionalEntries,
+        tokenLookup: (fullName) =>
+          loopTokenStore?.getAdditionalRepoToken(resolvedJob.loopId, fullName) ??
+          undefined,
+        committer: resolvedJob.committer,
+        artifactSlug: resolvedJob.artifactSlug,
+        webAppOrigin: resolvedJob.webAppOrigin,
+        gitShellPath,
+        existingEnvelope: seedEnvelope,
+      });
+      for (const w of outcome.warnings) {
+        if (!warnings.includes(w)) {
+          warnings.push(w);
+        }
+      }
+      if (outcome.changed) {
+        try {
+          writeFileSync(
+            path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
+            JSON.stringify(outcome.envelope),
+          );
+        } catch (err) {
+          gatewayLog.warn(
+            "loop-finalizer",
+            `Failed to re-persist execution-result.json with additional entries, loopId=${resolvedJob.loopId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      for (const event of outcome.errorEvents) {
+        // Best-effort per-repo error event; cloud finalize below may still
+        // retry. Not awaited in a throwing manner because per-repo failures
+        // must not block the primary completion flow.
+        await postLoopEvent(apiBaseUrl, resolvedJob.loopId, apiAuthToken, {
+          type: LoopEventType.Error,
+          code: LoopErrorCode.RepoNotFound,
+          message: event.message,
+          result: { message: event.message, repo: event.fullName },
+          loopId: resolvedJob.loopId,
+        });
+      }
+    }
   }
 
   let remoteError: string | undefined;
