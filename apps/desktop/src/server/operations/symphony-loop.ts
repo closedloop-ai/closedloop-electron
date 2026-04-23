@@ -2393,7 +2393,14 @@ export async function handleProcessCompletion(
     } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
       await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
-    await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt, "cleanup additional worktree failed (on error):");
+    // EXECUTE additional-repo worktrees carry real commits (each one may be a PR
+    // source) and are treated symmetrically with the primary worktree: preserved
+    // across success and failure so the user can inspect / iterate. Stale-prune
+    // on the next PLAN handles disk reclamation. PLAN additional worktrees are
+    // scratch space for exploration and are still cleaned here.
+    if (command !== "EXECUTE") {
+      await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt, "cleanup additional worktree failed (on error):");
+    }
     loopTokenStore?.deleteLoopToken(loopId);
     return;
   }
@@ -2581,10 +2588,12 @@ export async function handleProcessCompletion(
         }
       }
 
-      // Per-additional-repo commit/push/PR loop (T-6.4/T-6.5/T-6.6).
-      // Each entry is wrapped in try/finally so the worktree is always removed,
-      // and try/catch so a single-repo failure emits an error event without
+      // Per-additional-repo commit/push/PR loop. Each entry is wrapped in
+      // try/catch so a single-repo failure emits an error event without
       // blocking the remaining repos or the primary-repo completion flow.
+      // Worktrees are preserved on success and failure (symmetric with the
+      // primary worktree); the next PLAN on the same loop key stale-prunes
+      // leftovers.
       if (additionalWorktreeDirs.length > 0) {
         const tokenMap = new Map<string, string>(
           additionalRepoTokens.map(({ fullName, token }) => [fullName, token]),
@@ -2595,52 +2604,46 @@ export async function handleProcessCompletion(
           const fullName = addEntry.fullName ?? path.basename(addEntry.repoPath);
           const baseBranch = addEntry.baseBranch ?? "main";
           try {
-            try {
-              loopLog(loopId, `Additional repo commit/push/PR: ${fullName} dir=${addEntry.dir}`);
-              const addToken = addEntry.fullName ? tokenMap.get(addEntry.fullName) : undefined;
-              const addGitResult = executeAdditionalRepoCommitPush(
-                addEntry.dir,
-                fullName,
-                baseBranch,
-                loopId,
-                committer,
-                body.artifactSlug,
-                webAppOrigin,
-                addToken,
-                gitShellPath,
-              );
-              if (addGitResult.status === "success") {
-                loopLog(
-                  loopId,
-                  `Additional repo PR created: ${fullName} pr=${addGitResult.prUrl}`,
-                );
-              } else if (addGitResult.status === "no-changes") {
-                loopLog(loopId, `Additional repo no changes: ${fullName}`);
-              } else {
-                const scrubbedReason = scrubSecrets(addGitResult.reason);
-                gatewayLog.warn(
-                  "loop-harness",
-                  `Additional repo git ops failed: ${fullName} — ${scrubbedReason}, loopId=${loopId}`,
-                );
-                warnings.push(`ADDITIONAL_REPO_GIT_FAILED:${fullName}`);
-              }
-            } catch (err) {
-              // T-6.6: emit error event for per-repo failures
-              const scrubbedMsg = scrubSecrets(err instanceof Error ? err.message : String(err));
-              loopError(loopId, `Additional repo error for ${fullName}:`, err);
-              await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
-                type: LoopEventType.Error,
-                code: LoopErrorCode.RepoNotFound,
-                message: scrubbedMsg,
-                result: { message: scrubbedMsg, repo: fullName },
-                loopId,
-              });
-            }
-          } finally {
-            // T-6.4: always remove the additional worktree regardless of success or error
-            await wt.removeWorktree(addEntry.dir, addEntry.repoPath, loopId).catch((cleanupErr) =>
-              loopError(loopId, `Failed to remove additional repo worktree ${addEntry.dir}:`, cleanupErr),
+            loopLog(loopId, `Additional repo commit/push/PR: ${fullName} dir=${addEntry.dir}`);
+            const addToken = addEntry.fullName ? tokenMap.get(addEntry.fullName) : undefined;
+            const addGitResult = executeAdditionalRepoCommitPush(
+              addEntry.dir,
+              fullName,
+              baseBranch,
+              loopId,
+              committer,
+              body.artifactSlug,
+              webAppOrigin,
+              addToken,
+              gitShellPath,
             );
+            if (addGitResult.status === "success") {
+              loopLog(
+                loopId,
+                `Additional repo PR created: ${fullName} pr=${addGitResult.prUrl}`,
+              );
+            } else if (addGitResult.status === "no-changes") {
+              loopLog(loopId, `Additional repo no changes: ${fullName}`);
+            } else {
+              const scrubbedReason = scrubSecrets(addGitResult.reason);
+              gatewayLog.warn(
+                "loop-harness",
+                `Additional repo git ops failed: ${fullName} — ${scrubbedReason}, loopId=${loopId}`,
+              );
+              warnings.push(`ADDITIONAL_REPO_GIT_FAILED:${fullName}`);
+            }
+          } catch (err) {
+            // Emit error event for per-repo failures so they surface without
+            // blocking the remaining repos.
+            const scrubbedMsg = scrubSecrets(err instanceof Error ? err.message : String(err));
+            loopError(loopId, `Additional repo error for ${fullName}:`, err);
+            await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+              type: LoopEventType.Error,
+              code: LoopErrorCode.RepoNotFound,
+              message: scrubbedMsg,
+              result: { message: scrubbedMsg, repo: fullName },
+              loopId,
+            });
           }
         }
       }
@@ -2925,7 +2928,12 @@ export async function handleProcessCompletion(
       await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
 
-    await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt);
+    // EXECUTE additional-repo worktrees are deliverables (one PR each) and
+    // are preserved on success, matching primary-worktree behavior. PLAN
+    // scratch worktrees are still cleaned here.
+    if (command !== "EXECUTE") {
+      await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt);
+    }
   } finally {
     runningLoops.delete(loopId);
   }

@@ -231,13 +231,13 @@ test("EXECUTE with 2 additionalRepos passes --add-dir for each worktree to run-l
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
 
-  // Pre-create worktree dirs so EXECUTE's findWorktreeForBranch can return them.
+  // Pre-create the primary worktree dir so EXECUTE reuses it via
+  // findWorktreeForBranch. Additional-repo worktrees are NOT looked up via
+  // findWorktreeForBranch — EXECUTE always computes a fresh path and calls
+  // ensureWorktree — so we only assert the runtime --add-dir paths land
+  // under worktreeParent rather than matching pre-registered dirs.
   const primaryWorktreeDir = path.join(worktreeParent, "primary-wt");
   await fs.mkdir(primaryWorktreeDir, { recursive: true });
-  const additionalWorktreeDir1 = path.join(worktreeParent, "additional-wt-1");
-  await fs.mkdir(additionalWorktreeDir1, { recursive: true });
-  const additionalWorktreeDir2 = path.join(worktreeParent, "additional-wt-2");
-  await fs.mkdir(additionalWorktreeDir2, { recursive: true });
 
   process.env.HOME = tmpDir;
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
@@ -255,16 +255,15 @@ test("EXECUTE with 2 additionalRepos passes --add-dir for each worktree to run-l
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
 
-  // Custom provider: return a pre-created dir from findWorktreeForBranch for each
-  // repo so EXECUTE reuses them instead of creating fresh ones.
+  // Custom provider: reuse the pre-created primary worktree via
+  // findWorktreeForBranch; additional-repo worktrees go through ensureWorktree
+  // (EXECUTE does not consult findWorktreeForBranch for them).
   const executeProvider: WorktreeProvider = {
     async ensureWorktree(_repoPath, worktreeDir) {
       await fs.mkdir(worktreeDir, { recursive: true });
     },
     findWorktreeForBranch(repoPath: string): string | null {
       if (repoPath === primaryRepo) return primaryWorktreeDir;
-      if (repoPath === additionalRepo1) return additionalWorktreeDir1;
-      if (repoPath === additionalRepo2) return additionalWorktreeDir2;
       return null;
     },
     async removeWorktree(worktreeDir) {
@@ -331,11 +330,17 @@ test("EXECUTE with 2 additionalRepos passes --add-dir for each worktree to run-l
   const addDirMatches = [...spawnArgs.matchAll(/--add-dir\s+(\S+)/g)].map((m) => m[1]);
   assert.equal(addDirMatches.length, 2, "Should parse 2 --add-dir paths from spawn args");
 
-  const expectedAdditionalDirs = new Set([additionalWorktreeDir1, additionalWorktreeDir2]);
+  // Each --add-dir must live under the worktree parent (EXECUTE computes a
+  // fresh runtime path per additional repo) and the two paths must be distinct.
   for (const addDir of addDirMatches) {
     assert.ok(
-      expectedAdditionalDirs.has(addDir),
-      `Expected --add-dir path "${addDir}" to match one of the pre-created additional worktrees ${[...expectedAdditionalDirs].join(", ")}`,
+      addDir.startsWith(worktreeParent),
+      `Expected --add-dir path "${addDir}" to start with worktreeParent "${worktreeParent}"`,
     );
   }
+  assert.notEqual(
+    addDirMatches[0],
+    addDirMatches[1],
+    "Expected the two --add-dir paths to be distinct worktrees",
+  );
 });

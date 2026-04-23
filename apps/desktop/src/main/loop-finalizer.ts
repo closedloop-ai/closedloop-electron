@@ -891,7 +891,12 @@ export async function finalizeLoopFromRuntime(
   // The live-exit path already cleans these up in-process via its local
   // reference inside handleProcessCompletion; persisted cleanup here is the
   // safety net for jobs whose spawning process died before that ran.
-  if (reason !== "live-exit") {
+  //
+  // EXECUTE is excluded: its additional worktrees carry real commits (one PR
+  // each) and are treated as deliverables, symmetric with the primary
+  // worktree — preserved across success, failure, and crash recovery.
+  // Stale-prune on the next PLAN reclaims disk.
+  if (reason !== "live-exit" && resolvedJob.command !== "EXECUTE") {
     const latest = jobStore.getByLoopId(resolvedJob.loopId) ?? resolvedJob;
     await cleanupPersistedAdditionalWorktrees(
       latest,

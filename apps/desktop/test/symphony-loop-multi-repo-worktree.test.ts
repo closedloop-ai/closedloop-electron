@@ -510,9 +510,15 @@ test("handleProcessCompletion cleans additional worktrees when PLAN is cancelled
 // runs git add/commit/push and gh pr create. A capture file records
 // all gh pr create invocations; the test asserts it was called once
 // for the additional repo.
+//
+// The additional worktree is preserved on success (symmetric with primary
+// worktree behavior): it carries the pushed branch that backs the PR, so
+// the user can inspect/iterate. The next PLAN on the same loop key
+// stale-prunes leftovers. This test asserts removeWorktree is NOT called
+// for the additional worktree and that the dir still exists on disk.
 // ---------------------------------------------------------------------------
 
-test("EXECUTE per-repo commit/push/PR runs git and gh for each additional worktree (T-6.5)", async () => {
+test("EXECUTE per-repo commit/push/PR runs git and gh and preserves the additional worktree (T-6.5)", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "wt-lifecycle-execute-t65-"));
   tempPathsToClean.push(tmpDir);
 
@@ -528,10 +534,6 @@ test("EXECUTE per-repo commit/push/PR runs git and gh for each additional worktr
   // Pre-create the primary worktree dir so EXECUTE can reuse it via findWorktreeForBranch
   const primaryWorktreeDir = path.join(worktreeParent, "primary-wt");
   await fs.mkdir(primaryWorktreeDir, { recursive: true });
-
-  // Pre-create the additional repo worktree dir so EXECUTE finds it
-  const additionalWorktreeDir = path.join(worktreeParent, "additional-wt");
-  await fs.mkdir(additionalWorktreeDir, { recursive: true });
 
   process.env.HOME = tmpDir;
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
@@ -584,19 +586,20 @@ test("EXECUTE per-repo commit/push/PR runs git and gh for each additional worktr
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
 
-  // WorktreeProvider: findWorktreeForBranch returns pre-created dirs;
-  // removeWorktree records calls so we can assert cleanup happened.
+  // WorktreeProvider: primary is reused via findWorktreeForBranch; additional
+  // repos always go through ensureWorktree (EXECUTE computes a fresh path
+  // rather than consulting findWorktreeForBranch). Record both so we can
+  // locate the runtime additional dir and assert on cleanup.
+  const ensureCalls: Array<{ repoPath: string; worktreeDir: string }> = [];
   const removeCalls: Array<{ worktreeDir: string; repoPath: string }> = [];
   const executeProvider: WorktreeProvider = {
-    async ensureWorktree(_repoPath, worktreeDir) {
+    async ensureWorktree(repoPath, worktreeDir) {
+      ensureCalls.push({ repoPath, worktreeDir });
       await fs.mkdir(worktreeDir, { recursive: true });
     },
     findWorktreeForBranch(_repoPath: string, _branchName: string): string | null {
       if (_repoPath === primaryRepo) {
         return primaryWorktreeDir;
-      }
-      if (_repoPath === additionalRepo) {
-        return additionalWorktreeDir;
       }
       return null;
     },
@@ -654,17 +657,32 @@ test("EXECUTE per-repo commit/push/PR runs git and gh for each additional worktr
     `Expected gh pr create to be called at least once for the additional repo, got ${prCreateCount} calls`,
   );
 
-  // Assert removeWorktree was called for the additional worktree (T-6.4 success path)
-  const deadline = Date.now() + 5_000;
-  while (
-    Date.now() < deadline &&
-    !removeCalls.some((c) => c.worktreeDir === additionalWorktreeDir)
-  ) {
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
-  }
+  // Locate the runtime additional-repo worktree dir — EXECUTE computes it
+  // fresh via ensureWorktree rather than reusing a pre-registered path.
+  const additionalEnsure = ensureCalls.find(
+    (c) => c.repoPath === additionalRepo,
+  );
   assert.ok(
-    removeCalls.some((c) => c.worktreeDir === additionalWorktreeDir),
-    `Expected removeWorktree to be called for additional worktree ${additionalWorktreeDir} after EXECUTE success`,
+    additionalEnsure !== undefined,
+    `Expected ensureWorktree to be called for additional repo ${additionalRepo}, got calls: ${JSON.stringify(ensureCalls)}`,
+  );
+  const runtimeAdditionalDir = additionalEnsure.worktreeDir;
+
+  // Assert removeWorktree was NOT called for the runtime additional worktree
+  // — EXECUTE preserves additional worktrees (symmetric with primary). Give
+  // the async post-processing a moment to settle so a late cleanup would be
+  // visible.
+  await new Promise<void>((resolve) => setTimeout(resolve, 500));
+  assert.ok(
+    !removeCalls.some((c) => c.worktreeDir === runtimeAdditionalDir),
+    `Expected removeWorktree NOT to be called for additional worktree ${runtimeAdditionalDir} after EXECUTE success, got calls: ${JSON.stringify(removeCalls)}`,
+  );
+
+  // Positive proof: the worktree dir is still present on disk.
+  const stat = await fs.stat(runtimeAdditionalDir).catch(() => null);
+  assert.ok(
+    stat !== null && stat.isDirectory(),
+    `Expected additional worktree dir ${runtimeAdditionalDir} to still exist after EXECUTE success`,
   );
 });
 
@@ -678,7 +696,7 @@ test("EXECUTE per-repo commit/push/PR runs git and gh for each additional worktr
 // { status: "error" }; the handler adds ADDITIONAL_REPO_GIT_FAILED:<fullName>
 // to the warnings array and posts a completed event containing those warnings.
 // The test asserts that warning is present and that the additional worktree
-// is still removed (T-6.4 cleanup invariant).
+// is preserved for inspection (symmetric with primary-on-failure behavior).
 // ---------------------------------------------------------------------------
 
 test("EXECUTE records ADDITIONAL_REPO_GIT_FAILED warning when additional repo commit fails (T-6.6)", async () => {
@@ -697,9 +715,6 @@ test("EXECUTE records ADDITIONAL_REPO_GIT_FAILED warning when additional repo co
   const primaryWorktreeDir = path.join(worktreeParent, "primary-wt");
   await fs.mkdir(primaryWorktreeDir, { recursive: true });
 
-  const additionalWorktreeDir = path.join(worktreeParent, "additional-wt");
-  await fs.mkdir(additionalWorktreeDir, { recursive: true });
-
   process.env.HOME = tmpDir;
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
@@ -713,14 +728,18 @@ test("EXECUTE records ADDITIONAL_REPO_GIT_FAILED warning when additional repo co
   await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 
   // fake git:
-  //   - primary worktree: git status returns empty (no-changes path)
-  //   - additional worktree: git status reports changes; git commit fails (exit 1)
-  // This makes executeAdditionalRepoCommitPush return { status: "error" } for the
-  // additional repo, causing a warning to be added to the completed event.
+  //   - primary worktree (cwd = primaryWorktreeDir): git status returns empty
+  //     (no-changes path for primary).
+  //   - additional worktree: EXECUTE creates a fresh dir whose path contains
+  //     the base-branch slug ("feature-branch"), which the primary worktree
+  //     path does not. Match on that slug to inject commit failure only for
+  //     the additional repo. This makes executeAdditionalRepoCommitPush return
+  //     { status: "error" } for the additional repo, adding a warning to the
+  //     completed event.
   const fakeGitScript = [
     "#!/bin/sh",
     "CWD=$(pwd)",
-    `if echo "$CWD" | grep -q "additional-wt"; then`,
+    `if echo "$CWD" | grep -q "feature-branch"; then`,
     '  if [ "$1" = status ]; then printf "M changed.txt\\n"; exit 0; fi',
     '  if [ "$1" = add ]; then exit 0; fi',
     '  if [ "$1" = commit ]; then echo "simulated commit failure" >&2; exit 1; fi',
@@ -738,18 +757,21 @@ test("EXECUTE records ADDITIONAL_REPO_GIT_FAILED warning when additional repo co
 
   const additionalFullName = `execute-t66-test/${path.basename(additionalRepo)}`;
 
+  const ensureCalls: Array<{ repoPath: string; worktreeDir: string }> = [];
   const removeCalls: Array<{ worktreeDir: string; repoPath: string }> = [];
   const executeProvider: WorktreeProvider = {
-    async ensureWorktree(_repoPath, worktreeDir) {
+    async ensureWorktree(repoPath, worktreeDir) {
+      ensureCalls.push({ repoPath, worktreeDir });
       await fs.mkdir(worktreeDir, { recursive: true });
     },
     findWorktreeForBranch(_repoPath: string, _branchName: string): string | null {
       if (_repoPath === primaryRepo) {
         return primaryWorktreeDir;
       }
-      if (_repoPath === additionalRepo) {
-        return additionalWorktreeDir;
-      }
+      // Additional-repo worktrees are not located via findWorktreeForBranch —
+      // EXECUTE always creates a fresh one via ensureWorktree. Returning null
+      // here causes the runtime-generated path to be used, which the fake
+      // git script detects via the "feature-branch" slug.
       return null;
     },
     async removeWorktree(worktreeDir, repoPath) {
@@ -810,16 +832,28 @@ test("EXECUTE records ADDITIONAL_REPO_GIT_FAILED warning when additional repo co
     `Expected '${expectedWarning}' in completed event warnings, got: ${JSON.stringify(warnings)}`,
   );
 
-  // Assert the additional worktree was still cleaned up even after the failure (T-6.4)
-  const cleanupDeadline = Date.now() + 5_000;
-  while (
-    Date.now() < cleanupDeadline &&
-    !removeCalls.some((c) => c.worktreeDir === additionalWorktreeDir)
-  ) {
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
-  }
+  // Locate the runtime additional-repo worktree dir (EXECUTE creates a fresh
+  // path via ensureWorktree rather than reusing anything from findWorktreeForBranch).
+  const additionalEnsure = ensureCalls.find(
+    (c) => c.repoPath === additionalRepo,
+  );
   assert.ok(
-    removeCalls.some((c) => c.worktreeDir === additionalWorktreeDir),
-    `Expected removeWorktree to be called for additional worktree ${additionalWorktreeDir} even after git op failure (T-6.4)`,
+    additionalEnsure !== undefined,
+    `Expected ensureWorktree to be called for additional repo ${additionalRepo}, got calls: ${JSON.stringify(ensureCalls)}`,
+  );
+  const runtimeAdditionalDir = additionalEnsure.worktreeDir;
+
+  // Assert the runtime additional worktree was preserved after the per-repo
+  // commit failure — symmetric with the primary-worktree-on-failure contract.
+  // The user inspects the dirty worktree to understand why commit failed.
+  await new Promise<void>((resolve) => setTimeout(resolve, 500));
+  assert.ok(
+    !removeCalls.some((c) => c.worktreeDir === runtimeAdditionalDir),
+    `Expected removeWorktree NOT to be called for additional worktree ${runtimeAdditionalDir} after git op failure, got calls: ${JSON.stringify(removeCalls)}`,
+  );
+  const stat = await fs.stat(runtimeAdditionalDir).catch(() => null);
+  assert.ok(
+    stat !== null && stat.isDirectory(),
+    `Expected additional worktree dir ${runtimeAdditionalDir} to still exist after git op failure`,
   );
 });

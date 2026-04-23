@@ -1276,6 +1276,57 @@ test("finalizeLoopFromRuntime skips additional worktree cleanup on live-exit (in
   assert.deepEqual(persisted?.additionalWorktreeDirs, additional);
 });
 
+test("finalizeLoopFromRuntime preserves additional worktrees on boot-recovery for EXECUTE jobs", async () => {
+  // EXECUTE additional worktrees are deliverables (one PR each). A crashed
+  // EXECUTE that reaches the finalizer via boot-recovery must preserve them
+  // symmetric with the primary worktree, so the user can inspect/iterate
+  // after restart. Stale-prune on the next PLAN reclaims disk.
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(
+    path.join(claudeWorkDir, "plan.json"),
+    JSON.stringify({ tasks: [] }),
+  );
+  await fs.writeFile(path.join(claudeWorkDir, "open-questions.md"), "none");
+
+  const jobStore = createStore("finalizer-execute-preserve-additional");
+  const additional = [
+    { dir: path.join(tempRoot, "wt-e-a"), repoPath: path.join(tempRoot, "repo-e-a") },
+    { dir: path.join(tempRoot, "wt-e-b"), repoPath: path.join(tempRoot, "repo-e-b") },
+  ];
+  const job = createBaseJob({
+    claudeWorkDir,
+    command: "EXECUTE",
+    status: "COMPLETED",
+    additionalWorktreeDirs: additional,
+  });
+  jobStore.upsert(job);
+
+  let cleanupInvocations = 0;
+  await finalizeLoopFromRuntime(job, "boot-recovery", {
+    jobStore,
+    telemetry: { emit: () => {} },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+    cleanupAdditionalWorktrees: async () => {
+      cleanupInvocations++;
+    },
+  });
+
+  assert.equal(
+    cleanupInvocations,
+    0,
+    "EXECUTE additional worktrees must not be cleaned up by boot-recovery",
+  );
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.deepEqual(
+    persisted?.additionalWorktreeDirs,
+    additional,
+    "Persisted additionalWorktreeDirs must remain so the user can still find them after restart",
+  );
+});
+
 test("finalizeLoopFromRuntime tolerates a throwing cleanup callback and still clears the field", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
