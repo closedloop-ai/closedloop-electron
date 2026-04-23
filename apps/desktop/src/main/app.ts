@@ -292,6 +292,7 @@ export class DesktopApplication {
       telemetry: Observability.getTelemetryEmitter(),
       getApiKey: () => this.apiKeyStore.getApiKey(),
       getApiOrigin: () => this.settingsStore.getApiOrigin(),
+      getAllowedDirectories: () => this.getAllowedDirectoriesFromSandbox(),
       loopTokenStore: this.loopTokenStore,
     });
     this.registerIpcHandlers();

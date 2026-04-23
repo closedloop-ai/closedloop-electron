@@ -58,6 +58,22 @@ function resolveExecuteWorktreeDir(
   return path.join(worktreeParent, `${path.basename(repoPath)}-loop-${loopId}`);
 }
 
+async function waitForFile(
+  filePath: string,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      await fs.access(filePath);
+      return;
+    } catch {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  throw new Error(`Timed out waiting for file: ${filePath}`);
+}
+
 afterEach(async () => {
   restoreEnv(savedEnv);
   resetShellPathCache();
@@ -178,22 +194,40 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
     artifacts: {
       executionResult?: {
         pr_url?: string;
+        pr_number?: number | string;
+        branch_name?: string;
         has_changes?: boolean;
       };
     };
     metadata: Record<string, unknown>;
   };
 
-  // No changes → no PR URL in execution result
+  // No changes now persist an explicit execution-result.json so recovery can
+  // replay the same completion metadata after restart.
   assert.equal(
     uploadBody.artifacts.executionResult?.pr_url,
-    undefined,
-    `Expected no pr_url when there are no changes, got: ${uploadBody.artifacts.executionResult?.pr_url}`,
+    "",
+    `Expected empty-string pr_url when there are no changes, got: ${uploadBody.artifacts.executionResult?.pr_url}`,
   );
   assert.equal(
     uploadBody.artifacts.executionResult?.has_changes,
-    undefined,
-    "Expected has_changes to be absent when there are no changes",
+    false,
+    "Expected has_changes=false when there are no changes",
+  );
+  assert.equal(
+    uploadBody.artifacts.executionResult?.pr_number,
+    0,
+    `Expected pr_number=0 when there are no changes, got: ${uploadBody.artifacts.executionResult?.pr_number}`,
+  );
+  assert.equal(
+    uploadBody.metadata.executeFinalizationStatus,
+    "no-changes",
+    `Expected executeFinalizationStatus=no-changes, got: ${String(uploadBody.metadata.executeFinalizationStatus)}`,
+  );
+  assert.equal(
+    uploadBody.metadata.executeFinalizationPath,
+    "git-fallback",
+    `Expected executeFinalizationPath=git-fallback, got: ${String(uploadBody.metadata.executeFinalizationPath)}`,
   );
 
   // Also check the completed event does NOT contain GIT_PUSH_FAILED in warnings.
@@ -205,6 +239,151 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
     ),
     `Expected no GIT_PUSH_FAILED warning in completed event for no-changes path, got warnings: ${JSON.stringify(completedEvent.warnings)}`,
   );
+  assert.equal(
+    completedEvent.result?.executeFinalizationStatus,
+    "no-changes",
+    `Expected completed event executeFinalizationStatus=no-changes, got: ${String(completedEvent.result?.executeFinalizationStatus)}`,
+  );
+  assert.equal(
+    completedEvent.result?.executeFinalizationPath,
+    "git-fallback",
+    `Expected completed event executeFinalizationPath=git-fallback, got: ${String(completedEvent.result?.executeFinalizationPath)}`,
+  );
+});
+
+test("EXECUTE: sandbox change during LLM finalization skips git fallback and branch probing", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-sandbox-change-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-sandbox-change");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  const claudeStartedMarker = path.join(tmpDir, "claude-started");
+  const claudeReleaseMarker = path.join(tmpDir, "claude-release");
+  const gitCapture = path.join(tmpDir, "git-capture.txt");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(
+    path.join(fakeBin, "claude"),
+    [
+      "#!/bin/sh",
+      `touch ${JSON.stringify(claudeStartedMarker)}`,
+      `while [ ! -f ${JSON.stringify(claudeReleaseMarker)} ]; do sleep 0.05; done`,
+      "exit 0",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  await fs.writeFile(
+    path.join(fakeBin, "git"),
+    [
+      "#!/bin/sh",
+      `printf '%s\\n' \"$@\" >> ${JSON.stringify(gitCapture)}`,
+      'if [ "$1" = "rev-parse" ] && [ "$2" = "--abbrev-ref" ]; then',
+      '  echo "symphony/execute-test"',
+      "  exit 0",
+      "fi",
+      'if [ "$1" = status ]; then',
+      '  echo " M touched.txt"',
+      "  exit 0",
+      "fi",
+      "exit 0",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  await fs.writeFile(path.join(fakeBin, "gh"), "#!/bin/sh\nexit 1\n", {
+    mode: 0o755,
+  });
+
+  resetResolvedClaudePath();
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  let allowedDirs = [tmpDir];
+  const otherAllowedDir = path.join(tmpDir, "other-allowed");
+  await fs.mkdir(otherAllowedDir, { recursive: true });
+  const jobStore = new JobStore({ cwd: tmpDir, name: "test-jobs-sandbox-change" });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => allowedDirs,
+    machineName: "execute-sandbox-change-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000000101";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [],
+        repo: {
+          fullName: `sandbox/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  await waitForFile(claudeStartedMarker);
+  allowedDirs = [otherAllowedDir];
+  await fs.writeFile(claudeReleaseMarker, "release\n", "utf-8");
+
+  const uploadReq = await mock.waitForRequest("upload-artifacts");
+  const uploadBody = JSON.parse(uploadReq.body) as {
+    artifacts?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+  };
+  assert.equal(uploadBody.metadata?.executeFinalizationStatus, "skipped");
+  assert.equal(uploadBody.metadata?.executeFinalizationPath, "none");
+  assert.equal(
+    uploadBody.metadata?.executeFinalizationReason,
+    "worktree directory not allowed by current sandbox",
+  );
+  assert.equal(uploadBody.metadata?.branchName, undefined);
+  assert.equal(uploadBody.artifacts?.executionResult, undefined);
+
+  const completedEvent = await waitForCompletedEvent(mock.requests, loopId);
+  assert.equal(completedEvent.result?.executeFinalizationStatus, "skipped");
+  assert.equal(completedEvent.result?.executeFinalizationPath, "none");
+  assert.equal(
+    completedEvent.result?.executeFinalizationReason,
+    "worktree directory not allowed by current sandbox",
+  );
+  assert.equal(completedEvent.result?.branchName, undefined);
+  assert.equal(await fs.readFile(gitCapture, "utf-8").catch(() => ""), "");
 });
 
 // ---------------------------------------------------------------------------

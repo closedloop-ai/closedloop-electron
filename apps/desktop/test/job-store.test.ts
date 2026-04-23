@@ -115,3 +115,57 @@ test("persists and restores across instances", () => {
   assert.equal(store2.getByLoopId("la")?.id, "a");
   assert.equal(store2.getByLoopId("lb")?.id, "b");
 });
+
+test("persists execute finalization diagnostics and recovery inputs across instances", () => {
+  const finalizedAt = new Date().toISOString();
+  store.upsert(
+    makeJob({
+      id: "exec-1",
+      loopId: "loop-exec-1",
+      command: "EXECUTE",
+      status: "COMPLETED",
+      artifactSlug: "artifact-slug",
+      baseBranch: "release/test",
+      webAppOrigin: "https://app.closedloop.ai",
+      expectedMcpUrl: "http://127.0.0.1:8787/mcp",
+      committer: {
+        name: "Test Committer",
+        email: "test@example.com",
+      },
+      finalizationSource: "boot-recovery",
+      executeFinalizationStatus: "success",
+      executeFinalizationPath: "artifact-existing",
+      executeFinalizationStartedAt: finalizedAt,
+      executeFinalizationCompletedAt: finalizedAt,
+      executeFinalizationReason: "existing execution-result.json reused",
+      executeFinalizationPreExecutionResultPresent: true,
+      executeFinalizationPrePrBodyPresent: false,
+      executeFinalizationPostExecutionResultPresent: true,
+      executeFinalizationPostPrBodyPresent: false,
+    }),
+  );
+
+  const store2 = new JobStore({ cwd: tmpDir, name: "test-jobs" });
+  const restored = store2.getByLoopId("loop-exec-1");
+  assert.ok(restored);
+  assert.equal(restored.command, "EXECUTE");
+  assert.equal(restored.artifactSlug, "artifact-slug");
+  assert.equal(restored.baseBranch, "release/test");
+  assert.equal(restored.webAppOrigin, "https://app.closedloop.ai");
+  assert.equal(restored.expectedMcpUrl, "http://127.0.0.1:8787/mcp");
+  assert.deepEqual(restored.committer, {
+    name: "Test Committer",
+    email: "test@example.com",
+  });
+  assert.equal(restored.finalizationSource, "boot-recovery");
+  assert.equal(restored.executeFinalizationStatus, "success");
+  assert.equal(restored.executeFinalizationPath, "artifact-existing");
+  assert.equal(
+    restored.executeFinalizationReason,
+    "existing execution-result.json reused",
+  );
+  assert.equal(restored.executeFinalizationPreExecutionResultPresent, true);
+  assert.equal(restored.executeFinalizationPrePrBodyPresent, false);
+  assert.equal(restored.executeFinalizationPostExecutionResultPresent, true);
+  assert.equal(restored.executeFinalizationPostPrBodyPresent, false);
+});

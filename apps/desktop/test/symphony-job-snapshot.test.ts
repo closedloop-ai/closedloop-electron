@@ -171,3 +171,31 @@ test("enrichJobSnapshot: phase text suppressed when state.json says terminal but
     rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("enrichJobSnapshot preserves execute finalization diagnostics", async () => {
+  const snapshot = await enrichJobSnapshot(
+    makeJob({
+      command: "EXECUTE",
+      status: "COMPLETED",
+      finalizationSource: "boot-recovery",
+      executeFinalizationStatus: "success",
+      executeFinalizationPath: "artifact-existing",
+      executeFinalizationReason: "existing execution-result.json reused",
+      executeFinalizationPreExecutionResultPresent: true,
+      executeFinalizationPrePrBodyPresent: false,
+      executeFinalizationPostExecutionResultPresent: true,
+      executeFinalizationPostPrBodyPresent: false,
+    }),
+  );
+  assert.equal(snapshot.finalizationSource, "boot-recovery");
+  assert.equal(snapshot.executeFinalizationStatus, "success");
+  assert.equal(snapshot.executeFinalizationPath, "artifact-existing");
+  assert.equal(
+    snapshot.executeFinalizationReason,
+    "existing execution-result.json reused",
+  );
+  assert.equal(snapshot.executeFinalizationPreExecutionResultPresent, true);
+  assert.equal(snapshot.executeFinalizationPrePrBodyPresent, false);
+  assert.equal(snapshot.executeFinalizationPostExecutionResultPresent, true);
+  assert.equal(snapshot.executeFinalizationPostPrBodyPresent, false);
+});
