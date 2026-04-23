@@ -3,6 +3,10 @@ import { mock, afterEach, describe, test } from "node:test";
 import { Observability } from "../src/main/observability.js";
 import { PostHogAnalytics } from "../src/main/posthog-analytics.js";
 import type { EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
+import type { TelemetryCategory } from "../src/main/telemetry-protocol.js";
+
+// Compile-time regression guard: fails tsc if "queue.stats_changed" is removed from TelemetryCategory.
+const _queueStatsCategoryCheck: TelemetryCategory = "queue.stats_changed";
 
 afterEach(async () => {
   await Observability.shutdown();
@@ -568,5 +572,82 @@ describe("Observability", () => {
       assert.equal(telemetryEvents.length, 0);
       assert.equal(captureCalls.length, 0);
     });
+  });
+});
+
+describe("queueStatsChanged()", () => {
+  test("happy path: emits telemetry with correct fields", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.queueStatsChanged(3, 7);
+
+    assert.strictEqual(telemetryEvents.length, 1);
+    assert.strictEqual(telemetryEvents[0].category, "queue.stats_changed");
+    assert.strictEqual(telemetryEvents[0].severity, "info");
+    assert.strictEqual(telemetryEvents[0].message, "Queue stats changed");
+    assert.strictEqual(telemetryEvents[0].diagnostics?.extra?.activeCommands, 3);
+    assert.strictEqual(telemetryEvents[0].diagnostics?.extra?.queueDepth, 7);
+  });
+
+  test("no PostHog event emitted", () => {
+    const captureCalls: Array<{ event: string }> = [];
+    mock.method(PostHogAnalytics.prototype, "capture", (
+      _distinctId: string,
+      event: string,
+    ) => {
+      captureCalls.push({ event });
+    });
+
+    Observability.init({
+      telemetrySend: () => {},
+      posthog: { apiKey: "phc_test", host: "https://us.i.posthog.com" },
+    });
+
+    Observability.queueStatsChanged(3, 7);
+
+    assert.strictEqual(captureCalls.length, 0);
+  });
+
+  test("no command scoping injected into trace", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.queueStatsChanged(3, 7);
+
+    assert.ok(!telemetryEvents[0].trace?.commandId);
+    assert.ok(!telemetryEvents[0].trace?.operationId);
+  });
+
+  test("no-op when uninitialised: does not throw and returns undefined", () => {
+    // Do NOT call Observability.init() — telemetry is null (reset by afterEach).
+    // Exercises the optional-chain guard: Observability.telemetry?.emit(...).
+    let returnValue: unknown = "sentinel";
+    assert.doesNotThrow(() => {
+      returnValue = Observability.queueStatsChanged(1, 2);
+    });
+    assert.strictEqual(returnValue, undefined);
+  });
+
+  test("table-driven: various active/depth combinations", () => {
+    const cases: Array<[number, number]> = [[0, 0], [5, 12], [100, 0]];
+
+    for (const [active, depth] of cases) {
+      const telemetryEvents: EnrichedTelemetryEvent[] = [];
+      Observability.init({
+        telemetrySend: (event) => telemetryEvents.push(event),
+      });
+
+      Observability.queueStatsChanged(active, depth);
+
+      assert.strictEqual(telemetryEvents[0].diagnostics?.extra?.activeCommands, active);
+      assert.strictEqual(telemetryEvents[0].diagnostics?.extra?.queueDepth, depth);
+
+      Observability.reset();
+    }
   });
 });

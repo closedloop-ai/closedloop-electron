@@ -23,9 +23,19 @@ import {
   stripAnsi,
 } from "../../main/diagnostics-helpers.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
-import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
+import type {
+  JobStore,
+  LocalJobCommand,
+  LocalJobCommitter,
+  LocalJobExecuteFinalizationPath,
+  LocalJobExecuteFinalizationStatus,
+  LocalJobFinalizationSource,
+} from "../../main/job-store.js";
 import {
+  EXECUTE_NO_WORK_MESSAGE,
   finalizeLoopFromRuntime,
+  isExecuteNoWorkCompletion,
+  tryUploadArtifacts,
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
 import type { LoopTokenStore } from "../../main/loop-token-store.js";
@@ -41,6 +51,11 @@ import type {
 import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { getShellEnv, getShellPath, resolveBinarySync } from "../shell-path.js";
+import {
+  IMPORTED_PLAN_MARKDOWN_FILE,
+  isRawPlanArtifact,
+  toUploadedPlanArtifact,
+} from "../../shared/plan-artifact-utils.js";
 import { withMcpTools } from "./chat-tools.js";
 import { findWorktreeForBranch as findWorktreeForBranchImpl } from "./git-helpers.js";
 import { startOutputTailer } from "./output-tailer.js";
@@ -270,12 +285,26 @@ interface LoopArtifact {
   type: LoopArtifactType;
   title?: string;
   content: string;
+  raw?: Record<string, unknown>;
 }
 
 /** Artifact types that represent an implementation plan. */
 export const PLAN_ARTIFACT_TYPES: readonly LoopArtifactType[] = [
   LoopArtifactType.ImplementationPlan,
 ] as const;
+
+function readExecutePlanArtifact(
+  claudeWorkDir: string,
+): ReturnType<typeof toUploadedPlanArtifact> {
+  return (
+    toUploadedPlanArtifact(
+      readJsonFileSync(path.join(claudeWorkDir, LoopArtifactFile.Plan)),
+    ) ??
+    toUploadedPlanArtifact(
+      readTextFile(path.join(claudeWorkDir, IMPORTED_PLAN_MARKDOWN_FILE)),
+    )
+  );
+}
 
 /**
  * Write prd.md to a work directory from a list of artifacts and an optional
@@ -372,10 +401,7 @@ export function readEvaluateCodeOutputs(
   return readEvaluateOutputs(workDir, "code");
 }
 
-interface LoopCommitter {
-  name: string;
-  email: string;
-}
+type LoopCommitter = LocalJobCommitter;
 
 type ContextPackAttachment = SharedContextPackAttachment;
 
@@ -1213,14 +1239,65 @@ async function writeArtifactsForExecuteOrAmend(
   artifacts: LoopArtifact[],
   prompt?: string,
   attachments?: ContextPackAttachment[],
-): Promise<void> {
+  options?: {
+    command: "EXECUTE" | "REQUEST_CHANGES";
+    loopId: string;
+  },
+): Promise<{ importedPlanFile: string | null }> {
+  let importedPlanFile: string | null = null;
   for (const artifact of artifacts) {
     if (artifact.type === LoopArtifactType.ImplementationPlan) {
-      // Sync plan content like ECS harness's syncPlanFromContextPack():
-      // If plan.json already exists (from parent PLAN loop), update only the
-      // .content field — preserving tasks, openQuestions, metadata, etc.
-      // This picks up manual edits the user made in the Liveblocks editor.
+      // For EXECUTE, hosted markdown is canonical. Reuse remote raw plan state
+      // only when it still matches that markdown; otherwise force the
+      // imported-plan compatibility path from the hosted markdown.
       const planJsonPath = path.join(claudeWorkDir, LoopArtifactFile.Plan);
+      if (options?.command === "EXECUTE") {
+        const rawPlanPayload = isRawPlanArtifact(artifact.raw)
+          ? artifact.raw
+          : null;
+        const rawPlanAligned =
+          typeof rawPlanPayload?.content === "string" &&
+          rawPlanPayload.content === artifact.content;
+        const localPlanJsonPresent = existsSync(planJsonPath);
+        const importedPlanPath = path.join(
+          claudeWorkDir,
+          IMPORTED_PLAN_MARKDOWN_FILE,
+        );
+        await fs.rm(importedPlanPath, { force: true });
+
+        if (rawPlanAligned) {
+          importedPlanFile = null;
+          await fs.writeFile(
+            planJsonPath,
+            JSON.stringify(
+              { ...rawPlanPayload!, content: artifact.content },
+              null,
+              2,
+            ),
+          );
+          const message =
+            `EXECUTE plan source=raw-artifact ` +
+            `rawPlanPayload=true rawPlanAligned=true ` +
+            `localPlanJsonPresent=${localPlanJsonPresent}`;
+          loopLog(options.loopId, message);
+          gatewayLog.info("loop-harness", `loopId=${options.loopId} ${message}`);
+        } else {
+          if (localPlanJsonPresent) {
+            await fs.rm(planJsonPath, { force: true });
+          }
+          importedPlanFile = importedPlanPath;
+          await fs.writeFile(importedPlanPath, artifact.content);
+          const message =
+            `EXECUTE plan source=imported-plan-compat ` +
+            `rawPlanPayload=${rawPlanPayload !== null} rawPlanAligned=false ` +
+            `localPlanJsonPresent=${localPlanJsonPresent} ` +
+            `importedPlanFile=${importedPlanFile}`;
+          loopLog(options.loopId, message);
+          gatewayLog.info("loop-harness", `loopId=${options.loopId} ${message}`);
+        }
+        continue;
+      }
+
       if (existsSync(planJsonPath)) {
         try {
           const existing = JSON.parse(
@@ -1230,19 +1307,42 @@ async function writeArtifactsForExecuteOrAmend(
           await fs.writeFile(planJsonPath, JSON.stringify(existing, null, 2));
         } catch {
           // If existing plan.json is corrupt, overwrite entirely
-          await fs.writeFile(planJsonPath, artifact.content);
+          if (isRawPlanArtifact(artifact.raw)) {
+            await fs.writeFile(
+              planJsonPath,
+              JSON.stringify(
+                { ...artifact.raw, content: artifact.content },
+                null,
+                2,
+              ),
+            );
+          } else {
+            await fs.writeFile(planJsonPath, artifact.content);
+          }
         }
       } else {
-        // No existing plan.json — write the content as-is.
-        // If it's valid JSON, write directly. Otherwise wrap it.
-        try {
-          JSON.parse(artifact.content);
-          await fs.writeFile(planJsonPath, artifact.content);
-        } catch {
+        // No existing plan.json — prefer the uploaded raw plan state when the
+        // worktree was recreated from a later desktop resume.
+        if (isRawPlanArtifact(artifact.raw)) {
           await fs.writeFile(
             planJsonPath,
-            JSON.stringify({ content: artifact.content }, null, 2),
+            JSON.stringify(
+              { ...artifact.raw, content: artifact.content },
+              null,
+              2,
+            ),
           );
+        } else {
+          // If it's valid JSON, write directly. Otherwise wrap it.
+          try {
+            JSON.parse(artifact.content);
+            await fs.writeFile(planJsonPath, artifact.content);
+          } catch {
+            await fs.writeFile(
+              planJsonPath,
+              JSON.stringify({ content: artifact.content }, null, 2),
+            );
+          }
         }
       }
     } else if (
@@ -1260,6 +1360,7 @@ async function writeArtifactsForExecuteOrAmend(
   }
 
   await downloadAttachmentsToDisk(claudeWorkDir, attachments);
+  return { importedPlanFile };
 }
 
 /**
@@ -1309,8 +1410,8 @@ async function writeArtifactsForGeneratePrd(
 // ---------------------------------------------------------------------------
 
 function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
-  const plan = readJsonFileSync(
-    path.join(claudeWorkDir, LoopArtifactFile.Plan),
+  const plan = toUploadedPlanArtifact(
+    readJsonFileSync(path.join(claudeWorkDir, LoopArtifactFile.Plan)),
   );
   const openQuestions = readTextFile(
     path.join(claudeWorkDir, LoopArtifactFile.OpenQuestions),
@@ -1327,6 +1428,7 @@ function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
 }
 
 function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
+  const plan = readExecutePlanArtifact(claudeWorkDir);
   const executionResult = readJsonFileSync(
     path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
   );
@@ -1335,9 +1437,35 @@ function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
   );
 
   return {
+    plan: plan ?? undefined,
     executionResult: executionResult ?? undefined,
     codeJudges: codeJudges ?? undefined,
   };
+}
+
+function parseWarningEntries(warning: string | undefined): string[] {
+  if (!warning) {
+    return [];
+  }
+
+  return warning
+    .split(";")
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+}
+
+function mergeWarningEntries(
+  existingWarning: string | undefined,
+  warnings: readonly string[],
+): string | undefined {
+  if (warnings.length === 0) {
+    return existingWarning;
+  }
+
+  const mergedWarnings = [
+    ...new Set([...parseWarningEntries(existingWarning), ...warnings]),
+  ];
+  return mergedWarnings.map(sanitizeErrorMessage).join("; ");
 }
 
 function readDecomposeOutputs(workDir: string): Record<string, unknown> {
@@ -1902,6 +2030,523 @@ type GitOperationResult =
   | { status: "no-changes" }
   | { status: "error"; reason: string };
 
+export type ExecuteFinalizationStatus = Exclude<
+  LocalJobExecuteFinalizationStatus,
+  "pending"
+>;
+
+export type ExecuteFinalizationPath = LocalJobExecuteFinalizationPath;
+
+export type ExecuteFinalizationSource = LocalJobFinalizationSource;
+
+export interface ExecuteFinalizationResult {
+  status: ExecuteFinalizationStatus;
+  path: ExecuteFinalizationPath;
+  reason?: string;
+  executionResultPersisted: boolean;
+  prUrl?: string;
+  prNumber?: number;
+  branchName?: string;
+  commitSha?: string;
+}
+
+interface ExecuteFinalizationParams {
+  worktreeDir: string | null | undefined;
+  claudeWorkDir: string;
+  loopId: string;
+  artifactSlug: string | undefined;
+  baseBranch: string;
+  webAppOrigin: string;
+  committer: LoopCommitter | undefined;
+  getAllowedDirectories: () => string[];
+  expectedMcpUrl?: string;
+  jobStore?: JobStore;
+  source: ExecuteFinalizationSource;
+}
+
+function sanitizeExecuteFinalizationReason(
+  reason: string | undefined,
+): string | undefined {
+  const sanitized = reason ? sanitizeErrorMessage(reason).trim() : "";
+  if (!sanitized) {
+    return undefined;
+  }
+  return sanitized.slice(0, 500);
+}
+
+function getExecuteFinalizationArtifactPresence(claudeWorkDir: string): {
+  executionResultPresent: boolean;
+  prBodyPresent: boolean;
+} {
+  return {
+    executionResultPresent: existsSync(
+      path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
+    ),
+    prBodyPresent: existsSync(path.join(claudeWorkDir, "pr-body.md")),
+  };
+}
+
+function getExecuteFinalizationSandboxBlockReason(
+  worktreeDir: string,
+  getAllowedDirectories: () => string[],
+  loopId: string,
+): string | undefined {
+  try {
+    assertPathAllowed(worktreeDir, getAllowedDirectories());
+  } catch (sandboxErr) {
+    if (sandboxErr instanceof DirectoryNotAllowedError) {
+      loopError(
+        loopId,
+        `EXECUTE finalization skipped: worktreeDir not in allowed sandbox: ${worktreeDir}`,
+      );
+      return "worktree directory not allowed by current sandbox";
+    }
+    throw sandboxErr;
+  }
+  return undefined;
+}
+
+function buildPersistedExecutionResultArtifact(params: {
+  hasChanges: boolean;
+  prUrl: string | null;
+  prNumber: number | null;
+  branchName: string;
+  baseBranch: string;
+  commitSha: string | null;
+}): Record<string, unknown> {
+  return {
+    has_changes: params.hasChanges,
+    pr_url: params.prUrl ?? "",
+    pr_number: params.prNumber ?? 0,
+    branch_name: params.branchName,
+    base_ref: params.baseBranch,
+    base_branch: params.baseBranch,
+    commit_sha: params.commitSha,
+  };
+}
+
+function persistExecutionResultArtifact(
+  claudeWorkDir: string,
+  executionResult: Record<string, unknown>,
+): boolean {
+  try {
+    writeFileSync(
+      path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
+      JSON.stringify(executionResult),
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getHeadCommitShaFromWorktree(worktreeDir: string): string | null {
+  try {
+    return (
+      execSync(`${shellEscape(getResolvedGitPath())} rev-parse HEAD`, {
+        cwd: worktreeDir,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 5_000,
+      }).trim() || null
+    );
+  } catch {
+    return null;
+  }
+}
+
+function getAuthoritativeExecutionResult(
+  value: unknown,
+): ExecuteFinalizationResult | null {
+  const parsed = parseExecutionResultFile(value);
+  if (!parsed) {
+    return null;
+  }
+  if (!parsed.hasChanges) {
+    return {
+      status: "no-changes",
+      path: "artifact-existing",
+      reason: "existing execution-result.json reused",
+      executionResultPersisted: true,
+      branchName: parsed.branchName ?? undefined,
+      commitSha: parsed.commitSha ?? undefined,
+    };
+  }
+  if (
+    parsed.prUrl &&
+    parsed.prNumber != null &&
+    parsed.branchName &&
+    parsed.commitSha
+  ) {
+    return {
+      status: "success",
+      path: "artifact-existing",
+      reason: "existing execution-result.json reused",
+      executionResultPersisted: true,
+      prUrl: parsed.prUrl,
+      prNumber: parsed.prNumber,
+      branchName: parsed.branchName,
+      commitSha: parsed.commitSha,
+    };
+  }
+  return null;
+}
+
+function upsertExecuteFinalizationDiagnostics(
+  jobStore: JobStore | undefined,
+  loopId: string,
+  updates: Partial<{
+    finalizationSource: ExecuteFinalizationSource;
+    executeFinalizationStatus: LocalJobExecuteFinalizationStatus;
+    executeFinalizationPath: ExecuteFinalizationPath;
+    executeFinalizationStartedAt: string;
+    executeFinalizationCompletedAt: string;
+    executeFinalizationReason: string | undefined;
+    executeFinalizationPreExecutionResultPresent: boolean;
+    executeFinalizationPrePrBodyPresent: boolean;
+    executeFinalizationPostExecutionResultPresent: boolean;
+    executeFinalizationPostPrBodyPresent: boolean;
+  }>,
+): void {
+  if (!jobStore) {
+    return;
+  }
+  const current = jobStore.getByLoopId(loopId);
+  if (!current) {
+    return;
+  }
+  jobStore.upsert({
+    ...current,
+    ...updates,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+function completeExecuteFinalization(
+  jobStore: JobStore | undefined,
+  loopId: string,
+  source: ExecuteFinalizationSource,
+  claudeWorkDir: string,
+  startedAt: string,
+  result: ExecuteFinalizationResult,
+  preArtifacts: {
+    executionResultPresent: boolean;
+    prBodyPresent: boolean;
+  },
+): ExecuteFinalizationResult {
+  const postArtifacts = getExecuteFinalizationArtifactPresence(claudeWorkDir);
+  upsertExecuteFinalizationDiagnostics(jobStore, loopId, {
+    finalizationSource: source,
+    executeFinalizationStatus: result.status,
+    executeFinalizationPath: result.path,
+    executeFinalizationStartedAt: startedAt,
+    executeFinalizationCompletedAt: new Date().toISOString(),
+    executeFinalizationReason: sanitizeExecuteFinalizationReason(result.reason),
+    executeFinalizationPreExecutionResultPresent:
+      preArtifacts.executionResultPresent,
+    executeFinalizationPrePrBodyPresent: preArtifacts.prBodyPresent,
+    executeFinalizationPostExecutionResultPresent:
+      postArtifacts.executionResultPresent,
+    executeFinalizationPostPrBodyPresent: postArtifacts.prBodyPresent,
+  });
+  return {
+    ...result,
+    reason: sanitizeExecuteFinalizationReason(result.reason),
+  };
+}
+
+export async function runExecuteFinalization(
+  params: ExecuteFinalizationParams,
+): Promise<ExecuteFinalizationResult> {
+  const startedAt = new Date().toISOString();
+  const preArtifacts = getExecuteFinalizationArtifactPresence(
+    params.claudeWorkDir,
+  );
+
+  upsertExecuteFinalizationDiagnostics(params.jobStore, params.loopId, {
+    finalizationSource: params.source,
+    executeFinalizationStatus: "pending",
+    executeFinalizationPath: "none",
+    executeFinalizationStartedAt: startedAt,
+    executeFinalizationCompletedAt: undefined,
+    executeFinalizationReason: undefined,
+    executeFinalizationPreExecutionResultPresent:
+      preArtifacts.executionResultPresent,
+    executeFinalizationPrePrBodyPresent: preArtifacts.prBodyPresent,
+    executeFinalizationPostExecutionResultPresent: undefined,
+    executeFinalizationPostPrBodyPresent: undefined,
+  });
+
+  const existingExecutionResult = readJsonFileSync(
+    path.join(params.claudeWorkDir, LoopArtifactFile.ExecutionResult),
+  );
+  const authoritativeExisting = getAuthoritativeExecutionResult(
+    existingExecutionResult,
+  );
+  if (authoritativeExisting) {
+    return completeExecuteFinalization(
+      params.jobStore,
+      params.loopId,
+      params.source,
+      params.claudeWorkDir,
+      startedAt,
+      authoritativeExisting,
+      preArtifacts,
+    );
+  }
+
+  if (!params.worktreeDir || !existsSync(params.worktreeDir)) {
+    return completeExecuteFinalization(
+      params.jobStore,
+      params.loopId,
+      params.source,
+      params.claudeWorkDir,
+      startedAt,
+      {
+        status: "skipped",
+        path: "none",
+        reason: "worktree directory unavailable for execute finalization",
+        executionResultPersisted: false,
+      },
+      preArtifacts,
+    );
+  }
+
+  const sandboxBlockReason = getExecuteFinalizationSandboxBlockReason(
+    params.worktreeDir,
+    params.getAllowedDirectories,
+    params.loopId,
+  );
+  if (sandboxBlockReason) {
+    return completeExecuteFinalization(
+      params.jobStore,
+      params.loopId,
+      params.source,
+      params.claudeWorkDir,
+      startedAt,
+      {
+        status: "skipped",
+        path: "none",
+        reason: sandboxBlockReason,
+        executionResultPersisted: false,
+      },
+      preArtifacts,
+    );
+  }
+
+  const llmResult = await attemptLlmCommit(
+    params.worktreeDir,
+    params.baseBranch,
+    params.loopId,
+    "EXECUTE",
+    params.artifactSlug,
+    params.webAppOrigin,
+    params.committer,
+    params.getAllowedDirectories,
+    params.expectedMcpUrl,
+    undefined,
+    params.jobStore,
+    params.claudeWorkDir,
+  );
+
+  if (llmResult) {
+    const executionResult = buildPersistedExecutionResultArtifact({
+      hasChanges: true,
+      prUrl: llmResult.prUrl,
+      prNumber: llmResult.prNumber,
+      branchName: llmResult.branchName,
+      baseBranch: params.baseBranch,
+      commitSha: llmResult.commitSha,
+    });
+    const persisted = persistExecutionResultArtifact(
+      params.claudeWorkDir,
+      executionResult,
+    );
+    return completeExecuteFinalization(
+      params.jobStore,
+      params.loopId,
+      params.source,
+      params.claudeWorkDir,
+      startedAt,
+      persisted
+        ? {
+            status: "success",
+            path: "llm",
+            executionResultPersisted: true,
+            prUrl: llmResult.prUrl,
+            prNumber: llmResult.prNumber,
+            branchName: llmResult.branchName,
+            commitSha: llmResult.commitSha,
+          }
+        : {
+            status: "error",
+            path: "llm",
+            reason:
+              "failed to persist execution-result.json after LLM commit finalization",
+            executionResultPersisted: false,
+          },
+      preArtifacts,
+    );
+  }
+
+  const gitFallbackSandboxBlockReason = getExecuteFinalizationSandboxBlockReason(
+    params.worktreeDir,
+    params.getAllowedDirectories,
+    params.loopId,
+  );
+  if (gitFallbackSandboxBlockReason) {
+    return completeExecuteFinalization(
+      params.jobStore,
+      params.loopId,
+      params.source,
+      params.claudeWorkDir,
+      startedAt,
+      {
+        status: "skipped",
+        path: "none",
+        reason: gitFallbackSandboxBlockReason,
+        executionResultPersisted: false,
+      },
+      preArtifacts,
+    );
+  }
+
+  try {
+    unlinkSync(path.join(params.worktreeDir, LoopArtifactFile.ExecutionResult));
+  } catch {
+    /* may not exist */
+  }
+  try {
+    unlinkSync(path.join(params.worktreeDir, "pr-body.md"));
+  } catch {
+    /* may not exist */
+  }
+
+  const gitShellPath = await getShellPath();
+  const gitResult = executeGitOperations(
+    params.worktreeDir,
+    params.committer,
+    params.baseBranch,
+    params.loopId,
+    "EXECUTE",
+    params.artifactSlug,
+    params.webAppOrigin,
+    gitShellPath,
+  );
+
+  if (gitResult.status === "success") {
+    const executionResult = buildPersistedExecutionResultArtifact({
+      hasChanges: true,
+      prUrl: gitResult.prUrl,
+      prNumber: gitResult.prNumber,
+      branchName: gitResult.branchName,
+      baseBranch: params.baseBranch,
+      commitSha: gitResult.commitSha,
+    });
+    const persisted = persistExecutionResultArtifact(
+      params.claudeWorkDir,
+      executionResult,
+    );
+    return completeExecuteFinalization(
+      params.jobStore,
+      params.loopId,
+      params.source,
+      params.claudeWorkDir,
+      startedAt,
+      persisted
+        ? {
+            status: "success",
+            path: "git-fallback",
+            executionResultPersisted: true,
+            prUrl: gitResult.prUrl,
+            prNumber: gitResult.prNumber,
+            branchName: gitResult.branchName,
+            commitSha: gitResult.commitSha,
+          }
+        : {
+            status: "error",
+            path: "git-fallback",
+            reason:
+              "failed to persist execution-result.json after git finalization",
+            executionResultPersisted: false,
+          },
+      preArtifacts,
+    );
+  }
+
+  if (gitResult.status === "no-changes") {
+    const branchName = getCurrentBranchImpl(params.worktreeDir);
+    const commitSha = getHeadCommitShaFromWorktree(params.worktreeDir);
+    if (!branchName) {
+      return completeExecuteFinalization(
+        params.jobStore,
+        params.loopId,
+        params.source,
+        params.claudeWorkDir,
+        startedAt,
+        {
+          status: "error",
+          path: "git-fallback",
+          reason: "could not determine branch name for no-changes execution result",
+          executionResultPersisted: false,
+        },
+        preArtifacts,
+      );
+    }
+    const executionResult = buildPersistedExecutionResultArtifact({
+      hasChanges: false,
+      prUrl: null,
+      prNumber: null,
+      branchName,
+      baseBranch: params.baseBranch,
+      commitSha,
+    });
+    const persisted = persistExecutionResultArtifact(
+      params.claudeWorkDir,
+      executionResult,
+    );
+    return completeExecuteFinalization(
+      params.jobStore,
+      params.loopId,
+      params.source,
+      params.claudeWorkDir,
+      startedAt,
+      persisted
+        ? {
+            status: "no-changes",
+            path: "git-fallback",
+            reason: "no local changes detected",
+            executionResultPersisted: true,
+            branchName,
+            commitSha: commitSha ?? undefined,
+          }
+        : {
+            status: "error",
+            path: "git-fallback",
+            reason:
+              "failed to persist execution-result.json for no-changes finalization",
+            executionResultPersisted: false,
+          },
+      preArtifacts,
+    );
+  }
+
+  return completeExecuteFinalization(
+    params.jobStore,
+    params.loopId,
+    params.source,
+    params.claudeWorkDir,
+    startedAt,
+    {
+      status: "error",
+      path: "git-fallback",
+      reason: gitResult.reason,
+      executionResultPersisted: false,
+    },
+    preArtifacts,
+  );
+}
+
 function executeGitOperations(
   worktreeDir: string,
   committer: LoopCommitter | undefined,
@@ -2184,6 +2829,55 @@ export async function handleProcessCompletion(
     const wasCancelled =
       existingJob?.status === "CANCEL_PENDING" ||
       existingJob?.status === "CANCELLED";
+    const failureBranchName = worktreeDir
+      ? wt.getCurrentBranch(worktreeDir) ?? undefined
+      : undefined;
+    const failureWarnings: string[] = [];
+
+    if (!wasCancelled && command === "EXECUTE") {
+      if (existingJob && jobStore) {
+        const uploadResult = await tryUploadArtifacts(
+          existingJob,
+          command,
+          claudeWorkDir,
+          worktreeDir ?? undefined,
+          failureWarnings,
+          {
+            jobStore,
+            apiAuthToken: closedLoopAuthToken,
+            apiBaseUrl,
+          },
+        );
+        if (uploadResult.failed) {
+          gatewayLog.warn(
+            "loop-harness",
+            `EXECUTE failure artifact upload failed for loopId=${loopId}: ${uploadResult.error ?? "unknown error"}`,
+          );
+        }
+      } else {
+        const uploadResult = await uploadArtifacts(
+          apiBaseUrl,
+          loopId,
+          closedLoopAuthToken,
+          {
+            artifacts: readExecuteOutputs(claudeWorkDir),
+            metadata: {
+              finishedAt: new Date().toISOString(),
+              command: command.toLowerCase(),
+              ...(failureSessionId ? { sessionId: failureSessionId } : {}),
+              ...(failureBranchName ? { branchName: failureBranchName } : {}),
+            },
+          },
+        );
+        if (!uploadResult.success) {
+          failureWarnings.push("ARTIFACT_UPLOAD_FAILED");
+          gatewayLog.warn(
+            "loop-harness",
+            `EXECUTE failure artifact upload failed for loopId=${loopId}: ${uploadResult.error ?? "unknown error"}`,
+          );
+        }
+      }
+    }
 
     // Determine abort reason
     const abortReason: string | undefined = wasCancelled
@@ -2214,6 +2908,7 @@ export async function handleProcessCompletion(
         message: "Loop cancelled",
         loopId,
         sessionId: failureSessionId,
+        ...(failureBranchName ? { branchName: failureBranchName } : {}),
         tokenUsage: diagnostics.tokenUsage,
         tokensByModel: diagnostics.tokensByModel,
         logTail: diagnostics.logTail,
@@ -2222,6 +2917,7 @@ export async function handleProcessCompletion(
         elapsedMs: diagnostics.elapsedMs,
         abortReason: diagnostics.abortReason,
         diagnosticsVersion: String(diagnostics.diagnosticsVersion),
+        ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
       });
     } else {
       Observability.jobFailed(
@@ -2264,6 +2960,7 @@ export async function handleProcessCompletion(
           message: limitMsg,
           loopId,
           sessionId: failureSessionId,
+          ...(failureBranchName ? { branchName: failureBranchName } : {}),
           tokenUsage: diagnostics.tokenUsage,
           tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
@@ -2272,6 +2969,7 @@ export async function handleProcessCompletion(
           elapsedMs: diagnostics.elapsedMs,
           abortReason: diagnostics.abortReason,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
+          ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
         });
       } else if (isAuthChallenge) {
         const authMsg = jsonlAuthError ?? "Claude auth challenge detected";
@@ -2294,6 +2992,7 @@ export async function handleProcessCompletion(
           message: authMsg,
           loopId,
           sessionId: failureSessionId,
+          ...(failureBranchName ? { branchName: failureBranchName } : {}),
           tokenUsage: diagnostics.tokenUsage,
           tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
@@ -2302,6 +3001,7 @@ export async function handleProcessCompletion(
           elapsedMs: diagnostics.elapsedMs,
           abortReason: diagnostics.abortReason,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
+          ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
         });
       } else {
         loopError(loopId, `Process failed with exit code ${exitCode}`);
@@ -2315,6 +3015,7 @@ export async function handleProcessCompletion(
           message: `Process exited with code ${exitCode}`,
           loopId,
           sessionId: failureSessionId,
+          ...(failureBranchName ? { branchName: failureBranchName } : {}),
           tokenUsage: diagnostics.tokenUsage,
           tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
@@ -2323,14 +3024,16 @@ export async function handleProcessCompletion(
           elapsedMs: diagnostics.elapsedMs,
           abortReason: diagnostics.abortReason,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
+          ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
         });
       }
     }
 
     if (existingJob && jobStore) {
       const now = new Date().toISOString();
+      const latestJob = jobStore.getByLoopId(loopId) ?? existingJob;
       jobStore.upsert({
-        ...existingJob,
+        ...latestJob,
         status: wasCancelled ? "CANCELLED" : "FAILED",
         liveActivity:
           !wasCancelled && isContextLimit
@@ -2339,6 +3042,7 @@ export async function handleProcessCompletion(
               ? `Auth challenge: ${jsonlAuthError ?? "authentication error"}`
               : undefined,
         exitCode,
+        warning: mergeWarningEntries(latestJob.warning, failureWarnings),
         updatedAt: now,
         completedAt: now,
       });
@@ -2363,147 +3067,98 @@ export async function handleProcessCompletion(
     let artifacts: Record<string, unknown> = {};
     const metadata: Record<string, unknown> = {};
     const warnings: string[] = [];
+    let executeFinalization: ExecuteFinalizationResult | null = null;
 
     if (command === "PLAN" || command === "REQUEST_CHANGES") {
       artifacts = readPlanOutputs(claudeWorkDir);
     } else if (command === "EXECUTE") {
-      artifacts = readExecuteOutputs(claudeWorkDir);
+      const baseBranch = body.repo?.branch ?? "main";
 
-      // Git operations for EXECUTE
-      if (worktreeDir) {
-        const baseBranch = body.repo?.branch ?? "main";
-
-        // Cancellation gate: skip git operations if cancelled during main process
-        if (isCancelled(jobStore, loopId)) {
-          const cancelJob = jobStore?.getByLoopId(loopId);
-          if (cancelJob && jobStore) {
-            const now = new Date().toISOString();
-            jobStore.upsert({
-              ...cancelJob,
-              status: "CANCELLED",
-              updatedAt: now,
-              completedAt: now,
-            });
-          }
-          if (tempCleanupDir) {
-            fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(
-              () => {},
-            );
-          }
-          loopTokenStore?.deleteLoopToken(loopId);
-          return;
+      // Cancellation gate: skip execute finalization if cancelled during main process
+      if (isCancelled(jobStore, loopId)) {
+        const cancelJob = jobStore?.getByLoopId(loopId);
+        if (cancelJob && jobStore) {
+          const now = new Date().toISOString();
+          jobStore.upsert({
+            ...cancelJob,
+            status: "CANCELLED",
+            updatedAt: now,
+            completedAt: now,
+          });
         }
+        if (tempCleanupDir) {
+          fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(
+            () => {},
+          );
+        }
+        loopTokenStore?.deleteLoopToken(loopId);
+        return;
+      }
 
-        // Try LLM-assisted commit first; fall back to executeGitOperations if it
-        // returns null.  Never call both.
-        const llmResult = await attemptLlmCommit(
-          worktreeDir,
-          baseBranch,
-          loopId,
-          command,
-          body.artifactSlug,
-          webAppOrigin ?? "",
-          committer,
-          getAllowedDirectories,
-          expectedMcpUrl,
-          () => {
-            warnings.push(
-              sanitizeErrorMessage("LLM commit timed out after 30m"),
-            );
-          },
-          jobStore,
-          claudeWorkDir,
+      executeFinalization = await runExecuteFinalization({
+        worktreeDir,
+        claudeWorkDir,
+        loopId,
+        artifactSlug: body.artifactSlug,
+        baseBranch,
+        webAppOrigin: webAppOrigin ?? "",
+        committer,
+        getAllowedDirectories,
+        expectedMcpUrl,
+        jobStore,
+        source: "live-exit",
+      });
+
+      // Cancellation gate: skip finalization upload/event work if cancellation won
+      // while execute post-processing was running.
+      if (isCancelled(jobStore, loopId)) {
+        const cancelJob = jobStore?.getByLoopId(loopId);
+        if (cancelJob && jobStore) {
+          const now = new Date().toISOString();
+          jobStore.upsert({
+            ...cancelJob,
+            status: "CANCELLED",
+            updatedAt: now,
+            completedAt: now,
+          });
+        }
+        if (tempCleanupDir) {
+          fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(
+            () => {},
+          );
+        }
+        loopTokenStore?.deleteLoopToken(loopId);
+        return;
+      }
+
+      if (executeFinalization.status === "no-changes") {
+        gatewayLog.info(
+          "loop-harness",
+          "no local changes detected, skipping PR creation, loopId=" + loopId,
         );
+      } else if (executeFinalization.status === "error") {
+        gatewayLog.warn(
+          "loop-harness",
+          "execute finalization failed: " +
+            sanitizeErrorMessage(
+              executeFinalization.reason ?? "unknown execute finalization error",
+            ) +
+            ", loopId=" +
+            loopId,
+        );
+        warnings.push("GIT_PUSH_FAILED");
+      }
 
-        // Clean up any remaining LLM scratch files before fallback to prevent
-        // them from being committed by executeGitOperations.  attemptLlmCommit
-        // already cleans up on success, but these guards cover edge cases where
-        // the process was killed before the cleanup ran.
-        if (!llmResult) {
-          try {
-            unlinkSync(
-              path.join(worktreeDir, LoopArtifactFile.ExecutionResult),
-            );
-          } catch {
-            /* may not exist */
-          }
-          try {
-            unlinkSync(path.join(worktreeDir, "pr-body.md"));
-          } catch {
-            /* may not exist */
-          }
-        }
-
-        // Cancellation gate: skip fallback git operations if cancelled during LLM commit
-        if (isCancelled(jobStore, loopId)) {
-          const cancelJob = jobStore?.getByLoopId(loopId);
-          if (cancelJob && jobStore) {
-            const now = new Date().toISOString();
-            jobStore.upsert({
-              ...cancelJob,
-              status: "CANCELLED",
-              updatedAt: now,
-              completedAt: now,
-            });
-          }
-          if (tempCleanupDir) {
-            fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(
-              () => {},
-            );
-          }
-          loopTokenStore?.deleteLoopToken(loopId);
-          return;
-        }
-
-        const gitShellPath = await getShellPath();
-        const gitResult: GitOperationResult = llmResult
-          ? { status: "success" as const, ...llmResult }
-          : executeGitOperations(
-              worktreeDir,
-              committer,
-              baseBranch,
-              loopId,
-              command,
-              body.artifactSlug,
-              webAppOrigin ?? "",
-              gitShellPath,
-            );
-
-        if (gitResult.status === "success") {
-          // Merge git info into execution result
-          const execResult =
-            (artifacts.executionResult as Record<string, unknown>) ?? {};
-          execResult.pr_url = gitResult.prUrl;
-          execResult.pr_number = gitResult.prNumber;
-          execResult.branch_name = gitResult.branchName;
-          execResult.commit_sha = gitResult.commitSha;
-          execResult.has_changes = true;
-          execResult.base_ref = baseBranch;
-          artifacts.executionResult = execResult;
-          metadata.branchName = gitResult.branchName;
-          // Persist merged execute metadata for reboot-time finalization replay.
-          try {
-            writeFileSync(
-              path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
-              JSON.stringify(execResult),
-            );
-          } catch (err) {
-            loopLog(loopId, "Failed to persist execution-result.json:", err);
-          }
-        } else if (gitResult.status === "no-changes") {
-          gatewayLog.info(
-            "loop-harness",
-            "no local changes detected, skipping PR creation, loopId=" + loopId,
-          );
-        } else if (gitResult.status === "error") {
-          gatewayLog.warn(
-            "loop-harness",
-            "git operations failed: " +
-              sanitizeErrorMessage(gitResult.reason) +
-              ", loopId=" +
-              loopId,
-          );
-          warnings.push("GIT_PUSH_FAILED");
+      artifacts = readExecuteOutputs(claudeWorkDir);
+      if (executeFinalization.branchName) {
+        metadata.branchName = executeFinalization.branchName;
+      }
+      if (!jobStore) {
+        metadata.finalizationSource = "live-exit";
+        metadata.executeFinalizationStatus = executeFinalization.status;
+        metadata.executeFinalizationPath = executeFinalization.path;
+        if (executeFinalization.reason) {
+          metadata.executeFinalizationReason = executeFinalization.reason;
         }
       }
     } else if (command === "DECOMPOSE") {
@@ -2593,15 +3248,8 @@ export async function handleProcessCompletion(
     );
 
     // Detect 0-token EXECUTE completions as failures (ghost loop)
-    if (
-      command === "EXECUTE" &&
-      tokensUsed.inputTokens === 0 &&
-      tokensUsed.outputTokens === 0 &&
-      tokensUsed.cacheCreationInputTokens === 0 &&
-      tokensUsed.cacheReadInputTokens === 0
-    ) {
-      const noWorkMsg =
-        "EXECUTE loop completed with 0 tokens -- no work was done";
+    if (!jobStore && isExecuteNoWorkCompletion(command, tokensUsed)) {
+      const noWorkMsg = EXECUTE_NO_WORK_MESSAGE;
       loopError(loopId, noWorkMsg);
       gatewayLog.error("loop-harness", `${noWorkMsg}, loopId=${loopId}`);
       runningLoops.delete(loopId);
@@ -2613,20 +3261,6 @@ export async function handleProcessCompletion(
         abortReason: "ghost-loop",
         elapsedMs,
       });
-      if (jobStore) {
-        const existingJob = jobStore.getByLoopId(loopId);
-        if (existingJob) {
-          const now = new Date().toISOString();
-          jobStore.upsert({
-            ...existingJob,
-            status: "FAILED",
-            liveActivity: "Error: Loop produced no output (0 tokens)",
-            exitCode: 0,
-            updatedAt: now,
-            completedAt: now,
-          });
-        }
-      }
       if (tempCleanupDir) {
         fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(() => {});
       }
@@ -2663,16 +3297,9 @@ export async function handleProcessCompletion(
     if (warnings.length > 0 && jobStore) {
       const existingJob = jobStore.getByLoopId(loopId);
       if (existingJob) {
-        const existingWarnings = existingJob.warning
-          ? existingJob.warning
-              .split(";")
-              .map((value) => value.trim())
-              .filter((value) => value.length > 0)
-          : [];
-        const mergedWarnings = [...new Set([...existingWarnings, ...warnings])];
         jobStore.upsert({
           ...existingJob,
-          warning: mergedWarnings.map(sanitizeErrorMessage).join("; "),
+          warning: mergeWarningEntries(existingJob.warning, warnings),
           updatedAt: new Date().toISOString(),
         });
       }
@@ -2691,6 +3318,7 @@ export async function handleProcessCompletion(
         apiAuthToken: closedLoopAuthToken,
         apiBaseUrl,
         isProcessRunning,
+        getAllowedDirectories,
         loopTokenStore,
       };
       const outcome = await finalizeLoopFromRuntime(
@@ -2731,6 +3359,14 @@ export async function handleProcessCompletion(
           result.prNumber = parsed.prNumber;
           result.branchName = parsed.branchName;
           result.has_changes = parsed.hasChanges;
+        }
+      }
+      if (command === "EXECUTE" && executeFinalization) {
+        result.finalizationSource = "live-exit";
+        result.executeFinalizationStatus = executeFinalization.status;
+        result.executeFinalizationPath = executeFinalization.path;
+        if (executeFinalization.reason) {
+          result.executeFinalizationReason = executeFinalization.reason;
         }
       }
       if (worktreeDir && !result.branchName) {
@@ -3127,6 +3763,7 @@ async function handleLoopRequest(
     let worktreeDir: string | null = null;
     let claudeWorkDir: string;
     let usedTempDir = false;
+    let executeImportedPlanFile: string | null = null;
 
     if (body.command === "DECOMPOSE") {
       // DECOMPOSE uses a single temp dir for everything: context pack, logs, and output.
@@ -3400,12 +4037,17 @@ async function handleLoopRequest(
           body.attachments,
         );
       } else if (body.command === "EXECUTE") {
-        await writeArtifactsForExecuteOrAmend(
+        const executeArtifacts = await writeArtifactsForExecuteOrAmend(
           claudeWorkDir,
           body.artifacts,
           undefined,
           body.attachments,
+          {
+            command: "EXECUTE",
+            loopId: body.loopId,
+          },
         );
+        executeImportedPlanFile = executeArtifacts.importedPlanFile;
       } else {
         // REQUEST_CHANGES
         await writeArtifactsForExecuteOrAmend(
@@ -3413,6 +4055,10 @@ async function handleLoopRequest(
           body.artifacts,
           body.prompt,
           body.attachments,
+          {
+            command: "REQUEST_CHANGES",
+            loopId: body.loopId,
+          },
         );
       }
     } else if (body.command === "GENERATE_PRD") {
@@ -3637,8 +4283,12 @@ async function handleLoopRequest(
       // Reuse the path from pre-flight so validation and execution stay aligned.
       const claudeBinary = resolved.path;
 
+      const closedLoopPlanFile =
+        body.command === "EXECUTE" ? executeImportedPlanFile ?? "" : "";
+
       const spawnEnv: Record<string, string> = await getShellEnv({
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
+        CLOSEDLOOP_PLAN_FILE: closedLoopPlanFile,
         // Pass resolved claude path so run-loop.sh uses the same binary
         // the desktop app validated in pre-flight (avoids PATH mismatches
         // between Electron's env and the user's login shell).
@@ -4022,6 +4672,11 @@ async function handleLoopRequest(
         ...existing,
         ...(commandId ? { commandId } : {}),
         ...(operationId ? { operationId } : {}),
+        artifactSlug: body.artifactSlug ?? existing?.artifactSlug,
+        baseBranch: body.repo?.branch ?? existing?.baseBranch ?? "main",
+        webAppOrigin: webAppOrigin || existing?.webAppOrigin,
+        expectedMcpUrl: expectedMcpUrl ?? existing?.expectedMcpUrl,
+        committer: body.committer ?? existing?.committer,
         worktreeDir: worktreeDir ?? undefined,
         claudeWorkDir,
         // Persist so finalizer/boot-recovery can remove these after a crash
