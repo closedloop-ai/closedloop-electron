@@ -3496,31 +3496,103 @@ async function handleLoopRequest(
           );
         }
 
-        // EXECUTE: find additional repo worktrees created by the preceding PLAN.
-        // These were checked out onto symphony/<key> branches during PLAN setup.
+        // EXECUTE: ensure additional-repo worktrees exist. PLAN's post-run
+        // cleanup removes them unconditionally (they are scratch space for
+        // exploration, not persistent artifacts), so by the time EXECUTE runs
+        // the worktrees are typically gone. Recreate-on-miss is safe because
+        // PLAN does not write to additional-repo worktrees, and ensureWorktree
+        // uses `git worktree add -B` which resets an existing symphony branch
+        // back to baseRef — no error on the "branch-exists, worktree-gone"
+        // case left behind by PLAN, and no state lost.
         if (body.command === "EXECUTE" && resolvedAdditionalRepos.length > 0) {
           for (const addRepo of resolvedAdditionalRepos) {
             const addRepoSlug = slugifyLoopId(addRepo.branch);
             const addRepoKey = `${worktreeKey}-${addRepoSlug}-${additionalRepoDisambiguator(addRepo.repoPath)}`;
+            const addWorktreeDir = resolveLoopWorktreeDir(
+              addRepo.repoPath,
+              addRepoKey,
+            );
             const addBranchName = `symphony/${addRepoKey}`;
-            const existingAddWorktree = wt.findWorktreeForBranch(addRepo.repoPath, addBranchName);
-            if (existingAddWorktree && existsSync(existingAddWorktree)) {
-              additionalWorktreeDirs.push({
-                dir: existingAddWorktree,
-                repoPath: addRepo.repoPath,
-                fullName: addRepo.fullName,
-                baseBranch: addRepo.branch,
-              });
-              loopLog(
-                body.loopId,
-                `Found additional repo worktree for EXECUTE: ${existingAddWorktree} (branch: ${addBranchName})`,
-              );
-            } else {
-              loopLog(
-                body.loopId,
-                `No existing additional repo worktree found for EXECUTE: ${addRepo.repoPath} branch=${addBranchName} — skipping`,
-              );
+
+            try {
+              assertPathAllowed(addWorktreeDir, allowedDirs);
+            } catch (e) {
+              if (e instanceof DirectoryNotAllowedError) {
+                await cleanupAdditionalWorktrees(
+                  additionalWorktreeDirs,
+                  body.loopId,
+                  wt,
+                  "cleanup additional worktree failed (allowlist reject):",
+                );
+                await postLoopEventBounded(
+                  apiBaseUrl,
+                  body.loopId,
+                  body.closedLoopAuthToken,
+                  {
+                    type: LoopEventType.Error,
+                    code: LoopErrorCode.RepoNotAllowed,
+                    message: `Additional repo worktree path not allowed: ${addWorktreeDir}`,
+                  },
+                );
+                json(context, 403, {
+                  error: `Additional repo worktree path not allowed: ${addWorktreeDir}`,
+                });
+                return;
+              }
+              throw e;
             }
+
+            try {
+              await wt.ensureWorktree(
+                addRepo.repoPath,
+                addWorktreeDir,
+                addBranchName,
+                addRepo.branch,
+                body.loopId,
+              );
+            } catch (checkoutErr) {
+              const msg =
+                checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr);
+              loopError(
+                body.loopId,
+                `ensureWorktree failed for additional repo ${addRepo.repoPath}:`,
+                checkoutErr,
+              );
+              await wt
+                .removeWorktree(addWorktreeDir, addRepo.repoPath, body.loopId)
+                .catch(() => {});
+              await cleanupAdditionalWorktrees(
+                additionalWorktreeDirs,
+                body.loopId,
+                wt,
+                "cleanup additional worktree failed (checkout reject):",
+              );
+              await postLoopEventBounded(
+                apiBaseUrl,
+                body.loopId,
+                body.closedLoopAuthToken,
+                {
+                  type: LoopEventType.Error,
+                  code: LoopErrorCode.BranchCreateFailed,
+                  message: `Failed to checkout additional repo worktree: ${msg}`,
+                },
+              );
+              json(context, 500, {
+                error: `Failed to checkout additional repo worktree: ${msg}`,
+              });
+              return;
+            }
+
+            additionalWorktreeDirs.push({
+              dir: addWorktreeDir,
+              repoPath: addRepo.repoPath,
+              fullName: addRepo.fullName,
+              baseBranch: addRepo.branch,
+            });
+            loopLog(
+              body.loopId,
+              `Ensured additional repo worktree for EXECUTE: ${addWorktreeDir} (branch: ${addBranchName} based on ${addRepo.branch})`,
+            );
           }
         }
       }
