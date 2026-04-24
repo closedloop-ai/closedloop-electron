@@ -610,6 +610,10 @@ function parseBootstrapParams(prompt: string | undefined): BootstrapParams | nul
   try {
     const parsed = JSON.parse(prompt) as Record<string, unknown>;
     if (!Array.isArray(parsed.repos)) return null;
+    for (const entry of parsed.repos) {
+      if (typeof entry !== "object" || entry === null) return null;
+      if (typeof (entry as Record<string, unknown>).fullName !== "string") return null;
+    }
     return parsed as unknown as BootstrapParams;
   } catch {
     return null;
@@ -4677,7 +4681,7 @@ async function handleLoopRequest(
           scriptLines.push(
             `echo "=== BOOTSTRAP ${i}: ${entry.fullName} ==="`,
             `cd ${shellEscape(entry.localPath)}`,
-            `if $CLAUDE_BIN -p "/agent-bootstrap" 2>${shellEscape(stderrLog)}; then`,
+            `if "$CLAUDE_BIN" -p "/agent-bootstrap" 2>${shellEscape(stderrLog)}; then`,
             `  echo "ok" > ${shellEscape(marker)}`,
             `else`,
             `  echo "fail:$?" > ${shellEscape(marker)}`,
