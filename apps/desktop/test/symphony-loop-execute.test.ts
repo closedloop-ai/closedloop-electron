@@ -1333,6 +1333,330 @@ test("EXECUTE: remote raw plan payload wins over existing local plan.json", asyn
   );
 });
 
+test("EXECUTE: missing raw payload keeps matching local plan.json", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-plan-local-match-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-plan-local-match");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  const loopId = "00000000-0000-0000-0000-000000000455";
+  const worktreeDir = resolveExecuteWorktreeDir(worktreeParent, repoPath, loopId);
+  const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const hostedMarkdown = "# Hosted plan\n\n- unchanged markdown";
+  const localPlan = {
+    title: "Local plan",
+    content: hostedMarkdown,
+    source: "local",
+    tasks: [
+      {
+        id: "local-task",
+        title: "Local task",
+        description: "local description",
+      },
+    ],
+  };
+  await fs.writeFile(
+    path.join(claudeWorkDir, "plan.json"),
+    JSON.stringify(localPlan, null, 2),
+  );
+
+  await createFakeRunLoopScript(
+    tmpDir,
+    [
+      "#!/bin/sh",
+      'printf "%s" "$CLOSEDLOOP_PLAN_FILE" > "$CLOSEDLOOP_WORKDIR/captured-plan-file.txt"',
+      'if [ -e "$CLOSEDLOOP_WORKDIR/imported-plan.md" ]; then echo "present" > "$CLOSEDLOOP_WORKDIR/imported-plan-marker.txt"; fi',
+      'cp "$CLOSEDLOOP_WORKDIR/plan.json" "$CLOSEDLOOP_WORKDIR/captured-plan.json"',
+      "exit 0",
+    ].join("\n"),
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'if [ "$1" = status ]; then exit 0; fi',
+    'if [ "$1" = push ]; then exit 0; fi',
+    'if [ "$1" = add ]; then exit 0; fi',
+    'if [ "$1" = commit ]; then exit 0; fi',
+    'if [ "$1" = fetch ]; then exit 0; fi',
+    'if [ "$1" = "rev-parse" ]; then',
+    '  if [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+    "  exit 0",
+    "fi",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-plan-local-match-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [
+          {
+            type: "IMPLEMENTATION_PLAN",
+            content: hostedMarkdown,
+          },
+        ],
+        repo: {
+          fullName: `plan-local-match/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  const uploadReq = await mock.waitForRequest("upload-artifacts");
+  const uploadBody = JSON.parse(uploadReq.body) as {
+    artifacts?: {
+      plan?: {
+        content?: string;
+        raw?: Record<string, unknown>;
+      };
+    };
+  };
+
+  const capturedPlanFile = await fs.readFile(
+    path.join(claudeWorkDir, "captured-plan-file.txt"),
+    "utf-8",
+  );
+  assert.equal(
+    capturedPlanFile.trim(),
+    "",
+    `Expected CLOSEDLOOP_PLAN_FILE to be empty when matching local plan.json is reused, got: ${capturedPlanFile}`,
+  );
+
+  const importedPlanMarker = await fs.readFile(
+    path.join(claudeWorkDir, "imported-plan-marker.txt"),
+    "utf-8",
+  ).catch(() => "");
+  assert.equal(
+    importedPlanMarker,
+    "",
+    "Expected no imported-plan.md source file when matching local plan.json is reused",
+  );
+
+  const capturedPlan = JSON.parse(
+    await fs.readFile(
+      path.join(claudeWorkDir, "captured-plan.json"),
+      "utf-8",
+    ),
+  ) as Record<string, unknown>;
+  assert.equal(capturedPlan.source, "local");
+  assert.equal(capturedPlan.content, hostedMarkdown);
+  assert.equal(uploadBody.artifacts?.plan?.content, hostedMarkdown);
+  assert.equal(uploadBody.artifacts?.plan?.raw?.source, "local");
+});
+
+test("EXECUTE: missing raw payload removes mismatched local plan.json", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-plan-local-mismatch-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-plan-local-mismatch");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  const loopId = "00000000-0000-0000-0000-000000000456";
+  const worktreeDir = resolveExecuteWorktreeDir(worktreeParent, repoPath, loopId);
+  const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  await fs.writeFile(
+    path.join(claudeWorkDir, "plan.json"),
+    JSON.stringify(
+      {
+        title: "Local stale plan",
+        content: "# Local stale plan\n\n- local snapshot",
+        source: "local",
+      },
+      null,
+      2,
+    ),
+  );
+
+  await createFakeRunLoopScript(
+    tmpDir,
+    [
+      "#!/bin/sh",
+      'printf "%s" "$CLOSEDLOOP_PLAN_FILE" > "$CLOSEDLOOP_WORKDIR/captured-plan-file.txt"',
+      'if [ -e "$CLOSEDLOOP_WORKDIR/plan.json" ]; then echo "present" > "$CLOSEDLOOP_WORKDIR/prewritten-plan-json.txt"; fi',
+      'cp "$CLOSEDLOOP_PLAN_FILE" "$CLOSEDLOOP_WORKDIR/captured-plan-source.md"',
+      "exit 0",
+    ].join("\n"),
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'if [ "$1" = status ]; then exit 0; fi',
+    'if [ "$1" = push ]; then exit 0; fi',
+    'if [ "$1" = add ]; then exit 0; fi',
+    'if [ "$1" = commit ]; then exit 0; fi',
+    'if [ "$1" = fetch ]; then exit 0; fi',
+    'if [ "$1" = "rev-parse" ]; then',
+    '  if [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+    "  exit 0",
+    "fi",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-plan-local-mismatch-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const hostedMarkdown = "# Hosted plan\n\n- latest markdown";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [
+          {
+            type: "IMPLEMENTATION_PLAN",
+            content: hostedMarkdown,
+          },
+        ],
+        repo: {
+          fullName: `plan-local-mismatch/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  const uploadReq = await mock.waitForRequest("upload-artifacts");
+  const uploadBody = JSON.parse(uploadReq.body) as {
+    artifacts?: {
+      plan?: {
+        content?: string;
+        raw?: Record<string, unknown>;
+      };
+    };
+  };
+
+  const capturedPlanFile = await fs.readFile(
+    path.join(claudeWorkDir, "captured-plan-file.txt"),
+    "utf-8",
+  );
+  assert.equal(
+    capturedPlanFile.trim(),
+    path.join(claudeWorkDir, "imported-plan.md"),
+    `Expected mismatched local plan.json to fall back to imported-plan.md, got: ${capturedPlanFile}`,
+  );
+
+  const capturedPlanSource = await fs.readFile(
+    path.join(claudeWorkDir, "captured-plan-source.md"),
+    "utf-8",
+  );
+  assert.equal(
+    capturedPlanSource,
+    hostedMarkdown,
+    "Expected mismatched local fallback to use the hosted markdown content",
+  );
+
+  const prewrittenPlanJson = await fs.readFile(
+    path.join(claudeWorkDir, "prewritten-plan-json.txt"),
+    "utf-8",
+  ).catch(() => "");
+  assert.equal(
+    prewrittenPlanJson,
+    "",
+    "Expected mismatched local plan.json to be removed before imported-plan execution starts",
+  );
+  assert.deepEqual(uploadBody.artifacts?.plan, {
+    content: hostedMarkdown,
+  });
+});
+
 test("EXECUTE: stale raw plan state falls back to imported-plan compatibility", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-plan-stale-raw-"));
   tempPathsToClean.push(tmpDir);
