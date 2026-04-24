@@ -1,9 +1,18 @@
+import type { ApiKeyProvenance } from "./api-key-store.js";
+import {
+  LOCAL_AUTH_VERIFY_PATH,
+  type DesktopPopSigner,
+} from "./desktop-pop.js";
+import { gatewayLog } from "./gateway-logger.js";
+
 export interface VerifyChallengeOptions {
   challengeToken: string;
   requestOrigin: string;
   userAgent?: string;
   apiOrigin: string;
   apiKey: string;
+  apiKeyProvenance?: ApiKeyProvenance;
+  signDesktopRequest?: DesktopPopSigner;
 }
 
 export type VerifyChallengeResult =
@@ -40,12 +49,10 @@ export async function verifyChallenge(
   const timeout = setTimeout(() => controller.abort(), VERIFY_TIMEOUT_MS);
 
   try {
+    const headers = await buildVerifyHeaders(options);
     const response = await fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${options.apiKey}`,
-      },
+      headers,
       body: JSON.stringify(body),
       signal: controller.signal,
     });
@@ -82,4 +89,33 @@ export async function verifyChallenge(
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function buildVerifyHeaders(
+  options: VerifyChallengeOptions
+): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${options.apiKey}`,
+  };
+  if (options.apiKeyProvenance !== "DESKTOP_MANAGED" || !options.signDesktopRequest) {
+    return headers;
+  }
+
+  try {
+    const popHeaders = await options.signDesktopRequest({
+      method: "POST",
+      pathname: LOCAL_AUTH_VERIFY_PATH,
+    });
+    if (popHeaders) {
+      return { ...headers, ...popHeaders };
+    }
+  } catch {
+    // Redacted by design: do not log key material, signatures, or payloads.
+  }
+  gatewayLog.warn(
+    "desktop-pop",
+    "PoP signing unavailable for local-auth verification; continuing bearer-only compatibility mode",
+  );
+  return headers;
 }

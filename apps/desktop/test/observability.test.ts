@@ -7,6 +7,7 @@ import type { TelemetryCategory } from "../src/main/telemetry-protocol.js";
 
 // Compile-time regression guard: fails tsc if "queue.stats_changed" is removed from TelemetryCategory.
 const _queueStatsCategoryCheck: TelemetryCategory = "queue.stats_changed";
+const _desktopPopUnavailableCategoryCheck: TelemetryCategory = "desktop_pop.unavailable";
 
 afterEach(async () => {
   await Observability.shutdown();
@@ -122,6 +123,37 @@ describe("Observability", () => {
     assert.equal(captureCalls[0].event, "desktop_connection_established");
     assert.equal(captureCalls[0].properties.desktop_id, "desktop-1");
     assert.equal(captureCalls[0].properties.desktop_client_version, "0.9.6");
+  });
+
+  test("desktopPopUnavailable emits redacted telemetry and PostHog diagnostics", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    const captureCalls: Array<{ event: string; properties: Record<string, unknown> }> = [];
+    mock.method(PostHogAnalytics.prototype, "capture", (
+      _distinctId: string,
+      event: string,
+      properties: Record<string, unknown>,
+    ) => {
+      captureCalls.push({ event, properties });
+    });
+
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+      posthog: { apiKey: "phc_test", host: "https://us.i.posthog.com" },
+    });
+
+    Observability.desktopPopUnavailable("/internal/api-keys/verify", "key_missing");
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "desktop_pop.unavailable");
+    assert.equal(telemetryEvents[0].severity, "warn");
+    assert.deepEqual(telemetryEvents[0].diagnostics?.extra, {
+      surface: "/internal/api-keys/verify",
+      reason: "key_missing",
+    });
+    assert.equal(captureCalls.length, 1);
+    assert.equal(captureCalls[0].event, "desktop_pop_unavailable");
+    assert.equal(captureCalls[0].properties.surface, "/internal/api-keys/verify");
+    assert.equal(captureCalls[0].properties.reason, "key_missing");
   });
 
   test("setTargetId injects computeTargetId into telemetry events", () => {

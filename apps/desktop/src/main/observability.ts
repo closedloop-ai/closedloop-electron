@@ -229,6 +229,18 @@ export class Observability {
     Observability.capturePostHog("desktop_connection_lost", { reason });
   }
 
+  /** Emits a redacted diagnostic when Desktop PoP cannot sign a managed-key request. */
+  static desktopPopUnavailable(surface: string, reason: string): void {
+    Observability.emitTelemetry(
+      "warn",
+      "desktop_pop.unavailable",
+      "Desktop PoP unavailable; continuing compatibility mode",
+      {},
+      { extra: { surface, reason } },
+    );
+    Observability.capturePostHog("desktop_pop_unavailable", { surface, reason });
+  }
+
   // --- Sandbox (PostHog only) ---
 
   static sandboxBlocked(operationClass: string): void {

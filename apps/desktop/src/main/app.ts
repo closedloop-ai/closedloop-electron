@@ -21,9 +21,19 @@ import {
   normalizeScopePath,
 } from "../shared/sandbox-policy.js";
 import { ApiKeyStore } from "./api-key-store.js";
+import {
+  claimDesktopManagedApiKey,
+  type BootstrapClaimDiagnostic,
+} from "./bootstrap-claim.js";
 import { CloudCommandExecutor } from "./cloud-command-executor.js";
 import type { CloudSocketStatus } from "./cloud-protocol.js";
 import { CloudSocketService } from "./cloud-socket.js";
+import {
+  signDesktopPopHeaders,
+  type DesktopPopHeaders,
+  type DesktopPopSigningRequest,
+} from "./desktop-pop.js";
+import { GatewaySigningKeyStore } from "./gateway-signing-key-store.js";
 import { SettingsStore } from "./settings-store.js";
 import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
@@ -79,6 +89,7 @@ const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 export class DesktopApplication {
   private readonly settingsStore: SettingsStore;
   private readonly apiKeyStore: ApiKeyStore;
+  private readonly gatewaySigningKeyStore: GatewaySigningKeyStore;
   private readonly loopTokenStore: LoopTokenStore;
   private readonly tray: DesktopTray;
   private readonly desktopWindow: DesktopWindow;
@@ -121,6 +132,7 @@ export class DesktopApplication {
       this.settingsStore.getCloudConnectionEnabled();
     this.apiKeyStore = new ApiKeyStore();
     this.loopTokenStore = new LoopTokenStore();
+    this.gatewaySigningKeyStore = new GatewaySigningKeyStore();
     this.tray = new DesktopTray();
     this.desktopWindow = new DesktopWindow();
     this.activityLog = new ActivityLogStore();
@@ -175,6 +187,8 @@ export class DesktopApplication {
       () => this.gatewayId,
       () => this.settingsStore.getBinaryPaths(),
       (patch) => this.applyBinaryPathPatchAndInvalidateCaches(patch),
+      () => this.apiKeyStore.getApiKeyProvenance(),
+      (request) => this.signDesktopRequest(request),
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -203,6 +217,8 @@ export class DesktopApplication {
     this.cloudSocket = new CloudSocketService({
       getRelayOrigin: () => this.settingsStore.getRelayOrigin(),
       getApiKey: () => this.apiKeyStore.getApiKey(),
+      getApiKeyProvenance: () => this.apiKeyStore.getApiKeyProvenance(),
+      signDesktopRequest: (request) => this.signDesktopRequest(request),
       getAllowedDirectories: () => this.getAllowedDirectoriesFromSandbox(),
       getMaxInFlightCommands: () => MAX_IN_FLIGHT_COMMANDS,
       machineName: os.hostname(),
@@ -1237,6 +1253,8 @@ export class DesktopApplication {
           webAppOrigin: string;
           sandboxBaseDirectory: string;
           apiKey?: string;
+          onboardingAttemptId?: string;
+          bootstrapToken?: string;
           binaryPaths?: { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
         },
       ) => {
@@ -1262,7 +1280,30 @@ export class DesktopApplication {
           if (!trimmedApiKey.startsWith("sk_live_")) {
             throw new Error("API key must start with sk_live_");
           }
-          this.apiKeyStore.setApiKey(trimmedApiKey);
+          this.apiKeyStore.setApiKey(trimmedApiKey, "USER_CREATED");
+        } else {
+          const onboardingAttemptId =
+            typeof payload.onboardingAttemptId === "string"
+              ? payload.onboardingAttemptId.trim()
+              : "";
+          if (onboardingAttemptId) {
+            const claimResult = await claimDesktopManagedApiKey({
+              apiOrigin: apiOrigin ?? this.settingsStore.getApiOrigin(),
+              onboardingAttemptId,
+              webAppOrigin,
+              gatewayId: this.gatewayId,
+              signingKeys: this.gatewaySigningKeyStore,
+              bootstrapToken: typeof payload.bootstrapToken === "string" ? payload.bootstrapToken : undefined,
+              onDiagnostic: (diagnostic) => this.reportBootstrapClaimDiagnostic(diagnostic),
+            });
+            if (claimResult.kind === "claimed") {
+              this.apiKeyStore.setApiKey(claimResult.apiKey, "DESKTOP_MANAGED");
+            } else if (claimResult.kind === "manual_fallback") {
+              throw new Error("Managed Desktop key setup is unavailable; enter an API key manually.");
+            } else {
+              throw new Error(`Managed Desktop key claim failed: ${claimResult.error}`);
+            }
+          }
         }
 
         this.settingsStore.update({
@@ -1394,7 +1435,11 @@ export class DesktopApplication {
       if (status.source === "safeStorage") {
         const currentApiKey = this.apiKeyStore.getApiKey() ?? "";
         if (currentApiKey) {
-          this.apiKeyStore.saveProfileKey(savedConfig.id, currentApiKey);
+          this.apiKeyStore.saveProfileKey(
+            savedConfig.id,
+            currentApiKey,
+            this.apiKeyStore.getApiKeyProvenance() ?? "USER_CREATED",
+          );
         }
       }
       return savedConfig;
@@ -1444,15 +1489,51 @@ export class DesktopApplication {
         throw new Error("safeStorage is not available -- cannot apply config");
       }
       const appliedConfig = this.settingsStore.applyConfig(id);
-      const profileKey = this.apiKeyStore.getProfileKey(id);
+      const profileKey = this.apiKeyStore.getProfileKeyRecord(id);
       if (profileKey) {
-        this.apiKeyStore.setApiKey(profileKey);
+        this.apiKeyStore.setApiKey(profileKey.apiKey, profileKey.provenance);
       } else {
         this.apiKeyStore.clearApiKey();
       }
       this.restartCloudSocket();
       return appliedConfig;
     });
+  }
+
+  private signDesktopRequest(
+    request: DesktopPopSigningRequest,
+  ): DesktopPopHeaders | null {
+    const keyPair = this.gatewaySigningKeyStore.load(this.gatewayId);
+    if (!keyPair.ok) {
+      this.reportDesktopPopUnavailable(request.pathname, keyPair.reason);
+      return null;
+    }
+    try {
+      return signDesktopPopHeaders({
+        ...request,
+        gatewayId: this.gatewayId,
+        privateKeyPkcs8Pem: keyPair.keyPair.privateKeyPkcs8Pem,
+      });
+    } catch {
+      this.reportDesktopPopUnavailable(request.pathname, "sign_failed");
+      return null;
+    }
+  }
+
+  private reportBootstrapClaimDiagnostic(diagnostic: BootstrapClaimDiagnostic): void {
+    gatewayLog.warn(
+      "desktop-pop",
+      `PoP unavailable for ${diagnostic.surface}; routing to manual USER_CREATED setup (${diagnostic.reason})`,
+    );
+    Observability.desktopPopUnavailable(diagnostic.surface, diagnostic.reason);
+  }
+
+  private reportDesktopPopUnavailable(surface: string, reason: string): void {
+    gatewayLog.warn(
+      "desktop-pop",
+      `PoP signing unavailable for ${surface}; continuing bearer-only compatibility mode (${reason})`,
+    );
+    Observability.desktopPopUnavailable(surface, reason);
   }
 
   private applyBinaryPathPatchAndInvalidateCaches(

@@ -1,9 +1,19 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { afterEach, describe, test } from "node:test";
-import { CloudSocketService, type CloudSocketOptions } from "../src/main/cloud-socket.js";
+import {
+  CloudSocketService,
+  buildRelayValidationPopHeaders,
+  type CloudSocketOptions,
+} from "../src/main/cloud-socket.js";
 import { GATEWAY_PROTOCOL_VERSION } from "../src/shared/contracts.js";
 import { gatewayLog } from "../src/main/gateway-logger.js";
+import {
+  DESKTOP_POP_GATEWAY_ID_HEADER,
+  DESKTOP_POP_SIGNATURE_HEADER,
+  DESKTOP_POP_TIMESTAMP_HEADER,
+  RELAY_API_KEY_VERIFY_PATH,
+} from "../src/main/desktop-pop.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -76,6 +86,64 @@ describe("T-6.1: Presence state log deduplication", () => {
       (e) => e.tag === "cloud-socket" && e.message.includes("Sending presence:"),
     );
     assert.equal(afterBackOnline.length, 3, "Transition back to online should log");
+  });
+});
+
+describe("relay validation PoP headers", () => {
+  test("managed keys sign the relay API-key verification path", async () => {
+    let capturedRequest: unknown;
+    const headers = await buildRelayValidationPopHeaders(
+      "DESKTOP_MANAGED",
+      (request) => {
+        capturedRequest = request;
+        return {
+          [DESKTOP_POP_GATEWAY_ID_HEADER]: "gateway-1",
+          [DESKTOP_POP_TIMESTAMP_HEADER]: "1713984000",
+          [DESKTOP_POP_SIGNATURE_HEADER]: "signature",
+        };
+      },
+    );
+
+    assert.deepEqual(capturedRequest, {
+      method: "POST",
+      pathname: RELAY_API_KEY_VERIFY_PATH,
+    });
+    assert.deepEqual(headers, {
+      [DESKTOP_POP_GATEWAY_ID_HEADER]: "gateway-1",
+      [DESKTOP_POP_TIMESTAMP_HEADER]: "1713984000",
+      [DESKTOP_POP_SIGNATURE_HEADER]: "signature",
+    });
+  });
+
+  test("manual keys omit relay PoP headers and do not call signer", async () => {
+    let signerCalled = false;
+    const headers = await buildRelayValidationPopHeaders(
+      "USER_CREATED",
+      () => {
+        signerCalled = true;
+        return null;
+      },
+    );
+
+    assert.equal(headers, undefined);
+    assert.equal(signerCalled, false);
+  });
+
+  test("managed signing unavailable falls back to bearer-only compatibility", async () => {
+    const headers = await buildRelayValidationPopHeaders(
+      "DESKTOP_MANAGED",
+      () => null,
+    );
+
+    assert.equal(headers, undefined);
+    assert.equal(
+      gatewayLog.getEntries().some(
+        (entry) =>
+          entry.tag === "desktop-pop" &&
+          entry.message.includes("continuing bearer-only compatibility mode"),
+      ),
+      true,
+    );
   });
 });
 

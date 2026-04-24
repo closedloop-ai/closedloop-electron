@@ -16,11 +16,19 @@ import {
   type ProtocolEnvelope
 } from "./cloud-protocol.js";
 import { normalizeAndValidateOrigin } from "./origin-policy.js";
+import type { ApiKeyProvenance } from "./api-key-store.js";
+import {
+  RELAY_API_KEY_VERIFY_PATH,
+  type DesktopPopHeaders,
+  type DesktopPopSigner,
+} from "./desktop-pop.js";
 import type { DesktopTelemetryEvent } from "./telemetry-protocol.js";
 
 export interface CloudSocketOptions {
   getRelayOrigin: () => string;
   getApiKey: () => string | null;
+  getApiKeyProvenance?: () => ApiKeyProvenance | null;
+  signDesktopRequest?: DesktopPopSigner;
   getAllowedDirectories: () => string[];
   getMaxInFlightCommands: () => number;
   machineName: string;
@@ -75,7 +83,14 @@ export class CloudSocketService {
     }
 
     this.notifyStatus({ state: "idle" });
-    this.connect(apiKey, relayOrigin);
+    const relayValidationPopHeaders = await buildRelayValidationPopHeaders(
+      this.options.getApiKeyProvenance?.() ?? "USER_CREATED",
+      this.options.signDesktopRequest,
+    );
+    if (this.stopped) {
+      return;
+    }
+    this.connect(apiKey, relayOrigin, relayValidationPopHeaders);
   }
 
   stop(): void {
@@ -133,7 +148,11 @@ export class CloudSocketService {
     }
   }
 
-  private connect(apiKey: string, relayOrigin: string): void {
+  private connect(
+    apiKey: string,
+    relayOrigin: string,
+    relayValidationPopHeaders?: DesktopPopHeaders,
+  ): void {
     const socket = io(`${relayOrigin}/desktop-gateway`, {
       transports: ["websocket"],
       reconnection: true,
@@ -143,7 +162,8 @@ export class CloudSocketService {
       autoConnect: false,
       auth: {
         apiKey
-      }
+      },
+      ...(relayValidationPopHeaders ? { extraHeaders: relayValidationPopHeaders } : {})
     });
     this.socket = socket;
 
@@ -350,6 +370,34 @@ export class CloudSocketService {
   private notifyStatus(status: CloudSocketStatus): void {
     this.options.onStatusChange?.(status);
   }
+}
+
+/**
+ * Builds PoP headers for the relay's API-key verification request only when using a managed key.
+ */
+export async function buildRelayValidationPopHeaders(
+  apiKeyProvenance: ApiKeyProvenance,
+  signDesktopRequest?: DesktopPopSigner,
+): Promise<DesktopPopHeaders | undefined> {
+  if (apiKeyProvenance !== "DESKTOP_MANAGED" || !signDesktopRequest) {
+    return undefined;
+  }
+  try {
+    const headers = await signDesktopRequest({
+      method: "POST",
+      pathname: RELAY_API_KEY_VERIFY_PATH,
+    });
+    if (headers) {
+      return headers;
+    }
+  } catch {
+    // Redacted by design: do not log key material, signatures, or payloads.
+  }
+  gatewayLog.warn(
+    "desktop-pop",
+    "PoP signing unavailable for relay validation; continuing bearer-only compatibility mode",
+  );
+  return undefined;
 }
 
 type EnvelopeOnlyFields = ProtocolEnvelope;
