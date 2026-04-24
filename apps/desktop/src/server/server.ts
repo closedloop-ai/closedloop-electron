@@ -14,6 +14,7 @@ import type { JobStore } from "../main/job-store.js";
 import type { LoopTokenStore } from "../main/loop-token-store.js";
 import type { ApiKeyProvenance } from "../main/api-key-store.js";
 import type { DesktopPopSigner } from "../main/desktop-pop.js";
+import type { DesktopPopUnavailableReporter } from "../main/desktop-pop-sign-utils.js";
 import {
   GatewayRouter,
   type GatewayActivityEvent,
@@ -45,6 +46,7 @@ export interface DesktopGatewayServerOptions {
   getApiKey?: () => string | null;
   getApiKeyProvenance?: () => ApiKeyProvenance | null;
   signDesktopRequest?: DesktopPopSigner;
+  onDesktopPopUnavailable?: DesktopPopUnavailableReporter;
   getApiOrigin?: () => string;
   prodOriginsOnly?: boolean;
   jobStore?: JobStore;
@@ -89,6 +91,7 @@ export class DesktopGatewayServer {
       getApiKey: this.options.getApiKey,
       getApiKeyProvenance: this.options.getApiKeyProvenance,
       signDesktopRequest: this.options.signDesktopRequest,
+      onDesktopPopUnavailable: this.options.onDesktopPopUnavailable,
       getApiOrigin: this.options.getApiOrigin,
       prodOriginsOnly: this.options.prodOriginsOnly,
       jobStore: this.options.jobStore,
@@ -127,6 +130,7 @@ export class DesktopGatewayServer {
     applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string },
     getApiKeyProvenance?: () => ApiKeyProvenance | null,
     signDesktopRequest?: DesktopPopSigner,
+    onDesktopPopUnavailable?: DesktopPopUnavailableReporter,
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -147,6 +151,7 @@ export class DesktopGatewayServer {
       getApiKey,
       getApiKeyProvenance,
       signDesktopRequest,
+      onDesktopPopUnavailable,
       getApiOrigin,
       prodOriginsOnly,
       jobStore,

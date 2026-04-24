@@ -101,4 +101,57 @@ describe("bootstrap claim", () => {
       reason: "safe_storage_unavailable",
     }]);
   });
+
+  test("invalid claim payload returns failed without a misleading key diagnostic", async () => {
+    const keyPair = makeKeyMaterial("gateway-1");
+    let fetchCalled = false;
+    const diagnostics: unknown[] = [];
+
+    const result = await claimDesktopManagedApiKey({
+      apiOrigin: "https://api.test",
+      onboardingAttemptId: " ",
+      webAppOrigin: "https://app.test",
+      gatewayId: "gateway-1",
+      signingKeys: {
+        getOrCreate: () => ({ ok: true, keyPair }),
+      },
+      fetchImpl: async () => {
+        fetchCalled = true;
+        return new Response("{}", { status: 200 });
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+    });
+
+    assert.equal(fetchCalled, false);
+    assert.equal(diagnostics.length, 0);
+    assert.deepEqual(result, {
+      kind: "failed",
+      error: "bootstrap claim requires onboardingAttemptId, webAppOrigin, gatewayId, and gatewayPublicKeyPem",
+    });
+  });
+
+  test("invalid apiOrigin returns failed instead of throwing", async () => {
+    const keyPair = makeKeyMaterial("gateway-1");
+    let fetchCalled = false;
+
+    const result = await claimDesktopManagedApiKey({
+      apiOrigin: "",
+      onboardingAttemptId: "attempt-1",
+      webAppOrigin: "https://app.test",
+      gatewayId: "gateway-1",
+      signingKeys: {
+        getOrCreate: () => ({ ok: true, keyPair }),
+      },
+      fetchImpl: async () => {
+        fetchCalled = true;
+        return new Response("{}", { status: 200 });
+      },
+    });
+
+    assert.equal(fetchCalled, false);
+    assert.deepEqual(result, {
+      kind: "failed",
+      error: "invalid apiOrigin",
+    });
+  });
 });

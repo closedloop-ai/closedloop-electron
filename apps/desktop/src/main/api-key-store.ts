@@ -1,7 +1,10 @@
-import { createRequire } from "node:module";
 import Store from "electron-store";
+import {
+  getElectronSafeStorage,
+  type SafeStorageLike,
+} from "./electron-safe-storage.js";
 
-const require = createRequire(import.meta.url);
+export type { SafeStorageLike } from "./electron-safe-storage.js";
 
 type SecretsSchema = {
   encryptedApiKey?: string;
@@ -25,22 +28,10 @@ export type ApiKeyStatus = {
   provenance?: ApiKeyProvenance;
 };
 
-export interface SafeStorageLike {
-  isEncryptionAvailable(): boolean;
-  encryptString(plainText: string): Buffer;
-  decryptString(encrypted: Buffer): string;
-}
-
 export interface ApiKeyStoreOptions {
   cwd?: string;
   name?: string;
   safeStorage?: SafeStorageLike;
-}
-
-function getDefaultSafeStorage(): SafeStorageLike {
-  // Lazy import Electron's safeStorage to allow testing without Electron
-  const { safeStorage } = require("electron") as { safeStorage: SafeStorageLike };
-  return safeStorage;
 }
 
 export class ApiKeyStore {
@@ -52,7 +43,7 @@ export class ApiKeyStore {
       name: options?.name ?? "desktop-secrets",
       cwd: options?.cwd
     });
-    this.safeStorage = options?.safeStorage ?? getDefaultSafeStorage();
+    this.safeStorage = getElectronSafeStorage(options?.safeStorage, "ApiKeyStore");
   }
 
   /** Returns only the plaintext key for legacy callers that do not need provenance. */

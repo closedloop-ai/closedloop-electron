@@ -1,9 +1,13 @@
 import type { ApiKeyProvenance } from "./api-key-store.js";
+import { unwrapApiResultData } from "./api-response-utils.js";
+import {
+  buildManagedDesktopPopHeaders,
+  type DesktopPopUnavailableReporter,
+} from "./desktop-pop-sign-utils.js";
 import {
   LOCAL_AUTH_VERIFY_PATH,
   type DesktopPopSigner,
 } from "./desktop-pop.js";
-import { gatewayLog } from "./gateway-logger.js";
 
 export interface VerifyChallengeOptions {
   challengeToken: string;
@@ -13,6 +17,7 @@ export interface VerifyChallengeOptions {
   apiKey: string;
   apiKeyProvenance?: ApiKeyProvenance;
   signDesktopRequest?: DesktopPopSigner;
+  onDesktopPopUnavailable?: DesktopPopUnavailableReporter;
 }
 
 export type VerifyChallengeResult =
@@ -20,16 +25,6 @@ export type VerifyChallengeResult =
   | { ok: false; error: string; statusCode?: number };
 
 const VERIFY_TIMEOUT_MS = 5_000;
-
-type VerifySuccessPayload = {
-  ok?: boolean;
-  sessionTtlSeconds?: number;
-  success?: boolean;
-  data?: {
-    ok?: boolean;
-    sessionTtlSeconds?: number;
-  };
-};
 
 /** Verify a challenge token with the API server using the desktop API key. */
 export async function verifyChallenge(
@@ -58,11 +53,7 @@ export async function verifyChallenge(
     });
 
     if (response.ok) {
-      const data = (await response.json()) as VerifySuccessPayload;
-      const payload =
-        data.success === true && data.data && typeof data.data === "object"
-          ? data.data
-          : data;
+      const payload = unwrapApiResultData(await response.json());
       if (payload.ok === true && typeof payload.sessionTtlSeconds === "number") {
         return { ok: true, sessionTtlSeconds: payload.sessionTtlSeconds };
       }
@@ -102,20 +93,19 @@ async function buildVerifyHeaders(
     return headers;
   }
 
-  try {
-    const popHeaders = await options.signDesktopRequest({
+  const popHeaders = await buildManagedDesktopPopHeaders({
+    apiKeyProvenance: options.apiKeyProvenance,
+    signDesktopRequest: options.signDesktopRequest,
+    request: {
       method: "POST",
       pathname: LOCAL_AUTH_VERIFY_PATH,
-    });
-    if (popHeaders) {
-      return { ...headers, ...popHeaders };
-    }
-  } catch {
-    // Redacted by design: do not log key material, signatures, or payloads.
+    },
+    surface: LOCAL_AUTH_VERIFY_PATH,
+    unavailableMessage: "PoP signing unavailable for local-auth verification; continuing bearer-only compatibility mode",
+    onUnavailable: options.onDesktopPopUnavailable,
+  });
+  if (popHeaders) {
+    return { ...headers, ...popHeaders };
   }
-  gatewayLog.warn(
-    "desktop-pop",
-    "PoP signing unavailable for local-auth verification; continuing bearer-only compatibility mode",
-  );
   return headers;
 }

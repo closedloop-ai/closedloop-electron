@@ -8,6 +8,7 @@ import type { LocalSessionStore } from "../main/local-session-store.js";
 import { verifyChallenge } from "../main/local-auth-verifier.js";
 import type { ApiKeyProvenance } from "../main/api-key-store.js";
 import type { DesktopPopSigner } from "../main/desktop-pop.js";
+import type { DesktopPopUnavailableReporter } from "../main/desktop-pop-sign-utils.js";
 import { OperationDispatcher } from "./operation-dispatcher.js";
 import { registerFilesystemDirectoriesRoutes } from "./operations/filesystem-directories.js";
 import { registerFilesystemSearchRoutes } from "./operations/filesystem-search.js";
@@ -68,6 +69,7 @@ export interface GatewayRouterOptions {
   getApiKey?: () => string | null;
   getApiKeyProvenance?: () => ApiKeyProvenance | null;
   signDesktopRequest?: DesktopPopSigner;
+  onDesktopPopUnavailable?: DesktopPopUnavailableReporter;
   getApiOrigin?: () => string;
   prodOriginsOnly?: boolean;
   jobStore?: JobStore;
@@ -599,6 +601,7 @@ export class GatewayRouter {
       apiKey,
       apiKeyProvenance: this.options.getApiKeyProvenance?.() ?? "USER_CREATED",
       signDesktopRequest: this.options.signDesktopRequest,
+      onDesktopPopUnavailable: this.options.onDesktopPopUnavailable,
     });
 
     if (!result.ok) {
@@ -762,4 +765,3 @@ function isLoopbackOrigin(originValue: string): boolean {
     return false;
   }
 }
-

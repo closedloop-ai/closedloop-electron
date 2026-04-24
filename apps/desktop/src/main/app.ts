@@ -29,6 +29,7 @@ import { CloudCommandExecutor } from "./cloud-command-executor.js";
 import type { CloudSocketStatus } from "./cloud-protocol.js";
 import { CloudSocketService } from "./cloud-socket.js";
 import {
+  DesktopPopUnavailableError,
   signDesktopPopHeaders,
   type DesktopPopHeaders,
   type DesktopPopSigningRequest,
@@ -189,6 +190,7 @@ export class DesktopApplication {
       (patch) => this.applyBinaryPathPatchAndInvalidateCaches(patch),
       () => this.apiKeyStore.getApiKeyProvenance(),
       (request) => this.signDesktopRequest(request),
+      (surface, reason) => this.reportDesktopPopUnavailable(surface, reason),
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -219,6 +221,7 @@ export class DesktopApplication {
       getApiKey: () => this.apiKeyStore.getApiKey(),
       getApiKeyProvenance: () => this.apiKeyStore.getApiKeyProvenance(),
       signDesktopRequest: (request) => this.signDesktopRequest(request),
+      onDesktopPopUnavailable: (surface, reason) => this.reportDesktopPopUnavailable(surface, reason),
       getAllowedDirectories: () => this.getAllowedDirectoriesFromSandbox(),
       getMaxInFlightCommands: () => MAX_IN_FLIGHT_COMMANDS,
       machineName: os.hostname(),
@@ -1505,8 +1508,7 @@ export class DesktopApplication {
   ): DesktopPopHeaders | null {
     const keyPair = this.gatewaySigningKeyStore.load(this.gatewayId);
     if (!keyPair.ok) {
-      this.reportDesktopPopUnavailable(request.pathname, keyPair.reason);
-      return null;
+      throw new DesktopPopUnavailableError(keyPair.reason);
     }
     try {
       return signDesktopPopHeaders({
@@ -1515,8 +1517,7 @@ export class DesktopApplication {
         privateKeyPkcs8Pem: keyPair.keyPair.privateKeyPkcs8Pem,
       });
     } catch {
-      this.reportDesktopPopUnavailable(request.pathname, "sign_failed");
-      return null;
+      throw new DesktopPopUnavailableError("sign_failed");
     }
   }
 
@@ -1529,10 +1530,6 @@ export class DesktopApplication {
   }
 
   private reportDesktopPopUnavailable(surface: string, reason: string): void {
-    gatewayLog.warn(
-      "desktop-pop",
-      `PoP signing unavailable for ${surface}; continuing bearer-only compatibility mode (${reason})`,
-    );
     Observability.desktopPopUnavailable(surface, reason);
   }
 

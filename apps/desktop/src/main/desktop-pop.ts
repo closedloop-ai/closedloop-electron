@@ -29,6 +29,28 @@ export type DesktopPopSigner = (
 ) => DesktopPopHeaders | null | Promise<DesktopPopHeaders | null>;
 
 /**
+ * Redacted failure used to preserve precise PoP-unavailable reasons across signer callers.
+ */
+export class DesktopPopUnavailableError extends Error {
+  readonly reason: string;
+
+  constructor(reason: string) {
+    super("Desktop PoP signing unavailable");
+    this.name = "DesktopPopUnavailableError";
+    this.reason = reason;
+  }
+}
+
+/**
+ * Returns a redacted fallback reason for PoP signing failures.
+ */
+export function getDesktopPopUnavailableReason(error: unknown): string {
+  return error instanceof DesktopPopUnavailableError
+    ? error.reason
+    : "sign_failed_or_null";
+}
+
+/**
  * Builds the exact canonical input expected by PRD-181 Phase B PoP verification.
  */
 export function buildDesktopPopCanonicalString(input: {

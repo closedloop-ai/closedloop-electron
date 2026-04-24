@@ -2,6 +2,10 @@ import type {
   GatewaySigningKeyStore,
   GatewaySigningKeyUnavailableReason,
 } from "./gateway-signing-key-store.js";
+import {
+  extractApiErrorMessage,
+  unwrapApiResultData,
+} from "./api-response-utils.js";
 
 export interface BootstrapClaimPayload {
   onboardingAttemptId: string;
@@ -75,16 +79,25 @@ export async function claimDesktopManagedApiKey(
       gatewayId: options.gatewayId,
       gatewayPublicKeyPem: keyPair.keyPair.publicKeySpkiPem,
     });
-  } catch {
-    options.onDiagnostic?.({
-      surface: "bootstrap_claim",
-      reason: "key_import_failed",
-    });
-    return { kind: "manual_fallback", reason: "key_import_failed" };
+  } catch (error) {
+    return {
+      kind: "failed",
+      error: error instanceof Error
+        ? error.message
+        : "invalid bootstrap claim payload",
+    };
   }
 
   const fetchFn = options.fetchImpl ?? fetch;
-  const url = new URL("/desktop/bootstrap/claim", options.apiOrigin);
+  let url: URL;
+  try {
+    url = new URL("/desktop/bootstrap/claim", options.apiOrigin);
+  } catch {
+    return {
+      kind: "failed",
+      error: "invalid apiOrigin",
+    };
+  }
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
@@ -119,7 +132,7 @@ export async function claimDesktopManagedApiKey(
     return {
       kind: "failed",
       statusCode: response.status,
-      error: extractErrorMessage(body) ?? `bootstrap claim failed (${response.status})`,
+      error: extractApiErrorMessage(body) ?? `bootstrap claim failed (${response.status})`,
     };
   }
 
@@ -136,7 +149,7 @@ export async function claimDesktopManagedApiKey(
 }
 
 function extractApiKey(body: unknown): string | null {
-  const payload = unwrapData(body);
+  const payload = unwrapApiResultData(body);
   for (const key of ["apiKey", "cloudApiKey", "key"]) {
     const value = payload[key];
     if (typeof value === "string" && value.trim()) {
@@ -144,30 +157,4 @@ function extractApiKey(body: unknown): string | null {
     }
   }
   return null;
-}
-
-function extractErrorMessage(body: unknown): string | null {
-  const record = asRecord(body);
-  if (typeof record.error === "string") {
-    return record.error;
-  }
-  const errorRecord = asRecord(record.error);
-  if (typeof errorRecord.message === "string") {
-    return errorRecord.message;
-  }
-  return null;
-}
-
-function unwrapData(body: unknown): Record<string, unknown> {
-  const record = asRecord(body);
-  if (record.success === true && record.data && typeof record.data === "object") {
-    return asRecord(record.data);
-  }
-  return record;
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
 }

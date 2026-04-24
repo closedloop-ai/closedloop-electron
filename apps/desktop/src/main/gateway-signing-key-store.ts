@@ -3,11 +3,11 @@ import {
   createPublicKey,
   generateKeyPairSync,
 } from "node:crypto";
-import { createRequire } from "node:module";
 import Store from "electron-store";
-import type { SafeStorageLike } from "./api-key-store.js";
-
-const require = createRequire(import.meta.url);
+import {
+  getElectronSafeStorage,
+  type SafeStorageLike,
+} from "./electron-safe-storage.js";
 
 type GatewaySigningKeysSchema = {
   encryptedPrivateKeysByGatewayId: Record<string, string>;
@@ -37,35 +37,6 @@ export interface GatewaySigningKeyStoreOptions {
   safeStorage?: SafeStorageLike;
 }
 
-function resolveSafeStorage(override?: SafeStorageLike): SafeStorageLike {
-  if (override) {
-    return override;
-  }
-  try {
-    const electron = require("electron") as unknown;
-    if (
-      electron &&
-      typeof electron === "object" &&
-      "safeStorage" in electron
-    ) {
-      const safeStorage = (electron as { safeStorage?: SafeStorageLike }).safeStorage;
-      if (
-        safeStorage &&
-        typeof safeStorage.isEncryptionAvailable === "function" &&
-        typeof safeStorage.encryptString === "function" &&
-        typeof safeStorage.decryptString === "function"
-      ) {
-        return safeStorage;
-      }
-    }
-  } catch {
-    /* not running in Electron */
-  }
-  throw new Error(
-    "GatewaySigningKeyStore requires Electron main process or options.safeStorage",
-  );
-}
-
 /**
  * Encrypted persistence for the Desktop gateway Ed25519 private key, scoped by stable gatewayId.
  */
@@ -74,7 +45,10 @@ export class GatewaySigningKeyStore {
   private readonly safeStorage: SafeStorageLike;
 
   constructor(options?: GatewaySigningKeyStoreOptions) {
-    this.safeStorage = resolveSafeStorage(options?.safeStorage);
+    this.safeStorage = getElectronSafeStorage(
+      options?.safeStorage,
+      "GatewaySigningKeyStore",
+    );
     this.store = new Store<GatewaySigningKeysSchema>({
       name: options?.name ?? "desktop-gateway-signing-keys",
       cwd: options?.cwd,

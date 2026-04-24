@@ -288,6 +288,7 @@ test("manual key verification omits Desktop PoP headers and does not call signer
 
 test("managed key signing unavailable preserves existing 5xx semantics without retry", async () => {
   let fetchCalls = 0;
+  const unavailableReports: Array<{ surface: string; reason: string }> = [];
 
   globalThis.fetch = async () => {
     fetchCalls += 1;
@@ -304,9 +305,14 @@ test("managed key signing unavailable preserves existing 5xx semantics without r
     apiKey: "managed-key",
     apiKeyProvenance: "DESKTOP_MANAGED",
     signDesktopRequest: () => null,
+    onDesktopPopUnavailable: (surface, reason) => unavailableReports.push({ surface, reason }),
   });
 
   assert.equal(fetchCalls, 1);
+  assert.deepEqual(unavailableReports, [{
+    surface: LOCAL_AUTH_VERIFY_PATH,
+    reason: "sign_failed_or_null",
+  }]);
   assert.equal(result.ok, false);
   if (!result.ok) {
     assert.equal(result.statusCode, 503);

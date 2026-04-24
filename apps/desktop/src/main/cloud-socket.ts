@@ -18,6 +18,10 @@ import {
 import { normalizeAndValidateOrigin } from "./origin-policy.js";
 import type { ApiKeyProvenance } from "./api-key-store.js";
 import {
+  buildManagedDesktopPopHeaders,
+  type DesktopPopUnavailableReporter,
+} from "./desktop-pop-sign-utils.js";
+import {
   RELAY_API_KEY_VERIFY_PATH,
   type DesktopPopHeaders,
   type DesktopPopSigner,
@@ -29,6 +33,7 @@ export interface CloudSocketOptions {
   getApiKey: () => string | null;
   getApiKeyProvenance?: () => ApiKeyProvenance | null;
   signDesktopRequest?: DesktopPopSigner;
+  onDesktopPopUnavailable?: DesktopPopUnavailableReporter;
   getAllowedDirectories: () => string[];
   getMaxInFlightCommands: () => number;
   machineName: string;
@@ -50,6 +55,7 @@ export class CloudSocketService {
   private stopped = true;
   private targetId: string | null = null;
   private helloAckTimer: NodeJS.Timeout | null = null;
+  private reconnectTimer: NodeJS.Timeout | null = null;
   private awaitingHelloAck = false;
   private lastPresenceState: string | null = null;
   private hadSuccessfulConnection = false;
@@ -66,6 +72,7 @@ export class CloudSocketService {
     this.awaitingHelloAck = false;
     this.disconnectSocket();
     this.clearHelloAckTimer();
+    this.clearReconnectTimer();
 
     const apiKey = this.options.getApiKey();
     if (!apiKey) {
@@ -86,6 +93,7 @@ export class CloudSocketService {
     const relayValidationPopHeaders = await buildRelayValidationPopHeaders(
       this.options.getApiKeyProvenance?.() ?? "USER_CREATED",
       this.options.signDesktopRequest,
+      this.options.onDesktopPopUnavailable,
     );
     if (this.stopped) {
       return;
@@ -101,6 +109,7 @@ export class CloudSocketService {
     this.hadSuccessfulConnection = false;
     this.degradedSince = null;
     this.clearHelloAckTimer();
+    this.clearReconnectTimer();
     this.clearRecoveryTimer();
     this.disconnectSocket();
   }
@@ -155,7 +164,7 @@ export class CloudSocketService {
   ): void {
     const socket = io(`${relayOrigin}/desktop-gateway`, {
       transports: ["websocket"],
-      reconnection: true,
+      reconnection: false,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 30_000,
       timeout: 10_000,
@@ -171,6 +180,7 @@ export class CloudSocketService {
       if (this.stopped) {
         return;
       }
+      this.clearReconnectTimer();
       gatewayLog.info("cloud-socket", "Connected to relay, sending hello handshake");
       this.awaitingHelloAck = true;
       this.emitHello();
@@ -195,6 +205,7 @@ export class CloudSocketService {
         this.notifyStatus({ state: "degraded", error: `Cloud socket connection failed: ${message}` });
       }
       this.degradedSince ??= Date.now();
+      this.scheduleSocketReconnect(socket);
     });
 
     socket.on("disconnect", (reason) => {
@@ -207,6 +218,7 @@ export class CloudSocketService {
       this.notifyStatus({ state: "degraded", error: `Cloud socket disconnected: ${reason}` });
       this.degradedSince ??= Date.now();
       this.options.onDisconnect?.(reason);
+      this.scheduleSocketReconnect(socket);
     });
 
     socket.on("desktop.hello.ack", (payload: unknown) => {
@@ -313,10 +325,37 @@ export class CloudSocketService {
     }
     this.awaitingHelloAck = false;
     this.clearHelloAckTimer();
+    this.clearReconnectTimer();
 
     this.socket.removeAllListeners();
     this.socket.disconnect();
     this.socket = null;
+  }
+
+  private scheduleSocketReconnect(socket: Socket): void {
+    if (this.reconnectTimer || this.stopped) {
+      return;
+    }
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.reconnectSocket(socket);
+    }, RECONNECT_DELAY_MS);
+  }
+
+  private async reconnectSocket(socket: Socket): Promise<void> {
+    if (this.stopped || this.socket !== socket) {
+      return;
+    }
+    await refreshRelayValidationPopHeadersForSocket(
+      socket,
+      this.options.getApiKeyProvenance?.() ?? "USER_CREATED",
+      this.options.signDesktopRequest,
+      this.options.onDesktopPopUnavailable,
+    );
+    if (this.stopped || this.socket !== socket) {
+      return;
+    }
+    socket.connect();
   }
 
   private scheduleHelloAckTimeout(): void {
@@ -343,6 +382,14 @@ export class CloudSocketService {
     }
     clearTimeout(this.helloAckTimer);
     this.helloAckTimer = null;
+  }
+
+  private clearReconnectTimer(): void {
+    if (!this.reconnectTimer) {
+      return;
+    }
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
   }
 
   private startRecoveryTimer(): void {
@@ -378,31 +425,46 @@ export class CloudSocketService {
 export async function buildRelayValidationPopHeaders(
   apiKeyProvenance: ApiKeyProvenance,
   signDesktopRequest?: DesktopPopSigner,
+  onUnavailable?: DesktopPopUnavailableReporter,
 ): Promise<DesktopPopHeaders | undefined> {
-  if (apiKeyProvenance !== "DESKTOP_MANAGED" || !signDesktopRequest) {
-    return undefined;
-  }
-  try {
-    const headers = await signDesktopRequest({
+  return buildManagedDesktopPopHeaders({
+    apiKeyProvenance,
+    signDesktopRequest,
+    request: {
       method: "POST",
       pathname: RELAY_API_KEY_VERIFY_PATH,
-    });
-    if (headers) {
-      return headers;
-    }
-  } catch {
-    // Redacted by design: do not log key material, signatures, or payloads.
-  }
-  gatewayLog.warn(
-    "desktop-pop",
-    "PoP signing unavailable for relay validation; continuing bearer-only compatibility mode",
+    },
+    surface: RELAY_API_KEY_VERIFY_PATH,
+    unavailableMessage: "PoP signing unavailable for relay validation; continuing bearer-only compatibility mode",
+    onUnavailable,
+  });
+}
+
+/**
+ * Refreshes Socket.IO Engine extraHeaders before a manual reconnect attempt.
+ */
+export async function refreshRelayValidationPopHeadersForSocket(
+  socket: Socket,
+  apiKeyProvenance: ApiKeyProvenance,
+  signDesktopRequest?: DesktopPopSigner,
+  onUnavailable?: DesktopPopUnavailableReporter,
+): Promise<void> {
+  const headers = await buildRelayValidationPopHeaders(
+    apiKeyProvenance,
+    signDesktopRequest,
+    onUnavailable,
   );
-  return undefined;
+  if (headers) {
+    socket.io.opts.extraHeaders = headers;
+  } else {
+    delete socket.io.opts.extraHeaders;
+  }
 }
 
 type EnvelopeOnlyFields = ProtocolEnvelope;
 
 const HELLO_ACK_TIMEOUT_MS = 10_000;
+const RECONNECT_DELAY_MS = 1_000;
 const RECOVERY_TIMEOUT_MS = 2 * 60_000;
 const RECOVERY_CHECK_INTERVAL_MS = 30_000;
 
