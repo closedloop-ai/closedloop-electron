@@ -306,6 +306,13 @@ function readExecutePlanArtifact(
   );
 }
 
+function readPlanJsonContent(planJsonPath: string): string | null {
+  const localPlan = readJsonFileSync(planJsonPath);
+  return isRawPlanArtifact(localPlan) && typeof localPlan.content === "string"
+    ? localPlan.content
+    : null;
+}
+
 /**
  * Write prd.md to a work directory from a list of artifacts and an optional
  * explicit prompt.
@@ -1259,6 +1266,9 @@ async function writeArtifactsForExecuteOrAmend(
           typeof rawPlanPayload?.content === "string" &&
           rawPlanPayload.content === artifact.content;
         const localPlanJsonPresent = existsSync(planJsonPath);
+        const localPlanJsonAligned =
+          localPlanJsonPresent &&
+          readPlanJsonContent(planJsonPath) === artifact.content;
         const importedPlanPath = path.join(
           claudeWorkDir,
           IMPORTED_PLAN_MARKDOWN_FILE,
@@ -1281,6 +1291,14 @@ async function writeArtifactsForExecuteOrAmend(
             `localPlanJsonPresent=${localPlanJsonPresent}`;
           loopLog(options.loopId, message);
           gatewayLog.info("loop-harness", `loopId=${options.loopId} ${message}`);
+        } else if (localPlanJsonAligned) {
+          importedPlanFile = null;
+          const message =
+            `EXECUTE plan source=local-plan-json ` +
+            `rawPlanPayload=${rawPlanPayload !== null} rawPlanAligned=false ` +
+            `localPlanJsonPresent=true localPlanJsonAligned=true`;
+          loopLog(options.loopId, message);
+          gatewayLog.info("loop-harness", `loopId=${options.loopId} ${message}`);
         } else {
           if (localPlanJsonPresent) {
             await fs.rm(planJsonPath, { force: true });
@@ -1291,6 +1309,7 @@ async function writeArtifactsForExecuteOrAmend(
             `EXECUTE plan source=imported-plan-compat ` +
             `rawPlanPayload=${rawPlanPayload !== null} rawPlanAligned=false ` +
             `localPlanJsonPresent=${localPlanJsonPresent} ` +
+            `localPlanJsonAligned=${localPlanJsonAligned} ` +
             `importedPlanFile=${importedPlanFile}`;
           loopLog(options.loopId, message);
           gatewayLog.info("loop-harness", `loopId=${options.loopId} ${message}`);
