@@ -11,8 +11,8 @@ importers:
   apps/desktop:
     dependencies:
       '@closedloop-ai/loops-api':
-        specifier: 0.2.5
-        version: 0.2.5(zod@4.3.6)
+        specifier: 0.2.6
+        version: 0.2.6(zod@4.3.6)
       busboy:
         specifier: ^1.6.0
         version: 1.6.0
@@ -71,8 +71,8 @@ packages:
   7zip-bin@5.2.0:
     resolution: {integrity: sha512-ukTPVhqG4jNzMro2qA9HSCSSVJN3aN7tlb+hfqYCt3ER0yWroeA2VR38MNrOHLQ/cVj+DaIMad0kFCtWWowh/A==}
 
-  '@closedloop-ai/loops-api@0.2.5':
-    resolution: {integrity: sha512-Ypmhd56J+o7T1uCj7ujCjd26UXM+iHN9q+U9cWi/QZyC49s8sHxJl6TTjq/7+2b+O3YTbH+sFFTl/Svh2mncIg==, tarball: https://npm.pkg.github.com/download/@closedloop-ai/loops-api/0.2.5/8477ded39b50b522567c3bdb2cc72cbbf0faf037}
+  '@closedloop-ai/loops-api@0.2.6':
+    resolution: {integrity: sha512-s1BgJY94W9x0QDthOrSUsGo8t++dSf9KFMabqtPQGvqwjVgErtRzLGq4vOQpDUbGPtHSTNfY9eb0eMlchyvfwQ==, tarball: https://npm.pkg.github.com/download/@closedloop-ai/loops-api/0.2.6/77394c143a93c68bec08ace2ba240e0d2087b9aa}
     peerDependencies:
       zod: ^4.0.0
 
@@ -1909,7 +1909,7 @@ snapshots:
 
   7zip-bin@5.2.0: {}
 
-  '@closedloop-ai/loops-api@0.2.5(zod@4.3.6)':
+  '@closedloop-ai/loops-api@0.2.6(zod@4.3.6)':
     dependencies:
       zod: 4.3.6
 
