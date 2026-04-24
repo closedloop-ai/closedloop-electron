@@ -98,13 +98,8 @@ describe("symlink traversal", () => {
 
   test("rejects symlink to sensitive path", async () => {
     const sandbox = await makeTempDir("sym-sensitive");
-    const link = path.join(sandbox, "ssh-link");
-    const sshDir = path.join(os.homedir(), ".ssh");
-    try {
-      fs.symlinkSync(sshDir, link);
-    } catch {
-      return; // .ssh doesn't exist, skip
-    }
+    const link = path.join(sandbox, "etc-link");
+    fs.symlinkSync("/etc", link);
     assert.equal(isPathAllowed(link, [sandbox]), false);
   });
 
