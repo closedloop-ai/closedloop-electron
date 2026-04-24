@@ -591,6 +591,7 @@ interface BootstrapParams {
 interface BootstrapManifestEntry {
   fullName: string;
   localPath: string;
+  branch: string;
   skip: boolean;
   skipReason?: string;
 }
@@ -1616,7 +1617,7 @@ function readBootstrapOutputs(claudeWorkDir: string): Record<string, unknown> {
     if (entry.skip) {
       repos.push({
         fullName: entry.fullName,
-        branch: "main",
+        branch: entry.branch ?? "main",
         success: false,
         error: entry.skipReason ?? "skipped",
         agents: [],
@@ -1638,7 +1639,7 @@ function readBootstrapOutputs(claudeWorkDir: string): Record<string, unknown> {
 
     repos.push({
       fullName: entry.fullName,
-      branch: "main",
+      branch: entry.branch ?? "main",
       success,
       error,
       ...outputs,
@@ -3736,6 +3737,16 @@ async function handleLoopRequest(
     }
   }
 
+  if (body.command === "BOOTSTRAP") {
+    const bootstrapParams = parseBootstrapParams(body.prompt);
+    if (!bootstrapParams || bootstrapParams.repos.length === 0) {
+      json(context, 400, {
+        error: "BOOTSTRAP requires a JSON prompt with a non-empty repos array",
+      });
+      return;
+    }
+  }
+
   if (runningLoops.has(body.loopId)) {
     json(context, 409, { error: "Loop is already running on this machine" });
     return;
@@ -4198,6 +4209,7 @@ async function handleLoopRequest(
         }
         throw e;
       }
+      await runBootstrapIfNeeded(worktreeDir, body.loopId);
       claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
       await fs.mkdir(claudeWorkDir, { recursive: true });
 
@@ -4662,24 +4674,35 @@ async function handleLoopRequest(
         const allowedDirs = getAllowedDirectories();
         const manifest: BootstrapManifestEntry[] = [];
         for (const repo of params.repos) {
+          const branch = repo.branch ?? "main";
           const localPath = repo.localPath
             ? expandHome(repo.localPath)
             : findLocalRepo(repo.fullName, allowedDirs);
           if (!localPath) {
-            manifest.push({ fullName: repo.fullName, localPath: "", skip: true, skipReason: "not found locally" });
+            manifest.push({ fullName: repo.fullName, localPath: "", branch, skip: true, skipReason: "not found locally" });
+            continue;
+          }
+          try {
+            const st = statSync(localPath);
+            if (!st.isDirectory()) {
+              manifest.push({ fullName: repo.fullName, localPath, branch, skip: true, skipReason: "path is not a directory" });
+              continue;
+            }
+          } catch {
+            manifest.push({ fullName: repo.fullName, localPath, branch, skip: true, skipReason: "path does not exist" });
             continue;
           }
           try {
             assertPathAllowed(localPath, allowedDirs);
           } catch {
-            manifest.push({ fullName: repo.fullName, localPath: "", skip: true, skipReason: "outside sandbox" });
+            manifest.push({ fullName: repo.fullName, localPath: "", branch, skip: true, skipReason: "outside sandbox" });
             continue;
           }
           if (!params.options?.update && hasBootstrapArtifacts(localPath)) {
-            manifest.push({ fullName: repo.fullName, localPath, skip: true, skipReason: "artifacts already exist" });
+            manifest.push({ fullName: repo.fullName, localPath, branch, skip: true, skipReason: "artifacts already exist" });
             continue;
           }
-          manifest.push({ fullName: repo.fullName, localPath, skip: false });
+          manifest.push({ fullName: repo.fullName, localPath, branch, skip: false });
         }
 
         writeFileSync(
@@ -4691,19 +4714,21 @@ async function handleLoopRequest(
         const scriptLines: string[] = [
           "#!/bin/bash",
           `CLAUDE_BIN=${shellEscape(claudeBinary)}`,
-          `WORK_DIR=${shellEscape(claudeWorkDir)}`,
           "",
         ];
         for (const [i, entry] of runnableRepos.entries()) {
           const marker = path.join(claudeWorkDir, `repo-${i}-done`);
           const stderrLog = path.join(claudeWorkDir, `repo-${i}-stderr.log`);
           scriptLines.push(
-            `echo "=== BOOTSTRAP ${i}: ${entry.fullName} ==="`,
-            `cd ${shellEscape(entry.localPath)}`,
-            `if "$CLAUDE_BIN" -p "/agent-bootstrap" 2>${shellEscape(stderrLog)}; then`,
-            `  echo "ok" > ${shellEscape(marker)}`,
+            `echo "=== BOOTSTRAP ${i}: ${shellEscape(entry.fullName)} ==="`,
+            `if ! cd ${shellEscape(entry.localPath)}; then`,
+            `  echo "fail:cd" > ${shellEscape(marker)}`,
             `else`,
-            `  echo "fail:$?" > ${shellEscape(marker)}`,
+            `  if "$CLAUDE_BIN" -p "/agent-bootstrap" 2>${shellEscape(stderrLog)}; then`,
+            `    echo "ok" > ${shellEscape(marker)}`,
+            `  else`,
+            `    echo "fail:$?" > ${shellEscape(marker)}`,
+            `  fi`,
             `fi`,
             "",
           );
