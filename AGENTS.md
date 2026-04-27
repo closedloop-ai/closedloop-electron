@@ -41,6 +41,14 @@ Tests run with `tsx --test` (Node test runner) via `just desktop-test`.
 - Add or update tests with behavior changes, especially gateway auth, process spawning, and telemetry flows.
 - Before opening a PR, run: `just desktop-lint && just desktop-typecheck && just desktop-test`.
 
+## Breaking Changes
+Migration requirements apply only to contracts consumed by separate repositories or external clients that ship and upgrade independently of the desktop app:
+HTTP gateway routes, cloud relay messages, and persisted store schemas read across downgrade/rollback boundaries.
+
+- Breaking those external contracts requires legacy migration logic at the boundary and a ClosedLoop ticket to track removing the migration path later.
+- Internal contracts that ship as one Electron bundle do not need migration logic: main/renderer IPC bridge messages, internal module interfaces, and types consumed only inside `apps/desktop/`.
+- When reviewing a compatibility issue, first identify whether the caller is independently shipped. If both producer and consumer update atomically in the same desktop build, treat it as an internal refactor unless persisted data or an external client is involved.
+
 ## Commit & Pull Request Guidelines
 Commit format follows `.gitmessage` and recent history:
 

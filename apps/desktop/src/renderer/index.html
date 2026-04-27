@@ -3777,6 +3777,8 @@
         onboardingApiKeyHint.textContent = state?.hasStoredApiKey
           ? "A cloud API key is already stored. You can leave this blank."
           : "No stored API key found. Enter one now or later in Settings.";
+        const managedProvisioning = state?.managedProvisioning;
+        onboardingMessage.textContent = managedProvisioning?.message || "";
         updateOnboardingSandboxWarning();
 
         if (state?.completed) {
@@ -4005,6 +4007,10 @@
 
       window.addEventListener("desktop:update-available", (event) => {
         showUpdateBanner(event.detail);
+      });
+
+      window.addEventListener("desktop:onboarding-state-changed", () => {
+        void loadOnboardingState();
       });
 
       updateBannerBtn.addEventListener("click", triggerUpdate);

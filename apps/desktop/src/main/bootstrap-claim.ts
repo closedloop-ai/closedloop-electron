@@ -3,6 +3,7 @@ import type {
   GatewaySigningKeyUnavailableReason,
 } from "./gateway-signing-key-store.js";
 import {
+  asRecord,
   extractApiErrorMessage,
   unwrapApiResultData,
 } from "./api-response-utils.js";
@@ -22,7 +23,29 @@ export type BootstrapClaimDiagnostic = {
 export type BootstrapClaimResult =
   | { kind: "claimed"; apiKey: string }
   | { kind: "manual_fallback"; reason: GatewaySigningKeyUnavailableReason }
-  | { kind: "failed"; statusCode?: number; error: string };
+  | {
+      kind: "failed";
+      statusCode?: number;
+      code?: string;
+      retryable?: boolean;
+      error: string;
+    };
+
+/**
+ * Returns whether a failed managed-key claim should be retried by Desktop.
+ * An explicit contract `retryable` value from the server wins over status-code fallback.
+ */
+export function isRetryableBootstrapClaimFailure(
+  result: BootstrapClaimResult,
+): boolean {
+  if (result.kind !== "failed") {
+    return false;
+  }
+  if (result.retryable !== undefined) {
+    return result.retryable;
+  }
+  return result.statusCode === 502 || result.statusCode === 503;
+}
 
 export interface ClaimDesktopManagedApiKeyOptions {
   apiOrigin: string;
@@ -129,9 +152,12 @@ export async function claimDesktopManagedApiKey(
   }
 
   if (!response.ok) {
+    const contractError = extractDesktopContractError(body);
     return {
       kind: "failed",
       statusCode: response.status,
+      ...(contractError.code ? { code: contractError.code } : {}),
+      ...(contractError.retryable !== undefined ? { retryable: contractError.retryable } : {}),
       error: extractApiErrorMessage(body) ?? `bootstrap claim failed (${response.status})`,
     };
   }
@@ -146,6 +172,16 @@ export async function claimDesktopManagedApiKey(
   }
 
   return { kind: "claimed", apiKey };
+}
+
+function extractDesktopContractError(
+  body: unknown,
+): { code?: string; retryable?: boolean } {
+  const record = asRecord(body);
+  return {
+    ...(typeof record.code === "string" ? { code: record.code } : {}),
+    ...(typeof record.retryable === "boolean" ? { retryable: record.retryable } : {}),
+  };
 }
 
 function extractApiKey(body: unknown): string | null {

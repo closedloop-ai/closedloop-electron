@@ -31,7 +31,7 @@ app.on("ready", () => {
 });
 
 app.on("activate", () => {
-  desktopApplication.showWindow();
+  void desktopApplication.handleActivate();
 });
 
 let quitPromise: Promise<void> | null = null;
