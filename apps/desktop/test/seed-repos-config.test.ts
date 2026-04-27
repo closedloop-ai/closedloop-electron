@@ -132,6 +132,14 @@ test("sandbox change from A to B overwrites stale worktreeParentDir=A", async ()
   assert.equal(configB.settings.worktreeParentDirConfirmed, true);
 });
 
+test("cancelled seeding does not create repo defaults", async () => {
+  const sandbox = makeTempSandbox();
+
+  await seedReposConfig(sandbox, { isCancelled: () => true });
+
+  await assert.rejects(fs.stat(configDir(sandbox)), { code: "ENOENT" });
+});
+
 test("seeding failure does not throw but logs to console.error", async () => {
   const errors: unknown[] = [];
   const origError = console.error;

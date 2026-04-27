@@ -1,5 +1,6 @@
 import { app, nativeTheme } from "electron";
 import { DesktopApplication } from "./app.js";
+import { handleActivateEvent } from "./app-lifecycle.js";
 import { handleUncaughtException, handleUnhandledRejection } from "./error-handlers.js";
 import { gatewayLog } from "./gateway-logger.js";
 
@@ -31,7 +32,10 @@ app.on("ready", () => {
 });
 
 app.on("activate", () => {
-  void desktopApplication.handleActivate();
+  void handleActivateEvent({
+    handleActivate: () => desktopApplication.handleActivate(),
+    log: (message) => gatewayLog.warn("activate", message),
+  });
 });
 
 let quitPromise: Promise<void> | null = null;

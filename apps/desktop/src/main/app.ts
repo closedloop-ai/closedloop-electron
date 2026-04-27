@@ -91,6 +91,10 @@ import {
   withSingleManagedOnboardingRetry,
 } from "./managed-onboarding.js";
 import {
+  ManagedOnboardingRunTracker,
+  type ManagedOnboardingRunToken,
+} from "./managed-onboarding-run.js";
+import {
   getCanonicalOnboardingHandoffPath,
   isCanonicalOnboardingHandoffPath,
   OnboardingHandoffQueue,
@@ -146,6 +150,7 @@ export class DesktopApplication {
   private bootReadyForOnboarding = false;
   private processingOnboardingHandoff = false;
   private readonly queuedOpenFileHandoffs = new OnboardingHandoffQueue();
+  private readonly managedOnboardingRuns = new ManagedOnboardingRunTracker();
   private managedOnboardingState: ManagedOnboardingState = { status: "idle" };
   private readonly queueStatsTelemetryDebounce: QueueStatsDebounce =
     createQueueStatsDebounce(
@@ -560,6 +565,7 @@ export class DesktopApplication {
   private async handleLoadedOnboardingHandoff(
     payload: PendingOnboardingHandoff,
   ): Promise<void> {
+    const run = this.managedOnboardingRuns.begin();
     this.managedOnboardingState = {
       status: "awaiting-origin-confirmation",
       webAppOrigin: payload.webAppOrigin,
@@ -569,6 +575,9 @@ export class DesktopApplication {
     this.showWindow();
 
     const confirmed = await this.confirmManagedOnboardingOrigin(payload);
+    if (this.shouldStopManagedOnboardingRun(run, "origin confirmation")) {
+      return;
+    }
     if (!confirmed) {
       this.setManagedOnboardingFailure(
         "origin_confirmation_dismissed",
@@ -578,7 +587,7 @@ export class DesktopApplication {
       return;
     }
 
-    await this.runManagedOnboardingProvisioning(payload);
+    await this.runManagedOnboardingProvisioning(payload, run);
   }
 
   private async confirmManagedOnboardingOrigin(
@@ -599,7 +608,11 @@ export class DesktopApplication {
 
   private async runManagedOnboardingProvisioning(
     payload: PendingOnboardingHandoff,
+    run: ManagedOnboardingRunToken,
   ): Promise<void> {
+    if (this.shouldStopManagedOnboardingRun(run, "provisioning start")) {
+      return;
+    }
     this.managedOnboardingState = {
       status: "provisioning",
       webAppOrigin: payload.webAppOrigin,
@@ -612,8 +625,12 @@ export class DesktopApplication {
         fetchTrustedDesktopConfig({ webAppOrigin: payload.webAppOrigin }),
       shouldRetry: isRetryableTrustedConfigFailure,
       delayMs: MANAGED_ONBOARDING_RETRY_DELAY_MS,
-      isCancelled: () => this.shuttingDown,
+      isCancelled: () =>
+        this.managedOnboardingRuns.isCancelled(run, this.shuttingDown),
     });
+    if (this.shouldStopManagedOnboardingRun(run, "trusted config result")) {
+      return;
+    }
     if (trustedConfig.kind !== "ok") {
       this.setManagedOnboardingFailure(
         trustedConfig.reason,
@@ -623,6 +640,9 @@ export class DesktopApplication {
       return;
     }
 
+    if (this.shouldStopManagedOnboardingRun(run, "claim start")) {
+      return;
+    }
     this.managedOnboardingState = {
       status: "provisioning",
       webAppOrigin: payload.webAppOrigin,
@@ -643,9 +663,13 @@ export class DesktopApplication {
         }),
       shouldRetry: isRetryableBootstrapClaimFailure,
       delayMs: MANAGED_ONBOARDING_RETRY_DELAY_MS,
-      isCancelled: () => this.shuttingDown,
+      isCancelled: () =>
+        this.managedOnboardingRuns.isCancelled(run, this.shuttingDown),
     });
 
+    if (this.shouldStopManagedOnboardingRun(run, "claim result")) {
+      return;
+    }
     if (claimResult.kind === "manual_fallback") {
       this.setManagedOnboardingFailure(
         claimResult.reason,
@@ -663,6 +687,9 @@ export class DesktopApplication {
       return;
     }
 
+    if (this.shouldStopManagedOnboardingRun(run, "managed key persistence")) {
+      return;
+    }
     this.apiKeyStore.setApiKey(claimResult.apiKey, "DESKTOP_MANAGED");
     const sandboxBaseDirectory = normalizeScopePath(
       payload.sandboxBaseDirectory,
@@ -685,7 +712,16 @@ export class DesktopApplication {
     });
 
     if (safeSandboxBaseDirectory) {
-      await seedReposConfig(safeSandboxBaseDirectory);
+      if (this.shouldStopManagedOnboardingRun(run, "repo config seeding")) {
+        return;
+      }
+      await seedReposConfig(safeSandboxBaseDirectory, {
+        isCancelled: () =>
+          this.managedOnboardingRuns.isCancelled(run, this.shuttingDown),
+      });
+      if (this.shouldStopManagedOnboardingRun(run, "completion state update")) {
+        return;
+      }
       this.managedOnboardingState = {
         status: "idle",
         webAppOrigin: payload.webAppOrigin,
@@ -704,6 +740,33 @@ export class DesktopApplication {
     };
     this.notifyOnboardingStateChanged();
     this.showWindow();
+  }
+
+  private shouldStopManagedOnboardingRun(
+    run: ManagedOnboardingRunToken,
+    stage: string,
+  ): boolean {
+    if (!this.managedOnboardingRuns.isCancelled(run, this.shuttingDown)) {
+      return false;
+    }
+    gatewayLog.debug(
+      "managed-onboarding",
+      `Skipping stale managed onboarding continuation at ${stage}.`,
+    );
+    return true;
+  }
+
+  private cancelManagedOnboardingForUserChange(reason: string): void {
+    this.managedOnboardingRuns.cancel();
+    if (this.managedOnboardingState.status === "idle") {
+      return;
+    }
+    gatewayLog.debug(
+      "managed-onboarding",
+      `Canceled automated onboarding because ${reason}.`,
+    );
+    this.managedOnboardingState = { status: "idle" };
+    this.notifyOnboardingStateChanged();
   }
 
   private setManagedOnboardingFailure(
@@ -1326,6 +1389,21 @@ export class DesktopApplication {
           );
         }
 
+        const updatesOnboardingState = (
+          [
+            "sandboxBaseDirectory",
+            "onboardingCompleted",
+            "relayOrigin",
+            "apiOrigin",
+            "webAppOrigin",
+          ] as const
+        ).some((key) => key in partial);
+        if (updatesOnboardingState) {
+          this.cancelManagedOnboardingForUserChange(
+            "settings were updated manually",
+          );
+        }
+
         const updated = this.settingsStore.update(
           nextPartial as Partial<DesktopSettings>,
         );
@@ -1500,11 +1578,13 @@ export class DesktopApplication {
       if (!trimmed.startsWith("sk_live_")) {
         throw new Error("API key must start with sk_live_");
       }
+      this.cancelManagedOnboardingForUserChange("a manual API key was set");
       this.apiKeyStore.setApiKey(trimmed);
       this.restartCloudSocket();
       return this.apiKeyStore.getStatus();
     });
     ipcMain.handle("desktop:clear-api-key", () => {
+      this.cancelManagedOnboardingForUserChange("the API key was cleared");
       this.apiKeyStore.clearApiKey();
       this.restartCloudSocket();
       return this.apiKeyStore.getStatus();
@@ -1571,7 +1651,6 @@ export class DesktopApplication {
           if (!trimmedApiKey.startsWith("sk_live_")) {
             throw new Error("API key must start with sk_live_");
           }
-          this.apiKeyStore.setApiKey(trimmedApiKey, "USER_CREATED");
         } else {
           const onboardingAttemptId =
             typeof payload.onboardingAttemptId === "string"
@@ -1582,6 +1661,10 @@ export class DesktopApplication {
           }
         }
 
+        this.cancelManagedOnboardingForUserChange("manual onboarding completed");
+        if (trimmedApiKey) {
+          this.apiKeyStore.setApiKey(trimmedApiKey, "USER_CREATED");
+        }
         this.settingsStore.update({
           ...(relayOrigin !== undefined ? { relayOrigin } : {}),
           ...(apiOrigin !== undefined ? { apiOrigin } : {}),
@@ -1735,6 +1818,9 @@ export class DesktopApplication {
       }
       const { wasActive } = this.settingsStore.deleteConfig(id);
       if (wasActive) {
+        this.cancelManagedOnboardingForUserChange(
+          "the active saved config was deleted",
+        );
         this.settingsStore.setRelayOrigin(DEFAULT_DESKTOP_SETTINGS.relayOrigin);
         this.settingsStore.setApiOrigin(DEFAULT_DESKTOP_SETTINGS.apiOrigin);
         this.settingsStore.setWebAppOrigin(DEFAULT_DESKTOP_SETTINGS.webAppOrigin);
@@ -1764,6 +1850,7 @@ export class DesktopApplication {
       if (!safeStorage.isEncryptionAvailable()) {
         throw new Error("safeStorage is not available -- cannot apply config");
       }
+      this.cancelManagedOnboardingForUserChange("a saved config was applied");
       const appliedConfig = this.settingsStore.applyConfig(id);
       const profileKey = this.apiKeyStore.getProfileKeyRecord(id);
       if (profileKey) {
