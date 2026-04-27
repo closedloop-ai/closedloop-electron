@@ -1,9 +1,23 @@
+import type { ApiKeyProvenance } from "./api-key-store.js";
+import { unwrapApiResultData } from "./api-response-utils.js";
+import {
+  buildManagedDesktopPopHeaders,
+  type DesktopPopUnavailableReporter,
+} from "./desktop-pop-sign-utils.js";
+import {
+  LOCAL_AUTH_VERIFY_PATH,
+  type DesktopPopSigner,
+} from "./desktop-pop.js";
+
 export interface VerifyChallengeOptions {
   challengeToken: string;
   requestOrigin: string;
   userAgent?: string;
   apiOrigin: string;
   apiKey: string;
+  apiKeyProvenance?: ApiKeyProvenance;
+  signDesktopRequest?: DesktopPopSigner;
+  onDesktopPopUnavailable?: DesktopPopUnavailableReporter;
 }
 
 export type VerifyChallengeResult =
@@ -11,16 +25,6 @@ export type VerifyChallengeResult =
   | { ok: false; error: string; statusCode?: number };
 
 const VERIFY_TIMEOUT_MS = 5_000;
-
-type VerifySuccessPayload = {
-  ok?: boolean;
-  sessionTtlSeconds?: number;
-  success?: boolean;
-  data?: {
-    ok?: boolean;
-    sessionTtlSeconds?: number;
-  };
-};
 
 /** Verify a challenge token with the API server using the desktop API key. */
 export async function verifyChallenge(
@@ -40,22 +44,16 @@ export async function verifyChallenge(
   const timeout = setTimeout(() => controller.abort(), VERIFY_TIMEOUT_MS);
 
   try {
+    const headers = await buildVerifyHeaders(options);
     const response = await fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${options.apiKey}`,
-      },
+      headers,
       body: JSON.stringify(body),
       signal: controller.signal,
     });
 
     if (response.ok) {
-      const data = (await response.json()) as VerifySuccessPayload;
-      const payload =
-        data.success === true && data.data && typeof data.data === "object"
-          ? data.data
-          : data;
+      const payload = unwrapApiResultData(await response.json());
       if (payload.ok === true && typeof payload.sessionTtlSeconds === "number") {
         return { ok: true, sessionTtlSeconds: payload.sessionTtlSeconds };
       }
@@ -82,4 +80,32 @@ export async function verifyChallenge(
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function buildVerifyHeaders(
+  options: VerifyChallengeOptions
+): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Authorization: `Bearer ${options.apiKey}`,
+  };
+  if (options.apiKeyProvenance !== "DESKTOP_MANAGED" || !options.signDesktopRequest) {
+    return headers;
+  }
+
+  const popHeaders = await buildManagedDesktopPopHeaders({
+    apiKeyProvenance: options.apiKeyProvenance,
+    signDesktopRequest: options.signDesktopRequest,
+    request: {
+      method: "POST",
+      pathname: LOCAL_AUTH_VERIFY_PATH,
+    },
+    surface: LOCAL_AUTH_VERIFY_PATH,
+    unavailableMessage: "PoP signing unavailable for local-auth verification; continuing bearer-only compatibility mode",
+    onUnavailable: options.onDesktopPopUnavailable,
+  });
+  if (popHeaders) {
+    return { ...headers, ...popHeaders };
+  }
+  return headers;
 }

@@ -26,6 +26,7 @@ export type TelemetryCategory =
   | "connection.reconnection_resumed"
   | "connection.degraded"
   | "connection.lost"
+  | "desktop_pop.unavailable"
   | "command.initiated"
   | "command.started"
   | "command.completed"

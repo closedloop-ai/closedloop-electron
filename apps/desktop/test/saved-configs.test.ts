@@ -312,6 +312,75 @@ test("ApiKeyStore.saveProfileKey/getProfileKey/deleteProfileKey roundtrip", () =
   assert.equal(apiKeyStore.getProfileKey("profile-1"), null);
 });
 
+test("ApiKeyStore persists DESKTOP_MANAGED provenance for current and profile keys", () => {
+  const tmpDir = makeTempDir("saved-configs-apikey-source-");
+  const apiKeyStore = makeApiKeyStore(tmpDir);
+
+  apiKeyStore.setApiKey("sk_live_managed", "DESKTOP_MANAGED");
+  assert.deepEqual(apiKeyStore.getApiKeyRecord(), {
+    apiKey: "sk_live_managed",
+    provenance: "DESKTOP_MANAGED",
+  });
+  assert.equal(apiKeyStore.getStatus().provenance, "DESKTOP_MANAGED");
+
+  const rehydrated = makeApiKeyStore(tmpDir);
+  assert.deepEqual(rehydrated.getApiKeyRecord(), {
+    apiKey: "sk_live_managed",
+    provenance: "DESKTOP_MANAGED",
+  });
+
+  rehydrated.saveProfileKey("profile-1", "sk_live_profile_managed", "DESKTOP_MANAGED");
+  assert.deepEqual(rehydrated.getProfileKeyRecord("profile-1"), {
+    apiKey: "sk_live_profile_managed",
+    provenance: "DESKTOP_MANAGED",
+  });
+});
+
+test("ApiKeyStore treats legacy encrypted keys without provenance as USER_CREATED", () => {
+  const tmpDir = makeTempDir("saved-configs-apikey-legacy-");
+  fs.writeFileSync(
+    path.join(tmpDir, "secrets.json"),
+    JSON.stringify({
+      encryptedApiKey: Buffer.from("stub:sk_live_legacy", "utf-8").toString("base64"),
+    }),
+    "utf-8",
+  );
+
+  const apiKeyStore = makeApiKeyStore(tmpDir);
+
+  assert.deepEqual(apiKeyStore.getApiKeyRecord(), {
+    apiKey: "sk_live_legacy",
+    provenance: "USER_CREATED",
+  });
+});
+
+test("ApiKeyStore treats environment keys as USER_CREATED", () => {
+  const tmpDir = makeTempDir("saved-configs-apikey-env-");
+  const previousClosedLoopKey = process.env.CLOSEDLOOP_API_KEY;
+  const previousSymphonyKey = process.env.SYMPHONY_API_KEY;
+  process.env.CLOSEDLOOP_API_KEY = "sk_live_env";
+  delete process.env.SYMPHONY_API_KEY;
+  try {
+    const apiKeyStore = makeApiKeyStore(tmpDir);
+
+    assert.deepEqual(apiKeyStore.getApiKeyRecord(), {
+      apiKey: "sk_live_env",
+      provenance: "USER_CREATED",
+    });
+  } finally {
+    if (previousClosedLoopKey === undefined) {
+      delete process.env.CLOSEDLOOP_API_KEY;
+    } else {
+      process.env.CLOSEDLOOP_API_KEY = previousClosedLoopKey;
+    }
+    if (previousSymphonyKey === undefined) {
+      delete process.env.SYMPHONY_API_KEY;
+    } else {
+      process.env.SYMPHONY_API_KEY = previousSymphonyKey;
+    }
+  }
+});
+
 test("ApiKeyStore.deleteProfileKey is a no-op for unknown profileId", () => {
   const tmpDir = makeTempDir("saved-configs-apikey-noop-");
   const apiKeyStore = makeApiKeyStore(tmpDir);
