@@ -7,6 +7,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -70,11 +71,13 @@ import {
   CLONE_GIT_TIMEOUT,
   expandHome,
   fetchOrigin,
+  hasBootstrapArtifacts,
   isProcessRunning,
   loopError,
   loopLog,
   resolveRef,
   resolveWorktreeParentDir,
+  runBootstrapIfNeeded,
   runLoopsSetupScript,
   SymphonyDirNotConfiguredError,
   tryAssertRepoAllowed,
@@ -257,6 +260,7 @@ const SUPPORTED_COMMANDS = new Set<LoopCommand>([
   "GENERATE_PRD",
   "EVALUATE_PLAN",
   "EVALUATE_CODE",
+  "BOOTSTRAP",
 ]);
 const VALID_COMMANDS = SUPPORTED_COMMANDS;
 type RepoRequirement = "REQUIRED" | "OPTIONAL" | "NOT_REQUIRED";
@@ -272,6 +276,7 @@ const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
   DECOMPOSE: "NOT_REQUIRED",
   EVALUATE_PLAN: "REQUIRED",
   EVALUATE_CODE: "REQUIRED",
+  BOOTSTRAP: "NOT_REQUIRED",
 };
 const LOCAL_CALLBACK_FAIL_FAST_COMMANDS = new Set<LoopCommand>([
   "PLAN",
@@ -563,6 +568,107 @@ function findLocalRepo(fullName: string, allowedDirs: string[]): string | null {
     }
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Bootstrap helpers (FEA-652)
+// ---------------------------------------------------------------------------
+
+interface BootstrapRepoParam {
+  fullName: string;
+  branch?: string;
+  localPath?: string;
+}
+
+interface BootstrapParams {
+  repos: BootstrapRepoParam[];
+  options?: {
+    depth?: "quick" | "medium" | "deep";
+    update?: boolean;
+  };
+}
+
+interface BootstrapManifestEntry {
+  fullName: string;
+  localPath: string;
+  branch: string;
+  skip: boolean;
+  skipReason?: string;
+}
+
+interface BootstrapRepoResult {
+  fullName: string;
+  branch: string;
+  success: boolean;
+  error?: string;
+  agents: Array<{
+    name: string;
+    slug: string;
+    role: string;
+    description: string;
+    prompt: string;
+  }>;
+  criticGates: Record<string, unknown> | null;
+  metadata: Record<string, unknown> | null;
+  duration: number;
+}
+
+function parseBootstrapParams(prompt: string | undefined): BootstrapParams | null {
+  if (!prompt) return null;
+  try {
+    const parsed = JSON.parse(prompt) as Record<string, unknown>;
+    if (!Array.isArray(parsed.repos)) return null;
+    for (const entry of parsed.repos) {
+      if (typeof entry !== "object" || entry === null) return null;
+      if (typeof (entry as Record<string, unknown>).fullName !== "string") return null;
+    }
+    return parsed as unknown as BootstrapParams;
+  } catch {
+    return null;
+  }
+}
+
+function parseAgentFrontmatter(content: string): { name: string; description: string } {
+  const fmMatch = /^---\n([\s\S]*?)\n---/.exec(content);
+  if (!fmMatch) return { name: "", description: "" };
+  const fm = fmMatch[1];
+
+  const nameMatch = /^name:\s*(.+)$/m.exec(fm);
+  const descMatch = /^description:\s*(.+)$/m.exec(fm);
+  return {
+    name: nameMatch?.[1]?.trim() ?? "",
+    description: descMatch?.[1]?.trim() ?? "",
+  };
+}
+
+function readBootstrapRepoOutputs(repoPath: string): Omit<BootstrapRepoResult, "fullName" | "branch" | "success" | "error" | "duration"> {
+  const agents: BootstrapRepoResult["agents"] = [];
+  const agentsDir = path.join(repoPath, ".claude", "agents");
+  try {
+    for (const file of readdirSync(agentsDir)) {
+      if (!file.endsWith(".md")) continue;
+      const slug = file.slice(0, -3);
+      const content = readFileSync(path.join(agentsDir, file), "utf-8");
+      const { name, description } = parseAgentFrontmatter(content);
+      agents.push({
+        name: name || slug,
+        slug,
+        role: slug,
+        description,
+        prompt: content,
+      });
+    }
+  } catch {
+    // agents dir may not exist
+  }
+
+  const criticGatesPath = path.join(repoPath, ".closedloop-ai", "settings", "critic-gates.json");
+  const criticGates = readJsonFileSync(criticGatesPath) as Record<string, unknown> | null;
+
+  const metadataPath = path.join(repoPath, ".closedloop-ai", "bootstrap-metadata.json");
+  const metadata = readJsonFileSync(metadataPath) as Record<string, unknown> | null;
+
+  return { agents, criticGates, metadata };
 }
 
 // ---------------------------------------------------------------------------
@@ -1049,6 +1155,7 @@ async function ensureWorktreeImpl(
     },
   );
 
+  await runBootstrapIfNeeded(worktreeDir, loopId);
   await runLoopsSetupScript(worktreeDir, loopId);
 }
 
@@ -1497,6 +1604,52 @@ function readDecomposeOutputs(workDir: string): Record<string, unknown> {
 function readGeneratePrdOutputs(worktreeDir: string): Record<string, unknown> {
   const prdContent = readTextFile(path.join(worktreeDir, LoopArtifactFile.Prd));
   return { prd: prdContent ? { content: prdContent } : undefined };
+}
+
+function readBootstrapOutputs(claudeWorkDir: string): Record<string, unknown> {
+  const manifestFile = path.join(claudeWorkDir, "bootstrap-manifest.json");
+  const manifest = readJsonFileSync(manifestFile) as BootstrapManifestEntry[] | null;
+  if (!manifest) return {};
+
+  const repos: BootstrapRepoResult[] = [];
+  let runnableIndex = 0;
+  for (const entry of manifest) {
+    if (entry.skip) {
+      repos.push({
+        fullName: entry.fullName,
+        branch: entry.branch ?? "main",
+        success: false,
+        error: entry.skipReason ?? "skipped",
+        agents: [],
+        criticGates: null,
+        metadata: null,
+        duration: 0,
+      });
+      continue;
+    }
+
+    const markerPath = path.join(claudeWorkDir, `repo-${runnableIndex}-done`);
+    const marker = readTextFile(markerPath)?.trim() ?? "fail:unknown";
+    const success = marker === "ok";
+    const error = success ? undefined : marker.replace(/^fail:/, "");
+
+    const outputs = success
+      ? readBootstrapRepoOutputs(entry.localPath)
+      : { agents: [], criticGates: null, metadata: null };
+
+    repos.push({
+      fullName: entry.fullName,
+      branch: entry.branch ?? "main",
+      success,
+      error,
+      ...outputs,
+      duration: 0,
+    });
+    runnableIndex += 1;
+  }
+
+  const result = { repos, totalDuration: 0 };
+  return { bootstrapResult: result };
 }
 
 // ---------------------------------------------------------------------------
@@ -3190,6 +3343,8 @@ export async function handleProcessCompletion(
       artifacts = readEvaluateCodeOutputs(claudeWorkDir);
     } else if (command === "GENERATE_PRD") {
       artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
+    } else if (command === "BOOTSTRAP") {
+      artifacts = readBootstrapOutputs(claudeWorkDir);
     }
 
     // Validate result bundle — warn if required artifacts are missing for this command
@@ -3577,6 +3732,16 @@ async function handleLoopRequest(
       json(context, 400, {
         error:
           "EVALUATE_CODE requires a repository (repo.fullName or localRepoPath)",
+      });
+      return;
+    }
+  }
+
+  if (body.command === "BOOTSTRAP") {
+    const bootstrapParams = parseBootstrapParams(body.prompt);
+    if (!bootstrapParams || bootstrapParams.repos.length === 0) {
+      json(context, 400, {
+        error: "BOOTSTRAP requires a JSON prompt with a non-empty repos array",
       });
       return;
     }
@@ -4044,6 +4209,7 @@ async function handleLoopRequest(
         }
         throw e;
       }
+      await runBootstrapIfNeeded(worktreeDir, body.loopId);
       claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
       await fs.mkdir(claudeWorkDir, { recursive: true });
 
@@ -4146,6 +4312,15 @@ async function handleLoopRequest(
         body.prompt!,
         body.repo,
       );
+    } else if (body.command === "BOOTSTRAP") {
+      usedTempDir = true;
+      const tmpDir = path.join(
+        os.tmpdir(),
+        `symphony-bootstrap-${body.loopId.slice(0, 8)}`,
+      );
+      await fs.rm(tmpDir, { recursive: true, force: true });
+      await fs.mkdir(tmpDir, { recursive: true });
+      claudeWorkDir = tmpDir;
     } else {
       json(context, 400, { error: `Unknown command: ${body.command}` });
       return;
@@ -4485,6 +4660,88 @@ async function handleLoopRequest(
         spawnStartedAt = Date.now();
         child = spawn(pipeline.cmd, pipeline.args, {
           cwd: worktreeDir!,
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: spawnEnv,
+        });
+        child.unref();
+      } else if (body.command === "BOOTSTRAP") {
+        const params = parseBootstrapParams(body.prompt);
+        if (!params || params.repos.length === 0) {
+          throw new Error("BOOTSTRAP requires repos in prompt JSON");
+        }
+
+        const allowedDirs = getAllowedDirectories();
+        const manifest: BootstrapManifestEntry[] = [];
+        for (const repo of params.repos) {
+          const branch = repo.branch ?? "main";
+          const localPath = repo.localPath
+            ? expandHome(repo.localPath)
+            : findLocalRepo(repo.fullName, allowedDirs);
+          if (!localPath) {
+            manifest.push({ fullName: repo.fullName, localPath: "", branch, skip: true, skipReason: "not found locally" });
+            continue;
+          }
+          try {
+            const st = statSync(localPath);
+            if (!st.isDirectory()) {
+              manifest.push({ fullName: repo.fullName, localPath, branch, skip: true, skipReason: "path is not a directory" });
+              continue;
+            }
+          } catch {
+            manifest.push({ fullName: repo.fullName, localPath, branch, skip: true, skipReason: "path does not exist" });
+            continue;
+          }
+          try {
+            assertPathAllowed(localPath, allowedDirs);
+          } catch {
+            manifest.push({ fullName: repo.fullName, localPath: "", branch, skip: true, skipReason: "outside sandbox" });
+            continue;
+          }
+          if (!params.options?.update && hasBootstrapArtifacts(localPath)) {
+            manifest.push({ fullName: repo.fullName, localPath, branch, skip: true, skipReason: "artifacts already exist" });
+            continue;
+          }
+          manifest.push({ fullName: repo.fullName, localPath, branch, skip: false });
+        }
+
+        writeFileSync(
+          path.join(claudeWorkDir, "bootstrap-manifest.json"),
+          JSON.stringify(manifest, null, 2),
+        );
+
+        const runnableRepos = manifest.filter((e) => !e.skip);
+        const scriptLines: string[] = [
+          "#!/bin/bash",
+          `CLAUDE_BIN=${shellEscape(claudeBinary)}`,
+          "",
+        ];
+        for (const [i, entry] of runnableRepos.entries()) {
+          const marker = path.join(claudeWorkDir, `repo-${i}-done`);
+          const stderrLog = path.join(claudeWorkDir, `repo-${i}-stderr.log`);
+          scriptLines.push(
+            `echo "=== BOOTSTRAP ${i}: ${shellEscape(entry.fullName)} ==="`,
+            `if ! cd ${shellEscape(entry.localPath)}; then`,
+            `  echo "fail:cd" > ${shellEscape(marker)}`,
+            `else`,
+            `  if "$CLAUDE_BIN" -p "/agent-bootstrap" 2>${shellEscape(stderrLog)}; then`,
+            `    echo "ok" > ${shellEscape(marker)}`,
+            `  else`,
+            `    echo "fail:$?" > ${shellEscape(marker)}`,
+            `  fi`,
+            `fi`,
+            "",
+          );
+        }
+
+        const bootstrapScript = path.join(claudeWorkDir, "bootstrap.sh");
+        writeFileSync(bootstrapScript, scriptLines.join("\n"), { mode: 0o755 });
+
+        collectedSpawnMeta.command = "bash";
+        collectedSpawnMeta.args = [bootstrapScript];
+        spawnStartedAt = Date.now();
+        child = spawn("bash", [bootstrapScript], {
+          cwd: claudeWorkDir,
           detached: true,
           stdio: ["ignore", logFd, logFd],
           env: spawnEnv,
