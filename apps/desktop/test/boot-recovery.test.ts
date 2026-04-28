@@ -26,7 +26,7 @@ import { LoopTokenStore } from "../src/main/loop-token-store.js";
 import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
 import { initGitRepo, restoreEnv } from "./symphony-test-utils.js";
 import type { TelemetryEventPayload } from "../src/main/telemetry-protocol.js";
-import { cleanupAdditionalWorktreesSelective } from "../src/server/operations/symphony-loop.js";
+import { cleanupAdditionalWorktrees } from "../src/server/operations/symphony-loop.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 
 let tempRoot = "";
@@ -979,11 +979,11 @@ test("sweepOrphanedTokens removes tokens for finalized and unknown loops, keeps 
 });
 
 // ---------------------------------------------------------------------------
-// cleanupAdditionalWorktreesSelective tests
+// cleanupAdditionalWorktrees tests
 // ---------------------------------------------------------------------------
 
 /**
- * A minimal WorktreeProvider stub for selective-cleanup tests.
+ * A minimal WorktreeProvider stub for cleanup tests.
  * removeWorktree does fs.rm (force) so it is safe for plain directories.
  * The other methods are no-ops / stubs not exercised by these tests.
  */
@@ -1005,31 +1005,31 @@ function makeSimpleRemoveProvider(): WorktreeProvider {
   };
 }
 
-test("cleanupAdditionalWorktreesSelective removes clean worktree (no uncommitted changes)", async () => {
+test("cleanupAdditionalWorktrees removes worktree with no code changes", async () => {
   // Create a temp repo root outside tempRoot so the afterEach rm for tempRoot
   // does not race with the assertion. We clean it up manually.
-  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "selective-clean-"));
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "cleanup-clean-"));
   try {
-    // initGitRepo creates a git repo with a committed README.md so git status
-    // returns nothing (clean HEAD state).
+    // initGitRepo creates a git repo with a single committed README on `main`.
+    // HEAD == main means no commits unique to HEAD vs the comparison refs.
     await initGitRepo(repoRoot);
 
     const wt = makeSimpleRemoveProvider();
-    await cleanupAdditionalWorktreesSelective(
+    await cleanupAdditionalWorktrees(
       [{ dir: repoRoot, repoPath: repoRoot }],
       "test-loop",
       wt,
     );
 
-    // The clean worktree should have been removed.
+    // No uncommitted changes and no commits unique to HEAD -> safe to remove.
     assert.ok(!existsSync(repoRoot), "expected clean worktree to be removed");
   } finally {
     await fs.rm(repoRoot, { recursive: true, force: true });
   }
 });
 
-test("cleanupAdditionalWorktreesSelective retains worktree with staged/uncommitted changes", async () => {
-  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "selective-dirty-"));
+test("cleanupAdditionalWorktrees retains worktree with staged/uncommitted changes", async () => {
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "cleanup-dirty-"));
   try {
     await initGitRepo(repoRoot);
 
@@ -1039,7 +1039,7 @@ test("cleanupAdditionalWorktreesSelective retains worktree with staged/uncommitt
     execFileSync("git", ["add", "work.txt"], { cwd: repoRoot, stdio: "pipe" });
 
     const wt = makeSimpleRemoveProvider();
-    await cleanupAdditionalWorktreesSelective(
+    await cleanupAdditionalWorktrees(
       [{ dir: repoRoot, repoPath: repoRoot }],
       "test-loop",
       wt,
@@ -1052,8 +1052,38 @@ test("cleanupAdditionalWorktreesSelective retains worktree with staged/uncommitt
   }
 });
 
-test("cleanupAdditionalWorktreesSelective handles nonexistent worktree path without error", async () => {
-  const nonexistentDir = path.join(os.tmpdir(), `selective-nonexistent-${Date.now()}`);
+test("cleanupAdditionalWorktrees retains worktree with committed-only changes on a symphony branch", async () => {
+  // Mirrors the EXECUTE shape: agent commits to a `symphony/<key>` branch and
+  // the working tree is left clean. The branch still carries unique commits
+  // relative to non-symphony refs, so the worktree must be preserved.
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "cleanup-committed-"));
+  try {
+    await initGitRepo(repoRoot);
+
+    execFileSync("git", ["checkout", "-b", "symphony/test-loop"], { cwd: repoRoot, stdio: "pipe" });
+    const committedFile = path.join(repoRoot, "feature.txt");
+    await fs.writeFile(committedFile, "committed work");
+    execFileSync("git", ["add", "feature.txt"], { cwd: repoRoot, stdio: "pipe" });
+    execFileSync("git", ["commit", "-m", "wip"], { cwd: repoRoot, stdio: "pipe" });
+
+    const wt = makeSimpleRemoveProvider();
+    await cleanupAdditionalWorktrees(
+      [{ dir: repoRoot, repoPath: repoRoot }],
+      "test-loop",
+      wt,
+    );
+
+    assert.ok(
+      existsSync(repoRoot),
+      "expected worktree with committed-only changes on a symphony branch to be retained",
+    );
+  } finally {
+    await fs.rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("cleanupAdditionalWorktrees handles nonexistent worktree path without error", async () => {
+  const nonexistentDir = path.join(os.tmpdir(), `cleanup-nonexistent-${Date.now()}`);
 
   // Confirm the path really does not exist before the test.
   assert.ok(!existsSync(nonexistentDir), "pre-condition: path must not exist");
@@ -1062,11 +1092,38 @@ test("cleanupAdditionalWorktreesSelective handles nonexistent worktree path with
 
   // Should resolve without throwing even though the dir does not exist.
   await assert.doesNotReject(
-    cleanupAdditionalWorktreesSelective(
+    cleanupAdditionalWorktrees(
       [{ dir: nonexistentDir, repoPath: nonexistentDir }],
       "test-loop",
       wt,
     ),
-    "cleanupAdditionalWorktreesSelective must not throw for nonexistent paths",
+    "cleanupAdditionalWorktrees must not throw for nonexistent paths",
   );
+});
+
+test("cleanupAdditionalWorktrees retains worktree when git status fails unexpectedly", async () => {
+  // Create a directory that is NOT a git repo. `git status` fails (not ENOENT
+  // on the dir, but a non-zero git exit) and the worktree must be retained
+  // rather than blindly removed — the original bug was the catch arm calling
+  // removeWorktree on any error, which destroyed user work.
+  const nonRepoDir = await fs.mkdtemp(path.join(os.tmpdir(), "cleanup-nonrepo-"));
+  try {
+    const sentinel = path.join(nonRepoDir, "user-work.txt");
+    await fs.writeFile(sentinel, "do not delete");
+
+    const wt = makeSimpleRemoveProvider();
+    await cleanupAdditionalWorktrees(
+      [{ dir: nonRepoDir, repoPath: nonRepoDir }],
+      "test-loop",
+      wt,
+    );
+
+    assert.ok(
+      existsSync(nonRepoDir),
+      "expected worktree to be retained when git status returns a non-ENOENT error",
+    );
+    assert.ok(existsSync(sentinel), "expected user files to remain on git error");
+  } finally {
+    await fs.rm(nonRepoDir, { recursive: true, force: true });
+  }
 });

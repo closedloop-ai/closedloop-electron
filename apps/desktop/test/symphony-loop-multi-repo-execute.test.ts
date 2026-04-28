@@ -16,6 +16,7 @@
  */
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -82,6 +83,13 @@ function makeRecordingWorktreeProvider(): {
     async ensureWorktree(repoPath, worktreeDir, branchName, baseBranch) {
       ensureWorktreeCalls.push({ repoPath, worktreeDir, branchName, baseBranch });
       await fs.mkdir(worktreeDir, { recursive: true });
+      // Initialize as a real git repo so cleanupAdditionalWorktrees can run
+      // its `git status` / `git rev-list` checks against an actual repo
+      // instead of bailing into the "retain on error" safety branch.
+      execFileSync("git", ["init", "-q", "-b", "main"], { cwd: worktreeDir, stdio: "pipe" });
+      execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: worktreeDir, stdio: "pipe" });
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: worktreeDir, stdio: "pipe" });
+      execFileSync("git", ["commit", "--allow-empty", "-m", "initial"], { cwd: worktreeDir, stdio: "pipe" });
     },
     findWorktreeForBranch() {
       return null;

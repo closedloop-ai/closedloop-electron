@@ -1,8 +1,6 @@
 import { startOutputTailer } from "../server/operations/output-tailer.js";
 import {
-  cleanupAdditionalWorktreesSelective,
   cleanupAdditionalWorktreesWithDefaultProvider,
-  defaultWorktreeProvider,
   registerRecoveredLoop,
   unregisterLoop,
 } from "../server/operations/symphony-loop.js";
@@ -33,21 +31,6 @@ interface LiveJobHandle {
 
 const DEFAULT_WATCHER_POLL_MS = 3000;
 const MAX_RECOVERY_ATTEMPTS = 3;
-
-/**
- * Build the appropriate worktree cleanup callback for a job. EXECUTE jobs use
- * selective cleanup (retaining worktrees with uncommitted changes); all other
- * commands do a full best-effort removal.
- */
-function buildWorktreeCleanup(
-  job: Pick<LocalJob, "command">,
-): LoopFinalizerDeps["cleanupAdditionalWorktrees"] {
-  if (job.command === "EXECUTE") {
-    return (entries, loopId) =>
-      cleanupAdditionalWorktreesSelective([...entries], loopId, defaultWorktreeProvider);
-  }
-  return cleanupAdditionalWorktreesWithDefaultProvider;
-}
 
 export class BootRecoveryService {
   private readonly deps: BootRecoveryDeps;
@@ -187,7 +170,7 @@ export class BootRecoveryService {
           isProcessRunning,
           getAllowedDirectories,
           loopTokenStore,
-          cleanupAdditionalWorktrees: buildWorktreeCleanup(job),
+          cleanupAdditionalWorktrees: cleanupAdditionalWorktreesWithDefaultProvider,
         });
         if (!outcome.cloudFinalized && outcome.retryableFailure) {
           const latest = jobStore.getByLoopId(job.loopId);
@@ -377,7 +360,7 @@ export class BootRecoveryService {
         isProcessRunning,
         getAllowedDirectories,
         loopTokenStore,
-        cleanupAdditionalWorktrees: buildWorktreeCleanup(job),
+        cleanupAdditionalWorktrees: cleanupAdditionalWorktreesWithDefaultProvider,
       };
 
       try {

@@ -825,56 +825,36 @@ export class AdditionalRepoError extends Error {
 const ADDITIONAL_REPOS_MAX = 5;
 
 /**
- * Best-effort cleanup of additional repo worktree directories.
- * Errors are logged but never re-thrown so callers can use this in
- * both success and error teardown paths without try/catch.
+ * Cleanup of additional-repo worktree directories.
+ *
+ * Retains a worktree when it contains any code changes — uncommitted (modulo
+ * the `.claude` / `.closedloop-ai` runtime metadata) or commits unique to
+ * HEAD relative to non-symphony refs. Removes only when both checks come
+ * back empty. On any unexpected git error the worktree is retained so we do
+ * not destroy in-progress user work; the only error narrowed to "remove" is
+ * a missing directory (ENOENT), which has nothing to preserve.
+ *
+ * The same rule fits both EXECUTE (which produces commits) and PLAN (which
+ * does not): clean PLAN worktrees still get removed because both checks
+ * report no changes; EXECUTE worktrees with commits are preserved if cloud
+ * finalization couldn't push them.
  */
-async function cleanupAdditionalWorktrees(
+export async function cleanupAdditionalWorktrees(
   entries: readonly { dir: string; repoPath: string }[],
   loopId: string,
   wt: WorktreeProvider,
-  logPrefix = "cleanup additional worktree failed:",
 ): Promise<void> {
   for (const entry of entries) {
-    await wt.removeWorktree(entry.dir, entry.repoPath, loopId).catch((err) =>
-      loopError(loopId, logPrefix, err),
-    );
-  }
-}
-
-/**
- * Selective cleanup of additional repo worktree directories.
- * Retains worktrees that have uncommitted changes (excluding .claude and
- * .closedloop-ai directories). Removes worktrees with no changes.
- * Errors from git status are treated as no-changes (i.e. the worktree is removed).
- */
-export async function cleanupAdditionalWorktreesSelective(
-  entries: Array<{ dir: string; repoPath: string }>,
-  loopId: string,
-  wt: WorktreeProvider,
-): Promise<void> {
-  for (const entry of entries) {
+    if (decideAdditionalWorktreeCleanup(entry.dir, loopId) === "retain") {
+      continue;
+    }
     try {
-      const output = execFileSync(getResolvedGitPath(), ['status', '--porcelain', '--', '.', ':!.claude', ':!.closedloop-ai'], {
-        cwd: entry.dir,
-        encoding: 'utf-8',
-        stdio: 'pipe',
-        timeout: 10_000,
-      });
-      if (output.trim()) {
-        // Has changes — retain this worktree
-        gatewayLog.info("cleanup-worktree-selective", `Retaining worktree with changes: ${entry.dir} (loop ${loopId})`);
-        continue;
-      }
-      // No changes — remove
-      await wt.removeWorktree(entry.dir, entry.repoPath);
-    } catch {
-      // Any error (ENOENT, git failure) — treat as no-changes, remove
-      try {
-        await wt.removeWorktree(entry.dir, entry.repoPath);
-      } catch {
-        // Ignore removal failure
-      }
+      await wt.removeWorktree(entry.dir, entry.repoPath, loopId);
+    } catch (err) {
+      gatewayLog.warn(
+        "cleanup-additional-worktree",
+        `removeWorktree failed for ${entry.dir} (loop ${loopId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 }
@@ -882,13 +862,121 @@ export async function cleanupAdditionalWorktreesSelective(
 /**
  * Default-provider cleanup helper. Exposed so recovery-time callers that do
  * not own a `WorktreeProvider` (e.g. `boot-recovery.ts`) can reuse the same
- * best-effort teardown semantics used on the live path.
+ * teardown semantics used on the live path.
  */
 export async function cleanupAdditionalWorktreesWithDefaultProvider(
   entries: readonly { dir: string; repoPath: string }[],
   loopId: string,
 ): Promise<void> {
   await cleanupAdditionalWorktrees(entries, loopId, defaultWorktreeProvider);
+}
+
+function isEnoentError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = (err as { code?: unknown }).code;
+  return code === "ENOENT";
+}
+
+/** Detect whether an additional-repo worktree carries any code changes. */
+function decideAdditionalWorktreeCleanup(
+  worktreeDir: string,
+  loopId: string,
+): "retain" | "remove" {
+  const gitBin = getResolvedGitPath();
+
+  // 1) Uncommitted changes (excluding our own runtime metadata).
+  let uncommitted: string;
+  try {
+    uncommitted = execFileSync(
+      gitBin,
+      ["status", "--porcelain", "--", ".", ":!.claude", ":!.closedloop-ai"],
+      { cwd: worktreeDir, encoding: "utf-8", stdio: "pipe", timeout: 10_000 },
+    ).trim();
+  } catch (err) {
+    if (isEnoentError(err)) {
+      return "remove";
+    }
+    gatewayLog.warn(
+      "cleanup-additional-worktree",
+      `git status failed for ${worktreeDir} (loop ${loopId}); retaining worktree to avoid data loss: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return "retain";
+  }
+  if (uncommitted.length > 0) {
+    gatewayLog.info(
+      "cleanup-additional-worktree",
+      `Retaining worktree with uncommitted changes: ${worktreeDir} (loop ${loopId})`,
+    );
+    return "retain";
+  }
+
+  // 2) Committed changes unique to HEAD relative to non-symphony refs. PLAN
+  //    worktrees never reach this branch with non-empty output because PLAN
+  //    does not commit; EXECUTE worktrees with retained commits do.
+  let comparisonRefs: string[];
+  try {
+    const refsOut = execFileSync(
+      gitBin,
+      ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes", "refs/tags"],
+      { cwd: worktreeDir, encoding: "utf-8", stdio: "pipe", timeout: 10_000 },
+    );
+    comparisonRefs = refsOut
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((ref) => ref.length > 0)
+      .filter(
+        (ref) =>
+          !ref.startsWith("refs/heads/symphony/") &&
+          !/^refs\/remotes\/[^/]+\/symphony\//.test(ref),
+      );
+  } catch (err) {
+    if (isEnoentError(err)) {
+      return "remove";
+    }
+    gatewayLog.warn(
+      "cleanup-additional-worktree",
+      `git for-each-ref failed for ${worktreeDir} (loop ${loopId}); retaining worktree to avoid data loss: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return "retain";
+  }
+
+  if (comparisonRefs.length === 0) {
+    // Without any non-symphony ref to compare against we can't safely
+    // distinguish "no commits" from "every commit is unique". Default to
+    // retain so user work is never destroyed.
+    gatewayLog.warn(
+      "cleanup-additional-worktree",
+      `No non-symphony refs found in ${worktreeDir} (loop ${loopId}); retaining worktree to avoid data loss`,
+    );
+    return "retain";
+  }
+
+  let unique: string;
+  try {
+    unique = execFileSync(
+      gitBin,
+      ["rev-list", "-n", "1", "HEAD", "--not", ...comparisonRefs],
+      { cwd: worktreeDir, encoding: "utf-8", stdio: "pipe", timeout: 10_000 },
+    ).trim();
+  } catch (err) {
+    if (isEnoentError(err)) {
+      return "remove";
+    }
+    gatewayLog.warn(
+      "cleanup-additional-worktree",
+      `git rev-list failed for ${worktreeDir} (loop ${loopId}); retaining worktree to avoid data loss: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return "retain";
+  }
+  if (unique.length > 0) {
+    gatewayLog.info(
+      "cleanup-additional-worktree",
+      `Retaining worktree with committed changes unique to HEAD: ${worktreeDir} (loop ${loopId})`,
+    );
+    return "retain";
+  }
+
+  return "remove";
 }
 
 /** Resolve an additional repo entry to a validated local path, or throw. */
@@ -3397,7 +3485,7 @@ export async function handleProcessCompletion(
     } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
       await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
-    await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt, "cleanup additional worktree failed (on error):");
+    await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt);
     loopTokenStore?.deleteLoopToken(loopId);
     return;
   }
@@ -3866,12 +3954,7 @@ async function provisionAdditionalRepoWorktrees(args: {
       assertPathAllowed(addWorktreeDir, allowedDirs);
     } catch (e) {
       if (e instanceof DirectoryNotAllowedError) {
-        await cleanupAdditionalWorktrees(
-          additionalWorktreeDirs,
-          body.loopId,
-          wt,
-          "cleanup additional worktree failed (allowlist reject):",
-        );
+        await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
         await wt.removeWorktree(worktreeDir, primaryRepoPath, body.loopId).catch(() => {});
         await postLoopEventBounded(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
           type: LoopEventType.Error,
@@ -3898,12 +3981,7 @@ async function provisionAdditionalRepoWorktrees(args: {
       const msg = checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr);
       loopError(body.loopId, `ensureWorktree failed for additional repo ${addRepo.repoPath}:`, checkoutErr);
       await wt.removeWorktree(addWorktreeDir, addRepo.repoPath, body.loopId).catch(() => {});
-      await cleanupAdditionalWorktrees(
-        additionalWorktreeDirs,
-        body.loopId,
-        wt,
-        "cleanup additional worktree failed (checkout reject):",
-      );
+      await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
       await wt.removeWorktree(worktreeDir, primaryRepoPath, body.loopId).catch(() => {});
       await postLoopEventBounded(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
         type: LoopEventType.Error,
@@ -5345,7 +5423,7 @@ async function handleLoopRequest(
       runningLoops.delete(body.loopId);
       loopTokenStore?.deleteLoopToken(body.loopId);
       // Best-effort cleanup of any additional repo worktrees created before spawn failed
-      void cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt, "finally: cleanup additional worktree failed:");
+      void cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
     }
   }
 }
