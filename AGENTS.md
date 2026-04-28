@@ -58,3 +58,6 @@ Commit format follows `.gitmessage` and recent history:
 - Footer sections: `Testing:` and `Risks:`.
 
 PRs should target `main`, explain what changed and why, link the ticket, and include screenshots/log snippets when UI or gateway behavior changes. Any PR that changes files under `apps/desktop/` must include a version bump in `apps/desktop/package.json`. If the current branch already has a version bump in `apps/desktop/package.json` (committed or uncommitted), do not bump again.
+
+## GitHub Review Replies
+When replying to existing GitHub PR review comments, use the review-comment REST reply endpoint (`POST /repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies`) with the original review comment database ID. Do not use GraphQL `addPullRequestReviewThreadReply` unless you have verified in the GitHub UI or REST response model that it renders as a normal inline reply. After posting, verify the new comment has `in_reply_to_id` set to the original comment ID.
