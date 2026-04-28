@@ -55,6 +55,12 @@ export type LocalJob = {
   artifactSlug?: string;
   issueId?: string;
   baseBranch?: string;
+  /**
+   * Primary repo `owner/name` from the loop request (`body.repo.fullName`).
+   * Carried so boot-recovery finalization can populate the V2 envelope's
+   * `fullName` field without depending on in-memory request state.
+   */
+  primaryRepoFullName?: string;
   webAppOrigin?: string;
   expectedMcpUrl?: string;
   committer?: LocalJobCommitter;

@@ -32,7 +32,7 @@ import {
   assertPathAllowed,
   DirectoryNotAllowedError,
 } from "../server/security.js";
-import { getPrimaryRepoResult, type ExecutionResultV2 } from '@closedloop-ai/loops-api/execution-result';
+import { getPrimaryRepoResult } from '@closedloop-ai/loops-api/execution-result';
 
 export interface LoopFinalizerDeps {
   jobStore: JobStore;
@@ -250,19 +250,34 @@ function buildCompletedEventResult(
   };
 
   if (command === "EXECUTE" && artifacts.executionResult) {
-    const execResult = artifacts.executionResult as Record<string, unknown>;
-    if (execResult.schemaVersion === 2) {
-      // V2 path
-      const v2 = execResult as unknown as ExecutionResultV2;
-      const primaryFullName = v2.results[0]?.fullName ?? "";
-      const primaryResult = getPrimaryRepoResult(v2.results, primaryFullName);
+    const primaryFullName = job.primaryRepoFullName ?? "";
+    // FEA-683: legacy V1-on-disk recovery — `parseExecutionResultFile`
+    // normalizes V1 snake_case to a length-1 RepoExecutionResult[]; the
+    // fullName argument seeds the V1 entry. V2 files carry their own
+    // fullName and ignore this argument.
+    const parsed = parseExecutionResultFile(
+      artifacts.executionResult,
+      primaryFullName || "local/primary",
+    );
+    if (!parsed.ok) {
+      gatewayLog.warn(
+        "execution-result-parse-failed",
+        `loopId=${job.loopId} error=${parsed.error}`,
+      );
+      result.has_changes = false;
+    } else {
+      const lookupName = primaryFullName || parsed.results[0]?.fullName || "";
+      const primaryResult = getPrimaryRepoResult(parsed.results, lookupName);
 
-      result.repoResults = v2.results;
+      result.repoResults = parsed.results;
 
       if (primaryResult === null) {
-        gatewayLog.warn("primary-repo-not-found-in-results", `loopId=${job.loopId} primaryFullName=${primaryFullName}`);
+        gatewayLog.warn(
+          "primary-repo-not-found-in-results",
+          `loopId=${job.loopId} primaryFullName=${lookupName}`,
+        );
         result.has_changes = false;
-      } else if (primaryResult.status === 'success') {
+      } else if (primaryResult.status === "success") {
         result.prUrl = primaryResult.prUrl;
         result.prNumber = primaryResult.prNumber;
         result.branchName = primaryResult.branchName;
@@ -270,14 +285,6 @@ function buildCompletedEventResult(
       } else {
         result.has_changes = false;
       }
-    } else {
-      // V1 path — preserve existing snake_case reads.
-      // TODO(FEA-683): remove V1 execution-result.json fallback once all
-      // in-flight jobs drain and no pre-PLN-378 desktop builds remain.
-      result.prUrl = execResult.pr_url;
-      result.prNumber = execResult.pr_number;
-      result.branchName = execResult.branch_name;
-      result.has_changes = execResult.has_changes ?? false;
     }
   }
 
@@ -956,6 +963,7 @@ export async function finalizeLoopFromRuntime(
       expectedMcpUrl: resolvedJob.expectedMcpUrl,
       jobStore,
       source: reason === "live-exit" ? "live-exit" : "boot-recovery",
+      primaryFullName: resolvedJob.primaryRepoFullName ?? "",
     });
     if (
       executeFinalization.status === "error" &&

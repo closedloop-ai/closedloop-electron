@@ -423,7 +423,7 @@ test("EXECUTE: malformed execution-result.json falls back to no-changes complete
 // Test 5: execution result upload keeps base_ref plus additive base_branch
 // ---------------------------------------------------------------------------
 
-test("EXECUTE: uploaded execution result contains base_ref and additive base_branch", async () => {
+test("EXECUTE: uploaded execution result is V2 envelope with baseBranch on success entry", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "contract-baseref-"));
   tempPathsToClean.push(tmpDir);
 
@@ -446,11 +446,14 @@ test("EXECUTE: uploaded execution result contains base_ref and additive base_bra
   await fs.mkdir(fakeBin, { recursive: true });
 
   // fake claude for attemptLlmCommit: writes execution-result.json relative to cwd
+  // The LLM scratch file is the camelCase format documented in the prompt;
+  // the harness re-emits it as a V2 envelope to claudeWorkDir.
+  const repoFullName = `baseref/${path.basename(repoPath)}`;
   const executionResultContent = JSON.stringify({
-    pr_url: "https://github.com/org/repo/pull/99",
-    pr_number: 99,
-    has_changes: true,
-    branch_name: "symphony/baseref-test",
+    prUrl: `https://github.com/${repoFullName}/pull/99`,
+    prNumber: 99,
+    branchName: "symphony/baseref-test",
+    commitSha: "deadbeef",
   });
   const claudeScript = [
     "#!/bin/sh",
@@ -507,7 +510,7 @@ test("EXECUTE: uploaded execution result contains base_ref and additive base_bra
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
-        repo: { fullName: `baseref/${path.basename(repoPath)}`, branch: "main" },
+        repo: { fullName: repoFullName, branch: "main" },
       }),
     },
   );
@@ -516,20 +519,22 @@ test("EXECUTE: uploaded execution result contains base_ref and additive base_bra
 
   const uploadReq = await mock.waitForRequest("upload-artifacts");
   const uploadBody = JSON.parse(uploadReq.body) as {
-    artifacts: { executionResult?: Record<string, unknown> };
+    artifacts: {
+      executionResult?: {
+        schemaVersion?: number;
+        results?: Array<{ status: string; baseBranch?: string }>;
+      };
+    };
   };
 
   const execResult = uploadBody.artifacts.executionResult;
   assert.ok(execResult, "executionResult should be present in upload");
+  assert.equal(execResult.schemaVersion, 2, "executionResult should be V2");
+  assert.equal(execResult.results?.[0]?.status, "success");
   assert.equal(
-    execResult.base_ref,
+    execResult.results?.[0]?.baseBranch,
     "main",
-    "base_ref should be set to the target branch",
-  );
-  assert.equal(
-    execResult.base_branch,
-    "main",
-    "base_branch should remain as an additive compatibility field",
+    "baseBranch should be set to the target branch on the primary success entry",
   );
 });
 

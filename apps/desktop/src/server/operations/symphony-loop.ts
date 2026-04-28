@@ -2360,6 +2360,12 @@ interface ExecuteFinalizationParams {
   expectedMcpUrl?: string;
   jobStore?: JobStore;
   source: ExecuteFinalizationSource;
+  /**
+   * Primary repo `owner/name` for the V2 envelope's `fullName` field.
+   * Empty string when caller has none (rare boot-recovery path for jobs
+   * persisted before the field existed).
+   */
+  primaryFullName: string;
 }
 
 function sanitizeExecuteFinalizationReason(
@@ -2404,22 +2410,12 @@ function getExecuteFinalizationSandboxBlockReason(
   return undefined;
 }
 
-function buildPersistedExecutionResultArtifact(params: {
-  hasChanges: boolean;
-  prUrl: string | null;
-  prNumber: number | null;
-  branchName: string;
-  baseBranch: string;
-  commitSha: string | null;
-}): Record<string, unknown> {
+function buildExecutionResultV2(
+  results: RepoExecutionResult[],
+): ExecutionResultV2 {
   return {
-    has_changes: params.hasChanges,
-    pr_url: params.prUrl ?? "",
-    pr_number: params.prNumber ?? 0,
-    branch_name: params.branchName,
-    base_ref: params.baseBranch,
-    base_branch: params.baseBranch,
-    commit_sha: params.commitSha,
+    schemaVersion: 2,
+    results,
   };
 }
 
@@ -2672,17 +2668,21 @@ export async function runExecuteFinalization(
   );
 
   if (llmResult) {
-    const executionResult = buildPersistedExecutionResultArtifact({
-      hasChanges: true,
-      prUrl: llmResult.prUrl,
-      prNumber: llmResult.prNumber,
-      branchName: llmResult.branchName,
-      baseBranch: params.baseBranch,
-      commitSha: llmResult.commitSha,
-    });
+    const executionResult = buildExecutionResultV2([
+      {
+        status: "success",
+        fullName: params.primaryFullName,
+        prUrl: llmResult.prUrl,
+        prNumber: llmResult.prNumber,
+        branchName: llmResult.branchName,
+        baseBranch: params.baseBranch,
+        hasChanges: true,
+        commitSha: llmResult.commitSha,
+      },
+    ]);
     const persisted = persistExecutionResultArtifact(
       params.claudeWorkDir,
-      executionResult,
+      executionResult as unknown as Record<string, unknown>,
     );
     return completeExecuteFinalization(
       params.jobStore,
@@ -2757,17 +2757,21 @@ export async function runExecuteFinalization(
   );
 
   if (gitResult.status === "success") {
-    const executionResult = buildPersistedExecutionResultArtifact({
-      hasChanges: true,
-      prUrl: gitResult.prUrl,
-      prNumber: gitResult.prNumber,
-      branchName: gitResult.branchName,
-      baseBranch: params.baseBranch,
-      commitSha: gitResult.commitSha,
-    });
+    const executionResult = buildExecutionResultV2([
+      {
+        status: "success",
+        fullName: params.primaryFullName,
+        prUrl: gitResult.prUrl,
+        prNumber: gitResult.prNumber,
+        branchName: gitResult.branchName,
+        baseBranch: params.baseBranch,
+        hasChanges: true,
+        commitSha: gitResult.commitSha,
+      },
+    ]);
     const persisted = persistExecutionResultArtifact(
       params.claudeWorkDir,
-      executionResult,
+      executionResult as unknown as Record<string, unknown>,
     );
     return completeExecuteFinalization(
       params.jobStore,
@@ -2815,17 +2819,16 @@ export async function runExecuteFinalization(
         preArtifacts,
       );
     }
-    const executionResult = buildPersistedExecutionResultArtifact({
-      hasChanges: false,
-      prUrl: null,
-      prNumber: null,
-      branchName,
-      baseBranch: params.baseBranch,
-      commitSha,
-    });
+    const executionResult = buildExecutionResultV2([
+      {
+        status: "skipped",
+        fullName: params.primaryFullName,
+        reason: "no_changes",
+      },
+    ]);
     const persisted = persistExecutionResultArtifact(
       params.claudeWorkDir,
-      executionResult,
+      executionResult as unknown as Record<string, unknown>,
     );
     return completeExecuteFinalization(
       params.jobStore,
@@ -2916,6 +2919,7 @@ export async function finalizeMultiRepoExecute(
         // overwrite the primary's finalization metadata in the job store.
         jobStore: undefined,
         source: "live-exit",
+        primaryFullName: entry.fullName,
       });
       results.push(buildPrimaryRepoResult(entry.fullName, entry.baseBranch, finalization));
     } catch (err) {
@@ -3540,6 +3544,7 @@ export async function handleProcessCompletion(
         expectedMcpUrl,
         jobStore,
         source: "live-exit",
+        primaryFullName: body.repo?.fullName ?? "",
       });
 
       // Cancellation gate: skip finalization upload/event work if cancellation won
@@ -3611,10 +3616,7 @@ export async function handleProcessCompletion(
         });
 
         const primaryResult = buildPrimaryRepoResult(primaryFullName, baseBranch, executeFinalization);
-        const v2Envelope: ExecutionResultV2 = {
-          schemaVersion: 2,
-          results: [primaryResult, ...additionalResults],
-        };
+        const v2Envelope = buildExecutionResultV2([primaryResult, ...additionalResults]);
         persistExecutionResultArtifact(claudeWorkDir, v2Envelope as unknown as Record<string, unknown>);
       }
 
@@ -5382,6 +5384,8 @@ async function handleLoopRequest(
         ...(operationId ? { operationId } : {}),
         artifactSlug: body.artifactSlug ?? existing?.artifactSlug,
         baseBranch: body.repo?.branch ?? existing?.baseBranch ?? "main",
+        primaryRepoFullName:
+          body.repo?.fullName ?? existing?.primaryRepoFullName,
         webAppOrigin: webAppOrigin || existing?.webAppOrigin,
         expectedMcpUrl: expectedMcpUrl ?? existing?.expectedMcpUrl,
         committer: body.committer ?? existing?.committer,
