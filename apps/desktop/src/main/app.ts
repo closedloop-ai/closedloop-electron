@@ -108,6 +108,7 @@ import {
   type OnboardingHandoffFailureReason,
   type PendingOnboardingHandoff,
 } from "./onboarding-handoff.js";
+import { isSecurityUpgradeProvisioned } from "./security-upgrade-result.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -921,7 +922,6 @@ export class DesktopApplication {
     }
 
     const run = this.managedOnboardingRuns.begin();
-    const priorKey = this.apiKeyStore.getApiKeyRecord();
     await this.runManagedOnboardingProvisioning(
       {
         onboardingAttemptId: payload.onboardingAttemptId,
@@ -941,10 +941,7 @@ export class DesktopApplication {
     }
 
     const currentKey = this.apiKeyStore.getApiKeyRecord();
-    if (
-      currentKey?.provenance === "DESKTOP_MANAGED" &&
-      currentKey.apiKey !== priorKey?.apiKey
-    ) {
+    if (isSecurityUpgradeProvisioned(currentKey)) {
       return { ok: true };
     }
 
