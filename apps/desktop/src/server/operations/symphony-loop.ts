@@ -3592,8 +3592,8 @@ export async function handleProcessCompletion(
       // the primary entry from runExecuteFinalization (which already
       // committed/pushed/created the PR for the primary). Including the
       // primary in finalizeMultiRepoExecute would re-check `git status` on an
-      // already-clean worktree and overwrite the v1 artifact's PR info with
-      // a `status: 'skipped'` entry.
+      // already-clean worktree and overwrite the primary's PR info with a
+      // `status: 'skipped'` entry.
       if (additionalWorktreeDirs.length > 0 && worktreeDir) {
         const primaryFullName = body.repo?.fullName ?? "";
         const additionalEntries: Array<{ fullName: string; worktreeDir: string; baseBranch: string }> =

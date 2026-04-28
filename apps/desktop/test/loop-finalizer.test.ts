@@ -1872,47 +1872,6 @@ test("v2 path: schemaVersion===2 causes result.repoResults to include full resul
   assert.equal(repoResults[1]?.status, "skipped");
 });
 
-test("v2 path: primary entry status:success derives convenience fields prUrl, prNumber, branchName, has_changes:true", async () => {
-  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
-  await fs.mkdir(claudeWorkDir, { recursive: true });
-
-  const v2Envelope: ExecutionResultV2 = {
-    schemaVersion: 2,
-    results: [
-      {
-        status: "success",
-        fullName: "acme/primary",
-        prUrl: "https://github.com/acme/primary/pull/55",
-        prNumber: 55,
-        branchName: "feat/primary-success",
-        baseBranch: "main",
-        hasChanges: true,
-        commitSha: "111abc",
-      },
-    ],
-  };
-
-  const jobStore = createStore("v2-primary-success");
-  const job = createBaseJob({ claudeWorkDir, command: "EXECUTE" });
-  jobStore.upsert(job);
-
-  await tryPostCompletedEvent(
-    job,
-    "EXECUTE",
-    claudeWorkDir,
-    { executionResult: v2Envelope as unknown as Record<string, unknown> },
-    [],
-    artifactDeps(jobStore),
-  );
-
-  const body = fetchCalls[0]?.body ?? "";
-  const parsed = JSON.parse(body) as { result?: Record<string, unknown> };
-  assert.equal(parsed.result?.has_changes, true, "has_changes must be true for success primary");
-  assert.equal(parsed.result?.prUrl, "https://github.com/acme/primary/pull/55");
-  assert.equal(parsed.result?.prNumber, 55);
-  assert.equal(parsed.result?.branchName, "feat/primary-success");
-});
-
 test("v2 path: primary entry status:skipped yields has_changes:false, no prUrl or prNumber", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });

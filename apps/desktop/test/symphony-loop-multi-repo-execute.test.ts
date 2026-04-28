@@ -7,12 +7,12 @@
  *   (c) --add-dir args in spawned process (check spawn-args.txt)
  *   (d) Invalid/duplicate additional repo returns HTTP 400
  *
- * T-6.3: Failure-cleanup test
- *   (b) After failed EXECUTE, additional worktrees are removed
- *
  * Per-repo finalization (T-6.2) is covered by direct unit tests on
- * runExecuteFinalization elsewhere in the suite. Selective cleanup (T-6.3(a))
- * is covered by direct unit tests in boot-recovery.test.ts.
+ * runExecuteFinalization elsewhere in the suite. Failure-cleanup of
+ * additional worktrees (formerly T-6.3) is covered by:
+ *   - the equivalent PLAN integration test in symphony-loop-multi-repo-worktree.test.ts
+ *     (cleanup is unified across PLAN and EXECUTE), and
+ *   - direct unit tests on cleanupAdditionalWorktrees in boot-recovery.test.ts.
  */
 
 import assert from "node:assert/strict";
@@ -69,7 +69,6 @@ function makeRecordingWorktreeProvider(): {
     branchName: string;
     baseBranch: string;
   }>;
-  removeCalls: Array<{ worktreeDir: string; repoPath: string; loopId?: string }>;
 } {
   const ensureWorktreeCalls: Array<{
     repoPath: string;
@@ -77,7 +76,6 @@ function makeRecordingWorktreeProvider(): {
     branchName: string;
     baseBranch: string;
   }> = [];
-  const removeCalls: Array<{ worktreeDir: string; repoPath: string; loopId?: string }> = [];
 
   const provider: WorktreeProvider = {
     async ensureWorktree(repoPath, worktreeDir, branchName, baseBranch) {
@@ -94,8 +92,7 @@ function makeRecordingWorktreeProvider(): {
     findWorktreeForBranch() {
       return null;
     },
-    async removeWorktree(worktreeDir, repoPath, loopId) {
-      removeCalls.push({ worktreeDir, repoPath, loopId });
+    async removeWorktree(worktreeDir) {
       await fs.rm(worktreeDir, { recursive: true, force: true });
     },
     getCurrentBranch() {
@@ -104,7 +101,7 @@ function makeRecordingWorktreeProvider(): {
     branchExists: async () => true,
   };
 
-  return { provider, ensureWorktreeCalls, removeCalls };
+  return { provider, ensureWorktreeCalls };
 }
 
 // ---------------------------------------------------------------------------
@@ -464,98 +461,3 @@ describe("T-6.1(d): Invalid or duplicate additionalRepos returns HTTP 400", () =
   });
 });
 
-// ---------------------------------------------------------------------------
-// T-6.3(b): Failed EXECUTE → all additional worktrees removed
-// ---------------------------------------------------------------------------
-
-describe("T-6.3: Selective additional worktree cleanup", () => {
-  it("T-6.3(b): failed EXECUTE (run-loop.sh exits 1) removes all additional worktrees", async () => {
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-execute-fail-cleanup-"));
-    tempPathsToClean.push(tmpDir);
-
-    const primaryRepo = path.join(tmpDir, "primary-repo");
-    await fs.mkdir(primaryRepo, { recursive: true });
-
-    const additionalRepo = path.join(tmpDir, "additional-repo");
-    await fs.mkdir(additionalRepo, { recursive: true });
-
-    const worktreeParent = path.join(tmpDir, "worktrees");
-    await fs.mkdir(worktreeParent, { recursive: true });
-
-    process.env.HOME = tmpDir;
-    process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
-    process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
-
-    // run-loop.sh exits 1 to simulate failure
-    await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 1\n", { skipTokens: true });
-
-    const fakeBin = path.join(tmpDir, "fake-bin");
-    await fs.mkdir(fakeBin, { recursive: true });
-    await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-    process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-    setShellPathForTest();
-
-    const { provider, ensureWorktreeCalls, removeCalls } = makeRecordingWorktreeProvider();
-
-    const mock = await startMockApiServer();
-    mockServersToClose.push(mock.server);
-    const server = await createTestGateway(tmpDir, mock.port, provider);
-
-    const loopId = "00000000-0000-0000-0000-000000008030";
-    // EXECUTE requires either a prompt or artifacts
-    const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          loopId,
-          command: "EXECUTE",
-          closedLoopAuthToken: "tok",
-          prompt: "Execute the implementation plan",
-          artifacts: [],
-          repo: {
-            fullName: `execute-fail-test/${path.basename(primaryRepo)}`,
-            branch: "main",
-          },
-          additionalRepos: [
-            { localRepoPath: additionalRepo, branch: "feature-branch" },
-          ],
-        }),
-      },
-    );
-
-    assert.equal(response.status, 200, "EXECUTE should return HTTP 200 (process failure is async)");
-
-    // Wait for the terminal event (error from process failure)
-    const terminalEvent = await waitForTerminalEvent(mock.requests, loopId);
-    assert.equal(
-      terminalEvent.type,
-      "error",
-      `Expected terminal event 'error', got '${terminalEvent.type}'`,
-    );
-
-    // Get the additional worktree dirs that were created
-    const additionalWorktreeDirs = ensureWorktreeCalls
-      .filter((c) => c.repoPath !== primaryRepo)
-      .map((c) => c.worktreeDir);
-
-    assert.equal(
-      additionalWorktreeDirs.length,
-      1,
-      `Expected 1 additional worktree created, got ${additionalWorktreeDirs.length}`,
-    );
-
-    // Poll until removeWorktree is called for the additional worktree
-    const expectedDir = additionalWorktreeDirs[0];
-    const deadline = Date.now() + 5_000;
-    while (Date.now() < deadline && !removeCalls.some((c) => c.worktreeDir === expectedDir)) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 50));
-    }
-
-    assert.ok(
-      removeCalls.some((c) => c.worktreeDir === expectedDir),
-      `Expected removeWorktree called for additional worktree ${expectedDir} after EXECUTE failure`,
-    );
-  });
-});

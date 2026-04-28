@@ -5,7 +5,7 @@
  * 2. validateCommandInputs enforces per-command input requirements
  * 3. validateResultBundle logs warnings for missing required artifacts
  * 4. malformed EXECUTE results fall back to an authoritative no-changes result
- * 5. execution result uploads keep base_ref plus additive base_branch
+ * 5. uploaded execution result is a V2 envelope with baseBranch on the primary entry
  * 6. sessionId is included in PROCESS_FAILED error events
  */
 
@@ -420,7 +420,7 @@ test("EXECUTE: malformed execution-result.json falls back to no-changes complete
 });
 
 // ---------------------------------------------------------------------------
-// Test 5: execution result upload keeps base_ref plus additive base_branch
+// Test 5: uploaded execution result is V2 envelope with baseBranch on the primary entry
 // ---------------------------------------------------------------------------
 
 test("EXECUTE: uploaded execution result is V2 envelope with baseBranch on success entry", async () => {
