@@ -813,6 +813,19 @@ export interface ResolvedAdditionalRepo {
   readonly branch: string;
 }
 
+/**
+ * Per-additional-repo worktree entry tracked in-process and persisted on
+ * `LocalJob`. `fullName` and `baseBranch` are required by recovery to run
+ * `finalizeMultiRepoExecute` after a desktop restart; older persisted jobs
+ * may lack them.
+ */
+export interface AdditionalWorktreeEntry {
+  dir: string;
+  repoPath: string;
+  fullName?: string;
+  baseBranch?: string;
+}
+
 /** Typed error thrown when an additional repo entry fails validation. */
 export class AdditionalRepoError extends Error {
   constructor(
@@ -829,7 +842,7 @@ const ADDITIONAL_REPOS_MAX = 5;
 
 /** Remove only additional-repo worktrees that are clean and safe to discard. */
 export async function cleanupAdditionalWorktrees(
-  entries: readonly { dir: string; repoPath: string }[],
+  entries: readonly AdditionalWorktreeEntry[],
   loopId: string,
   wt: WorktreeProvider,
 ): Promise<void> {
@@ -854,7 +867,7 @@ export async function cleanupAdditionalWorktrees(
  * teardown semantics used on the live path.
  */
 export async function cleanupAdditionalWorktreesWithDefaultProvider(
-  entries: readonly { dir: string; repoPath: string }[],
+  entries: readonly AdditionalWorktreeEntry[],
   loopId: string,
 ): Promise<void> {
   await cleanupAdditionalWorktrees(entries, loopId, defaultWorktreeProvider);
@@ -2947,6 +2960,136 @@ export async function finalizeMultiRepoExecute(
   return results;
 }
 
+/**
+ * Outcome of `finalizeAdditionalReposAndPersist`.
+ *
+ * - `skipped:no-additionals`: caller passed an empty entries array.
+ * - `skipped:already-finalized`: existing on-disk V2 already contains the
+ *   multi-repo envelope (idempotent re-entry from recovery).
+ * - `skipped:incomplete-metadata`: an entry persisted by an older build
+ *   lacks the `fullName` or `baseBranch` required to finalize. Recovery
+ *   logs a warning and falls through to worktree cleanup only.
+ * - `ok`: finalization ran; combined V2 envelope was persisted.
+ */
+export type FinalizeAdditionalReposOutcome =
+  | { status: "skipped:no-additionals" }
+  | { status: "skipped:already-finalized" }
+  | { status: "skipped:incomplete-metadata"; missingRepoPaths: string[] }
+  | { status: "ok"; results: RepoExecutionResult[] };
+
+/**
+ * Run `finalizeMultiRepoExecute` for the additional-repo worktrees and
+ * persist the combined V2 envelope (primary + additional results) to
+ * `execution-result.json`. Used by both the live-exit path in
+ * `handleProcessCompletion` and by recovery in `finalizeLoopFromRuntime`,
+ * so the same git push / PR creation runs after a desktop restart.
+ *
+ * Idempotent: if the on-disk V2 already carries multiple results, returns
+ * without doing further work.
+ */
+export async function finalizeAdditionalReposAndPersist(args: {
+  additionalEntries: readonly AdditionalWorktreeEntry[];
+  primaryFullName: string;
+  primaryBaseBranch: string;
+  /**
+   * Fresh primary finalization result from the live path or from a recovery
+   * call that just ran `runExecuteFinalization`. When `null`, the helper
+   * falls back to the primary entry already on disk in `execution-result.json`
+   * (recovery path where primary was finalized in a prior attempt).
+   */
+  executeFinalization: ExecuteFinalizationResult | null;
+  claudeWorkDir: string;
+  loopId: string;
+  apiBaseUrl: string;
+  token: string;
+  webAppOrigin: string;
+  getAllowedDirectories: () => string[];
+  artifactSlug?: string;
+  expectedMcpUrl?: string;
+  committer?: LoopCommitter;
+}): Promise<FinalizeAdditionalReposOutcome> {
+  if (args.additionalEntries.length === 0) {
+    return { status: "skipped:no-additionals" };
+  }
+
+  // Idempotency guard: a prior run (live-exit pre-crash, or earlier recovery
+  // attempt) may have already persisted the multi-repo envelope.
+  const existing = readJsonFileSync(
+    path.join(args.claudeWorkDir, LoopArtifactFile.ExecutionResult),
+  );
+  const parsedExisting = parseExecutionResultFile(
+    existing,
+    V1_PRIMARY_FULL_NAME_PLACEHOLDER,
+  );
+  if (parsedExisting.ok && parsedExisting.results.length > 1) {
+    return { status: "skipped:already-finalized" };
+  }
+
+  const finalizable: Array<{
+    fullName: string;
+    worktreeDir: string;
+    baseBranch: string;
+  }> = [];
+  const missingRepoPaths: string[] = [];
+  for (const entry of args.additionalEntries) {
+    const fullName =
+      entry.fullName ?? resolveRepoFullName(entry.repoPath) ?? undefined;
+    const baseBranch = entry.baseBranch;
+    if (!fullName || !baseBranch) {
+      missingRepoPaths.push(entry.repoPath);
+      continue;
+    }
+    finalizable.push({
+      fullName,
+      worktreeDir: entry.dir,
+      baseBranch,
+    });
+  }
+
+  if (missingRepoPaths.length > 0) {
+    gatewayLog.warn(
+      "loop-harness",
+      `Skipping additional-repo recovery for loopId=${args.loopId}: ` +
+        `missing fullName/baseBranch metadata for repos [${missingRepoPaths.join(", ")}]`,
+    );
+    return { status: "skipped:incomplete-metadata", missingRepoPaths };
+  }
+
+  const additionalResults = await finalizeMultiRepoExecute(finalizable, {
+    loopId: args.loopId,
+    apiBaseUrl: args.apiBaseUrl,
+    token: args.token,
+    webAppOrigin: args.webAppOrigin,
+    getAllowedDirectories: args.getAllowedDirectories,
+    artifactSlug: args.artifactSlug,
+    expectedMcpUrl: args.expectedMcpUrl,
+    committer: args.committer,
+  });
+
+  // Prefer the primary entry already on disk so we preserve any prUrl /
+  // branchName / commitSha values previously written. Fall back to building
+  // one from `executeFinalization` (live path or fresh recovery).
+  const existingPrimary =
+    parsedExisting.ok && parsedExisting.results.length >= 1
+      ? parsedExisting.results[0]
+      : null;
+  const primaryResult: RepoExecutionResult =
+    existingPrimary ??
+    buildPrimaryRepoResult(
+      args.primaryFullName,
+      args.primaryBaseBranch,
+      args.executeFinalization,
+    );
+
+  const v2Envelope = buildExecutionResultV2([
+    primaryResult,
+    ...additionalResults,
+  ]);
+  persistExecutionResultArtifact(args.claudeWorkDir, v2Envelope);
+
+  return { status: "ok", results: additionalResults };
+}
+
 function buildPrimaryRepoResult(
   fullName: string,
   baseBranch: string,
@@ -3237,7 +3380,7 @@ export async function handleProcessCompletion(
   operationId?: string,
   wt: WorktreeProvider = defaultWorktreeProvider,
   loopTokenStore?: LoopTokenStore,
-  additionalWorktreeDirs: { dir: string; repoPath: string }[] = [],
+  additionalWorktreeDirs: AdditionalWorktreeEntry[] = [],
   exitSignal?: string,
   spawnStartedAt?: number,
   spawnMeta?: {
@@ -3590,23 +3733,21 @@ export async function handleProcessCompletion(
       }
 
       // Additional repos are finalized after the primary so the primary PR info
-      // is not overwritten by a second clean-worktree check.
+      // is not overwritten by a second clean-worktree check. Recovery calls the
+      // same helper from `finalizeLoopFromRuntime` so this work is replayed if
+      // the desktop crashes after primary finalization but before this block
+      // persists the combined V2 envelope.
       if (additionalWorktreeDirs.length > 0 && worktreeDir) {
         const primaryFullName = resolveLoopPrimaryFullName(
           body,
           expandedRepoPath,
         );
-        const additionalEntries: Array<{ fullName: string; worktreeDir: string; baseBranch: string }> =
-          additionalWorktreeDirs.map((entry, i) => ({
-            fullName:
-              body.additionalRepos?.[i]?.fullName ??
-              resolveRepoFullName(entry.repoPath) ??
-              "",
-            worktreeDir: entry.dir,
-            baseBranch: body.additionalRepos?.[i]?.branch ?? "main",
-          }));
-
-        const additionalResults = await finalizeMultiRepoExecute(additionalEntries, {
+        await finalizeAdditionalReposAndPersist({
+          additionalEntries: additionalWorktreeDirs,
+          primaryFullName,
+          primaryBaseBranch: baseBranch,
+          executeFinalization,
+          claudeWorkDir,
           loopId,
           apiBaseUrl,
           token: body.closedLoopAuthToken,
@@ -3616,10 +3757,6 @@ export async function handleProcessCompletion(
           expectedMcpUrl,
           committer,
         });
-
-        const primaryResult = buildPrimaryRepoResult(primaryFullName, baseBranch, executeFinalization);
-        const v2Envelope = buildExecutionResultV2([primaryResult, ...additionalResults]);
-        persistExecutionResultArtifact(claudeWorkDir, v2Envelope);
       }
 
       artifacts = readExecuteOutputs(claudeWorkDir);
@@ -3930,7 +4067,7 @@ async function provisionAdditionalRepoWorktrees(args: {
   worktreeKey: string;
   worktreeDir: string;
   primaryRepoPath: string;
-  additionalWorktreeDirs: Array<{ dir: string; repoPath: string }>;
+  additionalWorktreeDirs: AdditionalWorktreeEntry[];
   allowedDirs: string[];
   body: LoopRequestBody;
   apiBaseUrl: string;
@@ -3957,7 +4094,9 @@ async function provisionAdditionalRepoWorktrees(args: {
     ownsPrimaryWorktree,
   } = args;
 
-  for (const addRepo of resolvedAdditionalRepos) {
+  for (let addIdx = 0; addIdx < resolvedAdditionalRepos.length; addIdx++) {
+    const addRepo = resolvedAdditionalRepos[addIdx];
+    const requestEntry = body.additionalRepos?.[addIdx];
     const addRepoSlug = slugifyLoopId(addRepo.branch);
     const addRepoKey = `${worktreeKey}-${addRepoSlug}-${additionalRepoDisambiguator(addRepo.repoPath)}`;
     const addWorktreeDir = resolveLoopWorktreeDir(addRepo.repoPath, addRepoKey);
@@ -4009,7 +4148,15 @@ async function provisionAdditionalRepoWorktrees(args: {
       return false;
     }
 
-    additionalWorktreeDirs.push({ dir: addWorktreeDir, repoPath: addRepo.repoPath });
+    additionalWorktreeDirs.push({
+      dir: addWorktreeDir,
+      repoPath: addRepo.repoPath,
+      fullName:
+        requestEntry?.fullName ??
+        resolveRepoFullName(addRepo.repoPath) ??
+        undefined,
+      baseBranch: requestEntry?.branch ?? addRepo.branch,
+    });
     loopLog(
       body.loopId,
       `Created additional repo worktree: ${addWorktreeDir} (branch: ${addBranchName} based on ${addRepo.branch})`,
@@ -4190,7 +4337,7 @@ async function handleLoopRequest(
 
   let spawnedSuccessfully = false;
   let expandedRepoPath: string | null = null;
-  const additionalWorktreeDirs: { dir: string; repoPath: string }[] = [];
+  const additionalWorktreeDirs: AdditionalWorktreeEntry[] = [];
   try {
     const allowedDirs = getAllowedDirectories();
 

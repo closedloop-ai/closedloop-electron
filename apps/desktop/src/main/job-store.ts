@@ -68,12 +68,22 @@ export type LocalJob = {
   worktreeDir?: string;
   claudeWorkDir?: string;
   /**
-   * Additional-repo worktrees created for multi-repo PLAN runs.
-   * Persisted so boot recovery / finalizer can remove them after an Electron
-   * restart; in-process spawn logic also tracks these locally for immediate
-   * cleanup on live exits.
+   * Additional-repo worktrees created for multi-repo PLAN/EXECUTE runs.
+   * Persisted so boot recovery / finalizer can finalize their git work and
+   * remove the worktrees after an Electron restart; in-process spawn logic
+   * also tracks these locally for immediate finalization + cleanup on live
+   * exits.
+   *
+   * `fullName` and `baseBranch` are optional for backward compatibility with
+   * jobs persisted by older builds. When absent, recovery skips multi-repo
+   * finalization (logs a warning) and falls through to worktree cleanup only.
    */
-  additionalWorktreeDirs?: { dir: string; repoPath: string }[];
+  additionalWorktreeDirs?: {
+    dir: string;
+    repoPath: string;
+    fullName?: string;
+    baseBranch?: string;
+  }[];
   logPath?: string;
   jsonlPath?: string;
   statePath?: string;

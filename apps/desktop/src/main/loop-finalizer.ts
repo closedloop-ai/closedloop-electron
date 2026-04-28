@@ -11,6 +11,8 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { readEffectiveStatusFromState } from "../server/operations/symphony-job-snapshot.js";
 import {
+  type ExecuteFinalizationResult,
+  finalizeAdditionalReposAndPersist,
   getResolvedGitPath,
   runExecuteFinalization,
   V1_PRIMARY_FULL_NAME_PLACEHOLDER,
@@ -966,12 +968,13 @@ export async function finalizeLoopFromRuntime(
     resolvedJob = jobStore.getByLoopId(resolvedJob.loopId) ?? resolvedJob;
   }
 
+  let executeFinalization: ExecuteFinalizationResult | null = null;
   if (
     command === "EXECUTE" &&
     isSuccessStatus &&
     !hasTerminalExecuteFinalization(resolvedJob.executeFinalizationStatus)
   ) {
-    const executeFinalization = await runExecuteFinalization({
+    executeFinalization = await runExecuteFinalization({
       worktreeDir: resolvedJob.worktreeDir,
       claudeWorkDir,
       loopId: resolvedJob.loopId,
@@ -992,6 +995,60 @@ export async function finalizeLoopFromRuntime(
       warnings.push("GIT_PUSH_FAILED");
     }
     resolvedJob = jobStore.getByLoopId(resolvedJob.loopId) ?? resolvedJob;
+  }
+
+  // Recovery path: replay multi-repo finalization for any persisted
+  // additional-repo worktrees. The live-exit path runs its own copy of this
+  // helper inside `handleProcessCompletion` (same idempotency check, so a
+  // double invocation here is a no-op). This guards the crash window between
+  // primary push/PR creation and the live block that persists the combined
+  // V2 envelope: without this, side-repo commits/pushes are never replayed
+  // and the cloud receives a primary-only envelope.
+  if (
+    command === "EXECUTE" &&
+    isSuccessStatus &&
+    reason !== "live-exit" &&
+    resolvedJob.additionalWorktreeDirs &&
+    resolvedJob.additionalWorktreeDirs.length > 0
+  ) {
+    try {
+      const outcome = await finalizeAdditionalReposAndPersist({
+        additionalEntries: resolvedJob.additionalWorktreeDirs,
+        primaryFullName: resolvedJob.primaryRepoFullName ?? "",
+        primaryBaseBranch: resolvedJob.baseBranch ?? "main",
+        executeFinalization,
+        claudeWorkDir,
+        loopId: resolvedJob.loopId,
+        apiBaseUrl,
+        token: apiAuthToken,
+        webAppOrigin: resolvedJob.webAppOrigin ?? "",
+        getAllowedDirectories,
+        artifactSlug: resolvedJob.artifactSlug,
+        expectedMcpUrl: resolvedJob.expectedMcpUrl,
+        committer: resolvedJob.committer,
+      });
+      gatewayLog.info(
+        "loop-finalizer",
+        `Additional-repo recovery for loopId=${resolvedJob.loopId}: ${outcome.status}`,
+      );
+      if (
+        outcome.status === "ok" &&
+        outcome.results.some((r) => r.status === "failed")
+      ) {
+        if (!warnings.includes("GIT_PUSH_FAILED")) {
+          warnings.push("GIT_PUSH_FAILED");
+        }
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      gatewayLog.warn(
+        "loop-finalizer",
+        `Additional-repo recovery threw for loopId=${resolvedJob.loopId}: ${message}`,
+      );
+      if (!warnings.includes("GIT_PUSH_FAILED")) {
+        warnings.push("GIT_PUSH_FAILED");
+      }
+    }
   }
 
   let remoteError: string | undefined;
