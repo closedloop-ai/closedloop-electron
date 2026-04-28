@@ -43,6 +43,7 @@ import {
 // Replicate waitForExit() from codex.ts lines 2080-2085
 // ---------------------------------------------------------------------------
 
+// drift-check: matches apps/desktop/src/server/operations/codex.ts:1985
 function waitForExit(child: EventEmitter): Promise<number> {
   return new Promise((resolve, reject) => {
     child.once("error", reject);
@@ -54,6 +55,7 @@ function waitForExit(child: EventEmitter): Promise<number> {
 // Replicate writeEvent() from codex.ts lines 2127-2129
 // ---------------------------------------------------------------------------
 
+// drift-check: matches apps/desktop/src/server/operations/codex.ts:2030
 function writeEvent(
   response: ReturnType<typeof buildMockResponse>,
   payload: Record<string, unknown>
@@ -159,6 +161,7 @@ test(
 test(
   "(b) codex.ts runCommand(): ENOENT rejects the promise, caller try/catch returns { available: false }",
   async () => {
+    // drift-check: matches apps/desktop/src/server/operations/codex.ts:1992
     // Replicate the runCommand() Promise wrapper (codex.ts lines 2087-2116).
     function runCommandMock(
       mockChild: ReturnType<typeof buildMockChildProcess>
