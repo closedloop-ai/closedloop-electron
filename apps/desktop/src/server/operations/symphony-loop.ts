@@ -1,13 +1,13 @@
+import type { ExecutionResultV2, RepoExecutionResult } from "@closedloop-ai/loops-api/execution-result";
 import { execFile, execFileSync, execSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { promisify } from "node:util";
 import {
   closeSync,
   existsSync,
   mkdirSync,
   openSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -16,6 +16,7 @@ import {
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import {
   readLogTail,
   readStderrTail,
@@ -45,6 +46,11 @@ import {
   parseTokenUsage,
   type ModelTokenUsage,
 } from "../../main/token-usage.js";
+import {
+  IMPORTED_PLAN_MARKDOWN_FILE,
+  isRawPlanArtifact,
+  toUploadedPlanArtifact,
+} from "../../shared/plan-artifact-utils.js";
 import type {
   OperationDispatcher,
   OperationRequestContext,
@@ -52,11 +58,6 @@ import type {
 import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { getShellEnv, getShellPath, resolveBinarySync } from "../shell-path.js";
-import {
-  IMPORTED_PLAN_MARKDOWN_FILE,
-  isRawPlanArtifact,
-  toUploadedPlanArtifact,
-} from "../../shared/plan-artifact-utils.js";
 import { withMcpTools } from "./chat-tools.js";
 import { findWorktreeForBranch as findWorktreeForBranchImpl } from "./git-helpers.js";
 import { startOutputTailer } from "./output-tailer.js";
@@ -65,9 +66,8 @@ import {
   findPluginVersions,
   getPluginCacheRoot,
 } from "./plugin-cache.js";
-import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import { addRepo } from "./repos-config-utils.js";
-import type { ExecutionResultV2, RepoExecutionResult } from "@closedloop-ai/loops-api/execution-result";
+import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import {
   CLONE_GIT_TIMEOUT,
   expandHome,
@@ -87,7 +87,7 @@ export {
   readFileTail,
   readLogTail,
   readStderrTail,
-  stripAnsi,
+  stripAnsi
 } from "../../main/diagnostics-helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -248,7 +248,7 @@ import type { ContextPackAttachment as SharedContextPackAttachment } from "@clos
 import type { LoopRequestBody } from "@closedloop-ai/loops-api/desktop-request";
 import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
-import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
+import { getPrimaryRepoResult, parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
 import { json } from "./response-utils.js";
 
 /** Commands that have full spawn/dispatch support in this gateway version. */
@@ -2926,7 +2926,11 @@ export async function finalizeMultiRepoExecute(
       loopError(deps.loopId, "multi-repo-finalization-failed", entry.fullName, String(err));
       await postLoopEventBounded(deps.apiBaseUrl, deps.loopId, deps.token, {
         type: LoopEventType.Error,
-        code: LoopErrorCode.RepoNotFound,
+        // runExecuteFinalization can throw for many reasons (push rejected,
+        // PR creation, sandbox violation, file I/O). RunnerError is the
+        // generic catch-all; RepoNotFound is reserved for actual
+        // repo-resolution failures so cloud-side dispatch stays correct.
+        code: LoopErrorCode.RunnerError,
         message: redactCredentials(sanitizeErrorMessage(err instanceof Error ? err.message : String(err))),
         result: { repo: entry.fullName },
       });
@@ -3830,7 +3834,8 @@ export async function handleProcessCompletion(
           artifacts.executionResult,
           V1_PRIMARY_FULL_NAME_PLACEHOLDER,
         );
-        const primary = parsed.ok ? parsed.results[0] : null;
+        const lookupName = parsed.ok ? parsed.results[0]?.fullName ?? "" : "";
+        const primary = parsed.ok ? getPrimaryRepoResult(parsed.results, lookupName) : null;
         if (primary?.status === "success") {
           result.prUrl = primary.prUrl;
           result.prNumber = primary.prNumber;
@@ -3931,6 +3936,10 @@ async function provisionAdditionalRepoWorktrees(args: {
   context: OperationRequestContext;
   wt: WorktreeProvider;
   freshLabel: string;
+  // True only when the caller created the primary worktree fresh in this
+  // request. EXECUTE/REQUEST_CHANGES that reuse a parent PLAN's worktree
+  // must pass false so failures here do not delete the parent's checkout.
+  ownsPrimaryWorktree: boolean;
 }): Promise<boolean> {
   const {
     resolvedAdditionalRepos,
@@ -3944,6 +3953,7 @@ async function provisionAdditionalRepoWorktrees(args: {
     context,
     wt,
     freshLabel,
+    ownsPrimaryWorktree,
   } = args;
 
   for (const addRepo of resolvedAdditionalRepos) {
@@ -3957,7 +3967,9 @@ async function provisionAdditionalRepoWorktrees(args: {
     } catch (e) {
       if (e instanceof DirectoryNotAllowedError) {
         await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
-        await wt.removeWorktree(worktreeDir, primaryRepoPath, body.loopId).catch(() => {});
+        if (ownsPrimaryWorktree) {
+          await wt.removeWorktree(worktreeDir, primaryRepoPath, body.loopId).catch(() => {});
+        }
         await postLoopEventBounded(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
           type: LoopEventType.Error,
           code: LoopErrorCode.RepoNotAllowed,
@@ -3984,7 +3996,9 @@ async function provisionAdditionalRepoWorktrees(args: {
       loopError(body.loopId, `ensureWorktree failed for additional repo ${addRepo.repoPath}:`, checkoutErr);
       await wt.removeWorktree(addWorktreeDir, addRepo.repoPath, body.loopId).catch(() => {});
       await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
-      await wt.removeWorktree(worktreeDir, primaryRepoPath, body.loopId).catch(() => {});
+      if (ownsPrimaryWorktree) {
+        await wt.removeWorktree(worktreeDir, primaryRepoPath, body.loopId).catch(() => {});
+      }
       await postLoopEventBounded(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
         type: LoopEventType.Error,
         code: LoopErrorCode.BranchCreateFailed,
@@ -4547,14 +4561,17 @@ async function handleLoopRequest(
           context,
           wt,
           freshLabel: "PLAN",
+          ownsPrimaryWorktree: true,
         });
         if (!planAdditionalsOk) return;
       } else {
         // EXECUTE/REQUEST_CHANGES: reuse existing worktree.
         // Try artifact slug first, then parentLoopId fallback, then create new.
+        let reusedPrimaryWorktree = false;
         const existingWorktree = wt.findWorktreeForBranch(repoPath, branchName);
         if (existingWorktree) {
           worktreeDir = existingWorktree;
+          reusedPrimaryWorktree = true;
           loopLog(
             body.loopId,
             `Reusing worktree via artifact slug: ${worktreeDir} (branch: ${branchName})`,
@@ -4568,6 +4585,7 @@ async function handleLoopRequest(
           );
           if (parentWorktree) {
             worktreeDir = parentWorktree;
+            reusedPrimaryWorktree = true;
             loopLog(
               body.loopId,
               `Reusing worktree via parentLoopId fallback: ${worktreeDir} (branch: ${parentBranch})`,
@@ -4584,6 +4602,7 @@ async function handleLoopRequest(
             body.repo?.branch ?? "main",
             body.loopId,
           );
+          reusedPrimaryWorktree = false;
           loopLog(
             body.loopId,
             `Created new worktree: ${worktreeDir} (branch: ${branchName})`,
@@ -4605,10 +4624,19 @@ async function handleLoopRequest(
           context,
           wt,
           freshLabel: "EXECUTE",
+          // Only allow primary worktree removal on failure when we created it
+          // fresh in this request. Reused parent PLAN worktrees must not be
+          // destroyed by an additional-repo provisioning failure.
+          ownsPrimaryWorktree: !reusedPrimaryWorktree,
         });
         if (!executeAdditionalsOk) return;
 
-        // Bootstrap additional-repo worktrees sequentially
+        // Bootstrap additional-repo worktrees sequentially.
+        // On failure, clean up only the additional worktrees — the primary
+        // here may be a reused parent PLAN's worktree, and an additional-repo
+        // bootstrap blip (npm install hiccup, transient network) must not
+        // destroy parent state. Only the caller created additional worktrees
+        // in this request, so they are always safe to roll back.
         for (const addEntry of additionalWorktreeDirs) {
           try {
             await runBootstrapIfNeeded(addEntry.dir, body.loopId);
@@ -4620,8 +4648,6 @@ async function handleLoopRequest(
             // Clean up all prior additional worktrees
             await cleanupAdditionalWorktrees(additionalWorktreeDirs.filter(e => e !== addEntry), body.loopId, wt);
             additionalWorktreeDirs.length = 0;
-            // Remove primary worktree
-            try { await wt.removeWorktree(worktreeDir, repoPath, body.loopId); } catch { /* ignore */ }
             await postLoopEventBounded(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
               type: LoopEventType.Error,
               code: LoopErrorCode.BranchCreateFailed,

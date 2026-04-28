@@ -1872,7 +1872,7 @@ test("v2 path: schemaVersion===2 causes result.repoResults to include full resul
   assert.equal(repoResults[1]?.status, "skipped");
 });
 
-test("v2 path: primary entry status:skipped yields has_changes:false, no prUrl or prNumber", async () => {
+test("v2 path: primary entry status:skipped yields no-changes completed fields", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
 
@@ -1903,15 +1903,16 @@ test("v2 path: primary entry status:skipped yields has_changes:false, no prUrl o
   const body = fetchCalls[0]?.body ?? "";
   const parsed = JSON.parse(body) as { result?: Record<string, unknown> };
   assert.equal(parsed.result?.has_changes, false, "has_changes must be false for skipped primary");
-  assert.equal(parsed.result?.prUrl, undefined, "prUrl must not be present for skipped status");
-  assert.equal(parsed.result?.prNumber, undefined, "prNumber must not be present for skipped status");
+  assert.equal(parsed.result?.prUrl, null, "prUrl must normalize to null for skipped status");
+  assert.equal(parsed.result?.prNumber, null, "prNumber must normalize to null for skipped status");
 });
 
 test("v2 path: null from getPrimaryRepoResult (empty results) yields defensive has_changes:false", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
 
-  // v2 envelope with results but no matching primary entry (first entry fullName is empty string)
+  // v2 envelope with an empty results array — getPrimaryRepoResult
+  // returns null, triggering the defensive has_changes:false fallback.
   const v2Envelope = {
     schemaVersion: 2,
     results: [] as RepoExecutionResult[],
@@ -1932,10 +1933,10 @@ test("v2 path: null from getPrimaryRepoResult (empty results) yields defensive h
 
   const body = fetchCalls[0]?.body ?? "";
   const parsed = JSON.parse(body) as { result?: Record<string, unknown> };
-  // Defensive fallback: has_changes must be false, no prUrl or prNumber
+  // Defensive fallback: has_changes must be false, PR fields normalize to null.
   assert.equal(parsed.result?.has_changes, false, "has_changes must default to false when no primary entry found");
-  assert.equal(parsed.result?.prUrl, undefined);
-  assert.equal(parsed.result?.prNumber, undefined);
+  assert.equal(parsed.result?.prUrl, null);
+  assert.equal(parsed.result?.prNumber, null);
 });
 
 test("getPrimaryRepoResult: returns matching entry by fullName", () => {

@@ -1,5 +1,4 @@
 import Store from "electron-store";
-import type { RepoExecutionResult } from '@closedloop-ai/loops-api/execution-result';
 
 export type LocalJobStatus =
   | "QUEUED"
@@ -115,7 +114,6 @@ export type LocalJob = {
   executeFinalizationPostExecutionResultPresent?: boolean;
   executeFinalizationPostPrBodyPresent?: boolean;
   apiBaseUrl?: string;
-  executionResults?: ReadonlyArray<RepoExecutionResult>;
 };
 
 const TERMINAL_STATUSES: ReadonlySet<LocalJobStatus> = new Set([

@@ -213,16 +213,21 @@ function getCompletionCorrelationFields(
   let branchName: string | undefined;
 
   if (command === "EXECUTE" && artifacts.executionResult) {
-    // Synthetic fullName: we only read branchName off the primary entry,
-    // not fullName itself, so the placeholder unblocks v1 normalization.
-    const primaryFullName = job.primaryRepoFullName ?? "local/primary";
+    const primaryFullName = job.primaryRepoFullName ?? "";
+    // Synthetic fullName seeds V1 normalization in parseExecutionResultFile;
+    // V2 files carry their own fullName and ignore this argument.
     const parsed = parseExecutionResultFile(
       artifacts.executionResult,
-      primaryFullName,
+      primaryFullName || "local/primary",
     );
-    const primary = parsed.ok ? getPrimaryRepoResult(parsed.results, primaryFullName) : null;
-    if (primary?.status === "success" && primary.branchName) {
-      branchName = primary.branchName;
+    if (parsed.ok) {
+      // Match buildCompletedEventResult's lookup so reboot replay and live
+      // exit pick the same entry — never rely on positional ordering.
+      const lookupName = primaryFullName || parsed.results[0]?.fullName || "";
+      const primary = getPrimaryRepoResult(parsed.results, lookupName);
+      if (primary?.status === "success" && primary.branchName) {
+        branchName = primary.branchName;
+      }
     }
   }
 
@@ -248,6 +253,11 @@ function buildCompletedEventResult(
     exitCode: job.exitCode ?? 0,
     subtype: command.toLowerCase(),
   };
+  const setNoChangesFields = (): void => {
+    result.prUrl = null;
+    result.prNumber = null;
+    result.has_changes = false;
+  };
 
   if (command === "EXECUTE" && artifacts.executionResult) {
     const primaryFullName = job.primaryRepoFullName ?? "";
@@ -264,7 +274,7 @@ function buildCompletedEventResult(
         "execution-result-parse-failed",
         `loopId=${job.loopId} error=${parsed.error}`,
       );
-      result.has_changes = false;
+      setNoChangesFields();
     } else {
       const lookupName = primaryFullName || parsed.results[0]?.fullName || "";
       const primaryResult = getPrimaryRepoResult(parsed.results, lookupName);
@@ -276,14 +286,14 @@ function buildCompletedEventResult(
           "primary-repo-not-found-in-results",
           `loopId=${job.loopId} primaryFullName=${lookupName}`,
         );
-        result.has_changes = false;
+        setNoChangesFields();
       } else if (primaryResult.status === "success") {
         result.prUrl = primaryResult.prUrl;
         result.prNumber = primaryResult.prNumber;
         result.branchName = primaryResult.branchName;
         result.has_changes = true;
       } else {
-        result.has_changes = false;
+        setNoChangesFields();
       }
     }
   }
