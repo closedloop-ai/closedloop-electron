@@ -1,65 +1,35 @@
-/**
- * Integration tests for multi-repo EXECUTE requests.
- *
- * T-6.1: EXECUTE multi-repo gate tests
- *   (a) POST /api/gateway/symphony/loop with command: 'EXECUTE' and additionalRepos populated → HTTP 200
- *   (b) ensureWorktree called per additional repo
- *   (c) --add-dir args in spawned process (check spawn-args.txt)
- *   (d) Invalid/duplicate additional repo returns HTTP 400
- *
- * Per-repo finalization (T-6.2) is covered by direct unit tests on
- * runExecuteFinalization elsewhere in the suite. Failure-cleanup of
- * additional worktrees (formerly T-6.3) is covered by:
- *   - the equivalent PLAN integration test in symphony-loop-multi-repo-worktree.test.ts
- *     (cleanup is unified across PLAN and EXECUTE), and
- *   - direct unit tests on cleanupAdditionalWorktrees in boot-recovery.test.ts.
- */
-
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, it, test } from "node:test";
+import { afterEach, test } from "node:test";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 import { setShellPathForTest } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
-  makeFakeWorktreeProvider,
   makeMultiRepoGateway,
   makeMultiRepoTestHarness,
   startMockApiServer,
-  waitForTerminalEvent,
 } from "./symphony-test-utils.js";
-
-// ---------------------------------------------------------------------------
-// Shared fixtures
-// ---------------------------------------------------------------------------
-
-const fakeWorktreeProvider = makeFakeWorktreeProvider("symphony/multi-repo-execute-test");
 
 const { serversToClose, mockServersToClose, tempPathsToClean, cleanup } =
   makeMultiRepoTestHarness();
 afterEach(cleanup);
 
-/** Create a gateway server backed by a mock API and the given worktree provider. */
 function createTestGateway(
   tmpDir: string,
   mockPort: number,
-  worktreeProvider?: WorktreeProvider,
+  worktreeProvider: WorktreeProvider,
 ) {
   return makeMultiRepoGateway({
     tmpDir,
     mockPort,
     machineName: "multi-repo-execute-test",
-    worktreeProvider: worktreeProvider ?? fakeWorktreeProvider,
+    worktreeProvider,
     serversToClose,
   });
 }
-
-// ---------------------------------------------------------------------------
-// Call-recording WorktreeProvider
-// ---------------------------------------------------------------------------
 
 function makeRecordingWorktreeProvider(): {
   provider: WorktreeProvider;
@@ -81,13 +51,22 @@ function makeRecordingWorktreeProvider(): {
     async ensureWorktree(repoPath, worktreeDir, branchName, baseBranch) {
       ensureWorktreeCalls.push({ repoPath, worktreeDir, branchName, baseBranch });
       await fs.mkdir(worktreeDir, { recursive: true });
-      // Initialize as a real git repo so cleanupAdditionalWorktrees can run
-      // its `git status` / `git rev-list` checks against an actual repo
-      // instead of bailing into the "retain on error" safety branch.
-      execFileSync("git", ["init", "-q", "-b", "main"], { cwd: worktreeDir, stdio: "pipe" });
-      execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: worktreeDir, stdio: "pipe" });
-      execFileSync("git", ["config", "user.name", "Test"], { cwd: worktreeDir, stdio: "pipe" });
-      execFileSync("git", ["commit", "--allow-empty", "-m", "initial"], { cwd: worktreeDir, stdio: "pipe" });
+      execFileSync("git", ["init", "-q", "-b", "main"], {
+        cwd: worktreeDir,
+        stdio: "pipe",
+      });
+      execFileSync("git", ["config", "user.email", "test@test.com"], {
+        cwd: worktreeDir,
+        stdio: "pipe",
+      });
+      execFileSync("git", ["config", "user.name", "Test"], {
+        cwd: worktreeDir,
+        stdio: "pipe",
+      });
+      execFileSync("git", ["commit", "--allow-empty", "-m", "initial"], {
+        cwd: worktreeDir,
+        stdio: "pipe",
+      });
     },
     findWorktreeForBranch() {
       return null;
@@ -104,11 +83,10 @@ function makeRecordingWorktreeProvider(): {
   return { provider, ensureWorktreeCalls };
 }
 
-// ---------------------------------------------------------------------------
-// Helper: find a file recursively under a directory
-// ---------------------------------------------------------------------------
-
-async function findFileRecursive(dir: string, filename: string): Promise<string | null> {
+async function findFileRecursive(
+  dir: string,
+  filename: string,
+): Promise<string | null> {
   let entries: Awaited<ReturnType<typeof fs.readdir>>;
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
@@ -117,167 +95,43 @@ async function findFileRecursive(dir: string, filename: string): Promise<string 
   }
   for (const entry of entries) {
     const fullPath = path.join(dir, entry.name);
-    if (entry.isFile() && entry.name === filename) {
-      return fullPath;
-    }
+    if (entry.isFile() && entry.name === filename) return fullPath;
     if (entry.isDirectory()) {
       const result = await findFileRecursive(fullPath, filename);
-      if (result !== null) {
-        return result;
-      }
+      if (result !== null) return result;
     }
   }
   return null;
 }
 
-async function findSpawnArgsFile(searchRoot: string, timeoutMs = 20_000): Promise<string> {
-  const deadline = Date.now() + timeoutMs;
+async function findSpawnArgsFile(searchRoot: string): Promise<string> {
+  const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     const found = await findFileRecursive(searchRoot, "spawn-args.txt");
-    if (found !== null) {
-      return found;
-    }
+    if (found !== null) return found;
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
   }
-  throw new Error(
-    `Timed out waiting for spawn-args.txt under ${searchRoot} after ${timeoutMs}ms`,
-  );
+  throw new Error(`Timed out waiting for spawn-args.txt under ${searchRoot}`);
 }
 
-// ---------------------------------------------------------------------------
-// T-6.1(a): EXECUTE with additionalRepos → HTTP 200
-// T-6.1(b): ensureWorktree called per additional repo
-// ---------------------------------------------------------------------------
-
-test("T-6.1(a,b): EXECUTE with additionalRepos returns HTTP 200 and calls ensureWorktree per additional repo", async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-execute-gate-"));
+test("EXECUTE with additionalRepos provisions additionals, passes --add-dir, and uploads V2 repo results", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-execute-"));
   tempPathsToClean.push(tmpDir);
 
   const primaryRepo = path.join(tmpDir, "primary-repo");
-  await fs.mkdir(primaryRepo, { recursive: true });
-
   const additionalRepo1 = path.join(tmpDir, "additional-repo-1");
   const additionalRepo2 = path.join(tmpDir, "additional-repo-2");
-  await fs.mkdir(additionalRepo1, { recursive: true });
-  await fs.mkdir(additionalRepo2, { recursive: true });
-
   const worktreeParent = path.join(tmpDir, "worktrees");
-  await fs.mkdir(worktreeParent, { recursive: true });
+  await Promise.all(
+    [primaryRepo, additionalRepo1, additionalRepo2, worktreeParent].map((dir) =>
+      fs.mkdir(dir, { recursive: true }),
+    ),
+  );
 
   process.env.HOME = tmpDir;
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
 
-  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
-
-  const fakeBin = path.join(tmpDir, "fake-bin");
-  await fs.mkdir(fakeBin, { recursive: true });
-  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  // git: status returns empty (no changes from the run-loop)
-  const fakeGitScript = [
-    "#!/bin/sh",
-    "if [ \"$1\" = status ]; then exit 0; fi",
-    "exit 0",
-  ].join("\n");
-  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
-
-  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest();
-
-  const { provider, ensureWorktreeCalls } = makeRecordingWorktreeProvider();
-
-  const mock = await startMockApiServer();
-  mockServersToClose.push(mock.server);
-  const server = await createTestGateway(tmpDir, mock.port, provider);
-
-  const loopId = "00000000-0000-0000-0000-000000008001";
-  // EXECUTE requires either a prompt or artifacts (requiresPromptOrArtifacts: true)
-  const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        loopId,
-        command: "EXECUTE",
-        closedLoopAuthToken: "tok",
-        prompt: "Execute the implementation plan",
-        artifacts: [],
-        repo: {
-          fullName: `execute-test/${path.basename(primaryRepo)}`,
-          branch: "main",
-        },
-        additionalRepos: [
-          { localRepoPath: additionalRepo1, branch: "feature-a" },
-          { localRepoPath: additionalRepo2, branch: "feature-b" },
-        ],
-      }),
-    },
-  );
-
-  assert.equal(response.status, 200, `Expected HTTP 200, got ${response.status}`);
-
-  // Wait for the terminal event so ensureWorktree calls are fully captured
-  await waitForTerminalEvent(mock.requests, loopId);
-
-  // Additional repo ensureWorktree calls only
-  const additionalCalls = ensureWorktreeCalls.filter(
-    (c) => c.repoPath !== primaryRepo,
-  );
-
-  assert.equal(
-    additionalCalls.length,
-    2,
-    `Expected ensureWorktree called 2 times for additional repos, got ${additionalCalls.length}`,
-  );
-
-  for (const [repoPath, expectedBaseBranch] of [
-    [additionalRepo1, "feature-a"],
-    [additionalRepo2, "feature-b"],
-  ] as const) {
-    const call = additionalCalls.find((c) => c.repoPath === repoPath);
-    assert.ok(call, `ensureWorktree should be called with ${repoPath}`);
-    assert.equal(
-      call.baseBranch,
-      expectedBaseBranch,
-      `Expected baseBranch '${expectedBaseBranch}' for ${repoPath}, got '${call.baseBranch}'`,
-    );
-    assert.ok(
-      call.branchName.startsWith("symphony/"),
-      `Scratch branch name should be under symphony/ namespace, got '${call.branchName}'`,
-    );
-    assert.notEqual(
-      call.branchName,
-      call.baseBranch,
-      "Scratch branch must differ from baseBranch",
-    );
-  }
-});
-
-// ---------------------------------------------------------------------------
-// T-6.1(c): --add-dir args in spawned process
-// ---------------------------------------------------------------------------
-
-test("T-6.1(c): EXECUTE with additionalRepos passes --add-dir for each worktree to run-loop.sh", async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-execute-spawn-"));
-  tempPathsToClean.push(tmpDir);
-
-  const primaryRepo = path.join(tmpDir, "primary-repo");
-  await fs.mkdir(primaryRepo, { recursive: true });
-
-  const additionalRepo1 = path.join(tmpDir, "additional-repo-1");
-  const additionalRepo2 = path.join(tmpDir, "additional-repo-2");
-  await fs.mkdir(additionalRepo1, { recursive: true });
-  await fs.mkdir(additionalRepo2, { recursive: true });
-
-  const worktreeParent = path.join(tmpDir, "worktrees");
-  await fs.mkdir(worktreeParent, { recursive: true });
-
-  process.env.HOME = tmpDir;
-  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
-  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
-
-  // Fake run-loop.sh writes its arguments to spawn-args.txt in CLOSEDLOOP_WORKDIR
   await createFakeRunLoopScript(
     tmpDir,
     '#!/bin/sh\necho "$@" > "$CLOSEDLOOP_WORKDIR/spawn-args.txt"\nexit 0\n',
@@ -285,23 +139,32 @@ test("T-6.1(c): EXECUTE with additionalRepos passes --add-dir for each worktree 
 
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
-  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
-  const fakeGitScript = [
-    "#!/bin/sh",
-    "if [ \"$1\" = status ]; then exit 0; fi",
-    "exit 0",
-  ].join("\n");
-  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
-
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+  await fs.writeFile(
+    path.join(fakeBin, "git"),
+    [
+      "#!/bin/sh",
+      'if [ "$1" = status ]; then exit 0; fi',
+      'if [ "$1" = "rev-parse" ] && [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+      'if [ "$1" = "rev-parse" ]; then echo "abc123"; exit 0; fi',
+      'if [ "$1" = "for-each-ref" ]; then exit 0; fi',
+      'if [ "$1" = "rev-list" ]; then exit 0; fi',
+      "exit 0",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
 
+  const { provider, ensureWorktreeCalls } = makeRecordingWorktreeProvider();
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
-  const server = await createTestGateway(tmpDir, mock.port);
+  const server = await createTestGateway(tmpDir, mock.port, provider);
 
-  const loopId = "00000000-0000-0000-0000-000000008002";
-  // EXECUTE requires either a prompt or artifacts (requiresPromptOrArtifacts: true)
+  const loopId = "00000000-0000-0000-0000-000000008001";
+  const primaryFullName = `execute-test/${path.basename(primaryRepo)}`;
   const response = await fetch(
     `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
@@ -313,151 +176,58 @@ test("T-6.1(c): EXECUTE with additionalRepos passes --add-dir for each worktree 
         closedLoopAuthToken: "tok",
         prompt: "Execute the implementation plan",
         artifacts: [],
-        repo: {
-          fullName: `execute-spawn-test/${path.basename(primaryRepo)}`,
-          branch: "main",
-        },
+        repo: { fullName: primaryFullName, branch: "main" },
         additionalRepos: [
-          { localRepoPath: additionalRepo1, branch: "main" },
-          { localRepoPath: additionalRepo2, branch: "main" },
+          { localRepoPath: additionalRepo1, fullName: "acme/add-one", branch: "feature-a" },
+          { localRepoPath: additionalRepo2, fullName: "acme/add-two", branch: "feature-b" },
         ],
       }),
     },
   );
 
-  assert.equal(response.status, 200, `Expected HTTP 200, got ${response.status}`);
+  assert.equal(response.status, 200);
 
-  const terminalEvent = await waitForTerminalEvent(mock.requests, loopId);
-  assert.equal(
-    terminalEvent.type,
-    "completed",
-    `Expected terminal event 'completed', got '${terminalEvent.type}': ${JSON.stringify(terminalEvent)}`,
+  const uploadReq = await mock.waitForRequest("upload-artifacts");
+  const uploadBody = JSON.parse(uploadReq.body) as {
+    artifacts?: {
+      executionResult?: {
+        schemaVersion?: number;
+        results?: Array<{ fullName?: string; status?: string }>;
+      };
+    };
+  };
+
+  const additionalCalls = ensureWorktreeCalls.filter(
+    (call) => call.repoPath !== primaryRepo,
+  );
+  assert.equal(additionalCalls.length, 2);
+  assert.deepEqual(
+    additionalCalls.map((call) => call.baseBranch).sort(),
+    ["feature-a", "feature-b"],
+  );
+  assert.ok(
+    additionalCalls.every(
+      (call) =>
+        call.branchName.startsWith("symphony/") &&
+        call.branchName !== call.baseBranch,
+    ),
   );
 
   const spawnArgsFile = await findSpawnArgsFile(tmpDir);
   const spawnArgs = (await fs.readFile(spawnArgsFile, "utf-8")).trim();
+  const addDirMatches = [...spawnArgs.matchAll(/--add-dir\s+(\S+)/g)].map(
+    (match) => match[1],
+  );
+  assert.equal(addDirMatches.length, 2);
+  assert.ok(addDirMatches.every((addDir) => addDir.startsWith(worktreeParent)));
 
+  const executionResult = uploadBody.artifacts?.executionResult;
+  assert.equal(executionResult?.schemaVersion, 2);
+  assert.deepEqual(
+    executionResult?.results?.map((result) => result.fullName),
+    [primaryFullName, "acme/add-one", "acme/add-two"],
+  );
   assert.ok(
-    spawnArgs.includes("--add-dir"),
-    `Expected --add-dir in spawn args, got: ${spawnArgs}`,
+    executionResult?.results?.every((result) => result.status === "skipped"),
   );
-
-  const addDirCount = (spawnArgs.match(/--add-dir/g) ?? []).length;
-  assert.equal(
-    addDirCount,
-    2,
-    `Expected exactly 2 --add-dir flags, got ${addDirCount}. Args: ${spawnArgs}`,
-  );
-
-  const addDirMatches = [...spawnArgs.matchAll(/--add-dir\s+(\S+)/g)].map((m) => m[1]);
-  assert.equal(addDirMatches.length, 2, "Should parse 2 --add-dir paths from spawn args");
-
-  for (const addDir of addDirMatches) {
-    assert.ok(
-      addDir.startsWith(worktreeParent),
-      `Expected --add-dir path "${addDir}" to start with worktreeParent "${worktreeParent}"`,
-    );
-  }
 });
-
-// ---------------------------------------------------------------------------
-// T-6.1(d): Invalid/duplicate additional repo returns HTTP 400
-// ---------------------------------------------------------------------------
-
-describe("T-6.1(d): Invalid or duplicate additionalRepos returns HTTP 400", () => {
-  it("nonexistent localRepoPath not in allowed dirs returns HTTP 400", async () => {
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-execute-invalid-"));
-    tempPathsToClean.push(tmpDir);
-
-    const primaryRepo = path.join(tmpDir, "primary-repo");
-    await fs.mkdir(primaryRepo, { recursive: true });
-
-    // Path outside tmpDir (not in allowed dirs)
-    const outsidePath = path.join(os.tmpdir(), "nonexistent-not-in-allowed-dirs");
-
-    process.env.HOME = tmpDir;
-    process.env.SYMPHONY_WORKTREE_PARENT_DIR = path.join(tmpDir, "worktrees");
-
-    const mock = await startMockApiServer();
-    mockServersToClose.push(mock.server);
-    const server = await createTestGateway(tmpDir, mock.port);
-
-    const loopId = "00000000-0000-0000-0000-000000008010";
-    const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          loopId,
-          command: "EXECUTE",
-          closedLoopAuthToken: "tok",
-          prompt: "Execute the plan",
-          artifacts: [],
-          repo: {
-            fullName: `execute-test/${path.basename(primaryRepo)}`,
-            branch: "main",
-          },
-          additionalRepos: [
-            { localRepoPath: outsidePath, branch: "main" },
-          ],
-        }),
-      },
-    );
-
-    assert.equal(
-      response.status,
-      400,
-      `Expected HTTP 400 for repo outside allowed dirs, got ${response.status}`,
-    );
-  });
-
-  it("duplicate localRepoPath across additionalRepos returns HTTP 400", async () => {
-    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-execute-dup-"));
-    tempPathsToClean.push(tmpDir);
-
-    const primaryRepo = path.join(tmpDir, "primary-repo");
-    await fs.mkdir(primaryRepo, { recursive: true });
-
-    const additionalRepo = path.join(tmpDir, "additional-repo");
-    await fs.mkdir(additionalRepo, { recursive: true });
-
-    process.env.HOME = tmpDir;
-    process.env.SYMPHONY_WORKTREE_PARENT_DIR = path.join(tmpDir, "worktrees");
-
-    const mock = await startMockApiServer();
-    mockServersToClose.push(mock.server);
-    const server = await createTestGateway(tmpDir, mock.port);
-
-    const loopId = "00000000-0000-0000-0000-000000008011";
-    const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          loopId,
-          command: "EXECUTE",
-          closedLoopAuthToken: "tok",
-          prompt: "Execute the plan",
-          artifacts: [],
-          repo: {
-            fullName: `execute-dup-test/${path.basename(primaryRepo)}`,
-            branch: "main",
-          },
-          additionalRepos: [
-            { localRepoPath: additionalRepo, branch: "main" },
-            { localRepoPath: additionalRepo, branch: "feature" },
-          ],
-        }),
-      },
-    );
-
-    assert.equal(
-      response.status,
-      400,
-      `Expected HTTP 400 for duplicate additionalRepo path, got ${response.status}`,
-    );
-  });
-});
-

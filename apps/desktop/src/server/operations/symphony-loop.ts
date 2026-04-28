@@ -824,21 +824,7 @@ export class AdditionalRepoError extends Error {
 
 const ADDITIONAL_REPOS_MAX = 5;
 
-/**
- * Cleanup of additional-repo worktree directories.
- *
- * Retains a worktree when it contains any code changes — uncommitted (modulo
- * the `.claude` / `.closedloop-ai` runtime metadata) or commits unique to
- * HEAD relative to non-symphony refs. Removes only when both checks come
- * back empty. On any unexpected git error the worktree is retained so we do
- * not destroy in-progress user work; the only error narrowed to "remove" is
- * a missing directory (ENOENT), which has nothing to preserve.
- *
- * The same rule fits both EXECUTE (which produces commits) and PLAN (which
- * does not): clean PLAN worktrees still get removed because both checks
- * report no changes; EXECUTE worktrees with commits are preserved if cloud
- * finalization couldn't push them.
- */
+/** Remove only additional-repo worktrees that are clean and safe to discard. */
 export async function cleanupAdditionalWorktrees(
   entries: readonly { dir: string; repoPath: string }[],
   loopId: string,
@@ -884,7 +870,6 @@ function decideAdditionalWorktreeCleanup(
 ): "retain" | "remove" {
   const gitBin = getResolvedGitPath();
 
-  // 1) Uncommitted changes (excluding our own runtime metadata).
   let uncommitted: string;
   try {
     uncommitted = execFileSync(
@@ -910,9 +895,6 @@ function decideAdditionalWorktreeCleanup(
     return "retain";
   }
 
-  // 2) Committed changes unique to HEAD relative to non-symphony refs. PLAN
-  //    worktrees never reach this branch with non-empty output because PLAN
-  //    does not commit; EXECUTE worktrees with retained commits do.
   let comparisonRefs: string[];
   try {
     const refsOut = execFileSync(
@@ -941,9 +923,6 @@ function decideAdditionalWorktreeCleanup(
   }
 
   if (comparisonRefs.length === 0) {
-    // Without any non-symphony ref to compare against we can't safely
-    // distinguish "no commits" from "every commit is unique". Default to
-    // retain so user work is never destroyed.
     gatewayLog.warn(
       "cleanup-additional-worktree",
       `No non-symphony refs found in ${worktreeDir} (loop ${loopId}); retaining worktree to avoid data loss`,
@@ -2436,7 +2415,7 @@ export function scrubObjectCredentials(obj: unknown): unknown {
 
 function persistExecutionResultArtifact(
   claudeWorkDir: string,
-  executionResult: Record<string, unknown>,
+  executionResult: unknown,
 ): boolean {
   try {
     const scrubbed = scrubObjectCredentials(executionResult);
@@ -2466,10 +2445,6 @@ function getHeadCommitShaFromWorktree(worktreeDir: string): string | null {
   }
 }
 
-// Synthetic fullName for v1 normalization — execution-result.json is a
-// per-worktree artifact, so its primary-repo identity isn't carried in v1
-// payloads. The downstream code reads PR fields, not fullName, so any
-// non-empty placeholder unblocks the v1 parser.
 const V1_PRIMARY_FULL_NAME_PLACEHOLDER = "local/primary";
 
 function getAuthoritativeExecutionResult(
@@ -2682,7 +2657,7 @@ export async function runExecuteFinalization(
     ]);
     const persisted = persistExecutionResultArtifact(
       params.claudeWorkDir,
-      executionResult as unknown as Record<string, unknown>,
+      executionResult,
     );
     return completeExecuteFinalization(
       params.jobStore,
@@ -2771,7 +2746,7 @@ export async function runExecuteFinalization(
     ]);
     const persisted = persistExecutionResultArtifact(
       params.claudeWorkDir,
-      executionResult as unknown as Record<string, unknown>,
+      executionResult,
     );
     return completeExecuteFinalization(
       params.jobStore,
@@ -2828,7 +2803,7 @@ export async function runExecuteFinalization(
     ]);
     const persisted = persistExecutionResultArtifact(
       params.claudeWorkDir,
-      executionResult as unknown as Record<string, unknown>,
+      executionResult,
     );
     return completeExecuteFinalization(
       params.jobStore,
@@ -2872,16 +2847,6 @@ export async function runExecuteFinalization(
   );
 }
 
-// ---------------------------------------------------------------------------
-// Multi-repo EXECUTE finalization
-// ---------------------------------------------------------------------------
-
-/**
- * Finalizes EXECUTE for each entry in a multi-repo loop by delegating to
- * `runExecuteFinalization` per repo. LLM-commit spawns are serialized
- * (`runningLoops[loopId]` is a single PID slot), so entries run sequentially.
- * One failure never aborts the others.
- */
 export async function finalizeMultiRepoExecute(
   entries: Array<{ fullName: string; worktreeDir: string; baseBranch: string }>,
   deps: {
@@ -2893,16 +2858,12 @@ export async function finalizeMultiRepoExecute(
     artifactSlug?: string;
     expectedMcpUrl?: string;
     committer?: LoopCommitter;
-    jobStore?: JobStore;
   },
 ): Promise<RepoExecutionResult[]> {
   const results: RepoExecutionResult[] = [];
 
   for (const entry of entries) {
     try {
-      // claudeWorkDir lives under .closedloop-ai/ so per-repo artifacts written
-      // by runExecuteFinalization (process.pid, execution-result.json, pr-body.md)
-      // are excluded by the `:!.closedloop-ai` pathspec used in `git add`.
       const entryClaudeWorkDir = path.join(entry.worktreeDir, ".closedloop-ai", "work");
       mkdirSync(entryClaudeWorkDir, { recursive: true });
       const finalization = await runExecuteFinalization({
@@ -2915,8 +2876,6 @@ export async function finalizeMultiRepoExecute(
         committer: deps.committer,
         getAllowedDirectories: deps.getAllowedDirectories,
         expectedMcpUrl: deps.expectedMcpUrl,
-        // Skip per-loop diagnostics for additional repos so they don't
-        // overwrite the primary's finalization metadata in the job store.
         jobStore: undefined,
         source: "live-exit",
         primaryFullName: entry.fullName,
@@ -2926,10 +2885,6 @@ export async function finalizeMultiRepoExecute(
       loopError(deps.loopId, "multi-repo-finalization-failed", entry.fullName, String(err));
       await postLoopEventBounded(deps.apiBaseUrl, deps.loopId, deps.token, {
         type: LoopEventType.Error,
-        // runExecuteFinalization can throw for many reasons (push rejected,
-        // PR creation, sandbox violation, file I/O). RunnerError is the
-        // generic catch-all; RepoNotFound is reserved for actual
-        // repo-resolution failures so cloud-side dispatch stays correct.
         code: LoopErrorCode.RunnerError,
         message: redactCredentials(sanitizeErrorMessage(err instanceof Error ? err.message : String(err))),
         result: { repo: entry.fullName },
@@ -2945,13 +2900,6 @@ export async function finalizeMultiRepoExecute(
   return results;
 }
 
-/**
- * Build a RepoExecutionResult for the primary repo from the
- * ExecuteFinalizationResult produced by runExecuteFinalization. The primary
- * repo is finalized separately from the additional repos in the multi-repo
- * EXECUTE flow, so its v2 envelope entry is constructed from that result
- * rather than re-running git status on an already-committed worktree.
- */
 function buildPrimaryRepoResult(
   fullName: string,
   baseBranch: string,
@@ -3591,13 +3539,8 @@ export async function handleProcessCompletion(
         warnings.push("GIT_PUSH_FAILED");
       }
 
-      // Multi-repo finalization: when additional worktree dirs are present,
-      // run finalizeMultiRepoExecute for the additional repos only and seed
-      // the primary entry from runExecuteFinalization (which already
-      // committed/pushed/created the PR for the primary). Including the
-      // primary in finalizeMultiRepoExecute would re-check `git status` on an
-      // already-clean worktree and overwrite the primary's PR info with a
-      // `status: 'skipped'` entry.
+      // Additional repos are finalized after the primary so the primary PR info
+      // is not overwritten by a second clean-worktree check.
       if (additionalWorktreeDirs.length > 0 && worktreeDir) {
         const primaryFullName = body.repo?.fullName ?? "";
         const additionalEntries: Array<{ fullName: string; worktreeDir: string; baseBranch: string }> =
@@ -3616,12 +3559,11 @@ export async function handleProcessCompletion(
           artifactSlug: body.artifactSlug,
           expectedMcpUrl,
           committer,
-          jobStore,
         });
 
         const primaryResult = buildPrimaryRepoResult(primaryFullName, baseBranch, executeFinalization);
         const v2Envelope = buildExecutionResultV2([primaryResult, ...additionalResults]);
-        persistExecutionResultArtifact(claudeWorkDir, v2Envelope as unknown as Record<string, unknown>);
+        persistExecutionResultArtifact(claudeWorkDir, v2Envelope);
       }
 
       artifacts = readExecuteOutputs(claudeWorkDir);
