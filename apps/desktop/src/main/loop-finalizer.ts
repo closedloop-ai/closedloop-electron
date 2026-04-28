@@ -1,14 +1,19 @@
+import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
+import { LoopEventType } from "@closedloop-ai/loops-api/events";
+import { getPrimaryRepoResult, parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
 import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
+import { readEffectiveStatusFromState } from "../server/operations/symphony-job-snapshot.js";
 import {
   getResolvedGitPath,
   runExecuteFinalization,
 } from "../server/operations/symphony-loop.js";
-import crypto from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
-import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
-import { LoopEventType } from "@closedloop-ai/loops-api/events";
-import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
+import {
+  assertPathAllowed,
+  DirectoryNotAllowedError,
+} from "../server/security.js";
 import {
   IMPORTED_PLAN_MARKDOWN_FILE,
   toUploadedPlanArtifact,
@@ -27,12 +32,6 @@ import {
 import type { LoopTokenStore } from "./loop-token-store.js";
 import type { TelemetryEmitter } from "./telemetry-protocol.js";
 import { parseApiKeySource, parseTokenUsage } from "./token-usage.js";
-import { readEffectiveStatusFromState } from "../server/operations/symphony-job-snapshot.js";
-import {
-  assertPathAllowed,
-  DirectoryNotAllowedError,
-} from "../server/security.js";
-import { getPrimaryRepoResult } from '@closedloop-ai/loops-api/execution-result';
 
 export interface LoopFinalizerDeps {
   jobStore: JobStore;
@@ -216,11 +215,12 @@ function getCompletionCorrelationFields(
   if (command === "EXECUTE" && artifacts.executionResult) {
     // Synthetic fullName: we only read branchName off the primary entry,
     // not fullName itself, so the placeholder unblocks v1 normalization.
+    const primaryFullName = job.primaryRepoFullName ?? "local/primary";
     const parsed = parseExecutionResultFile(
       artifacts.executionResult,
-      "local/primary",
+      primaryFullName,
     );
-    const primary = parsed.ok ? parsed.results[0] : null;
+    const primary = parsed.ok ? getPrimaryRepoResult(parsed.results, primaryFullName) : null;
     if (primary?.status === "success" && primary.branchName) {
       branchName = primary.branchName;
     }
