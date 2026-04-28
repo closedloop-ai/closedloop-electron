@@ -1185,6 +1185,7 @@ test("tryUploadArtifacts omits branchName fallback when worktree is outside allo
     { mode: 0o755 },
   );
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   const jobStore = createStore("step-upload-disallowed-worktree");
   const job = createBaseJob({ claudeWorkDir, worktreeDir });

@@ -3,12 +3,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, test } from "node:test";
 import { retrySpawn, type RetrySpawnDeps } from "../src/main/spawn-retry.js";
-
-function makeEnoentError(cmd: string): NodeJS.ErrnoException {
-  const err = new Error(`spawn ${cmd} ENOENT`) as NodeJS.ErrnoException;
-  err.code = "ENOENT";
-  return err;
-}
+import { makeEnoentError } from "./helpers/spawn-test-utils.js";
 
 function makeStubDeps(overrides?: Partial<RetrySpawnDeps>): RetrySpawnDeps & {
   calls: Record<string, unknown[][]>;
@@ -34,6 +29,7 @@ function makeStubDeps(overrides?: Partial<RetrySpawnDeps>): RetrySpawnDeps & {
   return state;
 }
 
+// drift-check: matches apps/desktop/src/main/spawn-retry.ts:26
 describe("retrySpawn", () => {
   test("fn succeeds on first attempt -- delay never called, refreshTray never called, result returned", async () => {
     const deps = makeStubDeps();

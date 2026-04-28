@@ -20,6 +20,7 @@ function createStubDeps(): {
   };
 }
 
+// drift-check: matches apps/desktop/src/main/error-handlers.ts:29
 test("spawn ENOENT (code=ENOENT, syscall=spawn) -- log called, exit NOT called", () => {
   const deps = createStubDeps();
   const error = Object.assign(new Error("spawn enoent"), {
@@ -70,6 +71,7 @@ test("ENOENT with syscall=open -- exit(1) IS called (not suppressed)", () => {
   assert.ok(deps.calls.exit?.some(([code]) => code === 1), "exit(1) should be called");
 });
 
+// drift-check: matches apps/desktop/src/main/error-handlers.ts:54
 test("handleUnhandledRejection with spawn ENOENT Error reason -- suppressed, no exit", () => {
   const deps = createStubDeps();
   const reason = Object.assign(new Error("spawn enoent rejection"), {

@@ -307,6 +307,7 @@ describe("streamCodexReview flush-gate pattern", () => {
     ]);
 
     // Replicate the streamCodexReview pattern: createWriteStream + close→end + finish→resolve
+    // drift-check: matches apps/desktop/src/server/operations/codex.ts:1767
     const logStream = createWriteStream(logPath, { flags: "a", encoding: "utf-8" });
 
     child.stdout?.setEncoding("utf-8");
