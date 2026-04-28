@@ -265,7 +265,9 @@ function buildCompletedEventResult(
         result.has_changes = false;
       }
     } else {
-      // V1 path — preserve existing snake_case reads
+      // V1 path — preserve existing snake_case reads.
+      // TODO(FEA-683): remove V1 execution-result.json fallback once all
+      // in-flight jobs drain and no pre-PLN-378 desktop builds remain.
       result.prUrl = execResult.pr_url;
       result.prNumber = execResult.pr_number;
       result.branchName = execResult.branch_name;
