@@ -4,6 +4,7 @@ import { describe, test } from "node:test";
 import {
   buildBootstrapClaimPayload,
   claimDesktopManagedApiKey,
+  isRetryableBootstrapClaimFailure,
 } from "../src/main/bootstrap-claim.js";
 import type { GatewaySigningKeyMaterial } from "../src/main/gateway-signing-key-store.js";
 
@@ -153,5 +154,42 @@ describe("bootstrap claim", () => {
       kind: "failed",
       error: "invalid apiOrigin",
     });
+  });
+
+  test("retry predicate honors explicit claim retryable contract values", () => {
+    assert.equal(
+      isRetryableBootstrapClaimFailure({
+        kind: "failed",
+        statusCode: 503,
+        retryable: false,
+        error: "attempt already consumed",
+      }),
+      false,
+    );
+    assert.equal(
+      isRetryableBootstrapClaimFailure({
+        kind: "failed",
+        statusCode: 503,
+        retryable: true,
+        error: "temporary outage",
+      }),
+      true,
+    );
+    assert.equal(
+      isRetryableBootstrapClaimFailure({
+        kind: "failed",
+        statusCode: 503,
+        error: "legacy temporary outage",
+      }),
+      true,
+    );
+    assert.equal(
+      isRetryableBootstrapClaimFailure({
+        kind: "failed",
+        statusCode: 409,
+        error: "conflict",
+      }),
+      false,
+    );
   });
 });
