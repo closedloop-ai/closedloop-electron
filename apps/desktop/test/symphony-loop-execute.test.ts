@@ -24,6 +24,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
 import { JobStore } from "../src/main/job-store.js";
+import { Observability } from "../src/main/observability.js";
+import type { EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { resetResolvedClaudePath } from "../src/server/operations/symphony-loop.js";
@@ -75,6 +77,8 @@ async function waitForFile(
 }
 
 afterEach(async () => {
+  await Observability.shutdown();
+  Observability.reset();
   restoreEnv(savedEnv);
   resetShellPathCache();
 
@@ -988,6 +992,11 @@ test("EXECUTE: fresh worktree without raw plan stages plan.md and passes CLOSEDL
   serversToClose.push(server);
   await server.start();
 
+  const telemetryEvents: EnrichedTelemetryEvent[] = [];
+  Observability.init({
+    telemetrySend: (event) => telemetryEvents.push(event),
+  });
+
   const sourceMarkdown = "# Fresh plan\n\n- staged from markdown";
   const response = await fetch(
     `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
@@ -1020,6 +1029,29 @@ test("EXECUTE: fresh worktree without raw plan stages plan.md and passes CLOSEDL
   );
 
   await mock.waitForRequest("upload-artifacts");
+
+  const planSourceEvent = telemetryEvents.find(
+    (event) =>
+      event.category === "job.plan_source_resolved" &&
+      event.trace?.loopId === loopId,
+  );
+  assert.ok(planSourceEvent, "Expected plan source telemetry to be emitted");
+  const planSource = planSourceEvent.diagnostics?.planSource;
+  assert.ok(planSource, "Expected plan source diagnostics to be present");
+  assert.equal(planSource.source, "imported-plan-compat");
+  assert.equal(planSource.rawPlanPayload, false);
+  assert.equal(planSource.rawPlanAligned, false);
+  assert.equal(planSource.localPlanJsonPresent, false);
+  assert.equal(planSource.localPlanJsonAligned, false);
+  assert.equal(planSource.importedPlanFileStaged, true);
+  assert.equal(planSource.closedLoopPlanFileSet, true);
+  assert.equal(planSource.planArtifactContentLength, sourceMarkdown.length);
+  assert.equal(planSource.rawPlanContentLength, null);
+  assert.equal(planSource.rawPlanContentHash, null);
+  assert.match(
+    planSource.planArtifactContentHash ?? "",
+    /^[a-f0-9]{12}$/,
+  );
 
   const capturedPlanFile = await fs.readFile(
     path.join(claudeWorkDir, "captured-plan-file.txt"),

@@ -14,6 +14,7 @@ export type TelemetryCategory =
   | "command.cancelled"
   | "command.gateway_error"
   | "job.started"
+  | "job.plan_source_resolved"
   | "job.completed"
   | "job.recovery.finalize_replayed"
   | "job.failed"
@@ -45,6 +46,25 @@ export interface TelemetryTraceContext {
   loopSessionId?: string;
 }
 
+export type ExecutePlanSource =
+  | "raw-artifact"
+  | "local-plan-json"
+  | "imported-plan-compat";
+
+export interface ExecutePlanSourceDiagnostics {
+  source: ExecutePlanSource;
+  rawPlanPayload: boolean;
+  rawPlanAligned: boolean;
+  localPlanJsonPresent: boolean;
+  localPlanJsonAligned: boolean;
+  importedPlanFileStaged: boolean;
+  closedLoopPlanFileSet: boolean;
+  planArtifactContentLength: number;
+  rawPlanContentLength?: number | null;
+  planArtifactContentHash?: string | null;
+  rawPlanContentHash?: string | null;
+}
+
 export interface TelemetryDiagnostics {
   exitCode?: number;
   logTail?: string;
@@ -53,6 +73,7 @@ export interface TelemetryDiagnostics {
   elapsedMs?: number;
   stdoutBytes?: number;
   abortReason?: string;
+  planSource?: ExecutePlanSourceDiagnostics;
   spawnMeta?: {
     command: string;
     args: string[];

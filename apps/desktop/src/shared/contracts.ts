@@ -55,6 +55,20 @@ export interface SavedConfig {
   apiOrigin: string;
   webAppOrigin: string;
   // cloudApiKey is NOT stored here -- stored encrypted in ApiKeyStore keyed by profile UUID
+  /** Provenance of the encrypted API key stored for this profile. Missing values migrate as USER_CREATED. */
+  apiKeySource?: "USER_CREATED" | "DESKTOP_MANAGED";
+  /** Desktop-managed gateway identity scoped to this saved profile. */
+  gatewayId?: string;
+  /** Public half of the profile-scoped Ed25519 PoP keypair. */
+  gatewayPublicKeyPem?: string;
+  /** Security-upgrade protocol version supported by this profile identity. */
+  desktopSecurityUpgradeProtocolVersion?: 1;
+  /** Last relay compute target observed for this profile. */
+  lastComputeTargetId?: string | null;
+  /** One-time Settings prompt dismissal scoped to this profile. */
+  desktopSecurityPromptDismissedAt?: string | null;
+  /** Pending managed onboarding attempt scoped to this profile, if any. */
+  pendingOnboardingAttemptId?: string | null;
 }
 
 export interface DesktopSettings {

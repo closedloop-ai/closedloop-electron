@@ -33,6 +33,7 @@ TypeScript is strict-mode (`tsconfig.base.json`) and ESM (`NodeNext`).
 - Keep boundaries clear between `main`, `server`, and `shared` modules.
 - Prefix intentionally unused variables/args with `_` to satisfy lint rules.
 - Do not edit `apps/desktop/src/shared/build-info.ts` manually (auto-generated in prebuild).
+- Export and reuse shared TypeScript types for cross-module contracts or metadata patches instead of duplicating inline `Pick`/`Partial` shapes in callers.
 
 ## Testing Guidelines
 Tests run with `tsx --test` (Node test runner) via `just desktop-test`.

@@ -17,6 +17,8 @@ import type { DesktopPopSigner } from "../main/desktop-pop.js";
 import type { DesktopPopUnavailableReporter } from "../main/desktop-pop-sign-utils.js";
 import {
   GatewayRouter,
+  type DesktopSecurityUpgradePayload,
+  type DesktopSecurityUpgradeResult,
   type GatewayActivityEvent,
   type GatewayApprovalRequest,
   type GatewayApprovalResult,
@@ -55,6 +57,10 @@ export interface DesktopGatewayServerOptions {
   onUnexpectedClose?: () => void;
   loopTokenStore?: LoopTokenStore;
   getGatewayId: () => string;
+  getComputeTargetId?: () => string | null;
+  handleSecurityUpgrade?: (
+    payload: DesktopSecurityUpgradePayload
+  ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult;
   getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
   applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
 }
@@ -99,6 +105,8 @@ export class DesktopGatewayServer {
       loopTokenStore: this.options.loopTokenStore,
       retrySpawnDeps: this.options.retrySpawnDeps,
       getGatewayId: this.options.getGatewayId,
+      getComputeTargetId: this.options.getComputeTargetId,
+      handleSecurityUpgrade: this.options.handleSecurityUpgrade,
       getBinaryPaths: this.options.getBinaryPaths,
       applyBinaryPathPatch: this.options.applyBinaryPathPatch,
     });
@@ -131,6 +139,10 @@ export class DesktopGatewayServer {
     getApiKeyProvenance?: () => ApiKeyProvenance | null,
     signDesktopRequest?: DesktopPopSigner,
     onDesktopPopUnavailable?: DesktopPopUnavailableReporter,
+    getComputeTargetId?: () => string | null,
+    handleSecurityUpgrade?: (
+      payload: DesktopSecurityUpgradePayload
+    ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult,
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -159,6 +171,8 @@ export class DesktopGatewayServer {
       loopTokenStore,
       retrySpawnDeps,
       getGatewayId,
+      getComputeTargetId,
+      handleSecurityUpgrade,
       getBinaryPaths,
       applyBinaryPathPatch,
     });

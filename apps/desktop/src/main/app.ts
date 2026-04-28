@@ -6,13 +6,14 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { app, dialog, ipcMain, nativeImage, Notification, safeStorage } from "electron";
+import { app, dialog, ipcMain, nativeImage, Notification, safeStorage, shell } from "electron";
 import {
   type AlwaysAllowRule,
   DEFAULT_DESKTOP_SETTINGS,
   DEFAULT_POSTHOG_HOST,
   GATEWAY_PROTOCOL_VERSION,
   EMPTY_CAPABILITIES,
+  type SavedConfig,
   type DesktopSettings,
   type RiskTier,
 } from "../shared/contracts.js";
@@ -37,8 +38,11 @@ import {
   type DesktopPopHeaders,
   type DesktopPopSigningRequest,
 } from "./desktop-pop.js";
-import { GatewaySigningKeyStore } from "./gateway-signing-key-store.js";
-import { SettingsStore } from "./settings-store.js";
+import {
+  GatewaySigningKeyStore,
+  type GatewaySigningKeyResult,
+} from "./gateway-signing-key-store.js";
+import { SettingsStore, type SavedConfigManagedPatch } from "./settings-store.js";
 import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
 import { DesktopGatewayServer } from "../server/server.js";
@@ -62,6 +66,8 @@ import { ApprovalStore } from "./approval-store.js";
 import { JobStore, isTerminalJobStatus, type LocalJob } from "./job-store.js";
 import { Observability } from "./observability.js";
 import type {
+  DesktopSecurityUpgradePayload,
+  DesktopSecurityUpgradeResult,
   GatewayApprovalRequest,
   GatewayApprovalResult,
 } from "../server/router.js";
@@ -138,7 +144,7 @@ export class DesktopApplication {
   private readonly recovery: GatewayRecoveryManager;
   private readonly bootRecovery: BootRecoveryService;
   private readonly gatewayAuthToken: string;
-  private readonly gatewayId: string;
+  private readonly legacyGatewayId: string;
   private readonly sessionStore: LocalSessionStore;
   private shuttingDown = false;
   private dangerousAutoApprove = false;
@@ -204,7 +210,7 @@ export class DesktopApplication {
     const gatewayIdentityStore = new GatewayIdentityStore(
       app.getPath("userData"),
     );
-    this.gatewayId = gatewayIdentityStore.loadSync();
+    this.legacyGatewayId = gatewayIdentityStore.loadSync();
     this.server = DesktopGatewayServer.createDefault(
       this.settingsStore.getWebAppOrigin(),
       () => (this.isNoAuthMode() ? undefined : this.gatewayAuthToken),
@@ -226,12 +232,15 @@ export class DesktopApplication {
       () => this.recovery.onUnexpectedClose(),
       this.loopTokenStore,
       retrySpawnDeps,
-      () => this.gatewayId,
+      () => this.getActiveGatewayId(),
       () => this.settingsStore.getBinaryPaths(),
       (patch) => this.applyBinaryPathPatchAndInvalidateCaches(patch),
       () => this.apiKeyStore.getApiKeyProvenance(),
       (request) => this.signDesktopRequest(request),
       (surface, reason) => this.reportDesktopPopUnavailable(surface, reason),
+      () =>
+        this.cloudStatus.state === "online" ? this.cloudStatus.targetId : null,
+      (payload) => this.handleSecurityUpgradeCommand(payload),
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -265,6 +274,7 @@ export class DesktopApplication {
       onDesktopPopUnavailable: (surface, reason) => this.reportDesktopPopUnavailable(surface, reason),
       getAllowedDirectories: () => this.getAllowedDirectoriesFromSandbox(),
       getMaxInFlightCommands: () => MAX_IN_FLIGHT_COMMANDS,
+      getGatewayId: () => this.getUpgradeCapableGatewayId(),
       machineName: os.hostname(),
       pluginVersion: getCodePluginVersion(),
       desktopClientVersion: app.getVersion(),
@@ -606,6 +616,93 @@ export class DesktopApplication {
     return result.response === 0;
   }
 
+  /**
+   * Returns the gateway identity for the active saved profile, creating a
+   * profile-scoped UUID when needed. Unsaved legacy installs keep the original
+   * singleton identity for backward compatibility.
+   */
+  private getActiveGatewayId(): string {
+    const activeConfigId = this.settingsStore.getActiveConfigId();
+    if (!activeConfigId) {
+      return this.legacyGatewayId;
+    }
+    return this.settingsStore.ensureConfigGatewayId(activeConfigId).gatewayId ?? this.legacyGatewayId;
+  }
+
+  private getUpgradeCapableGatewayId(): string | null {
+    const keyPair = this.getOrCreateActiveSigningKey();
+    return keyPair.ok ? keyPair.keyPair.gatewayId : null;
+  }
+
+  private getActiveConfig(): SavedConfig | null {
+    return this.settingsStore.getActiveConfig();
+  }
+
+  private getConnectionSecurityStatus(): {
+    mode:
+      | "enhanced"
+      | "standard"
+      | "unconfigured"
+      | "signing_unavailable";
+    detail: string;
+  } {
+    const apiKeyStatus = this.apiKeyStore.getStatus();
+    if (!apiKeyStatus.hasApiKey) {
+      return {
+        mode: "unconfigured",
+        detail: "No cloud API key is configured.",
+      };
+    }
+    if (apiKeyStatus.provenance !== "DESKTOP_MANAGED") {
+      return {
+        mode: "standard",
+        detail: "Using a manually configured bearer key.",
+      };
+    }
+
+    const keyPair = this.gatewaySigningKeyStore.load(this.getActiveGatewayId());
+    if (!keyPair.ok) {
+      return {
+        mode: "signing_unavailable",
+        detail: "Managed key is present but request signing is unavailable.",
+      };
+    }
+
+    return {
+      mode: "enhanced",
+      detail: "Managed key with request signing is configured.",
+    };
+  }
+
+  private getOrCreateActiveSigningKey(): GatewaySigningKeyResult {
+    const gatewayId = this.getActiveGatewayId();
+    const keyPair = this.gatewaySigningKeyStore.getOrCreate(gatewayId);
+    if (keyPair.ok) {
+      this.persistActiveConfigManagedMetadata({
+        gatewayId,
+        gatewayPublicKeyPem: keyPair.keyPair.publicKeySpkiPem,
+        desktopSecurityUpgradeProtocolVersion: 1,
+      });
+    }
+    return keyPair;
+  }
+
+  private persistActiveConfigManagedMetadata(patch: SavedConfigManagedPatch): void {
+    this.settingsStore.updateActiveConfigManagedMetadata(patch);
+  }
+
+  private persistActiveProfileKey(
+    apiKey: string,
+    provenance: "USER_CREATED" | "DESKTOP_MANAGED",
+  ): void {
+    const activeConfig = this.getActiveConfig();
+    if (!activeConfig) {
+      return;
+    }
+    this.apiKeyStore.saveProfileKey(activeConfig.id, apiKey, provenance);
+    this.persistActiveConfigManagedMetadata({ apiKeySource: provenance });
+  }
+
   private async runManagedOnboardingProvisioning(
     payload: PendingOnboardingHandoff,
     run: ManagedOnboardingRunToken,
@@ -650,13 +747,14 @@ export class DesktopApplication {
     };
     this.notifyOnboardingStateChanged();
 
+    const activeGatewayId = this.getActiveGatewayId();
     const claimResult = await withSingleManagedOnboardingRetry({
       operation: () =>
         claimDesktopManagedApiKey({
           apiOrigin: trustedConfig.config.apiOrigin,
           onboardingAttemptId: payload.onboardingAttemptId,
           webAppOrigin: payload.webAppOrigin,
-          gatewayId: this.gatewayId,
+          gatewayId: activeGatewayId,
           signingKeys: this.gatewaySigningKeyStore,
           onDiagnostic: (diagnostic) =>
             this.reportBootstrapClaimDiagnostic(diagnostic),
@@ -691,6 +789,17 @@ export class DesktopApplication {
       return;
     }
     this.apiKeyStore.setApiKey(claimResult.apiKey, "DESKTOP_MANAGED");
+    this.persistActiveProfileKey(claimResult.apiKey, "DESKTOP_MANAGED");
+    const keyPair = this.gatewaySigningKeyStore.load(activeGatewayId);
+    this.persistActiveConfigManagedMetadata({
+      apiKeySource: "DESKTOP_MANAGED",
+      gatewayId: activeGatewayId,
+      ...(keyPair.ok
+        ? { gatewayPublicKeyPem: keyPair.keyPair.publicKeySpkiPem }
+        : {}),
+      desktopSecurityUpgradeProtocolVersion: 1,
+      pendingOnboardingAttemptId: null,
+    });
     const sandboxBaseDirectory = normalizeScopePath(
       payload.sandboxBaseDirectory,
     );
@@ -709,6 +818,11 @@ export class DesktopApplication {
             onboardingCompleted: true,
           }
         : { onboardingCompleted: false }),
+    });
+    this.settingsStore.updateActiveConfigOrigins({
+      apiOrigin: trustedConfig.config.apiOrigin,
+      relayOrigin: trustedConfig.config.relayOrigin,
+      webAppOrigin: payload.webAppOrigin,
     });
 
     if (safeSandboxBaseDirectory) {
@@ -740,6 +854,247 @@ export class DesktopApplication {
     };
     this.notifyOnboardingStateChanged();
     this.showWindow();
+  }
+
+  private async handleSecurityUpgradeCommand(
+    payload: DesktopSecurityUpgradePayload,
+  ): Promise<DesktopSecurityUpgradeResult> {
+    const activeGatewayId = this.getActiveGatewayId();
+    if (payload.gatewayId !== activeGatewayId) {
+      return {
+        ok: false,
+        code: "SECURITY_UPGRADE_GATEWAY_MISMATCH",
+        retryable: false,
+        statusCode: 409,
+      };
+    }
+    if (
+      this.cloudStatus.state === "online" &&
+      this.cloudStatus.targetId !== payload.computeTargetId
+    ) {
+      return {
+        ok: false,
+        code: "SECURITY_UPGRADE_TARGET_MISMATCH",
+        retryable: false,
+        statusCode: 409,
+      };
+    }
+    if (Date.parse(payload.expiresAt) <= Date.now()) {
+      return {
+        ok: false,
+        code: "SECURITY_UPGRADE_ATTEMPT_EXPIRED",
+        retryable: false,
+        statusCode: 410,
+      };
+    }
+
+    let webAppOrigin: string;
+    try {
+      webAppOrigin = normalizeWebAppOrigin(payload.webAppOrigin);
+    } catch {
+      return {
+        ok: false,
+        code: "SECURITY_UPGRADE_INVALID_ORIGIN",
+        retryable: false,
+        statusCode: 400,
+      };
+    }
+
+    const confirmation = await dialog.showMessageBox({
+      type: "question",
+      buttons: ["Upgrade security", "Cancel"],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+      title: "Upgrade Desktop Security",
+      message:
+        "ClosedLoop wants to upgrade this Desktop connection to a protected managed key. Confirm the web app URL before continuing.",
+      detail: webAppOrigin,
+    });
+    if (confirmation.response !== 0) {
+      return {
+        ok: false,
+        code: "SECURITY_UPGRADE_CONFIRMATION_DISMISSED",
+        retryable: false,
+        statusCode: 409,
+      };
+    }
+
+    const run = this.managedOnboardingRuns.begin();
+    const priorKey = this.apiKeyStore.getApiKeyRecord();
+    await this.runManagedOnboardingProvisioning(
+      {
+        onboardingAttemptId: payload.onboardingAttemptId,
+        webAppOrigin,
+        sandboxBaseDirectory: this.settingsStore.getSandboxBaseDirectory(),
+        createdAt: new Date().toISOString(),
+      },
+      run,
+    );
+    if (this.shouldStopManagedOnboardingRun(run, "security upgrade result")) {
+      return {
+        ok: false,
+        code: "SECURITY_UPGRADE_CANCELLED",
+        retryable: true,
+        statusCode: 409,
+      };
+    }
+
+    const currentKey = this.apiKeyStore.getApiKeyRecord();
+    if (
+      currentKey?.provenance === "DESKTOP_MANAGED" &&
+      currentKey.apiKey !== priorKey?.apiKey
+    ) {
+      return { ok: true };
+    }
+
+    return {
+      ok: false,
+      code: "SECURITY_UPGRADE_FAILED",
+      retryable: false,
+      statusCode: 503,
+    };
+  }
+
+  private async startDesktopFirstDeviceOnboarding(
+    webAppOriginInput?: string,
+  ): Promise<{ status: "approved" | "pending"; verificationUrl?: string }> {
+    const webAppOrigin = normalizeWebAppOrigin(
+      webAppOriginInput || this.settingsStore.getWebAppOrigin(),
+    );
+    const keyPair = this.getOrCreateActiveSigningKey();
+    if (!keyPair.ok) {
+      throw new Error(`Desktop signing key unavailable: ${keyPair.reason}`);
+    }
+    const activeGatewayId = keyPair.keyPair.gatewayId;
+
+    const apiOrigin = normalizeAndValidateOrigin(
+      this.settingsStore.getApiOrigin(),
+    );
+    const startUrl = new URL("/desktop/device-onboarding/start", apiOrigin);
+    const startResponse = await fetch(startUrl.toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        webAppOrigin,
+        gatewayId: activeGatewayId,
+        gatewayPublicKeyPem: keyPair.keyPair.publicKeySpkiPem,
+        machineName: os.hostname(),
+        platform: process.platform,
+        desktopVersion: app.getVersion(),
+        desktopSecurityUpgradeProtocolVersion: 1,
+      }),
+    });
+    const startBody = (await startResponse.json().catch(() => null)) as
+      | {
+          deviceSessionId?: string;
+          deviceSessionSecret?: string;
+          verificationUrl?: string;
+          expiresAt?: string;
+          pollIntervalSeconds?: number;
+        }
+      | null;
+    if (
+      !startResponse.ok ||
+      !startBody?.deviceSessionId ||
+      !startBody.deviceSessionSecret ||
+      !startBody.verificationUrl ||
+      !startBody.expiresAt
+    ) {
+      throw new Error("Could not start browser connection");
+    }
+
+    const run = this.managedOnboardingRuns.begin();
+    this.managedOnboardingState = {
+      status: "provisioning",
+      webAppOrigin,
+      message: "Waiting for browser approval...",
+    };
+    this.notifyOnboardingStateChanged();
+    await shell.openExternal(startBody.verificationUrl);
+
+    const pollUrl = new URL("/desktop/device-onboarding/poll", apiOrigin);
+    const pollIntervalMs = Math.max(
+      1_000,
+      (startBody.pollIntervalSeconds ?? 5) * 1000,
+    );
+    while (
+      !this.managedOnboardingRuns.isCancelled(run, this.shuttingDown) &&
+      Date.parse(startBody.expiresAt) > Date.now()
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+      type DeviceOnboardingPollBody = {
+        status?: string;
+        onboardingAttemptId?: string;
+        webAppOrigin?: string;
+        expiresAt?: string;
+      };
+      let pollResponse: Response;
+      let pollBody: DeviceOnboardingPollBody | null = null;
+      try {
+        pollResponse = await fetch(pollUrl.toString(), {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            deviceSessionId: startBody.deviceSessionId,
+            deviceSessionSecret: startBody.deviceSessionSecret,
+          }),
+        });
+        pollBody = (await pollResponse
+          .json()
+          .catch(() => null)) as DeviceOnboardingPollBody | null;
+      } catch {
+        continue;
+      }
+      if (!pollResponse.ok || !pollBody?.status) {
+        continue;
+      }
+      if (pollBody.status === "pending") {
+        continue;
+      }
+      if (
+        pollBody.status === "approved" &&
+        pollBody.onboardingAttemptId &&
+        pollBody.webAppOrigin
+      ) {
+        const confirmed = await this.confirmManagedOnboardingOrigin({
+          onboardingAttemptId: pollBody.onboardingAttemptId,
+          webAppOrigin: pollBody.webAppOrigin,
+          createdAt: new Date().toISOString(),
+        });
+        if (!confirmed) {
+          this.setManagedOnboardingFailure(
+            "origin_confirmation_dismissed",
+            "Browser connection was canceled. Use manual setup or start again.",
+            ["use_manual_setup", "retry_automated_onboarding"],
+          );
+          return { status: "pending", verificationUrl: startBody.verificationUrl };
+        }
+        await this.runManagedOnboardingProvisioning(
+          {
+            onboardingAttemptId: pollBody.onboardingAttemptId,
+            webAppOrigin: pollBody.webAppOrigin,
+            sandboxBaseDirectory: this.settingsStore.getSandboxBaseDirectory(),
+            createdAt: new Date().toISOString(),
+          },
+          run,
+        );
+        return { status: "approved", verificationUrl: startBody.verificationUrl };
+      }
+      this.setManagedOnboardingFailure(
+        `device_session_${pollBody.status}`,
+        "Browser connection was not approved. Use manual setup or start again.",
+        ["use_manual_setup", "retry_automated_onboarding"],
+      );
+      return { status: "pending", verificationUrl: startBody.verificationUrl };
+    }
+
+    this.setManagedOnboardingFailure(
+      "device_session_expired",
+      "Browser connection expired. Use manual setup or start again.",
+      ["use_manual_setup", "retry_automated_onboarding"],
+    );
+    return { status: "pending", verificationUrl: startBody.verificationUrl };
   }
 
   private shouldStopManagedOnboardingRun(
@@ -847,6 +1202,9 @@ export class DesktopApplication {
     const stats = this.commandExecutor.getStats();
 
     if (status.state === "online") {
+      this.persistActiveConfigManagedMetadata({
+        lastComputeTargetId: status.targetId,
+      });
       this.cloudSocket.sendPresence({
         state: this.cloudCommandsPaused ? "degraded" : "online",
         ...(this.cloudCommandsPaused
@@ -1432,6 +1790,7 @@ export class DesktopApplication {
       sandboxBaseDirectory: this.settingsStore.getSandboxBaseDirectory(),
       commandsPaused: this.cloudCommandsPaused,
       connectionEnabled: this.cloudConnectionEnabled,
+      connectionSecurity: this.getConnectionSecurityStatus(),
       serverAlive: this.server.isAlive(),
       gatewayHealthy: this.recovery.gatewayHealthy,
     }));
@@ -1664,6 +2023,7 @@ export class DesktopApplication {
         this.cancelManagedOnboardingForUserChange("manual onboarding completed");
         if (trimmedApiKey) {
           this.apiKeyStore.setApiKey(trimmedApiKey, "USER_CREATED");
+          this.persistActiveProfileKey(trimmedApiKey, "USER_CREATED");
         }
         this.settingsStore.update({
           ...(relayOrigin !== undefined ? { relayOrigin } : {}),
@@ -1690,6 +2050,11 @@ export class DesktopApplication {
         this.restartCloudSocket();
         return this.getOnboardingState();
       },
+    );
+    ipcMain.handle(
+      "desktop:start-device-onboarding",
+      async (_event, payload: { webAppOrigin?: string } | undefined) =>
+        this.startDesktopFirstDeviceOnboarding(payload?.webAppOrigin),
     );
     ipcMain.handle("desktop:get-binary-paths", () =>
       this.settingsStore.getBinaryPaths(),
@@ -1789,15 +2154,36 @@ export class DesktopApplication {
 
     ipcMain.handle("desktop:save-config", (_event, payload: { name: string }) => {
       // Name validation and trimming is performed by settingsStore.saveConfig
-      const savedConfig = this.settingsStore.saveConfig(payload?.name ?? "");
+      let savedConfig = this.settingsStore.saveConfig(payload?.name ?? "");
       const status = this.apiKeyStore.getStatus();
       if (status.source === "safeStorage") {
         const currentApiKey = this.apiKeyStore.getApiKey() ?? "";
         if (currentApiKey) {
+          const provenance =
+            this.apiKeyStore.getApiKeyProvenance() ?? "USER_CREATED";
+          // A new saved profile must not inherit the active profile's managed
+          // signing identity. Treat copied managed keys as bearer-only until
+          // that profile completes its own security upgrade.
+          const profileProvenance =
+            provenance === "DESKTOP_MANAGED" ? "USER_CREATED" : provenance;
           this.apiKeyStore.saveProfileKey(
             savedConfig.id,
             currentApiKey,
-            this.apiKeyStore.getApiKeyProvenance() ?? "USER_CREATED",
+            profileProvenance,
+          );
+          const managedPatch: SavedConfigManagedPatch = {
+            apiKeySource: profileProvenance,
+          };
+          if (provenance === "DESKTOP_MANAGED") {
+            const profileGateway = this.settingsStore.ensureConfigGatewayId(
+              savedConfig.id,
+            );
+            managedPatch.gatewayId = profileGateway.gatewayId;
+            managedPatch.desktopSecurityUpgradeProtocolVersion = 1;
+          }
+          savedConfig = this.settingsStore.updateConfigManagedMetadata(
+            savedConfig.id,
+            managedPatch,
           );
         }
       }
@@ -1816,6 +2202,7 @@ export class DesktopApplication {
       if (!id) {
         throw new Error("id is required");
       }
+      const config = this.settingsStore.listConfigs().find((c) => c.id === id);
       const { wasActive } = this.settingsStore.deleteConfig(id);
       if (wasActive) {
         this.cancelManagedOnboardingForUserChange(
@@ -1830,6 +2217,18 @@ export class DesktopApplication {
         this.refreshTrayState();
       }
       this.apiKeyStore.deleteProfileKey(id);
+      if (config?.gatewayId) {
+        const activeRuntimeGatewayId = this.settingsStore.getActiveConfigId()
+          ? null
+          : this.legacyGatewayId;
+        if (
+          !this.settingsStore.isGatewayIdReferenced(config.gatewayId, {
+            activeRuntimeGatewayId,
+          })
+        ) {
+          this.gatewaySigningKeyStore.delete(config.gatewayId);
+        }
+      }
       return { wasActive };
     });
 
@@ -1854,9 +2253,20 @@ export class DesktopApplication {
       const appliedConfig = this.settingsStore.applyConfig(id);
       const profileKey = this.apiKeyStore.getProfileKeyRecord(id);
       if (profileKey) {
-        this.apiKeyStore.setApiKey(profileKey.apiKey, profileKey.provenance);
+        const hasManagedIdentity =
+          appliedConfig.gatewayId &&
+          appliedConfig.gatewayPublicKeyPem &&
+          profileKey.provenance === "DESKTOP_MANAGED";
+        const provenance = hasManagedIdentity ? "DESKTOP_MANAGED" : "USER_CREATED";
+        this.apiKeyStore.setApiKey(profileKey.apiKey, provenance);
+        this.settingsStore.updateConfigManagedMetadata(id, {
+          apiKeySource: provenance,
+        });
       } else {
         this.apiKeyStore.clearApiKey();
+        this.settingsStore.updateConfigManagedMetadata(id, {
+          apiKeySource: "USER_CREATED",
+        });
       }
       this.restartCloudSocket();
       return appliedConfig;
@@ -1866,14 +2276,15 @@ export class DesktopApplication {
   private signDesktopRequest(
     request: DesktopPopSigningRequest,
   ): DesktopPopHeaders | null {
-    const keyPair = this.gatewaySigningKeyStore.load(this.gatewayId);
+    const activeGatewayId = this.getActiveGatewayId();
+    const keyPair = this.gatewaySigningKeyStore.load(activeGatewayId);
     if (!keyPair.ok) {
       throw new DesktopPopUnavailableError(keyPair.reason);
     }
     try {
       return signDesktopPopHeaders({
         ...request,
-        gatewayId: this.gatewayId,
+        gatewayId: activeGatewayId,
         privateKeyPkcs8Pem: keyPair.keyPair.privateKeyPkcs8Pem,
       });
     } catch {
