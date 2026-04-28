@@ -1,3 +1,13 @@
+/** DRIFT ANNOTATION (PLN-392)
+ *
+ * Drift classes present in this file:
+ *   - Class (ii) — pattern-replication test drift: prose cites stale line ranges
+ *     that contradict adjacent drift-check annotations
+ *
+ * Production source: apps/desktop/src/server/operations/symphony-interactive.ts:489,1047
+ * Fix approach: Remediation deferred to FEA-618.
+ */
+
 /**
  * Characterization tests for spawn ENOENT error handling.
  *
@@ -171,8 +181,8 @@ test(
           reject(new Error(`claude exited with code ${code}, no usable output`));
         });
 
-        // Mirrors line 1073-1077: error handler — ENOENT arrives here.
-        // drift-check: matches apps/desktop/src/server/operations/symphony-interactive.ts:1047
+        // Mirrors :1047: error handler — ENOENT arrives here.
+        // drift-check: replicates apps/desktop/src/server/operations/symphony-interactive.ts:1047
         mockChild.on("error", (err: Error) => {
           clearTimeout(timer);
           console.error("[commit-message] failed to spawn claude:", err.message);
@@ -182,8 +192,8 @@ test(
     }
 
     // -----------------------------------------------------------------------
-    // Replicate the outer try/catch (symphony-interactive.ts lines 502-522)
-    // drift-check: matches apps/desktop/src/server/operations/symphony-interactive.ts:489
+    // Replicate the outer try/catch (symphony-interactive.ts :489)
+    // drift-check: replicates apps/desktop/src/server/operations/symphony-interactive.ts:489
     // -----------------------------------------------------------------------
     async function outerFn(
       mockChild: ReturnType<typeof buildMockChildProcess>

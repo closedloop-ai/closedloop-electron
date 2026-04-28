@@ -1,3 +1,12 @@
+/** DRIFT ANNOTATION (PLN-392)
+ *
+ * Drift classes present in this file:
+ *   - Class (i) — drift-check annotation referencing production source line
+ *
+ * Production source: apps/desktop/src/main/spawn-retry.ts:26
+ * Fix approach: Remediation deferred to FEA-618.
+ */
+
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";

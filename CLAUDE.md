@@ -34,6 +34,15 @@ This rule does NOT apply to internal contracts that ship as a single unit with t
 
 - **[mistake]**: When adding new operation files, do not copy-paste helper functions from existing files. Check for shared modules first. The `json()` response helper was duplicated across 33 files before being extracted into `response-utils.ts`.
 
+## Test Drift Audit
+
+The `apps/desktop/test/` directory has a maintained drift audit and annotation
+convention. See [`apps/desktop/test/DRIFT-AUDIT.md`](apps/desktop/test/DRIFT-AUDIT.md)
+for the full per-file audit table, the two-form annotation vocabulary
+(`// drift-check: matches` for line-pointer anchors, `// drift-check: replicates`
+for pattern-replication sites), and the maintenance contract when adding or
+reclassifying tests.
+
 ## Commit Messages
 
 Follow the format in `.gitmessage`. The subject line must be `<TICKET>: <description>` where TICKET is extracted from the branch name (e.g. `FEAT-68: add no-auth dev mode`). Include bullet-point body, Testing, and Risks sections.

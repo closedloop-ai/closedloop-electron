@@ -27,6 +27,19 @@
  *   wrap closeSync() in try/catch, add the secondary gatewayLog.warn for
  *   closeSync failure, and track fdClosed = true inside the try block.
  *   Update test comment line references from 699-715 to 672-688.
+ *
+ * Tests (b), (c), and (d) — intentional-and-current pattern-replication
+ * (no drift):
+ *   These tests replicate production logic (generateCommitWithClaude in
+ *   symphony-interactive.ts:489 and :1047, waitForExit in codex.ts:1985,
+ *   and the learnings.ts:264 detached-spawn handler). The replicated
+ *   patterns are still aligned with production at PLN-392 audit time, so
+ *   no remediation is required. Per the PRD-220 vocabulary decision (PR
+ *   #134), every site that copies production logic carries a
+ *   `// drift-check: replicates <file>:<line>` annotation regardless of
+ *   drift state, so the eventual FEA-621 drift-check script can monitor
+ *   the entire pattern-replication surface rather than only the drifted
+ *   subset.
  */
 
 /**
@@ -322,9 +335,9 @@ test(
           reject(new Error(`claude exited with code ${code}, no usable output`));
         });
 
-        // Mirrors lines 1088-1092 (reference: line 1073 pattern):
+        // Mirrors symphony-interactive.ts:1047 (reference: line 1073 pattern):
         // child.on("error") → reject(err).
-        // drift-check: matches apps/desktop/src/server/operations/symphony-interactive.ts:1047
+        // drift-check: replicates apps/desktop/src/server/operations/symphony-interactive.ts:1047
         mockChild.on("error", (err: Error) => {
           clearTimeout(timer);
           console.error("[commit-message] failed to spawn claude:", err.message);
@@ -333,8 +346,8 @@ test(
       });
     }
 
-    // --- Replicate the outer try/catch (lines 503-522) ---
-    // drift-check: matches apps/desktop/src/server/operations/symphony-interactive.ts:489
+    // --- Replicate the outer try/catch (symphony-interactive.ts:489) ---
+    // drift-check: replicates apps/desktop/src/server/operations/symphony-interactive.ts:489
     async function commitMessageRouteHandlerCatch(
       mockChild: ReturnType<typeof buildMockChildProcess>
     ): Promise<{ title: string; description: string; source: string }> {
@@ -612,8 +625,8 @@ test(
 test(
   "(c) codex.ts finding-chat handler: ENOENT causes SSE response to contain { type: 'error' } event",
   async () => {
-    // --- Replicate waitForExit() from codex.ts lines 2080-2085 ---
-    // drift-check: matches apps/desktop/src/server/operations/codex.ts:1985
+    // --- Replicate waitForExit() from codex.ts:1985 ---
+    // drift-check: replicates apps/desktop/src/server/operations/codex.ts:1985
     function waitForExit(child: import("node:events").EventEmitter): Promise<number> {
       return new Promise((resolve, reject) => {
         child.once("error", reject);
@@ -756,11 +769,11 @@ test(
 
     try {
       // Replicate the spawn + child.on('error') pattern from learnings.ts
-      // lines 273-286.
+      // :264.
       const child = buildMockChildProcess();
 
-      // Mirror learnings.ts lines 283-285:
-      // drift-check: matches apps/desktop/src/server/operations/learnings.ts:264
+      // Mirror learnings.ts:264:
+      // drift-check: replicates apps/desktop/src/server/operations/learnings.ts:264
       child.on("error", (err: NodeJS.ErrnoException) => {
         logger.warn("learnings-launch", `detached-spawn-failed: ${err.message}`);
       });

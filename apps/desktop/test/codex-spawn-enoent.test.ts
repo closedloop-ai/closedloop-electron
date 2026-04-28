@@ -1,17 +1,26 @@
+/** DRIFT ANNOTATION (PLN-392)
+ *
+ * Drift classes present in this file:
+ *   - Class (i) — drift-check annotations referencing production source lines
+ *
+ * Production source: apps/desktop/src/server/operations/codex.ts:1985,1992,2030
+ * Fix approach: Remediation deferred to FEA-618.
+ */
+
 /**
  * T-2.3: Characterization tests for spawn ENOENT handling in codex.ts.
  *
  * Verifies that the spawn('claude', args) call in codex.ts at line 1156
  * handles ENOENT correctly through the existing error-handling chain:
  *
- *   (a) waitForExit() at lines 2080-2085 has child.once('error', reject),
- *       which causes the Promise to reject on ENOENT, and the outer catch at
- *       line 1228 writes { type: 'error', error: ... } to the SSE response
+ *   (a) waitForExit() at :1985 has child.once('error', reject),
+ *       which causes the Promise to reject on ENOENT, and the outer catch
+ *       writes { type: 'error', error: ... } to the SSE response
  *       stream without any uncaughtException escaping.
  *
- *   (b) runCommand() at lines 2087-2116 (used by GET /api/gateway/codex/available
- *       at line 296) has child.once('error', reject) at line 2107, and its
- *       caller wraps in try/catch (lines 294-305) returning { available: false }
+ *   (b) runCommand() at :1992 (used by GET /api/gateway/codex/available
+ *       at line 297) has child.once('error', reject) at line 2010, and its
+ *       caller wraps in try/catch (lines 297-306) returning { available: false }
  *       on any error, so ENOENT does not escape.
  *
  * These are pure characterization tests: no production code changes are
@@ -40,7 +49,7 @@ import {
 } from "./helpers/spawn-test-utils.js";
 
 // ---------------------------------------------------------------------------
-// Replicate waitForExit() from codex.ts lines 2080-2085
+// Replicate waitForExit() from codex.ts :1985
 // ---------------------------------------------------------------------------
 
 // drift-check: matches apps/desktop/src/server/operations/codex.ts:1985
@@ -52,7 +61,7 @@ function waitForExit(child: EventEmitter): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
-// Replicate writeEvent() from codex.ts lines 2127-2129
+// Replicate writeEvent() from codex.ts :2030
 // ---------------------------------------------------------------------------
 
 // drift-check: matches apps/desktop/src/server/operations/codex.ts:2030
@@ -162,7 +171,7 @@ test(
   "(b) codex.ts runCommand(): ENOENT rejects the promise, caller try/catch returns { available: false }",
   async () => {
     // drift-check: matches apps/desktop/src/server/operations/codex.ts:1992
-    // Replicate the runCommand() Promise wrapper (codex.ts lines 2087-2116).
+    // Replicate the runCommand() Promise wrapper (codex.ts :1992).
     function runCommandMock(
       mockChild: ReturnType<typeof buildMockChildProcess>
     ): Promise<string> {

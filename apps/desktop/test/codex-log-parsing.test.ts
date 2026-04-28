@@ -1,3 +1,12 @@
+/** DRIFT ANNOTATION (PLN-392)
+ *
+ * Drift classes present in this file:
+ *   - Class (i) — drift-check annotation referencing production source line
+ *
+ * Production source: apps/desktop/src/server/operations/codex.ts:1767
+ * Fix approach: Remediation deferred to FEA-618.
+ */
+
 import assert from "node:assert/strict";
 import { createWriteStream } from "node:fs";
 import fs from "node:fs/promises";
