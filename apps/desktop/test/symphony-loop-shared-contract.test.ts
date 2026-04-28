@@ -538,6 +538,92 @@ test("EXECUTE: uploaded execution result is V2 envelope with baseBranch on succe
   );
 });
 
+test("EXECUTE: localRepoPath-only success infers V2 fullName from PR URL", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "contract-localpath-fullname-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-localpath");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  await createFakeRunLoopScript(tmpDir, [
+    "#!/bin/sh",
+    "echo 'change' > local-path-change.txt",
+    "exit 0",
+  ].join("\n"));
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+
+  const inferredFullName = "local-only/repo-localpath";
+  const executionResultContent = JSON.stringify({
+    prUrl: `https://github.com/${inferredFullName}/pull/7`,
+    prNumber: 7,
+    branchName: "symphony/localpath-test",
+    commitSha: "abc1234",
+  });
+  await fs.writeFile(
+    path.join(fakeBin, "claude"),
+    [
+      "#!/bin/sh",
+      `printf '%s' '${executionResultContent}' > execution-result.json`,
+      "exit 0",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+  const server = await createTestGateway(tmpDir, mock.port);
+
+  const loopId = "00000000-0000-0000-0000-000000002041";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [],
+        localRepoPath: repoPath,
+      }),
+    },
+  );
+
+  assert.equal(response.status, 200);
+
+  const uploadReq = await mock.waitForRequest("upload-artifacts");
+  const uploadBody = JSON.parse(uploadReq.body) as {
+    artifacts: {
+      executionResult?: {
+        schemaVersion?: number;
+        results?: Array<{ status: string; fullName?: string; prUrl?: string }>;
+      };
+    };
+  };
+  const primary = uploadBody.artifacts.executionResult?.results?.[0];
+  assert.equal(uploadBody.artifacts.executionResult?.schemaVersion, 2);
+  assert.equal(primary?.status, "success");
+  assert.equal(primary?.fullName, inferredFullName);
+  assert.equal(primary?.prUrl, `https://github.com/${inferredFullName}/pull/7`);
+
+  const completedEvent = await waitForCompletedEvent(mock.requests, loopId);
+  assert.equal(completedEvent.result?.prUrl, `https://github.com/${inferredFullName}/pull/7`);
+  assert.equal(completedEvent.result?.has_changes, true);
+});
+
 // ---------------------------------------------------------------------------
 // Test 6: PROCESS_FAILED error event includes sessionId
 // ---------------------------------------------------------------------------

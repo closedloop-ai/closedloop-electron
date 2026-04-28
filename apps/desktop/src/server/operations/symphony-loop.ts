@@ -59,7 +59,10 @@ import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { getShellEnv, getShellPath, resolveBinarySync } from "../shell-path.js";
 import { withMcpTools } from "./chat-tools.js";
-import { findWorktreeForBranch as findWorktreeForBranchImpl } from "./git-helpers.js";
+import {
+  findWorktreeForBranch as findWorktreeForBranchImpl,
+  resolveRepoFullName,
+} from "./git-helpers.js";
 import { startOutputTailer } from "./output-tailer.js";
 import {
   findPluginScript,
@@ -1034,6 +1037,16 @@ export async function resolveAdditionalRepos(
   }
 
   return resolved;
+}
+
+function resolveLoopPrimaryFullName(
+  body: LoopRequestBody,
+  expandedRepoPath: string | null,
+): string {
+  return (
+    body.repo?.fullName ??
+    (expandedRepoPath ? resolveRepoFullName(expandedRepoPath) ?? "" : "")
+  );
 }
 
 /**
@@ -2398,6 +2411,30 @@ function buildExecutionResultV2(
   };
 }
 
+function parseGitHubFullNameFromPrUrl(prUrl: string): string | null {
+  try {
+    const parsed = new URL(prUrl);
+    if (parsed.hostname !== "github.com") {
+      return null;
+    }
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    if (parts.length < 4 || parts[2] !== "pull") {
+      return null;
+    }
+    const [owner, repo] = parts;
+    return owner && repo ? `${owner}/${repo}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function getSuccessExecutionResultFullName(
+  preferredFullName: string,
+  prUrl: string,
+): string {
+  return preferredFullName.trim() || (parseGitHubFullNameFromPrUrl(prUrl) ?? "");
+}
+
 export function scrubObjectCredentials(obj: unknown): unknown {
   if (typeof obj === "string") return redactCredentials(obj);
   if (Array.isArray(obj)) return obj.map(scrubObjectCredentials);
@@ -2646,7 +2683,10 @@ export async function runExecuteFinalization(
     const executionResult = buildExecutionResultV2([
       {
         status: "success",
-        fullName: params.primaryFullName,
+        fullName: getSuccessExecutionResultFullName(
+          params.primaryFullName,
+          llmResult.prUrl,
+        ),
         prUrl: llmResult.prUrl,
         prNumber: llmResult.prNumber,
         branchName: llmResult.branchName,
@@ -2735,7 +2775,10 @@ export async function runExecuteFinalization(
     const executionResult = buildExecutionResultV2([
       {
         status: "success",
-        fullName: params.primaryFullName,
+        fullName: getSuccessExecutionResultFullName(
+          params.primaryFullName,
+          gitResult.prUrl,
+        ),
         prUrl: gitResult.prUrl,
         prNumber: gitResult.prNumber,
         branchName: gitResult.branchName,
@@ -2906,21 +2949,24 @@ function buildPrimaryRepoResult(
   executeFinalization: ExecuteFinalizationResult | null,
 ): RepoExecutionResult {
   if (!executeFinalization) {
-    return { status: 'skipped', fullName, reason: 'no_finalization' };
+    return { status: "skipped", fullName, reason: "no_finalization" };
   }
-  if (executeFinalization.status === 'no-changes') {
-    return { status: 'skipped', fullName, reason: 'no_changes' };
+  if (executeFinalization.status === "no-changes") {
+    return { status: "skipped", fullName, reason: "no_changes" };
   }
   if (
-    executeFinalization.status === 'success' &&
+    executeFinalization.status === "success" &&
     executeFinalization.prUrl &&
     executeFinalization.prNumber !== undefined &&
     executeFinalization.branchName &&
     executeFinalization.commitSha
   ) {
     return {
-      status: 'success',
-      fullName,
+      status: "success",
+      fullName: getSuccessExecutionResultFullName(
+        fullName,
+        executeFinalization.prUrl,
+      ),
       prUrl: executeFinalization.prUrl,
       prNumber: executeFinalization.prNumber,
       branchName: executeFinalization.branchName,
@@ -2930,7 +2976,7 @@ function buildPrimaryRepoResult(
     };
   }
   return {
-    status: 'failed',
+    status: "failed",
     fullName,
     error: executeFinalization.reason ?? `execute finalization status: ${executeFinalization.status}`,
   };
@@ -3496,7 +3542,7 @@ export async function handleProcessCompletion(
         expectedMcpUrl,
         jobStore,
         source: "live-exit",
-        primaryFullName: body.repo?.fullName ?? "",
+        primaryFullName: resolveLoopPrimaryFullName(body, expandedRepoPath),
       });
 
       // Cancellation gate: skip finalization upload/event work if cancellation won
@@ -3542,10 +3588,16 @@ export async function handleProcessCompletion(
       // Additional repos are finalized after the primary so the primary PR info
       // is not overwritten by a second clean-worktree check.
       if (additionalWorktreeDirs.length > 0 && worktreeDir) {
-        const primaryFullName = body.repo?.fullName ?? "";
+        const primaryFullName = resolveLoopPrimaryFullName(
+          body,
+          expandedRepoPath,
+        );
         const additionalEntries: Array<{ fullName: string; worktreeDir: string; baseBranch: string }> =
           additionalWorktreeDirs.map((entry, i) => ({
-            fullName: body.additionalRepos?.[i]?.fullName ?? entry.repoPath,
+            fullName:
+              body.additionalRepos?.[i]?.fullName ??
+              resolveRepoFullName(entry.repoPath) ??
+              "",
             worktreeDir: entry.dir,
             baseBranch: body.additionalRepos?.[i]?.branch ?? "main",
           }));
@@ -5353,7 +5405,8 @@ async function handleLoopRequest(
         artifactSlug: body.artifactSlug ?? existing?.artifactSlug,
         baseBranch: body.repo?.branch ?? existing?.baseBranch ?? "main",
         primaryRepoFullName:
-          body.repo?.fullName ?? existing?.primaryRepoFullName,
+          resolveLoopPrimaryFullName(body, expandedRepoPath) ||
+          existing?.primaryRepoFullName,
         webAppOrigin: webAppOrigin || existing?.webAppOrigin,
         expectedMcpUrl: expectedMcpUrl ?? existing?.expectedMcpUrl,
         committer: body.committer ?? existing?.committer,
