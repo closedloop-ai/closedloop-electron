@@ -67,7 +67,7 @@ import {
 } from "./plugin-cache.js";
 import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import { addRepo } from "./repos-config-utils.js";
-import type { ExecutionResultV2, RepoExecutionResult } from "../../shared/contracts.js";
+import type { ExecutionResultV2, RepoExecutionResult } from "@closedloop-ai/loops-api/execution-result";
 import {
   CLONE_GIT_TIMEOUT,
   expandHome,
@@ -2382,38 +2382,45 @@ function getHeadCommitShaFromWorktree(worktreeDir: string): string | null {
   }
 }
 
+// Synthetic fullName for v1 normalization — execution-result.json is a
+// per-worktree artifact, so its primary-repo identity isn't carried in v1
+// payloads. The downstream code reads PR fields, not fullName, so any
+// non-empty placeholder unblocks the v1 parser.
+const V1_PRIMARY_FULL_NAME_PLACEHOLDER = "local/primary";
+
 function getAuthoritativeExecutionResult(
   value: unknown,
 ): ExecuteFinalizationResult | null {
-  const parsed = parseExecutionResultFile(value);
-  if (!parsed) {
+  const parsed = parseExecutionResultFile(value, V1_PRIMARY_FULL_NAME_PLACEHOLDER);
+  if (!parsed.ok) {
     return null;
   }
-  if (!parsed.hasChanges) {
+  const primary = parsed.results[0];
+  if (!primary || primary.status === "failed") {
+    return null;
+  }
+  if (primary.status === "skipped" || !primary.hasChanges) {
     return {
       status: "no-changes",
       path: "artifact-existing",
       reason: "existing execution-result.json reused",
       executionResultPersisted: true,
-      branchName: parsed.branchName ?? undefined,
-      commitSha: parsed.commitSha ?? undefined,
+      branchName:
+        primary.status === "success" ? primary.branchName : undefined,
+      commitSha:
+        primary.status === "success" ? primary.commitSha ?? undefined : undefined,
     };
   }
-  if (
-    parsed.prUrl &&
-    parsed.prNumber != null &&
-    parsed.branchName &&
-    parsed.commitSha
-  ) {
+  if (primary.commitSha) {
     return {
       status: "success",
       path: "artifact-existing",
       reason: "existing execution-result.json reused",
       executionResultPersisted: true,
-      prUrl: parsed.prUrl,
-      prNumber: parsed.prNumber,
-      branchName: parsed.branchName,
-      commitSha: parsed.commitSha,
+      prUrl: primary.prUrl,
+      prNumber: primary.prNumber,
+      branchName: primary.branchName,
+      commitSha: primary.commitSha,
     };
   }
   return null;
@@ -3729,12 +3736,22 @@ export async function handleProcessCompletion(
         subtype: command.toLowerCase(),
       };
       if (command === "EXECUTE" && artifacts.executionResult) {
-        const parsed = parseExecutionResultFile(artifacts.executionResult);
-        if (parsed) {
-          result.prUrl = parsed.prUrl;
-          result.prNumber = parsed.prNumber;
-          result.branchName = parsed.branchName;
-          result.has_changes = parsed.hasChanges;
+        const parsed = parseExecutionResultFile(
+          artifacts.executionResult,
+          V1_PRIMARY_FULL_NAME_PLACEHOLDER,
+        );
+        const primary = parsed.ok ? parsed.results[0] : null;
+        if (primary?.status === "success") {
+          result.prUrl = primary.prUrl;
+          result.prNumber = primary.prNumber;
+          result.branchName = primary.branchName;
+          result.has_changes = primary.hasChanges;
+        } else if (primary?.status === "skipped") {
+          // v1 has_changes=false normalizes to skipped; preserve the legacy
+          // shape where prUrl/prNumber surface as null and has_changes=false.
+          result.prUrl = null;
+          result.prNumber = null;
+          result.has_changes = false;
         }
       }
       if (command === "EXECUTE" && executeFinalization) {

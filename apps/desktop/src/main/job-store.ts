@@ -1,5 +1,5 @@
 import Store from "electron-store";
-import type { RepoExecutionResult } from '../shared/contracts.js';
+import type { RepoExecutionResult } from '@closedloop-ai/loops-api/execution-result';
 
 export type LocalJobStatus =
   | "QUEUED"

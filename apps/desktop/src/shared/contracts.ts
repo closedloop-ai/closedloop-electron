@@ -96,22 +96,3 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   savedConfigs: [],
   activeConfigId: null
 };
-
-// TODO: remove shim and import from @closedloop-ai/loops-api when package exports these symbols
-
-export type RepoExecutionResult =
-  | { status: 'success'; fullName: string; prUrl: string; prNumber: number; branchName: string; baseBranch: string; hasChanges: true; commitSha: string }
-  | { status: 'skipped'; fullName: string; reason: string }
-  | { status: 'failed'; fullName: string; error: string };
-
-export function getPrimaryRepoResult(
-  results: readonly RepoExecutionResult[],
-  primaryFullName: string
-): RepoExecutionResult | null {
-  return results.find((r) => r.fullName === primaryFullName) ?? null;
-}
-
-export type ExecutionResultV2 = {
-  schemaVersion: 2;
-  results: RepoExecutionResult[];
-};

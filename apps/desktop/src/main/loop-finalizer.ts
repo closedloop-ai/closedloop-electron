@@ -32,7 +32,7 @@ import {
   assertPathAllowed,
   DirectoryNotAllowedError,
 } from "../server/security.js";
-import { getPrimaryRepoResult, type ExecutionResultV2 } from '../shared/contracts.js';
+import { getPrimaryRepoResult, type ExecutionResultV2 } from '@closedloop-ai/loops-api/execution-result';
 
 export interface LoopFinalizerDeps {
   jobStore: JobStore;
@@ -214,9 +214,15 @@ function getCompletionCorrelationFields(
   let branchName: string | undefined;
 
   if (command === "EXECUTE" && artifacts.executionResult) {
-    const parsed = parseExecutionResultFile(artifacts.executionResult);
-    if (parsed?.branchName) {
-      branchName = parsed.branchName;
+    // Synthetic fullName: we only read branchName off the primary entry,
+    // not fullName itself, so the placeholder unblocks v1 normalization.
+    const parsed = parseExecutionResultFile(
+      artifacts.executionResult,
+      "local/primary",
+    );
+    const primary = parsed.ok ? parsed.results[0] : null;
+    if (primary?.status === "success" && primary.branchName) {
+      branchName = primary.branchName;
     }
   }
 

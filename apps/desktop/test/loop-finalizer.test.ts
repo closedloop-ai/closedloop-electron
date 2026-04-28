@@ -1816,7 +1816,7 @@ test("finalizeLoopFromRuntime retries EXECUTE finalization after a prior error o
 // T-6.5: v2 envelope and loop-finalizer tests
 // ---------------------------------------------------------------------------
 
-import { getPrimaryRepoResult, type RepoExecutionResult, type ExecutionResultV2 } from "../src/shared/contracts.js";
+import { getPrimaryRepoResult, type RepoExecutionResult, type ExecutionResultV2 } from "@closedloop-ai/loops-api/execution-result";
 
 test("v2 path: schemaVersion===2 causes result.repoResults to include full results array", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
