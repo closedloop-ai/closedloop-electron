@@ -12,17 +12,31 @@ import { loadReposConfig, saveReposConfig } from "../server/operations/repos-con
  * Repos are added explicitly by the user via POST /api/gateway/repos — this
  * function never auto-discovers repos from the filesystem.
  *
- * Best-effort — logs errors but never throws.
+ * Best-effort — logs errors but never throws. When provided, `isCancelled`
+ * lets long-running callers avoid writing stale repo defaults after the user
+ * has switched to another onboarding/settings path.
  */
-export async function seedReposConfig(rawSandboxBaseDirectory: string): Promise<void> {
+export async function seedReposConfig(
+  rawSandboxBaseDirectory: string,
+  options: { isCancelled?: () => boolean } = {},
+): Promise<void> {
   try {
+    if (options.isCancelled?.()) {
+      return;
+    }
     const sandboxBaseDirectory = normalizeScopePath(rawSandboxBaseDirectory);
     if (!sandboxBaseDirectory) {
+      return;
+    }
+    if (options.isCancelled?.()) {
       return;
     }
 
     const symphonyDir = computeSymphonyDir(sandboxBaseDirectory);
     const configDir = path.join(symphonyDir, "config");
+    if (options.isCancelled?.()) {
+      return;
+    }
     mkdirSync(configDir, { recursive: true });
 
     // Ensure worktreeParentDir + worktreeParentDirConfirmed are both set.
@@ -37,6 +51,9 @@ export async function seedReposConfig(rawSandboxBaseDirectory: string): Promise<
     //     set confirmed only.
     // Single load → mutate in-memory → single save.
     const config = await loadReposConfig(configDir);
+    if (options.isCancelled?.()) {
+      return;
+    }
     let dirty = false;
 
     const existingDir = config.settings.worktreeParentDir;
@@ -58,7 +75,7 @@ export async function seedReposConfig(rawSandboxBaseDirectory: string): Promise<
       dirty = true;
     }
 
-    if (dirty) {
+    if (dirty && !options.isCancelled?.()) {
       await saveReposConfig(config, configDir);
     }
   } catch (err) {

@@ -85,3 +85,7 @@ ipcRenderer.on("desktop:navigate-tab", (_event, tab: string) => {
 ipcRenderer.on("desktop:update-available", (_event, result) => {
   window.dispatchEvent(new CustomEvent("desktop:update-available", { detail: result }));
 });
+
+ipcRenderer.on("desktop:onboarding-state-changed", () => {
+  window.dispatchEvent(new CustomEvent("desktop:onboarding-state-changed"));
+});

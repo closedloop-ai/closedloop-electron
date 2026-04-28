@@ -18,12 +18,15 @@ import {
 } from "../shared/contracts.js";
 import {
   buildAllowedDirectories,
+  isRiskyAllowedDirectory,
   normalizeScopePath,
 } from "../shared/sandbox-policy.js";
 import { ApiKeyStore } from "./api-key-store.js";
 import {
   claimDesktopManagedApiKey,
+  isRetryableBootstrapClaimFailure,
   type BootstrapClaimDiagnostic,
+  type BootstrapClaimResult,
 } from "./bootstrap-claim.js";
 import { CloudCommandExecutor } from "./cloud-command-executor.js";
 import type { CloudSocketStatus } from "./cloud-protocol.js";
@@ -82,10 +85,42 @@ import {
   createQueueStatsDebounce,
   type QueueStatsDebounce,
 } from "./queue-stats-debounce.js";
+import {
+  fetchTrustedDesktopConfig,
+  type TrustedDesktopConfigResult,
+  withSingleManagedOnboardingRetry,
+} from "./managed-onboarding.js";
+import {
+  ManagedOnboardingRunTracker,
+  type ManagedOnboardingRunToken,
+} from "./managed-onboarding-run.js";
+import {
+  getCanonicalOnboardingHandoffPath,
+  isCanonicalOnboardingHandoffPath,
+  OnboardingHandoffQueue,
+  readPendingOnboardingHandoff,
+  type OnboardingHandoffFailureReason,
+  type PendingOnboardingHandoff,
+} from "./onboarding-handoff.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
 const UPDATE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const MANAGED_ONBOARDING_RETRY_DELAY_MS = 5_000;
+
+type ManagedOnboardingStatus =
+  | "idle"
+  | "awaiting-origin-confirmation"
+  | "provisioning"
+  | "sandbox-required"
+  | "failed";
+
+type ManagedOnboardingState = {
+  status: ManagedOnboardingStatus;
+  webAppOrigin?: string;
+  message?: string;
+  recoveryActions?: Array<"retry_automated_onboarding" | "use_manual_setup" | "choose_sandbox">;
+};
 
 export class DesktopApplication {
   private readonly settingsStore: SettingsStore;
@@ -111,6 +146,12 @@ export class DesktopApplication {
   private cloudCommandsPaused: boolean;
   private cloudConnectionEnabled: boolean;
   private updateCheckTimer: NodeJS.Timeout | null = null;
+  private readonly onboardingHandoffPath = getCanonicalOnboardingHandoffPath();
+  private bootReadyForOnboarding = false;
+  private processingOnboardingHandoff = false;
+  private readonly queuedOpenFileHandoffs = new OnboardingHandoffQueue();
+  private readonly managedOnboardingRuns = new ManagedOnboardingRunTracker();
+  private managedOnboardingState: ManagedOnboardingState = { status: "idle" };
   private readonly queueStatsTelemetryDebounce: QueueStatsDebounce =
     createQueueStatsDebounce(
       (active, depth) => Observability.queueStatsChanged(active, depth),
@@ -315,6 +356,7 @@ export class DesktopApplication {
       loopTokenStore: this.loopTokenStore,
     });
     this.registerIpcHandlers();
+    this.registerOnboardingFileOpenHandler();
   }
 
   async boot(): Promise<void> {
@@ -335,6 +377,9 @@ export class DesktopApplication {
     this.tray.setPaused(this.cloudCommandsPaused);
     this.syncPendingApprovalsToTray();
     this.desktopWindow.init();
+    this.bootReadyForOnboarding = true;
+    void this.drainQueuedOnboardingHandoffs();
+    void this.processCanonicalOnboardingHandoff("cold-start");
 
     gatewayLog.setVerbose(this.settingsStore.getAll().verboseLogging);
     const deadJobs = this.reconcileJobStore();
@@ -439,6 +484,310 @@ export class DesktopApplication {
   showWindow(): void {
     this.desktopWindow.init();
     this.desktopWindow.show();
+  }
+
+  async handleActivate(): Promise<void> {
+    this.showWindow();
+    await this.processCanonicalOnboardingHandoff("activate");
+  }
+
+  private registerOnboardingFileOpenHandler(): void {
+    app.on("open-file", (event, filePath) => {
+      event.preventDefault();
+      this.enqueueOnboardingFileOpen(filePath);
+    });
+  }
+
+  private enqueueOnboardingFileOpen(filePath: string): void {
+    if (!isCanonicalOnboardingHandoffPath(filePath, this.onboardingHandoffPath)) {
+      gatewayLog.debug(
+        "onboarding-handoff",
+        `Ignoring non-canonical open-file path: ${filePath}`,
+      );
+      return;
+    }
+
+    if (!this.bootReadyForOnboarding || this.processingOnboardingHandoff) {
+      this.queuedOpenFileHandoffs.enqueueCanonicalOpenFile();
+      return;
+    }
+
+    void this.processCanonicalOnboardingHandoff("open-file");
+  }
+
+  private async drainQueuedOnboardingHandoffs(): Promise<void> {
+    if (!this.queuedOpenFileHandoffs.drainCanonicalOpenFile()) {
+      return;
+    }
+    await this.processCanonicalOnboardingHandoff("open-file");
+  }
+
+  private async processCanonicalOnboardingHandoff(
+    entryPath: "open-file" | "cold-start" | "activate",
+  ): Promise<void> {
+    if (this.processingOnboardingHandoff || this.shuttingDown) {
+      return;
+    }
+    this.processingOnboardingHandoff = true;
+    try {
+      const result = await readPendingOnboardingHandoff(
+        this.onboardingHandoffPath,
+      );
+      if (result.kind === "absent") {
+        return;
+      }
+      if (result.kind === "ignored") {
+        this.setManagedOnboardingFailure(
+          result.reason,
+          handoffFailureMessage(result.reason),
+          ["use_manual_setup", "retry_automated_onboarding"],
+        );
+        gatewayLog.warn(
+          "onboarding-handoff",
+          `Ignored pending onboarding handoff from ${entryPath}: ${result.reason}`,
+        );
+        this.showWindow();
+        return;
+      }
+
+      await this.handleLoadedOnboardingHandoff(result.payload);
+    } finally {
+      this.processingOnboardingHandoff = false;
+      if (
+        !this.shuttingDown &&
+        this.queuedOpenFileHandoffs.hasPendingCanonicalOpenFile()
+      ) {
+        await this.drainQueuedOnboardingHandoffs();
+      }
+    }
+  }
+
+  private async handleLoadedOnboardingHandoff(
+    payload: PendingOnboardingHandoff,
+  ): Promise<void> {
+    const run = this.managedOnboardingRuns.begin();
+    this.managedOnboardingState = {
+      status: "awaiting-origin-confirmation",
+      webAppOrigin: payload.webAppOrigin,
+      message: "Waiting for URL confirmation before automated provisioning.",
+    };
+    this.notifyOnboardingStateChanged();
+    this.showWindow();
+
+    const confirmed = await this.confirmManagedOnboardingOrigin(payload);
+    if (this.shouldStopManagedOnboardingRun(run, "origin confirmation")) {
+      return;
+    }
+    if (!confirmed) {
+      this.setManagedOnboardingFailure(
+        "origin_confirmation_dismissed",
+        "Automated provisioning was canceled. Start a fresh onboarding attempt from the web app or use manual setup.",
+        ["retry_automated_onboarding", "use_manual_setup"],
+      );
+      return;
+    }
+
+    await this.runManagedOnboardingProvisioning(payload, run);
+  }
+
+  private async confirmManagedOnboardingOrigin(
+    payload: PendingOnboardingHandoff,
+  ): Promise<boolean> {
+    const result = await dialog.showMessageBox({
+      type: "question",
+      buttons: ["Continue", "Use manual setup"],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+      title: "Confirm ClosedLoop Web App URL",
+      message: "Auto-provisioning was initiated. Please confirm this ClosedLoop web app URL before we continue.",
+      detail: payload.webAppOrigin,
+    });
+    return result.response === 0;
+  }
+
+  private async runManagedOnboardingProvisioning(
+    payload: PendingOnboardingHandoff,
+    run: ManagedOnboardingRunToken,
+  ): Promise<void> {
+    if (this.shouldStopManagedOnboardingRun(run, "provisioning start")) {
+      return;
+    }
+    this.managedOnboardingState = {
+      status: "provisioning",
+      webAppOrigin: payload.webAppOrigin,
+      message: "Fetching trusted Desktop configuration...",
+    };
+    this.notifyOnboardingStateChanged();
+
+    const trustedConfig = await withSingleManagedOnboardingRetry({
+      operation: () =>
+        fetchTrustedDesktopConfig({ webAppOrigin: payload.webAppOrigin }),
+      shouldRetry: isRetryableTrustedConfigFailure,
+      delayMs: MANAGED_ONBOARDING_RETRY_DELAY_MS,
+      isCancelled: () =>
+        this.managedOnboardingRuns.isCancelled(run, this.shuttingDown),
+    });
+    if (this.shouldStopManagedOnboardingRun(run, "trusted config result")) {
+      return;
+    }
+    if (trustedConfig.kind !== "ok") {
+      this.setManagedOnboardingFailure(
+        trustedConfig.reason,
+        managedOnboardingFailureMessage(trustedConfig),
+        managedOnboardingRecoveryActions(trustedConfig),
+      );
+      return;
+    }
+
+    if (this.shouldStopManagedOnboardingRun(run, "claim start")) {
+      return;
+    }
+    this.managedOnboardingState = {
+      status: "provisioning",
+      webAppOrigin: payload.webAppOrigin,
+      message: "Claiming managed Desktop key...",
+    };
+    this.notifyOnboardingStateChanged();
+
+    const claimResult = await withSingleManagedOnboardingRetry({
+      operation: () =>
+        claimDesktopManagedApiKey({
+          apiOrigin: trustedConfig.config.apiOrigin,
+          onboardingAttemptId: payload.onboardingAttemptId,
+          webAppOrigin: payload.webAppOrigin,
+          gatewayId: this.gatewayId,
+          signingKeys: this.gatewaySigningKeyStore,
+          onDiagnostic: (diagnostic) =>
+            this.reportBootstrapClaimDiagnostic(diagnostic),
+        }),
+      shouldRetry: isRetryableBootstrapClaimFailure,
+      delayMs: MANAGED_ONBOARDING_RETRY_DELAY_MS,
+      isCancelled: () =>
+        this.managedOnboardingRuns.isCancelled(run, this.shuttingDown),
+    });
+
+    if (this.shouldStopManagedOnboardingRun(run, "claim result")) {
+      return;
+    }
+    if (claimResult.kind === "manual_fallback") {
+      this.setManagedOnboardingFailure(
+        claimResult.reason,
+        "Managed Desktop key setup is unavailable on this machine. Use manual API key setup.",
+        ["use_manual_setup"],
+      );
+      return;
+    }
+    if (claimResult.kind === "failed") {
+      this.setManagedOnboardingFailure(
+        `claim_${claimResult.statusCode ?? "failed"}`,
+        bootstrapClaimFailureMessage(claimResult),
+        bootstrapClaimRecoveryActions(claimResult),
+      );
+      return;
+    }
+
+    if (this.shouldStopManagedOnboardingRun(run, "managed key persistence")) {
+      return;
+    }
+    this.apiKeyStore.setApiKey(claimResult.apiKey, "DESKTOP_MANAGED");
+    const sandboxBaseDirectory = normalizeScopePath(
+      payload.sandboxBaseDirectory,
+    );
+    const safeSandboxBaseDirectory =
+      sandboxBaseDirectory && !isRiskyAllowedDirectory(sandboxBaseDirectory)
+        ? sandboxBaseDirectory
+        : null;
+
+    this.settingsStore.update({
+      apiOrigin: trustedConfig.config.apiOrigin,
+      relayOrigin: trustedConfig.config.relayOrigin,
+      webAppOrigin: payload.webAppOrigin,
+      ...(safeSandboxBaseDirectory
+        ? {
+            sandboxBaseDirectory: safeSandboxBaseDirectory,
+            onboardingCompleted: true,
+          }
+        : { onboardingCompleted: false }),
+    });
+
+    if (safeSandboxBaseDirectory) {
+      if (this.shouldStopManagedOnboardingRun(run, "repo config seeding")) {
+        return;
+      }
+      await seedReposConfig(safeSandboxBaseDirectory, {
+        isCancelled: () =>
+          this.managedOnboardingRuns.isCancelled(run, this.shuttingDown),
+      });
+      if (this.shouldStopManagedOnboardingRun(run, "completion state update")) {
+        return;
+      }
+      this.managedOnboardingState = {
+        status: "idle",
+        webAppOrigin: payload.webAppOrigin,
+        message: "Automated onboarding completed.",
+      };
+      this.restartCloudSocket();
+      this.notifyOnboardingStateChanged();
+      return;
+    }
+
+    this.managedOnboardingState = {
+      status: "sandbox-required",
+      webAppOrigin: payload.webAppOrigin,
+      message: "Choose a safe sandbox directory to finish Desktop setup.",
+      recoveryActions: ["choose_sandbox", "use_manual_setup"],
+    };
+    this.notifyOnboardingStateChanged();
+    this.showWindow();
+  }
+
+  private shouldStopManagedOnboardingRun(
+    run: ManagedOnboardingRunToken,
+    stage: string,
+  ): boolean {
+    if (!this.managedOnboardingRuns.isCancelled(run, this.shuttingDown)) {
+      return false;
+    }
+    gatewayLog.debug(
+      "managed-onboarding",
+      `Skipping stale managed onboarding continuation at ${stage}.`,
+    );
+    return true;
+  }
+
+  private cancelManagedOnboardingForUserChange(reason: string): void {
+    this.managedOnboardingRuns.cancel();
+    if (this.managedOnboardingState.status === "idle") {
+      return;
+    }
+    gatewayLog.debug(
+      "managed-onboarding",
+      `Canceled automated onboarding because ${reason}.`,
+    );
+    this.managedOnboardingState = { status: "idle" };
+    this.notifyOnboardingStateChanged();
+  }
+
+  private setManagedOnboardingFailure(
+    reason: string,
+    message: string,
+    recoveryActions: ManagedOnboardingState["recoveryActions"],
+  ): void {
+    this.managedOnboardingState = {
+      status: "failed",
+      message,
+      recoveryActions,
+    };
+    gatewayLog.warn("managed-onboarding", `${reason}: ${message}`);
+    this.notifyOnboardingStateChanged();
+    this.showWindow();
+  }
+
+  private notifyOnboardingStateChanged(): void {
+    this.desktopWindow
+      .getWindow()
+      ?.webContents.send("desktop:onboarding-state-changed");
   }
 
   setQuitting(): void {
@@ -616,6 +965,7 @@ export class DesktopApplication {
     completed: boolean;
     settings: DesktopSettings;
     hasStoredApiKey: boolean;
+    managedProvisioning: ManagedOnboardingState;
   } {
     const settings = this.settingsStore.getAll();
     return {
@@ -627,6 +977,7 @@ export class DesktopApplication {
           settings.sandboxBaseDirectory,
       },
       hasStoredApiKey: this.apiKeyStore.getStatus().hasApiKey,
+      managedProvisioning: this.managedOnboardingState,
     };
   }
 
@@ -1038,6 +1389,21 @@ export class DesktopApplication {
           );
         }
 
+        const updatesOnboardingState = (
+          [
+            "sandboxBaseDirectory",
+            "onboardingCompleted",
+            "relayOrigin",
+            "apiOrigin",
+            "webAppOrigin",
+          ] as const
+        ).some((key) => key in partial);
+        if (updatesOnboardingState) {
+          this.cancelManagedOnboardingForUserChange(
+            "settings were updated manually",
+          );
+        }
+
         const updated = this.settingsStore.update(
           nextPartial as Partial<DesktopSettings>,
         );
@@ -1212,11 +1578,13 @@ export class DesktopApplication {
       if (!trimmed.startsWith("sk_live_")) {
         throw new Error("API key must start with sk_live_");
       }
+      this.cancelManagedOnboardingForUserChange("a manual API key was set");
       this.apiKeyStore.setApiKey(trimmed);
       this.restartCloudSocket();
       return this.apiKeyStore.getStatus();
     });
     ipcMain.handle("desktop:clear-api-key", () => {
+      this.cancelManagedOnboardingForUserChange("the API key was cleared");
       this.apiKeyStore.clearApiKey();
       this.restartCloudSocket();
       return this.apiKeyStore.getStatus();
@@ -1283,32 +1651,20 @@ export class DesktopApplication {
           if (!trimmedApiKey.startsWith("sk_live_")) {
             throw new Error("API key must start with sk_live_");
           }
-          this.apiKeyStore.setApiKey(trimmedApiKey, "USER_CREATED");
         } else {
           const onboardingAttemptId =
             typeof payload.onboardingAttemptId === "string"
               ? payload.onboardingAttemptId.trim()
               : "";
           if (onboardingAttemptId) {
-            const claimResult = await claimDesktopManagedApiKey({
-              apiOrigin: apiOrigin ?? this.settingsStore.getApiOrigin(),
-              onboardingAttemptId,
-              webAppOrigin,
-              gatewayId: this.gatewayId,
-              signingKeys: this.gatewaySigningKeyStore,
-              bootstrapToken: typeof payload.bootstrapToken === "string" ? payload.bootstrapToken : undefined,
-              onDiagnostic: (diagnostic) => this.reportBootstrapClaimDiagnostic(diagnostic),
-            });
-            if (claimResult.kind === "claimed") {
-              this.apiKeyStore.setApiKey(claimResult.apiKey, "DESKTOP_MANAGED");
-            } else if (claimResult.kind === "manual_fallback") {
-              throw new Error("Managed Desktop key setup is unavailable; enter an API key manually.");
-            } else {
-              throw new Error(`Managed Desktop key claim failed: ${claimResult.error}`);
-            }
+            throw new Error("Automated onboarding must start from the installer handoff file.");
           }
         }
 
+        this.cancelManagedOnboardingForUserChange("manual onboarding completed");
+        if (trimmedApiKey) {
+          this.apiKeyStore.setApiKey(trimmedApiKey, "USER_CREATED");
+        }
         this.settingsStore.update({
           ...(relayOrigin !== undefined ? { relayOrigin } : {}),
           ...(apiOrigin !== undefined ? { apiOrigin } : {}),
@@ -1462,6 +1818,9 @@ export class DesktopApplication {
       }
       const { wasActive } = this.settingsStore.deleteConfig(id);
       if (wasActive) {
+        this.cancelManagedOnboardingForUserChange(
+          "the active saved config was deleted",
+        );
         this.settingsStore.setRelayOrigin(DEFAULT_DESKTOP_SETTINGS.relayOrigin);
         this.settingsStore.setApiOrigin(DEFAULT_DESKTOP_SETTINGS.apiOrigin);
         this.settingsStore.setWebAppOrigin(DEFAULT_DESKTOP_SETTINGS.webAppOrigin);
@@ -1491,6 +1850,7 @@ export class DesktopApplication {
       if (!safeStorage.isEncryptionAvailable()) {
         throw new Error("safeStorage is not available -- cannot apply config");
       }
+      this.cancelManagedOnboardingForUserChange("a saved config was applied");
       const appliedConfig = this.settingsStore.applyConfig(id);
       const profileKey = this.apiKeyStore.getProfileKeyRecord(id);
       if (profileKey) {
@@ -1560,6 +1920,81 @@ const APPROVAL_TIMEOUT_MS = 120_000;
 const MAX_IN_FLIGHT_COMMANDS = 2;
 const QUEUE_STATS_DEBOUNCE_MS = 1000;
 const ALWAYS_ALLOW_RULE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+function handoffFailureMessage(reason: OnboardingHandoffFailureReason): string {
+  switch (reason) {
+    case "stale":
+      return "The automated onboarding handoff expired. Start a fresh onboarding attempt from the web app.";
+    case "invalid_origin":
+      return "The automated onboarding handoff contained an invalid web app URL. Use manual setup or start again from the web app.";
+    case "read_failed":
+      return "Desktop could not read the automated onboarding handoff. Use manual setup or start again from the web app.";
+    case "delete_failed":
+      return "Desktop could not consume the automated onboarding handoff safely. Use manual setup or start again from the web app.";
+    default:
+      return "The automated onboarding handoff was invalid. Use manual setup or start again from the web app.";
+  }
+}
+
+function isRetryableTrustedConfigFailure(
+  result: TrustedDesktopConfigResult,
+): boolean {
+  return result.kind === "failed" && result.retryable;
+}
+
+function managedOnboardingFailureMessage(
+  result: Exclude<TrustedDesktopConfigResult, { kind: "ok" }>,
+): string {
+  if (result.retryable) {
+    return "Desktop could not reach the trusted web app config after retrying. Start a fresh onboarding attempt or use manual setup.";
+  }
+  if (result.reason === "unsupported_protocol") {
+    return "This ClosedLoop web app does not support this Desktop onboarding protocol. Use manual setup.";
+  }
+  return "Desktop could not validate the trusted web app config. Use manual setup or start again from the web app.";
+}
+
+function managedOnboardingRecoveryActions(
+  result: Exclude<TrustedDesktopConfigResult, { kind: "ok" }>,
+): ManagedOnboardingState["recoveryActions"] {
+  return result.retryable
+    ? ["retry_automated_onboarding", "use_manual_setup"]
+    : ["use_manual_setup"];
+}
+
+function bootstrapClaimFailureMessage(
+  result: Exclude<BootstrapClaimResult, { kind: "claimed" | "manual_fallback" }>,
+): string {
+  switch (result.statusCode) {
+    case 401:
+      return "The onboarding attempt expired or was already used. Start a fresh onboarding attempt from the web app.";
+    case 400:
+    case 403:
+      return "The automated onboarding request was rejected. Use manual setup.";
+    case 409:
+      return "Desktop managed-key rotation conflicted with another active attempt. Start a fresh onboarding attempt or use manual setup.";
+    case 502:
+    case 503:
+      if (result.retryable === false) {
+        return "Desktop could not claim a managed key. Start a fresh onboarding attempt or use manual setup.";
+      }
+      return "Desktop could not claim a managed key after retrying. Start a fresh onboarding attempt or use manual setup.";
+    default:
+      return result.error || "Desktop could not claim a managed key. Use manual setup.";
+  }
+}
+
+function bootstrapClaimRecoveryActions(
+  result: Exclude<BootstrapClaimResult, { kind: "claimed" | "manual_fallback" }>,
+): ManagedOnboardingState["recoveryActions"] {
+  switch (result.statusCode) {
+    case 400:
+    case 403:
+      return ["use_manual_setup"];
+    default:
+      return ["retry_automated_onboarding", "use_manual_setup"];
+  }
+}
 
 function pruneExpiredAlwaysAllowRules(
   rules: AlwaysAllowRule[] | undefined,
