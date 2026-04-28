@@ -1819,7 +1819,7 @@ test("finalizeLoopFromRuntime retries EXECUTE finalization after a prior error o
   assert.ok(completedEventCall, "expected completed event on recovery retry");
 });
 
-test("tryPostCompletedEvent includes V2 repoResults and primary PR fields", async () => {
+test("tryPostCompletedEvent includes V2 top-level results and primary PR fields", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
 
@@ -1855,11 +1855,14 @@ test("tryPostCompletedEvent includes V2 repoResults and primary PR fields", asyn
   );
 
   const body = fetchCalls[0]?.body ?? "";
-  const parsed = JSON.parse(body) as { result?: Record<string, unknown> };
-  const repoResults = parsed.result?.repoResults as
+  const parsed = JSON.parse(body) as {
+    result?: Record<string, unknown>;
+    results?: Array<{ status?: string; fullName?: string }>;
+  };
+  const repoResults = parsed.results as
     | Array<{ status?: string; fullName?: string }>
     | undefined;
-  assert.ok(repoResults, "result.repoResults must be present for v2 envelope");
+  assert.ok(repoResults, "top-level results must be present for v2 envelope");
   assert.equal(repoResults.length, 2);
   assert.equal(repoResults[0]?.status, "success");
   assert.equal(repoResults[1]?.status, "skipped");

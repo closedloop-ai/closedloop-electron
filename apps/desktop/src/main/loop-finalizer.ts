@@ -1,6 +1,10 @@
 import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
-import { getPrimaryRepoResult, parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
+import {
+  getPrimaryRepoResult,
+  parseExecutionResultFile,
+  type RepoExecutionResult,
+} from "@closedloop-ai/loops-api/execution-result";
 import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
@@ -248,11 +252,12 @@ function buildCompletedEventResult(
   claudeWorkDir: string,
   artifacts: Record<string, unknown>,
   getAllowedDirectories?: () => string[],
-): Record<string, unknown> {
+): { result: Record<string, unknown>; results?: RepoExecutionResult[] } {
   const result: Record<string, unknown> = {
     exitCode: job.exitCode ?? 0,
     subtype: command.toLowerCase(),
   };
+  let results: RepoExecutionResult[] | undefined;
   const setNoChangesFields = (): void => {
     result.prUrl = null;
     result.prNumber = null;
@@ -279,7 +284,7 @@ function buildCompletedEventResult(
       const lookupName = primaryFullName || parsed.results[0]?.fullName || "";
       const primaryResult = getPrimaryRepoResult(parsed.results, lookupName);
 
-      result.repoResults = parsed.results;
+      results = parsed.results;
 
       if (primaryResult === null) {
         gatewayLog.warn(
@@ -319,8 +324,11 @@ function buildCompletedEventResult(
   }
 
   return {
-    ...result,
-    ...getExecuteFinalizationMetadata(job, command),
+    result: {
+      ...result,
+      ...getExecuteFinalizationMetadata(job, command),
+    },
+    ...(results ? { results } : {}),
   };
 }
 
@@ -407,7 +415,7 @@ export async function tryPostCompletedEvent(
   }
 
   const tokensUsed = parseTokenUsage(claudeWorkDir);
-  const result = buildCompletedEventResult(
+  const completedResult = buildCompletedEventResult(
     job,
     command,
     claudeWorkDir,
@@ -424,7 +432,7 @@ export async function tryPostCompletedEvent(
 
   const completedEvent: Record<string, unknown> = {
     type: LoopEventType.Completed,
-    result,
+    result: completedResult.result,
     tokensUsed: {
       input: tokensUsed.inputTokens,
       output: tokensUsed.outputTokens,
@@ -435,6 +443,7 @@ export async function tryPostCompletedEvent(
     },
     ...(apiKeySource != null ? { apiKeySource } : {}),
     loopId: job.loopId,
+    ...(completedResult.results ? { results: completedResult.results } : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
   };
 
