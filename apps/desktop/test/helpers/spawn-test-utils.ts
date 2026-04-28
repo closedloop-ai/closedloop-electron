@@ -99,7 +99,18 @@ export function parseWrittenEvents(
 // makeEnoentError
 // ---------------------------------------------------------------------------
 
-/** Build a minimal ENOENT-style spawn error. */
+/**
+ * Build a minimal ENOENT-style spawn error.
+ *
+ * The returned error has:
+ *   - `code: "ENOENT"` — signals that the binary was not found.
+ *   - `syscall: "spawn"` — mirrors what Node's `child_process.spawn` sets when
+ *     the executable cannot be located.
+ *
+ * If a test needs an error without the `syscall` property (e.g. to exercise a
+ * code path that only checks `code`), construct the error manually rather than
+ * stripping the field from the value returned here.
+ */
 export function makeEnoentError(
   binary = "run-loop.sh"
 ): NodeJS.ErrnoException {

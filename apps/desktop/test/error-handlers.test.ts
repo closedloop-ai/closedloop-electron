@@ -1,3 +1,12 @@
+/** DRIFT ANNOTATION (PLN-392)
+ *
+ * Drift classes present in this file:
+ *   - Class (i) — drift-check annotations referencing production source lines
+ *
+ * Production source: apps/desktop/src/main/error-handlers.ts:29,54
+ * Fix approach: Remediation deferred to FEA-618.
+ */
+
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { handleUncaughtException, handleUnhandledRejection } from "../src/main/error-handlers.js";

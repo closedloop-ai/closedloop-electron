@@ -1,3 +1,12 @@
+/** DRIFT ANNOTATION (PLN-392)
+ *
+ * Drift classes present in this file:
+ *   - Class (i) — drift-check annotation referencing production source line
+ *
+ * Production source: apps/desktop/src/main/boot-recovery.ts:308
+ * Fix approach: Remediation deferred to FEA-618.
+ */
+
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
@@ -636,7 +645,7 @@ test("finalizes recovered live job as FAILED when process is externally killed",
   const loopTokenStore = createLoopTokenStore("boot-recovery-live-kill-loop-tokens");
   loopTokenStore.setLoopToken("loop-1", "loop-token");
 
-  // drift-check: matches apps/desktop/src/main/boot-recovery.ts:303
+  // drift-check: matches apps/desktop/src/main/boot-recovery.ts:308
   const child = spawn("bash", ["-lc", "sleep 5"], { detached: false });
   assert.ok(child.pid);
 
@@ -698,7 +707,7 @@ test("preserves COMPLETED status when terminal snapshot is available during boot
   const loopTokenStore = createLoopTokenStore("boot-recovery-live-completed-snapshot-tokens");
   loopTokenStore.setLoopToken("loop-1", "loop-token");
 
-  // drift-check: matches apps/desktop/src/main/boot-recovery.ts:303
+  // drift-check: matches apps/desktop/src/main/boot-recovery.ts:308
   const child = spawn("bash", ["-lc", "sleep 0.1"], { detached: false });
   assert.ok(child.pid);
 
