@@ -11,7 +11,6 @@
  */
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -22,59 +21,14 @@ import { handleProcessCompletion } from "../src/server/operations/symphony-loop.
 import { setShellPathForTest } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
+  initGitRepoSync,
+  makeRecordingGitWorktreeProvider,
   makeMultiRepoGateway,
   makeMultiRepoTestHarness,
   startMockApiServer,
   waitForCompletedEvent,
   waitForTerminalEvent,
 } from "./symphony-test-utils.js";
-
-// ---------------------------------------------------------------------------
-// Call-recording fake worktree provider
-// ---------------------------------------------------------------------------
-
-/**
- * Build a call-recording WorktreeProvider. Each test should create its own
- * instance so recorded calls don't bleed across tests.
- *
- * Records all ensureWorktree calls. For additional-repo tests, filter by
- * repoPath to distinguish primary from additional repo calls.
- */
-function makeRecordingWorktreeProvider(): {
-  provider: WorktreeProvider;
-  ensureWorktreeCalls: Array<{ repoPath: string; worktreeDir: string; branchName: string; baseBranch: string }>;
-  removeCalls: Array<{ worktreeDir: string; repoPath: string; loopId?: string }>;
-} {
-  const ensureWorktreeCalls: Array<{ repoPath: string; worktreeDir: string; branchName: string; baseBranch: string }> = [];
-  const removeCalls: Array<{ worktreeDir: string; repoPath: string; loopId?: string }> = [];
-
-  const provider: WorktreeProvider = {
-    async ensureWorktree(repoPath, worktreeDir, branchName, baseBranch) {
-      ensureWorktreeCalls.push({ repoPath, worktreeDir, branchName, baseBranch });
-      await fs.mkdir(worktreeDir, { recursive: true });
-      // Initialize as a real git repo so cleanupAdditionalWorktrees can run
-      // its `git status` / `git rev-list` checks against an actual repo
-      // instead of bailing into the "retain on error" safety branch.
-      execFileSync("git", ["init", "-q", "-b", "main"], { cwd: worktreeDir, stdio: "pipe" });
-      execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: worktreeDir, stdio: "pipe" });
-      execFileSync("git", ["config", "user.name", "Test"], { cwd: worktreeDir, stdio: "pipe" });
-      execFileSync("git", ["commit", "--allow-empty", "-m", "initial"], { cwd: worktreeDir, stdio: "pipe" });
-    },
-    findWorktreeForBranch() {
-      return null;
-    },
-    async removeWorktree(worktreeDir, repoPath, loopId) {
-      removeCalls.push({ worktreeDir, repoPath, loopId });
-      await fs.rm(worktreeDir, { recursive: true, force: true });
-    },
-    getCurrentBranch() {
-      return "symphony/worktree-lifecycle-test";
-    },
-    branchExists: async () => true,
-  };
-
-  return { provider, ensureWorktreeCalls, removeCalls };
-}
 
 // ---------------------------------------------------------------------------
 // Shared state and cleanup
@@ -130,7 +84,9 @@ test("ensureWorktree called for each additional repo with correct branch before 
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
 
-  const { provider, ensureWorktreeCalls } = makeRecordingWorktreeProvider();
+  const { provider, ensureWorktreeCalls } = makeRecordingGitWorktreeProvider(
+    "symphony/worktree-lifecycle-test",
+  );
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -231,7 +187,8 @@ test("removeWorktree called for additional worktree dirs when process fails", as
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
 
-  const { provider, ensureWorktreeCalls, removeCalls } = makeRecordingWorktreeProvider();
+  const { provider, ensureWorktreeCalls, removeCalls } =
+    makeRecordingGitWorktreeProvider("symphony/worktree-lifecycle-test");
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -331,7 +288,7 @@ test("ensureWorktree throws for additional repo — cleans leaked worktree, post
     provider: baseProvider,
     ensureWorktreeCalls,
     removeCalls,
-  } = makeRecordingWorktreeProvider();
+  } = makeRecordingGitWorktreeProvider("symphony/worktree-lifecycle-test");
   const throwingProvider: WorktreeProvider = {
     ...baseProvider,
     async ensureWorktree(repoPath, worktreeDir, branchName, baseBranch, loopId) {
@@ -446,10 +403,7 @@ test("handleProcessCompletion cleans additional worktrees when PLAN is cancelled
       await fs.mkdir(repoPath, { recursive: true });
       // Initialize as a real git repo so the unified cleanup logic can verify
       // the worktree carries no code changes and is safe to remove.
-      execFileSync("git", ["init", "-q", "-b", "main"], { cwd: dir, stdio: "pipe" });
-      execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: dir, stdio: "pipe" });
-      execFileSync("git", ["config", "user.name", "Test"], { cwd: dir, stdio: "pipe" });
-      execFileSync("git", ["commit", "--allow-empty", "-m", "initial"], { cwd: dir, stdio: "pipe" });
+      initGitRepoSync(dir);
     }),
   );
 
@@ -513,4 +467,3 @@ test("handleProcessCompletion cleans additional worktrees when PLAN is cancelled
   const finalJob = jobStore.getByLoopId(loopId);
   assert.equal(finalJob?.status, "CANCELLED");
 });
-

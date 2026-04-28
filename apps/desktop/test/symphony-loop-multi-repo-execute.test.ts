@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +7,8 @@ import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js
 import { setShellPathForTest } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
+  findSpawnArgsFile,
+  makeRecordingGitWorktreeProvider,
   makeMultiRepoGateway,
   makeMultiRepoTestHarness,
   startMockApiServer,
@@ -29,89 +30,6 @@ function createTestGateway(
     worktreeProvider,
     serversToClose,
   });
-}
-
-function makeRecordingWorktreeProvider(): {
-  provider: WorktreeProvider;
-  ensureWorktreeCalls: Array<{
-    repoPath: string;
-    worktreeDir: string;
-    branchName: string;
-    baseBranch: string;
-  }>;
-} {
-  const ensureWorktreeCalls: Array<{
-    repoPath: string;
-    worktreeDir: string;
-    branchName: string;
-    baseBranch: string;
-  }> = [];
-
-  const provider: WorktreeProvider = {
-    async ensureWorktree(repoPath, worktreeDir, branchName, baseBranch) {
-      ensureWorktreeCalls.push({ repoPath, worktreeDir, branchName, baseBranch });
-      await fs.mkdir(worktreeDir, { recursive: true });
-      execFileSync("git", ["init", "-q", "-b", "main"], {
-        cwd: worktreeDir,
-        stdio: "pipe",
-      });
-      execFileSync("git", ["config", "user.email", "test@test.com"], {
-        cwd: worktreeDir,
-        stdio: "pipe",
-      });
-      execFileSync("git", ["config", "user.name", "Test"], {
-        cwd: worktreeDir,
-        stdio: "pipe",
-      });
-      execFileSync("git", ["commit", "--allow-empty", "-m", "initial"], {
-        cwd: worktreeDir,
-        stdio: "pipe",
-      });
-    },
-    findWorktreeForBranch() {
-      return null;
-    },
-    async removeWorktree(worktreeDir) {
-      await fs.rm(worktreeDir, { recursive: true, force: true });
-    },
-    getCurrentBranch() {
-      return "symphony/multi-repo-execute-test";
-    },
-    branchExists: async () => true,
-  };
-
-  return { provider, ensureWorktreeCalls };
-}
-
-async function findFileRecursive(
-  dir: string,
-  filename: string,
-): Promise<string | null> {
-  let entries: Awaited<ReturnType<typeof fs.readdir>>;
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return null;
-  }
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isFile() && entry.name === filename) return fullPath;
-    if (entry.isDirectory()) {
-      const result = await findFileRecursive(fullPath, filename);
-      if (result !== null) return result;
-    }
-  }
-  return null;
-}
-
-async function findSpawnArgsFile(searchRoot: string): Promise<string> {
-  const deadline = Date.now() + 20_000;
-  while (Date.now() < deadline) {
-    const found = await findFileRecursive(searchRoot, "spawn-args.txt");
-    if (found !== null) return found;
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(`Timed out waiting for spawn-args.txt under ${searchRoot}`);
 }
 
 test("EXECUTE with additionalRepos provisions additionals, passes --add-dir, and uploads V2 repo results", async () => {
@@ -158,7 +76,9 @@ test("EXECUTE with additionalRepos provisions additionals, passes --add-dir, and
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
 
-  const { provider, ensureWorktreeCalls } = makeRecordingWorktreeProvider();
+  const { provider, ensureWorktreeCalls } = makeRecordingGitWorktreeProvider(
+    "symphony/multi-repo-execute-test",
+  );
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
   const server = await createTestGateway(tmpDir, mock.port, provider);

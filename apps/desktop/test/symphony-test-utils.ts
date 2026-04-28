@@ -6,7 +6,7 @@
  * to eliminate duplication.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -72,6 +72,61 @@ export async function initGitRepo(repoPath: string): Promise<void> {
     `git add .`,
     `git commit -m initial`,
   ].join(" && ")]);
+}
+
+export function initGitRepoSync(repoPath: string): void {
+  execFileSync("git", ["init", "-q", "-b", "main"], {
+    cwd: repoPath,
+    stdio: "pipe",
+  });
+  execFileSync("git", ["config", "user.email", "test@test.com"], {
+    cwd: repoPath,
+    stdio: "pipe",
+  });
+  execFileSync("git", ["config", "user.name", "Test"], {
+    cwd: repoPath,
+    stdio: "pipe",
+  });
+  execFileSync("git", ["commit", "--allow-empty", "-m", "initial"], {
+    cwd: repoPath,
+    stdio: "pipe",
+  });
+}
+
+export async function findFileRecursive(
+  dir: string,
+  filename: string,
+): Promise<string | null> {
+  let entries: Awaited<ReturnType<typeof fs.readdir>>;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isFile() && entry.name === filename) return fullPath;
+    if (entry.isDirectory()) {
+      const result = await findFileRecursive(fullPath, filename);
+      if (result !== null) return result;
+    }
+  }
+  return null;
+}
+
+export async function findSpawnArgsFile(
+  searchRoot: string,
+  timeoutMs = 20_000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const found = await findFileRecursive(searchRoot, "spawn-args.txt");
+    if (found !== null) return found;
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(
+    `Timed out waiting for spawn-args.txt under ${searchRoot} after ${timeoutMs}ms`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -392,7 +447,8 @@ export async function setupStubClaudeBlocking(
  * `findWorktreeForBranch` returns null, `branchExists` always returns true,
  * and `getCurrentBranch` returns `currentBranchLabel` verbatim.
  *
- * Tests that need to record call arguments should build their own provider.
+ * Tests that need real git metadata and call recording should use
+ * makeRecordingGitWorktreeProvider.
  */
 export function makeFakeWorktreeProvider(currentBranchLabel: string): WorktreeProvider {
   return {
@@ -410,6 +466,50 @@ export function makeFakeWorktreeProvider(currentBranchLabel: string): WorktreePr
     },
     branchExists: async () => true,
   };
+}
+
+export function makeRecordingGitWorktreeProvider(currentBranchLabel: string): {
+  provider: WorktreeProvider;
+  ensureWorktreeCalls: Array<{
+    repoPath: string;
+    worktreeDir: string;
+    branchName: string;
+    baseBranch: string;
+  }>;
+  removeCalls: Array<{ worktreeDir: string; repoPath: string; loopId?: string }>;
+} {
+  const ensureWorktreeCalls: Array<{
+    repoPath: string;
+    worktreeDir: string;
+    branchName: string;
+    baseBranch: string;
+  }> = [];
+  const removeCalls: Array<{
+    worktreeDir: string;
+    repoPath: string;
+    loopId?: string;
+  }> = [];
+
+  const provider: WorktreeProvider = {
+    async ensureWorktree(repoPath, worktreeDir, branchName, baseBranch) {
+      ensureWorktreeCalls.push({ repoPath, worktreeDir, branchName, baseBranch });
+      await fs.mkdir(worktreeDir, { recursive: true });
+      initGitRepoSync(worktreeDir);
+    },
+    findWorktreeForBranch() {
+      return null;
+    },
+    async removeWorktree(worktreeDir, repoPath, loopId) {
+      removeCalls.push({ worktreeDir, repoPath, loopId });
+      await fs.rm(worktreeDir, { recursive: true, force: true });
+    },
+    getCurrentBranch() {
+      return currentBranchLabel;
+    },
+    branchExists: async () => true,
+  };
+
+  return { provider, ensureWorktreeCalls, removeCalls };
 }
 
 // ---------------------------------------------------------------------------
