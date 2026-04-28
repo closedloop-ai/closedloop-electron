@@ -13,6 +13,7 @@ import { readEffectiveStatusFromState } from "../server/operations/symphony-job-
 import {
   getResolvedGitPath,
   runExecuteFinalization,
+  V1_PRIMARY_FULL_NAME_PLACEHOLDER,
 } from "../server/operations/symphony-loop.js";
 import {
   assertPathAllowed,
@@ -222,7 +223,7 @@ function getCompletionCorrelationFields(
     // V2 files carry their own fullName and ignore this argument.
     const parsed = parseExecutionResultFile(
       artifacts.executionResult,
-      primaryFullName || "local/primary",
+      primaryFullName || V1_PRIMARY_FULL_NAME_PLACEHOLDER,
     );
     if (parsed.ok) {
       // Match buildCompletedEventResult's lookup so reboot replay and live
@@ -272,7 +273,7 @@ function buildCompletedEventResult(
     // fullName and ignore this argument.
     const parsed = parseExecutionResultFile(
       artifacts.executionResult,
-      primaryFullName || "local/primary",
+      primaryFullName || V1_PRIMARY_FULL_NAME_PLACEHOLDER,
     );
     if (!parsed.ok) {
       gatewayLog.warn(

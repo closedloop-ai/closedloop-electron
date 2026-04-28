@@ -2482,7 +2482,11 @@ function getHeadCommitShaFromWorktree(worktreeDir: string): string | null {
   }
 }
 
-const V1_PRIMARY_FULL_NAME_PLACEHOLDER = "local/primary";
+// FEA-683: V1-on-disk recovery — synthetic fullName seeds V1 normalization in
+// `parseExecutionResultFile`; V2 files carry their own fullName and ignore this
+// argument. Remove this constant and its callsites when the V1 retention window
+// passes.
+export const V1_PRIMARY_FULL_NAME_PLACEHOLDER = "local/primary";
 
 function getAuthoritativeExecutionResult(
   value: unknown,
@@ -3824,6 +3828,9 @@ export async function handleProcessCompletion(
         subtype: command.toLowerCase(),
       };
       if (command === "EXECUTE" && artifacts.executionResult) {
+        // FEA-683: V1-on-disk recovery — remove this `parseExecutionResultFile`
+        // V1 callsite (and the no-jobStore legacy completion path it lives in)
+        // when the V1 retention window passes.
         const parsed = parseExecutionResultFile(
           artifacts.executionResult,
           V1_PRIMARY_FULL_NAME_PLACEHOLDER,
