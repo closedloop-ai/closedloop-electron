@@ -30,34 +30,8 @@
  */
 
 import assert from "node:assert/strict";
-import { EventEmitter } from "node:events";
 import { test } from "node:test";
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Build a minimal mock ChildProcess that looks like what spawn returns:
- * an EventEmitter with stdout and stderr sub-emitters, plus a kill() stub.
- *
- * After construction, callers can emit events on the child to drive behavior.
- */
-function buildMockChildProcess(): EventEmitter & {
-  stdout: EventEmitter;
-  stderr: EventEmitter;
-  kill: () => void;
-} {
-  const child = new EventEmitter() as EventEmitter & {
-    stdout: EventEmitter;
-    stderr: EventEmitter;
-    kill: () => void;
-  };
-  child.stdout = new EventEmitter();
-  child.stderr = new EventEmitter();
-  child.kill = () => {};
-  return child;
-}
+import { buildMockChildProcess } from "./helpers/spawn-test-utils.js";
 
 // ---------------------------------------------------------------------------
 // Test (a): EventEmitter characterization
@@ -198,6 +172,7 @@ test(
         });
 
         // Mirrors line 1073-1077: error handler — ENOENT arrives here.
+        // drift-check: matches apps/desktop/src/server/operations/symphony-interactive.ts:1047
         mockChild.on("error", (err: Error) => {
           clearTimeout(timer);
           console.error("[commit-message] failed to spawn claude:", err.message);
@@ -208,6 +183,7 @@ test(
 
     // -----------------------------------------------------------------------
     // Replicate the outer try/catch (symphony-interactive.ts lines 502-522)
+    // drift-check: matches apps/desktop/src/server/operations/symphony-interactive.ts:489
     // -----------------------------------------------------------------------
     async function outerFn(
       mockChild: ReturnType<typeof buildMockChildProcess>

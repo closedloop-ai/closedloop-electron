@@ -24,6 +24,7 @@ describe("git-helpers: git path override shell safety", () => {
     tempPathsToClean.length = 0;
   });
 
+  // drift-check: matches apps/desktop/src/server/operations/git-helpers.ts:10
   test("resolveRepoFullName honors a git binary path containing spaces", () => {
     // A directory name with a space must survive the full spawn pipeline.
     // Shell-string interpolation would split on the space and fail with ENOENT.

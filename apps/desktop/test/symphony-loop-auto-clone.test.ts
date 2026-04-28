@@ -470,6 +470,7 @@ describe("cloneRepoViaGh: failure path", () => {
     configureBinaryPathsResolver(() => ({ gh: path.join(fakeBin, "gh") }));
 
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+    setShellPathForTest();
 
     const mock = await startMockApiServer();
     mockServersToClose.push(mock.server);
@@ -556,6 +557,7 @@ describe("cloneRepoViaGh: failure path", () => {
     await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
 
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+    setShellPathForTest();
 
     const mock = await startMockApiServer();
     mockServersToClose.push(mock.server);

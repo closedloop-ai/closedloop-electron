@@ -639,6 +639,7 @@ test("finalizes recovered live job as FAILED when process is externally killed",
   const loopTokenStore = createLoopTokenStore("boot-recovery-live-kill-loop-tokens");
   loopTokenStore.setLoopToken("loop-1", "loop-token");
 
+  // drift-check: matches apps/desktop/src/main/boot-recovery.ts:303
   const child = spawn("bash", ["-lc", "sleep 5"], { detached: false });
   assert.ok(child.pid);
 
@@ -700,6 +701,7 @@ test("preserves COMPLETED status when terminal snapshot is available during boot
   const loopTokenStore = createLoopTokenStore("boot-recovery-live-completed-snapshot-tokens");
   loopTokenStore.setLoopToken("loop-1", "loop-token");
 
+  // drift-check: matches apps/desktop/src/main/boot-recovery.ts:303
   const child = spawn("bash", ["-lc", "sleep 0.1"], { detached: false });
   assert.ok(child.pid);
 
