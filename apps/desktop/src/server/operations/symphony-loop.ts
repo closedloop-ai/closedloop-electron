@@ -1,13 +1,13 @@
+import type { ExecutionResultV2, RepoExecutionResult } from "@closedloop-ai/loops-api/execution-result";
 import { execFile, execFileSync, execSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { promisify } from "node:util";
 import {
   closeSync,
   existsSync,
   mkdirSync,
   openSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -16,6 +16,7 @@ import {
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import {
   readLogTail,
   readStderrTail,
@@ -45,6 +46,11 @@ import {
   parseTokenUsage,
   type ModelTokenUsage,
 } from "../../main/token-usage.js";
+import {
+  IMPORTED_PLAN_MARKDOWN_FILE,
+  isRawPlanArtifact,
+  toUploadedPlanArtifact,
+} from "../../shared/plan-artifact-utils.js";
 import type {
   OperationDispatcher,
   OperationRequestContext,
@@ -52,21 +58,19 @@ import type {
 import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { getShellEnv, getShellPath, resolveBinarySync } from "../shell-path.js";
-import {
-  IMPORTED_PLAN_MARKDOWN_FILE,
-  isRawPlanArtifact,
-  toUploadedPlanArtifact,
-} from "../../shared/plan-artifact-utils.js";
 import { withMcpTools } from "./chat-tools.js";
-import { findWorktreeForBranch as findWorktreeForBranchImpl } from "./git-helpers.js";
+import {
+  findWorktreeForBranch as findWorktreeForBranchImpl,
+  resolveRepoFullName,
+} from "./git-helpers.js";
 import { startOutputTailer } from "./output-tailer.js";
 import {
   findPluginScript,
   findPluginVersions,
   getPluginCacheRoot,
 } from "./plugin-cache.js";
-import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import { addRepo } from "./repos-config-utils.js";
+import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import {
   CLONE_GIT_TIMEOUT,
   expandHome,
@@ -86,7 +90,7 @@ export {
   readFileTail,
   readLogTail,
   readStderrTail,
-  stripAnsi,
+  stripAnsi
 } from "../../main/diagnostics-helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -247,7 +251,7 @@ import type { ContextPackAttachment as SharedContextPackAttachment } from "@clos
 import type { LoopRequestBody } from "@closedloop-ai/loops-api/desktop-request";
 import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
-import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
+import { getPrimaryRepoResult, parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
 import { json } from "./response-utils.js";
 
 /** Commands that have full spawn/dispatch support in this gateway version. */
@@ -809,6 +813,19 @@ export interface ResolvedAdditionalRepo {
   readonly branch: string;
 }
 
+/**
+ * Per-additional-repo worktree entry tracked in-process and persisted on
+ * `LocalJob`. `fullName` and `baseBranch` are required by recovery to run
+ * `finalizeMultiRepoExecute` after a desktop restart; older persisted jobs
+ * may lack them.
+ */
+export interface AdditionalWorktreeEntry {
+  dir: string;
+  repoPath: string;
+  fullName?: string;
+  baseBranch?: string;
+}
+
 /** Typed error thrown when an additional repo entry fails validation. */
 export class AdditionalRepoError extends Error {
   constructor(
@@ -823,34 +840,138 @@ export class AdditionalRepoError extends Error {
 
 const ADDITIONAL_REPOS_MAX = 5;
 
-/**
- * Best-effort cleanup of additional repo worktree directories.
- * Errors are logged but never re-thrown so callers can use this in
- * both success and error teardown paths without try/catch.
- */
-async function cleanupAdditionalWorktrees(
-  entries: readonly { dir: string; repoPath: string }[],
+/** Remove only additional-repo worktrees that are clean and safe to discard. */
+export async function cleanupAdditionalWorktrees(
+  entries: readonly AdditionalWorktreeEntry[],
   loopId: string,
   wt: WorktreeProvider,
-  logPrefix = "cleanup additional worktree failed:",
 ): Promise<void> {
   for (const entry of entries) {
-    await wt.removeWorktree(entry.dir, entry.repoPath, loopId).catch((err) =>
-      loopError(loopId, logPrefix, err),
-    );
+    if (decideAdditionalWorktreeCleanup(entry.dir, loopId) === "retain") {
+      continue;
+    }
+    try {
+      await wt.removeWorktree(entry.dir, entry.repoPath, loopId);
+    } catch (err) {
+      gatewayLog.warn(
+        "cleanup-additional-worktree",
+        `removeWorktree failed for ${entry.dir} (loop ${loopId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 }
 
 /**
  * Default-provider cleanup helper. Exposed so recovery-time callers that do
  * not own a `WorktreeProvider` (e.g. `boot-recovery.ts`) can reuse the same
- * best-effort teardown semantics used on the live path.
+ * teardown semantics used on the live path.
  */
 export async function cleanupAdditionalWorktreesWithDefaultProvider(
-  entries: readonly { dir: string; repoPath: string }[],
+  entries: readonly AdditionalWorktreeEntry[],
   loopId: string,
 ): Promise<void> {
   await cleanupAdditionalWorktrees(entries, loopId, defaultWorktreeProvider);
+}
+
+function isEnoentError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = (err as { code?: unknown }).code;
+  return code === "ENOENT";
+}
+
+/** Detect whether an additional-repo worktree carries any code changes. */
+function decideAdditionalWorktreeCleanup(
+  worktreeDir: string,
+  loopId: string,
+): "retain" | "remove" {
+  const gitBin = getResolvedGitPath();
+
+  let uncommitted: string;
+  try {
+    uncommitted = execFileSync(
+      gitBin,
+      ["status", "--porcelain", "--", ".", ":!.claude", ":!.closedloop-ai"],
+      { cwd: worktreeDir, encoding: "utf-8", stdio: "pipe", timeout: 10_000 },
+    ).trim();
+  } catch (err) {
+    if (isEnoentError(err)) {
+      return "remove";
+    }
+    gatewayLog.warn(
+      "cleanup-additional-worktree",
+      `git status failed for ${worktreeDir} (loop ${loopId}); retaining worktree to avoid data loss: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return "retain";
+  }
+  if (uncommitted.length > 0) {
+    gatewayLog.info(
+      "cleanup-additional-worktree",
+      `Retaining worktree with uncommitted changes: ${worktreeDir} (loop ${loopId})`,
+    );
+    return "retain";
+  }
+
+  let comparisonRefs: string[];
+  try {
+    const refsOut = execFileSync(
+      gitBin,
+      ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes", "refs/tags"],
+      { cwd: worktreeDir, encoding: "utf-8", stdio: "pipe", timeout: 10_000 },
+    );
+    comparisonRefs = refsOut
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((ref) => ref.length > 0)
+      .filter(
+        (ref) =>
+          !ref.startsWith("refs/heads/symphony/") &&
+          !/^refs\/remotes\/[^/]+\/symphony\//.test(ref),
+      );
+  } catch (err) {
+    if (isEnoentError(err)) {
+      return "remove";
+    }
+    gatewayLog.warn(
+      "cleanup-additional-worktree",
+      `git for-each-ref failed for ${worktreeDir} (loop ${loopId}); retaining worktree to avoid data loss: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return "retain";
+  }
+
+  if (comparisonRefs.length === 0) {
+    gatewayLog.warn(
+      "cleanup-additional-worktree",
+      `No non-symphony refs found in ${worktreeDir} (loop ${loopId}); retaining worktree to avoid data loss`,
+    );
+    return "retain";
+  }
+
+  let unique: string;
+  try {
+    unique = execFileSync(
+      gitBin,
+      ["rev-list", "-n", "1", "HEAD", "--not", ...comparisonRefs],
+      { cwd: worktreeDir, encoding: "utf-8", stdio: "pipe", timeout: 10_000 },
+    ).trim();
+  } catch (err) {
+    if (isEnoentError(err)) {
+      return "remove";
+    }
+    gatewayLog.warn(
+      "cleanup-additional-worktree",
+      `git rev-list failed for ${worktreeDir} (loop ${loopId}); retaining worktree to avoid data loss: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return "retain";
+  }
+  if (unique.length > 0) {
+    gatewayLog.info(
+      "cleanup-additional-worktree",
+      `Retaining worktree with committed changes unique to HEAD: ${worktreeDir} (loop ${loopId})`,
+    );
+    return "retain";
+  }
+
+  return "remove";
 }
 
 /** Resolve an additional repo entry to a validated local path, or throw. */
@@ -929,6 +1050,16 @@ export async function resolveAdditionalRepos(
   }
 
   return resolved;
+}
+
+function resolveLoopPrimaryFullName(
+  body: LoopRequestBody,
+  expandedRepoPath: string | null,
+): string {
+  return (
+    body.repo?.fullName ??
+    (expandedRepoPath ? resolveRepoFullName(expandedRepoPath) ?? "" : "")
+  );
 }
 
 /**
@@ -2234,6 +2365,12 @@ interface ExecuteFinalizationParams {
   expectedMcpUrl?: string;
   jobStore?: JobStore;
   source: ExecuteFinalizationSource;
+  /**
+   * Primary repo `owner/name` for the V2 envelope's `fullName` field.
+   * Empty string when caller has none (rare boot-recovery path for jobs
+   * persisted before the field existed).
+   */
+  primaryFullName: string;
 }
 
 function sanitizeExecuteFinalizationReason(
@@ -2278,33 +2415,64 @@ function getExecuteFinalizationSandboxBlockReason(
   return undefined;
 }
 
-function buildPersistedExecutionResultArtifact(params: {
-  hasChanges: boolean;
-  prUrl: string | null;
-  prNumber: number | null;
-  branchName: string;
-  baseBranch: string;
-  commitSha: string | null;
-}): Record<string, unknown> {
+function buildExecutionResultV2(
+  results: RepoExecutionResult[],
+): ExecutionResultV2 {
   return {
-    has_changes: params.hasChanges,
-    pr_url: params.prUrl ?? "",
-    pr_number: params.prNumber ?? 0,
-    branch_name: params.branchName,
-    base_ref: params.baseBranch,
-    base_branch: params.baseBranch,
-    commit_sha: params.commitSha,
+    schemaVersion: 2,
+    results,
   };
+}
+
+function parseGitHubFullNameFromPrUrl(prUrl: string): string | null {
+  try {
+    const parsed = new URL(prUrl);
+    if (parsed.hostname !== "github.com") {
+      return null;
+    }
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    if (parts.length < 4 || parts[2] !== "pull") {
+      return null;
+    }
+    const [owner, repo] = parts;
+    return owner && repo ? `${owner}/${repo}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function getSuccessExecutionResultFullName(
+  preferredFullName: string,
+  prUrl: string,
+): string {
+  return preferredFullName.trim() || (parseGitHubFullNameFromPrUrl(prUrl) ?? "");
+}
+
+export function scrubObjectCredentials(obj: unknown): unknown {
+  if (typeof obj === "string") return redactCredentials(obj);
+  if (Array.isArray(obj)) return obj.map(scrubObjectCredentials);
+  if (obj !== null && typeof obj === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(
+      obj as Record<string, unknown>,
+    )) {
+      result[key] = scrubObjectCredentials(value);
+    }
+    return result;
+  }
+  return obj;
 }
 
 function persistExecutionResultArtifact(
   claudeWorkDir: string,
-  executionResult: Record<string, unknown>,
+  executionResult: unknown,
 ): boolean {
   try {
+    const scrubbed = scrubObjectCredentials(executionResult);
+    const json = JSON.stringify(scrubbed, null, 2);
     writeFileSync(
       path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
-      JSON.stringify(executionResult),
+      json,
     );
     return true;
   } catch {
@@ -2327,38 +2495,45 @@ function getHeadCommitShaFromWorktree(worktreeDir: string): string | null {
   }
 }
 
+// FEA-683: V1-on-disk recovery — synthetic fullName seeds V1 normalization in
+// `parseExecutionResultFile`; V2 files carry their own fullName and ignore this
+// argument. Remove this constant and its callsites when the V1 retention window
+// passes.
+export const V1_PRIMARY_FULL_NAME_PLACEHOLDER = "local/primary";
+
 function getAuthoritativeExecutionResult(
   value: unknown,
 ): ExecuteFinalizationResult | null {
-  const parsed = parseExecutionResultFile(value);
-  if (!parsed) {
+  const parsed = parseExecutionResultFile(value, V1_PRIMARY_FULL_NAME_PLACEHOLDER);
+  if (!parsed.ok) {
     return null;
   }
-  if (!parsed.hasChanges) {
+  const primary = parsed.results[0];
+  if (!primary || primary.status === "failed") {
+    return null;
+  }
+  if (primary.status === "skipped" || !primary.hasChanges) {
     return {
       status: "no-changes",
       path: "artifact-existing",
       reason: "existing execution-result.json reused",
       executionResultPersisted: true,
-      branchName: parsed.branchName ?? undefined,
-      commitSha: parsed.commitSha ?? undefined,
+      branchName:
+        primary.status === "success" ? primary.branchName : undefined,
+      commitSha:
+        primary.status === "success" ? primary.commitSha ?? undefined : undefined,
     };
   }
-  if (
-    parsed.prUrl &&
-    parsed.prNumber != null &&
-    parsed.branchName &&
-    parsed.commitSha
-  ) {
+  if (primary.commitSha) {
     return {
       status: "success",
       path: "artifact-existing",
       reason: "existing execution-result.json reused",
       executionResultPersisted: true,
-      prUrl: parsed.prUrl,
-      prNumber: parsed.prNumber,
-      branchName: parsed.branchName,
-      commitSha: parsed.commitSha,
+      prUrl: primary.prUrl,
+      prNumber: primary.prNumber,
+      branchName: primary.branchName,
+      commitSha: primary.commitSha,
     };
   }
   return null;
@@ -2522,14 +2697,21 @@ export async function runExecuteFinalization(
   );
 
   if (llmResult) {
-    const executionResult = buildPersistedExecutionResultArtifact({
-      hasChanges: true,
-      prUrl: llmResult.prUrl,
-      prNumber: llmResult.prNumber,
-      branchName: llmResult.branchName,
-      baseBranch: params.baseBranch,
-      commitSha: llmResult.commitSha,
-    });
+    const executionResult = buildExecutionResultV2([
+      {
+        status: "success",
+        fullName: getSuccessExecutionResultFullName(
+          params.primaryFullName,
+          llmResult.prUrl,
+        ),
+        prUrl: llmResult.prUrl,
+        prNumber: llmResult.prNumber,
+        branchName: llmResult.branchName,
+        baseBranch: params.baseBranch,
+        hasChanges: true,
+        commitSha: llmResult.commitSha,
+      },
+    ]);
     const persisted = persistExecutionResultArtifact(
       params.claudeWorkDir,
       executionResult,
@@ -2607,14 +2789,21 @@ export async function runExecuteFinalization(
   );
 
   if (gitResult.status === "success") {
-    const executionResult = buildPersistedExecutionResultArtifact({
-      hasChanges: true,
-      prUrl: gitResult.prUrl,
-      prNumber: gitResult.prNumber,
-      branchName: gitResult.branchName,
-      baseBranch: params.baseBranch,
-      commitSha: gitResult.commitSha,
-    });
+    const executionResult = buildExecutionResultV2([
+      {
+        status: "success",
+        fullName: getSuccessExecutionResultFullName(
+          params.primaryFullName,
+          gitResult.prUrl,
+        ),
+        prUrl: gitResult.prUrl,
+        prNumber: gitResult.prNumber,
+        branchName: gitResult.branchName,
+        baseBranch: params.baseBranch,
+        hasChanges: true,
+        commitSha: gitResult.commitSha,
+      },
+    ]);
     const persisted = persistExecutionResultArtifact(
       params.claudeWorkDir,
       executionResult,
@@ -2665,14 +2854,13 @@ export async function runExecuteFinalization(
         preArtifacts,
       );
     }
-    const executionResult = buildPersistedExecutionResultArtifact({
-      hasChanges: false,
-      prUrl: null,
-      prNumber: null,
-      branchName,
-      baseBranch: params.baseBranch,
-      commitSha,
-    });
+    const executionResult = buildExecutionResultV2([
+      {
+        status: "skipped",
+        fullName: params.primaryFullName,
+        reason: "no_changes",
+      },
+    ]);
     const persisted = persistExecutionResultArtifact(
       params.claudeWorkDir,
       executionResult,
@@ -2717,6 +2905,235 @@ export async function runExecuteFinalization(
     },
     preArtifacts,
   );
+}
+
+export async function finalizeMultiRepoExecute(
+  entries: Array<{ fullName: string; worktreeDir: string; baseBranch: string }>,
+  deps: {
+    loopId: string;
+    apiBaseUrl: string;
+    token: string;
+    webAppOrigin: string;
+    getAllowedDirectories: () => string[];
+    artifactSlug?: string;
+    expectedMcpUrl?: string;
+    committer?: LoopCommitter;
+  },
+): Promise<RepoExecutionResult[]> {
+  const results: RepoExecutionResult[] = [];
+
+  for (const entry of entries) {
+    try {
+      const entryClaudeWorkDir = path.join(entry.worktreeDir, ".closedloop-ai", "work");
+      mkdirSync(entryClaudeWorkDir, { recursive: true });
+      const finalization = await runExecuteFinalization({
+        worktreeDir: entry.worktreeDir,
+        claudeWorkDir: entryClaudeWorkDir,
+        loopId: deps.loopId,
+        artifactSlug: deps.artifactSlug,
+        baseBranch: entry.baseBranch,
+        webAppOrigin: deps.webAppOrigin,
+        committer: deps.committer,
+        getAllowedDirectories: deps.getAllowedDirectories,
+        expectedMcpUrl: deps.expectedMcpUrl,
+        jobStore: undefined,
+        source: "live-exit",
+        primaryFullName: entry.fullName,
+      });
+      results.push(buildPrimaryRepoResult(entry.fullName, entry.baseBranch, finalization));
+    } catch (err) {
+      loopError(deps.loopId, "multi-repo-finalization-failed", entry.fullName, String(err));
+      await postLoopEventBounded(deps.apiBaseUrl, deps.loopId, deps.token, {
+        type: LoopEventType.Error,
+        code: LoopErrorCode.RunnerError,
+        message: redactCredentials(sanitizeErrorMessage(err instanceof Error ? err.message : String(err))),
+        result: { repo: entry.fullName },
+      });
+      results.push({
+        status: "failed",
+        fullName: entry.fullName,
+        error: String(err),
+      });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Outcome of `finalizeAdditionalReposAndPersist`.
+ *
+ * - `skipped:no-additionals`: caller passed an empty entries array.
+ * - `skipped:already-finalized`: existing on-disk V2 already contains the
+ *   multi-repo envelope (idempotent re-entry from recovery).
+ * - `skipped:incomplete-metadata`: an entry persisted by an older build
+ *   lacks the `fullName` or `baseBranch` required to finalize. Recovery
+ *   logs a warning and falls through to worktree cleanup only.
+ * - `ok`: finalization ran; combined V2 envelope was persisted.
+ */
+export type FinalizeAdditionalReposOutcome =
+  | { status: "skipped:no-additionals" }
+  | { status: "skipped:already-finalized" }
+  | { status: "skipped:incomplete-metadata"; missingRepoPaths: string[] }
+  | { status: "ok"; results: RepoExecutionResult[] };
+
+/**
+ * Run `finalizeMultiRepoExecute` for the additional-repo worktrees and
+ * persist the combined V2 envelope (primary + additional results) to
+ * `execution-result.json`. Used by both the live-exit path in
+ * `handleProcessCompletion` and by recovery in `finalizeLoopFromRuntime`,
+ * so the same git push / PR creation runs after a desktop restart.
+ *
+ * Idempotent: if the on-disk V2 already carries multiple results, returns
+ * without doing further work.
+ */
+export async function finalizeAdditionalReposAndPersist(args: {
+  additionalEntries: readonly AdditionalWorktreeEntry[];
+  primaryFullName: string;
+  primaryBaseBranch: string;
+  /**
+   * Fresh primary finalization result from the live path or from a recovery
+   * call that just ran `runExecuteFinalization`. When `null`, the helper
+   * falls back to the primary entry already on disk in `execution-result.json`
+   * (recovery path where primary was finalized in a prior attempt).
+   */
+  executeFinalization: ExecuteFinalizationResult | null;
+  claudeWorkDir: string;
+  loopId: string;
+  apiBaseUrl: string;
+  token: string;
+  webAppOrigin: string;
+  getAllowedDirectories: () => string[];
+  artifactSlug?: string;
+  expectedMcpUrl?: string;
+  committer?: LoopCommitter;
+}): Promise<FinalizeAdditionalReposOutcome> {
+  if (args.additionalEntries.length === 0) {
+    return { status: "skipped:no-additionals" };
+  }
+
+  // Idempotency guard: a prior run (live-exit pre-crash, or earlier recovery
+  // attempt) may have already persisted the multi-repo envelope.
+  const existing = readJsonFileSync(
+    path.join(args.claudeWorkDir, LoopArtifactFile.ExecutionResult),
+  );
+  const parsedExisting = parseExecutionResultFile(
+    existing,
+    V1_PRIMARY_FULL_NAME_PLACEHOLDER,
+  );
+  if (parsedExisting.ok && parsedExisting.results.length > 1) {
+    return { status: "skipped:already-finalized" };
+  }
+
+  const finalizable: Array<{
+    fullName: string;
+    worktreeDir: string;
+    baseBranch: string;
+  }> = [];
+  const missingRepoPaths: string[] = [];
+  for (const entry of args.additionalEntries) {
+    const fullName =
+      entry.fullName ?? resolveRepoFullName(entry.repoPath) ?? undefined;
+    const baseBranch = entry.baseBranch;
+    if (!fullName || !baseBranch) {
+      missingRepoPaths.push(entry.repoPath);
+      continue;
+    }
+    finalizable.push({
+      fullName,
+      worktreeDir: entry.dir,
+      baseBranch,
+    });
+  }
+
+  if (missingRepoPaths.length > 0) {
+    gatewayLog.warn(
+      "loop-harness",
+      `Skipping additional-repo recovery for loopId=${args.loopId}: ` +
+        `missing fullName/baseBranch metadata for repos [${missingRepoPaths.join(", ")}]`,
+    );
+    return { status: "skipped:incomplete-metadata", missingRepoPaths };
+  }
+
+  const additionalResults = await finalizeMultiRepoExecute(finalizable, {
+    loopId: args.loopId,
+    apiBaseUrl: args.apiBaseUrl,
+    token: args.token,
+    webAppOrigin: args.webAppOrigin,
+    getAllowedDirectories: args.getAllowedDirectories,
+    artifactSlug: args.artifactSlug,
+    expectedMcpUrl: args.expectedMcpUrl,
+    committer: args.committer,
+  });
+
+  // Prefer the primary entry already on disk so we preserve any prUrl /
+  // branchName / commitSha values previously written. Fall back to building
+  // one from `executeFinalization` (live path or fresh recovery).
+  const existingPrimary =
+    parsedExisting.ok && parsedExisting.results.length >= 1
+      ? parsedExisting.results[0]
+      : null;
+  const primaryResult: RepoExecutionResult =
+    existingPrimary ??
+    buildPrimaryRepoResult(
+      args.primaryFullName,
+      args.primaryBaseBranch,
+      args.executeFinalization,
+    );
+
+  const v2Envelope = buildExecutionResultV2([
+    primaryResult,
+    ...additionalResults,
+  ]);
+  persistExecutionResultArtifact(args.claudeWorkDir, v2Envelope);
+
+  return { status: "ok", results: additionalResults };
+}
+
+function buildPrimaryRepoResult(
+  fullName: string,
+  baseBranch: string,
+  executeFinalization: ExecuteFinalizationResult | null,
+): RepoExecutionResult {
+  if (!executeFinalization) {
+    return { status: "skipped", fullName, reason: "no_finalization" };
+  }
+  if (
+    executeFinalization.status === "no-changes" ||
+    executeFinalization.status === "skipped"
+  ) {
+    return {
+      status: "skipped",
+      fullName,
+      reason: executeFinalization.reason ?? "no_changes",
+    };
+  }
+  if (
+    executeFinalization.status === "success" &&
+    executeFinalization.prUrl &&
+    executeFinalization.prNumber !== undefined &&
+    executeFinalization.branchName &&
+    executeFinalization.commitSha
+  ) {
+    return {
+      status: "success",
+      fullName: getSuccessExecutionResultFullName(
+        fullName,
+        executeFinalization.prUrl,
+      ),
+      prUrl: executeFinalization.prUrl,
+      prNumber: executeFinalization.prNumber,
+      branchName: executeFinalization.branchName,
+      baseBranch,
+      hasChanges: true,
+      commitSha: executeFinalization.commitSha,
+    };
+  }
+  return {
+    status: "failed",
+    fullName,
+    error: executeFinalization.reason ?? `execute finalization status: ${executeFinalization.status}`,
+  };
 }
 
 function executeGitOperations(
@@ -2970,7 +3387,7 @@ export async function handleProcessCompletion(
   operationId?: string,
   wt: WorktreeProvider = defaultWorktreeProvider,
   loopTokenStore?: LoopTokenStore,
-  additionalWorktreeDirs: { dir: string; repoPath: string }[] = [],
+  additionalWorktreeDirs: AdditionalWorktreeEntry[] = [],
   exitSignal?: string,
   spawnStartedAt?: number,
   spawnMeta?: {
@@ -3224,7 +3641,7 @@ export async function handleProcessCompletion(
     } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
       await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
-    await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt, "cleanup additional worktree failed (on error):");
+    await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt);
     loopTokenStore?.deleteLoopToken(loopId);
     return;
   }
@@ -3279,6 +3696,7 @@ export async function handleProcessCompletion(
         expectedMcpUrl,
         jobStore,
         source: "live-exit",
+        primaryFullName: resolveLoopPrimaryFullName(body, expandedRepoPath),
       });
 
       // Cancellation gate: skip finalization upload/event work if cancellation won
@@ -3319,6 +3737,33 @@ export async function handleProcessCompletion(
             loopId,
         );
         warnings.push("GIT_PUSH_FAILED");
+      }
+
+      // Additional repos are finalized after the primary so the primary PR info
+      // is not overwritten by a second clean-worktree check. Recovery calls the
+      // same helper from `finalizeLoopFromRuntime` so this work is replayed if
+      // the desktop crashes after primary finalization but before this block
+      // persists the combined V2 envelope.
+      if (additionalWorktreeDirs.length > 0 && worktreeDir) {
+        const primaryFullName = resolveLoopPrimaryFullName(
+          body,
+          expandedRepoPath,
+        );
+        await finalizeAdditionalReposAndPersist({
+          additionalEntries: additionalWorktreeDirs,
+          primaryFullName,
+          primaryBaseBranch: baseBranch,
+          executeFinalization,
+          claudeWorkDir,
+          loopId,
+          apiBaseUrl,
+          token: body.closedLoopAuthToken,
+          webAppOrigin: webAppOrigin ?? "",
+          getAllowedDirectories,
+          artifactSlug: body.artifactSlug,
+          expectedMcpUrl,
+          committer,
+        });
       }
 
       artifacts = readExecuteOutputs(claudeWorkDir);
@@ -3527,12 +3972,26 @@ export async function handleProcessCompletion(
         subtype: command.toLowerCase(),
       };
       if (command === "EXECUTE" && artifacts.executionResult) {
-        const parsed = parseExecutionResultFile(artifacts.executionResult);
-        if (parsed) {
-          result.prUrl = parsed.prUrl;
-          result.prNumber = parsed.prNumber;
-          result.branchName = parsed.branchName;
-          result.has_changes = parsed.hasChanges;
+        // FEA-683: V1-on-disk recovery — remove this `parseExecutionResultFile`
+        // V1 callsite (and the no-jobStore legacy completion path it lives in)
+        // when the V1 retention window passes.
+        const parsed = parseExecutionResultFile(
+          artifacts.executionResult,
+          V1_PRIMARY_FULL_NAME_PLACEHOLDER,
+        );
+        const lookupName = parsed.ok ? parsed.results[0]?.fullName ?? "" : "";
+        const primary = parsed.ok ? getPrimaryRepoResult(parsed.results, lookupName) : null;
+        if (primary?.status === "success") {
+          result.prUrl = primary.prUrl;
+          result.prNumber = primary.prNumber;
+          result.branchName = primary.branchName;
+          result.has_changes = primary.hasChanges;
+        } else if (primary?.status === "skipped") {
+          // v1 has_changes=false normalizes to skipped; preserve the legacy
+          // shape where prUrl/prNumber surface as null and has_changes=false.
+          result.prUrl = null;
+          result.prNumber = null;
+          result.has_changes = false;
         }
       }
       if (command === "EXECUTE" && executeFinalization) {
@@ -3601,6 +4060,137 @@ export async function handleProcessCompletion(
   } finally {
     runningLoops.delete(loopId);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Additional-repo worktree provisioning shared by PLAN and EXECUTE branches.
+// On failure, unwinds the partially-created worktree set (already-pushed
+// additionals + primary), posts a LoopEvent.Error, writes the HTTP error, and
+// returns false so the caller can `return` early.
+// ---------------------------------------------------------------------------
+
+async function provisionAdditionalRepoWorktrees(args: {
+  resolvedAdditionalRepos: readonly ResolvedAdditionalRepo[];
+  worktreeKey: string;
+  worktreeDir: string;
+  primaryRepoPath: string;
+  additionalWorktreeDirs: AdditionalWorktreeEntry[];
+  allowedDirs: string[];
+  body: LoopRequestBody;
+  apiBaseUrl: string;
+  context: OperationRequestContext;
+  wt: WorktreeProvider;
+  freshLabel: string;
+  // True only when the caller created the primary worktree fresh in this
+  // request. EXECUTE/REQUEST_CHANGES that reuse a parent PLAN's worktree
+  // must pass false so failures here do not delete the parent's checkout.
+  ownsPrimaryWorktree: boolean;
+  // PLAN passes false: stale additional-repo worktrees are force-removed so
+  // PLAN starts fresh. EXECUTE/REQUEST_CHANGES pass true so a retained dirty
+  // worktree from a prior failed/cancelled attempt (kept by
+  // cleanupAdditionalWorktrees to avoid data loss) is reused instead of
+  // force-removed by --force/fs.rm.
+  reuseStaleWorktree: boolean;
+}): Promise<boolean> {
+  const {
+    resolvedAdditionalRepos,
+    worktreeKey,
+    worktreeDir,
+    primaryRepoPath,
+    additionalWorktreeDirs,
+    allowedDirs,
+    body,
+    apiBaseUrl,
+    context,
+    wt,
+    freshLabel,
+    ownsPrimaryWorktree,
+    reuseStaleWorktree,
+  } = args;
+
+  for (let addIdx = 0; addIdx < resolvedAdditionalRepos.length; addIdx++) {
+    const addRepo = resolvedAdditionalRepos[addIdx];
+    const requestEntry = body.additionalRepos?.[addIdx];
+    const addRepoSlug = slugifyLoopId(addRepo.branch);
+    const addRepoKey = `${worktreeKey}-${addRepoSlug}-${additionalRepoDisambiguator(addRepo.repoPath)}`;
+    const canonicalAddWorktreeDir = resolveLoopWorktreeDir(addRepo.repoPath, addRepoKey);
+    const addBranchName = `symphony/${addRepoKey}`;
+
+    const staleAddWorktree = wt.findWorktreeForBranch(addRepo.repoPath, addBranchName);
+    const reuseExisting = reuseStaleWorktree && staleAddWorktree !== null;
+    const addWorktreeDir = reuseExisting && staleAddWorktree
+      ? staleAddWorktree
+      : canonicalAddWorktreeDir;
+
+    try {
+      assertPathAllowed(addWorktreeDir, allowedDirs);
+    } catch (e) {
+      if (e instanceof DirectoryNotAllowedError) {
+        await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
+        if (ownsPrimaryWorktree) {
+          await wt.removeWorktree(worktreeDir, primaryRepoPath, body.loopId).catch(() => {});
+        }
+        await postLoopEventBounded(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+          type: LoopEventType.Error,
+          code: LoopErrorCode.RepoNotAllowed,
+          message: `Additional repo worktree path not allowed: ${addWorktreeDir}`,
+        });
+        json(context, 403, { error: `Additional repo worktree path not allowed: ${addWorktreeDir}` });
+        return false;
+      }
+      throw e;
+    }
+
+    try {
+      if (reuseExisting) {
+        loopLog(
+          body.loopId,
+          `Reusing retained additional-repo worktree for ${freshLabel}: ${addWorktreeDir} (branch: ${addBranchName})`,
+        );
+      } else {
+        if (staleAddWorktree) {
+          loopLog(
+            body.loopId,
+            `Removing stale additional-repo worktree for fresh ${freshLabel}: ${staleAddWorktree}`,
+          );
+          await wt.removeWorktree(staleAddWorktree, addRepo.repoPath, body.loopId);
+        }
+        await wt.ensureWorktree(addRepo.repoPath, addWorktreeDir, addBranchName, addRepo.branch, body.loopId);
+      }
+    } catch (checkoutErr) {
+      const msg = checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr);
+      loopError(body.loopId, `ensureWorktree failed for additional repo ${addRepo.repoPath}:`, checkoutErr);
+      await wt.removeWorktree(addWorktreeDir, addRepo.repoPath, body.loopId).catch(() => {});
+      await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
+      if (ownsPrimaryWorktree) {
+        await wt.removeWorktree(worktreeDir, primaryRepoPath, body.loopId).catch(() => {});
+      }
+      await postLoopEventBounded(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+        type: LoopEventType.Error,
+        code: LoopErrorCode.BranchCreateFailed,
+        message: `Failed to checkout additional repo worktree: ${msg}`,
+      });
+      json(context, 500, { error: `Failed to checkout additional repo worktree: ${msg}` });
+      return false;
+    }
+
+    additionalWorktreeDirs.push({
+      dir: addWorktreeDir,
+      repoPath: addRepo.repoPath,
+      fullName:
+        requestEntry?.fullName ??
+        resolveRepoFullName(addRepo.repoPath) ??
+        undefined,
+      baseBranch: requestEntry?.branch ?? addRepo.branch,
+    });
+    loopLog(
+      body.loopId,
+      reuseExisting
+        ? `Reused additional repo worktree: ${addWorktreeDir} (branch: ${addBranchName})`
+        : `Created additional repo worktree: ${addWorktreeDir} (branch: ${addBranchName} based on ${addRepo.branch})`,
+    );
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -3775,7 +4365,7 @@ async function handleLoopRequest(
 
   let spawnedSuccessfully = false;
   let expandedRepoPath: string | null = null;
-  const additionalWorktreeDirs: { dir: string; repoPath: string }[] = [];
+  const additionalWorktreeDirs: AdditionalWorktreeEntry[] = [];
   try {
     const allowedDirs = getAllowedDirectories();
 
@@ -3914,7 +4504,7 @@ async function handleLoopRequest(
     }
 
     let resolvedAdditionalRepos: ResolvedAdditionalRepo[] = [];
-    if (body.command === "PLAN" && body.additionalRepos && body.additionalRepos.length > 0) {
+    if ((body.command === "PLAN" || body.command === "EXECUTE") && body.additionalRepos && body.additionalRepos.length > 0) {
       try {
         resolvedAdditionalRepos = await resolveAdditionalRepos(
           body.additionalRepos,
@@ -3941,6 +4531,69 @@ async function handleLoopRequest(
           return;
         }
         throw err;
+      }
+
+      // Deduplication guard: reject if any fullName or repoPath appears more than once
+      // across the primary repo and all additional repos.
+      const seenFullNames = new Set<string>();
+      const seenRepoPaths = new Set<string>();
+
+      if (body.repo?.fullName) {
+        seenFullNames.add(body.repo.fullName);
+      }
+      if (expandedRepoPath) {
+        seenRepoPaths.add(path.resolve(expandedRepoPath));
+      }
+
+      for (let i = 0; i < resolvedAdditionalRepos.length; i++) {
+        const resolved = resolvedAdditionalRepos[i];
+        const entry = body.additionalRepos![i];
+        const entryFullName = entry.fullName;
+
+        if (entryFullName) {
+          if (seenFullNames.has(entryFullName)) {
+            const dupMsg = `Duplicate repository fullName across repos: ${entryFullName}`;
+            await postLoopEventBounded(
+              apiBaseUrl,
+              body.loopId,
+              body.closedLoopAuthToken,
+              {
+                type: LoopEventType.Error,
+                code: LoopErrorCode.PreRunValidationFailed,
+                message: dupMsg,
+              },
+            );
+            gatewayLog.error(
+              "loop-harness",
+              `additionalRepo deduplication failed for loopId=${body.loopId}: ${dupMsg}`,
+            );
+            json(context, 400, { error: dupMsg });
+            return;
+          }
+          seenFullNames.add(entryFullName);
+        }
+
+        const resolvedCanonical = path.resolve(resolved.repoPath);
+        if (seenRepoPaths.has(resolvedCanonical)) {
+          const dupMsg = `Duplicate repository path across repos: ${resolved.repoPath}`;
+          await postLoopEventBounded(
+            apiBaseUrl,
+            body.loopId,
+            body.closedLoopAuthToken,
+            {
+              type: LoopEventType.Error,
+              code: LoopErrorCode.PreRunValidationFailed,
+              message: dupMsg,
+            },
+          );
+          gatewayLog.error(
+            "loop-harness",
+            `additionalRepo deduplication failed for loopId=${body.loopId}: ${dupMsg}`,
+          );
+          json(context, 400, { error: dupMsg });
+          return;
+        }
+        seenRepoPaths.add(resolvedCanonical);
       }
     }
 
@@ -4072,96 +4725,31 @@ async function handleLoopRequest(
         // Create additional repo worktrees for PLAN command.
         // Mirror the primary-repo pattern: create a fresh scratch branch
         // based on the user-specified branch so loop work does not mutate it.
-        for (const addRepo of resolvedAdditionalRepos) {
-          const addRepoSlug = slugifyLoopId(addRepo.branch);
-          const addRepoKey = `${worktreeKey}-${addRepoSlug}-${additionalRepoDisambiguator(addRepo.repoPath)}`;
-          const addWorktreeDir = resolveLoopWorktreeDir(
-            addRepo.repoPath,
-            addRepoKey,
-          );
-          const addBranchName = `symphony/${addRepoKey}`;
-
-          // Validate the additional-repo worktree path against the sandbox
-          // roots BEFORE any git checkout is materialized. SYMPHONY_WORKTREE_PARENT_DIR
-          // is untrusted config; if it points outside allowedDirs, we must
-          // refuse to write the checkout at all, not clean it up after the fact.
-          try {
-            assertPathAllowed(addWorktreeDir, allowedDirs);
-          } catch (e) {
-            if (e instanceof DirectoryNotAllowedError) {
-              // Unwind already-created additional-repo worktrees from prior
-              // iterations of this loop *before* the primary, so a failure on
-              // iteration N doesn't leak iterations 0..N-1 on disk.
-              await cleanupAdditionalWorktrees(
-                additionalWorktreeDirs,
-                body.loopId,
-                wt,
-                "cleanup additional worktree failed (allowlist reject):",
-              );
-              await wt.removeWorktree(worktreeDir, repoPath, body.loopId).catch(() => {});
-              await postLoopEventBounded(
-                apiBaseUrl,
-                body.loopId,
-                body.closedLoopAuthToken,
-                {
-                  type: LoopEventType.Error,
-                  code: LoopErrorCode.RepoNotAllowed,
-                  message: `Additional repo worktree path not allowed: ${addWorktreeDir}`,
-                },
-              );
-              json(context, 403, { error: `Additional repo worktree path not allowed: ${addWorktreeDir}` });
-              return;
-            }
-            throw e;
-          }
-
-          try {
-            const staleAddWorktree = wt.findWorktreeForBranch(addRepo.repoPath, addBranchName);
-            if (staleAddWorktree) {
-              loopLog(
-                body.loopId,
-                `Removing stale additional-repo worktree for fresh PLAN: ${staleAddWorktree}`,
-              );
-              await wt.removeWorktree(staleAddWorktree, addRepo.repoPath, body.loopId);
-            }
-            await wt.ensureWorktree(addRepo.repoPath, addWorktreeDir, addBranchName, addRepo.branch, body.loopId);
-          } catch (checkoutErr) {
-            const msg = checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr);
-            loopError(body.loopId, `ensureWorktree failed for additional repo ${addRepo.repoPath}:`, checkoutErr);
-            // Clean up the half-materialized current worktree, then any
-            // successfully-checked-out worktrees from prior iterations, then
-            // the primary worktree. Order matters only for log readability;
-            // all operations are independent best-effort.
-            await wt.removeWorktree(addWorktreeDir, addRepo.repoPath, body.loopId).catch(() => {});
-            await cleanupAdditionalWorktrees(
-              additionalWorktreeDirs,
-              body.loopId,
-              wt,
-              "cleanup additional worktree failed (checkout reject):",
-            );
-            await wt.removeWorktree(worktreeDir, repoPath, body.loopId).catch(() => {});
-            await postLoopEventBounded(
-              apiBaseUrl,
-              body.loopId,
-              body.closedLoopAuthToken,
-              {
-                type: LoopEventType.Error,
-                code: LoopErrorCode.BranchCreateFailed,
-                message: `Failed to checkout additional repo worktree: ${msg}`,
-              },
-            );
-            json(context, 500, { error: `Failed to checkout additional repo worktree: ${msg}` });
-            return;
-          }
-          additionalWorktreeDirs.push({ dir: addWorktreeDir, repoPath: addRepo.repoPath });
-          loopLog(body.loopId, `Created additional repo worktree: ${addWorktreeDir} (branch: ${addBranchName} based on ${addRepo.branch})`);
-        }
+        const planAdditionalsOk = await provisionAdditionalRepoWorktrees({
+          resolvedAdditionalRepos,
+          worktreeKey,
+          worktreeDir,
+          primaryRepoPath: repoPath,
+          additionalWorktreeDirs,
+          allowedDirs,
+          body,
+          apiBaseUrl,
+          context,
+          wt,
+          freshLabel: "PLAN",
+          ownsPrimaryWorktree: true,
+          // PLAN promises a fresh tree — destroy any prior worktree at this branch.
+          reuseStaleWorktree: false,
+        });
+        if (!planAdditionalsOk) return;
       } else {
         // EXECUTE/REQUEST_CHANGES: reuse existing worktree.
         // Try artifact slug first, then parentLoopId fallback, then create new.
+        let reusedPrimaryWorktree = false;
         const existingWorktree = wt.findWorktreeForBranch(repoPath, branchName);
         if (existingWorktree) {
           worktreeDir = existingWorktree;
+          reusedPrimaryWorktree = true;
           loopLog(
             body.loopId,
             `Reusing worktree via artifact slug: ${worktreeDir} (branch: ${branchName})`,
@@ -4175,6 +4763,7 @@ async function handleLoopRequest(
           );
           if (parentWorktree) {
             worktreeDir = parentWorktree;
+            reusedPrimaryWorktree = true;
             loopLog(
               body.loopId,
               `Reusing worktree via parentLoopId fallback: ${worktreeDir} (branch: ${parentBranch})`,
@@ -4191,10 +4780,68 @@ async function handleLoopRequest(
             body.repo?.branch ?? "main",
             body.loopId,
           );
+          reusedPrimaryWorktree = false;
           loopLog(
             body.loopId,
             `Created new worktree: ${worktreeDir} (branch: ${branchName})`,
           );
+        }
+
+        // Create additional repo worktrees for EXECUTE/REQUEST_CHANGES command.
+        // Mirror the primary-repo pattern: create a fresh scratch branch
+        // based on the user-specified branch so loop work does not mutate it.
+        const executeAdditionalsOk = await provisionAdditionalRepoWorktrees({
+          resolvedAdditionalRepos,
+          worktreeKey,
+          worktreeDir,
+          primaryRepoPath: repoPath,
+          additionalWorktreeDirs,
+          allowedDirs,
+          body,
+          apiBaseUrl,
+          context,
+          wt,
+          freshLabel: "EXECUTE",
+          // Only allow primary worktree removal on failure when we created it
+          // fresh in this request. Reused parent PLAN worktrees must not be
+          // destroyed by an additional-repo provisioning failure.
+          ownsPrimaryWorktree: !reusedPrimaryWorktree,
+          // EXECUTE/REQUEST_CHANGES retries may hit a retained dirty additional
+          // worktree from a prior failed/cancelled attempt (kept by
+          // cleanupAdditionalWorktrees to avoid data loss). Reuse it instead of
+          // force-removing it.
+          reuseStaleWorktree: true,
+        });
+        if (!executeAdditionalsOk) return;
+
+        // Bootstrap additional-repo worktrees sequentially.
+        // On failure, clean up only the additional worktrees — the primary
+        // here may be a reused parent PLAN's worktree, and an additional-repo
+        // bootstrap blip (npm install hiccup, transient network) must not
+        // destroy parent state. `cleanupAdditionalWorktrees` runs the smart
+        // retention check and keeps any prior entry that has uncommitted
+        // changes (typically bootstrap output like package-lock.json or
+        // node_modules) so the user does not lose work; retained trees are
+        // reused on retry via `reuseStaleWorktree: true` in
+        // `provisionAdditionalRepoWorktrees`.
+        for (const addEntry of additionalWorktreeDirs) {
+          try {
+            await runBootstrapIfNeeded(addEntry.dir, body.loopId);
+          } catch (bootstrapErr) {
+            loopError(body.loopId, `bootstrap failed for additional repo worktree: ${addEntry.dir}`, bootstrapErr);
+            gatewayLog.error("bootstrap-additional-repo-failed", `loopId=${body.loopId} dir=${addEntry.dir} error=${String(bootstrapErr)}`);
+            // Remove the failed worktree
+            try { await wt.removeWorktree(addEntry.dir, addEntry.repoPath, body.loopId); } catch { /* ignore */ }
+            // Clean up all prior additional worktrees
+            await cleanupAdditionalWorktrees(additionalWorktreeDirs.filter(e => e !== addEntry), body.loopId, wt);
+            additionalWorktreeDirs.length = 0;
+            await postLoopEventBounded(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+              type: LoopEventType.Error,
+              code: LoopErrorCode.BranchCreateFailed,
+              message: `Bootstrap failed for additional repo worktree: ${addEntry.dir}`,
+            });
+            return json(context, 500, { error: "Bootstrap failed for additional repo worktree" });
+          }
         }
       }
 
@@ -4763,7 +5410,7 @@ async function handleLoopRequest(
           scriptArgs.push("--prd", prdPath);
         }
 
-        if (body.command === "PLAN") {
+        if (body.command === "PLAN" || body.command === "EXECUTE") {
           for (const addEntry of additionalWorktreeDirs) {
             scriptArgs.push("--add-dir", addEntry.dir);
           }
@@ -4950,6 +5597,9 @@ async function handleLoopRequest(
         ...(operationId ? { operationId } : {}),
         artifactSlug: body.artifactSlug ?? existing?.artifactSlug,
         baseBranch: body.repo?.branch ?? existing?.baseBranch ?? "main",
+        primaryRepoFullName:
+          resolveLoopPrimaryFullName(body, expandedRepoPath) ||
+          existing?.primaryRepoFullName,
         webAppOrigin: webAppOrigin || existing?.webAppOrigin,
         expectedMcpUrl: expectedMcpUrl ?? existing?.expectedMcpUrl,
         committer: body.committer ?? existing?.committer,
@@ -4991,7 +5641,7 @@ async function handleLoopRequest(
       runningLoops.delete(body.loopId);
       loopTokenStore?.deleteLoopToken(body.loopId);
       // Best-effort cleanup of any additional repo worktrees created before spawn failed
-      void cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt, "finally: cleanup additional worktree failed:");
+      void cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
     }
   }
 }
