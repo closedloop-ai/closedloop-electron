@@ -299,7 +299,7 @@ function buildCompletedEventResult(
         result.prUrl = primaryResult.prUrl;
         result.prNumber = primaryResult.prNumber;
         result.branchName = primaryResult.branchName;
-        result.has_changes = true;
+        result.has_changes = primaryResult.hasChanges;
       } else {
         setNoChangesFields();
       }

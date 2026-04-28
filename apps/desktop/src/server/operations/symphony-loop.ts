@@ -3098,8 +3098,15 @@ function buildPrimaryRepoResult(
   if (!executeFinalization) {
     return { status: "skipped", fullName, reason: "no_finalization" };
   }
-  if (executeFinalization.status === "no-changes") {
-    return { status: "skipped", fullName, reason: "no_changes" };
+  if (
+    executeFinalization.status === "no-changes" ||
+    executeFinalization.status === "skipped"
+  ) {
+    return {
+      status: "skipped",
+      fullName,
+      reason: executeFinalization.reason ?? "no_changes",
+    };
   }
   if (
     executeFinalization.status === "success" &&
@@ -4811,8 +4818,12 @@ async function handleLoopRequest(
         // On failure, clean up only the additional worktrees — the primary
         // here may be a reused parent PLAN's worktree, and an additional-repo
         // bootstrap blip (npm install hiccup, transient network) must not
-        // destroy parent state. Only the caller created additional worktrees
-        // in this request, so they are always safe to roll back.
+        // destroy parent state. `cleanupAdditionalWorktrees` runs the smart
+        // retention check and keeps any prior entry that has uncommitted
+        // changes (typically bootstrap output like package-lock.json or
+        // node_modules) so the user does not lose work; retained trees are
+        // reused on retry via `reuseStaleWorktree: true` in
+        // `provisionAdditionalRepoWorktrees`.
         for (const addEntry of additionalWorktreeDirs) {
           try {
             await runBootstrapIfNeeded(addEntry.dir, body.loopId);

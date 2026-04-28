@@ -62,35 +62,35 @@ export function restoreEnv(saved: Record<string, string | undefined>): void {
 // Git helpers
 // ---------------------------------------------------------------------------
 
-export async function initGitRepo(repoPath: string): Promise<void> {
+export async function initGitRepo(
+  repoPath: string,
+  options: { allowEmpty?: boolean } = {},
+): Promise<void> {
+  const commitStep = options.allowEmpty
+    ? `git commit --allow-empty -m initial`
+    : `echo "# initial" > README.md && git add . && git commit -m initial`;
   await execFileAsync("/bin/sh", ["-c", [
     `git init -b main "${repoPath}"`,
     `cd "${repoPath}"`,
     `git config user.email test@test.com`,
     `git config user.name Test`,
-    `echo "# initial" > README.md`,
-    `git add .`,
-    `git commit -m initial`,
+    commitStep,
   ].join(" && ")]);
-}
-
-export function initGitRepoSync(repoPath: string): void {
-  execFileSync("git", ["init", "-q", "-b", "main"], {
-    cwd: repoPath,
-    stdio: "pipe",
-  });
-  execFileSync("git", ["config", "user.email", "test@test.com"], {
-    cwd: repoPath,
-    stdio: "pipe",
-  });
-  execFileSync("git", ["config", "user.name", "Test"], {
-    cwd: repoPath,
-    stdio: "pipe",
-  });
-  execFileSync("git", ["commit", "--allow-empty", "-m", "initial"], {
-    cwd: repoPath,
-    stdio: "pipe",
-  });
+  // Fail loudly if a fake git binary on PATH no-op'd init without creating
+  // .git metadata. Otherwise callers that depend on real git state (e.g.,
+  // `makeRecordingGitWorktreeProvider`) silently break.
+  try {
+    execFileSync("git", ["rev-parse", "--git-dir"], {
+      cwd: repoPath,
+      stdio: "pipe",
+    });
+  } catch (err) {
+    throw new Error(
+      `initGitRepo(${repoPath}): git init appeared to succeed but no .git ` +
+        `metadata was created. A fake git binary on PATH is the most likely cause. ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 export async function findFileRecursive(
@@ -494,7 +494,7 @@ export function makeRecordingGitWorktreeProvider(currentBranchLabel: string): {
     async ensureWorktree(repoPath, worktreeDir, branchName, baseBranch) {
       ensureWorktreeCalls.push({ repoPath, worktreeDir, branchName, baseBranch });
       await fs.mkdir(worktreeDir, { recursive: true });
-      initGitRepoSync(worktreeDir);
+      await initGitRepo(worktreeDir, { allowEmpty: true });
     },
     findWorktreeForBranch() {
       return null;

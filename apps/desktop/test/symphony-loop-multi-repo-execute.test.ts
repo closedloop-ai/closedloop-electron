@@ -64,9 +64,18 @@ test("EXECUTE with additionalRepos provisions additionals, passes --add-dir, and
     path.join(fakeBin, "git"),
     [
       "#!/bin/sh",
+      // Delegate repo-setup commands to the real git binary so worktrees
+      // produced by the recording provider carry valid .git metadata
+      // (initGitRepo asserts this after init). Use an absolute path to avoid
+      // recursing into this fake script via PATH.
+      'case "$1" in',
+      "  init|config|commit|add|rev-parse)",
+      '    if [ "$1" = "rev-parse" ] && [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+      '    if [ "$1" = "rev-parse" ] && [ "$2" != "--git-dir" ]; then echo "abc123"; exit 0; fi',
+      '    exec /usr/bin/git "$@"',
+      "    ;;",
+      "esac",
       'if [ "$1" = status ]; then exit 0; fi',
-      'if [ "$1" = "rev-parse" ] && [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
-      'if [ "$1" = "rev-parse" ]; then echo "abc123"; exit 0; fi',
       'if [ "$1" = "for-each-ref" ]; then exit 0; fi',
       'if [ "$1" = "rev-list" ]; then exit 0; fi',
       "exit 0",

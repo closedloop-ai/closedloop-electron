@@ -21,7 +21,7 @@ import { handleProcessCompletion } from "../src/server/operations/symphony-loop.
 import { setShellPathForTest } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
-  initGitRepoSync,
+  initGitRepo,
   makeRecordingGitWorktreeProvider,
   makeMultiRepoGateway,
   makeMultiRepoTestHarness,
@@ -529,7 +529,7 @@ test("handleProcessCompletion cleans additional worktrees when PLAN is cancelled
       await fs.mkdir(repoPath, { recursive: true });
       // Initialize as a real git repo so the unified cleanup logic can verify
       // the worktree carries no code changes and is safe to remove.
-      initGitRepoSync(dir);
+      await initGitRepo(dir, { allowEmpty: true });
     }),
   );
 
