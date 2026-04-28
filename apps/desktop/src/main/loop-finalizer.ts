@@ -32,6 +32,7 @@ import {
   assertPathAllowed,
   DirectoryNotAllowedError,
 } from "../server/security.js";
+import { getPrimaryRepoResult, type ExecutionResultV2 } from '../shared/contracts.js';
 
 export interface LoopFinalizerDeps {
   jobStore: JobStore;
@@ -244,10 +245,32 @@ function buildCompletedEventResult(
 
   if (command === "EXECUTE" && artifacts.executionResult) {
     const execResult = artifacts.executionResult as Record<string, unknown>;
-    result.prUrl = execResult.pr_url;
-    result.prNumber = execResult.pr_number;
-    result.branchName = execResult.branch_name;
-    result.has_changes = execResult.has_changes ?? false;
+    if (execResult.schemaVersion === 2) {
+      // V2 path
+      const v2 = execResult as unknown as ExecutionResultV2;
+      const primaryFullName = v2.results[0]?.fullName ?? "";
+      const primaryResult = getPrimaryRepoResult(v2.results, primaryFullName);
+
+      result.repoResults = v2.results;
+
+      if (primaryResult === null) {
+        gatewayLog.warn("primary-repo-not-found-in-results", `loopId=${job.loopId} primaryFullName=${primaryFullName}`);
+        result.has_changes = false;
+      } else if (primaryResult.status === 'success') {
+        result.prUrl = primaryResult.prUrl;
+        result.prNumber = primaryResult.prNumber;
+        result.branchName = primaryResult.branchName;
+        result.has_changes = true;
+      } else {
+        result.has_changes = false;
+      }
+    } else {
+      // V1 path — preserve existing snake_case reads
+      result.prUrl = execResult.pr_url;
+      result.prNumber = execResult.pr_number;
+      result.branchName = execResult.branch_name;
+      result.has_changes = execResult.has_changes ?? false;
+    }
   }
 
   const { sessionId, branchName } = getCompletionCorrelationFields(
@@ -777,8 +800,7 @@ async function cleanupPersistedAdditionalWorktrees(
     }
   }
   const current = jobStore.getByLoopId(job.loopId) ?? job;
-  const { additionalWorktreeDirs: _drop, ...rest } = current;
-  void _drop;
+  const { additionalWorktreeDirs: _, ...rest } = current;
   jobStore.upsert({
     ...rest,
     updatedAt: new Date().toISOString(),

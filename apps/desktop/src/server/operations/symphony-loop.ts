@@ -59,6 +59,7 @@ import {
 } from "../../shared/plan-artifact-utils.js";
 import { withMcpTools } from "./chat-tools.js";
 import { findWorktreeForBranch as findWorktreeForBranchImpl } from "./git-helpers.js";
+import { createPullRequest } from "./git-pr-utils.js";
 import { startOutputTailer } from "./output-tailer.js";
 import {
   findPluginScript,
@@ -67,6 +68,7 @@ import {
 } from "./plugin-cache.js";
 import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import { addRepo } from "./repos-config-utils.js";
+import type { ExecutionResultV2, RepoExecutionResult } from "../../shared/contracts.js";
 import {
   CLONE_GIT_TIMEOUT,
   expandHome,
@@ -262,7 +264,6 @@ const SUPPORTED_COMMANDS = new Set<LoopCommand>([
   "EVALUATE_CODE",
   "BOOTSTRAP",
 ]);
-const VALID_COMMANDS = SUPPORTED_COMMANDS;
 type RepoRequirement = "REQUIRED" | "OPTIONAL" | "NOT_REQUIRED";
 const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
   PLAN: "REQUIRED",
@@ -838,6 +839,43 @@ async function cleanupAdditionalWorktrees(
     await wt.removeWorktree(entry.dir, entry.repoPath, loopId).catch((err) =>
       loopError(loopId, logPrefix, err),
     );
+  }
+}
+
+/**
+ * Selective cleanup of additional repo worktree directories.
+ * Retains worktrees that have uncommitted changes (excluding .claude and
+ * .closedloop-ai directories). Removes worktrees with no changes.
+ * Errors from git status are treated as no-changes (i.e. the worktree is removed).
+ */
+export async function cleanupAdditionalWorktreesSelective(
+  entries: Array<{ dir: string; repoPath: string }>,
+  loopId: string,
+  wt: WorktreeProvider,
+): Promise<void> {
+  for (const entry of entries) {
+    try {
+      const output = execFileSync(getResolvedGitPath(), ['status', '--porcelain', '--', '.', ':!.claude', ':!.closedloop-ai'], {
+        cwd: entry.dir,
+        encoding: 'utf-8',
+        stdio: 'pipe',
+        timeout: 10_000,
+      });
+      if (output.trim()) {
+        // Has changes — retain this worktree
+        gatewayLog.info("cleanup-worktree-selective", `Retaining worktree with changes: ${entry.dir} (loop ${loopId})`);
+        continue;
+      }
+      // No changes — remove
+      await wt.removeWorktree(entry.dir, entry.repoPath);
+    } catch {
+      // Any error (ENOENT, git failure) — treat as no-changes, remove
+      try {
+        await wt.removeWorktree(entry.dir, entry.repoPath);
+      } catch {
+        // Ignore removal failure
+      }
+    }
   }
 }
 
@@ -1680,7 +1718,7 @@ const CREDENTIAL_PATTERNS: Array<[RegExp, string]> = [
 /**
  * Apply credential-pattern filters to redact common secret formats from a string.
  */
-function redactCredentials(text: string): string {
+export function redactCredentials(text: string): string {
   let result = text;
   for (const [pattern, replacement] of CREDENTIAL_PATTERNS) {
     result = result.replace(pattern, replacement);
@@ -2297,14 +2335,31 @@ function buildPersistedExecutionResultArtifact(params: {
   };
 }
 
+export function scrubObjectCredentials(obj: unknown): unknown {
+  if (typeof obj === "string") return redactCredentials(obj);
+  if (Array.isArray(obj)) return obj.map(scrubObjectCredentials);
+  if (obj !== null && typeof obj === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(
+      obj as Record<string, unknown>,
+    )) {
+      result[key] = scrubObjectCredentials(value);
+    }
+    return result;
+  }
+  return obj;
+}
+
 function persistExecutionResultArtifact(
   claudeWorkDir: string,
   executionResult: Record<string, unknown>,
 ): boolean {
   try {
+    const scrubbed = scrubObjectCredentials(executionResult);
+    const json = JSON.stringify(scrubbed, null, 2);
     writeFileSync(
       path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
-      JSON.stringify(executionResult),
+      json,
     );
     return true;
   } catch {
@@ -2717,6 +2772,251 @@ export async function runExecuteFinalization(
     },
     preArtifacts,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Multi-repo EXECUTE finalization
+// ---------------------------------------------------------------------------
+
+/**
+ * Finalizes EXECUTE for each entry in a multi-repo loop.
+ *
+ * LLM-commit spawns are serialized — `runningLoops[loopId]` is a single PID
+ * slot, so we process entries one at a time via a sequential for-of loop.
+ * One failure never aborts the others; each entry is independently wrapped in
+ * try-catch and produces its own RepoExecutionResult.
+ */
+export async function finalizeMultiRepoExecute(
+  entries: Array<{ fullName: string; worktreeDir: string; baseBranch: string }>,
+  deps: {
+    loopId: string;
+    apiBaseUrl: string;
+    token: string;
+    webAppOrigin: string;
+    getAllowedDirectories: () => string[];
+    artifactSlug?: string;
+    expectedMcpUrl?: string;
+    committer?: LoopCommitter;
+    jobStore?: JobStore;
+  },
+): Promise<RepoExecutionResult[]> {
+  const results: RepoExecutionResult[] = [];
+
+  for (const entry of entries) {
+    try {
+      // Step 1: Check git status, excluding gateway-owned directories.
+      let statusOutput: string;
+      try {
+        statusOutput = execFileSync(
+          getResolvedGitPath(),
+          ['status', '--porcelain', '--', '.', ':!.claude', ':!.closedloop-ai'],
+          {
+            cwd: entry.worktreeDir,
+            encoding: 'utf-8',
+            stdio: 'pipe',
+            timeout: 10_000,
+          },
+        );
+      } catch (statusErr) {
+        results.push({
+          status: 'failed',
+          fullName: entry.fullName,
+          error: String(statusErr),
+        });
+        continue;
+      }
+
+      if (!statusOutput.trim()) {
+        // Step 2: No changes — skip.
+        results.push({
+          status: 'skipped',
+          fullName: entry.fullName,
+          reason: 'no_changes',
+        });
+        continue;
+      }
+
+      // Step 3: Changes exist — attempt LLM-assisted commit (serialized).
+      // claudeWorkDir must point inside .closedloop-ai/ so the process.pid
+      // file written by attemptLlmCommit lands in a directory excluded by the
+      // ':!.closedloop-ai' pathspec used during `git add`. Passing the
+      // worktree root would leak process.pid into the commit.
+      const entryClaudeWorkDir = path.join(entry.worktreeDir, '.closedloop-ai', 'work');
+      mkdirSync(entryClaudeWorkDir, { recursive: true });
+      const llmResult = await attemptLlmCommit(
+        entry.worktreeDir,
+        entry.baseBranch,
+        deps.loopId,
+        'EXECUTE',
+        deps.artifactSlug,
+        deps.webAppOrigin,
+        deps.committer,
+        deps.getAllowedDirectories,
+        deps.expectedMcpUrl,
+        undefined,
+        deps.jobStore,
+        entryClaudeWorkDir,
+      );
+
+      if (llmResult) {
+        results.push({
+          status: 'success',
+          fullName: entry.fullName,
+          prUrl: llmResult.prUrl,
+          prNumber: llmResult.prNumber,
+          branchName: llmResult.branchName,
+          baseBranch: entry.baseBranch,
+          hasChanges: true,
+          commitSha: llmResult.commitSha,
+        });
+        continue;
+      }
+
+      // LLM commit returned null — fall back to deterministic git + createPullRequest.
+      const gitShellPath = await getShellPath();
+      const gitBin = getResolvedGitPath();
+      const shortId = deps.loopId.slice(0, 8);
+      const env: Record<string, string> = {
+        ...(process.env as Record<string, string>),
+        ...(gitShellPath ? { PATH: gitShellPath } : {}),
+      };
+      if (deps.committer) {
+        env.GIT_AUTHOR_NAME = deps.committer.name;
+        env.GIT_AUTHOR_EMAIL = deps.committer.email;
+        env.GIT_COMMITTER_NAME = deps.committer.name;
+        env.GIT_COMMITTER_EMAIL = deps.committer.email;
+      }
+
+      const commitTitle = deps.artifactSlug
+        ? `${deps.artifactSlug}: Automated changes from loop ${shortId}`
+        : `Automated changes from loop ${shortId}`;
+
+      // Re-check status: attemptLlmCommit may have committed/pushed before
+      // exiting non-zero or failing to write execution-result.json. If the
+      // worktree is now clean, skip add/commit and recover the PR state from
+      // the already-committed branch instead of throwing "nothing to commit".
+      const postLlmStatus = execFileSync(
+        gitBin,
+        ['status', '--porcelain', '--', '.', ':!.claude', ':!.closedloop-ai'],
+        { cwd: entry.worktreeDir, encoding: 'utf-8', stdio: 'pipe', timeout: 10_000 },
+      );
+
+      if (postLlmStatus.trim()) {
+        execFileSync(gitBin, ['add', '--', '.', ':!.claude', ':!.closedloop-ai'], {
+          cwd: entry.worktreeDir,
+          stdio: 'pipe',
+          env,
+          timeout: 10_000,
+        });
+        execFileSync(gitBin, ['commit', '-m', commitTitle], {
+          cwd: entry.worktreeDir,
+          stdio: 'pipe',
+          env,
+          timeout: 30_000,
+        });
+      }
+      const branchName = execFileSync(
+        gitBin, ['rev-parse', '--abbrev-ref', 'HEAD'],
+        { cwd: entry.worktreeDir, encoding: 'utf-8', stdio: 'pipe', timeout: 10_000 },
+      ).trim();
+      execFileSync(gitBin, ['push', '-u', 'origin', branchName], {
+        cwd: entry.worktreeDir,
+        stdio: 'pipe',
+        env,
+        timeout: 60_000,
+      });
+      const commitSha = execFileSync(
+        gitBin, ['rev-parse', 'HEAD'],
+        { cwd: entry.worktreeDir, encoding: 'utf-8', stdio: 'pipe', timeout: 10_000 },
+      ).trim();
+
+      const prBody = [
+        `Automated PR created by ClosedLoop.AI loop runner.`,
+        '',
+        `**Loop:** \`${deps.loopId}\``,
+        `**Command:** EXECUTE`,
+        '',
+        `---\nLoop ID: ${deps.loopId}`,
+      ].join('\n');
+
+      const { prUrl, prNumber } = await createPullRequest({
+        worktreeDir: entry.worktreeDir,
+        baseBranch: entry.baseBranch,
+        title: commitTitle,
+        body: prBody,
+        repoPath: entry.worktreeDir,
+      });
+
+      results.push({
+        status: 'success',
+        fullName: entry.fullName,
+        prUrl,
+        prNumber,
+        branchName,
+        baseBranch: entry.baseBranch,
+        hasChanges: true,
+        commitSha,
+      });
+    } catch (err) {
+      loopError(deps.loopId, "multi-repo-finalization-failed", entry.fullName, String(err));
+      await postLoopEventBounded(deps.apiBaseUrl, deps.loopId, deps.token, {
+        type: LoopEventType.Error,
+        code: LoopErrorCode.RepoNotFound,
+        message: redactCredentials(sanitizeErrorMessage(err instanceof Error ? err.message : String(err))),
+        result: { repo: entry.fullName },
+      });
+      results.push({
+        status: 'failed',
+        fullName: entry.fullName,
+        error: String(err),
+      });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Build a RepoExecutionResult for the primary repo from the
+ * ExecuteFinalizationResult produced by runExecuteFinalization. The primary
+ * repo is finalized separately from the additional repos in the multi-repo
+ * EXECUTE flow, so its v2 envelope entry is constructed from that result
+ * rather than re-running git status on an already-committed worktree.
+ */
+function buildPrimaryRepoResult(
+  fullName: string,
+  baseBranch: string,
+  executeFinalization: ExecuteFinalizationResult | null,
+): RepoExecutionResult {
+  if (!executeFinalization) {
+    return { status: 'skipped', fullName, reason: 'no_finalization' };
+  }
+  if (executeFinalization.status === 'no-changes') {
+    return { status: 'skipped', fullName, reason: 'no_changes' };
+  }
+  if (
+    executeFinalization.status === 'success' &&
+    executeFinalization.prUrl &&
+    executeFinalization.prNumber !== undefined &&
+    executeFinalization.branchName &&
+    executeFinalization.commitSha
+  ) {
+    return {
+      status: 'success',
+      fullName,
+      prUrl: executeFinalization.prUrl,
+      prNumber: executeFinalization.prNumber,
+      branchName: executeFinalization.branchName,
+      baseBranch,
+      hasChanges: true,
+      commitSha: executeFinalization.commitSha,
+    };
+  }
+  return {
+    status: 'failed',
+    fullName,
+    error: executeFinalization.reason ?? `execute finalization status: ${executeFinalization.status}`,
+  };
 }
 
 function executeGitOperations(
@@ -3321,6 +3621,42 @@ export async function handleProcessCompletion(
         warnings.push("GIT_PUSH_FAILED");
       }
 
+      // Multi-repo finalization: when additional worktree dirs are present,
+      // run finalizeMultiRepoExecute for the additional repos only and seed
+      // the primary entry from runExecuteFinalization (which already
+      // committed/pushed/created the PR for the primary). Including the
+      // primary in finalizeMultiRepoExecute would re-check `git status` on an
+      // already-clean worktree and overwrite the v1 artifact's PR info with
+      // a `status: 'skipped'` entry.
+      if (additionalWorktreeDirs.length > 0 && worktreeDir) {
+        const primaryFullName = body.repo?.fullName ?? "";
+        const additionalEntries: Array<{ fullName: string; worktreeDir: string; baseBranch: string }> =
+          additionalWorktreeDirs.map((entry, i) => ({
+            fullName: body.additionalRepos?.[i]?.fullName ?? entry.repoPath,
+            worktreeDir: entry.dir,
+            baseBranch: body.additionalRepos?.[i]?.branch ?? "main",
+          }));
+
+        const additionalResults = await finalizeMultiRepoExecute(additionalEntries, {
+          loopId,
+          apiBaseUrl,
+          token: body.closedLoopAuthToken,
+          webAppOrigin: webAppOrigin ?? "",
+          getAllowedDirectories,
+          artifactSlug: body.artifactSlug,
+          expectedMcpUrl,
+          committer,
+          jobStore,
+        });
+
+        const primaryResult = buildPrimaryRepoResult(primaryFullName, baseBranch, executeFinalization);
+        const v2Envelope: ExecutionResultV2 = {
+          schemaVersion: 2,
+          results: [primaryResult, ...additionalResults],
+        };
+        persistExecutionResultArtifact(claudeWorkDir, v2Envelope as unknown as Record<string, unknown>);
+      }
+
       artifacts = readExecuteOutputs(claudeWorkDir);
       if (executeFinalization.branchName) {
         metadata.branchName = executeFinalization.branchName;
@@ -3661,7 +3997,7 @@ async function handleLoopRequest(
     return;
   }
 
-  if (!VALID_COMMANDS.has(body.command)) {
+  if (!SUPPORTED_COMMANDS.has(body.command)) {
     json(context, 400, { error: `Invalid command: ${body.command}` });
     return;
   }
@@ -3914,7 +4250,7 @@ async function handleLoopRequest(
     }
 
     let resolvedAdditionalRepos: ResolvedAdditionalRepo[] = [];
-    if (body.command === "PLAN" && body.additionalRepos && body.additionalRepos.length > 0) {
+    if ((body.command === "PLAN" || body.command === "EXECUTE") && body.additionalRepos && body.additionalRepos.length > 0) {
       try {
         resolvedAdditionalRepos = await resolveAdditionalRepos(
           body.additionalRepos,
@@ -3941,6 +4277,69 @@ async function handleLoopRequest(
           return;
         }
         throw err;
+      }
+
+      // Deduplication guard: reject if any fullName or repoPath appears more than once
+      // across the primary repo and all additional repos.
+      const seenFullNames = new Set<string>();
+      const seenRepoPaths = new Set<string>();
+
+      if (body.repo?.fullName) {
+        seenFullNames.add(body.repo.fullName);
+      }
+      if (expandedRepoPath) {
+        seenRepoPaths.add(path.resolve(expandedRepoPath));
+      }
+
+      for (let i = 0; i < resolvedAdditionalRepos.length; i++) {
+        const resolved = resolvedAdditionalRepos[i];
+        const entry = body.additionalRepos![i];
+        const entryFullName = entry.fullName;
+
+        if (entryFullName) {
+          if (seenFullNames.has(entryFullName)) {
+            const dupMsg = `Duplicate repository fullName across repos: ${entryFullName}`;
+            await postLoopEventBounded(
+              apiBaseUrl,
+              body.loopId,
+              body.closedLoopAuthToken,
+              {
+                type: LoopEventType.Error,
+                code: LoopErrorCode.PreRunValidationFailed,
+                message: dupMsg,
+              },
+            );
+            gatewayLog.error(
+              "loop-harness",
+              `additionalRepo deduplication failed for loopId=${body.loopId}: ${dupMsg}`,
+            );
+            json(context, 400, { error: dupMsg });
+            return;
+          }
+          seenFullNames.add(entryFullName);
+        }
+
+        const resolvedCanonical = path.resolve(resolved.repoPath);
+        if (seenRepoPaths.has(resolvedCanonical)) {
+          const dupMsg = `Duplicate repository path across repos: ${resolved.repoPath}`;
+          await postLoopEventBounded(
+            apiBaseUrl,
+            body.loopId,
+            body.closedLoopAuthToken,
+            {
+              type: LoopEventType.Error,
+              code: LoopErrorCode.PreRunValidationFailed,
+              message: dupMsg,
+            },
+          );
+          gatewayLog.error(
+            "loop-harness",
+            `additionalRepo deduplication failed for loopId=${body.loopId}: ${dupMsg}`,
+          );
+          json(context, 400, { error: dupMsg });
+          return;
+        }
+        seenRepoPaths.add(resolvedCanonical);
       }
     }
 
@@ -4195,6 +4594,117 @@ async function handleLoopRequest(
             body.loopId,
             `Created new worktree: ${worktreeDir} (branch: ${branchName})`,
           );
+        }
+
+        // Create additional repo worktrees for EXECUTE/REQUEST_CHANGES command.
+        // Mirror the primary-repo pattern: create a fresh scratch branch
+        // based on the user-specified branch so loop work does not mutate it.
+        for (const addRepo of resolvedAdditionalRepos) {
+          const addRepoSlug = slugifyLoopId(addRepo.branch);
+          const addRepoKey = `${worktreeKey}-${addRepoSlug}-${additionalRepoDisambiguator(addRepo.repoPath)}`;
+          const addWorktreeDir = resolveLoopWorktreeDir(
+            addRepo.repoPath,
+            addRepoKey,
+          );
+          const addBranchName = `symphony/${addRepoKey}`;
+
+          // Validate the additional-repo worktree path against the sandbox
+          // roots BEFORE any git checkout is materialized. SYMPHONY_WORKTREE_PARENT_DIR
+          // is untrusted config; if it points outside allowedDirs, we must
+          // refuse to write the checkout at all, not clean it up after the fact.
+          try {
+            assertPathAllowed(addWorktreeDir, allowedDirs);
+          } catch (e) {
+            if (e instanceof DirectoryNotAllowedError) {
+              // Unwind already-created additional-repo worktrees from prior
+              // iterations of this loop *before* the primary, so a failure on
+              // iteration N doesn't leak iterations 0..N-1 on disk.
+              await cleanupAdditionalWorktrees(
+                additionalWorktreeDirs,
+                body.loopId,
+                wt,
+                "cleanup additional worktree failed (allowlist reject):",
+              );
+              await wt.removeWorktree(worktreeDir, repoPath, body.loopId).catch(() => {});
+              await postLoopEventBounded(
+                apiBaseUrl,
+                body.loopId,
+                body.closedLoopAuthToken,
+                {
+                  type: LoopEventType.Error,
+                  code: LoopErrorCode.RepoNotAllowed,
+                  message: `Additional repo worktree path not allowed: ${addWorktreeDir}`,
+                },
+              );
+              json(context, 403, { error: `Additional repo worktree path not allowed: ${addWorktreeDir}` });
+              return;
+            }
+            throw e;
+          }
+
+          try {
+            const staleAddWorktree = wt.findWorktreeForBranch(addRepo.repoPath, addBranchName);
+            if (staleAddWorktree) {
+              loopLog(
+                body.loopId,
+                `Removing stale additional-repo worktree for fresh EXECUTE: ${staleAddWorktree}`,
+              );
+              await wt.removeWorktree(staleAddWorktree, addRepo.repoPath, body.loopId);
+            }
+            await wt.ensureWorktree(addRepo.repoPath, addWorktreeDir, addBranchName, addRepo.branch, body.loopId);
+          } catch (checkoutErr) {
+            const msg = checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr);
+            loopError(body.loopId, `ensureWorktree failed for additional repo ${addRepo.repoPath}:`, checkoutErr);
+            // Clean up the half-materialized current worktree, then any
+            // successfully-checked-out worktrees from prior iterations, then
+            // the primary worktree. Order matters only for log readability;
+            // all operations are independent best-effort.
+            await wt.removeWorktree(addWorktreeDir, addRepo.repoPath, body.loopId).catch(() => {});
+            await cleanupAdditionalWorktrees(
+              additionalWorktreeDirs,
+              body.loopId,
+              wt,
+              "cleanup additional worktree failed (checkout reject):",
+            );
+            await wt.removeWorktree(worktreeDir, repoPath, body.loopId).catch(() => {});
+            await postLoopEventBounded(
+              apiBaseUrl,
+              body.loopId,
+              body.closedLoopAuthToken,
+              {
+                type: LoopEventType.Error,
+                code: LoopErrorCode.BranchCreateFailed,
+                message: `Failed to checkout additional repo worktree: ${msg}`,
+              },
+            );
+            json(context, 500, { error: `Failed to checkout additional repo worktree: ${msg}` });
+            return;
+          }
+          additionalWorktreeDirs.push({ dir: addWorktreeDir, repoPath: addRepo.repoPath });
+          loopLog(body.loopId, `Created additional repo worktree: ${addWorktreeDir} (branch: ${addBranchName} based on ${addRepo.branch})`);
+        }
+
+        // Bootstrap additional-repo worktrees sequentially
+        for (const addEntry of additionalWorktreeDirs) {
+          try {
+            await runBootstrapIfNeeded(addEntry.dir, body.loopId);
+          } catch (bootstrapErr) {
+            loopError(body.loopId, `bootstrap failed for additional repo worktree: ${addEntry.dir}`, bootstrapErr);
+            gatewayLog.error("bootstrap-additional-repo-failed", `loopId=${body.loopId} dir=${addEntry.dir} error=${String(bootstrapErr)}`);
+            // Remove the failed worktree
+            try { await wt.removeWorktree(addEntry.dir, addEntry.repoPath, body.loopId); } catch { /* ignore */ }
+            // Clean up all prior additional worktrees
+            await cleanupAdditionalWorktrees(additionalWorktreeDirs.filter(e => e !== addEntry), body.loopId, wt);
+            additionalWorktreeDirs.length = 0;
+            // Remove primary worktree
+            try { await wt.removeWorktree(worktreeDir, repoPath, body.loopId); } catch { /* ignore */ }
+            await postLoopEventBounded(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+              type: LoopEventType.Error,
+              code: LoopErrorCode.BranchCreateFailed,
+              message: `Bootstrap failed for additional repo worktree: ${addEntry.dir}`,
+            });
+            return json(context, 500, { error: "Bootstrap failed for additional repo worktree" });
+          }
         }
       }
 
@@ -4763,7 +5273,7 @@ async function handleLoopRequest(
           scriptArgs.push("--prd", prdPath);
         }
 
-        if (body.command === "PLAN") {
+        if (body.command === "PLAN" || body.command === "EXECUTE") {
           for (const addEntry of additionalWorktreeDirs) {
             scriptArgs.push("--add-dir", addEntry.dir);
           }

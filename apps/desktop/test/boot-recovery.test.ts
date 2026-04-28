@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -23,8 +24,10 @@ import { BootRecoveryService } from "../src/main/boot-recovery.js";
 import { JobStore, type LocalJob } from "../src/main/job-store.js";
 import { LoopTokenStore } from "../src/main/loop-token-store.js";
 import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
-import { restoreEnv } from "./symphony-test-utils.js";
+import { initGitRepo, restoreEnv } from "./symphony-test-utils.js";
 import type { TelemetryEventPayload } from "../src/main/telemetry-protocol.js";
+import { cleanupAdditionalWorktreesSelective } from "../src/server/operations/symphony-loop.js";
+import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 
 let tempRoot = "";
 let fetchCalls: Array<{ url: string; body: string; authHeader?: string | null }> = [];
@@ -973,4 +976,97 @@ test("sweepOrphanedTokens removes tokens for finalized and unknown loops, keeps 
   assert.equal(loopTokenStore.getLoopToken("loop-finalized"), null);
   assert.equal(loopTokenStore.getLoopToken("loop-unknown"), null);
   assert.equal(loopTokenStore.getLoopToken("loop-active"), "token-active");
+});
+
+// ---------------------------------------------------------------------------
+// cleanupAdditionalWorktreesSelective tests
+// ---------------------------------------------------------------------------
+
+/**
+ * A minimal WorktreeProvider stub for selective-cleanup tests.
+ * removeWorktree does fs.rm (force) so it is safe for plain directories.
+ * The other methods are no-ops / stubs not exercised by these tests.
+ */
+function makeSimpleRemoveProvider(): WorktreeProvider {
+  return {
+    async ensureWorktree(_repoPath, worktreeDir) {
+      await fs.mkdir(worktreeDir, { recursive: true });
+    },
+    findWorktreeForBranch() {
+      return null;
+    },
+    async removeWorktree(worktreeDir) {
+      await fs.rm(worktreeDir, { recursive: true, force: true });
+    },
+    getCurrentBranch() {
+      return null;
+    },
+    branchExists: async () => false,
+  };
+}
+
+test("cleanupAdditionalWorktreesSelective removes clean worktree (no uncommitted changes)", async () => {
+  // Create a temp repo root outside tempRoot so the afterEach rm for tempRoot
+  // does not race with the assertion. We clean it up manually.
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "selective-clean-"));
+  try {
+    // initGitRepo creates a git repo with a committed README.md so git status
+    // returns nothing (clean HEAD state).
+    await initGitRepo(repoRoot);
+
+    const wt = makeSimpleRemoveProvider();
+    await cleanupAdditionalWorktreesSelective(
+      [{ dir: repoRoot, repoPath: repoRoot }],
+      "test-loop",
+      wt,
+    );
+
+    // The clean worktree should have been removed.
+    assert.ok(!existsSync(repoRoot), "expected clean worktree to be removed");
+  } finally {
+    await fs.rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("cleanupAdditionalWorktreesSelective retains worktree with staged/uncommitted changes", async () => {
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "selective-dirty-"));
+  try {
+    await initGitRepo(repoRoot);
+
+    // Stage a new file so git status --porcelain returns non-empty output.
+    const changedFile = path.join(repoRoot, "work.txt");
+    await fs.writeFile(changedFile, "work in progress");
+    execFileSync("git", ["add", "work.txt"], { cwd: repoRoot, stdio: "pipe" });
+
+    const wt = makeSimpleRemoveProvider();
+    await cleanupAdditionalWorktreesSelective(
+      [{ dir: repoRoot, repoPath: repoRoot }],
+      "test-loop",
+      wt,
+    );
+
+    // The worktree with staged changes must be retained.
+    assert.ok(existsSync(repoRoot), "expected dirty worktree to be retained");
+  } finally {
+    await fs.rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("cleanupAdditionalWorktreesSelective handles nonexistent worktree path without error", async () => {
+  const nonexistentDir = path.join(os.tmpdir(), `selective-nonexistent-${Date.now()}`);
+
+  // Confirm the path really does not exist before the test.
+  assert.ok(!existsSync(nonexistentDir), "pre-condition: path must not exist");
+
+  const wt = makeSimpleRemoveProvider();
+
+  // Should resolve without throwing even though the dir does not exist.
+  await assert.doesNotReject(
+    cleanupAdditionalWorktreesSelective(
+      [{ dir: nonexistentDir, repoPath: nonexistentDir }],
+      "test-loop",
+      wt,
+    ),
+    "cleanupAdditionalWorktreesSelective must not throw for nonexistent paths",
+  );
 });

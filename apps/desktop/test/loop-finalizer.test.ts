@@ -1811,3 +1811,309 @@ test("finalizeLoopFromRuntime retries EXECUTE finalization after a prior error o
   );
   assert.ok(completedEventCall, "expected completed event on recovery retry");
 });
+
+// ---------------------------------------------------------------------------
+// T-6.5: v2 envelope and loop-finalizer tests
+// ---------------------------------------------------------------------------
+
+import { getPrimaryRepoResult, type RepoExecutionResult, type ExecutionResultV2 } from "../src/shared/contracts.js";
+
+test("v2 envelope: ExecutionResultV2 is built with schemaVersion:2 and results array", () => {
+  const results: RepoExecutionResult[] = [
+    {
+      status: "success",
+      fullName: "acme/repo",
+      prUrl: "https://github.com/acme/repo/pull/42",
+      prNumber: 42,
+      branchName: "feat/v2",
+      baseBranch: "main",
+      hasChanges: true,
+      commitSha: "abc123",
+    },
+    {
+      status: "skipped",
+      fullName: "acme/secondary",
+      reason: "no changes detected",
+    },
+  ];
+  const envelope: ExecutionResultV2 = { schemaVersion: 2, results };
+  assert.equal(envelope.schemaVersion, 2);
+  assert.equal(envelope.results.length, 2);
+  assert.equal(envelope.results[0]?.status, "success");
+  assert.equal(envelope.results[1]?.status, "skipped");
+});
+
+test("v2 envelope round-trip: write JSON to disk and read back via tryUploadArtifacts", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const v2Envelope: ExecutionResultV2 = {
+    schemaVersion: 2,
+    results: [
+      {
+        status: "success",
+        fullName: "acme/repo",
+        prUrl: "https://github.com/acme/repo/pull/7",
+        prNumber: 7,
+        branchName: "feat/round-trip",
+        baseBranch: "main",
+        hasChanges: true,
+        commitSha: "deadbeef",
+      },
+    ],
+  };
+  writeFileSync(
+    path.join(claudeWorkDir, "execution-result.json"),
+    JSON.stringify(v2Envelope, null, 2),
+  );
+
+  const jobStore = createStore("v2-round-trip-upload");
+  const job = createBaseJob({ claudeWorkDir, command: "EXECUTE" });
+  jobStore.upsert(job);
+
+  const warnings: string[] = [];
+  const { failed, artifacts } = await tryUploadArtifacts(
+    job,
+    "EXECUTE",
+    claudeWorkDir,
+    undefined,
+    warnings,
+    artifactDeps(jobStore),
+  );
+
+  assert.equal(failed, false);
+  // The artifact read from disk should carry the v2 shape
+  const execResult = artifacts.executionResult as ExecutionResultV2 | undefined;
+  assert.ok(execResult, "executionResult artifact must be present");
+  assert.equal((execResult as unknown as Record<string, unknown>).schemaVersion, 2);
+  assert.ok(Array.isArray((execResult as unknown as Record<string, unknown>).results));
+  assert.equal(((execResult as unknown as Record<string, unknown>).results as RepoExecutionResult[])[0]?.status, "success");
+});
+
+test("v2 path: schemaVersion===2 causes result.repoResults to include full results array", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const v2Envelope: ExecutionResultV2 = {
+    schemaVersion: 2,
+    results: [
+      {
+        status: "success",
+        fullName: "acme/main-repo",
+        prUrl: "https://github.com/acme/main-repo/pull/10",
+        prNumber: 10,
+        branchName: "feat/v2-multi",
+        baseBranch: "main",
+        hasChanges: true,
+        commitSha: "cafebabe",
+      },
+      {
+        status: "skipped",
+        fullName: "acme/side-repo",
+        reason: "nothing changed",
+      },
+    ],
+  };
+
+  const jobStore = createStore("v2-repo-results");
+  const job = createBaseJob({ claudeWorkDir, command: "EXECUTE" });
+  jobStore.upsert(job);
+
+  await tryPostCompletedEvent(
+    job,
+    "EXECUTE",
+    claudeWorkDir,
+    { executionResult: v2Envelope as unknown as Record<string, unknown> },
+    [],
+    artifactDeps(jobStore),
+  );
+
+  const body = fetchCalls[0]?.body ?? "";
+  const parsed = JSON.parse(body) as { result?: Record<string, unknown> };
+  const repoResults = parsed.result?.repoResults as RepoExecutionResult[] | undefined;
+  assert.ok(repoResults, "result.repoResults must be present for v2 envelope");
+  assert.equal(repoResults.length, 2);
+  assert.equal(repoResults[0]?.status, "success");
+  assert.equal(repoResults[1]?.status, "skipped");
+});
+
+test("v2 path: primary entry status:success derives convenience fields prUrl, prNumber, branchName, has_changes:true", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const v2Envelope: ExecutionResultV2 = {
+    schemaVersion: 2,
+    results: [
+      {
+        status: "success",
+        fullName: "acme/primary",
+        prUrl: "https://github.com/acme/primary/pull/55",
+        prNumber: 55,
+        branchName: "feat/primary-success",
+        baseBranch: "main",
+        hasChanges: true,
+        commitSha: "111abc",
+      },
+    ],
+  };
+
+  const jobStore = createStore("v2-primary-success");
+  const job = createBaseJob({ claudeWorkDir, command: "EXECUTE" });
+  jobStore.upsert(job);
+
+  await tryPostCompletedEvent(
+    job,
+    "EXECUTE",
+    claudeWorkDir,
+    { executionResult: v2Envelope as unknown as Record<string, unknown> },
+    [],
+    artifactDeps(jobStore),
+  );
+
+  const body = fetchCalls[0]?.body ?? "";
+  const parsed = JSON.parse(body) as { result?: Record<string, unknown> };
+  assert.equal(parsed.result?.has_changes, true, "has_changes must be true for success primary");
+  assert.equal(parsed.result?.prUrl, "https://github.com/acme/primary/pull/55");
+  assert.equal(parsed.result?.prNumber, 55);
+  assert.equal(parsed.result?.branchName, "feat/primary-success");
+});
+
+test("v2 path: primary entry status:skipped yields has_changes:false, no prUrl or prNumber", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const v2Envelope: ExecutionResultV2 = {
+    schemaVersion: 2,
+    results: [
+      {
+        status: "skipped",
+        fullName: "acme/primary",
+        reason: "branch already has an open PR",
+      },
+    ],
+  };
+
+  const jobStore = createStore("v2-primary-skipped");
+  const job = createBaseJob({ claudeWorkDir, command: "EXECUTE" });
+  jobStore.upsert(job);
+
+  await tryPostCompletedEvent(
+    job,
+    "EXECUTE",
+    claudeWorkDir,
+    { executionResult: v2Envelope as unknown as Record<string, unknown> },
+    [],
+    artifactDeps(jobStore),
+  );
+
+  const body = fetchCalls[0]?.body ?? "";
+  const parsed = JSON.parse(body) as { result?: Record<string, unknown> };
+  assert.equal(parsed.result?.has_changes, false, "has_changes must be false for skipped primary");
+  assert.equal(parsed.result?.prUrl, undefined, "prUrl must not be present for skipped status");
+  assert.equal(parsed.result?.prNumber, undefined, "prNumber must not be present for skipped status");
+});
+
+test("v2 path: null from getPrimaryRepoResult (empty results) yields defensive has_changes:false", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  // v2 envelope with results but no matching primary entry (first entry fullName is empty string)
+  const v2Envelope = {
+    schemaVersion: 2,
+    results: [] as RepoExecutionResult[],
+  };
+
+  const jobStore = createStore("v2-null-primary");
+  const job = createBaseJob({ claudeWorkDir, command: "EXECUTE" });
+  jobStore.upsert(job);
+
+  await tryPostCompletedEvent(
+    job,
+    "EXECUTE",
+    claudeWorkDir,
+    { executionResult: v2Envelope as unknown as Record<string, unknown> },
+    [],
+    artifactDeps(jobStore),
+  );
+
+  const body = fetchCalls[0]?.body ?? "";
+  const parsed = JSON.parse(body) as { result?: Record<string, unknown> };
+  // Defensive fallback: has_changes must be false, no prUrl or prNumber
+  assert.equal(parsed.result?.has_changes, false, "has_changes must default to false when no primary entry found");
+  assert.equal(parsed.result?.prUrl, undefined);
+  assert.equal(parsed.result?.prNumber, undefined);
+});
+
+test("getPrimaryRepoResult: returns matching entry by fullName", () => {
+  const results: RepoExecutionResult[] = [
+    {
+      status: "success",
+      fullName: "org/first",
+      prUrl: "https://github.com/org/first/pull/1",
+      prNumber: 1,
+      branchName: "feat/first",
+      baseBranch: "main",
+      hasChanges: true,
+      commitSha: "aaa111",
+    },
+    {
+      status: "skipped",
+      fullName: "org/second",
+      reason: "no changes",
+    },
+  ];
+
+  const primary = getPrimaryRepoResult(results, "org/first");
+  assert.ok(primary, "must find primary entry");
+  assert.equal(primary.status, "success");
+  assert.equal(primary.fullName, "org/first");
+});
+
+test("getPrimaryRepoResult: returns null when fullName not found", () => {
+  const results: RepoExecutionResult[] = [
+    {
+      status: "skipped",
+      fullName: "org/only-repo",
+      reason: "nothing to do",
+    },
+  ];
+
+  const result = getPrimaryRepoResult(results, "org/missing-repo");
+  assert.equal(result, null);
+});
+
+test("v1 path: flat-object with has_changes/pr_url/pr_number/branch_name still passes v1 code path", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const v1Artifact = {
+    has_changes: true,
+    pr_url: "https://github.com/acme/repo/pull/99",
+    pr_number: 99,
+    branch_name: "feat/v1-compat",
+    base_ref: "main",
+  };
+
+  const jobStore = createStore("v1-flat-object");
+  const job = createBaseJob({ claudeWorkDir, command: "EXECUTE" });
+  jobStore.upsert(job);
+
+  await tryPostCompletedEvent(
+    job,
+    "EXECUTE",
+    claudeWorkDir,
+    { executionResult: v1Artifact },
+    [],
+    artifactDeps(jobStore),
+  );
+
+  const body = fetchCalls[0]?.body ?? "";
+  const parsed = JSON.parse(body) as { result?: Record<string, unknown> };
+  // v1 path reads snake_case fields
+  assert.equal(parsed.result?.has_changes, true, "v1: has_changes must be true");
+  assert.equal(parsed.result?.prUrl, "https://github.com/acme/repo/pull/99", "v1: prUrl must come from pr_url");
+  assert.equal(parsed.result?.prNumber, 99, "v1: prNumber must come from pr_number");
+  assert.equal(parsed.result?.branchName, "feat/v1-compat", "v1: branchName must come from branch_name");
+  // v1 result must NOT include repoResults
+  assert.equal(parsed.result?.repoResults, undefined, "v1: repoResults must not be present");
+});
