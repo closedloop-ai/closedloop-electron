@@ -4078,6 +4078,12 @@ async function provisionAdditionalRepoWorktrees(args: {
   // request. EXECUTE/REQUEST_CHANGES that reuse a parent PLAN's worktree
   // must pass false so failures here do not delete the parent's checkout.
   ownsPrimaryWorktree: boolean;
+  // PLAN passes false: stale additional-repo worktrees are force-removed so
+  // PLAN starts fresh. EXECUTE/REQUEST_CHANGES pass true so a retained dirty
+  // worktree from a prior failed/cancelled attempt (kept by
+  // cleanupAdditionalWorktrees to avoid data loss) is reused instead of
+  // force-removed by --force/fs.rm.
+  reuseStaleWorktree: boolean;
 }): Promise<boolean> {
   const {
     resolvedAdditionalRepos,
@@ -4092,6 +4098,7 @@ async function provisionAdditionalRepoWorktrees(args: {
     wt,
     freshLabel,
     ownsPrimaryWorktree,
+    reuseStaleWorktree,
   } = args;
 
   for (let addIdx = 0; addIdx < resolvedAdditionalRepos.length; addIdx++) {
@@ -4099,8 +4106,14 @@ async function provisionAdditionalRepoWorktrees(args: {
     const requestEntry = body.additionalRepos?.[addIdx];
     const addRepoSlug = slugifyLoopId(addRepo.branch);
     const addRepoKey = `${worktreeKey}-${addRepoSlug}-${additionalRepoDisambiguator(addRepo.repoPath)}`;
-    const addWorktreeDir = resolveLoopWorktreeDir(addRepo.repoPath, addRepoKey);
+    const canonicalAddWorktreeDir = resolveLoopWorktreeDir(addRepo.repoPath, addRepoKey);
     const addBranchName = `symphony/${addRepoKey}`;
+
+    const staleAddWorktree = wt.findWorktreeForBranch(addRepo.repoPath, addBranchName);
+    const reuseExisting = reuseStaleWorktree && staleAddWorktree !== null;
+    const addWorktreeDir = reuseExisting && staleAddWorktree
+      ? staleAddWorktree
+      : canonicalAddWorktreeDir;
 
     try {
       assertPathAllowed(addWorktreeDir, allowedDirs);
@@ -4122,15 +4135,21 @@ async function provisionAdditionalRepoWorktrees(args: {
     }
 
     try {
-      const staleAddWorktree = wt.findWorktreeForBranch(addRepo.repoPath, addBranchName);
-      if (staleAddWorktree) {
+      if (reuseExisting) {
         loopLog(
           body.loopId,
-          `Removing stale additional-repo worktree for fresh ${freshLabel}: ${staleAddWorktree}`,
+          `Reusing retained additional-repo worktree for ${freshLabel}: ${addWorktreeDir} (branch: ${addBranchName})`,
         );
-        await wt.removeWorktree(staleAddWorktree, addRepo.repoPath, body.loopId);
+      } else {
+        if (staleAddWorktree) {
+          loopLog(
+            body.loopId,
+            `Removing stale additional-repo worktree for fresh ${freshLabel}: ${staleAddWorktree}`,
+          );
+          await wt.removeWorktree(staleAddWorktree, addRepo.repoPath, body.loopId);
+        }
+        await wt.ensureWorktree(addRepo.repoPath, addWorktreeDir, addBranchName, addRepo.branch, body.loopId);
       }
-      await wt.ensureWorktree(addRepo.repoPath, addWorktreeDir, addBranchName, addRepo.branch, body.loopId);
     } catch (checkoutErr) {
       const msg = checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr);
       loopError(body.loopId, `ensureWorktree failed for additional repo ${addRepo.repoPath}:`, checkoutErr);
@@ -4159,7 +4178,9 @@ async function provisionAdditionalRepoWorktrees(args: {
     });
     loopLog(
       body.loopId,
-      `Created additional repo worktree: ${addWorktreeDir} (branch: ${addBranchName} based on ${addRepo.branch})`,
+      reuseExisting
+        ? `Reused additional repo worktree: ${addWorktreeDir} (branch: ${addBranchName})`
+        : `Created additional repo worktree: ${addWorktreeDir} (branch: ${addBranchName} based on ${addRepo.branch})`,
     );
   }
   return true;
@@ -4710,6 +4731,8 @@ async function handleLoopRequest(
           wt,
           freshLabel: "PLAN",
           ownsPrimaryWorktree: true,
+          // PLAN promises a fresh tree — destroy any prior worktree at this branch.
+          reuseStaleWorktree: false,
         });
         if (!planAdditionalsOk) return;
       } else {
@@ -4776,6 +4799,11 @@ async function handleLoopRequest(
           // fresh in this request. Reused parent PLAN worktrees must not be
           // destroyed by an additional-repo provisioning failure.
           ownsPrimaryWorktree: !reusedPrimaryWorktree,
+          // EXECUTE/REQUEST_CHANGES retries may hit a retained dirty additional
+          // worktree from a prior failed/cancelled attempt (kept by
+          // cleanupAdditionalWorktrees to avoid data loss). Reuse it instead of
+          // force-removing it.
+          reuseStaleWorktree: true,
         });
         if (!executeAdditionalsOk) return;
 

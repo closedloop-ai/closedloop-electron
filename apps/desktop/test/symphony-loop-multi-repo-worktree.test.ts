@@ -354,6 +354,132 @@ test("ensureWorktree throws for additional repo — cleans leaked worktree, post
   );
 });
 
+// ---------------------------------------------------------------------------
+// Test 4: EXECUTE retry reuses retained additional-repo worktree
+// ---------------------------------------------------------------------------
+
+test("EXECUTE retry reuses retained additional-repo worktree instead of force-removing it", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "wt-lifecycle-retain-"));
+  tempPathsToClean.push(tmpDir);
+
+  const primaryRepo = path.join(tmpDir, "primary-repo");
+  const additionalRepo = path.join(tmpDir, "additional-repo");
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await Promise.all(
+    [primaryRepo, additionalRepo, worktreeParent].map((dir) =>
+      fs.mkdir(dir, { recursive: true }),
+    ),
+  );
+
+  // Simulate a retained additional-repo worktree from a prior failed/cancelled
+  // EXECUTE attempt — cleanupAdditionalWorktrees keeps it because it carries
+  // uncommitted or unique-to-HEAD changes. The retry must NOT --force-remove it.
+  const retainedAddWorktree = path.join(worktreeParent, "retained-add-worktree");
+  await fs.mkdir(retainedAddWorktree, { recursive: true });
+  await fs.writeFile(
+    path.join(retainedAddWorktree, "uncommitted-work.txt"),
+    "user changes that must survive the retry\n",
+  );
+
+  process.env.HOME = tmpDir;
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const {
+    provider: baseProvider,
+    ensureWorktreeCalls,
+    removeCalls,
+  } = makeRecordingGitWorktreeProvider("symphony/wt-lifecycle-retain");
+
+  // Override findWorktreeForBranch so the additional repo lookup returns the
+  // retained worktree path (the primary repo lookup keeps returning null so
+  // the primary worktree is created fresh and is not part of this assertion).
+  const provider: WorktreeProvider = {
+    ...baseProvider,
+    findWorktreeForBranch(repoPath, branchName) {
+      if (repoPath === additionalRepo && branchName.startsWith("symphony/")) {
+        return retainedAddWorktree;
+      }
+      return null;
+    },
+  };
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+  const server = await createTestGateway(tmpDir, mock.port, provider);
+
+  const loopId = "00000000-0000-0000-0000-000000007006";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "Execute the implementation plan",
+        artifacts: [],
+        artifactSlug: "PLAN-99",
+        repo: {
+          fullName: `wt-lifecycle-test/${path.basename(primaryRepo)}`,
+          branch: "main",
+        },
+        additionalRepos: [
+          { localRepoPath: additionalRepo, fullName: "acme/add-one", branch: "feature-branch" },
+        ],
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    "EXECUTE with a retained additional worktree should succeed",
+  );
+
+  await waitForCompletedEvent(mock.requests, loopId);
+
+  // The retained worktree must NEVER be force-removed.
+  const retainedRemovals = removeCalls.filter(
+    (call) => call.worktreeDir === retainedAddWorktree,
+  );
+  assert.equal(
+    retainedRemovals.length,
+    0,
+    `Retained additional worktree must not be removed; got ${retainedRemovals.length} removeWorktree call(s) for ${retainedAddWorktree}`,
+  );
+
+  // Reuse path also skips ensureWorktree for the additional repo: the prior
+  // attempt's git worktree is already on disk with the right branch.
+  const additionalEnsureCalls = ensureWorktreeCalls.filter(
+    (call) => call.repoPath === additionalRepo,
+  );
+  assert.equal(
+    additionalEnsureCalls.length,
+    0,
+    `Reused additional worktree must not be re-created via ensureWorktree; got ${additionalEnsureCalls.length} call(s)`,
+  );
+
+  // Sanity: the retained worktree directory still exists with its uncommitted file.
+  const survived = await fs
+    .readFile(path.join(retainedAddWorktree, "uncommitted-work.txt"), "utf-8")
+    .catch(() => null);
+  assert.equal(
+    survived,
+    "user changes that must survive the retry\n",
+    "Uncommitted work in the retained worktree must survive an EXECUTE retry",
+  );
+});
+
 test("handleProcessCompletion cleans additional worktrees when PLAN is cancelled during post-processing", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "wt-lifecycle-cancel-"));
   tempPathsToClean.push(tmpDir);
