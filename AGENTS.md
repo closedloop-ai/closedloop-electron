@@ -63,6 +63,7 @@ Migration requirements apply only to contracts consumed by separate repositories
 HTTP gateway routes, cloud relay messages, and persisted store schemas read across downgrade/rollback boundaries.
 
 - Breaking those external contracts requires legacy migration logic at the boundary and a ClosedLoop ticket to track removing the migration path later.
+- For optional external payload fields, preserve omission when a value is absent. Do not serialize absent optional fields as `null` unless the receiving contract explicitly declares that field nullable and old clients are known to accept it.
 - Internal contracts that ship as one Electron bundle do not need migration logic: main/renderer IPC bridge messages, internal module interfaces, and types consumed only inside `apps/desktop/`.
 - When reviewing a compatibility issue, first identify whether the caller is independently shipped. If both producer and consumer update atomically in the same desktop build, treat it as an internal refactor unless persisted data or an external client is involved.
 

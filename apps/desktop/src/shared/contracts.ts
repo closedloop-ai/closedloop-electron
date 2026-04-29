@@ -34,6 +34,10 @@ export interface HealthResponse {
   capabilities: ComputeTargetCapabilities;
   version: string;
   port: number;
+  /** Stable Desktop gateway identity used to match this local app to cloud compute targets. */
+  gatewayId?: string;
+  /** True once this desktop profile has completed setup and can accept cloud commands. */
+  onboardingCompleted?: boolean;
 }
 
 export type RiskTier = "none" | "low" | "medium" | "high";

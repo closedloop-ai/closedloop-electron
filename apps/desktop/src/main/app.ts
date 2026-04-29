@@ -109,6 +109,7 @@ import {
   type PendingOnboardingHandoff,
 } from "./onboarding-handoff.js";
 import { isSecurityUpgradeProvisioned } from "./security-upgrade-result.js";
+import { isDesktopSetupCompleteFromState } from "./setup-readiness.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -242,6 +243,7 @@ export class DesktopApplication {
       () =>
         this.cloudStatus.state === "online" ? this.cloudStatus.targetId : null,
       (payload) => this.handleSecurityUpgradeCommand(payload),
+      () => this.isDesktopSetupComplete(),
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -299,7 +301,7 @@ export class DesktopApplication {
         );
       },
       onCommand: (command) => {
-        if (!this.settingsStore.getOnboardingCompleted()) {
+        if (!this.isDesktopSetupComplete()) {
           this.cloudSocket.sendCommandAck({
             commandId: command.commandId,
             accepted: false,
@@ -628,6 +630,15 @@ export class DesktopApplication {
       return this.legacyGatewayId;
     }
     return this.settingsStore.ensureConfigGatewayId(activeConfigId).gatewayId ?? this.legacyGatewayId;
+  }
+
+  /** Reports setup completion for first-run onboarding and already-provisioned profiles. */
+  private isDesktopSetupComplete(): boolean {
+    return isDesktopSetupCompleteFromState({
+      onboardingCompleted: this.settingsStore.getOnboardingCompleted(),
+      sandboxBaseDirectory: this.settingsStore.getSandboxBaseDirectory(),
+      hasApiKey: this.apiKeyStore.getApiKey() !== null,
+    });
   }
 
   private getUpgradeCapableGatewayId(): string | null {
@@ -1324,7 +1335,11 @@ export class DesktopApplication {
   } {
     const settings = this.settingsStore.getAll();
     return {
-      completed: Boolean(settings.onboardingCompleted),
+      completed: isDesktopSetupCompleteFromState({
+        onboardingCompleted: settings.onboardingCompleted,
+        sandboxBaseDirectory: settings.sandboxBaseDirectory,
+        hasApiKey: this.apiKeyStore.getStatus().hasApiKey,
+      }),
       settings: {
         ...settings,
         sandboxBaseDirectory:
@@ -1383,7 +1398,7 @@ export class DesktopApplication {
   private async evaluateApproval(
     request: GatewayApprovalRequest,
   ): Promise<GatewayApprovalResult> {
-    if (!this.settingsStore.getOnboardingCompleted()) {
+    if (!this.isDesktopSetupComplete()) {
       return {
         allow: false,
         statusCode: 403,

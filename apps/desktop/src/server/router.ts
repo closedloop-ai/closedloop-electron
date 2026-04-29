@@ -57,6 +57,7 @@ export interface GatewayRouterOptions {
   machineName: string;
   version: string;
   capabilities: ComputeTargetCapabilities;
+  getOnboardingCompleted?: () => boolean;
   getActivePort: () => number;
   getAllowedDirectories: () => string[];
   getSymphonyDir?: () => string;
@@ -366,6 +367,8 @@ export class GatewayRouter {
         status: "ok",
         machineName: this.options.machineName,
         capabilities: this.options.capabilities,
+        gatewayId: this.options.getGatewayId() || undefined,
+        onboardingCompleted: this.options.getOnboardingCompleted?.() ?? false,
         version: this.options.version,
         port: this.options.getActivePort()
       };
