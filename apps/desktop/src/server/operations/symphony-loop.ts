@@ -24,7 +24,10 @@ import {
   sanitizeErrorMessage,
   stripAnsi,
 } from "../../main/diagnostics-helpers.js";
-import { emitDecisionTableVerificationTelemetry } from "../../main/decision-table-verification-telemetry.js";
+import {
+  emitDecisionTableVerificationTelemetry,
+  getDecisionTableVerificationTelemetryOffset,
+} from "../../main/decision-table-verification-telemetry.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import type { ExecutePlanSourceDiagnostics } from "../../main/telemetry-protocol.js";
 import type {
@@ -3435,7 +3438,7 @@ function emitExecuteDecisionTableVerificationTelemetry(args: {
   commandId?: string;
   operationId?: string;
   claudeWorkDir: string;
-  spawnStartedAt?: number;
+  decisionTableVerificationStartOffset?: number;
 }): void {
   const summary = emitDecisionTableVerificationTelemetry({
     telemetry: Observability.getTelemetryEmitter(),
@@ -3443,9 +3446,7 @@ function emitExecuteDecisionTableVerificationTelemetry(args: {
     operationId: args.operationId,
     loopId: args.loopId,
     closedLoopWorkDir: args.claudeWorkDir,
-    ...(args.spawnStartedAt && args.spawnStartedAt > 0
-      ? { sinceMs: args.spawnStartedAt }
-      : {}),
+    startOffset: args.decisionTableVerificationStartOffset,
   });
 
   if (summary.emittedRecords > 0) {
@@ -3490,6 +3491,7 @@ export async function handleProcessCompletion(
     authFilesExist: boolean;
     envSnapshot: Record<string, string>;
   },
+  decisionTableVerificationStartOffset = 0,
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
   // Temp-dir commands (DECOMPOSE, EVALUATE_*) need the entire temp tree removed on cleanup.
@@ -3579,7 +3581,7 @@ export async function handleProcessCompletion(
         commandId: commandId ?? existingJob?.commandId,
         operationId: operationId ?? existingJob?.operationId,
         claudeWorkDir,
-        spawnStartedAt,
+        decisionTableVerificationStartOffset,
       });
     }
 
@@ -4032,7 +4034,7 @@ export async function handleProcessCompletion(
         commandId: commandId ?? currentJob?.commandId,
         operationId: operationId ?? currentJob?.operationId,
         claudeWorkDir,
-        spawnStartedAt,
+        decisionTableVerificationStartOffset,
       });
     }
 
@@ -5219,6 +5221,7 @@ async function handleLoopRequest(
     }
     let child: ReturnType<typeof spawn>;
     let spawnStartedAt = 0;
+    let decisionTableVerificationStartOffset = 0;
     const collectedSpawnMeta: {
       command: string;
       args: string[];
@@ -5535,6 +5538,10 @@ async function handleLoopRequest(
         collectedSpawnMeta.command = scriptPath!;
         collectedSpawnMeta.args = redactSpawnArgs(scriptArgs);
         collectedSpawnMeta.cwd = worktreeDir!;
+        if (body.command === "EXECUTE") {
+          decisionTableVerificationStartOffset =
+            getDecisionTableVerificationTelemetryOffset(claudeWorkDir);
+        }
         spawnStartedAt = Date.now();
         child = spawn(scriptPath!, scriptArgs, {
           cwd: worktreeDir!,
@@ -5617,6 +5624,7 @@ async function handleLoopRequest(
         signal,
         spawnStartedAt,
         collectedSpawnMeta,
+        decisionTableVerificationStartOffset,
       ).catch((err) => {
         loopError(body.loopId, "Completion handler error:", err);
         gatewayLog.error(

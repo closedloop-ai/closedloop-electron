@@ -37,17 +37,24 @@ function verificationLine(overrides: Record<string, unknown> = {}): string {
   });
 }
 
-test("scanDecisionTableVerificationTelemetry reads only current-run JSONL records", async () => {
+test("scanDecisionTableVerificationTelemetry reads only JSONL records appended after start offset", async () => {
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "dt-telemetry-scan-"));
   tempPathsToClean.push(workDir);
 
   const telemetryDir = path.join(workDir, ".closedloop-ai");
   await fs.mkdir(telemetryDir, { recursive: true });
+  const priorContent = [
+    verificationLine({
+      timestamp: "2026-04-29T15:00:00Z",
+      final_status: "verification_failed",
+      fixes_attempted: 99,
+    }),
+    "",
+  ].join("\n");
   await fs.writeFile(
     path.join(telemetryDir, "decision-table-verifications.jsonl"),
     [
-      verificationLine({ timestamp: "2026-04-29T14:59:58Z" }),
-      "",
+      priorContent,
       verificationLine({
         timestamp: "2026-04-29T15:00:00Z",
         final_status: "aligned_with_clarifications",
@@ -57,13 +64,14 @@ test("scanDecisionTableVerificationTelemetry reads only current-run JSONL record
   );
 
   const result = scanDecisionTableVerificationTelemetry(workDir, {
-    sinceMs: Date.parse("2026-04-29T15:00:00Z"),
+    startOffset: Buffer.byteLength(priorContent),
   });
 
   assert.equal(result.records.length, 1);
   assert.equal(result.records[0].finalStatus, "aligned_with_clarifications");
   assert.equal(result.records[0].fixesAttempted, 4);
-  assert.equal(result.linesRead, 2);
+  assert.equal(result.records[0].lineNumber, 3);
+  assert.equal(result.linesRead, 1);
   assert.equal(result.invalidLines, 0);
 });
 
@@ -74,7 +82,7 @@ test("emitDecisionTableVerificationTelemetry reports missing files as skip telem
     telemetry: { emit: (event) => telemetryEvents.push(event) },
     loopId: "loop-1",
     closedLoopWorkDir: path.join(os.tmpdir(), "missing-dt-telemetry"),
-    sinceMs: Date.parse("2026-04-29T15:00:00Z"),
+    startOffset: 123,
   });
 
   assert.equal(summary.emittedRecords, 0);

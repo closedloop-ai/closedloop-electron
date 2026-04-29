@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import type {
@@ -11,8 +11,6 @@ export const DECISION_TABLE_VERIFICATION_RELATIVE_PATH = path.join(
   ".closedloop-ai",
   "decision-table-verifications.jsonl",
 );
-
-const TIMESTAMP_PRECISION_TOLERANCE_MS = 1_000;
 
 const decisionTableVerificationSchema = z.object({
   timestamp: z.string().refine((value) => !Number.isNaN(Date.parse(value))),
@@ -42,6 +40,8 @@ type RawDecisionTableVerification = z.infer<
 export type DecisionTableVerificationScanResult = {
   filePath: string;
   filePresent: boolean;
+  startOffset: number;
+  endOffset: number;
   linesRead: number;
   invalidLines: number;
   records: DecisionTableVerificationRecordDiagnostics[];
@@ -52,36 +52,47 @@ export type DecisionTableVerificationEmissionSummary = {
   filePath: string;
   emittedRecords: number;
   emittedMissing: boolean;
+  startOffset: number;
+  endOffset: number;
   linesRead: number;
   invalidLines: number;
   missingReason?: DecisionTableVerificationMissingDiagnostics["missingReason"];
 };
 
 /**
+ * Capture the current append boundary for the Phase 5.5 verifier JSONL before
+ * an EXECUTE process starts writing new telemetry lines.
+ */
+export function getDecisionTableVerificationTelemetryOffset(
+  closedLoopWorkDir: string,
+): number {
+  const filePath =
+    getDecisionTableVerificationTelemetryFilePath(closedLoopWorkDir);
+  try {
+    return existsSync(filePath) ? statSync(filePath).size : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
  * Read Phase 5.5 verifier JSONL from a ClosedLoop workdir and return only
- * records that belong to the current EXECUTE process window.
+ * records appended after the current EXECUTE process boundary.
  */
 export function scanDecisionTableVerificationTelemetry(
   closedLoopWorkDir: string,
-  options: { sinceMs?: number } = {},
+  options: { startOffset?: number } = {},
 ): DecisionTableVerificationScanResult {
-  const filePath = path.join(
-    closedLoopWorkDir,
-    DECISION_TABLE_VERIFICATION_RELATIVE_PATH,
-  );
-  const sinceMs =
-    options.sinceMs !== undefined
-      ? options.sinceMs - TIMESTAMP_PRECISION_TOLERANCE_MS
-      : undefined;
-  const sinceIso =
-    options.sinceMs !== undefined
-      ? new Date(options.sinceMs).toISOString()
-      : undefined;
+  const filePath =
+    getDecisionTableVerificationTelemetryFilePath(closedLoopWorkDir);
+  const startOffset = normalizeStartOffset(options.startOffset);
 
   if (!existsSync(filePath)) {
     return {
       filePath,
       filePresent: false,
+      startOffset,
+      endOffset: 0,
       linesRead: 0,
       invalidLines: 0,
       records: [],
@@ -92,18 +103,19 @@ export function scanDecisionTableVerificationTelemetry(
         linesRead: 0,
         invalidLines: 0,
         missingReason: "file_not_found",
-        ...(sinceIso ? { sinceIso } : {}),
       },
     };
   }
 
-  let content: string;
+  let contentBuffer: Buffer;
   try {
-    content = readFileSync(filePath, "utf-8");
+    contentBuffer = readFileSync(filePath);
   } catch (err) {
     return {
       filePath,
       filePresent: true,
+      startOffset,
+      endOffset: 0,
       linesRead: 0,
       invalidLines: 0,
       records: [],
@@ -115,11 +127,17 @@ export function scanDecisionTableVerificationTelemetry(
         invalidLines: 0,
         missingReason: "read_error",
         readError: err instanceof Error ? err.message : String(err),
-        ...(sinceIso ? { sinceIso } : {}),
       },
     };
   }
 
+  const endOffset = contentBuffer.byteLength;
+  const readStartOffset = Math.min(startOffset, endOffset);
+  const lineNumberBase = countNewlinesBeforeOffset(
+    contentBuffer,
+    readStartOffset,
+  );
+  const content = contentBuffer.subarray(readStartOffset).toString("utf-8");
   const records: DecisionTableVerificationRecordDiagnostics[] = [];
   let linesRead = 0;
   let invalidLines = 0;
@@ -145,20 +163,23 @@ export function scanDecisionTableVerificationTelemetry(
       continue;
     }
 
-    const recordTimestampMs = Date.parse(parsed.data.timestamp);
-    if (sinceMs !== undefined && recordTimestampMs < sinceMs) {
-      continue;
-    }
-
-    records.push(toTelemetryRecord(parsed.data, filePath, index + 1));
+    records.push(
+      toTelemetryRecord(parsed.data, filePath, lineNumberBase + index + 1),
+    );
   }
 
   const missingReason =
-    linesRead === 0 ? "empty" : records.length === 0 ? "no_current_run_records" : null;
+    records.length > 0
+      ? null
+      : linesRead === 0 && readStartOffset === 0
+        ? "empty"
+        : "no_current_run_records";
 
   return {
     filePath,
     filePresent: true,
+    startOffset: readStartOffset,
+    endOffset,
     linesRead,
     invalidLines,
     records,
@@ -171,7 +192,6 @@ export function scanDecisionTableVerificationTelemetry(
             linesRead,
             invalidLines,
             missingReason,
-            ...(sinceIso ? { sinceIso } : {}),
           },
         }
       : {}),
@@ -188,10 +208,10 @@ export function emitDecisionTableVerificationTelemetry(args: {
   operationId?: string;
   loopId: string;
   closedLoopWorkDir: string;
-  sinceMs?: number;
+  startOffset?: number;
 }): DecisionTableVerificationEmissionSummary {
   const scan = scanDecisionTableVerificationTelemetry(args.closedLoopWorkDir, {
-    sinceMs: args.sinceMs,
+    startOffset: args.startOffset,
   });
 
   for (const record of scan.records) {
@@ -217,6 +237,8 @@ export function emitDecisionTableVerificationTelemetry(args: {
     filePath: scan.filePath,
     emittedRecords: scan.records.length,
     emittedMissing: scan.records.length === 0 && scan.missing !== undefined,
+    startOffset: scan.startOffset,
+    endOffset: scan.endOffset,
     linesRead: scan.linesRead,
     invalidLines: scan.invalidLines,
     ...(scan.missing ? { missingReason: scan.missing.missingReason } : {}),
@@ -244,6 +266,33 @@ function emitMissingTelemetry(
     },
     diagnostics: { decisionTableVerification: diagnostic },
   });
+}
+
+function getDecisionTableVerificationTelemetryFilePath(
+  closedLoopWorkDir: string,
+): string {
+  return path.join(closedLoopWorkDir, DECISION_TABLE_VERIFICATION_RELATIVE_PATH);
+}
+
+function normalizeStartOffset(startOffset: number | undefined): number {
+  if (
+    startOffset === undefined ||
+    !Number.isFinite(startOffset) ||
+    startOffset < 0
+  ) {
+    return 0;
+  }
+  return Math.floor(startOffset);
+}
+
+function countNewlinesBeforeOffset(buffer: Buffer, offset: number): number {
+  let count = 0;
+  for (let index = 0; index < offset; index += 1) {
+    if (buffer[index] === 0x0a) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 function toTelemetryRecord(
