@@ -24,6 +24,7 @@ import {
   sanitizeErrorMessage,
   stripAnsi,
 } from "../../main/diagnostics-helpers.js";
+import { emitDecisionTableVerificationTelemetry } from "../../main/decision-table-verification-telemetry.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import type { ExecutePlanSourceDiagnostics } from "../../main/telemetry-protocol.js";
 import type {
@@ -3429,6 +3430,38 @@ function isCancelled(jobStore: JobStore | undefined, loopId: string): boolean {
   return status === "CANCEL_PENDING" || status === "CANCELLED";
 }
 
+function emitExecuteDecisionTableVerificationTelemetry(args: {
+  loopId: string;
+  commandId?: string;
+  operationId?: string;
+  claudeWorkDir: string;
+  spawnStartedAt?: number;
+}): void {
+  const summary = emitDecisionTableVerificationTelemetry({
+    telemetry: Observability.getTelemetryEmitter(),
+    commandId: args.commandId,
+    operationId: args.operationId,
+    loopId: args.loopId,
+    closedLoopWorkDir: args.claudeWorkDir,
+    ...(args.spawnStartedAt && args.spawnStartedAt > 0
+      ? { sinceMs: args.spawnStartedAt }
+      : {}),
+  });
+
+  if (summary.emittedRecords > 0) {
+    gatewayLog.info(
+      "decision-table-telemetry",
+      `Emitted ${summary.emittedRecords} decision-table verification telemetry record(s) for loopId=${args.loopId} file=${summary.filePath}`,
+    );
+    return;
+  }
+
+  gatewayLog.info(
+    "decision-table-telemetry",
+    `Emitted decision-table verification missing telemetry for loopId=${args.loopId} reason=${summary.missingReason ?? "unknown"} file=${summary.filePath}`,
+  );
+}
+
 export async function handleProcessCompletion(
   exitCode: number,
   body: LoopRequestBody,
@@ -3539,6 +3572,16 @@ export async function handleProcessCompletion(
       abortReason,
       spawnMeta,
     };
+
+    if (!wasCancelled && command === "EXECUTE") {
+      emitExecuteDecisionTableVerificationTelemetry({
+        loopId,
+        commandId: commandId ?? existingJob?.commandId,
+        operationId: operationId ?? existingJob?.operationId,
+        claudeWorkDir,
+        spawnStartedAt,
+      });
+    }
 
     if (wasCancelled) {
       Observability.jobCancelled(
@@ -3980,6 +4023,17 @@ export async function handleProcessCompletion(
           updatedAt: new Date().toISOString(),
         });
       }
+    }
+
+    if (command === "EXECUTE") {
+      const currentJob = jobStore?.getByLoopId(loopId);
+      emitExecuteDecisionTableVerificationTelemetry({
+        loopId,
+        commandId: commandId ?? currentJob?.commandId,
+        operationId: operationId ?? currentJob?.operationId,
+        claudeWorkDir,
+        spawnStartedAt,
+      });
     }
 
     runningLoops.delete(loopId);

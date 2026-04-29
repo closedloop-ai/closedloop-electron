@@ -15,6 +15,7 @@ export type TelemetryCategory =
   | "command.gateway_error"
   | "job.started"
   | "job.plan_source_resolved"
+  | "job.decision_table_verification"
   | "job.completed"
   | "job.recovery.finalize_replayed"
   | "job.failed"
@@ -65,6 +66,58 @@ export interface ExecutePlanSourceDiagnostics {
   rawPlanContentHash?: string | null;
 }
 
+export type DecisionTableVerificationFinalStatus =
+  | "aligned"
+  | "aligned_with_clarifications"
+  | "verification_failed";
+
+export type DecisionTableVerificationMissingReason =
+  | "file_not_found"
+  | "empty"
+  | "no_current_run_records"
+  | "read_error";
+
+export interface DecisionTableVerificationDriftKindCounts {
+  codeDrift: number;
+  testDrift: number;
+  planAmbiguity: number;
+}
+
+export interface DecisionTableVerificationRecordDiagnostics {
+  telemetryStatus: "reported";
+  telemetryFilePath: string;
+  lineNumber: number;
+  timestamp: string;
+  workdir: string;
+  decisionTablePath: string;
+  finalStatus: DecisionTableVerificationFinalStatus;
+  iterations: number;
+  driftKindCounts: DecisionTableVerificationDriftKindCounts;
+  fixesAttempted: number;
+  parseFailures: number;
+  verifierInvocations: number;
+  phaseDurationMs: number;
+}
+
+export interface DecisionTableVerificationMissingDiagnostics {
+  telemetryStatus: "missing";
+  telemetryFilePath: string;
+  filePresent: boolean;
+  linesRead: number;
+  invalidLines: number;
+  missingReason: DecisionTableVerificationMissingReason;
+  sinceIso?: string;
+  readError?: string;
+}
+
+/**
+ * Decision-table verifier telemetry extracted from the JSONL file emitted by
+ * Phase 5.5 after an EXECUTE loop exits.
+ */
+export type DecisionTableVerificationTelemetryDiagnostics =
+  | DecisionTableVerificationRecordDiagnostics
+  | DecisionTableVerificationMissingDiagnostics;
+
 export interface TelemetryDiagnostics {
   exitCode?: number;
   logTail?: string;
@@ -84,6 +137,7 @@ export interface TelemetryDiagnostics {
     envSnapshot: Record<string, string>;
   };
   tokenUsage?: { inputTokens: number; outputTokens: number };
+  decisionTableVerification?: DecisionTableVerificationTelemetryDiagnostics;
   diagnosticsVersion?: number;
   errorStack?: string;
   extra?: Record<string, unknown>;

@@ -10,6 +10,8 @@ const _queueStatsCategoryCheck: TelemetryCategory = "queue.stats_changed";
 const _desktopPopUnavailableCategoryCheck: TelemetryCategory = "desktop_pop.unavailable";
 const _jobPlanSourceResolvedCategoryCheck: TelemetryCategory =
   "job.plan_source_resolved";
+const _jobDecisionTableVerificationCategoryCheck: TelemetryCategory =
+  "job.decision_table_verification";
 
 afterEach(async () => {
   await Observability.shutdown();
