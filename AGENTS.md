@@ -17,6 +17,8 @@ Use `just` recipes from the repo root:
 
 - `just install`: install workspace dependencies.
 - `just desktop-dev`: build and run Electron locally.
+- `just desktop-no-auth`: start Electron with gateway auth disabled for local development only.
+- `just desktop-debug-auth`: start Electron with debug token minting enabled.
 - `just desktop-start`: run Electron from existing build output.
 - `just desktop-lint`: run ESLint for desktop sources.
 - `just desktop-typecheck`: run TypeScript `--noEmit`.
@@ -31,6 +33,7 @@ TypeScript is strict-mode (`tsconfig.base.json`) and ESM (`NodeNext`).
 - Follow existing style: 2-space indentation, semicolons, double quotes.
 - Prefer `kebab-case` file names (for example, `gateway-auth.ts`).
 - Keep boundaries clear between `main`, `server`, and `shared` modules.
+- Use `.js` extensions in ESM imports.
 - Prefix intentionally unused variables/args with `_` to satisfy lint rules.
 - Do not edit `apps/desktop/src/shared/build-info.ts` manually (auto-generated in prebuild).
 - Avoid unnecessary TypeScript casts. Prefer importing concrete shared types, narrowing with type guards, or shaping helper return types so call sites do not need `as` to satisfy the compiler.
@@ -40,6 +43,13 @@ TypeScript is strict-mode (`tsconfig.base.json`) and ESM (`NodeNext`).
 - Prefer schema-based object validation and narrowing at JSON, IPC, persisted-store, and HTTP boundaries instead of ad hoc `Record<string, unknown>` casts or manual `typeof value === "object"` checks. Reuse or colocate schemas when the shape is shared.
 - For expected service outcomes such as conflicts, invalid state transitions, missing records, validation failures, or unsupported operations, return typed domain results instead of throwing custom Error classes for control flow.
 - Avoid `instanceof` and `in` checks for routine error/result handling when a typed result discriminant or shared error code can express the branch more clearly. Reserve thrown errors and exception-style narrowing for unexpected failures or third-party APIs that require it.
+
+## Gateway Operations
+Gateway route handlers live under `apps/desktop/src/server/operations/`.
+
+- Before adding a helper to an operation file, check existing shared modules such as `response-utils.ts` for `json()` and `symphony-utils.ts` for `expandHome()`. If helper logic is used by more than one operation, extract it into a shared module instead of copying it.
+- Follow the route registration pattern: export `registerXxxRoutes(dispatcher, ...deps)` from the operation module and register it from `router.ts`.
+- Do not duplicate local response helpers across operation files.
 
 ## Testing Guidelines
 Tests run with `tsx --test` (Node test runner) via `just desktop-test`.
