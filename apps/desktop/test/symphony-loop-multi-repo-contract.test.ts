@@ -50,23 +50,23 @@ function createTestGateway(
   });
 }
 
-// ---------------------------------------------------------------------------
-// PLAN rejects nonexistent branch (branchExists returns false)
-//   — assert HTTP 400 and PreRunValidationFailed error event
-// ---------------------------------------------------------------------------
-
-it("PLAN with nonexistent branch in additionalRepo returns HTTP 400 and PreRunValidationFailed event", async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-nobranch-"));
+/**
+ * Shared setup for the "nonexistent branch" tests: creates temp dirs, mock API,
+ * a branchNotFound worktreeProvider, and a gateway server. Returns everything
+ * needed to issue a loop request and assert on the result.
+ */
+async function setupNonexistentBranchTest(tmpDirLabel: string) {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), tmpDirLabel));
   tempPathsToClean.push(tmpDir);
 
   const primaryRepo = path.join(tmpDir, "primary-repo");
-  await fs.mkdir(primaryRepo, { recursive: true });
-
   const additionalRepo = path.join(tmpDir, "additional-repo");
-  await fs.mkdir(additionalRepo, { recursive: true });
-
   const worktreeParent = path.join(tmpDir, "worktrees");
-  await fs.mkdir(worktreeParent, { recursive: true });
+  await Promise.all([
+    fs.mkdir(primaryRepo, { recursive: true }),
+    fs.mkdir(additionalRepo, { recursive: true }),
+    fs.mkdir(worktreeParent, { recursive: true }),
+  ]);
 
   process.env.HOME = tmpDir;
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
@@ -74,53 +74,80 @@ it("PLAN with nonexistent branch in additionalRepo returns HTTP 400 and PreRunVa
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
 
-  // Use a worktreeProvider whose branchExists always returns false
   const branchNotFoundProvider: WorktreeProvider = {
     ...fakeWorktreeProvider,
     branchExists: async () => false,
   };
   const server = await createTestGateway(tmpDir, mock.port, branchNotFoundProvider);
 
-  const loopId = "00000000-0000-0000-0000-000000003004";
-  const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        loopId,
-        command: "PLAN",
-        closedLoopAuthToken: "tok",
-        artifacts: [],
-        repo: {
-          fullName: `multi-repo-test/${path.basename(primaryRepo)}`,
-          branch: "main",
-        },
-        additionalRepos: [
-          {
-            localRepoPath: additionalRepo,
-            branch: "nonexistent-branch",
+  return { primaryRepo, additionalRepo, mock, server };
+}
+
+// ---------------------------------------------------------------------------
+// PLAN / EXECUTE reject nonexistent branch (branchExists returns false)
+//   — assert HTTP 400 and PreRunValidationFailed error event
+// ---------------------------------------------------------------------------
+
+for (const { command, loopId, extraBody } of [
+  {
+    command: "PLAN",
+    loopId: "00000000-0000-0000-0000-000000003004",
+    extraBody: {},
+  },
+  {
+    command: "EXECUTE",
+    loopId: "00000000-0000-0000-0000-000000003005",
+    extraBody: { prompt: "Execute the plan" },
+  },
+] as const) {
+  it(`${command} with nonexistent branch in additionalRepo returns HTTP 400 and PreRunValidationFailed event`, async () => {
+    const { primaryRepo, additionalRepo, mock, server } =
+      await setupNonexistentBranchTest(`multi-repo-${command.toLowerCase()}-nobranch-`);
+
+    const response = await fetch(
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          loopId,
+          command,
+          closedLoopAuthToken: "tok",
+          artifacts: [],
+          ...extraBody,
+          repo: {
+            fullName: `multi-repo-test/${path.basename(primaryRepo)}`,
+            branch: "main",
           },
-        ],
-      }),
-    },
-  );
+          additionalRepos: [
+            {
+              localRepoPath: additionalRepo,
+              branch: "nonexistent-branch",
+            },
+          ],
+        }),
+      },
+    );
 
-  assert.equal(
-    response.status,
-    400,
-    "PLAN with nonexistent branch in additionalRepo should return HTTP 400",
-  );
+    assert.equal(
+      response.status,
+      400,
+      `${command} with nonexistent branch in additionalRepo should return HTTP 400`,
+    );
 
-  // The error event with code PRE_RUN_VALIDATION_FAILED must be posted to the API
-  const errorEvent = await waitForTerminalEvent(mock.requests, loopId);
-  assert.equal(errorEvent.type, "error");
-  assert.equal(
-    errorEvent.code,
-    "PRE_RUN_VALIDATION_FAILED",
-    `Expected error code PRE_RUN_VALIDATION_FAILED, got: ${JSON.stringify(errorEvent.code)}`,
-  );
-});
+    const errorEvent = await waitForTerminalEvent(mock.requests, loopId);
+    assert.equal(errorEvent.type, "error");
+    assert.equal(
+      errorEvent.code,
+      "PRE_RUN_VALIDATION_FAILED",
+      `Expected error code PRE_RUN_VALIDATION_FAILED, got: ${JSON.stringify(errorEvent.code)}`,
+    );
+    assert.ok(
+      typeof errorEvent.message === "string" && errorEvent.message.length > 0,
+      `Expected a non-empty message string in the error event, got: ${JSON.stringify(errorEvent.message)}`,
+    );
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Unit-style tests for resolveAdditionalRepos
@@ -145,6 +172,32 @@ describe("resolveAdditionalRepos — unit-style", () => {
         err instanceof AdditionalRepoError &&
         err.message.includes("exceeds maximum"),
     );
+  });
+
+  it("accepts exactly one additional repo and returns a single resolved entry", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-single-"));
+    tempPathsToClean.push(tmpDir);
+
+    const repoDir = path.join(tmpDir, "single-repo");
+    await fs.mkdir(repoDir, { recursive: true });
+
+    const resolved = await resolveAdditionalRepos(
+      [{ localRepoPath: repoDir, branch: "main" }],
+      [tmpDir],
+      fakeWorktreeProvider,
+    );
+
+    assert.equal(resolved.length, 1);
+    assert.equal(resolved[0].repoPath, path.resolve(repoDir));
+  });
+
+  it("returns empty array when additionalRepos is empty", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "multi-repo-empty-"));
+    tempPathsToClean.push(tmpDir);
+
+    const resolved = await resolveAdditionalRepos([], [tmpDir], fakeWorktreeProvider);
+
+    assert.deepEqual(resolved, []);
   });
 });
 
