@@ -170,8 +170,7 @@ export class BootRecoveryService {
           isProcessRunning,
           getAllowedDirectories,
           loopTokenStore,
-          cleanupAdditionalWorktrees:
-            cleanupAdditionalWorktreesWithDefaultProvider,
+          cleanupAdditionalWorktrees: cleanupAdditionalWorktreesWithDefaultProvider,
         });
         if (!outcome.cloudFinalized && outcome.retryableFailure) {
           const latest = jobStore.getByLoopId(job.loopId);
@@ -361,8 +360,7 @@ export class BootRecoveryService {
         isProcessRunning,
         getAllowedDirectories,
         loopTokenStore,
-        cleanupAdditionalWorktrees:
-          cleanupAdditionalWorktreesWithDefaultProvider,
+        cleanupAdditionalWorktrees: cleanupAdditionalWorktreesWithDefaultProvider,
       };
 
       try {
