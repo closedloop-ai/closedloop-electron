@@ -26,6 +26,7 @@ import { registerHealthCheckRoutes } from "./operations/health-check.js";
 import { registerLearningsRoutes } from "./operations/learnings.js";
 import { registerMetadataRoutes } from "./operations/metadata-routes.js";
 import { configureMcpDetectionCwdResolver } from "./operations/mcp-detection.js";
+import { registerSecurityUpgradeRoutes } from "./operations/security-upgrade.js";
 import { configureBinaryPathsResolver } from "./operations/symphony-loop.js";
 import { registerReposConfigRoutes } from "./operations/repos-config.js";
 import { registerRunViewerChatRoutes } from "./operations/run-viewer-chat.js";
@@ -77,6 +78,10 @@ export interface GatewayRouterOptions {
   loopTokenStore?: LoopTokenStore;
   retrySpawnDeps?: RetrySpawnDeps;
   getGatewayId: () => string;
+  getComputeTargetId?: () => string | null;
+  handleSecurityUpgrade?: (
+    payload: DesktopSecurityUpgradePayload
+  ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult;
   getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
   applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
 }
@@ -109,6 +114,18 @@ export interface GatewayApprovalRequest {
 export type GatewayApprovalResult =
   | { allow: true }
   | { allow: false; statusCode: number; payload: Record<string, unknown> };
+
+export type DesktopSecurityUpgradePayload = {
+  onboardingAttemptId: string;
+  webAppOrigin: string;
+  computeTargetId: string;
+  gatewayId: string;
+  expiresAt: string;
+};
+
+export type DesktopSecurityUpgradeResult =
+  | { ok: true }
+  | { ok: false; code: string; retryable: boolean; statusCode?: number };
 
 export class GatewayRouter {
   private readonly options: GatewayRouterOptions;
@@ -218,7 +235,10 @@ export class GatewayRouter {
         this.options.getAllowedDirectories,
         getApiKey,
         getApiOrigin,
-        this.options.jobStore
+        this.options.jobStore,
+        this.options.getApiKeyProvenance,
+        this.options.signDesktopRequest,
+        this.options.onDesktopPopUnavailable
       );
     }
     registerSymphonyUploadRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
@@ -245,6 +265,11 @@ export class GatewayRouter {
       providerRegistry,
       this.options.getGatewayId
     );
+    registerSecurityUpgradeRoutes(this.operationDispatcher, {
+      getGatewayId: this.options.getGatewayId,
+      getComputeTargetId: this.options.getComputeTargetId,
+      handleSecurityUpgrade: this.options.handleSecurityUpgrade,
+    });
   }
 
   async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {

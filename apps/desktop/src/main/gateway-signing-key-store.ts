@@ -96,6 +96,17 @@ export class GatewaySigningKeyStore {
     return this.materialFromPrivateKey(normalizedGatewayId, privateKeyPkcs8Pem);
   }
 
+  /** Deletes persisted private key material for a removed saved-config identity. */
+  delete(gatewayId: string): void {
+    const normalizedGatewayId = gatewayId.trim();
+    if (!normalizedGatewayId) {
+      return;
+    }
+    const map = this.getEncryptedMap();
+    delete map[normalizedGatewayId];
+    this.setEncryptedMap(map);
+  }
+
   private create(gatewayId: string): GatewaySigningKeyResult {
     const normalizedGatewayId = gatewayId.trim();
     if (!normalizedGatewayId) {

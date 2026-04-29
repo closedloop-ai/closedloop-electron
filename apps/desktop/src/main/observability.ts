@@ -2,6 +2,7 @@ import { TelemetryService, type EnrichedTelemetryEvent } from "./telemetry-servi
 import { PostHogAnalytics } from "./posthog-analytics.js";
 import { gatewayLog } from "./gateway-logger.js";
 import type {
+  ExecutePlanSourceDiagnostics,
   TelemetryCategory,
   TelemetryDiagnostics,
   TelemetryEmitter,
@@ -258,6 +259,26 @@ export class Observability {
       loopId,
       jobId: loopId,
     });
+  }
+
+  static jobPlanSourceResolved(
+    commandId: string | undefined,
+    operationId: string | undefined,
+    loopId: string,
+    planSource: ExecutePlanSourceDiagnostics,
+  ): void {
+    Observability.emitTelemetry(
+      "info",
+      "job.plan_source_resolved",
+      `EXECUTE plan source resolved: ${planSource.source}`,
+      {
+        commandId,
+        operationId,
+        loopId,
+        jobId: loopId,
+      },
+      { planSource },
+    );
   }
 
   static jobCompleted(
