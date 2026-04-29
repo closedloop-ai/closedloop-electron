@@ -33,7 +33,13 @@ TypeScript is strict-mode (`tsconfig.base.json`) and ESM (`NodeNext`).
 - Keep boundaries clear between `main`, `server`, and `shared` modules.
 - Prefix intentionally unused variables/args with `_` to satisfy lint rules.
 - Do not edit `apps/desktop/src/shared/build-info.ts` manually (auto-generated in prebuild).
+- Avoid unnecessary TypeScript casts. Prefer importing concrete shared types, narrowing with type guards, or shaping helper return types so call sites do not need `as` to satisfy the compiler.
+- Use shared constants, generated enums, or exported enum-like objects for statuses, reasons, protocol modes, channel names, storage keys, and other contract values. Do not duplicate hardcoded strings when a constant or enum exists.
 - Export and reuse shared TypeScript types for cross-module contracts or metadata patches instead of duplicating inline `Pick`/`Partial` shapes in callers.
+- When the same helper logic, object shape, or protocol type appears in multiple files, extract it into the nearest shared module owned by that surface instead of committing parallel copies.
+- Prefer schema-based object validation and narrowing at JSON, IPC, persisted-store, and HTTP boundaries instead of ad hoc `Record<string, unknown>` casts or manual `typeof value === "object"` checks. Reuse or colocate schemas when the shape is shared.
+- For expected service outcomes such as conflicts, invalid state transitions, missing records, validation failures, or unsupported operations, return typed domain results instead of throwing custom Error classes for control flow.
+- Avoid `instanceof` and `in` checks for routine error/result handling when a typed result discriminant or shared error code can express the branch more clearly. Reserve thrown errors and exception-style narrowing for unexpected failures or third-party APIs that require it.
 
 ## Testing Guidelines
 Tests run with `tsx --test` (Node test runner) via `just desktop-test`.
