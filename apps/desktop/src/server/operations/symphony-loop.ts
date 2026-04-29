@@ -25,6 +25,7 @@ import {
   stripAnsi,
 } from "../../main/diagnostics-helpers.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
+import type { ExecutePlanSourceDiagnostics } from "../../main/telemetry-protocol.js";
 import type {
   JobStore,
   LocalJobCommand,
@@ -320,6 +321,12 @@ function readPlanJsonContent(planJsonPath: string): string | null {
   return isRawPlanArtifact(localPlan) && typeof localPlan.content === "string"
     ? localPlan.content
     : null;
+}
+
+function shortContentHash(value: string | undefined | null): string | null {
+  return value == null
+    ? null
+    : crypto.createHash("sha256").update(value).digest("hex").slice(0, 12);
 }
 
 /**
@@ -1487,6 +1494,8 @@ async function writeArtifactsForExecuteOrAmend(
   options?: {
     command: "EXECUTE" | "REQUEST_CHANGES";
     loopId: string;
+    commandId?: string;
+    operationId?: string;
   },
 ): Promise<{ importedPlanFile: string | null }> {
   let importedPlanFile: string | null = null;
@@ -1500,9 +1509,12 @@ async function writeArtifactsForExecuteOrAmend(
         const rawPlanPayload = isRawPlanArtifact(artifact.raw)
           ? artifact.raw
           : null;
+        const rawPlanContent =
+          typeof rawPlanPayload?.content === "string"
+            ? rawPlanPayload.content
+            : undefined;
         const rawPlanAligned =
-          typeof rawPlanPayload?.content === "string" &&
-          rawPlanPayload.content === artifact.content;
+          rawPlanContent !== undefined && rawPlanContent === artifact.content;
         const localPlanJsonPresent = existsSync(planJsonPath);
         const localPlanJsonAligned =
           localPlanJsonPresent &&
@@ -1512,6 +1524,33 @@ async function writeArtifactsForExecuteOrAmend(
           IMPORTED_PLAN_MARKDOWN_FILE,
         );
         await fs.rm(importedPlanPath, { force: true });
+        const basePlanSource = {
+          rawPlanPayload: rawPlanPayload !== null,
+          rawPlanAligned,
+          localPlanJsonPresent,
+          localPlanJsonAligned,
+          planArtifactContentLength: artifact.content.length,
+          rawPlanContentLength: rawPlanContent?.length ?? null,
+          planArtifactContentHash: shortContentHash(artifact.content),
+          rawPlanContentHash: shortContentHash(rawPlanContent),
+        };
+        const emitPlanSource = (
+          source: ExecutePlanSourceDiagnostics["source"],
+          importedPlanFileStaged: boolean,
+          closedLoopPlanFileSet: boolean,
+        ): void => {
+          Observability.jobPlanSourceResolved(
+            options.commandId,
+            options.operationId,
+            options.loopId,
+            {
+              source,
+              ...basePlanSource,
+              importedPlanFileStaged,
+              closedLoopPlanFileSet,
+            },
+          );
+        };
 
         if (rawPlanAligned) {
           importedPlanFile = null;
@@ -1529,6 +1568,7 @@ async function writeArtifactsForExecuteOrAmend(
             `localPlanJsonPresent=${localPlanJsonPresent}`;
           loopLog(options.loopId, message);
           gatewayLog.info("loop-harness", `loopId=${options.loopId} ${message}`);
+          emitPlanSource("raw-artifact", false, false);
         } else if (localPlanJsonAligned) {
           importedPlanFile = null;
           const message =
@@ -1537,6 +1577,7 @@ async function writeArtifactsForExecuteOrAmend(
             `localPlanJsonPresent=true localPlanJsonAligned=true`;
           loopLog(options.loopId, message);
           gatewayLog.info("loop-harness", `loopId=${options.loopId} ${message}`);
+          emitPlanSource("local-plan-json", false, false);
         } else {
           if (localPlanJsonPresent) {
             await fs.rm(planJsonPath, { force: true });
@@ -1551,6 +1592,7 @@ async function writeArtifactsForExecuteOrAmend(
             `importedPlanFile=${importedPlanFile}`;
           loopLog(options.loopId, message);
           gatewayLog.info("loop-harness", `loopId=${options.loopId} ${message}`);
+          emitPlanSource("imported-plan-compat", true, true);
         }
         continue;
       }
@@ -4886,6 +4928,8 @@ async function handleLoopRequest(
           {
             command: "EXECUTE",
             loopId: body.loopId,
+            commandId,
+            operationId,
           },
         );
         executeImportedPlanFile = executeArtifacts.importedPlanFile;
@@ -4899,6 +4943,8 @@ async function handleLoopRequest(
           {
             command: "REQUEST_CHANGES",
             loopId: body.loopId,
+            commandId,
+            operationId,
           },
         );
       }

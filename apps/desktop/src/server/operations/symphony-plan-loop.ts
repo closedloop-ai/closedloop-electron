@@ -1,4 +1,10 @@
 import { execFileSync } from "node:child_process";
+import type { ApiKeyProvenance } from "../../main/api-key-store.js";
+import type { DesktopPopSigner } from "../../main/desktop-pop.js";
+import {
+  buildManagedDesktopPopHeaders,
+  type DesktopPopUnavailableReporter,
+} from "../../main/desktop-pop-sign-utils.js";
 import type { JobStore } from "../../main/job-store.js";
 import type {
   OperationDispatcher,
@@ -245,7 +251,10 @@ export function registerSymphonyPlanLoopRoutes(
   getAllowedDirectories: () => string[],
   getApiKey: () => string | null,
   getApiOrigin: () => string,
-  jobStore?: JobStore
+  jobStore?: JobStore,
+  getApiKeyProvenance?: () => ApiKeyProvenance | null,
+  signDesktopRequest?: DesktopPopSigner,
+  onDesktopPopUnavailable?: DesktopPopUnavailableReporter
 ): void {
   // -----------------------------------------------------------------------
   // Operation A: POST /api/gateway/symphony/plan-loop/:ticketId/prepare
@@ -334,10 +343,23 @@ export function registerSymphonyPlanLoopRoutes(
       const apiOrigin = getApiOrigin();
 
       try {
-        const cancelResponse = await fetch(`${apiOrigin}/loops/${loopId}`, {
+        const path = `/loops/${loopId}`;
+        const popHeaders = await buildManagedDesktopPopHeaders({
+          apiKeyProvenance: getApiKeyProvenance?.() ?? "USER_CREATED",
+          signDesktopRequest,
+          request: {
+            method: "DELETE",
+            pathname: path,
+          },
+          surface: path,
+          unavailableMessage: "PoP signing unavailable for loop cancellation; continuing bearer-only compatibility mode",
+          onUnavailable: onDesktopPopUnavailable,
+        });
+        const cancelResponse = await fetch(`${apiOrigin}${path}`, {
           method: "DELETE",
           headers: {
             "Authorization": `Bearer ${apiKey}`,
+            ...(popHeaders ?? {}),
           },
         });
         if (!cancelResponse.ok && cancelResponse.status !== 404) {

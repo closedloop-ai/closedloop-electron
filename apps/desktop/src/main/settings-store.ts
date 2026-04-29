@@ -17,6 +17,26 @@ type BinaryPaths = {
   git?: string;
 };
 
+export type SavedConfigManagedPatch = Partial<
+  Pick<
+    SavedConfig,
+    | "apiKeySource"
+    | "gatewayId"
+    | "gatewayPublicKeyPem"
+    | "desktopSecurityUpgradeProtocolVersion"
+    | "lastComputeTargetId"
+    | "desktopSecurityPromptDismissedAt"
+    | "pendingOnboardingAttemptId"
+  >
+>;
+type SavedConfigOriginsPatch = Pick<
+  SavedConfig,
+  "relayOrigin" | "apiOrigin" | "webAppOrigin"
+>;
+
+const UUID_V4_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 export interface SettingsStoreOptions {
   cwd?: string;
   name?: string;
@@ -103,6 +123,8 @@ export class SettingsStore {
     if (!("activeConfigId" in raw)) {
       this.store.set("activeConfigId", null as DesktopSettings["activeConfigId"]);
     }
+
+    this.migrateSavedConfigManagedFields();
   }
 
   getAll(): DesktopSettings {
@@ -220,6 +242,14 @@ export class SettingsStore {
     this.store.set("activeConfigId", id as DesktopSettings["activeConfigId"]);
   }
 
+  getActiveConfig(): SavedConfig | null {
+    const activeConfigId = this.getActiveConfigId();
+    if (!activeConfigId) {
+      return null;
+    }
+    return this.getSavedConfigs().find((c) => c.id === activeConfigId) ?? null;
+  }
+
   private validateConfigName(name: string): string {
     const trimmed = typeof name === "string" ? name.trim() : "";
     if (!trimmed) {
@@ -262,7 +292,8 @@ export class SettingsStore {
       name: trimmedName,
       relayOrigin: this.getRelayOrigin(),
       apiOrigin: this.getApiOrigin(),
-      webAppOrigin: this.getWebAppOrigin()
+      webAppOrigin: this.getWebAppOrigin(),
+      apiKeySource: "USER_CREATED"
     };
     configs.push(config);
     this.setSavedConfigs(configs);
@@ -287,6 +318,26 @@ export class SettingsStore {
       this.setActiveConfigId(null);
     }
     return { wasActive };
+  }
+
+  /**
+   * Returns whether a gateway identity is still referenced by any saved profile
+   * or by the active unsaved legacy runtime identity.
+   */
+  isGatewayIdReferenced(
+    gatewayId: string | null | undefined,
+    options: { activeRuntimeGatewayId?: string | null } = {},
+  ): boolean {
+    const normalizedGatewayId = gatewayId?.trim();
+    if (!normalizedGatewayId) {
+      return false;
+    }
+    if (options.activeRuntimeGatewayId?.trim() === normalizedGatewayId) {
+      return true;
+    }
+    return this.getSavedConfigs().some(
+      (config) => config.gatewayId?.trim() === normalizedGatewayId,
+    );
   }
 
   renameConfig(id: string, name: string): void {
@@ -315,6 +366,81 @@ export class SettingsStore {
     this.setWebAppOrigin(normalizedWebAppOrigin);
     this.setActiveConfigId(id);
     return config;
+  }
+
+  /**
+   * Ensures the saved profile has its own stable gateway UUID, creating it only
+   * for that profile. Unsaved legacy installs continue using the legacy identity.
+   */
+  ensureConfigGatewayId(id: string): SavedConfig {
+    const configs = this.getSavedConfigs();
+    const index = configs.findIndex((c) => c.id === id);
+    if (index === -1) {
+      throw new Error(`Config not found: ${id}`);
+    }
+    const existing = configs[index].gatewayId;
+    if (existing && UUID_V4_RE.test(existing)) {
+      return configs[index];
+    }
+    configs[index] = {
+      ...configs[index],
+      gatewayId: randomUUID(),
+      desktopSecurityUpgradeProtocolVersion: 1
+    };
+    this.setSavedConfigs(configs);
+    return configs[index];
+  }
+
+  /** Updates non-secret managed-key metadata for a saved profile. */
+  updateConfigManagedMetadata(id: string, patch: SavedConfigManagedPatch): SavedConfig {
+    const configs = this.getSavedConfigs();
+    const index = configs.findIndex((c) => c.id === id);
+    if (index === -1) {
+      throw new Error(`Config not found: ${id}`);
+    }
+    const hasChanges = Object.entries(patch).some(([key, value]) => {
+      const field = key as keyof SavedConfig;
+      return configs[index][field] !== value;
+    });
+    if (!hasChanges) {
+      return configs[index];
+    }
+    configs[index] = {
+      ...configs[index],
+      ...patch
+    };
+    this.setSavedConfigs(configs);
+    return configs[index];
+  }
+
+  /** Updates managed-key metadata for the active saved profile when one exists. */
+  updateActiveConfigManagedMetadata(patch: SavedConfigManagedPatch): SavedConfig | null {
+    const activeConfigId = this.getActiveConfigId();
+    if (!activeConfigId) {
+      return null;
+    }
+    return this.updateConfigManagedMetadata(activeConfigId, patch);
+  }
+
+  /** Updates trusted origins for the active saved profile when one exists. */
+  updateActiveConfigOrigins(patch: SavedConfigOriginsPatch): SavedConfig | null {
+    const activeConfigId = this.getActiveConfigId();
+    if (!activeConfigId) {
+      return null;
+    }
+    const configs = this.getSavedConfigs();
+    const index = configs.findIndex((c) => c.id === activeConfigId);
+    if (index === -1) {
+      throw new Error(`Config not found: ${activeConfigId}`);
+    }
+    configs[index] = {
+      ...configs[index],
+      relayOrigin: normalizeAndValidateOrigin(patch.relayOrigin),
+      apiOrigin: normalizeAndValidateOrigin(patch.apiOrigin),
+      webAppOrigin: normalizeWebAppOrigin(patch.webAppOrigin)
+    };
+    this.setSavedConfigs(configs);
+    return configs[index];
   }
 
   update(partial: Partial<DesktopSettings>): DesktopSettings {
@@ -352,5 +478,30 @@ export class SettingsStore {
       this.store.set("defaultApprovalTier", partial.defaultApprovalTier);
     }
     return this.getAll();
+  }
+
+  private migrateSavedConfigManagedFields(): void {
+    const configs = this.getSavedConfigs();
+    let changed = false;
+    const migrated = configs.map((config) => {
+      const hasManagedIdentity =
+        typeof config.gatewayId === "string" &&
+        UUID_V4_RE.test(config.gatewayId) &&
+        typeof config.gatewayPublicKeyPem === "string" &&
+        config.gatewayPublicKeyPem.includes("BEGIN PUBLIC KEY");
+      const apiKeySource: SavedConfig["apiKeySource"] =
+        config.apiKeySource === "DESKTOP_MANAGED" && hasManagedIdentity
+          ? "DESKTOP_MANAGED"
+          : "USER_CREATED";
+      if (config.apiKeySource !== apiKeySource) {
+        changed = true;
+        return { ...config, apiKeySource };
+      }
+      return config;
+    });
+
+    if (changed) {
+      this.setSavedConfigs(migrated);
+    }
   }
 }
