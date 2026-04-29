@@ -1498,6 +1498,11 @@ async function writeArtifactsForExecuteOrAmend(
     operationId?: string;
   },
 ): Promise<{ importedPlanFile: string | null }> {
+  if (options?.command === "EXECUTE") {
+    await fs.rm(path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult), {
+      force: true,
+    });
+  }
   let importedPlanFile: string | null = null;
   for (const artifact of artifacts) {
     if (artifact.type === LoopArtifactType.ImplementationPlan) {
