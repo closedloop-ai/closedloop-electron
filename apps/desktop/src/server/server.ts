@@ -43,6 +43,7 @@ export interface DesktopGatewayServerOptions {
   machineName: string;
   version: string;
   capabilities: ComputeTargetCapabilities;
+  getOnboardingCompleted?: () => boolean;
   discoveryFilePath?: string;
   sessionStore?: LocalSessionStore;
   getApiKey?: () => string | null;
@@ -56,7 +57,7 @@ export interface DesktopGatewayServerOptions {
   retrySpawnDeps?: RetrySpawnDeps;
   onUnexpectedClose?: () => void;
   loopTokenStore?: LoopTokenStore;
-  getGatewayId: () => string;
+  getGatewayId?: () => string;
   getComputeTargetId?: () => string | null;
   handleSecurityUpgrade?: (
     payload: DesktopSecurityUpgradePayload
@@ -75,6 +76,7 @@ export class DesktopGatewayServer {
   constructor(options: DesktopGatewayServerOptions) {
     this.options = {
       ...options,
+      getGatewayId: options.getGatewayId ?? (() => ""),
       discoveryFilePath:
         options.discoveryFilePath ??
         path.join(os.homedir(), ".closedloop-ai", "electron-port"),
@@ -87,6 +89,7 @@ export class DesktopGatewayServer {
       machineName: this.options.machineName,
       version: this.options.version,
       capabilities: this.options.capabilities,
+      getOnboardingCompleted: this.options.getOnboardingCompleted,
       getActivePort: () => this.activePort,
       getAllowedDirectories: this.options.getAllowedDirectories,
       getSymphonyDir: this.options.getSymphonyDir,
@@ -104,7 +107,7 @@ export class DesktopGatewayServer {
       worktreeProvider: this.options.worktreeProvider,
       loopTokenStore: this.options.loopTokenStore,
       retrySpawnDeps: this.options.retrySpawnDeps,
-      getGatewayId: this.options.getGatewayId,
+      getGatewayId: this.options.getGatewayId ?? (() => ""),
       getComputeTargetId: this.options.getComputeTargetId,
       handleSecurityUpgrade: this.options.handleSecurityUpgrade,
       getBinaryPaths: this.options.getBinaryPaths,
@@ -143,6 +146,7 @@ export class DesktopGatewayServer {
     handleSecurityUpgrade?: (
       payload: DesktopSecurityUpgradePayload
     ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult,
+    getOnboardingCompleted?: () => boolean,
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -173,6 +177,7 @@ export class DesktopGatewayServer {
       getGatewayId,
       getComputeTargetId,
       handleSecurityUpgrade,
+      getOnboardingCompleted,
       getBinaryPaths,
       applyBinaryPathPatch,
     });
@@ -191,6 +196,8 @@ export class DesktopGatewayServer {
       status: "ok",
       machineName: this.options.machineName,
       capabilities: this.options.capabilities,
+      gatewayId: this.options.getGatewayId?.() || undefined,
+      onboardingCompleted: this.options.getOnboardingCompleted?.() ?? false,
       version: this.options.version,
       port: this.activePort,
     };

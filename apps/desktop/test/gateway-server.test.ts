@@ -107,6 +107,8 @@ test("returns health contract with active port and CORS headers", async () => {
     machineName: "test-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    getGatewayId: () => "019dd8f5-5a1a-4bce-ae72-a3c973850f81",
+    getOnboardingCompleted: () => true,
     discoveryFilePath: discoveryFile
   });
   serversToClose.push(server);
@@ -116,9 +118,17 @@ test("returns health contract with active port and CORS headers", async () => {
   assert.equal(healthResponse.status, 200);
   assert.equal(healthResponse.headers.get("access-control-allow-origin"), "https://app.symphony.com");
 
-  const healthBody = (await healthResponse.json()) as { status: string; port: number; machineName: string };
+  const healthBody = (await healthResponse.json()) as {
+    status: string;
+    port: number;
+    machineName: string;
+    gatewayId?: string;
+    onboardingCompleted?: boolean;
+  };
   assert.equal(healthBody.status, "ok");
   assert.equal(healthBody.machineName, "test-machine");
+  assert.equal(healthBody.gatewayId, "019dd8f5-5a1a-4bce-ae72-a3c973850f81");
+  assert.equal(healthBody.onboardingCompleted, true);
   assert.equal(healthBody.port, server.getActivePort());
 
   const discoveryPort = await fs.readFile(discoveryFile, "utf-8");
