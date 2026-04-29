@@ -36,6 +36,7 @@ export interface CloudSocketOptions {
   onDesktopPopUnavailable?: DesktopPopUnavailableReporter;
   getAllowedDirectories: () => string[];
   getMaxInFlightCommands: () => number;
+  getGatewayId?: () => string | null;
   machineName: string;
   pluginVersion: string;
   desktopClientVersion: string;
@@ -294,9 +295,12 @@ export class CloudSocketService {
   }
 
   private emitHello(): void {
+    const gatewayId = this.options.getGatewayId?.() ?? undefined;
     const hello: DesktopHelloEvent = {
       ...createEnvelope(),
       computeTargetId: this.targetId ?? undefined,
+      gatewayId,
+      ...(gatewayId ? { desktopSecurityUpgradeProtocolVersion: 1 as const } : {}),
       machineName: this.options.machineName,
       platform: process.platform,
       pluginVersion: this.options.pluginVersion,

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -23,8 +24,10 @@ import { BootRecoveryService } from "../src/main/boot-recovery.js";
 import { JobStore, type LocalJob } from "../src/main/job-store.js";
 import { LoopTokenStore } from "../src/main/loop-token-store.js";
 import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
-import { restoreEnv } from "./symphony-test-utils.js";
+import { initGitRepo, restoreEnv } from "./symphony-test-utils.js";
 import type { TelemetryEventPayload } from "../src/main/telemetry-protocol.js";
+import { cleanupAdditionalWorktrees } from "../src/server/operations/symphony-loop.js";
+import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 
 let tempRoot = "";
 let fetchCalls: Array<{ url: string; body: string; authHeader?: string | null }> = [];
@@ -973,4 +976,97 @@ test("sweepOrphanedTokens removes tokens for finalized and unknown loops, keeps 
   assert.equal(loopTokenStore.getLoopToken("loop-finalized"), null);
   assert.equal(loopTokenStore.getLoopToken("loop-unknown"), null);
   assert.equal(loopTokenStore.getLoopToken("loop-active"), "token-active");
+});
+
+function makeSimpleRemoveProvider(): WorktreeProvider {
+  return {
+    async ensureWorktree(_repoPath, worktreeDir) {
+      await fs.mkdir(worktreeDir, { recursive: true });
+    },
+    findWorktreeForBranch() {
+      return null;
+    },
+    async removeWorktree(worktreeDir) {
+      await fs.rm(worktreeDir, { recursive: true, force: true });
+    },
+    getCurrentBranch() {
+      return null;
+    },
+    branchExists: async () => false,
+  };
+}
+
+async function runAdditionalCleanup(dir: string): Promise<void> {
+  await cleanupAdditionalWorktrees(
+    [{ dir, repoPath: dir }],
+    "test-loop",
+    makeSimpleRemoveProvider(),
+  );
+}
+
+test("cleanupAdditionalWorktrees removes worktree with no code changes", async () => {
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "cleanup-clean-"));
+  try {
+    await initGitRepo(repoRoot);
+    await runAdditionalCleanup(repoRoot);
+    assert.ok(!existsSync(repoRoot), "expected clean worktree to be removed");
+  } finally {
+    await fs.rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+for (const scenario of [
+  {
+    name: "staged changes",
+    setup: async (repoRoot: string) => {
+      await fs.writeFile(path.join(repoRoot, "work.txt"), "work in progress");
+      execFileSync("git", ["add", "work.txt"], {
+        cwd: repoRoot,
+        stdio: "pipe",
+      });
+    },
+  },
+  {
+    name: "committed-only changes on a symphony branch",
+    setup: async (repoRoot: string) => {
+      execFileSync("git", ["checkout", "-b", "symphony/test-loop"], {
+        cwd: repoRoot,
+        stdio: "pipe",
+      });
+      await fs.writeFile(path.join(repoRoot, "feature.txt"), "committed work");
+      execFileSync("git", ["add", "feature.txt"], {
+        cwd: repoRoot,
+        stdio: "pipe",
+      });
+      execFileSync("git", ["commit", "-m", "wip"], {
+        cwd: repoRoot,
+        stdio: "pipe",
+      });
+    },
+  },
+] as const) {
+  test(`cleanupAdditionalWorktrees retains worktree with ${scenario.name}`, async () => {
+    const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "cleanup-retain-"));
+    try {
+      await initGitRepo(repoRoot);
+      await scenario.setup(repoRoot);
+      await runAdditionalCleanup(repoRoot);
+      assert.ok(existsSync(repoRoot), "expected worktree to be retained");
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+}
+
+test("cleanupAdditionalWorktrees retains worktree when git status fails unexpectedly", async () => {
+  const nonRepoDir = await fs.mkdtemp(path.join(os.tmpdir(), "cleanup-nonrepo-"));
+  try {
+    const sentinel = path.join(nonRepoDir, "user-work.txt");
+    await fs.writeFile(sentinel, "do not delete");
+    await runAdditionalCleanup(nonRepoDir);
+    assert.ok(existsSync(nonRepoDir), "expected worktree to be retained");
+    assert.ok(existsSync(sentinel), "expected user files to remain on git error");
+  } finally {
+    await fs.rm(nonRepoDir, { recursive: true, force: true });
+  }
 });

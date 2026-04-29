@@ -22,6 +22,7 @@ import { afterEach, test } from "node:test";
 import { setShellPathForTest } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
+  findSpawnArgsFile,
   makeFakeWorktreeProvider,
   makeMultiRepoGateway,
   makeMultiRepoTestHarness,
@@ -48,50 +49,6 @@ function createTestGateway(tmpDir: string, mockPort: number) {
     worktreeProvider: fakeWorktreeProvider,
     serversToClose,
   });
-}
-
-/**
- * Recursively find the first spawn-args.txt under searchRoot.
- * Polls until the file is found or the timeout elapses.
- */
-async function findSpawnArgsFile(
-  searchRoot: string,
-  timeoutMs = 20_000,
-): Promise<string> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const found = await findFileRecursive(searchRoot, "spawn-args.txt");
-    if (found !== null) {
-      return found;
-    }
-    await new Promise<void>((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(
-    `Timed out waiting for spawn-args.txt under ${searchRoot} after ${timeoutMs}ms`,
-  );
-}
-
-/** Recursively search for a filename under a directory. Returns the first match or null. */
-async function findFileRecursive(dir: string, filename: string): Promise<string | null> {
-  let entries: Awaited<ReturnType<typeof fs.readdir>>;
-  try {
-    entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
-    return null;
-  }
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-    if (entry.isFile() && entry.name === filename) {
-      return fullPath;
-    }
-    if (entry.isDirectory()) {
-      const result = await findFileRecursive(fullPath, filename);
-      if (result !== null) {
-        return result;
-      }
-    }
-  }
-  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -199,4 +156,3 @@ test("PLAN with 2 additionalRepos passes --add-dir for each worktree to run-loop
     );
   }
 });
-

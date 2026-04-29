@@ -33,6 +33,7 @@ export const OPERATION_RISK_TIERS: Record<OperationId, Exclude<RiskTier, "none">
   codex_argue:             "medium",
   deploy:                  "high",
   learnings:               "medium",
+  desktop_security_upgrade: "high",
   binary_paths_settings:   "medium"
 };
 

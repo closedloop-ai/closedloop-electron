@@ -26,3 +26,36 @@ export function normalizeScopePath(value: string | null | undefined): string | n
   }
   return path.resolve(expandHomePath(trimmed));
 }
+
+/**
+ * Returns true for broad or sensitive roots that should not complete automated
+ * onboarding without an explicit safer sandbox selection.
+ */
+export function isRiskyAllowedDirectory(value: string | null | undefined): boolean {
+  const scopedPath = normalizeScopePath(value);
+  const normalized =
+    scopedPath === "/" ? scopedPath : scopedPath?.replace(/\/+$/, "");
+  if (!normalized) {
+    return false;
+  }
+  if (normalized === "/" || normalized === expandHomePath("~")) {
+    return true;
+  }
+  if (normalized === "/Users" || /^\/Users\/[^/]+$/.test(normalized)) {
+    return true;
+  }
+  if (normalized === "/home" || /^\/home\/[^/]+$/.test(normalized)) {
+    return true;
+  }
+  return [
+    "/etc",
+    "/private",
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/var",
+    "/System",
+  ].some(
+    (prefix) => normalized === prefix || normalized.startsWith(`${prefix}/`),
+  );
+}

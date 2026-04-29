@@ -1,14 +1,26 @@
-import { execFileSync } from "node:child_process";
+import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
+import { LoopEventType } from "@closedloop-ai/loops-api/events";
 import {
-  getResolvedGitPath,
-  runExecuteFinalization,
-} from "../server/operations/symphony-loop.js";
+  getPrimaryRepoResult,
+  parseExecutionResultFile,
+  type RepoExecutionResult,
+} from "@closedloop-ai/loops-api/execution-result";
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
-import { LoopEventType } from "@closedloop-ai/loops-api/events";
-import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
+import { readEffectiveStatusFromState } from "../server/operations/symphony-job-snapshot.js";
+import {
+  type ExecuteFinalizationResult,
+  finalizeAdditionalReposAndPersist,
+  getResolvedGitPath,
+  runExecuteFinalization,
+  V1_PRIMARY_FULL_NAME_PLACEHOLDER,
+} from "../server/operations/symphony-loop.js";
+import {
+  assertPathAllowed,
+  DirectoryNotAllowedError,
+} from "../server/security.js";
 import {
   IMPORTED_PLAN_MARKDOWN_FILE,
   toUploadedPlanArtifact,
@@ -27,11 +39,6 @@ import {
 import type { LoopTokenStore } from "./loop-token-store.js";
 import type { TelemetryEmitter } from "./telemetry-protocol.js";
 import { parseApiKeySource, parseTokenUsage } from "./token-usage.js";
-import { readEffectiveStatusFromState } from "../server/operations/symphony-job-snapshot.js";
-import {
-  assertPathAllowed,
-  DirectoryNotAllowedError,
-} from "../server/security.js";
 
 export interface LoopFinalizerDeps {
   jobStore: JobStore;
@@ -213,9 +220,21 @@ function getCompletionCorrelationFields(
   let branchName: string | undefined;
 
   if (command === "EXECUTE" && artifacts.executionResult) {
-    const parsed = parseExecutionResultFile(artifacts.executionResult);
-    if (parsed?.branchName) {
-      branchName = parsed.branchName;
+    const primaryFullName = job.primaryRepoFullName ?? "";
+    // Synthetic fullName seeds V1 normalization in parseExecutionResultFile;
+    // V2 files carry their own fullName and ignore this argument.
+    const parsed = parseExecutionResultFile(
+      artifacts.executionResult,
+      primaryFullName || V1_PRIMARY_FULL_NAME_PLACEHOLDER,
+    );
+    if (parsed.ok) {
+      // Match buildCompletedEventResult's lookup so reboot replay and live
+      // exit pick the same entry — never rely on positional ordering.
+      const lookupName = primaryFullName || parsed.results[0]?.fullName || "";
+      const primary = getPrimaryRepoResult(parsed.results, lookupName);
+      if (primary?.status === "success" && primary.branchName) {
+        branchName = primary.branchName;
+      }
     }
   }
 
@@ -236,18 +255,55 @@ function buildCompletedEventResult(
   claudeWorkDir: string,
   artifacts: Record<string, unknown>,
   getAllowedDirectories?: () => string[],
-): Record<string, unknown> {
+): { result: Record<string, unknown>; results?: RepoExecutionResult[] } {
   const result: Record<string, unknown> = {
     exitCode: job.exitCode ?? 0,
     subtype: command.toLowerCase(),
   };
+  let results: RepoExecutionResult[] | undefined;
+  const setNoChangesFields = (): void => {
+    result.prUrl = null;
+    result.prNumber = null;
+    result.has_changes = false;
+  };
 
   if (command === "EXECUTE" && artifacts.executionResult) {
-    const execResult = artifacts.executionResult as Record<string, unknown>;
-    result.prUrl = execResult.pr_url;
-    result.prNumber = execResult.pr_number;
-    result.branchName = execResult.branch_name;
-    result.has_changes = execResult.has_changes ?? false;
+    const primaryFullName = job.primaryRepoFullName ?? "";
+    // FEA-683: legacy V1-on-disk recovery — `parseExecutionResultFile`
+    // normalizes V1 snake_case to a length-1 RepoExecutionResult[]; the
+    // fullName argument seeds the V1 entry. V2 files carry their own
+    // fullName and ignore this argument.
+    const parsed = parseExecutionResultFile(
+      artifacts.executionResult,
+      primaryFullName || V1_PRIMARY_FULL_NAME_PLACEHOLDER,
+    );
+    if (!parsed.ok) {
+      gatewayLog.warn(
+        "execution-result-parse-failed",
+        `loopId=${job.loopId} error=${parsed.error}`,
+      );
+      setNoChangesFields();
+    } else {
+      const lookupName = primaryFullName || parsed.results[0]?.fullName || "";
+      const primaryResult = getPrimaryRepoResult(parsed.results, lookupName);
+
+      results = parsed.results;
+
+      if (primaryResult === null) {
+        gatewayLog.warn(
+          "primary-repo-not-found-in-results",
+          `loopId=${job.loopId} primaryFullName=${lookupName}`,
+        );
+        setNoChangesFields();
+      } else if (primaryResult.status === "success") {
+        result.prUrl = primaryResult.prUrl;
+        result.prNumber = primaryResult.prNumber;
+        result.branchName = primaryResult.branchName;
+        result.has_changes = primaryResult.hasChanges;
+      } else {
+        setNoChangesFields();
+      }
+    }
   }
 
   const { sessionId, branchName } = getCompletionCorrelationFields(
@@ -271,8 +327,11 @@ function buildCompletedEventResult(
   }
 
   return {
-    ...result,
-    ...getExecuteFinalizationMetadata(job, command),
+    result: {
+      ...result,
+      ...getExecuteFinalizationMetadata(job, command),
+    },
+    ...(results ? { results } : {}),
   };
 }
 
@@ -359,7 +418,7 @@ export async function tryPostCompletedEvent(
   }
 
   const tokensUsed = parseTokenUsage(claudeWorkDir);
-  const result = buildCompletedEventResult(
+  const completedResult = buildCompletedEventResult(
     job,
     command,
     claudeWorkDir,
@@ -376,7 +435,7 @@ export async function tryPostCompletedEvent(
 
   const completedEvent: Record<string, unknown> = {
     type: LoopEventType.Completed,
-    result,
+    result: completedResult.result,
     tokensUsed: {
       input: tokensUsed.inputTokens,
       output: tokensUsed.outputTokens,
@@ -387,6 +446,7 @@ export async function tryPostCompletedEvent(
     },
     ...(apiKeySource != null ? { apiKeySource } : {}),
     loopId: job.loopId,
+    ...(completedResult.results ? { results: completedResult.results } : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
   };
 
@@ -777,8 +837,7 @@ async function cleanupPersistedAdditionalWorktrees(
     }
   }
   const current = jobStore.getByLoopId(job.loopId) ?? job;
-  const { additionalWorktreeDirs: _drop, ...rest } = current;
-  void _drop;
+  const { additionalWorktreeDirs: _, ...rest } = current;
   jobStore.upsert({
     ...rest,
     updatedAt: new Date().toISOString(),
@@ -909,12 +968,13 @@ export async function finalizeLoopFromRuntime(
     resolvedJob = jobStore.getByLoopId(resolvedJob.loopId) ?? resolvedJob;
   }
 
+  let executeFinalization: ExecuteFinalizationResult | null = null;
   if (
     command === "EXECUTE" &&
     isSuccessStatus &&
     !hasTerminalExecuteFinalization(resolvedJob.executeFinalizationStatus)
   ) {
-    const executeFinalization = await runExecuteFinalization({
+    executeFinalization = await runExecuteFinalization({
       worktreeDir: resolvedJob.worktreeDir,
       claudeWorkDir,
       loopId: resolvedJob.loopId,
@@ -926,6 +986,7 @@ export async function finalizeLoopFromRuntime(
       expectedMcpUrl: resolvedJob.expectedMcpUrl,
       jobStore,
       source: reason === "live-exit" ? "live-exit" : "boot-recovery",
+      primaryFullName: resolvedJob.primaryRepoFullName ?? "",
     });
     if (
       executeFinalization.status === "error" &&
@@ -934,6 +995,60 @@ export async function finalizeLoopFromRuntime(
       warnings.push("GIT_PUSH_FAILED");
     }
     resolvedJob = jobStore.getByLoopId(resolvedJob.loopId) ?? resolvedJob;
+  }
+
+  // Recovery path: replay multi-repo finalization for any persisted
+  // additional-repo worktrees. The live-exit path runs its own copy of this
+  // helper inside `handleProcessCompletion` (same idempotency check, so a
+  // double invocation here is a no-op). This guards the crash window between
+  // primary push/PR creation and the live block that persists the combined
+  // V2 envelope: without this, side-repo commits/pushes are never replayed
+  // and the cloud receives a primary-only envelope.
+  if (
+    command === "EXECUTE" &&
+    isSuccessStatus &&
+    reason !== "live-exit" &&
+    resolvedJob.additionalWorktreeDirs &&
+    resolvedJob.additionalWorktreeDirs.length > 0
+  ) {
+    try {
+      const outcome = await finalizeAdditionalReposAndPersist({
+        additionalEntries: resolvedJob.additionalWorktreeDirs,
+        primaryFullName: resolvedJob.primaryRepoFullName ?? "",
+        primaryBaseBranch: resolvedJob.baseBranch ?? "main",
+        executeFinalization,
+        claudeWorkDir,
+        loopId: resolvedJob.loopId,
+        apiBaseUrl,
+        token: apiAuthToken,
+        webAppOrigin: resolvedJob.webAppOrigin ?? "",
+        getAllowedDirectories,
+        artifactSlug: resolvedJob.artifactSlug,
+        expectedMcpUrl: resolvedJob.expectedMcpUrl,
+        committer: resolvedJob.committer,
+      });
+      gatewayLog.info(
+        "loop-finalizer",
+        `Additional-repo recovery for loopId=${resolvedJob.loopId}: ${outcome.status}`,
+      );
+      if (
+        outcome.status === "ok" &&
+        outcome.results.some((r) => r.status === "failed")
+      ) {
+        if (!warnings.includes("GIT_PUSH_FAILED")) {
+          warnings.push("GIT_PUSH_FAILED");
+        }
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      gatewayLog.warn(
+        "loop-finalizer",
+        `Additional-repo recovery threw for loopId=${resolvedJob.loopId}: ${message}`,
+      );
+      if (!warnings.includes("GIT_PUSH_FAILED")) {
+        warnings.push("GIT_PUSH_FAILED");
+      }
+    }
   }
 
   let remoteError: string | undefined;

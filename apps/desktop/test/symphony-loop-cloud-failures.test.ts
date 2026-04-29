@@ -592,6 +592,17 @@ test("PLAN: non-zero exit cleans up persisted loop token", async () => {
   // Wait for the error event indicating the process failed
   await waitForTerminalEvent(mock.requests, loopId);
 
+  // The token is deleted after the error event is posted (post-event cleanup
+  // continues with jobStore upsert and worktree cleanup before the synchronous
+  // deleteLoopToken call). Poll briefly to absorb that gap on slow CI runners.
+  const tokenDeadline = Date.now() + 5_000;
+  while (
+    loopTokenStore.getLoopToken(loopId) !== null &&
+    Date.now() < tokenDeadline
+  ) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+
   assert.equal(
     loopTokenStore.getLoopToken(loopId),
     null,

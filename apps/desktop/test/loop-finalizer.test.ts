@@ -24,6 +24,7 @@ import {
 } from "../src/server/shell-path.js";
 import type { TelemetryEventPayload } from "../src/main/telemetry-protocol.js";
 import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
+import { makeV2ExecutionResult } from "./helpers/execution-result-fixtures.js";
 
 let tempRoot = "";
 let fetchCalls: Array<{ url: string; body: string }> = [];
@@ -913,12 +914,11 @@ test("tryPostCompletedEvent adds EXECUTE PR fields from artifacts", async () => 
   jobStore.upsert(job);
 
   const artifacts = {
-    executionResult: {
-      pr_url: "https://example.com/pr/1",
-      pr_number: 1,
-      branch_name: "feat/x",
-      has_changes: true,
-    },
+    executionResult: makeV2ExecutionResult({
+      fullName: "acme/repo",
+      prNumber: 1,
+      branchName: "feat/x",
+    }) as unknown as Record<string, unknown>,
   };
 
   await tryPostCompletedEvent(
@@ -931,7 +931,7 @@ test("tryPostCompletedEvent adds EXECUTE PR fields from artifacts", async () => 
   );
 
   const body = fetchCalls[0]?.body ?? "";
-  assert.match(body, /"prUrl":"https:\/\/example.com\/pr\/1"/);
+  assert.match(body, /"prUrl":"https:\/\/github.com\/acme\/repo\/pull\/1"/);
   assert.match(body, /"prNumber":1/);
   assert.match(body, /"branchName":"feat\/x"/);
   assert.match(body, /"has_changes":true/);
@@ -984,12 +984,15 @@ test("tryPostCompletedEvent EXECUTE uses git branch when executionResult omits b
   });
   jobStore.upsert(job);
 
+  // Worktree-branch fallback: when the primary entry is skipped (no branchName
+  // on the V2 entry), getCompletionCorrelationFields falls back to git HEAD
+  // of the worktree.
   const artifacts = {
-    executionResult: {
-      pr_url: "https://example.com/pr/2",
-      pr_number: 2,
-      has_changes: true,
-    },
+    executionResult: makeV2ExecutionResult({
+      status: "skipped",
+      fullName: "acme/repo",
+      reason: "no_changes",
+    }) as unknown as Record<string, unknown>,
   };
 
   await tryPostCompletedEvent(job, "EXECUTE", claudeWorkDir, artifacts, [], artifactDeps(jobStore));
@@ -1014,12 +1017,11 @@ test("tryPostCompletedEvent EXECUTE prefers executionResult branch_name over git
   jobStore.upsert(job);
 
   const artifacts = {
-    executionResult: {
-      pr_url: "https://example.com/pr/3",
-      pr_number: 3,
-      branch_name: "feat/from-artifact",
-      has_changes: true,
-    },
+    executionResult: makeV2ExecutionResult({
+      fullName: "acme/repo",
+      prNumber: 3,
+      branchName: "feat/from-artifact",
+    }) as unknown as Record<string, unknown>,
   };
 
   await tryPostCompletedEvent(job, "EXECUTE", claudeWorkDir, artifacts, [], artifactDeps(jobStore));
@@ -1045,12 +1047,11 @@ test("tryPostCompletedEvent includes execute finalization metadata for EXECUTE j
   jobStore.upsert(job);
 
   const artifacts = {
-    executionResult: {
-      pr_url: "https://example.com/pr/4",
-      pr_number: 4,
-      branch_name: "feat/recovered-complete",
-      has_changes: true,
-    },
+    executionResult: makeV2ExecutionResult({
+      fullName: "acme/repo",
+      prNumber: 4,
+      branchName: "feat/recovered-complete",
+    }) as unknown as Record<string, unknown>,
   };
 
   await tryPostCompletedEvent(
@@ -1111,15 +1112,14 @@ test("tryUploadArtifacts includes execute finalization metadata for EXECUTE jobs
   await fs.mkdir(claudeWorkDir, { recursive: true });
   await fs.writeFile(
     path.join(claudeWorkDir, "execution-result.json"),
-    JSON.stringify({
-      has_changes: true,
-      pr_url: "https://example.com/pr/11",
-      pr_number: 11,
-      branch_name: "feat/recovered-upload",
-      base_ref: "main",
-      base_branch: "main",
-      commit_sha: "abc123",
-    }),
+    JSON.stringify(
+      makeV2ExecutionResult({
+        fullName: "acme/repo",
+        prNumber: 11,
+        branchName: "feat/recovered-upload",
+        commitSha: "abc123",
+      }),
+    ),
   );
 
   const jobStore = createStore("step-upload-exec-finalization-metadata");
@@ -1699,7 +1699,7 @@ test("finalizeLoopFromRuntime retries EXECUTE finalization after a prior error o
     [
       "#!/bin/sh",
       'if [ "$1" = "pr" ] && [ "$2" = "create" ]; then',
-      '  echo "https://example.com/pull/123"',
+      '  echo "https://github.com/acme/repo/pull/123"',
       "  exit 0",
       "fi",
       'if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then',
@@ -1752,6 +1752,7 @@ test("finalizeLoopFromRuntime retries EXECUTE finalization after a prior error o
     command: "EXECUTE",
     baseBranch: "main",
     webAppOrigin: "https://app.closedloop.ai",
+    primaryRepoFullName: "acme/repo",
     committer: {
       name: "Test User",
       email: "test@example.com",
@@ -1798,16 +1799,147 @@ test("finalizeLoopFromRuntime retries EXECUTE finalization after a prior error o
   assert.ok(uploadCall, "expected upload-artifacts on recovery retry");
   const uploadBody = JSON.parse(uploadCall.body) as {
     metadata?: Record<string, unknown>;
-    artifacts?: { executionResult?: Record<string, unknown> };
+    artifacts?: {
+      executionResult?: {
+        schemaVersion?: number;
+        results?: Array<{ status: string; prUrl?: string }>;
+      };
+    };
   };
   assert.equal(uploadBody.metadata?.executeFinalizationStatus, "success");
+  assert.equal(uploadBody.artifacts?.executionResult?.schemaVersion, 2);
   assert.equal(
-    uploadBody.artifacts?.executionResult?.pr_url,
-    "https://example.com/pull/123",
+    uploadBody.artifacts?.executionResult?.results?.[0]?.prUrl,
+    "https://github.com/acme/repo/pull/123",
   );
 
   const completedEventCall = fetchCalls.find((call) =>
     call.body.includes('"type":"completed"'),
   );
   assert.ok(completedEventCall, "expected completed event on recovery retry");
+});
+
+test("tryPostCompletedEvent includes V2 top-level results and primary PR fields", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const jobStore = createStore("v2-repo-results");
+  const job = createBaseJob({
+    claudeWorkDir,
+    command: "EXECUTE",
+    primaryRepoFullName: "acme/main-repo",
+  });
+  jobStore.upsert(job);
+
+  await tryPostCompletedEvent(
+    job,
+    "EXECUTE",
+    claudeWorkDir,
+    {
+      executionResult: makeV2ExecutionResult([
+        {
+          fullName: "acme/main-repo",
+          prNumber: 10,
+          branchName: "feat/v2-multi",
+          commitSha: "cafebabe",
+        },
+        {
+          status: "skipped",
+          fullName: "acme/side-repo",
+          reason: "nothing changed",
+        },
+      ]) as unknown as Record<string, unknown>,
+    },
+    [],
+    artifactDeps(jobStore),
+  );
+
+  const body = fetchCalls[0]?.body ?? "";
+  const parsed = JSON.parse(body) as {
+    result?: Record<string, unknown>;
+    results?: Array<{ status?: string; fullName?: string }>;
+  };
+  const repoResults = parsed.results as
+    | Array<{ status?: string; fullName?: string }>
+    | undefined;
+  assert.ok(repoResults, "top-level results must be present for v2 envelope");
+  assert.equal(repoResults.length, 2);
+  assert.equal(repoResults[0]?.status, "success");
+  assert.equal(repoResults[1]?.status, "skipped");
+  assert.equal(parsed.result?.prUrl, "https://github.com/acme/main-repo/pull/10");
+  assert.equal(parsed.result?.prNumber, 10);
+  assert.equal(parsed.result?.branchName, "feat/v2-multi");
+  assert.equal(parsed.result?.has_changes, true);
+});
+
+test("tryPostCompletedEvent treats skipped V2 primary as no changes", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const jobStore = createStore("v2-primary-skipped");
+  const job = createBaseJob({ claudeWorkDir, command: "EXECUTE" });
+  jobStore.upsert(job);
+
+  await tryPostCompletedEvent(
+    job,
+    "EXECUTE",
+    claudeWorkDir,
+    {
+      executionResult: makeV2ExecutionResult({
+        status: "skipped",
+        fullName: "acme/primary",
+        reason: "branch already has an open PR",
+      }) as unknown as Record<string, unknown>,
+    },
+    [],
+    artifactDeps(jobStore),
+  );
+
+  const body = fetchCalls[0]?.body ?? "";
+  const parsed = JSON.parse(body) as { result?: Record<string, unknown> };
+  assert.equal(parsed.result?.has_changes, false, "has_changes must be false for skipped primary");
+  assert.equal(parsed.result?.prUrl, null, "prUrl must normalize to null for skipped status");
+  assert.equal(parsed.result?.prNumber, null, "prNumber must normalize to null for skipped status");
+});
+
+// Legacy V1-on-disk recovery: jobs that finalized under pre-PLN-378 desktop
+// builds may still have V1 snake_case files. parseExecutionResultFile
+// normalizes them to a length-1 RepoExecutionResult[]. Delete this fixture
+// (and the V1 reader in @closedloop-ai/loops-api) under FEA-683 once the
+// in-flight retention window passes.
+test("legacy V1-on-disk: snake_case fields normalize through unified parse path", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const v1Artifact = {
+    has_changes: true,
+    pr_url: "https://github.com/acme/repo/pull/99",
+    pr_number: 99,
+    branch_name: "feat/v1-compat",
+    base_ref: "main",
+  };
+
+  const jobStore = createStore("v1-flat-object");
+  const job = createBaseJob({
+    claudeWorkDir,
+    command: "EXECUTE",
+    primaryRepoFullName: "acme/repo",
+  });
+  jobStore.upsert(job);
+
+  await tryPostCompletedEvent(
+    job,
+    "EXECUTE",
+    claudeWorkDir,
+    { executionResult: v1Artifact },
+    [],
+    artifactDeps(jobStore),
+  );
+
+  const body = fetchCalls[0]?.body ?? "";
+  const parsed = JSON.parse(body) as { result?: Record<string, unknown> };
+  assert.equal(parsed.result?.has_changes, true, "v1: has_changes must be true");
+  assert.equal(parsed.result?.prUrl, "https://github.com/acme/repo/pull/99", "v1: prUrl must come from pr_url");
+  assert.equal(parsed.result?.prNumber, 99, "v1: prNumber must come from pr_number");
+  assert.equal(parsed.result?.branchName, "feat/v1-compat", "v1: branchName must come from branch_name");
 });

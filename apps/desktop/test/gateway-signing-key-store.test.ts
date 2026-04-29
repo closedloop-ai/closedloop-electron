@@ -98,6 +98,23 @@ describe("GatewaySigningKeyStore", () => {
     assert.deepEqual(missing, { ok: false, reason: "key_missing" });
   });
 
+  test("delete removes only the requested gateway key", () => {
+    const store = new GatewaySigningKeyStore({
+      cwd: makeTempDir(),
+      name: "gateway-keys",
+      safeStorage: makeSafeStorage(),
+    });
+    const first = store.getOrCreate("gateway-1");
+    const second = store.getOrCreate("gateway-2");
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, true);
+
+    store.delete("gateway-1");
+
+    assert.deepEqual(store.load("gateway-1"), { ok: false, reason: "key_missing" });
+    assert.equal(store.load("gateway-2").ok, true);
+  });
+
   test("safeStorage unavailable returns a redacted failure reason", () => {
     const store = new GatewaySigningKeyStore({
       cwd: makeTempDir(),

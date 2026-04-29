@@ -8,6 +8,8 @@ import type { TelemetryCategory } from "../src/main/telemetry-protocol.js";
 // Compile-time regression guard: fails tsc if "queue.stats_changed" is removed from TelemetryCategory.
 const _queueStatsCategoryCheck: TelemetryCategory = "queue.stats_changed";
 const _desktopPopUnavailableCategoryCheck: TelemetryCategory = "desktop_pop.unavailable";
+const _jobPlanSourceResolvedCategoryCheck: TelemetryCategory =
+  "job.plan_source_resolved";
 
 afterEach(async () => {
   await Observability.shutdown();
@@ -75,6 +77,47 @@ describe("Observability", () => {
     assert.equal(telemetryEvents.length, 1);
     assert.equal(telemetryEvents[0].category, "job.started");
     assert.equal(captureCalls.length, 0);
+  });
+
+  test("jobPlanSourceResolved emits redacted EXECUTE plan diagnostics", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.jobPlanSourceResolved("cmd-1", "symphony_loop", "loop-1", {
+      source: "imported-plan-compat",
+      rawPlanPayload: true,
+      rawPlanAligned: false,
+      localPlanJsonPresent: true,
+      localPlanJsonAligned: false,
+      importedPlanFileStaged: true,
+      closedLoopPlanFileSet: true,
+      planArtifactContentLength: 10455,
+      rawPlanContentLength: 23906,
+      planArtifactContentHash: "abc123def456",
+      rawPlanContentHash: "fed654cba321",
+    });
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "job.plan_source_resolved");
+    assert.equal(telemetryEvents[0].severity, "info");
+    assert.equal(telemetryEvents[0].trace?.commandId, "cmd-1");
+    assert.equal(telemetryEvents[0].trace?.operationId, "symphony_loop");
+    assert.equal(telemetryEvents[0].trace?.loopId, "loop-1");
+    assert.deepEqual(telemetryEvents[0].diagnostics?.planSource, {
+      source: "imported-plan-compat",
+      rawPlanPayload: true,
+      rawPlanAligned: false,
+      localPlanJsonPresent: true,
+      localPlanJsonAligned: false,
+      importedPlanFileStaged: true,
+      closedLoopPlanFileSet: true,
+      planArtifactContentLength: 10455,
+      rawPlanContentLength: 23906,
+      planArtifactContentHash: "abc123def456",
+      rawPlanContentHash: "fed654cba321",
+    });
   });
 
   test("approval events include time-to-resolution", () => {

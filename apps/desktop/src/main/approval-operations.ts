@@ -31,6 +31,7 @@ export const SUPPORTED_OPERATION_IDS = [
   "deploy",
   "learnings",
   "filesystem",
+  "desktop_security_upgrade",
   "binary_paths_settings"
 ] as const;
 
@@ -127,6 +128,9 @@ export function resolveOperationId(pathname: string): string | null {
   }
   if (pathname === "/api/gateway/health-check") {
     return "health_check";
+  }
+  if (pathname === "/api/gateway/security/upgrade") {
+    return "desktop_security_upgrade";
   }
   if (pathname.startsWith("/api/gateway/settings/binary-paths")) {
     return "binary_paths_settings";

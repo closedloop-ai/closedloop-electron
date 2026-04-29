@@ -15,6 +15,8 @@ export interface ProtocolEnvelope {
 
 export interface DesktopHelloEvent extends ProtocolEnvelope {
   computeTargetId?: string;
+  gatewayId?: string;
+  desktopSecurityUpgradeProtocolVersion?: 1;
   machineName: string;
   platform: NodeJS.Platform;
   pluginVersion: string;

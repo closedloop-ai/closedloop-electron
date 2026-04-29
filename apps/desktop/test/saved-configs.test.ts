@@ -197,6 +197,37 @@ test("deleteConfig with unknown id returns wasActive: false without throwing", (
   assert.equal(result.wasActive, false);
 });
 
+test("isGatewayIdReferenced preserves shared saved or active legacy gateway keys", () => {
+  const tmpDir = makeTempDir("saved-configs-gateway-reference-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.test");
+  store.setApiOrigin("https://api.test");
+  store.setWebAppOrigin("https://app.test");
+  const first = store.saveConfig("first");
+  const second = store.saveConfig("second");
+
+  store.updateConfigManagedMetadata(first.id, {
+    apiKeySource: "DESKTOP_MANAGED",
+    gatewayId: "gateway-shared",
+  });
+  store.updateConfigManagedMetadata(second.id, {
+    apiKeySource: "DESKTOP_MANAGED",
+    gatewayId: "gateway-shared",
+  });
+
+  store.deleteConfig(first.id);
+
+  assert.equal(store.isGatewayIdReferenced("gateway-shared"), true);
+  store.deleteConfig(second.id);
+  assert.equal(store.isGatewayIdReferenced("gateway-shared"), false);
+  assert.equal(
+    store.isGatewayIdReferenced("gateway-shared", {
+      activeRuntimeGatewayId: "gateway-shared",
+    }),
+    true,
+  );
+});
+
 // --- renameConfig ---
 
 test("renameConfig persists to disk and preserves id", () => {
@@ -295,6 +326,85 @@ test("migration: fresh install initializes savedConfigs to [] and activeConfigId
 
   assert.deepEqual(all.savedConfigs, []);
   assert.equal(all.activeConfigId, null);
+});
+
+test("migration: saved configs without managed identity are treated as USER_CREATED", () => {
+  const tmpDir = makeTempDir("saved-configs-managed-migration-");
+  const storeName = "migration-managed";
+  fs.writeFileSync(
+    path.join(tmpDir, `${storeName}.json`),
+    JSON.stringify({
+      savedConfigs: [
+        {
+          id: "00000000-0000-4000-8000-000000000001",
+          name: "legacy",
+          relayOrigin: "https://relay.test",
+          apiOrigin: "https://api.test",
+          webAppOrigin: "https://app.test",
+          apiKeySource: "DESKTOP_MANAGED",
+        },
+      ],
+      activeConfigId: null,
+    }),
+    "utf-8",
+  );
+
+  const store = makeSettings(tmpDir, storeName);
+
+  assert.equal(store.listConfigs()[0]?.apiKeySource, "USER_CREATED");
+});
+
+test("ensureConfigGatewayId creates isolated persisted gateway identities", () => {
+  const tmpDir = makeTempDir("saved-configs-gateway-id-");
+  const storeName = "gateway-id-settings";
+  const store = makeSettings(tmpDir, storeName);
+  store.setRelayOrigin("https://relay.test");
+  store.setApiOrigin("https://api.test");
+  store.setWebAppOrigin("https://app.test");
+  const first = store.saveConfig("first");
+  const second = store.saveConfig("second");
+
+  const firstWithGateway = store.ensureConfigGatewayId(first.id);
+  const secondWithGateway = store.ensureConfigGatewayId(second.id);
+
+  assert.match(firstWithGateway.gatewayId ?? "", UUID_V4_RE);
+  assert.match(secondWithGateway.gatewayId ?? "", UUID_V4_RE);
+  assert.notEqual(firstWithGateway.gatewayId, secondWithGateway.gatewayId);
+  assert.equal(
+    store.ensureConfigGatewayId(first.id).gatewayId,
+    firstWithGateway.gatewayId,
+  );
+  assert.equal(
+    makeSettings(tmpDir, storeName).listConfigs().find((c) => c.id === first.id)
+      ?.gatewayId,
+    firstWithGateway.gatewayId,
+  );
+});
+
+test("updateActiveConfigOrigins persists trusted origins on the active profile", () => {
+  const tmpDir = makeTempDir("saved-configs-active-origins-");
+  const storeName = "active-origins-settings";
+  const store = makeSettings(tmpDir, storeName);
+  store.setRelayOrigin("https://relay.old.test");
+  store.setApiOrigin("https://api.old.test");
+  store.setWebAppOrigin("https://app.old.test");
+  const config = store.saveConfig("Dev");
+  store.applyConfig(config.id);
+
+  const updated = store.updateActiveConfigOrigins({
+    relayOrigin: "http://localhost:3020/socket",
+    apiOrigin: "http://localhost:3002/v1",
+    webAppOrigin: "http://localhost:3000/settings",
+  });
+
+  assert.equal(updated?.relayOrigin, "http://localhost:3020");
+  assert.equal(updated?.apiOrigin, "http://localhost:3002");
+  assert.equal(updated?.webAppOrigin, "http://localhost:3000");
+  const rehydrated = makeSettings(tmpDir, storeName);
+  const rehydratedConfig = rehydrated.listConfigs().find((c) => c.id === config.id);
+  assert.equal(rehydratedConfig?.relayOrigin, "http://localhost:3020");
+  assert.equal(rehydratedConfig?.apiOrigin, "http://localhost:3002");
+  assert.equal(rehydratedConfig?.webAppOrigin, "http://localhost:3000");
 });
 
 // --- ApiKeyStore profile key methods ---
