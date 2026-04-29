@@ -2087,6 +2087,8 @@ async function attemptLlmCommit(
     "2. Stage all changed/new files EXCEPT the .claude/ and .closedloop-ai/ directories:",
     "   git add -- . ':!.claude' ':!.closedloop-ai'",
     "3. Write a clear, descriptive commit message based on the actual code changes",
+    "   - First check if a `.gitmessage` file exists at the repo root. If it does, read it and",
+    "     follow its format exactly (subject line format, body structure, required sections).",
     "   - Summarize WHAT changed and WHY (not just 'ClosedLoop.AI loop output')",
     "   - Use conventional commit style if the changes have a clear category",
     "   - If an artifact slug is provided, prefix the commit message with it",
