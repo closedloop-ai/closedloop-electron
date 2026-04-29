@@ -242,6 +242,7 @@ export class DesktopApplication {
       () =>
         this.cloudStatus.state === "online" ? this.cloudStatus.targetId : null,
       (payload) => this.handleSecurityUpgradeCommand(payload),
+      () => this.isDesktopSetupComplete(),
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -628,6 +629,17 @@ export class DesktopApplication {
       return this.legacyGatewayId;
     }
     return this.settingsStore.ensureConfigGatewayId(activeConfigId).gatewayId ?? this.legacyGatewayId;
+  }
+
+  /** Reports setup completion for first-run onboarding and already-provisioned profiles. */
+  private isDesktopSetupComplete(): boolean {
+    const sandboxBaseDirectory = normalizeScopePath(
+      this.settingsStore.getSandboxBaseDirectory(),
+    );
+    return (
+      this.settingsStore.getOnboardingCompleted() ||
+      (sandboxBaseDirectory !== null && this.apiKeyStore.getApiKey() !== null)
+    );
   }
 
   private getUpgradeCapableGatewayId(): string | null {
