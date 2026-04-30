@@ -76,6 +76,28 @@ async function waitForFile(
   throw new Error(`Timed out waiting for file: ${filePath}`);
 }
 
+async function waitForTelemetryCategory(
+  events: EnrichedTelemetryEvent[],
+  category: string,
+  loopId: string,
+  timeoutMs = 10_000,
+): Promise<EnrichedTelemetryEvent> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const event = events.find(
+      (candidate) =>
+        candidate.category === category && candidate.trace?.loopId === loopId,
+    );
+    if (event) {
+      return event;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(
+    `Timed out waiting for telemetry category ${category} loopId=${loopId}`,
+  );
+}
+
 afterEach(async () => {
   await Observability.shutdown();
   Observability.reset();
@@ -919,6 +941,126 @@ test("EXECUTE: rehydrates aligned raw implementation plan state into a fresh wor
   assert.deepEqual(capturedPlan.pendingTasks, ["task-1"]);
   assert.deepEqual(capturedPlan.completedTasks, ["task-0"]);
   assert.deepEqual(capturedPlan.openQuestions, ["question-1"]);
+});
+
+test("EXECUTE: emits decision-table verifier telemetry from current-run JSONL", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-dt-telemetry-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-dt-telemetry");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+  await createFakeRunLoopScript(
+    tmpDir,
+    [
+      "#!/bin/sh",
+      'mkdir -p "$CLOSEDLOOP_WORKDIR/.closedloop-ai"',
+      "printf '{\"timestamp\":\"%s\",\"workdir\":\"%s\",\"decision_table_path\":\".closedloop-ai/decision-tables/pln-302.md\",\"final_status\":\"aligned\",\"iterations\":3,\"drift_kind_counts\":{\"code_drift\":2,\"test_drift\":1,\"plan_ambiguity\":0},\"fixes_attempted\":3,\"parse_failures\":0,\"verifier_invocations\":3,\"phase_duration_ms\":58921}\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$CLOSEDLOOP_WORKDIR\" >> \"$CLOSEDLOOP_WORKDIR/.closedloop-ai/decision-table-verifications.jsonl\"",
+      "exit 0",
+    ].join("\n"),
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+  await fs.writeFile(
+    path.join(fakeBin, "git"),
+    [
+      "#!/bin/sh",
+      'if [ "$1" = status ]; then exit 0; fi',
+      'if [ "$1" = "rev-parse" ]; then echo "abc123"; exit 0; fi',
+      "exit 0",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const telemetryEvents: EnrichedTelemetryEvent[] = [];
+  Observability.init({
+    telemetrySend: (event) => telemetryEvents.push(event),
+  });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-dt-telemetry-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000000452";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [
+          {
+            type: "IMPLEMENTATION_PLAN",
+            content: "# Plan\n\n- Verify behavior",
+          },
+        ],
+        repo: {
+          fullName: `dt-telemetry/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  await mock.waitForRequest("upload-artifacts");
+
+  const event = await waitForTelemetryCategory(
+    telemetryEvents,
+    "job.decision_table_verification",
+    loopId,
+  );
+  const diagnostic = event.diagnostics?.decisionTableVerification;
+  assert.ok(diagnostic, "Expected decision-table diagnostics");
+  assert.equal(diagnostic.telemetryStatus, "reported");
+  if (diagnostic.telemetryStatus === "reported") {
+    assert.equal(diagnostic.finalStatus, "aligned");
+    assert.equal(diagnostic.decisionTablePath, ".closedloop-ai/decision-tables/pln-302.md");
+    assert.equal(diagnostic.iterations, 3);
+    assert.equal(diagnostic.driftKindCounts.codeDrift, 2);
+    assert.equal(diagnostic.driftKindCounts.testDrift, 1);
+    assert.equal(diagnostic.fixesAttempted, 3);
+    assert.equal(diagnostic.parseFailures, 0);
+    assert.equal(diagnostic.verifierInvocations, 3);
+    assert.equal(diagnostic.phaseDurationMs, 58921);
+  }
 });
 
 test("EXECUTE: fresh worktree without raw plan stages plan.md and passes CLOSEDLOOP_PLAN_FILE", async () => {

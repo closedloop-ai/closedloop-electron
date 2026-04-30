@@ -24,6 +24,10 @@ import {
   sanitizeErrorMessage,
   stripAnsi,
 } from "../../main/diagnostics-helpers.js";
+import {
+  emitDecisionTableVerificationTelemetry,
+  getDecisionTableVerificationTelemetryOffset,
+} from "../../main/decision-table-verification-telemetry.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import type { ExecutePlanSourceDiagnostics } from "../../main/telemetry-protocol.js";
 import type {
@@ -3429,6 +3433,36 @@ function isCancelled(jobStore: JobStore | undefined, loopId: string): boolean {
   return status === "CANCEL_PENDING" || status === "CANCELLED";
 }
 
+function emitExecuteDecisionTableVerificationTelemetry(args: {
+  loopId: string;
+  commandId?: string;
+  operationId?: string;
+  claudeWorkDir: string;
+  decisionTableVerificationStartOffset?: number;
+}): void {
+  const summary = emitDecisionTableVerificationTelemetry({
+    telemetry: Observability.getTelemetryEmitter(),
+    commandId: args.commandId,
+    operationId: args.operationId,
+    loopId: args.loopId,
+    closedLoopWorkDir: args.claudeWorkDir,
+    startOffset: args.decisionTableVerificationStartOffset,
+  });
+
+  if (summary.emittedRecords > 0) {
+    gatewayLog.info(
+      "decision-table-telemetry",
+      `Emitted ${summary.emittedRecords} decision-table verification telemetry record(s) for loopId=${args.loopId} file=${summary.filePath}`,
+    );
+    return;
+  }
+
+  gatewayLog.info(
+    "decision-table-telemetry",
+    `Emitted decision-table verification missing telemetry for loopId=${args.loopId} reason=${summary.missingReason ?? "unknown"} file=${summary.filePath}`,
+  );
+}
+
 export async function handleProcessCompletion(
   exitCode: number,
   body: LoopRequestBody,
@@ -3457,6 +3491,7 @@ export async function handleProcessCompletion(
     authFilesExist: boolean;
     envSnapshot: Record<string, string>;
   },
+  decisionTableVerificationStartOffset = 0,
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
   // Temp-dir commands (DECOMPOSE, EVALUATE_*) need the entire temp tree removed on cleanup.
@@ -3539,6 +3574,16 @@ export async function handleProcessCompletion(
       abortReason,
       spawnMeta,
     };
+
+    if (!wasCancelled && command === "EXECUTE") {
+      emitExecuteDecisionTableVerificationTelemetry({
+        loopId,
+        commandId: commandId ?? existingJob?.commandId,
+        operationId: operationId ?? existingJob?.operationId,
+        claudeWorkDir,
+        decisionTableVerificationStartOffset,
+      });
+    }
 
     if (wasCancelled) {
       Observability.jobCancelled(
@@ -3980,6 +4025,17 @@ export async function handleProcessCompletion(
           updatedAt: new Date().toISOString(),
         });
       }
+    }
+
+    if (command === "EXECUTE") {
+      const currentJob = jobStore?.getByLoopId(loopId);
+      emitExecuteDecisionTableVerificationTelemetry({
+        loopId,
+        commandId: commandId ?? currentJob?.commandId,
+        operationId: operationId ?? currentJob?.operationId,
+        claudeWorkDir,
+        decisionTableVerificationStartOffset,
+      });
     }
 
     runningLoops.delete(loopId);
@@ -5165,6 +5221,7 @@ async function handleLoopRequest(
     }
     let child: ReturnType<typeof spawn>;
     let spawnStartedAt = 0;
+    let decisionTableVerificationStartOffset = 0;
     const collectedSpawnMeta: {
       command: string;
       args: string[];
@@ -5481,6 +5538,10 @@ async function handleLoopRequest(
         collectedSpawnMeta.command = scriptPath!;
         collectedSpawnMeta.args = redactSpawnArgs(scriptArgs);
         collectedSpawnMeta.cwd = worktreeDir!;
+        if (body.command === "EXECUTE") {
+          decisionTableVerificationStartOffset =
+            getDecisionTableVerificationTelemetryOffset(claudeWorkDir);
+        }
         spawnStartedAt = Date.now();
         child = spawn(scriptPath!, scriptArgs, {
           cwd: worktreeDir!,
@@ -5563,6 +5624,7 @@ async function handleLoopRequest(
         signal,
         spawnStartedAt,
         collectedSpawnMeta,
+        decisionTableVerificationStartOffset,
       ).catch((err) => {
         loopError(body.loopId, "Completion handler error:", err);
         gatewayLog.error(
