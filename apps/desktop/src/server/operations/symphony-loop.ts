@@ -17,6 +17,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { z } from "zod";
 import {
   readLogTail,
   readStderrTail,
@@ -293,6 +294,28 @@ const LOCAL_CALLBACK_FAIL_FAST_COMMANDS = new Set<LoopCommand>([
   "REQUEST_CHANGES",
   "GENERATE_PRD",
 ]);
+const USER_VISIBLE_LOOP_FAILURE_FILE = "loop-error.json";
+const USER_VISIBLE_LOOP_FAILURE_MAX_BYTES = 8 * 1024;
+const USER_VISIBLE_LOOP_FAILURE_MAX_MESSAGE_LENGTH = 1000;
+const USER_VISIBLE_LOOP_FAILURE_SUBCODE = /^[A-Z][A-Z0-9_]{2,63}$/;
+
+const userVisibleLoopFailureSchema = z
+  .object({
+    code: z.union([
+      z.literal(LoopErrorCode.RunnerError),
+      z.literal(LoopErrorCode.PreRunValidationFailed),
+      z.literal(LoopErrorCode.PlanStateUnavailable),
+    ]),
+    message: z.string().min(1).max(USER_VISIBLE_LOOP_FAILURE_MAX_MESSAGE_LENGTH),
+    result: z
+      .object({
+        subcode: z.string().regex(USER_VISIBLE_LOOP_FAILURE_SUBCODE),
+      })
+      .strict(),
+  })
+  .passthrough();
+
+type UserVisibleLoopFailure = z.infer<typeof userVisibleLoopFailureSchema>;
 
 interface LoopArtifact {
   id?: string;
@@ -1888,6 +1911,46 @@ function redactSpawnArgs(args: string[]): string[] {
     }
     return arg;
   });
+}
+
+/**
+ * Read the intentional user-visible failure marker written by run-loop.sh.
+ * Invalid, oversized, or unreadable markers are ignored so arbitrary bash
+ * failures cannot choose the loop status message.
+ */
+function readUserVisibleLoopFailure(
+  claudeWorkDir: string,
+  markerNotBeforeMs = 0,
+): UserVisibleLoopFailure | null {
+  const markerPath = path.join(claudeWorkDir, USER_VISIBLE_LOOP_FAILURE_FILE);
+  if (!existsSync(markerPath)) {
+    return null;
+  }
+
+  try {
+    const markerStat = statSync(markerPath);
+    if (
+      !markerStat.isFile() ||
+      markerStat.size > USER_VISIBLE_LOOP_FAILURE_MAX_BYTES ||
+      (markerNotBeforeMs > 0 && markerStat.mtimeMs < markerNotBeforeMs)
+    ) {
+      return null;
+    }
+
+    const parsed = JSON.parse(readFileSync(markerPath, "utf-8")) as unknown;
+    const result = userVisibleLoopFailureSchema.safeParse(parsed);
+    return result.success ? result.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearUserVisibleLoopFailureMarker(claudeWorkDir: string): void {
+  try {
+    unlinkSync(path.join(claudeWorkDir, USER_VISIBLE_LOOP_FAILURE_FILE));
+  } catch {
+    // Missing or best-effort cleanup failure falls back to normal finalizer validation.
+  }
 }
 
 /**
@@ -3637,6 +3700,16 @@ export async function handleProcessCompletion(
       (jsonlAuthError !== null ||
         (diagnostics.logTail != null &&
           isAuthChallengeError(diagnostics.logTail)));
+    const userVisibleFailure = readUserVisibleLoopFailure(
+      claudeWorkDir,
+      spawnStartedAt,
+    );
+    const userVisibleFailureMessage =
+      userVisibleFailure !== null
+        ? redactCredentials(
+            stripAnsi(sanitizeErrorMessage(userVisibleFailure.message)),
+          )
+        : undefined;
 
     if (!wasCancelled) {
       if (isContextLimit) {
@@ -3695,6 +3768,35 @@ export async function handleProcessCompletion(
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
           ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
         });
+      } else if (userVisibleFailure !== null) {
+        const userVisibleMessage =
+          userVisibleFailureMessage ?? userVisibleFailure.message;
+        loopError(
+          loopId,
+          `User-visible runner failure detected: ${userVisibleFailure.code} ${userVisibleFailure.result.subcode}`,
+        );
+        gatewayLog.error(
+          "loop-harness",
+          `${command} reported user-visible runner failure, loopId=${loopId}, code=${userVisibleFailure.code}, subcode=${userVisibleFailure.result.subcode}`,
+        );
+        await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+          type: LoopEventType.Error,
+          code: userVisibleFailure.code,
+          message: userVisibleMessage,
+          result: userVisibleFailure.result,
+          loopId,
+          sessionId: failureSessionId,
+          ...(failureBranchName ? { branchName: failureBranchName } : {}),
+          tokenUsage: diagnostics.tokenUsage,
+          tokensByModel: diagnostics.tokensByModel,
+          logTail: diagnostics.logTail,
+          stderrTail: diagnostics.stderrTail,
+          exitSignal: diagnostics.exitSignal,
+          elapsedMs: diagnostics.elapsedMs,
+          abortReason: diagnostics.abortReason,
+          diagnosticsVersion: String(diagnostics.diagnosticsVersion),
+          ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
+        });
       } else {
         loopError(loopId, `Process failed with exit code ${exitCode}`);
         gatewayLog.error(
@@ -3732,7 +3834,9 @@ export async function handleProcessCompletion(
             ? "Context limit exceeded"
             : !wasCancelled && isAuthChallenge
               ? `Auth challenge: ${jsonlAuthError ?? "authentication error"}`
-              : undefined,
+              : !wasCancelled && userVisibleFailureMessage
+                ? userVisibleFailureMessage
+                : undefined,
         exitCode,
         warning: mergeWarningEntries(latestJob.warning, failureWarnings),
         updatedAt: now,
@@ -5254,6 +5358,7 @@ async function handleLoopRequest(
         // between Electron's env and the user's login shell).
         CLAUDE_BIN: claudeBinary,
       });
+      clearUserVisibleLoopFailureMarker(claudeWorkDir);
 
       // Collect non-sensitive env snapshot: NODE_ENV + CLAUDE_CODE_USE_* keys only
       const envSnapshot: Record<string, string> = {};
