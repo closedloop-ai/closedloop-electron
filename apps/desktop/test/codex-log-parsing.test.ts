@@ -4,8 +4,14 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import type { ServerResponse } from "node:http";
 import { afterEach, describe, test } from "node:test";
-import { extractTextFromNdjsonLog, extractVerdictTag } from "../src/server/operations/codex.js";
+import {
+  extractTextFromNdjsonLog,
+  extractVerdictTag,
+  streamCodexReview,
+  stripCodexNonUserDiagnostics,
+} from "../src/server/operations/codex.js";
 import { createStreamState, processStreamEvent } from "../src/server/operations/stream-events.js";
 
 const tempPaths: string[] = [];
@@ -101,6 +107,20 @@ describe("extractTextFromNdjsonLog", () => {
     ].join("\n");
 
     assert.equal(extractTextFromNdjsonLog(raw), "");
+  });
+
+  test("removes Codex rollout recorder diagnostics from stored log text", () => {
+    const diagnostic = "2026-04-30T15:21:30.628333Z ERROR codex_core::session: failed to record rollout items: thread 019ddefa-3be6-7b32-a969-c0f364fb225c not found";
+    const raw = [
+      "Finding before diagnostic.",
+      diagnostic,
+      JSON.stringify({ type: "text", content: `Finding after diagnostic.\n${diagnostic}\n` }),
+    ].join("\n");
+
+    assert.equal(
+      extractTextFromNdjsonLog(raw),
+      "Finding before diagnostic.Finding after diagnostic.\n"
+    );
   });
 });
 
@@ -295,6 +315,49 @@ describe("streamClaudeReview log write ordering", () => {
 // ---------------------------------------------------------------------------
 
 describe("streamCodexReview flush-gate pattern", () => {
+  test("does not emit Codex stderr diagnostics as review text", async () => {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "codex-stderr-diagnostic-"));
+    tempPaths.push(tmpDir);
+    const logPath = path.join(tmpDir, "codex-review.log");
+    const diagnostic = "2026-04-30T15:21:30.714121Z ERROR codex_core::session: failed to record rollout items: thread 019ddefa-3a0e-78e2-90fa-c7c3e7bcc247 not found";
+
+    const child = spawn("node", [
+      "-e",
+      `process.stdout.write("review finding\\n"); process.stderr.write(${JSON.stringify(`${diagnostic}\n`)});`,
+    ]);
+
+    const events: Array<Record<string, unknown>> = [];
+    const response = {
+      destroyed: false,
+      writable: true,
+      write: (payload: string) => {
+        events.push(JSON.parse(payload) as Record<string, unknown>);
+        return true;
+      },
+    } as unknown as ServerResponse;
+    const stderrHolder = { value: "" };
+
+    await streamCodexReview(child, response, logPath, { value: undefined }, stderrHolder);
+
+    assert.deepEqual(
+      events.filter((event) => event.type === "text").map((event) => event.content),
+      ["review finding\n"]
+    );
+    assert.equal(events.some((event) => String(event.content ?? "").includes("failed to record rollout items")), false);
+    assert.match(stderrHolder.value, /failed to record rollout items/);
+
+    const logContent = await fs.readFile(logPath, "utf-8");
+    assert.match(logContent, /review finding/);
+    assert.match(logContent, /failed to record rollout items/);
+  });
+
+  test("stripCodexNonUserDiagnostics preserves real stderr failures", () => {
+    const diagnostic = "2026-04-30T15:21:30.628333Z ERROR codex_core::session: failed to record rollout items: thread 019ddefa-3be6-7b32-a969-c0f364fb225c not found";
+    const raw = `${diagnostic}\nreal failure\n${diagnostic}\n`;
+
+    assert.equal(stripCodexNonUserDiagnostics(raw), "real failure\n");
+  });
+
   test("log finish resolves only after all data is flushed from child stdout", async () => {
     const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "codex-flush-gate-"));
     tempPaths.push(tmpDir);

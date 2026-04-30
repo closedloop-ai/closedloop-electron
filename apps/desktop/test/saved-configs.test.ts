@@ -131,6 +131,78 @@ test("findConfigByOrigins returns the matching config or null", () => {
   );
 });
 
+test("ensureActiveConfigForCurrentOrigins creates and activates a default profile", () => {
+  const tmpDir = makeTempDir("saved-configs-ensure-active-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.dev.test");
+  store.setApiOrigin("https://api.dev.test");
+  store.setWebAppOrigin("https://app.dev.test");
+
+  const config = store.ensureActiveConfigForCurrentOrigins("Default");
+
+  assert.equal(config.name, "Default");
+  assert.equal(config.relayOrigin, "https://relay.dev.test");
+  assert.equal(config.apiOrigin, "https://api.dev.test");
+  assert.equal(config.webAppOrigin, "https://app.dev.test");
+  assert.equal(store.getActiveConfigId(), config.id);
+  assert.equal(store.listConfigs().length, 1);
+});
+
+test("ensureActiveConfigForCurrentOrigins syncs origins onto the active profile", () => {
+  const tmpDir = makeTempDir("saved-configs-ensure-active-origins-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.old.test");
+  store.setApiOrigin("https://api.old.test");
+  store.setWebAppOrigin("https://app.old.test");
+  const existing = store.saveConfig("Development");
+  store.applyConfig(existing.id);
+  store.setRelayOrigin("https://relay.new.test");
+  store.setApiOrigin("https://api.new.test");
+  store.setWebAppOrigin("https://app.new.test");
+
+  const config = store.ensureActiveConfigForCurrentOrigins("Default");
+
+  assert.equal(config.id, existing.id);
+  assert.equal(config.relayOrigin, "https://relay.new.test");
+  assert.equal(config.apiOrigin, "https://api.new.test");
+  assert.equal(config.webAppOrigin, "https://app.new.test");
+  assert.equal(store.listConfigs().length, 1);
+});
+
+test("ensureActiveConfigForCurrentOrigins reuses a matching saved profile", () => {
+  const tmpDir = makeTempDir("saved-configs-ensure-reuse-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.dev.test");
+  store.setApiOrigin("https://api.dev.test");
+  store.setWebAppOrigin("https://app.dev.test");
+  const existing = store.saveConfig("Development");
+
+  const config = store.ensureActiveConfigForCurrentOrigins("Default");
+
+  assert.equal(config.id, existing.id);
+  assert.equal(config.name, "Development");
+  assert.equal(store.getActiveConfigId(), existing.id);
+  assert.equal(store.listConfigs().length, 1);
+});
+
+test("ensureActiveConfigForCurrentOrigins chooses an available default name", () => {
+  const tmpDir = makeTempDir("saved-configs-ensure-name-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.one.test");
+  store.setApiOrigin("https://api.one.test");
+  store.setWebAppOrigin("https://app.one.test");
+  store.saveConfig("Default");
+  store.setRelayOrigin("https://relay.two.test");
+  store.setApiOrigin("https://api.two.test");
+  store.setWebAppOrigin("https://app.two.test");
+
+  const config = store.ensureActiveConfigForCurrentOrigins("Default");
+
+  assert.equal(config.name, "Default 2");
+  assert.equal(store.getActiveConfigId(), config.id);
+  assert.equal(store.listConfigs().length, 2);
+});
+
 // --- listConfigs ---
 
 test("listConfigs returns configs in insertion order", () => {
