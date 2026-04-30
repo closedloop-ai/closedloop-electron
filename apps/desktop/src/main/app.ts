@@ -800,18 +800,7 @@ export class DesktopApplication {
     if (this.shouldStopManagedOnboardingRun(run, "managed key persistence")) {
       return;
     }
-    this.apiKeyStore.setApiKey(claimResult.apiKey, "DESKTOP_MANAGED");
-    this.persistActiveProfileKey(claimResult.apiKey, "DESKTOP_MANAGED");
     const keyPair = this.gatewaySigningKeyStore.load(activeGatewayId);
-    this.persistActiveConfigManagedMetadata({
-      apiKeySource: "DESKTOP_MANAGED",
-      gatewayId: activeGatewayId,
-      ...(keyPair.ok
-        ? { gatewayPublicKeyPem: keyPair.keyPair.publicKeySpkiPem }
-        : {}),
-      desktopSecurityUpgradeProtocolVersion: 1,
-      pendingOnboardingAttemptId: null,
-    });
     const sandboxBaseDirectory = normalizeScopePath(
       payload.sandboxBaseDirectory,
     );
@@ -820,6 +809,7 @@ export class DesktopApplication {
         ? sandboxBaseDirectory
         : null;
 
+    this.apiKeyStore.setApiKey(claimResult.apiKey, "DESKTOP_MANAGED");
     this.settingsStore.update({
       apiOrigin: trustedConfig.config.apiOrigin,
       relayOrigin: trustedConfig.config.relayOrigin,
@@ -831,10 +821,21 @@ export class DesktopApplication {
           }
         : { onboardingCompleted: false }),
     });
-    this.settingsStore.updateActiveConfigOrigins({
-      apiOrigin: trustedConfig.config.apiOrigin,
-      relayOrigin: trustedConfig.config.relayOrigin,
-      webAppOrigin: payload.webAppOrigin,
+    const activeConfig =
+      this.settingsStore.ensureActiveConfigForCurrentOrigins();
+    this.apiKeyStore.saveProfileKey(
+      activeConfig.id,
+      claimResult.apiKey,
+      "DESKTOP_MANAGED",
+    );
+    this.settingsStore.updateConfigManagedMetadata(activeConfig.id, {
+      apiKeySource: "DESKTOP_MANAGED",
+      gatewayId: activeGatewayId,
+      ...(keyPair.ok
+        ? { gatewayPublicKeyPem: keyPair.keyPair.publicKeySpkiPem }
+        : {}),
+      desktopSecurityUpgradeProtocolVersion: 1,
+      pendingOnboardingAttemptId: null,
     });
 
     if (safeSandboxBaseDirectory) {

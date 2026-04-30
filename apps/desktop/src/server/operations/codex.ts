@@ -14,6 +14,7 @@ import { assertRepoAllowed, ensureWorktreeForReview, resolveWorktreeDir, resolve
 import { json } from "./response-utils.js";
 
 const CODEX_SESSION_ID_REGEX = /session id:\s*([0-9a-f-]{36})/i;
+const CODEX_ROLLOUT_ITEM_RECORDING_DIAGNOSTIC_REGEX = /^\d{4}-\d{2}-\d{2}T[^\s]+\s+ERROR\s+codex_core::session:\s+failed to record rollout items:\s+thread\s+[0-9a-f-]{36}\s+not found$/i;
 const FINDINGS_CODE_BLOCK_REGEX = /```json\s*\n([\s\S]*?)\n\s*```/;
 const FINDINGS_ARRAY_REGEX = /\[[\s\S]*\]/;
 const PR_PREFIX_REGEX = /^pr-/;
@@ -161,15 +162,35 @@ export function extractTextFromNdjsonLog(raw: string, truncated = false): string
     try {
       const event = JSON.parse(line) as { type?: string; content?: string; error?: string };
       if (event.type === "text" && typeof event.content === "string") {
-        parts.push(event.content);
+        const content = stripCodexNonUserDiagnostics(event.content);
+        if (content) {
+          parts.push(content);
+        }
       } else if (event.type === "error" && typeof event.error === "string") {
-        parts.push(event.error);
+        const error = stripCodexNonUserDiagnostics(event.error);
+        if (error) {
+          parts.push(error);
+        }
       }
     } catch {
-      parts.push(line);
+      const content = stripCodexNonUserDiagnostics(line);
+      if (content) {
+        parts.push(content);
+      }
     }
   }
   return parts.join("");
+}
+
+/**
+ * Removes Codex CLI diagnostics that describe local rollout recording failures,
+ * not model review output or actionable user-facing failures.
+ */
+export function stripCodexNonUserDiagnostics(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => !CODEX_ROLLOUT_ITEM_RECORDING_DIAGNOSTIC_REGEX.test(line.trim()))
+    .join("\n");
 }
 
 function tryKillRunningReview(state: ReviewState): void {
@@ -848,8 +869,9 @@ export function registerCodexRoutes(
       // Detect context window exhaustion — codex exited mid-review, findings are incomplete
       const isContextError = exitCode !== 0 && /context window|out of room/i.test(stderrHolder.value);
 
-      if (exitCode !== 0 && !isContextError && stderrHolder.value.trim()) {
-        writeEvent(context.response, { type: "error", error: stderrHolder.value.trim() });
+      const stderrForUser = stripCodexNonUserDiagnostics(stderrHolder.value).trim();
+      if (exitCode !== 0 && !isContextError && stderrForUser) {
+        writeEvent(context.response, { type: "error", error: stderrForUser });
       }
 
       const finalState: ReviewState = {
@@ -1764,7 +1786,8 @@ async function streamClaudeReview(
   });
 }
 
-function streamCodexReview(
+/** @internal Streams Codex review stdout to SSE while retaining stderr for diagnostics. */
+export function streamCodexReview(
   child: ChildProcess,
   response: ServerResponse,
   logPath: string,
@@ -1797,8 +1820,6 @@ function streamCodexReview(
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
     logStream.write(text);
     stderrHolder.value += text;
-    eventCount++;
-    writeEvent(response, { type: "text", content: text });
   });
 
   child.on("close", () => {

@@ -34,6 +34,7 @@ type SavedConfigOriginsPatch = Pick<
   "relayOrigin" | "apiOrigin" | "webAppOrigin"
 >;
 
+const DEFAULT_MANAGED_ONBOARDING_CONFIG_NAME = "Default";
 const UUID_V4_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -281,6 +282,62 @@ export class SettingsStore {
           c.webAppOrigin === webAppOrigin
       ) ?? null
     );
+  }
+
+  private getAvailableConfigName(preferredName: string): string {
+    const baseName = this.validateConfigName(preferredName);
+    const usedNames = new Set(
+      this.getSavedConfigs().map((config) =>
+        config.name.trim().toLocaleLowerCase(),
+      ),
+    );
+    if (!usedNames.has(baseName.toLocaleLowerCase())) {
+      return baseName;
+    }
+    for (let suffix = 2; suffix < 1000; suffix += 1) {
+      const candidate = `${baseName} ${suffix}`;
+      if (!usedNames.has(candidate.toLocaleLowerCase())) {
+        return candidate;
+      }
+    }
+    throw new Error(`No available config name for "${baseName}"`);
+  }
+
+  /**
+   * Ensures the current runtime origins are represented by an active saved
+   * profile, reusing a matching profile before creating a default one.
+   */
+  ensureActiveConfigForCurrentOrigins(
+    preferredName = DEFAULT_MANAGED_ONBOARDING_CONFIG_NAME,
+  ): SavedConfig {
+    const relayOrigin = this.getRelayOrigin();
+    const apiOrigin = this.getApiOrigin();
+    const webAppOrigin = this.getWebAppOrigin();
+
+    const activeConfig = this.getActiveConfig();
+    if (activeConfig) {
+      return (
+        this.updateActiveConfigOrigins({
+          relayOrigin,
+          apiOrigin,
+          webAppOrigin,
+        }) ?? activeConfig
+      );
+    }
+
+    const matchingConfig = this.findConfigByOrigins(
+      relayOrigin,
+      apiOrigin,
+      webAppOrigin,
+    );
+    if (matchingConfig) {
+      return this.applyConfig(matchingConfig.id);
+    }
+
+    const savedConfig = this.saveConfig(
+      this.getAvailableConfigName(preferredName),
+    );
+    return this.applyConfig(savedConfig.id);
   }
 
   saveConfig(name: string): SavedConfig {
