@@ -3,6 +3,7 @@ import type {
   OperationRequestContext,
 } from "../operation-dispatcher.js";
 import { json } from "./response-utils.js";
+import { isRecord } from "./type-guards.js";
 import type {
   DesktopSecurityUpgradePayload,
   DesktopSecurityUpgradeResult,
@@ -15,10 +16,6 @@ type SecurityUpgradeRouteOptions = {
     payload: DesktopSecurityUpgradePayload
   ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult;
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function parsePayload(rawBody: string): DesktopSecurityUpgradePayload | null {
   let value: unknown;

@@ -2,10 +2,7 @@ import { openSync, readSync, closeSync, existsSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
 import { gatewayLog } from "../../main/gateway-logger.js";
-
-export function isRecord(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
+import { isRecord } from "./type-guards.js";
 
 // ---------------------------------------------------------------------------
 // JSONL record types (Claude CLI streaming output)

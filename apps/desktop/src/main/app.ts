@@ -932,6 +932,7 @@ export class DesktopApplication {
       };
     }
 
+    const preProvisioningApiKey = this.apiKeyStore.getApiKeyRecord()?.apiKey;
     const run = this.managedOnboardingRuns.begin();
     await this.runManagedOnboardingProvisioning(
       {
@@ -952,7 +953,10 @@ export class DesktopApplication {
     }
 
     const currentKey = this.apiKeyStore.getApiKeyRecord();
-    if (isSecurityUpgradeProvisioned(currentKey)) {
+    if (
+      isSecurityUpgradeProvisioned(currentKey) &&
+      currentKey!.apiKey !== preProvisioningApiKey
+    ) {
       return { ok: true };
     }
 
