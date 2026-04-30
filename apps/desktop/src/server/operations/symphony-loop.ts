@@ -298,6 +298,13 @@ const USER_VISIBLE_LOOP_FAILURE_FILE = "loop-error.json";
 const USER_VISIBLE_LOOP_FAILURE_MAX_BYTES = 8 * 1024;
 const USER_VISIBLE_LOOP_FAILURE_MAX_MESSAGE_LENGTH = 1000;
 const USER_VISIBLE_LOOP_FAILURE_SUBCODE = /^[A-Z][A-Z0-9_]{2,63}$/;
+const USER_VISIBLE_LOOP_FAILURE_SIGNATURE = /^sha256=[a-f0-9]{64}$/;
+// Runtime-only marker signing secret passed to run-loop.sh. The script copies
+// it into a non-exported shell variable and unsets this env var before spawning
+// Claude, so tool-invoked commands cannot forge trusted failure markers just by
+// writing loop-error.json in the workdir.
+const USER_VISIBLE_LOOP_FAILURE_SECRET_ENV =
+  "CLOSEDLOOP_USER_VISIBLE_FAILURE_SECRET";
 
 const userVisibleLoopFailureSchema = z
   .object({
@@ -312,10 +319,15 @@ const userVisibleLoopFailureSchema = z
         subcode: z.string().regex(USER_VISIBLE_LOOP_FAILURE_SUBCODE),
       })
       .strict(),
+    signature: z.string().regex(USER_VISIBLE_LOOP_FAILURE_SIGNATURE),
   })
   .passthrough();
 
 type UserVisibleLoopFailure = z.infer<typeof userVisibleLoopFailureSchema>;
+type UserVisibleLoopFailureSignedPayload = Pick<
+  UserVisibleLoopFailure,
+  "code" | "message" | "result"
+>;
 
 interface LoopArtifact {
   id?: string;
@@ -1918,10 +1930,45 @@ function redactSpawnArgs(args: string[]): string[] {
  * Invalid, oversized, or unreadable markers are ignored so arbitrary bash
  * failures cannot choose the loop status message.
  */
-function readUserVisibleLoopFailure(
-  claudeWorkDir: string,
-  markerNotBeforeMs = 0,
-): UserVisibleLoopFailure | null {
+function signUserVisibleLoopFailure(
+  payload: UserVisibleLoopFailureSignedPayload,
+  secret: string,
+): string {
+  const canonicalPayload = JSON.stringify({
+    code: payload.code,
+    message: payload.message,
+    result: { subcode: payload.result.subcode },
+  });
+  const digest = crypto
+    .createHmac("sha256", secret)
+    .update(canonicalPayload)
+    .digest("hex");
+  return `sha256=${digest}`;
+}
+
+function hasValidUserVisibleLoopFailureSignature(
+  failure: UserVisibleLoopFailure,
+  secret: string,
+): boolean {
+  const expectedSignature = signUserVisibleLoopFailure(failure, secret);
+  const provided = Buffer.from(failure.signature);
+  const expected = Buffer.from(expectedSignature);
+  return (
+    provided.length === expected.length &&
+    crypto.timingSafeEqual(provided, expected)
+  );
+}
+
+function readUserVisibleLoopFailure(args: {
+  claudeWorkDir: string;
+  markerNotBeforeMs?: number;
+  signingSecret?: string;
+}): UserVisibleLoopFailure | null {
+  const { claudeWorkDir, markerNotBeforeMs = 0, signingSecret } = args;
+  if (!signingSecret) {
+    return null;
+  }
+
   const markerPath = path.join(claudeWorkDir, USER_VISIBLE_LOOP_FAILURE_FILE);
   if (!existsSync(markerPath)) {
     return null;
@@ -1939,7 +1986,13 @@ function readUserVisibleLoopFailure(
 
     const parsed = JSON.parse(readFileSync(markerPath, "utf-8")) as unknown;
     const result = userVisibleLoopFailureSchema.safeParse(parsed);
-    return result.success ? result.data : null;
+    if (
+      !result.success ||
+      !hasValidUserVisibleLoopFailureSignature(result.data, signingSecret)
+    ) {
+      return null;
+    }
+    return result.data;
   } catch {
     return null;
   }
@@ -3555,6 +3608,7 @@ export async function handleProcessCompletion(
     envSnapshot: Record<string, string>;
   },
   decisionTableVerificationStartOffset = 0,
+  userVisibleLoopFailureSecret?: string,
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
   // Temp-dir commands (DECOMPOSE, EVALUATE_*) need the entire temp tree removed on cleanup.
@@ -3700,10 +3754,11 @@ export async function handleProcessCompletion(
       (jsonlAuthError !== null ||
         (diagnostics.logTail != null &&
           isAuthChallengeError(diagnostics.logTail)));
-    const userVisibleFailure = readUserVisibleLoopFailure(
+    const userVisibleFailure = readUserVisibleLoopFailure({
       claudeWorkDir,
-      spawnStartedAt,
-    );
+      markerNotBeforeMs: spawnStartedAt,
+      signingSecret: userVisibleLoopFailureSecret,
+    });
     const userVisibleFailureMessage =
       userVisibleFailure !== null
         ? redactCredentials(
@@ -5342,6 +5397,7 @@ async function handleLoopRequest(
       authFilesExist: false,
       envSnapshot: {},
     };
+    let userVisibleLoopFailureSecret: string | undefined;
 
     try {
       // Reuse the path from pre-flight so validation and execution stay aligned.
@@ -5350,9 +5406,19 @@ async function handleLoopRequest(
       const closedLoopPlanFile =
         body.command === "EXECUTE" ? executeImportedPlanFile ?? "" : "";
 
+      userVisibleLoopFailureSecret =
+        body.command === "PLAN" || body.command === "EXECUTE"
+          ? crypto.randomBytes(32).toString("base64url")
+          : undefined;
       const spawnEnv: Record<string, string> = await getShellEnv({
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
         CLOSEDLOOP_PLAN_FILE: closedLoopPlanFile,
+        ...(userVisibleLoopFailureSecret
+          ? {
+              [USER_VISIBLE_LOOP_FAILURE_SECRET_ENV]:
+                userVisibleLoopFailureSecret,
+            }
+          : {}),
         // Pass resolved claude path so run-loop.sh uses the same binary
         // the desktop app validated in pre-flight (avoids PATH mismatches
         // between Electron's env and the user's login shell).
@@ -5730,6 +5796,7 @@ async function handleLoopRequest(
         spawnStartedAt,
         collectedSpawnMeta,
         decisionTableVerificationStartOffset,
+        userVisibleLoopFailureSecret,
       ).catch((err) => {
         loopError(body.loopId, "Completion handler error:", err);
         gatewayLog.error(
