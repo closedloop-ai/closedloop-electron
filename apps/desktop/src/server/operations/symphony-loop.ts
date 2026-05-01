@@ -261,7 +261,6 @@ import { getPrimaryRepoResult, parseExecutionResultFile } from "@closedloop-ai/l
 import { json } from "./response-utils.js";
 
 /** Commands that have full spawn/dispatch support in this gateway version. */
-// @ts-expect-error -- EVALUATE_FEATURE is not yet in LoopCommand type (loops-api 0.2.7); will be added in next package release
 const SUPPORTED_COMMANDS = new Set<LoopCommand>([
   "PLAN",
   "EXECUTE",
@@ -288,7 +287,6 @@ const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
   DECOMPOSE: "NOT_REQUIRED",
   EVALUATE_PLAN: "REQUIRED",
   EVALUATE_CODE: "REQUIRED",
-  // @ts-expect-error -- EVALUATE_FEATURE is not yet in LoopCommand type (loops-api 0.2.7); will be added in next package release
   EVALUATE_FEATURE: "OPTIONAL",
   BOOTSTRAP: "NOT_REQUIRED",
 };
@@ -389,7 +387,7 @@ const EVALUATE_ARTIFACT_OUTPUT = {
     key: LoopOutputArtifactKey.CodeJudges,
   },
   [EvaluateArtifact.Feature]: {
-    file: "feature-judges.json",
+    file: LoopArtifactFile.FeatureJudges,
     key: LoopOutputArtifactKey.FeatureJudges,
   },
 } as const satisfies Record<
@@ -4119,7 +4117,6 @@ export async function handleProcessCompletion(
       command === "EVALUATE_PRD" ||
       command === "EVALUATE_PLAN" ||
       command === "EVALUATE_CODE" ||
-      // @ts-expect-error -- EVALUATE_FEATURE is not yet in LoopCommand type (loops-api 0.2.7); will be added in next package release
       command === "EVALUATE_FEATURE"
     ) {
       artifacts = readEvaluateOutputs(
@@ -4989,7 +4986,6 @@ async function handleLoopRequest(
       body.command === "EVALUATE_PRD" ||
       body.command === "EVALUATE_PLAN" ||
       body.command === "EVALUATE_CODE" ||
-      // @ts-expect-error -- EVALUATE_FEATURE is not yet in LoopCommand type (loops-api 0.2.7); will be added in next package release
       body.command === "EVALUATE_FEATURE"
     ) {
       // EVALUATE_PRD, EVALUATE_PLAN, EVALUATE_CODE, and EVALUATE_FEATURE: use temp dir, no worktree needed.
@@ -5568,7 +5564,6 @@ async function handleLoopRequest(
         child.unref();
       } else if (
         body.command === "EVALUATE_PRD" ||
-        // @ts-expect-error -- EVALUATE_FEATURE is not yet in LoopCommand type (loops-api 0.2.7); will be added in next package release
         body.command === "EVALUATE_FEATURE"
       ) {
         // EVALUATE_PRD and EVALUATE_FEATURE share identical spawn logic:
