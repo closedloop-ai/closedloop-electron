@@ -41,8 +41,6 @@ test("scanDecisionTableVerificationTelemetry reads only JSONL records appended a
   const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "dt-telemetry-scan-"));
   tempPathsToClean.push(workDir);
 
-  const telemetryDir = path.join(workDir, ".closedloop-ai");
-  await fs.mkdir(telemetryDir, { recursive: true });
   const priorContent = [
     verificationLine({
       timestamp: "2026-04-29T15:00:00Z",
@@ -52,7 +50,7 @@ test("scanDecisionTableVerificationTelemetry reads only JSONL records appended a
     "",
   ].join("\n");
   await fs.writeFile(
-    path.join(telemetryDir, "decision-table-verifications.jsonl"),
+    path.join(workDir, "decision-table-verifications.jsonl"),
     [
       priorContent,
       verificationLine({
@@ -68,6 +66,10 @@ test("scanDecisionTableVerificationTelemetry reads only JSONL records appended a
   });
 
   assert.equal(result.records.length, 1);
+  assert.equal(
+    result.filePath,
+    path.join(workDir, "decision-table-verifications.jsonl"),
+  );
   assert.equal(result.records[0].finalStatus, "aligned_with_clarifications");
   assert.equal(result.records[0].fixesAttempted, 4);
   assert.equal(result.records[0].lineNumber, 3);
