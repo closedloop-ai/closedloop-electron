@@ -398,7 +398,7 @@ const EVALUATE_ARTIFACT_OUTPUT = {
 >;
 
 /** Maps each EVALUATE_* loop command to its artifact discriminator. */
-const EVALUATE_COMMAND_ARTIFACT = {
+export const EVALUATE_COMMAND_ARTIFACT = {
   EVALUATE_PRD: EvaluateArtifact.Prd,
   EVALUATE_PLAN: EvaluateArtifact.Plan,
   EVALUATE_CODE: EvaluateArtifact.Code,

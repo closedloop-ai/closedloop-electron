@@ -11,9 +11,11 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { readEffectiveStatusFromState } from "../server/operations/symphony-job-snapshot.js";
 import {
+  EVALUATE_COMMAND_ARTIFACT,
   type ExecuteFinalizationResult,
   finalizeAdditionalReposAndPersist,
   getResolvedGitPath,
+  readEvaluateOutputs,
   runExecuteFinalization,
   V1_PRIMARY_FULL_NAME_PLACEHOLDER,
 } from "../server/operations/symphony-loop.js";
@@ -722,11 +724,10 @@ function readArtifacts(
     command === "EVALUATE_CODE" ||
     command === "EVALUATE_FEATURE"
   ) {
-    const evalType = command.replace("EVALUATE_", "").toLowerCase();
-    const judges = readJsonFileSync(
-      path.join(claudeWorkDir, `${evalType}-judges.json`),
+    return readEvaluateOutputs(
+      claudeWorkDir,
+      EVALUATE_COMMAND_ARTIFACT[command],
     );
-    return { [`${evalType}Judges`]: judges ?? undefined };
   }
   if (command === "GENERATE_PRD") {
     const baseDir = worktreeDir ?? claudeWorkDir;
