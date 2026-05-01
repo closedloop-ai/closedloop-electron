@@ -716,23 +716,17 @@ function readArtifacts(
     );
     return { features: features ?? undefined };
   }
-  if (command === "EVALUATE_PRD") {
+  if (
+    command === "EVALUATE_PRD" ||
+    command === "EVALUATE_PLAN" ||
+    command === "EVALUATE_CODE" ||
+    command === "EVALUATE_FEATURE"
+  ) {
+    const evalType = command.replace("EVALUATE_", "").toLowerCase();
     const judges = readJsonFileSync(
-      path.join(claudeWorkDir, "prd-judges.json"),
+      path.join(claudeWorkDir, `${evalType}-judges.json`),
     );
-    return { prdJudges: judges ?? undefined };
-  }
-  if (command === "EVALUATE_PLAN") {
-    const judges = readJsonFileSync(
-      path.join(claudeWorkDir, "plan-judges.json"),
-    );
-    return { planJudges: judges ?? undefined };
-  }
-  if (command === "EVALUATE_CODE") {
-    const judges = readJsonFileSync(
-      path.join(claudeWorkDir, "code-judges.json"),
-    );
-    return { codeJudges: judges ?? undefined };
+    return { [`${evalType}Judges`]: judges ?? undefined };
   }
   if (command === "GENERATE_PRD") {
     const baseDir = worktreeDir ?? claudeWorkDir;

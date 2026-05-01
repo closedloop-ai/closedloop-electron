@@ -260,6 +260,7 @@ import { getPrimaryRepoResult, parseExecutionResultFile } from "@closedloop-ai/l
 import { json } from "./response-utils.js";
 
 /** Commands that have full spawn/dispatch support in this gateway version. */
+// @ts-expect-error -- EVALUATE_FEATURE is not yet in LoopCommand type (loops-api 0.2.7); will be added in next package release
 const SUPPORTED_COMMANDS = new Set<LoopCommand>([
   "PLAN",
   "EXECUTE",
@@ -269,6 +270,7 @@ const SUPPORTED_COMMANDS = new Set<LoopCommand>([
   "GENERATE_PRD",
   "EVALUATE_PLAN",
   "EVALUATE_CODE",
+  "EVALUATE_FEATURE",
   "BOOTSTRAP",
 ]);
 const VALID_COMMANDS = SUPPORTED_COMMANDS;
@@ -285,6 +287,8 @@ const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
   DECOMPOSE: "NOT_REQUIRED",
   EVALUATE_PLAN: "REQUIRED",
   EVALUATE_CODE: "REQUIRED",
+  // @ts-expect-error -- EVALUATE_FEATURE is not yet in LoopCommand type (loops-api 0.2.7); will be added in next package release
+  EVALUATE_FEATURE: "OPTIONAL",
   BOOTSTRAP: "NOT_REQUIRED",
 };
 const LOCAL_CALLBACK_FAIL_FAST_COMMANDS = new Set<LoopCommand>([
@@ -397,6 +401,31 @@ export async function writeCodeArtifact(
 }
 
 /**
+ * Write prd.md to a work directory from a Feature artifact.
+ *
+ * Unlike writePrdArtifact, this helper is strict: it requires a
+ * LoopArtifactType.Feature artifact and does not fall back to PRD or
+ * prompt. If no Feature artifact is present, it throws.
+ */
+export async function writeFeatureArtifact(
+  workDir: string,
+  artifacts: LoopArtifact[],
+): Promise<void> {
+  const featureArtifact = artifacts.find(
+    (a) => a.type === LoopArtifactType.Feature,
+  );
+  if (!featureArtifact) {
+    throw new Error(
+      "writeFeatureArtifact: no LoopArtifactType.Feature artifact found",
+    );
+  }
+  await fs.writeFile(
+    path.join(workDir, LoopArtifactFile.Prd),
+    featureArtifact.content,
+  );
+}
+
+/**
  * Read outputs produced by an EVALUATE_{type} loop iteration.
  * Returns undefined values for missing or unreadable files.
  */
@@ -426,6 +455,12 @@ export function readEvaluateCodeOutputs(
   workDir: string,
 ): Record<string, unknown> {
   return readEvaluateOutputs(workDir, "code");
+}
+
+export function readEvaluateFeatureOutputs(
+  workDir: string,
+): Record<string, unknown> {
+  return readEvaluateOutputs(workDir, "feature");
 }
 
 type LoopCommitter = LocalJobCommitter;
@@ -3883,12 +3918,15 @@ export async function handleProcessCompletion(
       }
     } else if (command === "DECOMPOSE") {
       artifacts = readDecomposeOutputs(worktreeDir ?? claudeWorkDir);
-    } else if (command === "EVALUATE_PRD") {
-      artifacts = readEvaluatePrdOutputs(claudeWorkDir);
-    } else if (command === "EVALUATE_PLAN") {
-      artifacts = readEvaluatePlanOutputs(claudeWorkDir);
-    } else if (command === "EVALUATE_CODE") {
-      artifacts = readEvaluateCodeOutputs(claudeWorkDir);
+    } else if (
+      command === "EVALUATE_PRD" ||
+      command === "EVALUATE_PLAN" ||
+      command === "EVALUATE_CODE" ||
+      // @ts-expect-error -- EVALUATE_FEATURE is not yet in LoopCommand type (loops-api 0.2.7); will be added in next package release
+      command === "EVALUATE_FEATURE"
+    ) {
+      const evalType = command.replace("EVALUATE_", "").toLowerCase();
+      artifacts = readEvaluateOutputs(claudeWorkDir, evalType);
     } else if (command === "GENERATE_PRD") {
       artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
     } else if (command === "BOOTSTRAP") {
@@ -4751,9 +4789,11 @@ async function handleLoopRequest(
     } else if (
       body.command === "EVALUATE_PRD" ||
       body.command === "EVALUATE_PLAN" ||
-      body.command === "EVALUATE_CODE"
+      body.command === "EVALUATE_CODE" ||
+      // @ts-expect-error -- EVALUATE_FEATURE is not yet in LoopCommand type (loops-api 0.2.7); will be added in next package release
+      body.command === "EVALUATE_FEATURE"
     ) {
-      // EVALUATE_PRD, EVALUATE_PLAN, and EVALUATE_CODE: use temp dir, no worktree needed.
+      // EVALUATE_PRD, EVALUATE_PLAN, EVALUATE_CODE, and EVALUATE_FEATURE: use temp dir, no worktree needed.
       // Temp dir is intentionally exempt from assertPathAllowed.
       usedTempDir = true;
       const label = body.command.toLowerCase().replace(/_/g, "-");
@@ -4771,6 +4811,8 @@ async function handleLoopRequest(
           await writePlanArtifact(claudeWorkDir, body.artifacts, body.prompt);
         } else if (body.command === "EVALUATE_CODE") {
           await writeCodeArtifact(claudeWorkDir, body.artifacts);
+        } else if (body.command === "EVALUATE_FEATURE") {
+          await writeFeatureArtifact(claudeWorkDir, body.artifacts);
         }
       } catch (artifactErr) {
         await fs.rm(claudeWorkDir, { recursive: true, force: true });
@@ -5313,14 +5355,21 @@ async function handleLoopRequest(
           env: spawnEnv,
         });
         child.unref();
-      } else if (body.command === "EVALUATE_PRD") {
-        // REPO_PATH only when a target repo is linked (expandedRepoPath).
-        let evaluatePrdPrompt = `Activate judges:run-judges skill --artifact-type prd --workdir ${claudeWorkDir}.\n`;
+      } else if (
+        body.command === "EVALUATE_PRD" ||
+        // @ts-expect-error -- EVALUATE_FEATURE is not yet in LoopCommand type (loops-api 0.2.7); will be added in next package release
+        body.command === "EVALUATE_FEATURE"
+      ) {
+        // EVALUATE_PRD and EVALUATE_FEATURE share identical spawn logic:
+        // REPO_PATH is optional — only added when a target repo is linked.
+        const artifactType = body.command === "EVALUATE_PRD" ? "prd" : "feature";
+        const label = `evaluate-${artifactType}`;
+        let prompt = `Activate judges:run-judges skill --artifact-type ${artifactType} --workdir ${claudeWorkDir}.\n`;
         if (expandedRepoPath) {
-          evaluatePrdPrompt += `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`;
+          prompt += `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`;
         }
-        const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
-        await fs.writeFile(promptFile, evaluatePrdPrompt);
+        const promptFile = path.join(claudeWorkDir, `${label}-prompt.txt`);
+        await fs.writeFile(promptFile, prompt);
 
         const pipeline = buildClaudePipeline(
           stdinClaudeArgs,
@@ -5344,7 +5393,7 @@ async function handleLoopRequest(
       ) {
         // EVALUATE_PLAN and EVALUATE_CODE share identical spawn logic,
         // differing only in the artifact type passed to run-judges.
-        // Unlike EVALUATE_PRD (where REPO_PATH is optional—only added when a repo is linked),
+        // Unlike EVALUATE_PRD/EVALUATE_FEATURE (where REPO_PATH is optional),
         // plan and code judges need the implementation tree, so the request must resolve to
         // a local repo and expandedRepoPath is always set on this path.
         const artifactType = body.command === "EVALUATE_PLAN" ? "plan" : "code";
