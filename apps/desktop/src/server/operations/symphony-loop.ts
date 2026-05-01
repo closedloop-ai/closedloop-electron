@@ -346,13 +346,26 @@ export const PLAN_ARTIFACT_TYPES: readonly LoopArtifactType[] = [
   LoopArtifactType.ImplementationPlan,
 ] as const;
 
-/**
- * Discriminator for outputs produced by an EVALUATE_{type} loop iteration.
- * `EvaluateArtifactType` maps to the on-disk judges filename and
- * `EvaluateArtifactKey` to the response-payload key — the same shape as the
- * parallel `LoopArtifactType` / `LoopArtifactFile` consts in
- * `@closedloop-ai/loops-api/artifacts`.
- */
+/** Response-payload keys for artifacts produced by loop commands. */
+export const LoopOutputArtifactKey = {
+  Plan: "plan",
+  OpenQuestions: "openQuestions",
+  Judges: "judges",
+  ExecutionResult: "executionResult",
+  CodeJudges: "codeJudges",
+  Features: "features",
+  Prd: "prd",
+  PrdJudges: "prdJudges",
+  PlanJudges: "planJudges",
+  FeatureJudges: "featureJudges",
+  BootstrapResult: "bootstrapResult",
+} as const;
+export type LoopOutputArtifactKey =
+  (typeof LoopOutputArtifactKey)[keyof typeof LoopOutputArtifactKey];
+
+type LoopOutputArtifacts = Partial<Record<LoopOutputArtifactKey, unknown>>;
+
+/** Discriminator for outputs produced by an EVALUATE_{type} loop iteration. */
 export const EvaluateArtifact = {
   Prd: "Prd",
   Plan: "Plan",
@@ -362,23 +375,27 @@ export const EvaluateArtifact = {
 export type EvaluateArtifact =
   (typeof EvaluateArtifact)[keyof typeof EvaluateArtifact];
 
-export const EvaluateArtifactType = {
-  Prd: "prd-judges.json",
-  Plan: "plan-judges.json",
-  Code: "code-judges.json",
-  Feature: "feature-judges.json",
-} as const satisfies Record<EvaluateArtifact, string>;
-export type EvaluateArtifactType =
-  (typeof EvaluateArtifactType)[keyof typeof EvaluateArtifactType];
-
-export const EvaluateArtifactKey = {
-  Prd: "prdJudges",
-  Plan: "planJudges",
-  Code: "codeJudges",
-  Feature: "featureJudges",
-} as const satisfies Record<EvaluateArtifact, string>;
-export type EvaluateArtifactKey =
-  (typeof EvaluateArtifactKey)[keyof typeof EvaluateArtifactKey];
+const EVALUATE_ARTIFACT_OUTPUT = {
+  [EvaluateArtifact.Prd]: {
+    file: LoopArtifactFile.PrdJudges,
+    key: LoopOutputArtifactKey.PrdJudges,
+  },
+  [EvaluateArtifact.Plan]: {
+    file: LoopArtifactFile.PlanJudges,
+    key: LoopOutputArtifactKey.PlanJudges,
+  },
+  [EvaluateArtifact.Code]: {
+    file: LoopArtifactFile.CodeJudges,
+    key: LoopOutputArtifactKey.CodeJudges,
+  },
+  [EvaluateArtifact.Feature]: {
+    file: "feature-judges.json",
+    key: LoopOutputArtifactKey.FeatureJudges,
+  },
+} as const satisfies Record<
+  EvaluateArtifact,
+  { file: string; key: LoopOutputArtifactKey }
+>;
 
 /** Maps each EVALUATE_* loop command to its artifact discriminator. */
 const EVALUATE_COMMAND_ARTIFACT = {
@@ -509,11 +526,10 @@ export async function writeFeatureArtifact(
 export function readEvaluateOutputs(
   workDir: string,
   artifact: EvaluateArtifact,
-): Record<string, unknown> {
-  const judges = readJsonFileSync(
-    path.join(workDir, EvaluateArtifactType[artifact]),
-  );
-  return { [EvaluateArtifactKey[artifact]]: judges ?? undefined };
+): LoopOutputArtifacts {
+  const output = EVALUATE_ARTIFACT_OUTPUT[artifact];
+  const judges = readJsonFileSync(path.join(workDir, output.file));
+  return { [output.key]: judges ?? undefined };
 }
 
 type LoopCommitter = LocalJobCommitter;
@@ -1805,7 +1821,7 @@ async function writeArtifactsForGeneratePrd(
 // Per-command output reading
 // ---------------------------------------------------------------------------
 
-function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
+function readPlanOutputs(claudeWorkDir: string): LoopOutputArtifacts {
   const plan = toUploadedPlanArtifact(
     readJsonFileSync(path.join(claudeWorkDir, LoopArtifactFile.Plan)),
   );
@@ -1817,13 +1833,13 @@ function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
   );
 
   return {
-    plan: plan ?? undefined,
-    openQuestions: openQuestions ?? undefined,
-    judges: judges ?? undefined,
+    [LoopOutputArtifactKey.Plan]: plan ?? undefined,
+    [LoopOutputArtifactKey.OpenQuestions]: openQuestions ?? undefined,
+    [LoopOutputArtifactKey.Judges]: judges ?? undefined,
   };
 }
 
-function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
+function readExecuteOutputs(claudeWorkDir: string): LoopOutputArtifacts {
   const plan = readExecutePlanArtifact(claudeWorkDir);
   const executionResult = readJsonFileSync(
     path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
@@ -1833,9 +1849,9 @@ function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
   );
 
   return {
-    plan: plan ?? undefined,
-    executionResult: executionResult ?? undefined,
-    codeJudges: codeJudges ?? undefined,
+    [LoopOutputArtifactKey.Plan]: plan ?? undefined,
+    [LoopOutputArtifactKey.ExecutionResult]: executionResult ?? undefined,
+    [LoopOutputArtifactKey.CodeJudges]: codeJudges ?? undefined,
   };
 }
 
@@ -1864,19 +1880,23 @@ function mergeWarningEntries(
   return mergedWarnings.map(sanitizeErrorMessage).join("; ");
 }
 
-function readDecomposeOutputs(workDir: string): Record<string, unknown> {
+function readDecomposeOutputs(workDir: string): LoopOutputArtifacts {
   const features = readJsonFileSync(
     path.join(workDir, LoopArtifactFile.Features),
   );
-  return { features: features ?? undefined };
+  return { [LoopOutputArtifactKey.Features]: features ?? undefined };
 }
 
-function readGeneratePrdOutputs(worktreeDir: string): Record<string, unknown> {
+function readGeneratePrdOutputs(worktreeDir: string): LoopOutputArtifacts {
   const prdContent = readTextFile(path.join(worktreeDir, LoopArtifactFile.Prd));
-  return { prd: prdContent ? { content: prdContent } : undefined };
+  return {
+    [LoopOutputArtifactKey.Prd]: prdContent
+      ? { content: prdContent }
+      : undefined,
+  };
 }
 
-function readBootstrapOutputs(claudeWorkDir: string): Record<string, unknown> {
+function readBootstrapOutputs(claudeWorkDir: string): LoopOutputArtifacts {
   const manifestFile = path.join(claudeWorkDir, "bootstrap-manifest.json");
   const manifest = readJsonFileSync(manifestFile) as BootstrapManifestEntry[] | null;
   if (!manifest) return {};
@@ -1919,7 +1939,7 @@ function readBootstrapOutputs(claudeWorkDir: string): Record<string, unknown> {
   }
 
   const result = { repos, totalDuration: 0 };
-  return { bootstrapResult: result };
+  return { [LoopOutputArtifactKey.BootstrapResult]: result };
 }
 
 // ---------------------------------------------------------------------------
@@ -3968,7 +3988,7 @@ export async function handleProcessCompletion(
       "loop-harness",
       `${command} succeeded (exit 0), reading artifacts for loopId=${loopId}`,
     );
-    let artifacts: Record<string, unknown> = {};
+    let artifacts: LoopOutputArtifacts = {};
     const metadata: Record<string, unknown> = {};
     const warnings: string[] = [];
     let executeFinalization: ExecuteFinalizationResult | null = null;
