@@ -346,6 +346,48 @@ export const PLAN_ARTIFACT_TYPES: readonly LoopArtifactType[] = [
   LoopArtifactType.ImplementationPlan,
 ] as const;
 
+/**
+ * Discriminator for outputs produced by an EVALUATE_{type} loop iteration.
+ * `EvaluateArtifactType` maps to the on-disk judges filename and
+ * `EvaluateArtifactKey` to the response-payload key — the same shape as the
+ * parallel `LoopArtifactType` / `LoopArtifactFile` consts in
+ * `@closedloop-ai/loops-api/artifacts`.
+ */
+export const EvaluateArtifact = {
+  Prd: "Prd",
+  Plan: "Plan",
+  Code: "Code",
+  Feature: "Feature",
+} as const;
+export type EvaluateArtifact =
+  (typeof EvaluateArtifact)[keyof typeof EvaluateArtifact];
+
+export const EvaluateArtifactType = {
+  Prd: "prd-judges.json",
+  Plan: "plan-judges.json",
+  Code: "code-judges.json",
+  Feature: "feature-judges.json",
+} as const satisfies Record<EvaluateArtifact, string>;
+export type EvaluateArtifactType =
+  (typeof EvaluateArtifactType)[keyof typeof EvaluateArtifactType];
+
+export const EvaluateArtifactKey = {
+  Prd: "prdJudges",
+  Plan: "planJudges",
+  Code: "codeJudges",
+  Feature: "featureJudges",
+} as const satisfies Record<EvaluateArtifact, string>;
+export type EvaluateArtifactKey =
+  (typeof EvaluateArtifactKey)[keyof typeof EvaluateArtifactKey];
+
+/** Maps each EVALUATE_* loop command to its artifact discriminator. */
+const EVALUATE_COMMAND_ARTIFACT = {
+  EVALUATE_PRD: EvaluateArtifact.Prd,
+  EVALUATE_PLAN: EvaluateArtifact.Plan,
+  EVALUATE_CODE: EvaluateArtifact.Code,
+  EVALUATE_FEATURE: EvaluateArtifact.Feature,
+} as const satisfies Record<string, EvaluateArtifact>;
+
 function readExecutePlanArtifact(
   claudeWorkDir: string,
 ): ReturnType<typeof toUploadedPlanArtifact> {
@@ -464,38 +506,14 @@ export async function writeFeatureArtifact(
  * Read outputs produced by an EVALUATE_{type} loop iteration.
  * Returns undefined values for missing or unreadable files.
  */
-function readEvaluateOutputs(
+export function readEvaluateOutputs(
   workDir: string,
-  artifactType: string,
+  artifact: EvaluateArtifact,
 ): Record<string, unknown> {
   const judges = readJsonFileSync(
-    path.join(workDir, `${artifactType}-judges.json`),
+    path.join(workDir, EvaluateArtifactType[artifact]),
   );
-  return { [`${artifactType}Judges`]: judges ?? undefined };
-}
-
-export function readEvaluatePrdOutputs(
-  workDir: string,
-): Record<string, unknown> {
-  return readEvaluateOutputs(workDir, "prd");
-}
-
-export function readEvaluatePlanOutputs(
-  workDir: string,
-): Record<string, unknown> {
-  return readEvaluateOutputs(workDir, "plan");
-}
-
-export function readEvaluateCodeOutputs(
-  workDir: string,
-): Record<string, unknown> {
-  return readEvaluateOutputs(workDir, "code");
-}
-
-export function readEvaluateFeatureOutputs(
-  workDir: string,
-): Record<string, unknown> {
-  return readEvaluateOutputs(workDir, "feature");
+  return { [EvaluateArtifactKey[artifact]]: judges ?? undefined };
 }
 
 type LoopCommitter = LocalJobCommitter;
@@ -4084,8 +4102,10 @@ export async function handleProcessCompletion(
       // @ts-expect-error -- EVALUATE_FEATURE is not yet in LoopCommand type (loops-api 0.2.7); will be added in next package release
       command === "EVALUATE_FEATURE"
     ) {
-      const evalType = command.replace("EVALUATE_", "").toLowerCase();
-      artifacts = readEvaluateOutputs(claudeWorkDir, evalType);
+      artifacts = readEvaluateOutputs(
+        claudeWorkDir,
+        EVALUATE_COMMAND_ARTIFACT[command],
+      );
     } else if (command === "GENERATE_PRD") {
       artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
     } else if (command === "BOOTSTRAP") {

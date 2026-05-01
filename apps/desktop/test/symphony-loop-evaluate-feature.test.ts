@@ -7,8 +7,9 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import {
+  EvaluateArtifact,
+  readEvaluateOutputs,
   writeFeatureArtifact,
-  readEvaluateFeatureOutputs,
 } from "../src/server/operations/symphony-loop.js";
 import { LoopArtifactType } from "@closedloop-ai/loops-api/artifacts";
 import { setShellPathForTest } from "../src/server/shell-path.js";
@@ -381,10 +382,10 @@ describe("T-4.1b: writeFeatureArtifact", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T-4.1c: readEvaluateFeatureOutputs unit tests
+// T-4.1c: readEvaluateOutputs(EvaluateArtifact.Feature) unit tests
 // ---------------------------------------------------------------------------
 
-describe("T-4.1c: readEvaluateFeatureOutputs", () => {
+describe("T-4.1c: readEvaluateOutputs(EvaluateArtifact.Feature)", () => {
   test("file exists: returns featureJudges from feature-judges.json", () => {
     const tmpDir = makeTempDir("read-feature-outputs-exists");
     const featureJudgesData = { scores: [{ judge: "quality", score: 9 }] };
@@ -393,13 +394,13 @@ describe("T-4.1c: readEvaluateFeatureOutputs", () => {
       JSON.stringify(featureJudgesData),
     );
 
-    const result = readEvaluateFeatureOutputs(tmpDir);
+    const result = readEvaluateOutputs(tmpDir, EvaluateArtifact.Feature);
     assert.deepEqual(result.featureJudges, featureJudgesData);
   });
 
   test("file absent: returns { featureJudges: undefined }", () => {
     const tmpDir = makeTempDir("read-feature-outputs-absent");
-    const result = readEvaluateFeatureOutputs(tmpDir);
+    const result = readEvaluateOutputs(tmpDir, EvaluateArtifact.Feature);
     assert.equal(result.featureJudges, undefined);
   });
 
@@ -408,7 +409,7 @@ describe("T-4.1c: readEvaluateFeatureOutputs", () => {
     writeFileSync(path.join(tmpDir, "feature-judges.json"), "not valid json {{{{");
     let result: Record<string, unknown> | undefined;
     assert.doesNotThrow(() => {
-      result = readEvaluateFeatureOutputs(tmpDir);
+      result = readEvaluateOutputs(tmpDir, EvaluateArtifact.Feature);
     });
     assert.equal(result?.featureJudges, undefined);
   });
