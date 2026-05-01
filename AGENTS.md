@@ -73,6 +73,7 @@ Commit format follows `.gitmessage` and recent history:
 - Subject: `<TICKET>: <imperative summary>` (example: `PLN-276: Add binary path overrides`).
 - Body: short bullet list of key changes.
 - Footer sections: `Testing:` and `Risks:`.
+- In the `Testing:` footer, summarize the validation scope instead of listing every command when the command list is repetitive. Prefer phrasing like `Localized desktop tests, typecheck, and lint passed` or `Full desktop test suite, typecheck, and lint passed`. Include specific commands only when a precise command is unusually important to reproduce a failure or narrow validation. Include manual testing only when the user clearly reported doing it during the chat or you personally performed it.
 
 PRs should target `main`, explain what changed and why, link the ticket, and include screenshots/log snippets when UI or gateway behavior changes. Any PR that changes files under `apps/desktop/` must include a version bump in `apps/desktop/package.json`. If the current branch already has a version bump in `apps/desktop/package.json` (committed or uncommitted), do not bump again.
 
