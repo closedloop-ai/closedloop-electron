@@ -176,7 +176,14 @@ export class GatewayRouter {
       this.options.getAllowedDirectories,
       getSymphonyDir
     );
-    registerHealthCheckRoutes(this.operationDispatcher, this.processManager, getSymphonyDir, undefined, this.options.getBinaryPaths);
+    registerHealthCheckRoutes(
+      this.operationDispatcher,
+      this.processManager,
+      getSymphonyDir,
+      undefined,
+      this.options.getBinaryPaths,
+      () => this.options.version
+    );
     if (this.options.getBinaryPaths && this.options.applyBinaryPathPatch) {
       registerBinaryPathsRoutes(this.operationDispatcher, this.options.getBinaryPaths, this.options.applyBinaryPathPatch);
     }

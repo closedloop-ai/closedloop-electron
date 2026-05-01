@@ -67,6 +67,26 @@ HTTP gateway routes, cloud relay messages, and persisted store schemas read acro
 - Internal contracts that ship as one Electron bundle do not need migration logic: main/renderer IPC bridge messages, internal module interfaces, and types consumed only inside `apps/desktop/`.
 - When reviewing a compatibility issue, first identify whether the caller is independently shipped. If both producer and consumer update atomically in the same desktop build, treat it as an internal refactor unless persisted data or an external client is involved.
 
+## Cross-Repo Telemetry Contracts
+
+Desktop telemetry categories, diagnostics fields, and relay/API event payload
+shapes are producer contracts consumed by `symphony-alpha`. When adding or
+changing a Desktop telemetry payload, include the `symphony-alpha` consumer
+update in the same PR stack or call out the required companion PR explicitly.
+
+At minimum, verify the companion change covers:
+
+- `packages/observability/telemetry/schema.ts` accepts the new Desktop-origin
+  diagnostics shape.
+- `apps/api/lib/desktop-telemetry-handler.ts` preserves the fields into
+  Datadog-bound metadata.
+- Tests prove the new Desktop payload survives schema parsing, diagnostics
+  sanitization, and handler logging.
+- Docs or runbooks list the Datadog query and expected structured fields.
+
+Do not assume a Desktop-emitted diagnostic is queryable in Datadog until the
+`symphony-alpha` consumer schema and handler tests prove it.
+
 ## Commit & Pull Request Guidelines
 Commit format follows `.gitmessage` and recent history:
 
