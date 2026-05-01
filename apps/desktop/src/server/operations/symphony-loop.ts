@@ -363,6 +363,12 @@ interface LoopCommitter {
   email: string;
 }
 
+/** Metadata derived from artifacts for PR title and body links. */
+interface PrMetadata {
+  friendlyTitle?: string;
+  featureLinkUrl?: string;
+}
+
 type ContextPackAttachment = SharedContextPackAttachment;
 
 interface ExecutionResult {
@@ -1406,6 +1412,7 @@ async function attemptLlmCommit(
   onTimeout?: () => void,
   jobStore?: JobStore,
   claudeWorkDir?: string,
+  prMetadata?: PrMetadata,
 ): Promise<ExecutionResult | null> {
   // Build metadata footer for PR body
   // Strip newlines from user-controlled fields to prevent prompt injection
@@ -1415,24 +1422,44 @@ async function attemptLlmCommit(
     ? sanitizeCommitMessage(artifactSlug).replace(/[\r\n]/g, "")
     : null;
 
+  const featureLine = prMetadata?.featureLinkUrl
+    ? `\nFeature: ${prMetadata.featureLinkUrl}`
+    : "";
   let footer: string;
   if (safeSlug) {
     // safeSlug contains only alphanumerics, hyphens, and underscores after
     // sanitizeCommitMessage() + newline stripping — no backticks that would
     // break shell heredocs or prompt injection via template literals.
     const artifactLink = `${webAppOrigin}/implementation-plans/${safeSlug}`;
-    footer = `---\nLoop ID: ${safeLoopId}\nArtifact: ${artifactLink}`;
+    footer = `---\nLoop ID: ${safeLoopId}\nArtifact: ${artifactLink}${featureLine}`;
   } else {
-    footer = `---\nLoop ID: ${safeLoopId}`;
+    footer = `---\nLoop ID: ${safeLoopId}${featureLine}`;
   }
 
   // Build slug instruction for the prompt
-  const slugInstruction = safeSlug
-    ? `The artifact slug is ${safeSlug}. ` +
+  let slugInstruction: string;
+  if (safeSlug && prMetadata?.friendlyTitle) {
+    // Both slug and friendly title are available — use the exact PR title
+    slugInstruction =
+      `The artifact slug is ${safeSlug}. ` +
+      `You MUST use this exact PR title: "${safeSlug}: ${prMetadata.friendlyTitle}". ` +
+      `Also prefix the commit message the same way.`;
+  } else if (safeSlug) {
+    // Slug only — instruct the LLM to prefix with the slug
+    slugInstruction =
+      `The artifact slug is ${safeSlug}. ` +
       `You MUST prefix the PR title with "${safeSlug}: " ` +
       `(e.g., "${safeSlug}: Add feature X"). ` +
-      `Also prefix the commit message the same way.`
-    : "No artifact slug is available — use a descriptive title without a prefix.";
+      `Also prefix the commit message the same way.`;
+  } else if (prMetadata?.friendlyTitle) {
+    // Friendly title only (no slug) — use as-is without a prefix
+    slugInstruction =
+      `You MUST use this exact PR title: "${prMetadata.friendlyTitle}". ` +
+      `Use the same title for the commit message subject.`;
+  } else {
+    slugInstruction =
+      "No artifact slug is available — use a descriptive title without a prefix.";
+  }
 
   const prompt = [
     `You are a commit assistant finalizing work from a ClosedLoop.AI ${command} loop.`,
@@ -1743,6 +1770,7 @@ function executeGitOperations(
   artifactSlug?: string,
   webAppOrigin?: string,
   shellPath?: string,
+  prMetadata?: PrMetadata,
 ): GitOperationResult {
   const shortId = loopId.slice(0, 8);
   const env: Record<string, string> = {
@@ -1787,8 +1815,16 @@ function executeGitOperations(
       timeout: 10_000,
     });
 
-    const commitPrefix = artifactSlug ? `${artifactSlug}: ` : "";
-    const fallbackTitle = `${commitPrefix}Automated changes from loop ${shortId}`;
+    let fallbackTitle: string;
+    if (prMetadata?.friendlyTitle && artifactSlug) {
+      fallbackTitle = `${artifactSlug}: ${prMetadata.friendlyTitle}`;
+    } else if (prMetadata?.friendlyTitle) {
+      fallbackTitle = prMetadata.friendlyTitle;
+    } else if (artifactSlug) {
+      fallbackTitle = `${artifactSlug}: Automated changes from loop ${shortId}`;
+    } else {
+      fallbackTitle = `Automated changes from loop ${shortId}`;
+    }
     execSync(`${shellEscape(gitBin)} commit -m ${shellEscape(fallbackTitle)}`, {
       cwd: worktreeDir,
       stdio: "pipe",
@@ -1824,7 +1860,10 @@ function executeGitOperations(
       artifactSlug && webAppOrigin
         ? `\nArtifact: ${webAppOrigin}/implementation-plans/${artifactSlug}`
         : "";
-    const metadataFooter = `---\nLoop ID: ${loopId}\nCommand: ${command}${artifactLine}`;
+    const featureLine = prMetadata?.featureLinkUrl
+      ? `\nFeature: ${prMetadata.featureLinkUrl}`
+      : "";
+    const metadataFooter = `---\nLoop ID: ${loopId}\nCommand: ${command}${artifactLine}${featureLine}`;
 
     let prBody: string;
     const templatePath = path.join(
@@ -2184,6 +2223,45 @@ export async function handleProcessCompletion(
           return;
         }
 
+        // Derive PR metadata from artifacts for use in commit message and PR body.
+        // Priority chain for friendlyTitle:
+        //   1. Feature-type artifact title
+        //   2. Any artifact title
+        //   3. undefined
+        // Note: sanitizeCommitMessage() is intentionally NOT applied here because
+        // prMetadata.friendlyTitle is used for the PR title (not the git commit
+        // subject line), which has different formatting requirements.  The git
+        // commit subject line is formatted separately inside attemptLlmCommit /
+        // executeGitOperations.
+        const friendlyTitle = (
+          body.artifacts.find(
+            (a) => a.type === LoopArtifactType.Feature,
+          )?.title ??
+          body.artifacts.find((a) => a.title)?.title
+        )
+          ?.replace(/[\r\n\x00-\x1f]/g, "")
+          .slice(0, 200);
+
+        // GAP-001: featureLinkUrl links the PR back to the originating Feature
+        // artifact in the web app.  Guard both featureArtifact.id and
+        // webAppOrigin being truthy to avoid constructing a broken URL.
+        const featureArtifact = body.artifacts.find(
+          (a) =>
+            a.type === LoopArtifactType.Feature &&
+            typeof a.id === "string" &&
+            a.id.length > 0,
+        );
+        const safeFeatureId = featureArtifact?.id?.replace(
+          /[\r\n\x00-\x1f]/g,
+          "",
+        );
+        const featureLinkUrl =
+          safeFeatureId && webAppOrigin
+            ? `${webAppOrigin}/features/${safeFeatureId}`
+            : undefined;
+
+        const prMetadata: PrMetadata = { friendlyTitle, featureLinkUrl };
+
         // Try LLM-assisted commit first; fall back to executeGitOperations if it
         // returns null.  Never call both.
         const llmResult = await attemptLlmCommit(
@@ -2203,6 +2281,7 @@ export async function handleProcessCompletion(
           },
           jobStore,
           claudeWorkDir,
+          prMetadata,
         );
 
         // Clean up any remaining LLM scratch files before fallback to prevent
@@ -2257,6 +2336,7 @@ export async function handleProcessCompletion(
               body.artifactSlug,
               webAppOrigin ?? "",
               gitShellPath,
+              prMetadata,
             );
 
         if (gitResult.status === "success") {

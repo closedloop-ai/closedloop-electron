@@ -28,6 +28,7 @@ import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { resetResolvedClaudePath } from "../src/server/operations/symphony-loop.js";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
+import { LoopArtifactType } from "@closedloop-ai/loops-api/artifacts";
 import {
   createFakeRunLoopScript,
   initGitRepo,
@@ -1103,7 +1104,171 @@ test("EXECUTE: artifact links use /implementation-plans/ in PR body and LLM prom
 });
 
 // ---------------------------------------------------------------------------
-// Test 9 (T-2.3): SAFETY commit PR title format is
+// Test 9a (T-3.1): SAFETY commit PR title — happy path
+//         When a Feature artifact with a title and id is provided alongside
+//         artifactSlug, the PR title uses the friendly format
+//         "<artifactSlug>: <Feature.title>" and the PR body contains a
+//         /features/<id> link.
+// ---------------------------------------------------------------------------
+
+test("EXECUTE: SAFETY commit PR title uses friendly Feature title and includes feature link in body", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-prtitle-happy-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-prtitle-happy");
+  await initGitRepo(repoPath);
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  // fake run-loop.sh: write a file so there are changes to commit
+  await createFakeRunLoopScript(
+    tmpDir,
+    [
+      "#!/bin/sh",
+      "echo 'implementation output' > impl.txt",
+      "exit 0",
+    ].join("\n")
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+
+  // fake claude: exits 0 without execution-result.json so code falls through to
+  // executeGitOperations (the SAFETY commit path)
+  await fs.writeFile(
+    path.join(fakeBin, "claude"),
+    "#!/bin/sh\nexit 0\n",
+    { mode: 0o755 }
+  );
+
+  // Capture files for the gh pr create --title argument and --body-file content
+  const ghTitleCapture = path.join(tmpDir, "gh-title-capture.txt");
+  const ghBodyCapture = path.join(tmpDir, "gh-body-capture.txt");
+
+  // fake git: stub push; delegate everything else to real git
+  const fakeGitScript = [
+    "#!/bin/sh",
+    "if [ \"$1\" = push ]; then exit 0; fi",
+    `exec /usr/bin/git "$@"`,
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  // fake gh: capture --title argument and --body-file content; return a fake
+  // PR URL from pr create; return non-zero for pr view (no existing PR) so
+  // pr create is called; return empty body for pr view --json body to skip
+  // the footer-update step.
+  const fakeGhScript = [
+    "#!/bin/sh",
+    "if [ \"$1\" = pr ] && [ \"$2\" = view ] && [ \"$3\" != \"--json\" ]; then",
+    "  exit 1",
+    "fi",
+    "if [ \"$1\" = pr ] && [ \"$2\" = view ] && [ \"$3\" = \"--json\" ]; then",
+    "  printf '{\"body\":\"\"}\\n'",
+    "  exit 0",
+    "fi",
+    "if [ \"$1\" = pr ] && [ \"$2\" = create ]; then",
+    "  prev=''",
+    "  for arg in \"$@\"; do",
+    "    if [ \"$prev\" = \"--title\" ]; then",
+    `      printf '%s' "$arg" > ${JSON.stringify(ghTitleCapture)}`,
+    "    fi",
+    "    if [ \"$prev\" = \"--body-file\" ] && [ -f \"$arg\" ]; then",
+    `      cp "$arg" ${JSON.stringify(ghBodyCapture)}`,
+    "    fi",
+    "    prev=\"$arg\"",
+    "  done",
+    "  printf 'https://github.com/org/repo-prtitle-happy/pull/55\\n'",
+    "  exit 0",
+    "fi",
+    "if [ \"$1\" = pr ] && [ \"$2\" = edit ]; then",
+    "  exit 0",
+    "fi",
+    `exec /usr/bin/gh "$@" 2>/dev/null || true`,
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "gh"), fakeGhScript, { mode: 0o755 });
+
+  resetResolvedClaudePath();
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-prtitle-happy-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000001100";
+  const artifactSlug = "PLAN-55";
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [
+          {
+            type: LoopArtifactType.Feature,
+            title: "My Feature Title",
+            id: "feat-123",
+            content: "",
+          },
+        ],
+        artifactSlug,
+        repo: { fullName: `prtitle-happy/${path.basename(repoPath)}`, branch: "main" },
+      }),
+    }
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
+  );
+
+  // Wait for the upload to confirm git operations completed
+  await mock.waitForRequest("upload-artifacts");
+
+  // Assert the title uses the friendly format: "<artifactSlug>: <Feature.title>"
+  const capturedTitle = await fs.readFile(ghTitleCapture, "utf-8").catch(() => "");
+  assert.equal(
+    capturedTitle,
+    "PLAN-55: My Feature Title",
+    `Expected PR title "PLAN-55: My Feature Title", got "${capturedTitle}"`
+  );
+
+  // Assert the PR body contains the feature link /features/feat-123
+  const capturedBody = await fs.readFile(ghBodyCapture, "utf-8").catch(() => "");
+  assert.ok(
+    capturedBody.includes("/features/feat-123"),
+    `Expected PR body to contain /features/feat-123, got body: ${capturedBody}`
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 9b (T-2.3): SAFETY commit PR title — fallback format
+//         When no artifacts are provided, the PR title falls back to
 //         "<artifactSlug>: Automated changes from loop <shortId>"
 //         and does NOT contain the old 'Symphony: EXECUTE' substring.
 // ---------------------------------------------------------------------------
@@ -1206,7 +1371,7 @@ test("EXECUTE: SAFETY commit PR title uses '<slug>: Automated changes from loop 
   serversToClose.push(server);
   await server.start();
 
-  const loopId = "00000000-0000-0000-0000-000000001100";
+  const loopId = "00000000-0000-0000-0000-000000001101";
   const artifactSlug = "PLAN-55";
   const shortId = loopId.slice(0, 8); // "00000000"
 
@@ -1238,7 +1403,7 @@ test("EXECUTE: SAFETY commit PR title uses '<slug>: Automated changes from loop 
 
   const capturedTitle = await fs.readFile(ghTitleCapture, "utf-8").catch(() => "");
 
-  // Assert the title matches the expected format:
+  // Assert the title matches the expected fallback format:
   // "<artifactSlug>: Automated changes from loop <shortId>"
   const expectedTitle = `${artifactSlug}: Automated changes from loop ${shortId}`;
   assert.equal(
@@ -1251,6 +1416,159 @@ test("EXECUTE: SAFETY commit PR title uses '<slug>: Automated changes from loop 
   assert.ok(
     !capturedTitle.includes("Symphony: EXECUTE"),
     `PR title must not contain 'Symphony: EXECUTE', got: "${capturedTitle}"`
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test 9c (T-3.2): LLM prompt contains friendlyTitle slug instruction
+//         When a Feature artifact with a title is provided, attemptLlmCommit()
+//         injects prMetadata.friendlyTitle into the slug instruction inside the
+//         LLM prompt.  The fake claude binary captures its -p argument to a file
+//         (same pattern as Test 8) and exits 0.  After upload-artifacts is
+//         received we assert the captured prompt contains "My Feature Title".
+// ---------------------------------------------------------------------------
+
+test("EXECUTE: LLM prompt slug instruction contains Feature artifact friendlyTitle", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "execute-llmprompt-title-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-llmprompt-title");
+  await initGitRepo(repoPath);
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  // fake run-loop.sh: write a file so there are changes to commit (needed so
+  // executeGitOperations can fall back if required)
+  await createFakeRunLoopScript(
+    tmpDir,
+    [
+      "#!/bin/sh",
+      "echo 'feature output' > feature-output.txt",
+      "exit 0",
+    ].join("\n")
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+
+  // Capture path for the LLM prompt
+  const claudePromptCapture = path.join(tmpDir, "claude-prompt-capture.txt");
+
+  // fake claude for attemptLlmCommit: captures the -p argument (the LLM prompt)
+  // to a file, then exits 0 without writing execution-result.json so the code
+  // falls through to the SAFETY executeGitOperations path.
+  const claudeScript = [
+    "#!/bin/sh",
+    "# Capture the argument following -p",
+    "prev=''",
+    'for arg in "$@"; do',
+    '  if [ "$prev" = "-p" ]; then',
+    `    printf '%s' "$arg" > ${JSON.stringify(claudePromptCapture)}`,
+    "  fi",
+    '  prev="$arg"',
+    "done",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "claude"), claudeScript, { mode: 0o755 });
+
+  // fake git: stub push; delegate everything else to real git
+  const fakeGitScript = [
+    "#!/bin/sh",
+    "if [ \"$1\" = push ]; then exit 0; fi",
+    `exec /usr/bin/git "$@"`,
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  // fake gh: return non-zero for pr view (no existing PR); return empty body for
+  // pr view --json body; return a fake URL from pr create; accept pr edit.
+  const fakeGhScript = [
+    "#!/bin/sh",
+    "if [ \"$1\" = pr ] && [ \"$2\" = view ] && [ \"$3\" != \"--json\" ]; then",
+    "  exit 1",
+    "fi",
+    "if [ \"$1\" = pr ] && [ \"$2\" = view ] && [ \"$3\" = \"--json\" ]; then",
+    "  printf '{\"body\":\"\"}\\n'",
+    "  exit 0",
+    "fi",
+    "if [ \"$1\" = pr ] && [ \"$2\" = create ]; then",
+    "  printf 'https://github.com/org/repo-llmprompt-title/pull/66\\n'",
+    "  exit 0",
+    "fi",
+    "if [ \"$1\" = pr ] && [ \"$2\" = edit ]; then",
+    "  exit 0",
+    "fi",
+    `exec /usr/bin/gh "$@" 2>/dev/null || true`,
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "gh"), fakeGhScript, { mode: 0o755 });
+
+  resetResolvedClaudePath();
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-llmprompt-title-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000001102";
+  const artifactSlug = "PLAN-66";
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: "EXECUTE",
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [
+          {
+            type: LoopArtifactType.Feature,
+            title: "My Feature Title",
+            id: "feat-123",
+            content: "",
+          },
+        ],
+        artifactSlug,
+        repo: { fullName: `llmprompt-title/${path.basename(repoPath)}`, branch: "main" },
+      }),
+    }
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`
+  );
+
+  // Wait for upload to confirm the flow completed
+  await mock.waitForRequest("upload-artifacts");
+
+  // Read the captured LLM prompt and assert it contains the feature title
+  const capturedPrompt = await fs.readFile(claudePromptCapture, "utf-8").catch(() => "");
+  assert.ok(
+    capturedPrompt.includes("My Feature Title"),
+    `Expected LLM prompt slug instruction to contain "My Feature Title", got prompt (tail): ${capturedPrompt.slice(-500)}`
   );
 });
 
