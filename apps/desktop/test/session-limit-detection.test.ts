@@ -442,6 +442,66 @@ describe("detectAuthChallengeFromJsonl", () => {
     ]);
     assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
   });
+
+  // isApiErrorMessage: true branch
+
+  test("isApiErrorMessage: true with apiErrorStatus 429 maps to rate-limit", () => {
+    writeJsonl([
+      { isApiErrorMessage: true, error: "some unrelated text", apiErrorStatus: 429 },
+    ]);
+    const result = detectAuthChallengeFromJsonl(tmpDir);
+    assert.ok(result !== null, "should detect 429 as auth/rate-limit");
+    assert.ok(result.includes("HTTP 429"), `expected "HTTP 429" in result, got: ${result}`);
+  });
+
+  test("isApiErrorMessage: true with error matching AUTH_CHALLENGE_PATTERN is detected", () => {
+    writeJsonl([
+      { isApiErrorMessage: true, error: "authentication_error: Invalid API key" },
+    ]);
+    const result = detectAuthChallengeFromJsonl(tmpDir);
+    assert.ok(result !== null, "should detect auth challenge pattern in error field");
+    assert.ok(
+      result.includes("authentication_error"),
+      `expected "authentication_error" in result, got: ${result}`,
+    );
+  });
+
+  test("isApiErrorMessage: true with both error and apiErrorStatus formats as '<error> — HTTP <status>'", () => {
+    writeJsonl([
+      { isApiErrorMessage: true, error: "authentication_error", apiErrorStatus: 401 },
+    ]);
+    const result = detectAuthChallengeFromJsonl(tmpDir);
+    assert.strictEqual(result, "authentication_error — HTTP 401");
+  });
+
+  test("isApiErrorMessage: true with no error field but apiErrorStatus 429 returns fallback", () => {
+    writeJsonl([
+      { isApiErrorMessage: true, apiErrorStatus: 429 },
+    ]);
+    const result = detectAuthChallengeFromJsonl(tmpDir);
+    assert.strictEqual(result, "HTTP 429");
+  });
+
+  test("isApiErrorMessage: true with non-matching error text and non-429 status returns null", () => {
+    writeJsonl([
+      { isApiErrorMessage: true, error: "some unrelated error message", apiErrorStatus: 500 },
+    ]);
+    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
+  });
+
+  test("isApiErrorMessage: false with matching error field is NOT detected via this branch", () => {
+    writeJsonl([
+      { isApiErrorMessage: false, error: "authentication_error: Invalid API key" },
+    ]);
+    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
+  });
+
+  test("record without isApiErrorMessage field and matching error field is NOT detected via this branch", () => {
+    writeJsonl([
+      { error: "authentication_error: Invalid API key" },
+    ]);
+    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
+  });
 });
 
 // ---------------------------------------------------------------------------

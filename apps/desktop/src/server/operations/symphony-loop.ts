@@ -2054,14 +2054,26 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
 export const SESSION_LIMIT_PATTERN =
   /prompt is too long|exceed context limit|context limit reached|conversation too long/i;
 
+// ---------------------------------------------------------------------------
+// Auth challenge detection
+// ---------------------------------------------------------------------------
+
+/** Pattern that matches known auth/rate-limit/billing error messages from Claude CLI. */
+export const AUTH_CHALLENGE_PATTERN =
+  /authentication_error|invalid bearer token|rate_limit_error|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|token.*expired/i;
+
+// ---------------------------------------------------------------------------
+// Shared JSONL scanner
+// ---------------------------------------------------------------------------
+
 /**
- * Scan claude-output.jsonl for a result record with `is_error: true` whose
- * message matches a known session/context limit pattern.
- * Returns the error text (e.g. "Prompt is too long") or null if not found
- * or if the error is unrelated to context limits.
+ * Read claude-output.jsonl and return the first entry for which `matcher`
+ * returns a non-null string. Returns null when the file is missing, empty,
+ * or no entry matches.
  */
-export function detectSessionLimitFromJsonl(
+function scanJsonl(
   claudeWorkDir: string,
+  matcher: (entry: Record<string, unknown>) => string | null,
 ): string | null {
   const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
   if (!existsSync(outputFile)) {
@@ -2075,13 +2087,9 @@ export function detectSessionLimitFromJsonl(
       }
       try {
         const entry = JSON.parse(line) as Record<string, unknown>;
-        if (
-          entry.type === "result" &&
-          entry.is_error === true &&
-          typeof entry.result === "string" &&
-          SESSION_LIMIT_PATTERN.test(entry.result)
-        ) {
-          return entry.result;
+        const result = matcher(entry);
+        if (result !== null) {
+          return result;
         }
       } catch {
         // skip malformed lines
@@ -2091,6 +2099,32 @@ export function detectSessionLimitFromJsonl(
     // file read error
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Session/context limit detection
+// ---------------------------------------------------------------------------
+
+/**
+ * Scan claude-output.jsonl for a result record with `is_error: true` whose
+ * message matches a known session/context limit pattern.
+ * Returns the error text (e.g. "Prompt is too long") or null if not found
+ * or if the error is unrelated to context limits.
+ */
+export function detectSessionLimitFromJsonl(
+  claudeWorkDir: string,
+): string | null {
+  return scanJsonl(claudeWorkDir, (entry) => {
+    if (
+      entry.type === "result" &&
+      entry.is_error === true &&
+      typeof entry.result === "string" &&
+      SESSION_LIMIT_PATTERN.test(entry.result)
+    ) {
+      return entry.result;
+    }
+    return null;
+  });
 }
 
 /**
@@ -2101,50 +2135,50 @@ export function isSessionLimitError(logTail: string): boolean {
   return SESSION_LIMIT_PATTERN.test(logTail);
 }
 
-// ---------------------------------------------------------------------------
-// Auth challenge detection
-// ---------------------------------------------------------------------------
-
-/** Pattern that matches known auth/rate-limit/billing error messages from Claude CLI. */
-export const AUTH_CHALLENGE_PATTERN =
-  /authentication_error|invalid bearer token|rate_limit_error|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|token.*expired/i;
-
 /**
  * Scan claude-output.jsonl for a result record with `is_error: true` whose
- * message matches a known auth/rate-limit/billing pattern.
+ * message matches a known auth/rate-limit/billing pattern, or a synthetic
+ * API-error entry (`isApiErrorMessage: true`) with an auth-related error
+ * or HTTP 429 status.
  * Returns the error text or null if not found.
  */
 export function detectAuthChallengeFromJsonl(
   claudeWorkDir: string,
 ): string | null {
-  const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
-  if (!existsSync(outputFile)) {
-    return null;
-  }
-  try {
-    const content = readFileSync(outputFile, "utf-8");
-    for (const line of content.split("\n")) {
-      if (!line.trim()) {
-        continue;
-      }
-      try {
-        const entry = JSON.parse(line) as Record<string, unknown>;
-        if (
-          entry.type === "result" &&
-          entry.is_error === true &&
-          typeof entry.result === "string" &&
-          AUTH_CHALLENGE_PATTERN.test(entry.result)
-        ) {
-          return entry.result;
+  return scanJsonl(claudeWorkDir, (entry) => {
+    if (
+      entry.type === "result" &&
+      entry.is_error === true &&
+      typeof entry.result === "string" &&
+      AUTH_CHALLENGE_PATTERN.test(entry.result)
+    ) {
+      return entry.result;
+    }
+    // Synthetic API-error transcript entries emitted by Claude CLI when it
+    // receives an API error response (e.g. rate_limit, auth). These records
+    // have `isApiErrorMessage: true` and carry the error in `.error` and/or
+    // an HTTP status in `apiErrorStatus`.
+    if (entry.isApiErrorMessage === true) {
+      const errorText =
+        typeof entry.error === "string" ? entry.error : "";
+      const status =
+        typeof entry.apiErrorStatus === "number"
+          ? entry.apiErrorStatus
+          : null;
+      // 429 always maps to rate-limit; otherwise test the error text
+      if (status === 429 || AUTH_CHALLENGE_PATTERN.test(errorText)) {
+        const parts: string[] = [];
+        if (errorText) {
+          parts.push(errorText);
         }
-      } catch {
-        // skip malformed lines
+        if (status !== null) {
+          parts.push(`HTTP ${status}`);
+        }
+        return parts.join(" — ");
       }
     }
-  } catch {
-    // file read error
-  }
-  return null;
+    return null;
+  });
 }
 
 /**
