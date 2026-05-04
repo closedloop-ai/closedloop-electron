@@ -6,6 +6,7 @@ import { SUPPORTED_OPERATION_IDS, resolveOperationId } from "../src/main/approva
 // --- riskTierOrder ---
 
 test("riskTierOrder returns correct numeric ordering", () => {
+  assert.ok(riskTierOrder("none") < riskTierOrder("low"));
   assert.ok(riskTierOrder("low") < riskTierOrder("medium"));
   assert.ok(riskTierOrder("medium") < riskTierOrder("high"));
 });
@@ -28,6 +29,13 @@ test("policy high: auto-approves all mapped operations", () => {
   assert.equal(shouldAutoApprove("health_check", "high", false), true);
   assert.equal(shouldAutoApprove("symphony_loop", "high", false), true);
   assert.equal(shouldAutoApprove("deploy", "high", false), true);
+});
+
+test("policy none: blocks all operations including low-risk", () => {
+  assert.equal(shouldAutoApprove("health_check", "none", false), false);
+  assert.equal(shouldAutoApprove("symphony_loop", "none", false), false);
+  assert.equal(shouldAutoApprove("deploy", "none", false), false);
+  assert.equal(shouldAutoApprove("unknown_op", "none", false), false);
 });
 
 test("forceApproval overrides threshold", () => {
@@ -54,23 +62,23 @@ test("OPERATION_RISK_TIERS keys exactly match SUPPORTED_OPERATION_IDS", () => {
 // --- resolveOperationId routing ---
 
 test("resolveOperationId maps known paths correctly", () => {
-  assert.equal(resolveOperationId("/api/engineer/health-check"), "health_check");
-  assert.equal(resolveOperationId("/api/engineer/symphony/launch"), "symphony_launch");
-  assert.equal(resolveOperationId("/api/engineer/deploy/anything"), "deploy");
+  assert.equal(resolveOperationId("/api/gateway/health-check"), "health_check");
+  assert.equal(resolveOperationId("/api/gateway/symphony/launch"), "symphony_launch");
+  assert.equal(resolveOperationId("/api/gateway/deploy/anything"), "deploy");
 });
 
 test("resolveOperationId maps previously unmapped routes", () => {
-  assert.equal(resolveOperationId("/api/engineer/version"), "health_check");
-  assert.equal(resolveOperationId("/api/engineer/symphony/status"), "symphony_status");
-  assert.equal(resolveOperationId("/api/engineer/symphony/status/FEAT-1"), "symphony_status");
-  assert.equal(resolveOperationId("/api/engineer/symphony/attachments/FEAT-1/img.png"), "filesystem");
-  assert.equal(resolveOperationId("/api/engineer/symphony/upload/FEAT-1"), "filesystem");
+  assert.equal(resolveOperationId("/api/gateway/version"), "health_check");
+  assert.equal(resolveOperationId("/api/gateway/symphony/status"), "symphony_status");
+  assert.equal(resolveOperationId("/api/gateway/symphony/status/FEAT-1"), "symphony_status");
+  assert.equal(resolveOperationId("/api/gateway/symphony/attachments/FEAT-1/img.png"), "filesystem");
+  assert.equal(resolveOperationId("/api/gateway/symphony/upload/FEAT-1"), "filesystem");
 });
 
-test("resolveOperationId returns null for truly unknown engineer paths", () => {
-  assert.equal(resolveOperationId("/api/engineer/does-not-exist"), null);
+test("resolveOperationId returns null for truly unknown gateway paths", () => {
+  assert.equal(resolveOperationId("/api/gateway/does-not-exist"), null);
 });
 
-test("resolveOperationId returns null for paths outside /api/engineer/", () => {
+test("resolveOperationId returns null for paths outside /api/gateway/", () => {
   assert.equal(resolveOperationId("/health"), null);
 });

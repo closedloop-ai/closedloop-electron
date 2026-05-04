@@ -6,16 +6,25 @@ import {
   DEFAULT_GATEWAY_PORT,
   FALLBACK_GATEWAY_PORTS,
   type ComputeTargetCapabilities,
-  type HealthResponse
+  type HealthResponse,
 } from "../shared/contracts.js";
+import { gatewayLog } from "../main/gateway-logger.js";
 import type { LocalSessionStore } from "../main/local-session-store.js";
 import type { JobStore } from "../main/job-store.js";
+import type { LoopTokenStore } from "../main/loop-token-store.js";
+import type { ApiKeyProvenance } from "../main/api-key-store.js";
+import type { DesktopPopSigner } from "../main/desktop-pop.js";
+import type { DesktopPopUnavailableReporter } from "../main/desktop-pop-sign-utils.js";
 import {
   GatewayRouter,
+  type DesktopSecurityUpgradePayload,
+  type DesktopSecurityUpgradeResult,
   type GatewayActivityEvent,
   type GatewayApprovalRequest,
-  type GatewayApprovalResult
+  type GatewayApprovalResult,
 } from "./router.js";
+import type { WorktreeProvider } from "./operations/symphony-loop.js";
+import type { RetrySpawnDeps } from "../main/spawn-retry.js";
 
 export interface DesktopGatewayServerOptions {
   host: string;
@@ -26,33 +35,51 @@ export interface DesktopGatewayServerOptions {
   getGatewayAuthToken?: () => string | undefined;
   getAllowedDirectories: () => string[];
   getSymphonyDir?: () => string;
-  fallbackEngineerOrigin?: string;
+  fallbackGatewayOrigin?: string;
   onActivityEvent?: (event: GatewayActivityEvent) => void;
   evaluateApproval?: (
-    request: GatewayApprovalRequest
+    request: GatewayApprovalRequest,
   ) => GatewayApprovalResult | Promise<GatewayApprovalResult>;
   machineName: string;
   version: string;
   capabilities: ComputeTargetCapabilities;
+  getOnboardingCompleted?: () => boolean;
   discoveryFilePath?: string;
   sessionStore?: LocalSessionStore;
   getApiKey?: () => string | null;
+  getApiKeyProvenance?: () => ApiKeyProvenance | null;
+  signDesktopRequest?: DesktopPopSigner;
+  onDesktopPopUnavailable?: DesktopPopUnavailableReporter;
   getApiOrigin?: () => string;
   prodOriginsOnly?: boolean;
   jobStore?: JobStore;
+  worktreeProvider?: WorktreeProvider;
+  retrySpawnDeps?: RetrySpawnDeps;
+  onUnexpectedClose?: () => void;
+  loopTokenStore?: LoopTokenStore;
+  getGatewayId?: () => string;
+  getComputeTargetId?: () => string | null;
+  handleSecurityUpgrade?: (
+    payload: DesktopSecurityUpgradePayload
+  ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult;
+  getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
+  applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
 }
 
 export class DesktopGatewayServer {
   private readonly options: DesktopGatewayServerOptions;
   private readonly router: GatewayRouter;
   private server: Server | null = null;
+  private alive = false;
   private activePort: number;
 
   constructor(options: DesktopGatewayServerOptions) {
     this.options = {
       ...options,
+      getGatewayId: options.getGatewayId ?? (() => ""),
       discoveryFilePath:
-        options.discoveryFilePath ?? path.join(os.homedir(), ".closedloop-ai", "electron-port")
+        options.discoveryFilePath ??
+        path.join(os.homedir(), ".closedloop-ai", "electron-port"),
     };
     this.activePort = this.options.preferredPort;
     this.router = new GatewayRouter({
@@ -62,17 +89,29 @@ export class DesktopGatewayServer {
       machineName: this.options.machineName,
       version: this.options.version,
       capabilities: this.options.capabilities,
+      getOnboardingCompleted: this.options.getOnboardingCompleted,
       getActivePort: () => this.activePort,
       getAllowedDirectories: this.options.getAllowedDirectories,
       getSymphonyDir: this.options.getSymphonyDir,
-      fallbackEngineerOrigin: this.options.fallbackEngineerOrigin,
+      fallbackGatewayOrigin: this.options.fallbackGatewayOrigin,
       onActivityEvent: this.options.onActivityEvent,
       evaluateApproval: this.options.evaluateApproval,
       sessionStore: this.options.sessionStore,
       getApiKey: this.options.getApiKey,
+      getApiKeyProvenance: this.options.getApiKeyProvenance,
+      signDesktopRequest: this.options.signDesktopRequest,
+      onDesktopPopUnavailable: this.options.onDesktopPopUnavailable,
       getApiOrigin: this.options.getApiOrigin,
       prodOriginsOnly: this.options.prodOriginsOnly,
       jobStore: this.options.jobStore,
+      worktreeProvider: this.options.worktreeProvider,
+      loopTokenStore: this.options.loopTokenStore,
+      retrySpawnDeps: this.options.retrySpawnDeps,
+      getGatewayId: this.options.getGatewayId ?? (() => ""),
+      getComputeTargetId: this.options.getComputeTargetId,
+      handleSecurityUpgrade: this.options.handleSecurityUpgrade,
+      getBinaryPaths: this.options.getBinaryPaths,
+      applyBinaryPathPatch: this.options.applyBinaryPathPatch,
     });
   }
 
@@ -85,7 +124,7 @@ export class DesktopGatewayServer {
     capabilities: ComputeTargetCapabilities,
     onActivityEvent?: (event: GatewayActivityEvent) => void,
     evaluateApproval?: (
-      request: GatewayApprovalRequest
+      request: GatewayApprovalRequest,
     ) => GatewayApprovalResult | Promise<GatewayApprovalResult>,
     getSymphonyDir?: () => string,
     sessionStore?: LocalSessionStore,
@@ -93,7 +132,21 @@ export class DesktopGatewayServer {
     getApiOrigin?: () => string,
     getWebAppOrigin?: () => string,
     prodOriginsOnly?: boolean,
-    jobStore?: JobStore
+    jobStore?: JobStore,
+    onUnexpectedClose?: () => void,
+    loopTokenStore?: LoopTokenStore,
+    retrySpawnDeps?: RetrySpawnDeps,
+    getGatewayId: () => string = () => "",
+    getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string },
+    applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string },
+    getApiKeyProvenance?: () => ApiKeyProvenance | null,
+    signDesktopRequest?: DesktopPopSigner,
+    onDesktopPopUnavailable?: DesktopPopUnavailableReporter,
+    getComputeTargetId?: () => string | null,
+    handleSecurityUpgrade?: (
+      payload: DesktopSecurityUpgradePayload
+    ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult,
+    getOnboardingCompleted?: () => boolean,
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -104,7 +157,7 @@ export class DesktopGatewayServer {
       getGatewayAuthToken,
       getAllowedDirectories,
       getSymphonyDir,
-      fallbackEngineerOrigin: process.env.SYMPHONY_ENGINEER_FALLBACK_ORIGIN,
+      fallbackGatewayOrigin: process.env.SYMPHONY_GATEWAY_FALLBACK_ORIGIN,
       onActivityEvent,
       evaluateApproval,
       machineName,
@@ -112,9 +165,21 @@ export class DesktopGatewayServer {
       capabilities,
       sessionStore,
       getApiKey,
+      getApiKeyProvenance,
+      signDesktopRequest,
+      onDesktopPopUnavailable,
       getApiOrigin,
       prodOriginsOnly,
       jobStore,
+      onUnexpectedClose,
+      loopTokenStore,
+      retrySpawnDeps,
+      getGatewayId,
+      getComputeTargetId,
+      handleSecurityUpgrade,
+      getOnboardingCompleted,
+      getBinaryPaths,
+      applyBinaryPathPatch,
     });
   }
 
@@ -131,8 +196,10 @@ export class DesktopGatewayServer {
       status: "ok",
       machineName: this.options.machineName,
       capabilities: this.options.capabilities,
+      gatewayId: this.options.getGatewayId?.() || undefined,
+      onboardingCompleted: this.options.getOnboardingCompleted?.() ?? false,
       version: this.options.version,
-      port: this.activePort
+      port: this.activePort,
     };
   }
 
@@ -141,7 +208,10 @@ export class DesktopGatewayServer {
       return;
     }
 
-    const candidates = [this.options.preferredPort, ...this.options.fallbackPorts];
+    const candidates = [
+      this.options.preferredPort,
+      ...this.options.fallbackPorts,
+    ];
     let lastError: Error | null = null;
 
     for (const candidate of candidates) {
@@ -152,7 +222,21 @@ export class DesktopGatewayServer {
       try {
         await this.listen(candidateServer, candidate);
         this.server = candidateServer;
-        this.activePort = candidate;
+        this.alive = true;
+        const addr = candidateServer.address();
+        this.activePort =
+          typeof addr === "object" && addr ? addr.port : candidate;
+        candidateServer.on("error", (err) => {
+          gatewayLog.error("gateway-server", `Server error: ${err.message}`);
+        });
+        candidateServer.on("close", () => {
+          if (this.server === candidateServer) {
+            this.alive = false;
+            this.server = null;
+            gatewayLog.warn("gateway-server", "Server closed unexpectedly");
+            this.options.onUnexpectedClose?.();
+          }
+        });
         await this.writeDiscoveryFile();
         return;
       } catch (error) {
@@ -168,11 +252,12 @@ export class DesktopGatewayServer {
     }
 
     throw new Error(
-      `failed to bind gateway server to any candidate port (${candidates.join(", ")}): ${lastError?.message ?? "unknown error"}`
+      `failed to bind gateway server to any candidate port (${candidates.join(", ")}): ${lastError?.message ?? "unknown error"}`,
     );
   }
 
   async stop(): Promise<void> {
+    this.alive = false;
     if (!this.server) {
       return;
     }
@@ -181,13 +266,27 @@ export class DesktopGatewayServer {
     this.server = null;
     await new Promise<void>((resolve, reject) => {
       runningServer.close((error) => {
-        if (error) {
+        if (
+          error &&
+          (error as NodeJS.ErrnoException).code !== "ERR_SERVER_NOT_RUNNING"
+        ) {
           reject(error);
           return;
         }
         resolve();
       });
+      // Force-drop active NDJSON/SSE streams so close() can actually complete.
+      runningServer.closeAllConnections();
     });
+  }
+
+  isAlive(): boolean {
+    return this.alive && this.server !== null && this.server.listening;
+  }
+
+  async restart(): Promise<void> {
+    await this.stop();
+    await this.start();
   }
 
   private async listen(server: Server, port: number): Promise<void> {
@@ -204,6 +303,10 @@ export class DesktopGatewayServer {
 
     const discoveryDirectory = path.dirname(this.options.discoveryFilePath);
     await fs.mkdir(discoveryDirectory, { recursive: true });
-    await fs.writeFile(this.options.discoveryFilePath, String(this.activePort), "utf-8");
+    await fs.writeFile(
+      this.options.discoveryFilePath,
+      String(this.activePort),
+      "utf-8",
+    );
   }
 }

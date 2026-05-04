@@ -8,11 +8,18 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import {
-  readEvaluatePrdOutputs,
+  EvaluateArtifact,
+  readEvaluateOutputs,
   writePrdArtifact,
-} from "../src/server/operations/symphony-prd-artifacts.js";
+} from "../src/server/operations/symphony-loop.js";
+import { LoopArtifactType } from "@closedloop-ai/loops-api/artifacts";
+import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
-import { EMPTY_CAPABILITIES, PORT_PROBE_ORDER } from "../src/shared/contracts.js";
+import {
+  setupStubClaude,
+  setupStubClaudeBlocking,
+} from "./symphony-test-utils.js";
+import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 
 // ---------------------------------------------------------------------------
 // Shared cleanup state
@@ -42,6 +49,7 @@ afterEach(async () => {
   } else {
     process.env.PATH = originalPath;
   }
+  resetShellPathCache();
 
   for (const server of serversToClose.splice(0)) {
     await server.stop();
@@ -82,12 +90,13 @@ function makeGatewayServer(options?: {
   allowedDirs?: string[];
   tmpDir?: string;
   getApiOrigin?: () => string;
+  getSymphonyDir?: () => string;
 }): DesktopGatewayServer {
   const tmpDir = options?.tmpDir ?? makeTempDir();
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getGatewayAuthToken: () => "test-token",
     // Dummy origin for tests that never POST loop events (Node fetch rejects port 9 as invalid).
@@ -97,6 +106,7 @@ function makeGatewayServer(options?: {
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: options?.getSymphonyDir ?? (() => tmpDir),
   });
   serversToClose.push(server);
   return server;
@@ -196,7 +206,7 @@ function buildEvaluatePrdBody(overrides?: Partial<Record<string, unknown>>): Rec
     command: "EVALUATE_PRD",
     closedLoopAuthToken: "cl-token",
     apiBaseUrl: "https://api.example.com",
-    artifacts: [],
+    artifacts: [{ type: "PRD", content: "PRD content for evaluation" }],
     ...overrides,
   };
 }
@@ -210,11 +220,13 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
     // We post a valid EVALUATE_PRD without a repo field.
     // The handler should not return 400 — it treats repo as optional for this command.
     // It may return 200 (if spawn succeeds) or 500 (if claude not found) but never 400.
+    // Stub claude so we never spawn the real CLI (would hit the API and take minutes).
+    await setupStubClaude(makeTempDir());
     const server = makeGatewayServer();
     await server.start();
 
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -230,18 +242,14 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
 
   test("EVALUATE_PRD ignores stale repo.fullName and still proceeds", async () => {
     const tmpDir = makeTempDir();
-    const fakeBin = path.join(tmpDir, "fake-bin");
-    await fs.mkdir(fakeBin, { recursive: true });
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
 
-    const stubScript = [
-      "#!/bin/sh",
-      'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
-      "exit 0",
-    ].join("\n");
-    await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
-    process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+    // Blocking stub keeps the child process alive until we release it, so the
+    // post-completion cleanup that removes claudeWorkDir cannot race with the
+    // file assertions below.
+    const releaseSentinel = path.join(tmpDir, "release-stub");
+    const stub = await setupStubClaudeBlocking(tmpDir, releaseSentinel);
 
     const server = makeGatewayServer({
       allowedDirs: [tmpDir],
@@ -251,7 +259,7 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
 
     const loopId = "77777777-0000-0000-0000-000000000007";
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -280,6 +288,9 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
       `Prompt should not include REPO_PATH for stale repo metadata, got: ${promptContent}`
     );
 
+    // Release the stub now that we've finished asserting on claudeWorkDir.
+    await stub.release();
+
     await eventSrv.waitForEvent(
       (b) => b.type === "completed" || b.type === "error",
       15_000
@@ -288,18 +299,11 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
 
   test("EVALUATE_PRD ignores disallowed localRepoPath and still proceeds", async () => {
     const tmpDir = makeTempDir();
-    const fakeBin = path.join(tmpDir, "fake-bin");
-    await fs.mkdir(fakeBin, { recursive: true });
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
 
-    const stubScript = [
-      "#!/bin/sh",
-      'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
-      "exit 0",
-    ].join("\n");
-    await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
-    process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+    const releaseSentinel = path.join(tmpDir, "release-stub");
+    const stub = await setupStubClaudeBlocking(tmpDir, releaseSentinel);
 
     const disallowedRepoPath = path.join(tmpDir, "..", "outside-allowed-dir");
     const server = makeGatewayServer({
@@ -310,7 +314,7 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
 
     const loopId = "88888888-0000-0000-0000-000000000008";
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -339,6 +343,8 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
       `Prompt should not include REPO_PATH for disallowed localRepoPath, got: ${promptContent}`
     );
 
+    await stub.release();
+
     await eventSrv.waitForEvent(
       (b) => b.type === "completed" || b.type === "error",
       15_000
@@ -350,7 +356,7 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
     await server.start();
 
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -389,42 +395,70 @@ describe("T-5.2: writePrdArtifact", () => {
     assert.ok(!existsSync(path.join(tmpDir, "prd.md")), "prd.md should not exist");
   });
 
-  test("(c) artifact fallback type ('artifact') writes prd.md", async () => {
+  test("(c) FEATURE fallback type writes prd.md", async () => {
     const tmpDir = makeTempDir();
     await writePrdArtifact(tmpDir, [
-      { type: "artifact", content: "Fallback PRD content" },
+      { type: LoopArtifactType.Feature, content: "Fallback PRD content" },
     ]);
     const prdPath = path.join(tmpDir, "prd.md");
-    assert.ok(existsSync(prdPath), "prd.md should exist for artifact type");
+    assert.ok(existsSync(prdPath), "prd.md should exist for FEATURE type");
     const content = await fs.readFile(prdPath, "utf-8");
     assert.equal(content, "Fallback PRD content");
+  });
+
+  test("(d) PRD artifact takes priority over prompt", async () => {
+    const tmpDir = makeTempDir();
+    await writePrdArtifact(
+      tmpDir,
+      [{ type: "PRD", content: "The real PRD content" }],
+      "This is the prompt, not the PRD",
+    );
+    const prdPath = path.join(tmpDir, "prd.md");
+    assert.ok(existsSync(prdPath), "prd.md should exist");
+    const content = await fs.readFile(prdPath, "utf-8");
+    assert.equal(content, "The real PRD content", "Artifact content should win over prompt");
+  });
+
+  test("(e) prompt used as fallback when no artifact present", async () => {
+    const tmpDir = makeTempDir();
+    await writePrdArtifact(tmpDir, [], "Prompt-as-fallback content");
+    const prdPath = path.join(tmpDir, "prd.md");
+    assert.ok(existsSync(prdPath), "prd.md should exist");
+    const content = await fs.readFile(prdPath, "utf-8");
+    assert.equal(content, "Prompt-as-fallback content");
+  });
+
+  test("(f) picks the primary PRD when a PRD context ref precedes it", async () => {
+    // Backend appends the primary artifact last; refs come first. If a PRD
+    // context ref shares the primary's type, find() would shadow the primary
+    // and judges would score the wrong document. findLast picks the trailing
+    // primary even with a same-type ref present.
+    const tmpDir = makeTempDir();
+    await writePrdArtifact(tmpDir, [
+      { type: "PRD", content: "PARENT PRD (context ref)" },
+      { type: "PRD", content: "PRIMARY PRD" },
+    ]);
+    assert.equal(
+      await fs.readFile(path.join(tmpDir, "prd.md"), "utf-8"),
+      "PRIMARY PRD",
+    );
   });
 
   test("prompt without repo contains skill --workdir runDir but not REPO_PATH=", async () => {
     // Verify evaluate-prd-prompt.txt matches harness-agent EVALUATE_PRD when no target repo.
     const tmpDir = makeTempDir();
-    const fakeBin = path.join(tmpDir, "fake-bin");
-    await fs.mkdir(fakeBin, { recursive: true });
-
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
 
-    // stub claude: reads stdin (the prompt), exits 0
-    const stubScript = [
-      "#!/bin/sh",
-      // One stream-json line starting with { so grep in buildClaudePipeline succeeds.
-      'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
-      "exit 0",
-    ].join("\n");
-    await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
-    process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+    const releaseSentinel = path.join(tmpDir, "release-stub");
+    const stub = await setupStubClaudeBlocking(tmpDir, releaseSentinel);
 
     const server = makeGatewayServer({ getApiOrigin: () => apiBaseUrl });
     await server.start();
 
     const loopId = "22222222-0000-0000-0000-000000000002";
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -444,15 +478,14 @@ describe("T-5.2: writePrdArtifact", () => {
 
     assert.equal(response.status, 200, `Expected 200, got ${response.status}`);
 
-    // Read the prompt file before waiting for the completed event.
-    // The file is written before the HTTP 200 response is sent, so it is safe
-    // to read here. After the completed event fires, production code calls
-    // fs.rm(claudeWorkDir) fire-and-forget, which races with async readFile.
+    // Stub is blocked, so claudeWorkDir cannot be cleaned up while we read here.
     const claudeWorkDir = path.join(os.tmpdir(), `symphony-evaluate-prd-${loopId.slice(0, 8)}`);
     const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
 
     assert.ok(existsSync(promptFile), `Prompt file should exist at ${promptFile}`);
     const promptContent = await fs.readFile(promptFile, "utf-8");
+
+    await stub.release();
 
     // Wait for completed or error event
     await eventSrv.waitForEvent(
@@ -475,20 +508,11 @@ describe("T-5.2: writePrdArtifact", () => {
   test("prompt with repo contains --workdir runDir and REPO_PATH=", async () => {
     // Use a real local repo directory to test repo-present prompt
     const tmpDir = makeTempDir();
-    const fakeBin = path.join(tmpDir, "fake-bin");
-    await fs.mkdir(fakeBin, { recursive: true });
-
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
 
-    const stubScript = [
-      "#!/bin/sh",
-      // One stream-json line starting with { so grep in buildClaudePipeline succeeds.
-      'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
-      "exit 0",
-    ].join("\n");
-    await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
-    process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+    const releaseSentinel = path.join(tmpDir, "release-stub");
+    const stub = await setupStubClaudeBlocking(tmpDir, releaseSentinel);
 
     // Create a fake repo dir with the expected naming for findLocalRepo
     // findLocalRepo looks for a dir matching the repo's base name inside allowed dirs
@@ -504,7 +528,7 @@ describe("T-5.2: writePrdArtifact", () => {
 
     const loopId = "66666666-0000-0000-0000-000000000006";
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -524,15 +548,14 @@ describe("T-5.2: writePrdArtifact", () => {
 
     assert.equal(response.status, 200, `Expected 200, got ${response.status}`);
 
-    // Read the prompt file before waiting for the completed event.
-    // The file is written before the HTTP 200 response is sent, so it is safe
-    // to read here. After the completed event fires, production code calls
-    // fs.rm(claudeWorkDir) fire-and-forget, which races with async readFile.
+    // Stub is blocked, so claudeWorkDir cannot be cleaned up while we read here.
     const claudeWorkDir = path.join(os.tmpdir(), `symphony-evaluate-prd-${loopId.slice(0, 8)}`);
     const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
 
     assert.ok(existsSync(promptFile), `Prompt file should exist at ${promptFile}`);
     const promptContent = await fs.readFile(promptFile, "utf-8");
+
+    await stub.release();
 
     await eventSrv.waitForEvent(
       (b) => b.type === "completed" || b.type === "error",
@@ -557,10 +580,10 @@ describe("T-5.2: writePrdArtifact", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T-5.3: readEvaluatePrdOutputs unit tests
+// T-5.3: readEvaluateOutputs(EvaluateArtifact.Prd) unit tests
 // ---------------------------------------------------------------------------
 
-describe("T-5.3: readEvaluatePrdOutputs", () => {
+describe("T-5.3: readEvaluateOutputs(EvaluateArtifact.Prd)", () => {
   test("file exists: returns prdJudges from prd-judges.json", () => {
     const tmpDir = makeTempDir();
     const prdJudgesData = { scores: [{ judge: "quality", score: 8 }] };
@@ -569,13 +592,13 @@ describe("T-5.3: readEvaluatePrdOutputs", () => {
       JSON.stringify(prdJudgesData)
     );
 
-    const result = readEvaluatePrdOutputs(tmpDir);
+    const result = readEvaluateOutputs(tmpDir, EvaluateArtifact.Prd);
     assert.deepEqual(result.prdJudges, prdJudgesData);
   });
 
   test("file absent: returns { prdJudges: undefined }", () => {
     const tmpDir = makeTempDir();
-    const result = readEvaluatePrdOutputs(tmpDir);
+    const result = readEvaluateOutputs(tmpDir, EvaluateArtifact.Prd);
     assert.equal(result.prdJudges, undefined);
   });
 
@@ -584,7 +607,7 @@ describe("T-5.3: readEvaluatePrdOutputs", () => {
     writeFileSync(path.join(tmpDir, "prd-judges.json"), "not valid json {{{{");
     let result: Record<string, unknown> | undefined;
     assert.doesNotThrow(() => {
-      result = readEvaluatePrdOutputs(tmpDir);
+      result = readEvaluateOutputs(tmpDir, EvaluateArtifact.Prd);
     });
     assert.equal(result?.prdJudges, undefined);
   });
@@ -610,6 +633,7 @@ describe("T-5.4: Temp dir cleanup after EVALUATE_PRD completes", () => {
     ].join("\n");
     await fs.writeFile(path.join(fakeBin, "claude"), stubScript, { mode: 0o755 });
     process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+    setShellPathForTest();
 
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
@@ -619,7 +643,7 @@ describe("T-5.4: Temp dir cleanup after EVALUATE_PRD completes", () => {
 
     const loopId = "44444444-0000-0000-0000-000000000004";
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -631,7 +655,7 @@ describe("T-5.4: Temp dir cleanup after EVALUATE_PRD completes", () => {
           command: "EVALUATE_PRD",
           closedLoopAuthToken: "cl-token",
           apiBaseUrl,
-          artifacts: [],
+          artifacts: [{ type: "PRD", content: "PRD content for cleanup test" }],
         }),
       }
     );
@@ -672,6 +696,7 @@ describe("T-5.5: BINARY_NOT_FOUND when claude not in PATH", () => {
     await fs.mkdir(emptyBin, { recursive: true });
     // No claude binary in emptyBin — PATH points only there
     process.env.PATH = emptyBin;
+    setShellPathForTest();
 
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
@@ -681,7 +706,7 @@ describe("T-5.5: BINARY_NOT_FOUND when claude not in PATH", () => {
 
     const loopId = "55555555-0000-0000-0000-000000000005";
     const response = await fetch(
-      `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/loop`,
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
       {
         method: "POST",
         headers: {
@@ -693,7 +718,7 @@ describe("T-5.5: BINARY_NOT_FOUND when claude not in PATH", () => {
           command: "EVALUATE_PRD",
           closedLoopAuthToken: "cl-token",
           apiBaseUrl,
-          artifacts: [],
+          artifacts: [{ type: "PRD", content: "PRD content for binary test" }],
         }),
       }
     );

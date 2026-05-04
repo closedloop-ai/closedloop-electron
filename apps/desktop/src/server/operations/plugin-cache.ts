@@ -68,3 +68,69 @@ export function isPluginInstalled(pluginName: string, registryPath?: string): bo
     return false;
   }
 }
+
+/**
+ * Read installed plugin versions from the manifest.
+ * Returns a map of "name@closedloop-ai" -> version string.
+ */
+export function getInstalledPluginVersions(registryPath?: string): Record<string, string> {
+  registryPath ??= path.join(os.homedir(), ".claude", "plugins", "installed_plugins.json");
+  try {
+    const data = JSON.parse(readFileSync(registryPath, "utf-8")) as InstalledPluginsFile;
+    const result: Record<string, string> = {};
+    if (!data.plugins) {
+      return result;
+    }
+    for (const [key, entries] of Object.entries(data.plugins)) {
+      if (!key.endsWith("@closedloop-ai") || !entries || entries.length === 0) {
+        continue;
+      }
+      const lastEntry = entries.at(-1);
+      if (lastEntry?.installPath && existsSync(lastEntry.installPath)) {
+        result[key] = lastEntry.version ?? "installed";
+      }
+    }
+    return result;
+  } catch {
+    return {};
+  }
+}
+
+/** Semver pattern that also accepts pre-release / build metadata suffixes (AC-049 sandbox). */
+const SEMVER_PATTERN = /^\d+\.\d+\.\d+([-+][\w.]+)?$/;
+const MAX_VERSION_LENGTH = 64;
+
+function isValidSemver(value: string): boolean {
+  return value.length <= MAX_VERSION_LENGTH && SEMVER_PATTERN.test(value);
+}
+
+/**
+ * Return the installed version string for the `code@closedloop-ai` plugin.
+ *
+ * Resolution order:
+ *  1. `CL_PLUGIN_VERSION` environment variable (AC-049 sandbox override).
+ *  2. `getInstalledPluginVersions()` registry lookup for `code@closedloop-ai`.
+ *
+ * The resolved string is validated against a semver pattern and a 64-character
+ * maximum length. Returns `'unknown'` on any failure.
+ *
+ * @param cacheRoot - Optional registry path override (forwarded to
+ *   `getInstalledPluginVersions` for testability).
+ */
+export function getCodePluginVersion(cacheRoot?: string): string {
+  try {
+    // AC-049 sandbox: allow env-var override for controlled test environments.
+    const envVersion = process.env["CL_PLUGIN_VERSION"];
+    if (envVersion) {
+      return isValidSemver(envVersion) ? envVersion : "unknown";
+    }
+
+    const version = getInstalledPluginVersions(cacheRoot)["code@closedloop-ai"];
+    if (!version || !isValidSemver(version)) {
+      return "unknown";
+    }
+    return version;
+  } catch {
+    return "unknown";
+  }
+}

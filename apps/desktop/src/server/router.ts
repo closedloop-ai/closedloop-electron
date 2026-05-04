@@ -3,8 +3,12 @@ import { timingSafeEqual } from "node:crypto";
 import type { ComputeTargetCapabilities, HealthResponse } from "../shared/contracts.js";
 import { isLoopbackIPv4 } from "../shared/network-utils.js";
 import type { JobStore } from "../main/job-store.js";
+import type { LoopTokenStore } from "../main/loop-token-store.js";
 import type { LocalSessionStore } from "../main/local-session-store.js";
 import { verifyChallenge } from "../main/local-auth-verifier.js";
+import type { ApiKeyProvenance } from "../main/api-key-store.js";
+import type { DesktopPopSigner } from "../main/desktop-pop.js";
+import type { DesktopPopUnavailableReporter } from "../main/desktop-pop-sign-utils.js";
 import { OperationDispatcher } from "./operation-dispatcher.js";
 import { registerFilesystemDirectoriesRoutes } from "./operations/filesystem-directories.js";
 import { registerFilesystemSearchRoutes } from "./operations/filesystem-search.js";
@@ -12,12 +16,18 @@ import { registerDeployRoutes } from "./operations/deploy.js";
 import { registerCodexRoutes } from "./operations/codex.js";
 import { registerGitActionRoutes } from "./operations/git-action.js";
 import { registerGitBranchesRoutes } from "./operations/git-branches.js";
+import { registerGitBranchWorktreeRoutes } from "./operations/git-branch-worktree.js";
 import { registerGitDiffRoutes } from "./operations/git-diff.js";
 import { registerGitPrRoutes } from "./operations/git-pr.js";
+import { registerGitRepoPathRoutes } from "./operations/git-repo-path.js";
 import { registerGitWorktreeRoutes } from "./operations/git-worktree.js";
+import { registerBinaryPathsRoutes } from "./operations/binary-paths.js";
 import { registerHealthCheckRoutes } from "./operations/health-check.js";
 import { registerLearningsRoutes } from "./operations/learnings.js";
 import { registerMetadataRoutes } from "./operations/metadata-routes.js";
+import { configureMcpDetectionCwdResolver } from "./operations/mcp-detection.js";
+import { registerSecurityUpgradeRoutes } from "./operations/security-upgrade.js";
+import { configureBinaryPathsResolver } from "./operations/symphony-loop.js";
 import { registerReposConfigRoutes } from "./operations/repos-config.js";
 import { registerRunViewerChatRoutes } from "./operations/run-viewer-chat.js";
 import { registerRunViewerExtractRoutes } from "./operations/run-viewer-extract.js";
@@ -25,16 +35,19 @@ import { registerSymphonyAttachmentsRoutes } from "./operations/symphony-attachm
 import { registerSymphonyChatHistoryRoutes } from "./operations/symphony-chat-history.js";
 import { registerSymphonyJudgesRoutes } from "./operations/symphony-judges.js";
 import { registerSymphonyKillRoutes } from "./operations/symphony-kill.js";
-import { registerSymphonyLoopRoutes } from "./operations/symphony-loop.js";
+import { registerSymphonyLoopRoutes, type WorktreeProvider } from "./operations/symphony-loop.js";
 import { registerSymphonyLogsRoutes } from "./operations/symphony-logs.js";
 import { registerSymphonyPlanRoutes } from "./operations/symphony-plan.js";
 import { registerSymphonySessionRoutes } from "./operations/symphony-sessions.js";
 import { registerSymphonyStatusRoutes } from "./operations/symphony-status.js";
 import { registerSymphonyInteractiveRoutes } from "./operations/symphony-interactive.js";
+import type { RetrySpawnDeps } from "../main/spawn-retry.js";
 import { registerSymphonyPlanLoopRoutes } from "./operations/symphony-plan-loop.js";
 import { registerSymphonyUploadRoutes } from "./operations/symphony-upload.js";
 import { registerTerminalChatRoutes } from "./operations/terminal-chat.js";
 import { registerTicketChatRoutes } from "./operations/ticket-chat.js";
+import { registerChatSessionRoutes } from "./operations/chat-session.js";
+import { ClaudeProvider, CodexProvider, ProviderRegistry } from "./operations/chat-providers.js";
 import { ProcessManager } from "./process-manager.js";
 import { SymphonyDirNotConfiguredError } from "./operations/symphony-utils.js";
 
@@ -44,10 +57,11 @@ export interface GatewayRouterOptions {
   machineName: string;
   version: string;
   capabilities: ComputeTargetCapabilities;
+  getOnboardingCompleted?: () => boolean;
   getActivePort: () => number;
   getAllowedDirectories: () => string[];
   getSymphonyDir?: () => string;
-  fallbackEngineerOrigin?: string;
+  fallbackGatewayOrigin?: string;
   onActivityEvent?: (event: GatewayActivityEvent) => void;
   getGatewayAuthToken?: () => string | undefined;
   evaluateApproval?: (
@@ -55,9 +69,22 @@ export interface GatewayRouterOptions {
   ) => GatewayApprovalResult | Promise<GatewayApprovalResult>;
   sessionStore?: LocalSessionStore;
   getApiKey?: () => string | null;
+  getApiKeyProvenance?: () => ApiKeyProvenance | null;
+  signDesktopRequest?: DesktopPopSigner;
+  onDesktopPopUnavailable?: DesktopPopUnavailableReporter;
   getApiOrigin?: () => string;
   prodOriginsOnly?: boolean;
   jobStore?: JobStore;
+  worktreeProvider?: WorktreeProvider;
+  loopTokenStore?: LoopTokenStore;
+  retrySpawnDeps?: RetrySpawnDeps;
+  getGatewayId: () => string;
+  getComputeTargetId?: () => string | null;
+  handleSecurityUpgrade?: (
+    payload: DesktopSecurityUpgradePayload
+  ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult;
+  getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
+  applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
 }
 
 export interface GatewayActivityEvent {
@@ -89,6 +116,18 @@ export type GatewayApprovalResult =
   | { allow: true }
   | { allow: false; statusCode: number; payload: Record<string, unknown> };
 
+export type DesktopSecurityUpgradePayload = {
+  onboardingAttemptId: string;
+  webAppOrigin: string;
+  computeTargetId: string;
+  gatewayId: string;
+  expiresAt: string;
+};
+
+export type DesktopSecurityUpgradeResult =
+  | { ok: true }
+  | { ok: false; code: string; retryable: boolean; statusCode?: number };
+
 export class GatewayRouter {
   private readonly options: GatewayRouterOptions;
   private readonly operationDispatcher: OperationDispatcher;
@@ -100,6 +139,11 @@ export class GatewayRouter {
     this.processManager = new ProcessManager({
       getAllowedDirectories: this.options.getAllowedDirectories
     });
+    configureMcpDetectionCwdResolver(() => {
+      const [sandboxRoot] = this.options.getAllowedDirectories();
+      return sandboxRoot?.trim() || undefined;
+    });
+    configureBinaryPathsResolver(this.options.getBinaryPaths ?? null);
     const getSymphonyDir = this.options.getSymphonyDir ?? (() => { throw new SymphonyDirNotConfiguredError(); });
     registerFilesystemDirectoriesRoutes(
       this.operationDispatcher,
@@ -118,20 +162,36 @@ export class GatewayRouter {
       this.processManager,
       this.options.getAllowedDirectories
     );
+    registerGitBranchWorktreeRoutes(this.operationDispatcher, getSymphonyDir);
     registerGitDiffRoutes(
       this.operationDispatcher,
       this.processManager,
       this.options.getAllowedDirectories
     );
     registerGitPrRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
+    registerGitRepoPathRoutes(this.operationDispatcher, getSymphonyDir);
     registerGitWorktreeRoutes(
       this.operationDispatcher,
       this.processManager,
       this.options.getAllowedDirectories,
       getSymphonyDir
     );
-    registerHealthCheckRoutes(this.operationDispatcher, this.processManager, getSymphonyDir);
-    registerLearningsRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
+    registerHealthCheckRoutes(
+      this.operationDispatcher,
+      this.processManager,
+      getSymphonyDir,
+      undefined,
+      this.options.getBinaryPaths,
+      () => this.options.version
+    );
+    if (this.options.getBinaryPaths && this.options.applyBinaryPathPatch) {
+      registerBinaryPathsRoutes(this.operationDispatcher, this.options.getBinaryPaths, this.options.applyBinaryPathPatch);
+    }
+    registerLearningsRoutes(
+      this.operationDispatcher,
+      this.options.getAllowedDirectories,
+      getSymphonyDir
+    );
     registerMetadataRoutes(this.operationDispatcher, this.options.getAllowedDirectories, getSymphonyDir);
     registerReposConfigRoutes(this.operationDispatcher, getSymphonyDir);
     registerRunViewerChatRoutes(
@@ -150,12 +210,16 @@ export class GatewayRouter {
       this.options.getAllowedDirectories
     );
     registerSymphonyJudgesRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
-    registerSymphonyKillRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
+    registerSymphonyKillRoutes(this.operationDispatcher, this.options.getAllowedDirectories, this.options.jobStore);
     registerSymphonyLoopRoutes(
       this.operationDispatcher,
       this.options.getAllowedDirectories,
       this.options.getApiOrigin,
-      this.options.jobStore
+      this.options.jobStore,
+      this.options.getWebAppOrigin ?? (() => this.options.webAppOrigin),
+      this.options.worktreeProvider,
+      this.options.loopTokenStore,
+      getSymphonyDir
     );
     registerSymphonyLogsRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerSymphonyPlanRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
@@ -163,7 +227,13 @@ export class GatewayRouter {
     registerSymphonyStatusRoutes(this.operationDispatcher, this.options.getAllowedDirectories, this.options.jobStore);
     registerSymphonyInteractiveRoutes(
       this.operationDispatcher,
-      this.options.getAllowedDirectories
+      this.options.getAllowedDirectories,
+      this.options.retrySpawnDeps ?? {
+        log: (_level, msg) => console.warn('[spawn-retry fallback]', msg),
+        refreshTray: () => {},
+        isShuttingDown: () => false,
+        delay: (ms) => new Promise((r) => setTimeout(r, ms)),
+      }
     );
     if (this.options.getApiKey && this.options.getApiOrigin) {
       const getApiKey = this.options.getApiKey;
@@ -173,7 +243,10 @@ export class GatewayRouter {
         this.options.getAllowedDirectories,
         getApiKey,
         getApiOrigin,
-        this.options.jobStore
+        this.options.jobStore,
+        this.options.getApiKeyProvenance,
+        this.options.signDesktopRequest,
+        this.options.onDesktopPopUnavailable
       );
     }
     registerSymphonyUploadRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
@@ -189,6 +262,22 @@ export class GatewayRouter {
       this.options.getAllowedDirectories,
       getSymphonyDir
     );
+    const providerRegistry = new ProviderRegistry();
+    providerRegistry.register(new ClaudeProvider(this.processManager));
+    providerRegistry.register(
+      new CodexProvider(this.options.getAllowedDirectories)
+    );
+    registerChatSessionRoutes(
+      this.operationDispatcher,
+      this.processManager,
+      providerRegistry,
+      this.options.getGatewayId
+    );
+    registerSecurityUpgradeRoutes(this.operationDispatcher, {
+      getGatewayId: this.options.getGatewayId,
+      getComputeTargetId: this.options.getComputeTargetId,
+      handleSecurityUpgrade: this.options.handleSecurityUpgrade,
+    });
   }
 
   async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -196,7 +285,7 @@ export class GatewayRouter {
 
     const method = request.method?.toUpperCase() ?? "GET";
     const url = new URL(request.url ?? "/", "http://localhost");
-    const isEngineerRoute = url.pathname.startsWith("/api/engineer/");
+    const isGatewayRoute = url.pathname.startsWith("/api/gateway/");
     const isExchangeRoute = method === "POST" && url.pathname === "/gateway-auth/exchange";
     const startedAt = Date.now();
     let activityType: GatewayActivityEvent["type"] = "request";
@@ -204,7 +293,7 @@ export class GatewayRouter {
     let capturedRequestBody: string | undefined;
     let capturedResponseBody = "";
 
-    if ((isEngineerRoute || isExchangeRoute) && method !== "OPTIONS") {
+    if ((isGatewayRoute || isExchangeRoute) && method !== "OPTIONS") {
       const origWrite = response.write.bind(response) as typeof response.write;
       const origEnd = response.end.bind(response) as typeof response.end;
 
@@ -270,8 +359,8 @@ export class GatewayRouter {
       return;
     }
 
-    const authResult = this.isAuthorizedEngineerRequest(request);
-    if (isEngineerRoute && !authResult.authorized) {
+    const authResult = this.isAuthorizedGatewayRequest(request);
+    if (isGatewayRoute && !authResult.authorized) {
       activityType = "security";
       activityDetail = authResult.reason ?? "unauthorized";
       response.statusCode = 401;
@@ -285,6 +374,8 @@ export class GatewayRouter {
         status: "ok",
         machineName: this.options.machineName,
         capabilities: this.options.capabilities,
+        gatewayId: this.options.getGatewayId() || undefined,
+        onboardingCompleted: this.options.getOnboardingCompleted?.() ?? false,
         version: this.options.version,
         port: this.options.getActivePort()
       };
@@ -294,7 +385,7 @@ export class GatewayRouter {
       return;
     }
 
-    if (isEngineerRoute) {
+    if (isGatewayRoute) {
       const rawBody = await this.readBody(request);
       const body = rawBody.toString("utf-8");
       capturedRequestBody = body || undefined;
@@ -336,7 +427,7 @@ export class GatewayRouter {
         return;
       }
 
-      if (this.options.fallbackEngineerOrigin) {
+      if (this.options.fallbackGatewayOrigin) {
         await this.proxyToFallback(request, response, url.pathname + url.search, rawBody);
         return;
       }
@@ -396,7 +487,7 @@ export class GatewayRouter {
     return false;
   }
 
-  private isAuthorizedEngineerRequest(
+  private isAuthorizedGatewayRequest(
     request: IncomingMessage
   ): { authorized: true } | { authorized: false; reason: string } {
     const expectedToken = this.options.getGatewayAuthToken?.();
@@ -543,6 +634,9 @@ export class GatewayRouter {
       userAgent,
       apiOrigin,
       apiKey,
+      apiKeyProvenance: this.options.getApiKeyProvenance?.() ?? "USER_CREATED",
+      signDesktopRequest: this.options.signDesktopRequest,
+      onDesktopPopUnavailable: this.options.onDesktopPopUnavailable,
     });
 
     if (!result.ok) {
@@ -595,7 +689,7 @@ export class GatewayRouter {
     requestPath: string,
     rawBody: Buffer
   ): Promise<void> {
-    const targetUrl = new URL(requestPath, this.options.fallbackEngineerOrigin);
+    const targetUrl = new URL(requestPath, this.options.fallbackGatewayOrigin);
     const headers = new Headers();
     for (const [name, value] of Object.entries(request.headers)) {
       if (!value) {
@@ -706,6 +800,3 @@ function isLoopbackOrigin(originValue: string): boolean {
     return false;
   }
 }
-
-
-

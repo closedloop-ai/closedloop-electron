@@ -52,7 +52,7 @@ desktop-package:
 desktop-debug-auth:
   CL_LOCAL_GATEWAY_DEBUG_AUTH=1 pnpm -C apps/desktop dev
 
-# Start Electron with auth disabled (dev-only, all engineer routes are open. For debugging only. Do not use!).
+# Start Electron with auth disabled (dev-only, all gateway routes are open. For debugging only. Do not use!).
 desktop-no-auth:
   CL_LOCAL_GATEWAY_NO_AUTH=1 pnpm -C apps/desktop dev
 

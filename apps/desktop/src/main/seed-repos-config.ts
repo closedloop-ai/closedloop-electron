@@ -1,6 +1,5 @@
-import os from "node:os";
 import path from "node:path";
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { normalizeScopePath } from "../shared/sandbox-policy.js";
 import { computeSymphonyDir } from "../server/operations/symphony-utils.js";
 import { loadReposConfig, saveReposConfig } from "../server/operations/repos-config-utils.js";
@@ -8,34 +7,37 @@ import { loadReposConfig, saveReposConfig } from "../server/operations/repos-con
 /**
  * Seeds repos.json within the symphony config directory for the given sandbox.
  *
- * - Preserves legacy repos.json from ~/.claude/closedloop/ if dest doesn't exist
  * - Sets worktreeParentDir + worktreeParentDirConfirmed
  *
- * Repos are added explicitly by the user via POST /api/engineer/repos — this
+ * Repos are added explicitly by the user via POST /api/gateway/repos — this
  * function never auto-discovers repos from the filesystem.
  *
- * Best-effort — logs errors but never throws.
+ * Best-effort — logs errors but never throws. When provided, `isCancelled`
+ * lets long-running callers avoid writing stale repo defaults after the user
+ * has switched to another onboarding/settings path.
  */
-export async function seedReposConfig(rawSandboxBaseDirectory: string): Promise<void> {
+export async function seedReposConfig(
+  rawSandboxBaseDirectory: string,
+  options: { isCancelled?: () => boolean } = {},
+): Promise<void> {
   try {
+    if (options.isCancelled?.()) {
+      return;
+    }
     const sandboxBaseDirectory = normalizeScopePath(rawSandboxBaseDirectory);
     if (!sandboxBaseDirectory) {
+      return;
+    }
+    if (options.isCancelled?.()) {
       return;
     }
 
     const symphonyDir = computeSymphonyDir(sandboxBaseDirectory);
     const configDir = path.join(symphonyDir, "config");
-    mkdirSync(configDir, { recursive: true });
-
-    // Preserve legacy repos.json if it exists and dest doesn't yet.
-    // migrateLegacyData() only runs at boot when sandboxBaseDirectory is
-    // already set. On first-time onboarding it exits early, so this copy
-    // must happen before we seed to avoid blocking future migration.
-    const legacyRepos = path.join(os.homedir(), ".claude", "closedloop", "repos.json");
-    const destRepos = path.join(configDir, "repos.json");
-    if (existsSync(legacyRepos) && !existsSync(destRepos)) {
-      copyFileSync(legacyRepos, destRepos);
+    if (options.isCancelled?.()) {
+      return;
     }
+    mkdirSync(configDir, { recursive: true });
 
     // Ensure worktreeParentDir + worktreeParentDirConfirmed are both set.
     // The health check (health-check.ts:176) requires BOTH to be truthy.
@@ -49,6 +51,9 @@ export async function seedReposConfig(rawSandboxBaseDirectory: string): Promise<
     //     set confirmed only.
     // Single load → mutate in-memory → single save.
     const config = await loadReposConfig(configDir);
+    if (options.isCancelled?.()) {
+      return;
+    }
     let dirty = false;
 
     const existingDir = config.settings.worktreeParentDir;
@@ -70,7 +75,7 @@ export async function seedReposConfig(rawSandboxBaseDirectory: string): Promise<
       dirty = true;
     }
 
-    if (dirty) {
+    if (dirty && !options.isCancelled?.()) {
       await saveReposConfig(config, configDir);
     }
   } catch (err) {

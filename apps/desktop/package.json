@@ -1,14 +1,14 @@
 {
   "name": "desktop",
-  "version": "0.7.1",
+  "version": "0.14.12",
   "description": "ClosedLoop Desktop",
   "author": "ClosedLoop AI <support@closedloop.ai>",
   "private": true,
   "type": "module",
   "main": "dist/main/index.js",
   "scripts": {
-    "dev": "pnpm build && ELECTRON_BIN=$(bash scripts/patch-electron-plist.sh | tail -1) && \"$ELECTRON_BIN\" dist/main/index.js",
-    "start": "ELECTRON_BIN=$(bash scripts/patch-electron-plist.sh | tail -1) && \"$ELECTRON_BIN\" dist/main/index.js",
+    "dev": "pnpm build && ELECTRON_BIN=$(bash scripts/patch-electron-plist.sh | tail -1) && \"$ELECTRON_BIN\" .",
+    "start": "ELECTRON_BIN=$(bash scripts/patch-electron-plist.sh | tail -1) && \"$ELECTRON_BIN\" .",
     "prebuild": "node -e \"const{execSync:e}=require('child_process'),{writeFileSync:w}=require('fs');const h=e('git rev-parse HEAD').toString().trim();w('src/shared/build-info.ts','// AUTO-GENERATED — do not edit\\nexport const BUILD_COMMIT_HASH = \\\"'+h+'\\\";\\n');\"",
     "build": "pnpm prebuild && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -18,11 +18,14 @@
     "release": "pnpm build && electron-builder --mac --publish always --config electron-builder.yml"
   },
   "dependencies": {
+    "@closedloop-ai/loops-api": "0.2.8",
     "busboy": "^1.6.0",
     "electron-store": "^8.2.0",
     "electron-updater": "^6.8.3",
     "glob": "^11.0.1",
-    "socket.io-client": "^4.8.1"
+    "posthog-node": "^5.28.8",
+    "socket.io-client": "^4.8.1",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/busboy": "^1.5.4",

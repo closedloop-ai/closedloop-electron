@@ -1,15 +1,16 @@
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import type { OperationDispatcher } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError } from "../security.js";
 import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 export function registerSymphonyJudgesRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[]
 ): void {
-  dispatcher.register("GET", "/api/engineer/symphony/judges/:ticketId", async (context) => {
+  dispatcher.register("GET", "/api/gateway/symphony/judges/:ticketId", async (context) => {
     try {
       const ticketId = context.params.ticketId;
       const repoPath = context.query.get("repo");
@@ -36,7 +37,7 @@ export function registerSymphonyJudgesRoutes(
       }
 
       const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-      const judgesPath = path.join(worktreeDir, ".claude", "work", "judges.json");
+      const judgesPath = path.join(worktreeDir, ".closedloop-ai", "work", "judges.json");
 
       if (!existsSync(worktreeDir)) {
         json(context, 404, {
@@ -88,10 +89,3 @@ export function registerSymphonyJudgesRoutes(
     }
   });
 }
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-

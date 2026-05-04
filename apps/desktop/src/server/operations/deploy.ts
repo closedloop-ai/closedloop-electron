@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import net from "node:net";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import { getShellEnv, getShellPath } from "../shell-path.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import {
   loadReposConfig,
@@ -12,6 +13,7 @@ import {
   type ReposConfig
 } from "./repos-config-utils.js";
 import { expandHome } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 type DeployStatus = "running" | "completed" | "failed" | "not-started";
 
@@ -23,7 +25,7 @@ export function registerDeployRoutes(
   getSymphonyDir: () => string
 ): void {
   const configDir = () => path.join(getSymphonyDir(), "config");
-  dispatcher.register("POST", "/api/engineer/deploy", async (context) => {
+  dispatcher.register("POST", "/api/gateway/deploy", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -79,7 +81,7 @@ export function registerDeployRoutes(
       await saveReposConfig(reposConfig, configDir());
     }
 
-    const claudeWorkDir = path.join(expandedWorktreePath, ".claude", "work");
+    const claudeWorkDir = path.join(expandedWorktreePath, ".closedloop-ai", "work");
     await fs.mkdir(claudeWorkDir, { recursive: true });
 
     const logFile = path.join(claudeWorkDir, "deploy.log");
@@ -91,7 +93,7 @@ export function registerDeployRoutes(
     copyEnvLocalFiles(expandedRepoPath, expandedWorktreePath).catch(() => undefined);
 
     const spawnEnv: NodeJS.ProcessEnv = {
-      PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
+      PATH: await getShellPath(),
       HOME: process.env.HOME,
       USER: process.env.USER,
       SHELL: process.env.SHELL ?? "/bin/bash",
@@ -123,6 +125,8 @@ export function registerDeployRoutes(
       if (!child.pid) {
         throw new Error("failed to start deploy process");
       }
+
+      await fs.writeFile(path.join(claudeWorkDir, "process.pid"), String(child.pid));
 
       child.on("exit", (code) => {
         if (code === 0) {
@@ -161,7 +165,7 @@ export function registerDeployRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/deploy/health", async (context) => {
+  dispatcher.register("POST", "/api/gateway/deploy/health", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -191,7 +195,7 @@ export function registerDeployRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/deploy/kill", async (context) => {
+  dispatcher.register("POST", "/api/gateway/deploy/kill", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -247,7 +251,7 @@ export function registerDeployRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/deploy/teardown", async (context) => {
+  dispatcher.register("POST", "/api/gateway/deploy/teardown", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -296,7 +300,7 @@ export function registerDeployRoutes(
     }
 
     if (deployConfig?.teardownCommand) {
-      if (runTeardownCommand(deployConfig.teardownCommand, expandedWorktreePath)) {
+      if (await runTeardownCommand(deployConfig.teardownCommand, expandedWorktreePath)) {
         json(context, 200, { success: true });
         return;
       }
@@ -315,7 +319,7 @@ export function registerDeployRoutes(
     });
   });
 
-  dispatcher.register("GET", "/api/engineer/deploy/status/:ticketId", async (context) => {
+  dispatcher.register("GET", "/api/gateway/deploy/status/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const pidRaw = context.query.get("pid");
@@ -351,17 +355,16 @@ export function registerDeployRoutes(
       throw error;
     }
 
-    const claudeWorkDir = path.join(worktreeDir, ".claude", "work");
-    const logs = await readTextFile(path.join(claudeWorkDir, "deploy.log"));
-    const exitInfo = await readJsonFile<{ exitCode: number; failedCommand: string }>(
-      path.join(claudeWorkDir, "deploy-exit.json")
-    );
-    const deployResult = await readJsonFile<{ url?: string; serviceId?: string }>(
-      path.join(claudeWorkDir, "deploy-result.json")
-    );
+    const deployWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+    const logsPath = path.join(deployWorkDir, "deploy.log");
+    const exitInfoPath = path.join(deployWorkDir, "deploy-exit.json");
+    const deployResultPath = path.join(deployWorkDir, "deploy-result.json");
+    const logs = await readTextFile(logsPath) || null;
+    const exitInfo = await readJsonFile<{ exitCode: number; failedCommand: string }>(exitInfoPath);
+    const deployResult = await readJsonFile<{ url?: string; serviceId?: string }>(deployResultPath);
 
     const processAlive = isProcessAlive(pidRaw);
-    const status = determineStatus(exitInfo, deployResult?.url, processAlive, logs, pidRaw);
+    const status = determineStatus(exitInfo, deployResult?.url, processAlive, logs ?? "", pidRaw);
 
     json(context, 200, {
       status,
@@ -373,7 +376,7 @@ export function registerDeployRoutes(
     });
   });
 
-  dispatcher.register("POST", "/api/engineer/deploy/check-existing", async (context) => {
+  dispatcher.register("POST", "/api/gateway/deploy/check-existing", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -423,7 +426,7 @@ export function registerDeployRoutes(
     json(context, 200, { active: false });
   });
 
-  dispatcher.register("POST", "/api/engineer/deploy/detect", async (context) => {
+  dispatcher.register("POST", "/api/gateway/deploy/detect", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -457,7 +460,7 @@ export function registerDeployRoutes(
     json(context, 200, { detected: true, config: detected });
   });
 
-  dispatcher.register("POST", "/api/engineer/deploy/redetect", async (context) => {
+  dispatcher.register("POST", "/api/gateway/deploy/redetect", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -502,7 +505,7 @@ export function registerDeployRoutes(
     json(context, 200, { redetected: false });
   });
 
-  dispatcher.register("POST", "/api/engineer/deploy/extract-info", async (context) => {
+  dispatcher.register("POST", "/api/gateway/deploy/extract-info", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -606,7 +609,7 @@ function detectDeployment(repoPath: string): RepoDeploymentConfig | null {
     };
 
     const framework = detectFramework(deps);
-    const script = resolveStartCommand(packageJson.scripts ?? {});
+    const script = resolveStartCommand(packageJson.scripts ?? {}, repoPath);
     if (!script) {
       return null;
     }
@@ -662,21 +665,21 @@ function detectFramework(dependencies: Record<string, string>): string | undefin
   return undefined;
 }
 
-function resolveStartCommand(scripts: Record<string, string>): string | null {
+function resolveStartCommand(scripts: Record<string, string>, repoPath: string): string | null {
   if (scripts.dev) {
-    if (existsSync(path.join(process.cwd(), "pnpm-lock.yaml"))) {
+    if (existsSync(path.join(repoPath, "pnpm-lock.yaml"))) {
       return "pnpm dev";
     }
-    if (existsSync(path.join(process.cwd(), "yarn.lock"))) {
+    if (existsSync(path.join(repoPath, "yarn.lock"))) {
       return "yarn dev";
     }
     return "npm run dev";
   }
   if (scripts.start) {
-    if (existsSync(path.join(process.cwd(), "pnpm-lock.yaml"))) {
+    if (existsSync(path.join(repoPath, "pnpm-lock.yaml"))) {
       return "pnpm start";
     }
-    if (existsSync(path.join(process.cwd(), "yarn.lock"))) {
+    if (existsSync(path.join(repoPath, "yarn.lock"))) {
       return "yarn start";
     }
     return "npm run start";
@@ -853,17 +856,14 @@ function killByPort(port: number): "killed" | "none" | "error" {
   }
 }
 
-function runTeardownCommand(command: string, worktreePath: string): boolean {
+async function runTeardownCommand(command: string, worktreePath: string): Promise<boolean> {
   try {
     execSync(command, {
       cwd: worktreePath,
       shell: "/bin/bash",
       timeout: 60_000,
       stdio: "pipe",
-      env: {
-        ...process.env,
-        PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`
-      }
+      env: await getShellEnv(),
     });
     return true;
   } catch {
@@ -980,10 +980,4 @@ function asNumber(value: unknown): number | null {
   }
 
   return null;
-}
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
 }

@@ -6,6 +6,7 @@ import type { ProcessManager } from "../process-manager.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { loadReposConfig } from "./repos-config-utils.js";
 import { expandHome, SymphonyDirNotConfiguredError } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 export function registerGitWorktreeRoutes(
   dispatcher: OperationDispatcher,
@@ -15,7 +16,7 @@ export function registerGitWorktreeRoutes(
 ): void {
   const configDir = () => path.join(getSymphonyDir(), "config");
 
-  dispatcher.register("DELETE", "/api/engineer/git/worktree", async (context) => {
+  dispatcher.register("DELETE", "/api/gateway/git/worktree", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -71,7 +72,7 @@ export function registerGitWorktreeRoutes(
     json(context, 500, { error: `Failed to remove worktree: ${errorText}` });
   });
 
-  dispatcher.register("POST", "/api/engineer/git/worktree", async (context) => {
+  dispatcher.register("POST", "/api/gateway/git/worktree", async (context) => {
     try {
       const worktreeParentDir = await resolveWorktreeParentDir(configDir());
       if (!existsSync(worktreeParentDir)) {
@@ -154,10 +155,3 @@ function parseBody(context: OperationRequestContext): Record<string, unknown> | 
     return null;
   }
 }
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-

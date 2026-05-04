@@ -4,9 +4,10 @@ import path from "node:path";
 import crypto from "node:crypto";
 import Busboy from "busboy";
 import type { Readable } from "node:stream";
-import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import type { OperationDispatcher } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 const ALLOWED_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
@@ -29,7 +30,7 @@ export function registerSymphonyUploadRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[]
 ): void {
-  dispatcher.register("POST", "/api/engineer/symphony/upload/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/symphony/upload/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
 
@@ -55,7 +56,7 @@ export function registerSymphonyUploadRoutes(
       return;
     }
 
-    const attachmentsDir = path.join(worktreeDir, ".claude", "work", "attachments");
+    const attachmentsDir = path.join(worktreeDir, ".closedloop-ai", "work", "attachments");
     try {
       assertPathAllowed(attachmentsDir, getAllowedDirectories());
     } catch (error) {
@@ -117,7 +118,7 @@ export function registerSymphonyUploadRoutes(
 
       await fs.writeFile(savedPath, file.buffer);
 
-      const apiUrl = `/api/engineer/symphony/attachments/${encodeURIComponent(
+      const apiUrl = `/api/gateway/symphony/attachments/${encodeURIComponent(
         ticketId
       )}/${encodeURIComponent(savedName)}?repo=${encodeURIComponent(repoPath)}`;
       savedFiles.push({
@@ -171,10 +172,4 @@ async function parseMultipartFiles(contentType: string, body: Buffer): Promise<U
 
     busboy.end(body);
   });
-}
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
 }

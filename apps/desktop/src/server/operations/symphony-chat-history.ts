@@ -4,6 +4,7 @@ import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { VALID_PROVIDERS, assertRepoAllowed, chatHistoryFilename, resolveWorktreeDir } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 type ChatMessage = {
   id: string;
@@ -25,7 +26,7 @@ export function registerSymphonyChatHistoryRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[]
 ): void {
-  dispatcher.register("GET", "/api/engineer/symphony/chat-history/:ticketId", async (context) => {
+  dispatcher.register("GET", "/api/gateway/symphony/chat-history/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const provider = context.query.get("provider");
@@ -77,7 +78,7 @@ export function registerSymphonyChatHistoryRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/symphony/chat-history/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/symphony/chat-history/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const provider = context.query.get("provider");
@@ -112,11 +113,12 @@ export function registerSymphonyChatHistoryRoutes(
     const message = parseMessage(body.message);
     const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
 
-    const historyPath = getChatHistoryPath(ticketId, expandedRepoPath, provider);
-    const historyDir = path.dirname(historyPath);
+    const historyReadPath = getChatHistoryPath(ticketId, expandedRepoPath, provider);
+    const historyWritePath = historyReadPath;
+    const historyWriteDir = path.dirname(historyWritePath);
 
     try {
-      assertPathAllowed(historyDir, getAllowedDirectories());
+      assertPathAllowed(historyWriteDir, getAllowedDirectories());
     } catch (error) {
       if (error instanceof DirectoryNotAllowedError) {
         json(context, 403, { error: "directory not allowed" });
@@ -125,12 +127,12 @@ export function registerSymphonyChatHistoryRoutes(
       throw error;
     }
 
-    await fs.mkdir(historyDir, { recursive: true });
+    await fs.mkdir(historyWriteDir, { recursive: true });
 
     let history: ChatHistory;
-    if (existsSync(historyPath)) {
+    if (existsSync(historyReadPath)) {
       try {
-        const content = await fs.readFile(historyPath, "utf-8");
+        const content = await fs.readFile(historyReadPath, "utf-8");
         history = JSON.parse(content) as ChatHistory;
       } catch {
         history = { messages: [], ticketId, repoPath };
@@ -142,7 +144,7 @@ export function registerSymphonyChatHistoryRoutes(
     if (sessionId && !message) {
       history.sessionId = sessionId;
       try {
-        await fs.writeFile(historyPath, JSON.stringify(history, null, 2), "utf-8");
+        await fs.writeFile(historyWritePath, JSON.stringify(history, null, 2), "utf-8");
         json(context, 200, { success: true, sessionId });
       } catch (error) {
         const messageText = error instanceof Error ? error.message : "Unknown error";
@@ -159,7 +161,7 @@ export function registerSymphonyChatHistoryRoutes(
     history.messages.push(message);
 
     try {
-      await fs.writeFile(historyPath, JSON.stringify(history, null, 2), "utf-8");
+      await fs.writeFile(historyWritePath, JSON.stringify(history, null, 2), "utf-8");
       json(context, 200, { success: true, history });
     } catch (error) {
       const messageText = error instanceof Error ? error.message : "Unknown error";
@@ -167,7 +169,7 @@ export function registerSymphonyChatHistoryRoutes(
     }
   });
 
-  dispatcher.register("DELETE", "/api/engineer/symphony/chat-history/:ticketId", async (context) => {
+  dispatcher.register("DELETE", "/api/gateway/symphony/chat-history/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const indexParam = context.query.get("index");
@@ -195,10 +197,10 @@ export function registerSymphonyChatHistoryRoutes(
     }
 
     const historyPath = getChatHistoryPath(ticketId, expandedRepoPath, provider);
-    const workDir = path.dirname(historyPath);
+    const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
+    const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
 
     if (!existsSync(historyPath)) {
-      // Even if no transcript exists, clean up associated state files
       if (indexParam === null && provider === "codex") {
         await fs.rm(path.join(workDir, "codex-chat-review.json"), { force: true });
       } else if (indexParam === null && !provider) {
@@ -213,13 +215,11 @@ export function registerSymphonyChatHistoryRoutes(
 
     try {
       if (indexParam === null) {
-        await fs.unlink(historyPath);
+        await fs.rm(historyPath, { force: true });
 
         if (provider === "codex") {
-          // Only clean up the review-scoped Codex session file
           await fs.rm(path.join(workDir, "codex-chat-review.json"), { force: true });
         } else if (!provider) {
-          // No provider specified (SymphonyChat full clear) — blanket cleanup
           await deleteSharedCodexChatState(workDir);
         }
         // provider=claude: do NOT touch any codex state files
@@ -255,15 +255,18 @@ export function registerSymphonyChatHistoryRoutes(
   });
 }
 
+/** Returns the canonical path for chat history reads and writes. */
 function getChatHistoryPath(
   ticketId: string,
   expandedRepoPath: string,
   provider?: string | null
 ): string {
-  return path.join(resolveWorktreeDir(expandedRepoPath, ticketId), ".claude", "work", chatHistoryFilename(provider));
+  const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
+  const filename = chatHistoryFilename(provider);
+  return path.join(worktreeDir, ".closedloop-ai", "work", filename);
 }
 
-/** Delete shared-surface Codex chat state files: legacy + review. */
+/** Delete shared-surface Codex chat state files. */
 async function deleteSharedCodexChatState(workDir: string): Promise<void> {
   for (const name of ["codex-chat.json", "codex-chat-review.json"]) {
     await fs.rm(path.join(workDir, name), { force: true });
@@ -310,10 +313,3 @@ function parseMessage(value: unknown): ChatMessage | undefined {
 
   return parsed;
 }
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-

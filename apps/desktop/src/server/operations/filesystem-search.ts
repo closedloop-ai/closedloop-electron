@@ -1,9 +1,10 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { glob } from "glob";
-import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import type { OperationDispatcher } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 const EXCLUDE_PATTERNS = [
   "**/node_modules/**",
@@ -24,7 +25,7 @@ export function registerFilesystemSearchRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[]
 ): void {
-  dispatcher.register("GET", "/api/engineer/files/search", async (context) => {
+  dispatcher.register("GET", "/api/gateway/files/search", async (context) => {
     try {
       const repoPath = context.query.get("repo");
       const ticketId = context.query.get("ticket");
@@ -128,10 +129,3 @@ function sortByRelevance(a: string, b: string, query: string): number {
 
   return a.localeCompare(b);
 }
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-

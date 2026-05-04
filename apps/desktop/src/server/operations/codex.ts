@@ -1,16 +1,20 @@
 import { execSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createWriteStream, existsSync, unlinkSync, writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
-import path from "node:path";
 import type { ServerResponse } from "node:http";
+import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError } from "../security.js";
-import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
+import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getOverrideBinaryPaths, getResolvedGitPath } from "./symphony-loop.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
-import { createStreamState, processStreamEvent, type ContentBlock } from "./stream-events.js";
-import { assertRepoAllowed, ensureWorktreeForReview, resolveWorktreeDir, resolveWorktreeParentDir, tryAssertRepoAllowed, tryAssertPathAllowed } from "./symphony-utils.js";
+import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
+import { type ContentBlock, createStreamState, processStreamEvent } from "./stream-events.js";
+import { assertRepoAllowed, ensureWorktreeForReview, resolveWorktreeDir, resolveWorktreeParentDir, tryAssertPathAllowed, tryAssertRepoAllowed } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 const CODEX_SESSION_ID_REGEX = /session id:\s*([0-9a-f-]{36})/i;
+const CODEX_ROLLOUT_ITEM_RECORDING_DIAGNOSTIC_REGEX = /^\d{4}-\d{2}-\d{2}T[^\s]+\s+ERROR\s+codex_core::session:\s+failed to record rollout items:\s+thread\s+[0-9a-f-]{36}\s+not found$/i;
 const FINDINGS_CODE_BLOCK_REGEX = /```json\s*\n([\s\S]*?)\n\s*```/;
 const FINDINGS_ARRAY_REGEX = /\[[\s\S]*\]/;
 const PR_PREFIX_REGEX = /^pr-/;
@@ -63,6 +67,13 @@ type FindingsFile = {
   declineReason?: string;
 };
 
+type ReviewVerdictRequest = {
+  repoPath?: unknown;
+  sessionId?: unknown;
+  provider?: unknown;
+  expectedMcpUrl?: unknown;
+};
+
 type CodexChatState = {
   sessionId?: string;
   messageCount: number;
@@ -112,7 +123,7 @@ export async function saveCodexChatSession(
 ): Promise<void> {
   if (sessionId && provider === "codex") {
     const filename = chatContextId === "review" ? "codex-chat-review.json" : "codex-chat.json";
-    const chatStatePath = path.join(worktreeDir, ".claude", "work", filename);
+    const chatStatePath = path.join(worktreeDir, ".closedloop-ai", "work", filename);
     await saveJsonFile(chatStatePath, {
       sessionId,
       messageCount: 0
@@ -151,15 +162,35 @@ export function extractTextFromNdjsonLog(raw: string, truncated = false): string
     try {
       const event = JSON.parse(line) as { type?: string; content?: string; error?: string };
       if (event.type === "text" && typeof event.content === "string") {
-        parts.push(event.content);
+        const content = stripCodexNonUserDiagnostics(event.content);
+        if (content) {
+          parts.push(content);
+        }
       } else if (event.type === "error" && typeof event.error === "string") {
-        parts.push(event.error);
+        const error = stripCodexNonUserDiagnostics(event.error);
+        if (error) {
+          parts.push(error);
+        }
       }
     } catch {
-      parts.push(line);
+      const content = stripCodexNonUserDiagnostics(line);
+      if (content) {
+        parts.push(content);
+      }
     }
   }
   return parts.join("");
+}
+
+/**
+ * Removes Codex CLI diagnostics that describe local rollout recording failures,
+ * not model review output or actionable user-facing failures.
+ */
+export function stripCodexNonUserDiagnostics(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => !CODEX_ROLLOUT_ITEM_RECORDING_DIAGNOSTIC_REGEX.test(line.trim()))
+    .join("\n");
 }
 
 function tryKillRunningReview(state: ReviewState): void {
@@ -178,19 +209,19 @@ async function stopAndCleanProvider(
   providerName: string
 ): Promise<string[]> {
   const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-  const { statePath, logPath, pidPath, findingsPath } = getReviewPaths(worktreeDir, providerName);
+  const paths = getReviewPaths(worktreeDir, providerName);
   const deleted: string[] = [];
 
-  if (existsSync(statePath)) {
+  if (existsSync(paths.statePath)) {
     try {
-      const state = JSON.parse(await fs.readFile(statePath, "utf-8")) as ReviewState;
+      const state = JSON.parse(await fs.readFile(paths.statePath, "utf-8")) as ReviewState;
       tryKillRunningReview(state);
     } catch {
       // Ignore corrupted state.
     }
   }
 
-  for (const targetPath of [statePath, logPath, pidPath, findingsPath]) {
+  for (const targetPath of [paths.statePath, paths.logPath, paths.pidPath, paths.findingsPath]) {
     if (existsSync(targetPath)) {
       await fs.rm(targetPath, { force: true });
       deleted.push(path.basename(targetPath));
@@ -202,21 +233,23 @@ async function stopAndCleanProvider(
 
 async function handleMarkCommented(
   context: OperationRequestContext,
-  findingsPath: string,
+  readPath: string,
+  writePath: string,
   commentedIndex: number
 ): Promise<void> {
-  if (!existsSync(findingsPath)) {
+  if (!existsSync(readPath)) {
     json(context, 404, { error: "No findings file found" });
     return;
   }
   try {
-    const data = JSON.parse(await fs.readFile(findingsPath, "utf-8")) as FindingsFile;
+    const data = JSON.parse(await fs.readFile(readPath, "utf-8")) as FindingsFile;
     if (commentedIndex < 0 || commentedIndex >= data.findings.length) {
       json(context, 400, { error: "Index out of range" });
       return;
     }
     data.findings[commentedIndex].commented = true;
-    await fs.writeFile(findingsPath, JSON.stringify(data, null, 2), "utf-8");
+    await fs.mkdir(path.dirname(writePath), { recursive: true });
+    await fs.writeFile(writePath, JSON.stringify(data, null, 2), "utf-8");
     json(context, 200, { success: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -226,18 +259,20 @@ async function handleMarkCommented(
 
 async function handleDeclineFindings(
   context: OperationRequestContext,
-  findingsPath: string,
+  readPath: string,
+  writePath: string,
   declineReason: string
 ): Promise<void> {
-  if (!existsSync(findingsPath)) {
+  if (!existsSync(readPath)) {
     json(context, 404, { error: "No findings file found" });
     return;
   }
   try {
-    const data = JSON.parse(await fs.readFile(findingsPath, "utf-8")) as FindingsFile;
+    const data = JSON.parse(await fs.readFile(readPath, "utf-8")) as FindingsFile;
     data.declined = true;
     data.declineReason = declineReason;
-    await fs.writeFile(findingsPath, JSON.stringify(data, null, 2), "utf-8");
+    await fs.mkdir(path.dirname(writePath), { recursive: true });
+    await fs.writeFile(writePath, JSON.stringify(data, null, 2), "utf-8");
     json(context, 200, { success: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
@@ -280,7 +315,7 @@ export function registerCodexRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[]
 ): void {
-  dispatcher.register("GET", "/api/engineer/codex/available", async (context) => {
+  dispatcher.register("GET", "/api/gateway/codex/available", async (context) => {
     try {
       const output = await runCommand("codex", ["--version"]);
       const match = /codex-cli\s+([\d.]+)/i.exec(output);
@@ -293,7 +328,7 @@ export function registerCodexRoutes(
     }
   });
 
-  dispatcher.register("GET", "/api/engineer/codex/status/:ticketId", async (context) => {
+  dispatcher.register("GET", "/api/gateway/codex/status/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const requestedProvider = context.query.get("provider");
@@ -325,11 +360,10 @@ export function registerCodexRoutes(
       return;
     }
 
-    const workDir = path.join(worktreeDir, ".claude", "work");
     const provider =
       requestedProvider && (requestedProvider === "claude" || requestedProvider === "codex")
         ? requestedProvider
-        : resolveProvider(workDir);
+        : resolveProvider(worktreeDir);
 
     if (!provider) {
       json(context, 200, { hasReview: false, worktreeDir, message: "No review has been started" });
@@ -368,7 +402,7 @@ export function registerCodexRoutes(
     }
   });
 
-  dispatcher.register("DELETE", "/api/engineer/codex/status/:ticketId", async (context) => {
+  dispatcher.register("DELETE", "/api/gateway/codex/status/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const provider = context.query.get("provider");
@@ -394,17 +428,19 @@ export function registerCodexRoutes(
 
     await Promise.all(
       providers.flatMap((name) => {
-        const { statePath, logPath, pidPath, findingsPath } = getReviewPaths(worktreeDir, name);
-        return [statePath, logPath, pidPath, findingsPath].map(async (targetPath) => {
-          await fs.rm(targetPath, { force: true });
-        });
+        const paths = getReviewPaths(worktreeDir, name);
+        return [paths.statePath, paths.logPath, paths.pidPath, paths.findingsPath].map(
+          async (targetPath) => {
+            await fs.rm(targetPath, { force: true });
+          }
+        );
       })
     );
 
     json(context, 200, { success: true });
   });
 
-  dispatcher.register("POST", "/api/engineer/codex/stop/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/codex/stop/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const body = parseBody(context);
     if (!body) {
@@ -464,6 +500,7 @@ export function registerCodexRoutes(
         // Process may have already exited.
       }
 
+      await fs.mkdir(path.dirname(statePath), { recursive: true });
       const updatedState: ReviewState = {
         ...state,
         status: "stopped",
@@ -478,7 +515,7 @@ export function registerCodexRoutes(
     }
   });
 
-  dispatcher.register("DELETE", "/api/engineer/codex/stop/:ticketId", async (context) => {
+  dispatcher.register("DELETE", "/api/gateway/codex/stop/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const provider = context.query.get("provider");
@@ -502,7 +539,7 @@ export function registerCodexRoutes(
     json(context, 200, { deleted: results.flat() });
   });
 
-  dispatcher.register("GET", "/api/engineer/codex/review-findings/:ticketId", async (context) => {
+  dispatcher.register("GET", "/api/gateway/codex/review-findings/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const provider = context.query.get("provider") ?? "codex";
@@ -537,7 +574,7 @@ export function registerCodexRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/codex/review-findings/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/codex/review-findings/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const provider = context.query.get("provider") ?? "codex";
@@ -558,15 +595,16 @@ export function registerCodexRoutes(
       return;
     }
 
-    const findingsPath = getReviewPaths(resolveWorktreeDir(repoResult.path, ticketId), provider).findingsPath;
+    const worktreeDir = resolveWorktreeDir(repoResult.path, ticketId);
+    const findingsPath = getReviewPaths(worktreeDir, provider).findingsPath;
 
     if (typeof body.commentedIndex === "number") {
-      await handleMarkCommented(context, findingsPath, body.commentedIndex);
+      await handleMarkCommented(context, findingsPath, findingsPath, body.commentedIndex);
       return;
     }
 
     if (body.declined === true && typeof body.declineReason === "string" && body.declineReason.trim().length > 0) {
-      await handleDeclineFindings(context, findingsPath, body.declineReason);
+      await handleDeclineFindings(context, findingsPath, findingsPath, body.declineReason);
       return;
     }
 
@@ -578,7 +616,7 @@ export function registerCodexRoutes(
     await handleSaveFindings(context, findingsPath, body, provider);
   });
 
-  dispatcher.register("POST", "/api/engineer/codex/review-dedup/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/codex/review-dedup/:ticketId", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid or empty JSON body" });
@@ -620,7 +658,7 @@ export function registerCodexRoutes(
     json(context, 200, { duplicates });
   });
 
-  dispatcher.register("POST", "/api/engineer/codex/review-extract/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/codex/review-extract/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const body = parseBody(context);
     if (!body) {
@@ -648,17 +686,16 @@ export function registerCodexRoutes(
     }
 
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-    const workDir = path.join(worktreeDir, ".claude", "work");
+    const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
 
     let raw = "";
     for (const fileName of ["codex-review-claude.log", "codex-review-codex.log"]) {
       const candidate = path.join(workDir, fileName);
-      if (!existsSync(candidate)) {
-        continue;
-      }
-      raw = await fs.readFile(candidate, "utf-8");
-      if (raw.trim()) {
-        break;
+      if (existsSync(candidate)) {
+        raw = await fs.readFile(candidate, "utf-8");
+        if (raw.trim()) {
+          break;
+        }
       }
     }
 
@@ -666,7 +703,7 @@ export function registerCodexRoutes(
     json(context, 200, { findings });
   });
 
-  dispatcher.register("POST", "/api/engineer/codex/review-verdict/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/codex/review-verdict/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const body = parseBody(context);
     if (!body) {
@@ -674,9 +711,11 @@ export function registerCodexRoutes(
       return;
     }
 
-    const repoPath = asString(body.repoPath);
-    const sessionId = asString(body.sessionId);
-    const provider = asProvider(body.provider);
+    const requestBody = body as ReviewVerdictRequest;
+    const repoPath = asString(requestBody.repoPath);
+    const sessionId = asString(requestBody.sessionId);
+    const provider = asProvider(requestBody.provider);
+    const expectedMcpUrl = asString(requestBody.expectedMcpUrl) ?? undefined;
 
     if (!(repoPath && sessionId && provider)) {
       json(context, 400, { error: "repoPath, sessionId, and provider are required" });
@@ -707,7 +746,7 @@ export function registerCodexRoutes(
       );
       const collected = provider === "codex"
         ? await runCodexVerdict(worktreeDir, sessionId)
-        : await runClaudeVerdict(worktreeDir, sessionId);
+        : await runClaudeVerdict(worktreeDir, sessionId, expectedMcpUrl);
 
       console.log(`[review-verdict] Collected ${collected.length} chars of output`);
 
@@ -726,7 +765,7 @@ export function registerCodexRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/codex/review/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/codex/review/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const body = parseBody(context);
 
@@ -796,7 +835,7 @@ export function registerCodexRoutes(
     try {
       const child = provider === "claude"
         ? await resolveClaudeReviewProcess(reviewCwd, model, ticketId.slice(3), logPath)
-        : spawnCodexReviewProcess({ cwd: reviewCwd, model, reasoningEffort, reviewMode: effectiveReviewMode, baseBranch, instructions });
+        : await spawnCodexReviewProcess({ cwd: reviewCwd, model, reasoningEffort, reviewMode: effectiveReviewMode, baseBranch, instructions });
 
       if (!child.pid) {
         throw new Error("failed to start review process");
@@ -830,8 +869,9 @@ export function registerCodexRoutes(
       // Detect context window exhaustion — codex exited mid-review, findings are incomplete
       const isContextError = exitCode !== 0 && /context window|out of room/i.test(stderrHolder.value);
 
-      if (exitCode !== 0 && !isContextError && stderrHolder.value.trim()) {
-        writeEvent(context.response, { type: "error", error: stderrHolder.value.trim() });
+      const stderrForUser = stripCodexNonUserDiagnostics(stderrHolder.value).trim();
+      if (exitCode !== 0 && !isContextError && stderrForUser) {
+        writeEvent(context.response, { type: "error", error: stderrForUser });
       }
 
       const finalState: ReviewState = {
@@ -863,7 +903,7 @@ export function registerCodexRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/codex/argue/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/codex/argue/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoQuery = context.query.get("repo");
     const body = parseBody(context);
@@ -906,7 +946,8 @@ export function registerCodexRoutes(
       return;
     }
 
-    const debateStatePath = path.join(worktreeDir, ".claude", "work", "codex-debate.json");
+    const debateWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+    const debateStatePath = path.join(debateWorkDir, "codex-debate.json");
     const debateState = await loadJsonFile<{ sessionId?: string; rounds: number }>(debateStatePath, {
       rounds: 0
     });
@@ -938,7 +979,7 @@ export function registerCodexRoutes(
     );
   });
 
-  dispatcher.register("POST", "/api/engineer/codex/chat/:ticketId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/codex/chat/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const body = parseBody(context);
     if (!body) {
@@ -971,7 +1012,7 @@ export function registerCodexRoutes(
 
     const chatContextId = asString(body.chatContextId);
     const stateFilename = chatContextId === "review" ? "codex-chat-review.json" : "codex-chat.json";
-    const statePath = path.join(worktreeDir, ".claude", "work", stateFilename);
+    const statePath = path.join(worktreeDir, ".closedloop-ai", "work", stateFilename);
     const chatState = await loadJsonFile<CodexChatState>(statePath, { messageCount: 0 });
 
     const args = chatState.sessionId
@@ -992,7 +1033,7 @@ export function registerCodexRoutes(
     );
   });
 
-  dispatcher.register("GET", "/api/engineer/codex/finding-chat/:findingId", async (context) => {
+  dispatcher.register("GET", "/api/gateway/codex/finding-chat/:findingId", async (context) => {
     const findingId = context.params.findingId;
     const ticketId = context.query.get("ticketId");
     const repoPath = context.query.get("repo");
@@ -1024,7 +1065,7 @@ export function registerCodexRoutes(
     json(context, 200, history);
   });
 
-  dispatcher.register("POST", "/api/engineer/codex/finding-chat/:findingId", async (context) => {
+  dispatcher.register("POST", "/api/gateway/codex/finding-chat/:findingId", async (context) => {
     const findingId = context.params.findingId;
     const ticketId = context.query.get("ticketId");
     const repoPath = context.query.get("repo");
@@ -1105,18 +1146,15 @@ export function registerCodexRoutes(
       "--output-format",
       "stream-json",
       "--allowedTools",
-      withMcpTools(ENGINEER_CHAT_TOOLS),
+      await withMcpTools(ENGINEER_CHAT_TOOLS),
       ...(history.sessionId ? ["--resume", history.sessionId] : [])
     ];
 
     try {
-      const child = spawn("claude", args, {
+      const child = spawn(resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path, args, {
         cwd: worktreeDir,
         stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`
-        }
+        env: await getShellEnv(),
       });
 
       if (!child.pid) {
@@ -1174,6 +1212,9 @@ export function registerCodexRoutes(
         });
       }
       history.contextPercent = streamState.contextPercent;
+      if (exitCode !== 0 && streamState.authChallengeDetected && history.sessionId) {
+        history.sessionId = undefined;
+      }
       await saveJsonFile(historyPath, history);
 
       writeEvent(context.response, {
@@ -1192,7 +1233,7 @@ export function registerCodexRoutes(
     }
   });
 
-  dispatcher.register("PATCH", "/api/engineer/codex/finding-chat/:findingId", async (context) => {
+  dispatcher.register("PATCH", "/api/gateway/codex/finding-chat/:findingId", async (context) => {
     const findingId = context.params.findingId;
     const ticketId = context.query.get("ticketId");
     const repoPath = context.query.get("repo");
@@ -1241,7 +1282,7 @@ export function registerCodexRoutes(
     json(context, 200, { success: true });
   });
 
-  dispatcher.register("DELETE", "/api/engineer/codex/finding-chat/:findingId", async (context) => {
+  dispatcher.register("DELETE", "/api/gateway/codex/finding-chat/:findingId", async (context) => {
     const findingId = context.params.findingId;
     const ticketId = context.query.get("ticketId");
     const repoPath = context.query.get("repo");
@@ -1262,8 +1303,10 @@ export function registerCodexRoutes(
       throw error;
     }
 
-    const historyPath = getFindingHistoryPath(ticketId, expandedRepoPath, findingId);
-    await fs.rm(historyPath, { force: true });
+    const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
+    const sanitizedFinding = findingId.replaceAll(/[^a-zA-Z0-9-_]/g, "_");
+    const findingFile = path.join("finding-chats", `${sanitizedFinding}.json`);
+    await fs.rm(path.join(worktreeDir, ".closedloop-ai", "work", findingFile), { force: true });
     json(context, 200, { success: true });
   });
 }
@@ -1275,20 +1318,18 @@ function asProvider(value: unknown): "claude" | "codex" | null {
   return null;
 }
 
-function resolveProvider(workDir: string): "claude" | "codex" | null {
-  const claudeState = path.join(workDir, "codex-review-claude.json");
-  if (existsSync(claudeState)) {
+function resolveProvider(worktreeDir: string): "claude" | "codex" | null {
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
+  if (existsSync(path.join(workDir, "codex-review-claude.json"))) {
     return "claude";
   }
-
-  const codexState = path.join(workDir, "codex-review-codex.json");
-  if (existsSync(codexState)) {
+  if (existsSync(path.join(workDir, "codex-review-codex.json"))) {
     return "codex";
   }
-
   return null;
 }
 
+/** Resolve review file paths from .closedloop-ai/work. */
 function getReviewPaths(worktreeDir: string, provider: string): {
   workDir: string;
   statePath: string;
@@ -1296,7 +1337,7 @@ function getReviewPaths(worktreeDir: string, provider: string): {
   pidPath: string;
   findingsPath: string;
 } {
-  const workDir = path.join(worktreeDir, ".claude", "work");
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
   return {
     workDir,
     statePath: path.join(workDir, `codex-review-${provider}.json`),
@@ -1455,9 +1496,10 @@ function similarityScore(messageA: string, messageB: string, fileA: string, file
   return Math.min(score, 1);
 }
 
-function spawnClaudeReview(cwd: string, model: string): ChildProcess {
+async function spawnClaudeReview(cwd: string, model: string): Promise<ChildProcess> {
+  const allowedTools = await withMcpTools("Bash,Read,Glob,Grep,Task,TodoWrite");
   return spawn(
-    "claude",
+    resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path,
     [
       "-p",
       "--verbose",
@@ -1466,7 +1508,7 @@ function spawnClaudeReview(cwd: string, model: string): ChildProcess {
       "--model",
       model,
       "--allowedTools",
-      withMcpTools("Bash,Read,Glob,Grep,Task,TodoWrite"),
+      allowedTools,
       "--append-system-prompt",
       REVIEW_SYSTEM_PROMPT
     ],
@@ -1474,10 +1516,7 @@ function spawnClaudeReview(cwd: string, model: string): ChildProcess {
       cwd,
       detached: false,
       stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`
-      }
+      env: await getShellEnv(),
     }
   );
 }
@@ -1493,7 +1532,7 @@ async function resolveClaudeReviewProcess(
   prNum: string,
   logPath: string
 ): Promise<ChildProcess> {
-  const first = spawnClaudeReview(cwd, model);
+  const first = await spawnClaudeReview(cwd, model);
   first.stdin?.write("/code-review:start");
   first.stdin?.end();
 
@@ -1565,7 +1604,7 @@ async function resolveClaudeReviewProcess(
   // Skill exited without producing review content — fall back to /review <prNum>
   await fs.writeFile(logPath, "", "utf-8");
 
-  const fallback = spawnClaudeReview(cwd, model);
+  const fallback = await spawnClaudeReview(cwd, model);
   fallback.stdin?.write(`/review ${prNum}`);
   fallback.stdin?.end();
   return fallback;
@@ -1590,11 +1629,12 @@ function resolveEffectiveReviewMode(
     if (!SAFE_REF_REGEX.test(baseBranch)) {
       return reviewMode;
     }
-    const headSha = execSync("git rev-parse HEAD", {
+    const gitBin = getResolvedGitPath();
+    const headSha = execSync(`${gitBin} rev-parse HEAD`, {
       cwd: worktreeDir, encoding: "utf-8", timeout: 10_000,
     }).trim();
     const mergeBaseResult = spawnSync(
-      "git", ["merge-base", "HEAD", `origin/${baseBranch}`],
+      gitBin, ["merge-base", "HEAD", `origin/${baseBranch}`],
       { cwd: worktreeDir, encoding: "utf-8", timeout: 10_000 }
     );
     const mergeBase = (mergeBaseResult.stdout as string).trim();
@@ -1619,7 +1659,8 @@ function applyMergedPrDiff(
   }
   console.log("[codex-review] Merged PR detected. Applying gh pr diff.");
 
-  const diffResult = spawnSync("gh", ["pr", "diff", prNum], {
+  const ghBin = resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path;
+  const diffResult = spawnSync(ghBin, ["pr", "diff", prNum], {
     cwd: worktreeDir, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024, timeout: 30_000,
   });
   const diff = (diffResult.stdout as string) ?? "";
@@ -1630,12 +1671,13 @@ function applyMergedPrDiff(
 
   // Checkout the merge commit's parent so the diff applies cleanly
   const mergeOidResult = spawnSync(
-    "gh", ["pr", "view", prNum, "--json", "mergeCommit", "--jq", ".mergeCommit.oid"],
+    ghBin, ["pr", "view", prNum, "--json", "mergeCommit", "--jq", ".mergeCommit.oid"],
     { cwd: worktreeDir, encoding: "utf-8", timeout: 30_000 }
   );
   const mergeOid = (mergeOidResult.stdout as string).trim();
   if (mergeOid) {
-    const baseCommitResult = spawnSync("git", ["rev-parse", `${mergeOid}^1`], {
+    const gitBin = getResolvedGitPath();
+    const baseCommitResult = spawnSync(gitBin, ["rev-parse", `${mergeOid}^1`], {
       cwd: worktreeDir, encoding: "utf-8", timeout: 10_000,
     });
     const baseCommit = (baseCommitResult.stdout as string).trim();
@@ -1643,7 +1685,7 @@ function applyMergedPrDiff(
       console.warn("[codex-review] Failed to resolve base commit for merged PR");
       return "base";
     }
-    const checkoutResult = spawnSync("git", ["checkout", "--detach", baseCommit], {
+    const checkoutResult = spawnSync(gitBin, ["checkout", "--detach", baseCommit], {
       cwd: worktreeDir, stdio: "pipe", timeout: 10_000,
     });
     if (checkoutResult.status !== 0) {
@@ -1652,10 +1694,11 @@ function applyMergedPrDiff(
     }
   }
 
+  const gitBin2 = getResolvedGitPath();
   const patchPath = path.join(worktreeDir, ".pr-review-diff.patch");
   writeFileSync(patchPath, diff);
   try {
-    execSync(`git apply "${patchPath}"`, { cwd: worktreeDir, stdio: "pipe" });
+    execSync(`${gitBin2} apply "${patchPath}"`, { cwd: worktreeDir, stdio: "pipe" });
   } catch (err) {
     console.warn("[codex-review] Failed to apply PR diff:", err);
     unlinkSync(patchPath);
@@ -1666,14 +1709,14 @@ function applyMergedPrDiff(
   return "uncommitted";
 }
 
-function spawnCodexReviewProcess(options: {
+async function spawnCodexReviewProcess(options: {
   cwd: string;
   model: string;
   reasoningEffort: string;
   reviewMode: "uncommitted" | "base";
   baseBranch: string;
   instructions?: string;
-}): ChildProcess {
+}): Promise<ChildProcess> {
   const args: string[] = ["review"];
   if (options.reviewMode === "uncommitted") {
     args.push("--uncommitted");
@@ -1683,14 +1726,11 @@ function spawnCodexReviewProcess(options: {
 
   args.push("-c", `model=${options.model}`, "-c", `model_reasoning_effort=${options.reasoningEffort}`);
 
-  return spawn("codex", args, {
+  return spawn(resolveBinarySync("codex", getOverrideBinaryPaths()?.codex).path, args, {
     cwd: options.cwd,
     detached: false,
     stdio: ["ignore", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      FORCE_COLOR: "0"
-    }
+    env: await getShellEnv({ FORCE_COLOR: "0" }),
   });
 }
 
@@ -1746,7 +1786,8 @@ async function streamClaudeReview(
   });
 }
 
-function streamCodexReview(
+/** @internal Streams Codex review stdout to SSE while retaining stderr for diagnostics. */
+export function streamCodexReview(
   child: ChildProcess,
   response: ServerResponse,
   logPath: string,
@@ -1779,8 +1820,6 @@ function streamCodexReview(
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
     logStream.write(text);
     stderrHolder.value += text;
-    eventCount++;
-    writeEvent(response, { type: "text", content: text });
   });
 
   child.on("close", () => {
@@ -1801,13 +1840,10 @@ async function streamCodexConversation(
   onSessionId: (sessionId: string) => Promise<void>
 ): Promise<void> {
   try {
-    const child = spawn("codex", args, {
+    const child = spawn(resolveBinarySync("codex", getOverrideBinaryPaths()?.codex).path, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        FORCE_COLOR: "0"
-      }
+      env: await getShellEnv({ FORCE_COLOR: "0" }),
     });
 
     if (!child.pid) {
@@ -1959,17 +1995,12 @@ function buildFindingPrompt(
   return parts.join("\n\n");
 }
 
+/** Returns the canonical path for finding chat history. */
 function getFindingHistoryPath(ticketId: string, expandedRepoPath: string, findingId: string): string {
   const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
   const sanitizedFindingId = findingId.replaceAll(/[^a-zA-Z0-9-_]/g, "_");
-
-  return path.join(
-    worktreeDir,
-    ".claude",
-    "work",
-    "finding-chats",
-    `${sanitizedFindingId}.json`
-  );
+  const filename = path.join("finding-chats", `${sanitizedFindingId}.json`);
+  return path.join(worktreeDir, ".closedloop-ai", "work", filename);
 }
 
 async function waitForExit(child: ChildProcess): Promise<number> {
@@ -1980,13 +2011,11 @@ async function waitForExit(child: ChildProcess): Promise<number> {
 }
 
 async function runCommand(command: string, args: string[]): Promise<string> {
+  const env = await getShellEnv();
   return await new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`
-      }
+      env,
     });
 
     let output = "";
@@ -2051,13 +2080,6 @@ function asNumber(value: unknown): number | null {
 
   return null;
 }
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-
 // --- Verdict extraction ---
 
 const VERDICT_PROMPT = `Now perform a Premise Review of the changes you just reviewed. Question whether the changes were necessary at all:
@@ -2255,20 +2277,35 @@ function extractClaudeVerdictLine(trimmedLine: string): string | null {
   }
 }
 
-function runCodexVerdict(worktreeDir: string, sessionId: string): Promise<string> {
+async function runCodexVerdict(worktreeDir: string, sessionId: string): Promise<string> {
   return runVerdictProcess(
-    "codex",
+    resolveBinarySync("codex", getOverrideBinaryPaths()?.codex).path,
     ["exec", "resume", sessionId, VERDICT_PROMPT, "--full-auto", "--json"],
-    { cwd: worktreeDir, env: { FORCE_COLOR: "0" } },
+    { cwd: worktreeDir, env: await getShellEnv({ FORCE_COLOR: "0" }) },
     extractCodexVerdictLine
   );
 }
 
-function runClaudeVerdict(worktreeDir: string, sessionId: string): Promise<string> {
+async function runClaudeVerdict(
+  worktreeDir: string,
+  sessionId: string,
+  expectedMcpUrl?: string
+): Promise<string> {
+  const allowedTools = await withMcpTools("Read,Glob,Grep", expectedMcpUrl);
   return runVerdictProcess(
-    "claude",
-    ["-p", "--resume", sessionId, "--output-format", "stream-json", "--model", "sonnet", "--allowedTools", "Read,Glob,Grep"],
-    { cwd: worktreeDir, stdin: VERDICT_PROMPT, env: { PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin` } },
+    resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path,
+    [
+      "-p",
+      "--resume",
+      sessionId,
+      "--output-format",
+      "stream-json",
+      "--model",
+      "sonnet",
+      "--allowedTools",
+      allowedTools,
+    ],
+    { cwd: worktreeDir, stdin: VERDICT_PROMPT, env: await getShellEnv() },
     extractClaudeVerdictLine
   );
 }

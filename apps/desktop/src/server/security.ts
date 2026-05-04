@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { expandHomePath } from "../shared/path-utils.js";
+import { Observability } from "../main/observability.js";
 
 export class DirectoryNotAllowedError extends Error {
   readonly targetPath: string;
@@ -13,8 +14,12 @@ export class DirectoryNotAllowedError extends Error {
 }
 
 export function isPathAllowed(targetPath: string, allowedDirectories: string[]): boolean {
+  const expandedTarget = path.resolve(expandHomePath(targetPath));
   const resolvedTarget = canonicalizePathForPolicy(targetPath);
-  if (isSensitiveDeniedPath(resolvedTarget)) {
+
+  // Check both the original (non-canonicalized) and resolved (canonicalized) paths
+  // This ensures we catch sensitive paths even if they are symlinks (e.g., ~/.ssh -> real location)
+  if (isSensitiveDeniedPath(expandedTarget) || isSensitiveDeniedPath(resolvedTarget)) {
     return false;
   }
 
@@ -38,6 +43,7 @@ export function isPathAllowed(targetPath: string, allowedDirectories: string[]):
 
 export function assertPathAllowed(targetPath: string, allowedDirectories: string[]): void {
   if (!isPathAllowed(targetPath, allowedDirectories)) {
+    Observability.sandboxBlocked("path_denied");
     throw new DirectoryNotAllowedError(targetPath);
   }
 }
@@ -74,9 +80,20 @@ function resolveWithNearestRealpath(absolutePath: string): string {
   }
 }
 
-function isSensitiveDeniedPath(resolvedTarget: string): boolean {
-  const lowerTarget = resolvedTarget.toLowerCase();
+function isSensitiveDeniedPath(targetPath: string): boolean {
+  const lowerTarget = targetPath.toLowerCase();
   return SENSITIVE_DENY_PATHS.some((blockedPath) => {
+    // Check both the original blocked path and its canonical form
+    // This catches direct matches and symlinked paths
+    const lowerBlockedOriginal = blockedPath.toLowerCase();
+    const isMatchOriginal =
+      lowerTarget === lowerBlockedOriginal ||
+      lowerTarget.startsWith(lowerBlockedOriginal.endsWith(path.sep) ? lowerBlockedOriginal : `${lowerBlockedOriginal}${path.sep}`);
+
+    if (isMatchOriginal) {
+      return true;
+    }
+
     const canonicalBlocked = canonicalizePathForPolicy(blockedPath);
     const lowerBlocked = canonicalBlocked.toLowerCase();
     return (

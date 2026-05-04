@@ -1,9 +1,10 @@
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import type { OperationDispatcher } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError } from "../security.js";
 import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 const CONTENT_TYPES: Record<string, string> = {
   ".png": "image/png",
@@ -20,7 +21,7 @@ export function registerSymphonyAttachmentsRoutes(
 ): void {
   dispatcher.register(
     "GET",
-    "/api/engineer/symphony/attachments/:ticketId/*attachmentPath",
+    "/api/gateway/symphony/attachments/:ticketId/*attachmentPath",
     async (context) => {
       const ticketId = context.params.ticketId;
       const repoPath = context.query.get("repo");
@@ -48,17 +49,20 @@ export function registerSymphonyAttachmentsRoutes(
       }
 
       const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-      const attachmentsDir = path.join(worktreeDir, ".claude", "work", "attachments");
       const normalizedAttachmentPath = attachmentPath
         .split("/")
         .map((segment) => decodeURIComponent(segment))
         .join(path.sep);
+
+      const attachmentsDir = path.resolve(path.join(worktreeDir, ".closedloop-ai", "work", "attachments"));
       const filePath = path.resolve(attachmentsDir, normalizedAttachmentPath);
-      const resolvedAttachmentsDir = path.resolve(attachmentsDir);
-      const allowedPrefix = resolvedAttachmentsDir.endsWith(path.sep)
-        ? resolvedAttachmentsDir
-        : `${resolvedAttachmentsDir}${path.sep}`;
-      if (!(filePath === resolvedAttachmentsDir || filePath.startsWith(allowedPrefix))) {
+
+      const isUnderDir = (file: string, dir: string): boolean => {
+        const prefix = dir.endsWith(path.sep) ? dir : `${dir}${path.sep}`;
+        return file === dir || file.startsWith(prefix);
+      };
+
+      if (!isUnderDir(filePath, attachmentsDir)) {
         json(context, 403, { error: "Invalid path" });
         return;
       }
@@ -83,10 +87,4 @@ export function registerSymphonyAttachmentsRoutes(
       }
     }
   );
-}
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
 }

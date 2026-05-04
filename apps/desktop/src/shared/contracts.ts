@@ -1,13 +1,14 @@
 export const DEFAULT_GATEWAY_PORT = 19432;
 export const FALLBACK_GATEWAY_PORTS = [19433, 19434, 19435] as const;
 export const PORT_PROBE_ORDER = [DEFAULT_GATEWAY_PORT, ...FALLBACK_GATEWAY_PORTS] as const;
-export const DESKTOP_GATEWAY_VERSION = "0.1.0";
+export const GATEWAY_PROTOCOL_VERSION = "0.1.0";
 
 /** WebSocket relay host — the electron app connects here for cloud commands, not the REST API. */
 export const DEFAULT_RELAY_ORIGIN = process.env.CL_RELAY_ORIGIN ?? "https://relay.closedloop.ai";
 export const DEFAULT_WEB_APP_ORIGIN = process.env.CL_WEB_APP_ORIGIN ?? "https://app.closedloop.ai";
 /** REST API origin — used for auth verification and other REST calls (not the Socket.IO relay). */
 export const DEFAULT_AUTH_API_ORIGIN = process.env.CL_AUTH_API_ORIGIN ?? "https://api.closedloop.ai";
+export const DEFAULT_POSTHOG_HOST = process.env.CL_POSTHOG_HOST ?? "https://us.i.posthog.com";
 
 export type CapabilityToolName = "claude" | "codex" | "git" | "gh" | "python3";
 
@@ -33,9 +34,13 @@ export interface HealthResponse {
   capabilities: ComputeTargetCapabilities;
   version: string;
   port: number;
+  /** Stable Desktop gateway identity used to match this local app to cloud compute targets. */
+  gatewayId?: string;
+  /** True once this desktop profile has completed setup and can accept cloud commands. */
+  onboardingCompleted?: boolean;
 }
 
-export type RiskTier = "auto" | "low" | "medium" | "high";
+export type RiskTier = "none" | "low" | "medium" | "high";
 
 export interface AlwaysAllowRule {
   id: string;
@@ -45,6 +50,29 @@ export interface AlwaysAllowRule {
   scopePath?: string;
   createdAt: string;
   expiresAt: string;
+}
+
+export interface SavedConfig {
+  id: string;
+  name: string;
+  relayOrigin: string;
+  apiOrigin: string;
+  webAppOrigin: string;
+  // cloudApiKey is NOT stored here -- stored encrypted in ApiKeyStore keyed by profile UUID
+  /** Provenance of the encrypted API key stored for this profile. Missing values migrate as USER_CREATED. */
+  apiKeySource?: "USER_CREATED" | "DESKTOP_MANAGED";
+  /** Desktop-managed gateway identity scoped to this saved profile. */
+  gatewayId?: string;
+  /** Public half of the profile-scoped Ed25519 PoP keypair. */
+  gatewayPublicKeyPem?: string;
+  /** Security-upgrade protocol version supported by this profile identity. */
+  desktopSecurityUpgradeProtocolVersion?: 1;
+  /** Last relay compute target observed for this profile. */
+  lastComputeTargetId?: string | null;
+  /** One-time Settings prompt dismissal scoped to this profile. */
+  desktopSecurityPromptDismissedAt?: string | null;
+  /** Pending managed onboarding attempt scoped to this profile, if any. */
+  pendingOnboardingAttemptId?: string | null;
 }
 
 export interface DesktopSettings {
@@ -58,6 +86,16 @@ export interface DesktopSettings {
   relayOrigin: string;
   apiOrigin: string;
   webAppOrigin: string;
+  verboseLogging: boolean;
+  binaryPaths?: {
+    claude?: string;
+    gh?: string;
+    codex?: string;
+    python3?: string;
+    git?: string;
+  };
+  savedConfigs: SavedConfig[];
+  activeConfigId: string | null;
 }
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
@@ -70,5 +108,9 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   defaultApprovalTier: "high",
   relayOrigin: DEFAULT_RELAY_ORIGIN,
   apiOrigin: DEFAULT_AUTH_API_ORIGIN,
-  webAppOrigin: DEFAULT_WEB_APP_ORIGIN
+  webAppOrigin: DEFAULT_WEB_APP_ORIGIN,
+  verboseLogging: false,
+  binaryPaths: {},
+  savedConfigs: [],
+  activeConfigId: null
 };

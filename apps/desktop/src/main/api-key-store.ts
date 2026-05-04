@@ -1,40 +1,83 @@
-import { safeStorage } from "electron";
 import Store from "electron-store";
+import {
+  getElectronSafeStorage,
+  type SafeStorageLike,
+} from "./electron-safe-storage.js";
+
+export type { SafeStorageLike } from "./electron-safe-storage.js";
 
 type SecretsSchema = {
   encryptedApiKey?: string;
+  apiKeyProvenance?: ApiKeyProvenance;
+  [key: string]: string | undefined;
+};
+
+/** Provenance controls whether Desktop PoP signing applies to the active API key. */
+export type ApiKeyProvenance = "USER_CREATED" | "DESKTOP_MANAGED";
+
+/** Plaintext API key plus non-secret provenance metadata for request-signing decisions. */
+export type ApiKeyRecord = {
+  apiKey: string;
+  provenance: ApiKeyProvenance;
 };
 
 export type ApiKeyStatus = {
   hasApiKey: boolean;
   source: "safeStorage" | "environment" | "none";
   environmentVariable?: "CLOSEDLOOP_API_KEY" | "SYMPHONY_API_KEY";
+  provenance?: ApiKeyProvenance;
 };
+
+export interface ApiKeyStoreOptions {
+  cwd?: string;
+  name?: string;
+  safeStorage?: SafeStorageLike;
+}
 
 export class ApiKeyStore {
   private readonly store: Store<SecretsSchema>;
+  private readonly safeStorage: SafeStorageLike;
 
-  constructor() {
+  constructor(options?: ApiKeyStoreOptions) {
     this.store = new Store<SecretsSchema>({
-      name: "desktop-secrets"
+      name: options?.name ?? "desktop-secrets",
+      cwd: options?.cwd
     });
+    this.safeStorage = getElectronSafeStorage(options?.safeStorage, "ApiKeyStore");
   }
 
+  /** Returns only the plaintext key for legacy callers that do not need provenance. */
   getApiKey(): string | null {
+    return this.getApiKeyRecord()?.apiKey ?? null;
+  }
+
+  /** Returns the plaintext key and provenance, treating env and legacy keys as USER_CREATED. */
+  getApiKeyRecord(): ApiKeyRecord | null {
     const encryptedApiKey = this.store.get("encryptedApiKey");
     if (!encryptedApiKey) {
-      return this.getEnvironmentApiKey()?.value ?? null;
+      const envApiKey = this.getEnvironmentApiKey();
+      return envApiKey
+        ? { apiKey: envApiKey.value, provenance: "USER_CREATED" }
+        : null;
     }
 
-    if (!safeStorage.isEncryptionAvailable()) {
+    if (!this.safeStorage.isEncryptionAvailable()) {
       return null;
     }
 
     try {
-      return safeStorage.decryptString(Buffer.from(encryptedApiKey, "base64"));
+      return {
+        apiKey: this.safeStorage.decryptString(Buffer.from(encryptedApiKey, "base64")),
+        provenance: this.getStoredApiKeyProvenance()
+      };
     } catch {
       return null;
     }
+  }
+
+  /** Returns provenance for the active key, or null when no key can be read. */
+  getApiKeyProvenance(): ApiKeyProvenance | null {
+    return this.getApiKeyRecord()?.provenance ?? null;
   }
 
   getStatus(): ApiKeyStatus {
@@ -43,7 +86,8 @@ export class ApiKeyStore {
       const decrypted = this.getApiKey();
       return {
         hasApiKey: Boolean(decrypted),
-        source: decrypted ? "safeStorage" : "none"
+        source: decrypted ? "safeStorage" : "none",
+        provenance: decrypted ? this.getStoredApiKeyProvenance() : undefined
       };
     }
 
@@ -52,7 +96,8 @@ export class ApiKeyStore {
       return {
         hasApiKey: true,
         source: "environment",
-        environmentVariable: envApiKey.environmentVariable
+        environmentVariable: envApiKey.environmentVariable,
+        provenance: "USER_CREATED"
       };
     }
 
@@ -62,17 +107,74 @@ export class ApiKeyStore {
     };
   }
 
-  setApiKey(apiKey: string): void {
-    if (!safeStorage.isEncryptionAvailable()) {
+  /** Stores the active key encrypted at rest with explicit provenance metadata. */
+  setApiKey(apiKey: string, provenance: ApiKeyProvenance = "USER_CREATED"): void {
+    if (!this.safeStorage.isEncryptionAvailable()) {
       throw new Error("safeStorage is not available on this system");
     }
 
-    const encrypted = safeStorage.encryptString(apiKey);
+    const encrypted = this.safeStorage.encryptString(apiKey);
     this.store.set("encryptedApiKey", encrypted.toString("base64"));
+    this.store.set("apiKeyProvenance", provenance);
   }
 
   clearApiKey(): void {
     this.store.delete("encryptedApiKey");
+    this.store.delete("apiKeyProvenance");
+  }
+
+  /** Stores a saved-config key encrypted at rest with its provenance metadata. */
+  saveProfileKey(
+    profileId: string,
+    key: string,
+    provenance: ApiKeyProvenance = "USER_CREATED",
+  ): void {
+    if (!this.safeStorage.isEncryptionAvailable()) {
+      throw new Error("safeStorage is not available on this system");
+    }
+    const encrypted = this.safeStorage.encryptString(key);
+    this.store.set(`profile:${profileId}`, encrypted.toString("base64"));
+    this.store.set(`profile:${profileId}:provenance`, provenance);
+  }
+
+  /** Returns only a saved-config key for legacy callers that do not need provenance. */
+  getProfileKey(profileId: string): string | null {
+    return this.getProfileKeyRecord(profileId)?.apiKey ?? null;
+  }
+
+  /** Returns a saved-config key plus provenance, defaulting legacy profiles to USER_CREATED. */
+  getProfileKeyRecord(profileId: string): ApiKeyRecord | null {
+    const encryptedValue = this.store.get(`profile:${profileId}` as keyof SecretsSchema);
+    if (!encryptedValue) {
+      return null;
+    }
+    if (!this.safeStorage.isEncryptionAvailable()) {
+      return null;
+    }
+    try {
+      return {
+        apiKey: this.safeStorage.decryptString(Buffer.from(encryptedValue, "base64")),
+        provenance: this.getProfileKeyProvenance(profileId)
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Returns non-secret provenance metadata for a saved-config key. */
+  getProfileKeyProvenance(profileId: string): ApiKeyProvenance {
+    const raw = this.store.get(`profile:${profileId}:provenance` as keyof SecretsSchema);
+    return raw === "DESKTOP_MANAGED" ? "DESKTOP_MANAGED" : "USER_CREATED";
+  }
+
+  deleteProfileKey(profileId: string): void {
+    this.store.delete(`profile:${profileId}` as keyof SecretsSchema);
+    this.store.delete(`profile:${profileId}:provenance` as keyof SecretsSchema);
+  }
+
+  private getStoredApiKeyProvenance(): ApiKeyProvenance {
+    const raw = this.store.get("apiKeyProvenance");
+    return raw === "DESKTOP_MANAGED" ? "DESKTOP_MANAGED" : "USER_CREATED";
   }
 
   private getEnvironmentApiKey():

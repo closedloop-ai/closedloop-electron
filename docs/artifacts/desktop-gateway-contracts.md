@@ -59,36 +59,36 @@ This artifact tracks the Desktop -> Relay contract checkpoints from the desktop 
 
 | Operation | Route | Methods | Status | Notes |
 | --- | --- | --- | --- | --- |
-| `symphony_launch` | `/api/engineer/symphony/launch` | `POST` | `implemented` | Creates/uses ticket worktree, writes PRD context, and starts loop process when script is available; AC-049 on repo/context paths before worktree/process operations. |
-| `symphony_status` | `/api/engineer/symphony/status/:ticketId` | `GET` | `implemented` | Ticket status envelope with state/process/plan/task metadata and liveness handling. |
-| `symphony_kill` | `/api/engineer/symphony/kill` | `POST` | `implemented` | PID/group stop semantics with state update + loop marker cleanup; AC-049 on repo path input. |
-| `symphony_chat` | `/api/engineer/symphony/chat/:ticketId` | `POST` | `implemented` | Claude NDJSON stream (`text/event-stream` + newline-delimited JSON) with persisted session/history. |
-| `symphony_comment_chat` | `/api/engineer/symphony/comment-chat/:commentId` | `GET, POST, PATCH, DELETE` | `implemented` | Comment-thread scoped history + Claude streaming + responded-flag update + delete. |
-| `symphony_commit_message` | `/api/engineer/symphony/commit-message/:ticketId` | `GET` | `implemented` | Diff-based commit message generation with Claude fallback/default envelope parity. |
-| `symphony_sessions` | `/api/engineer/symphony/sessions` | `GET, POST, DELETE` | `implemented` | Session CRUD persisted under `~/.symphony/sessions.json`; AC-049 on repo/worktree/context paths. |
-| `terminal_chat` | `/api/engineer/terminal-chat` | `GET, POST, DELETE` | `implemented` | Claude/Codex NDJSON terminal chat stream + durable history/session handling. |
-| `ticket_chat` | `/api/engineer/ticket-chat` | `GET, POST, DELETE` | `implemented` | Ticket-scoped chat history + NDJSON stream with repo allowlist enforcement before spawn. |
-| `run_viewer_chat` | `/api/engineer/run-viewer-chat` | `GET, POST, DELETE` | `implemented` | Run artifact chat history + NDJSON stream; AC-049 on `runDir` prior to command execution. |
-| `codex_review` | `/api/engineer/codex/review/:ticketId` | `POST` | `implemented` | Claude/Codex review process streaming with persisted state/log/pid/session artifacts. |
-| `codex_review_status` | `/api/engineer/codex/status/:ticketId` | `GET, DELETE` | `implemented` | Review status/log read + cleanup contract (provider-aware). |
-| `codex_review_stop` | `/api/engineer/codex/stop/:ticketId` | `POST, DELETE` | `implemented` | Explicit stop + delete semantics for active/inactive reviews. |
-| `codex_review_findings` | `/api/engineer/codex/review-findings/:ticketId` | `GET, POST` | `implemented` | Persist/load findings + mark-commented mutation envelope. |
-| `codex_review_extract` | `/api/engineer/codex/review-extract/:ticketId` | `POST` | `implemented` | Structured findings extraction envelope from review output. |
-| `codex_review_dedup` | `/api/engineer/codex/review-dedup/:ticketId` | `POST` | `implemented` | Duplicate pairing contract (`duplicates: [indexA,indexB][]`). |
-| `codex_argue` | `/api/engineer/codex/argue/:ticketId` | `POST` | `implemented` | Codex debate NDJSON streaming with persisted debate session state. |
-| `codex_chat` | `/api/engineer/codex/chat/:ticketId` | `POST` | `implemented` | Ticket-scoped Codex chat stream with session resume support. |
-| `codex_finding_chat` | `/api/engineer/codex/finding-chat/:findingId` | `GET, POST, PATCH, DELETE` | `implemented` | Finding-scoped history + Claude stream + responded-flag mutation + delete. |
-| `git_action` | `/api/engineer/git` | `POST` | `implemented` | Multi-action git envelope (`status/branch/commit/push/pull/branch-diff/sync-status`). |
-| `git_pr` | `/api/engineer/git/pr*`, `/api/engineer/git/user` | `GET, POST` | `implemented` | PR create/list/comments/reviews/reply/files/head-sha/inline-comment/user parity routes. |
-| `health_check` | `/api/engineer/health-check` | `GET` | `implemented` | Tool/auth/script readiness check bundle with remediation metadata. |
-| `repos_config` | `/api/engineer/repos` | `GET, POST, DELETE, PATCH` | `implemented` | Repo config CRUD/settings persistence in `~/.claude/closedloop/repos.json`. |
-| `deploy` | `/api/engineer/deploy*` | `GET, POST` | `implemented` | Deploy detect/start/status/health/kill/teardown/check-existing/extract-info route family. |
-| `learnings` | `/api/engineer/learnings`, `/api/engineer/symphony/*learnings*` | `GET, POST` | `implemented` | Learnings read/extract/process/status/usage-record endpoints with filesystem contracts. |
-| `filesystem` | `/api/engineer/directories`, `/api/engineer/files/search`, `/api/engineer/run-viewer-extract` | `GET, POST, DELETE` | `implemented` | Directory/search + run-viewer zip extract/list/cleanup contracts. |
-| `supporting parity routes` | `/api/engineer/version`, `/api/engineer/work-directory/:ticketId`, `/api/engineer/mcp-auth`, `/api/engineer/symphony/status` | `GET` | `implemented` | Auxiliary engineer endpoints implemented natively for desktop route parity completeness. |
+| `symphony_launch` | `/api/gateway/symphony/launch` | `POST` | `implemented` | Creates/uses ticket worktree, writes PRD context, and starts loop process when script is available; AC-049 on repo/context paths before worktree/process operations. |
+| `symphony_status` | `/api/gateway/symphony/status/:ticketId` | `GET` | `implemented` | Ticket status envelope with state/process/plan/task metadata and liveness handling. |
+| `symphony_kill` | `/api/gateway/symphony/kill` | `POST` | `implemented` | PID/group stop semantics with state update + loop marker cleanup; AC-049 on repo path input. |
+| `symphony_chat` | `/api/gateway/symphony/chat/:ticketId` | `POST` | `implemented` | Claude NDJSON stream (`text/event-stream` + newline-delimited JSON) with persisted session/history. |
+| `symphony_comment_chat` | `/api/gateway/symphony/comment-chat/:commentId` | `GET, POST, PATCH, DELETE` | `implemented` | Comment-thread scoped history + Claude streaming + responded-flag update + delete. |
+| `symphony_commit_message` | `/api/gateway/symphony/commit-message/:ticketId` | `GET` | `implemented` | Diff-based commit message generation with Claude fallback/default envelope parity. |
+| `symphony_sessions` | `/api/gateway/symphony/sessions` | `GET, POST, DELETE` | `implemented` | Session CRUD persisted under `~/.symphony/sessions.json`; AC-049 on repo/worktree/context paths. |
+| `terminal_chat` | `/api/gateway/terminal-chat` | `GET, POST, DELETE` | `implemented` | Claude/Codex NDJSON terminal chat stream + durable history/session handling. |
+| `ticket_chat` | `/api/gateway/ticket-chat` | `GET, POST, DELETE` | `implemented` | Ticket-scoped chat history + NDJSON stream with repo allowlist enforcement before spawn. |
+| `run_viewer_chat` | `/api/gateway/run-viewer-chat` | `GET, POST, DELETE` | `implemented` | Run artifact chat history + NDJSON stream; AC-049 on `runDir` prior to command execution. |
+| `codex_review` | `/api/gateway/codex/review/:ticketId` | `POST` | `implemented` | Claude/Codex review process streaming with persisted state/log/pid/session artifacts. |
+| `codex_review_status` | `/api/gateway/codex/status/:ticketId` | `GET, DELETE` | `implemented` | Review status/log read + cleanup contract (provider-aware). |
+| `codex_review_stop` | `/api/gateway/codex/stop/:ticketId` | `POST, DELETE` | `implemented` | Explicit stop + delete semantics for active/inactive reviews. |
+| `codex_review_findings` | `/api/gateway/codex/review-findings/:ticketId` | `GET, POST` | `implemented` | Persist/load findings + mark-commented mutation envelope. |
+| `codex_review_extract` | `/api/gateway/codex/review-extract/:ticketId` | `POST` | `implemented` | Structured findings extraction envelope from review output. |
+| `codex_review_dedup` | `/api/gateway/codex/review-dedup/:ticketId` | `POST` | `implemented` | Duplicate pairing contract (`duplicates: [indexA,indexB][]`). |
+| `codex_argue` | `/api/gateway/codex/argue/:ticketId` | `POST` | `implemented` | Codex debate NDJSON streaming with persisted debate session state. |
+| `codex_chat` | `/api/gateway/codex/chat/:ticketId` | `POST` | `implemented` | Ticket-scoped Codex chat stream with session resume support. |
+| `codex_finding_chat` | `/api/gateway/codex/finding-chat/:findingId` | `GET, POST, PATCH, DELETE` | `implemented` | Finding-scoped history + Claude stream + responded-flag mutation + delete. |
+| `git_action` | `/api/gateway/git` | `POST` | `implemented` | Multi-action git envelope (`status/branch/commit/push/pull/branch-diff/sync-status`). |
+| `git_pr` | `/api/gateway/git/pr*`, `/api/gateway/git/user` | `GET, POST` | `implemented` | PR create/list/comments/reviews/reply/files/head-sha/inline-comment/user parity routes. |
+| `health_check` | `/api/gateway/health-check` | `GET` | `implemented` | Tool/auth/script readiness check bundle with remediation metadata. |
+| `repos_config` | `/api/gateway/repos` | `GET, POST, DELETE, PATCH` | `implemented` | Repo config CRUD/settings persistence in `~/.closedloop-ai/config/repos.json`. |
+| `deploy` | `/api/gateway/deploy*` | `GET, POST` | `implemented` | Deploy detect/start/status/health/kill/teardown/check-existing/extract-info route family. |
+| `learnings` | `/api/gateway/learnings`, `/api/gateway/symphony/*learnings*` | `GET, POST` | `implemented` | Learnings read/extract/process/status/usage-record endpoints with filesystem contracts. |
+| `filesystem` | `/api/gateway/directories`, `/api/gateway/files/search`, `/api/gateway/run-viewer-extract` | `GET, POST, DELETE` | `implemented` | Directory/search + run-viewer zip extract/list/cleanup contracts. |
+| `supporting parity routes` | `/api/gateway/version`, `/api/gateway/work-directory/:ticketId`, `/api/gateway/mcp-auth`, `/api/gateway/symphony/status` | `GET` | `implemented` | Auxiliary engineer endpoints implemented natively for desktop route parity completeness. |
 
 - Notes:
-  - All mapped `apps/app/app/api/engineer/*` routes are implemented natively in desktop.
+  - All mapped `apps/app/app/api/gateway/*` routes are implemented natively in desktop.
   - Fallback proxy remains optional but is no longer required for parity coverage.
   - Wildcard attachment route parity is maintained with equivalent semantics (`*attachmentPath` vs `*path` naming only).
   - Approval workflow is integrated in desktop UI with approve-by-default tiering (`defaultApprovalTier=high`) and per-operation `Always Allow` overrides.

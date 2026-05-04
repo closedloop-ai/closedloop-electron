@@ -18,7 +18,10 @@ import {
   readLaunchMetadata,
   readProcessPidSync,
   releaseLaunchLock,
+  restoreWorktreeState,
+  runLoopsSetupScript,
   sanitizeTicketId,
+  saveWorktreeState,
   writeLaunchMetadata,
 } from "../src/server/operations/symphony-utils.js";
 
@@ -33,12 +36,84 @@ afterEach(async () => {
 function makeTempDir(): string {
   const dir = path.join(
     os.tmpdir(),
-    `symphony-utils-test-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    `symphony-utils-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   );
   mkdirSync(dir, { recursive: true });
   tempPaths.push(dir);
   return dir;
 }
+
+// --- worktree state save/restore ---
+
+describe("worktree state save/restore", () => {
+  test("preserves .closedloop-ai state across worktree recreation", () => {
+    const dir = makeTempDir();
+    const workDir = path.join(dir, ".closedloop-ai", "work");
+    mkdirSync(workDir, { recursive: true });
+    writeFileSync(path.join(workDir, "state.json"), '{"status":"RUNNING"}');
+
+    const saved = saveWorktreeState(dir);
+    restoreWorktreeState(saved, dir);
+
+    assert.equal(
+      readFileSync(
+        path.join(dir, ".closedloop-ai", "work", "state.json"),
+        "utf-8",
+      ),
+      '{"status":"RUNNING"}',
+    );
+  });
+
+  test("ignores legacy .claude/work state", () => {
+    const dir = makeTempDir();
+    const attachmentsDir = path.join(dir, ".claude", "work", "attachments");
+    mkdirSync(attachmentsDir, { recursive: true });
+    writeFileSync(path.join(attachmentsDir, "image.png"), "binary-data");
+
+    const saved = saveWorktreeState(dir);
+    restoreWorktreeState(saved, dir);
+
+    assert.equal(
+      existsSync(
+        path.join(dir, ".closedloop-ai", "work", "attachments", "image.png"),
+      ),
+      false,
+    );
+  });
+
+  test("preserves .claude/agents without restoring unrelated .claude state", () => {
+    const dir = makeTempDir();
+    const agentsDir = path.join(dir, ".claude", "agents");
+    mkdirSync(agentsDir, { recursive: true });
+    writeFileSync(path.join(agentsDir, "custom-agent.md"), "# custom agent");
+    writeFileSync(
+      path.join(dir, ".claude", "settings.json"),
+      '{"legacy":true}',
+    );
+
+    const saved = saveWorktreeState(dir);
+
+    mkdirSync(path.join(dir, ".claude"), { recursive: true });
+    writeFileSync(
+      path.join(dir, ".claude", "settings.json"),
+      '{"tracked":true}',
+    );
+
+    restoreWorktreeState(saved, dir);
+
+    assert.equal(
+      readFileSync(
+        path.join(dir, ".claude", "agents", "custom-agent.md"),
+        "utf-8",
+      ),
+      "# custom agent",
+    );
+    assert.equal(
+      readFileSync(path.join(dir, ".claude", "settings.json"), "utf-8"),
+      '{"tracked":true}',
+    );
+  });
+});
 
 // --- readProcessPidSync ---
 
@@ -50,7 +125,7 @@ describe("readProcessPidSync", () => {
 
   test("returns parsed PID from valid file", () => {
     const dir = makeTempDir();
-    const claudeWorkDir = path.join(dir, ".claude", "work");
+    const claudeWorkDir = path.join(dir, ".closedloop-ai", "work");
     mkdirSync(claudeWorkDir, { recursive: true });
     writeFileSync(path.join(claudeWorkDir, "process.pid"), "12345");
 
@@ -59,7 +134,7 @@ describe("readProcessPidSync", () => {
 
   test("returns null for non-numeric content", () => {
     const dir = makeTempDir();
-    const claudeWorkDir = path.join(dir, ".claude", "work");
+    const claudeWorkDir = path.join(dir, ".closedloop-ai", "work");
     mkdirSync(claudeWorkDir, { recursive: true });
     writeFileSync(path.join(claudeWorkDir, "process.pid"), "not-a-pid");
 
@@ -89,11 +164,11 @@ describe("readLaunchMetadata", () => {
 
   test("returns baseBranch and parentTicketId from valid file", () => {
     const dir = makeTempDir();
-    const claudeWorkDir = path.join(dir, ".claude", "work");
+    const claudeWorkDir = path.join(dir, ".closedloop-ai", "work");
     mkdirSync(claudeWorkDir, { recursive: true });
     writeFileSync(
       path.join(claudeWorkDir, "launch-metadata.json"),
-      JSON.stringify({ baseBranch: "main", parentTicketId: "AI-100" })
+      JSON.stringify({ baseBranch: "main", parentTicketId: "AI-100" }),
     );
 
     const meta = readLaunchMetadata(dir);
@@ -109,23 +184,20 @@ describe("readLaunchMetadata", () => {
 
   test("returns null for malformed JSON", () => {
     const dir = makeTempDir();
-    const claudeWorkDir = path.join(dir, ".claude", "work");
+    const claudeWorkDir = path.join(dir, ".closedloop-ai", "work");
     mkdirSync(claudeWorkDir, { recursive: true });
-    writeFileSync(
-      path.join(claudeWorkDir, "launch-metadata.json"),
-      "not json"
-    );
+    writeFileSync(path.join(claudeWorkDir, "launch-metadata.json"), "not json");
 
     assert.equal(readLaunchMetadata(dir), null);
   });
 
   test("ignores non-string fields", () => {
     const dir = makeTempDir();
-    const claudeWorkDir = path.join(dir, ".claude", "work");
+    const claudeWorkDir = path.join(dir, ".closedloop-ai", "work");
     mkdirSync(claudeWorkDir, { recursive: true });
     writeFileSync(
       path.join(claudeWorkDir, "launch-metadata.json"),
-      JSON.stringify({ baseBranch: 123, parentTicketId: null })
+      JSON.stringify({ baseBranch: 123, parentTicketId: null }),
     );
 
     const meta = readLaunchMetadata(dir);
@@ -143,11 +215,16 @@ describe("readLaunchMetadata", () => {
 // --- writeLaunchMetadata ---
 
 describe("writeLaunchMetadata", () => {
-  test("writes launch-metadata.json and creates .claude/work dir", () => {
+  test("writes launch-metadata.json and creates .closedloop-ai/work dir", () => {
     const dir = makeTempDir();
     writeLaunchMetadata(dir, { baseBranch: "develop" });
 
-    const metaPath = path.join(dir, ".claude", "work", "launch-metadata.json");
+    const metaPath = path.join(
+      dir,
+      ".closedloop-ai",
+      "work",
+      "launch-metadata.json",
+    );
     assert.ok(existsSync(metaPath));
     const content = JSON.parse(readFileSync(metaPath, "utf-8"));
     assert.equal(content.baseBranch, "develop");
@@ -224,7 +301,7 @@ describe("acquireLaunchLock", () => {
     assert.ok(result !== null);
 
     const lockContent = JSON.parse(
-      readFileSync(path.join(lockDir, "launch.lock"), "utf-8")
+      readFileSync(path.join(lockDir, "launch.lock"), "utf-8"),
     );
     assert.equal(lockContent.pid, process.pid);
     assert.equal(typeof lockContent.timestamp, "number");
@@ -261,7 +338,7 @@ describe("cleanStaleLock", () => {
     mkdirSync(lockDir, { recursive: true });
     writeFileSync(
       path.join(lockDir, "launch.lock"),
-      JSON.stringify({ pid: 999_999_999, timestamp: Date.now() })
+      JSON.stringify({ pid: 999_999_999, timestamp: Date.now() }),
     );
 
     cleanStaleLock(lockDir);
@@ -273,7 +350,7 @@ describe("cleanStaleLock", () => {
     mkdirSync(lockDir, { recursive: true });
     writeFileSync(
       path.join(lockDir, "launch.lock"),
-      JSON.stringify({ pid: process.pid, timestamp: Date.now() })
+      JSON.stringify({ pid: process.pid, timestamp: Date.now() }),
     );
 
     cleanStaleLock(lockDir);
@@ -285,7 +362,7 @@ describe("cleanStaleLock", () => {
     mkdirSync(lockDir, { recursive: true });
     writeFileSync(
       path.join(lockDir, "launch.lock"),
-      JSON.stringify({ timestamp: Date.now() })
+      JSON.stringify({ timestamp: Date.now() }),
     );
 
     cleanStaleLock(lockDir);
@@ -340,10 +417,7 @@ describe("cleanStaleLock", () => {
     mkdirSync(lockDir, { recursive: true });
     const lockPath = path.join(lockDir, "launch.lock");
     // Lock with very old timestamp but alive PID
-    writeFileSync(
-      lockPath,
-      JSON.stringify({ pid: process.pid, timestamp: 0 })
-    );
+    writeFileSync(lockPath, JSON.stringify({ pid: process.pid, timestamp: 0 }));
 
     // Backdate the file mtime as well
     const veryOld = new Date(Date.now() - 60_000);
@@ -362,7 +436,7 @@ describe("getLockDir", () => {
     const result = getLockDir("/parent", "my-repo", "AI-100");
     assert.equal(
       result,
-      path.join("/parent", ".closedloop-ai", "locks", "my-repo-AI-100")
+      path.join("/parent", ".closedloop-ai", "locks", "my-repo-AI-100"),
     );
   });
 });
@@ -376,5 +450,46 @@ describe("sanitizeTicketId", () => {
 
   test("replaces special characters with underscores", () => {
     assert.equal(sanitizeTicketId("AI/100 (foo)"), "AI_100__foo_");
+  });
+});
+
+// --- runLoopsSetupScript ---
+
+describe("runLoopsSetupScript", () => {
+  test("runs script that exists and creates a marker file", async () => {
+    const dir = makeTempDir();
+    const scriptDir = path.join(dir, ".closedloop-ai");
+    mkdirSync(scriptDir, { recursive: true });
+    writeFileSync(
+      path.join(scriptDir, "loops-setup.sh"),
+      '#!/bin/bash\necho "ok" > "$PWD/.setup-marker"',
+    );
+
+    await runLoopsSetupScript(dir, "test-loop-id");
+
+    assert.ok(existsSync(path.join(dir, ".setup-marker")));
+    assert.equal(
+      readFileSync(path.join(dir, ".setup-marker"), "utf-8").trim(),
+      "ok",
+    );
+  });
+
+  test("no-ops when script does not exist", async () => {
+    const dir = makeTempDir();
+    // Should not throw
+    await runLoopsSetupScript(dir, "test-loop-id");
+  });
+
+  test("does not throw when script exits non-zero", async () => {
+    const dir = makeTempDir();
+    const scriptDir = path.join(dir, ".closedloop-ai");
+    mkdirSync(scriptDir, { recursive: true });
+    writeFileSync(
+      path.join(scriptDir, "loops-setup.sh"),
+      "#!/bin/bash\nexit 1",
+    );
+
+    // Should not throw — failure is non-fatal
+    await runLoopsSetupScript(dir, "test-loop-id");
   });
 });

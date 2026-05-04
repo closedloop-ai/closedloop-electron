@@ -37,6 +37,8 @@ const desktopApi = {
   getOnboardingState: () => ipcRenderer.invoke("desktop:get-onboarding-state") as Promise<unknown>,
   completeOnboarding: (payload: unknown) =>
     ipcRenderer.invoke("desktop:complete-onboarding", payload) as Promise<unknown>,
+  startDeviceOnboarding: (payload: unknown) =>
+    ipcRenderer.invoke("desktop:start-device-onboarding", payload) as Promise<unknown>,
   pickSandboxDirectory: () => ipcRenderer.invoke("desktop:pick-sandbox-directory") as Promise<unknown>,
   getDangerousAutoApprove: () =>
     ipcRenderer.invoke("desktop:get-dangerous-auto-approve") as Promise<boolean>,
@@ -53,7 +55,27 @@ const desktopApi = {
   listCompletedJobs: () => ipcRenderer.invoke("desktop:list-completed-jobs") as Promise<unknown>,
   getJob: (jobId: string) => ipcRenderer.invoke("desktop:get-job", jobId) as Promise<unknown>,
   getJobLogTail: (jobId: string, lines?: number) =>
-    ipcRenderer.invoke("desktop:get-job-log-tail", jobId, lines) as Promise<unknown>
+    ipcRenderer.invoke("desktop:get-job-log-tail", jobId, lines) as Promise<unknown>,
+  getLogs: () => ipcRenderer.invoke("desktop:get-logs") as Promise<unknown>,
+  clearLogs: () => ipcRenderer.invoke("desktop:clear-logs") as Promise<unknown>,
+  getAppVersion: () => ipcRenderer.invoke("desktop:get-app-version") as Promise<string>,
+  getBinaryPaths: () => ipcRenderer.invoke("desktop:get-binary-paths") as Promise<unknown>,
+  patchBinaryPaths: (patch: unknown) =>
+    ipcRenderer.invoke("desktop:patch-binary-paths", patch) as Promise<unknown>,
+  detectCliTools: () =>
+    ipcRenderer.invoke("desktop:detect-cli-tools") as Promise<unknown>,
+  saveConfig: (name: string) =>
+    ipcRenderer.invoke("desktop:save-config", { name }) as Promise<unknown>,
+  findMatchingConfig: () =>
+    ipcRenderer.invoke("desktop:find-matching-config") as Promise<unknown>,
+  listConfigs: () =>
+    ipcRenderer.invoke("desktop:list-configs") as Promise<unknown>,
+  deleteConfig: (id: string) =>
+    ipcRenderer.invoke("desktop:delete-config", { id }) as Promise<unknown>,
+  renameConfig: (id: string, name: string) =>
+    ipcRenderer.invoke("desktop:rename-config", { id, name }) as Promise<unknown>,
+  applyConfig: (id: string) =>
+    ipcRenderer.invoke("desktop:apply-config", { id }) as Promise<unknown>
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);
@@ -64,4 +86,8 @@ ipcRenderer.on("desktop:navigate-tab", (_event, tab: string) => {
 
 ipcRenderer.on("desktop:update-available", (_event, result) => {
   window.dispatchEvent(new CustomEvent("desktop:update-available", { detail: result }));
+});
+
+ipcRenderer.on("desktop:onboarding-state-changed", () => {
+  window.dispatchEvent(new CustomEvent("desktop:onboarding-state-changed"));
 });

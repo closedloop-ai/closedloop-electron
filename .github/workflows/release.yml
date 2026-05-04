@@ -1,10 +1,6 @@
 name: Release Desktop
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "apps/desktop/**"
   workflow_dispatch:
 
 concurrency:
@@ -20,6 +16,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: write
+      packages: read
 
     steps:
       - name: Checkout repository
@@ -34,7 +31,7 @@ jobs:
       - name: Check if version already released
         id: check_release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           if gh release view "v$VERSION" --repo "${{ github.repository }}" > /dev/null 2>&1; then
@@ -58,10 +55,16 @@ jobs:
       - name: Install dependencies
         if: steps.check_release.outputs.skip != 'true'
         run: pnpm install --frozen-lockfile
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Generate build info
         if: steps.check_release.outputs.skip != 'true'
         run: pnpm -r prebuild
+
+      - name: Lint
+        if: steps.check_release.outputs.skip != 'true'
+        run: pnpm -C apps/desktop lint
 
       - name: Typecheck
         if: steps.check_release.outputs.skip != 'true'
@@ -74,13 +77,18 @@ jobs:
       - name: Build and publish to GitHub Releases
         if: steps.check_release.outputs.skip != 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ secrets.APPLE_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.APPLE_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: pnpm -C apps/desktop release
 
       - name: Publish release (undraft)
         if: steps.check_release.outputs.skip != 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release edit "v${{ steps.version.outputs.version }}" --draft=false --repo "${{ github.repository }}"
 
       - name: Upload DMG as workflow artifact

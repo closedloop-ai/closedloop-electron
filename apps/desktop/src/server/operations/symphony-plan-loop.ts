@@ -1,10 +1,17 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import type { ApiKeyProvenance } from "../../main/api-key-store.js";
+import type { DesktopPopSigner } from "../../main/desktop-pop.js";
+import {
+  buildManagedDesktopPopHeaders,
+  type DesktopPopUnavailableReporter,
+} from "../../main/desktop-pop-sign-utils.js";
 import type { JobStore } from "../../main/job-store.js";
 import type {
   OperationDispatcher,
   OperationRequestContext,
 } from "../operation-dispatcher.js";
 import path from "node:path";
+import { getActiveLoopPid, getResolvedGitPath } from "./symphony-loop.js";
 import {
   isProcessRunning,
   readProcessPidSync,
@@ -13,6 +20,8 @@ import {
   tryAssertRepoAllowed,
   writeLaunchMetadata,
 } from "./symphony-utils.js";
+import { resolveRepoFullName } from "./git-helpers.js";
+import { json } from "./response-utils.js";
 
 // ---------------------------------------------------------------------------
 // Shared prepare/confirm handler implementations
@@ -154,17 +163,6 @@ async function handleConfirm(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function json(
-  context: OperationRequestContext,
-  status: number,
-  payload: unknown
-): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-
 function parseBody(
   context: OperationRequestContext
 ): Record<string, unknown> | null {
@@ -183,40 +181,20 @@ function asString(value: unknown): string | null {
 }
 
 /**
- * Resolve the git remote full name (org/repo) from a local repo path.
- * Returns null if the remote origin URL cannot be parsed.
- */
-function resolveRepoFullName(repoPath: string): string | null {
-  try {
-    const remoteUrl = execSync("git remote get-url origin", {
-      cwd: repoPath,
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 10_000,
-    }).trim();
-
-    // Handle SSH: git@github.com:org/repo.git
-    const sshMatch = /[:/]([^/:]+\/[^/]+?)(?:\.git)?$/.exec(remoteUrl);
-    if (sshMatch) {
-      return sshMatch[1];
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Resolve the current branch name of a repo.
  */
 function resolveCurrentBranch(repoPath: string): string | null {
   try {
-    return execSync("git rev-parse --abbrev-ref HEAD", {
-      cwd: repoPath,
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 10_000,
-    }).trim();
+    return execFileSync(
+      getResolvedGitPath(),
+      ["rev-parse", "--abbrev-ref", "HEAD"],
+      {
+        cwd: repoPath,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 10_000,
+      },
+    ).trim();
   } catch {
     return null;
   }
@@ -227,12 +205,16 @@ function resolveCurrentBranch(repoPath: string): string | null {
  */
 function resolveDefaultBranch(repoPath: string): string {
   try {
-    const ref = execSync("git symbolic-ref refs/remotes/origin/HEAD", {
-      cwd: repoPath,
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 10_000,
-    }).trim();
+    const ref = execFileSync(
+      getResolvedGitPath(),
+      ["symbolic-ref", "refs/remotes/origin/HEAD"],
+      {
+        cwd: repoPath,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 10_000,
+      },
+    ).trim();
     // refs/remotes/origin/main -> main
     return ref.split("/").pop() ?? "main";
   } catch {
@@ -269,10 +251,13 @@ export function registerSymphonyPlanLoopRoutes(
   getAllowedDirectories: () => string[],
   getApiKey: () => string | null,
   getApiOrigin: () => string,
-  jobStore?: JobStore
+  jobStore?: JobStore,
+  getApiKeyProvenance?: () => ApiKeyProvenance | null,
+  signDesktopRequest?: DesktopPopSigner,
+  onDesktopPopUnavailable?: DesktopPopUnavailableReporter
 ): void {
   // -----------------------------------------------------------------------
-  // Operation A: POST /api/engineer/symphony/plan-loop/:ticketId/prepare
+  // Operation A: POST /api/gateway/symphony/plan-loop/:ticketId/prepare
   //
   // Filesystem-only: validates repoPath, resolves worktree + git remote info.
   // No API call -- completes instantly. Used for both initial start and
@@ -280,7 +265,7 @@ export function registerSymphonyPlanLoopRoutes(
   // -----------------------------------------------------------------------
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/plan-loop/:ticketId/prepare",
+    "/api/gateway/symphony/plan-loop/:ticketId/prepare",
     (context) => handlePrepare(context, getAllowedDirectories)
   );
 
@@ -288,12 +273,12 @@ export function registerSymphonyPlanLoopRoutes(
   // The prepare step is identical -- only the subsequent API call differs.
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/plan-loop/:ticketId/select-artifact/prepare",
+    "/api/gateway/symphony/plan-loop/:ticketId/select-artifact/prepare",
     (context) => handlePrepare(context, getAllowedDirectories)
   );
 
   // -----------------------------------------------------------------------
-  // Operation B: POST /api/engineer/symphony/plan-loop/:ticketId/confirm
+  // Operation B: POST /api/gateway/symphony/plan-loop/:ticketId/confirm
   //
   // Filesystem-only: writes launch-metadata.json and updates JobStore.
   // Called fire-and-forget by the browser after the API returns the loop.
@@ -301,19 +286,19 @@ export function registerSymphonyPlanLoopRoutes(
   // -----------------------------------------------------------------------
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/plan-loop/:ticketId/confirm",
+    "/api/gateway/symphony/plan-loop/:ticketId/confirm",
     (context) => handleConfirm(context, context.params.ticketId, getAllowedDirectories, jobStore)
   );
 
   // Also register the same confirm handler for the select-artifact path.
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/plan-loop/:ticketId/select-artifact/confirm",
+    "/api/gateway/symphony/plan-loop/:ticketId/select-artifact/confirm",
     (context) => handleConfirm(context, context.params.ticketId, getAllowedDirectories, jobStore)
   );
 
   // -----------------------------------------------------------------------
-  // Operation C: POST /api/engineer/symphony/plan-loop/:ticketId/cancel
+  // Operation C: POST /api/gateway/symphony/plan-loop/:ticketId/cancel
   //
   // Cancels DB loop via API + kills local process. The DELETE /loops/:loopId
   // call is a simple idempotent delete that doesn't dispatch a new relay
@@ -321,7 +306,7 @@ export function registerSymphonyPlanLoopRoutes(
   // -----------------------------------------------------------------------
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/plan-loop/:ticketId/cancel",
+    "/api/gateway/symphony/plan-loop/:ticketId/cancel",
     async (context) => {
       const ticketId = context.params.ticketId;
       const body = parseBody(context);
@@ -358,10 +343,23 @@ export function registerSymphonyPlanLoopRoutes(
       const apiOrigin = getApiOrigin();
 
       try {
-        const cancelResponse = await fetch(`${apiOrigin}/loops/${loopId}`, {
+        const path = `/loops/${loopId}`;
+        const popHeaders = await buildManagedDesktopPopHeaders({
+          apiKeyProvenance: getApiKeyProvenance?.() ?? "USER_CREATED",
+          signDesktopRequest,
+          request: {
+            method: "DELETE",
+            pathname: path,
+          },
+          surface: path,
+          unavailableMessage: "PoP signing unavailable for loop cancellation; continuing bearer-only compatibility mode",
+          onUnavailable: onDesktopPopUnavailable,
+        });
+        const cancelResponse = await fetch(`${apiOrigin}${path}`, {
           method: "DELETE",
           headers: {
             "Authorization": `Bearer ${apiKey}`,
+            ...(popHeaders ?? {}),
           },
         });
         if (!cancelResponse.ok && cancelResponse.status !== 404) {
@@ -388,7 +386,17 @@ export function registerSymphonyPlanLoopRoutes(
           worktreeDir = job.worktreeDir;
         }
       }
-      const pid = readProcessPidSync(worktreeDir);
+      // Resolve PID: file first, then in-memory tracker, then JobStore fallback
+      let pid = readProcessPidSync(worktreeDir);
+      if (pid === null) {
+        pid = getActiveLoopPid(loopId);
+      }
+      if (pid === null && jobStore) {
+        const job = jobStore.getByLoopId(loopId);
+        if (job?.pid != null && isProcessRunning(job.pid)) {
+          pid = job.pid;
+        }
+      }
 
       if (pid === null) {
         // No PID found -- process state is uncertain
@@ -412,7 +420,7 @@ export function registerSymphonyPlanLoopRoutes(
 
       // Attempt to kill the process
       try {
-        process.kill(pid, "SIGTERM");
+        process.kill(-pid, "SIGTERM");
 
         // Brief wait to allow graceful exit before liveness check
         await new Promise<void>((resolve) => setTimeout(resolve, 500));
@@ -423,7 +431,7 @@ export function registerSymphonyPlanLoopRoutes(
           process.kill(pid, 0);
           // Still alive after SIGTERM
           try {
-            process.kill(pid, "SIGKILL");
+            process.kill(-pid, "SIGKILL");
           } catch {
             // Already gone
           }

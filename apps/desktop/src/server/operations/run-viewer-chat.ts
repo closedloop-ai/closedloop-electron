@@ -3,10 +3,13 @@ import path from "node:path";
 import type { ServerResponse } from "node:http";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import type { ProcessManager } from "../process-manager.js";
+import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getOverrideBinaryPaths } from "./symphony-loop.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
-import { READONLY_CODEBASE_TOOLS, WEB_ONLY_TOOLS } from "./chat-tools.js";
+import { getReadonlyCodebaseTools, getWebOnlyTools } from "./chat-tools.js";
 import { createStreamState, processStreamEvent } from "./stream-events.js";
+import { json } from "./response-utils.js";
 
 type ChatMessage = {
   id: string;
@@ -26,18 +29,18 @@ export function registerRunViewerChatRoutes(
   getAllowedDirectories: () => string[],
   getSymphonyDir: () => string
 ): void {
-  dispatcher.register("GET", "/api/engineer/run-viewer-chat", async (context) => {
+  dispatcher.register("GET", "/api/gateway/run-viewer-chat", async (context) => {
     const dir = getSymphonyDir();
     const history = await loadChatHistory(dir);
     json(context, 200, history);
   });
 
-  dispatcher.register("DELETE", "/api/engineer/run-viewer-chat", async (context) => {
+  dispatcher.register("DELETE", "/api/gateway/run-viewer-chat", async (context) => {
     await saveChatHistory(getSymphonyDir(), { messages: [] });
     json(context, 200, { success: true });
   });
 
-  dispatcher.register("POST", "/api/engineer/run-viewer-chat", async (context) => {
+  dispatcher.register("POST", "/api/gateway/run-viewer-chat", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -45,6 +48,8 @@ export function registerRunViewerChatRoutes(
     }
 
     const message = typeof body.message === "string" ? body.message : null;
+    const expectedMcpUrl =
+      typeof body.expectedMcpUrl === "string" ? body.expectedMcpUrl : undefined;
     const runDir = typeof body.runDir === "string" ? body.runDir : undefined;
     if (!message) {
       json(context, 400, { error: "message is required" });
@@ -76,12 +81,16 @@ export function registerRunViewerChatRoutes(
     await saveChatHistory(dir, history);
 
     const isResuming = Boolean(history.claudeSessionId);
-    const allowedTools = validatedRunDir ? READONLY_CODEBASE_TOOLS : WEB_ONLY_TOOLS;
+    const allowedTools = validatedRunDir
+      ? await getReadonlyCodebaseTools(expectedMcpUrl)
+      : await getWebOnlyTools(expectedMcpUrl);
     const systemPrompt = buildRunViewerSystemPrompt(validatedRunDir);
     const prompt = isResuming ? message : `${systemPrompt}\n\n---\n\nUser: ${message}`;
 
     setStreamingHeaders(context.response);
     writeEvent(context.response, { type: "status", status: "spawning", mode: "claude" });
+
+    const shellEnv = await getShellEnv();
 
     await new Promise<void>((resolve) => {
       const streamState = createStreamState(async (sessionId) => {
@@ -115,7 +124,7 @@ export function registerRunViewerChatRoutes(
 
       void processManager
         .spawnStreaming({
-          command: "claude",
+          command: resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path,
           args: [
             "-p",
             "--verbose",
@@ -127,6 +136,7 @@ export function registerRunViewerChatRoutes(
               : [])
           ],
           cwd: validatedRunDir ?? os.homedir(),
+          env: shellEnv,
           input: prompt,
           onLine: (line) => {
             try {
@@ -142,6 +152,10 @@ export function registerRunViewerChatRoutes(
             writeEvent(context.response, { type: "error", error: error.message });
           },
           onExit: (exitCode) => {
+            if (exitCode !== 0 && streamState.authChallengeDetected && history.claudeSessionId) {
+              history.claudeSessionId = undefined;
+              void saveChatHistory(dir, history);
+            }
             writeEvent(context.response, {
               type: "result",
               success: exitCode === 0
@@ -215,10 +229,3 @@ function setStreamingHeaders(response: ServerResponse): void {
 function writeEvent(response: ServerResponse, payload: Record<string, unknown>): void {
   response.write(`${JSON.stringify(payload)}\n`);
 }
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-

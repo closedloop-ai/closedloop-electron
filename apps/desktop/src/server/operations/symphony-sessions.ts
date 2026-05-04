@@ -4,6 +4,7 @@ import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { VALID_PROVIDERS, chatHistoryFilename, expandHome } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 type ActiveSession = {
   ticketId: string;
@@ -95,7 +96,7 @@ export function registerSymphonySessionRoutes(
   getSymphonyDir: () => string
 ): void {
 
-  dispatcher.register("GET", "/api/engineer/symphony/sessions/unread-count", async (context) => {
+  dispatcher.register("GET", "/api/gateway/symphony/sessions/unread-count", async (context) => {
     const dir = getSymphonyDir();
     const config = await loadSessions(dir);
 
@@ -105,7 +106,7 @@ export function registerSymphonySessionRoutes(
       if (!existsSync(worktreePath)) {
         continue;
       }
-      const workDir = path.join(worktreePath, ".claude", "work");
+      const workDir = path.join(worktreePath, ".closedloop-ai", "work");
       const candidates = [chatHistoryFilename(), ...[...VALID_PROVIDERS].map((p) => chatHistoryFilename(p))];
       const chatPath = candidates.map((f) => path.join(workDir, f)).find((p) => existsSync(p));
       if (!chatPath) {
@@ -125,7 +126,7 @@ export function registerSymphonySessionRoutes(
     json(context, 200, { count });
   });
 
-  dispatcher.register("GET", "/api/engineer/symphony/sessions", async (context) => {
+  dispatcher.register("GET", "/api/gateway/symphony/sessions", async (context) => {
     const dir = getSymphonyDir();
     const config = await loadSessions(dir);
 
@@ -141,7 +142,7 @@ export function registerSymphonySessionRoutes(
     json(context, 200, { sessions: validSessions });
   });
 
-  dispatcher.register("POST", "/api/engineer/symphony/sessions", async (context) => {
+  dispatcher.register("POST", "/api/gateway/symphony/sessions", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -180,7 +181,7 @@ export function registerSymphonySessionRoutes(
     json(context, 200, { success: true });
   });
 
-  dispatcher.register("DELETE", "/api/engineer/symphony/sessions", async (context) => {
+  dispatcher.register("DELETE", "/api/gateway/symphony/sessions", async (context) => {
     const ticketId = context.query.get("ticketId");
     if (!ticketId) {
       json(context, 400, { error: "ticketId parameter is required" });
@@ -252,13 +253,6 @@ function parseBody(context: OperationRequestContext): Record<string, unknown> | 
     return null;
   }
 }
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-
 function getSessionsFile(symphonyDir: string): string {
   return path.join(symphonyDir, "sessions.json");
 }

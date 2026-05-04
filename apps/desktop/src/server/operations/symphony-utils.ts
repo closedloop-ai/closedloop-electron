@@ -1,8 +1,9 @@
-import { execFileSync, execSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import {
   closeSync,
   constants,
   copyFileSync,
+  cpSync,
   existsSync,
   mkdirSync,
   openSync,
@@ -17,14 +18,39 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { expandHomePath } from "../../shared/path-utils.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
+import { getShellEnv } from "../shell-path.js";
+import { getResolvedClaudePath, getResolvedGitPath } from "./symphony-loop.js";
+import { isPluginInstalled } from "./plugin-cache.js";
+
+const execFileAsync = promisify(execFile);
 
 /** Timeout for local-only git commands (rev-parse, checkout, diff, worktree list/prune). */
 const LOCAL_GIT_TIMEOUT = 10_000;
 
 /** Timeout for network-touching git commands (fetch, pull, rebase) and worktree add. */
 const NETWORK_GIT_TIMEOUT = 30_000;
+
+/** Timeout for git clone operations (may download large repositories). */
+export const CLONE_GIT_TIMEOUT = 300_000;
+
+// ---------------------------------------------------------------------------
+// Logging helpers (shared with symphony-loop.ts)
+// ---------------------------------------------------------------------------
+
+export function loopLog(loopId: string, ...args: unknown[]): void {
+  const short = loopId.slice(0, 8);
+  const ts = new Date().toISOString().slice(11, 23);
+  console.log(`[symphony-loop][${ts}][${short}]`, ...args);
+}
+
+export function loopError(loopId: string, ...args: unknown[]): void {
+  const short = loopId.slice(0, 8);
+  const ts = new Date().toISOString().slice(11, 23);
+  console.error(`[symphony-loop][${ts}][${short}]`, ...args);
+}
 
 export class SymphonyDirNotConfiguredError extends Error {
   constructor() {
@@ -56,19 +82,19 @@ export function sanitizeTicketId(ticketId: string): string {
 
 export function resolveWorktreeDir(
   expandedRepoPath: string,
-  ticketId: string
+  ticketId: string,
 ): string {
   const sanitizedTicket = sanitizeTicketId(ticketId);
   const repoName = path.basename(expandedRepoPath);
   return path.join(
     resolveWorktreeParentDir(expandedRepoPath),
-    `${repoName}-${sanitizedTicket}`
+    `${repoName}-${sanitizedTicket}`,
   );
 }
 
 export function assertRepoAllowed(
   repoPath: string,
-  allowedDirectories: string[]
+  allowedDirectories: string[],
 ): string {
   const expandedRepoPath = expandHome(repoPath);
   try {
@@ -124,10 +150,43 @@ function copyEnvLocalFiles(repoPath: string, worktreePath: string): void {
   }
 }
 
-/** Fetch latest refs from origin. No-op if offline. */
-function fetchOrigin(repoPath: string): void {
+/**
+ * Run the customer's `.closedloop-ai/loops-setup.sh` bootstrap script if it
+ * exists in the worktree.  Non-fatal: failures are logged but never block the
+ * loop from proceeding.
+ *
+ * Async to avoid blocking the Node event loop during long-running setup scripts
+ * (e.g. dependency installs).  Uses getShellEnv() so that the script inherits
+ * the user's full PATH (Electron strips it on launch).
+ */
+export async function runLoopsSetupScript(
+  worktreeDir: string,
+  loopId: string,
+): Promise<void> {
+  const scriptPath = path.join(worktreeDir, ".closedloop-ai", "loops-setup.sh");
+  if (!existsSync(scriptPath)) return;
+
+  loopLog(loopId, `Running loops-setup.sh in ${worktreeDir}`);
   try {
-    execSync("git fetch origin", {
+    const env = await getShellEnv();
+    await execFileAsync("bash", [scriptPath], {
+      cwd: worktreeDir,
+      timeout: 600_000, // 10 minutes — enough for dependency installs
+      env,
+    });
+    loopLog(loopId, "loops-setup.sh completed successfully");
+  } catch (err) {
+    loopError(
+      loopId,
+      `loops-setup.sh failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/** Fetch latest refs from origin. No-op if offline. */
+export function fetchOrigin(repoPath: string): void {
+  try {
+    execFileSync(getResolvedGitPath(), ["fetch", "origin"], {
       cwd: repoPath,
       stdio: "pipe",
       timeout: NETWORK_GIT_TIMEOUT,
@@ -137,44 +196,77 @@ function fetchOrigin(repoPath: string): void {
   }
 }
 
+type SavedWorktreeState = {
+  savedClaudeAgentsDir: string | null;
+  savedClosedloopDir: string | null;
+};
+
 /**
- * Save .claude/ from a non-git directory to a temp location.
- * Returns the temp path, or null if there was nothing to save.
+ * Save accepted worktree state to temp locations.
+ * - Preserve .claude/agents/ (project agents still live there)
+ * - Preserve .closedloop-ai/
  */
-function saveClaudeState(worktreeDir: string): string | null {
-  const claudeDir = path.join(worktreeDir, ".claude");
-  if (!existsSync(claudeDir)) {
-    return null;
+export function saveWorktreeState(worktreeDir: string): SavedWorktreeState {
+  const claudeAgentsDir = path.join(worktreeDir, ".claude", "agents");
+  const closedloopDir = path.join(worktreeDir, ".closedloop-ai");
+  const ts = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+  let savedClaudeAgentsDir: string | null = null;
+  if (existsSync(claudeAgentsDir)) {
+    savedClaudeAgentsDir = path.join(
+      os.tmpdir(),
+      `worktree-claude-agents-${ts}`,
+    );
+    renameSync(claudeAgentsDir, savedClaudeAgentsDir);
   }
-  const saved = path.join(os.tmpdir(), `worktree-claude-${Date.now()}`);
-  renameSync(claudeDir, saved);
-  return saved;
+
+  let savedClosedloopDir: string | null = null;
+  if (existsSync(closedloopDir)) {
+    savedClosedloopDir = path.join(os.tmpdir(), `worktree-closedloop-${ts}`);
+    renameSync(closedloopDir, savedClosedloopDir);
+  }
+
+  return { savedClaudeAgentsDir, savedClosedloopDir };
 }
 
 /**
- * Restore previously saved .claude/ state files into worktreeDir.
- * Merges work files if .claude/ already exists (created by git worktree add).
+ * Restore previously saved .claude/agents/ and .closedloop-ai/ state into worktreeDir.
  */
-function restoreClaudeState(savedDir: string, worktreeDir: string): void {
-  const destClaude = path.join(worktreeDir, ".claude");
-  if (!existsSync(destClaude)) {
-    renameSync(savedDir, destClaude);
-    return;
-  }
-  // Merge: copy saved work files into the new worktree's .claude/work
-  const savedWork = path.join(savedDir, "work");
-  if (existsSync(savedWork)) {
-    const destWork = path.join(destClaude, "work");
-    mkdirSync(destWork, { recursive: true });
-    for (const file of readdirSync(savedWork)) {
-      try {
-        copyFileSync(path.join(savedWork, file), path.join(destWork, file));
-      } catch {
-        // Best effort
+export function restoreWorktreeState(
+  saved: SavedWorktreeState,
+  worktreeDir: string,
+): void {
+  const { savedClaudeAgentsDir, savedClosedloopDir } = saved;
+
+  if (savedClaudeAgentsDir) {
+    const destClaudeAgents = path.join(worktreeDir, ".claude", "agents");
+    try {
+      mkdirSync(destClaudeAgents, { recursive: true });
+      for (const child of readdirSync(savedClaudeAgentsDir)) {
+        const destChild = path.join(destClaudeAgents, child);
+        if (!existsSync(destChild)) {
+          cpSync(path.join(savedClaudeAgentsDir, child), destChild, {
+            recursive: true,
+            force: false,
+          });
+        }
       }
+      rmSync(savedClaudeAgentsDir, { recursive: true, force: true });
+    } catch {
+      // Best effort -- backup preserved if restore failed
     }
   }
-  rmSync(savedDir, { recursive: true, force: true });
+
+  if (savedClosedloopDir) {
+    const destClosedloop = path.join(worktreeDir, ".closedloop-ai");
+    try {
+      mkdirSync(destClosedloop, { recursive: true });
+      cpSync(savedClosedloopDir, destClosedloop, { recursive: true });
+      rmSync(savedClosedloopDir, { recursive: true, force: true });
+    } catch {
+      // Best effort -- backup preserved if restore failed
+    }
+  }
 }
 
 /**
@@ -184,16 +276,16 @@ function restoreClaudeState(savedDir: string, worktreeDir: string): void {
 function addWorktree(repoPath: string, worktreeDir: string, ref: string): void {
   // If the directory exists but isn't a git worktree (e.g. state files were
   // written there by a "use base repo" review), remove it so git worktree add
-  // can create it cleanly. Preserve .claude/ (review state files).
-  let savedClaudeDir: string | null = null;
+  // can create it cleanly. Preserve .claude/agents/ and .closedloop-ai/.
+  let savedState: ReturnType<typeof saveWorktreeState> | null = null;
   if (existsSync(worktreeDir) && !existsSync(path.join(worktreeDir, ".git"))) {
-    savedClaudeDir = saveClaudeState(worktreeDir);
+    savedState = saveWorktreeState(worktreeDir);
     rmSync(worktreeDir, { recursive: true, force: true });
   }
 
   // Prune stale worktree entries (directory was removed but git still tracks it)
   try {
-    execSync("git worktree prune", {
+    execFileSync(getResolvedGitPath(), ["worktree", "prune"], {
       cwd: repoPath,
       stdio: "pipe",
       timeout: LOCAL_GIT_TIMEOUT,
@@ -202,14 +294,23 @@ function addWorktree(repoPath: string, worktreeDir: string, ref: string): void {
     // Best effort
   }
 
-  execFileSync("git", ["worktree", "add", worktreeDir, ref], {
-    cwd: repoPath,
-    stdio: "pipe",
-    timeout: NETWORK_GIT_TIMEOUT,
-  });
+  try {
+    execFileSync(getResolvedGitPath(), ["worktree", "add", worktreeDir, ref], {
+      cwd: repoPath,
+      stdio: "pipe",
+      timeout: NETWORK_GIT_TIMEOUT,
+    });
+  } catch (err) {
+    // Restore saved state before propagating -- prevents stranding in /tmp
+    if (savedState) {
+      mkdirSync(worktreeDir, { recursive: true });
+      restoreWorktreeState(savedState, worktreeDir);
+    }
+    throw err;
+  }
 
-  if (savedClaudeDir) {
-    restoreClaudeState(savedClaudeDir, worktreeDir);
+  if (savedState) {
+    restoreWorktreeState(savedState, worktreeDir);
   }
 
   copyEnvLocalFiles(repoPath, worktreeDir);
@@ -218,7 +319,7 @@ function addWorktree(repoPath: string, worktreeDir: string, ref: string): void {
 /** Check out a branch in an existing worktree, trying multiple fallback strategies. */
 function checkoutBranch(worktreeDir: string, branchName: string): void {
   try {
-    execFileSync("git", ["checkout", branchName], {
+    execFileSync(getResolvedGitPath(), ["checkout", branchName], {
       cwd: worktreeDir,
       stdio: "pipe",
       timeout: LOCAL_GIT_TIMEOUT,
@@ -229,20 +330,20 @@ function checkoutBranch(worktreeDir: string, branchName: string): void {
   }
   try {
     execFileSync(
-      "git",
+      getResolvedGitPath(),
       ["checkout", "-B", branchName, `origin/${branchName}`],
       {
         cwd: worktreeDir,
         stdio: "pipe",
         timeout: LOCAL_GIT_TIMEOUT,
-      }
+      },
     );
     return;
   } catch {
     // Branch may be checked out in another worktree
   }
   try {
-    execFileSync("git", ["checkout", "--detach", `origin/${branchName}`], {
+    execFileSync(getResolvedGitPath(), ["checkout", "--detach", `origin/${branchName}`], {
       cwd: worktreeDir,
       stdio: "pipe",
       timeout: LOCAL_GIT_TIMEOUT,
@@ -255,7 +356,7 @@ function checkoutBranch(worktreeDir: string, branchName: string): void {
 /** Fast-forward or rebase an existing worktree to the latest remote branch. */
 function fastForwardBranch(worktreeDir: string, branchName: string): void {
   try {
-    execFileSync("git", ["pull", "--ff-only", "origin", branchName], {
+    execFileSync(getResolvedGitPath(), ["pull", "--ff-only", "origin", branchName], {
       cwd: worktreeDir,
       stdio: "pipe",
       timeout: NETWORK_GIT_TIMEOUT,
@@ -265,17 +366,17 @@ function fastForwardBranch(worktreeDir: string, branchName: string): void {
     // ff-only failed (diverged) — try rebase if working tree is clean
   }
   try {
-    execFileSync("git", ["diff", "--quiet"], {
+    execFileSync(getResolvedGitPath(), ["diff", "--quiet"], {
       cwd: worktreeDir,
       stdio: "pipe",
       timeout: LOCAL_GIT_TIMEOUT,
     });
-    execFileSync("git", ["diff", "--cached", "--quiet"], {
+    execFileSync(getResolvedGitPath(), ["diff", "--cached", "--quiet"], {
       cwd: worktreeDir,
       stdio: "pipe",
       timeout: LOCAL_GIT_TIMEOUT,
     });
-    execFileSync("git", ["rebase", `origin/${branchName}`], {
+    execFileSync(getResolvedGitPath(), ["rebase", `origin/${branchName}`], {
       cwd: worktreeDir,
       stdio: "pipe",
       timeout: NETWORK_GIT_TIMEOUT,
@@ -289,10 +390,10 @@ function fastForwardBranch(worktreeDir: string, branchName: string): void {
  * Resolve a branch name to a valid git ref, trying remote then local.
  * Returns the resolved ref string, or null if neither exists.
  */
-function resolveRef(repoPath: string, branchName: string): string | null {
+export function resolveRef(repoPath: string, branchName: string): string | null {
   for (const candidate of [`origin/${branchName}`, branchName]) {
     try {
-      execFileSync("git", ["rev-parse", "--verify", candidate], {
+      execFileSync(getResolvedGitPath(), ["rev-parse", "--verify", candidate], {
         cwd: repoPath,
         stdio: "pipe",
         timeout: LOCAL_GIT_TIMEOUT,
@@ -316,7 +417,7 @@ function ensureWorktree(
   repoPath: string,
   worktreeDir: string,
   branchName?: string,
-  baseBranch?: string
+  baseBranch?: string,
 ): void {
   fetchOrigin(repoPath);
 
@@ -331,7 +432,7 @@ function ensureWorktree(
       const fallbackRef = resolveRef(repoPath, baseBranch ?? "main");
       if (!fallbackRef) {
         throw new Error(
-          `Branch '${branchName}' not found (may have been deleted after merge) and base branch '${baseBranch ?? "main"}' also not found`
+          `Branch '${branchName}' not found (may have been deleted after merge) and base branch '${baseBranch ?? "main"}' also not found`,
         );
       }
       addWorktree(repoPath, worktreeDir, fallbackRef);
@@ -356,7 +457,7 @@ export function ensureWorktreeForReview(
   worktreeDir: string,
   branchName: string | undefined,
   useBaseRepo: boolean,
-  baseBranch?: string
+  baseBranch?: string,
 ): { status: number; message: string } | null {
   if (useBaseRepo) {
     return null;
@@ -386,7 +487,7 @@ export function ensureWorktreeForReview(
 
 export function tryAssertRepoAllowed(
   repoPath: string,
-  allowedDirs: string[]
+  allowedDirs: string[],
 ): { path: string } | { error: string; status: 403 } {
   try {
     return { path: assertRepoAllowed(repoPath, allowedDirs) };
@@ -400,7 +501,7 @@ export function tryAssertRepoAllowed(
 
 export function tryAssertPathAllowed(
   dirPath: string,
-  allowedDirs: string[]
+  allowedDirs: string[],
 ): true | { error: string; status: 403 } {
   try {
     assertPathAllowed(dirPath, allowedDirs);
@@ -411,15 +512,6 @@ export function tryAssertPathAllowed(
     }
     throw error;
   }
-}
-
-export function findFirstExisting(...paths: string[]): string | null {
-  for (const p of paths) {
-    if (existsSync(p)) {
-      return p;
-    }
-  }
-  return null;
 }
 
 export const VALID_PROVIDERS = new Set(["claude", "codex"]);
@@ -433,15 +525,16 @@ export function chatHistoryFilename(provider?: string | null): string {
 // --- Launch idempotency utilities ---
 
 /**
- * Read the PID from process.pid file if it exists.
+ * Read the PID from .closedloop-ai/work/process.pid if it exists.
  * Returns null if file doesn't exist or is invalid.
  */
 export function readProcessPidSync(worktreeDir: string): number | null {
-  const pidPath = path.join(worktreeDir, ".claude", "work", "process.pid");
-
-  if (!existsSync(pidPath)) {
-    return null;
-  }
+  const pidPath = path.join(
+    worktreeDir,
+    ".closedloop-ai",
+    "work",
+    "process.pid",
+  );
 
   try {
     const pidContent = readFileSync(pidPath, "utf-8");
@@ -474,32 +567,26 @@ export type LaunchMetadata = {
 };
 
 /**
- * Read launch metadata from {worktreeDir}/.claude/work/launch-metadata.json.
+ * Read launch metadata from {worktreeDir}/.closedloop-ai/work/launch-metadata.json.
  */
 export function readLaunchMetadata(worktreeDir: string): LaunchMetadata | null {
   const metaPath = path.join(
     worktreeDir,
-    ".claude",
+    ".closedloop-ai",
     "work",
-    "launch-metadata.json"
+    "launch-metadata.json",
   );
-
-  if (!existsSync(metaPath)) {
-    return null;
-  }
 
   try {
     const content = readFileSync(metaPath, "utf-8");
     const parsed = JSON.parse(content) as Record<string, unknown>;
     return {
-      issueId:
-        typeof parsed.issueId === "string" ? parsed.issueId : undefined,
+      issueId: typeof parsed.issueId === "string" ? parsed.issueId : undefined,
       ticketTitle:
         typeof parsed.ticketTitle === "string" ? parsed.ticketTitle : undefined,
       artifactId:
         typeof parsed.artifactId === "string" ? parsed.artifactId : undefined,
-      loopId:
-        typeof parsed.loopId === "string" ? parsed.loopId : undefined,
+      loopId: typeof parsed.loopId === "string" ? parsed.loopId : undefined,
       baseBranch:
         typeof parsed.baseBranch === "string" ? parsed.baseBranch : undefined,
       parentTicketId:
@@ -517,9 +604,9 @@ export function readLaunchMetadata(worktreeDir: string): LaunchMetadata | null {
  */
 export function writeLaunchMetadata(
   worktreeDir: string,
-  meta: LaunchMetadata
+  meta: LaunchMetadata,
 ): void {
-  const claudeWorkDir = path.join(worktreeDir, ".claude", "work");
+  const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
   mkdirSync(claudeWorkDir, { recursive: true });
 
   const metaPath = path.join(claudeWorkDir, "launch-metadata.json");
@@ -554,8 +641,8 @@ export function acquireLaunchLock(lockDir: string): { fd: number } | null {
       writeSync(
         fd,
         Buffer.from(
-          JSON.stringify({ pid: process.pid, timestamp: Date.now() })
-        )
+          JSON.stringify({ pid: process.pid, timestamp: Date.now() }),
+        ),
       );
     } catch (writeErr) {
       try {
@@ -647,12 +734,61 @@ function isLockFileOld(lockPath: string): boolean {
 export function getLockDir(
   worktreeParentDir: string,
   repoName: string,
-  sanitizedTicket: string
+  sanitizedTicket: string,
 ): string {
   return path.join(
     worktreeParentDir,
     ".closedloop-ai",
     "locks",
-    `${repoName}-${sanitizedTicket}`
+    `${repoName}-${sanitizedTicket}`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Auto-bootstrap gate (FEA-652 Part B)
+// ---------------------------------------------------------------------------
+
+export function hasBootstrapArtifacts(dir: string): boolean {
+  const metadataPath = path.join(dir, ".closedloop-ai", "bootstrap-metadata.json");
+  if (existsSync(metadataPath)) return true;
+
+  const agentsDir = path.join(dir, ".claude", "agents");
+  try {
+    const files = readdirSync(agentsDir);
+    return files.some((f) => f.endsWith(".md"));
+  } catch {
+    return false;
+  }
+}
+
+export async function runBootstrapIfNeeded(
+  worktreeDir: string,
+  loopId: string,
+): Promise<void> {
+  if (hasBootstrapArtifacts(worktreeDir)) {
+    loopLog(loopId, "Bootstrap skipped — artifacts already present");
+    return;
+  }
+
+  if (!isPluginInstalled("bootstrap")) {
+    loopLog(loopId, "Bootstrap skipped — plugin not installed");
+    return;
+  }
+
+  try {
+    loopLog(loopId, "Running bootstrap (no artifacts detected)...");
+    const claudePath = getResolvedClaudePath();
+    const env = await getShellEnv();
+    await execFileAsync(claudePath, ["-p", "/agent-bootstrap"], {
+      cwd: worktreeDir,
+      env,
+      timeout: 15 * 60 * 1000,
+    });
+    loopLog(loopId, "Bootstrap completed");
+  } catch (err) {
+    loopError(
+      loopId,
+      `Bootstrap failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }

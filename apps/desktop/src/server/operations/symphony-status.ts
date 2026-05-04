@@ -1,10 +1,11 @@
 import { existsSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import type { JobStore } from "../../main/job-store.js";
-import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import { isTerminalJobStatus, type JobStore, type LocalJobStatus } from "../../main/job-store.js";
+import type { OperationDispatcher } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
-import { expandHome, findFirstExisting, resolveWorktreeDir, sanitizeTicketId } from "./symphony-utils.js";
+import { expandHome, readProcessPidSync, resolveWorktreeDir } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 type TaskProgress = {
   pending: number;
@@ -32,7 +33,7 @@ export function registerSymphonyStatusRoutes(
   getAllowedDirectories: () => string[],
   jobStore?: JobStore
 ): void {
-  dispatcher.register("GET", "/api/engineer/symphony/status/:ticketId", async (context) => {
+  dispatcher.register("GET", "/api/gateway/symphony/status/:ticketId", async (context) => {
     try {
       const ticketId = context.params.ticketId;
       const repoPath = context.query.get("repo");
@@ -81,11 +82,7 @@ export function registerSymphonyStatusRoutes(
           }
         }
       }
-      const safeTicketId = sanitizeTicketId(ticketId);
-      const statePath = findFirstExisting(
-        path.join(worktreeDir, safeTicketId, "state.json"),
-        path.join(worktreeDir, ".claude", "work", "state.json")
-      );
+      const statePath = path.join(worktreeDir, ".closedloop-ai", "work", "state.json");
 
       if (!existsSync(worktreeDir)) {
         json(context, 200, {
@@ -97,7 +94,7 @@ export function registerSymphonyStatusRoutes(
         return;
       }
 
-      if (!statePath) {
+      if (!existsSync(statePath)) {
         json(context, 200, {
           exists: true,
           stateExists: false,
@@ -112,12 +109,9 @@ export function registerSymphonyStatusRoutes(
       const state = JSON.parse(stateContent) as Record<string, unknown>;
 
       const effective = await resolveEffectiveState(worktreeDir, state, statePath);
-      const resolvedPlanPath = findFirstExisting(
-        path.join(worktreeDir, safeTicketId, "plan.json"),
-        path.join(worktreeDir, ".claude", "work", "plan.json")
-      );
-      const planExists = resolvedPlanPath !== null;
-      const { taskProgress, currentTaskId } = await readPlanProgress(resolvedPlanPath ?? "");
+      const resolvedPlanPath = path.join(worktreeDir, ".closedloop-ai", "work", "plan.json");
+      const planExists = existsSync(resolvedPlanPath);
+      const { taskProgress, currentTaskId } = await readPlanProgress(resolvedPlanPath);
       const activeAgents = await readActiveAgents(worktreeDir);
 
       json(context, 200, {
@@ -152,25 +146,10 @@ function isProcessRunning(pid: number): boolean {
   }
 }
 
-async function readProcessPid(worktreeDir: string): Promise<number | null> {
-  const pidPath = path.join(worktreeDir, ".claude", "work", "process.pid");
-  if (!existsSync(pidPath)) {
-    return null;
-  }
-
-  try {
-    const pidContent = await readFile(pidPath, "utf-8");
-    const pid = Number.parseInt(pidContent.trim(), 10);
-    return Number.isNaN(pid) ? null : pid;
-  } catch {
-    return null;
-  }
-}
-
 async function detectCompletionFromLogs(
   worktreeDir: string
 ): Promise<{ completed: boolean; awaitingUser: boolean }> {
-  const logPath = path.join(worktreeDir, ".claude", "work", "symphony-launch.log");
+  const logPath = path.join(worktreeDir, ".closedloop-ai", "work", "symphony-launch.log");
   if (!existsSync(logPath)) {
     return { completed: false, awaitingUser: false };
   }
@@ -197,14 +176,20 @@ async function resolveEffectiveState(
   state: Record<string, unknown>,
   statePath: string
 ): Promise<EffectiveState> {
-  const status = typeof state.status === "string" ? state.status : "UNKNOWN";
-  const phase = typeof state.phase === "string" ? state.phase : "Unknown";
-  const pid = await readProcessPid(worktreeDir);
+  let effectiveStatus = typeof state.status === "string" ? state.status : "UNKNOWN";
+  let effectivePhase = typeof state.phase === "string" ? state.phase : "Unknown";
+  const pid = readProcessPidSync(worktreeDir);
   const processRunning = pid !== null && isProcessRunning(pid);
   const base = { processRunning, pid };
 
-  if (status !== "IN_PROGRESS") {
-    return { status, phase, fallbackDetected: false, ...base };
+  // Normalize: if process is alive but state.json says terminal, treat as IN_PROGRESS
+  if (processRunning && isTerminalJobStatus(effectiveStatus as LocalJobStatus)) {
+    effectiveStatus = "IN_PROGRESS";
+    effectivePhase = "Running";
+  }
+
+  if (effectiveStatus !== "IN_PROGRESS") {
+    return { status: effectiveStatus, phase: effectivePhase, fallbackDetected: false, ...base };
   }
 
   if (pid !== null && !processRunning) {
@@ -216,20 +201,20 @@ async function resolveEffectiveState(
     };
   }
 
-  const lockPath = path.join(worktreeDir, ".claude", "work", ".learnings", ".lock");
+  const lockPath = path.join(worktreeDir, ".closedloop-ai", "work", ".learnings", ".lock");
   if (existsSync(lockPath)) {
-    return { status, phase, fallbackDetected: false, ...base };
+    return { status: effectiveStatus, phase: effectivePhase, fallbackDetected: false, ...base };
   }
 
   const stateStats = await stat(statePath);
   const stateAgeMs = Date.now() - stateStats.mtime.getTime();
   if (stateAgeMs <= 2 * 60 * 1000) {
-    return { status, phase, fallbackDetected: false, ...base };
+    return { status: effectiveStatus, phase: effectivePhase, fallbackDetected: false, ...base };
   }
 
   const fallback = await detectCompletionFromLogs(worktreeDir);
   if (!fallback.completed) {
-    return { status, phase, fallbackDetected: false, ...base };
+    return { status: effectiveStatus, phase: effectivePhase, fallbackDetected: false, ...base };
   }
 
   const resolvedStatus = fallback.awaitingUser ? "AWAITING_USER" : "COMPLETED";
@@ -273,15 +258,14 @@ async function readPlanProgress(
 }
 
 async function readActiveAgents(worktreeDir: string): Promise<ActiveAgent[]> {
-  const agentTypesDir = path.join(worktreeDir, ".claude", "work", ".agent-types");
+  const agentTypesDir = path.join(worktreeDir, ".closedloop-ai", "work", ".agent-types");
   if (!existsSync(agentTypesDir)) {
     return [];
   }
 
+  const agents: ActiveAgent[] = [];
   try {
     const files = await readdir(agentTypesDir);
-    const agents: ActiveAgent[] = [];
-
     for (const file of files) {
       if (file.includes("-")) {
         continue;
@@ -302,15 +286,9 @@ async function readActiveAgents(worktreeDir: string): Promise<ActiveAgent[]> {
         continue;
       }
     }
-
-    return agents;
   } catch {
-    return [];
+    // Best effort
   }
-}
 
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
+  return agents;
 }

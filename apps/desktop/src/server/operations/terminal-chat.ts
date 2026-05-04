@@ -3,9 +3,12 @@ import fs from "node:fs/promises";
 import type { ServerResponse } from "node:http";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import type { ProcessManager } from "../process-manager.js";
+import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getOverrideBinaryPaths } from "./symphony-loop.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { createStreamState, processStreamEvent } from "./stream-events.js";
 import { withMcpTools } from "./chat-tools.js";
+import { json } from "./response-utils.js";
 
 type MessageMode = "claude" | "codex";
 
@@ -29,17 +32,17 @@ export function registerTerminalChatRoutes(
   getAllowedDirectories: () => string[],
   getSymphonyDir: () => string
 ): void {
-  dispatcher.register("GET", "/api/engineer/terminal-chat", async (context) => {
+  dispatcher.register("GET", "/api/gateway/terminal-chat", async (context) => {
     const history = await loadChatHistory(getSymphonyDir());
     json(context, 200, history);
   });
 
-  dispatcher.register("DELETE", "/api/engineer/terminal-chat", async (context) => {
+  dispatcher.register("DELETE", "/api/gateway/terminal-chat", async (context) => {
     await saveChatHistory(getSymphonyDir(), { messages: [] });
     json(context, 200, { success: true });
   });
 
-  dispatcher.register("POST", "/api/engineer/terminal-chat", async (context) => {
+  dispatcher.register("POST", "/api/gateway/terminal-chat", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -53,6 +56,8 @@ export function registerTerminalChatRoutes(
     }
 
     const { mode, cleanMessage } = parseMessageMode(message);
+    const expectedMcpUrl =
+      typeof body.expectedMcpUrl === "string" ? body.expectedMcpUrl : undefined;
     const dir = getSymphonyDir();
     const history = await loadChatHistory(dir);
     history.messages.push({
@@ -81,7 +86,15 @@ export function registerTerminalChatRoutes(
     });
 
     if (mode === "claude") {
-      await streamClaude(context.response, processManager, cleanMessage, history, terminalCwd, dir);
+      await streamClaude(
+        context.response,
+        processManager,
+        cleanMessage,
+        history,
+        terminalCwd,
+        dir,
+        expectedMcpUrl
+      );
       return;
     }
 
@@ -95,7 +108,8 @@ async function streamClaude(
   message: string,
   history: TerminalChatHistory,
   terminalCwd: string,
-  symphonyDir: string
+  symphonyDir: string,
+  expectedMcpUrl?: string
 ): Promise<void> {
   const streamState = createStreamState(async (sessionId) => {
     if (!history.claudeSessionId) {
@@ -103,6 +117,12 @@ async function streamClaude(
       await saveChatHistory(symphonyDir, history);
     }
   });
+
+  const shellEnv = await getShellEnv();
+  const allowedTools = await withMcpTools(
+    "WebSearch,WebFetch,Bash",
+    expectedMcpUrl
+  );
 
   await new Promise<void>((resolve) => {
     let handled = false;
@@ -131,16 +151,17 @@ async function streamClaude(
 
     void processManager
       .spawnStreaming({
-        command: "claude",
+        command: resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path,
         args: [
           "-p",
           "--verbose",
           "--output-format",
           "stream-json",
-          `--allowedTools=${withMcpTools("WebSearch,WebFetch,Bash")}`,
+          `--allowedTools=${allowedTools}`,
           ...(history.claudeSessionId ? ["--resume", history.claudeSessionId] : [])
         ],
         cwd: terminalCwd,
+        env: shellEnv,
         input: message,
         onLine: (line) => {
           try {
@@ -154,6 +175,10 @@ async function streamClaude(
           writeEvent(response, { type: "error", error: error.message });
         },
         onExit: (exitCode) => {
+          if (exitCode !== 0 && streamState.authChallengeDetected && history.claudeSessionId) {
+            history.claudeSessionId = undefined;
+            void saveChatHistory(symphonyDir, history);
+          }
           writeEvent(response, {
             type: "result",
             success: exitCode === 0
@@ -185,6 +210,7 @@ async function streamCodex(
   symphonyDir: string
 ): Promise<void> {
   let assistantContent = "";
+  const codexShellEnv = await getShellEnv();
 
   await new Promise<void>((resolve) => {
     let handled = false;
@@ -213,9 +239,10 @@ async function streamCodex(
 
     void processManager
       .spawnStreaming({
-        command: "codex",
+        command: resolveBinarySync("codex", getOverrideBinaryPaths()?.codex).path,
         args: ["exec", "--full-auto", "--json", "-m", "codex-mini-latest", message],
         cwd: terminalCwd,
+        env: codexShellEnv,
         isResultEvent: (line) => {
           try {
             const parsed = JSON.parse(line) as { type?: string };
@@ -329,13 +356,6 @@ function setStreamingHeaders(response: ServerResponse): void {
 function writeEvent(response: ServerResponse, payload: Record<string, unknown>): void {
   response.write(`${JSON.stringify(payload)}\n`);
 }
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-
 function getChatsRootDir(symphonyDir: string): string {
   return path.join(symphonyDir, "chats");
 }

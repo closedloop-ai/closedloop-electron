@@ -3,11 +3,14 @@ import os from "node:os";
 import type { ServerResponse } from "node:http";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import type { ProcessManager } from "../process-manager.js";
+import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getOverrideBinaryPaths } from "./symphony-loop.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
-import { READONLY_CODEBASE_TOOLS, WEB_ONLY_TOOLS } from "./chat-tools.js";
+import { getReadonlyCodebaseTools, getWebOnlyTools } from "./chat-tools.js";
 import { createStreamState, processStreamEvent } from "./stream-events.js";
 import { expandHome } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 type ChatMessage = {
   id: string;
@@ -35,7 +38,7 @@ export function registerTicketChatRoutes(
   getAllowedDirectories: () => string[],
   getSymphonyDir: () => string
 ): void {
-  dispatcher.register("GET", "/api/engineer/ticket-chat", async (context) => {
+  dispatcher.register("GET", "/api/gateway/ticket-chat", async (context) => {
     const ticketId = context.query.get("ticketId");
     if (!ticketId) {
       json(context, 400, { error: "ticketId parameter is required" });
@@ -46,7 +49,7 @@ export function registerTicketChatRoutes(
     json(context, 200, history);
   });
 
-  dispatcher.register("DELETE", "/api/engineer/ticket-chat", async (context) => {
+  dispatcher.register("DELETE", "/api/gateway/ticket-chat", async (context) => {
     const ticketId = context.query.get("ticketId");
     if (!ticketId) {
       json(context, 400, { error: "ticketId parameter is required" });
@@ -57,7 +60,7 @@ export function registerTicketChatRoutes(
     json(context, 200, { success: true });
   });
 
-  dispatcher.register("POST", "/api/engineer/ticket-chat", async (context) => {
+  dispatcher.register("POST", "/api/gateway/ticket-chat", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -66,6 +69,8 @@ export function registerTicketChatRoutes(
 
     const ticketId = typeof body.ticketId === "string" ? body.ticketId : null;
     const message = typeof body.message === "string" ? body.message : null;
+    const expectedMcpUrl =
+      typeof body.expectedMcpUrl === "string" ? body.expectedMcpUrl : undefined;
     const ticketContext = isTicketContext(body.ticketContext) ? body.ticketContext : null;
     const repoPath = typeof body.repoPath === "string" ? body.repoPath : undefined;
 
@@ -101,10 +106,14 @@ export function registerTicketChatRoutes(
     const isResuming = Boolean(history.sessionId);
     const contextPrompt = buildTicketContextPrompt(ticketContext, expandedRepoPath);
     const prompt = isResuming ? message : `${contextPrompt}\n\n---\n\nUser: ${message}`;
-    const allowedTools = expandedRepoPath ? READONLY_CODEBASE_TOOLS : WEB_ONLY_TOOLS;
+    const allowedTools = expandedRepoPath
+      ? await getReadonlyCodebaseTools(expectedMcpUrl)
+      : await getWebOnlyTools(expectedMcpUrl);
 
     setStreamingHeaders(context.response);
     writeEvent(context.response, { type: "status", status: "spawning", resuming: isResuming });
+
+    const shellEnv = await getShellEnv();
 
     await new Promise<void>((resolve) => {
       const streamState = createStreamState(async (sessionId) => {
@@ -141,7 +150,7 @@ export function registerTicketChatRoutes(
 
       void processManager
         .spawnStreaming({
-          command: "claude",
+          command: resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path,
           args: [
             "-p",
             "--verbose",
@@ -151,6 +160,7 @@ export function registerTicketChatRoutes(
             ...(isResuming && history.sessionId ? ["--resume", history.sessionId] : [])
           ],
           cwd: expandedRepoPath ?? os.homedir(),
+          env: shellEnv,
           input: prompt,
           onLine: (line) => {
             try {
@@ -166,6 +176,10 @@ export function registerTicketChatRoutes(
             writeEvent(context.response, { type: "error", error: error.message });
           },
           onExit: (exitCode) => {
+            if (exitCode !== 0 && streamState.authChallengeDetected && history.sessionId) {
+              history.sessionId = undefined;
+              void saveChatHistory(dir, ticketId, history);
+            }
             writeEvent(context.response, {
               type: "result",
               success: exitCode === 0
@@ -262,10 +276,3 @@ function setStreamingHeaders(response: ServerResponse): void {
 function writeEvent(response: ServerResponse, payload: Record<string, unknown>): void {
   response.write(`${JSON.stringify(payload)}\n`);
 }
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-

@@ -1,11 +1,13 @@
 import { execFileSync } from "node:child_process";
+import { getResolvedGitPath } from "./symphony-loop.js";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import type { OperationDispatcher } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed, isPathAllowed } from "../security.js";
 import { expandHome } from "./symphony-utils.js";
 import { loadReposConfig } from "./repos-config-utils.js";
+import { json } from "./response-utils.js";
 
 type Commit = {
   hash: string;
@@ -33,15 +35,15 @@ export function registerMetadataRoutes(
   getAllowedDirectories: () => string[],
   getSymphonyDir: () => string
 ): void {
-  dispatcher.register("GET", "/api/engineer/version", async (context) => {
+  dispatcher.register("GET", "/api/gateway/version", async (context) => {
     try {
-      const version = execFileSync("git", ["rev-parse", "--short", "HEAD"], {
+      const version = execFileSync(getResolvedGitPath(), ["rev-parse", "--short", "HEAD"], {
         cwd: process.cwd(),
         encoding: "utf-8"
       }).trim();
 
       const format = "%H|%h|%s|%b|%an|%ci|%cr";
-      const rawLog = execFileSync("git", ["log", "-10", `--pretty=format:${format}---COMMIT_END---`], {
+      const rawLog = execFileSync(getResolvedGitPath(), ["log", "-10", `--pretty=format:${format}---COMMIT_END---`], {
         cwd: process.cwd(),
         encoding: "utf-8"
       });
@@ -68,7 +70,7 @@ export function registerMetadataRoutes(
     }
   });
 
-  dispatcher.register("GET", "/api/engineer/symphony/status", async (context) => {
+  dispatcher.register("GET", "/api/gateway/symphony/status", async (context) => {
     const workDir = context.query.get("workDir");
     if (!workDir) {
       json(context, 400, { error: "workDir parameter is required" });
@@ -86,7 +88,7 @@ export function registerMetadataRoutes(
       throw error;
     }
 
-    const stateFile = path.join(expandedWorkDir, ".claude", "work", "state.json");
+    const stateFile = path.join(expandedWorkDir, ".closedloop-ai", "work", "state.json");
 
     if (!existsSync(stateFile)) {
       json(context, 200, {
@@ -123,7 +125,7 @@ export function registerMetadataRoutes(
     }
   });
 
-  dispatcher.register("GET", "/api/engineer/work-directory/:ticketId", async (context) => {
+  dispatcher.register("GET", "/api/gateway/work-directory/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     if (!ticketId || typeof ticketId !== "string") {
       json(context, 400, { error: "ticketId is required and must be a string" });
@@ -212,7 +214,7 @@ function checkPendingClaudeMd(worktreePath: string): string | null {
   }
 
   try {
-    const status = execFileSync("git", ["status", "--porcelain", "--", "CLAUDE.md"], {
+    const status = execFileSync(getResolvedGitPath(), ["status", "--porcelain", "--", "CLAUDE.md"], {
       cwd: worktreePath,
       encoding: "utf-8",
       timeout: 5_000
@@ -228,13 +230,13 @@ function checkBranchStatus(worktreePath: string): {
   remoteMissing: boolean;
 } | null {
   try {
-    const branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+    const branch = execFileSync(getResolvedGitPath(), ["rev-parse", "--abbrev-ref", "HEAD"], {
       cwd: worktreePath,
       encoding: "utf-8",
       timeout: 5_000
     }).trim();
 
-    const remoteExists = execFileSync("git", ["ls-remote", "--heads", "origin", branch], {
+    const remoteExists = execFileSync(getResolvedGitPath(), ["ls-remote", "--heads", "origin", branch], {
       cwd: worktreePath,
       encoding: "utf-8",
       timeout: 5_000
@@ -245,7 +247,7 @@ function checkBranchStatus(worktreePath: string): {
     }
 
     try {
-      const mergedBranches = execFileSync("git", ["branch", "--merged", "origin/main"], {
+      const mergedBranches = execFileSync(getResolvedGitPath(), ["branch", "--merged", "origin/main"], {
         cwd: worktreePath,
         encoding: "utf-8",
         timeout: 5_000
@@ -260,10 +262,4 @@ function checkBranchStatus(worktreePath: string): {
   } catch {
     return null;
   }
-}
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
 }

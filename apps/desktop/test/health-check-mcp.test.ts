@@ -1,0 +1,336 @@
+import assert from "node:assert/strict";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import os from "node:os";
+import { describe, test } from "node:test";
+import { OperationDispatcher } from "../src/server/operation-dispatcher.js";
+import { registerHealthCheckRoutes } from "../src/server/operations/health-check.js";
+import type { McpDetectionResult } from "../src/server/operations/mcp-detection.js";
+import type { ProcessManager } from "../src/server/process-manager.js";
+
+type CapturedResponse = {
+  response: ServerResponse;
+  chunks: string[];
+  get statusCode(): number;
+  get ended(): boolean;
+};
+
+type CheckResultPayload = {
+  id: string;
+  label: string;
+  required: boolean;
+  passed: boolean;
+  version?: string;
+  error?: string;
+  remediation?: string;
+};
+
+function makeResponse(): CapturedResponse {
+  let statusCode = 0;
+  const chunks: string[] = [];
+  let ended = false;
+  const response = {
+    get statusCode() {
+      return statusCode;
+    },
+    set statusCode(value: number) {
+      statusCode = value;
+    },
+    setHeader() {},
+    flushHeaders() {},
+    socket: { setNoDelay() {} },
+    write(chunk: unknown) {
+      if (typeof chunk === "string") {
+        chunks.push(chunk);
+      }
+      return true;
+    },
+    end(chunk?: unknown) {
+      if (typeof chunk === "string") {
+        chunks.push(chunk);
+      }
+      ended = true;
+    },
+  } as unknown as ServerResponse;
+
+  return {
+    response,
+    chunks,
+    get statusCode() {
+      return statusCode;
+    },
+    get ended() {
+      return ended;
+    },
+  };
+}
+
+async function dispatchHealthCheck(
+  dispatcher: OperationDispatcher,
+  options: { expectedMcpUrl?: string; latestVersion?: string } = {}
+): Promise<CapturedResponse> {
+  const captured = makeResponse();
+  const query = new URLSearchParams();
+  if (options.expectedMcpUrl) {
+    query.set("expectedMcpUrl", options.expectedMcpUrl);
+  }
+  if (options.latestVersion !== undefined) {
+    query.set("latestVersion", options.latestVersion);
+  }
+
+  await dispatcher.dispatch({
+    method: "GET",
+    pathname: "/api/gateway/health-check",
+    params: {},
+    query,
+    rawBody: Buffer.alloc(0),
+    body: "",
+    request: {} as IncomingMessage,
+    response: captured.response,
+  });
+  return captured;
+}
+
+function parsePayload(captured: CapturedResponse): Record<string, unknown> {
+  return JSON.parse(captured.chunks.join("")) as Record<string, unknown>;
+}
+
+function getChecks(payload: Record<string, unknown>): CheckResultPayload[] {
+  assert.ok(Array.isArray(payload.checks));
+  return payload.checks as CheckResultPayload[];
+}
+
+function findAppVersion(payload: Record<string, unknown>): CheckResultPayload | undefined {
+  return getChecks(payload).find((check) => check.id === "app-version");
+}
+
+const unavailableMcp = async (): Promise<McpDetectionResult> => ({
+  available: false,
+  serverName: null,
+  matchedUrl: null,
+  checkedAt: "2026-04-12T00:00:00.000Z",
+  closedloopAvailable: false,
+});
+
+function registerHealthCheckWithAppVersion(
+  dispatcher: OperationDispatcher,
+  getAppVersion?: () => string | undefined
+): void {
+  registerHealthCheckRoutes(
+    dispatcher,
+    {} as unknown as ProcessManager,
+    () => os.tmpdir(),
+    unavailableMcp,
+    undefined,
+    getAppVersion
+  );
+}
+
+describe("registerHealthCheckRoutes — MCP injection", () => {
+  const expectedMcpUrl = "https://mcp.closedloop.ai/mcp";
+
+  test("response includes mcpServers from injected detectMcp stub", async () => {
+    const dispatcher = new OperationDispatcher();
+    const claudeStub: McpDetectionResult = {
+      available: true,
+      serverName: "team-prod",
+      matchedUrl: expectedMcpUrl,
+      checkedAt: "2026-04-12T00:00:00.000Z",
+      closedloopAvailable: true,
+    };
+    const codexStub: McpDetectionResult = {
+      available: false,
+      serverName: "team-prod",
+      matchedUrl: expectedMcpUrl,
+      checkedAt: "2026-04-12T00:00:00.000Z",
+      closedloopAvailable: false,
+    };
+    const detectMcp = async (
+      provider: "claude" | "codex",
+      _expectedMcpUrl?: string
+    ): Promise<McpDetectionResult> =>
+      provider === "claude" ? claudeStub : codexStub;
+
+    registerHealthCheckRoutes(
+      dispatcher,
+      {} as unknown as ProcessManager,
+      () => os.tmpdir(),
+      detectMcp
+    );
+
+    const captured = await dispatchHealthCheck(dispatcher, { expectedMcpUrl });
+    assert.equal(captured.statusCode, 200);
+    assert.equal(captured.ended, true);
+
+    const payload = parsePayload(captured);
+    getChecks(payload);
+    assert.equal(typeof payload.allRequiredPassed, "boolean");
+
+    const mcpServers = payload.mcpServers as Record<string, unknown>;
+    assert.deepEqual(mcpServers.claude, claudeStub);
+    assert.deepEqual(mcpServers.codex, codexStub);
+  });
+
+  test("invokes detectMcp once per provider with the correct argument", async () => {
+    const dispatcher = new OperationDispatcher();
+    const calls: Array<{ provider: "claude" | "codex"; expectedMcpUrl?: string }> = [];
+    const detectMcp = async (
+      provider: "claude" | "codex",
+      expectedMcpUrlArg?: string
+    ): Promise<McpDetectionResult> => {
+      calls.push({ provider, expectedMcpUrl: expectedMcpUrlArg });
+      return {
+        available: true,
+        serverName: "team-prod",
+        matchedUrl: expectedMcpUrl,
+        checkedAt: "2026-04-12T00:00:00.000Z",
+        closedloopAvailable: true,
+      };
+    };
+
+    registerHealthCheckRoutes(
+      dispatcher,
+      {} as unknown as ProcessManager,
+      () => os.tmpdir(),
+      detectMcp
+    );
+
+    await dispatchHealthCheck(dispatcher, { expectedMcpUrl });
+    assert.equal(calls.length, 2);
+    assert.deepEqual(calls, [
+      { provider: "claude", expectedMcpUrl },
+      { provider: "codex", expectedMcpUrl },
+    ]);
+  });
+
+  test("includes mcpServers even when both providers report unavailable", async () => {
+    const dispatcher = new OperationDispatcher();
+    const detectMcp = async (): Promise<McpDetectionResult> => ({
+      available: false,
+      serverName: null,
+      matchedUrl: null,
+      checkedAt: "2026-04-12T00:00:00.000Z",
+      closedloopAvailable: false,
+    });
+
+    registerHealthCheckRoutes(
+      dispatcher,
+      {} as unknown as ProcessManager,
+      () => os.tmpdir(),
+      detectMcp
+    );
+
+    const captured = await dispatchHealthCheck(dispatcher, { expectedMcpUrl });
+    const payload = parsePayload(captured);
+    const mcpServers = payload.mcpServers as Record<
+      string,
+      { available: boolean; serverName: string | null; closedloopAvailable: boolean }
+    >;
+    assert.equal(mcpServers.claude.available, false);
+    assert.equal(mcpServers.claude.serverName, null);
+    assert.equal(mcpServers.claude.closedloopAvailable, false);
+    assert.equal(mcpServers.codex.available, false);
+    assert.equal(mcpServers.codex.serverName, null);
+    assert.equal(mcpServers.codex.closedloopAvailable, false);
+  });
+});
+
+describe("app-version check", () => {
+  test("omits app-version when latestVersion is absent", async () => {
+    const dispatcher = new OperationDispatcher();
+    registerHealthCheckWithAppVersion(dispatcher, () => "1.0.0");
+
+    const captured = await dispatchHealthCheck(dispatcher);
+    const payload = parsePayload(captured);
+
+    assert.equal(findAppVersion(payload), undefined);
+  });
+
+  test("passes when latestVersion equals currentVersion", async () => {
+    const dispatcher = new OperationDispatcher();
+    registerHealthCheckWithAppVersion(dispatcher, () => "1.0.0");
+
+    const captured = await dispatchHealthCheck(dispatcher, { latestVersion: "1.0.0" });
+    const appVersion = findAppVersion(parsePayload(captured));
+
+    assert.deepEqual(appVersion, {
+      id: "app-version",
+      label: "Gateway Version",
+      required: true,
+      passed: true,
+      version: "1.0.0",
+    });
+  });
+
+  test("reports update availability without failing the health check", async () => {
+    const dispatcher = new OperationDispatcher();
+    registerHealthCheckWithAppVersion(dispatcher, () => "1.0.0");
+
+    const captured = await dispatchHealthCheck(dispatcher, { latestVersion: "2.0.0" });
+    const payload = parsePayload(captured);
+    const appVersion = findAppVersion(payload);
+
+    assert.equal(appVersion?.required, true);
+    assert.equal(appVersion?.passed, true);
+    assert.equal(appVersion?.version, "1.0.0");
+    assert.equal(appVersion?.error, "Update available: 2.0.0");
+    assert.ok(appVersion?.remediation);
+  });
+
+  test("omits app-version when getAppVersion is not provided", async () => {
+    const dispatcher = new OperationDispatcher();
+    registerHealthCheckWithAppVersion(dispatcher);
+
+    const captured = await dispatchHealthCheck(dispatcher, { latestVersion: "2.0.0" });
+    const payload = parsePayload(captured);
+
+    assert.equal(findAppVersion(payload), undefined);
+  });
+
+  test("omits app-version when getAppVersion returns undefined", async () => {
+    const dispatcher = new OperationDispatcher();
+    registerHealthCheckWithAppVersion(dispatcher, () => undefined);
+
+    const captured = await dispatchHealthCheck(dispatcher, { latestVersion: "2.0.0" });
+    const payload = parsePayload(captured);
+
+    assert.equal(findAppVersion(payload), undefined);
+  });
+
+  test("reports unrecognized formats without failing the health check", async () => {
+    const cases: Array<{
+      name: string;
+      currentVersion: string;
+      latestVersion: string;
+    }> = [
+      { name: "current", currentVersion: "dev-build", latestVersion: "2.0.0" },
+      { name: "latest", currentVersion: "1.0.0", latestVersion: "latest" },
+    ];
+
+    for (const testCase of cases) {
+      const dispatcher = new OperationDispatcher();
+      registerHealthCheckWithAppVersion(dispatcher, () => testCase.currentVersion);
+
+      const captured = await dispatchHealthCheck(dispatcher, {
+        latestVersion: testCase.latestVersion,
+      });
+      const appVersion = findAppVersion(parsePayload(captured));
+
+      assert.equal(appVersion?.required, true, testCase.name);
+      assert.equal(appVersion?.passed, true, testCase.name);
+      assert.match(appVersion?.error ?? "", /unrecognized/i, testCase.name);
+    }
+  });
+
+  test("normalizes a leading v prefix before comparing and formatting the update error", async () => {
+    const dispatcher = new OperationDispatcher();
+    registerHealthCheckWithAppVersion(dispatcher, () => "1.0.0");
+
+    const captured = await dispatchHealthCheck(dispatcher, { latestVersion: "v2.0.0" });
+    const appVersion = findAppVersion(parsePayload(captured));
+
+    assert.equal(appVersion?.required, true);
+    assert.equal(appVersion?.passed, true);
+    assert.equal(appVersion?.version, "1.0.0");
+    assert.equal(appVersion?.error, "Update available: 2.0.0");
+  });
+});

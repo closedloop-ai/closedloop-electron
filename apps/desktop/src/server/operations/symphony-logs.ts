@@ -1,15 +1,16 @@
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import type { OperationDispatcher } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError } from "../security.js";
 import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 export function registerSymphonyLogsRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[]
 ): void {
-  dispatcher.register("GET", "/api/engineer/symphony/logs/:ticketId", async (context) => {
+  dispatcher.register("GET", "/api/gateway/symphony/logs/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
     const lines = Number.parseInt(context.query.get("lines") ?? "100", 10);
@@ -31,11 +32,12 @@ export function registerSymphonyLogsRoutes(
     }
 
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-    const jsonlFile = path.join(worktreeDir, ".claude", "work", "claude-output.jsonl");
-    const legacyLogFile = path.join(worktreeDir, ".claude", "work", "symphony-launch.log");
+    const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
+    const jsonlFile = path.join(workDir, "claude-output.jsonl");
+    const launchLogFile = path.join(workDir, "symphony-launch.log");
 
     const isJsonl = existsSync(jsonlFile);
-    const logFile = isJsonl ? jsonlFile : legacyLogFile;
+    const logFile = isJsonl ? jsonlFile : launchLogFile;
     if (!existsSync(logFile)) {
       json(context, 200, {
         exists: false,
@@ -76,10 +78,3 @@ export function registerSymphonyLogsRoutes(
     }
   });
 }
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-

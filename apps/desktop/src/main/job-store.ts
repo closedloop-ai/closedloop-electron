@@ -16,6 +16,26 @@ export type LocalJobKind = "SYMPHONY_LOOP";
 
 export type LocalJobCommand = "PLAN" | "EXECUTE" | "REQUEST_CHANGES" | "DECOMPOSE" | "GENERATE_PRD";
 
+export type LocalJobCommitter = {
+  name: string;
+  email: string;
+};
+
+export type LocalJobFinalizationSource = "live-exit" | "boot-recovery";
+
+export type LocalJobExecuteFinalizationStatus =
+  | "pending"
+  | "success"
+  | "no-changes"
+  | "error"
+  | "skipped";
+
+export type LocalJobExecuteFinalizationPath =
+  | "llm"
+  | "git-fallback"
+  | "artifact-existing"
+  | "none";
+
 export type TaskProgress = {
   pending: number;
   completed: number;
@@ -27,15 +47,43 @@ export type LocalJob = {
   kind: LocalJobKind;
   loopId: string;
   commandId?: string;
+  operationId?: string;
   command: LocalJobCommand;
   ticketId?: string;
   artifactId?: string;
   artifactSlug?: string;
   issueId?: string;
+  baseBranch?: string;
+  /**
+   * Primary repo `owner/name` from the loop request (`body.repo.fullName`).
+   * Carried so boot-recovery finalization can populate the V2 envelope's
+   * `fullName` field without depending on in-memory request state.
+   */
+  primaryRepoFullName?: string;
+  webAppOrigin?: string;
+  expectedMcpUrl?: string;
+  committer?: LocalJobCommitter;
   repoPath?: string;
   localRepoPath?: string;
   worktreeDir?: string;
   claudeWorkDir?: string;
+  /**
+   * Additional-repo worktrees created for multi-repo PLAN/EXECUTE runs.
+   * Persisted so boot recovery / finalizer can finalize their git work and
+   * remove the worktrees after an Electron restart; in-process spawn logic
+   * also tracks these locally for immediate finalization + cleanup on live
+   * exits.
+   *
+   * `fullName` and `baseBranch` are optional for backward compatibility with
+   * jobs persisted by older builds. When absent, recovery skips multi-repo
+   * finalization (logs a warning) and falls through to worktree cleanup only.
+   */
+  additionalWorktreeDirs?: {
+    dir: string;
+    repoPath: string;
+    fullName?: string;
+    baseBranch?: string;
+  }[];
   logPath?: string;
   jsonlPath?: string;
   statePath?: string;
@@ -50,6 +98,32 @@ export type LocalJob = {
   completedAt?: string;
   warning?: string;
   exitCode?: number | null;
+  /**
+   * Replay-safe byte offset into `jsonlPath` (claude-output.jsonl).
+   * Updated by the output tailer only after newline-delimited bytes are committed:
+   * either summarized with no cloud `output` event, or after a successful (2xx) POST.
+   */
+  lastObservedJsonlOffset?: number;
+  artifactsUploadedAt?: string;
+  completedEventPostedAt?: string;
+  finalStatusPersistedAt?: string;
+  /** Set once cloud-side finalization is fully persisted. */
+  cloudFinalizedAt?: string;
+  /** Number of boot/live finalization attempts after local terminal persistence. */
+  recoveryAttempts?: number;
+  /** Last cloud finalization error for diagnostics and retry decisions. */
+  lastRecoveryError?: string;
+  finalizationSource?: LocalJobFinalizationSource;
+  executeFinalizationStatus?: LocalJobExecuteFinalizationStatus;
+  executeFinalizationPath?: LocalJobExecuteFinalizationPath;
+  executeFinalizationStartedAt?: string;
+  executeFinalizationCompletedAt?: string;
+  executeFinalizationReason?: string;
+  executeFinalizationPreExecutionResultPresent?: boolean;
+  executeFinalizationPrePrBodyPresent?: boolean;
+  executeFinalizationPostExecutionResultPresent?: boolean;
+  executeFinalizationPostPrBodyPresent?: boolean;
+  apiBaseUrl?: string;
 };
 
 const TERMINAL_STATUSES: ReadonlySet<LocalJobStatus> = new Set([

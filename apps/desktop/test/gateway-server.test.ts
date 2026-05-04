@@ -1,31 +1,26 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, test } from "node:test";
-import { promisify } from "node:util";
+import { afterEach, mock, test } from "node:test";
 import { DesktopGatewayServer } from "../src/server/server.js";
+import { Observability } from "../src/main/observability.js";
+import type { EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
 import { saveCodexChatSession } from "../src/server/operations/codex.js";
-import { EMPTY_CAPABILITIES, PORT_PROBE_ORDER } from "../src/shared/contracts.js";
+import { _setRunCommandForTesting } from "../src/server/operations/health-check.js";
+import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
+import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { SymphonyDirNotConfiguredError, tryAssertRepoAllowed, tryAssertPathAllowed } from "../src/server/operations/symphony-utils.js";
-
-const execFileAsync = promisify(execFile);
-
-async function initGitRepo(repoPath: string): Promise<void> {
-  await execFileAsync("git", ["init", repoPath]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.email", "test@test.com"]);
-  await execFileAsync("git", ["-C", repoPath, "config", "user.name", "Test"]);
-  await fs.writeFile(path.join(repoPath, "README.md"), "# initial\n");
-  await execFileAsync("git", ["-C", repoPath, "add", "."]);
-  await execFileAsync("git", ["-C", repoPath, "commit", "-m", "initial"]);
-}
+import { JobStore } from "../src/main/job-store.js";
+import type { LocalJob, LocalJobStatus } from "../src/main/job-store.js";
 
 const serversToClose: DesktopGatewayServer[] = [];
 const blockersToClose: net.Server[] = [];
 const tempPathsToClean: string[] = [];
+const childPidsToKill: number[] = [];
 const originalSymphonyWorktreeParentDir = process.env.SYMPHONY_WORKTREE_PARENT_DIR;
 const originalHome = process.env.HOME;
 const originalPath = process.env.PATH;
@@ -48,6 +43,7 @@ afterEach(async () => {
   } else {
     process.env.PATH = originalPath;
   }
+  resetShellPathCache();
 
   for (const server of serversToClose.splice(0)) {
     await server.stop();
@@ -65,16 +61,25 @@ afterEach(async () => {
     });
   }
 
+  for (const pid of childPidsToKill.splice(0)) {
+    try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+  }
+
   for (const tempPath of tempPathsToClean.splice(0)) {
     await fs.rm(tempPath, { recursive: true, force: true });
   }
+
+  // Reset Observability singleton so telemetry state does not bleed between tests
+  await Observability.shutdown();
+  Observability.reset();
+  mock.restoreAll();
 });
 
 test("uses closedloop-ai discovery file path by default", () => {
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [os.homedir()],
     machineName: "discovery-default-machine",
@@ -95,13 +100,15 @@ test("returns health contract with active port and CORS headers", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "test-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    getGatewayId: () => "019dd8f5-5a1a-4bce-ae72-a3c973850f81",
+    getOnboardingCompleted: () => true,
     discoveryFilePath: discoveryFile
   });
   serversToClose.push(server);
@@ -111,9 +118,17 @@ test("returns health contract with active port and CORS headers", async () => {
   assert.equal(healthResponse.status, 200);
   assert.equal(healthResponse.headers.get("access-control-allow-origin"), "https://app.symphony.com");
 
-  const healthBody = (await healthResponse.json()) as { status: string; port: number; machineName: string };
+  const healthBody = (await healthResponse.json()) as {
+    status: string;
+    port: number;
+    machineName: string;
+    gatewayId?: string;
+    onboardingCompleted?: boolean;
+  };
   assert.equal(healthBody.status, "ok");
   assert.equal(healthBody.machineName, "test-machine");
+  assert.equal(healthBody.gatewayId, "019dd8f5-5a1a-4bce-ae72-a3c973850f81");
+  assert.equal(healthBody.onboardingCompleted, true);
   assert.equal(healthBody.port, server.getActivePort());
 
   const discoveryPort = await fs.readFile(discoveryFile, "utf-8");
@@ -126,8 +141,8 @@ test("returns 204 for CORS preflight requests", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://staging.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "preflight-machine",
@@ -138,7 +153,7 @@ test("returns 204 for CORS preflight requests", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/launch`, {
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/launch`, {
     method: "OPTIONS"
   });
 
@@ -156,8 +171,8 @@ test("returns private-network CORS allow header for terminal-chat preflight", as
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.closedloop.ai",
     getAllowedDirectories: () => [tmpDir],
     machineName: "pna-preflight-machine",
@@ -168,7 +183,7 @@ test("returns private-network CORS allow header for terminal-chat preflight", as
   serversToClose.push(server);
   await server.start();
 
-  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`, {
     method: "OPTIONS",
     headers: {
       Origin: "https://app.closedloop.ai",
@@ -190,8 +205,8 @@ test("allows loopback origin variants for CORS preflight", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "http://localhost:3000",
     getAllowedDirectories: () => [tmpDir],
     machineName: "loopback-origin-machine",
@@ -202,7 +217,7 @@ test("allows loopback origin variants for CORS preflight", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`, {
     method: "OPTIONS",
     headers: {
       Origin: "http://127.0.0.1:3001",
@@ -221,8 +236,8 @@ test("normal mode: 127.0.0.2 loopback variant echoed back in CORS preflight", as
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.closedloop.ai",
     getAllowedDirectories: () => [tmpDir],
     machineName: "loopback-127-2-machine",
@@ -233,7 +248,7 @@ test("normal mode: 127.0.0.2 loopback variant echoed back in CORS preflight", as
   serversToClose.push(server);
   await server.start();
 
-  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`, {
     method: "OPTIONS",
     headers: {
       Origin: "http://127.0.0.2:8080",
@@ -252,8 +267,8 @@ test("normal mode: DNS name like 127.evil.com is NOT treated as loopback", async
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.closedloop.ai",
     getAllowedDirectories: () => [tmpDir],
     machineName: "loopback-evil-machine",
@@ -264,7 +279,7 @@ test("normal mode: DNS name like 127.evil.com is NOT treated as loopback", async
   serversToClose.push(server);
   await server.start();
 
-  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`, {
     method: "OPTIONS",
     headers: {
       Origin: "http://127.evil.com:8080",
@@ -284,8 +299,8 @@ test("prodOriginsOnly: preflight from loopback returns configured origin, no PNA
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.closedloop.ai",
     getAllowedDirectories: () => [tmpDir],
     machineName: "prod-loopback-machine",
@@ -297,7 +312,7 @@ test("prodOriginsOnly: preflight from loopback returns configured origin, no PNA
   serversToClose.push(server);
   await server.start();
 
-  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`, {
     method: "OPTIONS",
     headers: {
       Origin: "http://localhost:3000",
@@ -318,8 +333,8 @@ test("prodOriginsOnly: preflight from configured origin returns correct CORS + P
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.closedloop.ai",
     getAllowedDirectories: () => [tmpDir],
     machineName: "prod-configured-machine",
@@ -331,7 +346,7 @@ test("prodOriginsOnly: preflight from configured origin returns correct CORS + P
   serversToClose.push(server);
   await server.start();
 
-  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`, {
     method: "OPTIONS",
     headers: {
       Origin: "https://app.closedloop.ai",
@@ -352,8 +367,8 @@ test("prodOriginsOnly: preflight from random origin returns configured origin", 
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.closedloop.ai",
     getAllowedDirectories: () => [tmpDir],
     machineName: "prod-random-machine",
@@ -365,7 +380,7 @@ test("prodOriginsOnly: preflight from random origin returns configured origin", 
   serversToClose.push(server);
   await server.start();
 
-  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`, {
     method: "OPTIONS",
     headers: {
       Origin: "https://random.example",
@@ -384,8 +399,8 @@ test("prodOriginsOnly: loopback webAppOrigin preflight from that origin echoes i
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "http://localhost:3000",
     getAllowedDirectories: () => [tmpDir],
     machineName: "prod-loopback-webapp-machine",
@@ -397,7 +412,7 @@ test("prodOriginsOnly: loopback webAppOrigin preflight from that origin echoes i
   serversToClose.push(server);
   await server.start();
 
-  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+  const preflight = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`, {
     method: "OPTIONS",
     headers: {
       Origin: "http://localhost:3000",
@@ -417,8 +432,8 @@ test("requires gateway token when configured", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getGatewayAuthToken: () => "test-gateway-token",
     getAllowedDirectories: () => [tmpDir],
@@ -438,12 +453,12 @@ test("requires gateway token when configured", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const unauthorized = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`);
+  const unauthorized = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`);
   assert.equal(unauthorized.status, 401);
   const body = await unauthorized.json() as { error: string; reason?: string };
   assert.equal(body.error, "unauthorized");
 
-  const authorized = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`, {
+  const authorized = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`, {
     headers: {
       "x-desktop-gateway-token": "test-gateway-token"
     }
@@ -453,10 +468,10 @@ test("requires gateway token when configured", async () => {
   assert.equal(activityEvents.length, 2);
   assert.equal(activityEvents[0].type, "security");
   assert.equal(activityEvents[0].statusCode, 401);
-  assert.equal(activityEvents[0].path, "/api/engineer/unimplemented-route");
+  assert.equal(activityEvents[0].path, "/api/gateway/unimplemented-route");
   assert.equal(activityEvents[1].type, "request");
   assert.equal(activityEvents[1].statusCode, 501);
-  assert.equal(activityEvents[1].path, "/api/engineer/unimplemented-route");
+  assert.equal(activityEvents[1].path, "/api/gateway/unimplemented-route");
 });
 
 test("rejects trusted browser origin without session token (origin-only bypass removed)", async () => {
@@ -465,8 +480,8 @@ test("rejects trusted browser origin without session token (origin-only bypass r
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.closedloop.ai",
     getGatewayAuthToken: () => "test-gateway-token",
     getAllowedDirectories: () => [tmpDir],
@@ -479,14 +494,14 @@ test("rejects trusted browser origin without session token (origin-only bypass r
   await server.start();
 
   // Trusted origin alone is no longer sufficient — session token required
-  const trusted = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`, {
+  const trusted = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`, {
     headers: {
       Origin: "https://app.closedloop.ai"
     }
   });
   assert.equal(trusted.status, 401);
 
-  const untrusted = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`, {
+  const untrusted = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`, {
     headers: {
       Origin: "https://evil.example"
     }
@@ -500,8 +515,8 @@ test("rejects localhost browser origin without session token", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.closedloop.ai",
     getGatewayAuthToken: () => "test-gateway-token",
     getAllowedDirectories: () => [tmpDir],
@@ -514,7 +529,7 @@ test("rejects localhost browser origin without session token", async () => {
   await server.start();
 
   const localhostOrigin = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`,
     {
       headers: {
         Origin: "http://localhost:3000"
@@ -530,8 +545,8 @@ test("rejects loopback browser request without origin or session token", async (
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "http://localhost:3000",
     getGatewayAuthToken: () => "test-gateway-token",
     getAllowedDirectories: () => [tmpDir],
@@ -543,7 +558,7 @@ test("rejects loopback browser request without origin or session token", async (
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`, {
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`, {
     headers: {
       "sec-fetch-mode": "cors",
       "sec-fetch-site": "cross-site",
@@ -561,8 +576,8 @@ test("keeps non-browser loopback request unauthorized without token", async () =
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "http://localhost:3000",
     getGatewayAuthToken: () => "test-gateway-token",
     getAllowedDirectories: () => [tmpDir],
@@ -574,18 +589,18 @@ test("keeps non-browser loopback request unauthorized without token", async () =
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`);
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`);
   assert.equal(response.status, 401);
 });
 
-test("returns approval-required response when approval evaluator blocks engineer route", async () => {
+test("returns approval-required response when approval evaluator blocks gateway route", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-approval-gate-"));
   tempPathsToClean.push(tmpDir);
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "approval-machine",
@@ -606,7 +621,7 @@ test("returns approval-required response when approval evaluator blocks engineer
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/health-check`);
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
   assert.equal(response.status, 202);
   assert.deepEqual(await response.json(), {
     approvalRequired: true,
@@ -622,8 +637,8 @@ test("supports async approval evaluation before dispatch", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "approval-async-machine",
@@ -640,7 +655,7 @@ test("supports async approval evaluation before dispatch", async () => {
   await server.start();
 
   const startedAt = Date.now();
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/sessions`);
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/sessions`);
   const durationMs = Date.now() - startedAt;
   assert.equal(response.status, 200);
   assert.ok(durationMs >= 25);
@@ -659,8 +674,8 @@ test("passes cloud approval headers into approval evaluator context", async () =
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "approval-header-machine",
@@ -680,7 +695,7 @@ test("passes cloud approval headers into approval evaluator context", async () =
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/sessions`, {
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/sessions`, {
     headers: {
       "x-desktop-source": "cloud-socket",
       "x-desktop-force-approval": "1",
@@ -742,8 +757,8 @@ test("supports symphony sessions CRUD with contract-compatible response envelope
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "session-machine",
@@ -755,7 +770,7 @@ test("supports symphony sessions CRUD with contract-compatible response envelope
   serversToClose.push(server);
   await server.start();
 
-  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/sessions`, {
+  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/sessions`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -768,7 +783,7 @@ test("supports symphony sessions CRUD with contract-compatible response envelope
   assert.equal(postResponse.status, 200);
   assert.deepEqual(await postResponse.json(), { success: true });
 
-  const getResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/sessions`);
+  const getResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/sessions`);
   assert.equal(getResponse.status, 200);
   const getBody = (await getResponse.json()) as { sessions: Array<{ ticketId: string; repoPath: string }> };
   assert.equal(getBody.sessions.length, 1);
@@ -776,7 +791,7 @@ test("supports symphony sessions CRUD with contract-compatible response envelope
   assert.equal(getBody.sessions[0]?.repoPath, repoPath);
 
   const deleteResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/sessions?ticketId=AI-123`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/sessions?ticketId=AI-123`,
     { method: "DELETE" }
   );
   assert.equal(deleteResponse.status, 200);
@@ -794,8 +809,8 @@ test("rejects disallowed directories for symphony sessions writes (AC-049)", asy
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "session-deny-machine",
@@ -807,7 +822,7 @@ test("rejects disallowed directories for symphony sessions writes (AC-049)", asy
   serversToClose.push(server);
   await server.start();
 
-  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/sessions`, {
+  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/sessions`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -831,9 +846,9 @@ test("returns symphony status envelope for existing state file", async () => {
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-status-AI-321");
-  await fs.mkdir(path.join(worktreeDir, ".claude", "work"), { recursive: true });
+  await fs.mkdir(path.join(worktreeDir, ".closedloop-ai", "work"), { recursive: true });
   await fs.writeFile(
-    path.join(worktreeDir, ".claude", "work", "state.json"),
+    path.join(worktreeDir, ".closedloop-ai", "work", "state.json"),
     JSON.stringify({
       status: "STOPPED",
       phase: "Process stopped by user",
@@ -842,7 +857,7 @@ test("returns symphony status envelope for existing state file", async () => {
     "utf-8"
   );
   await fs.writeFile(
-    path.join(worktreeDir, ".claude", "work", "plan.json"),
+    path.join(worktreeDir, ".closedloop-ai", "work", "plan.json"),
     JSON.stringify({
       pendingTasks: [{ id: "task-2" }],
       completedTasks: [{ id: "task-1" }]
@@ -852,8 +867,8 @@ test("returns symphony status envelope for existing state file", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "status-machine",
@@ -865,7 +880,7 @@ test("returns symphony status envelope for existing state file", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/status/AI-321?repo=${encodeURIComponent(repoPath)}`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/status/AI-321?repo=${encodeURIComponent(repoPath)}`
   );
   assert.equal(response.status, 200);
   const body = (await response.json()) as {
@@ -896,8 +911,8 @@ test("rejects disallowed repo paths for symphony status (AC-049)", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "status-deny-machine",
@@ -909,7 +924,7 @@ test("rejects disallowed repo paths for symphony status (AC-049)", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/status/AI-777?repo=${encodeURIComponent(repoPath)}`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/status/AI-777?repo=${encodeURIComponent(repoPath)}`
   );
 
   assert.equal(response.status, 403);
@@ -927,19 +942,20 @@ test("marks state as stopped when killing by ticket without PID file", async () 
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-kill-AI-444");
-  const workDir = path.join(worktreeDir, ".claude", "work");
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
   await fs.mkdir(workDir, { recursive: true });
   await fs.writeFile(
     path.join(workDir, "state.json"),
     JSON.stringify({ status: "IN_PROGRESS", phase: "Running" }),
     "utf-8"
   );
-  await fs.writeFile(path.join(worktreeDir, ".claude", "symphony-loop.local.md"), "loop-state", "utf-8");
+  await fs.mkdir(path.join(worktreeDir, ".closedloop-ai"), { recursive: true });
+  await fs.writeFile(path.join(worktreeDir, ".closedloop-ai", "symphony-loop.local.md"), "loop-state", "utf-8");
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "kill-machine",
@@ -950,7 +966,7 @@ test("marks state as stopped when killing by ticket without PID file", async () 
   serversToClose.push(server);
   await server.start();
 
-  const killResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/kill`, {
+  const killResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/kill`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ ticketId: "AI-444", repoPath })
@@ -968,7 +984,7 @@ test("marks state as stopped when killing by ticket without PID file", async () 
   assert.equal(stateAfterKill.status, "STOPPED");
   assert.equal(stateAfterKill.phase, "Process stopped by user");
   await assert.rejects(
-    fs.readFile(path.join(worktreeDir, ".claude", "symphony-loop.local.md"), "utf-8")
+    fs.readFile(path.join(worktreeDir, ".closedloop-ai", "symphony-loop.local.md"), "utf-8")
   );
 });
 
@@ -981,8 +997,8 @@ test("rejects disallowed repo paths for symphony kill (AC-049)", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "kill-deny-machine",
@@ -993,7 +1009,7 @@ test("rejects disallowed repo paths for symphony kill (AC-049)", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const killResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/kill`, {
+  const killResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/kill`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -1016,7 +1032,7 @@ test("returns plan content envelope for symphony plan route", async () => {
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-plan-AI-777");
-  const workDir = path.join(worktreeDir, ".claude", "work");
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
   await fs.mkdir(workDir, { recursive: true });
   await fs.writeFile(
     path.join(workDir, "plan.json"),
@@ -1030,8 +1046,8 @@ test("returns plan content envelope for symphony plan route", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "plan-machine",
@@ -1043,7 +1059,7 @@ test("returns plan content envelope for symphony plan route", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/plan/AI-777?repo=${encodeURIComponent(repoPath)}`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/plan/AI-777?repo=${encodeURIComponent(repoPath)}`
   );
   assert.equal(response.status, 200);
   const body = (await response.json()) as { exists: boolean; planExists: boolean; content: string; worktreeDir: string };
@@ -1063,12 +1079,12 @@ test("supports chat history CRUD operations", async () => {
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-chat-AI-888");
-  await fs.mkdir(path.join(worktreeDir, ".claude", "work"), { recursive: true });
+  await fs.mkdir(path.join(worktreeDir, ".closedloop-ai", "work"), { recursive: true });
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "chat-history-machine",
@@ -1080,7 +1096,7 @@ test("supports chat history CRUD operations", async () => {
   await server.start();
 
   const postSessionResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/chat-history/AI-888?repo=${encodeURIComponent(repoPath)}`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/chat-history/AI-888?repo=${encodeURIComponent(repoPath)}`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1091,7 +1107,7 @@ test("supports chat history CRUD operations", async () => {
   assert.deepEqual(await postSessionResponse.json(), { success: true, sessionId: "session-1" });
 
   const postMessageResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/chat-history/AI-888?repo=${encodeURIComponent(repoPath)}`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/chat-history/AI-888?repo=${encodeURIComponent(repoPath)}`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1108,7 +1124,7 @@ test("supports chat history CRUD operations", async () => {
   assert.equal(postMessageResponse.status, 200);
 
   const getResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/chat-history/AI-888?repo=${encodeURIComponent(repoPath)}`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/chat-history/AI-888?repo=${encodeURIComponent(repoPath)}`
   );
   assert.equal(getResponse.status, 200);
   const getBody = (await getResponse.json()) as { sessionId?: string; messages: Array<{ content: string }> };
@@ -1117,7 +1133,7 @@ test("supports chat history CRUD operations", async () => {
   assert.equal(getBody.messages[0]?.content, "hello");
 
   const deleteResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/chat-history/AI-888?repo=${encodeURIComponent(repoPath)}`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/chat-history/AI-888?repo=${encodeURIComponent(repoPath)}`,
     { method: "DELETE" }
   );
   assert.equal(deleteResponse.status, 200);
@@ -1134,13 +1150,13 @@ test("supports provider-scoped chat history with isolated CRUD", async () => {
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-provider-AI-900");
-  const workDir = path.join(worktreeDir, ".claude", "work");
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
   await fs.mkdir(workDir, { recursive: true });
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "provider-scope-machine",
@@ -1151,7 +1167,7 @@ test("supports provider-scoped chat history with isolated CRUD", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const base = `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/chat-history/AI-900`;
+  const base = `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/chat-history/AI-900`;
   const repo = `repo=${encodeURIComponent(repoPath)}`;
 
   // POST with provider=claude → writes to chat-history-claude.json
@@ -1245,7 +1261,7 @@ test("returns jsonl log format when claude-output.jsonl exists", async () => {
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-logs-AI-999");
-  const workDir = path.join(worktreeDir, ".claude", "work");
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
   await fs.mkdir(workDir, { recursive: true });
   await fs.writeFile(
     path.join(workDir, "claude-output.jsonl"),
@@ -1255,8 +1271,8 @@ test("returns jsonl log format when claude-output.jsonl exists", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "logs-machine",
@@ -1268,7 +1284,7 @@ test("returns jsonl log format when claude-output.jsonl exists", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/logs/AI-999?repo=${encodeURIComponent(repoPath)}&lines=1`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/logs/AI-999?repo=${encodeURIComponent(repoPath)}&lines=1`
   );
   assert.equal(response.status, 200);
   const body = (await response.json()) as { format: string; lines?: string[]; returnedLines?: number };
@@ -1287,7 +1303,7 @@ test("returns judges payload when judges.json exists", async () => {
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-judges-AI-456");
-  const workDir = path.join(worktreeDir, ".claude", "work");
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
   await fs.mkdir(workDir, { recursive: true });
   await fs.writeFile(
     path.join(workDir, "judges.json"),
@@ -1297,8 +1313,8 @@ test("returns judges payload when judges.json exists", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "judges-machine",
@@ -1310,7 +1326,7 @@ test("returns judges payload when judges.json exists", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/judges/AI-456?repo=${encodeURIComponent(repoPath)}`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/judges/AI-456?repo=${encodeURIComponent(repoPath)}`
   );
   assert.equal(response.status, 200);
   const body = (await response.json()) as { exists: boolean; isMock: boolean; data?: { score: number } };
@@ -1329,15 +1345,15 @@ test("serves attachment binary from wildcard route", async () => {
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-attachments-AI-111");
-  const attachmentsDir = path.join(worktreeDir, ".claude", "work", "attachments");
+  const attachmentsDir = path.join(worktreeDir, ".closedloop-ai", "work", "attachments");
   await fs.mkdir(attachmentsDir, { recursive: true });
   const imageFile = path.join(attachmentsDir, "image.png");
   await fs.writeFile(imageFile, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "attachments-machine",
@@ -1349,7 +1365,7 @@ test("serves attachment binary from wildcard route", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/attachments/AI-111/image.png?repo=${encodeURIComponent(repoPath)}`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/attachments/AI-111/image.png?repo=${encodeURIComponent(repoPath)}`
   );
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("content-type"), "image/png");
@@ -1367,12 +1383,12 @@ test("uploads image attachments and returns file metadata", async () => {
   await fs.mkdir(repoPath, { recursive: true });
 
   const worktreeDir = path.join(worktreeParent, "repo-upload-AI-222");
-  await fs.mkdir(path.join(worktreeDir, ".claude", "work"), { recursive: true });
+  await fs.mkdir(path.join(worktreeDir, ".closedloop-ai", "work"), { recursive: true });
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "upload-machine",
@@ -1387,7 +1403,7 @@ test("uploads image attachments and returns file metadata", async () => {
   formData.append("file", new Blob([Uint8Array.from([0x89, 0x50, 0x4e, 0x47])], { type: "image/png" }), "test.png");
 
   const uploadResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/upload/AI-222?repo=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/upload/AI-222?repo=${encodeURIComponent(
       repoPath
     )}`,
     {
@@ -1416,8 +1432,8 @@ test("returns health-check response envelope with required check structure", asy
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "health-check-machine",
@@ -1429,7 +1445,7 @@ test("returns health-check response envelope with required check structure", asy
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/health-check`);
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
   assert.equal(response.status, 200);
   const body = (await response.json()) as {
     checks: Array<{ id: string; label: string; required: boolean; passed: boolean }>;
@@ -1449,8 +1465,8 @@ test("health-check returns 200 with worktree-dir failed when getSymphonyDir thro
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "health-unconfigured-machine",
@@ -1462,7 +1478,7 @@ test("health-check returns 200 with worktree-dir failed when getSymphonyDir thro
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/health-check`);
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
   assert.equal(response.status, 200, "health-check should return 200 even when unconfigured");
   const body = (await response.json()) as {
     checks: Array<{ id: string; passed: boolean; error?: string }>;
@@ -1481,8 +1497,8 @@ test("repos-config returns 503 when getSymphonyDir throws (not 500)", async () =
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "repos-unconfigured-machine",
@@ -1494,7 +1510,7 @@ test("repos-config returns 503 when getSymphonyDir throws (not 500)", async () =
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/repos`);
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/repos`);
   assert.equal(response.status, 503, "repos should return 503 when symphony dir not configured");
   const body = (await response.json()) as { error: string };
   assert.ok(body.error.includes("not configured"), "error message should mention configuration");
@@ -1537,8 +1553,8 @@ test("supports repos config CRUD and settings patch", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "repos-machine",
@@ -1550,7 +1566,7 @@ test("supports repos config CRUD and settings patch", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/repos`, {
+  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/repos`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ path: repoPath, description: "test repo" })
@@ -1560,7 +1576,7 @@ test("supports repos config CRUD and settings patch", async () => {
   assert.equal(postBody.success, true);
   assert.equal(postBody.repo?.path.endsWith("repo-configured"), true);
 
-  const patchResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/repos`, {
+  const patchResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/repos`, {
     method: "PATCH",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ worktreeParentDir: "~/tmp", worktreeParentDirConfirmed: true })
@@ -1568,14 +1584,14 @@ test("supports repos config CRUD and settings patch", async () => {
   assert.equal(patchResponse.status, 200);
   assert.deepEqual(await patchResponse.json(), { success: true });
 
-  const getResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/repos`);
+  const getResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/repos`);
   assert.equal(getResponse.status, 200);
   const getBody = (await getResponse.json()) as { repos: Array<{ path: string }>; settings: { worktreeParentDir?: string } };
   assert.equal(getBody.repos.length, 1);
   assert.equal(getBody.settings.worktreeParentDir, "~/tmp");
 
   const deleteResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/repos?path=${encodeURIComponent(repoPath)}`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/repos?path=${encodeURIComponent(repoPath)}`,
     { method: "DELETE" }
   );
   assert.equal(deleteResponse.status, 200);
@@ -1600,8 +1616,8 @@ test("lists directories and supports file search endpoint", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "filesystem-machine",
@@ -1613,7 +1629,7 @@ test("lists directories and supports file search endpoint", async () => {
   await server.start();
 
   const directoriesResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/directories?path=${encodeURIComponent(tmpDir)}`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/directories?path=${encodeURIComponent(tmpDir)}`
   );
   assert.equal(directoriesResponse.status, 200);
   const directoriesBody = (await directoriesResponse.json()) as {
@@ -1622,7 +1638,7 @@ test("lists directories and supports file search endpoint", async () => {
   assert.equal(directoriesBody.directories.some((entry) => entry.name === "repo-search"), true);
 
   const searchResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/files/search?repo=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/files/search?repo=${encodeURIComponent(
       repoPath
     )}&ticket=AI-121&query=Widget`
   );
@@ -1638,8 +1654,8 @@ test("supports terminal chat history GET and DELETE", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "terminal-chat-machine",
@@ -1651,12 +1667,12 @@ test("supports terminal chat history GET and DELETE", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const getResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`);
+  const getResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`);
   assert.equal(getResponse.status, 200);
   const getBody = (await getResponse.json()) as { messages: unknown[] };
   assert.equal(Array.isArray(getBody.messages), true);
 
-  const deleteResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/terminal-chat`, {
+  const deleteResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/terminal-chat`, {
     method: "DELETE"
   });
   assert.equal(deleteResponse.status, 200);
@@ -1669,8 +1685,8 @@ test("supports ticket chat GET and DELETE with ticketId", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "ticket-chat-machine",
@@ -1683,7 +1699,7 @@ test("supports ticket chat GET and DELETE with ticketId", async () => {
   await server.start();
 
   const getResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/ticket-chat?ticketId=AI-200`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/ticket-chat?ticketId=AI-200`
   );
   assert.equal(getResponse.status, 200);
   const getBody = (await getResponse.json()) as { ticketId?: string; messages: unknown[] };
@@ -1691,7 +1707,7 @@ test("supports ticket chat GET and DELETE with ticketId", async () => {
   assert.equal(Array.isArray(getBody.messages), true);
 
   const deleteResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/ticket-chat?ticketId=AI-200`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/ticket-chat?ticketId=AI-200`,
     { method: "DELETE" }
   );
   assert.equal(deleteResponse.status, 200);
@@ -1707,8 +1723,8 @@ test("rejects disallowed repo path for ticket chat POST before spawn (AC-049)", 
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "ticket-chat-deny-machine",
@@ -1720,7 +1736,7 @@ test("rejects disallowed repo path for ticket chat POST before spawn (AC-049)", 
   serversToClose.push(server);
   await server.start();
 
-  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/ticket-chat`, {
+  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/ticket-chat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -1744,8 +1760,8 @@ test("supports run viewer chat history GET and DELETE", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "run-viewer-chat-machine",
@@ -1757,13 +1773,13 @@ test("supports run viewer chat history GET and DELETE", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const getResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/run-viewer-chat`);
+  const getResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/run-viewer-chat`);
   assert.equal(getResponse.status, 200);
   const getBody = (await getResponse.json()) as { messages: unknown[] };
   assert.equal(Array.isArray(getBody.messages), true);
 
   const deleteResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/run-viewer-chat`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/run-viewer-chat`,
     { method: "DELETE" }
   );
   assert.equal(deleteResponse.status, 200);
@@ -1779,8 +1795,8 @@ test("rejects disallowed run directory for run viewer chat POST (AC-049)", async
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "run-viewer-chat-deny-machine",
@@ -1792,7 +1808,7 @@ test("rejects disallowed run directory for run viewer chat POST (AC-049)", async
   serversToClose.push(server);
   await server.start();
 
-  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/run-viewer-chat`, {
+  const postResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/run-viewer-chat`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -1816,8 +1832,8 @@ test("lists and cleans up extracted run-viewer directories", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "run-viewer-extract-machine",
@@ -1829,7 +1845,7 @@ test("lists and cleans up extracted run-viewer directories", async () => {
   await server.start();
 
   const getResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/run-viewer-extract?runDir=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/run-viewer-extract?runDir=${encodeURIComponent(
       runDir
     )}`
   );
@@ -1837,7 +1853,7 @@ test("lists and cleans up extracted run-viewer directories", async () => {
   assert.deepEqual(await getResponse.json(), { files: ["nested/trace.log"] });
 
   const deleteResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/run-viewer-extract`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/run-viewer-extract`,
     {
       method: "DELETE",
       headers: { "content-type": "application/json" },
@@ -1855,8 +1871,8 @@ test("validates run-viewer-extract POST multipart payload", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "run-viewer-extract-post-machine",
@@ -1867,7 +1883,7 @@ test("validates run-viewer-extract POST multipart payload", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/run-viewer-extract`, {
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/run-viewer-extract`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ file: "bad" })
@@ -1876,7 +1892,7 @@ test("validates run-viewer-extract POST multipart payload", async () => {
   assert.deepEqual(await response.json(), { error: "Invalid form data" });
 });
 
-test("proxies unimplemented engineer routes to fallback origin when configured", async () => {
+test("proxies unimplemented gateway routes to fallback origin when configured", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-fallback-proxy-"));
   tempPathsToClean.push(tmpDir);
 
@@ -1899,11 +1915,11 @@ test("proxies unimplemented engineer routes to fallback origin when configured",
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
-    fallbackEngineerOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
+    fallbackGatewayOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
     machineName: "fallback-proxy-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
@@ -1913,7 +1929,7 @@ test("proxies unimplemented engineer routes to fallback origin when configured",
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/unimplemented-route`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`
   );
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { proxied: true, source: "upstream" });
@@ -1925,17 +1941,37 @@ test("supports core git action routes", async () => {
   const repoPath = path.join(tmpDir, "repo-git");
   await fs.mkdir(repoPath, { recursive: true });
 
-  await execFileAsync("git", ["init"], { cwd: repoPath });
-  await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: repoPath });
-  await execFileAsync("git", ["config", "user.name", "Test User"], { cwd: repoPath });
-  await fs.writeFile(path.join(repoPath, "README.md"), "# Hello\n", "utf-8");
-  await execFileAsync("git", ["add", "."], { cwd: repoPath });
-  await execFileAsync("git", ["commit", "-m", "initial"], { cwd: repoPath });
+  // Fake git binary: handles the subcommands the route exercises without
+  // requiring a real git repository.
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'case "$1" in',
+    '  rev-parse) echo "main" ;;',
+    '  status) exit 0 ;;',
+    '  branch)',
+    '    case "$2" in',
+    '      --list) exit 0 ;;',
+    '      --show-current) echo "main" ;;',
+    '      -a) printf "main|\\nfeature/AI-501|\\n" ;;',
+    '      *) exit 0 ;;',
+    '    esac',
+    '    ;;',
+    '  checkout) exit 0 ;;',
+    '  symbolic-ref) exit 1 ;;',
+    '  worktree) exit 0 ;;',
+    '  *) exit 0 ;;',
+    'esac',
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "git-action-machine",
@@ -1946,7 +1982,7 @@ test("supports core git action routes", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const statusResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/git`, {
+  const statusResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ action: "status", repoPath })
@@ -1956,7 +1992,7 @@ test("supports core git action routes", async () => {
   assert.equal(statusBody.hasChanges, false);
   assert.equal(typeof statusBody.currentBranch, "string");
 
-  const branchResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/git`, {
+  const branchResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ action: "branch", branchName: "feature/AI-501", repoPath })
@@ -1967,7 +2003,7 @@ test("supports core git action routes", async () => {
   assert.equal(branchBody.branchName, "feature/AI-501");
 
   const branchesResponse = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/git/branches?repo=${encodeURIComponent(repoPath)}`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/git/branches?repo=${encodeURIComponent(repoPath)}`
   );
   assert.equal(branchesResponse.status, 200);
   const branchesBody = (await branchesResponse.json()) as { branches: Array<{ name: string }> };
@@ -1980,18 +2016,28 @@ test("supports git diff route for working tree changes", async () => {
   const repoPath = path.join(tmpDir, "repo-git-diff");
   await fs.mkdir(repoPath, { recursive: true });
 
-  await execFileAsync("git", ["init"], { cwd: repoPath });
-  await execFileAsync("git", ["config", "user.email", "test@example.com"], { cwd: repoPath });
-  await execFileAsync("git", ["config", "user.name", "Test User"], { cwd: repoPath });
-  await fs.writeFile(path.join(repoPath, "app.ts"), "export const value = 1;\n", "utf-8");
-  await execFileAsync("git", ["add", "."], { cwd: repoPath });
-  await execFileAsync("git", ["commit", "-m", "initial"], { cwd: repoPath });
+  // Write the "current" file on disk (new content read directly by the route handler).
   await fs.writeFile(path.join(repoPath, "app.ts"), "export const value = 2;\n", "utf-8");
+
+  // Fake git binary: status reports the file as modified; show returns the old content.
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'case "$1" in',
+    '  status) printf " M app.ts\\n" ;;',
+    '  show) printf "export const value = 1;\\n" ;;',
+    '  *) exit 0 ;;',
+    'esac',
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "git-diff-machine",
@@ -2002,7 +2048,7 @@ test("supports git diff route for working tree changes", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const diffResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/git/diff`, {
+  const diffResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git/diff`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -2023,8 +2069,8 @@ test("validates git PR create request payload", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "git-pr-validate-machine",
@@ -2035,7 +2081,7 @@ test("validates git PR create request payload", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/git/pr`, {
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git/pr`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ title: "Missing repo" })
@@ -2054,8 +2100,8 @@ test("rejects disallowed repo for git PR list endpoint (AC-049)", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "git-pr-deny-machine",
@@ -2067,7 +2113,7 @@ test("rejects disallowed repo for git PR list endpoint (AC-049)", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/git/pr/list?repo=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/git/pr/list?repo=${encodeURIComponent(
       path.join(tmpDir, "not-allowed", "repo")
     )}`
   );
@@ -2085,8 +2131,8 @@ test("returns empty work-directory result when no session or worktree exists", a
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "work-dir-machine",
@@ -2099,7 +2145,7 @@ test("returns empty work-directory result when no session or worktree exists", a
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/work-directory/AI-999`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/work-directory/AI-999`
   );
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), {
@@ -2119,8 +2165,8 @@ test("rejects disallowed workDir on aggregate symphony status route (AC-049)", a
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "status-all-deny-machine",
@@ -2132,7 +2178,7 @@ test("rejects disallowed workDir on aggregate symphony status route (AC-049)", a
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/status?workDir=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/status?workDir=${encodeURIComponent(
       path.join(tmpDir, "not-allowed")
     )}`
   );
@@ -2154,8 +2200,8 @@ test("detects deploy config from repo scripts", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "deploy-detect-machine",
@@ -2167,7 +2213,7 @@ test("detects deploy config from repo scripts", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/deploy/detect`, {
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/deploy/detect`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ repoPath })
@@ -2192,8 +2238,8 @@ test("rejects disallowed repo/worktree for deploy check-existing (AC-049)", asyn
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "deploy-deny-machine",
@@ -2205,7 +2251,7 @@ test("rejects disallowed repo/worktree for deploy check-existing (AC-049)", asyn
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/deploy/check-existing`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/deploy/check-existing`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2226,8 +2272,8 @@ test("validates required fields for symphony extract-learnings route", async () 
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "learnings-validate-machine",
@@ -2239,7 +2285,7 @@ test("validates required fields for symphony extract-learnings route", async () 
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/extract-learnings`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/extract-learnings`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2259,14 +2305,14 @@ test("returns skipped status when no learnings are pending", async () => {
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
 
   await fs.mkdir(repoPath, { recursive: true });
-  await fs.mkdir(path.join(worktreeParent, "repo-learning-AI-101", ".claude", "work"), {
+  await fs.mkdir(path.join(worktreeParent, "repo-learning-AI-101", ".closedloop-ai", "work"), {
     recursive: true
   });
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "learnings-process-machine",
@@ -2278,7 +2324,7 @@ test("returns skipped status when no learnings are pending", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/process-learnings`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/process-learnings`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2297,6 +2343,11 @@ test("invokes plugin cache discovery when pending learnings exist", async () => 
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-learnings-plugin-"));
   tempPathsToClean.push(tmpDir);
 
+  // Isolate HOME so a developer's real ~/.claude/plugins/cache never spawns a real wrapper.
+  const isolatedHome = path.join(tmpDir, "isolated-home");
+  await fs.mkdir(isolatedHome, { recursive: true });
+  process.env.HOME = isolatedHome;
+
   const repoPath = path.join(tmpDir, "repo-plugin");
   const worktreeParent = path.join(tmpDir, "worktrees");
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
@@ -2305,7 +2356,7 @@ test("invokes plugin cache discovery when pending learnings exist", async () => 
   const pendingDir = path.join(
     worktreeParent,
     "repo-plugin-PLG-01",
-    ".claude",
+    ".closedloop-ai",
     "work",
     ".learnings",
     "pending"
@@ -2315,8 +2366,8 @@ test("invokes plugin cache discovery when pending learnings exist", async () => 
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "learnings-plugin-machine",
@@ -2328,7 +2379,7 @@ test("invokes plugin cache discovery when pending learnings exist", async () => 
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/process-learnings`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/process-learnings`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2339,14 +2390,13 @@ test("invokes plugin cache discovery when pending learnings exist", async () => 
   assert.equal(response.status, 200);
   const body = await response.json() as Record<string, unknown>;
   assert.equal(body.status, "processing");
-  // pid is null (no plugin cache) or a number (plugin found and script spawned)
-  assert.ok(body.pid === null || typeof body.pid === "number", "pid should be null or a number");
+  assert.equal(body.pid, null, "with isolated HOME and no plugin cache, no real script should spawn");
 
   // Allow the fire-and-forget status write to complete before cleanup
   await new Promise((resolve) => setTimeout(resolve, 400));
 });
 
-test("process-learnings launches self-learning wrapper with .claude/work as arg 1", async () => {
+test("process-learnings launches self-learning wrapper with .closedloop-ai/work as arg 1", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-learnings-wrapper-"));
   tempPathsToClean.push(tmpDir);
 
@@ -2356,7 +2406,7 @@ test("process-learnings launches self-learning wrapper with .claude/work as arg 
 
   await fs.mkdir(repoPath, { recursive: true });
   const worktreeDir = path.join(worktreeParent, "repo-wrapper-LRN-01");
-  const pendingDir = path.join(worktreeDir, ".claude", "work", ".learnings", "pending");
+  const pendingDir = path.join(worktreeDir, ".closedloop-ai", "work", ".learnings", "pending");
   await fs.mkdir(pendingDir, { recursive: true });
   await fs.writeFile(path.join(pendingDir, "learning-1.json"), "{}");
 
@@ -2380,8 +2430,8 @@ test("process-learnings launches self-learning wrapper with .claude/work as arg 
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "learnings-wrapper-machine",
@@ -2393,7 +2443,7 @@ test("process-learnings launches self-learning wrapper with .claude/work as arg 
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/process-learnings`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/process-learnings`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2406,7 +2456,7 @@ test("process-learnings launches self-learning wrapper with .claude/work as arg 
   assert.equal(body.status, "processing");
   assert.equal(typeof body.pid, "number", "pid should be a number when wrapper is found");
 
-  const expectedClaudeWorkDir = path.join(worktreeDir, ".claude", "work");
+  const expectedClaudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
   let spyContent = "";
   for (let attempt = 0; attempt < 20; attempt++) {
     try {
@@ -2421,11 +2471,11 @@ test("process-learnings launches self-learning wrapper with .claude/work as arg 
   assert.ok(spyContent.includes("ARG1="), "spy script should have recorded its arguments");
   assert.ok(
     spyContent.includes(`ARG1=${expectedClaudeWorkDir}`),
-    `wrapper should receive .claude/work as arg 1, got: ${spyContent}`
+    `wrapper should receive .closedloop-ai/work as arg 1, got: ${spyContent}`
   );
   assert.ok(
     spyContent.includes(`CLOSEDLOOP_WORKDIR=${expectedClaudeWorkDir}`),
-    `CLOSEDLOOP_WORKDIR env should be .claude/work path, got: ${spyContent}`
+    `CLOSEDLOOP_WORKDIR env should be .closedloop-ai/work path, got: ${spyContent}`
   );
 });
 
@@ -2438,8 +2488,8 @@ test("rejects disallowed repo path for record-learning-use (AC-049)", async () =
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "learnings-deny-machine",
@@ -2451,7 +2501,7 @@ test("rejects disallowed repo path for record-learning-use (AC-049)", async () =
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/record-learning-use`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/record-learning-use`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2473,8 +2523,8 @@ test("validates required fields for symphony chat route", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "symphony-chat-validate-machine",
@@ -2486,7 +2536,7 @@ test("validates required fields for symphony chat route", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/chat/AI-909`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/chat/AI-909`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2503,8 +2553,8 @@ test("validates required query params for symphony comment-chat GET", async () =
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "comment-chat-validate-machine",
@@ -2516,7 +2566,7 @@ test("validates required query params for symphony comment-chat GET", async () =
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/comment-chat/c-1`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/comment-chat/c-1`
   );
   assert.equal(response.status, 400);
   assert.deepEqual(await response.json(), { error: "ticketId and repo parameters are required" });
@@ -2532,8 +2582,8 @@ test("returns default commit message when worktree does not exist", async () => 
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "commit-message-default-machine",
@@ -2545,7 +2595,7 @@ test("returns default commit message when worktree does not exist", async () => 
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/commit-message/AI-123?repo=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/commit-message/AI-123?repo=${encodeURIComponent(
       repoPath
     )}`
   );
@@ -2564,33 +2614,38 @@ test("returns empty description when claude CLI is unavailable", async () => {
   const repoPath = path.join(tmpDir, "repo-commit-noclip");
   await fs.mkdir(repoPath, { recursive: true });
 
-  await initGitRepo(repoPath);
-
-  // Create a worktree matching the naming pattern resolveWorktreeDir produces
+  // Create a worktree directory matching the naming pattern resolveWorktreeDir
+  // produces, without using a real git worktree.
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
   const ticketId = "CM-001";
   const worktreeDir = path.join(worktreeParent, `repo-commit-noclip-${ticketId}`);
-  await execFileAsync("git", ["-C", repoPath, "worktree", "add", worktreeDir, "-b", `work/${ticketId}`]);
+  await fs.mkdir(worktreeDir, { recursive: true });
 
-  // Make a file change so git diff HEAD produces output
-  await fs.writeFile(path.join(worktreeDir, "feature.ts"), "export const x = 1;\n");
-  await execFileAsync("git", ["-C", worktreeDir, "add", "."]);
-
-  // Create a fake claude that exits non-zero with no output, placed first in
-  // PATH so it shadows any real installation (the spawn env appends
-  // /opt/homebrew/bin:/usr/local/bin, so restricting PATH alone is not enough)
+  // Create a fake bin directory with:
+  //   git   -- outputs diff content so getGitDiff returns non-empty (triggering
+  //            the claude call path)
+  //   claude -- exits non-zero with no output (unavailable)
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'case "$1" in',
+    '  diff) printf "feature.ts | 1 +\\n+ export const x = 1;\\n" ;;',
+    '  *) exit 0 ;;',
+    'esac',
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
   await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "commit-claude-unavail-machine",
@@ -2602,7 +2657,7 @@ test("returns empty description when claude CLI is unavailable", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/commit-message/${ticketId}?repo=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/commit-message/${ticketId}?repo=${encodeURIComponent(
       repoPath
     )}`
   );
@@ -2624,36 +2679,42 @@ test("uses valid JSON from claude stdout even when exit code is non-zero", async
   const repoPath = path.join(tmpDir, "repo-commit-nonzero");
   await fs.mkdir(repoPath, { recursive: true });
 
-  await initGitRepo(repoPath);
-
-  // Create a worktree with a staged change so getGitDiff returns non-empty
+  // Create a worktree directory so getGitDiff is reached (no real git needed).
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
   const ticketId = "CM-003";
   const worktreeDir = path.join(worktreeParent, `repo-commit-nonzero-${ticketId}`);
-  await execFileAsync("git", ["-C", repoPath, "worktree", "add", worktreeDir, "-b", `work/${ticketId}`]);
-  await fs.writeFile(path.join(worktreeDir, "feature.ts"), "export const x = 1;\n");
-  await execFileAsync("git", ["-C", worktreeDir, "add", "."]);
+  await fs.mkdir(worktreeDir, { recursive: true });
 
-  // Create a fake claude that exits non-zero but prints valid commit JSON.
-  // This is the core spawn-over-execFile regression guard: execFileAsync
-  // discards stdout on non-zero exit, but spawn preserves it.
+  // Create a fake bin with:
+  //   git    -- outputs diff content so getGitDiff returns non-empty
+  //   claude -- exits non-zero but prints valid commit JSON (spawn-over-execFile
+  //             regression guard: spawn preserves stdout on non-zero exit)
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
-  const fakeScript = [
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'case "$1" in',
+    '  diff) printf "feature.ts | 1 +\\n+ export const x = 1;\\n" ;;',
+    '  *) exit 0 ;;',
+    'esac',
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+  const fakeClaudeScript = [
     "#!/bin/sh",
     'echo \'{"title": "CM-003: Add feature module", "description": "- Added feature.ts export"}\'',
     "exit 1",
   ].join("\n");
-  await fs.writeFile(path.join(fakeBin, "claude"), fakeScript, { mode: 0o755 });
+  await fs.writeFile(path.join(fakeBin, "claude"), fakeClaudeScript, { mode: 0o755 });
 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "commit-nonzero-machine",
@@ -2665,14 +2726,14 @@ test("uses valid JSON from claude stdout even when exit code is non-zero", async
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/commit-message/${ticketId}?repo=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/commit-message/${ticketId}?repo=${encodeURIComponent(
       repoPath
     )}`
   );
   assert.equal(response.status, 200);
   const body = await response.json();
-  // Must parse the JSON from stdout despite non-zero exit — this is the
-  // contract that spawn preserves and execFileAsync would break.
+  // Must parse the JSON from stdout despite non-zero exit -- this is the
+  // contract that spawn preserves (execFile would discard stdout on non-zero exit).
   assert.equal(body.source, "claude", "source should be claude when valid JSON is parsed from stdout");
   assert.equal(body.title, "CM-003: Add feature module");
   assert.equal(body.description, "- Added feature.ts export");
@@ -2685,22 +2746,32 @@ test("returns default with empty description when worktree has no diff", async (
   const repoPath = path.join(tmpDir, "repo-commit-nodiff");
   await fs.mkdir(repoPath, { recursive: true });
 
-  await initGitRepo(repoPath);
-
-  // Create a real worktree with no uncommitted changes — getGitDiff returns ""
-  // because git diff HEAD produces no output, hitting the !diff early-return
+  // Create a worktree directory with no changes — fake git outputs nothing for
+  // "diff", so getGitDiff strips the "---" separator and returns "".
   const worktreeParent = path.join(tmpDir, "worktrees");
   await fs.mkdir(worktreeParent, { recursive: true });
   const ticketId = "CM-002";
-  const worktreeDir = path.join(worktreeParent, `repo-commit-nodiff-${ticketId}`);
-  await execFileAsync("git", ["-C", repoPath, "worktree", "add", worktreeDir, "-b", `work/${ticketId}`]);
+  await fs.mkdir(path.join(worktreeParent, `repo-commit-nodiff-${ticketId}`), { recursive: true });
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'case "$1" in',
+    '  diff) exit 0 ;;',
+    '  *) exit 0 ;;',
+    'esac',
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "commit-nodiff-machine",
@@ -2712,7 +2783,7 @@ test("returns default with empty description when worktree has no diff", async (
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/commit-message/${ticketId}?repo=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/commit-message/${ticketId}?repo=${encodeURIComponent(
       repoPath
     )}`
   );
@@ -2733,8 +2804,8 @@ test("rejects disallowed repo for symphony launch (AC-049)", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "launch-deny-machine",
@@ -2745,7 +2816,7 @@ test("rejects disallowed repo for symphony launch (AC-049)", async () => {
   serversToClose.push(server);
   await server.start();
 
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/launch`, {
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/launch`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -2762,6 +2833,11 @@ test("symphony launch invokes plugin cache discovery for run-loop script", async
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-launch-plugin-"));
   tempPathsToClean.push(tmpDir);
 
+  // Isolate HOME so a developer's real ~/.claude/plugins/cache never spawns real run-loop.sh.
+  const isolatedHome = path.join(tmpDir, "isolated-home");
+  await fs.mkdir(isolatedHome, { recursive: true });
+  process.env.HOME = isolatedHome;
+
   const repoPath = path.join(tmpDir, "repo-launch");
   const worktreeParent = path.join(tmpDir, "worktrees");
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
@@ -2772,8 +2848,8 @@ test("symphony launch invokes plugin cache discovery for run-loop script", async
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "launch-plugin-machine",
@@ -2785,7 +2861,7 @@ test("symphony launch invokes plugin cache discovery for run-loop script", async
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/launch`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/launch`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2800,11 +2876,10 @@ test("symphony launch invokes plugin cache discovery for run-loop script", async
   const body = await response.json() as Record<string, unknown>;
   assert.equal(body.success, true);
   assert.equal(body.ticketId, "LAUNCH-01");
-  // pid is null (no plugin cache) or a number (plugin found and script spawned)
-  assert.ok(body.pid === null || typeof body.pid === "number", "pid should be null or a number");
+  assert.equal(body.pid, null, "with isolated HOME and no plugin cache, no real run-loop should spawn");
 });
 
-test("symphony launch passes .claude/work path (not ticket ID) as first arg to run-loop.sh", async () => {
+test("symphony launch passes .closedloop-ai/work path (not ticket ID) as first arg to run-loop.sh", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-launch-args-"));
   tempPathsToClean.push(tmpDir);
 
@@ -2840,8 +2915,8 @@ test("symphony launch passes .claude/work path (not ticket ID) as first arg to r
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "launch-args-machine",
@@ -2853,7 +2928,7 @@ test("symphony launch passes .claude/work path (not ticket ID) as first arg to r
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/symphony/launch`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/launch`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2870,7 +2945,7 @@ test("symphony launch passes .claude/work path (not ticket ID) as first arg to r
   assert.equal(typeof body.pid, "number", "pid should be a number when script is found");
 
   // Wait for the detached spy script to write its output
-  const expectedClaudeWorkDir = path.join(worktreeDir, ".claude", "work");
+  const expectedClaudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
   let spyContent = "";
   for (let attempt = 0; attempt < 20; attempt++) {
     try {
@@ -2885,11 +2960,11 @@ test("symphony launch passes .claude/work path (not ticket ID) as first arg to r
   assert.ok(spyContent.includes("ARG1="), "spy script should have recorded its arguments");
   assert.ok(
     spyContent.includes(`ARG1=${expectedClaudeWorkDir}`),
-    `first arg should be .claude/work path, got: ${spyContent}`
+    `first arg should be .closedloop-ai/work path, got: ${spyContent}`
   );
   assert.ok(
     spyContent.includes(`CLOSEDLOOP_WORKDIR=${expectedClaudeWorkDir}`),
-    `CLOSEDLOOP_WORKDIR env should be .claude/work path, got: ${spyContent}`
+    `CLOSEDLOOP_WORKDIR env should be .closedloop-ai/work path, got: ${spyContent}`
   );
 });
 
@@ -2899,8 +2974,8 @@ test("validates required fields for codex chat route", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [tmpDir],
     machineName: "codex-chat-validate-machine",
@@ -2912,7 +2987,7 @@ test("validates required fields for codex chat route", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/codex/chat/AI-111`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/codex/chat/AI-111`,
     {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -2933,8 +3008,8 @@ test("rejects disallowed repo for codex status route (AC-049)", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://app.symphony.com",
     getAllowedDirectories: () => [allowedDir],
     machineName: "codex-status-deny-machine",
@@ -2946,7 +3021,7 @@ test("rejects disallowed repo for codex status route (AC-049)", async () => {
   await server.start();
 
   const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/codex/status/AI-333?repo=${encodeURIComponent(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/codex/status/AI-333?repo=${encodeURIComponent(
       path.join(tmpDir, "not-allowed", "repo")
     )}`
   );
@@ -2971,7 +3046,7 @@ test("saveCodexChatSession writes to review-scoped file when chatContextId is 'r
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-codex-session-"));
   tempPathsToClean.push(tmpDir);
 
-  const workDir = path.join(tmpDir, ".claude", "work");
+  const workDir = path.join(tmpDir, ".closedloop-ai", "work");
   await fs.mkdir(workDir, { recursive: true });
 
   // Write with chatContextId: "review" → codex-chat-review.json
@@ -2997,7 +3072,7 @@ test("saveCodexChatSession is a no-op for non-codex providers", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-codex-session-noop-"));
   tempPathsToClean.push(tmpDir);
 
-  const workDir = path.join(tmpDir, ".claude", "work");
+  const workDir = path.join(tmpDir, ".closedloop-ai", "work");
   await fs.mkdir(workDir, { recursive: true });
 
   await saveCodexChatSession(tmpDir, "sess-1", "claude", "review");
@@ -3018,10 +3093,10 @@ test("GET codex status returns sessionId when state file has one", async () => {
   const repoDir = path.join(tmpDir, "my-repo");
   await fs.mkdir(repoDir, { recursive: true });
 
-  // Create worktree structure: <parent>/<repoName>-<ticketId>/.claude/work/
+  // Create worktree structure: <parent>/<repoName>-<ticketId>/.closedloop-ai/work/
   const ticketId = "TEST-123";
   const worktreeDir = path.join(tmpDir, `my-repo-${ticketId}`);
-  const workDir = path.join(worktreeDir, ".claude", "work");
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
   await fs.mkdir(workDir, { recursive: true });
 
   // Write state file with sessionId
@@ -3042,8 +3117,8 @@ test("GET codex status returns sessionId when state file has one", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "http://localhost:3000",
     getAllowedDirectories: () => [tmpDir],
     machineName: "status-sessionid-machine",
@@ -3055,7 +3130,7 @@ test("GET codex status returns sessionId when state file has one", async () => {
   await server.start();
 
   const res = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/codex/status/${ticketId}?repo=${encodeURIComponent(repoDir)}&provider=codex`
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/codex/status/${ticketId}?repo=${encodeURIComponent(repoDir)}&provider=codex`
   );
   assert.equal(res.status, 200);
   const data = await res.json() as { hasReview: boolean; sessionId?: string; status: string };
@@ -3070,8 +3145,8 @@ test("POST review-verdict returns 400 when sessionId is missing", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "http://localhost:3000",
     getAllowedDirectories: () => [tmpDir],
     machineName: "verdict-400-machine",
@@ -3083,7 +3158,7 @@ test("POST review-verdict returns 400 when sessionId is missing", async () => {
   await server.start();
 
   const res = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/codex/review-verdict/TICKET-1`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/codex/review-verdict/TICKET-1`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3101,8 +3176,8 @@ test("POST review-verdict returns 400 for invalid provider", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "http://localhost:3000",
     getAllowedDirectories: () => [tmpDir],
     machineName: "verdict-bad-provider-machine",
@@ -3114,7 +3189,7 @@ test("POST review-verdict returns 400 for invalid provider", async () => {
   await server.start();
 
   const res = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/codex/review-verdict/TICKET-1`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/codex/review-verdict/TICKET-1`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3132,8 +3207,8 @@ test("POST review-verdict returns 403 for disallowed repo", async () => {
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "http://localhost:3000",
     getAllowedDirectories: () => [tmpDir],
     machineName: "verdict-403-machine",
@@ -3145,7 +3220,7 @@ test("POST review-verdict returns 403 for disallowed repo", async () => {
   await server.start();
 
   const res = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/engineer/codex/review-verdict/TICKET-1`,
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/codex/review-verdict/TICKET-1`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3163,8 +3238,8 @@ test("getWebAppOrigin getter takes effect on next CORS response without restart"
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
-    preferredPort: PORT_PROBE_ORDER[0],
-    fallbackPorts: PORT_PROBE_ORDER.slice(1),
+    preferredPort: 0,
+    fallbackPorts: [0],
     webAppOrigin: "https://initial.example.com",
     getWebAppOrigin: () => currentWebAppOrigin,
     getAllowedDirectories: () => [tmpDir],
@@ -3186,6 +3261,940 @@ test("getWebAppOrigin getter takes effect on next CORS response without restart"
   // Second request: should reflect the updated origin immediately
   const res2 = await fetch(`http://127.0.0.1:${server.getActivePort()}/health`);
   assert.equal(res2.headers.get("access-control-allow-origin"), "https://updated.example.com");
+});
+
+// ---------------------------------------------------------------------------
+// Helper: build a minimal LocalJob for seeding JobStore
+// ---------------------------------------------------------------------------
+
+function makeTestJob(overrides: Partial<LocalJob> = {}): LocalJob {
+  const now = new Date().toISOString();
+  return {
+    id: overrides.id ?? "test-job-1",
+    kind: "SYMPHONY_LOOP",
+    loopId: overrides.loopId ?? "test-loop-1",
+    command: "EXECUTE",
+    status: "RUNNING" as LocalJobStatus,
+    startedAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Bug 3: /api/gateway/symphony/kill updates JobStore immediately
+// ---------------------------------------------------------------------------
+
+test("symphony/kill updates JobStore to STOPPED when killing by ticket", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-kill-jobstore-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-kill-js");
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeDir = path.join(worktreeParent, "repo-kill-js-AI-900");
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
+  await fs.mkdir(workDir, { recursive: true });
+  await fs.writeFile(
+    path.join(workDir, "state.json"),
+    JSON.stringify({ status: "IN_PROGRESS", phase: "Running" }),
+    "utf-8"
+  );
+
+  // Seed JobStore with a RUNNING job whose worktreeDir matches the kill target
+  const jobStore = new JobStore({ cwd: tmpDir, name: "test-kill-jobstore" });
+  const seededJob = makeTestJob({
+    id: "kill-js-job-1",
+    worktreeDir,
+    status: "RUNNING",
+  });
+  jobStore.upsert(seededJob);
+  assert.equal(jobStore.listRunning().length, 1, "precondition: job is active");
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "kill-jobstore-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  // Kill via ticketId + repoPath (no PID file -> noPidFile branch)
+  const killResponse = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/kill`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ticketId: "AI-900", repoPath }),
+    }
+  );
+  assert.equal(killResponse.status, 200);
+
+  // JobStore should now have the job as STOPPED (not stale RUNNING)
+  const updatedJob = jobStore.getById("kill-js-job-1");
+  assert.ok(updatedJob, "job should still exist in store");
+  assert.equal(updatedJob!.status, "STOPPED", "job status should be STOPPED after kill");
+  assert.ok(updatedJob!.completedAt, "completedAt should be set");
+  assert.equal(jobStore.listRunning().length, 0, "no active jobs should remain");
+});
+
+// ---------------------------------------------------------------------------
+// Bug 4e: Restart-fallback cancel via loop/kill
+// ---------------------------------------------------------------------------
+
+test("loop/kill uses JobStore fallback when runningLoops is empty (post-restart)", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-loopkill-fallback-"));
+  tempPathsToClean.push(tmpDir);
+
+  // Spawn a real process so the kill handler can find it alive
+  const sleeper = spawn("sleep", ["120"], { detached: true, stdio: "ignore" });
+  const sleeperPid = sleeper.pid!;
+  childPidsToKill.push(sleeperPid);
+
+  // Seed JobStore with a RUNNING job that has a loopId and the sleeper PID
+  const jobStore = new JobStore({ cwd: tmpDir, name: "test-loopkill-fallback" });
+  const loopId = "restart-fallback-loop-1";
+  const seededJob = makeTestJob({
+    id: "loopkill-fb-job-1",
+    loopId,
+    pid: sleeperPid,
+    status: "RUNNING",
+  });
+  jobStore.upsert(seededJob);
+
+  // Fresh server (runningLoops map is empty since this is a new server instance)
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "loopkill-fallback-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const killResponse = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop/kill`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ loopId }),
+    }
+  );
+  assert.equal(killResponse.status, 200);
+  const killBody = (await killResponse.json()) as { success: boolean; message: string };
+  assert.equal(killBody.success, true);
+  assert.ok(killBody.message.includes("restart fallback"), "message should mention restart fallback");
+
+  // JobStore should now have the job as CANCEL_PENDING
+  const updatedJob = jobStore.getById("loopkill-fb-job-1");
+  assert.ok(updatedJob, "job should still exist in store");
+  assert.equal(updatedJob!.status, "CANCEL_PENDING", "job status should be CANCEL_PENDING");
+
+  // Process should be dead (the handler sends SIGTERM + waits + SIGKILL)
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  let processAlive = false;
+  try { process.kill(sleeperPid, 0); processAlive = true; } catch { /* dead */ }
+  assert.equal(processAlive, false, "sleeper process should be killed");
+});
+
+// ---------------------------------------------------------------------------
+// Bug 5: status endpoint suppresses terminal status while process is alive
+// ---------------------------------------------------------------------------
+
+test("symphony/status returns IN_PROGRESS when state.json says COMPLETED but process is alive", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-status-alive-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-status-alive");
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeDir = path.join(worktreeParent, "repo-status-alive-AI-555");
+  const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
+  await fs.mkdir(workDir, { recursive: true });
+
+  // Spawn a real process so isProcessRunning returns true
+  const sleeper = spawn("sleep", ["120"], { detached: true, stdio: "ignore" });
+  const sleeperPid = sleeper.pid!;
+  childPidsToKill.push(sleeperPid);
+
+  // Write PID file so the status handler finds the alive process
+  await fs.writeFile(path.join(workDir, "process.pid"), String(sleeperPid), "utf-8");
+
+  // Write state.json with terminal status COMPLETED
+  await fs.writeFile(
+    path.join(workDir, "state.json"),
+    JSON.stringify({
+      status: "COMPLETED",
+      phase: "Completed",
+      timestamp: new Date().toISOString(),
+    }),
+    "utf-8"
+  );
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "status-alive-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/status/AI-555?repo=${encodeURIComponent(repoPath)}`
+  );
+  assert.equal(response.status, 200);
+
+  const body = (await response.json()) as {
+    exists: boolean;
+    stateExists: boolean;
+    status: string;
+    phase: string;
+    processRunning: boolean;
+    pid: number;
+  };
+  assert.equal(body.exists, true);
+  assert.equal(body.stateExists, true);
+  assert.equal(body.processRunning, true, "process should be detected as alive");
+  assert.equal(body.pid, sleeperPid);
+  // Key assertion: terminal status is suppressed while process is alive
+  assert.equal(body.status, "IN_PROGRESS", "should show IN_PROGRESS, not COMPLETED, while process alive");
+  assert.equal(body.phase, "Running", "phase should be normalized to Running");
+});
+
+// Helper: create a minimal passing environment for health-check tests
+// (fake binaries, plugin registry, repos config) and return the tmpDir.
+async function createHealthCheckFixture(
+  pythonBinaryContent: string | null
+): Promise<{ tmpDir: string; binDir: string; symphonyDir: string }> {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-python-hc-"));
+  tempPathsToClean.push(tmpDir);
+
+  // Create fake home dir structure
+  const homeDir = path.join(tmpDir, "home");
+  const binDir = path.join(tmpDir, "bin");
+  const symphonyDir = path.join(tmpDir, "symphony-home");
+  await fs.mkdir(homeDir, { recursive: true });
+  await fs.mkdir(binDir, { recursive: true });
+  await fs.mkdir(symphonyDir, { recursive: true });
+
+  // Write fake binaries for git, claude, gh
+  const fakeBinaries: Array<[string, string]> = [
+    ["git", '#!/bin/sh\necho "git version 2.40.0"'],
+    ["claude", '#!/bin/sh\necho "1.5.0"'],
+    [
+      "gh",
+      '#!/bin/sh\nif [ "$1" = "auth" ]; then\n  exit 0\nfi\necho "gh version 2.40.0 (2024-01-01)"\n',
+    ],
+    ["codex", '#!/bin/sh\necho "0.1.0"'],
+  ];
+  for (const [name, content] of fakeBinaries) {
+    const binPath = path.join(binDir, name);
+    await fs.writeFile(binPath, content, { mode: 0o755 });
+  }
+
+  // Optionally write the python3 binary
+  if (pythonBinaryContent !== null) {
+    const pythonPath = path.join(binDir, "python3");
+    await fs.writeFile(pythonPath, pythonBinaryContent, { mode: 0o755 });
+  }
+
+  // Write installed_plugins.json so all plugin checks pass
+  const pluginsDir = path.join(homeDir, ".claude", "plugins");
+  await fs.mkdir(pluginsDir, { recursive: true });
+
+  const pluginNames = ["code", "platform", "judges", "code-review", "self-learning"];
+  const pluginsRecord: Record<string, Array<{ installPath: string; version: string }>> = {};
+  for (const name of pluginNames) {
+    const installPath = path.join(tmpDir, `plugin-${name}`);
+    await fs.mkdir(installPath, { recursive: true });
+    pluginsRecord[`${name}@closedloop-ai`] = [{ installPath, version: "1.0.0" }];
+  }
+  await fs.writeFile(
+    path.join(pluginsDir, "installed_plugins.json"),
+    JSON.stringify({ version: 1, plugins: pluginsRecord }),
+    "utf-8"
+  );
+
+  // Write repos.json so worktree-dir check passes
+  const configDir = path.join(symphonyDir, "config");
+  await fs.mkdir(configDir, { recursive: true });
+  await fs.writeFile(
+    path.join(configDir, "repos.json"),
+    JSON.stringify({
+      settings: { worktreeParentDir: "/tmp/worktrees", worktreeParentDirConfirmed: true },
+    }),
+    "utf-8"
+  );
+
+  return { tmpDir, binDir, symphonyDir };
+}
+
+test("python3 health check: passes for version 3.11.0 (control)", async () => {
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.11.0"\n'
+  );
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "python-hc-control-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; required: boolean; passed: boolean; remediation?: string }>;
+    allRequiredPassed: boolean;
+  };
+
+  const pythonCheck = body.checks.find((c) => c.id === "python3");
+  assert.ok(pythonCheck, "python3 check should be present");
+  assert.equal(pythonCheck.passed, true, "python3 3.11.0 should pass");
+  assert.equal(pythonCheck.required, true, "python3 check should be required");
+  assert.equal(pythonCheck.remediation, undefined, "no remediation on passing check");
+  assert.equal(body.allRequiredPassed, true, "all required checks should pass");
+});
+
+test("python3 health check: fails when python3 not found", async () => {
+  // Pass null to skip writing the python3 binary
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(null);
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "python-hc-notfound-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; required: boolean; passed: boolean; remediation?: string }>;
+    allRequiredPassed: boolean;
+  };
+
+  const pythonCheck = body.checks.find((c) => c.id === "python3");
+  assert.ok(pythonCheck, "python3 check should be present");
+  assert.equal(pythonCheck.passed, false, "python3 not found should fail");
+  assert.equal(pythonCheck.required, true, "python3 check should be required");
+  // Remediation is either an install hint (binary not found anywhere) or a PATH hint
+  // (binary found at a known location like /usr/bin/python3 but not on the test PATH).
+  // Both are valid and informative; accept either.
+  assert.ok(
+    pythonCheck.remediation?.includes("Install Python 3.10 or later") ||
+      pythonCheck.remediation?.includes("PATH"),
+    `remediation should mention install or PATH, got: ${pythonCheck.remediation}`
+  );
+  assert.equal(body.allRequiredPassed, false, "allRequiredPassed should be false when python3 missing");
+});
+
+test("python3 health check: fails for version below floor (3.9.7)", async () => {
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.9.7"\n'
+  );
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "python-hc-belowfloor-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; required: boolean; passed: boolean; remediation?: string }>;
+    allRequiredPassed: boolean;
+  };
+
+  const pythonCheck = body.checks.find((c) => c.id === "python3");
+  assert.ok(pythonCheck, "python3 check should be present");
+  assert.equal(pythonCheck.passed, false, "python3 3.9.7 should fail");
+  assert.equal(pythonCheck.required, true, "python3 check should be required");
+  assert.ok(
+    (pythonCheck as { error?: string }).error?.includes("below the required minimum"),
+    "error should indicate version is below minimum"
+  );
+  assert.ok(
+    pythonCheck.remediation?.includes("Install Python 3.10 or later"),
+    "remediation should mention Install Python 3.10 or later"
+  );
+  assert.equal(body.allRequiredPassed, false, "allRequiredPassed should be false for below-floor python");
+});
+
+test("python3 health check: fails for suffixed below-floor version (3.9rc1)", async () => {
+  // This exercises the NaN-via-split path that the regex fix closes:
+  // VERSION_REGEX captures "3.9rc1" as a valid version, but Number("9rc1") === NaN
+  // and NaN < 10 is false, so the old split(".").map(Number) code would have passed this.
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.9rc1"\n'
+  );
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "python-hc-suffixed-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; required: boolean; passed: boolean; remediation?: string }>;
+    allRequiredPassed: boolean;
+  };
+
+  const pythonCheck = body.checks.find((c) => c.id === "python3");
+  assert.ok(pythonCheck, "python3 check should be present");
+  assert.equal(pythonCheck.passed, false, "python3 3.9rc1 should fail");
+  assert.equal(pythonCheck.required, true, "python3 check should be required");
+  assert.ok(
+    (pythonCheck as { error?: string }).error?.includes("below the required minimum"),
+    "error should indicate version is below minimum, not 'Unable to determine'"
+  );
+  assert.ok(
+    pythonCheck.remediation?.includes("Install Python 3.10 or later"),
+    "remediation should mention Install Python 3.10 or later"
+  );
+  assert.equal(body.allRequiredPassed, false, "allRequiredPassed should be false for suffixed below-floor version");
+});
+
+test("python3 health check: passes for version with extra suffix (3.10.1.post1)", async () => {
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.10.1.post1"\n'
+  );
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "python-hc-extrasuffix-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; required: boolean; passed: boolean; error?: string; remediation?: string }>;
+    allRequiredPassed: boolean;
+  };
+
+  const pythonCheck = body.checks.find((c) => c.id === "python3");
+  assert.ok(pythonCheck, "python3 check should be present");
+  assert.equal(pythonCheck.passed, true, "python3 3.10.1.post1 should pass");
+  assert.equal(pythonCheck.required, true, "python3 check should be required");
+  assert.equal(pythonCheck.error, undefined, "no error on passing check");
+  assert.equal(body.allRequiredPassed, true, "all required checks should pass");
+});
+
+test("python3 health check: fails for unparseable version string", async () => {
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "custom-build"\n'
+  );
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "python-hc-unparseable-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; required: boolean; passed: boolean; error?: string; remediation?: string }>;
+    allRequiredPassed: boolean;
+  };
+
+  const pythonCheck = body.checks.find((c) => c.id === "python3");
+  assert.ok(pythonCheck, "python3 check should be present");
+  assert.equal(pythonCheck.passed, false, "unparseable python version should fail");
+  assert.equal(pythonCheck.required, true, "python3 check should be required");
+  assert.ok(
+    (pythonCheck as { error?: string }).error?.includes("Unable to determine Python version"),
+    "error should indicate unable to determine version"
+  );
+  assert.equal(body.allRequiredPassed, false, "allRequiredPassed should be false for unparseable version");
+});
+
+// ---- Phase 1 tests: claude-cli rich diagnostics ----
+
+test("claude-cli ENOENT with no foundAt: error is Not found, remediation mentions npm install", async () => {
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.11.0"\n'
+  );
+
+  // Remove the fake claude binary so ENOENT is triggered
+  await fs.rm(path.join(binDir, "claude"), { force: true });
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "phase1-enoent-no-foundat",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; passed: boolean; error?: string; remediation?: string }>;
+  };
+
+  const check = body.checks.find((c) => c.id === "claude-cli");
+  assert.ok(check, "claude-cli check should be present");
+  assert.equal(check.passed, false);
+  assert.equal(check.error, "Not found");
+  assert.ok(check.remediation?.includes("npm install"), `remediation should mention npm install, got: ${check.remediation}`);
+});
+
+test("claude-cli ENOENT with foundAt: error mentions path, remediation mentions Add to PATH", async () => {
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.11.0"\n'
+  );
+
+  // Remove claude from binDir (PATH) but place it in a known location (~/.claude/local/claude)
+  await fs.rm(path.join(binDir, "claude"), { force: true });
+  const homeDir = path.join(tmpDir, "home");
+  const claudeLocalDir = path.join(homeDir, ".claude", "local");
+  await fs.mkdir(claudeLocalDir, { recursive: true });
+  await fs.writeFile(path.join(claudeLocalDir, "claude"), '#!/bin/sh\necho "1.5.0"', { mode: 0o755 });
+
+  process.env.HOME = homeDir;
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "phase1-enoent-with-foundat",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; passed: boolean; error?: string; remediation?: string; debug?: { foundAt?: string[] } }>;
+  };
+
+  const check = body.checks.find((c) => c.id === "claude-cli");
+  assert.ok(check, "claude-cli check should be present");
+  assert.equal(check.passed, false);
+  assert.ok(check.error?.includes("but not on PATH"), `error should mention 'but not on PATH', got: ${check.error}`);
+  assert.ok(check.remediation?.includes("Add"), `remediation should mention 'Add', got: ${check.remediation}`);
+  assert.ok(check.remediation?.includes("to PATH"), `remediation should mention 'to PATH', got: ${check.remediation}`);
+});
+
+test("claude-cli ETIMEDOUT: error mentions Timed out, remediation mentions terminal", async () => {
+  // Mock runCommand so `claude --version` throws ETIMEDOUT immediately.
+  // Avoids spawning a real process or waiting on the 3s command timeout,
+  // and dodges shell-portability issues (dash on Ubuntu rejects `read -t`).
+  // Match by basename because resolveBinary() may pass a full resolved path
+  // (e.g. /Users/.../bin/claude) rather than the bare binary name.
+  _setRunCommandForTesting(async (cmd) => {
+    if (path.basename(cmd) === "claude") {
+      throw { code: "ETIMEDOUT", stderr: "", message: "command timed out" };
+    }
+    throw { code: "ENOENT", stderr: "", message: "not found" };
+  });
+  try {
+    const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-etimedout-"));
+    tempPathsToClean.push(tmpDir);
+    const symphonyDir = path.join(tmpDir, "symphony-home");
+    await fs.mkdir(symphonyDir, { recursive: true });
+
+    const server = new DesktopGatewayServer({
+      host: "127.0.0.1",
+      preferredPort: 0,
+      fallbackPorts: [0],
+      webAppOrigin: "https://app.symphony.com",
+      getAllowedDirectories: () => [tmpDir],
+      machineName: "phase1-etimedout",
+      version: "0.1.0-test",
+      capabilities: EMPTY_CAPABILITIES,
+      discoveryFilePath: path.join(tmpDir, "electron-port"),
+      getSymphonyDir: () => symphonyDir,
+    });
+    serversToClose.push(server);
+    await server.start();
+
+    const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      checks: Array<{ id: string; passed: boolean; error?: string; remediation?: string }>;
+    };
+
+    const check = body.checks.find((c) => c.id === "claude-cli");
+    assert.ok(check, "claude-cli check should be present");
+    assert.equal(check.passed, false);
+    assert.ok(check.error?.includes("Timed out"), `error should mention Timed out, got: ${check.error}`);
+    assert.ok(
+      check.remediation?.includes("terminal"),
+      `remediation should mention terminal, got: ${check.remediation}`
+    );
+  } finally {
+    _setRunCommandForTesting();
+  }
+});
+
+test("KNOWN_CLAUDE_LOCATIONS probe: fake binary at known location appears in foundAt", async () => {
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.11.0"\n'
+  );
+
+  // Remove claude from PATH
+  await fs.rm(path.join(binDir, "claude"), { force: true });
+
+  // Place claude at ~/.volta/bin/claude (a KNOWN_CLAUDE_LOCATIONS entry)
+  const homeDir = path.join(tmpDir, "home");
+  const voltaBinDir = path.join(homeDir, ".volta", "bin");
+  await fs.mkdir(voltaBinDir, { recursive: true });
+  await fs.writeFile(path.join(voltaBinDir, "claude"), '#!/bin/sh\necho "1.5.0"', { mode: 0o755 });
+
+  process.env.HOME = homeDir;
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "phase1-known-locations",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; passed: boolean; debug?: { foundAt?: string[] } }>;
+  };
+
+  const check = body.checks.find((c) => c.id === "claude-cli");
+  assert.ok(check, "claude-cli check should be present");
+  assert.equal(check.passed, false);
+  assert.ok(Array.isArray(check.debug?.foundAt), "debug.foundAt should be an array");
+  assert.ok(
+    check.debug?.foundAt?.some((p) => p.includes(".volta")),
+    `foundAt should include the volta path, got: ${JSON.stringify(check.debug?.foundAt)}`
+  );
+});
+
+test("claude-cli EACCES with foundAt: error mentions not executable, remediation mentions chmod +x", async () => {
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.11.0"\n'
+  );
+
+  // Make the claude binary on PATH non-executable so execFileAsync fails with EACCES.
+  // Note: fs.writeFile({ mode }) only applies when creating a new file; since the fixture
+  // already created claude with 0o755, we must explicitly chmod it.
+  const claudeOnPath = path.join(binDir, "claude");
+  await fs.chmod(claudeOnPath, 0o644);
+
+  // Place an executable claude at ~/.claude/local/claude (a KNOWN_CLAUDE_LOCATIONS entry)
+  // so that collectBinaryDebug finds it and populates foundAt
+  const homeDir = path.join(tmpDir, "home");
+  const claudeLocalDir = path.join(homeDir, ".claude", "local");
+  await fs.mkdir(claudeLocalDir, { recursive: true });
+  const knownClaudePath = path.join(claudeLocalDir, "claude");
+  await fs.writeFile(knownClaudePath, '#!/bin/sh\necho "1.5.0"', { mode: 0o755 });
+
+  process.env.HOME = homeDir;
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "phase1-eacces-with-foundat",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{ id: string; passed: boolean; error?: string; remediation?: string }>;
+  };
+
+  const check = body.checks.find((c) => c.id === "claude-cli");
+  assert.ok(check, "claude-cli check should be present");
+  assert.equal(check.passed, false);
+  assert.ok(
+    check.error?.includes("not executable"),
+    `error should mention 'not executable', got: ${check.error}`
+  );
+  assert.ok(
+    check.remediation?.includes("chmod +x"),
+    `remediation should mention 'chmod +x', got: ${check.remediation}`
+  );
+  // Remediation must point at the actually-broken file (claudeOnPath), not
+  // the unrelated executable at knownClaudePath. Regression guard for the
+  // PR review comment about preserving the failing path in EACCES diagnostics.
+  assert.ok(
+    check.remediation?.includes(claudeOnPath),
+    `remediation should reference the non-executable path ${claudeOnPath}, got: ${check.remediation}`
+  );
+  assert.ok(
+    !check.remediation?.includes(knownClaudePath),
+    `remediation should not reference the working path ${knownClaudePath}, got: ${check.remediation}`
+  );
+});
+
+// ---- Telemetry dedupe integration tests ----
+
+test("telemetry dedupe: ENOENT health-check emits healthcheck.failure_detected with check_id=claude-cli", async () => {
+  const telemetryEvents: EnrichedTelemetryEvent[] = [];
+  Observability.init({ telemetrySend: (event) => telemetryEvents.push(event) });
+
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.11.0"\n'
+  );
+
+  // Remove claude binary so ENOENT is triggered
+  await fs.rm(path.join(binDir, "claude"), { force: true });
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "telemetry-dedupe-enoent-1",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+
+  const failureEvent = telemetryEvents.find((e) => e.category === "healthcheck.failure_detected");
+  assert.ok(failureEvent, "healthcheck.failure_detected should have been emitted");
+  assert.equal(failureEvent.diagnostics?.extra?.check_id, "claude-cli");
+});
+
+test("telemetry dedupe: second identical ENOENT health-check emits no additional telemetry", async () => {
+  const telemetryEvents: EnrichedTelemetryEvent[] = [];
+  Observability.init({ telemetrySend: (event) => telemetryEvents.push(event) });
+
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.11.0"\n'
+  );
+
+  // Remove claude binary so ENOENT is triggered
+  await fs.rm(path.join(binDir, "claude"), { force: true });
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "telemetry-dedupe-enoent-2",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  // First call emits failure_detected
+  await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  const countAfterFirst = telemetryEvents.filter((e) => e.category === "healthcheck.failure_detected").length;
+  assert.equal(countAfterFirst, 1, "first call should emit exactly one failure_detected");
+
+  // Second call with same failure should be deduped -- no new event
+  await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  const countAfterSecond = telemetryEvents.filter((e) => e.category === "healthcheck.failure_detected").length;
+  assert.equal(countAfterSecond, 1, "second identical call should not emit another failure_detected (dedupe)");
+});
+
+test("telemetry dedupe: health-check recovery emits healthcheck.recovered", async () => {
+  const telemetryEvents: EnrichedTelemetryEvent[] = [];
+  Observability.init({ telemetrySend: (event) => telemetryEvents.push(event) });
+
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.11.0"\n'
+  );
+
+  // Start with no claude binary (ENOENT)
+  const claudePath = path.join(binDir, "claude");
+  await fs.rm(claudePath, { force: true });
+
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "telemetry-dedupe-recovery",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  // First call: ENOENT -> failure_detected
+  await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  assert.ok(
+    telemetryEvents.some((e) => e.category === "healthcheck.failure_detected"),
+    "failure_detected should have been emitted"
+  );
+
+  // Restore claude binary
+  await fs.writeFile(claudePath, '#!/bin/sh\necho "1.5.0"', { mode: 0o755 });
+
+  // Second call: now passing -> recovered
+  await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  assert.ok(
+    telemetryEvents.some((e) => e.category === "healthcheck.recovered"),
+    "healthcheck.recovered should have been emitted after fix"
+  );
 });
 
 async function findAvailablePort(excluded: number[] = []): Promise<number> {

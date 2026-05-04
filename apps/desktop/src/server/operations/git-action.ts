@@ -2,6 +2,7 @@ import type { OperationDispatcher, OperationRequestContext } from "../operation-
 import type { ProcessManager } from "../process-manager.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { expandHome } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 type GitAction =
   | "branch"
@@ -17,7 +18,7 @@ export function registerGitActionRoutes(
   processManager: ProcessManager,
   getAllowedDirectories: () => string[]
 ): void {
-  dispatcher.register("POST", "/api/engineer/git", async (context) => {
+  dispatcher.register("POST", "/api/gateway/git", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -327,10 +328,3 @@ function parseBody(context: OperationRequestContext): Record<string, unknown> | 
     return null;
   }
 }
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
-}
-

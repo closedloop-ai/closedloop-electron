@@ -1,8 +1,12 @@
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getOverrideBinaryPaths, getResolvedGitPath } from "./symphony-loop.js";
+import { isNetworkError } from "../../main/gateway-logger.js";
 import { DirectoryNotAllowedError } from "../security.js";
 import { assertRepoAllowed } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 const execFileAsync = promisify(execFile);
 const PR_NUMBER_REGEX = /\/pull\/(\d+)/;
@@ -26,7 +30,7 @@ export function registerGitPrRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[]
 ): void {
-  dispatcher.register("POST", "/api/engineer/git/pr", async (context) => {
+  dispatcher.register("POST", "/api/gateway/git/pr", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -63,10 +67,10 @@ export function registerGitPrRoutes(
       : description;
 
     try {
-      const currentBranch = await runRead(cwd, "git", ["rev-parse", "--abbrev-ref", "HEAD"]);
-      await run(cwd, "git", ["push", "-u", "origin", currentBranch]);
+      const currentBranch = await runRead(cwd, getResolvedGitPath(), ["rev-parse", "--abbrev-ref", "HEAD"]);
+      await run(cwd, getResolvedGitPath(), ["push", "-u", "origin", currentBranch]);
 
-      const createOutput = await runRead(cwd, "gh", [
+      const createOutput = await runRead(cwd, resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, [
         "pr",
         "create",
         "--head",
@@ -88,7 +92,7 @@ export function registerGitPrRoutes(
         return;
       }
 
-      const view = await runRead(cwd, "gh", ["pr", "view", "--json", "url,number"]);
+      const view = await runRead(cwd, resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, ["pr", "view", "--json", "url,number"]);
       const parsedView = JSON.parse(view) as { url?: string; number?: number };
       json(context, 200, {
         success: true,
@@ -100,7 +104,7 @@ export function registerGitPrRoutes(
       const message = String(error);
       if (message.includes("already exists")) {
         try {
-          const view = await runRead(cwd, "gh", ["pr", "view", "--json", "url,number"]);
+          const view = await runRead(cwd, resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, ["pr", "view", "--json", "url,number"]);
           const parsedView = JSON.parse(view) as { url?: string; number?: number };
           json(context, 200, {
             success: true,
@@ -118,7 +122,7 @@ export function registerGitPrRoutes(
     }
   });
 
-  dispatcher.register("GET", "/api/engineer/git/pr/list", async (context) => {
+  dispatcher.register("GET", "/api/gateway/git/pr/list", async (context) => {
     const repoPath = context.query.get("repo");
     const state = context.query.get("state") ?? "open";
 
@@ -143,7 +147,7 @@ export function registerGitPrRoutes(
     }
 
     try {
-      const output = await runRead(cwd, "gh", [
+      const output = await runRead(cwd, resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, [
         "pr",
         "list",
         "--state",
@@ -179,7 +183,7 @@ export function registerGitPrRoutes(
     }
   });
 
-  dispatcher.register("GET", "/api/engineer/git/pr/comments", async (context) => {
+  dispatcher.register("GET", "/api/gateway/git/pr/comments", async (context) => {
     const repoPath = context.query.get("repo");
     const prNumber = context.query.get("pr");
 
@@ -208,7 +212,7 @@ export function registerGitPrRoutes(
     }
 
     try {
-      const prDataOutput = await runRead(cwd, "gh", [
+      const prDataOutput = await runRead(cwd, resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, [
         "pr",
         "view",
         prNumber,
@@ -293,12 +297,12 @@ export function registerGitPrRoutes(
       const repoSlug = await getRepoSlug(cwd);
       if (repoSlug) {
         const inlineResult = spawnSync(
-          "gh",
+          resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path,
           ["api", `repos/${repoSlug}/pulls/${prNumber}/comments`, "--paginate"],
           {
             cwd,
             encoding: "utf-8",
-            env: withPathEnv()
+            env: await withPathEnv()
           }
         );
 
@@ -357,7 +361,7 @@ export function registerGitPrRoutes(
     }
   });
 
-  dispatcher.register("GET", "/api/engineer/git/pr/reviews", async (context) => {
+  dispatcher.register("GET", "/api/gateway/git/pr/reviews", async (context) => {
     const owner = context.query.get("owner");
     const repo = context.query.get("repo");
     const number = context.query.get("number");
@@ -368,7 +372,7 @@ export function registerGitPrRoutes(
     }
 
     try {
-      const output = await runRead(undefined, "gh", [
+      const output = await runRead(undefined, resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, [
         "pr",
         "view",
         number,
@@ -423,7 +427,7 @@ export function registerGitPrRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/git/pr/reply", async (context) => {
+  dispatcher.register("POST", "/api/gateway/git/pr/reply", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -509,7 +513,7 @@ export function registerGitPrRoutes(
     }
   });
 
-  dispatcher.register("GET", "/api/engineer/git/pr/files", async (context) => {
+  dispatcher.register("GET", "/api/gateway/git/pr/files", async (context) => {
     const repoPath = context.query.get("repo");
     const prNumber = context.query.get("pr");
 
@@ -536,7 +540,7 @@ export function registerGitPrRoutes(
         return;
       }
 
-      const output = await runRead(cwd, "gh", [
+      const output = await runRead(cwd, resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, [
         "api",
         `repos/${repoSlug}/pulls/${prNumber}/files`,
         "--paginate",
@@ -554,7 +558,7 @@ export function registerGitPrRoutes(
     }
   });
 
-  dispatcher.register("GET", "/api/engineer/git/pr/head-sha", async (context) => {
+  dispatcher.register("GET", "/api/gateway/git/pr/head-sha", async (context) => {
     const repoPath = context.query.get("repo");
     const prNumber = context.query.get("pr");
 
@@ -581,7 +585,7 @@ export function registerGitPrRoutes(
         return;
       }
 
-      const sha = await runRead(cwd, "gh", [
+      const sha = await runRead(cwd, resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, [
         "api",
         `repos/${repoSlug}/pulls/${prNumber}`,
         "--jq",
@@ -599,7 +603,7 @@ export function registerGitPrRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/git/pr/inline-comment", async (context) => {
+  dispatcher.register("POST", "/api/gateway/git/pr/inline-comment", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -697,9 +701,9 @@ export function registerGitPrRoutes(
     }
   });
 
-  dispatcher.register("GET", "/api/engineer/git/user", async (context) => {
+  dispatcher.register("GET", "/api/gateway/git/user", async (context) => {
     try {
-      const login = await runRead(undefined, "gh", ["api", "user", "--jq", ".login"]);
+      const login = await runRead(undefined, resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, ["api", "user", "--jq", ".login"]);
       if (!login) {
         json(context, 500, { error: "Could not determine GitHub user" });
         return;
@@ -715,7 +719,7 @@ export function registerGitPrRoutes(
 
 async function getRepoSlug(cwd: string): Promise<string> {
   try {
-    const remoteUrl = await runRead(cwd, "git", ["remote", "get-url", "origin"]);
+    const remoteUrl = await runRead(cwd, getResolvedGitPath(), ["remote", "get-url", "origin"]);
     const match = GITHUB_REMOTE_REGEX.exec(remoteUrl);
     return match ? match[1].replace(GIT_SUFFIX_REGEX, "") : "";
   } catch {
@@ -757,7 +761,7 @@ function parseGhError(error: unknown): string {
   if (message.includes("not found") || message.includes("404")) {
     return "Repository not found or no access.";
   }
-  if (message.includes("network") || message.includes("ENOTFOUND")) {
+  if (message.includes("network") || isNetworkError(message)) {
     return "Network error. Check your connection.";
   }
 
@@ -772,7 +776,7 @@ async function runRead(
   const { stdout } = await execFileAsync(command, args, {
     cwd,
     encoding: "utf-8",
-    env: withPathEnv()
+    env: await withPathEnv()
   });
   return stdout.trim();
 }
@@ -781,26 +785,24 @@ async function run(cwd: string | undefined, command: string, args: string[]): Pr
   await execFileAsync(command, args, {
     cwd,
     encoding: "utf-8",
-    env: withPathEnv()
+    env: await withPathEnv()
   });
 }
 
-function withPathEnv(): NodeJS.ProcessEnv {
-  return {
-    ...process.env,
-    PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`
-  };
+async function withPathEnv(): Promise<NodeJS.ProcessEnv> {
+  return getShellEnv();
 }
 
-function ghApiViaStdin(
+async function ghApiViaStdin(
   apiPath: string,
   payload: Record<string, unknown>,
   cwd: string
 ): Promise<{ stdout: string; stderr: string }> {
+  const env = await withPathEnv();
   return new Promise((resolve, reject) => {
-    const process = spawn("gh", ["api", apiPath, "--method", "POST", "--input", "-"], {
+    const process = spawn(resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, ["api", apiPath, "--method", "POST", "--input", "-"], {
       cwd,
-      env: withPathEnv()
+      env
     });
 
     let stdout = "";
@@ -828,15 +830,16 @@ function ghApiViaStdin(
   });
 }
 
-function ghPrCommentViaStdin(
+async function ghPrCommentViaStdin(
   args: string[],
   body: string,
   cwd: string
 ): Promise<{ stdout: string; stderr: string }> {
+  const env = await withPathEnv();
   return new Promise((resolve, reject) => {
-    const process = spawn("gh", [...args, "--body-file", "-"], {
+    const process = spawn(resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, [...args, "--body-file", "-"], {
       cwd,
-      env: withPathEnv()
+      env
     });
 
     let stdout = "";
@@ -889,10 +892,4 @@ function asNumber(value: unknown): number | null {
     return Number.isNaN(parsed) ? null : parsed;
   }
   return null;
-}
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
 }

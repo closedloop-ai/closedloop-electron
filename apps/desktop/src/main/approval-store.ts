@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import Store from "electron-store";
 import type { RiskTier } from "../shared/contracts.js";
+import { Observability } from "./observability.js";
 
 export type ApprovalDecision = "approved" | "denied" | "always_allow" | "expired";
 
@@ -8,7 +9,7 @@ export type PendingApproval = {
   id: string;
   createdAt: string;
   operationId: string;
-  riskTier: Exclude<RiskTier, "auto">;
+  riskTier: Exclude<RiskTier, "none">;
   method: string;
   path: string;
   scopePath?: string;
@@ -74,7 +75,7 @@ export class ApprovalStore {
 
   enqueue(input: {
     operationId: string;
-    riskTier: Exclude<RiskTier, "auto">;
+    riskTier: Exclude<RiskTier, "none">;
     method: string;
     path: string;
     body: string;
@@ -107,6 +108,7 @@ export class ApprovalStore {
     this.pendingByFingerprint.set(fingerprint, pending.id);
     this.persist();
     this.onNewApproval?.(pending);
+    Observability.approvalRequested(pending.operationId);
     return pending;
   }
 
@@ -188,6 +190,7 @@ export class ApprovalStore {
     if (this.resolved.length > MAX_RESOLVED) {
       this.resolved.length = MAX_RESOLVED;
     }
+    this.emitApprovalResolved(pending, decision);
 
     const waiters = this.waitersByApprovalId.get(id);
     if (waiters) {
@@ -199,6 +202,17 @@ export class ApprovalStore {
 
     this.persist();
     return pending;
+  }
+
+  private emitApprovalResolved(pending: PendingApproval, decision: ApprovalDecision): void {
+    const timeToResolveMs = Date.now() - new Date(pending.createdAt).getTime();
+    const outcomeMap: Record<ApprovalDecision, "granted" | "denied" | "timed_out"> = {
+      approved: "granted",
+      always_allow: "granted",
+      denied: "denied",
+      expired: "timed_out",
+    };
+    Observability.approvalResolved(pending.operationId, outcomeMap[decision], timeToResolveMs);
   }
 
   private persist(): void {

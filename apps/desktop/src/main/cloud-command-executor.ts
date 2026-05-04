@@ -1,12 +1,15 @@
 import { URL } from "node:url";
+import { gatewayLog } from "./gateway-logger.js";
 import type {
   CommandEventRecord,
   DesktopCancelEvent,
   DesktopCommandAckEvent,
   DesktopCommandEvent,
   DesktopCommandStreamAckEvent,
-  DesktopCommandStreamEvent
+  DesktopCommandStreamEvent,
+  ProtocolEnvelope,
 } from "./cloud-protocol.js";
+import { Observability } from "./observability.js";
 
 const COMMAND_RETENTION_MS = 10 * 60_000;
 const MAX_RETAINED_TERMINAL_COMMANDS = 200;
@@ -15,9 +18,16 @@ export interface CloudCommandExecutorOptions {
   getGatewayPort: () => number;
   getGatewayAuthToken: () => string;
   maxInFlightCommands: number;
-  sendCommandAck: (event: Omit<DesktopCommandAckEvent, keyof EnvelopeFields>) => void;
-  sendCommandEvent: (event: Omit<DesktopCommandStreamEvent, keyof EnvelopeFields>) => void;
-  onQueueStatsChange?: (stats: { activeCommands: number; queueDepth: number }) => void;
+  sendCommandAck: (
+    event: Omit<DesktopCommandAckEvent, keyof EnvelopeFields>,
+  ) => void;
+  sendCommandEvent: (
+    event: Omit<DesktopCommandStreamEvent, keyof EnvelopeFields>,
+  ) => void;
+  onQueueStatsChange?: (stats: {
+    activeCommands: number;
+    queueDepth: number;
+  }) => void;
 }
 
 export class CloudCommandExecutor {
@@ -27,6 +37,8 @@ export class CloudCommandExecutor {
   private readonly lockOwners = new Map<string, string>();
   private readonly trackedByCommandId = new Map<string, TrackedCommand>();
   private connected = false;
+  private disposed = false;
+  private lastEmittedStats: { activeCommands: number; queueDepth: number } | null = null;
 
   constructor(options: CloudCommandExecutorOptions) {
     this.options = options;
@@ -47,7 +59,7 @@ export class CloudCommandExecutor {
       this.options.sendCommandAck({
         commandId: command.commandId,
         accepted: true,
-        state: "accepted"
+        state: "accepted",
       });
       if (existing.state === "terminal") {
         this.replayBuffered(command.commandId, 0);
@@ -57,42 +69,54 @@ export class CloudCommandExecutor {
 
     const validationError = validateCommand(command);
     if (validationError) {
+      gatewayLog.warn(
+        "command-executor",
+        `Rejected command ${command.commandId}: ${validationError}`,
+      );
       this.options.sendCommandAck({
         commandId: command.commandId,
         accepted: false,
         state: "failed",
-        reason: validationError
+        reason: validationError,
       });
       return;
     }
 
+    gatewayLog.debug(
+      "command-executor",
+      `Enqueued command ${command.commandId}: ${command.method} ${command.path}`,
+    );
     const tracked: TrackedCommand = {
       command,
       state: "queued",
+      enqueuedAt: Date.now(),
       lastEmittedSequence: 0,
       buffered: {
         lastAckedSequence: 0,
-        events: []
-      }
+        events: [],
+      },
     };
     this.trackedByCommandId.set(command.commandId, tracked);
     this.queue.push(command);
     this.options.sendCommandAck({
       commandId: command.commandId,
       accepted: true,
-      state: "accepted"
+      state: "accepted",
     });
+    Observability.commandInitiated(command.commandId, command.operationId);
     this.schedule();
   }
 
   cancel(cancelEvent: DesktopCancelEvent): void {
-    const queuedIndex = this.queue.findIndex((item) => item.commandId === cancelEvent.commandId);
+    const queuedIndex = this.queue.findIndex(
+      (item) => item.commandId === cancelEvent.commandId,
+    );
     if (queuedIndex >= 0) {
       this.queue.splice(queuedIndex, 1);
       this.emitTrackedEvent(cancelEvent.commandId, "done", {
         type: "done",
         cancelled: true,
-        reason: cancelEvent.reason ?? "cancelled"
+        reason: cancelEvent.reason ?? "cancelled",
       });
       this.markTerminal(cancelEvent.commandId, "cancelled");
       this.notifyQueueStats();
@@ -116,23 +140,29 @@ export class CloudCommandExecutor {
     }
     tracked.buffered.lastAckedSequence = Math.max(
       tracked.buffered.lastAckedSequence,
-      ackEvent.sequence
+      ackEvent.sequence,
     );
     if (tracked.state === "terminal") {
       return;
     }
     tracked.buffered.events = tracked.buffered.events.filter(
-      (event) => event.sequence > tracked.buffered.lastAckedSequence
+      (event) => event.sequence > tracked.buffered.lastAckedSequence,
     );
   }
 
   replayFrom(resumeFromSequence: Record<string, number>): void {
-    for (const [commandId, fromSequence] of Object.entries(resumeFromSequence)) {
-      this.replayBuffered(commandId, Number.isFinite(fromSequence) ? Math.trunc(fromSequence) : 0);
+    for (const [commandId, fromSequence] of Object.entries(
+      resumeFromSequence,
+    )) {
+      this.replayBuffered(
+        commandId,
+        Number.isFinite(fromSequence) ? Math.trunc(fromSequence) : 0,
+      );
     }
   }
 
   dispose(): void {
+    this.disposed = true;
     for (const running of this.inFlightByCommandId.values()) {
       if (running.timeout) {
         clearTimeout(running.timeout);
@@ -143,13 +173,17 @@ export class CloudCommandExecutor {
     this.inFlightByCommandId.clear();
     this.lockOwners.clear();
     this.trackedByCommandId.clear();
-    this.notifyQueueStats();
+    // Intentionally do not call notifyQueueStats() here: dispose() runs during
+    // app shutdown after Observability has already been torn down, and the
+    // app-level debounce has already been cancelled. Emitting a final {0,0}
+    // would re-arm that debounce timer and cause a telemetry call after
+    // Observability.shutdown() has returned.
   }
 
   getStats(): { activeCommands: number; queueDepth: number } {
     return {
       activeCommands: this.inFlightByCommandId.size,
-      queueDepth: this.queue.length
+      queueDepth: this.queue.length,
     };
   }
 
@@ -157,7 +191,10 @@ export class CloudCommandExecutor {
     if (!this.connected) {
       return;
     }
-    while (this.inFlightByCommandId.size < Math.max(1, this.options.maxInFlightCommands)) {
+    while (
+      this.inFlightByCommandId.size <
+      Math.max(1, this.options.maxInFlightCommands)
+    ) {
       const nextIndex = this.queue.findIndex((candidate) => {
         const lockKey = deriveLockKey(candidate);
         if (!lockKey) {
@@ -181,6 +218,10 @@ export class CloudCommandExecutor {
       return;
     }
     tracked.state = "running";
+    gatewayLog.debug(
+      "command-executor",
+      `Executing command ${command.commandId}: ${command.method} ${command.path}`,
+    );
 
     const lockKey = deriveLockKey(command);
     if (lockKey) {
@@ -191,7 +232,7 @@ export class CloudCommandExecutor {
     const running: RunningCommand = {
       lockKey,
       abortController,
-      cancelRequested: false
+      cancelRequested: false,
     };
     if (typeof command.timeoutMs === "number" && command.timeoutMs > 0) {
       running.timeout = setTimeout(() => {
@@ -205,37 +246,65 @@ export class CloudCommandExecutor {
     this.emitTrackedEvent(command.commandId, "status", {
       type: "status",
       status: "running",
-      operationId: command.operationId
+      operationId: command.operationId,
     });
+    Observability.commandStarted(command.commandId, command.operationId);
 
     try {
       await this.executeViaGateway(command, abortController.signal);
       if (!isTerminalState(tracked.terminalState)) {
         this.emitTrackedEvent(command.commandId, "done", { type: "done" });
+        Observability.commandCompleted(
+          command.commandId,
+          command.operationId,
+          Date.now() - tracked.enqueuedAt,
+        );
         this.markTerminal(command.commandId, "done");
       }
     } catch (error) {
+      if (this.disposed) {
+        this.markTerminal(command.commandId, "failed");
+        return;
+      }
+
       if (running.cancelRequested) {
         this.emitTrackedEvent(command.commandId, "done", {
           type: "done",
           cancelled: true,
-          reason: running.cancelReason ?? "cancelled"
+          reason: running.cancelReason ?? "cancelled",
         });
+        gatewayLog.debug(
+          "command-executor",
+          `Command ${command.commandId} cancelled`,
+        );
+        Observability.commandCancelled(command.commandId, command.operationId);
         this.markTerminal(command.commandId, "cancelled");
       } else if (running.timedOut) {
         this.emitTrackedEvent(command.commandId, "error", {
           type: "error",
           terminal: true,
           code: "timeout",
-          error: "command timed out"
+          error: "command timed out",
         });
+        gatewayLog.error(
+          "command-executor",
+          `Command ${command.commandId} timed out`,
+        );
+        Observability.commandTimedOut(command.commandId, command.operationId);
         this.markTerminal(command.commandId, "failed");
       } else {
+        const msg =
+          error instanceof Error ? error.message : "unknown command failure";
         this.emitTrackedEvent(command.commandId, "error", {
           type: "error",
           terminal: true,
-          error: error instanceof Error ? error.message : "unknown command failure"
+          error: msg,
         });
+        gatewayLog.error(
+          "command-executor",
+          `Command ${command.commandId} failed: ${msg}`,
+        );
+        Observability.commandFailed(command.commandId, command.operationId, msg);
         this.markTerminal(command.commandId, "failed");
       }
     } finally {
@@ -250,7 +319,10 @@ export class CloudCommandExecutor {
     }
   }
 
-  private async executeViaGateway(command: DesktopCommandEvent, signal: AbortSignal): Promise<void> {
+  private async executeViaGateway(
+    command: DesktopCommandEvent,
+    signal: AbortSignal,
+  ): Promise<void> {
     const port = this.options.getGatewayPort();
     const requestUrl = new URL(command.path, `http://127.0.0.1:${port}`);
     applyQuery(requestUrl, command.query);
@@ -258,6 +330,12 @@ export class CloudCommandExecutor {
     const headers = new Headers(command.headers);
     headers.set("x-desktop-gateway-token", this.options.getGatewayAuthToken());
     headers.set("x-desktop-source", "cloud-socket");
+    if (isValidUuid(command.commandId)) {
+      headers.set("x-desktop-command-id", command.commandId);
+    }
+    if (isSafeHeaderValue(command.operationId)) {
+      headers.set("x-desktop-operation-id", command.operationId);
+    }
     if (command.requiresApproval) {
       headers.set("x-desktop-force-approval", "1");
       if (command.approvalReason) {
@@ -268,19 +346,32 @@ export class CloudCommandExecutor {
     const method = command.method.toUpperCase();
     const body = serializeBody(command.body, headers, method);
 
+    gatewayLog.debug(
+      "command-executor",
+      `Gateway fetch: ${method} ${requestUrl.pathname}`,
+    );
     const response = await fetch(requestUrl, {
       method,
       headers,
       body,
-      signal
+      signal,
     });
-    const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+    const contentType = (
+      response.headers.get("content-type") ?? ""
+    ).toLowerCase();
     const isStream =
-      contentType.includes("text/event-stream") || contentType.includes("application/x-ndjson");
+      contentType.includes("text/event-stream") ||
+      contentType.includes("application/x-ndjson");
 
     if (!response.ok && !isStream) {
       const message = await safeReadBodyAsText(response);
-      throw new Error(`gateway returned ${response.status}${message ? `: ${message}` : ""}`);
+      gatewayLog.error(
+        "command-executor",
+        `Gateway returned ${response.status} for ${method} ${requestUrl.pathname}: ${message}`,
+      );
+      throw new Error(
+        `gateway returned ${response.status}${message ? `: ${message}` : ""}`,
+      );
     }
 
     if (isStream) {
@@ -293,13 +384,16 @@ export class CloudCommandExecutor {
       type: "result",
       statusCode: response.status,
       success: response.ok,
-      data: payload
+      data: payload,
     });
     this.emitTrackedEvent(command.commandId, "done", { type: "done" });
     this.markTerminal(command.commandId, "done");
   }
 
-  private async consumeStreamResponse(commandId: string, response: Response): Promise<void> {
+  private async consumeStreamResponse(
+    commandId: string,
+    response: Response,
+  ): Promise<void> {
     if (!response.body) {
       return;
     }
@@ -324,24 +418,15 @@ export class CloudCommandExecutor {
         if (!trimmed) {
           continue;
         }
-
-        const mapped = mapGatewayLineToCommandEvent(trimmed);
-        this.emitTrackedEvent(commandId, mapped.eventType, mapped.data);
-        if (isTerminalEvent(mapped.eventType, mapped.data)) {
+        if (this.processStreamLine(commandId, trimmed)) {
           emittedTerminal = true;
-          this.markTerminal(commandId, resolveTerminalState(mapped.eventType, mapped.data));
         }
       }
     }
 
     const trailing = buffer.trim();
-    if (trailing) {
-      const mapped = mapGatewayLineToCommandEvent(trailing);
-      this.emitTrackedEvent(commandId, mapped.eventType, mapped.data);
-      if (isTerminalEvent(mapped.eventType, mapped.data)) {
-        emittedTerminal = true;
-        this.markTerminal(commandId, resolveTerminalState(mapped.eventType, mapped.data));
-      }
+    if (trailing && this.processStreamLine(commandId, trailing)) {
+      emittedTerminal = true;
     }
 
     if (!emittedTerminal) {
@@ -350,10 +435,24 @@ export class CloudCommandExecutor {
     }
   }
 
+  /** Emit a mapped stream line event. Returns true if the event was terminal. */
+  private processStreamLine(commandId: string, line: string): boolean {
+    const mapped = mapGatewayLineToCommandEvent(line);
+    this.emitTrackedEvent(commandId, mapped.eventType, mapped.data);
+    if (isTerminalEvent(mapped.eventType, mapped.data)) {
+      this.markTerminal(
+        commandId,
+        resolveTerminalState(mapped.eventType, mapped.data),
+      );
+      return true;
+    }
+    return false;
+  }
+
   private emitTrackedEvent(
     commandId: string,
     eventType: DesktopCommandStreamEvent["eventType"],
-    data: unknown
+    data: unknown,
   ): void {
     const tracked = this.trackedByCommandId.get(commandId);
     if (!tracked) {
@@ -368,14 +467,14 @@ export class CloudCommandExecutor {
     const record: CommandEventRecord = {
       sequence,
       eventType,
-      data
+      data,
     };
     tracked.buffered.events.push(record);
     this.options.sendCommandEvent({
       commandId,
       sequence,
       eventType,
-      data
+      data,
     });
   }
 
@@ -402,19 +501,32 @@ export class CloudCommandExecutor {
         commandId,
         sequence: event.sequence,
         eventType: event.eventType,
-        data: event.data
+        data: event.data,
       });
     }
   }
 
   private notifyQueueStats(): void {
-    this.options.onQueueStatsChange?.(this.getStats());
+    const stats = this.getStats();
+    // Skip the callback when neither counter changed. schedule() is called on
+    // every setConnected(true) and every execute() boundary, so without this
+    // guard an idle reconnect would emit a spurious 0/0 telemetry event that
+    // does not correspond to a real queue mutation.
+    if (
+      this.lastEmittedStats &&
+      this.lastEmittedStats.activeCommands === stats.activeCommands &&
+      this.lastEmittedStats.queueDepth === stats.queueDepth
+    ) {
+      return;
+    }
+    this.lastEmittedStats = stats;
+    this.options.onQueueStatsChange?.(stats);
   }
 
   private pruneTerminalCommands(): void {
     const now = Date.now();
     const terminalEntries = [...this.trackedByCommandId.entries()].filter(
-      ([, tracked]) => tracked.state === "terminal"
+      ([, tracked]) => tracked.state === "terminal",
     );
 
     for (const [commandId, tracked] of terminalEntries) {
@@ -431,7 +543,7 @@ export class CloudCommandExecutor {
       .sort(
         (a, b) =>
           (a[1].completedAt ?? Number.MAX_SAFE_INTEGER) -
-          (b[1].completedAt ?? Number.MAX_SAFE_INTEGER)
+          (b[1].completedAt ?? Number.MAX_SAFE_INTEGER),
       );
     while (remainingTerminal.length > MAX_RETAINED_TERMINAL_COMMANDS) {
       const [commandId] = remainingTerminal.shift() as [string, TrackedCommand];
@@ -440,11 +552,7 @@ export class CloudCommandExecutor {
   }
 }
 
-type EnvelopeFields = {
-  protocolVersion: string;
-  messageId: string;
-  timestamp: string;
-};
+type EnvelopeFields = ProtocolEnvelope;
 
 interface BufferedCommandEvents {
   lastAckedSequence: number;
@@ -458,6 +566,7 @@ interface TrackedCommand {
   state: "queued" | "running" | "terminal";
   terminalState?: TerminalCommandState;
   completedAt?: number;
+  enqueuedAt: number;
   lastEmittedSequence: number;
   buffered: BufferedCommandEvents;
 }
@@ -478,13 +587,19 @@ function validateCommand(command: DesktopCommandEvent): string | null {
   if (!SUPPORTED_HTTP_METHODS.has(command.method.toUpperCase())) {
     return "unsupported method";
   }
-  if (!command.path.startsWith("/api/engineer/")) {
-    return "path must start with /api/engineer/";
+  if (!command.path.startsWith("/api/gateway/")) {
+    return "path must start with /api/gateway/";
   }
   return null;
 }
 
-const SUPPORTED_HTTP_METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
+const SUPPORTED_HTTP_METHODS = new Set([
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+]);
 
 function deriveLockKey(command: DesktopCommandEvent): string | null {
   if (command.lockKey?.trim()) {
@@ -515,8 +630,7 @@ function asNonEmptyString(value: unknown): string | null {
   if (typeof value !== "string") {
     return null;
   }
-  const trimmed = value.trim();
-  return trimmed ? trimmed : null;
+  return value.trim();
 }
 
 function applyQuery(url: URL, query: DesktopCommandEvent["query"]): void {
@@ -534,11 +648,15 @@ function applyQuery(url: URL, query: DesktopCommandEvent["query"]): void {
   }
 }
 
-function serializeBody(body: unknown, headers: Headers, method: string): string | undefined {
+function serializeBody(
+  body: unknown,
+  headers: Headers,
+  method: string,
+): string | undefined {
   if (method === "GET") {
     return undefined;
   }
-  if (typeof body === "undefined") {
+  if (body === undefined) {
     return undefined;
   }
   if (typeof body === "string") {
@@ -559,7 +677,9 @@ async function safeReadBodyAsText(response: Response): Promise<string> {
 }
 
 async function parseNonStreamingBody(response: Response): Promise<unknown> {
-  const contentType = (response.headers.get("content-type") ?? "").toLowerCase();
+  const contentType = (
+    response.headers.get("content-type") ?? ""
+  ).toLowerCase();
   if (contentType.includes("application/json")) {
     try {
       return await response.json();
@@ -589,22 +709,22 @@ function mapGatewayLineToCommandEvent(line: string): {
     if (type === "done") {
       return { eventType: "done", data: parsed };
     }
-    if (type === "text" || typeof parsed.content === "string") {
-      return { eventType: "chunk", data: parsed };
-    }
     return { eventType: "chunk", data: parsed };
   } catch {
     return {
       eventType: "chunk",
       data: {
         type: "text",
-        content: line
-      }
+        content: line,
+      },
     };
   }
 }
 
-function isTerminalEvent(eventType: DesktopCommandStreamEvent["eventType"], data: unknown): boolean {
+function isTerminalEvent(
+  eventType: DesktopCommandStreamEvent["eventType"],
+  data: unknown,
+): boolean {
   if (eventType === "done") {
     return true;
   }
@@ -617,7 +737,7 @@ function isTerminalEvent(eventType: DesktopCommandStreamEvent["eventType"], data
 
 function resolveTerminalState(
   eventType: DesktopCommandStreamEvent["eventType"],
-  data: unknown
+  data: unknown,
 ): TerminalCommandState {
   if (eventType === "done") {
     const record = asRecord(data);
@@ -630,5 +750,19 @@ function resolveTerminalState(
 }
 
 function isTerminalState(state: TerminalCommandState | undefined): boolean {
-  return state === "done" || state === "failed" || state === "cancelled";
+  return state !== undefined;
+}
+
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isValidUuid(value: string): boolean {
+  return UUID_REGEX.test(value);
+}
+
+/** Allow any non-empty printable ASCII string without CRLF (header injection guard). */
+const SAFE_HEADER_VALUE_REGEX = /^[\x20-\x7e]+$/;
+
+function isSafeHeaderValue(value: string): boolean {
+  return SAFE_HEADER_VALUE_REGEX.test(value);
 }

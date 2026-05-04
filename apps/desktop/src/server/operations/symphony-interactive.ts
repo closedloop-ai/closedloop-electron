@@ -7,7 +7,11 @@ import type {
   OperationDispatcher,
   OperationRequestContext,
 } from "../operation-dispatcher.js";
+import { gatewayLog } from "../../main/gateway-logger.js";
+import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getOverrideBinaryPaths, getResolvedGitPath } from "./symphony-loop.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
+import { retrySpawn, type RetrySpawnDeps } from "../../main/spawn-retry.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
 import { findPluginScript } from "./plugin-cache.js";
@@ -16,6 +20,7 @@ import {
   createStreamState,
   processStreamEvent,
 } from "./stream-events.js";
+import { json } from "./response-utils.js";
 import {
   acquireLaunchLock,
   assertRepoAllowed,
@@ -85,11 +90,12 @@ function assertAllReposAllowed(
 
 export function registerSymphonyInteractiveRoutes(
   dispatcher: OperationDispatcher,
-  getAllowedDirectories: () => string[]
+  getAllowedDirectories: () => string[],
+  deps: RetrySpawnDeps
 ): void {
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/chat/:ticketId",
+    "/api/gateway/symphony/chat/:ticketId",
     async (context) => {
       const ticketId = context.params.ticketId;
       const body = parseBody(context);
@@ -149,13 +155,9 @@ export function registerSymphonyInteractiveRoutes(
         json(context, 400, { error: "unsupported provider" });
         return;
       }
-      const historyPath = path.join(
-        worktreeDir,
-        ".claude",
-        "work",
-        chatHistoryFilename(provider)
-      );
-      const history = await loadJsonFile<TicketChatHistory>(historyPath, {
+      const historyFilename = chatHistoryFilename(provider);
+      const historyReadPath = path.join(worktreeDir, ".closedloop-ai", "work", historyFilename);
+      const history = await loadJsonFile<TicketChatHistory>(historyReadPath, {
         messages: [],
         ticketId,
         repoPath: repoInput,
@@ -167,23 +169,24 @@ export function registerSymphonyInteractiveRoutes(
         content: message,
         timestamp: new Date().toISOString(),
       });
-      await saveJsonFile(historyPath, history);
+      await fs.mkdir(path.dirname(historyReadPath), { recursive: true });
+      await saveJsonFile(historyReadPath, history);
 
       setStreamingHeaders(context.response);
       await streamClaudeChat({
         response: context.response,
         cwd: worktreeDir,
         history,
-        historyPath,
+        historyPath: historyReadPath,
         prompt: buildSymphonyPrompt(message, contextRepoPaths),
-        tools: withMcpTools(ENGINEER_CHAT_TOOLS),
+        tools: await withMcpTools(ENGINEER_CHAT_TOOLS),
       });
     }
   );
 
   dispatcher.register(
     "GET",
-    "/api/engineer/symphony/comment-chat/:commentId",
+    "/api/gateway/symphony/comment-chat/:commentId",
     async (context) => {
       const commentId = context.params.commentId;
       const ticketId = context.query.get("ticketId");
@@ -225,7 +228,7 @@ export function registerSymphonyInteractiveRoutes(
 
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/comment-chat/:commentId",
+    "/api/gateway/symphony/comment-chat/:commentId",
     async (context) => {
       const commentId = context.params.commentId;
       const ticketId = context.query.get("ticketId");
@@ -295,6 +298,7 @@ export function registerSymphonyInteractiveRoutes(
         content: message,
         timestamp: new Date().toISOString(),
       });
+      await fs.mkdir(path.dirname(historyPath), { recursive: true });
       await saveJsonFile(historyPath, history);
 
       setStreamingHeaders(context.response);
@@ -304,14 +308,14 @@ export function registerSymphonyInteractiveRoutes(
         history,
         historyPath,
         prompt: buildCommentPrompt(message, history.commentContext),
-        tools: withMcpTools(ENGINEER_CHAT_TOOLS),
+        tools: await withMcpTools(ENGINEER_CHAT_TOOLS),
       });
     }
   );
 
   dispatcher.register(
     "PATCH",
-    "/api/engineer/symphony/comment-chat/:commentId",
+    "/api/gateway/symphony/comment-chat/:commentId",
     async (context) => {
       const commentId = context.params.commentId;
       const ticketId = context.query.get("ticketId");
@@ -371,6 +375,7 @@ export function registerSymphonyInteractiveRoutes(
         }
       }
 
+      await fs.mkdir(path.dirname(historyPath), { recursive: true });
       await saveJsonFile(historyPath, history);
       json(context, 200, { success: true });
     }
@@ -378,7 +383,7 @@ export function registerSymphonyInteractiveRoutes(
 
   dispatcher.register(
     "DELETE",
-    "/api/engineer/symphony/comment-chat/:commentId",
+    "/api/gateway/symphony/comment-chat/:commentId",
     async (context) => {
       const commentId = context.params.commentId;
       const ticketId = context.query.get("ticketId");
@@ -414,7 +419,7 @@ export function registerSymphonyInteractiveRoutes(
 
   dispatcher.register(
     "GET",
-    "/api/engineer/symphony/commit-message/:ticketId",
+    "/api/gateway/symphony/commit-message/:ticketId",
     async (context) => {
       const ticketId = context.params.ticketId;
       const repoPath = context.query.get("repo");
@@ -474,7 +479,8 @@ export function registerSymphonyInteractiveRoutes(
         const generated = await generateCommitWithClaude(
           worktreeDir,
           ticketId,
-          diff
+          diff,
+          deps
         );
         json(context, 200, {
           ...generated,
@@ -496,7 +502,7 @@ export function registerSymphonyInteractiveRoutes(
 
   dispatcher.register(
     "POST",
-    "/api/engineer/symphony/launch",
+    "/api/gateway/symphony/launch",
     async (context) => {
       const body = parseBody(context);
       if (!body) {
@@ -579,7 +585,7 @@ export function registerSymphonyInteractiveRoutes(
         if (existingPid !== null && isProcessRunning(existingPid)) {
           // Refresh PRD (harmless to running process)
           if (ticket) {
-            const claudeWorkDir = path.join(worktreeDir, ".claude", "work");
+            const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
             await fs.mkdir(claudeWorkDir, { recursive: true });
             await createPrdFile(claudeWorkDir, ticket, expandedRepoPath);
           }
@@ -587,7 +593,7 @@ export function registerSymphonyInteractiveRoutes(
           const meta = readLaunchMetadata(worktreeDir);
           const logFile = path.join(
             worktreeDir,
-            ".claude",
+            ".closedloop-ai",
             "work",
             "symphony-launch.log"
           );
@@ -599,7 +605,7 @@ export function registerSymphonyInteractiveRoutes(
             worktreePath: worktreeDir,
             pid: existingPid,
             logFile,
-            prdFile: path.join(worktreeDir, ".claude", "work", "prd.md"),
+            prdFile: path.join(worktreeDir, ".closedloop-ai", "work", "prd.md"),
             baseBranch: meta?.baseBranch,
             parentTicketId: meta?.parentTicketId,
             alreadyRunning: true,
@@ -631,7 +637,7 @@ export function registerSymphonyInteractiveRoutes(
           resolvedBaseBranch = result.resolvedBaseBranch;
         }
 
-        const claudeWorkDir = path.join(worktreeDir, ".claude", "work");
+        const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
         await fs.mkdir(claudeWorkDir, { recursive: true });
 
         if (ticket) {
@@ -656,21 +662,48 @@ export function registerSymphonyInteractiveRoutes(
         let pid: number | null = null;
         if (scriptPath) {
           const logFd = openSync(logFile, "a");
+          let fdClosed = false;
           const child = spawn(scriptPath, [claudeWorkDir], {
             cwd: worktreeDir,
             detached: true,
             stdio: ["ignore", logFd, logFd],
-            env: {
-              ...process.env,
-              CLOSEDLOOP_WORKDIR: claudeWorkDir,
-              PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
-            },
+            env: await getShellEnv({ CLOSEDLOOP_WORKDIR: claudeWorkDir }),
           });
+          child.on("error", (err: NodeJS.ErrnoException) => {
+            if (!fdClosed) {
+              try {
+                closeSync(logFd);
+                fdClosed = true;
+              } catch (closeErr) {
+                gatewayLog.warn(
+                  "symphony-launch",
+                  `closeSync failed: ${closeErr instanceof Error ? closeErr.message : String(closeErr)}`
+                );
+              }
+            }
+            gatewayLog.warn(
+              "symphony-launch",
+              `detached-spawn-failed: ${err.message}`
+            );
+          });
+          if (!child.pid) {
+            if (!fdClosed) {
+              closeSync(logFd);
+              fdClosed = true;
+            }
+            json(context, 500, {
+              error: "failed to launch work loop: process did not start",
+            });
+            return;
+          }
           child.unref();
-          pid = child.pid ?? null;
+          pid = child.pid;
 
           // Close parent's copy of the log fd — the child inherited it via spawn
-          closeSync(logFd);
+          if (!fdClosed) {
+            closeSync(logFd);
+            fdClosed = true;
+          }
         }
 
         // Write PID AFTER metadata
@@ -688,7 +721,7 @@ export function registerSymphonyInteractiveRoutes(
           worktreePath: worktreeDir,
           pid,
           logFile,
-          prdFile: path.join(claudeWorkDir, "prd.md"),
+          prdFile: path.join(worktreeDir, ".closedloop-ai", "work", "prd.md"),
           baseBranch: mergedMeta?.baseBranch,
           parentTicketId: mergedMeta?.parentTicketId,
         });
@@ -733,10 +766,7 @@ async function streamClaudeChat(options: {
       {
         cwd,
         stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          ...process.env,
-          PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
-        },
+        env: await getShellEnv(),
       }
     );
 
@@ -794,6 +824,9 @@ async function streamClaudeChat(options: {
       });
     }
     history.contextPercent = streamState.contextPercent;
+    if (exitCode !== 0 && streamState.authChallengeDetected && history.sessionId) {
+      history.sessionId = undefined;
+    }
     await saveJsonFile(historyPath, history);
 
     writeEvent(response, { type: "result", success: exitCode === 0 });
@@ -865,10 +898,9 @@ function getCommentHistoryPath(
 ): string {
   const worktreeDir = resolveWorktreeForComment(ticketId, expandedRepoPath);
   const sanitizedComment = commentId.replaceAll(/[^a-zA-Z0-9-_]/g, "_");
-
   return path.join(
     worktreeDir,
-    ".claude",
+    ".closedloop-ai",
     "work",
     "comment-chats",
     `${sanitizedComment}.json`
@@ -886,7 +918,13 @@ function resolveWorktreeForComment(
   return expandedRepoPath;
 }
 
-function sanitizeCommitMessage(text: string): string {
+// Strips AI-vendor branding from commit text and normalises whitespace.
+// Backticks are intentionally NOT stripped here — slugs used in URL paths
+// (e.g. /implementation-plans/<slug>) never contain backticks because slug
+// values arrive as alphanumeric-hyphen strings; the caller additionally strips
+// newlines via .replace(/[\r\n]/g, ''), so the result is safe for shell
+// heredocs and template-literal URL construction.
+export function sanitizeCommitMessage(text: string): string {
   return text
     .replaceAll(/claude\s*code/gi, "")
     .replaceAll(/\bopus\b/gi, "")
@@ -927,12 +965,14 @@ function getGitDiff(worktreeDir: string): string {
   }
 }
 
-function generateCommitWithClaude(
+async function generateCommitWithClaude(
   worktreeDir: string,
   ticketId: string,
-  diff: string
+  diff: string,
+  deps: RetrySpawnDeps
 ): Promise<{ title: string; description: string }> {
-  return new Promise((resolve, reject) => {
+  const env = await getShellEnv();
+  return retrySpawn(() => new Promise<{ title: string; description: string }>((resolve, reject) => {
     const prompt = [
       `Generate a git commit message for ticket ${ticketId}.`,
       "",
@@ -947,13 +987,10 @@ function generateCommitWithClaude(
       "Do NOT include AI or assistant references.",
     ].join("\n");
 
-    const child = spawn("claude", ["--model", "haiku", "-p", prompt], {
+    const child = spawn(resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path, ["--model", "haiku", "-p", prompt], {
       cwd: worktreeDir,
       stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
-      },
+      env,
     });
 
     let stdout = "";
@@ -1012,10 +1049,8 @@ function generateCommitWithClaude(
       console.error("[commit-message] failed to spawn claude:", err.message);
       reject(err);
     });
-  });
+  }), deps);
 }
-
-
 
 function sanitizeBranchName(ticketId: string): string {
   const normalized = ticketId.replaceAll(/[^a-zA-Z0-9-_]/g, "-");
@@ -1030,8 +1065,9 @@ async function createWorktree(
 ): Promise<{ resolvedBaseBranch: string }> {
   await fs.mkdir(path.dirname(worktreeDir), { recursive: true });
 
+  const gitBin = getResolvedGitPath();
   try {
-    execSync("git fetch origin", {
+    execSync(`${gitBin} fetch origin`, {
       cwd: expandedRepoPath,
       stdio: "pipe",
     });
@@ -1041,7 +1077,7 @@ async function createWorktree(
 
   const resolvedBaseRef = resolveBaseRef(expandedRepoPath, baseBranch);
   execSync(
-    `git worktree add -B ${shellEscapeArg(branchName)} ${shellEscapeArg(worktreeDir)} ${shellEscapeArg(resolvedBaseRef)}`,
+    `${shellEscapeArg(gitBin)} worktree add -B ${shellEscapeArg(branchName)} ${shellEscapeArg(worktreeDir)} ${shellEscapeArg(resolvedBaseRef)}`,
     {
       cwd: expandedRepoPath,
       stdio: "pipe",
@@ -1058,8 +1094,9 @@ function resolveBaseRef(
   if (baseBranch) {
     const candidate = baseBranch.trim();
     if (/^[a-zA-Z0-9/_.-]+$/.test(candidate)) {
+      const gitBin = getResolvedGitPath();
       try {
-        execSync(`git rev-parse --verify ${shellEscapeArg(candidate)}`, {
+        execSync(`${shellEscapeArg(gitBin)} rev-parse --verify ${shellEscapeArg(candidate)}`, {
           cwd: expandedRepoPath,
           stdio: "pipe",
         });
@@ -1067,7 +1104,7 @@ function resolveBaseRef(
       } catch {
         try {
           const originRef = `origin/${candidate}`;
-          execSync(`git rev-parse --verify ${shellEscapeArg(originRef)}`, {
+          execSync(`${shellEscapeArg(gitBin)} rev-parse --verify ${shellEscapeArg(originRef)}`, {
             cwd: expandedRepoPath,
             stdio: "pipe",
           });
@@ -1080,7 +1117,7 @@ function resolveBaseRef(
   }
 
   try {
-    const ref = execSync("git symbolic-ref refs/remotes/origin/HEAD", {
+    const ref = execSync(`${shellEscapeArg(getResolvedGitPath())} symbolic-ref refs/remotes/origin/HEAD`, {
       cwd: expandedRepoPath,
       stdio: "pipe",
       encoding: "utf-8",
@@ -1197,14 +1234,4 @@ function parseBody(
 
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
-}
-
-function json(
-  context: OperationRequestContext,
-  status: number,
-  payload: unknown
-): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
 }

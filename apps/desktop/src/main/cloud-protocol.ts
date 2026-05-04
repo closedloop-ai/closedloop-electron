@@ -15,9 +15,18 @@ export interface ProtocolEnvelope {
 
 export interface DesktopHelloEvent extends ProtocolEnvelope {
   computeTargetId?: string;
+  gatewayId?: string;
+  desktopSecurityUpgradeProtocolVersion?: 1;
   machineName: string;
   platform: NodeJS.Platform;
   pluginVersion: string;
+  /** Electron app version (from app.getVersion()), distinct from the gateway wire protocol version. */
+  desktopClientVersion: string;
+  /**
+   * Gateway wire-protocol version (e.g. "0.1.0"), distinct from ProtocolEnvelope.protocolVersion
+   * which identifies the Socket.IO envelope schema version ("1", "2", …).
+   */
+  gatewayProtocolVersion: string;
   supportedOperations: string[];
   maxInFlightCommands: number;
   allowedDirectoriesHash: string;

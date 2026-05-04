@@ -47,8 +47,7 @@
       }
 
       header {
-        padding: 16px 20px;
-        border-bottom: 1px solid var(--border);
+        padding: 16px 20px 0;
         background: var(--panel);
       }
 
@@ -121,10 +120,11 @@
       }
 
       .control-group.danger-toggle.active {
-        background: #d97706;
-        color: #fff;
+        background: rgba(217, 119, 6, 0.1);
+        color: #d97706;
         border-color: #d97706;
-        box-shadow: 0 0 0 3px rgba(217, 119, 6, 0.2);
+        box-shadow: 0 0 0 2px rgba(217, 119, 6, 0.15);
+        font-weight: 600;
       }
 
       header h1 {
@@ -166,27 +166,36 @@
 
       nav {
         display: flex;
-        gap: 8px;
-        padding: 12px 20px;
+        gap: 4px;
+        padding: 0 20px;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
       }
 
       nav button {
-        border: 1px solid var(--border);
-        background: var(--surface);
-        color: var(--ink);
-        border-radius: 999px;
-        padding: 8px 12px;
+        border: none;
+        border-bottom: 2px solid transparent;
+        background: none;
+        color: var(--muted);
+        padding: 10px 12px;
+        font-size: 13px;
+        font-weight: 500;
         cursor: pointer;
+        transition: color 0.15s, border-color 0.15s;
+      }
+
+      nav button:hover {
+        color: var(--ink);
       }
 
       nav button.active {
-        background: var(--accent);
-        color: var(--accent-ink);
-        border-color: var(--accent);
+        color: var(--ink);
+        border-bottom-color: var(--accent);
+        font-weight: 600;
       }
 
       main {
-        padding: 0 20px 20px;
+        padding: 16px 20px 20px;
       }
 
       .panel {
@@ -205,22 +214,11 @@
         color: var(--muted);
       }
 
-      .status-line {
-        margin-bottom: 12px;
-      }
-
-      .ws-status {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        margin-bottom: 12px;
-      }
-
       .dashboard-summary {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
         gap: 10px;
-        margin-bottom: 12px;
+        margin-bottom: 16px;
       }
 
       .status-card {
@@ -245,6 +243,77 @@
         white-space: nowrap;
       }
 
+      .status-value.ok {
+        color: #16a34a;
+      }
+
+      .status-value.warn {
+        color: #d97706;
+      }
+
+      .status-value.err {
+        color: #dc2626;
+      }
+
+      .status-detail {
+        color: var(--muted);
+        font-size: 11px;
+        margin-top: 4px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .status-detail a {
+        color: var(--accent);
+        font-weight: 600;
+      }
+
+      .config-section-label {
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }
+
+      .dashboard-config {
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+        margin-bottom: 12px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        overflow: hidden;
+        background: var(--border);
+      }
+
+      .config-row {
+        display: flex;
+        align-items: baseline;
+        gap: 12px;
+        padding: 8px 12px;
+        background: var(--surface);
+        min-width: 0;
+      }
+
+      .config-row-label {
+        color: var(--muted);
+        font-size: 12px;
+        flex-shrink: 0;
+        width: 90px;
+      }
+
+      .config-row-value {
+        font-size: 13px;
+        font-weight: 500;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        min-width: 0;
+      }
+
       .warning-text {
         color: #d97706;
       }
@@ -258,40 +327,17 @@
           monospace;
       }
 
-      .ws-badge {
-        display: inline-flex;
-        align-items: center;
-        border: 1px solid var(--border);
-        border-radius: 999px;
-        padding: 4px 10px;
-        font-size: 12px;
-        font-weight: 600;
-        background: var(--surface);
-      }
-
-      .ws-badge.connected {
-        border-color: #16a34a;
-        color: #16a34a;
-      }
-
-      .ws-badge.reconnecting {
-        border-color: #d97706;
-        color: #d97706;
-      }
-
-      .ws-badge.disconnected {
-        border-color: #dc2626;
-        color: #dc2626;
-      }
-
       #updateBanner {
         display: none;
         align-items: center;
-        justify-content: center;
         gap: 12px;
-        padding: 10px 20px;
-        background: var(--accent);
-        color: var(--accent-ink);
+        padding: 10px 14px;
+        margin-bottom: 12px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--accent);
+        border-radius: 8px;
+        color: var(--ink);
         font-size: 13px;
         font-weight: 500;
       }
@@ -301,18 +347,20 @@
       }
 
       #updateBanner button {
-        padding: 4px 14px;
-        border: 1px solid var(--accent-ink);
-        border-radius: 4px;
-        background: transparent;
+        margin-left: auto;
+        padding: 5px 14px;
+        border: none;
+        border-radius: 6px;
+        background: var(--accent);
         color: var(--accent-ink);
         font-size: 12px;
         font-weight: 600;
         cursor: pointer;
+        white-space: nowrap;
       }
 
       #updateBanner button:hover {
-        background: rgba(255, 255, 255, 0.15);
+        filter: brightness(1.1);
       }
 
       #updateBanner button:disabled {
@@ -416,6 +464,228 @@
         border-color: var(--border);
       }
 
+      /* CLI Tools settings tab */
+      .cli-tools-intro {
+        margin-bottom: 18px;
+      }
+
+      .cli-tool-list {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .cli-tool-card {
+        position: relative;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 16px 14px 18px;
+        transition: border-color 0.15s ease, box-shadow 0.15s ease;
+        overflow: hidden;
+      }
+
+      .cli-tool-card::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 3px;
+        background: transparent;
+        transition: background 0.2s ease;
+      }
+
+      .cli-tool-card.state-override::before {
+        background: var(--accent);
+      }
+
+      .cli-tool-card.state-missing::before,
+      .cli-tool-card.state-invalid::before {
+        background: #d97706; /* amber-600 */
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .cli-tool-card.state-missing::before,
+        .cli-tool-card.state-invalid::before {
+          background: #f59e0b; /* amber-500 */
+        }
+      }
+
+      .cli-tool-card:focus-within {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px var(--focus);
+      }
+
+      .cli-tool-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .cli-tool-identity {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        min-width: 0;
+        flex-wrap: wrap;
+      }
+
+      .cli-tool-label {
+        font-size: 14px;
+        font-weight: 600;
+        color: var(--ink);
+        letter-spacing: -0.005em;
+      }
+
+      .cli-tool-badge {
+        flex-shrink: 0;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        padding: 3px 9px 3px 8px;
+        border-radius: 999px;
+        background: transparent;
+        color: var(--muted);
+        border: 1px solid var(--border);
+        white-space: nowrap;
+        transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+      }
+
+      .cli-tool-badge::before {
+        content: "";
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: currentColor;
+        opacity: 0.85;
+      }
+
+      .cli-tool-card.state-ok .cli-tool-badge {
+        color: var(--accent);
+        border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+        background: color-mix(in srgb, var(--accent) 8%, transparent);
+      }
+
+      .cli-tool-card.state-override .cli-tool-badge {
+        color: var(--accent);
+        border-color: var(--accent);
+        background: color-mix(in srgb, var(--accent) 12%, transparent);
+      }
+
+      .cli-tool-card.state-missing .cli-tool-badge,
+      .cli-tool-card.state-invalid .cli-tool-badge {
+        color: #b45309; /* amber-700 */
+        border-color: color-mix(in srgb, #d97706 40%, var(--border));
+        background: color-mix(in srgb, #d97706 10%, transparent);
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .cli-tool-card.state-missing .cli-tool-badge,
+        .cli-tool-card.state-invalid .cli-tool-badge {
+          color: #fbbf24;
+          border-color: color-mix(in srgb, #f59e0b 50%, var(--border));
+          background: color-mix(in srgb, #f59e0b 15%, transparent);
+        }
+      }
+
+      .cli-tool-hint {
+        margin: 0;
+        font-size: 11px;
+        color: var(--muted);
+        line-height: 1.45;
+      }
+
+      .cli-tool-hint:not(:empty) {
+        margin-top: 8px;
+      }
+
+      .cli-tool-card.state-missing .cli-tool-hint,
+      .cli-tool-card.state-invalid .cli-tool-hint {
+        color: #b45309;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .cli-tool-card.state-missing .cli-tool-hint,
+        .cli-tool-card.state-invalid .cli-tool-hint {
+          color: #fbbf24;
+        }
+      }
+
+      .cli-tool-input-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-top: 10px;
+      }
+
+      .cli-tool-input-row input {
+        flex: 1 1 auto;
+        min-width: 0;
+        padding: 8px 10px;
+        font-family: "Berkeley Mono", "JetBrains Mono", "SF Mono", "Fira Code", monospace;
+        font-size: 12px;
+        transition: color 0.12s ease;
+      }
+
+      /* Auto-detected path displays muted to signal "default, not pinned". */
+      .cli-tool-input-row input[data-mode="detected"] {
+        color: var(--muted);
+      }
+
+      .cli-tool-input-row input[data-mode="detected"]:focus {
+        color: var(--ink);
+      }
+
+      .cli-tool-input-row input::placeholder {
+        color: var(--muted);
+        opacity: 0.55;
+      }
+
+      .cli-tool-actions {
+        display: flex;
+        gap: 6px;
+        flex-shrink: 0;
+      }
+
+      .cli-tool-actions button {
+        padding: 8px 12px;
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 1;
+        border: 1px solid var(--accent);
+        background: var(--accent);
+        color: var(--accent-ink);
+        border-radius: 8px;
+        cursor: pointer;
+        transition: filter 0.12s ease;
+      }
+
+      .cli-tool-actions button.secondary {
+        background: var(--surface);
+        color: var(--ink);
+        border-color: var(--border);
+      }
+
+      .cli-tool-actions button:hover {
+        filter: brightness(1.05);
+      }
+
+      @media (max-width: 620px) {
+        .cli-tool-input-row {
+          flex-direction: column;
+          align-items: stretch;
+        }
+        .cli-tool-actions {
+          justify-content: flex-end;
+        }
+      }
+
       .approval-card {
         border: 1px solid var(--border);
         border-radius: 10px;
@@ -514,6 +784,48 @@
         line-height: 1.4;
       }
 
+      .approval-risk-tier {
+        display: inline-flex;
+        align-items: center;
+        border-radius: 4px;
+        padding: 1px 7px;
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        flex-shrink: 0;
+      }
+
+      .approval-risk-tier.risk-low {
+        background: rgba(22, 163, 74, 0.12);
+        color: #16a34a;
+      }
+
+      .approval-risk-tier.risk-medium {
+        background: rgba(245, 158, 11, 0.12);
+        color: #d97706;
+      }
+
+      .approval-risk-tier.risk-high {
+        background: rgba(220, 38, 38, 0.12);
+        color: #dc2626;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        .approval-risk-tier.risk-low {
+          background: rgba(22, 163, 74, 0.18);
+          color: #4ade80;
+        }
+        .approval-risk-tier.risk-medium {
+          background: rgba(245, 158, 11, 0.18);
+          color: #fbbf24;
+        }
+        .approval-risk-tier.risk-high {
+          background: rgba(220, 38, 38, 0.18);
+          color: #f87171;
+        }
+      }
+
       .approval-reason {
         color: var(--ink);
         font-size: 13px;
@@ -526,6 +838,154 @@
         border: 1px dashed var(--border);
         border-radius: 10px;
         padding: 12px;
+      }
+
+      .toggle-switch {
+        position: relative;
+        display: inline-block;
+        width: 36px;
+        height: 20px;
+        cursor: pointer;
+      }
+
+      .toggle-switch input {
+        opacity: 0;
+        width: 0;
+        height: 0;
+        position: absolute;
+      }
+
+      .toggle-track {
+        position: absolute;
+        inset: 0;
+        background: var(--border);
+        border-radius: 10px;
+        transition: background 0.2s;
+      }
+
+      .toggle-track::after {
+        content: "";
+        position: absolute;
+        width: 14px;
+        height: 14px;
+        left: 3px;
+        top: 3px;
+        background: var(--surface);
+        border-radius: 50%;
+        transition: transform 0.2s;
+      }
+
+      .toggle-switch input:checked + .toggle-track {
+        background: var(--accent);
+      }
+
+      .toggle-switch input:checked + .toggle-track::after {
+        transform: translateX(16px);
+      }
+
+      .logs-toolbar {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 10px;
+        padding: 8px 12px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+      }
+
+      .logs-verbose-label {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--muted);
+        cursor: pointer;
+        user-select: none;
+      }
+
+      .logs-actions {
+        display: flex;
+        gap: 4px;
+      }
+
+      .logs-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 30px;
+        height: 30px;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--muted);
+        cursor: pointer;
+        transition: background 0.15s, color 0.15s, border-color 0.15s;
+      }
+
+      .logs-btn:hover {
+        background: var(--surface-alt);
+        color: var(--ink);
+        border-color: var(--ink);
+      }
+
+      .logs-container {
+        font-family: "SF Mono", "Menlo", "Consolas", monospace;
+        font-size: 11px;
+        line-height: 1;
+        max-height: calc(100vh - 200px);
+        overflow-y: auto;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 4px 0;
+      }
+
+      .log-row {
+        display: flex;
+        gap: 8px;
+        padding: 3px 12px;
+        border-left: 2px solid transparent;
+      }
+
+      .log-row:hover {
+        background: var(--surface-alt);
+      }
+
+      .log-row.log-error {
+        border-left-color: #dc2626;
+        background: rgba(220, 38, 38, 0.06);
+      }
+
+      .log-row.log-warn {
+        border-left-color: #d97706;
+        background: rgba(245, 158, 11, 0.04);
+      }
+
+      .log-ts {
+        color: var(--muted);
+        opacity: 0.7;
+        flex-shrink: 0;
+      }
+
+      .log-tag {
+        color: var(--accent);
+        flex-shrink: 0;
+        min-width: 110px;
+      }
+
+      .log-msg {
+        color: var(--ink);
+        word-break: break-word;
+      }
+
+      .log-row.log-error .log-msg {
+        color: #f87171;
+      }
+
+      .log-row.log-warn .log-msg {
+        color: #fbbf24;
       }
 
       .tier-override-row {
@@ -924,12 +1384,6 @@
         overflow: auto;
       }
 
-      .tech-details summary {
-        cursor: pointer;
-        color: var(--muted);
-        margin-bottom: 8px;
-      }
-
       .job-section {
         margin-bottom: 20px;
       }
@@ -1090,6 +1544,8 @@
 
       .onboarding-card {
         width: min(760px, 100%);
+        max-height: calc(100vh - 40px);
+        overflow-y: auto;
         background: var(--panel);
         border: 1px solid var(--border);
         border-radius: 14px;
@@ -1154,6 +1610,221 @@
         border-top: 1px solid var(--border);
       }
 
+      .saved-configs-group {
+        margin-top: 20px;
+      }
+
+      .saved-configs-create {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+
+      .saved-configs-create input {
+        flex: 1;
+        padding: 8px 12px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        background: var(--surface);
+        color: var(--ink);
+        font-size: 13px;
+      }
+
+      .saved-configs-create input:focus {
+        outline: none;
+        border-color: var(--accent);
+      }
+
+      .saved-configs-create button {
+        padding: 8px 16px;
+        border-radius: 8px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        background: var(--accent);
+        color: var(--accent-ink);
+        border: 1px solid var(--accent);
+      }
+
+      .saved-configs-create button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .saved-configs-create button.confirming {
+        background: #d97706;
+        border-color: #d97706;
+        color: #fff;
+      }
+
+      .saved-configs-list {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .saved-config-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 10px 12px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--surface);
+      }
+
+      .saved-config-row.active {
+        border-color: var(--accent);
+        box-shadow: inset 0 0 0 1px var(--accent);
+      }
+
+      .saved-config-info {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+
+      .saved-config-name {
+        font-weight: 600;
+        font-size: 13px;
+        color: var(--ink);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .saved-config-meta {
+        font-size: 11px;
+        color: var(--muted);
+      }
+
+      .saved-config-badge {
+        display: inline-block;
+        margin-left: 6px;
+        padding: 1px 6px;
+        border-radius: 999px;
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        text-transform: uppercase;
+        background: var(--accent);
+        color: var(--accent-ink);
+      }
+
+      .saved-config-actions {
+        display: flex;
+        gap: 4px;
+        flex-shrink: 0;
+      }
+
+      .saved-config-actions button {
+        padding: 5px 10px;
+        font-size: 11px;
+        font-weight: 500;
+        background: none;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        color: var(--muted);
+        cursor: pointer;
+        transition: border-color 0.15s, color 0.15s, background 0.15s;
+      }
+
+      .saved-config-actions button:hover {
+        color: var(--ink);
+        border-color: var(--ink);
+      }
+
+      .saved-config-actions button.switch-btn:hover {
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+
+      .saved-config-actions button.delete-btn:hover {
+        color: #dc2626;
+        border-color: #dc2626;
+      }
+
+      .saved-config-actions button.delete-btn.confirming {
+        color: #fff;
+        background: #dc2626;
+        border-color: #dc2626;
+      }
+
+      .saved-config-rename {
+        flex: 1;
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+
+      .saved-config-rename input {
+        flex: 1;
+        padding: 6px 10px;
+        border: 1px solid var(--accent);
+        border-radius: 8px;
+        background: var(--bg);
+        color: var(--ink);
+        font-size: 13px;
+      }
+
+      .saved-configs-status {
+        margin: 12px 0 0;
+        padding: 10px 14px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        font-size: 13px;
+        font-weight: 500;
+        line-height: 1.4;
+        display: none;
+        align-items: flex-start;
+        gap: 10px;
+      }
+
+      .saved-configs-status.visible {
+        display: flex;
+      }
+
+      .saved-configs-status::before {
+        content: "";
+        flex-shrink: 0;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        margin-top: 6px;
+        background: currentColor;
+        box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 25%, transparent);
+      }
+
+      .saved-configs-status.success {
+        background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+        border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+        color: var(--accent);
+      }
+
+      .saved-configs-status.warning {
+        background: color-mix(in srgb, #d97706 14%, var(--surface));
+        border-color: color-mix(in srgb, #d97706 55%, var(--border));
+        color: #d97706;
+      }
+
+      .saved-configs-status.error {
+        background: color-mix(in srgb, #dc2626 14%, var(--surface));
+        border-color: color-mix(in srgb, #dc2626 55%, var(--border));
+        color: #dc2626;
+      }
+
+      .saved-configs-empty {
+        padding: 16px;
+        text-align: center;
+        border: 1px dashed var(--border);
+        border-radius: 10px;
+        color: var(--muted);
+        font-size: 12px;
+        margin: 0;
+      }
+
       .settings-tab-footer .muted {
         margin: 0;
         margin-left: 4px;
@@ -1185,7 +1856,7 @@
     <header>
       <div class="header-main">
         <div>
-          <h1>ClosedLoop Gateway</h1>
+          <h1>ClosedLoop Gateway <span id="appVersion" style="font-size: 12px; font-weight: 400; color: var(--muted)"></span></h1>
           <div class="sub">
             <span id="runtimeStatus" class="runtime-health unhealthy">
               <span class="dot"></span>
@@ -1206,10 +1877,6 @@
         </div>
       </div>
     </header>
-    <div id="updateBanner">
-      <span id="updateBannerText">A new version is available</span>
-      <button id="updateBannerBtn">Update &amp; Restart</button>
-    </div>
     <div id="onboardingOverlay" class="onboarding-overlay hidden">
       <div class="onboarding-card">
         <h2 style="margin-top: 0">Setup Required</h2>
@@ -1255,7 +1922,32 @@
           </div>
           <p class="muted warning-text" id="onboardingSandboxWarning"></p>
         </div>
+        <details id="onboardingBinaryPathsDetails" style="margin: 8px 0;">
+          <summary style="cursor: pointer; font-weight: 600; color: var(--accent); padding: 4px 0; user-select: none;">Configure binary paths (optional)</summary>
+          <p class="field-help" style="margin: 6px 0 12px;">Leave blank to auto-detect. Only set these if the diagnostics check shows a binary as "not found" even though it's installed.</p>
+          <div class="row">
+            <label for="onboardingBinaryPathClaude">claude</label>
+            <input id="onboardingBinaryPathClaude" placeholder="Auto-detect from PATH" />
+          </div>
+          <div class="row">
+            <label for="onboardingBinaryPathGh">gh</label>
+            <input id="onboardingBinaryPathGh" placeholder="Auto-detect from PATH" />
+          </div>
+          <div class="row">
+            <label for="onboardingBinaryPathCodex">codex</label>
+            <input id="onboardingBinaryPathCodex" placeholder="Auto-detect from PATH" />
+          </div>
+          <div class="row">
+            <label for="onboardingBinaryPathPython3">python3</label>
+            <input id="onboardingBinaryPathPython3" placeholder="Auto-detect from PATH" />
+          </div>
+          <div class="row">
+            <label for="onboardingBinaryPathGit">git</label>
+            <input id="onboardingBinaryPathGit" placeholder="Auto-detect from PATH" />
+          </div>
+        </details>
         <div class="actions">
+          <button class="secondary" id="connectInBrowser">Connect in browser</button>
           <button id="completeOnboarding">Complete Setup</button>
         </div>
         <p class="muted" id="onboardingMessage"></p>
@@ -1264,49 +1956,52 @@
     <nav>
       <button data-tab="dashboard" class="active">Dashboard</button>
       <button data-tab="approvals">Approvals</button>
-      <button data-tab="activity">Activity Log</button>
+      <button data-tab="activity">Requests</button>
+      <button data-tab="logs">Diagnostics</button>
       <button data-tab="settings">Settings</button>
     </nav>
     <main>
+      <div id="updateBanner">
+        <span id="updateBannerText">A new version is available</span>
+        <button id="updateBannerBtn">Update &amp; Restart</button>
+      </div>
       <section id="dashboard" class="panel active">
-        <div class="status-line">
-          Active operations are tracked server-side. This panel reflects gateway readiness.
-        </div>
-        <div class="ws-status">
-          <div class="ws-badge reconnecting" id="wsStatusBadge">WebSocket: Reconnecting</div>
-          <div class="muted" id="wsStatusDetail">Waiting for cloud connection status...</div>
-        </div>
         <div class="dashboard-summary">
           <div class="status-card">
-            <div class="status-label">Local Gateway Port</div>
+            <div class="status-label">Gateway Port</div>
             <div class="status-value" id="dashboardPort">Loading...</div>
           </div>
           <div class="status-card">
             <div class="status-label">Cloud Connection</div>
             <div class="status-value" id="dashboardCloud">Loading...</div>
-          </div>
-          <div class="status-card">
-            <div class="status-label">Target ID</div>
-            <div class="status-value mono" id="dashboardTarget">Loading...</div>
-          </div>
-          <div class="status-card">
-            <div class="status-label">Relay Origin</div>
-            <div class="status-value mono" id="dashboardRelayOrigin">Loading...</div>
-          </div>
-          <div class="status-card">
-            <div class="status-label">API Origin</div>
-            <div class="status-value mono" id="dashboardApiOrigin">Loading...</div>
+            <div class="status-detail" id="wsStatusDetail">Loading...</div>
           </div>
           <div class="status-card">
             <div class="status-label">Remote Commands</div>
             <div class="status-value" id="dashboardCommandsState">Loading...</div>
           </div>
+          <div class="status-card">
+            <div class="status-label">Connection Security</div>
+            <div class="status-value" id="dashboardSecurity">Loading...</div>
+            <div class="status-detail" id="dashboardSecurityDetail">Loading...</div>
+          </div>
+        </div>
+        <div class="config-section-label">Endpoints</div>
+        <div class="dashboard-config">
+          <div class="config-row">
+            <div class="config-row-label">Target ID</div>
+            <div class="config-row-value mono" id="dashboardTarget" title="">Loading...</div>
+          </div>
+          <div class="config-row">
+            <div class="config-row-label">Relay Origin</div>
+            <div class="config-row-value mono" id="dashboardRelayOrigin" title="">Loading...</div>
+          </div>
+          <div class="config-row">
+            <div class="config-row-label">API Origin</div>
+            <div class="config-row-value mono" id="dashboardApiOrigin" title="">Loading...</div>
+          </div>
         </div>
         <div id="dashboardApproval"></div>
-        <details class="tech-details">
-          <summary>Technical details</summary>
-          <pre id="dashboardPayload">Loading...</pre>
-        </details>
       </section>
       <section id="approvals" class="panel">
         <p class="muted">Pending requests that need approval (Approve, Decline, or Always Allow).</p>
@@ -1342,11 +2037,32 @@
         </div>
         <div id="activityList" class="activity-list"></div>
       </section>
+      <section id="logs" class="panel">
+        <div class="logs-toolbar">
+          <label class="logs-verbose-label">
+            <span class="toggle-switch">
+              <input type="checkbox" id="verboseLogging" />
+              <span class="toggle-track"></span>
+            </span>
+            <span>Verbose</span>
+          </label>
+          <div class="logs-actions">
+            <button class="logs-btn" id="refreshLogsBtn" title="Refresh logs">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 1.5v4.5h4.5"/><path d="M2.3 10a6 6 0 1 0 .9-4.8L1.5 6"/></svg>
+            </button>
+            <button class="logs-btn" id="clearLogsBtn" title="Clear logs">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="2" x2="14" y2="14"/><line x1="14" y1="2" x2="2" y2="14"/></svg>
+            </button>
+          </div>
+        </div>
+        <div id="logsList" class="logs-container"></div>
+      </section>
       <section id="settings" class="panel">
         <div class="settings-sub-nav">
           <button data-settings-tab="relay-gateway" class="active">Relay / Gateway</button>
           <button data-settings-tab="security">Security</button>
           <button data-settings-tab="policies">Policies</button>
+          <button data-settings-tab="binary-paths">CLI Tools</button>
         </div>
 
         <!-- Relay / Gateway sub-tab -->
@@ -1391,6 +2107,18 @@
               </div>
             </div>
           </div>
+          <!-- Saved Configs section -->
+          <div class="settings-group saved-configs-group">
+            <h3 class="settings-group-title">Saved Configs</h3>
+            <p class="settings-group-desc">Save the current origins and API key as a named profile, then switch between profiles instantly.</p>
+            <div class="saved-configs-create">
+              <input id="newConfigName" type="text" placeholder="Profile name (e.g. Production)" maxlength="60" autocomplete="off" />
+              <button id="saveCurrentConfig" type="button" disabled>Save current</button>
+            </div>
+            <div id="savedConfigsList" class="saved-configs-list"></div>
+            <div id="savedConfigsMessage" class="saved-configs-status" role="status" aria-live="polite"></div>
+          </div>
+
           <div class="settings-tab-footer">
             <button id="saveRelayGateway">Save</button>
             <button class="secondary" id="reloadRelayGateway">Reload</button>
@@ -1419,6 +2147,96 @@
           </div>
         </div>
 
+        <!-- CLI Tools sub-tab -->
+        <div id="settings-binary-paths" class="settings-sub-panel">
+          <div class="cli-tools-intro">
+            <h3 class="settings-group-title">Command-Line Tools</h3>
+            <p class="settings-group-desc">ClosedLoop runs these tools on your behalf. They're located automatically on your system. If a tool is missing or the wrong version is being used, set a custom path below.</p>
+          </div>
+          <div class="cli-tool-list">
+            <div class="cli-tool-card" id="binary-path-row-claude">
+              <div class="cli-tool-header">
+                <div class="cli-tool-identity">
+                  <span class="cli-tool-label">Claude Code</span>
+                </div>
+                <span class="cli-tool-badge" data-tool-badge="claude">Checking</span>
+              </div>
+              <div class="cli-tool-input-row">
+                <input id="binaryPathClaude" type="text" placeholder="Enter path to this tool" aria-label="Claude Code path" spellcheck="false" autocomplete="off" />
+                <div class="cli-tool-actions">
+                  <button type="button" data-binary-save="claude">Save</button>
+                  <button type="button" class="secondary" data-binary-clear="claude">Reset</button>
+                </div>
+              </div>
+              <p class="cli-tool-hint" data-tool-hint="claude"></p>
+            </div>
+            <div class="cli-tool-card" id="binary-path-row-gh">
+              <div class="cli-tool-header">
+                <div class="cli-tool-identity">
+                  <span class="cli-tool-label">GitHub CLI</span>
+                </div>
+                <span class="cli-tool-badge" data-tool-badge="gh">Checking</span>
+              </div>
+              <div class="cli-tool-input-row">
+                <input id="binaryPathGh" type="text" placeholder="Enter path to this tool" aria-label="GitHub CLI path" spellcheck="false" autocomplete="off" />
+                <div class="cli-tool-actions">
+                  <button type="button" data-binary-save="gh">Save</button>
+                  <button type="button" class="secondary" data-binary-clear="gh">Reset</button>
+                </div>
+              </div>
+              <p class="cli-tool-hint" data-tool-hint="gh"></p>
+            </div>
+            <div class="cli-tool-card" id="binary-path-row-codex">
+              <div class="cli-tool-header">
+                <div class="cli-tool-identity">
+                  <span class="cli-tool-label">Codex CLI</span>
+                </div>
+                <span class="cli-tool-badge" data-tool-badge="codex">Checking</span>
+              </div>
+              <div class="cli-tool-input-row">
+                <input id="binaryPathCodex" type="text" placeholder="Enter path to this tool" aria-label="Codex CLI path" spellcheck="false" autocomplete="off" />
+                <div class="cli-tool-actions">
+                  <button type="button" data-binary-save="codex">Save</button>
+                  <button type="button" class="secondary" data-binary-clear="codex">Reset</button>
+                </div>
+              </div>
+              <p class="cli-tool-hint" data-tool-hint="codex"></p>
+            </div>
+            <div class="cli-tool-card" id="binary-path-row-python3">
+              <div class="cli-tool-header">
+                <div class="cli-tool-identity">
+                  <span class="cli-tool-label">Python 3</span>
+                </div>
+                <span class="cli-tool-badge" data-tool-badge="python3">Checking</span>
+              </div>
+              <div class="cli-tool-input-row">
+                <input id="binaryPathPython3" type="text" placeholder="Enter path to this tool" aria-label="Python 3 path" spellcheck="false" autocomplete="off" />
+                <div class="cli-tool-actions">
+                  <button type="button" data-binary-save="python3">Save</button>
+                  <button type="button" class="secondary" data-binary-clear="python3">Reset</button>
+                </div>
+              </div>
+              <p class="cli-tool-hint" data-tool-hint="python3"></p>
+            </div>
+            <div class="cli-tool-card" id="binary-path-row-git">
+              <div class="cli-tool-header">
+                <div class="cli-tool-identity">
+                  <span class="cli-tool-label">Git</span>
+                </div>
+                <span class="cli-tool-badge" data-tool-badge="git">Checking</span>
+              </div>
+              <div class="cli-tool-input-row">
+                <input id="binaryPathGit" type="text" placeholder="Enter path to this tool" aria-label="Git path" spellcheck="false" autocomplete="off" />
+                <div class="cli-tool-actions">
+                  <button type="button" data-binary-save="git">Save</button>
+                  <button type="button" class="secondary" data-binary-clear="git">Reset</button>
+                </div>
+              </div>
+              <p class="cli-tool-hint" data-tool-hint="git"></p>
+            </div>
+          </div>
+        </div>
+
         <!-- Policies sub-tab -->
         <div id="settings-policies" class="settings-sub-panel">
           <div class="settings-group">
@@ -1427,10 +2245,10 @@
             <div class="row">
               <label for="defaultApprovalTier">Default Approval Tier</label>
               <select id="defaultApprovalTier">
-                <option value="high">high -- approve everything</option>
-                <option value="medium">medium -- approve risky operations</option>
-                <option value="low">low -- approve only destructive operations</option>
-                <option value="auto">auto -- never prompt</option>
+                <option value="high">high -- auto-approve all operations</option>
+                <option value="medium">medium -- prompt only for high-risk (e.g. deploy)</option>
+                <option value="low">low -- prompt for medium and high-risk operations</option>
+                <option value="none">none -- prompt for all operations</option>
               </select>
             </div>
             <div class="row">
@@ -1445,7 +2263,7 @@
                   <option value="high">high</option>
                   <option value="medium">medium</option>
                   <option value="low">low</option>
-                  <option value="auto">auto</option>
+                  <option value="none">none</option>
                 </select>
                 <button class="secondary" id="tierOverrideAddBtn" type="button">Add</button>
               </div>
@@ -1479,6 +2297,13 @@
           tabButton.classList.add("active");
           document.getElementById(tabName)?.classList.add("active");
         }
+        if (tabName === "logs") {
+          void renderLogs();
+          startLogsAutoRefresh();
+          api.getSettings().then(s => { verboseToggle.checked = !!s.verboseLogging; });
+        } else {
+          stopLogsAutoRefresh();
+        }
       }
 
       tabs.forEach((tab) => {
@@ -1500,6 +2325,12 @@
         if (btn) {
           btn.classList.add("active");
           document.getElementById(`settings-${tabName}`)?.classList.add("active");
+        }
+        if (tabName === "binary-paths" && typeof refreshCliToolDetection === "function") {
+          void refreshCliToolDetection();
+        }
+        if (tabName === "relay-gateway" && typeof loadSavedConfigs === "function") {
+          void loadSavedConfigs();
         }
       }
 
@@ -1523,20 +2354,24 @@
       const relayGatewayMessage = document.getElementById("relayGatewayMessage");
       const securityMessage = document.getElementById("securityMessage");
       const policiesMessage = document.getElementById("policiesMessage");
-      const dashboardPayload = document.getElementById("dashboardPayload");
+      const setCliToolHint = (name, text) => {
+        const hint = document.querySelector(`[data-tool-hint="${name}"]`);
+        if (hint) hint.textContent = text || "";
+      };
       const dashboardPort = document.getElementById("dashboardPort");
       const dashboardCloud = document.getElementById("dashboardCloud");
       const dashboardTarget = document.getElementById("dashboardTarget");
       const dashboardRelayOrigin = document.getElementById("dashboardRelayOrigin");
       const dashboardApiOrigin = document.getElementById("dashboardApiOrigin");
       const dashboardCommandsState = document.getElementById("dashboardCommandsState");
+      const dashboardSecurity = document.getElementById("dashboardSecurity");
+      const dashboardSecurityDetail = document.getElementById("dashboardSecurityDetail");
       const dashboardApproval = document.getElementById("dashboardApproval");
       const approvalsList = document.getElementById("approvalsList");
       const activityList = document.getElementById("activityList");
       const runningJobsList = document.getElementById("runningJobsList");
       const completedJobsList = document.getElementById("completedJobsList");
       const runtimeStatus = document.getElementById("runtimeStatus");
-      const wsStatusBadge = document.getElementById("wsStatusBadge");
       const wsStatusDetail = document.getElementById("wsStatusDetail");
       const sandboxBaseWarning = document.getElementById("sandboxBaseWarning");
       const headerPauseToggle = document.getElementById("headerPauseToggle");
@@ -1575,35 +2410,49 @@
         if (runtimeHealthLabel) {
           runtimeHealthLabel.textContent = runtimeHealth.label;
         }
-        wsStatusBadge.className = `ws-badge ${websocket.tone}`;
-        wsStatusBadge.textContent = `WebSocket: ${websocket.label}`;
+        // Cloud connection card -- value + color + detail subtitle
+        const cloudToneMap = { connected: "ok", reconnecting: "warn", disconnected: "err" };
+        dashboardCloud.textContent = describeCloudConnection(cloudStatus);
+        dashboardCloud.className = `status-value ${cloudToneMap[websocket.tone] ?? ""}`;
         wsStatusDetail.innerHTML = "";
         wsStatusDetail.textContent = websocket.detail;
         if (isAuthError(cloudStatus.error)) {
           const settingsLink = document.createElement("a");
           settingsLink.href = "#";
           settingsLink.textContent = " Open Settings";
-          settingsLink.style.color = "var(--accent)";
-          settingsLink.style.fontWeight = "600";
           settingsLink.addEventListener("click", (e) => { e.preventDefault(); activateTab("settings"); });
           wsStatusDetail.appendChild(settingsLink);
         }
+
+        // Gateway port
         dashboardPort.textContent = String(status.port ?? "-");
-        dashboardCloud.textContent = describeCloudConnection(cloudStatus);
-        dashboardTarget.textContent = describeTargetId(cloudStatus);
+
+        // Remote commands card -- value + color
+        const cmdText = !cachedConnectionEnabled
+          ? "Disconnected"
+          : cachedCommandsPaused
+            ? "Paused"
+            : "Running";
+        const cmdTone = !cachedConnectionEnabled || cachedCommandsPaused ? "warn" : "ok";
+        dashboardCommandsState.textContent = cmdText;
+        dashboardCommandsState.className = `status-value ${cmdTone}`;
+        const security = describeConnectionSecurity(status.connectionSecurity, cloudStatus);
+        dashboardSecurity.textContent = security.label;
+        dashboardSecurity.className = `status-value ${security.tone}`;
+        dashboardSecurityDetail.textContent = security.detail;
+
+        // Config rows
+        dashboardTarget.textContent = cloudStatus.state === "online" && cloudStatus.targetId
+          ? cloudStatus.targetId
+          : "Not assigned";
         dashboardTarget.title = cloudStatus.targetId || "";
         dashboardRelayOrigin.textContent = describeOrigin(status.relayOrigin);
         dashboardRelayOrigin.title = status.relayOrigin || "";
         dashboardApiOrigin.textContent = describeOrigin(status.apiOrigin);
         dashboardApiOrigin.title = status.apiOrigin || "";
-        dashboardCommandsState.textContent = !cachedConnectionEnabled
-          ? "Disconnected"
-          : cachedCommandsPaused
-            ? "Paused"
-            : "Running";
+
         headerPauseToggle.checked = cachedCommandsPaused;
         headerConnectionToggle.textContent = cachedConnectionEnabled ? "Disconnect" : "Reconnect";
-        dashboardPayload.textContent = JSON.stringify(status, null, 2);
       }
 
       function describeOrigin(origin) {
@@ -1623,18 +2472,44 @@
         return "Connecting";
       }
 
-      function describeTargetId(cloudStatus) {
-        if (cloudStatus.state !== "online" || !cloudStatus.targetId) {
-          return "Not assigned";
+      function describeConnectionSecurity(connectionSecurity, cloudStatus) {
+        const mode = connectionSecurity?.mode || "unknown";
+        const isOnline = cloudStatus.state === "online";
+        if (mode === "enhanced") {
+          return {
+            label: "Enhanced",
+            tone: "ok",
+            detail: isOnline
+              ? "Managed key with request signing is active."
+              : "Managed key and signing are configured."
+          };
         }
-        return abbreviateId(cloudStatus.targetId);
-      }
-
-      function abbreviateId(value) {
-        if (typeof value !== "string" || value.length <= 20) {
-          return value;
+        if (mode === "signing_unavailable") {
+          return {
+            label: "Needs Attention",
+            tone: "warn",
+            detail: connectionSecurity?.detail || "Managed key is present but signing is unavailable."
+          };
         }
-        return `${value.slice(0, 8)}...${value.slice(-6)}`;
+        if (mode === "standard") {
+          return {
+            label: "Standard",
+            tone: "",
+            detail: "Using a manually configured bearer key."
+          };
+        }
+        if (mode === "unconfigured") {
+          return {
+            label: "Not Configured",
+            tone: "warn",
+            detail: "No cloud API key is configured."
+          };
+        }
+        return {
+          label: "Unknown",
+          tone: "warn",
+          detail: "Security mode is not available."
+        };
       }
 
       function isAuthError(errorText) {
@@ -1818,27 +2693,28 @@
       }
 
       const PATH_TO_OPERATION = [
-        ["/api/engineer/symphony/launch", "symphony_launch"],
-        ["/api/engineer/symphony/status/", "symphony_status"],
-        ["/api/engineer/symphony/kill", "symphony_kill"],
-        ["/api/engineer/symphony/chat/", "symphony_chat"],
-        ["/api/engineer/symphony/comment-chat/", "symphony_comment_chat"],
-        ["/api/engineer/symphony/commit-message/", "symphony_commit_message"],
-        ["/api/engineer/symphony/sessions", "symphony_sessions"],
-        ["/api/engineer/terminal-chat", "terminal_chat"],
-        ["/api/engineer/ticket-chat", "ticket_chat"],
-        ["/api/engineer/run-viewer-chat", "run_viewer_chat"],
-        ["/api/engineer/codex/argue/", "codex_argue"],
-        ["/api/engineer/codex/", "codex_review"],
-        ["/api/engineer/git/pr", "git_pr"],
-        ["/api/engineer/git", "git_action"],
-        ["/api/engineer/health-check", "health_check"],
-        ["/api/engineer/repos", "repos_config"],
-        ["/api/engineer/deploy", "deploy"],
-        ["/api/engineer/learnings", "learnings"],
-        ["/api/engineer/directories", "filesystem"],
-        ["/api/engineer/files/search", "filesystem"],
-        ["/api/engineer/run-viewer-extract", "filesystem"],
+        ["/api/gateway/symphony/launch", "symphony_launch"],
+        ["/api/gateway/symphony/status/", "symphony_status"],
+        ["/api/gateway/symphony/kill", "symphony_kill"],
+        ["/api/gateway/symphony/chat/", "symphony_chat"],
+        ["/api/gateway/symphony/comment-chat/", "symphony_comment_chat"],
+        ["/api/gateway/symphony/commit-message/", "symphony_commit_message"],
+        ["/api/gateway/symphony/sessions", "symphony_sessions"],
+        ["/api/gateway/terminal-chat", "terminal_chat"],
+        ["/api/gateway/ticket-chat", "ticket_chat"],
+        ["/api/gateway/run-viewer-chat", "run_viewer_chat"],
+        ["/api/gateway/codex/argue/", "codex_argue"],
+        ["/api/gateway/codex/", "codex_review"],
+        ["/api/gateway/git/pr", "git_pr"],
+        ["/api/gateway/git/branch-worktree", "git_branch_worktree"],
+        ["/api/gateway/git", "git_action"],
+        ["/api/gateway/health-check", "health_check"],
+        ["/api/gateway/repos", "repos_config"],
+        ["/api/gateway/deploy", "deploy"],
+        ["/api/gateway/learnings", "learnings"],
+        ["/api/gateway/directories", "filesystem"],
+        ["/api/gateway/files/search", "filesystem"],
+        ["/api/gateway/run-viewer-extract", "filesystem"],
       ];
 
       function activityLabel(path) {
@@ -1848,7 +2724,7 @@
             return operationLabel(opId);
           }
         }
-        return path.replace("/api/engineer/", "").replace(/\//g, " ") || "Request";
+        return path.replace("/api/gateway/", "").replace(/\//g, " ") || "Request";
       }
 
       function statusLabel(code) {
@@ -2067,6 +2943,7 @@
         codex_argue: "Code Argue",
         git_action: "Git Action",
         git_pr: "Pull Request",
+        git_branch_worktree: "Branch Worktree",
         health_check: "Health Check",
         repos_config: "Repository Config",
         deploy: "Deploy",
@@ -2113,6 +2990,13 @@
         title.className = "approval-title";
         title.textContent = operationLabel(approval.operationId);
         header.appendChild(title);
+
+        if (approval.riskTier) {
+          const riskBadge = document.createElement("span");
+          riskBadge.className = `approval-risk-tier risk-${approval.riskTier}`;
+          riskBadge.textContent = approval.riskTier;
+          header.appendChild(riskBadge);
+        }
 
         const badge = document.createElement("span");
         badge.className = `approval-badge ${statusKey}`;
@@ -2232,10 +3116,148 @@
         apiOrigin.value = settings.apiOrigin || "";
         webAppOrigin.value = settings.webAppOrigin || "";
         sandboxBaseDirectory.value = settings.sandboxBaseDirectory || "";
-        defaultApprovalTier.value = settings.defaultApprovalTier || "high";
+        defaultApprovalTier.value = settings.defaultApprovalTier === "auto" ? "high" : (settings.defaultApprovalTier || "high");
         renderTierOverrides(settings.autoApprovalRules || {});
         renderAlwaysAllowRules(settings.alwaysAllowRules || []);
         updateSandboxBaseWarning();
+      }
+
+      const binaryPathInputs = {
+        claude: document.getElementById("binaryPathClaude"),
+        gh: document.getElementById("binaryPathGh"),
+        codex: document.getElementById("binaryPathCodex"),
+        python3: document.getElementById("binaryPathPython3"),
+        git: document.getElementById("binaryPathGit"),
+      };
+
+      const CLI_TOOL_LABELS = {
+        claude: "Claude Code",
+        gh: "GitHub CLI",
+        codex: "Codex CLI",
+        python3: "Python 3",
+        git: "Git",
+      };
+
+      const CLI_TOOL_STATE_CLASSES = ["state-ok", "state-override", "state-missing", "state-invalid"];
+
+      function setCardState(name, stateClass) {
+        const card = document.getElementById(`binary-path-row-${name}`);
+        if (!card) return;
+        for (const cls of CLI_TOOL_STATE_CLASSES) card.classList.remove(cls);
+        if (stateClass) card.classList.add(stateClass);
+      }
+
+      function renderCliToolStatus(name, detection) {
+        const card = document.getElementById(`binary-path-row-${name}`);
+        const badge = document.querySelector(`[data-tool-badge="${name}"]`);
+        const hint = document.querySelector(`[data-tool-hint="${name}"]`);
+        const input = binaryPathInputs[name];
+        if (!card || !badge || !hint || !input) return;
+
+        if (!detection) {
+          setCardState(name, "");
+          badge.textContent = "Checking";
+          hint.textContent = "";
+          return;
+        }
+
+        const overrideValue = detection.override || "";
+        const typedValue = input.value.trim();
+        const userDirty = typedValue && typedValue !== overrideValue &&
+          (detection.source !== "path" || typedValue !== (detection.resolvedPath || ""));
+
+        // User is actively editing -- show pending state, don't overwrite their input.
+        if (userDirty) {
+          setCardState(name, "state-override");
+          badge.textContent = "Unsaved";
+          hint.textContent = "Click Save to apply this path.";
+          input.removeAttribute("data-mode");
+          return;
+        }
+
+        if (detection.source === "override") {
+          input.value = overrideValue;
+          input.setAttribute("data-mode", "override");
+          setCardState(name, "state-override");
+          badge.textContent = "Custom path";
+          hint.textContent = "";
+        } else if (detection.source === "override_invalid") {
+          input.value = overrideValue;
+          input.setAttribute("data-mode", "override");
+          setCardState(name, "state-invalid");
+          badge.textContent = "Invalid path";
+          hint.textContent = "This path does not exist or is not executable. Fix it and Save, or Reset to auto-detect.";
+        } else if (detection.source === "path") {
+          input.value = detection.resolvedPath || "";
+          input.setAttribute("data-mode", "detected");
+          setCardState(name, "state-ok");
+          badge.textContent = "Detected";
+          hint.textContent = "";
+        } else {
+          // fallback - not found on PATH
+          input.value = "";
+          input.removeAttribute("data-mode");
+          setCardState(name, "state-missing");
+          badge.textContent = "Not found";
+          hint.textContent = "Not installed or not on your system PATH. Install the tool, or enter a path above.";
+        }
+      }
+
+      let cliToolDetections = {};
+
+      async function refreshCliToolDetection() {
+        try {
+          const detections = await api.detectCliTools();
+          cliToolDetections = detections || {};
+          for (const name of Object.keys(binaryPathInputs)) {
+            renderCliToolStatus(name, cliToolDetections[name]);
+          }
+        } catch (error) {
+          for (const name of Object.keys(binaryPathInputs)) {
+            setCliToolHint(name, `Could not check this tool: ${error.message}`);
+          }
+        }
+      }
+
+      async function loadBinaryPaths() {
+        try {
+          const paths = await api.getBinaryPaths();
+          for (const [name, input] of Object.entries(binaryPathInputs)) {
+            input.value = (paths && paths[name]) ? paths[name] : "";
+          }
+        } catch (error) {
+          for (const name of Object.keys(binaryPathInputs)) {
+            setCliToolHint(name, `Could not load saved path: ${error.message}`);
+          }
+        }
+        await refreshCliToolDetection();
+      }
+
+      async function saveBinaryPath(name) {
+        const input = binaryPathInputs[name];
+        const value = input.value.trim();
+        if (!value) {
+          setCliToolHint(name, "Enter a path above, or press Reset to auto-detect.");
+          return;
+        }
+        try {
+          const updated = await api.patchBinaryPaths({ [name]: value });
+          input.value = updated[name] || value;
+          await refreshCliToolDetection();
+          setCliToolHint(name, "Saved.");
+        } catch (error) {
+          setCliToolHint(name, `Could not save: ${error.message}`);
+        }
+      }
+
+      async function clearBinaryPath(name) {
+        try {
+          await api.patchBinaryPaths({ [name]: null });
+          binaryPathInputs[name].value = "";
+          await refreshCliToolDetection();
+        } catch (error) {
+          setCliToolHint(name, `Could not reset: ${error.message}`);
+        }
       }
 
       const ALL_OPERATION_IDS = [
@@ -2247,7 +3269,7 @@
         "health_check", "repos_config", "deploy", "filesystem"
       ];
 
-      const TIER_OPTIONS = ["high", "medium", "low", "auto"];
+      const TIER_OPTIONS = ["high", "medium", "low", "none"];
 
       function renderTierOverrides(rules) {
         // Sync hidden input for save
@@ -2272,7 +3294,8 @@
             const opt = document.createElement("option");
             opt.value = t;
             opt.textContent = t;
-            if (t === tier) opt.selected = true;
+            const normalizedTier = tier === "auto" ? "high" : tier;
+            if (t === normalizedTier) opt.selected = true;
             sel.appendChild(opt);
           }
           sel.addEventListener("change", () => {
@@ -2502,6 +3525,258 @@
         }
       }
 
+      const savedConfigsList = document.getElementById("savedConfigsList");
+      const savedConfigsMessage = document.getElementById("savedConfigsMessage");
+      const newConfigNameInput = document.getElementById("newConfigName");
+      const saveCurrentConfigBtn = document.getElementById("saveCurrentConfig");
+
+      let savedConfigsMessageTimer = null;
+      const SAVED_CONFIG_STATUS_TONES = ["success", "warning", "error"];
+      function flashSavedConfigsMessage(text, tone = "success", durationMs = 4000) {
+        if (savedConfigsMessageTimer !== null) {
+          window.clearTimeout(savedConfigsMessageTimer);
+          savedConfigsMessageTimer = null;
+        }
+        savedConfigsMessage.textContent = text;
+        savedConfigsMessage.classList.remove(...SAVED_CONFIG_STATUS_TONES, "visible");
+        if (!text) return;
+        const safeTone = SAVED_CONFIG_STATUS_TONES.includes(tone) ? tone : "success";
+        savedConfigsMessage.classList.add(safeTone, "visible");
+        savedConfigsMessageTimer = window.setTimeout(() => {
+          savedConfigsMessage.textContent = "";
+          savedConfigsMessage.classList.remove(...SAVED_CONFIG_STATUS_TONES, "visible");
+          savedConfigsMessageTimer = null;
+        }, durationMs);
+      }
+
+      function renderSavedConfigs(configs, activeConfigId) {
+        savedConfigsList.innerHTML = "";
+        if (!configs || !configs.length) {
+          const empty = document.createElement("p");
+          empty.className = "saved-configs-empty";
+          empty.textContent = "No saved configs yet. Save your current settings above to create your first profile.";
+          savedConfigsList.appendChild(empty);
+          return;
+        }
+        for (const config of configs) {
+          const row = document.createElement("div");
+          row.className = "saved-config-row";
+          const isActive = config.id === activeConfigId;
+          if (isActive) row.classList.add("active");
+
+          const info = document.createElement("div");
+          info.className = "saved-config-info";
+
+          const nameEl = document.createElement("div");
+          nameEl.className = "saved-config-name";
+          nameEl.textContent = config.name;
+          if (isActive) {
+            const badge = document.createElement("span");
+            badge.className = "saved-config-badge";
+            badge.textContent = "Active";
+            nameEl.appendChild(badge);
+          }
+          info.appendChild(nameEl);
+
+          const meta = document.createElement("div");
+          meta.className = "saved-config-meta";
+          meta.textContent = config.hasCloudApiKey ? "Includes API key" : "No API key stored";
+          info.appendChild(meta);
+          row.appendChild(info);
+
+          const actions = document.createElement("div");
+          actions.className = "saved-config-actions";
+
+          const switchBtn = document.createElement("button");
+          switchBtn.type = "button";
+          switchBtn.className = "switch-btn";
+          switchBtn.textContent = isActive ? "Current" : "Switch";
+          switchBtn.disabled = isActive;
+          switchBtn.addEventListener("click", async () => {
+            flashSavedConfigsMessage("");
+            try {
+              await api.applyConfig(config.id);
+              await Promise.all([loadSettings(), refreshRuntime(), refreshApiKeyStatus(), loadSavedConfigs()]);
+              flashSavedConfigsMessage(`Switched to "${config.name}".`);
+            } catch (error) {
+              flashSavedConfigsMessage(`Failed to switch: ${error.message}`, "error", 6000);
+            }
+          });
+          actions.appendChild(switchBtn);
+
+          const renameBtn = document.createElement("button");
+          renameBtn.type = "button";
+          renameBtn.textContent = "Rename";
+          renameBtn.addEventListener("click", () => beginRename(row, config, info, actions));
+          actions.appendChild(renameBtn);
+
+          const deleteBtn = document.createElement("button");
+          deleteBtn.type = "button";
+          deleteBtn.className = "delete-btn";
+          deleteBtn.textContent = "Delete";
+          let confirmTimer = null;
+          deleteBtn.addEventListener("click", async () => {
+            flashSavedConfigsMessage("");
+            if (!deleteBtn.classList.contains("confirming")) {
+              deleteBtn.classList.add("confirming");
+              deleteBtn.textContent = "Confirm?";
+              confirmTimer = window.setTimeout(() => {
+                deleteBtn.classList.remove("confirming");
+                deleteBtn.textContent = "Delete";
+              }, 3000);
+              return;
+            }
+            if (confirmTimer !== null) window.clearTimeout(confirmTimer);
+            try {
+              const result = await api.deleteConfig(config.id);
+              if (result && result.wasActive) {
+                relayOrigin.value = "";
+                apiOrigin.value = "";
+                webAppOrigin.value = "";
+                apiKey.value = "";
+                await Promise.all([loadSettings(), refreshRuntime(), refreshApiKeyStatus()]);
+              }
+              await loadSavedConfigs();
+              flashSavedConfigsMessage(`Config "${config.name}" deleted.`);
+            } catch (error) {
+              flashSavedConfigsMessage(`Failed to delete: ${error.message}`, "error", 6000);
+            }
+          });
+          actions.appendChild(deleteBtn);
+          row.appendChild(actions);
+
+          savedConfigsList.appendChild(row);
+        }
+      }
+
+      function beginRename(row, config, infoEl, actionsEl) {
+        flashSavedConfigsMessage("");
+
+        const form = document.createElement("div");
+        form.className = "saved-config-rename";
+        const input = document.createElement("input");
+        input.type = "text";
+        input.value = config.name;
+        input.maxLength = 60;
+        form.appendChild(input);
+
+        const saveBtn = document.createElement("button");
+        saveBtn.type = "button";
+        saveBtn.className = "switch-btn";
+        saveBtn.textContent = "Save";
+
+        const cancelBtn = document.createElement("button");
+        cancelBtn.type = "button";
+        cancelBtn.textContent = "Cancel";
+
+        infoEl.replaceWith(form);
+        actionsEl.replaceChildren(saveBtn, cancelBtn);
+
+        input.focus();
+        input.select();
+
+        const commit = async () => {
+          const newName = input.value.trim();
+          if (!newName || newName === config.name) {
+            void loadSavedConfigs();
+            return;
+          }
+          try {
+            await api.renameConfig(config.id, newName);
+            await loadSavedConfigs();
+            flashSavedConfigsMessage("Config renamed.");
+          } catch (error) {
+            flashSavedConfigsMessage(`Failed to rename: ${error.message}`, "error", 6000);
+            void loadSavedConfigs();
+          }
+        };
+
+        saveBtn.addEventListener("click", commit);
+        cancelBtn.addEventListener("click", () => { void loadSavedConfigs(); });
+        input.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); void commit(); }
+          else if (e.key === "Escape") { e.preventDefault(); void loadSavedConfigs(); }
+        });
+      }
+
+      async function loadSavedConfigs() {
+        try {
+          const [configs, settings] = await Promise.all([
+            api.listConfigs(),
+            api.getSettings()
+          ]);
+          renderSavedConfigs(
+            Array.isArray(configs) ? configs : [],
+            settings && settings.activeConfigId ? settings.activeConfigId : null
+          );
+        } catch (error) {
+          flashSavedConfigsMessage(`Failed to load configs: ${error.message}`, "error", 6000);
+        }
+      }
+
+      newConfigNameInput.addEventListener("input", () => {
+        saveCurrentConfigBtn.disabled = !newConfigNameInput.value.trim();
+      });
+
+      let pendingDuplicateMatchId = null;
+      function resetSaveButton() {
+        pendingDuplicateMatchId = null;
+        saveCurrentConfigBtn.textContent = "Save current";
+        saveCurrentConfigBtn.classList.remove("confirming");
+        saveCurrentConfigBtn.disabled = !newConfigNameInput.value.trim();
+      }
+
+      async function saveCurrentConfig() {
+        const name = newConfigNameInput.value.trim();
+        if (!name) return;
+        flashSavedConfigsMessage("");
+        saveCurrentConfigBtn.disabled = true;
+
+        if (pendingDuplicateMatchId === null) {
+          try {
+            const match = await api.findMatchingConfig();
+            if (match && match.id) {
+              pendingDuplicateMatchId = match.id;
+              saveCurrentConfigBtn.textContent = "Save anyway";
+              saveCurrentConfigBtn.classList.add("confirming");
+              saveCurrentConfigBtn.disabled = false;
+              flashSavedConfigsMessage(
+                `These origins already match "${match.name}". Save as a new profile anyway?`,
+                "warning",
+                8000
+              );
+              return;
+            }
+          } catch (error) {
+            flashSavedConfigsMessage(`Failed to check for duplicates: ${error.message}`, "error", 6000);
+            saveCurrentConfigBtn.disabled = !newConfigNameInput.value.trim();
+            return;
+          }
+        }
+
+        try {
+          await api.saveConfig(name);
+          newConfigNameInput.value = "";
+          await loadSavedConfigs();
+          flashSavedConfigsMessage(`Config "${name}" saved.`);
+        } catch (error) {
+          flashSavedConfigsMessage(`Failed to save config: ${error.message}`, "error", 6000);
+        } finally {
+          resetSaveButton();
+        }
+      }
+
+      saveCurrentConfigBtn.addEventListener("click", saveCurrentConfig);
+      newConfigNameInput.addEventListener("input", () => {
+        if (pendingDuplicateMatchId !== null) resetSaveButton();
+      });
+      newConfigNameInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && newConfigNameInput.value.trim()) {
+          e.preventDefault();
+          void saveCurrentConfig();
+        }
+      });
+
       async function clearActivity() {
         await api.clearActivityEvents();
         await refreshActivity();
@@ -2554,6 +3829,8 @@
         onboardingApiKeyHint.textContent = state?.hasStoredApiKey
           ? "A cloud API key is already stored. You can leave this blank."
           : "No stored API key found. Enter one now or later in Settings.";
+        const managedProvisioning = state?.managedProvisioning;
+        onboardingMessage.textContent = managedProvisioning?.message || "";
         updateOnboardingSandboxWarning();
 
         if (state?.completed) {
@@ -2580,13 +3857,28 @@
       async function completeOnboarding() {
         onboardingMessage.textContent = "";
         try {
-          await api.completeOnboarding({
+          const binaryPaths = {};
+          const claudePath = document.getElementById("onboardingBinaryPathClaude").value.trim();
+          const ghPath = document.getElementById("onboardingBinaryPathGh").value.trim();
+          const codexPath = document.getElementById("onboardingBinaryPathCodex").value.trim();
+          const python3Path = document.getElementById("onboardingBinaryPathPython3").value.trim();
+          const gitPath = document.getElementById("onboardingBinaryPathGit").value.trim();
+          if (claudePath) binaryPaths.claude = claudePath;
+          if (ghPath) binaryPaths.gh = ghPath;
+          if (codexPath) binaryPaths.codex = codexPath;
+          if (python3Path) binaryPaths.python3 = python3Path;
+          if (gitPath) binaryPaths.git = gitPath;
+          const payload = {
             relayOrigin: onboardingRelayOrigin.value.trim(),
             apiOrigin: onboardingApiOrigin.value.trim(),
             webAppOrigin: onboardingWebAppOrigin.value.trim(),
             sandboxBaseDirectory: onboardingSandboxDir.value.trim(),
             apiKey: onboardingApiKey.value.trim()
-          });
+          };
+          if (Object.keys(binaryPaths).length > 0) {
+            payload.binaryPaths = binaryPaths;
+          }
+          await api.completeOnboarding(payload);
           onboardingOverlay.classList.add("hidden");
           await Promise.all([loadSettings(), refreshRuntime(), refreshApiKeyStatus(), refreshApprovals()]);
         } catch (error) {
@@ -2594,12 +3886,83 @@
         }
       }
 
+      async function connectInBrowser() {
+        onboardingMessage.textContent = "Opening browser connection...";
+        try {
+          await api.startDeviceOnboarding({
+            webAppOrigin: onboardingWebAppOrigin.value.trim()
+          });
+          await loadOnboardingState();
+        } catch (error) {
+          onboardingMessage.textContent = `Failed to connect in browser: ${error.message}`;
+        }
+      }
+
+      // --- Logs tab ---
+      const logsList = document.getElementById("logsList");
+
+      let logsAutoRefreshTimer = null;
+
+      function startLogsAutoRefresh() {
+        stopLogsAutoRefresh();
+        logsAutoRefreshTimer = setInterval(() => void renderLogs(), 3000);
+      }
+
+      function stopLogsAutoRefresh() {
+        if (logsAutoRefreshTimer) {
+          clearInterval(logsAutoRefreshTimer);
+          logsAutoRefreshTimer = null;
+        }
+      }
+
+      async function renderLogs() {
+        const wasAtBottom = logsList.scrollTop + logsList.clientHeight >= logsList.scrollHeight - 20;
+        const entries = await api.getLogs();
+        if (!entries || !entries.length) {
+          logsList.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;color:var(--muted);text-align:center;gap:6px"><div style="font-size:13px">No log entries yet</div><div style="font-size:11px;opacity:0.7">Turn on Verbose to capture detailed diagnostics.</div></div>';
+          return;
+        }
+        const html = entries.map(e => {
+          const isError = e.level === "error";
+          const isWarn = e.level === "warn";
+          const rowClass = isError ? "log-row log-error" : isWarn ? "log-row log-warn" : "log-row";
+          const ts = e.timestamp.slice(11, 23);
+          return `<div class="${rowClass}"><span class="log-ts">${ts}</span><span class="log-tag">${escapeHtml(e.tag)}</span><span class="log-msg">${escapeHtml(e.message)}</span></div>`;
+        }).join("");
+        logsList.innerHTML = html;
+        if (wasAtBottom) {
+          logsList.scrollTop = logsList.scrollHeight;
+        }
+      }
+
+      function escapeHtml(s) {
+        return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      }
+
+      const verboseToggle = document.getElementById("verboseLogging");
+      verboseToggle.addEventListener("change", async () => {
+        await api.updateSettings({ verboseLogging: verboseToggle.checked });
+      });
+
+      document.getElementById("refreshLogsBtn").addEventListener("click", renderLogs);
+      document.getElementById("clearLogsBtn").addEventListener("click", async () => {
+        await api.clearLogs();
+        await renderLogs();
+      });
+
       document.getElementById("saveRelayGateway").addEventListener("click", saveRelayGatewaySettings);
-      document.getElementById("reloadRelayGateway").addEventListener("click", loadSettings);
+      document.getElementById("reloadRelayGateway").addEventListener("click", async () => {
+        await Promise.all([loadSettings(), loadSavedConfigs()]);
+      });
       document.getElementById("saveSecurity").addEventListener("click", saveSecuritySettings);
       document.getElementById("reloadSecurity").addEventListener("click", loadSettings);
       document.getElementById("savePolicies").addEventListener("click", savePoliciesSettings);
       document.getElementById("reloadPolicies").addEventListener("click", loadSettings);
+      for (const name of Object.keys(binaryPathInputs)) {
+        document.querySelector(`[data-binary-save="${name}"]`).addEventListener("click", () => void saveBinaryPath(name));
+        document.querySelector(`[data-binary-clear="${name}"]`).addEventListener("click", () => void clearBinaryPath(name));
+        binaryPathInputs[name].addEventListener("input", () => renderCliToolStatus(name, cliToolDetections[name]));
+      }
       document.getElementById("saveApiKey").addEventListener("click", saveApiKeyValue);
       document.getElementById("clearApiKey").addEventListener("click", clearApiKeyValue);
       headerPauseToggle.addEventListener("change", async () => {
@@ -2617,6 +3980,7 @@
         .getElementById("pickOnboardingSandbox")
         .addEventListener("click", () => void pickDirectoryForInput(onboardingSandboxDir, updateOnboardingSandboxWarning));
       document.getElementById("completeOnboarding").addEventListener("click", () => void completeOnboarding());
+      document.getElementById("connectInBrowser").addEventListener("click", () => void connectInBrowser());
       sandboxBaseDirectory.addEventListener("input", updateSandboxBaseWarning);
       onboardingSandboxDir.addEventListener("input", updateOnboardingSandboxWarning);
       document.getElementById("refreshApprovals").addEventListener("click", refreshApprovals);
@@ -2641,15 +4005,21 @@
           const result = await api.mintDebugToken();
           debugTokenOutput.textContent =
             `Token: ${result.sessionToken}\nOrigin: ${result.origin}\nExpires: ${result.expiresAt}\n\n` +
-            `curl -H 'X-Desktop-Session-Token: ${result.sessionToken}' -H 'Origin: ${result.origin}' http://localhost:${cachedPort}/api/engineer/...`;
+            `curl -H 'X-Desktop-Session-Token: ${result.sessionToken}' -H 'Origin: ${result.origin}' http://localhost:${cachedPort}/api/gateway/...`;
         } catch (error) {
           debugTokenOutput.textContent = `Error: ${error.message}`;
         }
       });
 
+      api.getAppVersion().then((v) => {
+        document.getElementById("appVersion").textContent = `v${v}`;
+      });
+
       Promise.all([
         loadOnboardingState(),
         loadSettings(),
+        loadSavedConfigs(),
+        loadBinaryPaths(),
         refreshRuntime(),
         refreshApiKeyStatus(),
         refreshApprovals(),
@@ -2702,6 +4072,10 @@
 
       window.addEventListener("desktop:update-available", (event) => {
         showUpdateBanner(event.detail);
+      });
+
+      window.addEventListener("desktop:onboarding-state-changed", () => {
+        void loadOnboardingState();
       });
 
       updateBannerBtn.addEventListener("click", triggerUpdate);

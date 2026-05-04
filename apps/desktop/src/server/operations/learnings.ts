@@ -1,12 +1,18 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { closeSync, existsSync, openSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import { gatewayLog } from "../../main/gateway-logger.js";
+import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getOverrideBinaryPaths } from "./symphony-loop.js";
+import { listAllWorktrees } from "./git-helpers.js";
 import { findPluginScript } from "./plugin-cache.js";
+import { loadReposConfig } from "./repos-config-utils.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
-import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
+import { assertRepoAllowed, expandHome, resolveWorktreeDir } from "./symphony-utils.js";
+import { json } from "./response-utils.js";
 
 type ParsedLearningPattern = {
   id: string;
@@ -20,10 +26,13 @@ type LearningUsed = {
 
 export function registerLearningsRoutes(
   dispatcher: OperationDispatcher,
-  getAllowedDirectories: () => string[]
+  getAllowedDirectories: () => string[],
+  getSymphonyDir: () => string
 ): void {
-  dispatcher.register("GET", "/api/engineer/learnings", async (context) => {
-    const filePath = path.join(os.homedir(), ".claude", ".learnings", "org-patterns.toon");
+  dispatcher.register("GET", "/api/gateway/learnings", async (context) => {
+    const newPath = path.join(os.homedir(), ".closedloop-ai", "learnings", "org-patterns.toon");
+    const legacyPath = path.join(os.homedir(), ".claude", ".learnings", "org-patterns.toon");
+    const filePath = existsSync(newPath) ? newPath : legacyPath;
 
     try {
       const content = await fs.readFile(filePath, "utf-8");
@@ -40,7 +49,7 @@ export function registerLearningsRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/symphony/extract-learnings", async (context) => {
+  dispatcher.register("POST", "/api/gateway/symphony/extract-learnings", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -74,7 +83,7 @@ export function registerLearningsRoutes(
       return;
     }
 
-    const claudeWorkDir = path.join(worktreeDir, ".claude", "work");
+    const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
     const chatHistoryPath = path.join(claudeWorkDir, chatFile);
 
     try {
@@ -126,7 +135,7 @@ export function registerLearningsRoutes(
     json(context, 200, { status: "processing" });
   });
 
-  dispatcher.register("GET", "/api/engineer/symphony/process-learnings", async (context) => {
+  dispatcher.register("GET", "/api/gateway/symphony/process-learnings", async (context) => {
     const ticketId = context.query.get("ticketId");
     const repoPath = context.query.get("repo");
 
@@ -147,13 +156,7 @@ export function registerLearningsRoutes(
     }
 
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-    const statusPath = path.join(
-      worktreeDir,
-      ".claude",
-      "work",
-      ".learnings",
-      "processing-status.json"
-    );
+    const statusPath = path.join(worktreeDir, ".closedloop-ai", "work", ".learnings", "processing-status.json");
 
     if (!existsSync(statusPath)) {
       json(context, 200, { status: "none" });
@@ -168,7 +171,7 @@ export function registerLearningsRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/symphony/process-learnings", async (context) => {
+  dispatcher.register("POST", "/api/gateway/symphony/process-learnings", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -201,7 +204,7 @@ export function registerLearningsRoutes(
       return;
     }
 
-    const claudeWorkDir = path.join(worktreeDir, ".claude", "work");
+    const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
     const learningsDir = path.join(claudeWorkDir, ".learnings");
     const pendingDir = path.join(learningsDir, "pending");
     const processingStatusPath = path.join(learningsDir, "processing-status.json");
@@ -256,11 +259,10 @@ export function registerLearningsRoutes(
         detached: true,
         stdio: "ignore",
         cwd: worktreeDir,
-        env: {
-          ...process.env,
-          PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`,
-          CLOSEDLOOP_WORKDIR: claudeWorkDir
-        }
+        env: await getShellEnv({ CLOSEDLOOP_WORKDIR: claudeWorkDir }),
+      });
+      child.on('error', (err: NodeJS.ErrnoException) => {
+        gatewayLog.warn('learnings-launch', `detached-spawn-failed: ${err.message}`);
       });
       child.unref();
       json(context, 200, { status: "processing", pid: child.pid, logFile });
@@ -283,7 +285,7 @@ export function registerLearningsRoutes(
     json(context, 200, { status: "processing", pid: null });
   });
 
-  dispatcher.register("GET", "/api/engineer/symphony/learnings-status/:ticketId", async (context) => {
+  dispatcher.register("GET", "/api/gateway/symphony/learnings-status/:ticketId", async (context) => {
     const ticketId = context.params.ticketId;
     const repoPath = context.query.get("repo");
 
@@ -304,13 +306,7 @@ export function registerLearningsRoutes(
     }
 
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
-    const statusPath = path.join(
-      worktreeDir,
-      ".claude",
-      "work",
-      ".learnings",
-      "chat-extraction-status.json"
-    );
+    const statusPath = path.join(worktreeDir, ".closedloop-ai", "work", ".learnings", "chat-extraction-status.json");
 
     if (!existsSync(statusPath)) {
       json(context, 200, { status: "none", count: 0 });
@@ -325,7 +321,7 @@ export function registerLearningsRoutes(
     }
   });
 
-  dispatcher.register("POST", "/api/engineer/symphony/record-learning-use", async (context) => {
+  dispatcher.register("POST", "/api/gateway/symphony/record-learning-use", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -372,7 +368,7 @@ export function registerLearningsRoutes(
       return;
     }
 
-    const claudeWorkDir = path.join(worktreeDir, ".claude", "work");
+    const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
     const learningsDir = path.join(claudeWorkDir, ".learnings");
 
     try {
@@ -397,12 +393,224 @@ export function registerLearningsRoutes(
     });
 
     await fs.appendFile(outcomesPath, `${lines.join("\n")}\n`, "utf-8");
-    triggerSuccessRateComputation(claudeWorkDir);
+    void triggerSuccessRateComputation(claudeWorkDir);
 
     json(context, 200, {
       status: "recorded",
       count: learnings.length
     });
+  });
+
+  dispatcher.register("GET", "/api/gateway/symphony/pending-learnings", async (context) => {
+    try {
+      const configDir = path.join(getSymphonyDir(), "config");
+      const reposConfig = await loadReposConfig(configDir);
+      let totalCount = 0;
+      let worktreeCount = 0;
+
+      for (const repo of reposConfig.repos) {
+        const expandedRepoPath = expandHome(repo.path);
+        if (!existsSync(expandedRepoPath)) {
+          continue;
+        }
+        const worktrees = listAllWorktrees(expandedRepoPath);
+        for (const worktreeDir of worktrees) {
+          const pendingDir = path.join(
+            worktreeDir,
+            ".closedloop-ai",
+            "work",
+            ".learnings",
+            "pending"
+          );
+          if (!existsSync(pendingDir)) {
+            continue;
+          }
+          try {
+            const entries = await fs.readdir(pendingDir);
+            const pendingCount = entries.filter((entry) => entry.endsWith(".json")).length;
+            if (pendingCount > 0) {
+              totalCount += pendingCount;
+              worktreeCount += 1;
+            }
+          } catch {
+            // Best-effort — skip worktrees we cannot read
+          }
+        }
+      }
+
+      json(context, 200, { totalCount, worktreeCount });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      json(context, 500, { error: `Failed to scan pending learnings: ${message}` });
+    }
+  });
+
+  dispatcher.register("GET", "/api/gateway/symphony/process-all-learnings", async (context) => {
+    const statusPath = path.join(
+      os.homedir(),
+      ".closedloop-ai",
+      "learnings",
+      "batch-processing-status.json"
+    );
+
+    if (!existsSync(statusPath)) {
+      json(context, 200, { status: "none" });
+      return;
+    }
+
+    try {
+      const content = await fs.readFile(statusPath, "utf-8");
+      json(context, 200, JSON.parse(content));
+    } catch {
+      json(context, 200, { status: "none" });
+    }
+  });
+
+  dispatcher.register("POST", "/api/gateway/symphony/process-all-learnings", async (context) => {
+    const statusDir = path.join(os.homedir(), ".closedloop-ai", "learnings");
+    const statusPath = path.join(statusDir, "batch-processing-status.json");
+
+    if (existsSync(statusPath)) {
+      try {
+        const existing = JSON.parse(await fs.readFile(statusPath, "utf-8"));
+        if (existing.status === "processing") {
+          json(context, 200, {
+            status: "already_processing",
+            worktreeCount: existing.worktreeCount,
+            processedWorktrees: existing.processedWorktrees,
+            startedAt: existing.startedAt,
+          });
+          return;
+        }
+      } catch {
+        // Corrupt status file — fall through and start a new batch
+      }
+    }
+
+    try {
+      const configDir = path.join(getSymphonyDir(), "config");
+      const reposConfig = await loadReposConfig(configDir);
+      const worktrees: Array<{
+        worktreeDir: string;
+        claudeWorkDir: string;
+        pendingCount: number;
+      }> = [];
+
+      for (const repo of reposConfig.repos) {
+        const expandedRepoPath = expandHome(repo.path);
+        if (!existsSync(expandedRepoPath)) {
+          continue;
+        }
+        const repoWorktrees = listAllWorktrees(expandedRepoPath);
+        for (const worktreeDir of repoWorktrees) {
+          const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+          const pendingDir = path.join(claudeWorkDir, ".learnings", "pending");
+          if (!existsSync(pendingDir)) {
+            continue;
+          }
+          try {
+            const entries = await fs.readdir(pendingDir);
+            const pendingCount = entries.filter((entry) => entry.endsWith(".json")).length;
+            if (pendingCount > 0) {
+              worktrees.push({ worktreeDir, claudeWorkDir, pendingCount });
+            }
+          } catch {
+            // Best-effort
+          }
+        }
+      }
+
+      if (worktrees.length === 0) {
+        json(context, 200, { status: "skipped", reason: "No pending learnings found" });
+        return;
+      }
+
+      const scriptPath = findPluginScript("self-learning", "process-chat-learnings.sh");
+      if (!scriptPath) {
+        json(context, 404, {
+          error: "process-chat-learnings.sh not found in self-learning plugin",
+        });
+        return;
+      }
+
+      await fs.mkdir(statusDir, { recursive: true });
+      const startedAt = new Date().toISOString();
+      const totalPending = worktrees.reduce((sum, w) => sum + w.pendingCount, 0);
+
+      await fs.writeFile(
+        statusPath,
+        JSON.stringify({
+          status: "processing",
+          worktreeCount: worktrees.length,
+          totalPending,
+          processedWorktrees: 0,
+          startedAt,
+        }),
+        "utf-8"
+      );
+
+      // Sequentially run the script for each worktree via a detached bash
+      // wrapper and update the status file after each. Matches the legacy
+      // apps/app handler's wrapper-script shape so downstream callers see
+      // the same progress envelope.
+      const statusPathEscaped = JSON.stringify(statusPath);
+      const perWorktreeCommands = worktrees
+        .map((w, i) =>
+          [
+            `echo "[batch] Processing" ${JSON.stringify(w.worktreeDir)}`,
+            `${JSON.stringify(scriptPath)} ${JSON.stringify(w.claudeWorkDir)} || true`,
+            `printf '{"status":"processing","worktreeCount":${worktrees.length},"totalPending":${totalPending},"processedWorktrees":${i + 1},"startedAt":"%s"}' "${startedAt}" > ${statusPathEscaped}`,
+          ].join(" && ")
+        )
+        .join("\n");
+
+      const wrapperScript = [
+        "#!/usr/bin/env bash",
+        perWorktreeCommands,
+        `printf '{"status":"completed","worktreeCount":${worktrees.length},"totalPending":${totalPending},"processedWorktrees":${worktrees.length},"completedAt":"%s"}' "$(date -u +%Y-%m-%dT%H:%M:%S.000Z)" > ${statusPathEscaped}`,
+      ].join("\n");
+
+      const logFile = path.join(statusDir, "batch-process-learnings.log");
+      const logFd = openSync(logFile, "a");
+
+      try {
+        const child = spawn("bash", ["-c", wrapperScript], {
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: await getShellEnv(),
+        });
+        child.on("error", (err: NodeJS.ErrnoException) => {
+          gatewayLog.warn(
+            "learnings-batch",
+            `detached-spawn-failed: ${err.message}`
+          );
+        });
+        child.unref();
+        closeSync(logFd);
+
+        json(context, 200, {
+          status: "processing",
+          worktreeCount: worktrees.length,
+          pid: child.pid,
+        });
+      } catch (err) {
+        closeSync(logFd);
+        const message = err instanceof Error ? err.message : "Unknown error";
+        await fs.writeFile(
+          statusPath,
+          JSON.stringify({
+            status: "error",
+            error: message,
+            completedAt: new Date().toISOString(),
+          }),
+          "utf-8"
+        );
+        json(context, 500, { error: `Failed to spawn batch process: ${message}` });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown error";
+      json(context, 500, { error: `Failed to start batch process: ${message}` });
+    }
   });
 }
 
@@ -413,8 +621,15 @@ function parseToon(content: string): ParsedLearningPattern[] {
     .filter(Boolean);
 
   return chunks.map((chunk, index) => {
-    const firstLine = chunk.split("\n")[0]?.trim() ?? "";
-    const summary = firstLine.replaceAll(/^[-*#\s]+/, "").slice(0, 240);
+    const lines = chunk
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    const candidateLine =
+      lines[0]?.startsWith("patterns[") && lines.length > 1 ? lines[1] : (lines[0] ?? "");
+    const csvSummaryMatch = candidateLine.match(/^[^,]+,[^,]+,\"([^\"]+)\"/);
+    const summary = (csvSummaryMatch?.[1] ?? candidateLine.replace(/^[-*#\s]+/, "")).slice(0, 240);
     return {
       id: `pattern-${index + 1}`,
       summary: summary || `Pattern ${index + 1}`,
@@ -423,7 +638,7 @@ function parseToon(content: string): ParsedLearningPattern[] {
   });
 }
 
-function triggerSuccessRateComputation(workDir: string): void {
+async function triggerSuccessRateComputation(workDir: string): Promise<void> {
   const runLoopPath = findPluginScript("code", "run-loop.sh");
   if (!runLoopPath) {
     return;
@@ -435,13 +650,10 @@ function triggerSuccessRateComputation(workDir: string): void {
     return;
   }
 
-  const child = spawn("python3", [ratesScript, "--workdir", workDir], {
+  const child = spawn(resolveBinarySync("python3", getOverrideBinaryPaths()?.python3).path, [ratesScript, "--workdir", workDir], {
     stdio: "ignore",
     detached: true,
-    env: {
-      ...process.env,
-      PATH: `${process.env.PATH}:/opt/homebrew/bin:/usr/local/bin`
-    }
+    env: await getShellEnv(),
   });
   child.unref();
 }
@@ -464,10 +676,4 @@ function parseBody(context: OperationRequestContext): Record<string, unknown> | 
 
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value : null;
-}
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
 }

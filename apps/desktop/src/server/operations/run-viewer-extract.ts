@@ -8,13 +8,14 @@ import { promisify } from "node:util";
 import Busboy from "busboy";
 import type { Readable } from "node:stream";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import { json } from "./response-utils.js";
 
 const execFileAsync = promisify(execFile);
 const PREFIX = path.join(os.tmpdir(), "run-viewer-");
 const MAX_ZIP_SIZE = 200 * 1024 * 1024;
 
 export function registerRunViewerExtractRoutes(dispatcher: OperationDispatcher): void {
-  dispatcher.register("POST", "/api/engineer/run-viewer-extract", async (context) => {
+  dispatcher.register("POST", "/api/gateway/run-viewer-extract", async (context) => {
     const contentType = context.request.headers["content-type"];
     if (!contentType || !contentType.toLowerCase().includes("multipart/form-data")) {
       json(context, 400, { error: "Invalid form data" });
@@ -67,7 +68,7 @@ export function registerRunViewerExtractRoutes(dispatcher: OperationDispatcher):
     }
   });
 
-  dispatcher.register("DELETE", "/api/engineer/run-viewer-extract", async (context) => {
+  dispatcher.register("DELETE", "/api/gateway/run-viewer-extract", async (context) => {
     const body = parseBody(context);
     if (!body) {
       json(context, 400, { error: "Invalid JSON body" });
@@ -87,7 +88,7 @@ export function registerRunViewerExtractRoutes(dispatcher: OperationDispatcher):
     json(context, 200, { success: true });
   });
 
-  dispatcher.register("GET", "/api/engineer/run-viewer-extract", async (context) => {
+  dispatcher.register("GET", "/api/gateway/run-viewer-extract", async (context) => {
     const runDir = context.query.get("runDir");
     if (!(runDir && isValidRunDir(runDir))) {
       json(context, 400, { error: "Invalid runDir" });
@@ -199,10 +200,4 @@ function parseBody(context: OperationRequestContext): Record<string, unknown> | 
   } catch {
     return null;
   }
-}
-
-function json(context: OperationRequestContext, status: number, payload: unknown): void {
-  context.response.statusCode = status;
-  context.response.setHeader("content-type", "application/json");
-  context.response.end(JSON.stringify(payload));
 }

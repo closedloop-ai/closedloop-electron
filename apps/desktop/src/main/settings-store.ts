@@ -1,11 +1,42 @@
+import { randomUUID } from "node:crypto";
 import Store from "electron-store";
 import {
   DEFAULT_DESKTOP_SETTINGS,
   type AlwaysAllowRule,
   type DesktopSettings,
-  type RiskTier
+  type RiskTier,
+  type SavedConfig
 } from "../shared/contracts.js";
-import { normalizeAndValidateOrigin } from "./origin-policy.js";
+import { normalizeAndValidateOrigin, normalizeWebAppOrigin } from "./origin-policy.js";
+
+type BinaryPaths = {
+  claude?: string;
+  gh?: string;
+  codex?: string;
+  python3?: string;
+  git?: string;
+};
+
+export type SavedConfigManagedPatch = Partial<
+  Pick<
+    SavedConfig,
+    | "apiKeySource"
+    | "gatewayId"
+    | "gatewayPublicKeyPem"
+    | "desktopSecurityUpgradeProtocolVersion"
+    | "lastComputeTargetId"
+    | "desktopSecurityPromptDismissedAt"
+    | "pendingOnboardingAttemptId"
+  >
+>;
+type SavedConfigOriginsPatch = Pick<
+  SavedConfig,
+  "relayOrigin" | "apiOrigin" | "webAppOrigin"
+>;
+
+const DEFAULT_MANAGED_ONBOARDING_CONFIG_NAME = "Default";
+const UUID_V4_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export interface SettingsStoreOptions {
   cwd?: string;
@@ -66,6 +97,35 @@ export class SettingsStore {
     if (hadAuthApiOrigin) {
       this.store.delete("authApiOrigin" as keyof DesktopSettings);
     }
+
+    // Migration: replace legacy "auto" tier with "high" (identical behavior).
+    if (raw.defaultApprovalTier === "auto") {
+      this.store.set("defaultApprovalTier", "high" as RiskTier);
+    }
+    const rules = raw.autoApprovalRules as Record<string, string> | undefined;
+    if (rules) {
+      let rulesChanged = false;
+      for (const [key, val] of Object.entries(rules)) {
+        if (val === "auto") {
+          rules[key] = "high";
+          rulesChanged = true;
+        }
+      }
+      if (rulesChanged) {
+        this.store.set("autoApprovalRules", rules as unknown as Record<string, RiskTier>);
+      }
+    }
+
+    // Migration: initialize savedConfigs and activeConfigId for existing installs.
+    // TODO(PLN-116-cleanup): Remove this migration block once all existing installs have been upgraded.
+    if (!("savedConfigs" in raw)) {
+      this.store.set("savedConfigs", []);
+    }
+    if (!("activeConfigId" in raw)) {
+      this.store.set("activeConfigId", null as DesktopSettings["activeConfigId"]);
+    }
+
+    this.migrateSavedConfigManagedFields();
   }
 
   getAll(): DesktopSettings {
@@ -73,7 +133,7 @@ export class SettingsStore {
   }
 
   getRelayOrigin(): string {
-    return this.store.get("relayOrigin" as keyof DesktopSettings, DEFAULT_DESKTOP_SETTINGS.relayOrigin) as string;
+    return this.store.get("relayOrigin", DEFAULT_DESKTOP_SETTINGS.relayOrigin);
   }
 
   getApiOrigin(): string {
@@ -125,7 +185,7 @@ export class SettingsStore {
   }
 
   setRelayOrigin(relayOrigin: string): void {
-    this.store.set("relayOrigin" as keyof DesktopSettings, relayOrigin);
+    this.store.set("relayOrigin", relayOrigin);
   }
 
   setApiOrigin(apiOrigin: string): void {
@@ -150,6 +210,296 @@ export class SettingsStore {
     this.store.set("alwaysAllowRules", alwaysAllowRules);
   }
 
+  getBinaryPaths(): BinaryPaths {
+    return (this.store.get("binaryPaths" as keyof DesktopSettings) ?? {}) as BinaryPaths;
+  }
+
+  patchBinaryPaths(patch: Record<string, string | null>): BinaryPaths {
+    const merged: BinaryPaths = { ...this.getBinaryPaths() };
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === null) {
+        delete (merged as Record<string, string | undefined>)[key];
+      } else {
+        (merged as Record<string, string>)[key] = value;
+      }
+    }
+    this.store.set("binaryPaths" as keyof DesktopSettings, merged as DesktopSettings["binaryPaths"]);
+    return merged;
+  }
+
+  getSavedConfigs(): SavedConfig[] {
+    return this.store.get("savedConfigs", DEFAULT_DESKTOP_SETTINGS.savedConfigs);
+  }
+
+  setSavedConfigs(configs: SavedConfig[]): void {
+    this.store.set("savedConfigs", configs);
+  }
+
+  getActiveConfigId(): string | null {
+    return this.store.get("activeConfigId", DEFAULT_DESKTOP_SETTINGS.activeConfigId);
+  }
+
+  setActiveConfigId(id: string | null): void {
+    this.store.set("activeConfigId", id as DesktopSettings["activeConfigId"]);
+  }
+
+  getActiveConfig(): SavedConfig | null {
+    const activeConfigId = this.getActiveConfigId();
+    if (!activeConfigId) {
+      return null;
+    }
+    return this.getSavedConfigs().find((c) => c.id === activeConfigId) ?? null;
+  }
+
+  private validateConfigName(name: string): string {
+    const trimmed = typeof name === "string" ? name.trim() : "";
+    if (!trimmed) {
+      throw new Error("Config name is required");
+    }
+    if (trimmed.length > 200) {
+      throw new Error("Config name must be 200 characters or fewer");
+    }
+    return trimmed;
+  }
+
+  private assertNameAvailable(configs: SavedConfig[], name: string, excludeId?: string): void {
+    const normalized = name.trim().toLocaleLowerCase();
+    const clash = configs.find(
+      (c) => c.id !== excludeId && c.name.trim().toLocaleLowerCase() === normalized
+    );
+    if (clash) {
+      throw new Error(`A config named "${clash.name}" already exists`);
+    }
+  }
+
+  findConfigByOrigins(relayOrigin: string, apiOrigin: string, webAppOrigin: string): SavedConfig | null {
+    const configs = this.getSavedConfigs();
+    return (
+      configs.find(
+        (c) =>
+          c.relayOrigin === relayOrigin &&
+          c.apiOrigin === apiOrigin &&
+          c.webAppOrigin === webAppOrigin
+      ) ?? null
+    );
+  }
+
+  private getAvailableConfigName(preferredName: string): string {
+    const baseName = this.validateConfigName(preferredName);
+    const usedNames = new Set(
+      this.getSavedConfigs().map((config) =>
+        config.name.trim().toLocaleLowerCase(),
+      ),
+    );
+    if (!usedNames.has(baseName.toLocaleLowerCase())) {
+      return baseName;
+    }
+    for (let suffix = 2; suffix < 1000; suffix += 1) {
+      const candidate = `${baseName} ${suffix}`;
+      if (!usedNames.has(candidate.toLocaleLowerCase())) {
+        return candidate;
+      }
+    }
+    throw new Error(`No available config name for "${baseName}"`);
+  }
+
+  /**
+   * Ensures the current runtime origins are represented by an active saved
+   * profile, reusing a matching profile before creating a default one.
+   */
+  ensureActiveConfigForCurrentOrigins(
+    preferredName = DEFAULT_MANAGED_ONBOARDING_CONFIG_NAME,
+  ): SavedConfig {
+    const relayOrigin = this.getRelayOrigin();
+    const apiOrigin = this.getApiOrigin();
+    const webAppOrigin = this.getWebAppOrigin();
+
+    const activeConfig = this.getActiveConfig();
+    if (activeConfig) {
+      return (
+        this.updateActiveConfigOrigins({
+          relayOrigin,
+          apiOrigin,
+          webAppOrigin,
+        }) ?? activeConfig
+      );
+    }
+
+    const matchingConfig = this.findConfigByOrigins(
+      relayOrigin,
+      apiOrigin,
+      webAppOrigin,
+    );
+    if (matchingConfig) {
+      return this.applyConfig(matchingConfig.id);
+    }
+
+    const savedConfig = this.saveConfig(
+      this.getAvailableConfigName(preferredName),
+    );
+    return this.applyConfig(savedConfig.id);
+  }
+
+  saveConfig(name: string): SavedConfig {
+    const trimmedName = this.validateConfigName(name);
+    const configs = this.getSavedConfigs();
+    this.assertNameAvailable(configs, trimmedName);
+    const config: SavedConfig = {
+      id: randomUUID(),
+      name: trimmedName,
+      relayOrigin: this.getRelayOrigin(),
+      apiOrigin: this.getApiOrigin(),
+      webAppOrigin: this.getWebAppOrigin(),
+      apiKeySource: "USER_CREATED"
+    };
+    configs.push(config);
+    this.setSavedConfigs(configs);
+    return config;
+  }
+
+  listConfigs(): SavedConfig[] {
+    return this.getSavedConfigs();
+  }
+
+  deleteConfig(id: string): { wasActive: boolean } {
+    const configs = this.getSavedConfigs();
+    const index = configs.findIndex((c) => c.id === id);
+    if (index === -1) {
+      return { wasActive: false };
+    }
+    const activeConfigId = this.getActiveConfigId();
+    const wasActive = activeConfigId === id;
+    configs.splice(index, 1);
+    this.setSavedConfigs(configs);
+    if (wasActive) {
+      this.setActiveConfigId(null);
+    }
+    return { wasActive };
+  }
+
+  /**
+   * Returns whether a gateway identity is still referenced by any saved profile
+   * or by the active unsaved legacy runtime identity.
+   */
+  isGatewayIdReferenced(
+    gatewayId: string | null | undefined,
+    options: { activeRuntimeGatewayId?: string | null } = {},
+  ): boolean {
+    const normalizedGatewayId = gatewayId?.trim();
+    if (!normalizedGatewayId) {
+      return false;
+    }
+    if (options.activeRuntimeGatewayId?.trim() === normalizedGatewayId) {
+      return true;
+    }
+    return this.getSavedConfigs().some(
+      (config) => config.gatewayId?.trim() === normalizedGatewayId,
+    );
+  }
+
+  renameConfig(id: string, name: string): void {
+    const trimmedName = this.validateConfigName(name);
+    const configs = this.getSavedConfigs();
+    const index = configs.findIndex((c) => c.id === id);
+    if (index === -1) {
+      throw new Error(`Config not found: ${id}`);
+    }
+    this.assertNameAvailable(configs, trimmedName, id);
+    configs[index] = { ...configs[index], name: trimmedName };
+    this.setSavedConfigs(configs);
+  }
+
+  applyConfig(id: string): SavedConfig {
+    const configs = this.getSavedConfigs();
+    const config = configs.find((c) => c.id === id);
+    if (!config) {
+      throw new Error(`Config not found: ${id}`);
+    }
+    const normalizedRelayOrigin = normalizeAndValidateOrigin(config.relayOrigin);
+    const normalizedApiOrigin = normalizeAndValidateOrigin(config.apiOrigin);
+    const normalizedWebAppOrigin = normalizeWebAppOrigin(config.webAppOrigin);
+    this.setRelayOrigin(normalizedRelayOrigin);
+    this.setApiOrigin(normalizedApiOrigin);
+    this.setWebAppOrigin(normalizedWebAppOrigin);
+    this.setActiveConfigId(id);
+    return config;
+  }
+
+  /**
+   * Ensures the saved profile has its own stable gateway UUID, creating it only
+   * for that profile. Unsaved legacy installs continue using the legacy identity.
+   */
+  ensureConfigGatewayId(id: string): SavedConfig {
+    const configs = this.getSavedConfigs();
+    const index = configs.findIndex((c) => c.id === id);
+    if (index === -1) {
+      throw new Error(`Config not found: ${id}`);
+    }
+    const existing = configs[index].gatewayId;
+    if (existing && UUID_V4_RE.test(existing)) {
+      return configs[index];
+    }
+    configs[index] = {
+      ...configs[index],
+      gatewayId: randomUUID(),
+      desktopSecurityUpgradeProtocolVersion: 1
+    };
+    this.setSavedConfigs(configs);
+    return configs[index];
+  }
+
+  /** Updates non-secret managed-key metadata for a saved profile. */
+  updateConfigManagedMetadata(id: string, patch: SavedConfigManagedPatch): SavedConfig {
+    const configs = this.getSavedConfigs();
+    const index = configs.findIndex((c) => c.id === id);
+    if (index === -1) {
+      throw new Error(`Config not found: ${id}`);
+    }
+    const hasChanges = Object.entries(patch).some(([key, value]) => {
+      const field = key as keyof SavedConfig;
+      return configs[index][field] !== value;
+    });
+    if (!hasChanges) {
+      return configs[index];
+    }
+    configs[index] = {
+      ...configs[index],
+      ...patch
+    };
+    this.setSavedConfigs(configs);
+    return configs[index];
+  }
+
+  /** Updates managed-key metadata for the active saved profile when one exists. */
+  updateActiveConfigManagedMetadata(patch: SavedConfigManagedPatch): SavedConfig | null {
+    const activeConfigId = this.getActiveConfigId();
+    if (!activeConfigId) {
+      return null;
+    }
+    return this.updateConfigManagedMetadata(activeConfigId, patch);
+  }
+
+  /** Updates trusted origins for the active saved profile when one exists. */
+  updateActiveConfigOrigins(patch: SavedConfigOriginsPatch): SavedConfig | null {
+    const activeConfigId = this.getActiveConfigId();
+    if (!activeConfigId) {
+      return null;
+    }
+    const configs = this.getSavedConfigs();
+    const index = configs.findIndex((c) => c.id === activeConfigId);
+    if (index === -1) {
+      throw new Error(`Config not found: ${activeConfigId}`);
+    }
+    configs[index] = {
+      ...configs[index],
+      relayOrigin: normalizeAndValidateOrigin(patch.relayOrigin),
+      apiOrigin: normalizeAndValidateOrigin(patch.apiOrigin),
+      webAppOrigin: normalizeWebAppOrigin(patch.webAppOrigin)
+    };
+    this.setSavedConfigs(configs);
+    return configs[index];
+  }
+
   update(partial: Partial<DesktopSettings>): DesktopSettings {
     if (typeof partial.sandboxBaseDirectory === "string") {
       this.store.set("sandboxBaseDirectory", partial.sandboxBaseDirectory);
@@ -163,8 +513,11 @@ export class SettingsStore {
     if (typeof partial.cloudConnectionEnabled === "boolean") {
       this.store.set("cloudConnectionEnabled", partial.cloudConnectionEnabled);
     }
+    if (typeof partial.verboseLogging === "boolean") {
+      this.store.set("verboseLogging", partial.verboseLogging);
+    }
     if (typeof partial.relayOrigin === "string") {
-      this.store.set("relayOrigin" as keyof DesktopSettings, partial.relayOrigin);
+      this.store.set("relayOrigin", partial.relayOrigin);
     }
     if (typeof partial.apiOrigin === "string") {
       this.store.set("apiOrigin", partial.apiOrigin);
@@ -182,5 +535,30 @@ export class SettingsStore {
       this.store.set("defaultApprovalTier", partial.defaultApprovalTier);
     }
     return this.getAll();
+  }
+
+  private migrateSavedConfigManagedFields(): void {
+    const configs = this.getSavedConfigs();
+    let changed = false;
+    const migrated = configs.map((config) => {
+      const hasManagedIdentity =
+        typeof config.gatewayId === "string" &&
+        UUID_V4_RE.test(config.gatewayId) &&
+        typeof config.gatewayPublicKeyPem === "string" &&
+        config.gatewayPublicKeyPem.includes("BEGIN PUBLIC KEY");
+      const apiKeySource: SavedConfig["apiKeySource"] =
+        config.apiKeySource === "DESKTOP_MANAGED" && hasManagedIdentity
+          ? "DESKTOP_MANAGED"
+          : "USER_CREATED";
+      if (config.apiKeySource !== apiKeySource) {
+        changed = true;
+        return { ...config, apiKeySource };
+      }
+      return config;
+    });
+
+    if (changed) {
+      this.setSavedConfigs(migrated);
+    }
   }
 }
