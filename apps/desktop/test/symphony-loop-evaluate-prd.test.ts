@@ -8,7 +8,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import {
-  readEvaluatePrdOutputs,
+  EvaluateArtifact,
+  readEvaluateOutputs,
   writePrdArtifact,
 } from "../src/server/operations/symphony-loop.js";
 import { LoopArtifactType } from "@closedloop-ai/loops-api/artifacts";
@@ -427,6 +428,22 @@ describe("T-5.2: writePrdArtifact", () => {
     assert.equal(content, "Prompt-as-fallback content");
   });
 
+  test("(f) picks the primary PRD when a PRD context ref precedes it", async () => {
+    // Backend appends the primary artifact last; refs come first. If a PRD
+    // context ref shares the primary's type, find() would shadow the primary
+    // and judges would score the wrong document. findLast picks the trailing
+    // primary even with a same-type ref present.
+    const tmpDir = makeTempDir();
+    await writePrdArtifact(tmpDir, [
+      { type: "PRD", content: "PARENT PRD (context ref)" },
+      { type: "PRD", content: "PRIMARY PRD" },
+    ]);
+    assert.equal(
+      await fs.readFile(path.join(tmpDir, "prd.md"), "utf-8"),
+      "PRIMARY PRD",
+    );
+  });
+
   test("prompt without repo contains skill --workdir runDir but not REPO_PATH=", async () => {
     // Verify evaluate-prd-prompt.txt matches harness-agent EVALUATE_PRD when no target repo.
     const tmpDir = makeTempDir();
@@ -563,10 +580,10 @@ describe("T-5.2: writePrdArtifact", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T-5.3: readEvaluatePrdOutputs unit tests
+// T-5.3: readEvaluateOutputs(EvaluateArtifact.Prd) unit tests
 // ---------------------------------------------------------------------------
 
-describe("T-5.3: readEvaluatePrdOutputs", () => {
+describe("T-5.3: readEvaluateOutputs(EvaluateArtifact.Prd)", () => {
   test("file exists: returns prdJudges from prd-judges.json", () => {
     const tmpDir = makeTempDir();
     const prdJudgesData = { scores: [{ judge: "quality", score: 8 }] };
@@ -575,13 +592,13 @@ describe("T-5.3: readEvaluatePrdOutputs", () => {
       JSON.stringify(prdJudgesData)
     );
 
-    const result = readEvaluatePrdOutputs(tmpDir);
+    const result = readEvaluateOutputs(tmpDir, EvaluateArtifact.Prd);
     assert.deepEqual(result.prdJudges, prdJudgesData);
   });
 
   test("file absent: returns { prdJudges: undefined }", () => {
     const tmpDir = makeTempDir();
-    const result = readEvaluatePrdOutputs(tmpDir);
+    const result = readEvaluateOutputs(tmpDir, EvaluateArtifact.Prd);
     assert.equal(result.prdJudges, undefined);
   });
 
@@ -590,7 +607,7 @@ describe("T-5.3: readEvaluatePrdOutputs", () => {
     writeFileSync(path.join(tmpDir, "prd-judges.json"), "not valid json {{{{");
     let result: Record<string, unknown> | undefined;
     assert.doesNotThrow(() => {
-      result = readEvaluatePrdOutputs(tmpDir);
+      result = readEvaluateOutputs(tmpDir, EvaluateArtifact.Prd);
     });
     assert.equal(result?.prdJudges, undefined);
   });

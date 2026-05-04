@@ -270,6 +270,7 @@ const SUPPORTED_COMMANDS = new Set<LoopCommand>([
   "GENERATE_PRD",
   "EVALUATE_PLAN",
   "EVALUATE_CODE",
+  "EVALUATE_FEATURE",
   "BOOTSTRAP",
 ]);
 const VALID_COMMANDS = SUPPORTED_COMMANDS;
@@ -286,6 +287,7 @@ const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
   DECOMPOSE: "NOT_REQUIRED",
   EVALUATE_PLAN: "REQUIRED",
   EVALUATE_CODE: "REQUIRED",
+  EVALUATE_FEATURE: "OPTIONAL",
   BOOTSTRAP: "NOT_REQUIRED",
 };
 const LOCAL_CALLBACK_FAIL_FAST_COMMANDS = new Set<LoopCommand>([
@@ -342,6 +344,65 @@ export const PLAN_ARTIFACT_TYPES: readonly LoopArtifactType[] = [
   LoopArtifactType.ImplementationPlan,
 ] as const;
 
+/** Response-payload keys for artifacts produced by loop commands. */
+export const LoopOutputArtifactKey = {
+  Plan: "plan",
+  OpenQuestions: "openQuestions",
+  Judges: "judges",
+  ExecutionResult: "executionResult",
+  CodeJudges: "codeJudges",
+  Features: "features",
+  Prd: "prd",
+  PrdJudges: "prdJudges",
+  PlanJudges: "planJudges",
+  FeatureJudges: "featureJudges",
+  BootstrapResult: "bootstrapResult",
+} as const;
+export type LoopOutputArtifactKey =
+  (typeof LoopOutputArtifactKey)[keyof typeof LoopOutputArtifactKey];
+
+type LoopOutputArtifacts = Partial<Record<LoopOutputArtifactKey, unknown>>;
+
+/** Discriminator for outputs produced by an EVALUATE_{type} loop iteration. */
+export const EvaluateArtifact = {
+  Prd: "Prd",
+  Plan: "Plan",
+  Code: "Code",
+  Feature: "Feature",
+} as const;
+export type EvaluateArtifact =
+  (typeof EvaluateArtifact)[keyof typeof EvaluateArtifact];
+
+const EVALUATE_ARTIFACT_OUTPUT = {
+  [EvaluateArtifact.Prd]: {
+    file: LoopArtifactFile.PrdJudges,
+    key: LoopOutputArtifactKey.PrdJudges,
+  },
+  [EvaluateArtifact.Plan]: {
+    file: LoopArtifactFile.PlanJudges,
+    key: LoopOutputArtifactKey.PlanJudges,
+  },
+  [EvaluateArtifact.Code]: {
+    file: LoopArtifactFile.CodeJudges,
+    key: LoopOutputArtifactKey.CodeJudges,
+  },
+  [EvaluateArtifact.Feature]: {
+    file: LoopArtifactFile.FeatureJudges,
+    key: LoopOutputArtifactKey.FeatureJudges,
+  },
+} as const satisfies Record<
+  EvaluateArtifact,
+  { file: string; key: LoopOutputArtifactKey }
+>;
+
+/** Maps each EVALUATE_* loop command to its artifact discriminator. */
+export const EVALUATE_COMMAND_ARTIFACT = {
+  EVALUATE_PRD: EvaluateArtifact.Prd,
+  EVALUATE_PLAN: EvaluateArtifact.Plan,
+  EVALUATE_CODE: EvaluateArtifact.Code,
+  EVALUATE_FEATURE: EvaluateArtifact.Feature,
+} as const satisfies Record<string, EvaluateArtifact>;
+
 function readExecutePlanArtifact(
   claudeWorkDir: string,
 ): ReturnType<typeof toUploadedPlanArtifact> {
@@ -384,10 +445,15 @@ export async function writePrdArtifact(
   artifacts: LoopArtifact[],
   prompt?: string,
 ): Promise<void> {
-  const prdArtifact = artifacts.find((a) => a.type === LoopArtifactType.Prd);
+  // Primary artifact is appended last by the backend's context-pack assembler
+  // (symphony-alpha apps/api/lib/loops/loop-context-pack.ts: refs precede primary).
+  // Match by findLast so a same-type context ref doesn't shadow the primary.
+  const prdArtifact = artifacts.findLast(
+    (a) => a.type === LoopArtifactType.Prd,
+  );
   const featureArtifact = prdArtifact
     ? null
-    : artifacts.find((a) => a.type === LoopArtifactType.Feature);
+    : artifacts.findLast((a) => a.type === LoopArtifactType.Feature);
   const source = prdArtifact ?? featureArtifact;
 
   const prdContent = source?.content || prompt || "";
@@ -397,12 +463,14 @@ export async function writePrdArtifact(
   }
 }
 
-/** Internal helper: writes plan.md to workDir from the first matching plan artifact. */
+/** Internal helper: writes plan.md to workDir from the last matching plan artifact. */
 async function writePlanFileToWorkDir(
   workDir: string,
   artifacts: LoopArtifact[],
 ): Promise<void> {
-  const artifact = artifacts.find((a) =>
+  // Primary artifact is appended last by the backend's context-pack assembler;
+  // refs precede it. findLast picks the primary even when refs share its type.
+  const artifact = artifacts.findLast((a) =>
     (PLAN_ARTIFACT_TYPES as readonly string[]).includes(a.type),
   );
   if (artifact?.content) {
@@ -432,35 +500,45 @@ export async function writeCodeArtifact(
 }
 
 /**
+ * Write prd.md to a work directory from a Feature artifact.
+ *
+ * Unlike writePrdArtifact, this helper is strict: it requires a
+ * LoopArtifactType.Feature artifact and does not fall back to PRD or
+ * prompt. If no Feature artifact is present, it throws.
+ */
+export async function writeFeatureArtifact(
+  workDir: string,
+  artifacts: LoopArtifact[],
+): Promise<void> {
+  // Primary artifact is appended last by the backend's context-pack assembler
+  // (symphony-alpha apps/api/lib/loops/loop-context-pack.ts: refs precede primary).
+  // For Feature-from-Feature evaluations, refs share the primary's type, so
+  // findLast is required to score the loop's actual document.
+  const featureArtifact = artifacts.findLast(
+    (a) => a.type === LoopArtifactType.Feature,
+  );
+  if (!featureArtifact) {
+    throw new Error(
+      "writeFeatureArtifact: no LoopArtifactType.Feature artifact found",
+    );
+  }
+  await fs.writeFile(
+    path.join(workDir, LoopArtifactFile.Prd),
+    featureArtifact.content,
+  );
+}
+
+/**
  * Read outputs produced by an EVALUATE_{type} loop iteration.
  * Returns undefined values for missing or unreadable files.
  */
-function readEvaluateOutputs(
+export function readEvaluateOutputs(
   workDir: string,
-  artifactType: string,
-): Record<string, unknown> {
-  const judges = readJsonFileSync(
-    path.join(workDir, `${artifactType}-judges.json`),
-  );
-  return { [`${artifactType}Judges`]: judges ?? undefined };
-}
-
-export function readEvaluatePrdOutputs(
-  workDir: string,
-): Record<string, unknown> {
-  return readEvaluateOutputs(workDir, "prd");
-}
-
-export function readEvaluatePlanOutputs(
-  workDir: string,
-): Record<string, unknown> {
-  return readEvaluateOutputs(workDir, "plan");
-}
-
-export function readEvaluateCodeOutputs(
-  workDir: string,
-): Record<string, unknown> {
-  return readEvaluateOutputs(workDir, "code");
+  artifact: EvaluateArtifact,
+): LoopOutputArtifacts {
+  const output = EVALUATE_ARTIFACT_OUTPUT[artifact];
+  const judges = readJsonFileSync(path.join(workDir, output.file));
+  return { [output.key]: judges ?? undefined };
 }
 
 type LoopCommitter = LocalJobCommitter;
@@ -1752,7 +1830,7 @@ async function writeArtifactsForGeneratePrd(
 // Per-command output reading
 // ---------------------------------------------------------------------------
 
-function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
+function readPlanOutputs(claudeWorkDir: string): LoopOutputArtifacts {
   const plan = toUploadedPlanArtifact(
     readJsonFileSync(path.join(claudeWorkDir, LoopArtifactFile.Plan)),
   );
@@ -1764,13 +1842,13 @@ function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
   );
 
   return {
-    plan: plan ?? undefined,
-    openQuestions: openQuestions ?? undefined,
-    judges: judges ?? undefined,
+    [LoopOutputArtifactKey.Plan]: plan ?? undefined,
+    [LoopOutputArtifactKey.OpenQuestions]: openQuestions ?? undefined,
+    [LoopOutputArtifactKey.Judges]: judges ?? undefined,
   };
 }
 
-function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
+function readExecuteOutputs(claudeWorkDir: string): LoopOutputArtifacts {
   const plan = readExecutePlanArtifact(claudeWorkDir);
   const executionResult = readJsonFileSync(
     path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
@@ -1780,9 +1858,9 @@ function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
   );
 
   return {
-    plan: plan ?? undefined,
-    executionResult: executionResult ?? undefined,
-    codeJudges: codeJudges ?? undefined,
+    [LoopOutputArtifactKey.Plan]: plan ?? undefined,
+    [LoopOutputArtifactKey.ExecutionResult]: executionResult ?? undefined,
+    [LoopOutputArtifactKey.CodeJudges]: codeJudges ?? undefined,
   };
 }
 
@@ -1811,19 +1889,23 @@ function mergeWarningEntries(
   return mergedWarnings.map(sanitizeErrorMessage).join("; ");
 }
 
-function readDecomposeOutputs(workDir: string): Record<string, unknown> {
+function readDecomposeOutputs(workDir: string): LoopOutputArtifacts {
   const features = readJsonFileSync(
     path.join(workDir, LoopArtifactFile.Features),
   );
-  return { features: features ?? undefined };
+  return { [LoopOutputArtifactKey.Features]: features ?? undefined };
 }
 
-function readGeneratePrdOutputs(worktreeDir: string): Record<string, unknown> {
+function readGeneratePrdOutputs(worktreeDir: string): LoopOutputArtifacts {
   const prdContent = readTextFile(path.join(worktreeDir, LoopArtifactFile.Prd));
-  return { prd: prdContent ? { content: prdContent } : undefined };
+  return {
+    [LoopOutputArtifactKey.Prd]: prdContent
+      ? { content: prdContent }
+      : undefined,
+  };
 }
 
-function readBootstrapOutputs(claudeWorkDir: string): Record<string, unknown> {
+function readBootstrapOutputs(claudeWorkDir: string): LoopOutputArtifacts {
   const manifestFile = path.join(claudeWorkDir, "bootstrap-manifest.json");
   const manifest = readJsonFileSync(manifestFile) as BootstrapManifestEntry[] | null;
   if (!manifest) return {};
@@ -1866,7 +1948,7 @@ function readBootstrapOutputs(claudeWorkDir: string): Record<string, unknown> {
   }
 
   const result = { repos, totalDuration: 0 };
-  return { bootstrapResult: result };
+  return { [LoopOutputArtifactKey.BootstrapResult]: result };
 }
 
 // ---------------------------------------------------------------------------
@@ -3949,7 +4031,7 @@ export async function handleProcessCompletion(
       "loop-harness",
       `${command} succeeded (exit 0), reading artifacts for loopId=${loopId}`,
     );
-    let artifacts: Record<string, unknown> = {};
+    let artifacts: LoopOutputArtifacts = {};
     const metadata: Record<string, unknown> = {};
     const warnings: string[] = [];
     let executeFinalization: ExecuteFinalizationResult | null = null;
@@ -4076,12 +4158,16 @@ export async function handleProcessCompletion(
       }
     } else if (command === "DECOMPOSE") {
       artifacts = readDecomposeOutputs(worktreeDir ?? claudeWorkDir);
-    } else if (command === "EVALUATE_PRD") {
-      artifacts = readEvaluatePrdOutputs(claudeWorkDir);
-    } else if (command === "EVALUATE_PLAN") {
-      artifacts = readEvaluatePlanOutputs(claudeWorkDir);
-    } else if (command === "EVALUATE_CODE") {
-      artifacts = readEvaluateCodeOutputs(claudeWorkDir);
+    } else if (
+      command === "EVALUATE_PRD" ||
+      command === "EVALUATE_PLAN" ||
+      command === "EVALUATE_CODE" ||
+      command === "EVALUATE_FEATURE"
+    ) {
+      artifacts = readEvaluateOutputs(
+        claudeWorkDir,
+        EVALUATE_COMMAND_ARTIFACT[command],
+      );
     } else if (command === "GENERATE_PRD") {
       artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
     } else if (command === "BOOTSTRAP") {
@@ -4634,6 +4720,18 @@ async function handleLoopRequest(
     }
   }
 
+  if (body.command === "EVALUATE_FEATURE") {
+    const hasFeatureArtifact = body.artifacts.some(
+      (a) => a.type === LoopArtifactType.Feature,
+    );
+    if (!hasFeatureArtifact) {
+      json(context, 400, {
+        error: "EVALUATE_FEATURE requires a feature artifact",
+      });
+      return;
+    }
+  }
+
   if (body.command === "BOOTSTRAP") {
     const bootstrapParams = parseBootstrapParams(body.prompt);
     if (!bootstrapParams || bootstrapParams.repos.length === 0) {
@@ -4944,9 +5042,10 @@ async function handleLoopRequest(
     } else if (
       body.command === "EVALUATE_PRD" ||
       body.command === "EVALUATE_PLAN" ||
-      body.command === "EVALUATE_CODE"
+      body.command === "EVALUATE_CODE" ||
+      body.command === "EVALUATE_FEATURE"
     ) {
-      // EVALUATE_PRD, EVALUATE_PLAN, and EVALUATE_CODE: use temp dir, no worktree needed.
+      // EVALUATE_PRD, EVALUATE_PLAN, EVALUATE_CODE, and EVALUATE_FEATURE: use temp dir, no worktree needed.
       // Temp dir is intentionally exempt from assertPathAllowed.
       usedTempDir = true;
       const label = body.command.toLowerCase().replace(/_/g, "-");
@@ -4964,6 +5063,8 @@ async function handleLoopRequest(
           await writePlanArtifact(claudeWorkDir, body.artifacts, body.prompt);
         } else if (body.command === "EVALUATE_CODE") {
           await writeCodeArtifact(claudeWorkDir, body.artifacts);
+        } else if (body.command === "EVALUATE_FEATURE") {
+          await writeFeatureArtifact(claudeWorkDir, body.artifacts);
         }
       } catch (artifactErr) {
         await fs.rm(claudeWorkDir, { recursive: true, force: true });
@@ -5518,14 +5619,20 @@ async function handleLoopRequest(
           env: spawnEnv,
         });
         child.unref();
-      } else if (body.command === "EVALUATE_PRD") {
-        // REPO_PATH only when a target repo is linked (expandedRepoPath).
-        let evaluatePrdPrompt = `Activate judges:run-judges skill --artifact-type prd --workdir ${claudeWorkDir}.\n`;
+      } else if (
+        body.command === "EVALUATE_PRD" ||
+        body.command === "EVALUATE_FEATURE"
+      ) {
+        // EVALUATE_PRD and EVALUATE_FEATURE share identical spawn logic:
+        // REPO_PATH is optional — only added when a target repo is linked.
+        const artifactType = body.command === "EVALUATE_PRD" ? "prd" : "feature";
+        const label = `evaluate-${artifactType}`;
+        let prompt = `Activate judges:run-judges skill --artifact-type ${artifactType} --workdir ${claudeWorkDir}.\n`;
         if (expandedRepoPath) {
-          evaluatePrdPrompt += `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`;
+          prompt += `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`;
         }
-        const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
-        await fs.writeFile(promptFile, evaluatePrdPrompt);
+        const promptFile = path.join(claudeWorkDir, `${label}-prompt.txt`);
+        await fs.writeFile(promptFile, prompt);
 
         const pipeline = buildClaudePipeline(
           stdinClaudeArgs,
@@ -5549,7 +5656,7 @@ async function handleLoopRequest(
       ) {
         // EVALUATE_PLAN and EVALUATE_CODE share identical spawn logic,
         // differing only in the artifact type passed to run-judges.
-        // Unlike EVALUATE_PRD (where REPO_PATH is optional—only added when a repo is linked),
+        // Unlike EVALUATE_PRD/EVALUATE_FEATURE (where REPO_PATH is optional),
         // plan and code judges need the implementation tree, so the request must resolve to
         // a local repo and expandedRepoPath is always set on this path.
         const artifactType = body.command === "EVALUATE_PLAN" ? "plan" : "code";

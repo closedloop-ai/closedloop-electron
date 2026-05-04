@@ -11,9 +11,11 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { readEffectiveStatusFromState } from "../server/operations/symphony-job-snapshot.js";
 import {
+  EVALUATE_COMMAND_ARTIFACT,
   type ExecuteFinalizationResult,
   finalizeAdditionalReposAndPersist,
   getResolvedGitPath,
+  readEvaluateOutputs,
   runExecuteFinalization,
   V1_PRIMARY_FULL_NAME_PLACEHOLDER,
 } from "../server/operations/symphony-loop.js";
@@ -716,23 +718,16 @@ function readArtifacts(
     );
     return { features: features ?? undefined };
   }
-  if (command === "EVALUATE_PRD") {
-    const judges = readJsonFileSync(
-      path.join(claudeWorkDir, "prd-judges.json"),
+  if (
+    command === "EVALUATE_PRD" ||
+    command === "EVALUATE_PLAN" ||
+    command === "EVALUATE_CODE" ||
+    command === "EVALUATE_FEATURE"
+  ) {
+    return readEvaluateOutputs(
+      claudeWorkDir,
+      EVALUATE_COMMAND_ARTIFACT[command],
     );
-    return { prdJudges: judges ?? undefined };
-  }
-  if (command === "EVALUATE_PLAN") {
-    const judges = readJsonFileSync(
-      path.join(claudeWorkDir, "plan-judges.json"),
-    );
-    return { planJudges: judges ?? undefined };
-  }
-  if (command === "EVALUATE_CODE") {
-    const judges = readJsonFileSync(
-      path.join(claudeWorkDir, "code-judges.json"),
-    );
-    return { codeJudges: judges ?? undefined };
   }
   if (command === "GENERATE_PRD") {
     const baseDir = worktreeDir ?? claudeWorkDir;
