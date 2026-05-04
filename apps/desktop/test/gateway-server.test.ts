@@ -24,8 +24,11 @@ const childPidsToKill: number[] = [];
 const originalSymphonyWorktreeParentDir = process.env.SYMPHONY_WORKTREE_PARENT_DIR;
 const originalHome = process.env.HOME;
 const originalPath = process.env.PATH;
+const originalFetch = globalThis.fetch;
 
 afterEach(async () => {
+  globalThis.fetch = originalFetch;
+
   if (originalSymphonyWorktreeParentDir === undefined) {
     delete process.env.SYMPHONY_WORKTREE_PARENT_DIR;
   } else {
@@ -3489,6 +3492,8 @@ test("symphony/status returns IN_PROGRESS when state.json says COMPLETED but pro
 async function createHealthCheckFixture(
   pythonBinaryContent: string | null
 ): Promise<{ tmpDir: string; binDir: string; symphonyDir: string }> {
+  mockClosedLoopPluginManifestFetch("1.0.0");
+
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-python-hc-"));
   tempPathsToClean.push(tmpDir);
 
@@ -3550,6 +3555,31 @@ async function createHealthCheckFixture(
   );
 
   return { tmpDir, binDir, symphonyDir };
+}
+
+function mockClosedLoopPluginManifestFetch(version: string): void {
+  const passthroughFetch = globalThis.fetch;
+  globalThis.fetch = (async (
+    input: RequestInfo | URL,
+    init?: RequestInit
+  ): Promise<Response> => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+    if (
+      url.startsWith(
+        "https://raw.githubusercontent.com/closedloop-ai/claude-plugins/main/plugins/"
+      )
+    ) {
+      return Response.json({ version });
+    }
+
+    return passthroughFetch(input, init);
+  }) as typeof fetch;
 }
 
 test("python3 health check: passes for version 3.11.0 (control)", async () => {

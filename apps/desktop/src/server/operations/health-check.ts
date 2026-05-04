@@ -67,7 +67,7 @@ export function registerHealthCheckRoutes(
   dispatcher.register("GET", "/api/gateway/health-check", async (context) => {
     const expectedMcpUrl = context.query.get("expectedMcpUrl")?.trim() || undefined;
     const paths = getBinaryPaths?.();
-    const [checks, claudeMcp, codexMcp] = await Promise.all([
+    const [baseChecks, claudeMcp, codexMcp] = await Promise.all([
       Promise.all([
         checkGit(processManager, paths?.git),
         checkClaudeCli(processManager, paths?.claude),
@@ -85,6 +85,7 @@ export function registerHealthCheckRoutes(
       detectMcp("claude", expectedMcpUrl),
       detectMcp("codex", expectedMcpUrl),
     ]);
+    let checks: CheckResult[] = [...baseChecks];
 
     // Check plugin versions if all plugins are installed
     const allPluginsInstalled = checks
@@ -92,10 +93,7 @@ export function registerHealthCheckRoutes(
       .every((c) => c.passed);
     if (allPluginsInstalled) {
       const installed = getInstalledPluginVersions();
-      const versionResult = await checkPluginVersions(installed);
-      if (versionResult !== undefined) {
-        checks.push(versionResult);
-      }
+      checks = await applyPluginVersionChecks(checks, installed);
     }
 
     for (const check of checks) {
@@ -152,6 +150,17 @@ let runCommand: RunCommand = defaultRunCommand;
  */
 export function _setRunCommandForTesting(fn?: RunCommand): void {
   runCommand = fn ?? defaultRunCommand;
+}
+
+/**
+ * @internal Test-only. Exposes plugin-version enrichment without relying
+ * on a developer machine's real Claude plugin registry.
+ */
+export async function _applyPluginVersionChecksForTesting(
+  checks: CheckResult[],
+  installed: Record<string, string>
+): Promise<CheckResult[]> {
+  return applyPluginVersionChecks(checks, installed);
 }
 
 function parseVersion(output: string): string | undefined {
@@ -675,7 +684,7 @@ function compareStrictSemver(installed: string, latest: string): boolean | undef
   return true;
 }
 
-/** Builds the advisory gateway-version health-check row from normalized semver strings. */
+/** Builds the gateway-version health-check row from normalized semver strings. */
 function checkAppVersion(currentVersion: string, latestVersion: string): CheckResult {
   const isUpToDate = compareStrictSemver(currentVersion, latestVersion);
   if (isUpToDate === undefined) {
@@ -703,14 +712,17 @@ function checkAppVersion(currentVersion: string, latestVersion: string): CheckRe
     id: "app-version",
     label: "Gateway Version",
     required: true,
-    passed: true,
+    passed: false,
     version: currentVersion,
     error: `Update available: ${latestVersion}`,
     remediation: "Open the ClosedLoop Gateway app to update",
   };
 }
 
-async function checkPluginVersions(installed: Record<string, string>): Promise<CheckResult | undefined> {
+async function applyPluginVersionChecks(
+  checks: CheckResult[],
+  installed: Record<string, string>
+): Promise<CheckResult[]> {
   const entries = Object.entries(PLUGIN_VERSION_MAP);
 
   const results = await Promise.allSettled(
@@ -722,22 +734,30 @@ async function checkPluginVersions(installed: Record<string, string>): Promise<C
     )
   );
 
-  const outdated: { key: string; installed: string; latest: string }[] = [];
-  const upToDate: string[] = [];
-  let unverified = 0;
+  const versionChecks = new Map<string, Partial<CheckResult>>();
 
   for (let i = 0; i < entries.length; i++) {
-    const [pluginKey] = entries[i];
+    const [pluginKey, folder] = entries[i];
+    const checkId = `plugin-${folder}`;
+    const installedVer = installed[pluginKey] ?? "";
     const result = results[i];
 
     if (result.status === "rejected") {
-      unverified++;
+      versionChecks.set(checkId, {
+        passed: false,
+        error: "Could not verify latest version",
+        remediation: "Check your network connection and re-run System Check",
+      });
       continue;
     }
 
     const response = result.value;
     if (!response.ok) {
-      unverified++;
+      versionChecks.set(checkId, {
+        passed: false,
+        error: "Could not verify latest version",
+        remediation: "Check your network connection and re-run System Check",
+      });
       continue;
     }
 
@@ -745,54 +765,50 @@ async function checkPluginVersions(installed: Record<string, string>): Promise<C
     try {
       const body = (await response.json()) as { version?: unknown };
       if (typeof body.version !== "string") {
-        unverified++;
+        versionChecks.set(checkId, {
+          passed: false,
+          error: "Could not verify latest version",
+          remediation: "Check your network connection and re-run System Check",
+        });
         continue;
       }
       latestVer = body.version;
     } catch {
-      unverified++;
+      versionChecks.set(checkId, {
+        passed: false,
+        error: "Could not verify latest version",
+        remediation: "Check your network connection and re-run System Check",
+      });
       continue;
     }
 
-    const installedVer = installed[pluginKey] ?? "";
     const cmp = compareStrictSemver(installedVer, latestVer);
 
     if (cmp === undefined) {
-      unverified++;
+      versionChecks.set(checkId, {
+        passed: false,
+        error: "Could not verify installed version",
+        remediation: `Reinstall the plugin: claude plugin install ${pluginKey}`,
+      });
     } else if (cmp === false) {
-      outdated.push({ key: pluginKey, installed: installedVer, latest: latestVer });
+      versionChecks.set(checkId, {
+        passed: false,
+        version: installedVer,
+        error: `Update available: ${latestVer}`,
+        remediation: `claude plugin update ${pluginKey}`,
+      });
     } else {
-      upToDate.push(pluginKey);
+      versionChecks.set(checkId, {
+        passed: true,
+        version: installedVer,
+      });
     }
   }
 
-  if (outdated.length > 0) {
-    return {
-      id: "plugin-versions",
-      label: "Plugin Updates",
-      required: false,
-      passed: false,
-      error: "Outdated: " + outdated.map((p) => `${p.key} (${p.installed} -> ${p.latest})`).join(", "),
-      remediation: outdated.map((p) => `claude plugin install ${p.key}`).join(" && "),
-    };
-  }
-
-  if (unverified > 0) {
-    return {
-      id: "plugin-versions",
-      label: "Plugin Updates",
-      required: false,
-      passed: false,
-      error: `${unverified}/${entries.length} plugin manifest(s) could not be verified`,
-    };
-  }
-
-  return {
-    id: "plugin-versions",
-    label: "Plugin Updates",
-    required: false,
-    passed: true,
-  };
+  return checks.map((check) => {
+    const versionCheck = versionChecks.get(check.id);
+    return versionCheck === undefined ? check : { ...check, ...versionCheck };
+  });
 }
 
 async function loadReposConfig(configDir: string): Promise<ReposConfig> {
