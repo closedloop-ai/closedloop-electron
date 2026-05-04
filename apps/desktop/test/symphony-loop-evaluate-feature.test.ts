@@ -37,6 +37,32 @@ function buildEvaluateFeatureBody(
   };
 }
 
+describe("EVALUATE_FEATURE dispatch validation", () => {
+  test("rejects requests without a Feature artifact with 400", async () => {
+    const server = makeGatewayServer();
+    await server.start();
+
+    const response = await postToLoopEndpoint(
+      server.getActivePort(),
+      buildEvaluateFeatureBody({
+        loopId: "fe000099-0000-0000-0000-000000000099",
+        artifacts: [{ type: "PRD", content: "PRD content" }],
+      }),
+    );
+
+    assert.equal(
+      response.status,
+      400,
+      `Expected 400 when no Feature artifact provided, got ${response.status}`,
+    );
+    const body = (await response.json()) as { error: string };
+    assert.ok(
+      body.error.includes("EVALUATE_FEATURE requires"),
+      `Error message should mention EVALUATE_FEATURE requires, got: ${body.error}`,
+    );
+  });
+});
+
 describe("EVALUATE_FEATURE", () => {
   test("starts without a repo and writes the Feature artifact into the judge workdir", async () => {
     const tmpDir = makeTempDir("evaluate-feature-no-repo");

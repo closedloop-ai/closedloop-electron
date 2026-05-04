@@ -4675,6 +4675,18 @@ async function handleLoopRequest(
     }
   }
 
+  if (body.command === "EVALUATE_FEATURE") {
+    const hasFeatureArtifact = body.artifacts.some(
+      (a) => a.type === LoopArtifactType.Feature,
+    );
+    if (!hasFeatureArtifact) {
+      json(context, 400, {
+        error: "EVALUATE_FEATURE requires a feature artifact",
+      });
+      return;
+    }
+  }
+
   if (body.command === "BOOTSTRAP") {
     const bootstrapParams = parseBootstrapParams(body.prompt);
     if (!bootstrapParams || bootstrapParams.repos.length === 0) {
