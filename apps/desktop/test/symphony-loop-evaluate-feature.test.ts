@@ -139,6 +139,23 @@ describe("writeFeatureArtifact", () => {
       /no LoopArtifactType\.Feature artifact found/,
     );
   });
+
+  test("picks the primary Feature when a Feature context ref precedes it", async () => {
+    // Backend appends the primary artifact last; refs (which preserve their
+    // underlying document type) come first. For a Feature-from-Feature loop
+    // both entries share LoopArtifactType.Feature — the primary is the trailing
+    // one, and writing the leading ref would cause judges to score the wrong
+    // document.
+    const tmpDir = makeTempDir("write-feature-artifact-ordering");
+    await writeFeatureArtifact(tmpDir, [
+      { type: LoopArtifactType.Feature, content: "PARENT FEATURE (context ref)" },
+      { type: LoopArtifactType.Feature, content: "PRIMARY FEATURE" },
+    ]);
+    assert.equal(
+      await fs.readFile(path.join(tmpDir, "prd.md"), "utf-8"),
+      "PRIMARY FEATURE",
+    );
+  });
 });
 
 describe("readEvaluateOutputs(EvaluateArtifact.Feature)", () => {

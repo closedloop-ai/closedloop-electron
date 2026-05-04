@@ -428,6 +428,22 @@ describe("T-5.2: writePrdArtifact", () => {
     assert.equal(content, "Prompt-as-fallback content");
   });
 
+  test("(f) picks the primary PRD when a PRD context ref precedes it", async () => {
+    // Backend appends the primary artifact last; refs come first. If a PRD
+    // context ref shares the primary's type, find() would shadow the primary
+    // and judges would score the wrong document. findLast picks the trailing
+    // primary even with a same-type ref present.
+    const tmpDir = makeTempDir();
+    await writePrdArtifact(tmpDir, [
+      { type: "PRD", content: "PARENT PRD (context ref)" },
+      { type: "PRD", content: "PRIMARY PRD" },
+    ]);
+    assert.equal(
+      await fs.readFile(path.join(tmpDir, "prd.md"), "utf-8"),
+      "PRIMARY PRD",
+    );
+  });
+
   test("prompt without repo contains skill --workdir runDir but not REPO_PATH=", async () => {
     // Verify evaluate-prd-prompt.txt matches harness-agent EVALUATE_PRD when no target repo.
     const tmpDir = makeTempDir();

@@ -445,10 +445,15 @@ export async function writePrdArtifact(
   artifacts: LoopArtifact[],
   prompt?: string,
 ): Promise<void> {
-  const prdArtifact = artifacts.find((a) => a.type === LoopArtifactType.Prd);
+  // Primary artifact is appended last by the backend's context-pack assembler
+  // (symphony-alpha apps/api/lib/loops/loop-context-pack.ts: refs precede primary).
+  // Match by findLast so a same-type context ref doesn't shadow the primary.
+  const prdArtifact = artifacts.findLast(
+    (a) => a.type === LoopArtifactType.Prd,
+  );
   const featureArtifact = prdArtifact
     ? null
-    : artifacts.find((a) => a.type === LoopArtifactType.Feature);
+    : artifacts.findLast((a) => a.type === LoopArtifactType.Feature);
   const source = prdArtifact ?? featureArtifact;
 
   const prdContent = source?.content || prompt || "";
@@ -458,12 +463,14 @@ export async function writePrdArtifact(
   }
 }
 
-/** Internal helper: writes plan.md to workDir from the first matching plan artifact. */
+/** Internal helper: writes plan.md to workDir from the last matching plan artifact. */
 async function writePlanFileToWorkDir(
   workDir: string,
   artifacts: LoopArtifact[],
 ): Promise<void> {
-  const artifact = artifacts.find((a) =>
+  // Primary artifact is appended last by the backend's context-pack assembler;
+  // refs precede it. findLast picks the primary even when refs share its type.
+  const artifact = artifacts.findLast((a) =>
     (PLAN_ARTIFACT_TYPES as readonly string[]).includes(a.type),
   );
   if (artifact?.content) {
@@ -503,7 +510,11 @@ export async function writeFeatureArtifact(
   workDir: string,
   artifacts: LoopArtifact[],
 ): Promise<void> {
-  const featureArtifact = artifacts.find(
+  // Primary artifact is appended last by the backend's context-pack assembler
+  // (symphony-alpha apps/api/lib/loops/loop-context-pack.ts: refs precede primary).
+  // For Feature-from-Feature evaluations, refs share the primary's type, so
+  // findLast is required to score the loop's actual document.
+  const featureArtifact = artifacts.findLast(
     (a) => a.type === LoopArtifactType.Feature,
   );
   if (!featureArtifact) {
