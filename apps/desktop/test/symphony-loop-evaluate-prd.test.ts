@@ -398,7 +398,7 @@ describe("T-5.2: writePrdArtifact", () => {
   test("(c) FEATURE fallback type writes prd.md", async () => {
     const tmpDir = makeTempDir();
     await writePrdArtifact(tmpDir, [
-      { type: LoopArtifactType.Feature, content: "Fallback PRD content" },
+      { id: "artifact-001", type: LoopArtifactType.Feature, content: "Fallback PRD content" },
     ]);
     const prdPath = path.join(tmpDir, "prd.md");
     assert.ok(existsSync(prdPath), "prd.md should exist for FEATURE type");
@@ -441,6 +441,27 @@ describe("T-5.2: writePrdArtifact", () => {
     assert.equal(
       await fs.readFile(path.join(tmpDir, "prd.md"), "utf-8"),
       "PRIMARY PRD",
+    );
+  });
+
+  test("(g) delegates to resolvePrimaryArtifact: primaryArtifactId selects first artifact over findLast", async () => {
+    // Both artifacts share LoopArtifactType.Prd. Without primaryArtifactId,
+    // findLast would return the last (second) artifact. With primaryArtifactId
+    // pointing to the first artifact's id, id-based selection wins and the
+    // first artifact's content is written to prd.md.
+    const tmpDir = makeTempDir();
+    await writePrdArtifact(
+      tmpDir,
+      [
+        { id: "prd-primary", type: LoopArtifactType.Prd, content: "FIRST PRD (primary)" },
+        { id: "prd-last", type: LoopArtifactType.Prd, content: "SECOND PRD (trailing)" },
+      ],
+      undefined,
+      "prd-primary",
+    );
+    assert.equal(
+      await fs.readFile(path.join(tmpDir, "prd.md"), "utf-8"),
+      "FIRST PRD (primary)",
     );
   });
 

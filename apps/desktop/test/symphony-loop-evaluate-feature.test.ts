@@ -116,11 +116,56 @@ describe("EVALUATE_FEATURE", () => {
   });
 });
 
+describe("EVALUATE_FEATURE with primaryArtifactId", () => {
+  test("writes the primary Feature artifact (child) to prd.md when primaryArtifactId points to child", async () => {
+    const tmpDir = makeTempDir("evaluate-feature-primary-artifact-id");
+    const eventSrv = await startEventServer();
+    const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+    const releaseSentinel = path.join(tmpDir, "release-stub");
+    const stub = await setupStubClaudeBlocking(tmpDir, releaseSentinel);
+    const server = makeGatewayServer({ getApiOrigin: () => apiBaseUrl });
+    await server.start();
+
+    const loopId = "fe000010-0000-0000-0000-000000000010";
+    const response = await postToLoopEndpoint(
+      server.getActivePort(),
+      {
+        loopId,
+        command: "EVALUATE_FEATURE",
+        closedLoopAuthToken: "cl-token",
+        apiBaseUrl,
+        artifacts: [
+          { id: "parent-feature-001", type: "FEATURE", content: "PARENT FEATURE CONTENT", title: "Parent" },
+          { id: "child-feature-002", type: "FEATURE", content: "PRIMARY FEATURE CONTENT", title: "Child" },
+        ],
+        primaryArtifactId: "child-feature-002",
+      },
+    );
+
+    assert.equal(response.status, 200, `Expected 200, got ${response.status}`);
+
+    const claudeWorkDir = path.join(
+      os.tmpdir(),
+      `symphony-evaluate-feature-${loopId.slice(0, 8)}`,
+    );
+    const prdFile = path.join(claudeWorkDir, "prd.md");
+
+    assert.equal(await fs.readFile(prdFile, "utf-8"), "PRIMARY FEATURE CONTENT");
+
+    await stub.release();
+    await eventSrv.waitForEvent(
+      (b) => b.type === "completed" || b.type === "error",
+      15_000,
+    );
+  });
+});
+
 describe("writeFeatureArtifact", () => {
   test("writes Feature content to prd.md and rejects non-Feature inputs", async () => {
     const tmpDir = makeTempDir("write-feature-artifact");
     await writeFeatureArtifact(tmpDir, [
-      { type: LoopArtifactType.Feature, content: "This is the Feature content" },
+      { id: "artifact-001", type: LoopArtifactType.Feature, content: "This is the Feature content" },
     ]);
     assert.equal(
       await fs.readFile(path.join(tmpDir, "prd.md"), "utf-8"),
@@ -129,14 +174,14 @@ describe("writeFeatureArtifact", () => {
 
     await assert.rejects(
       () => writeFeatureArtifact(tmpDir, []),
-      /no LoopArtifactType\.Feature artifact found/,
+      /no FEATURE artifact found/,
     );
     await assert.rejects(
       () =>
         writeFeatureArtifact(tmpDir, [
-          { type: LoopArtifactType.Prd, content: "PRD content" },
+          { id: "artifact-002", type: LoopArtifactType.Prd, content: "PRD content" },
         ]),
-      /no LoopArtifactType\.Feature artifact found/,
+      /no FEATURE artifact found/,
     );
   });
 
@@ -148,12 +193,31 @@ describe("writeFeatureArtifact", () => {
     // document.
     const tmpDir = makeTempDir("write-feature-artifact-ordering");
     await writeFeatureArtifact(tmpDir, [
-      { type: LoopArtifactType.Feature, content: "PARENT FEATURE (context ref)" },
-      { type: LoopArtifactType.Feature, content: "PRIMARY FEATURE" },
+      { id: "artifact-003", type: LoopArtifactType.Feature, content: "PARENT FEATURE (context ref)" },
+      { id: "artifact-004", type: LoopArtifactType.Feature, content: "PRIMARY FEATURE" },
     ]);
     assert.equal(
       await fs.readFile(path.join(tmpDir, "prd.md"), "utf-8"),
       "PRIMARY FEATURE",
+    );
+  });
+
+  test("delegates to resolvePrimaryArtifact: primaryArtifactId selects first artifact over findLast", async () => {
+    // Both artifacts share LoopArtifactType.Feature. Without primaryArtifactId,
+    // findLast would return the last (second) artifact. With primaryArtifactId
+    // pointing to the first artifact's id, id-based selection wins.
+    const tmpDir = makeTempDir("write-feature-artifact-primary-id");
+    await writeFeatureArtifact(
+      tmpDir,
+      [
+        { id: "feat-primary", type: LoopArtifactType.Feature, content: "FIRST FEATURE (primary)" },
+        { id: "feat-last", type: LoopArtifactType.Feature, content: "SECOND FEATURE (trailing)" },
+      ],
+      "feat-primary",
+    );
+    assert.equal(
+      await fs.readFile(path.join(tmpDir, "prd.md"), "utf-8"),
+      "FIRST FEATURE (primary)",
     );
   });
 });

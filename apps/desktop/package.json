@@ -18,7 +18,7 @@
     "release": "pnpm build && electron-builder --mac --publish always --config electron-builder.yml"
   },
   "dependencies": {
-    "@closedloop-ai/loops-api": "0.2.8",
+    "@closedloop-ai/loops-api": "0.3.0",
     "busboy": "^1.6.0",
     "electron-store": "^8.2.0",
     "electron-updater": "^6.8.3",
