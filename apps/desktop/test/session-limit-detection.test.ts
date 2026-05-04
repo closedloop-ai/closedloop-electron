@@ -519,6 +519,13 @@ describe("detectAuthChallengeFromJsonl", () => {
     assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), "HTTP 429");
   });
 
+  test("result record with is_error: true and errorStatus 429 is detected (camelCase alt)", () => {
+    writeJsonl([
+      { type: "result", is_error: true, errorStatus: 429 },
+    ]);
+    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), "HTTP 429");
+  });
+
   test("result record with non-string result and api_error_status 401 + auth-pattern error field is detected", () => {
     writeJsonl([
       {

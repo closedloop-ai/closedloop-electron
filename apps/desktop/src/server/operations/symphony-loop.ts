@@ -2238,6 +2238,17 @@ function readApiErrorStatus(entry: Record<string, unknown>): number | null {
   return null;
 }
 
+function buildAuthErrorText(errorText: string, status: number | null): string {
+  const parts: string[] = [];
+  if (errorText) {
+    parts.push(errorText);
+  }
+  if (status !== null) {
+    parts.push(`HTTP ${status}`);
+  }
+  return parts.join(" — ");
+}
+
 /**
  * Scan claude-output.jsonl for a result record with `is_error: true` whose
  * message matches a known auth/rate-limit/billing pattern, or a synthetic
@@ -2272,12 +2283,7 @@ export function detectAuthChallengeFromJsonl(
               ? entry.error
               : "";
         if (status === 429 || AUTH_CHALLENGE_PATTERN.test(errorText)) {
-          const parts: string[] = [];
-          if (errorText) {
-            parts.push(errorText);
-          }
-          parts.push(`HTTP ${status}`);
-          return parts.join(" — ");
+          return buildAuthErrorText(errorText, status);
         }
       }
     }
@@ -2291,14 +2297,7 @@ export function detectAuthChallengeFromJsonl(
       const status = readApiErrorStatus(entry);
       // 429 always maps to rate-limit; otherwise test the error text
       if (status === 429 || AUTH_CHALLENGE_PATTERN.test(errorText)) {
-        const parts: string[] = [];
-        if (errorText) {
-          parts.push(errorText);
-        }
-        if (status !== null) {
-          parts.push(`HTTP ${status}`);
-        }
-        return parts.join(" — ");
+        return buildAuthErrorText(errorText, status);
       }
     }
     return null;
