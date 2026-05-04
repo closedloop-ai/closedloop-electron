@@ -2218,6 +2218,27 @@ export function isSessionLimitError(logTail: string): boolean {
 }
 
 /**
+ * Read an HTTP status from any of the field-name variants Claude CLI is
+ * known to emit: snake_case `api_error_status` / `error_status` and the
+ * camelCase equivalents on synthetic records. Returns null when none are
+ * present as numbers.
+ */
+function readApiErrorStatus(entry: Record<string, unknown>): number | null {
+  const candidates = [
+    entry.api_error_status,
+    entry.error_status,
+    entry.apiErrorStatus,
+    entry.errorStatus,
+  ];
+  for (const v of candidates) {
+    if (typeof v === "number") {
+      return v;
+    }
+  }
+  return null;
+}
+
+/**
  * Scan claude-output.jsonl for a result record with `is_error: true` whose
  * message matches a known auth/rate-limit/billing pattern, or a synthetic
  * API-error entry (`isApiErrorMessage: true`) with an auth-related error
@@ -2236,6 +2257,30 @@ export function detectAuthChallengeFromJsonl(
     ) {
       return entry.result;
     }
+    // Status-only failures on the stream-json `result` record: Claude CLI
+    // can mark a turn as `is_error: true` and carry only a numeric HTTP
+    // status (e.g. `api_error_status: 429`) without descriptive text in
+    // `result`. Catch those so 429/auth statuses don't fall through to
+    // ProcessFailed when the regex above can't match.
+    if (entry.type === "result" && entry.is_error === true) {
+      const status = readApiErrorStatus(entry);
+      if (status !== null) {
+        const errorText =
+          typeof entry.result === "string"
+            ? entry.result
+            : typeof entry.error === "string"
+              ? entry.error
+              : "";
+        if (status === 429 || AUTH_CHALLENGE_PATTERN.test(errorText)) {
+          const parts: string[] = [];
+          if (errorText) {
+            parts.push(errorText);
+          }
+          parts.push(`HTTP ${status}`);
+          return parts.join(" — ");
+        }
+      }
+    }
     // Synthetic API-error transcript entries emitted by Claude CLI when it
     // receives an API error response (e.g. rate_limit, auth). These records
     // have `isApiErrorMessage: true` and carry the error in `.error` and/or
@@ -2243,10 +2288,7 @@ export function detectAuthChallengeFromJsonl(
     if (entry.isApiErrorMessage === true) {
       const errorText =
         typeof entry.error === "string" ? entry.error : "";
-      const status =
-        typeof entry.apiErrorStatus === "number"
-          ? entry.apiErrorStatus
-          : null;
+      const status = readApiErrorStatus(entry);
       // 429 always maps to rate-limit; otherwise test the error text
       if (status === 429 || AUTH_CHALLENGE_PATTERN.test(errorText)) {
         const parts: string[] = [];

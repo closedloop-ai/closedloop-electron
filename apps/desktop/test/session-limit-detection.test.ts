@@ -502,6 +502,69 @@ describe("detectAuthChallengeFromJsonl", () => {
     ]);
     assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
   });
+
+  // Status-only result-record branch (api_error_status / error_status etc.)
+
+  test("result record with is_error: true and api_error_status 429 is detected", () => {
+    writeJsonl([
+      { type: "result", is_error: true, api_error_status: 429 },
+    ]);
+    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), "HTTP 429");
+  });
+
+  test("result record with is_error: true and error_status 429 is detected (snake_case alt)", () => {
+    writeJsonl([
+      { type: "result", is_error: true, error_status: 429 },
+    ]);
+    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), "HTTP 429");
+  });
+
+  test("result record with non-string result and api_error_status 401 + auth-pattern error field is detected", () => {
+    writeJsonl([
+      {
+        type: "result",
+        is_error: true,
+        result: null,
+        error: "authentication_error",
+        api_error_status: 401,
+      },
+    ]);
+    assert.strictEqual(
+      detectAuthChallengeFromJsonl(tmpDir),
+      "authentication_error — HTTP 401",
+    );
+  });
+
+  test("result record with is_error: true and non-429 status with no auth text returns null", () => {
+    writeJsonl([
+      { type: "result", is_error: true, api_error_status: 500 },
+    ]);
+    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
+  });
+
+  test("result record with is_error: false and api_error_status 429 returns null", () => {
+    writeJsonl([
+      { type: "result", is_error: false, api_error_status: 429 },
+    ]);
+    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
+  });
+
+  test("result record with matching string result wins over status-only branch", () => {
+    writeJsonl([
+      {
+        type: "result",
+        is_error: true,
+        result: "rate_limit_error: Rate limit reached",
+        api_error_status: 429,
+      },
+    ]);
+    // Existing string-match branch fires first and returns just the text,
+    // without the HTTP suffix — preserving prior behavior.
+    assert.strictEqual(
+      detectAuthChallengeFromJsonl(tmpDir),
+      "rate_limit_error: Rate limit reached",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
