@@ -8,7 +8,6 @@ import type {
 } from "./telemetry-protocol.js";
 
 export const DECISION_TABLE_VERIFICATION_RELATIVE_PATH = path.join(
-  ".closedloop-ai",
   "decision-table-verifications.jsonl",
 );
 

@@ -14,6 +14,7 @@ import { json } from "./response-utils.js";
 
 const execFileAsync = promisify(execFile);
 const VERSION_REGEX = /(\d+\.\d+[\w.-]*)/;
+const VERSION_PREFIX_REGEX = /^[vV]/;
 
 type CheckResult = {
   id: string;
@@ -57,7 +58,8 @@ export function registerHealthCheckRoutes(
     provider: "claude" | "codex",
     expectedMcpUrl?: string
   ) => Promise<McpDetectionResult>,
-  getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string }
+  getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string },
+  getAppVersion?: () => string | undefined
 ): void {
   const detectMcp = detectMcpOverride ?? detectMcpAvailability;
   const configDir = () => path.join(getSymphonyDir(), "config");
@@ -98,6 +100,16 @@ export function registerHealthCheckRoutes(
 
     for (const check of checks) {
       Observability.healthCheckResult(check);
+    }
+
+    const rawLatestVersion = context.query.get("latestVersion")?.trim() || undefined;
+    const rawCurrentVersion = getAppVersion?.();
+    if (rawLatestVersion && rawCurrentVersion) {
+      const latestNorm = rawLatestVersion.replace(VERSION_PREFIX_REGEX, "");
+      const currentNorm = rawCurrentVersion.replace(VERSION_PREFIX_REGEX, "");
+      const appVersionResult = checkAppVersion(currentNorm, latestNorm);
+      checks.push(appVersionResult);
+      Observability.healthCheckResult(appVersionResult);
     }
 
     const allRequiredPassed = checks.filter((check) => check.required).every((check) => check.passed);
@@ -663,6 +675,41 @@ function compareStrictSemver(installed: string, latest: string): boolean | undef
   return true;
 }
 
+/** Builds the advisory gateway-version health-check row from normalized semver strings. */
+function checkAppVersion(currentVersion: string, latestVersion: string): CheckResult {
+  const isUpToDate = compareStrictSemver(currentVersion, latestVersion);
+  if (isUpToDate === undefined) {
+    return {
+      id: "app-version",
+      label: "Gateway Version",
+      required: true,
+      passed: true,
+      version: currentVersion,
+      error: `Version format unrecognized (installed: ${currentVersion}, latest: ${latestVersion})`,
+    };
+  }
+
+  if (isUpToDate) {
+    return {
+      id: "app-version",
+      label: "Gateway Version",
+      required: true,
+      passed: true,
+      version: currentVersion,
+    };
+  }
+
+  return {
+    id: "app-version",
+    label: "Gateway Version",
+    required: true,
+    passed: true,
+    version: currentVersion,
+    error: `Update available: ${latestVersion}`,
+    remediation: "Open the ClosedLoop Gateway app to update",
+  };
+}
+
 async function checkPluginVersions(installed: Record<string, string>): Promise<CheckResult | undefined> {
   const entries = Object.entries(PLUGIN_VERSION_MAP);
 
@@ -722,7 +769,7 @@ async function checkPluginVersions(installed: Record<string, string>): Promise<C
   if (outdated.length > 0) {
     return {
       id: "plugin-versions",
-      label: "Plugin Versions (@closedloop-ai)",
+      label: "Plugin Updates",
       required: false,
       passed: false,
       error: "Outdated: " + outdated.map((p) => `${p.key} (${p.installed} -> ${p.latest})`).join(", "),
@@ -733,7 +780,7 @@ async function checkPluginVersions(installed: Record<string, string>): Promise<C
   if (unverified > 0) {
     return {
       id: "plugin-versions",
-      label: "Plugin Versions (@closedloop-ai)",
+      label: "Plugin Updates",
       required: false,
       passed: false,
       error: `${unverified}/${entries.length} plugin manifest(s) could not be verified`,
@@ -742,7 +789,7 @@ async function checkPluginVersions(installed: Record<string, string>): Promise<C
 
   return {
     id: "plugin-versions",
-    label: "Plugin Versions (@closedloop-ai)",
+    label: "Plugin Updates",
     required: false,
     passed: true,
   };

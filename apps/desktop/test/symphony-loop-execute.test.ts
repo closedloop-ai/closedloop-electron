@@ -961,8 +961,7 @@ test("EXECUTE: emits decision-table verifier telemetry from current-run JSONL", 
     tmpDir,
     [
       "#!/bin/sh",
-      'mkdir -p "$CLOSEDLOOP_WORKDIR/.closedloop-ai"',
-      "printf '{\"timestamp\":\"%s\",\"workdir\":\"%s\",\"decision_table_path\":\".closedloop-ai/decision-tables/pln-302.md\",\"final_status\":\"aligned\",\"iterations\":3,\"drift_kind_counts\":{\"code_drift\":2,\"test_drift\":1,\"plan_ambiguity\":0},\"fixes_attempted\":3,\"parse_failures\":0,\"verifier_invocations\":3,\"phase_duration_ms\":58921}\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$CLOSEDLOOP_WORKDIR\" >> \"$CLOSEDLOOP_WORKDIR/.closedloop-ai/decision-table-verifications.jsonl\"",
+      "printf '{\"timestamp\":\"%s\",\"workdir\":\"%s\",\"decision_table_path\":\".closedloop-ai/decision-tables/pln-302.md\",\"final_status\":\"aligned\",\"iterations\":3,\"drift_kind_counts\":{\"code_drift\":2,\"test_drift\":1,\"plan_ambiguity\":0},\"fixes_attempted\":3,\"parse_failures\":0,\"verifier_invocations\":3,\"phase_duration_ms\":58921}\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \"$CLOSEDLOOP_WORKDIR\" >> \"$CLOSEDLOOP_WORKDIR/decision-table-verifications.jsonl\"",
       "exit 0",
     ].join("\n"),
   );
