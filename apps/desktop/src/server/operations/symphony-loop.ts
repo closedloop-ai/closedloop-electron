@@ -2256,6 +2256,19 @@ export function detectAuthChallengeFromJsonl(
         ) {
           return entry.result;
         }
+        // Synthetic API-error entries emitted by Claude CLI mid-conversation
+        // carry `isApiErrorMessage: true` and the error string in `error`.
+        if (
+          entry.isApiErrorMessage === true &&
+          typeof entry.error === "string" &&
+          AUTH_CHALLENGE_PATTERN.test(entry.error)
+        ) {
+          const status =
+            typeof entry.apiErrorStatus === "number"
+              ? ` (status ${entry.apiErrorStatus})`
+              : "";
+          return `Claude API ${entry.error} error${status}`;
+        }
       } catch {
         // skip malformed lines
       }
