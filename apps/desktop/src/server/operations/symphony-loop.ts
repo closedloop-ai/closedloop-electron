@@ -57,6 +57,7 @@ import {
 } from "../../main/token-usage.js";
 import {
   IMPORTED_PLAN_MARKDOWN_FILE,
+  PLAN_SOURCE_MARKDOWN_FILE,
   isRawPlanArtifact,
   toUploadedPlanArtifact,
 } from "../../shared/plan-artifact-utils.js";
@@ -465,6 +466,15 @@ function shortContentHash(value: string | undefined | null): string | null {
     : crypto.createHash("sha256").update(value).digest("hex").slice(0, 12);
 }
 
+function isValidJson(value: string): boolean {
+  try {
+    JSON.parse(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Resolve the primary artifact of a given type from a list of artifacts.
  *
@@ -552,11 +562,7 @@ async function writePlanFileToWorkDir(
   artifacts: LoopArtifact[],
   primaryArtifactId?: string,
 ): Promise<void> {
-  const artifact = findPrimaryArtifact(
-    artifacts,
-    PLAN_ARTIFACT_TYPES[0],
-    primaryArtifactId,
-  );
+  const artifact = findPrimaryArtifact(artifacts, LoopArtifactType.ImplementationPlan, primaryArtifactId);
   if (artifact?.content) {
     await fs.writeFile(
       path.join(workDir, LoopArtifactFile.PlanMarkdown),
@@ -1772,7 +1778,8 @@ async function writeArtifactsForPlan(
   await downloadAttachmentsToDisk(claudeWorkDir, attachments);
 }
 
-async function writeArtifactsForExecuteOrAmend(
+/** @internal Exported for testing only. */
+export async function writeArtifactsForExecuteOrAmend(
   claudeWorkDir: string,
   artifacts: LoopArtifact[],
   prompt?: string,
@@ -1897,7 +1904,17 @@ async function writeArtifactsForExecuteOrAmend(
         continue;
       }
 
-      if (existsSync(planJsonPath)) {
+      // When artifact.content is not valid JSON it is raw markdown from an
+      // older gateway; write it to plan-source.md so the plugin can import it.
+      if (!isValidJson(artifact.content)) {
+        const planSourcePath = path.join(
+          claudeWorkDir,
+          PLAN_SOURCE_MARKDOWN_FILE,
+        );
+        await fs.rm(planJsonPath, { force: true });
+        await fs.writeFile(planSourcePath, artifact.content);
+        importedPlanFile = planSourcePath;
+      } else if (existsSync(planJsonPath)) {
         try {
           const existing = JSON.parse(
             readFileSync(planJsonPath, "utf-8"),
@@ -1932,16 +1949,8 @@ async function writeArtifactsForExecuteOrAmend(
             ),
           );
         } else {
-          // If it's valid JSON, write directly. Otherwise wrap it.
-          try {
-            JSON.parse(artifact.content);
-            await fs.writeFile(planJsonPath, artifact.content);
-          } catch {
-            await fs.writeFile(
-              planJsonPath,
-              JSON.stringify({ content: artifact.content }, null, 2),
-            );
-          }
+          // artifact.content is valid JSON (checked above), write directly.
+          await fs.writeFile(planJsonPath, artifact.content);
         }
       }
     } else if (
@@ -5410,6 +5419,7 @@ async function handleLoopRequest(
     let claudeWorkDir: string;
     let usedTempDir = false;
     let executeImportedPlanFile: string | null = null;
+    let requestChangesImportedPlanFile: string | null = null;
 
     if (body.command === LoopCommand.Decompose) {
       // DECOMPOSE uses a single temp dir for everything: context pack, logs, and output.
@@ -5744,7 +5754,7 @@ async function handleLoopRequest(
         executeImportedPlanFile = executeArtifacts.importedPlanFile;
       } else {
         // REQUEST_CHANGES
-        await writeArtifactsForExecuteOrAmend(
+        const requestChangesArtifacts = await writeArtifactsForExecuteOrAmend(
           claudeWorkDir,
           body.artifacts,
           body.prompt,
@@ -5756,6 +5766,8 @@ async function handleLoopRequest(
             operationId,
           },
         );
+        requestChangesImportedPlanFile =
+          requestChangesArtifacts.importedPlanFile;
       }
     } else if (
       body.command === LoopCommand.GeneratePrd ||
@@ -5955,9 +5967,7 @@ async function handleLoopRequest(
       const claudeBinary = resolved.path;
 
       const closedLoopPlanFile =
-        body.command === LoopCommand.Execute
-          ? (executeImportedPlanFile ?? "")
-          : "";
+        executeImportedPlanFile ?? requestChangesImportedPlanFile ?? "";
 
       userVisibleLoopFailureSecret =
         body.command === LoopCommand.Plan ||
