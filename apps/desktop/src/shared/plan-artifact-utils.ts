@@ -4,6 +4,7 @@ export type UploadedPlanArtifact = {
 };
 
 export const IMPORTED_PLAN_MARKDOWN_FILE = "imported-plan.md";
+export const PLAN_SOURCE_MARKDOWN_FILE = "plan-source.md";
 
 export function isRawPlanArtifact(
   value: unknown,
