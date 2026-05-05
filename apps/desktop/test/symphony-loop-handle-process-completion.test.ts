@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { JobStore, type LocalJob } from "../src/main/job-store.js";
 import { handleProcessCompletion } from "../src/server/operations/symphony-loop.js";
 
@@ -65,7 +66,7 @@ function createBaseJob(
     id: loopId,
     kind: "SYMPHONY_LOOP",
     loopId,
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
     localRepoPath: path.join(tempRoot, "repo"),
     claudeWorkDir,
     status: "RUNNING",
@@ -116,7 +117,7 @@ async function completeFailedLoopWithMarkerSecret(args: {
     1,
     {
       loopId: args.loopId,
-      command: "EXECUTE",
+      command: LoopCommand.Execute,
       closedLoopAuthToken: "token",
     } as Parameters<typeof handleProcessCompletion>[1],
     "http://127.0.0.1:12345",
@@ -161,7 +162,7 @@ test("handleProcessCompletion merges existing warnings with failure upload warni
     1,
     {
       loopId,
-      command: "EXECUTE",
+      command: LoopCommand.Execute,
       closedLoopAuthToken: "token",
     } as Parameters<typeof handleProcessCompletion>[1],
     "http://127.0.0.1:12345",

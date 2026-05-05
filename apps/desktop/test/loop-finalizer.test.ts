@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { JobStore, type LocalJob } from "../src/main/job-store.js";
 import {
   EXECUTE_NO_WORK_LIVE_ACTIVITY,
@@ -68,7 +69,7 @@ function createBaseJob(overrides?: Partial<LocalJob>): LocalJob {
     id: "loop-1",
     kind: "SYMPHONY_LOOP",
     loopId: "loop-1",
-    command: "PLAN",
+    command: LoopCommand.Plan,
     localRepoPath: path.join(tempRoot, "repo"),
     claudeWorkDir,
     status: "RUNNING",
@@ -634,7 +635,7 @@ test("tryUploadArtifacts POSTs artifacts and sets artifactsUploadedAt on success
   const warnings: string[] = [];
   const { failed } = await tryUploadArtifacts(
     job,
-    "PLAN",
+    LoopCommand.Plan,
     claudeWorkDir,
     undefined,
     warnings,
@@ -678,14 +679,14 @@ test("tryUploadArtifacts includes current plan state on EXECUTE uploads", async 
   const jobStore = createStore("step-upload-execute-plan");
   const job = createBaseJob({
     claudeWorkDir,
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
   });
   jobStore.upsert(job);
 
   const warnings: string[] = [];
   const { failed } = await tryUploadArtifacts(
     job,
-    "EXECUTE",
+    LoopCommand.Execute,
     claudeWorkDir,
     undefined,
     warnings,
@@ -733,14 +734,14 @@ test("tryUploadArtifacts falls back to imported-plan markdown for EXECUTE upload
   const jobStore = createStore("step-upload-execute-imported-plan");
   const job = createBaseJob({
     claudeWorkDir,
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
   });
   jobStore.upsert(job);
 
   const warnings: string[] = [];
   const { failed } = await tryUploadArtifacts(
     job,
-    "EXECUTE",
+    LoopCommand.Execute,
     claudeWorkDir,
     undefined,
     warnings,
@@ -775,7 +776,7 @@ test("tryUploadArtifacts skips upload when artifactsUploadedAt already set", asy
   jobStore.upsert(job);
 
   const warnings: string[] = [];
-  await tryUploadArtifacts(job, "PLAN", claudeWorkDir, undefined, warnings, artifactDeps(jobStore));
+  await tryUploadArtifacts(job, LoopCommand.Plan, claudeWorkDir, undefined, warnings, artifactDeps(jobStore));
 
   assert.equal(fetchCalls.length, 0);
   assert.equal(warnings.length, 0);
@@ -802,7 +803,7 @@ test("tryUploadArtifacts records ARTIFACT_UPLOAD_FAILED when HTTP fails", async 
   const warnings: string[] = [];
   const { failed } = await tryUploadArtifacts(
     job,
-    "PLAN",
+    LoopCommand.Plan,
     claudeWorkDir,
     undefined,
     warnings,
@@ -854,7 +855,7 @@ test("tryPostCompletedEvent posts completed event and sets completedEventPostedA
   const warnings: string[] = [];
   const result = await tryPostCompletedEvent(
     job,
-    "PLAN",
+    LoopCommand.Plan,
     claudeWorkDir,
     { plan: {} },
     warnings,
@@ -891,7 +892,7 @@ test("tryPostCompletedEvent skips when completedEventPostedAt is set", async () 
 
   const result = await tryPostCompletedEvent(
     job,
-    "PLAN",
+    LoopCommand.Plan,
     claudeWorkDir,
     {},
     [],
@@ -909,7 +910,7 @@ test("tryPostCompletedEvent adds EXECUTE PR fields from artifacts", async () => 
   const jobStore = createStore("step-complete-execute");
   const job = createBaseJob({
     claudeWorkDir,
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
   });
   jobStore.upsert(job);
 
@@ -923,7 +924,7 @@ test("tryPostCompletedEvent adds EXECUTE PR fields from artifacts", async () => 
 
   await tryPostCompletedEvent(
     job,
-    "EXECUTE",
+    LoopCommand.Execute,
     claudeWorkDir,
     artifacts,
     [],
@@ -946,7 +947,7 @@ test("tryPostCompletedEvent includes sessionId from session-id.txt", async () =>
   const job = createBaseJob({ claudeWorkDir });
   jobStore.upsert(job);
 
-  await tryPostCompletedEvent(job, "PLAN", claudeWorkDir, { plan: {} }, [], artifactDeps(jobStore));
+  await tryPostCompletedEvent(job, LoopCommand.Plan, claudeWorkDir, { plan: {} }, [], artifactDeps(jobStore));
 
   const body = fetchCalls[0]?.body ?? "";
   assert.match(body, /"sessionId":"claude-sess-abc"/);
@@ -963,7 +964,7 @@ test("tryPostCompletedEvent adds branchName from worktree git for non-EXECUTE", 
   const job = createBaseJob({ claudeWorkDir, worktreeDir });
   jobStore.upsert(job);
 
-  await tryPostCompletedEvent(job, "PLAN", claudeWorkDir, { plan: {} }, [], artifactDeps(jobStore));
+  await tryPostCompletedEvent(job, LoopCommand.Plan, claudeWorkDir, { plan: {} }, [], artifactDeps(jobStore));
 
   const body = fetchCalls[0]?.body ?? "";
   assert.match(body, /"branchName":"plan-worktree-branch"/);
@@ -980,7 +981,7 @@ test("tryPostCompletedEvent EXECUTE uses git branch when executionResult omits b
   const job = createBaseJob({
     claudeWorkDir,
     worktreeDir,
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
   });
   jobStore.upsert(job);
 
@@ -995,7 +996,7 @@ test("tryPostCompletedEvent EXECUTE uses git branch when executionResult omits b
     }) as unknown as Record<string, unknown>,
   };
 
-  await tryPostCompletedEvent(job, "EXECUTE", claudeWorkDir, artifacts, [], artifactDeps(jobStore));
+  await tryPostCompletedEvent(job, LoopCommand.Execute, claudeWorkDir, artifacts, [], artifactDeps(jobStore));
 
   const body = fetchCalls[0]?.body ?? "";
   assert.match(body, /"branchName":"execute-git-fallback"/);
@@ -1012,7 +1013,7 @@ test("tryPostCompletedEvent EXECUTE prefers executionResult branch_name over git
   const job = createBaseJob({
     claudeWorkDir,
     worktreeDir,
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
   });
   jobStore.upsert(job);
 
@@ -1024,7 +1025,7 @@ test("tryPostCompletedEvent EXECUTE prefers executionResult branch_name over git
     }) as unknown as Record<string, unknown>,
   };
 
-  await tryPostCompletedEvent(job, "EXECUTE", claudeWorkDir, artifacts, [], artifactDeps(jobStore));
+  await tryPostCompletedEvent(job, LoopCommand.Execute, claudeWorkDir, artifacts, [], artifactDeps(jobStore));
 
   const body = fetchCalls[0]?.body ?? "";
   assert.match(body, /"branchName":"feat\/from-artifact"/);
@@ -1038,7 +1039,7 @@ test("tryPostCompletedEvent includes execute finalization metadata for EXECUTE j
   const jobStore = createStore("step-complete-exec-finalization-metadata");
   const job = createBaseJob({
     claudeWorkDir,
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
     finalizationSource: "boot-recovery",
     executeFinalizationStatus: "success",
     executeFinalizationPath: "artifact-existing",
@@ -1056,7 +1057,7 @@ test("tryPostCompletedEvent includes execute finalization metadata for EXECUTE j
 
   await tryPostCompletedEvent(
     job,
-    "EXECUTE",
+    LoopCommand.Execute,
     claudeWorkDir,
     artifacts,
     [],
@@ -1092,7 +1093,7 @@ test("tryUploadArtifacts sends sessionId and branchName in metadata", async () =
   const warnings: string[] = [];
   const { failed } = await tryUploadArtifacts(
     job,
-    "PLAN",
+    LoopCommand.Plan,
     claudeWorkDir,
     worktreeDir,
     warnings,
@@ -1125,7 +1126,7 @@ test("tryUploadArtifacts includes execute finalization metadata for EXECUTE jobs
   const jobStore = createStore("step-upload-exec-finalization-metadata");
   const job = createBaseJob({
     claudeWorkDir,
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
     finalizationSource: "boot-recovery",
     executeFinalizationStatus: "success",
     executeFinalizationPath: "artifact-existing",
@@ -1136,7 +1137,7 @@ test("tryUploadArtifacts includes execute finalization metadata for EXECUTE jobs
   const warnings: string[] = [];
   const { failed } = await tryUploadArtifacts(
     job,
-    "EXECUTE",
+    LoopCommand.Execute,
     claudeWorkDir,
     undefined,
     warnings,
@@ -1193,7 +1194,7 @@ test("tryUploadArtifacts omits branchName fallback when worktree is outside allo
   const warnings: string[] = [];
   const { failed } = await tryUploadArtifacts(
     job,
-    "PLAN",
+    LoopCommand.Plan,
     claudeWorkDir,
     worktreeDir,
     warnings,
@@ -1232,7 +1233,7 @@ test("tryPostCompletedEvent records EVENT_POST_FAILED when HTTP fails", async ()
   const warnings: string[] = [];
   const result = await tryPostCompletedEvent(
     job,
-    "PLAN",
+    LoopCommand.Plan,
     claudeWorkDir,
     {},
     warnings,
@@ -1335,7 +1336,7 @@ test("tryPostErrorEvent uses NO_WORK_PRODUCED for shared EXECUTE no-work failure
   const jobStore = createStore("step-error-no-work-produced");
   const job = createBaseJob({
     claudeWorkDir,
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
     status: "FAILED",
     exitCode: 0,
     liveActivity: EXECUTE_NO_WORK_LIVE_ACTIVITY,
@@ -1749,7 +1750,7 @@ test("finalizeLoopFromRuntime retries EXECUTE finalization after a prior error o
   const job = createBaseJob({
     claudeWorkDir,
     worktreeDir,
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
     baseBranch: "main",
     webAppOrigin: "https://app.closedloop.ai",
     primaryRepoFullName: "acme/repo",
@@ -1826,14 +1827,14 @@ test("tryPostCompletedEvent includes V2 top-level results and primary PR fields"
   const jobStore = createStore("v2-repo-results");
   const job = createBaseJob({
     claudeWorkDir,
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
     primaryRepoFullName: "acme/main-repo",
   });
   jobStore.upsert(job);
 
   await tryPostCompletedEvent(
     job,
-    "EXECUTE",
+    LoopCommand.Execute,
     claudeWorkDir,
     {
       executionResult: makeV2ExecutionResult([
@@ -1877,12 +1878,12 @@ test("tryPostCompletedEvent treats skipped V2 primary as no changes", async () =
   await fs.mkdir(claudeWorkDir, { recursive: true });
 
   const jobStore = createStore("v2-primary-skipped");
-  const job = createBaseJob({ claudeWorkDir, command: "EXECUTE" });
+  const job = createBaseJob({ claudeWorkDir, command: LoopCommand.Execute });
   jobStore.upsert(job);
 
   await tryPostCompletedEvent(
     job,
-    "EXECUTE",
+    LoopCommand.Execute,
     claudeWorkDir,
     {
       executionResult: makeV2ExecutionResult({
@@ -1922,14 +1923,14 @@ test("legacy V1-on-disk: snake_case fields normalize through unified parse path"
   const jobStore = createStore("v1-flat-object");
   const job = createBaseJob({
     claudeWorkDir,
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
     primaryRepoFullName: "acme/repo",
   });
   jobStore.upsert(job);
 
   await tryPostCompletedEvent(
     job,
-    "EXECUTE",
+    LoopCommand.Execute,
     claudeWorkDir,
     { executionResult: v1Artifact },
     [],

@@ -7,6 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import { LoopArtifactType } from "@closedloop-ai/loops-api/artifacts";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import {
   EvaluateArtifact,
   readEvaluateOutputs,
@@ -29,7 +30,7 @@ function buildEvaluateFeatureBody(
 ): Record<string, unknown> {
   return {
     loopId: "fe000001-0000-0000-0000-000000000001",
-    command: "EVALUATE_FEATURE",
+    command: LoopCommand.EvaluateFeature,
     closedLoopAuthToken: "cl-token",
     apiBaseUrl: "https://api.example.com",
     artifacts: [{ type: "FEATURE", content: "Feature content for evaluation" }],
@@ -132,7 +133,7 @@ describe("EVALUATE_FEATURE with primaryArtifactId", () => {
       server.getActivePort(),
       {
         loopId,
-        command: "EVALUATE_FEATURE",
+        command: LoopCommand.EvaluateFeature,
         closedLoopAuthToken: "cl-token",
         apiBaseUrl,
         artifacts: [

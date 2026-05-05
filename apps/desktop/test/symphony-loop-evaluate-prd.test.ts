@@ -13,6 +13,7 @@ import {
   writePrdArtifact,
 } from "../src/server/operations/symphony-loop.js";
 import { LoopArtifactType } from "@closedloop-ai/loops-api/artifacts";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import {
@@ -203,7 +204,7 @@ async function startEventServer(): Promise<{
 function buildEvaluatePrdBody(overrides?: Partial<Record<string, unknown>>): Record<string, unknown> {
   return {
     loopId: "11111111-0000-0000-0000-000000000001",
-    command: "EVALUATE_PRD",
+    command: LoopCommand.EvaluatePrd,
     closedLoopAuthToken: "cl-token",
     apiBaseUrl: "https://api.example.com",
     artifacts: [{ type: "PRD", content: "PRD content for evaluation" }],
@@ -268,7 +269,7 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
         },
         body: JSON.stringify({
           loopId,
-          command: "EVALUATE_PRD",
+          command: LoopCommand.EvaluatePrd,
           closedLoopAuthToken: "cl-token",
           apiBaseUrl,
           artifacts: [{ type: "PRD", content: "PRD content here" }],
@@ -323,7 +324,7 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
         },
         body: JSON.stringify({
           loopId,
-          command: "EVALUATE_PRD",
+          command: LoopCommand.EvaluatePrd,
           closedLoopAuthToken: "cl-token",
           apiBaseUrl,
           artifacts: [{ type: "PRD", content: "PRD content here" }],
@@ -488,7 +489,7 @@ describe("T-5.2: writePrdArtifact", () => {
         },
         body: JSON.stringify({
           loopId,
-          command: "EVALUATE_PRD",
+          command: LoopCommand.EvaluatePrd,
           closedLoopAuthToken: "cl-token",
           apiBaseUrl,
           artifacts: [{ type: "PRD", content: "PRD content here" }],
@@ -558,7 +559,7 @@ describe("T-5.2: writePrdArtifact", () => {
         },
         body: JSON.stringify({
           loopId,
-          command: "EVALUATE_PRD",
+          command: LoopCommand.EvaluatePrd,
           closedLoopAuthToken: "cl-token",
           apiBaseUrl,
           artifacts: [{ type: "PRD", content: "PRD content here" }],
@@ -673,7 +674,7 @@ describe("T-5.4: Temp dir cleanup after EVALUATE_PRD completes", () => {
         },
         body: JSON.stringify({
           loopId,
-          command: "EVALUATE_PRD",
+          command: LoopCommand.EvaluatePrd,
           closedLoopAuthToken: "cl-token",
           apiBaseUrl,
           artifacts: [{ type: "PRD", content: "PRD content for cleanup test" }],
@@ -736,7 +737,7 @@ describe("T-5.5: BINARY_NOT_FOUND when claude not in PATH", () => {
         },
         body: JSON.stringify({
           loopId,
-          command: "EVALUATE_PRD",
+          command: LoopCommand.EvaluatePrd,
           closedLoopAuthToken: "cl-token",
           apiBaseUrl,
           artifacts: [{ type: "PRD", content: "PRD content for binary test" }],

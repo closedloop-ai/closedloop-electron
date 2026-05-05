@@ -23,6 +23,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { JobStore } from "../src/main/job-store.js";
 import { Observability } from "../src/main/observability.js";
 import type { EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
@@ -196,7 +197,7 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -359,7 +360,7 @@ test("EXECUTE: sandbox change during LLM finalization skips git fallback and bra
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -503,7 +504,7 @@ test("EXECUTE: handleProcessCompletion reads pre-written execution-result.json a
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -657,7 +658,7 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -788,7 +789,7 @@ test("EXECUTE: git status failure sets GIT_PUSH_FAILED in completed event warnin
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -898,7 +899,7 @@ test("EXECUTE: rehydrates aligned raw implementation plan state into a fresh wor
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [
@@ -1016,7 +1017,7 @@ test("EXECUTE: emits decision-table verifier telemetry from current-run JSONL", 
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [
@@ -1147,7 +1148,7 @@ test("EXECUTE: fresh worktree without raw plan stages plan.md and passes CLOSEDL
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [
@@ -1293,7 +1294,7 @@ test("EXECUTE: imported-plan failure still uploads the staged plan artifact", as
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [
@@ -1443,7 +1444,7 @@ test("EXECUTE: remote raw plan payload wins over existing local plan.json", asyn
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [
@@ -1605,7 +1606,7 @@ test("EXECUTE: missing raw payload keeps matching local plan.json", async () => 
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [
@@ -1764,7 +1765,7 @@ test("EXECUTE: missing raw payload removes mismatched local plan.json", async ()
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [
@@ -1925,7 +1926,7 @@ test("EXECUTE: stale raw plan state falls back to imported-plan compatibility", 
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [
@@ -2057,7 +2058,7 @@ test("EXECUTE: non-cancelled failure uploads current plan state before posting t
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -2243,7 +2244,7 @@ test("EXECUTE: cancel before attemptLlmCommit ends job as CANCELLED with no uplo
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -2379,7 +2380,7 @@ test("EXECUTE: cancel during attemptLlmCommit ends job as CANCELLED with no comp
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -2578,7 +2579,7 @@ test("EXECUTE: artifact links use /implementation-plans/ in PR body and LLM prom
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -2735,7 +2736,7 @@ test("EXECUTE: SAFETY commit PR title uses '<slug>: Automated changes from loop 
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -2871,7 +2872,7 @@ test("EXECUTE: LLM commit spawns claude via resolved absolute path and writes PI
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -3012,7 +3013,7 @@ test("EXECUTE: non-zero exit with CANCEL_PENDING skips PROCESS_FAILED and ends a
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],

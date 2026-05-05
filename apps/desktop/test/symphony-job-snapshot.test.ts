@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { enrichJobSnapshot, shouldApplyStateStatus } from "../src/server/operations/symphony-job-snapshot.js";
 import type { LocalJob, LocalJobStatus } from "../src/main/job-store.js";
 
@@ -12,7 +13,7 @@ function makeJob(overrides: Partial<LocalJob> = {}): LocalJob {
     id: "job-1",
     kind: "SYMPHONY_LOOP",
     loopId: "loop-1",
-    command: "PLAN",
+    command: LoopCommand.Plan,
     status: "RUNNING" as LocalJobStatus,
     startedAt: now,
     updatedAt: now,
@@ -175,7 +176,7 @@ test("enrichJobSnapshot: phase text suppressed when state.json says terminal but
 test("enrichJobSnapshot preserves execute finalization diagnostics", async () => {
   const snapshot = await enrichJobSnapshot(
     makeJob({
-      command: "EXECUTE",
+      command: LoopCommand.Execute,
       status: "COMPLETED",
       finalizationSource: "boot-recovery",
       executeFinalizationStatus: "success",
