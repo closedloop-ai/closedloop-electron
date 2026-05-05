@@ -54,6 +54,7 @@ import {
 } from "../../main/token-usage.js";
 import {
   IMPORTED_PLAN_MARKDOWN_FILE,
+  PLAN_SOURCE_MARKDOWN_FILE,
   isRawPlanArtifact,
   toUploadedPlanArtifact,
 } from "../../shared/plan-artifact-utils.js";
@@ -332,7 +333,7 @@ type UserVisibleLoopFailureSignedPayload = Pick<
 >;
 
 interface LoopArtifact {
-  id?: string;
+  id: string;
   type: LoopArtifactType;
   title?: string;
   content: string;
@@ -429,6 +430,58 @@ function shortContentHash(value: string | undefined | null): string | null {
     : crypto.createHash("sha256").update(value).digest("hex").slice(0, 12);
 }
 
+function isValidJson(value: string): boolean {
+  try {
+    JSON.parse(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve the primary artifact of a given type from a list of artifacts.
+ *
+ * Selection priority:
+ * 1. When `primaryArtifactId` is a non-empty string, find by id — preferred
+ *    because it unambiguously identifies the artifact the caller cares about.
+ * 2. Fall through to `findLast` by type — the backend's context-pack assembler
+ *    (symphony-alpha apps/api/lib/loops/loop-context-pack.ts) appends the
+ *    primary artifact last, so findLast returns the primary even when
+ *    same-type context refs precede it.
+ * 3. Throw if neither strategy finds a match.
+ */
+export function resolvePrimaryArtifact(
+  artifacts: LoopArtifact[],
+  type: string,
+  primaryArtifactId?: string,
+): LoopArtifact {
+  const found = findPrimaryArtifact(artifacts, type, primaryArtifactId);
+  if (found !== undefined) {
+    return found;
+  }
+  throw new Error(`resolvePrimaryArtifact: no ${type} artifact found`);
+}
+
+/**
+ * Non-throwing variant of resolvePrimaryArtifact.
+ * Returns undefined instead of throwing when no matching artifact is found.
+ * Same selection priority: id match > findLast by type.
+ */
+function findPrimaryArtifact(
+  artifacts: LoopArtifact[],
+  type: string,
+  primaryArtifactId?: string,
+): LoopArtifact | undefined {
+  if (primaryArtifactId) {
+    const byId = artifacts.find((a) => a.id === primaryArtifactId);
+    if (byId !== undefined) {
+      return byId;
+    }
+  }
+  return artifacts.findLast((a) => a.type === type);
+}
+
 /**
  * Write prd.md to a work directory from a list of artifacts and an optional
  * explicit prompt.
@@ -444,16 +497,12 @@ export async function writePrdArtifact(
   workDir: string,
   artifacts: LoopArtifact[],
   prompt?: string,
+  primaryArtifactId?: string,
 ): Promise<void> {
-  // Primary artifact is appended last by the backend's context-pack assembler
-  // (symphony-alpha apps/api/lib/loops/loop-context-pack.ts: refs precede primary).
-  // Match by findLast so a same-type context ref doesn't shadow the primary.
-  const prdArtifact = artifacts.findLast(
-    (a) => a.type === LoopArtifactType.Prd,
-  );
+  const prdArtifact = findPrimaryArtifact(artifacts, LoopArtifactType.Prd, primaryArtifactId);
   const featureArtifact = prdArtifact
     ? null
-    : artifacts.findLast((a) => a.type === LoopArtifactType.Feature);
+    : findPrimaryArtifact(artifacts, LoopArtifactType.Feature, primaryArtifactId);
   const source = prdArtifact ?? featureArtifact;
 
   const prdContent = source?.content || prompt || "";
@@ -467,12 +516,9 @@ export async function writePrdArtifact(
 async function writePlanFileToWorkDir(
   workDir: string,
   artifacts: LoopArtifact[],
+  primaryArtifactId?: string,
 ): Promise<void> {
-  // Primary artifact is appended last by the backend's context-pack assembler;
-  // refs precede it. findLast picks the primary even when refs share its type.
-  const artifact = artifacts.findLast((a) =>
-    (PLAN_ARTIFACT_TYPES as readonly string[]).includes(a.type),
-  );
+  const artifact = findPrimaryArtifact(artifacts, LoopArtifactType.ImplementationPlan, primaryArtifactId);
   if (artifact?.content) {
     await fs.writeFile(
       path.join(workDir, LoopArtifactFile.PlanMarkdown),
@@ -486,17 +532,19 @@ export async function writePlanArtifact(
   workDir: string,
   artifacts: LoopArtifact[],
   prompt?: string,
+  primaryArtifactId?: string,
 ): Promise<void> {
-  await writePrdArtifact(workDir, artifacts, prompt);
-  await writePlanFileToWorkDir(workDir, artifacts);
+  await writePrdArtifact(workDir, artifacts, prompt, primaryArtifactId);
+  await writePlanFileToWorkDir(workDir, artifacts, primaryArtifactId);
 }
 
 /** Write plan.md to a work directory from a list of artifacts. */
 export async function writeCodeArtifact(
   workDir: string,
   artifacts: LoopArtifact[],
+  primaryArtifactId?: string,
 ): Promise<void> {
-  await writePlanFileToWorkDir(workDir, artifacts);
+  await writePlanFileToWorkDir(workDir, artifacts, primaryArtifactId);
 }
 
 /**
@@ -505,23 +553,22 @@ export async function writeCodeArtifact(
  * Unlike writePrdArtifact, this helper is strict: it requires a
  * LoopArtifactType.Feature artifact and does not fall back to PRD or
  * prompt. If no Feature artifact is present, it throws.
+ *
+ * When `primaryArtifactId` is provided, id-based selection is preferred;
+ * otherwise the backend ordering convention applies — the primary is
+ * appended last by the context-pack assembler, so findLast scores the
+ * loop's actual document even when same-type refs precede it.
  */
 export async function writeFeatureArtifact(
   workDir: string,
   artifacts: LoopArtifact[],
+  primaryArtifactId?: string,
 ): Promise<void> {
-  // Primary artifact is appended last by the backend's context-pack assembler
-  // (symphony-alpha apps/api/lib/loops/loop-context-pack.ts: refs precede primary).
-  // For Feature-from-Feature evaluations, refs share the primary's type, so
-  // findLast is required to score the loop's actual document.
-  const featureArtifact = artifacts.findLast(
-    (a) => a.type === LoopArtifactType.Feature,
+  const featureArtifact = resolvePrimaryArtifact(
+    artifacts,
+    LoopArtifactType.Feature,
+    primaryArtifactId,
   );
-  if (!featureArtifact) {
-    throw new Error(
-      "writeFeatureArtifact: no LoopArtifactType.Feature artifact found",
-    );
-  }
   await fs.writeFile(
     path.join(workDir, LoopArtifactFile.Prd),
     featureArtifact.content,
@@ -1603,7 +1650,8 @@ async function writeArtifactsForPlan(
   await downloadAttachmentsToDisk(claudeWorkDir, attachments);
 }
 
-async function writeArtifactsForExecuteOrAmend(
+/** @internal Exported for testing only. */
+export async function writeArtifactsForExecuteOrAmend(
   claudeWorkDir: string,
   artifacts: LoopArtifact[],
   prompt?: string,
@@ -1719,7 +1767,17 @@ async function writeArtifactsForExecuteOrAmend(
         continue;
       }
 
-      if (existsSync(planJsonPath)) {
+      // When artifact.content is not valid JSON it is raw markdown from an
+      // older gateway; write it to plan-source.md so the plugin can import it.
+      if (!isValidJson(artifact.content)) {
+        const planSourcePath = path.join(
+          claudeWorkDir,
+          PLAN_SOURCE_MARKDOWN_FILE,
+        );
+        await fs.rm(planJsonPath, { force: true });
+        await fs.writeFile(planSourcePath, artifact.content);
+        importedPlanFile = planSourcePath;
+      } else if (existsSync(planJsonPath)) {
         try {
           const existing = JSON.parse(
             readFileSync(planJsonPath, "utf-8"),
@@ -1754,16 +1812,8 @@ async function writeArtifactsForExecuteOrAmend(
             ),
           );
         } else {
-          // If it's valid JSON, write directly. Otherwise wrap it.
-          try {
-            JSON.parse(artifact.content);
-            await fs.writeFile(planJsonPath, artifact.content);
-          } catch {
-            await fs.writeFile(
-              planJsonPath,
-              JSON.stringify({ content: artifact.content }, null, 2),
-            );
-          }
+          // artifact.content is valid JSON (checked above), write directly.
+          await fs.writeFile(planJsonPath, artifact.content);
         }
       }
     } else if (
@@ -4972,6 +5022,7 @@ async function handleLoopRequest(
     let claudeWorkDir: string;
     let usedTempDir = false;
     let executeImportedPlanFile: string | null = null;
+    let requestChangesImportedPlanFile: string | null = null;
 
     if (body.command === "DECOMPOSE") {
       // DECOMPOSE uses a single temp dir for everything: context pack, logs, and output.
@@ -5024,13 +5075,13 @@ async function handleLoopRequest(
       claudeWorkDir = tmpDir;
       try {
         if (body.command === "EVALUATE_PRD") {
-          await writePrdArtifact(claudeWorkDir, body.artifacts, body.prompt);
+          await writePrdArtifact(claudeWorkDir, body.artifacts, body.prompt, body.primaryArtifactId);
         } else if (body.command === "EVALUATE_PLAN") {
-          await writePlanArtifact(claudeWorkDir, body.artifacts, body.prompt);
+          await writePlanArtifact(claudeWorkDir, body.artifacts, body.prompt, body.primaryArtifactId);
         } else if (body.command === "EVALUATE_CODE") {
-          await writeCodeArtifact(claudeWorkDir, body.artifacts);
+          await writeCodeArtifact(claudeWorkDir, body.artifacts, body.primaryArtifactId);
         } else if (body.command === "EVALUATE_FEATURE") {
-          await writeFeatureArtifact(claudeWorkDir, body.artifacts);
+          await writeFeatureArtifact(claudeWorkDir, body.artifacts, body.primaryArtifactId);
         }
       } catch (artifactErr) {
         await fs.rm(claudeWorkDir, { recursive: true, force: true });
@@ -5258,7 +5309,7 @@ async function handleLoopRequest(
         executeImportedPlanFile = executeArtifacts.importedPlanFile;
       } else {
         // REQUEST_CHANGES
-        await writeArtifactsForExecuteOrAmend(
+        const requestChangesArtifacts = await writeArtifactsForExecuteOrAmend(
           claudeWorkDir,
           body.artifacts,
           body.prompt,
@@ -5270,6 +5321,8 @@ async function handleLoopRequest(
             operationId,
           },
         );
+        requestChangesImportedPlanFile =
+          requestChangesArtifacts.importedPlanFile;
       }
     } else if (body.command === "GENERATE_PRD") {
       // expandedRepoPath is guaranteed non-null here: the repoRequirement === "REQUIRED"
@@ -5505,7 +5558,7 @@ async function handleLoopRequest(
       const claudeBinary = resolved.path;
 
       const closedLoopPlanFile =
-        body.command === "EXECUTE" ? executeImportedPlanFile ?? "" : "";
+        executeImportedPlanFile ?? requestChangesImportedPlanFile ?? "";
 
       userVisibleLoopFailureSecret =
         body.command === "PLAN" || body.command === "EXECUTE"
