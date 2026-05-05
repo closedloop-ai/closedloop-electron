@@ -289,6 +289,7 @@ export class BootRecoveryService {
             jobStore.upsert({ ...current, lastObservedJsonlOffset: offset });
           }
         },
+        job.claudeWorkDir,
       );
     } else {
       gatewayLog.warn(
