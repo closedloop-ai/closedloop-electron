@@ -6,28 +6,15 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, test } from "node:test";
+import { describe, test } from "node:test";
 import { LoopArtifactType } from "@closedloop-ai/loops-api/artifacts";
 import { PLAN_SOURCE_MARKDOWN_FILE } from "../src/shared/plan-artifact-utils.js";
 import { writeArtifactsForExecuteOrAmend } from "../src/server/operations/symphony-loop.js";
+import { createTempDirManager } from "./helpers/temp-dir.js";
 
-const tempPathsToClean: string[] = [];
-
-afterEach(async () => {
-  for (const p of tempPathsToClean.splice(0)) {
-    await fs.rm(p, { recursive: true, force: true });
-  }
-});
-
-function makeTempDir(): string {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "write-artifacts-non-execute-"));
-  tempPathsToClean.push(dir);
-  return dir;
-}
+const { makeTempDir } = createTempDirManager("write-artifacts-non-execute-");
 
 describe("writeArtifactsForExecuteOrAmend – non-EXECUTE branch, valid JSON artifact content", () => {
   test("writes plan.json when artifact content is valid JSON", async () => {
@@ -130,6 +117,40 @@ describe("writeArtifactsForExecuteOrAmend – non-EXECUTE branch, non-JSON artif
       { code: "ENOENT" },
       "plan.json must not be written when artifact content is non-JSON markdown",
     );
+  });
+
+  test("removes stale plan.json when artifact content is raw markdown", async () => {
+    const tmpDir = makeTempDir();
+    const rawMarkdown = "# Updated Plan\n\nUse this markdown plan.";
+    await fs.writeFile(
+      path.join(tmpDir, "plan.json"),
+      JSON.stringify({ content: "# Stale Plan" }),
+    );
+
+    await writeArtifactsForExecuteOrAmend(
+      tmpDir,
+      [
+        {
+          id: "plan-004",
+          type: LoopArtifactType.ImplementationPlan,
+          content: rawMarkdown,
+        },
+      ],
+      undefined,
+      undefined,
+      { command: "REQUEST_CHANGES", loopId: "test-loop-id-stale" },
+    );
+
+    await assert.rejects(
+      () => fs.readFile(path.join(tmpDir, "plan.json"), "utf-8"),
+      { code: "ENOENT" },
+      "stale plan.json must be removed when importing raw markdown",
+    );
+    const written = await fs.readFile(
+      path.join(tmpDir, PLAN_SOURCE_MARKDOWN_FILE),
+      "utf-8",
+    );
+    assert.equal(written, rawMarkdown);
   });
 
   test("writes plan-source.md with exact raw content preserved", async () => {

@@ -1770,10 +1770,13 @@ export async function writeArtifactsForExecuteOrAmend(
       // When artifact.content is not valid JSON it is raw markdown from an
       // older gateway; write it to plan-source.md so the plugin can import it.
       if (!isValidJson(artifact.content)) {
-        await fs.writeFile(
-          path.join(claudeWorkDir, PLAN_SOURCE_MARKDOWN_FILE),
-          artifact.content,
+        const planSourcePath = path.join(
+          claudeWorkDir,
+          PLAN_SOURCE_MARKDOWN_FILE,
         );
+        await fs.rm(planJsonPath, { force: true });
+        await fs.writeFile(planSourcePath, artifact.content);
+        importedPlanFile = planSourcePath;
       } else if (existsSync(planJsonPath)) {
         try {
           const existing = JSON.parse(
