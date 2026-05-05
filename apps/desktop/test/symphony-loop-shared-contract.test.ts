@@ -1,7 +1,7 @@
 /**
  * Tests for behaviors introduced by the @closedloop-ai/loops-api shared contract:
  *
- * 1. Unsupported commands (CHAT, EXPLORE, REQUEST_PRD_CHANGES) are rejected
+ * 1. Unsupported commands (CHAT, EXPLORE) are rejected
  * 2. validateCommandInputs enforces per-command input requirements
  * 3. validateResultBundle logs warnings for missing required artifacts
  * 4. malformed EXECUTE results fall back to an authoritative no-changes result
@@ -17,7 +17,10 @@ import path from "node:path";
 import { afterEach, test } from "node:test";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
-import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
+import {
+  resetShellPathCache,
+  setShellPathForTest,
+} from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
   makeFakeWorktreeProvider,
@@ -32,7 +35,9 @@ import {
 // Shared fixtures
 // ---------------------------------------------------------------------------
 
-const fakeWorktreeProvider = makeFakeWorktreeProvider("symphony/shared-contract-test");
+const fakeWorktreeProvider = makeFakeWorktreeProvider(
+  "symphony/shared-contract-test",
+);
 
 const serversToClose: DesktopGatewayServer[] = [];
 const mockServersToClose: http.Server[] = [];
@@ -51,7 +56,12 @@ afterEach(async () => {
     });
   }
   for (const tempPath of tempPathsToClean.splice(0)) {
-    await fs.rm(tempPath, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    await fs.rm(tempPath, {
+      recursive: true,
+      force: true,
+      maxRetries: 3,
+      retryDelay: 100,
+    });
   }
 });
 
@@ -80,7 +90,9 @@ async function createTestGateway(tmpDir: string, mockPort: number) {
 // ---------------------------------------------------------------------------
 
 test("unsupported command CHAT returns 400 Invalid command", async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "contract-unsupported-"));
+  const tmpDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "contract-unsupported-"),
+  );
   tempPathsToClean.push(tmpDir);
 
   const mock = await startMockApiServer();
@@ -103,12 +115,14 @@ test("unsupported command CHAT returns 400 Invalid command", async () => {
   );
 
   assert.equal(response.status, 400);
-  const body = await response.json() as { error: string };
+  const body = (await response.json()) as { error: string };
   assert.equal(body.error, "Invalid command: CHAT");
 });
 
 test("unsupported command EXPLORE returns 400 Invalid command", async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "contract-unsupported-"));
+  const tmpDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "contract-unsupported-"),
+  );
   tempPathsToClean.push(tmpDir);
 
   const mock = await startMockApiServer();
@@ -131,36 +145,8 @@ test("unsupported command EXPLORE returns 400 Invalid command", async () => {
   );
 
   assert.equal(response.status, 400);
-  const body = await response.json() as { error: string };
+  const body = (await response.json()) as { error: string };
   assert.equal(body.error, "Invalid command: EXPLORE");
-});
-
-test("unsupported command REQUEST_PRD_CHANGES returns 400 Invalid command", async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "contract-unsupported-"));
-  tempPathsToClean.push(tmpDir);
-
-  const mock = await startMockApiServer();
-  mockServersToClose.push(mock.server);
-  const server = await createTestGateway(tmpDir, mock.port);
-
-  const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        loopId: "00000000-0000-0000-0000-000000002003",
-        command: "REQUEST_PRD_CHANGES",
-        closedLoopAuthToken: "tok",
-        prompt: "fix the prd",
-        artifacts: [{ type: "PRD", content: "original prd" }],
-      }),
-    },
-  );
-
-  assert.equal(response.status, 400);
-  const body = await response.json() as { error: string };
-  assert.equal(body.error, "Invalid command: REQUEST_PRD_CHANGES");
 });
 
 // ---------------------------------------------------------------------------
@@ -191,7 +177,7 @@ test("validateCommandInputs: EXECUTE with no prompt and no artifacts returns 400
   );
 
   assert.equal(response.status, 400);
-  const body = await response.json() as { error: string };
+  const body = (await response.json()) as { error: string };
   assert.ok(
     body.error.includes("EXECUTE"),
     `Expected error about EXECUTE input requirements, got: ${body.error}`,
@@ -222,7 +208,7 @@ test("validateCommandInputs: DECOMPOSE with no artifacts returns 400", async () 
   );
 
   assert.equal(response.status, 400);
-  const body = await response.json() as { error: string };
+  const body = (await response.json()) as { error: string };
   assert.ok(
     body.error.includes("DECOMPOSE"),
     `Expected error about DECOMPOSE input requirements, got: ${body.error}`,
@@ -253,7 +239,7 @@ test("validateCommandInputs: REQUEST_CHANGES with no prompt returns 400", async 
   );
 
   assert.equal(response.status, 400);
-  const body = await response.json() as { error: string };
+  const body = (await response.json()) as { error: string };
   assert.ok(
     body.error.includes("REQUEST_CHANGES"),
     `Expected error about REQUEST_CHANGES input requirements, got: ${body.error}`,
@@ -290,7 +276,9 @@ test("PLAN: completes even when plan.json is missing (validateResultBundle warni
 
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
-  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
 
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
@@ -310,7 +298,10 @@ test("PLAN: completes even when plan.json is missing (validateResultBundle warni
         command: "PLAN",
         closedLoopAuthToken: "tok",
         artifacts: [],
-        repo: { fullName: `bundle-test/${path.basename(repoPath)}`, branch: "main" },
+        repo: {
+          fullName: `bundle-test/${path.basename(repoPath)}`,
+          branch: "main",
+        },
       }),
     },
   );
@@ -325,7 +316,9 @@ test("PLAN: completes even when plan.json is missing (validateResultBundle warni
 
   // Verify the upload was attempted — plan artifact should be absent
   const uploadReq = await mock.waitForRequest("upload-artifacts");
-  const uploadBody = JSON.parse(uploadReq.body) as { artifacts: Record<string, unknown> };
+  const uploadBody = JSON.parse(uploadReq.body) as {
+    artifacts: Record<string, unknown>;
+  };
   assert.equal(
     uploadBody.artifacts.plan,
     undefined,
@@ -351,15 +344,20 @@ test("EXECUTE: malformed execution-result.json falls back to no-changes complete
   process.env.HOME = tmpDir;
 
   // run-loop.sh writes a malformed execution-result.json (missing required fields)
-  await createFakeRunLoopScript(tmpDir, [
-    "#!/bin/sh",
-    'echo \'{"garbage": true}\' > "$CLOSEDLOOP_WORKDIR/execution-result.json"',
-    "exit 0",
-  ].join("\n"));
+  await createFakeRunLoopScript(
+    tmpDir,
+    [
+      "#!/bin/sh",
+      'echo \'{"garbage": true}\' > "$CLOSEDLOOP_WORKDIR/execution-result.json"',
+      "exit 0",
+    ].join("\n"),
+  );
 
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
-  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
 
   const fakeGitScript = [
     "#!/bin/sh",
@@ -390,7 +388,10 @@ test("EXECUTE: malformed execution-result.json falls back to no-changes complete
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
-        repo: { fullName: `parse-test/${path.basename(repoPath)}`, branch: "main" },
+        repo: {
+          fullName: `parse-test/${path.basename(repoPath)}`,
+          branch: "main",
+        },
       }),
     },
   );
@@ -436,11 +437,10 @@ test("EXECUTE: uploaded execution result is V2 envelope with baseBranch on succe
   process.env.HOME = tmpDir;
 
   // run-loop.sh: writes a file so the worktree has changes, exits 0
-  await createFakeRunLoopScript(tmpDir, [
-    "#!/bin/sh",
-    "echo 'change' > new-file.txt",
-    "exit 0",
-  ].join("\n"));
+  await createFakeRunLoopScript(
+    tmpDir,
+    ["#!/bin/sh", "echo 'change' > new-file.txt", "exit 0"].join("\n"),
+  );
 
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
@@ -460,7 +460,9 @@ test("EXECUTE: uploaded execution result is V2 envelope with baseBranch on succe
     `printf '%s' '${executionResultContent}' > execution-result.json`,
     "exit 0",
   ].join("\n");
-  await fs.writeFile(path.join(fakeBin, "claude"), claudeScript, { mode: 0o755 });
+  await fs.writeFile(path.join(fakeBin, "claude"), claudeScript, {
+    mode: 0o755,
+  });
 
   // fake git: status returns changes, push succeeds
   const fakeGitScript = [
@@ -539,7 +541,9 @@ test("EXECUTE: uploaded execution result is V2 envelope with baseBranch on succe
 });
 
 test("EXECUTE: localRepoPath-only success infers V2 fullName from PR URL", async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "contract-localpath-fullname-"));
+  const tmpDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "contract-localpath-fullname-"),
+  );
   tempPathsToClean.push(tmpDir);
 
   const repoPath = path.join(tmpDir, "repo-localpath");
@@ -550,11 +554,10 @@ test("EXECUTE: localRepoPath-only success infers V2 fullName from PR URL", async
 
   process.env.HOME = tmpDir;
 
-  await createFakeRunLoopScript(tmpDir, [
-    "#!/bin/sh",
-    "echo 'change' > local-path-change.txt",
-    "exit 0",
-  ].join("\n"));
+  await createFakeRunLoopScript(
+    tmpDir,
+    ["#!/bin/sh", "echo 'change' > local-path-change.txt", "exit 0"].join("\n"),
+  );
 
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
@@ -620,7 +623,10 @@ test("EXECUTE: localRepoPath-only success infers V2 fullName from PR URL", async
   assert.equal(primary?.prUrl, `https://github.com/${inferredFullName}/pull/7`);
 
   const completedEvent = await waitForCompletedEvent(mock.requests, loopId);
-  assert.equal(completedEvent.result?.prUrl, `https://github.com/${inferredFullName}/pull/7`);
+  assert.equal(
+    completedEvent.result?.prUrl,
+    `https://github.com/${inferredFullName}/pull/7`,
+  );
   assert.equal(completedEvent.result?.has_changes, true);
 });
 
@@ -629,7 +635,9 @@ test("EXECUTE: localRepoPath-only success infers V2 fullName from PR URL", async
 // ---------------------------------------------------------------------------
 
 test("PLAN: non-zero exit error event includes sessionId from session-id.txt", async () => {
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "contract-sessionid-"));
+  const tmpDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "contract-sessionid-"),
+  );
   tempPathsToClean.push(tmpDir);
 
   const repoPath = path.join(tmpDir, "repo-sessionid");
@@ -645,15 +653,21 @@ test("PLAN: non-zero exit error event includes sessionId from session-id.txt", a
   const expectedSessionId = "test-session-id-12345";
 
   // run-loop.sh: writes session-id.txt then exits non-zero
-  await createFakeRunLoopScript(tmpDir, [
-    "#!/bin/sh",
-    `echo '${expectedSessionId}' > "$CLOSEDLOOP_WORKDIR/session-id.txt"`,
-    "exit 1",
-  ].join("\n"), { skipTokens: true });
+  await createFakeRunLoopScript(
+    tmpDir,
+    [
+      "#!/bin/sh",
+      `echo '${expectedSessionId}' > "$CLOSEDLOOP_WORKDIR/session-id.txt"`,
+      "exit 1",
+    ].join("\n"),
+    { skipTokens: true },
+  );
 
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
-  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
 
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
@@ -673,7 +687,10 @@ test("PLAN: non-zero exit error event includes sessionId from session-id.txt", a
         command: "PLAN",
         closedLoopAuthToken: "tok",
         artifacts: [],
-        repo: { fullName: `sessionid/${path.basename(repoPath)}`, branch: "main" },
+        repo: {
+          fullName: `sessionid/${path.basename(repoPath)}`,
+          branch: "main",
+        },
       }),
     },
   );

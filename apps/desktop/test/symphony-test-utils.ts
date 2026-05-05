@@ -6,6 +6,7 @@
  * to eliminate duplication.
  */
 
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { execFile, execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import fs from "node:fs/promises";
@@ -20,6 +21,21 @@ import {
 import { DesktopGatewayServer } from "../src/server/server.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
+
+// ---------------------------------------------------------------------------
+// Multi-repo PRD command set
+// ---------------------------------------------------------------------------
+
+/**
+ * Peer-enabled PRD-side LoopCommands. Iterating this constant lets the
+ * multi-repo test files (-contract, -spawn, -worktree) cover both
+ * GENERATE_PRD and REQUEST_PRD_CHANGES from one declaration. Adding a new
+ * peer-enabled PRD command becomes a one-line edit here rather than three.
+ */
+export const PRD_PEER_COMMANDS = [
+  LoopCommand.GeneratePrd,
+  LoopCommand.RequestPrdChanges,
+] as const;
 
 const execFileAsync = promisify(execFile);
 

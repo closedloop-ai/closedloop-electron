@@ -1,3 +1,4 @@
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { execFileSync } from "node:child_process";
 import type { ApiKeyProvenance } from "../../main/api-key-store.js";
 import type { DesktopPopSigner } from "../../main/desktop-pop.js";
@@ -123,7 +124,7 @@ async function handleConfirm(
           id: loopId,
           kind: "SYMPHONY_LOOP",
           loopId,
-          command: "PLAN",
+          command: LoopCommand.Plan,
           ticketId: ticketId ?? undefined,
           artifactId: artifactId ?? undefined,
           artifactSlug: artifactSlug ?? undefined,
@@ -142,7 +143,7 @@ async function handleConfirm(
         id: loopId,
         kind: "SYMPHONY_LOOP",
         loopId,
-        command: "PLAN",
+        command: LoopCommand.Plan,
         ticketId: ticketId ?? undefined,
         artifactId: artifactId ?? undefined,
         artifactSlug: artifactSlug ?? undefined,

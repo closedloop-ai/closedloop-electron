@@ -10,6 +10,7 @@
  * additionalRepoDisambiguator in symphony-loop-multi-repo-contract.test.ts.
  */
 
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -25,6 +26,7 @@ import {
   makeRecordingGitWorktreeProvider,
   makeMultiRepoGateway,
   makeMultiRepoTestHarness,
+  PRD_PEER_COMMANDS,
   startMockApiServer,
   waitForCompletedEvent,
   waitForTerminalEvent,
@@ -100,7 +102,7 @@ test("ensureWorktree called for each additional repo with correct branch before 
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "PLAN",
+        command: LoopCommand.Plan,
         closedLoopAuthToken: "tok",
         artifacts: [],
         repo: {
@@ -202,7 +204,7 @@ test("removeWorktree called for additional worktree dirs when process fails", as
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "PLAN",
+        command: LoopCommand.Plan,
         closedLoopAuthToken: "tok",
         artifacts: [],
         repo: {
@@ -315,7 +317,7 @@ test("ensureWorktree throws for additional repo — cleans leaked worktree, post
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "PLAN",
+        command: LoopCommand.Plan,
         closedLoopAuthToken: "tok",
         artifacts: [],
         repo: {
@@ -424,7 +426,7 @@ test("EXECUTE retry reuses retained additional-repo worktree instead of force-re
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "Execute the implementation plan",
         artifacts: [],
@@ -507,7 +509,7 @@ test("handleProcessCompletion cleans additional worktrees when PLAN is cancelled
     id: "job-wt-lifecycle-cancel",
     kind: "SYMPHONY_LOOP",
     loopId,
-    command: "PLAN",
+    command: LoopCommand.Plan,
     status: "CANCEL_PENDING",
     startedAt: now,
     updatedAt: now,
@@ -557,7 +559,7 @@ test("handleProcessCompletion cleans additional worktrees when PLAN is cancelled
     0,
     {
       loopId,
-      command: "PLAN",
+      command: LoopCommand.Plan,
       closedLoopAuthToken: "tok",
     } as Parameters<typeof handleProcessCompletion>[1],
     "http://127.0.0.1:9",
@@ -593,3 +595,140 @@ test("handleProcessCompletion cleans additional worktrees when PLAN is cancelled
   const finalJob = jobStore.getByLoopId(loopId);
   assert.equal(finalJob?.status, "CANCELLED");
 });
+
+// ---------------------------------------------------------------------------
+// AC-007: cleanupAdditionalWorktrees emits NO LoopEvents — neither when it
+// removes a clean peer worktree on success, nor when the underlying remove
+// fails. Worktree lifecycle is gateway-internal noise; the user-visible
+// event channel must stay quiet.
+//
+// Tested for the new peer-enabled commands (GENERATE_PRD,
+// REQUEST_PRD_CHANGES). PLAN/EXECUTE inherit identical wiring through
+// cleanupAdditionalWorktrees so the AC-007 contract holds for them too.
+// ---------------------------------------------------------------------------
+
+for (const command of PRD_PEER_COMMANDS) {
+  test(`${command}: cleanupAdditionalWorktrees emits no LoopEvents on successful peer-worktree teardown`, async () => {
+    const tmpDir = await fs.mkdtemp(
+      path.join(
+        os.tmpdir(),
+        `wt-prd-cleanup-no-events-${command.toLowerCase()}-`,
+      ),
+    );
+    tempPathsToClean.push(tmpDir);
+
+    const primaryRepo = path.join(tmpDir, "primary-repo");
+    await fs.mkdir(primaryRepo, { recursive: true });
+    const peerRepo = path.join(tmpDir, "peer");
+    await fs.mkdir(peerRepo, { recursive: true });
+
+    const worktreeParent = path.join(tmpDir, "worktrees");
+    await fs.mkdir(worktreeParent, { recursive: true });
+
+    process.env.HOME = tmpDir;
+    process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+    process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+    // Direct-claude pipeline (no run-loop.sh) — exit 0 → completed terminal.
+    const fakeBin = path.join(tmpDir, "fake-bin");
+    await fs.mkdir(fakeBin, { recursive: true });
+    await fs.writeFile(
+      path.join(fakeBin, "claude"),
+      '#!/bin/sh\necho \'{"type":"result"}\'\nexit 0\n',
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+    setShellPathForTest();
+
+    const { provider, removeCalls } = makeRecordingGitWorktreeProvider(
+      "symphony/worktree-prd-cleanup-test",
+    );
+
+    const mock = await startMockApiServer();
+    mockServersToClose.push(mock.server);
+    const server = await createTestGateway(tmpDir, mock.port, provider);
+
+    const loopId =
+      command === LoopCommand.GeneratePrd
+        ? "00000000-0000-0000-0000-000000008101"
+        : "00000000-0000-0000-0000-000000008102";
+
+    const response = await fetch(
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          loopId,
+          command,
+          closedLoopAuthToken: "tok",
+          artifacts:
+            command === LoopCommand.RequestPrdChanges
+              ? [
+                  {
+                    id: "art-1",
+                    type: "prd",
+                    title: "Existing PRD",
+                    content: "PRD body",
+                  },
+                ]
+              : [],
+          prompt: "Generate / amend the PRD",
+          repo: {
+            fullName: `prd-wt/${path.basename(primaryRepo)}`,
+            branch: "main",
+          },
+          additionalRepos: [
+            { fullName: "org/peer", localRepoPath: peerRepo, branch: "main" },
+          ],
+        }),
+      },
+    );
+
+    assert.equal(response.status, 200);
+
+    // Wait for terminal event so handleProcessCompletion (and its peer
+    // cleanup) finishes before we inspect the event log.
+    const terminalEvent = await waitForTerminalEvent(mock.requests, loopId);
+    assert.equal(
+      terminalEvent.type,
+      "completed",
+      `${command}: expected terminal=completed, got ${terminalEvent.type}: ${JSON.stringify(terminalEvent)}`,
+    );
+
+    // The peer worktree must have been torn down. Cleanup of additional
+    // worktrees is async and runs after the terminal event is posted; poll
+    // until the remove call lands or the deadline elapses (matches Test 2's
+    // "removeWorktree on process failure" pattern above).
+    const cleanupDeadline = Date.now() + 5_000;
+    while (
+      Date.now() < cleanupDeadline &&
+      !removeCalls.some((c) => c.repoPath === peerRepo)
+    ) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(
+      removeCalls.some((c) => c.repoPath === peerRepo),
+      `${command}: peer worktree must be removed after success`,
+    );
+
+    // None of the posted LoopEvents should mention the peer worktree
+    // teardown — those are gateway-log only per AC-007.
+    const events = mock.requests.filter((r) =>
+      r.url.includes(`/loops/${loopId}/events`),
+    );
+    for (const e of events) {
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(e.body) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const message = String(parsed.message ?? "");
+      assert.ok(
+        !/cleanup|removed|removing|teardown|reaped/i.test(message),
+        `${command}: cleanup must not emit user-visible events; got message=${message}`,
+      );
+    }
+  });
+}
