@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { LoopRequestBodySchema } from "@closedloop-ai/loops-api/desktop-request";
 import { resolvePrimaryArtifact } from "../src/server/operations/symphony-loop.js";
 
@@ -59,7 +60,7 @@ describe("interop", () => {
   test("old-desktop Zod interop: LoopRequestBodySchema accepts body with primaryArtifactId without stripping it", () => {
     const body = {
       loopId: "loop-001",
-      command: "EXECUTE",
+      command: LoopCommand.Execute,
       closedLoopAuthToken: "token-abc",
       artifacts: [
         {

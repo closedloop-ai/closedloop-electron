@@ -24,6 +24,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import {
@@ -310,7 +311,7 @@ describe("cloneRepoViaGh: integration (DesktopGatewayServer)", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           loopId,
-          command: "EXECUTE",
+          command: LoopCommand.Execute,
           closedLoopAuthToken: "tok",
           prompt: "test auto-clone",
           artifacts: [],
@@ -500,7 +501,7 @@ describe("cloneRepoViaGh: failure path", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           loopId,
-          command: "EXECUTE",
+          command: LoopCommand.Execute,
           closedLoopAuthToken: "tok",
           prompt: "test",
           artifacts: [],
@@ -585,7 +586,7 @@ describe("cloneRepoViaGh: failure path", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           loopId,
-          command: "DECOMPOSE",
+          command: LoopCommand.Decompose,
           closedLoopAuthToken: "tok",
           prompt: "Decompose this",
           artifacts: [

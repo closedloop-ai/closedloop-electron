@@ -10,6 +10,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
@@ -123,7 +124,7 @@ test("DECOMPOSE: writes context pack with artifacts in .closedloop-ai/context/ar
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "DECOMPOSE",
+        command: LoopCommand.Decompose,
         closedLoopAuthToken: "tok",
         artifacts: [
           {
@@ -210,7 +211,7 @@ test("DECOMPOSE: uploads { features: ... } when features.json is written", async
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "DECOMPOSE",
+        command: LoopCommand.Decompose,
         closedLoopAuthToken: "tok",
         artifacts: [
           { id: "prd-1", type: "PRD", title: "PRD", content: "PRD content" },
@@ -270,7 +271,7 @@ test("DECOMPOSE: uploads empty artifacts when features.json is not written", asy
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "DECOMPOSE",
+        command: LoopCommand.Decompose,
         closedLoopAuthToken: "tok",
         artifacts: [
           { id: "prd-1", type: "PRD", title: "PRD", content: "PRD content" },

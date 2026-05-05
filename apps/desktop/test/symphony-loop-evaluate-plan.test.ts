@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { createEvaluateTestHarness, postToLoopEndpoint, setupStubClaude } from "./symphony-test-utils.js";
 
 // ---------------------------------------------------------------------------
@@ -26,7 +27,7 @@ afterEach(() => harness.afterEach());
 function buildEvaluatePlanBody(overrides?: Partial<Record<string, unknown>>): Record<string, unknown> {
   return {
     loopId: "aaaaaaaa-0000-0000-0000-000000000001",
-    command: "EVALUATE_PLAN",
+    command: LoopCommand.EvaluatePlan,
     closedLoopAuthToken: "cl-token",
     apiBaseUrl: "https://api.example.com",
     artifacts: [
