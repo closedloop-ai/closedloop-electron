@@ -1,27 +1,14 @@
 /** Tests for writePlanFileToWorkDir delegation via writeCodeArtifact. */
 
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, test } from "node:test";
+import { describe, test } from "node:test";
 import { LoopArtifactType } from "@closedloop-ai/loops-api/artifacts";
 import { writeCodeArtifact } from "../src/server/operations/symphony-loop.js";
+import { createTempDirManager } from "./helpers/temp-dir.js";
 
-const tempPathsToClean: string[] = [];
-
-afterEach(async () => {
-  for (const p of tempPathsToClean.splice(0)) {
-    await fs.rm(p, { recursive: true, force: true });
-  }
-});
-
-function makeTempDir(): string {
-  const dir = mkdtempSync(path.join(os.tmpdir(), "write-plan-artifact-"));
-  tempPathsToClean.push(dir);
-  return dir;
-}
+const { makeTempDir } = createTempDirManager("write-plan-artifact-");
 
 describe("writePlanFileToWorkDir (via writeCodeArtifact)", () => {
   test("writes plan.md from the last ImplementationPlan artifact when no primaryArtifactId", async () => {
