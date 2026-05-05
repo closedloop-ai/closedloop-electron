@@ -1903,24 +1903,19 @@ test("tryPostCompletedEvent treats skipped V2 primary as no changes", async () =
   assert.equal(parsed.result?.prNumber, null, "prNumber must normalize to null for skipped status");
 });
 
-// Legacy V1-on-disk recovery: jobs that finalized under pre-PLN-378 desktop
-// builds may still have V1 snake_case files. parseExecutionResultFile
-// normalizes them to a length-1 RepoExecutionResult[]. Delete this fixture
-// (and the V1 reader in @closedloop-ai/loops-api) under FEA-683 once the
-// in-flight retention window passes.
-test("legacy V1-on-disk: snake_case fields normalize through unified parse path", async () => {
+test("unsupported execution-result schema results in no-changes fields", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
 
-  const v1Artifact = {
+  const unrecognizedArtifact = {
     has_changes: true,
     pr_url: "https://github.com/acme/repo/pull/99",
     pr_number: 99,
-    branch_name: "feat/v1-compat",
+    branch_name: "feat/unknown-schema",
     base_ref: "main",
   };
 
-  const jobStore = createStore("v1-flat-object");
+  const jobStore = createStore("unsupported-schema");
   const job = createBaseJob({
     claudeWorkDir,
     command: LoopCommand.Execute,
@@ -1932,15 +1927,14 @@ test("legacy V1-on-disk: snake_case fields normalize through unified parse path"
     job,
     LoopCommand.Execute,
     claudeWorkDir,
-    { executionResult: v1Artifact },
+    { executionResult: unrecognizedArtifact },
     [],
     artifactDeps(jobStore),
   );
 
   const body = fetchCalls[0]?.body ?? "";
   const parsed = JSON.parse(body) as { result?: Record<string, unknown> };
-  assert.equal(parsed.result?.has_changes, true, "v1: has_changes must be true");
-  assert.equal(parsed.result?.prUrl, "https://github.com/acme/repo/pull/99", "v1: prUrl must come from pr_url");
-  assert.equal(parsed.result?.prNumber, 99, "v1: prNumber must come from pr_number");
-  assert.equal(parsed.result?.branchName, "feat/v1-compat", "v1: branchName must come from branch_name");
+  assert.equal(parsed.result?.has_changes, false, "unsupported schema must produce has_changes=false");
+  assert.equal(parsed.result?.prUrl, null, "unsupported schema must produce prUrl=null");
+  assert.equal(parsed.result?.prNumber, null, "unsupported schema must produce prNumber=null");
 });

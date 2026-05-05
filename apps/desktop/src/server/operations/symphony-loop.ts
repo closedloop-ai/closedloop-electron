@@ -2948,18 +2948,12 @@ function getHeadCommitShaFromWorktree(worktreeDir: string): string | null {
   }
 }
 
-// FEA-683: V1-on-disk recovery — synthetic fullName seeds V1 normalization in
-// `parseExecutionResultFile`; V2 files carry their own fullName and ignore this
-// argument. Remove this constant and its callsites when the V1 retention window
-// passes.
-export const V1_PRIMARY_FULL_NAME_PLACEHOLDER = "local/primary";
-
 function getAuthoritativeExecutionResult(
   value: unknown,
 ): ExecuteFinalizationResult | null {
   const parsed = parseExecutionResultFile(
     value,
-    V1_PRIMARY_FULL_NAME_PLACEHOLDER,
+    "",
   );
   if (!parsed.ok) {
     return null;
@@ -3493,7 +3487,7 @@ export async function finalizeAdditionalReposAndPersist(args: {
   );
   const parsedExisting = parseExecutionResultFile(
     existing,
-    V1_PRIMARY_FULL_NAME_PLACEHOLDER,
+    "",
   );
   if (parsedExisting.ok && parsedExisting.results.length > 1) {
     return { status: "skipped:already-finalized" };
@@ -4568,12 +4562,9 @@ export async function handleProcessCompletion(
         subtype: command.toLowerCase(),
       };
       if (command === LoopCommand.Execute && artifacts.executionResult) {
-        // FEA-683: V1-on-disk recovery — remove this `parseExecutionResultFile`
-        // V1 callsite (and the no-jobStore legacy completion path it lives in)
-        // when the V1 retention window passes.
         const parsed = parseExecutionResultFile(
           artifacts.executionResult,
-          V1_PRIMARY_FULL_NAME_PLACEHOLDER,
+          "",
         );
         const lookupName = parsed.ok ? (parsed.results[0]?.fullName ?? "") : "";
         const primary = parsed.ok
@@ -4585,8 +4576,8 @@ export async function handleProcessCompletion(
           result.branchName = primary.branchName;
           result.has_changes = primary.hasChanges;
         } else if (primary?.status === "skipped") {
-          // v1 has_changes=false normalizes to skipped; preserve the legacy
-          // shape where prUrl/prNumber surface as null and has_changes=false.
+          // A skipped repo had no changes to push; surface the standard
+          // no-changes shape so consumers handle it uniformly.
           result.prUrl = null;
           result.prNumber = null;
           result.has_changes = false;
