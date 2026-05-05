@@ -242,8 +242,6 @@ export function startOutputTailer(
   };
   /** Single-flight guard: prevents overlapping pollOnce executions. */
   let inFlightPoll: Promise<void> | null = null;
-  let activeJsonlPath = jsonlPath;
-  let activeFileIdentity = readFileIdentity(jsonlPath);
 
   function readFileIdentity(candidatePath: string): string | null {
     try {
@@ -266,6 +264,13 @@ export function startOutputTailer(
     }
     return null;
   }
+
+  const initialReadableJsonlPath = resolveReadableJsonlPath();
+  let activeJsonlPath = initialReadableJsonlPath ?? jsonlPath;
+  let activeFileIdentity =
+    initialReadableJsonlPath === null
+      ? null
+      : readFileIdentity(initialReadableJsonlPath);
 
   function updateActiveJsonlPath(candidatePath: string): boolean {
     const identity = readFileIdentity(candidatePath);

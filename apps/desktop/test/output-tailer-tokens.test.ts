@@ -192,6 +192,59 @@ test("flush follows sidecar-selected renamed output after fixed path disappears"
   assert.equal(tokenUsage.inputTokens, 4);
 });
 
+test("flush preserves saved offset when boot recovery follows renamed output", async () => {
+  process.env.CLOSEDLOOP_TAILER_POLL_MS = "600000";
+  process.env.CLOSEDLOOP_TAILER_THROTTLE_MS = "0";
+
+  const tmpDir = makeTempDir();
+  const jsonlPath = path.join(tmpDir, "claude-output.jsonl");
+  const renamedPath = path.join(tmpDir, "claude-output-run-1.jsonl");
+  const eventSrv = await startEventServer();
+  const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+  const deliveredLine = `${JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [{ type: "text", text: "already delivered" }],
+      usage: { input_tokens: 11, output_tokens: 3 },
+    },
+  })}\n`;
+  const pendingLine = `${JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [{ type: "text", text: "after restart" }],
+      usage: { input_tokens: 5, output_tokens: 2 },
+    },
+  })}\n`;
+  writeFileSync(renamedPath, deliveredLine + pendingLine);
+  writeFileSync(
+    path.join(tmpDir, "claude-output.name.txt"),
+    "claude-output-run-1.jsonl\n",
+  );
+
+  const committedOffsets: number[] = [];
+  const tailer = startOutputTailer(
+    jsonlPath,
+    apiBaseUrl,
+    "boot-rename-offset-loop",
+    "token",
+    Buffer.byteLength(deliveredLine),
+    (offset) => {
+      committedOffsets.push(offset);
+    },
+    tmpDir,
+  );
+
+  await tailer.flush();
+
+  const outputEvents = eventSrv.getCollected().filter((e) => e.type === "output");
+  assert.equal(outputEvents.length, 1);
+  const data = outputEvents[0]?.data as Record<string, unknown> | undefined;
+  assert.ok(data !== undefined);
+  assert.equal(data.chunk, "after restart");
+  assert.equal(committedOffsets.at(-1), Buffer.byteLength(deliveredLine + pendingLine));
+});
+
 test("flush resets stale pre-spawn offset when fixed JSONL is replaced", async () => {
   process.env.CLOSEDLOOP_TAILER_POLL_MS = "600000";
   process.env.CLOSEDLOOP_TAILER_THROTTLE_MS = "0";
