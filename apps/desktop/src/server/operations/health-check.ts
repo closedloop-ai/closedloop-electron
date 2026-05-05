@@ -163,6 +163,34 @@ export async function _applyPluginVersionChecksForTesting(
   return applyPluginVersionChecks(checks, installed);
 }
 
+/**
+ * Per-binary override of the hardcoded KNOWN_*_LOCATIONS arrays consulted
+ * by collectBinaryDebug. Used to make tests host-independent: a test that
+ * asserts on "Not found" can pass `{ claude: [] }` so the host's actual
+ * Homebrew/local install does not leak into `foundAt[]`. Production never
+ * sets this.
+ */
+let knownLocationsForTest: Record<string, string[]> | null = null;
+
+/**
+ * @internal Test-only. Override the KNOWN_*_LOCATIONS arrays per-binary so
+ * a test can assert on a clean "no-installed-binary-anywhere" state without
+ * being defeated by the host machine's Homebrew/native installs. Pass
+ * `null` to restore defaults.
+ */
+export function _setKnownBinaryLocationsForTesting(
+  override: Record<string, string[]> | null
+): void {
+  knownLocationsForTest = override;
+}
+
+function effectiveKnownLocations(
+  binaryName: string,
+  defaults: string[]
+): string[] {
+  return knownLocationsForTest?.[binaryName] ?? defaults;
+}
+
 function parseVersion(output: string): string | undefined {
   const match = VERSION_REGEX.exec(output);
   return match?.[1];
@@ -262,7 +290,9 @@ async function collectBinaryDebug(
     .map((segment) => path.join(segment, binaryName));
   const candidates = [
     ...pathSegmentCandidates,
-    ...knownLocations.map((loc) => expandTilde(loc)),
+    ...effectiveKnownLocations(binaryName, knownLocations).map((loc) =>
+      expandTilde(loc)
+    ),
   ];
 
   const knownHits: string[] = [];

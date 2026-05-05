@@ -10,7 +10,10 @@ import { DesktopGatewayServer } from "../src/server/server.js";
 import { Observability } from "../src/main/observability.js";
 import type { EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
 import { saveCodexChatSession } from "../src/server/operations/codex.js";
-import { _setRunCommandForTesting } from "../src/server/operations/health-check.js";
+import {
+  _setKnownBinaryLocationsForTesting,
+  _setRunCommandForTesting,
+} from "../src/server/operations/health-check.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { SymphonyDirNotConfiguredError, tryAssertRepoAllowed, tryAssertPathAllowed } from "../src/server/operations/symphony-utils.js";
@@ -3845,6 +3848,10 @@ test("python3 health check: fails for unparseable version string", async () => {
 // ---- Phase 1 tests: claude-cli rich diagnostics ----
 
 test("claude-cli ENOENT with no foundAt: error is Not found, remediation mentions npm install", async () => {
+  // Hide the KNOWN_CLAUDE_LOCATIONS sweep so the host's installed claude
+  // (e.g. /opt/homebrew/bin/claude on a developer Mac) cannot leak into the
+  // foundAt[] list — this test is asserting the truly-not-installed state.
+  _setKnownBinaryLocationsForTesting({ claude: [] });
   const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
     '#!/bin/sh\necho "Python 3.11.0"\n'
   );
@@ -3882,6 +3889,7 @@ test("claude-cli ENOENT with no foundAt: error is Not found, remediation mention
   assert.equal(check.passed, false);
   assert.equal(check.error, "Not found");
   assert.ok(check.remediation?.includes("npm install"), `remediation should mention npm install, got: ${check.remediation}`);
+  _setKnownBinaryLocationsForTesting(null);
 });
 
 test("claude-cli ENOENT with foundAt: error mentions path, remediation mentions Add to PATH", async () => {
