@@ -10,6 +10,7 @@ import { handleProcessCompletion } from "../src/server/operations/symphony-loop.
 
 let tempRoot = "";
 let fetchCalls: Array<{ url: string; body: string }> = [];
+let eventPostStatus = 200;
 const originalFetch = globalThis.fetch;
 const USER_VISIBLE_FAILURE_SECRET = "test-loop-failure-secret";
 
@@ -25,6 +26,7 @@ beforeEach(async () => {
     path.join(os.tmpdir(), "symphony-handle-process-completion-"),
   );
   fetchCalls = [];
+  eventPostStatus = 200;
   globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
     const url = String(input);
     fetchCalls.push({
@@ -35,6 +37,13 @@ beforeEach(async () => {
     if (url.includes("upload-artifacts")) {
       return new Response("nope", {
         status: 500,
+        statusText: "Internal Server Error",
+      });
+    }
+
+    if (url.includes("/events") && eventPostStatus !== 200) {
+      return new Response("nope", {
+        status: eventPostStatus,
         statusText: "Internal Server Error",
       });
     }
@@ -333,13 +342,13 @@ test("handleProcessCompletion preserves sanitized runner failure message in loca
   assert.deepEqual(eventBody.result, { subcode: "BAD_PLAN_STATE" });
 });
 
-test("handleProcessCompletion keeps context-limit precedence over runner failure marker", async () => {
-  const loopId = "loop-context-precedence";
+test("handleProcessCompletion keeps runner failure marker precedence over context-limit fallback", async () => {
+  const loopId = "loop-runner-marker-precedence";
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
   await writeSignedFailureMarker(claudeWorkDir, {
     code: "RUNNER_ERROR",
-    message: "Do not surface this.",
+    message: "Claude context limit reached through the runner marker.",
     result: { subcode: "XYZ_FAILURE" },
   });
   await fs.writeFile(
@@ -351,7 +360,7 @@ test("handleProcessCompletion keeps context-limit precedence over runner failure
     })}\n`,
   );
 
-  const jobStore = createStore("symphony-context-precedence");
+  const jobStore = createStore("symphony-runner-marker-precedence");
   jobStore.upsert(createBaseJob(loopId, claudeWorkDir));
 
   await completeFailedLoopWithMarkerSecret({
@@ -360,10 +369,57 @@ test("handleProcessCompletion keeps context-limit precedence over runner failure
     jobStore,
   });
 
+  const persisted = jobStore.getByLoopId(loopId);
+  assert.ok(persisted);
+  assert.equal(persisted.completedEventPostedAt !== undefined, true);
+  assert.deepEqual(persisted.userVisibleLoopFailure, {
+    code: "RUNNER_ERROR",
+    message: "Claude context limit reached through the runner marker.",
+    result: { subcode: "XYZ_FAILURE" },
+  });
+
   const eventBody = getPostedErrorEvent();
-  assert.equal(eventBody.code, "CONTEXT_LIMIT_EXCEEDED");
-  assert.equal(eventBody.message, "Prompt is too long for this model.");
-  assert.equal(eventBody.result, undefined);
+  assert.equal(eventBody.code, "RUNNER_ERROR");
+  assert.equal(
+    eventBody.message,
+    "Claude context limit reached through the runner marker.",
+  );
+  assert.deepEqual(eventBody.result, { subcode: "XYZ_FAILURE" });
+});
+
+test("handleProcessCompletion persists runner failure marker before failed error event post", async () => {
+  const loopId = "loop-runner-marker-event-failure";
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await writeSignedFailureMarker(claudeWorkDir, {
+    code: "RUNNER_ERROR",
+    message: "Claude rate limit reached.",
+    result: { subcode: "CLAUDE_RATE_LIMIT" },
+  });
+  eventPostStatus = 500;
+
+  const jobStore = createStore("symphony-runner-marker-event-failure");
+  jobStore.upsert(createBaseJob(loopId, claudeWorkDir));
+
+  await completeFailedLoopWithMarkerSecret({
+    loopId,
+    claudeWorkDir,
+    jobStore,
+  });
+
+  const persisted = jobStore.getByLoopId(loopId);
+  assert.ok(persisted);
+  assert.equal(persisted.completedEventPostedAt, undefined);
+  assert.deepEqual(persisted.userVisibleLoopFailure, {
+    code: "RUNNER_ERROR",
+    message: "Claude rate limit reached.",
+    result: { subcode: "CLAUDE_RATE_LIMIT" },
+  });
+
+  const eventBody = getPostedErrorEvent();
+  assert.equal(eventBody.code, "RUNNER_ERROR");
+  assert.equal(eventBody.message, "Claude rate limit reached.");
+  assert.deepEqual(eventBody.result, { subcode: "CLAUDE_RATE_LIMIT" });
 });
 
 test("handleProcessCompletion keeps cancellation precedence over runner failure marker", async () => {

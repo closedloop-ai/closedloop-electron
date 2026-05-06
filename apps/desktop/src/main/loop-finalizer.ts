@@ -41,6 +41,7 @@ import {
 import type { LoopTokenStore } from "./loop-token-store.js";
 import type { TelemetryEmitter } from "./telemetry-protocol.js";
 import { parseApiKeySource, parseTokenUsage } from "./token-usage.js";
+import { parseUserVisibleLoopFailurePayload } from "./user-visible-loop-failure.js";
 
 export interface LoopFinalizerDeps {
   jobStore: JobStore;
@@ -485,18 +486,23 @@ export async function tryPostErrorEvent(
   const logTail =
     readLogTail(path.join(claudeWorkDir, "symphony-loop.log")) ?? undefined;
   const noWorkProduced = isExecuteNoWorkFailure(job);
+  const userVisibleFailure = parseUserVisibleLoopFailurePayload(
+    job.userVisibleLoopFailure,
+  );
   const errorCode =
-    noWorkProduced
+    userVisibleFailure?.code ??
+    (noWorkProduced
       ? LoopErrorCode.NoWorkProduced
       : job.status === "FAILED"
-      ? LoopErrorCode.ProcessFailed
-      : LoopErrorCode.ProcessStopped;
+        ? LoopErrorCode.ProcessFailed
+        : LoopErrorCode.ProcessStopped);
   const errorMessage =
-    noWorkProduced
+    userVisibleFailure?.message ??
+    (noWorkProduced
       ? EXECUTE_NO_WORK_MESSAGE
       : job.status === "FAILED"
-      ? `Process exited with code ${job.exitCode ?? 1}`
-      : `Process ended with terminal status ${job.status}`;
+        ? `Process exited with code ${job.exitCode ?? 1}`
+        : `Process ended with terminal status ${job.status}`);
   const correlationFields = getCompletionCorrelationFields(
     job,
     String(job.command),
@@ -521,6 +527,7 @@ export async function tryPostErrorEvent(
       : {}),
     ...(logTail ? { logTail } : {}),
     ...(apiKeySource != null ? { apiKeySource } : {}),
+    ...(userVisibleFailure ? { result: userVisibleFailure.result } : {}),
     ...(correlationFields.sessionId
       ? { sessionId: correlationFields.sessionId }
       : {}),
