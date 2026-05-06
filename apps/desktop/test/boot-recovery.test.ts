@@ -5,6 +5,7 @@ import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 
 async function waitForCondition(
   fn: () => boolean,
@@ -90,7 +91,7 @@ function createJob(overrides?: Partial<LocalJob>): LocalJob {
     id: "loop-1",
     kind: "SYMPHONY_LOOP",
     loopId: "loop-1",
-    command: "PLAN",
+    command: LoopCommand.Plan,
     status: "RUNNING",
     startedAt: now,
     updatedAt: now,
@@ -782,7 +783,7 @@ test("replays zero-token EXECUTE recovery as NO_WORK_PRODUCED instead of a compl
 
   const jobStore = createStore("boot-recovery-execute-no-work");
   const deadJob = createJob({
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
     status: "RUNNING",
     claudeWorkDir,
     statePath,
@@ -868,7 +869,7 @@ test("replays EXECUTE completion from persisted execution-result artifacts durin
   const persistedAt = new Date().toISOString();
   const jobStore = createStore("boot-recovery-execute-artifact-existing");
   const finalizedJob = createJob({
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
     status: "COMPLETED",
     finalStatusPersistedAt: persistedAt,
     completedAt: persistedAt,

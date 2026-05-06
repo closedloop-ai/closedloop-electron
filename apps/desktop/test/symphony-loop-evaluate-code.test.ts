@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { createEvaluateTestHarness, postToLoopEndpoint, setupStubClaude } from "./symphony-test-utils.js";
 
 // ---------------------------------------------------------------------------
@@ -26,7 +27,7 @@ afterEach(() => harness.afterEach());
 function buildEvaluateCodeBody(overrides?: Partial<Record<string, unknown>>): Record<string, unknown> {
   return {
     loopId: "ec000001-0000-0000-0000-000000000001",
-    command: "EVALUATE_CODE",
+    command: LoopCommand.EvaluateCode,
     closedLoopAuthToken: "cl-token",
     artifacts: [{ type: "IMPLEMENTATION_PLAN", content: "Plan content" }],
     repo: { fullName: "org/repo", branch: "main" },
@@ -92,7 +93,7 @@ describe("T-5.2: EVALUATE_CODE prompt content", () => {
     const loopId = "a0000001-0000-0000-0000-000000000007";
     const response = await postToLoopEndpoint(server.getActivePort(), {
       loopId,
-      command: "EVALUATE_CODE",
+      command: LoopCommand.EvaluateCode,
       closedLoopAuthToken: "cl-token",
       artifacts: [{ type: "IMPLEMENTATION_PLAN", content: "Plan content" }],
       repo: { fullName: `org/${repoName}`, branch: "main" },
@@ -146,7 +147,7 @@ describe("T-5.2: EVALUATE_CODE prompt content", () => {
 
     const response = await postToLoopEndpoint(server.getActivePort(), {
       loopId,
-      command: "EVALUATE_CODE",
+      command: LoopCommand.EvaluateCode,
       closedLoopAuthToken: "cl-token",
       artifacts: [{ type: "IMPLEMENTATION_PLAN", content: planContent }],
       repo: { fullName: `org/${repoName}`, branch: "main" },

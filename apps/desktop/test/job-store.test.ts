@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { JobStore, isTerminalJobStatus } from "../src/main/job-store.js";
 import type { LocalJob, LocalJobStatus } from "../src/main/job-store.js";
 
@@ -15,7 +16,7 @@ function makeJob(overrides: Partial<LocalJob> = {}): LocalJob {
     id: overrides.id ?? "job-1",
     kind: "SYMPHONY_LOOP",
     loopId: overrides.loopId ?? "loop-1",
-    command: "PLAN",
+    command: LoopCommand.Plan,
     status: "RUNNING" as LocalJobStatus,
     startedAt: now,
     updatedAt: now,
@@ -122,7 +123,7 @@ test("persists execute finalization diagnostics and recovery inputs across insta
     makeJob({
       id: "exec-1",
       loopId: "loop-exec-1",
-      command: "EXECUTE",
+      command: LoopCommand.Execute,
       status: "COMPLETED",
       artifactSlug: "artifact-slug",
       baseBranch: "release/test",
@@ -148,7 +149,7 @@ test("persists execute finalization diagnostics and recovery inputs across insta
   const store2 = new JobStore({ cwd: tmpDir, name: "test-jobs" });
   const restored = store2.getByLoopId("loop-exec-1");
   assert.ok(restored);
-  assert.equal(restored.command, "EXECUTE");
+  assert.equal(restored.command, LoopCommand.Execute);
   assert.equal(restored.artifactSlug, "artifact-slug");
   assert.equal(restored.baseBranch, "release/test");
   assert.equal(restored.webAppOrigin, "https://app.closedloop.ai");

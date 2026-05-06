@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 import { setShellPathForTest } from "../src/server/shell-path.js";
 import {
@@ -101,7 +102,7 @@ test("EXECUTE with additionalRepos provisions additionals, passes --add-dir, and
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "Execute the implementation plan",
         artifacts: [],

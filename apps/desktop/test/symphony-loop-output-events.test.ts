@@ -5,6 +5,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { summarizeJsonlRecord, startOutputTailer } from "../src/server/operations/output-tailer.js";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
@@ -245,7 +246,7 @@ async function startEventServer(options?: {
 function buildLoopBody(overrides?: Partial<Record<string, unknown>>): Record<string, unknown> {
   return {
     loopId: "aaaaaaaa-0000-0000-0000-000000000001",
-    command: "EVALUATE_PRD",
+    command: LoopCommand.EvaluatePrd,
     closedLoopAuthToken: "cl-token",
     apiBaseUrl: "https://api.example.com",
     artifacts: [{ type: "PRD", content: "PRD content for output test" }],

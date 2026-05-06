@@ -19,6 +19,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { JobStore, isTerminalJobStatus, type LocalJob } from "../src/main/job-store.js";
 import { enrichJobSnapshot } from "../src/server/operations/symphony-job-snapshot.js";
 
@@ -42,7 +43,7 @@ function makeRunningJob(overrides: Partial<LocalJob> = {}): LocalJob {
     id: "loop-race-1",
     kind: "SYMPHONY_LOOP",
     loopId: "loop-race-1",
-    command: "PLAN",
+    command: LoopCommand.Plan,
     status: "RUNNING",
     pid: 999999999,
     startedAt: now,

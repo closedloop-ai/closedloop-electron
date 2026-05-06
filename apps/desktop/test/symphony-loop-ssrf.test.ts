@@ -11,6 +11,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 
 // ---------------------------------------------------------------------------
 // Minimal gateway server that records requests
@@ -190,7 +191,7 @@ test("returns 503 when getApiOrigin is absent", async () => {
       undefined
     );
     const handler = freshRoutes.find((r) => r.path.includes("/loop") && !r.path.includes("kill"))!.handler;
-    const ctx = buildContext({ loopId: "test", command: "PLAN", closedLoopAuthToken: "tok" }) as OperationRequestContext & { _responseStatus: number; _responseBody: string };
+    const ctx = buildContext({ loopId: "test", command: LoopCommand.Plan, closedLoopAuthToken: "tok" }) as OperationRequestContext & { _responseStatus: number; _responseBody: string };
     await handler(ctx);
     assert.equal(ctx._responseStatus, 503);
     assert.ok(ctx._responseBody.includes("API origin not configured"));
@@ -203,7 +204,7 @@ test("works with no apiBaseUrl field in body when getApiOrigin is configured", a
   const handler = findHandler("POST", "/loop");
   const ctx = buildContext({
     loopId: "00000000-0000-0000-0000-000000000001",
-    command: "PLAN",
+    command: LoopCommand.Plan,
     closedLoopAuthToken: "tok",
     // No apiBaseUrl at all
     artifacts: [],
@@ -222,7 +223,7 @@ test("ignores caller-supplied apiBaseUrl -- events go to configured origin", asy
   const handler = findHandler("POST", "/loop");
   const ctx = buildContext({
     loopId: "00000000-0000-0000-0000-000000000002",
-    command: "PLAN",
+    command: LoopCommand.Plan,
     closedLoopAuthToken: "tok",
     apiBaseUrl: "http://169.254.169.254", // attacker-controlled
     artifacts: [],
@@ -243,7 +244,7 @@ test("ignores caller-supplied localhost apiBaseUrl", async () => {
   const handler = findHandler("POST", "/loop");
   const ctx = buildContext({
     loopId: "00000000-0000-0000-0000-000000000003",
-    command: "PLAN",
+    command: LoopCommand.Plan,
     closedLoopAuthToken: "tok",
     apiBaseUrl: "http://localhost:9999", // different port than configured
     artifacts: [],
@@ -261,7 +262,7 @@ test("ignores caller-supplied private IP apiBaseUrl", async () => {
   const handler = findHandler("POST", "/loop");
   const ctx = buildContext({
     loopId: "00000000-0000-0000-0000-000000000004",
-    command: "PLAN",
+    command: LoopCommand.Plan,
     closedLoopAuthToken: "tok",
     apiBaseUrl: "http://10.0.0.1:3002",
     artifacts: [],

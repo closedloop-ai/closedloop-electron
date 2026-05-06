@@ -1,3 +1,4 @@
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
 import {
@@ -126,14 +127,14 @@ export function isExecuteNoWorkCompletion(
   command: string,
   tokenUsage: TokenUsageActivity,
 ): boolean {
-  return command === "EXECUTE" && !hasTokenUsageActivity(tokenUsage);
+  return command === LoopCommand.Execute && !hasTokenUsageActivity(tokenUsage);
 }
 
 function isExecuteNoWorkFailure(
   job: Pick<LocalJob, "command" | "status" | "liveActivity">,
 ): boolean {
   return (
-    String(job.command) === "EXECUTE" &&
+    String(job.command) === LoopCommand.Execute &&
     job.status === "FAILED" &&
     job.liveActivity === EXECUTE_NO_WORK_LIVE_ACTIVITY
   );
@@ -143,7 +144,7 @@ function getExecuteFinalizationMetadata(
   job: LocalJob,
   command: string,
 ): Record<string, unknown> {
-  if (command !== "EXECUTE") {
+  if (command !== LoopCommand.Execute) {
     return {};
   }
   return {
@@ -221,7 +222,7 @@ function getCompletionCorrelationFields(
   const sessionId = readLoopSessionId(claudeWorkDir);
   let branchName: string | undefined;
 
-  if (command === "EXECUTE" && artifacts.executionResult) {
+  if (command === LoopCommand.Execute && artifacts.executionResult) {
     const primaryFullName = job.primaryRepoFullName ?? "";
     // Synthetic fullName seeds V1 normalization in parseExecutionResultFile;
     // V2 files carry their own fullName and ignore this argument.
@@ -269,7 +270,7 @@ function buildCompletedEventResult(
     result.has_changes = false;
   };
 
-  if (command === "EXECUTE" && artifacts.executionResult) {
+  if (command === LoopCommand.Execute && artifacts.executionResult) {
     const primaryFullName = job.primaryRepoFullName ?? "";
     // FEA-683: legacy V1-on-disk recovery — `parseExecutionResultFile`
     // normalizes V1 snake_case to a length-1 RepoExecutionResult[]; the
@@ -680,7 +681,7 @@ function readArtifacts(
   claudeWorkDir: string,
   worktreeDir?: string,
 ): Record<string, unknown> {
-  if (command === "PLAN" || command === "REQUEST_CHANGES") {
+  if (command === LoopCommand.Plan || command === LoopCommand.RequestChanges) {
     const plan = toUploadedPlanArtifact(
       readJsonFileSync(path.join(claudeWorkDir, "plan.json")),
     );
@@ -694,7 +695,7 @@ function readArtifacts(
       judges: judges ?? undefined,
     };
   }
-  if (command === "EXECUTE") {
+  if (command === LoopCommand.Execute) {
     const plan =
       toUploadedPlanArtifact(readJsonFileSync(path.join(claudeWorkDir, "plan.json"))) ??
       toUploadedPlanArtifact(
@@ -712,24 +713,32 @@ function readArtifacts(
       codeJudges: codeJudges ?? undefined,
     };
   }
-  if (command === "DECOMPOSE") {
+  if (command === LoopCommand.Decompose) {
     const features = readJsonFileSync(
       path.join(claudeWorkDir, "features.json"),
     );
     return { features: features ?? undefined };
   }
   if (
-    command === "EVALUATE_PRD" ||
-    command === "EVALUATE_PLAN" ||
-    command === "EVALUATE_CODE" ||
-    command === "EVALUATE_FEATURE"
+    command === LoopCommand.EvaluatePrd ||
+    command === LoopCommand.EvaluatePlan ||
+    command === LoopCommand.EvaluateCode ||
+    command === LoopCommand.EvaluateFeature
   ) {
     return readEvaluateOutputs(
       claudeWorkDir,
       EVALUATE_COMMAND_ARTIFACT[command],
     );
   }
-  if (command === "GENERATE_PRD") {
+  if (
+    command === LoopCommand.GeneratePrd ||
+    command === LoopCommand.RequestPrdChanges
+  ) {
+    // Both PRD commands write the (re)generated PRD to prd.md in the same
+    // worktree. Live completion in handleProcessCompletion handles both via
+    // the same dispatch (see symphony-loop.ts); boot recovery must mirror
+    // that, otherwise a REQUEST_PRD_CHANGES loop finalized after an Electron
+    // restart would silently lose the generated artifact.
     const baseDir = worktreeDir ?? claudeWorkDir;
     const prdContent = readTextFile(path.join(baseDir, "prd.md"));
     return { prd: prdContent ? { content: prdContent } : undefined };
@@ -965,7 +974,7 @@ export async function finalizeLoopFromRuntime(
 
   let executeFinalization: ExecuteFinalizationResult | null = null;
   if (
-    command === "EXECUTE" &&
+    command === LoopCommand.Execute &&
     isSuccessStatus &&
     !hasTerminalExecuteFinalization(resolvedJob.executeFinalizationStatus)
   ) {
@@ -1000,7 +1009,7 @@ export async function finalizeLoopFromRuntime(
   // V2 envelope: without this, side-repo commits/pushes are never replayed
   // and the cloud receives a primary-only envelope.
   if (
-    command === "EXECUTE" &&
+    command === LoopCommand.Execute &&
     isSuccessStatus &&
     reason !== "live-exit" &&
     resolvedJob.additionalWorktreeDirs &&

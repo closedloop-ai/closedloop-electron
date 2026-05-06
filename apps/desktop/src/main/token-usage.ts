@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
 /** Per-model token breakdown. */
@@ -9,7 +9,113 @@ export interface ModelTokenUsage {
   cacheRead: number;
 }
 
-/** Parse token usage from claude-output.jsonl (JSONL stream output). */
+const CLAUDE_OUTPUT_FILE = "claude-output.jsonl";
+const CLAUDE_OUTPUT_SIDECAR_FILE = "claude-output.name.txt";
+const CLAUDE_OUTPUT_RENAMED_PREFIX = "claude-output-";
+const CLAUDE_OUTPUT_RENAMED_SUFFIX = ".jsonl";
+
+/**
+ * Resolve the Claude JSONL output for a run.
+ *
+ * Resolution order:
+ * 1. Sidecar-selected renamed output.
+ * 2. Newest renamed output when the sidecar is absent/unreadable/stale.
+ * 3. Legacy fixed-path `claude-output.jsonl`.
+ *
+ * An empty sidecar is a start-of-run sentinel, so it intentionally skips the
+ * renamed-file scan and only falls through to the legacy fixed path.
+ */
+export function resolveClaudeOutputPath(claudeWorkDir: string): string | null {
+  const legacyPath = path.join(claudeWorkDir, CLAUDE_OUTPUT_FILE);
+  const sidecarPath = path.join(claudeWorkDir, CLAUDE_OUTPUT_SIDECAR_FILE);
+
+  if (existsSync(sidecarPath)) {
+    try {
+      const sidecarValue = readFileSync(sidecarPath, "utf-8").trim();
+      if (sidecarValue.length === 0) {
+        return existsSync(legacyPath) ? legacyPath : null;
+      }
+      const resolvedSidecarPath = resolveSidecarOutputPath(
+        claudeWorkDir,
+        sidecarValue,
+      );
+      if (resolvedSidecarPath !== null) {
+        return resolvedSidecarPath;
+      }
+    } catch {
+      // Fall through to renamed-file scan when the sidecar cannot be read.
+    }
+  }
+
+  const newestRenamedPath = resolveNewestRenamedOutputPath(claudeWorkDir);
+  if (newestRenamedPath !== null) {
+    return newestRenamedPath;
+  }
+
+  return existsSync(legacyPath) ? legacyPath : null;
+}
+
+function resolveSidecarOutputPath(
+  claudeWorkDir: string,
+  sidecarValue: string,
+): string | null {
+  if (path.basename(sidecarValue) !== sidecarValue) {
+    return null;
+  }
+  if (
+    !sidecarValue.startsWith(CLAUDE_OUTPUT_RENAMED_PREFIX) ||
+    !sidecarValue.endsWith(CLAUDE_OUTPUT_RENAMED_SUFFIX)
+  ) {
+    return null;
+  }
+  const candidate = path.join(claudeWorkDir, sidecarValue);
+  if (!existsSync(candidate)) {
+    return null;
+  }
+  try {
+    return statSync(candidate).isFile() ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveNewestRenamedOutputPath(claudeWorkDir: string): string | null {
+  let newest: { path: string; mtimeMs: number; name: string } | null = null;
+  let entries: string[];
+  try {
+    entries = readdirSync(claudeWorkDir);
+  } catch {
+    return null;
+  }
+
+  for (const name of entries) {
+    if (
+      !name.startsWith(CLAUDE_OUTPUT_RENAMED_PREFIX) ||
+      !name.endsWith(CLAUDE_OUTPUT_RENAMED_SUFFIX)
+    ) {
+      continue;
+    }
+    const candidate = path.join(claudeWorkDir, name);
+    try {
+      const stats = statSync(candidate);
+      if (!stats.isFile()) {
+        continue;
+      }
+      if (
+        newest === null ||
+        stats.mtimeMs > newest.mtimeMs ||
+        (stats.mtimeMs === newest.mtimeMs && name > newest.name)
+      ) {
+        newest = { path: candidate, mtimeMs: stats.mtimeMs, name };
+      }
+    } catch {
+      // Ignore entries that disappear or cannot be statted.
+    }
+  }
+  return newest?.path ?? null;
+}
+
+/** Parse token usage from Claude JSONL stream output. */
 export function parseTokenUsage(claudeWorkDir: string): {
   inputTokens: number;
   outputTokens: number;
@@ -30,8 +136,8 @@ export function parseTokenUsage(claudeWorkDir: string): {
   };
   const modelSet = new Set<string>();
   const perModel = new Map<string, ModelTokenUsage>();
-  const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
-  if (!existsSync(outputFile)) {
+  const outputFile = resolveClaudeOutputPath(claudeWorkDir);
+  if (outputFile === null) {
     return totals;
   }
   try {
@@ -92,10 +198,10 @@ export function parseTokenUsage(claudeWorkDir: string): {
   return totals;
 }
 
-/** Extract apiKeySource from the init record in claude-output.jsonl. */
+/** Extract apiKeySource from the init record in Claude JSONL stream output. */
 export function parseApiKeySource(claudeWorkDir: string): string | null {
-  const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
-  if (!existsSync(outputFile)) {
+  const outputFile = resolveClaudeOutputPath(claudeWorkDir);
+  if (outputFile === null) {
     return null;
   }
   try {
