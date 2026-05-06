@@ -53,6 +53,7 @@ import type { LoopTokenStore } from "../../main/loop-token-store.js";
 import { Observability } from "../../main/observability.js";
 import {
   parseTokenUsage,
+  resolveClaudeOutputPath,
   type ModelTokenUsage,
 } from "../../main/token-usage.js";
 import {
@@ -2335,16 +2336,16 @@ export const SESSION_LIMIT_PATTERN =
   /prompt is too long|exceed context limit|context limit reached|conversation too long/i;
 
 /**
- * Scan claude-output.jsonl for a result record with `is_error: true` whose
- * message matches a known session/context limit pattern.
+ * Scan the current Claude JSONL output for a result record with
+ * `is_error: true` whose message matches a known session/context limit pattern.
  * Returns the error text (e.g. "Prompt is too long") or null if not found
  * or if the error is unrelated to context limits.
  */
 export function detectSessionLimitFromJsonl(
   claudeWorkDir: string,
 ): string | null {
-  const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
-  if (!existsSync(outputFile)) {
+  const outputFile = resolveClaudeOutputPath(claudeWorkDir);
+  if (outputFile === null) {
     return null;
   }
   try {
@@ -2390,15 +2391,15 @@ export const AUTH_CHALLENGE_PATTERN =
   /authentication_error|invalid bearer token|rate_limit_error|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|token.*expired/i;
 
 /**
- * Scan claude-output.jsonl for a result record with `is_error: true` whose
- * message matches a known auth/rate-limit/billing pattern.
+ * Scan the current Claude JSONL output for a result record with
+ * `is_error: true` whose message matches a known auth/rate-limit/billing pattern.
  * Returns the error text or null if not found.
  */
 export function detectAuthChallengeFromJsonl(
   claudeWorkDir: string,
 ): string | null {
-  const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
-  if (!existsSync(outputFile)) {
+  const outputFile = resolveClaudeOutputPath(claudeWorkDir);
+  if (outputFile === null) {
     return null;
   }
   try {
@@ -6498,9 +6499,10 @@ async function handleLoopRequest(
             const job = jobStore.getByLoopId(body.loopId);
             if (job) {
               jobStore.upsert({ ...job, lastObservedJsonlOffset: offset });
-            }
           }
+        }
         : undefined,
+      claudeWorkDir,
     );
     spawnedSuccessfully = true;
     loopLog(body.loopId, `Spawned pid=${pid}, worktree=${worktreeDir}`);
