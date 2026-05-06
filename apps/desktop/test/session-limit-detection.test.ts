@@ -540,7 +540,8 @@ describe("detectAuthChallengeFromJsonl", () => {
     const result = detectAuthChallengeFromJsonl(tmpDir);
     assert.ok(result);
     assert.ok(result.includes("rate_limit_error"));
-    
+  });
+
   test("reads a sidecar-selected renamed JSONL file", () => {
     writeJsonl([
       {
