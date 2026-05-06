@@ -491,6 +491,57 @@ describe("detectAuthChallengeFromJsonl", () => {
     assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
   });
 
+  // Synthetic API-error entries (isApiErrorMessage: true)
+
+  test("detects synthetic rate_limit_error entry", () => {
+    writeJsonl([
+      { type: "assistant", isApiErrorMessage: true, error: "rate_limit_error", apiErrorStatus: 429 },
+    ]);
+    const result = detectAuthChallengeFromJsonl(tmpDir);
+    assert.ok(result);
+    assert.ok(result.includes("rate_limit_error"));
+  });
+
+  test("detects synthetic authentication_error entry", () => {
+    writeJsonl([
+      { type: "assistant", isApiErrorMessage: true, error: "authentication_error", apiErrorStatus: 401 },
+    ]);
+    const result = detectAuthChallengeFromJsonl(tmpDir);
+    assert.ok(result);
+    assert.ok(result.includes("authentication_error"));
+  });
+
+  test("ignores synthetic entry without isApiErrorMessage flag", () => {
+    writeJsonl([
+      { type: "assistant", error: "rate_limit_error", apiErrorStatus: 429 },
+    ]);
+    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
+  });
+
+  test("ignores synthetic entry when isApiErrorMessage is false", () => {
+    writeJsonl([
+      { type: "assistant", isApiErrorMessage: false, error: "rate_limit_error", apiErrorStatus: 429 },
+    ]);
+    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
+  });
+
+  test("ignores synthetic entry with non-auth error", () => {
+    writeJsonl([
+      { type: "assistant", isApiErrorMessage: true, error: "Prompt is too long" },
+    ]);
+    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
+  });
+
+  test("detects synthetic entry in mixed JSONL alongside success result", () => {
+    writeJsonl([
+      { type: "result", subtype: "success", result: "", is_error: false },
+      { type: "assistant", isApiErrorMessage: true, error: "rate_limit_error", apiErrorStatus: 429 },
+    ]);
+    const result = detectAuthChallengeFromJsonl(tmpDir);
+    assert.ok(result);
+    assert.ok(result.includes("rate_limit_error"));
+  });
+
   test("reads a sidecar-selected renamed JSONL file", () => {
     writeJsonl([
       {
