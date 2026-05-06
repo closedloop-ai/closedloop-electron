@@ -853,13 +853,19 @@ test("replays EXECUTE completion from persisted execution-result artifacts durin
   await fs.writeFile(
     path.join(claudeWorkDir, "execution-result.json"),
     JSON.stringify({
-      has_changes: true,
-      pr_url: "https://example.com/pr/123",
-      pr_number: 123,
-      branch_name: "feat/recovered-execute",
-      base_ref: "main",
-      base_branch: "main",
-      commit_sha: "abc123",
+      schemaVersion: 2,
+      results: [
+        {
+          status: "success",
+          fullName: "owner/repo",
+          prUrl: "https://github.com/owner/repo/pull/123",
+          prNumber: 123,
+          branchName: "feat/recovered-execute",
+          baseBranch: "main",
+          hasChanges: true,
+          commitSha: "abc123",
+        },
+      ],
     }),
   );
 
@@ -912,10 +918,12 @@ test("replays EXECUTE completion from persisted execution-result artifacts durin
   assert.equal(uploadBody.metadata?.finalizationSource, "boot-recovery");
   assert.equal(uploadBody.metadata?.executeFinalizationStatus, "success");
   assert.equal(uploadBody.metadata?.executeFinalizationPath, "artifact-existing");
-  assert.equal(
-    uploadBody.artifacts?.executionResult?.branch_name,
-    "feat/recovered-execute",
-  );
+  const executionResultV2 = uploadBody.artifacts?.executionResult as {
+    schemaVersion?: number;
+    results?: Array<{ branchName?: string }>;
+  } | undefined;
+  assert.equal(executionResultV2?.schemaVersion, 2);
+  assert.equal(executionResultV2?.results?.[0]?.branchName, "feat/recovered-execute");
 
   const completedEventCall = fetchCalls.find((entry) =>
     entry.body.includes('"type":"completed"'),

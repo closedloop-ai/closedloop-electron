@@ -18,7 +18,6 @@ import {
   getResolvedGitPath,
   readEvaluateOutputs,
   runExecuteFinalization,
-  V1_PRIMARY_FULL_NAME_PLACEHOLDER,
 } from "../server/operations/symphony-loop.js";
 import {
   assertPathAllowed,
@@ -224,11 +223,9 @@ function getCompletionCorrelationFields(
 
   if (command === LoopCommand.Execute && artifacts.executionResult) {
     const primaryFullName = job.primaryRepoFullName ?? "";
-    // Synthetic fullName seeds V1 normalization in parseExecutionResultFile;
-    // V2 files carry their own fullName and ignore this argument.
     const parsed = parseExecutionResultFile(
       artifacts.executionResult,
-      primaryFullName || V1_PRIMARY_FULL_NAME_PLACEHOLDER,
+      primaryFullName,
     );
     if (parsed.ok) {
       // Match buildCompletedEventResult's lookup so reboot replay and live
@@ -272,18 +269,17 @@ function buildCompletedEventResult(
 
   if (command === LoopCommand.Execute && artifacts.executionResult) {
     const primaryFullName = job.primaryRepoFullName ?? "";
-    // FEA-683: legacy V1-on-disk recovery — `parseExecutionResultFile`
-    // normalizes V1 snake_case to a length-1 RepoExecutionResult[]; the
-    // fullName argument seeds the V1 entry. V2 files carry their own
-    // fullName and ignore this argument.
-    const parsed = parseExecutionResultFile(
-      artifacts.executionResult,
-      primaryFullName || V1_PRIMARY_FULL_NAME_PLACEHOLDER,
-    );
+    const parsed = parseExecutionResultFile(artifacts.executionResult);
     if (!parsed.ok) {
       gatewayLog.warn(
         "execution-result-parse-failed",
         `loopId=${job.loopId} error=${parsed.error}`,
+      );
+      setNoChangesFields();
+    } else if (parsed.schemaVersion !== 2) {
+      gatewayLog.warn(
+        "execution-result-unsupported-schema",
+        `loopId=${job.loopId} schemaVersion=${parsed.schemaVersion}`,
       );
       setNoChangesFields();
     } else {
