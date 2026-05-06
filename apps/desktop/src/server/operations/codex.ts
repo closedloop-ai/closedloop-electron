@@ -2296,6 +2296,7 @@ async function runClaudeVerdict(
     resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path,
     [
       "-p",
+      "--verbose",
       "--resume",
       sessionId,
       "--output-format",
