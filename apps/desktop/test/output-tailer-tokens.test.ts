@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -139,6 +139,163 @@ async function startEventServer(options?: {
 // ---------------------------------------------------------------------------
 // Test #6: No double-count across throttle/retry
 // ---------------------------------------------------------------------------
+
+test("flush follows sidecar-selected renamed output after fixed path disappears", async () => {
+  process.env.CLOSEDLOOP_TAILER_POLL_MS = "600000";
+  process.env.CLOSEDLOOP_TAILER_THROTTLE_MS = "0";
+
+  const tmpDir = makeTempDir();
+  const jsonlPath = path.join(tmpDir, "claude-output.jsonl");
+  const renamedPath = path.join(tmpDir, "claude-output-run-1.jsonl");
+  const eventSrv = await startEventServer();
+  const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+  const assistantLine = JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [{ type: "text", text: "final chunk" }],
+      usage: {
+        input_tokens: 4,
+        output_tokens: 2,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+    },
+  });
+  writeFileSync(jsonlPath, `${assistantLine}\n`);
+
+  const tailer = startOutputTailer(
+    jsonlPath,
+    apiBaseUrl,
+    "rename-flush-loop",
+    "token",
+    0,
+    undefined,
+    tmpDir,
+  );
+
+  renameSync(jsonlPath, renamedPath);
+  writeFileSync(
+    path.join(tmpDir, "claude-output.name.txt"),
+    "claude-output-run-1.jsonl\n",
+  );
+
+  await tailer.flush();
+
+  const outputEvents = eventSrv.getCollected().filter((e) => e.type === "output");
+  assert.equal(outputEvents.length, 1);
+  const data = outputEvents[0]?.data as Record<string, unknown> | undefined;
+  assert.ok(data !== undefined);
+  assert.equal(data.chunk, "final chunk");
+  const tokenUsage = data.tokenUsage as Record<string, unknown> | undefined;
+  assert.ok(tokenUsage !== undefined);
+  assert.equal(tokenUsage.inputTokens, 4);
+});
+
+test("flush preserves saved offset when boot recovery follows renamed output", async () => {
+  process.env.CLOSEDLOOP_TAILER_POLL_MS = "600000";
+  process.env.CLOSEDLOOP_TAILER_THROTTLE_MS = "0";
+
+  const tmpDir = makeTempDir();
+  const jsonlPath = path.join(tmpDir, "claude-output.jsonl");
+  const renamedPath = path.join(tmpDir, "claude-output-run-1.jsonl");
+  const eventSrv = await startEventServer();
+  const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+  const deliveredLine = `${JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [{ type: "text", text: "already delivered" }],
+      usage: { input_tokens: 11, output_tokens: 3 },
+    },
+  })}\n`;
+  const pendingLine = `${JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [{ type: "text", text: "after restart" }],
+      usage: { input_tokens: 5, output_tokens: 2 },
+    },
+  })}\n`;
+  writeFileSync(renamedPath, deliveredLine + pendingLine);
+  writeFileSync(
+    path.join(tmpDir, "claude-output.name.txt"),
+    "claude-output-run-1.jsonl\n",
+  );
+
+  const committedOffsets: number[] = [];
+  const tailer = startOutputTailer(
+    jsonlPath,
+    apiBaseUrl,
+    "boot-rename-offset-loop",
+    "token",
+    Buffer.byteLength(deliveredLine),
+    (offset) => {
+      committedOffsets.push(offset);
+    },
+    tmpDir,
+  );
+
+  await tailer.flush();
+
+  const outputEvents = eventSrv.getCollected().filter((e) => e.type === "output");
+  assert.equal(outputEvents.length, 1);
+  const data = outputEvents[0]?.data as Record<string, unknown> | undefined;
+  assert.ok(data !== undefined);
+  assert.equal(data.chunk, "after restart");
+  assert.equal(committedOffsets.at(-1), Buffer.byteLength(deliveredLine + pendingLine));
+});
+
+test("flush resets stale pre-spawn offset when fixed JSONL is replaced", async () => {
+  process.env.CLOSEDLOOP_TAILER_POLL_MS = "600000";
+  process.env.CLOSEDLOOP_TAILER_THROTTLE_MS = "0";
+
+  const tmpDir = makeTempDir();
+  const jsonlPath = path.join(tmpDir, "claude-output.jsonl");
+  const eventSrv = await startEventServer();
+  const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+  const staleLine = `${JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [{ type: "text", text: "stale prior run" }],
+      usage: { input_tokens: 100, output_tokens: 50 },
+    },
+  })}\n`;
+  writeFileSync(jsonlPath, staleLine);
+
+  const tailer = startOutputTailer(
+    jsonlPath,
+    apiBaseUrl,
+    "replace-offset-loop",
+    "token",
+    Buffer.byteLength(staleLine),
+    undefined,
+    tmpDir,
+  );
+
+  renameSync(jsonlPath, path.join(tmpDir, "claude-output-prior.jsonl"));
+  writeFileSync(
+    jsonlPath,
+    `${JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [{ type: "text", text: "current run" }],
+        usage: { input_tokens: 6, output_tokens: 2 },
+      },
+    })}\n`,
+  );
+
+  await tailer.flush();
+
+  const outputEvents = eventSrv.getCollected().filter((e) => e.type === "output");
+  assert.equal(outputEvents.length, 1);
+  const data = outputEvents[0]?.data as Record<string, unknown> | undefined;
+  assert.ok(data !== undefined);
+  assert.equal(data.chunk, "current run");
+  const tokenUsage = data.tokenUsage as Record<string, unknown> | undefined;
+  assert.ok(tokenUsage !== undefined);
+  assert.equal(tokenUsage.inputTokens, 6);
+});
 
 test("token totals only advance after successful POST commit, not on throttle/retry", async () => {
   // Use very long poll interval so the interval never fires -- we control timing via flush()
