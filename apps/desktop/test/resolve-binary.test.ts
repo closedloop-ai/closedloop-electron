@@ -198,6 +198,59 @@ describe("resolveBinarySync: no override, binary not on PATH (via override inval
 });
 
 // ---------------------------------------------------------------------------
+// FEA-935: PATH-discovery asymmetry between resolveBinary and resolveBinarySync
+// ---------------------------------------------------------------------------
+//
+// The symphony-loop preflight previously called resolveBinarySync("claude"),
+// which consulted Electron's bare process.env.PATH (and a bash -lc fallback).
+// That misses common installs (nvm/fnm/asdf/Volta/Bun/mise, /opt/homebrew on
+// Apple Silicon when ~/.zshrc owns the PATH munging) even when the in-app
+// health check — which uses getShellPath() via the async resolveBinary —
+// confirms the binary is reachable. This caused the user-visible failure:
+// green health check + every loop returning 500 "claude CLI not found in
+// PATH". The fix was to switch the preflight to await resolveBinary(...).
+//
+// These tests guard the contract that resolveBinary honors getShellPath()
+// independently of process.env.PATH.
+
+describe("resolveBinary: getShellPath drives discovery, not process.env.PATH (FEA-935)", () => {
+  test("finds binary via getShellPath() even when process.env.PATH excludes its dir", async () => {
+    const { dir, binPath } = makeTempBin("claude");
+
+    // Lock getShellPath() to a PATH that includes the fake binary's dir.
+    // This mirrors what `$SHELL -ilc echo $PATH` returns on a real machine
+    // where claude is installed via a version manager / Homebrew.
+    process.env.PATH = dir;
+    setShellPathForTest();
+
+    // Now strip the fake-bin dir from process.env.PATH. This simulates
+    // Electron's bare GUI-launched PATH on macOS, which does NOT include
+    // any dirs added by the user's interactive shell init.
+    const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "fea935-empty-"));
+    tempDirs.push(emptyDir);
+    process.env.PATH = emptyDir;
+
+    // resolveBinary (async) consults getShellPath() and finds the binary —
+    // the OLD preflight (resolveBinarySync) consulted process.env.PATH and
+    // missed it, returning "fallback" and 500ing the loop request.
+    const result = await resolveBinary("claude");
+    assert.equal(result.source, "path");
+    assert.equal(result.path, binPath);
+  });
+
+  test("returns 'fallback' only when binary is absent from BOTH getShellPath() and process.env.PATH", async () => {
+    const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "fea935-truly-empty-"));
+    tempDirs.push(emptyDir);
+    process.env.PATH = emptyDir;
+    setShellPathForTest();
+
+    const result = await resolveBinary("claude");
+    assert.equal(result.source, "fallback");
+    assert.equal(result.path, "claude");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // BinaryName compile-time type check
 // ---------------------------------------------------------------------------
 // This is intentionally a type-only assertion. All five names are accepted
