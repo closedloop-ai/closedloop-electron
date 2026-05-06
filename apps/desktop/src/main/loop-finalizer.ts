@@ -851,7 +851,7 @@ async function cleanupPersistedAdditionalWorktrees(
   });
 }
 
-function isRetryableFinalizationError(error?: string): boolean {
+export function isRetryableFinalizationError(error?: string): boolean {
   if (!error) {
     return false;
   }

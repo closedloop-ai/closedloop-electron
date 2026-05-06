@@ -45,6 +45,7 @@ import {
   EXECUTE_NO_WORK_MESSAGE,
   finalizeLoopFromRuntime,
   isExecuteNoWorkCompletion,
+  isRetryableFinalizationError,
   tryUploadArtifacts,
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
@@ -3835,6 +3836,9 @@ export async function handleProcessCompletion(
       ? (wt.getCurrentBranch(worktreeDir) ?? undefined)
       : undefined;
     const failureWarnings: string[] = [];
+    let failureCloudFinalized = false;
+    let failureRetryableFailure = false;
+    let failureRemoteError: string | undefined;
     const postFailureLoopEvent = async (
       eventBody: Record<string, unknown>,
     ): Promise<void> => {
@@ -3844,12 +3848,26 @@ export async function handleProcessCompletion(
         closedLoopAuthToken,
         eventBody,
       );
-      if (result.success && existingJob && jobStore) {
+      failureCloudFinalized = result.success;
+      if (!result.success) {
+        failureRemoteError = result.error;
+        failureRetryableFailure = isRetryableFinalizationError(result.error);
+        failureWarnings.push("EVENT_POST_FAILED");
+      }
+      if (existingJob && jobStore) {
         const now = new Date().toISOString();
         const latestJob = jobStore.getByLoopId(loopId) ?? existingJob;
         jobStore.upsert({
           ...latestJob,
-          completedEventPostedAt: latestJob.completedEventPostedAt ?? now,
+          ...(result.success
+            ? {
+                completedEventPostedAt: latestJob.completedEventPostedAt ?? now,
+                cloudFinalizedAt: latestJob.cloudFinalizedAt ?? now,
+                lastRecoveryError: undefined,
+              }
+            : {
+                lastRecoveryError: result.error,
+              }),
           updatedAt: now,
         });
       }
@@ -4131,6 +4149,19 @@ export async function handleProcessCompletion(
         warning: mergeWarningEntries(latestJob.warning, failureWarnings),
         updatedAt: now,
         completedAt: now,
+        ...(!wasCancelled
+          ? {
+              finalStatusPersistedAt: latestJob.finalStatusPersistedAt ?? now,
+              ...(failureCloudFinalized
+                ? {
+                    cloudFinalizedAt: latestJob.cloudFinalizedAt ?? now,
+                    lastRecoveryError: undefined,
+                  }
+                : failureRemoteError
+                  ? { lastRecoveryError: failureRemoteError }
+                  : {}),
+            }
+          : {}),
       });
     }
     if (tempCleanupDir) {
@@ -4144,7 +4175,9 @@ export async function handleProcessCompletion(
       await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
     await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt);
-    loopTokenStore?.deleteLoopToken(loopId);
+    if (wasCancelled || failureCloudFinalized || !failureRetryableFailure) {
+      loopTokenStore?.deleteLoopToken(loopId);
+    }
     return;
   }
 

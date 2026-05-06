@@ -6,7 +6,9 @@ import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { JobStore, type LocalJob } from "../src/main/job-store.js";
+import { LoopTokenStore } from "../src/main/loop-token-store.js";
 import { handleProcessCompletion } from "../src/server/operations/symphony-loop.js";
+import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
 
 let tempRoot = "";
 let fetchCalls: Array<{ url: string; body: string }> = [];
@@ -66,6 +68,14 @@ function createStore(name: string): JobStore {
   return new JobStore({ cwd: tempRoot, name });
 }
 
+function createLoopTokenStore(name: string): LoopTokenStore {
+  return new LoopTokenStore({
+    cwd: tempRoot,
+    name,
+    safeStorage: createTestLoopTokenSafeStorage(),
+  });
+}
+
 function createBaseJob(
   loopId: string,
   claudeWorkDir: string,
@@ -120,6 +130,7 @@ async function completeFailedLoopWithMarkerSecret(args: {
   loopId: string;
   claudeWorkDir: string;
   jobStore: JobStore;
+  loopTokenStore?: LoopTokenStore;
   spawnStartedAt?: number;
 }): Promise<void> {
   await handleProcessCompletion(
@@ -141,7 +152,7 @@ async function completeFailedLoopWithMarkerSecret(args: {
     undefined,
     undefined,
     undefined,
-    undefined,
+    args.loopTokenStore,
     [],
     undefined,
     args.spawnStartedAt,
@@ -399,17 +410,30 @@ test("handleProcessCompletion persists runner failure marker before failed error
   eventPostStatus = 500;
 
   const jobStore = createStore("symphony-runner-marker-event-failure");
+  const loopTokenStore = createLoopTokenStore(
+    "symphony-runner-marker-event-failure-tokens",
+  );
+  loopTokenStore.setLoopToken(loopId, "loop-token");
   jobStore.upsert(createBaseJob(loopId, claudeWorkDir));
 
   await completeFailedLoopWithMarkerSecret({
     loopId,
     claudeWorkDir,
     jobStore,
+    loopTokenStore,
   });
 
   const persisted = jobStore.getByLoopId(loopId);
   assert.ok(persisted);
   assert.equal(persisted.completedEventPostedAt, undefined);
+  assert.ok(persisted.finalStatusPersistedAt);
+  assert.equal(persisted.cloudFinalizedAt, undefined);
+  assert.equal(persisted.lastRecoveryError, "HTTP 500 Internal Server Error");
+  assert.deepEqual(persisted.warning?.split("; ").sort(), [
+    "ARTIFACT_UPLOAD_FAILED",
+    "EVENT_POST_FAILED",
+  ]);
+  assert.equal(loopTokenStore.getLoopToken(loopId), "loop-token");
   assert.deepEqual(persisted.userVisibleLoopFailure, {
     code: "RUNNER_ERROR",
     message: "Claude rate limit reached.",

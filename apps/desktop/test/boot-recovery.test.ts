@@ -830,6 +830,62 @@ test("replays zero-token EXECUTE recovery as NO_WORK_PRODUCED instead of a compl
   );
 });
 
+test("boot-recovery replays terminal user-visible runner failure", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const loopTokenStore = createLoopTokenStore(
+    "boot-recovery-terminal-runner-failure-tokens",
+  );
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
+
+  const persistedAt = new Date().toISOString();
+  const jobStore = createStore("boot-recovery-terminal-runner-failure");
+  jobStore.upsert(
+    createJob({
+      command: LoopCommand.Execute,
+      status: "FAILED",
+      exitCode: 1,
+      claudeWorkDir,
+      completedAt: persistedAt,
+      finalStatusPersistedAt: persistedAt,
+      userVisibleLoopFailure: {
+        code: "RUNNER_ERROR",
+        message: "Claude rate limit reached.",
+        result: { subcode: "CLAUDE_RATE_LIMIT" },
+      },
+    }),
+  );
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: () => {} },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4014",
+    loopTokenStore,
+  });
+  await service.run([]);
+  service.dispose();
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.status, "FAILED");
+  assert.ok(persisted.cloudFinalizedAt);
+  assert.equal(persisted.recoveryAttempts, 1);
+  assert.equal(loopTokenStore.getLoopToken("loop-1"), null);
+
+  const eventCall = fetchCalls.find((entry) =>
+    entry.url.endsWith("/loops/loop-1/events"),
+  );
+  assert.ok(eventCall, "expected recovered runner failure event");
+  const body = JSON.parse(eventCall.body) as Record<string, unknown>;
+  assert.equal(body.type, "error");
+  assert.equal(body.code, "RUNNER_ERROR");
+  assert.equal(body.message, "Claude rate limit reached.");
+  assert.deepEqual(body.result, { subcode: "CLAUDE_RATE_LIMIT" });
+});
+
 test("replays EXECUTE completion from persisted execution-result artifacts during boot-recovery", async () => {
   const repoDir = path.join(tempRoot, "repo");
   const claudeWorkDir = path.join(repoDir, "workdir");
