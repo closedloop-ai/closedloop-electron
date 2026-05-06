@@ -20,7 +20,6 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { z } from "zod";
 import {
   readLogTail,
   readStderrTail,
@@ -46,6 +45,7 @@ import {
   EXECUTE_NO_WORK_MESSAGE,
   finalizeLoopFromRuntime,
   isExecuteNoWorkCompletion,
+  isRetryableFinalizationError,
   tryUploadArtifacts,
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
@@ -56,6 +56,12 @@ import {
   resolveClaudeOutputPath,
   type ModelTokenUsage,
 } from "../../main/token-usage.js";
+import {
+  clearUserVisibleLoopFailureMarker,
+  readUserVisibleLoopFailure,
+  toUserVisibleLoopFailurePayload,
+  USER_VISIBLE_LOOP_FAILURE_SECRET_ENV,
+} from "../../main/user-visible-loop-failure.js";
 import {
   IMPORTED_PLAN_MARKDOWN_FILE,
   PLAN_SOURCE_MARKDOWN_FILE,
@@ -336,39 +342,6 @@ const LOCAL_CALLBACK_FAIL_FAST_COMMANDS = new Set<LoopCommand>([
   LoopCommand.RequestPrdChanges,
   LoopCommand.GeneratePrd,
 ]);
-const USER_VISIBLE_LOOP_FAILURE_FILE = "loop-error.json";
-const USER_VISIBLE_LOOP_FAILURE_MAX_BYTES = 8 * 1024;
-const USER_VISIBLE_LOOP_FAILURE_MAX_MESSAGE_LENGTH = 1000;
-const USER_VISIBLE_LOOP_FAILURE_SUBCODE = /^[A-Z][A-Z0-9_]{2,63}$/;
-const USER_VISIBLE_LOOP_FAILURE_SIGNATURE = /^sha256=[a-f0-9]{64}$/;
-// Runtime-only marker signing secret passed to run-loop.sh. The script copies
-// it into a non-exported shell variable and unsets this env var before spawning
-// Claude, so tool-invoked commands cannot forge trusted failure markers just by
-// writing loop-error.json in the workdir.
-const USER_VISIBLE_LOOP_FAILURE_SECRET_ENV =
-  "CLOSEDLOOP_USER_VISIBLE_FAILURE_SECRET";
-
-const userVisibleLoopFailureSchema = z.looseObject({
-  code: z.union([
-    z.literal(LoopErrorCode.RunnerError),
-    z.literal(LoopErrorCode.PreRunValidationFailed),
-    z.literal(LoopErrorCode.PlanStateUnavailable),
-  ]),
-  message: z.string().min(1).max(USER_VISIBLE_LOOP_FAILURE_MAX_MESSAGE_LENGTH),
-  result: z
-    .object({
-      subcode: z.string().regex(USER_VISIBLE_LOOP_FAILURE_SUBCODE),
-    })
-    .strict(),
-  signature: z.string().regex(USER_VISIBLE_LOOP_FAILURE_SIGNATURE),
-});
-
-type UserVisibleLoopFailure = z.infer<typeof userVisibleLoopFailureSchema>;
-type UserVisibleLoopFailureSignedPayload = Pick<
-  UserVisibleLoopFailure,
-  "code" | "message" | "result"
->;
-
 interface LoopArtifact {
   id: string;
   type: LoopArtifactType;
@@ -2207,87 +2180,6 @@ function redactSpawnArgs(args: string[]): string[] {
 }
 
 /**
- * Read the intentional user-visible failure marker written by run-loop.sh.
- * Invalid, oversized, or unreadable markers are ignored so arbitrary bash
- * failures cannot choose the loop status message.
- */
-function signUserVisibleLoopFailure(
-  payload: UserVisibleLoopFailureSignedPayload,
-  secret: string,
-): string {
-  const canonicalPayload = JSON.stringify({
-    code: payload.code,
-    message: payload.message,
-    result: { subcode: payload.result.subcode },
-  });
-  const digest = crypto
-    .createHmac("sha256", secret)
-    .update(canonicalPayload)
-    .digest("hex");
-  return `sha256=${digest}`;
-}
-
-function hasValidUserVisibleLoopFailureSignature(
-  failure: UserVisibleLoopFailure,
-  secret: string,
-): boolean {
-  const expectedSignature = signUserVisibleLoopFailure(failure, secret);
-  const provided = Buffer.from(failure.signature);
-  const expected = Buffer.from(expectedSignature);
-  return (
-    provided.length === expected.length &&
-    crypto.timingSafeEqual(provided, expected)
-  );
-}
-
-function readUserVisibleLoopFailure(args: {
-  claudeWorkDir: string;
-  markerNotBeforeMs?: number;
-  signingSecret?: string;
-}): UserVisibleLoopFailure | null {
-  const { claudeWorkDir, markerNotBeforeMs = 0, signingSecret } = args;
-  if (!signingSecret) {
-    return null;
-  }
-
-  const markerPath = path.join(claudeWorkDir, USER_VISIBLE_LOOP_FAILURE_FILE);
-  if (!existsSync(markerPath)) {
-    return null;
-  }
-
-  try {
-    const markerStat = statSync(markerPath);
-    if (
-      !markerStat.isFile() ||
-      markerStat.size > USER_VISIBLE_LOOP_FAILURE_MAX_BYTES ||
-      (markerNotBeforeMs > 0 && markerStat.mtimeMs < markerNotBeforeMs)
-    ) {
-      return null;
-    }
-
-    const parsed = JSON.parse(readFileSync(markerPath, "utf-8")) as unknown;
-    const result = userVisibleLoopFailureSchema.safeParse(parsed);
-    if (
-      !result.success ||
-      !hasValidUserVisibleLoopFailureSignature(result.data, signingSecret)
-    ) {
-      return null;
-    }
-    return result.data;
-  } catch {
-    return null;
-  }
-}
-
-function clearUserVisibleLoopFailureMarker(claudeWorkDir: string): void {
-  try {
-    unlinkSync(path.join(claudeWorkDir, USER_VISIBLE_LOOP_FAILURE_FILE));
-  } catch {
-    // Missing or best-effort cleanup failure falls back to normal finalizer validation.
-  }
-}
-
-/**
  * Collect failure diagnostics for a failed loop process.
  * Returns an object suitable for inclusion in the error telemetry event.
  */
@@ -3944,6 +3836,42 @@ export async function handleProcessCompletion(
       ? (wt.getCurrentBranch(worktreeDir) ?? undefined)
       : undefined;
     const failureWarnings: string[] = [];
+    let failureCloudFinalized = false;
+    let failureRetryableFailure = false;
+    let failureRemoteError: string | undefined;
+    const postFailureLoopEvent = async (
+      eventBody: Record<string, unknown>,
+    ): Promise<void> => {
+      const result = await postLoopEvent(
+        apiBaseUrl,
+        loopId,
+        closedLoopAuthToken,
+        eventBody,
+      );
+      failureCloudFinalized = result.success;
+      if (!result.success) {
+        failureRemoteError = result.error;
+        failureRetryableFailure = isRetryableFinalizationError(result.error);
+        failureWarnings.push("EVENT_POST_FAILED");
+      }
+      if (existingJob && jobStore) {
+        const now = new Date().toISOString();
+        const latestJob = jobStore.getByLoopId(loopId) ?? existingJob;
+        jobStore.upsert({
+          ...latestJob,
+          ...(result.success
+            ? {
+                completedEventPostedAt: latestJob.completedEventPostedAt ?? now,
+                cloudFinalizedAt: latestJob.cloudFinalizedAt ?? now,
+                lastRecoveryError: undefined,
+              }
+            : {
+                lastRecoveryError: result.error,
+              }),
+          updatedAt: now,
+        });
+      }
+    };
 
     if (!wasCancelled && command === LoopCommand.Execute) {
       if (existingJob && jobStore) {
@@ -4023,7 +3951,7 @@ export async function handleProcessCompletion(
         diagnostics,
         failureSessionId,
       );
-      await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+      await postFailureLoopEvent({
         type: LoopEventType.Error,
         code: LoopErrorCode.Cancelled,
         message: "Loop cancelled",
@@ -4077,16 +4005,58 @@ export async function handleProcessCompletion(
             stripAnsi(sanitizeErrorMessage(userVisibleFailure.message)),
           )
         : undefined;
+    const trustedUserVisibleFailure =
+      userVisibleFailure !== null
+        ? {
+            ...toUserVisibleLoopFailurePayload(userVisibleFailure),
+            message: userVisibleFailureMessage ?? userVisibleFailure.message,
+          }
+        : undefined;
+    if (!wasCancelled && trustedUserVisibleFailure && existingJob && jobStore) {
+      const latestJob = jobStore.getByLoopId(loopId) ?? existingJob;
+      jobStore.upsert({
+        ...latestJob,
+        userVisibleLoopFailure: trustedUserVisibleFailure,
+        updatedAt: new Date().toISOString(),
+      });
+    }
 
     if (!wasCancelled) {
-      if (isContextLimit) {
+      if (trustedUserVisibleFailure) {
+        loopError(
+          loopId,
+          `User-visible runner failure detected: ${trustedUserVisibleFailure.code} ${trustedUserVisibleFailure.result.subcode}`,
+        );
+        gatewayLog.error(
+          "loop-harness",
+          `${command} reported user-visible runner failure, loopId=${loopId}, code=${trustedUserVisibleFailure.code}, subcode=${trustedUserVisibleFailure.result.subcode}`,
+        );
+        await postFailureLoopEvent({
+          type: LoopEventType.Error,
+          code: trustedUserVisibleFailure.code,
+          message: trustedUserVisibleFailure.message,
+          result: trustedUserVisibleFailure.result,
+          loopId,
+          sessionId: failureSessionId,
+          ...(failureBranchName ? { branchName: failureBranchName } : {}),
+          tokenUsage: diagnostics.tokenUsage,
+          tokensByModel: diagnostics.tokensByModel,
+          logTail: diagnostics.logTail,
+          stderrTail: diagnostics.stderrTail,
+          exitSignal: diagnostics.exitSignal,
+          elapsedMs: diagnostics.elapsedMs,
+          abortReason: diagnostics.abortReason,
+          diagnosticsVersion: String(diagnostics.diagnosticsVersion),
+          ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
+        });
+      } else if (isContextLimit) {
         const limitMsg = jsonlError ?? "Context limit exceeded";
         loopError(loopId, `Context limit detected: ${limitMsg}`);
         gatewayLog.error(
           "loop-harness",
           `${command} hit context limit, loopId=${loopId}: ${limitMsg}`,
         );
-        await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+        await postFailureLoopEvent({
           type: LoopEventType.Error,
           code: LoopErrorCode.ContextLimitExceeded,
           message: limitMsg,
@@ -4118,39 +4088,10 @@ export async function handleProcessCompletion(
           diagnostics,
           failureSessionId,
         );
-        await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+        await postFailureLoopEvent({
           type: LoopEventType.Error,
           code: LoopErrorCode.AuthChallenge,
           message: authMsg,
-          loopId,
-          sessionId: failureSessionId,
-          ...(failureBranchName ? { branchName: failureBranchName } : {}),
-          tokenUsage: diagnostics.tokenUsage,
-          tokensByModel: diagnostics.tokensByModel,
-          logTail: diagnostics.logTail,
-          stderrTail: diagnostics.stderrTail,
-          exitSignal: diagnostics.exitSignal,
-          elapsedMs: diagnostics.elapsedMs,
-          abortReason: diagnostics.abortReason,
-          diagnosticsVersion: String(diagnostics.diagnosticsVersion),
-          ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
-        });
-      } else if (userVisibleFailure !== null) {
-        const userVisibleMessage =
-          userVisibleFailureMessage ?? userVisibleFailure.message;
-        loopError(
-          loopId,
-          `User-visible runner failure detected: ${userVisibleFailure.code} ${userVisibleFailure.result.subcode}`,
-        );
-        gatewayLog.error(
-          "loop-harness",
-          `${command} reported user-visible runner failure, loopId=${loopId}, code=${userVisibleFailure.code}, subcode=${userVisibleFailure.result.subcode}`,
-        );
-        await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
-          type: LoopEventType.Error,
-          code: userVisibleFailure.code,
-          message: userVisibleMessage,
-          result: userVisibleFailure.result,
           loopId,
           sessionId: failureSessionId,
           ...(failureBranchName ? { branchName: failureBranchName } : {}),
@@ -4170,7 +4111,7 @@ export async function handleProcessCompletion(
           "loop-harness",
           `${command} failed with exit code ${exitCode}, loopId=${loopId}`,
         );
-        await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+        await postFailureLoopEvent({
           type: LoopEventType.Error,
           code: LoopErrorCode.ProcessFailed,
           message: `Process exited with code ${exitCode}`,
@@ -4197,17 +4138,30 @@ export async function handleProcessCompletion(
         ...latestJob,
         status: wasCancelled ? "CANCELLED" : "FAILED",
         liveActivity:
-          !wasCancelled && isContextLimit
+          !wasCancelled && trustedUserVisibleFailure
+            ? trustedUserVisibleFailure.message
+            : !wasCancelled && isContextLimit
             ? "Context limit exceeded"
             : !wasCancelled && isAuthChallenge
               ? `Auth challenge: ${jsonlAuthError ?? "authentication error"}`
-              : !wasCancelled && userVisibleFailureMessage
-                ? userVisibleFailureMessage
-                : undefined,
+              : undefined,
         exitCode,
         warning: mergeWarningEntries(latestJob.warning, failureWarnings),
         updatedAt: now,
         completedAt: now,
+        ...(!wasCancelled
+          ? {
+              finalStatusPersistedAt: latestJob.finalStatusPersistedAt ?? now,
+              ...(failureCloudFinalized
+                ? {
+                    cloudFinalizedAt: latestJob.cloudFinalizedAt ?? now,
+                    lastRecoveryError: undefined,
+                  }
+                : failureRemoteError
+                  ? { lastRecoveryError: failureRemoteError }
+                  : {}),
+            }
+          : {}),
       });
     }
     if (tempCleanupDir) {
@@ -4221,7 +4175,9 @@ export async function handleProcessCompletion(
       await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
     await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt);
-    loopTokenStore?.deleteLoopToken(loopId);
+    if (wasCancelled || failureCloudFinalized || !failureRetryableFailure) {
+      loopTokenStore?.deleteLoopToken(loopId);
+    }
     return;
   }
 

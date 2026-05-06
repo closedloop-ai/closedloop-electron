@@ -1,4 +1,5 @@
 import Store from "electron-store";
+import type { UserVisibleLoopFailurePayload } from "./user-visible-loop-failure.js";
 
 export type LocalJobStatus =
   | "QUEUED"
@@ -91,6 +92,8 @@ export type LocalJob = {
   status: LocalJobStatus;
   phase?: string;
   liveActivity?: string;
+  /** Trusted runner failure marker payload authenticated by the live parent process. */
+  userVisibleLoopFailure?: UserVisibleLoopFailurePayload;
   currentTaskId?: string;
   taskProgress?: TaskProgress;
   startedAt: string;

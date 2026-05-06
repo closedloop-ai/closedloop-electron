@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { LoopCommand } from "@closedloop-ai/loops-api/commands";
+import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { JobStore, type LocalJob } from "../src/main/job-store.js";
 import {
   EXECUTE_NO_WORK_LIVE_ACTIVITY,
@@ -347,6 +348,45 @@ test("finalizeLoopFromRuntime preserves FAILED jobs and posts an error event", a
   assert.match(fetchCalls[0]?.body ?? "", /"code":"PROCESS_FAILED"/);
   assert.equal(telemetryEvents[0]?.category, "job.recovery.finalize_replayed");
   assert.equal(telemetryEvents[0]?.severity, "error");
+});
+
+test("finalizeLoopFromRuntime replays persisted user-visible runner failure", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jobStore = createStore("finalizer-user-visible-failure");
+  const job = createBaseJob({
+    claudeWorkDir,
+    status: "FAILED",
+    exitCode: 1,
+    liveActivity: "Claude rate limit reached.",
+    userVisibleLoopFailure: {
+      code: LoopErrorCode.RunnerError,
+      message: "Claude rate limit reached.",
+      result: { subcode: "CLAUDE_RATE_LIMIT" },
+    },
+  });
+  jobStore.upsert(job);
+
+  await finalizeLoopFromRuntime(job, "boot-recovery", {
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+  });
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.status, "FAILED");
+  assert.ok(persisted.completedEventPostedAt);
+  assert.equal(fetchCalls.length, 1);
+  const eventBody = JSON.parse(fetchCalls[0]?.body ?? "{}") as Record<
+    string,
+    unknown
+  >;
+  assert.equal(eventBody.code, "RUNNER_ERROR");
+  assert.equal(eventBody.message, "Claude rate limit reached.");
+  assert.deepEqual(eventBody.result, { subcode: "CLAUDE_RATE_LIMIT" });
 });
 
 test("finalizeLoopFromRuntime preserves CANCELLED jobs without posting loop events", async () => {
