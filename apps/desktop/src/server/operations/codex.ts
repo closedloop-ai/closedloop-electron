@@ -2297,6 +2297,7 @@ async function runClaudeVerdict(
     [
       "-p",
       "--resume",
+      "--verbose",
       sessionId,
       "--output-format",
       "stream-json",
