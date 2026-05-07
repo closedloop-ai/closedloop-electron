@@ -1,4 +1,5 @@
 import Store from "electron-store";
+import type { UserVisibleLoopFailurePayload } from "./user-visible-loop-failure.js";
 
 export type LocalJobStatus =
   | "QUEUED"
@@ -15,6 +16,26 @@ export type LocalJobStatus =
 export type LocalJobKind = "SYMPHONY_LOOP";
 
 export type LocalJobCommand = "PLAN" | "EXECUTE" | "REQUEST_CHANGES" | "DECOMPOSE" | "GENERATE_PRD";
+
+export type LocalJobCommitter = {
+  name: string;
+  email: string;
+};
+
+export type LocalJobFinalizationSource = "live-exit" | "boot-recovery";
+
+export type LocalJobExecuteFinalizationStatus =
+  | "pending"
+  | "success"
+  | "no-changes"
+  | "error"
+  | "skipped";
+
+export type LocalJobExecuteFinalizationPath =
+  | "llm"
+  | "git-fallback"
+  | "artifact-existing"
+  | "none";
 
 export type TaskProgress = {
   pending: number;
@@ -33,17 +54,37 @@ export type LocalJob = {
   artifactId?: string;
   artifactSlug?: string;
   issueId?: string;
+  baseBranch?: string;
+  /**
+   * Primary repo `owner/name` from the loop request (`body.repo.fullName`).
+   * Carried so boot-recovery finalization can populate the V2 envelope's
+   * `fullName` field without depending on in-memory request state.
+   */
+  primaryRepoFullName?: string;
+  webAppOrigin?: string;
+  expectedMcpUrl?: string;
+  committer?: LocalJobCommitter;
   repoPath?: string;
   localRepoPath?: string;
   worktreeDir?: string;
   claudeWorkDir?: string;
   /**
-   * Additional-repo worktrees created for multi-repo PLAN runs.
-   * Persisted so boot recovery / finalizer can remove them after an Electron
-   * restart; in-process spawn logic also tracks these locally for immediate
-   * cleanup on live exits.
+   * Additional-repo worktrees created for multi-repo PLAN/EXECUTE runs.
+   * Persisted so boot recovery / finalizer can finalize their git work and
+   * remove the worktrees after an Electron restart; in-process spawn logic
+   * also tracks these locally for immediate finalization + cleanup on live
+   * exits.
+   *
+   * `fullName` and `baseBranch` are optional for backward compatibility with
+   * jobs persisted by older builds. When absent, recovery skips multi-repo
+   * finalization (logs a warning) and falls through to worktree cleanup only.
    */
-  additionalWorktreeDirs?: { dir: string; repoPath: string }[];
+  additionalWorktreeDirs?: {
+    dir: string;
+    repoPath: string;
+    fullName?: string;
+    baseBranch?: string;
+  }[];
   logPath?: string;
   jsonlPath?: string;
   statePath?: string;
@@ -51,6 +92,8 @@ export type LocalJob = {
   status: LocalJobStatus;
   phase?: string;
   liveActivity?: string;
+  /** Trusted runner failure marker payload authenticated by the live parent process. */
+  userVisibleLoopFailure?: UserVisibleLoopFailurePayload;
   currentTaskId?: string;
   taskProgress?: TaskProgress;
   startedAt: string;
@@ -73,6 +116,16 @@ export type LocalJob = {
   recoveryAttempts?: number;
   /** Last cloud finalization error for diagnostics and retry decisions. */
   lastRecoveryError?: string;
+  finalizationSource?: LocalJobFinalizationSource;
+  executeFinalizationStatus?: LocalJobExecuteFinalizationStatus;
+  executeFinalizationPath?: LocalJobExecuteFinalizationPath;
+  executeFinalizationStartedAt?: string;
+  executeFinalizationCompletedAt?: string;
+  executeFinalizationReason?: string;
+  executeFinalizationPreExecutionResultPresent?: boolean;
+  executeFinalizationPrePrBodyPresent?: boolean;
+  executeFinalizationPostExecutionResultPresent?: boolean;
+  executeFinalizationPostPrBodyPresent?: boolean;
   apiBaseUrl?: string;
 };
 

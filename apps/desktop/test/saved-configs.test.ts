@@ -131,6 +131,78 @@ test("findConfigByOrigins returns the matching config or null", () => {
   );
 });
 
+test("ensureActiveConfigForCurrentOrigins creates and activates a default profile", () => {
+  const tmpDir = makeTempDir("saved-configs-ensure-active-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.dev.test");
+  store.setApiOrigin("https://api.dev.test");
+  store.setWebAppOrigin("https://app.dev.test");
+
+  const config = store.ensureActiveConfigForCurrentOrigins("Default");
+
+  assert.equal(config.name, "Default");
+  assert.equal(config.relayOrigin, "https://relay.dev.test");
+  assert.equal(config.apiOrigin, "https://api.dev.test");
+  assert.equal(config.webAppOrigin, "https://app.dev.test");
+  assert.equal(store.getActiveConfigId(), config.id);
+  assert.equal(store.listConfigs().length, 1);
+});
+
+test("ensureActiveConfigForCurrentOrigins syncs origins onto the active profile", () => {
+  const tmpDir = makeTempDir("saved-configs-ensure-active-origins-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.old.test");
+  store.setApiOrigin("https://api.old.test");
+  store.setWebAppOrigin("https://app.old.test");
+  const existing = store.saveConfig("Development");
+  store.applyConfig(existing.id);
+  store.setRelayOrigin("https://relay.new.test");
+  store.setApiOrigin("https://api.new.test");
+  store.setWebAppOrigin("https://app.new.test");
+
+  const config = store.ensureActiveConfigForCurrentOrigins("Default");
+
+  assert.equal(config.id, existing.id);
+  assert.equal(config.relayOrigin, "https://relay.new.test");
+  assert.equal(config.apiOrigin, "https://api.new.test");
+  assert.equal(config.webAppOrigin, "https://app.new.test");
+  assert.equal(store.listConfigs().length, 1);
+});
+
+test("ensureActiveConfigForCurrentOrigins reuses a matching saved profile", () => {
+  const tmpDir = makeTempDir("saved-configs-ensure-reuse-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.dev.test");
+  store.setApiOrigin("https://api.dev.test");
+  store.setWebAppOrigin("https://app.dev.test");
+  const existing = store.saveConfig("Development");
+
+  const config = store.ensureActiveConfigForCurrentOrigins("Default");
+
+  assert.equal(config.id, existing.id);
+  assert.equal(config.name, "Development");
+  assert.equal(store.getActiveConfigId(), existing.id);
+  assert.equal(store.listConfigs().length, 1);
+});
+
+test("ensureActiveConfigForCurrentOrigins chooses an available default name", () => {
+  const tmpDir = makeTempDir("saved-configs-ensure-name-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.one.test");
+  store.setApiOrigin("https://api.one.test");
+  store.setWebAppOrigin("https://app.one.test");
+  store.saveConfig("Default");
+  store.setRelayOrigin("https://relay.two.test");
+  store.setApiOrigin("https://api.two.test");
+  store.setWebAppOrigin("https://app.two.test");
+
+  const config = store.ensureActiveConfigForCurrentOrigins("Default");
+
+  assert.equal(config.name, "Default 2");
+  assert.equal(store.getActiveConfigId(), config.id);
+  assert.equal(store.listConfigs().length, 2);
+});
+
 // --- listConfigs ---
 
 test("listConfigs returns configs in insertion order", () => {
@@ -195,6 +267,37 @@ test("deleteConfig with unknown id returns wasActive: false without throwing", (
   const result = store.deleteConfig("00000000-0000-4000-8000-000000000000");
 
   assert.equal(result.wasActive, false);
+});
+
+test("isGatewayIdReferenced preserves shared saved or active legacy gateway keys", () => {
+  const tmpDir = makeTempDir("saved-configs-gateway-reference-");
+  const store = makeSettings(tmpDir);
+  store.setRelayOrigin("https://relay.test");
+  store.setApiOrigin("https://api.test");
+  store.setWebAppOrigin("https://app.test");
+  const first = store.saveConfig("first");
+  const second = store.saveConfig("second");
+
+  store.updateConfigManagedMetadata(first.id, {
+    apiKeySource: "DESKTOP_MANAGED",
+    gatewayId: "gateway-shared",
+  });
+  store.updateConfigManagedMetadata(second.id, {
+    apiKeySource: "DESKTOP_MANAGED",
+    gatewayId: "gateway-shared",
+  });
+
+  store.deleteConfig(first.id);
+
+  assert.equal(store.isGatewayIdReferenced("gateway-shared"), true);
+  store.deleteConfig(second.id);
+  assert.equal(store.isGatewayIdReferenced("gateway-shared"), false);
+  assert.equal(
+    store.isGatewayIdReferenced("gateway-shared", {
+      activeRuntimeGatewayId: "gateway-shared",
+    }),
+    true,
+  );
 });
 
 // --- renameConfig ---
@@ -297,6 +400,85 @@ test("migration: fresh install initializes savedConfigs to [] and activeConfigId
   assert.equal(all.activeConfigId, null);
 });
 
+test("migration: saved configs without managed identity are treated as USER_CREATED", () => {
+  const tmpDir = makeTempDir("saved-configs-managed-migration-");
+  const storeName = "migration-managed";
+  fs.writeFileSync(
+    path.join(tmpDir, `${storeName}.json`),
+    JSON.stringify({
+      savedConfigs: [
+        {
+          id: "00000000-0000-4000-8000-000000000001",
+          name: "legacy",
+          relayOrigin: "https://relay.test",
+          apiOrigin: "https://api.test",
+          webAppOrigin: "https://app.test",
+          apiKeySource: "DESKTOP_MANAGED",
+        },
+      ],
+      activeConfigId: null,
+    }),
+    "utf-8",
+  );
+
+  const store = makeSettings(tmpDir, storeName);
+
+  assert.equal(store.listConfigs()[0]?.apiKeySource, "USER_CREATED");
+});
+
+test("ensureConfigGatewayId creates isolated persisted gateway identities", () => {
+  const tmpDir = makeTempDir("saved-configs-gateway-id-");
+  const storeName = "gateway-id-settings";
+  const store = makeSettings(tmpDir, storeName);
+  store.setRelayOrigin("https://relay.test");
+  store.setApiOrigin("https://api.test");
+  store.setWebAppOrigin("https://app.test");
+  const first = store.saveConfig("first");
+  const second = store.saveConfig("second");
+
+  const firstWithGateway = store.ensureConfigGatewayId(first.id);
+  const secondWithGateway = store.ensureConfigGatewayId(second.id);
+
+  assert.match(firstWithGateway.gatewayId ?? "", UUID_V4_RE);
+  assert.match(secondWithGateway.gatewayId ?? "", UUID_V4_RE);
+  assert.notEqual(firstWithGateway.gatewayId, secondWithGateway.gatewayId);
+  assert.equal(
+    store.ensureConfigGatewayId(first.id).gatewayId,
+    firstWithGateway.gatewayId,
+  );
+  assert.equal(
+    makeSettings(tmpDir, storeName).listConfigs().find((c) => c.id === first.id)
+      ?.gatewayId,
+    firstWithGateway.gatewayId,
+  );
+});
+
+test("updateActiveConfigOrigins persists trusted origins on the active profile", () => {
+  const tmpDir = makeTempDir("saved-configs-active-origins-");
+  const storeName = "active-origins-settings";
+  const store = makeSettings(tmpDir, storeName);
+  store.setRelayOrigin("https://relay.old.test");
+  store.setApiOrigin("https://api.old.test");
+  store.setWebAppOrigin("https://app.old.test");
+  const config = store.saveConfig("Dev");
+  store.applyConfig(config.id);
+
+  const updated = store.updateActiveConfigOrigins({
+    relayOrigin: "http://localhost:3020/socket",
+    apiOrigin: "http://localhost:3002/v1",
+    webAppOrigin: "http://localhost:3000/settings",
+  });
+
+  assert.equal(updated?.relayOrigin, "http://localhost:3020");
+  assert.equal(updated?.apiOrigin, "http://localhost:3002");
+  assert.equal(updated?.webAppOrigin, "http://localhost:3000");
+  const rehydrated = makeSettings(tmpDir, storeName);
+  const rehydratedConfig = rehydrated.listConfigs().find((c) => c.id === config.id);
+  assert.equal(rehydratedConfig?.relayOrigin, "http://localhost:3020");
+  assert.equal(rehydratedConfig?.apiOrigin, "http://localhost:3002");
+  assert.equal(rehydratedConfig?.webAppOrigin, "http://localhost:3000");
+});
+
 // --- ApiKeyStore profile key methods ---
 
 test("ApiKeyStore.saveProfileKey/getProfileKey/deleteProfileKey roundtrip", () => {
@@ -310,6 +492,75 @@ test("ApiKeyStore.saveProfileKey/getProfileKey/deleteProfileKey roundtrip", () =
 
   apiKeyStore.deleteProfileKey("profile-1");
   assert.equal(apiKeyStore.getProfileKey("profile-1"), null);
+});
+
+test("ApiKeyStore persists DESKTOP_MANAGED provenance for current and profile keys", () => {
+  const tmpDir = makeTempDir("saved-configs-apikey-source-");
+  const apiKeyStore = makeApiKeyStore(tmpDir);
+
+  apiKeyStore.setApiKey("sk_live_managed", "DESKTOP_MANAGED");
+  assert.deepEqual(apiKeyStore.getApiKeyRecord(), {
+    apiKey: "sk_live_managed",
+    provenance: "DESKTOP_MANAGED",
+  });
+  assert.equal(apiKeyStore.getStatus().provenance, "DESKTOP_MANAGED");
+
+  const rehydrated = makeApiKeyStore(tmpDir);
+  assert.deepEqual(rehydrated.getApiKeyRecord(), {
+    apiKey: "sk_live_managed",
+    provenance: "DESKTOP_MANAGED",
+  });
+
+  rehydrated.saveProfileKey("profile-1", "sk_live_profile_managed", "DESKTOP_MANAGED");
+  assert.deepEqual(rehydrated.getProfileKeyRecord("profile-1"), {
+    apiKey: "sk_live_profile_managed",
+    provenance: "DESKTOP_MANAGED",
+  });
+});
+
+test("ApiKeyStore treats legacy encrypted keys without provenance as USER_CREATED", () => {
+  const tmpDir = makeTempDir("saved-configs-apikey-legacy-");
+  fs.writeFileSync(
+    path.join(tmpDir, "secrets.json"),
+    JSON.stringify({
+      encryptedApiKey: Buffer.from("stub:sk_live_legacy", "utf-8").toString("base64"),
+    }),
+    "utf-8",
+  );
+
+  const apiKeyStore = makeApiKeyStore(tmpDir);
+
+  assert.deepEqual(apiKeyStore.getApiKeyRecord(), {
+    apiKey: "sk_live_legacy",
+    provenance: "USER_CREATED",
+  });
+});
+
+test("ApiKeyStore treats environment keys as USER_CREATED", () => {
+  const tmpDir = makeTempDir("saved-configs-apikey-env-");
+  const previousClosedLoopKey = process.env.CLOSEDLOOP_API_KEY;
+  const previousSymphonyKey = process.env.SYMPHONY_API_KEY;
+  process.env.CLOSEDLOOP_API_KEY = "sk_live_env";
+  delete process.env.SYMPHONY_API_KEY;
+  try {
+    const apiKeyStore = makeApiKeyStore(tmpDir);
+
+    assert.deepEqual(apiKeyStore.getApiKeyRecord(), {
+      apiKey: "sk_live_env",
+      provenance: "USER_CREATED",
+    });
+  } finally {
+    if (previousClosedLoopKey === undefined) {
+      delete process.env.CLOSEDLOOP_API_KEY;
+    } else {
+      process.env.CLOSEDLOOP_API_KEY = previousClosedLoopKey;
+    }
+    if (previousSymphonyKey === undefined) {
+      delete process.env.SYMPHONY_API_KEY;
+    } else {
+      process.env.SYMPHONY_API_KEY = previousSymphonyKey;
+    }
+  }
 });
 
 test("ApiKeyStore.deleteProfileKey is a no-op for unknown profileId", () => {

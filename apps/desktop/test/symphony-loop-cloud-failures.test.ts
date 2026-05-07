@@ -19,6 +19,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { JobStore } from "../src/main/job-store.js";
 import { LoopTokenStore } from "../src/main/loop-token-store.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
@@ -166,7 +167,7 @@ test("EXECUTE: artifact upload failure sets ARTIFACT_UPLOAD_FAILED in completed 
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -259,7 +260,7 @@ test("EXECUTE local-direct: callback failure fails fast before spawn", async () 
   const loopId = "00000000-0000-0000-0000-000000000600";
   const requestBody = {
     loopId,
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
     closedLoopAuthToken: "tok",
     prompt: "test",
     artifacts: [],
@@ -383,7 +384,7 @@ test("EXECUTE relay: event post failure logged as warning in job store", async (
       },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -500,7 +501,7 @@ test("PLAN: pre-spawn log-file failure cleans up persisted loop token", async ()
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "PLAN",
+        command: LoopCommand.Plan,
         closedLoopAuthToken: "prespawn-token",
         artifacts: [],
         repo: { fullName: `prespawn-fail/${repoName}`, branch: "main" },
@@ -579,7 +580,7 @@ test("PLAN: non-zero exit cleans up persisted loop token", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "PLAN",
+        command: LoopCommand.Plan,
         closedLoopAuthToken: "nonzero-token",
         artifacts: [],
         repo: { fullName: `nonzero-fail/${path.basename(repoPath)}`, branch: "main" },
@@ -591,6 +592,17 @@ test("PLAN: non-zero exit cleans up persisted loop token", async () => {
 
   // Wait for the error event indicating the process failed
   await waitForTerminalEvent(mock.requests, loopId);
+
+  // The token is deleted after the error event is posted (post-event cleanup
+  // continues with jobStore upsert and worktree cleanup before the synchronous
+  // deleteLoopToken call). Poll briefly to absorb that gap on slow CI runners.
+  const tokenDeadline = Date.now() + 5_000;
+  while (
+    loopTokenStore.getLoopToken(loopId) !== null &&
+    Date.now() < tokenDeadline
+  ) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
 
   assert.equal(
     loopTokenStore.getLoopToken(loopId),
@@ -651,7 +663,7 @@ test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async (t) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -685,7 +697,7 @@ test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async (t) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -744,7 +756,7 @@ test("EXECUTE: localRepoPath outside sandbox emits REPO_NOT_ALLOWED error event"
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -831,7 +843,7 @@ test("EXECUTE: fullName-resolved path outside allowedDirs emits REPO_NOT_ALLOWED
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -930,7 +942,7 @@ test("EXECUTE: postLoopEventBounded times out after 1000ms when API server hangs
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],

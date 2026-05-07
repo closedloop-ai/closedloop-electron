@@ -10,6 +10,7 @@
  * additionalRepoDisambiguator in symphony-loop-multi-repo-contract.test.ts.
  */
 
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -21,52 +22,15 @@ import { handleProcessCompletion } from "../src/server/operations/symphony-loop.
 import { setShellPathForTest } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
+  initGitRepo,
+  makeRecordingGitWorktreeProvider,
   makeMultiRepoGateway,
   makeMultiRepoTestHarness,
+  PRD_PEER_COMMANDS,
   startMockApiServer,
   waitForCompletedEvent,
   waitForTerminalEvent,
 } from "./symphony-test-utils.js";
-
-// ---------------------------------------------------------------------------
-// Call-recording fake worktree provider
-// ---------------------------------------------------------------------------
-
-/**
- * Build a call-recording WorktreeProvider. Each test should create its own
- * instance so recorded calls don't bleed across tests.
- *
- * Records all ensureWorktree calls. For additional-repo tests, filter by
- * repoPath to distinguish primary from additional repo calls.
- */
-function makeRecordingWorktreeProvider(): {
-  provider: WorktreeProvider;
-  ensureWorktreeCalls: Array<{ repoPath: string; worktreeDir: string; branchName: string; baseBranch: string }>;
-  removeCalls: Array<{ worktreeDir: string; repoPath: string; loopId?: string }>;
-} {
-  const ensureWorktreeCalls: Array<{ repoPath: string; worktreeDir: string; branchName: string; baseBranch: string }> = [];
-  const removeCalls: Array<{ worktreeDir: string; repoPath: string; loopId?: string }> = [];
-
-  const provider: WorktreeProvider = {
-    async ensureWorktree(repoPath, worktreeDir, branchName, baseBranch) {
-      ensureWorktreeCalls.push({ repoPath, worktreeDir, branchName, baseBranch });
-      await fs.mkdir(worktreeDir, { recursive: true });
-    },
-    findWorktreeForBranch() {
-      return null;
-    },
-    async removeWorktree(worktreeDir, repoPath, loopId) {
-      removeCalls.push({ worktreeDir, repoPath, loopId });
-      await fs.rm(worktreeDir, { recursive: true, force: true });
-    },
-    getCurrentBranch() {
-      return "symphony/worktree-lifecycle-test";
-    },
-    branchExists: async () => true,
-  };
-
-  return { provider, ensureWorktreeCalls, removeCalls };
-}
 
 // ---------------------------------------------------------------------------
 // Shared state and cleanup
@@ -122,7 +86,9 @@ test("ensureWorktree called for each additional repo with correct branch before 
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
 
-  const { provider, ensureWorktreeCalls } = makeRecordingWorktreeProvider();
+  const { provider, ensureWorktreeCalls } = makeRecordingGitWorktreeProvider(
+    "symphony/worktree-lifecycle-test",
+  );
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -136,7 +102,7 @@ test("ensureWorktree called for each additional repo with correct branch before 
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "PLAN",
+        command: LoopCommand.Plan,
         closedLoopAuthToken: "tok",
         artifacts: [],
         repo: {
@@ -223,7 +189,8 @@ test("removeWorktree called for additional worktree dirs when process fails", as
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
 
-  const { provider, ensureWorktreeCalls, removeCalls } = makeRecordingWorktreeProvider();
+  const { provider, ensureWorktreeCalls, removeCalls } =
+    makeRecordingGitWorktreeProvider("symphony/worktree-lifecycle-test");
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -237,7 +204,7 @@ test("removeWorktree called for additional worktree dirs when process fails", as
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "PLAN",
+        command: LoopCommand.Plan,
         closedLoopAuthToken: "tok",
         artifacts: [],
         repo: {
@@ -323,7 +290,7 @@ test("ensureWorktree throws for additional repo — cleans leaked worktree, post
     provider: baseProvider,
     ensureWorktreeCalls,
     removeCalls,
-  } = makeRecordingWorktreeProvider();
+  } = makeRecordingGitWorktreeProvider("symphony/worktree-lifecycle-test");
   const throwingProvider: WorktreeProvider = {
     ...baseProvider,
     async ensureWorktree(repoPath, worktreeDir, branchName, baseBranch, loopId) {
@@ -350,7 +317,7 @@ test("ensureWorktree throws for additional repo — cleans leaked worktree, post
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "PLAN",
+        command: LoopCommand.Plan,
         closedLoopAuthToken: "tok",
         artifacts: [],
         repo: {
@@ -389,6 +356,132 @@ test("ensureWorktree throws for additional repo — cleans leaked worktree, post
   );
 });
 
+// ---------------------------------------------------------------------------
+// Test 4: EXECUTE retry reuses retained additional-repo worktree
+// ---------------------------------------------------------------------------
+
+test("EXECUTE retry reuses retained additional-repo worktree instead of force-removing it", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "wt-lifecycle-retain-"));
+  tempPathsToClean.push(tmpDir);
+
+  const primaryRepo = path.join(tmpDir, "primary-repo");
+  const additionalRepo = path.join(tmpDir, "additional-repo");
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await Promise.all(
+    [primaryRepo, additionalRepo, worktreeParent].map((dir) =>
+      fs.mkdir(dir, { recursive: true }),
+    ),
+  );
+
+  // Simulate a retained additional-repo worktree from a prior failed/cancelled
+  // EXECUTE attempt — cleanupAdditionalWorktrees keeps it because it carries
+  // uncommitted or unique-to-HEAD changes. The retry must NOT --force-remove it.
+  const retainedAddWorktree = path.join(worktreeParent, "retained-add-worktree");
+  await fs.mkdir(retainedAddWorktree, { recursive: true });
+  await fs.writeFile(
+    path.join(retainedAddWorktree, "uncommitted-work.txt"),
+    "user changes that must survive the retry\n",
+  );
+
+  process.env.HOME = tmpDir;
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const {
+    provider: baseProvider,
+    ensureWorktreeCalls,
+    removeCalls,
+  } = makeRecordingGitWorktreeProvider("symphony/wt-lifecycle-retain");
+
+  // Override findWorktreeForBranch so the additional repo lookup returns the
+  // retained worktree path (the primary repo lookup keeps returning null so
+  // the primary worktree is created fresh and is not part of this assertion).
+  const provider: WorktreeProvider = {
+    ...baseProvider,
+    findWorktreeForBranch(repoPath, branchName) {
+      if (repoPath === additionalRepo && branchName.startsWith("symphony/")) {
+        return retainedAddWorktree;
+      }
+      return null;
+    },
+  };
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+  const server = await createTestGateway(tmpDir, mock.port, provider);
+
+  const loopId = "00000000-0000-0000-0000-000000007006";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: LoopCommand.Execute,
+        closedLoopAuthToken: "tok",
+        prompt: "Execute the implementation plan",
+        artifacts: [],
+        artifactSlug: "PLAN-99",
+        repo: {
+          fullName: `wt-lifecycle-test/${path.basename(primaryRepo)}`,
+          branch: "main",
+        },
+        additionalRepos: [
+          { localRepoPath: additionalRepo, fullName: "acme/add-one", branch: "feature-branch" },
+        ],
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    "EXECUTE with a retained additional worktree should succeed",
+  );
+
+  await waitForCompletedEvent(mock.requests, loopId);
+
+  // The retained worktree must NEVER be force-removed.
+  const retainedRemovals = removeCalls.filter(
+    (call) => call.worktreeDir === retainedAddWorktree,
+  );
+  assert.equal(
+    retainedRemovals.length,
+    0,
+    `Retained additional worktree must not be removed; got ${retainedRemovals.length} removeWorktree call(s) for ${retainedAddWorktree}`,
+  );
+
+  // Reuse path also skips ensureWorktree for the additional repo: the prior
+  // attempt's git worktree is already on disk with the right branch.
+  const additionalEnsureCalls = ensureWorktreeCalls.filter(
+    (call) => call.repoPath === additionalRepo,
+  );
+  assert.equal(
+    additionalEnsureCalls.length,
+    0,
+    `Reused additional worktree must not be re-created via ensureWorktree; got ${additionalEnsureCalls.length} call(s)`,
+  );
+
+  // Sanity: the retained worktree directory still exists with its uncommitted file.
+  const survived = await fs
+    .readFile(path.join(retainedAddWorktree, "uncommitted-work.txt"), "utf-8")
+    .catch(() => null);
+  assert.equal(
+    survived,
+    "user changes that must survive the retry\n",
+    "Uncommitted work in the retained worktree must survive an EXECUTE retry",
+  );
+});
+
 test("handleProcessCompletion cleans additional worktrees when PLAN is cancelled during post-processing", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "wt-lifecycle-cancel-"));
   tempPathsToClean.push(tmpDir);
@@ -416,7 +509,7 @@ test("handleProcessCompletion cleans additional worktrees when PLAN is cancelled
     id: "job-wt-lifecycle-cancel",
     kind: "SYMPHONY_LOOP",
     loopId,
-    command: "PLAN",
+    command: LoopCommand.Plan,
     status: "CANCEL_PENDING",
     startedAt: now,
     updatedAt: now,
@@ -436,6 +529,9 @@ test("handleProcessCompletion cleans additional worktrees when PLAN is cancelled
     additionalWorktrees.map(async ({ dir, repoPath }) => {
       await fs.mkdir(dir, { recursive: true });
       await fs.mkdir(repoPath, { recursive: true });
+      // Initialize as a real git repo so the unified cleanup logic can verify
+      // the worktree carries no code changes and is safe to remove.
+      await initGitRepo(dir, { allowEmpty: true });
     }),
   );
 
@@ -463,7 +559,7 @@ test("handleProcessCompletion cleans additional worktrees when PLAN is cancelled
     0,
     {
       loopId,
-      command: "PLAN",
+      command: LoopCommand.Plan,
       closedLoopAuthToken: "tok",
     } as Parameters<typeof handleProcessCompletion>[1],
     "http://127.0.0.1:9",
@@ -500,3 +596,139 @@ test("handleProcessCompletion cleans additional worktrees when PLAN is cancelled
   assert.equal(finalJob?.status, "CANCELLED");
 });
 
+// ---------------------------------------------------------------------------
+// AC-007: cleanupAdditionalWorktrees emits NO LoopEvents — neither when it
+// removes a clean peer worktree on success, nor when the underlying remove
+// fails. Worktree lifecycle is gateway-internal noise; the user-visible
+// event channel must stay quiet.
+//
+// Tested for the new peer-enabled commands (GENERATE_PRD,
+// REQUEST_PRD_CHANGES). PLAN/EXECUTE inherit identical wiring through
+// cleanupAdditionalWorktrees so the AC-007 contract holds for them too.
+// ---------------------------------------------------------------------------
+
+for (const command of PRD_PEER_COMMANDS) {
+  test(`${command}: cleanupAdditionalWorktrees emits no LoopEvents on successful peer-worktree teardown`, async () => {
+    const tmpDir = await fs.mkdtemp(
+      path.join(
+        os.tmpdir(),
+        `wt-prd-cleanup-no-events-${command.toLowerCase()}-`,
+      ),
+    );
+    tempPathsToClean.push(tmpDir);
+
+    const primaryRepo = path.join(tmpDir, "primary-repo");
+    await fs.mkdir(primaryRepo, { recursive: true });
+    const peerRepo = path.join(tmpDir, "peer");
+    await fs.mkdir(peerRepo, { recursive: true });
+
+    const worktreeParent = path.join(tmpDir, "worktrees");
+    await fs.mkdir(worktreeParent, { recursive: true });
+
+    process.env.HOME = tmpDir;
+    process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+    process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+    // Direct-claude pipeline (no run-loop.sh) — exit 0 → completed terminal.
+    const fakeBin = path.join(tmpDir, "fake-bin");
+    await fs.mkdir(fakeBin, { recursive: true });
+    await fs.writeFile(
+      path.join(fakeBin, "claude"),
+      '#!/bin/sh\necho \'{"type":"result"}\'\nexit 0\n',
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+    setShellPathForTest();
+
+    const { provider, removeCalls } = makeRecordingGitWorktreeProvider(
+      "symphony/worktree-prd-cleanup-test",
+    );
+
+    const mock = await startMockApiServer();
+    mockServersToClose.push(mock.server);
+    const server = await createTestGateway(tmpDir, mock.port, provider);
+
+    const loopId =
+      command === LoopCommand.GeneratePrd
+        ? "00000000-0000-0000-0000-000000008101"
+        : "00000000-0000-0000-0000-000000008102";
+
+    const response = await fetch(
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          loopId,
+          command,
+          closedLoopAuthToken: "tok",
+          artifacts:
+            command === LoopCommand.RequestPrdChanges
+              ? [
+                  {
+                    id: "art-1",
+                    type: "prd",
+                    title: "Existing PRD",
+                    content: "PRD body",
+                  },
+                ]
+              : [],
+          prompt: "Generate / amend the PRD",
+          repo: {
+            fullName: `prd-wt/${path.basename(primaryRepo)}`,
+            branch: "main",
+          },
+          additionalRepos: [
+            { fullName: "org/peer", localRepoPath: peerRepo, branch: "main" },
+          ],
+        }),
+      },
+    );
+
+    assert.equal(response.status, 200);
+
+    // Wait for terminal event so handleProcessCompletion (and its peer
+    // cleanup) finishes before we inspect the event log.
+    const terminalEvent = await waitForTerminalEvent(mock.requests, loopId);
+    assert.equal(
+      terminalEvent.type,
+      "completed",
+      `${command}: expected terminal=completed, got ${terminalEvent.type}: ${JSON.stringify(terminalEvent)}`,
+    );
+
+    // The peer worktree must have been torn down. Cleanup of additional
+    // worktrees is async and runs after the terminal event is posted; poll
+    // until the remove call lands or the deadline elapses (matches Test 2's
+    // "removeWorktree on process failure" pattern above).
+    const cleanupDeadline = Date.now() + 5_000;
+    while (
+      Date.now() < cleanupDeadline &&
+      !removeCalls.some((c) => c.repoPath === peerRepo)
+    ) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    }
+    assert.ok(
+      removeCalls.some((c) => c.repoPath === peerRepo),
+      `${command}: peer worktree must be removed after success`,
+    );
+
+    // None of the posted LoopEvents should mention the peer worktree
+    // teardown — those are gateway-log only per AC-007.
+    const events = mock.requests.filter((r) =>
+      r.url.includes(`/loops/${loopId}/events`),
+    );
+    for (const e of events) {
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(e.body) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const message = String(parsed.message ?? "");
+      assert.ok(
+        !/cleanup|removed|removing|teardown|reaped/i.test(message),
+        `${command}: cleanup must not emit user-visible events; got message=${message}`,
+      );
+    }
+  });
+}

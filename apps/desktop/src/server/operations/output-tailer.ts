@@ -1,7 +1,8 @@
-import { openSync, readSync, closeSync, existsSync } from "node:fs";
+import { openSync, readSync, closeSync, existsSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
 import { gatewayLog } from "../../main/gateway-logger.js";
+import { resolveClaudeOutputPath } from "../../main/token-usage.js";
 
 export function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -211,6 +212,7 @@ export function startOutputTailer(
   token: string,
   initialByteOffset: number,
   onOffset?: (offset: number) => void,
+  claudeWorkDir?: string,
 ): { stop: () => void; flush: () => Promise<void> } {
   const pollIntervalMs = Number(process.env.CLOSEDLOOP_TAILER_POLL_MS) || DEFAULT_POLL_MS;
   const throttleMs = Number(process.env.CLOSEDLOOP_TAILER_THROTTLE_MS) || DEFAULT_THROTTLE_MS;
@@ -240,6 +242,57 @@ export function startOutputTailer(
   };
   /** Single-flight guard: prevents overlapping pollOnce executions. */
   let inFlightPoll: Promise<void> | null = null;
+
+  function readFileIdentity(candidatePath: string): string | null {
+    try {
+      const stats = statSync(candidatePath);
+      if (!stats.isFile()) {
+        return null;
+      }
+      return `${stats.dev}:${stats.ino}`;
+    } catch {
+      return null;
+    }
+  }
+
+  function resolveReadableJsonlPath(): string | null {
+    if (existsSync(jsonlPath)) {
+      return jsonlPath;
+    }
+    if (claudeWorkDir) {
+      return resolveClaudeOutputPath(claudeWorkDir);
+    }
+    return null;
+  }
+
+  const initialReadableJsonlPath = resolveReadableJsonlPath();
+  let activeJsonlPath = initialReadableJsonlPath ?? jsonlPath;
+  let activeFileIdentity =
+    initialReadableJsonlPath === null
+      ? null
+      : readFileIdentity(initialReadableJsonlPath);
+
+  function updateActiveJsonlPath(candidatePath: string): boolean {
+    const identity = readFileIdentity(candidatePath);
+    if (identity === null) {
+      return false;
+    }
+    if (identity !== activeFileIdentity) {
+      readByteOffset = 0;
+      pendingRemainder = Buffer.alloc(0);
+      committedByteOffset = 0;
+      tokenTotals = {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheCreationInputTokens: 0,
+        cacheReadInputTokens: 0,
+      };
+      lastSentAt = null;
+    }
+    activeJsonlPath = candidatePath;
+    activeFileIdentity = identity;
+    return true;
+  }
 
   function reportCommit(framedEndExclusive: number): void {
     if (framedEndExclusive > committedByteOffset) {
@@ -283,10 +336,12 @@ export function startOutputTailer(
     if (stopped) return;
     if (authRetriesExhausted && !forceAttempt) return;
     if (!ignoreBackoff && nextAuthRetryAt > Date.now()) return;
-    if (!existsSync(jsonlPath)) return;
+    const readableJsonlPath = resolveReadableJsonlPath();
+    if (readableJsonlPath === null) return;
+    if (!updateActiveJsonlPath(readableJsonlPath)) return;
     let fd: number | null = null;
     try {
-      fd = openSync(jsonlPath, "r");
+      fd = openSync(activeJsonlPath, "r");
       const chunkSize = 65536;
       const chunk = Buffer.alloc(chunkSize);
       let bytesRead: number;

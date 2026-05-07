@@ -20,6 +20,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { TELEMETRY_MAX_FIELD_BYTES } from "../src/main/telemetry-protocol.js";
@@ -225,7 +226,7 @@ test("telemetry: job.failed emitted with correct category/trace/diagnostics on p
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "DECOMPOSE",
+        command: LoopCommand.Decompose,
         closedLoopAuthToken: "tok",
         artifacts: [{ type: "PRD", content: "PRD content for telemetry test" }],
         prompt: "Decompose this feature into tasks",
@@ -331,7 +332,7 @@ test("telemetry: job.completed emitted with correct category/trace on process ex
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "DECOMPOSE",
+        command: LoopCommand.Decompose,
         closedLoopAuthToken: "tok",
         artifacts: [{ type: "PRD", content: "PRD content for telemetry test" }],
         prompt: "Decompose this feature into tasks",
@@ -415,7 +416,7 @@ test("telemetry: preflight.binary_not_found emitted when claude is absent from P
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "DECOMPOSE",
+        command: LoopCommand.Decompose,
         closedLoopAuthToken: "tok",
         artifacts: [{ type: "PRD", content: "PRD content for telemetry test" }],
         prompt: "Decompose this feature into tasks",
@@ -557,7 +558,7 @@ test("telemetry: preflight.spawn_failed emitted when log file open fails (EISDIR
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "PLAN",
+        command: LoopCommand.Plan,
         closedLoopAuthToken: "tok",
         artifacts: [],
         repo: {
@@ -643,7 +644,7 @@ test("telemetry: commandId and operationId from request headers appear in trace 
       },
       body: JSON.stringify({
         loopId,
-        command: "DECOMPOSE",
+        command: LoopCommand.Decompose,
         closedLoopAuthToken: "tok",
         artifacts: [{ type: "PRD", content: "PRD content for telemetry test" }],
         prompt: "Decompose this feature into tasks",

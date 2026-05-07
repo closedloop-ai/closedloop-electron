@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import os from "node:os";
-import { describe, test } from "node:test";
+import { afterEach, describe, test } from "node:test";
 import { OperationDispatcher } from "../src/server/operation-dispatcher.js";
-import { registerHealthCheckRoutes } from "../src/server/operations/health-check.js";
+import {
+  _applyPluginVersionChecksForTesting,
+  registerHealthCheckRoutes,
+} from "../src/server/operations/health-check.js";
 import type { McpDetectionResult } from "../src/server/operations/mcp-detection.js";
 import type { ProcessManager } from "../src/server/process-manager.js";
 
@@ -13,6 +16,41 @@ type CapturedResponse = {
   get statusCode(): number;
   get ended(): boolean;
 };
+
+type CheckResultPayload = {
+  id: string;
+  label: string;
+  required: boolean;
+  passed: boolean;
+  version?: string;
+  error?: string;
+  remediation?: string;
+};
+
+const CLOSEDLOOP_PLUGINS = [
+  { folder: "code", key: "code@closedloop-ai", label: "Symphony Plugin" },
+  {
+    folder: "self-learning",
+    key: "self-learning@closedloop-ai",
+    label: "Self-Learning Plugin",
+  },
+  { folder: "judges", key: "judges@closedloop-ai", label: "Judges Plugin" },
+  {
+    folder: "code-review",
+    key: "code-review@closedloop-ai",
+    label: "Code Review Plugin",
+  },
+  {
+    folder: "platform",
+    key: "platform@closedloop-ai",
+    label: "Platform Plugin",
+  },
+] as const;
+const originalFetch = globalThis.fetch;
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
 
 function makeResponse(): CapturedResponse {
   let statusCode = 0;
@@ -56,16 +94,22 @@ function makeResponse(): CapturedResponse {
 
 async function dispatchHealthCheck(
   dispatcher: OperationDispatcher,
-  expectedMcpUrl?: string
+  options: { expectedMcpUrl?: string; latestVersion?: string } = {}
 ): Promise<CapturedResponse> {
   const captured = makeResponse();
+  const query = new URLSearchParams();
+  if (options.expectedMcpUrl) {
+    query.set("expectedMcpUrl", options.expectedMcpUrl);
+  }
+  if (options.latestVersion !== undefined) {
+    query.set("latestVersion", options.latestVersion);
+  }
+
   await dispatcher.dispatch({
     method: "GET",
     pathname: "/api/gateway/health-check",
     params: {},
-    query: new URLSearchParams(
-      expectedMcpUrl ? [["expectedMcpUrl", expectedMcpUrl]] : []
-    ),
+    query,
     rawBody: Buffer.alloc(0),
     body: "",
     request: {} as IncomingMessage,
@@ -76,6 +120,63 @@ async function dispatchHealthCheck(
 
 function parsePayload(captured: CapturedResponse): Record<string, unknown> {
   return JSON.parse(captured.chunks.join("")) as Record<string, unknown>;
+}
+
+function getChecks(payload: Record<string, unknown>): CheckResultPayload[] {
+  assert.ok(Array.isArray(payload.checks));
+  return payload.checks as CheckResultPayload[];
+}
+
+function findAppVersion(payload: Record<string, unknown>): CheckResultPayload | undefined {
+  return getChecks(payload).find((check) => check.id === "app-version");
+}
+
+function buildInstalledPluginVersions(version: string): Record<string, string> {
+  return Object.fromEntries(
+    CLOSEDLOOP_PLUGINS.map((plugin) => [plugin.key, version])
+  );
+}
+
+function buildPassingPluginChecks(): CheckResultPayload[] {
+  return CLOSEDLOOP_PLUGINS.map((plugin) => ({
+    id: `plugin-${plugin.folder}`,
+    label: plugin.label,
+    required: true,
+    passed: true,
+  }));
+}
+
+function findPluginCheck(
+  checks: CheckResultPayload[],
+  folder: string
+): CheckResultPayload | undefined {
+  return checks.find((check) => check.id === `plugin-${folder}`);
+}
+
+function mockPluginManifestVersion(version: string): void {
+  globalThis.fetch = (async () => Response.json({ version })) as typeof fetch;
+}
+
+const unavailableMcp = async (): Promise<McpDetectionResult> => ({
+  available: false,
+  serverName: null,
+  matchedUrl: null,
+  checkedAt: "2026-04-12T00:00:00.000Z",
+  closedloopAvailable: false,
+});
+
+function registerHealthCheckWithAppVersion(
+  dispatcher: OperationDispatcher,
+  getAppVersion?: () => string | undefined
+): void {
+  registerHealthCheckRoutes(
+    dispatcher,
+    {} as unknown as ProcessManager,
+    () => os.tmpdir(),
+    unavailableMcp,
+    undefined,
+    getAppVersion
+  );
 }
 
 describe("registerHealthCheckRoutes — MCP injection", () => {
@@ -110,12 +211,12 @@ describe("registerHealthCheckRoutes — MCP injection", () => {
       detectMcp
     );
 
-    const captured = await dispatchHealthCheck(dispatcher, expectedMcpUrl);
+    const captured = await dispatchHealthCheck(dispatcher, { expectedMcpUrl });
     assert.equal(captured.statusCode, 200);
     assert.equal(captured.ended, true);
 
     const payload = parsePayload(captured);
-    assert.ok(Array.isArray(payload.checks));
+    getChecks(payload);
     assert.equal(typeof payload.allRequiredPassed, "boolean");
 
     const mcpServers = payload.mcpServers as Record<string, unknown>;
@@ -147,7 +248,7 @@ describe("registerHealthCheckRoutes — MCP injection", () => {
       detectMcp
     );
 
-    await dispatchHealthCheck(dispatcher, expectedMcpUrl);
+    await dispatchHealthCheck(dispatcher, { expectedMcpUrl });
     assert.equal(calls.length, 2);
     assert.deepEqual(calls, [
       { provider: "claude", expectedMcpUrl },
@@ -172,7 +273,7 @@ describe("registerHealthCheckRoutes — MCP injection", () => {
       detectMcp
     );
 
-    const captured = await dispatchHealthCheck(dispatcher, expectedMcpUrl);
+    const captured = await dispatchHealthCheck(dispatcher, { expectedMcpUrl });
     const payload = parsePayload(captured);
     const mcpServers = payload.mcpServers as Record<
       string,
@@ -184,5 +285,175 @@ describe("registerHealthCheckRoutes — MCP injection", () => {
     assert.equal(mcpServers.codex.available, false);
     assert.equal(mcpServers.codex.serverName, null);
     assert.equal(mcpServers.codex.closedloopAvailable, false);
+  });
+});
+
+describe("app-version check", () => {
+  test("omits app-version when latestVersion is absent", async () => {
+    const dispatcher = new OperationDispatcher();
+    registerHealthCheckWithAppVersion(dispatcher, () => "1.0.0");
+
+    const captured = await dispatchHealthCheck(dispatcher);
+    const payload = parsePayload(captured);
+
+    assert.equal(findAppVersion(payload), undefined);
+  });
+
+  test("passes when latestVersion equals currentVersion", async () => {
+    const dispatcher = new OperationDispatcher();
+    registerHealthCheckWithAppVersion(dispatcher, () => "1.0.0");
+
+    const captured = await dispatchHealthCheck(dispatcher, { latestVersion: "1.0.0" });
+    const appVersion = findAppVersion(parsePayload(captured));
+
+    assert.deepEqual(appVersion, {
+      id: "app-version",
+      label: "Gateway Version",
+      required: true,
+      passed: true,
+      version: "1.0.0",
+    });
+  });
+
+  test("reports update availability as a required health check failure", async () => {
+    const dispatcher = new OperationDispatcher();
+    registerHealthCheckWithAppVersion(dispatcher, () => "1.0.0");
+
+    const captured = await dispatchHealthCheck(dispatcher, { latestVersion: "2.0.0" });
+    const payload = parsePayload(captured);
+    const appVersion = findAppVersion(payload);
+
+    assert.equal(appVersion?.required, true);
+    assert.equal(appVersion?.passed, false);
+    assert.equal(appVersion?.version, "1.0.0");
+    assert.equal(appVersion?.error, "Update available: 2.0.0");
+    assert.ok(appVersion?.remediation);
+    assert.equal(payload.allRequiredPassed, false);
+  });
+
+  test("omits app-version when getAppVersion is not provided", async () => {
+    const dispatcher = new OperationDispatcher();
+    registerHealthCheckWithAppVersion(dispatcher);
+
+    const captured = await dispatchHealthCheck(dispatcher, { latestVersion: "2.0.0" });
+    const payload = parsePayload(captured);
+
+    assert.equal(findAppVersion(payload), undefined);
+  });
+
+  test("omits app-version when getAppVersion returns undefined", async () => {
+    const dispatcher = new OperationDispatcher();
+    registerHealthCheckWithAppVersion(dispatcher, () => undefined);
+
+    const captured = await dispatchHealthCheck(dispatcher, { latestVersion: "2.0.0" });
+    const payload = parsePayload(captured);
+
+    assert.equal(findAppVersion(payload), undefined);
+  });
+
+  test("reports unrecognized formats without failing the health check", async () => {
+    const cases: Array<{
+      name: string;
+      currentVersion: string;
+      latestVersion: string;
+    }> = [
+      { name: "current", currentVersion: "dev-build", latestVersion: "2.0.0" },
+      { name: "latest", currentVersion: "1.0.0", latestVersion: "latest" },
+    ];
+
+    for (const testCase of cases) {
+      const dispatcher = new OperationDispatcher();
+      registerHealthCheckWithAppVersion(dispatcher, () => testCase.currentVersion);
+
+      const captured = await dispatchHealthCheck(dispatcher, {
+        latestVersion: testCase.latestVersion,
+      });
+      const appVersion = findAppVersion(parsePayload(captured));
+
+      assert.equal(appVersion?.required, true, testCase.name);
+      assert.equal(appVersion?.passed, true, testCase.name);
+      assert.match(appVersion?.error ?? "", /unrecognized/i, testCase.name);
+    }
+  });
+
+  test("normalizes a leading v prefix before comparing and formatting the update error", async () => {
+    const dispatcher = new OperationDispatcher();
+    registerHealthCheckWithAppVersion(dispatcher, () => "1.0.0");
+
+    const captured = await dispatchHealthCheck(dispatcher, { latestVersion: "v2.0.0" });
+    const appVersion = findAppVersion(parsePayload(captured));
+
+    assert.equal(appVersion?.required, true);
+    assert.equal(appVersion?.passed, false);
+    assert.equal(appVersion?.version, "1.0.0");
+    assert.equal(appVersion?.error, "Update available: 2.0.0");
+  });
+});
+
+describe("plugin-version check", () => {
+  test("keeps up-to-date plugin rows required and passing with installed versions", async () => {
+    mockPluginManifestVersion("1.0.0");
+
+    const checks = await _applyPluginVersionChecksForTesting(
+      buildPassingPluginChecks(),
+      buildInstalledPluginVersions("1.0.0")
+    );
+
+    assert.equal(
+      checks.some((check) => check.id === "plugin-versions"),
+      false
+    );
+    assert.deepEqual(findPluginCheck(checks, "code"), {
+      id: "plugin-code",
+      label: "Symphony Plugin",
+      required: true,
+      passed: true,
+      version: "1.0.0",
+    });
+  });
+
+  test("marks outdated plugin rows as required health check failures", async () => {
+    mockPluginManifestVersion("2.0.0");
+
+    const checks = await _applyPluginVersionChecksForTesting(
+      buildPassingPluginChecks(),
+      buildInstalledPluginVersions("1.0.0")
+    );
+    const codePlugin = findPluginCheck(checks, "code");
+
+    assert.equal(
+      checks.some((check) => check.id === "plugin-versions"),
+      false
+    );
+    assert.equal(codePlugin?.label, "Symphony Plugin");
+    assert.equal(codePlugin?.required, true);
+    assert.equal(codePlugin?.passed, false);
+    assert.equal(codePlugin?.version, "1.0.0");
+    assert.equal(codePlugin?.error, "Update available: 2.0.0");
+    assert.match(
+      codePlugin?.remediation ?? "",
+      /claude plugin update code@closedloop-ai/
+    );
+  });
+
+  test("marks unverifiable plugin rows as required health check failures", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("offline");
+    }) as typeof fetch;
+
+    const checks = await _applyPluginVersionChecksForTesting(
+      buildPassingPluginChecks(),
+      buildInstalledPluginVersions("1.0.0")
+    );
+    const codePlugin = findPluginCheck(checks, "code");
+
+    assert.equal(
+      checks.some((check) => check.id === "plugin-versions"),
+      false
+    );
+    assert.equal(codePlugin?.label, "Symphony Plugin");
+    assert.equal(codePlugin?.required, true);
+    assert.equal(codePlugin?.passed, false);
+    assert.equal(codePlugin?.error, "Could not verify latest version");
   });
 });

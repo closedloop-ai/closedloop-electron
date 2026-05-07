@@ -19,6 +19,7 @@ export class DesktopWindow {
       width: 1280,
       height: 800,
       show: false,
+      backgroundColor: "#0f1723",
       webPreferences: {
         contextIsolation: true,
         sandbox: false,

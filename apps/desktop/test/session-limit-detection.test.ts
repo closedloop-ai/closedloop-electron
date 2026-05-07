@@ -39,9 +39,12 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-function writeJsonl(lines: Record<string, unknown>[]): void {
+function writeJsonl(
+  lines: Record<string, unknown>[],
+  filename = "claude-output.jsonl",
+): void {
   const content = lines.map((l) => JSON.stringify(l)).join("\n");
-  fs.writeFileSync(path.join(tmpDir, "claude-output.jsonl"), content);
+  fs.writeFileSync(path.join(tmpDir, filename), content);
 }
 
 // ---------------------------------------------------------------------------
@@ -227,6 +230,51 @@ describe("detectSessionLimitFromJsonl", () => {
     assert.strictEqual(
       detectSessionLimitFromJsonl(tmpDir),
       "Prompt is too long",
+    );
+  });
+
+  test("reads a sidecar-selected renamed JSONL file", () => {
+    writeJsonl([
+      {
+        type: "result",
+        subtype: "error",
+        result: "Prompt is too long",
+        is_error: true,
+      },
+    ], "claude-output-run-1.jsonl");
+    fs.writeFileSync(
+      path.join(tmpDir, "claude-output.name.txt"),
+      "claude-output-run-1.jsonl\n",
+    );
+
+    assert.strictEqual(
+      detectSessionLimitFromJsonl(tmpDir),
+      "Prompt is too long",
+    );
+  });
+
+  test("empty sidecar reads fixed-path current JSONL instead of stale renamed output", () => {
+    writeJsonl([
+      {
+        type: "result",
+        subtype: "error",
+        result: "authentication_error: stale prior run",
+        is_error: true,
+      },
+    ], "claude-output-stale.jsonl");
+    writeJsonl([
+      {
+        type: "result",
+        subtype: "error",
+        result: "context limit reached",
+        is_error: true,
+      },
+    ]);
+    fs.writeFileSync(path.join(tmpDir, "claude-output.name.txt"), "");
+
+    assert.strictEqual(
+      detectSessionLimitFromJsonl(tmpDir),
+      "context limit reached",
     );
   });
 });
@@ -441,6 +489,109 @@ describe("detectAuthChallengeFromJsonl", () => {
       { type: "result", subtype: "error", result: "Error: context limit reached, please start a new conversation", is_error: true },
     ]);
     assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
+  });
+
+  // Synthetic API-error entries (isApiErrorMessage: true)
+
+  test("detects synthetic rate_limit_error entry", () => {
+    writeJsonl([
+      { type: "assistant", isApiErrorMessage: true, error: "rate_limit_error", apiErrorStatus: 429 },
+    ]);
+    const result = detectAuthChallengeFromJsonl(tmpDir);
+    assert.ok(result);
+    assert.ok(result.includes("rate_limit_error"));
+  });
+
+  test("detects synthetic authentication_error entry", () => {
+    writeJsonl([
+      { type: "assistant", isApiErrorMessage: true, error: "authentication_error", apiErrorStatus: 401 },
+    ]);
+    const result = detectAuthChallengeFromJsonl(tmpDir);
+    assert.ok(result);
+    assert.ok(result.includes("authentication_error"));
+  });
+
+  test("ignores synthetic entry without isApiErrorMessage flag", () => {
+    writeJsonl([
+      { type: "assistant", error: "rate_limit_error", apiErrorStatus: 429 },
+    ]);
+    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
+  });
+
+  test("ignores synthetic entry when isApiErrorMessage is false", () => {
+    writeJsonl([
+      { type: "assistant", isApiErrorMessage: false, error: "rate_limit_error", apiErrorStatus: 429 },
+    ]);
+    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
+  });
+
+  test("ignores synthetic entry with non-auth error", () => {
+    writeJsonl([
+      { type: "assistant", isApiErrorMessage: true, error: "Prompt is too long" },
+    ]);
+    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
+  });
+
+  test("detects synthetic entry in mixed JSONL alongside success result", () => {
+    writeJsonl([
+      { type: "result", subtype: "success", result: "", is_error: false },
+      { type: "assistant", isApiErrorMessage: true, error: "rate_limit_error", apiErrorStatus: 429 },
+    ]);
+    const result = detectAuthChallengeFromJsonl(tmpDir);
+    assert.ok(result);
+    assert.ok(result.includes("rate_limit_error"));
+  });
+
+  test("reads a sidecar-selected renamed JSONL file", () => {
+    writeJsonl([
+      {
+        type: "result",
+        subtype: "error",
+        result: "authentication_error: Invalid bearer token",
+        is_error: true,
+      },
+    ], "claude-output-run-1.jsonl");
+    fs.writeFileSync(
+      path.join(tmpDir, "claude-output.name.txt"),
+      "claude-output-run-1.jsonl\n",
+    );
+
+    assert.strictEqual(
+      detectAuthChallengeFromJsonl(tmpDir),
+      "authentication_error: Invalid bearer token",
+    );
+  });
+
+  test("stale sidecar falls back to newest renamed JSONL file", () => {
+    const older = path.join(tmpDir, "claude-output-old.jsonl");
+    const newer = path.join(tmpDir, "claude-output-new.jsonl");
+    writeJsonl([
+      {
+        type: "result",
+        subtype: "error",
+        result: "authentication_error: old",
+        is_error: true,
+      },
+    ], path.basename(older));
+    writeJsonl([
+      {
+        type: "result",
+        subtype: "error",
+        result: "rate_limit_error: newest",
+        is_error: true,
+      },
+    ], path.basename(newer));
+    fs.utimesSync(older, new Date(1000), new Date(1000));
+    fs.utimesSync(newer, new Date(2000), new Date(2000));
+    fs.writeFileSync(
+      path.join(tmpDir, "claude-output.name.txt"),
+      "claude-output-missing.jsonl\n",
+    );
+
+    assert.strictEqual(
+      detectAuthChallengeFromJsonl(tmpDir),
+      "rate_limit_error: newest",
+    );
   });
 });
 

@@ -10,7 +10,10 @@ import { DesktopGatewayServer } from "../src/server/server.js";
 import { Observability } from "../src/main/observability.js";
 import type { EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
 import { saveCodexChatSession } from "../src/server/operations/codex.js";
-import { _setRunCommandForTesting } from "../src/server/operations/health-check.js";
+import {
+  _setKnownBinaryLocationsForTesting,
+  _setRunCommandForTesting,
+} from "../src/server/operations/health-check.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { SymphonyDirNotConfiguredError, tryAssertRepoAllowed, tryAssertPathAllowed } from "../src/server/operations/symphony-utils.js";
@@ -24,8 +27,11 @@ const childPidsToKill: number[] = [];
 const originalSymphonyWorktreeParentDir = process.env.SYMPHONY_WORKTREE_PARENT_DIR;
 const originalHome = process.env.HOME;
 const originalPath = process.env.PATH;
+const originalFetch = globalThis.fetch;
 
 afterEach(async () => {
+  globalThis.fetch = originalFetch;
+
   if (originalSymphonyWorktreeParentDir === undefined) {
     delete process.env.SYMPHONY_WORKTREE_PARENT_DIR;
   } else {
@@ -107,6 +113,8 @@ test("returns health contract with active port and CORS headers", async () => {
     machineName: "test-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    getGatewayId: () => "019dd8f5-5a1a-4bce-ae72-a3c973850f81",
+    getOnboardingCompleted: () => true,
     discoveryFilePath: discoveryFile
   });
   serversToClose.push(server);
@@ -116,9 +124,17 @@ test("returns health contract with active port and CORS headers", async () => {
   assert.equal(healthResponse.status, 200);
   assert.equal(healthResponse.headers.get("access-control-allow-origin"), "https://app.symphony.com");
 
-  const healthBody = (await healthResponse.json()) as { status: string; port: number; machineName: string };
+  const healthBody = (await healthResponse.json()) as {
+    status: string;
+    port: number;
+    machineName: string;
+    gatewayId?: string;
+    onboardingCompleted?: boolean;
+  };
   assert.equal(healthBody.status, "ok");
   assert.equal(healthBody.machineName, "test-machine");
+  assert.equal(healthBody.gatewayId, "019dd8f5-5a1a-4bce-ae72-a3c973850f81");
+  assert.equal(healthBody.onboardingCompleted, true);
   assert.equal(healthBody.port, server.getActivePort());
 
   const discoveryPort = await fs.readFile(discoveryFile, "utf-8");
@@ -3479,6 +3495,8 @@ test("symphony/status returns IN_PROGRESS when state.json says COMPLETED but pro
 async function createHealthCheckFixture(
   pythonBinaryContent: string | null
 ): Promise<{ tmpDir: string; binDir: string; symphonyDir: string }> {
+  mockClosedLoopPluginManifestFetch("1.0.0");
+
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-python-hc-"));
   tempPathsToClean.push(tmpDir);
 
@@ -3540,6 +3558,31 @@ async function createHealthCheckFixture(
   );
 
   return { tmpDir, binDir, symphonyDir };
+}
+
+function mockClosedLoopPluginManifestFetch(version: string): void {
+  const passthroughFetch = globalThis.fetch;
+  globalThis.fetch = (async (
+    input: RequestInfo | URL,
+    init?: RequestInit
+  ): Promise<Response> => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+    if (
+      url.startsWith(
+        "https://raw.githubusercontent.com/closedloop-ai/claude-plugins/main/plugins/"
+      )
+    ) {
+      return Response.json({ version });
+    }
+
+    return passthroughFetch(input, init);
+  }) as typeof fetch;
 }
 
 test("python3 health check: passes for version 3.11.0 (control)", async () => {
@@ -3805,6 +3848,10 @@ test("python3 health check: fails for unparseable version string", async () => {
 // ---- Phase 1 tests: claude-cli rich diagnostics ----
 
 test("claude-cli ENOENT with no foundAt: error is Not found, remediation mentions npm install", async () => {
+  // Hide the KNOWN_CLAUDE_LOCATIONS sweep so the host's installed claude
+  // (e.g. /opt/homebrew/bin/claude on a developer Mac) cannot leak into the
+  // foundAt[] list — this test is asserting the truly-not-installed state.
+  _setKnownBinaryLocationsForTesting({ claude: [] });
   const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
     '#!/bin/sh\necho "Python 3.11.0"\n'
   );
@@ -3842,6 +3889,7 @@ test("claude-cli ENOENT with no foundAt: error is Not found, remediation mention
   assert.equal(check.passed, false);
   assert.equal(check.error, "Not found");
   assert.ok(check.remediation?.includes("npm install"), `remediation should mention npm install, got: ${check.remediation}`);
+  _setKnownBinaryLocationsForTesting(null);
 });
 
 test("claude-cli ENOENT with foundAt: error mentions path, remediation mentions Add to PATH", async () => {

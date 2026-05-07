@@ -2,6 +2,7 @@ import { TelemetryService, type EnrichedTelemetryEvent } from "./telemetry-servi
 import { PostHogAnalytics } from "./posthog-analytics.js";
 import { gatewayLog } from "./gateway-logger.js";
 import type {
+  ExecutePlanSourceDiagnostics,
   TelemetryCategory,
   TelemetryDiagnostics,
   TelemetryEmitter,
@@ -229,6 +230,18 @@ export class Observability {
     Observability.capturePostHog("desktop_connection_lost", { reason });
   }
 
+  /** Emits a redacted diagnostic when Desktop PoP cannot sign a managed-key request. */
+  static desktopPopUnavailable(surface: string, reason: string): void {
+    Observability.emitTelemetry(
+      "warn",
+      "desktop_pop.unavailable",
+      "Desktop PoP unavailable; continuing compatibility mode",
+      {},
+      { extra: { surface, reason } },
+    );
+    Observability.capturePostHog("desktop_pop_unavailable", { surface, reason });
+  }
+
   // --- Sandbox (PostHog only) ---
 
   static sandboxBlocked(operationClass: string): void {
@@ -246,6 +259,26 @@ export class Observability {
       loopId,
       jobId: loopId,
     });
+  }
+
+  static jobPlanSourceResolved(
+    commandId: string | undefined,
+    operationId: string | undefined,
+    loopId: string,
+    planSource: ExecutePlanSourceDiagnostics,
+  ): void {
+    Observability.emitTelemetry(
+      "info",
+      "job.plan_source_resolved",
+      `EXECUTE plan source resolved: ${planSource.source}`,
+      {
+        commandId,
+        operationId,
+        loopId,
+        jobId: loopId,
+      },
+      { planSource },
+    );
   }
 
   static jobCompleted(

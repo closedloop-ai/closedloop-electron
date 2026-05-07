@@ -1,16 +1,10 @@
-import { createRequire } from "node:module";
 import Store from "electron-store";
+import {
+  getElectronSafeStorage,
+  type SafeStorageLike,
+} from "./electron-safe-storage.js";
 
-const require = createRequire(import.meta.url);
-
-/**
- * Subset of Electron safeStorage used by this store (injectable for Node tests).
- */
-export type SafeStorageLike = {
-  isEncryptionAvailable(): boolean;
-  encryptString(plainText: string): Buffer;
-  decryptString(encrypted: Buffer): string;
-};
+export type { SafeStorageLike } from "./electron-safe-storage.js";
 
 type LoopTokenStoreSchema = {
   encryptedLoopTokens: Record<string, string>;
@@ -26,36 +20,6 @@ export interface LoopTokenStoreOptions {
   safeStorage?: SafeStorageLike;
 }
 
-function resolveSafeStorage(override?: SafeStorageLike): SafeStorageLike {
-  if (override) {
-    return override;
-  }
-  try {
-    const electron = require("electron") as unknown;
-    if (
-      electron &&
-      typeof electron === "object" &&
-      electron !== null &&
-      "safeStorage" in electron
-    ) {
-      const ss = (electron as { safeStorage?: SafeStorageLike }).safeStorage;
-      if (
-        ss &&
-        typeof ss.isEncryptionAvailable === "function" &&
-        typeof ss.encryptString === "function" &&
-        typeof ss.decryptString === "function"
-      ) {
-        return ss;
-      }
-    }
-  } catch {
-    /* not running in Electron */
-  }
-  throw new Error(
-    "LoopTokenStore requires Electron main process or options.safeStorage",
-  );
-}
-
 /**
  * Encrypted persistence for per-loop runner auth tokens, keyed by `loopId`.
  * Uses the same pattern as {@link ApiKeyStore}: electron-store + safeStorage.
@@ -65,7 +29,7 @@ export class LoopTokenStore {
   private readonly safe: SafeStorageLike;
 
   constructor(options?: LoopTokenStoreOptions) {
-    this.safe = resolveSafeStorage(options?.safeStorage);
+    this.safe = getElectronSafeStorage(options?.safeStorage, "LoopTokenStore");
     this.store = new Store<LoopTokenStoreSchema>({
       name: options?.name ?? "desktop-loop-tokens",
       cwd: options?.cwd,

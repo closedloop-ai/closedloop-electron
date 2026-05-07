@@ -6,6 +6,9 @@ import type { JobStore } from "../main/job-store.js";
 import type { LoopTokenStore } from "../main/loop-token-store.js";
 import type { LocalSessionStore } from "../main/local-session-store.js";
 import { verifyChallenge } from "../main/local-auth-verifier.js";
+import type { ApiKeyProvenance } from "../main/api-key-store.js";
+import type { DesktopPopSigner } from "../main/desktop-pop.js";
+import type { DesktopPopUnavailableReporter } from "../main/desktop-pop-sign-utils.js";
 import { OperationDispatcher } from "./operation-dispatcher.js";
 import { registerFilesystemDirectoriesRoutes } from "./operations/filesystem-directories.js";
 import { registerFilesystemSearchRoutes } from "./operations/filesystem-search.js";
@@ -23,6 +26,7 @@ import { registerHealthCheckRoutes } from "./operations/health-check.js";
 import { registerLearningsRoutes } from "./operations/learnings.js";
 import { registerMetadataRoutes } from "./operations/metadata-routes.js";
 import { configureMcpDetectionCwdResolver } from "./operations/mcp-detection.js";
+import { registerSecurityUpgradeRoutes } from "./operations/security-upgrade.js";
 import { configureBinaryPathsResolver } from "./operations/symphony-loop.js";
 import { registerReposConfigRoutes } from "./operations/repos-config.js";
 import { registerRunViewerChatRoutes } from "./operations/run-viewer-chat.js";
@@ -53,6 +57,7 @@ export interface GatewayRouterOptions {
   machineName: string;
   version: string;
   capabilities: ComputeTargetCapabilities;
+  getOnboardingCompleted?: () => boolean;
   getActivePort: () => number;
   getAllowedDirectories: () => string[];
   getSymphonyDir?: () => string;
@@ -64,6 +69,9 @@ export interface GatewayRouterOptions {
   ) => GatewayApprovalResult | Promise<GatewayApprovalResult>;
   sessionStore?: LocalSessionStore;
   getApiKey?: () => string | null;
+  getApiKeyProvenance?: () => ApiKeyProvenance | null;
+  signDesktopRequest?: DesktopPopSigner;
+  onDesktopPopUnavailable?: DesktopPopUnavailableReporter;
   getApiOrigin?: () => string;
   prodOriginsOnly?: boolean;
   jobStore?: JobStore;
@@ -71,6 +79,10 @@ export interface GatewayRouterOptions {
   loopTokenStore?: LoopTokenStore;
   retrySpawnDeps?: RetrySpawnDeps;
   getGatewayId: () => string;
+  getComputeTargetId?: () => string | null;
+  handleSecurityUpgrade?: (
+    payload: DesktopSecurityUpgradePayload
+  ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult;
   getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
   applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
 }
@@ -103,6 +115,18 @@ export interface GatewayApprovalRequest {
 export type GatewayApprovalResult =
   | { allow: true }
   | { allow: false; statusCode: number; payload: Record<string, unknown> };
+
+export type DesktopSecurityUpgradePayload = {
+  onboardingAttemptId: string;
+  webAppOrigin: string;
+  computeTargetId: string;
+  gatewayId: string;
+  expiresAt: string;
+};
+
+export type DesktopSecurityUpgradeResult =
+  | { ok: true }
+  | { ok: false; code: string; retryable: boolean; statusCode?: number };
 
 export class GatewayRouter {
   private readonly options: GatewayRouterOptions;
@@ -152,7 +176,14 @@ export class GatewayRouter {
       this.options.getAllowedDirectories,
       getSymphonyDir
     );
-    registerHealthCheckRoutes(this.operationDispatcher, this.processManager, getSymphonyDir, undefined, this.options.getBinaryPaths);
+    registerHealthCheckRoutes(
+      this.operationDispatcher,
+      this.processManager,
+      getSymphonyDir,
+      undefined,
+      this.options.getBinaryPaths,
+      () => this.options.version
+    );
     if (this.options.getBinaryPaths && this.options.applyBinaryPathPatch) {
       registerBinaryPathsRoutes(this.operationDispatcher, this.options.getBinaryPaths, this.options.applyBinaryPathPatch);
     }
@@ -212,7 +243,10 @@ export class GatewayRouter {
         this.options.getAllowedDirectories,
         getApiKey,
         getApiOrigin,
-        this.options.jobStore
+        this.options.jobStore,
+        this.options.getApiKeyProvenance,
+        this.options.signDesktopRequest,
+        this.options.onDesktopPopUnavailable
       );
     }
     registerSymphonyUploadRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
@@ -239,6 +273,11 @@ export class GatewayRouter {
       providerRegistry,
       this.options.getGatewayId
     );
+    registerSecurityUpgradeRoutes(this.operationDispatcher, {
+      getGatewayId: this.options.getGatewayId,
+      getComputeTargetId: this.options.getComputeTargetId,
+      handleSecurityUpgrade: this.options.handleSecurityUpgrade,
+    });
   }
 
   async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -335,6 +374,8 @@ export class GatewayRouter {
         status: "ok",
         machineName: this.options.machineName,
         capabilities: this.options.capabilities,
+        gatewayId: this.options.getGatewayId() || undefined,
+        onboardingCompleted: this.options.getOnboardingCompleted?.() ?? false,
         version: this.options.version,
         port: this.options.getActivePort()
       };
@@ -593,6 +634,9 @@ export class GatewayRouter {
       userAgent,
       apiOrigin,
       apiKey,
+      apiKeyProvenance: this.options.getApiKeyProvenance?.() ?? "USER_CREATED",
+      signDesktopRequest: this.options.signDesktopRequest,
+      onDesktopPopUnavailable: this.options.onDesktopPopUnavailable,
     });
 
     if (!result.ok) {
@@ -756,5 +800,3 @@ function isLoopbackOrigin(originValue: string): boolean {
     return false;
   }
 }
-
-

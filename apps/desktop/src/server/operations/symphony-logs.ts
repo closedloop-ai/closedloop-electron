@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { resolveClaudeOutputPath } from "../../main/token-usage.js";
 import type { OperationDispatcher } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError } from "../security.js";
 import { assertRepoAllowed, resolveWorktreeDir } from "./symphony-utils.js";
@@ -33,11 +34,11 @@ export function registerSymphonyLogsRoutes(
 
     const worktreeDir = resolveWorktreeDir(expandedRepoPath, ticketId);
     const workDir = path.join(worktreeDir, ".closedloop-ai", "work");
-    const jsonlFile = path.join(workDir, "claude-output.jsonl");
+    const jsonlFile = resolveClaudeOutputPath(workDir);
     const launchLogFile = path.join(workDir, "symphony-launch.log");
 
-    const isJsonl = existsSync(jsonlFile);
-    const logFile = isJsonl ? jsonlFile : launchLogFile;
+    const isJsonl = jsonlFile !== null;
+    const logFile = jsonlFile ?? launchLogFile;
     if (!existsSync(logFile)) {
       json(context, 200, {
         exists: false,

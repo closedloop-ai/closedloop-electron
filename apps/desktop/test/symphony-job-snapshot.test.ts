@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { enrichJobSnapshot, shouldApplyStateStatus } from "../src/server/operations/symphony-job-snapshot.js";
 import type { LocalJob, LocalJobStatus } from "../src/main/job-store.js";
 
@@ -12,7 +13,7 @@ function makeJob(overrides: Partial<LocalJob> = {}): LocalJob {
     id: "job-1",
     kind: "SYMPHONY_LOOP",
     loopId: "loop-1",
-    command: "PLAN",
+    command: LoopCommand.Plan,
     status: "RUNNING" as LocalJobStatus,
     startedAt: now,
     updatedAt: now,
@@ -170,4 +171,32 @@ test("enrichJobSnapshot: phase text suppressed when state.json says terminal but
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
+});
+
+test("enrichJobSnapshot preserves execute finalization diagnostics", async () => {
+  const snapshot = await enrichJobSnapshot(
+    makeJob({
+      command: LoopCommand.Execute,
+      status: "COMPLETED",
+      finalizationSource: "boot-recovery",
+      executeFinalizationStatus: "success",
+      executeFinalizationPath: "artifact-existing",
+      executeFinalizationReason: "existing execution-result.json reused",
+      executeFinalizationPreExecutionResultPresent: true,
+      executeFinalizationPrePrBodyPresent: false,
+      executeFinalizationPostExecutionResultPresent: true,
+      executeFinalizationPostPrBodyPresent: false,
+    }),
+  );
+  assert.equal(snapshot.finalizationSource, "boot-recovery");
+  assert.equal(snapshot.executeFinalizationStatus, "success");
+  assert.equal(snapshot.executeFinalizationPath, "artifact-existing");
+  assert.equal(
+    snapshot.executeFinalizationReason,
+    "existing execution-result.json reused",
+  );
+  assert.equal(snapshot.executeFinalizationPreExecutionResultPresent, true);
+  assert.equal(snapshot.executeFinalizationPrePrBodyPresent, false);
+  assert.equal(snapshot.executeFinalizationPostExecutionResultPresent, true);
+  assert.equal(snapshot.executeFinalizationPostPrBodyPresent, false);
 });

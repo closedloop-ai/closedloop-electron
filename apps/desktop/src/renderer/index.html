@@ -216,7 +216,7 @@
 
       .dashboard-summary {
         display: grid;
-        grid-template-columns: repeat(3, 1fr);
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
         gap: 10px;
         margin-bottom: 16px;
       }
@@ -1947,6 +1947,7 @@
           </div>
         </details>
         <div class="actions">
+          <button class="secondary" id="connectInBrowser">Connect in browser</button>
           <button id="completeOnboarding">Complete Setup</button>
         </div>
         <p class="muted" id="onboardingMessage"></p>
@@ -1978,6 +1979,11 @@
           <div class="status-card">
             <div class="status-label">Remote Commands</div>
             <div class="status-value" id="dashboardCommandsState">Loading...</div>
+          </div>
+          <div class="status-card">
+            <div class="status-label">Connection Security</div>
+            <div class="status-value" id="dashboardSecurity">Loading...</div>
+            <div class="status-detail" id="dashboardSecurityDetail">Loading...</div>
           </div>
         </div>
         <div class="config-section-label">Endpoints</div>
@@ -2358,6 +2364,8 @@
       const dashboardRelayOrigin = document.getElementById("dashboardRelayOrigin");
       const dashboardApiOrigin = document.getElementById("dashboardApiOrigin");
       const dashboardCommandsState = document.getElementById("dashboardCommandsState");
+      const dashboardSecurity = document.getElementById("dashboardSecurity");
+      const dashboardSecurityDetail = document.getElementById("dashboardSecurityDetail");
       const dashboardApproval = document.getElementById("dashboardApproval");
       const approvalsList = document.getElementById("approvalsList");
       const activityList = document.getElementById("activityList");
@@ -2428,6 +2436,10 @@
         const cmdTone = !cachedConnectionEnabled || cachedCommandsPaused ? "warn" : "ok";
         dashboardCommandsState.textContent = cmdText;
         dashboardCommandsState.className = `status-value ${cmdTone}`;
+        const security = describeConnectionSecurity(status.connectionSecurity, cloudStatus);
+        dashboardSecurity.textContent = security.label;
+        dashboardSecurity.className = `status-value ${security.tone}`;
+        dashboardSecurityDetail.textContent = security.detail;
 
         // Config rows
         dashboardTarget.textContent = cloudStatus.state === "online" && cloudStatus.targetId
@@ -2458,6 +2470,46 @@
           return "Disconnected";
         }
         return "Connecting";
+      }
+
+      function describeConnectionSecurity(connectionSecurity, cloudStatus) {
+        const mode = connectionSecurity?.mode || "unknown";
+        const isOnline = cloudStatus.state === "online";
+        if (mode === "enhanced") {
+          return {
+            label: "Enhanced",
+            tone: "ok",
+            detail: isOnline
+              ? "Managed key with request signing is active."
+              : "Managed key and signing are configured."
+          };
+        }
+        if (mode === "signing_unavailable") {
+          return {
+            label: "Needs Attention",
+            tone: "warn",
+            detail: connectionSecurity?.detail || "Managed key is present but signing is unavailable."
+          };
+        }
+        if (mode === "standard") {
+          return {
+            label: "Standard",
+            tone: "",
+            detail: "Using a manually configured bearer key."
+          };
+        }
+        if (mode === "unconfigured") {
+          return {
+            label: "Not Configured",
+            tone: "warn",
+            detail: "No cloud API key is configured."
+          };
+        }
+        return {
+          label: "Unknown",
+          tone: "warn",
+          detail: "Security mode is not available."
+        };
       }
 
       function isAuthError(errorText) {
@@ -3791,6 +3843,8 @@
         onboardingApiKeyHint.textContent = state?.hasStoredApiKey
           ? "A cloud API key is already stored. You can leave this blank."
           : "No stored API key found. Enter one now or later in Settings.";
+        const managedProvisioning = state?.managedProvisioning;
+        onboardingMessage.textContent = managedProvisioning?.message || "";
         updateOnboardingSandboxWarning();
 
         if (state?.completed) {
@@ -3843,6 +3897,18 @@
           await Promise.all([loadSettings(), refreshRuntime(), refreshApiKeyStatus(), refreshApprovals()]);
         } catch (error) {
           onboardingMessage.textContent = `Failed to complete setup: ${error.message}`;
+        }
+      }
+
+      async function connectInBrowser() {
+        onboardingMessage.textContent = "Opening browser connection...";
+        try {
+          await api.startDeviceOnboarding({
+            webAppOrigin: onboardingWebAppOrigin.value.trim()
+          });
+          await loadOnboardingState();
+        } catch (error) {
+          onboardingMessage.textContent = `Failed to connect in browser: ${error.message}`;
         }
       }
 
@@ -3928,6 +3994,7 @@
         .getElementById("pickOnboardingSandbox")
         .addEventListener("click", () => void pickDirectoryForInput(onboardingSandboxDir, updateOnboardingSandboxWarning));
       document.getElementById("completeOnboarding").addEventListener("click", () => void completeOnboarding());
+      document.getElementById("connectInBrowser").addEventListener("click", () => void connectInBrowser());
       sandboxBaseDirectory.addEventListener("input", updateSandboxBaseWarning);
       onboardingSandboxDir.addEventListener("input", updateOnboardingSandboxWarning);
       document.getElementById("refreshApprovals").addEventListener("click", refreshApprovals);
@@ -4019,6 +4086,10 @@
 
       window.addEventListener("desktop:update-available", (event) => {
         showUpdateBanner(event.detail);
+      });
+
+      window.addEventListener("desktop:onboarding-state-changed", () => {
+        void loadOnboardingState();
       });
 
       updateBannerBtn.addEventListener("click", triggerUpdate);

@@ -1,9 +1,13 @@
+import type {
+  ExecutionResultV2,
+  RepoExecutionResult,
+} from "@closedloop-ai/loops-api/execution-result";
 import { execFile, execFileSync, execSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
-import { promisify } from "node:util";
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
   statSync,
@@ -13,15 +17,33 @@ import {
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import {
   readLogTail,
+  readStderrTail,
   readTextFile,
   sanitizeErrorMessage,
+  stripAnsi,
 } from "../../main/diagnostics-helpers.js";
-import { gatewayLog } from "../../main/gateway-logger.js";
-import type { JobStore, LocalJobCommand } from "../../main/job-store.js";
 import {
+  emitDecisionTableVerificationTelemetry,
+  getDecisionTableVerificationTelemetryOffset,
+} from "../../main/decision-table-verification-telemetry.js";
+import { gatewayLog } from "../../main/gateway-logger.js";
+import type { ExecutePlanSourceDiagnostics } from "../../main/telemetry-protocol.js";
+import type {
+  JobStore,
+  LocalJobCommand,
+  LocalJobCommitter,
+  LocalJobExecuteFinalizationPath,
+  LocalJobExecuteFinalizationStatus,
+  LocalJobFinalizationSource,
+} from "../../main/job-store.js";
+import {
+  EXECUTE_NO_WORK_MESSAGE,
   finalizeLoopFromRuntime,
+  isExecuteNoWorkCompletion,
+  isRetryableFinalizationError,
   tryUploadArtifacts,
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
@@ -29,8 +51,21 @@ import type { LoopTokenStore } from "../../main/loop-token-store.js";
 import { Observability } from "../../main/observability.js";
 import {
   parseTokenUsage,
+  resolveClaudeOutputPath,
   type ModelTokenUsage,
 } from "../../main/token-usage.js";
+import {
+  clearUserVisibleLoopFailureMarker,
+  readUserVisibleLoopFailure,
+  toUserVisibleLoopFailurePayload,
+  USER_VISIBLE_LOOP_FAILURE_SECRET_ENV,
+} from "../../main/user-visible-loop-failure.js";
+import {
+  IMPORTED_PLAN_MARKDOWN_FILE,
+  PLAN_SOURCE_MARKDOWN_FILE,
+  isRawPlanArtifact,
+  toUploadedPlanArtifact,
+} from "../../shared/plan-artifact-utils.js";
 import type {
   OperationDispatcher,
   OperationRequestContext,
@@ -38,12 +73,11 @@ import type {
 import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { getShellEnv, getShellPath, resolveBinarySync } from "../shell-path.js";
-import {
-  isRawPlanArtifact,
-  toUploadedPlanArtifact,
-} from "../../shared/plan-artifact-utils.js";
 import { withMcpTools } from "./chat-tools.js";
-import { findWorktreeForBranch as findWorktreeForBranchImpl } from "./git-helpers.js";
+import {
+  findWorktreeForBranch as findWorktreeForBranchImpl,
+  resolveRepoFullName,
+} from "./git-helpers.js";
 import {
   type PtySession,
   removeSession,
@@ -55,22 +89,29 @@ import {
   findPluginVersions,
   getPluginCacheRoot,
 } from "./plugin-cache.js";
-import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import { addRepo } from "./repos-config-utils.js";
+import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import {
   CLONE_GIT_TIMEOUT,
   expandHome,
   fetchOrigin,
+  hasBootstrapArtifacts,
   isProcessRunning,
   loopError,
   loopLog,
   resolveRef,
   resolveWorktreeParentDir,
+  runBootstrapIfNeeded,
   runLoopsSetupScript,
   SymphonyDirNotConfiguredError,
   tryAssertRepoAllowed,
 } from "./symphony-utils.js";
-export { readLogTail } from "../../main/diagnostics-helpers.js";
+export {
+  readFileTail,
+  readLogTail,
+  readStderrTail,
+  stripAnsi,
+} from "../../main/diagnostics-helpers.js";
 
 // ---------------------------------------------------------------------------
 // WorktreeProvider: abstraction over git worktree operations for testability
@@ -128,16 +169,38 @@ let resolvedClaudePath: string | null = null;
  * When set, getResolvedClaudePath() will check the claude override before falling
  * back to its existing which/login-shell resolution strategies.
  */
-let overrideGetBinaryPaths: (() => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string }) | null = null;
+let overrideGetBinaryPaths:
+  | (() => {
+      claude?: string;
+      gh?: string;
+      codex?: string;
+      python3?: string;
+      git?: string;
+    })
+  | null = null;
 
 export function configureBinaryPathsResolver(
-  resolver: (() => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string }) | null
+  resolver:
+    | (() => {
+        claude?: string;
+        gh?: string;
+        codex?: string;
+        python3?: string;
+        git?: string;
+      })
+    | null,
 ): void {
   overrideGetBinaryPaths = resolver;
   resetResolvedClaudePath();
 }
 
-export function getOverrideBinaryPaths(): { claude?: string; gh?: string; codex?: string; python3?: string; git?: string } | null {
+export function getOverrideBinaryPaths(): {
+  claude?: string;
+  gh?: string;
+  codex?: string;
+  python3?: string;
+  git?: string;
+} | null {
   return overrideGetBinaryPaths?.() ?? null;
 }
 
@@ -224,50 +287,66 @@ import {
   LoopArtifactType,
 } from "@closedloop-ai/loops-api/artifacts";
 import { validateResultBundle } from "@closedloop-ai/loops-api/bundles";
-import type { LoopCommand } from "@closedloop-ai/loops-api/commands";
-import { validateCommandInputs } from "@closedloop-ai/loops-api/commands";
+import {
+  LoopCommand,
+  validateCommandInputs,
+} from "@closedloop-ai/loops-api/commands";
 import type { ContextPackAttachment as SharedContextPackAttachment } from "@closedloop-ai/loops-api/context-pack";
 import type { LoopRequestBody } from "@closedloop-ai/loops-api/desktop-request";
 import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
-import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
+import {
+  getPrimaryRepoResult,
+  parseExecutionResultFile,
+} from "@closedloop-ai/loops-api/execution-result";
+import { getMultiRepoPolicy } from "@closedloop-ai/loops-api/multi-repo-policy";
+import {
+  buildMountPathsFooter,
+  toPeerWorktreeRefs,
+  writePeerReposManifest,
+} from "./peer-context.js";
 import { json } from "./response-utils.js";
 
 /** Commands that have full spawn/dispatch support in this gateway version. */
 const SUPPORTED_COMMANDS = new Set<LoopCommand>([
-  "PLAN",
-  "EXECUTE",
-  "REQUEST_CHANGES",
-  "DECOMPOSE",
-  "EVALUATE_PRD",
-  "GENERATE_PRD",
-  "EVALUATE_PLAN",
-  "EVALUATE_CODE",
+  LoopCommand.Plan,
+  LoopCommand.Execute,
+  LoopCommand.RequestChanges,
+  LoopCommand.RequestPrdChanges,
+  LoopCommand.Decompose,
+  LoopCommand.EvaluatePrd,
+  LoopCommand.GeneratePrd,
+  LoopCommand.EvaluatePlan,
+  LoopCommand.EvaluateCode,
+  LoopCommand.EvaluateFeature,
+  LoopCommand.Bootstrap,
 ]);
 const VALID_COMMANDS = SUPPORTED_COMMANDS;
 type RepoRequirement = "REQUIRED" | "OPTIONAL" | "NOT_REQUIRED";
 const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
-  PLAN: "REQUIRED",
-  EXECUTE: "REQUIRED",
-  CHAT: "NOT_REQUIRED",
-  EXPLORE: "NOT_REQUIRED",
-  REQUEST_CHANGES: "REQUIRED",
-  REQUEST_PRD_CHANGES: "REQUIRED",
-  EVALUATE_PRD: "OPTIONAL",
-  GENERATE_PRD: "REQUIRED",
-  DECOMPOSE: "NOT_REQUIRED",
-  EVALUATE_PLAN: "REQUIRED",
-  EVALUATE_CODE: "REQUIRED",
+  [LoopCommand.Plan]: "REQUIRED",
+  [LoopCommand.Execute]: "REQUIRED",
+  [LoopCommand.Chat]: "NOT_REQUIRED",
+  [LoopCommand.Explore]: "NOT_REQUIRED",
+  [LoopCommand.RequestChanges]: "REQUIRED",
+  [LoopCommand.RequestPrdChanges]: "REQUIRED",
+  [LoopCommand.EvaluatePrd]: "OPTIONAL",
+  [LoopCommand.GeneratePrd]: "REQUIRED",
+  [LoopCommand.Decompose]: "NOT_REQUIRED",
+  [LoopCommand.EvaluatePlan]: "REQUIRED",
+  [LoopCommand.EvaluateCode]: "REQUIRED",
+  [LoopCommand.EvaluateFeature]: "OPTIONAL",
+  [LoopCommand.Bootstrap]: "NOT_REQUIRED",
 };
 const LOCAL_CALLBACK_FAIL_FAST_COMMANDS = new Set<LoopCommand>([
-  "PLAN",
-  "EXECUTE",
-  "REQUEST_CHANGES",
-  "GENERATE_PRD",
+  LoopCommand.Plan,
+  LoopCommand.Execute,
+  LoopCommand.RequestChanges,
+  LoopCommand.RequestPrdChanges,
+  LoopCommand.GeneratePrd,
 ]);
-
 interface LoopArtifact {
-  id?: string;
+  id: string;
   type: LoopArtifactType;
   title?: string;
   content: string;
@@ -278,6 +357,143 @@ interface LoopArtifact {
 export const PLAN_ARTIFACT_TYPES: readonly LoopArtifactType[] = [
   LoopArtifactType.ImplementationPlan,
 ] as const;
+
+/** Response-payload keys for artifacts produced by loop commands. */
+export const LoopOutputArtifactKey = {
+  Plan: "plan",
+  OpenQuestions: "openQuestions",
+  Judges: "judges",
+  ExecutionResult: "executionResult",
+  CodeJudges: "codeJudges",
+  Features: "features",
+  Prd: "prd",
+  PrdJudges: "prdJudges",
+  PlanJudges: "planJudges",
+  FeatureJudges: "featureJudges",
+  BootstrapResult: "bootstrapResult",
+} as const;
+export type LoopOutputArtifactKey =
+  (typeof LoopOutputArtifactKey)[keyof typeof LoopOutputArtifactKey];
+
+type LoopOutputArtifacts = Partial<Record<LoopOutputArtifactKey, unknown>>;
+
+/** Discriminator for outputs produced by an EVALUATE_{type} loop iteration. */
+export const EvaluateArtifact = {
+  Prd: "Prd",
+  Plan: "Plan",
+  Code: "Code",
+  Feature: "Feature",
+} as const;
+export type EvaluateArtifact =
+  (typeof EvaluateArtifact)[keyof typeof EvaluateArtifact];
+
+const EVALUATE_ARTIFACT_OUTPUT = {
+  [EvaluateArtifact.Prd]: {
+    file: LoopArtifactFile.PrdJudges,
+    key: LoopOutputArtifactKey.PrdJudges,
+  },
+  [EvaluateArtifact.Plan]: {
+    file: LoopArtifactFile.PlanJudges,
+    key: LoopOutputArtifactKey.PlanJudges,
+  },
+  [EvaluateArtifact.Code]: {
+    file: LoopArtifactFile.CodeJudges,
+    key: LoopOutputArtifactKey.CodeJudges,
+  },
+  [EvaluateArtifact.Feature]: {
+    file: LoopArtifactFile.FeatureJudges,
+    key: LoopOutputArtifactKey.FeatureJudges,
+  },
+} as const satisfies Record<
+  EvaluateArtifact,
+  { file: string; key: LoopOutputArtifactKey }
+>;
+
+/** Maps each EVALUATE_* loop command to its artifact discriminator. */
+export const EVALUATE_COMMAND_ARTIFACT = {
+  EVALUATE_PRD: EvaluateArtifact.Prd,
+  EVALUATE_PLAN: EvaluateArtifact.Plan,
+  EVALUATE_CODE: EvaluateArtifact.Code,
+  EVALUATE_FEATURE: EvaluateArtifact.Feature,
+} as const satisfies Record<string, EvaluateArtifact>;
+
+function readExecutePlanArtifact(
+  claudeWorkDir: string,
+): ReturnType<typeof toUploadedPlanArtifact> {
+  return (
+    toUploadedPlanArtifact(
+      readJsonFileSync(path.join(claudeWorkDir, LoopArtifactFile.Plan)),
+    ) ??
+    toUploadedPlanArtifact(
+      readTextFile(path.join(claudeWorkDir, IMPORTED_PLAN_MARKDOWN_FILE)),
+    )
+  );
+}
+
+function readPlanJsonContent(planJsonPath: string): string | null {
+  const localPlan = readJsonFileSync(planJsonPath);
+  return isRawPlanArtifact(localPlan) && typeof localPlan.content === "string"
+    ? localPlan.content
+    : null;
+}
+
+function shortContentHash(value: string | undefined | null): string | null {
+  return value == null
+    ? null
+    : crypto.createHash("sha256").update(value).digest("hex").slice(0, 12);
+}
+
+function isValidJson(value: string): boolean {
+  try {
+    JSON.parse(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve the primary artifact of a given type from a list of artifacts.
+ *
+ * Selection priority:
+ * 1. When `primaryArtifactId` is a non-empty string, find by id — preferred
+ *    because it unambiguously identifies the artifact the caller cares about.
+ * 2. Fall through to `findLast` by type — the backend's context-pack assembler
+ *    (symphony-alpha apps/api/lib/loops/loop-context-pack.ts) appends the
+ *    primary artifact last, so findLast returns the primary even when
+ *    same-type context refs precede it.
+ * 3. Throw if neither strategy finds a match.
+ */
+export function resolvePrimaryArtifact(
+  artifacts: LoopArtifact[],
+  type: string,
+  primaryArtifactId?: string,
+): LoopArtifact {
+  const found = findPrimaryArtifact(artifacts, type, primaryArtifactId);
+  if (found !== undefined) {
+    return found;
+  }
+  throw new Error(`resolvePrimaryArtifact: no ${type} artifact found`);
+}
+
+/**
+ * Non-throwing variant of resolvePrimaryArtifact.
+ * Returns undefined instead of throwing when no matching artifact is found.
+ * Same selection priority: id match > findLast by type.
+ */
+function findPrimaryArtifact(
+  artifacts: LoopArtifact[],
+  type: string,
+  primaryArtifactId?: string,
+): LoopArtifact | undefined {
+  if (primaryArtifactId) {
+    const byId = artifacts.find((a) => a.id === primaryArtifactId);
+    if (byId !== undefined) {
+      return byId;
+    }
+  }
+  return artifacts.findLast((a) => a.type === type);
+}
 
 /**
  * Write prd.md to a work directory from a list of artifacts and an optional
@@ -294,11 +510,20 @@ export async function writePrdArtifact(
   workDir: string,
   artifacts: LoopArtifact[],
   prompt?: string,
+  primaryArtifactId?: string,
 ): Promise<void> {
-  const prdArtifact = artifacts.find((a) => a.type === LoopArtifactType.Prd);
+  const prdArtifact = findPrimaryArtifact(
+    artifacts,
+    LoopArtifactType.Prd,
+    primaryArtifactId,
+  );
   const featureArtifact = prdArtifact
     ? null
-    : artifacts.find((a) => a.type === LoopArtifactType.Feature);
+    : findPrimaryArtifact(
+        artifacts,
+        LoopArtifactType.Feature,
+        primaryArtifactId,
+      );
   const source = prdArtifact ?? featureArtifact;
 
   const prdContent = source?.content || prompt || "";
@@ -308,14 +533,13 @@ export async function writePrdArtifact(
   }
 }
 
-/** Internal helper: writes plan.md to workDir from the first matching plan artifact. */
+/** Internal helper: writes plan.md to workDir from the last matching plan artifact. */
 async function writePlanFileToWorkDir(
   workDir: string,
   artifacts: LoopArtifact[],
+  primaryArtifactId?: string,
 ): Promise<void> {
-  const artifact = artifacts.find((a) =>
-    (PLAN_ARTIFACT_TYPES as readonly string[]).includes(a.type),
-  );
+  const artifact = findPrimaryArtifact(artifacts, LoopArtifactType.ImplementationPlan, primaryArtifactId);
   if (artifact?.content) {
     await fs.writeFile(
       path.join(workDir, LoopArtifactFile.PlanMarkdown),
@@ -329,55 +553,63 @@ export async function writePlanArtifact(
   workDir: string,
   artifacts: LoopArtifact[],
   prompt?: string,
+  primaryArtifactId?: string,
 ): Promise<void> {
-  await writePrdArtifact(workDir, artifacts, prompt);
-  await writePlanFileToWorkDir(workDir, artifacts);
+  await writePrdArtifact(workDir, artifacts, prompt, primaryArtifactId);
+  await writePlanFileToWorkDir(workDir, artifacts, primaryArtifactId);
 }
 
 /** Write plan.md to a work directory from a list of artifacts. */
 export async function writeCodeArtifact(
   workDir: string,
   artifacts: LoopArtifact[],
+  primaryArtifactId?: string,
 ): Promise<void> {
-  await writePlanFileToWorkDir(workDir, artifacts);
+  await writePlanFileToWorkDir(workDir, artifacts, primaryArtifactId);
+}
+
+/**
+ * Write prd.md to a work directory from a Feature artifact.
+ *
+ * Unlike writePrdArtifact, this helper is strict: it requires a
+ * LoopArtifactType.Feature artifact and does not fall back to PRD or
+ * prompt. If no Feature artifact is present, it throws.
+ *
+ * When `primaryArtifactId` is provided, id-based selection is preferred;
+ * otherwise the backend ordering convention applies — the primary is
+ * appended last by the context-pack assembler, so findLast scores the
+ * loop's actual document even when same-type refs precede it.
+ */
+export async function writeFeatureArtifact(
+  workDir: string,
+  artifacts: LoopArtifact[],
+  primaryArtifactId?: string,
+): Promise<void> {
+  const featureArtifact = resolvePrimaryArtifact(
+    artifacts,
+    LoopArtifactType.Feature,
+    primaryArtifactId,
+  );
+  await fs.writeFile(
+    path.join(workDir, LoopArtifactFile.Prd),
+    featureArtifact.content,
+  );
 }
 
 /**
  * Read outputs produced by an EVALUATE_{type} loop iteration.
  * Returns undefined values for missing or unreadable files.
  */
-function readEvaluateOutputs(
+export function readEvaluateOutputs(
   workDir: string,
-  artifactType: string,
-): Record<string, unknown> {
-  const judges = readJsonFileSync(
-    path.join(workDir, `${artifactType}-judges.json`),
-  );
-  return { [`${artifactType}Judges`]: judges ?? undefined };
+  artifact: EvaluateArtifact,
+): LoopOutputArtifacts {
+  const output = EVALUATE_ARTIFACT_OUTPUT[artifact];
+  const judges = readJsonFileSync(path.join(workDir, output.file));
+  return { [output.key]: judges ?? undefined };
 }
 
-export function readEvaluatePrdOutputs(
-  workDir: string,
-): Record<string, unknown> {
-  return readEvaluateOutputs(workDir, "prd");
-}
-
-export function readEvaluatePlanOutputs(
-  workDir: string,
-): Record<string, unknown> {
-  return readEvaluateOutputs(workDir, "plan");
-}
-
-export function readEvaluateCodeOutputs(
-  workDir: string,
-): Record<string, unknown> {
-  return readEvaluateOutputs(workDir, "code");
-}
-
-interface LoopCommitter {
-  name: string;
-  email: string;
-}
+type LoopCommitter = LocalJobCommitter;
 
 type ContextPackAttachment = SharedContextPackAttachment;
 
@@ -471,11 +703,140 @@ function findLocalRepo(fullName: string, allowedDirs: string[]): string | null {
 }
 
 // ---------------------------------------------------------------------------
+// Bootstrap helpers (FEA-652)
+// ---------------------------------------------------------------------------
+
+interface BootstrapRepoParam {
+  fullName: string;
+  branch?: string;
+  localPath?: string;
+}
+
+interface BootstrapParams {
+  repos: BootstrapRepoParam[];
+  options?: {
+    depth?: "quick" | "medium" | "deep";
+    update?: boolean;
+  };
+}
+
+interface BootstrapManifestEntry {
+  fullName: string;
+  localPath: string;
+  branch: string;
+  skip: boolean;
+  skipReason?: string;
+}
+
+interface BootstrapRepoResult {
+  fullName: string;
+  branch: string;
+  success: boolean;
+  error?: string;
+  agents: Array<{
+    name: string;
+    slug: string;
+    role: string;
+    description: string;
+    prompt: string;
+  }>;
+  criticGates: Record<string, unknown> | null;
+  metadata: Record<string, unknown> | null;
+  duration: number;
+}
+
+function parseBootstrapParams(
+  prompt: string | undefined,
+): BootstrapParams | null {
+  if (!prompt) return null;
+  try {
+    const parsed = JSON.parse(prompt) as Record<string, unknown>;
+    if (!Array.isArray(parsed.repos)) return null;
+    for (const entry of parsed.repos) {
+      if (typeof entry !== "object" || entry === null) return null;
+      if (typeof (entry as Record<string, unknown>).fullName !== "string")
+        return null;
+    }
+    return parsed as unknown as BootstrapParams;
+  } catch {
+    return null;
+  }
+}
+
+function parseAgentFrontmatter(content: string): {
+  name: string;
+  description: string;
+} {
+  const fmMatch = /^---\n([\s\S]*?)\n---/.exec(content);
+  if (!fmMatch) return { name: "", description: "" };
+  const fm = fmMatch[1];
+
+  const nameMatch = /^name:\s*(.+)$/m.exec(fm);
+  const descMatch = /^description:\s*(.+)$/m.exec(fm);
+  return {
+    name: nameMatch?.[1]?.trim() ?? "",
+    description: descMatch?.[1]?.trim() ?? "",
+  };
+}
+
+function readBootstrapRepoOutputs(
+  repoPath: string,
+): Omit<
+  BootstrapRepoResult,
+  "fullName" | "branch" | "success" | "error" | "duration"
+> {
+  const agents: BootstrapRepoResult["agents"] = [];
+  const agentsDir = path.join(repoPath, ".claude", "agents");
+  try {
+    for (const file of readdirSync(agentsDir)) {
+      if (!file.endsWith(".md")) continue;
+      const slug = file.slice(0, -3);
+      const content = readFileSync(path.join(agentsDir, file), "utf-8");
+      const { name, description } = parseAgentFrontmatter(content);
+      agents.push({
+        name: name || slug,
+        slug,
+        role: slug,
+        description,
+        prompt: content,
+      });
+    }
+  } catch {
+    // agents dir may not exist
+  }
+
+  const criticGatesPath = path.join(
+    repoPath,
+    ".closedloop-ai",
+    "settings",
+    "critic-gates.json",
+  );
+  const criticGates = readJsonFileSync(criticGatesPath) as Record<
+    string,
+    unknown
+  > | null;
+
+  const metadataPath = path.join(
+    repoPath,
+    ".closedloop-ai",
+    "bootstrap-metadata.json",
+  );
+  const metadata = readJsonFileSync(metadataPath) as Record<
+    string,
+    unknown
+  > | null;
+
+  return { agents, criticGates, metadata };
+}
+
+// ---------------------------------------------------------------------------
 // Auto-clone helper
 // ---------------------------------------------------------------------------
 
 /** Result of an attempted `gh repo clone` operation. */
-export type CloneResult = { ok: true; path: string } | { ok: false; reason: string };
+export type CloneResult =
+  | { ok: true; path: string }
+  | { ok: false; reason: string };
 
 /**
  * Attempt to clone a GitHub repository via the authenticated `gh` CLI into an
@@ -495,7 +856,7 @@ export async function cloneRepoViaGh(
   timeout?: number,
 ): Promise<CloneResult> {
   if (allowedDirs.length === 0) {
-    return { ok: false, reason: 'no allowed directories configured' };
+    return { ok: false, reason: "no allowed directories configured" };
   }
 
   // --- compute clone destination ---
@@ -510,10 +871,16 @@ export async function cloneRepoViaGh(
   try {
     allowedDirStat = statSync(expandedAllowedDir);
   } catch {
-    return { ok: false, reason: `allowed directory does not exist or is not a directory: ${expandedAllowedDir}` };
+    return {
+      ok: false,
+      reason: `allowed directory does not exist or is not a directory: ${expandedAllowedDir}`,
+    };
   }
   if (!allowedDirStat.isDirectory()) {
-    return { ok: false, reason: `allowed directory does not exist or is not a directory: ${expandedAllowedDir}` };
+    return {
+      ok: false,
+      reason: `allowed directory does not exist or is not a directory: ${expandedAllowedDir}`,
+    };
   }
 
   // Clone into the allowed dir as a subdirectory (works whether or not
@@ -521,7 +888,10 @@ export async function cloneRepoViaGh(
   const destPath = path.join(expandedAllowedDir, repoName);
 
   if (existsSync(destPath)) {
-    return { ok: false, reason: `clone destination already exists: ${destPath}` };
+    return {
+      ok: false,
+      reason: `clone destination already exists: ${destPath}`,
+    };
   }
 
   // --- pre-clone path validation (fail-fast before any network I/O) ---
@@ -550,14 +920,18 @@ export async function cloneRepoViaGh(
     );
   } catch (err) {
     const stderrRaw = String(
-      (err as { stderr?: unknown }).stderr ?? (err instanceof Error ? err.message : String(err)),
+      (err as { stderr?: unknown }).stderr ??
+        (err instanceof Error ? err.message : String(err)),
     )
       .trim()
       .slice(0, 500);
     const sanitizedReason = sanitizeErrorMessage(stderrRaw);
     const failMsg = `clone failed: ${sanitizedReason}`;
     loopError(loopId, failMsg);
-    gatewayLog.warn("loop-auto-clone", `${failMsg} loopId=${loopId} fullName=${fullName} destPath=${destPath}`);
+    gatewayLog.warn(
+      "loop-auto-clone",
+      `${failMsg} loopId=${loopId} fullName=${fullName} destPath=${destPath}`,
+    );
     return { ok: false, reason: sanitizedReason };
   }
 
@@ -571,9 +945,15 @@ export async function cloneRepoViaGh(
     try {
       await fs.rm(destPath, { recursive: true, force: true });
     } catch (cleanupErr) {
-      gatewayLog.warn("loop-auto-clone", `orphan cleanup failed for ${destPath}: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`);
+      gatewayLog.warn(
+        "loop-auto-clone",
+        `orphan cleanup failed for ${destPath}: ${cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)}`,
+      );
     }
-    loopError(loopId, `post-clone path check failed, cleaned up: ${sanitizedReason}`);
+    loopError(
+      loopId,
+      `post-clone path check failed, cleaned up: ${sanitizedReason}`,
+    );
     gatewayLog.warn(
       "loop-auto-clone",
       `post-clone path check failed: ${sanitizedReason} loopId=${loopId} fullName=${fullName} destPath=${destPath}`,
@@ -583,17 +963,26 @@ export async function cloneRepoViaGh(
 
   // --- persist to repos.json ---
   const addResult = await addRepo(destPath, undefined, configDir);
-  if (!addResult.success && addResult.error !== "Repository already configured") {
+  if (
+    !addResult.success &&
+    addResult.error !== "Repository already configured"
+  ) {
     // non-fatal: log but still return success
     const warnMsg = `addRepo failed after clone (non-fatal): ${addResult.error ?? "unknown error"}`;
     loopError(loopId, warnMsg);
-    gatewayLog.warn("loop-auto-clone", `${warnMsg} loopId=${loopId} fullName=${fullName} destPath=${destPath}`);
+    gatewayLog.warn(
+      "loop-auto-clone",
+      `${warnMsg} loopId=${loopId} fullName=${fullName} destPath=${destPath}`,
+    );
   }
 
   // --- log success ---
   const successMsg = `clone succeeded: ${destPath}`;
   loopLog(loopId, successMsg);
-  gatewayLog.info("loop-auto-clone", `${successMsg} loopId=${loopId} fullName=${fullName}`);
+  gatewayLog.info(
+    "loop-auto-clone",
+    `${successMsg} loopId=${loopId} fullName=${fullName}`,
+  );
 
   return { ok: true, path: destPath };
 }
@@ -606,6 +995,19 @@ export async function cloneRepoViaGh(
 export interface ResolvedAdditionalRepo {
   readonly repoPath: string;
   readonly branch: string;
+}
+
+/**
+ * Per-additional-repo worktree entry tracked in-process and persisted on
+ * `LocalJob`. `fullName` and `baseBranch` are required by recovery to run
+ * `finalizeMultiRepoExecute` after a desktop restart; older persisted jobs
+ * may lack them.
+ */
+export interface AdditionalWorktreeEntry {
+  dir: string;
+  repoPath: string;
+  fullName?: string;
+  baseBranch?: string;
 }
 
 /** Typed error thrown when an additional repo entry fails validation. */
@@ -622,34 +1024,144 @@ export class AdditionalRepoError extends Error {
 
 const ADDITIONAL_REPOS_MAX = 5;
 
-/**
- * Best-effort cleanup of additional repo worktree directories.
- * Errors are logged but never re-thrown so callers can use this in
- * both success and error teardown paths without try/catch.
- */
-async function cleanupAdditionalWorktrees(
-  entries: readonly { dir: string; repoPath: string }[],
+/** Remove only additional-repo worktrees that are clean and safe to discard. */
+export async function cleanupAdditionalWorktrees(
+  entries: readonly AdditionalWorktreeEntry[],
   loopId: string,
   wt: WorktreeProvider,
-  logPrefix = "cleanup additional worktree failed:",
 ): Promise<void> {
   for (const entry of entries) {
-    await wt.removeWorktree(entry.dir, entry.repoPath, loopId).catch((err) =>
-      loopError(loopId, logPrefix, err),
-    );
+    if (decideAdditionalWorktreeCleanup(entry.dir, loopId) === "retain") {
+      continue;
+    }
+    try {
+      await wt.removeWorktree(entry.dir, entry.repoPath, loopId);
+    } catch (err) {
+      gatewayLog.warn(
+        "cleanup-additional-worktree",
+        `removeWorktree failed for ${entry.dir} (loop ${loopId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 }
 
 /**
  * Default-provider cleanup helper. Exposed so recovery-time callers that do
  * not own a `WorktreeProvider` (e.g. `boot-recovery.ts`) can reuse the same
- * best-effort teardown semantics used on the live path.
+ * teardown semantics used on the live path.
  */
 export async function cleanupAdditionalWorktreesWithDefaultProvider(
-  entries: readonly { dir: string; repoPath: string }[],
+  entries: readonly AdditionalWorktreeEntry[],
   loopId: string,
 ): Promise<void> {
   await cleanupAdditionalWorktrees(entries, loopId, defaultWorktreeProvider);
+}
+
+function isEnoentError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = (err as { code?: unknown }).code;
+  return code === "ENOENT";
+}
+
+/** Detect whether an additional-repo worktree carries any code changes. */
+function decideAdditionalWorktreeCleanup(
+  worktreeDir: string,
+  loopId: string,
+): "retain" | "remove" {
+  const gitBin = getResolvedGitPath();
+
+  let uncommitted: string;
+  try {
+    uncommitted = execFileSync(
+      gitBin,
+      ["status", "--porcelain", "--", ".", ":!.claude", ":!.closedloop-ai"],
+      { cwd: worktreeDir, encoding: "utf-8", stdio: "pipe", timeout: 10_000 },
+    ).trim();
+  } catch (err) {
+    if (isEnoentError(err)) {
+      return "remove";
+    }
+    gatewayLog.warn(
+      "cleanup-additional-worktree",
+      `git status failed for ${worktreeDir} (loop ${loopId}); retaining worktree to avoid data loss: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return "retain";
+  }
+  if (uncommitted.length > 0) {
+    gatewayLog.info(
+      "cleanup-additional-worktree",
+      `Retaining worktree with uncommitted changes: ${worktreeDir} (loop ${loopId})`,
+    );
+    return "retain";
+  }
+
+  let comparisonRefs: string[];
+  try {
+    const refsOut = execFileSync(
+      gitBin,
+      [
+        "for-each-ref",
+        "--format=%(refname)",
+        "refs/heads",
+        "refs/remotes",
+        "refs/tags",
+      ],
+      { cwd: worktreeDir, encoding: "utf-8", stdio: "pipe", timeout: 10_000 },
+    );
+    comparisonRefs = refsOut
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((ref) => ref.length > 0)
+      .filter(
+        (ref) =>
+          !ref.startsWith("refs/heads/symphony/") &&
+          !/^refs\/remotes\/[^/]+\/symphony\//.test(ref),
+      );
+  } catch (err) {
+    if (isEnoentError(err)) {
+      return "remove";
+    }
+    gatewayLog.warn(
+      "cleanup-additional-worktree",
+      `git for-each-ref failed for ${worktreeDir} (loop ${loopId}); retaining worktree to avoid data loss: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return "retain";
+  }
+
+  if (comparisonRefs.length === 0) {
+    gatewayLog.warn(
+      "cleanup-additional-worktree",
+      `No non-symphony refs found in ${worktreeDir} (loop ${loopId}); retaining worktree to avoid data loss`,
+    );
+    return "retain";
+  }
+
+  let unique: string;
+  try {
+    unique = execFileSync(
+      gitBin,
+      ["rev-list", "-n", "1", "HEAD", "--not", ...comparisonRefs],
+      { cwd: worktreeDir, encoding: "utf-8", stdio: "pipe", timeout: 10_000 },
+    ).trim();
+  } catch (err) {
+    if (isEnoentError(err)) {
+      return "remove";
+    }
+    gatewayLog.warn(
+      "cleanup-additional-worktree",
+      `git rev-list failed for ${worktreeDir} (loop ${loopId}); retaining worktree to avoid data loss: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return "retain";
+  }
+  if (unique.length > 0) {
+    gatewayLog.info(
+      "cleanup-additional-worktree",
+      `Retaining worktree with committed changes unique to HEAD: ${worktreeDir} (loop ${loopId})`,
+    );
+    return "retain";
+  }
+
+  return "remove";
 }
 
 /** Resolve an additional repo entry to a validated local path, or throw. */
@@ -681,10 +1193,13 @@ function resolveAndValidateRepoPath(
 
   const result = tryAssertRepoAllowed(candidate, allowedDirs);
   if ("error" in result) {
+    // Surface fullName explicitly when known so the LoopEvent message names
+    // the offending peer rather than a path that may be sanitized in logs.
+    const offender = entry.fullName ?? repoRef;
     throw new AdditionalRepoError(
       LoopErrorCode.RepoNotAllowed,
       repoRef,
-      `Additional repo path not allowed: ${repoRef}`,
+      `Additional repo path not allowed: ${offender}`,
     );
   }
   return result.path;
@@ -712,15 +1227,22 @@ export async function resolveAdditionalRepos(
 
   for (const entry of entries) {
     const repoRef = entry.localRepoPath ?? entry.fullName ?? "";
-    const resolvedPath = resolveAndValidateRepoPath(entry, allowedDirs, repoRef);
+    const resolvedPath = resolveAndValidateRepoPath(
+      entry,
+      allowedDirs,
+      repoRef,
+    );
     const canonicalPath = path.resolve(resolvedPath);
 
     const branchFound = await wt.branchExists(canonicalPath, entry.branch);
     if (!branchFound) {
+      // Embed fullName explicitly so the offending peer can be identified
+      // from the LoopEvent message alone (resolvedPath may be ambiguous).
+      const offender = entry.fullName ?? repoRef;
       throw new AdditionalRepoError(
         LoopErrorCode.PreRunValidationFailed,
         repoRef,
-        `Branch "${entry.branch}" not found in additional repo: ${resolvedPath}`,
+        `Branch "${entry.branch}" not found in additional repo: ${offender}`,
       );
     }
 
@@ -728,6 +1250,16 @@ export async function resolveAdditionalRepos(
   }
 
   return resolved;
+}
+
+function resolveLoopPrimaryFullName(
+  body: LoopRequestBody,
+  expandedRepoPath: string | null,
+): string {
+  return (
+    body.repo?.fullName ??
+    (expandedRepoPath ? (resolveRepoFullName(expandedRepoPath) ?? "") : "")
+  );
 }
 
 /**
@@ -940,11 +1472,14 @@ async function ensureWorktreeImpl(
   // Resolve base ref
   let baseRef = `origin/${baseBranch}`;
   try {
-    execSync(`${shellEscape(gitBin)} rev-parse --verify ${shellEscape(baseRef)}`, {
-      cwd: expandedRepoPath,
-      stdio: "pipe",
-      timeout: 10_000,
-    });
+    execSync(
+      `${shellEscape(gitBin)} rev-parse --verify ${shellEscape(baseRef)}`,
+      {
+        cwd: expandedRepoPath,
+        stdio: "pipe",
+        timeout: 10_000,
+      },
+    );
   } catch {
     baseRef = baseBranch;
   }
@@ -958,11 +1493,15 @@ async function ensureWorktreeImpl(
     },
   );
 
+  await runBootstrapIfNeeded(worktreeDir, loopId);
   await runLoopsSetupScript(worktreeDir, loopId);
 }
 
 /** Check whether a branch exists locally or on the remote. */
-async function branchExistsImpl(repoPath: string, branch: string): Promise<boolean> {
+async function branchExistsImpl(
+  repoPath: string,
+  branch: string,
+): Promise<boolean> {
   fetchOrigin(repoPath);
   return resolveRef(repoPath, branch) !== null;
 }
@@ -984,11 +1523,14 @@ async function removeWorktreeImpl(
 ): Promise<void> {
   const gitBin = getResolvedGitPath();
   try {
-    execSync(`${shellEscape(gitBin)} worktree remove --force ${shellEscape(worktreeDir)}`, {
-      cwd: expandedRepoPath,
-      stdio: "pipe",
-      timeout: 15_000,
-    });
+    execSync(
+      `${shellEscape(gitBin)} worktree remove --force ${shellEscape(worktreeDir)}`,
+      {
+        cwd: expandedRepoPath,
+        stdio: "pipe",
+        timeout: 15_000,
+      },
+    );
   } catch {
     if (loopId) {
       loopLog(
@@ -1013,12 +1555,15 @@ async function removeWorktreeImpl(
 function getCurrentBranchImpl(worktreeDir: string): string | null {
   try {
     return (
-      execSync(`${shellEscape(getResolvedGitPath())} rev-parse --abbrev-ref HEAD`, {
-        cwd: worktreeDir,
-        encoding: "utf-8",
-        stdio: "pipe",
-        timeout: 5_000,
-      }).trim() || null
+      execSync(
+        `${shellEscape(getResolvedGitPath())} rev-parse --abbrev-ref HEAD`,
+        {
+          cwd: worktreeDir,
+          encoding: "utf-8",
+          stdio: "pipe",
+          timeout: 5_000,
+        },
+      ).trim() || null
     );
   } catch {
     return null;
@@ -1156,20 +1701,143 @@ async function writeArtifactsForPlan(
   await downloadAttachmentsToDisk(claudeWorkDir, attachments);
 }
 
-async function writeArtifactsForExecuteOrAmend(
+/** @internal Exported for testing only. */
+export async function writeArtifactsForExecuteOrAmend(
   claudeWorkDir: string,
   artifacts: LoopArtifact[],
   prompt?: string,
   attachments?: ContextPackAttachment[],
-): Promise<void> {
+  options?: {
+    command: "EXECUTE" | "REQUEST_CHANGES";
+    loopId: string;
+    commandId?: string;
+    operationId?: string;
+  },
+): Promise<{ importedPlanFile: string | null }> {
+  if (options?.command === LoopCommand.Execute) {
+    await fs.rm(path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult), {
+      force: true,
+    });
+  }
+  let importedPlanFile: string | null = null;
   for (const artifact of artifacts) {
     if (artifact.type === LoopArtifactType.ImplementationPlan) {
-      // Sync plan content like ECS harness's syncPlanFromContextPack():
-      // If plan.json already exists (from parent PLAN loop), update only the
-      // .content field — preserving tasks, openQuestions, metadata, etc.
-      // This picks up manual edits the user made in the Liveblocks editor.
+      // For EXECUTE, hosted markdown is canonical. Reuse remote raw plan state
+      // only when it still matches that markdown; otherwise force the
+      // imported-plan compatibility path from the hosted markdown.
       const planJsonPath = path.join(claudeWorkDir, LoopArtifactFile.Plan);
-      if (existsSync(planJsonPath)) {
+      if (options?.command === LoopCommand.Execute) {
+        const rawPlanPayload = isRawPlanArtifact(artifact.raw)
+          ? artifact.raw
+          : null;
+        const rawPlanContent =
+          typeof rawPlanPayload?.content === "string"
+            ? rawPlanPayload.content
+            : undefined;
+        const rawPlanAligned =
+          rawPlanContent !== undefined && rawPlanContent === artifact.content;
+        const localPlanJsonPresent = existsSync(planJsonPath);
+        const localPlanJsonAligned =
+          localPlanJsonPresent &&
+          readPlanJsonContent(planJsonPath) === artifact.content;
+        const importedPlanPath = path.join(
+          claudeWorkDir,
+          IMPORTED_PLAN_MARKDOWN_FILE,
+        );
+        await fs.rm(importedPlanPath, { force: true });
+        const basePlanSource = {
+          rawPlanPayload: rawPlanPayload !== null,
+          rawPlanAligned,
+          localPlanJsonPresent,
+          localPlanJsonAligned,
+          planArtifactContentLength: artifact.content.length,
+          rawPlanContentLength: rawPlanContent?.length ?? null,
+          planArtifactContentHash: shortContentHash(artifact.content),
+          rawPlanContentHash: shortContentHash(rawPlanContent),
+        };
+        const emitPlanSource = (
+          source: ExecutePlanSourceDiagnostics["source"],
+          importedPlanFileStaged: boolean,
+          closedLoopPlanFileSet: boolean,
+        ): void => {
+          Observability.jobPlanSourceResolved(
+            options.commandId,
+            options.operationId,
+            options.loopId,
+            {
+              source,
+              ...basePlanSource,
+              importedPlanFileStaged,
+              closedLoopPlanFileSet,
+            },
+          );
+        };
+
+        if (rawPlanAligned) {
+          importedPlanFile = null;
+          await fs.writeFile(
+            planJsonPath,
+            JSON.stringify(
+              { ...rawPlanPayload!, content: artifact.content },
+              null,
+              2,
+            ),
+          );
+          const message =
+            `EXECUTE plan source=raw-artifact ` +
+            `rawPlanPayload=true rawPlanAligned=true ` +
+            `localPlanJsonPresent=${localPlanJsonPresent}`;
+          loopLog(options.loopId, message);
+          gatewayLog.info(
+            "loop-harness",
+            `loopId=${options.loopId} ${message}`,
+          );
+          emitPlanSource("raw-artifact", false, false);
+        } else if (localPlanJsonAligned) {
+          importedPlanFile = null;
+          const message =
+            `EXECUTE plan source=local-plan-json ` +
+            `rawPlanPayload=${rawPlanPayload !== null} rawPlanAligned=false ` +
+            `localPlanJsonPresent=true localPlanJsonAligned=true`;
+          loopLog(options.loopId, message);
+          gatewayLog.info(
+            "loop-harness",
+            `loopId=${options.loopId} ${message}`,
+          );
+          emitPlanSource("local-plan-json", false, false);
+        } else {
+          if (localPlanJsonPresent) {
+            await fs.rm(planJsonPath, { force: true });
+          }
+          importedPlanFile = importedPlanPath;
+          await fs.writeFile(importedPlanPath, artifact.content);
+          const message =
+            `EXECUTE plan source=imported-plan-compat ` +
+            `rawPlanPayload=${rawPlanPayload !== null} rawPlanAligned=false ` +
+            `localPlanJsonPresent=${localPlanJsonPresent} ` +
+            `localPlanJsonAligned=${localPlanJsonAligned} ` +
+            `importedPlanFile=${importedPlanFile}`;
+          loopLog(options.loopId, message);
+          gatewayLog.info(
+            "loop-harness",
+            `loopId=${options.loopId} ${message}`,
+          );
+          emitPlanSource("imported-plan-compat", true, true);
+        }
+        continue;
+      }
+
+      // When artifact.content is not valid JSON it is raw markdown from an
+      // older gateway; write it to plan-source.md so the plugin can import it.
+      if (!isValidJson(artifact.content)) {
+        const planSourcePath = path.join(
+          claudeWorkDir,
+          PLAN_SOURCE_MARKDOWN_FILE,
+        );
+        await fs.rm(planJsonPath, { force: true });
+        await fs.writeFile(planSourcePath, artifact.content);
+        importedPlanFile = planSourcePath;
+      } else if (existsSync(planJsonPath)) {
         try {
           const existing = JSON.parse(
             readFileSync(planJsonPath, "utf-8"),
@@ -1204,16 +1872,8 @@ async function writeArtifactsForExecuteOrAmend(
             ),
           );
         } else {
-          // If it's valid JSON, write directly. Otherwise wrap it.
-          try {
-            JSON.parse(artifact.content);
-            await fs.writeFile(planJsonPath, artifact.content);
-          } catch {
-            await fs.writeFile(
-              planJsonPath,
-              JSON.stringify({ content: artifact.content }, null, 2),
-            );
-          }
+          // artifact.content is valid JSON (checked above), write directly.
+          await fs.writeFile(planJsonPath, artifact.content);
         }
       }
     } else if (
@@ -1231,10 +1891,11 @@ async function writeArtifactsForExecuteOrAmend(
   }
 
   await downloadAttachmentsToDisk(claudeWorkDir, attachments);
+  return { importedPlanFile };
 }
 
 /**
- * Write context pack files for GENERATE_PRD command.
+ * Write context pack files for GENERATE_PRD and REQUEST_PRD_CHANGES commands.
  * Mirrors writeContextPackFiles in harness-agent.mjs (lines 744-816).
  * Files go under worktreeDir/.closedloop-ai/context/ (NOT claudeWorkDir).
  */
@@ -1243,6 +1904,7 @@ async function writeArtifactsForGeneratePrd(
   artifacts: LoopArtifact[],
   prompt: string,
   repo?: unknown,
+  additionalWorktrees: ReadonlyArray<AdditionalWorktreeEntry> = [],
 ): Promise<void> {
   const contextDir = path.join(worktreeDir, ".closedloop-ai", "context");
   const artifactsDir = path.join(contextDir, "artifacts");
@@ -1258,6 +1920,14 @@ async function writeArtifactsForGeneratePrd(
       JSON.stringify(repo, null, 2),
     );
   }
+
+  // Write peer-repos.json so the agent can discover peer mounts by structured
+  // metadata (mirrors the ECS harness's writeContextPackFiles peer manifest).
+  // No-op when there are no peers.
+  await writePeerReposManifest(
+    contextDir,
+    toPeerWorktreeRefs(additionalWorktrees),
+  );
 
   // Write each artifact
   for (const artifact of artifacts) {
@@ -1279,7 +1949,7 @@ async function writeArtifactsForGeneratePrd(
 // Per-command output reading
 // ---------------------------------------------------------------------------
 
-function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
+function readPlanOutputs(claudeWorkDir: string): LoopOutputArtifacts {
   const plan = toUploadedPlanArtifact(
     readJsonFileSync(path.join(claudeWorkDir, LoopArtifactFile.Plan)),
   );
@@ -1291,16 +1961,14 @@ function readPlanOutputs(claudeWorkDir: string): Record<string, unknown> {
   );
 
   return {
-    plan: plan ?? undefined,
-    openQuestions: openQuestions ?? undefined,
-    judges: judges ?? undefined,
+    [LoopOutputArtifactKey.Plan]: plan ?? undefined,
+    [LoopOutputArtifactKey.OpenQuestions]: openQuestions ?? undefined,
+    [LoopOutputArtifactKey.Judges]: judges ?? undefined,
   };
 }
 
-function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
-  const plan = toUploadedPlanArtifact(
-    readJsonFileSync(path.join(claudeWorkDir, LoopArtifactFile.Plan)),
-  );
+function readExecuteOutputs(claudeWorkDir: string): LoopOutputArtifacts {
+  const plan = readExecutePlanArtifact(claudeWorkDir);
   const executionResult = readJsonFileSync(
     path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
   );
@@ -1309,9 +1977,9 @@ function readExecuteOutputs(claudeWorkDir: string): Record<string, unknown> {
   );
 
   return {
-    plan: plan ?? undefined,
-    executionResult: executionResult ?? undefined,
-    codeJudges: codeJudges ?? undefined,
+    [LoopOutputArtifactKey.Plan]: plan ?? undefined,
+    [LoopOutputArtifactKey.ExecutionResult]: executionResult ?? undefined,
+    [LoopOutputArtifactKey.CodeJudges]: codeJudges ?? undefined,
   };
 }
 
@@ -1340,16 +2008,68 @@ function mergeWarningEntries(
   return mergedWarnings.map(sanitizeErrorMessage).join("; ");
 }
 
-function readDecomposeOutputs(workDir: string): Record<string, unknown> {
+function readDecomposeOutputs(workDir: string): LoopOutputArtifacts {
   const features = readJsonFileSync(
     path.join(workDir, LoopArtifactFile.Features),
   );
-  return { features: features ?? undefined };
+  return { [LoopOutputArtifactKey.Features]: features ?? undefined };
 }
 
-function readGeneratePrdOutputs(worktreeDir: string): Record<string, unknown> {
+function readGeneratePrdOutputs(worktreeDir: string): LoopOutputArtifacts {
   const prdContent = readTextFile(path.join(worktreeDir, LoopArtifactFile.Prd));
-  return { prd: prdContent ? { content: prdContent } : undefined };
+  return {
+    [LoopOutputArtifactKey.Prd]: prdContent
+      ? { content: prdContent }
+      : undefined,
+  };
+}
+
+function readBootstrapOutputs(claudeWorkDir: string): LoopOutputArtifacts {
+  const manifestFile = path.join(claudeWorkDir, "bootstrap-manifest.json");
+  const manifest = readJsonFileSync(manifestFile) as
+    | BootstrapManifestEntry[]
+    | null;
+  if (!manifest) return {};
+
+  const repos: BootstrapRepoResult[] = [];
+  let runnableIndex = 0;
+  for (const entry of manifest) {
+    if (entry.skip) {
+      repos.push({
+        fullName: entry.fullName,
+        branch: entry.branch ?? "main",
+        success: false,
+        error: entry.skipReason ?? "skipped",
+        agents: [],
+        criticGates: null,
+        metadata: null,
+        duration: 0,
+      });
+      continue;
+    }
+
+    const markerPath = path.join(claudeWorkDir, `repo-${runnableIndex}-done`);
+    const marker = readTextFile(markerPath)?.trim() ?? "fail:unknown";
+    const success = marker === "ok";
+    const error = success ? undefined : marker.replace(/^fail:/, "");
+
+    const outputs = success
+      ? readBootstrapRepoOutputs(entry.localPath)
+      : { agents: [], criticGates: null, metadata: null };
+
+    repos.push({
+      fullName: entry.fullName,
+      branch: entry.branch ?? "main",
+      success,
+      error,
+      ...outputs,
+      duration: 0,
+    });
+    runnableIndex += 1;
+  }
+
+  const result = { repos, totalDuration: 0 };
+  return { [LoopOutputArtifactKey.BootstrapResult]: result };
 }
 
 // ---------------------------------------------------------------------------
@@ -1389,11 +2109,32 @@ function redactCredentials(text: string): string {
 }
 
 /**
+ * Redact spawn args to avoid leaking user prompt/code content into telemetry.
+ * Replaces long args (likely prompt text) and values following message/prompt flags.
+ */
+function redactSpawnArgs(args: string[]): string[] {
+  return args.map((arg, i) => {
+    if (arg.length > 200) {
+      return "[REDACTED_LONG_ARG]";
+    }
+    // Redact values after --message, --prompt, -p flags
+    if (i > 0) {
+      const prev = args[i - 1];
+      if (prev === "--message" || prev === "--prompt" || prev === "-p") {
+        return "[REDACTED]";
+      }
+    }
+    return arg;
+  });
+}
+
+/**
  * Collect failure diagnostics for a failed loop process.
  * Returns an object suitable for inclusion in the error telemetry event.
  */
 function collectFailureDiagnostics(claudeWorkDir: string): {
   logTail: string | undefined;
+  stderrTail: string | undefined;
   tokenUsage: {
     inputTokens: number;
     outputTokens: number;
@@ -1405,7 +2146,11 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
 } {
   const logPath = path.join(claudeWorkDir, "symphony-loop.log");
   const rawTail = readLogTail(logPath);
-  const logTail = rawTail ? redactCredentials(rawTail) : undefined;
+  const logTail = rawTail ? redactCredentials(stripAnsi(rawTail)) : undefined;
+  const rawStderr = readStderrTail(claudeWorkDir);
+  const stderrTail = rawStderr
+    ? redactCredentials(stripAnsi(rawStderr))
+    : undefined;
   const {
     inputTokens,
     outputTokens,
@@ -1415,6 +2160,7 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
   } = parseTokenUsage(claudeWorkDir);
   return {
     logTail,
+    stderrTail,
     tokenUsage: {
       inputTokens,
       outputTokens,
@@ -1422,7 +2168,7 @@ function collectFailureDiagnostics(claudeWorkDir: string): {
       cacheReadInputTokens,
     },
     tokensByModel,
-    diagnosticsVersion: 1,
+    diagnosticsVersion: 2,
   };
 }
 
@@ -1431,16 +2177,16 @@ export const SESSION_LIMIT_PATTERN =
   /prompt is too long|exceed context limit|context limit reached|conversation too long/i;
 
 /**
- * Scan claude-output.jsonl for a result record with `is_error: true` whose
- * message matches a known session/context limit pattern.
+ * Scan the current Claude JSONL output for a result record with
+ * `is_error: true` whose message matches a known session/context limit pattern.
  * Returns the error text (e.g. "Prompt is too long") or null if not found
  * or if the error is unrelated to context limits.
  */
 export function detectSessionLimitFromJsonl(
   claudeWorkDir: string,
 ): string | null {
-  const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
-  if (!existsSync(outputFile)) {
+  const outputFile = resolveClaudeOutputPath(claudeWorkDir);
+  if (outputFile === null) {
     return null;
   }
   try {
@@ -1486,15 +2232,15 @@ export const AUTH_CHALLENGE_PATTERN =
   /authentication_error|invalid bearer token|rate_limit_error|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|token.*expired/i;
 
 /**
- * Scan claude-output.jsonl for a result record with `is_error: true` whose
- * message matches a known auth/rate-limit/billing pattern.
+ * Scan the current Claude JSONL output for a result record with
+ * `is_error: true` whose message matches a known auth/rate-limit/billing pattern.
  * Returns the error text or null if not found.
  */
 export function detectAuthChallengeFromJsonl(
   claudeWorkDir: string,
 ): string | null {
-  const outputFile = path.join(claudeWorkDir, "claude-output.jsonl");
-  if (!existsSync(outputFile)) {
+  const outputFile = resolveClaudeOutputPath(claudeWorkDir);
+  if (outputFile === null) {
     return null;
   }
   try {
@@ -1512,6 +2258,19 @@ export function detectAuthChallengeFromJsonl(
           AUTH_CHALLENGE_PATTERN.test(entry.result)
         ) {
           return entry.result;
+        }
+        // Synthetic API-error entries emitted by Claude CLI mid-conversation
+        // carry `isApiErrorMessage: true` and the error string in `error`.
+        if (
+          entry.isApiErrorMessage === true &&
+          typeof entry.error === "string" &&
+          AUTH_CHALLENGE_PATTERN.test(entry.error)
+        ) {
+          const status =
+            typeof entry.apiErrorStatus === "number"
+              ? ` (status ${entry.apiErrorStatus})`
+              : "";
+          return `Claude API ${entry.error} error${status}`;
         }
       } catch {
         // skip malformed lines
@@ -1588,6 +2347,8 @@ async function attemptLlmCommit(
     "2. Stage all changed/new files EXCEPT the .claude/ and .closedloop-ai/ directories:",
     "   git add -- . ':!.claude' ':!.closedloop-ai'",
     "3. Write a clear, descriptive commit message based on the actual code changes",
+    "   - First check if a `.gitmessage` file exists at the repo root. If it does, read it and",
+    "     follow its format exactly (subject line format, body structure, required sections).",
     "   - Summarize WHAT changed and WHY (not just 'ClosedLoop.AI loop output')",
     "   - Use conventional commit style if the changes have a clear category",
     "   - If an artifact slug is provided, prefix the commit message with it",
@@ -1605,9 +2366,18 @@ async function attemptLlmCommit(
     "     c. Write the complete PR body to pr-body.md",
     `     d. Create the PR: gh pr create --label symphony --base ${shellEscape(safeBranch)} --title '<slug-prefixed descriptive title>' --body-file pr-body.md`,
     "   - If a PR already exists, get its URL with: gh pr view --json url,number",
-    "     Fetch the current body: gh pr view <number> --json body --jq .body",
-    "     If any required template sections are missing, append them.",
-    `     Write the full updated body to pr-body.md and run: gh pr edit <number> --body-file pr-body.md`,
+    "     The existing PR may have been created by a prior failed/interrupted run with",
+    "     a generic title and empty description. You must bring it up to quality:",
+    `     a. Run \`git diff --stat origin/${shellEscape(safeBranch)}...HEAD\` to understand ALL changes on the branch (not just this commit)`,
+    "     b. Update the PR title to accurately describe the full feature/change:",
+    `        gh pr edit <number> --title '<slug-prefixed descriptive title>'`,
+    "     c. Rewrite the PR body from scratch based on the full branch diff.",
+    "        Check if the repo has a PR template at .github/pull_request_template.md",
+    "        If a template exists, use it as the base — fill in every section.",
+    "        If no template exists, write a summary of all changes and why.",
+    "        Append the following metadata footer on its own lines at the end:",
+    `        ${footer}`,
+    `        Write the full body to pr-body.md and run: gh pr edit <number> --body-file pr-body.md`,
     "7. ONLY after a successful commit AND push, write this EXACT JSON file:",
     "   File path: execution-result.json",
     "   ```json",
@@ -1666,12 +2436,7 @@ async function attemptLlmCommit(
     "Bash,Read,Write,Glob,Grep",
     expectedMcpUrl,
   );
-  const spawnArgs = [
-    "-p",
-    prompt,
-    "--allowedTools",
-    allowedTools,
-  ];
+  const spawnArgs = ["-p", prompt, "--allowedTools", allowedTools];
   loopLog(
     loopId,
     `LLM commit spawn: binary=${claudeBinary} args=["-p", "<prompt omitted>", "--allowedTools", "${allowedTools}"] cwd=${worktreeDir} PATH=${spawnEnv.PATH ?? "(unset)"}`,
@@ -1876,6 +2641,826 @@ type GitOperationResult =
   | { status: "no-changes" }
   | { status: "error"; reason: string };
 
+export type ExecuteFinalizationStatus = Exclude<
+  LocalJobExecuteFinalizationStatus,
+  "pending"
+>;
+
+export type ExecuteFinalizationPath = LocalJobExecuteFinalizationPath;
+
+export type ExecuteFinalizationSource = LocalJobFinalizationSource;
+
+export interface ExecuteFinalizationResult {
+  status: ExecuteFinalizationStatus;
+  path: ExecuteFinalizationPath;
+  reason?: string;
+  executionResultPersisted: boolean;
+  prUrl?: string;
+  prNumber?: number;
+  branchName?: string;
+  commitSha?: string;
+}
+
+interface ExecuteFinalizationParams {
+  worktreeDir: string | null | undefined;
+  claudeWorkDir: string;
+  loopId: string;
+  artifactSlug: string | undefined;
+  baseBranch: string;
+  webAppOrigin: string;
+  committer: LoopCommitter | undefined;
+  getAllowedDirectories: () => string[];
+  expectedMcpUrl?: string;
+  jobStore?: JobStore;
+  source: ExecuteFinalizationSource;
+  /**
+   * Primary repo `owner/name` for the V2 envelope's `fullName` field.
+   * Empty string when caller has none (rare boot-recovery path for jobs
+   * persisted before the field existed).
+   */
+  primaryFullName: string;
+}
+
+function sanitizeExecuteFinalizationReason(
+  reason: string | undefined,
+): string | undefined {
+  const sanitized = reason ? sanitizeErrorMessage(reason).trim() : "";
+  if (!sanitized) {
+    return undefined;
+  }
+  return sanitized.slice(0, 500);
+}
+
+function getExecuteFinalizationArtifactPresence(claudeWorkDir: string): {
+  executionResultPresent: boolean;
+  prBodyPresent: boolean;
+} {
+  return {
+    executionResultPresent: existsSync(
+      path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
+    ),
+    prBodyPresent: existsSync(path.join(claudeWorkDir, "pr-body.md")),
+  };
+}
+
+function getExecuteFinalizationSandboxBlockReason(
+  worktreeDir: string,
+  getAllowedDirectories: () => string[],
+  loopId: string,
+): string | undefined {
+  try {
+    assertPathAllowed(worktreeDir, getAllowedDirectories());
+  } catch (sandboxErr) {
+    if (sandboxErr instanceof DirectoryNotAllowedError) {
+      loopError(
+        loopId,
+        `EXECUTE finalization skipped: worktreeDir not in allowed sandbox: ${worktreeDir}`,
+      );
+      return "worktree directory not allowed by current sandbox";
+    }
+    throw sandboxErr;
+  }
+  return undefined;
+}
+
+function buildExecutionResultV2(
+  results: RepoExecutionResult[],
+): ExecutionResultV2 {
+  return {
+    schemaVersion: 2,
+    results,
+  };
+}
+
+function parseGitHubFullNameFromPrUrl(prUrl: string): string | null {
+  try {
+    const parsed = new URL(prUrl);
+    if (parsed.hostname !== "github.com") {
+      return null;
+    }
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    if (parts.length < 4 || parts[2] !== "pull") {
+      return null;
+    }
+    const [owner, repo] = parts;
+    return owner && repo ? `${owner}/${repo}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function getSuccessExecutionResultFullName(
+  preferredFullName: string,
+  prUrl: string,
+): string {
+  return (
+    preferredFullName.trim() || (parseGitHubFullNameFromPrUrl(prUrl) ?? "")
+  );
+}
+
+export function scrubObjectCredentials(obj: unknown): unknown {
+  if (typeof obj === "string") return redactCredentials(obj);
+  if (Array.isArray(obj)) return obj.map(scrubObjectCredentials);
+  if (obj !== null && typeof obj === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+      result[key] = scrubObjectCredentials(value);
+    }
+    return result;
+  }
+  return obj;
+}
+
+function persistExecutionResultArtifact(
+  claudeWorkDir: string,
+  executionResult: unknown,
+): boolean {
+  try {
+    const scrubbed = scrubObjectCredentials(executionResult);
+    const json = JSON.stringify(scrubbed, null, 2);
+    writeFileSync(
+      path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
+      json,
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getHeadCommitShaFromWorktree(worktreeDir: string): string | null {
+  try {
+    return (
+      execSync(`${shellEscape(getResolvedGitPath())} rev-parse HEAD`, {
+        cwd: worktreeDir,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 5_000,
+      }).trim() || null
+    );
+  } catch {
+    return null;
+  }
+}
+
+function getAuthoritativeExecutionResult(
+  value: unknown,
+): ExecuteFinalizationResult | null {
+  const parsed = parseExecutionResultFile(
+    value,
+    "",
+  );
+  if (!parsed.ok) {
+    return null;
+  }
+  const primary = parsed.results[0];
+  if (!primary || primary.status === "failed") {
+    return null;
+  }
+  if (primary.status === "skipped" || !primary.hasChanges) {
+    return {
+      status: "no-changes",
+      path: "artifact-existing",
+      reason: "existing execution-result.json reused",
+      executionResultPersisted: true,
+      branchName: primary.status === "success" ? primary.branchName : undefined,
+      commitSha:
+        primary.status === "success"
+          ? (primary.commitSha ?? undefined)
+          : undefined,
+    };
+  }
+  if (primary.commitSha) {
+    return {
+      status: "success",
+      path: "artifact-existing",
+      reason: "existing execution-result.json reused",
+      executionResultPersisted: true,
+      prUrl: primary.prUrl,
+      prNumber: primary.prNumber,
+      branchName: primary.branchName,
+      commitSha: primary.commitSha,
+    };
+  }
+  return null;
+}
+
+function upsertExecuteFinalizationDiagnostics(
+  jobStore: JobStore | undefined,
+  loopId: string,
+  updates: Partial<{
+    finalizationSource: ExecuteFinalizationSource;
+    executeFinalizationStatus: LocalJobExecuteFinalizationStatus;
+    executeFinalizationPath: ExecuteFinalizationPath;
+    executeFinalizationStartedAt: string;
+    executeFinalizationCompletedAt: string;
+    executeFinalizationReason: string | undefined;
+    executeFinalizationPreExecutionResultPresent: boolean;
+    executeFinalizationPrePrBodyPresent: boolean;
+    executeFinalizationPostExecutionResultPresent: boolean;
+    executeFinalizationPostPrBodyPresent: boolean;
+  }>,
+): void {
+  if (!jobStore) {
+    return;
+  }
+  const current = jobStore.getByLoopId(loopId);
+  if (!current) {
+    return;
+  }
+  jobStore.upsert({
+    ...current,
+    ...updates,
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+function completeExecuteFinalization(
+  jobStore: JobStore | undefined,
+  loopId: string,
+  source: ExecuteFinalizationSource,
+  claudeWorkDir: string,
+  startedAt: string,
+  result: ExecuteFinalizationResult,
+  preArtifacts: {
+    executionResultPresent: boolean;
+    prBodyPresent: boolean;
+  },
+): ExecuteFinalizationResult {
+  const postArtifacts = getExecuteFinalizationArtifactPresence(claudeWorkDir);
+  upsertExecuteFinalizationDiagnostics(jobStore, loopId, {
+    finalizationSource: source,
+    executeFinalizationStatus: result.status,
+    executeFinalizationPath: result.path,
+    executeFinalizationStartedAt: startedAt,
+    executeFinalizationCompletedAt: new Date().toISOString(),
+    executeFinalizationReason: sanitizeExecuteFinalizationReason(result.reason),
+    executeFinalizationPreExecutionResultPresent:
+      preArtifacts.executionResultPresent,
+    executeFinalizationPrePrBodyPresent: preArtifacts.prBodyPresent,
+    executeFinalizationPostExecutionResultPresent:
+      postArtifacts.executionResultPresent,
+    executeFinalizationPostPrBodyPresent: postArtifacts.prBodyPresent,
+  });
+  return {
+    ...result,
+    reason: sanitizeExecuteFinalizationReason(result.reason),
+  };
+}
+
+export async function runExecuteFinalization(
+  params: ExecuteFinalizationParams,
+): Promise<ExecuteFinalizationResult> {
+  const startedAt = new Date().toISOString();
+  const preArtifacts = getExecuteFinalizationArtifactPresence(
+    params.claudeWorkDir,
+  );
+
+  upsertExecuteFinalizationDiagnostics(params.jobStore, params.loopId, {
+    finalizationSource: params.source,
+    executeFinalizationStatus: "pending",
+    executeFinalizationPath: "none",
+    executeFinalizationStartedAt: startedAt,
+    executeFinalizationCompletedAt: undefined,
+    executeFinalizationReason: undefined,
+    executeFinalizationPreExecutionResultPresent:
+      preArtifacts.executionResultPresent,
+    executeFinalizationPrePrBodyPresent: preArtifacts.prBodyPresent,
+    executeFinalizationPostExecutionResultPresent: undefined,
+    executeFinalizationPostPrBodyPresent: undefined,
+  });
+
+  const existingExecutionResult = readJsonFileSync(
+    path.join(params.claudeWorkDir, LoopArtifactFile.ExecutionResult),
+  );
+  const authoritativeExisting = getAuthoritativeExecutionResult(
+    existingExecutionResult,
+  );
+  if (authoritativeExisting) {
+    return completeExecuteFinalization(
+      params.jobStore,
+      params.loopId,
+      params.source,
+      params.claudeWorkDir,
+      startedAt,
+      authoritativeExisting,
+      preArtifacts,
+    );
+  }
+
+  if (!params.worktreeDir || !existsSync(params.worktreeDir)) {
+    return completeExecuteFinalization(
+      params.jobStore,
+      params.loopId,
+      params.source,
+      params.claudeWorkDir,
+      startedAt,
+      {
+        status: "skipped",
+        path: "none",
+        reason: "worktree directory unavailable for execute finalization",
+        executionResultPersisted: false,
+      },
+      preArtifacts,
+    );
+  }
+
+  const sandboxBlockReason = getExecuteFinalizationSandboxBlockReason(
+    params.worktreeDir,
+    params.getAllowedDirectories,
+    params.loopId,
+  );
+  if (sandboxBlockReason) {
+    return completeExecuteFinalization(
+      params.jobStore,
+      params.loopId,
+      params.source,
+      params.claudeWorkDir,
+      startedAt,
+      {
+        status: "skipped",
+        path: "none",
+        reason: sandboxBlockReason,
+        executionResultPersisted: false,
+      },
+      preArtifacts,
+    );
+  }
+
+  const llmResult = await attemptLlmCommit(
+    params.worktreeDir,
+    params.baseBranch,
+    params.loopId,
+    LoopCommand.Execute,
+    params.artifactSlug,
+    params.webAppOrigin,
+    params.committer,
+    params.getAllowedDirectories,
+    params.expectedMcpUrl,
+    undefined,
+    params.jobStore,
+    params.claudeWorkDir,
+  );
+
+  if (llmResult) {
+    const executionResult = buildExecutionResultV2([
+      {
+        status: "success",
+        fullName: getSuccessExecutionResultFullName(
+          params.primaryFullName,
+          llmResult.prUrl,
+        ),
+        prUrl: llmResult.prUrl,
+        prNumber: llmResult.prNumber,
+        branchName: llmResult.branchName,
+        baseBranch: params.baseBranch,
+        hasChanges: true,
+        commitSha: llmResult.commitSha,
+      },
+    ]);
+    const persisted = persistExecutionResultArtifact(
+      params.claudeWorkDir,
+      executionResult,
+    );
+    return completeExecuteFinalization(
+      params.jobStore,
+      params.loopId,
+      params.source,
+      params.claudeWorkDir,
+      startedAt,
+      persisted
+        ? {
+            status: "success",
+            path: "llm",
+            executionResultPersisted: true,
+            prUrl: llmResult.prUrl,
+            prNumber: llmResult.prNumber,
+            branchName: llmResult.branchName,
+            commitSha: llmResult.commitSha,
+          }
+        : {
+            status: "error",
+            path: "llm",
+            reason:
+              "failed to persist execution-result.json after LLM commit finalization",
+            executionResultPersisted: false,
+          },
+      preArtifacts,
+    );
+  }
+
+  const gitFallbackSandboxBlockReason =
+    getExecuteFinalizationSandboxBlockReason(
+      params.worktreeDir,
+      params.getAllowedDirectories,
+      params.loopId,
+    );
+  if (gitFallbackSandboxBlockReason) {
+    return completeExecuteFinalization(
+      params.jobStore,
+      params.loopId,
+      params.source,
+      params.claudeWorkDir,
+      startedAt,
+      {
+        status: "skipped",
+        path: "none",
+        reason: gitFallbackSandboxBlockReason,
+        executionResultPersisted: false,
+      },
+      preArtifacts,
+    );
+  }
+
+  try {
+    unlinkSync(path.join(params.worktreeDir, LoopArtifactFile.ExecutionResult));
+  } catch {
+    /* may not exist */
+  }
+  try {
+    unlinkSync(path.join(params.worktreeDir, "pr-body.md"));
+  } catch {
+    /* may not exist */
+  }
+
+  const gitShellPath = await getShellPath();
+  const gitResult = executeGitOperations(
+    params.worktreeDir,
+    params.committer,
+    params.baseBranch,
+    params.loopId,
+    LoopCommand.Execute,
+    params.artifactSlug,
+    params.webAppOrigin,
+    gitShellPath,
+  );
+
+  if (gitResult.status === "success") {
+    const executionResult = buildExecutionResultV2([
+      {
+        status: "success",
+        fullName: getSuccessExecutionResultFullName(
+          params.primaryFullName,
+          gitResult.prUrl,
+        ),
+        prUrl: gitResult.prUrl,
+        prNumber: gitResult.prNumber,
+        branchName: gitResult.branchName,
+        baseBranch: params.baseBranch,
+        hasChanges: true,
+        commitSha: gitResult.commitSha,
+      },
+    ]);
+    const persisted = persistExecutionResultArtifact(
+      params.claudeWorkDir,
+      executionResult,
+    );
+    return completeExecuteFinalization(
+      params.jobStore,
+      params.loopId,
+      params.source,
+      params.claudeWorkDir,
+      startedAt,
+      persisted
+        ? {
+            status: "success",
+            path: "git-fallback",
+            executionResultPersisted: true,
+            prUrl: gitResult.prUrl,
+            prNumber: gitResult.prNumber,
+            branchName: gitResult.branchName,
+            commitSha: gitResult.commitSha,
+          }
+        : {
+            status: "error",
+            path: "git-fallback",
+            reason:
+              "failed to persist execution-result.json after git finalization",
+            executionResultPersisted: false,
+          },
+      preArtifacts,
+    );
+  }
+
+  if (gitResult.status === "no-changes") {
+    const branchName = getCurrentBranchImpl(params.worktreeDir);
+    const commitSha = getHeadCommitShaFromWorktree(params.worktreeDir);
+    if (!branchName) {
+      return completeExecuteFinalization(
+        params.jobStore,
+        params.loopId,
+        params.source,
+        params.claudeWorkDir,
+        startedAt,
+        {
+          status: "error",
+          path: "git-fallback",
+          reason:
+            "could not determine branch name for no-changes execution result",
+          executionResultPersisted: false,
+        },
+        preArtifacts,
+      );
+    }
+    const executionResult = buildExecutionResultV2([
+      {
+        status: "skipped",
+        fullName: params.primaryFullName,
+        reason: "no_changes",
+      },
+    ]);
+    const persisted = persistExecutionResultArtifact(
+      params.claudeWorkDir,
+      executionResult,
+    );
+    return completeExecuteFinalization(
+      params.jobStore,
+      params.loopId,
+      params.source,
+      params.claudeWorkDir,
+      startedAt,
+      persisted
+        ? {
+            status: "no-changes",
+            path: "git-fallback",
+            reason: "no local changes detected",
+            executionResultPersisted: true,
+            branchName,
+            commitSha: commitSha ?? undefined,
+          }
+        : {
+            status: "error",
+            path: "git-fallback",
+            reason:
+              "failed to persist execution-result.json for no-changes finalization",
+            executionResultPersisted: false,
+          },
+      preArtifacts,
+    );
+  }
+
+  return completeExecuteFinalization(
+    params.jobStore,
+    params.loopId,
+    params.source,
+    params.claudeWorkDir,
+    startedAt,
+    {
+      status: "error",
+      path: "git-fallback",
+      reason: gitResult.reason,
+      executionResultPersisted: false,
+    },
+    preArtifacts,
+  );
+}
+
+export async function finalizeMultiRepoExecute(
+  entries: Array<{ fullName: string; worktreeDir: string; baseBranch: string }>,
+  deps: {
+    loopId: string;
+    apiBaseUrl: string;
+    token: string;
+    webAppOrigin: string;
+    getAllowedDirectories: () => string[];
+    artifactSlug?: string;
+    expectedMcpUrl?: string;
+    committer?: LoopCommitter;
+  },
+): Promise<RepoExecutionResult[]> {
+  const results: RepoExecutionResult[] = [];
+
+  for (const entry of entries) {
+    try {
+      const entryClaudeWorkDir = path.join(
+        entry.worktreeDir,
+        ".closedloop-ai",
+        "work",
+      );
+      mkdirSync(entryClaudeWorkDir, { recursive: true });
+      const finalization = await runExecuteFinalization({
+        worktreeDir: entry.worktreeDir,
+        claudeWorkDir: entryClaudeWorkDir,
+        loopId: deps.loopId,
+        artifactSlug: deps.artifactSlug,
+        baseBranch: entry.baseBranch,
+        webAppOrigin: deps.webAppOrigin,
+        committer: deps.committer,
+        getAllowedDirectories: deps.getAllowedDirectories,
+        expectedMcpUrl: deps.expectedMcpUrl,
+        jobStore: undefined,
+        source: "live-exit",
+        primaryFullName: entry.fullName,
+      });
+      results.push(
+        buildPrimaryRepoResult(entry.fullName, entry.baseBranch, finalization),
+      );
+    } catch (err) {
+      loopError(
+        deps.loopId,
+        "multi-repo-finalization-failed",
+        entry.fullName,
+        String(err),
+      );
+      await postLoopEventBounded(deps.apiBaseUrl, deps.loopId, deps.token, {
+        type: LoopEventType.Error,
+        code: LoopErrorCode.RunnerError,
+        message: redactCredentials(
+          sanitizeErrorMessage(
+            err instanceof Error ? err.message : String(err),
+          ),
+        ),
+        result: { repo: entry.fullName },
+      });
+      results.push({
+        status: "failed",
+        fullName: entry.fullName,
+        error: String(err),
+      });
+    }
+  }
+
+  return results;
+}
+
+/**
+ * Outcome of `finalizeAdditionalReposAndPersist`.
+ *
+ * - `skipped:no-additionals`: caller passed an empty entries array.
+ * - `skipped:already-finalized`: existing on-disk V2 already contains the
+ *   multi-repo envelope (idempotent re-entry from recovery).
+ * - `skipped:incomplete-metadata`: an entry persisted by an older build
+ *   lacks the `fullName` or `baseBranch` required to finalize. Recovery
+ *   logs a warning and falls through to worktree cleanup only.
+ * - `ok`: finalization ran; combined V2 envelope was persisted.
+ */
+export type FinalizeAdditionalReposOutcome =
+  | { status: "skipped:no-additionals" }
+  | { status: "skipped:already-finalized" }
+  | { status: "skipped:incomplete-metadata"; missingRepoPaths: string[] }
+  | { status: "ok"; results: RepoExecutionResult[] };
+
+/**
+ * Run `finalizeMultiRepoExecute` for the additional-repo worktrees and
+ * persist the combined V2 envelope (primary + additional results) to
+ * `execution-result.json`. Used by both the live-exit path in
+ * `handleProcessCompletion` and by recovery in `finalizeLoopFromRuntime`,
+ * so the same git push / PR creation runs after a desktop restart.
+ *
+ * Idempotent: if the on-disk V2 already carries multiple results, returns
+ * without doing further work.
+ */
+export async function finalizeAdditionalReposAndPersist(args: {
+  additionalEntries: readonly AdditionalWorktreeEntry[];
+  primaryFullName: string;
+  primaryBaseBranch: string;
+  /**
+   * Fresh primary finalization result from the live path or from a recovery
+   * call that just ran `runExecuteFinalization`. When `null`, the helper
+   * falls back to the primary entry already on disk in `execution-result.json`
+   * (recovery path where primary was finalized in a prior attempt).
+   */
+  executeFinalization: ExecuteFinalizationResult | null;
+  claudeWorkDir: string;
+  loopId: string;
+  apiBaseUrl: string;
+  token: string;
+  webAppOrigin: string;
+  getAllowedDirectories: () => string[];
+  artifactSlug?: string;
+  expectedMcpUrl?: string;
+  committer?: LoopCommitter;
+}): Promise<FinalizeAdditionalReposOutcome> {
+  if (args.additionalEntries.length === 0) {
+    return { status: "skipped:no-additionals" };
+  }
+
+  // Idempotency guard: a prior run (live-exit pre-crash, or earlier recovery
+  // attempt) may have already persisted the multi-repo envelope.
+  const existing = readJsonFileSync(
+    path.join(args.claudeWorkDir, LoopArtifactFile.ExecutionResult),
+  );
+  const parsedExisting = parseExecutionResultFile(
+    existing,
+    "",
+  );
+  if (parsedExisting.ok && parsedExisting.results.length > 1) {
+    return { status: "skipped:already-finalized" };
+  }
+
+  const finalizable: Array<{
+    fullName: string;
+    worktreeDir: string;
+    baseBranch: string;
+  }> = [];
+  const missingRepoPaths: string[] = [];
+  for (const entry of args.additionalEntries) {
+    const fullName =
+      entry.fullName ?? resolveRepoFullName(entry.repoPath) ?? undefined;
+    const baseBranch = entry.baseBranch;
+    if (!fullName || !baseBranch) {
+      missingRepoPaths.push(entry.repoPath);
+      continue;
+    }
+    finalizable.push({
+      fullName,
+      worktreeDir: entry.dir,
+      baseBranch,
+    });
+  }
+
+  if (missingRepoPaths.length > 0) {
+    gatewayLog.warn(
+      "loop-harness",
+      `Skipping additional-repo recovery for loopId=${args.loopId}: ` +
+        `missing fullName/baseBranch metadata for repos [${missingRepoPaths.join(", ")}]`,
+    );
+    return { status: "skipped:incomplete-metadata", missingRepoPaths };
+  }
+
+  const additionalResults = await finalizeMultiRepoExecute(finalizable, {
+    loopId: args.loopId,
+    apiBaseUrl: args.apiBaseUrl,
+    token: args.token,
+    webAppOrigin: args.webAppOrigin,
+    getAllowedDirectories: args.getAllowedDirectories,
+    artifactSlug: args.artifactSlug,
+    expectedMcpUrl: args.expectedMcpUrl,
+    committer: args.committer,
+  });
+
+  // Prefer the primary entry already on disk so we preserve any prUrl /
+  // branchName / commitSha values previously written. Fall back to building
+  // one from `executeFinalization` (live path or fresh recovery).
+  const existingPrimary =
+    parsedExisting.ok && parsedExisting.results.length >= 1
+      ? parsedExisting.results[0]
+      : null;
+  const primaryResult: RepoExecutionResult =
+    existingPrimary ??
+    buildPrimaryRepoResult(
+      args.primaryFullName,
+      args.primaryBaseBranch,
+      args.executeFinalization,
+    );
+
+  const v2Envelope = buildExecutionResultV2([
+    primaryResult,
+    ...additionalResults,
+  ]);
+  persistExecutionResultArtifact(args.claudeWorkDir, v2Envelope);
+
+  return { status: "ok", results: additionalResults };
+}
+
+function buildPrimaryRepoResult(
+  fullName: string,
+  baseBranch: string,
+  executeFinalization: ExecuteFinalizationResult | null,
+): RepoExecutionResult {
+  if (!executeFinalization) {
+    return { status: "skipped", fullName, reason: "no_finalization" };
+  }
+  if (
+    executeFinalization.status === "no-changes" ||
+    executeFinalization.status === "skipped"
+  ) {
+    return {
+      status: "skipped",
+      fullName,
+      reason: executeFinalization.reason ?? "no_changes",
+    };
+  }
+  if (
+    executeFinalization.status === "success" &&
+    executeFinalization.prUrl &&
+    executeFinalization.prNumber !== undefined &&
+    executeFinalization.branchName &&
+    executeFinalization.commitSha
+  ) {
+    return {
+      status: "success",
+      fullName: getSuccessExecutionResultFullName(
+        fullName,
+        executeFinalization.prUrl,
+      ),
+      prUrl: executeFinalization.prUrl,
+      prNumber: executeFinalization.prNumber,
+      branchName: executeFinalization.branchName,
+      baseBranch,
+      hasChanges: true,
+      commitSha: executeFinalization.commitSha,
+    };
+  }
+  return {
+    status: "failed",
+    fullName,
+    error:
+      executeFinalization.reason ??
+      `execute finalization status: ${executeFinalization.status}`,
+  };
+}
+
 function executeGitOperations(
   worktreeDir: string,
   committer: LoopCommitter | undefined,
@@ -1938,19 +3523,25 @@ function executeGitOperations(
       timeout: 30_000,
     });
 
-    const branchName = execSync(`${shellEscape(gitBin)} rev-parse --abbrev-ref HEAD`, {
-      cwd: worktreeDir,
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 10_000,
-    }).trim();
+    const branchName = execSync(
+      `${shellEscape(gitBin)} rev-parse --abbrev-ref HEAD`,
+      {
+        cwd: worktreeDir,
+        encoding: "utf-8",
+        stdio: "pipe",
+        timeout: 10_000,
+      },
+    ).trim();
 
-    execSync(`${shellEscape(gitBin)} push -u origin ${shellEscape(branchName)}`, {
-      cwd: worktreeDir,
-      stdio: "pipe",
-      env,
-      timeout: 60_000,
-    });
+    execSync(
+      `${shellEscape(gitBin)} push -u origin ${shellEscape(branchName)}`,
+      {
+        cwd: worktreeDir,
+        stdio: "pipe",
+        env,
+        timeout: 60_000,
+      },
+    );
 
     const commitSha = execSync(`${shellEscape(gitBin)} rev-parse HEAD`, {
       cwd: worktreeDir,
@@ -2111,6 +3702,36 @@ function isCancelled(jobStore: JobStore | undefined, loopId: string): boolean {
   return status === "CANCEL_PENDING" || status === "CANCELLED";
 }
 
+function emitExecuteDecisionTableVerificationTelemetry(args: {
+  loopId: string;
+  commandId?: string;
+  operationId?: string;
+  claudeWorkDir: string;
+  decisionTableVerificationStartOffset?: number;
+}): void {
+  const summary = emitDecisionTableVerificationTelemetry({
+    telemetry: Observability.getTelemetryEmitter(),
+    commandId: args.commandId,
+    operationId: args.operationId,
+    loopId: args.loopId,
+    closedLoopWorkDir: args.claudeWorkDir,
+    startOffset: args.decisionTableVerificationStartOffset,
+  });
+
+  if (summary.emittedRecords > 0) {
+    gatewayLog.info(
+      "decision-table-telemetry",
+      `Emitted ${summary.emittedRecords} decision-table verification telemetry record(s) for loopId=${args.loopId} file=${summary.filePath}`,
+    );
+    return;
+  }
+
+  gatewayLog.info(
+    "decision-table-telemetry",
+    `Emitted decision-table verification missing telemetry for loopId=${args.loopId} reason=${summary.missingReason ?? "unknown"} file=${summary.filePath}`,
+  );
+}
+
 export async function handleProcessCompletion(
   exitCode: number,
   body: LoopRequestBody,
@@ -2127,17 +3748,31 @@ export async function handleProcessCompletion(
   operationId?: string,
   wt: WorktreeProvider = defaultWorktreeProvider,
   loopTokenStore?: LoopTokenStore,
-  additionalWorktreeDirs: { dir: string; repoPath: string }[] = [],
+  additionalWorktreeDirs: AdditionalWorktreeEntry[] = [],
+  exitSignal?: string,
+  spawnStartedAt?: number,
+  spawnMeta?: {
+    command: string;
+    args: string[];
+    cwd: string;
+    claudeVersion?: string;
+    binaryPath: string;
+    authFilesExist: boolean;
+    envSnapshot: Record<string, string>;
+  },
+  decisionTableVerificationStartOffset = 0,
+  userVisibleLoopFailureSecret?: string,
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
   // Temp-dir commands (DECOMPOSE, EVALUATE_*) need the entire temp tree removed on cleanup.
   const tempCleanupDir = usedTempDir ? (worktreeDir ?? claudeWorkDir) : null;
+  const elapsedMs = spawnStartedAt ? Date.now() - spawnStartedAt : undefined;
 
   loopLog(loopId, `Process exited with code ${exitCode}, command=${command}`);
 
   if (exitCode !== 0) {
-    // Collect diagnostics (log tail + token usage) for the failure event
-    const diagnostics = collectFailureDiagnostics(claudeWorkDir);
+    // Collect diagnostics (log tail + stderr + token usage) for the failure event
+    const baseDiagnostics = collectFailureDiagnostics(claudeWorkDir);
     const sessionFileForTelemetry = path.join(claudeWorkDir, "session-id.txt");
     const rawSessionId = readTextFile(sessionFileForTelemetry);
     const failureSessionId = rawSessionId ? rawSessionId.trim() : undefined;
@@ -2147,11 +3782,47 @@ export async function handleProcessCompletion(
       existingJob?.status === "CANCEL_PENDING" ||
       existingJob?.status === "CANCELLED";
     const failureBranchName = worktreeDir
-      ? wt.getCurrentBranch(worktreeDir) ?? undefined
+      ? (wt.getCurrentBranch(worktreeDir) ?? undefined)
       : undefined;
     const failureWarnings: string[] = [];
+    let failureCloudFinalized = false;
+    let failureRetryableFailure = false;
+    let failureRemoteError: string | undefined;
+    const postFailureLoopEvent = async (
+      eventBody: Record<string, unknown>,
+    ): Promise<void> => {
+      const result = await postLoopEvent(
+        apiBaseUrl,
+        loopId,
+        closedLoopAuthToken,
+        eventBody,
+      );
+      failureCloudFinalized = result.success;
+      if (!result.success) {
+        failureRemoteError = result.error;
+        failureRetryableFailure = isRetryableFinalizationError(result.error);
+        failureWarnings.push("EVENT_POST_FAILED");
+      }
+      if (existingJob && jobStore) {
+        const now = new Date().toISOString();
+        const latestJob = jobStore.getByLoopId(loopId) ?? existingJob;
+        jobStore.upsert({
+          ...latestJob,
+          ...(result.success
+            ? {
+                completedEventPostedAt: latestJob.completedEventPostedAt ?? now,
+                cloudFinalizedAt: latestJob.cloudFinalizedAt ?? now,
+                lastRecoveryError: undefined,
+              }
+            : {
+                lastRecoveryError: result.error,
+              }),
+          updatedAt: now,
+        });
+      }
+    };
 
-    if (!wasCancelled && command === "EXECUTE") {
+    if (!wasCancelled && command === LoopCommand.Execute) {
       if (existingJob && jobStore) {
         const uploadResult = await tryUploadArtifacts(
           existingJob,
@@ -2196,6 +3867,30 @@ export async function handleProcessCompletion(
       }
     }
 
+    // Determine abort reason
+    const abortReason: string | undefined = wasCancelled
+      ? "cancelled"
+      : "process-exit";
+
+    // Build enriched diagnostics with new fields
+    const diagnostics = {
+      ...baseDiagnostics,
+      exitSignal,
+      elapsedMs,
+      abortReason,
+      spawnMeta,
+    };
+
+    if (!wasCancelled && command === LoopCommand.Execute) {
+      emitExecuteDecisionTableVerificationTelemetry({
+        loopId,
+        commandId: commandId ?? existingJob?.commandId,
+        operationId: operationId ?? existingJob?.operationId,
+        claudeWorkDir,
+        decisionTableVerificationStartOffset,
+      });
+    }
+
     if (wasCancelled) {
       Observability.jobCancelled(
         commandId ?? existingJob?.commandId,
@@ -2205,7 +3900,7 @@ export async function handleProcessCompletion(
         diagnostics,
         failureSessionId,
       );
-      await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+      await postFailureLoopEvent({
         type: LoopEventType.Error,
         code: LoopErrorCode.Cancelled,
         message: "Loop cancelled",
@@ -2215,6 +3910,10 @@ export async function handleProcessCompletion(
         tokenUsage: diagnostics.tokenUsage,
         tokensByModel: diagnostics.tokensByModel,
         logTail: diagnostics.logTail,
+        stderrTail: diagnostics.stderrTail,
+        exitSignal: diagnostics.exitSignal,
+        elapsedMs: diagnostics.elapsedMs,
+        abortReason: diagnostics.abortReason,
         diagnosticsVersion: String(diagnostics.diagnosticsVersion),
         ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
       });
@@ -2244,16 +3943,69 @@ export async function handleProcessCompletion(
       (jsonlAuthError !== null ||
         (diagnostics.logTail != null &&
           isAuthChallengeError(diagnostics.logTail)));
+    const userVisibleFailure = readUserVisibleLoopFailure({
+      claudeWorkDir,
+      markerNotBeforeMs: spawnStartedAt,
+      signingSecret: userVisibleLoopFailureSecret,
+    });
+    const userVisibleFailureMessage =
+      userVisibleFailure !== null
+        ? redactCredentials(
+            stripAnsi(sanitizeErrorMessage(userVisibleFailure.message)),
+          )
+        : undefined;
+    const trustedUserVisibleFailure =
+      userVisibleFailure !== null
+        ? {
+            ...toUserVisibleLoopFailurePayload(userVisibleFailure),
+            message: userVisibleFailureMessage ?? userVisibleFailure.message,
+          }
+        : undefined;
+    if (!wasCancelled && trustedUserVisibleFailure && existingJob && jobStore) {
+      const latestJob = jobStore.getByLoopId(loopId) ?? existingJob;
+      jobStore.upsert({
+        ...latestJob,
+        userVisibleLoopFailure: trustedUserVisibleFailure,
+        updatedAt: new Date().toISOString(),
+      });
+    }
 
     if (!wasCancelled) {
-      if (isContextLimit) {
+      if (trustedUserVisibleFailure) {
+        loopError(
+          loopId,
+          `User-visible runner failure detected: ${trustedUserVisibleFailure.code} ${trustedUserVisibleFailure.result.subcode}`,
+        );
+        gatewayLog.error(
+          "loop-harness",
+          `${command} reported user-visible runner failure, loopId=${loopId}, code=${trustedUserVisibleFailure.code}, subcode=${trustedUserVisibleFailure.result.subcode}`,
+        );
+        await postFailureLoopEvent({
+          type: LoopEventType.Error,
+          code: trustedUserVisibleFailure.code,
+          message: trustedUserVisibleFailure.message,
+          result: trustedUserVisibleFailure.result,
+          loopId,
+          sessionId: failureSessionId,
+          ...(failureBranchName ? { branchName: failureBranchName } : {}),
+          tokenUsage: diagnostics.tokenUsage,
+          tokensByModel: diagnostics.tokensByModel,
+          logTail: diagnostics.logTail,
+          stderrTail: diagnostics.stderrTail,
+          exitSignal: diagnostics.exitSignal,
+          elapsedMs: diagnostics.elapsedMs,
+          abortReason: diagnostics.abortReason,
+          diagnosticsVersion: String(diagnostics.diagnosticsVersion),
+          ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
+        });
+      } else if (isContextLimit) {
         const limitMsg = jsonlError ?? "Context limit exceeded";
         loopError(loopId, `Context limit detected: ${limitMsg}`);
         gatewayLog.error(
           "loop-harness",
           `${command} hit context limit, loopId=${loopId}: ${limitMsg}`,
         );
-        await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+        await postFailureLoopEvent({
           type: LoopEventType.Error,
           code: LoopErrorCode.ContextLimitExceeded,
           message: limitMsg,
@@ -2263,6 +4015,10 @@ export async function handleProcessCompletion(
           tokenUsage: diagnostics.tokenUsage,
           tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
+          stderrTail: diagnostics.stderrTail,
+          exitSignal: diagnostics.exitSignal,
+          elapsedMs: diagnostics.elapsedMs,
+          abortReason: diagnostics.abortReason,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
           ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
         });
@@ -2281,7 +4037,7 @@ export async function handleProcessCompletion(
           diagnostics,
           failureSessionId,
         );
-        await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+        await postFailureLoopEvent({
           type: LoopEventType.Error,
           code: LoopErrorCode.AuthChallenge,
           message: authMsg,
@@ -2291,6 +4047,10 @@ export async function handleProcessCompletion(
           tokenUsage: diagnostics.tokenUsage,
           tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
+          stderrTail: diagnostics.stderrTail,
+          exitSignal: diagnostics.exitSignal,
+          elapsedMs: diagnostics.elapsedMs,
+          abortReason: diagnostics.abortReason,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
           ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
         });
@@ -2300,7 +4060,7 @@ export async function handleProcessCompletion(
           "loop-harness",
           `${command} failed with exit code ${exitCode}, loopId=${loopId}`,
         );
-        await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+        await postFailureLoopEvent({
           type: LoopEventType.Error,
           code: LoopErrorCode.ProcessFailed,
           message: `Process exited with code ${exitCode}`,
@@ -2310,6 +4070,10 @@ export async function handleProcessCompletion(
           tokenUsage: diagnostics.tokenUsage,
           tokensByModel: diagnostics.tokensByModel,
           logTail: diagnostics.logTail,
+          stderrTail: diagnostics.stderrTail,
+          exitSignal: diagnostics.exitSignal,
+          elapsedMs: diagnostics.elapsedMs,
+          abortReason: diagnostics.abortReason,
           diagnosticsVersion: String(diagnostics.diagnosticsVersion),
           ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
         });
@@ -2323,7 +4087,9 @@ export async function handleProcessCompletion(
         ...latestJob,
         status: wasCancelled ? "CANCELLED" : "FAILED",
         liveActivity:
-          !wasCancelled && isContextLimit
+          !wasCancelled && trustedUserVisibleFailure
+            ? trustedUserVisibleFailure.message
+            : !wasCancelled && isContextLimit
             ? "Context limit exceeded"
             : !wasCancelled && isAuthChallenge
               ? `Auth challenge: ${jsonlAuthError ?? "authentication error"}`
@@ -2332,15 +4098,35 @@ export async function handleProcessCompletion(
         warning: mergeWarningEntries(latestJob.warning, failureWarnings),
         updatedAt: now,
         completedAt: now,
+        ...(!wasCancelled
+          ? {
+              finalStatusPersistedAt: latestJob.finalStatusPersistedAt ?? now,
+              ...(failureCloudFinalized
+                ? {
+                    cloudFinalizedAt: latestJob.cloudFinalizedAt ?? now,
+                    lastRecoveryError: undefined,
+                  }
+                : failureRemoteError
+                  ? { lastRecoveryError: failureRemoteError }
+                  : {}),
+            }
+          : {}),
       });
     }
     if (tempCleanupDir) {
       fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(() => {});
-    } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
+    } else if (
+      (command === LoopCommand.GeneratePrd ||
+        command === LoopCommand.RequestPrdChanges) &&
+      worktreeDir &&
+      expandedRepoPath
+    ) {
       await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
-    await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt, "cleanup additional worktree failed (on error):");
-    loopTokenStore?.deleteLoopToken(loopId);
+    await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt);
+    if (wasCancelled || failureCloudFinalized || !failureRetryableFailure) {
+      loopTokenStore?.deleteLoopToken(loopId);
+    }
     setTimeout(() => removeSession(loopId), 30_000);
     return;
   }
@@ -2352,162 +4138,156 @@ export async function handleProcessCompletion(
       "loop-harness",
       `${command} succeeded (exit 0), reading artifacts for loopId=${loopId}`,
     );
-    let artifacts: Record<string, unknown> = {};
+    let artifacts: LoopOutputArtifacts = {};
     const metadata: Record<string, unknown> = {};
     const warnings: string[] = [];
+    let executeFinalization: ExecuteFinalizationResult | null = null;
 
-    if (command === "PLAN" || command === "REQUEST_CHANGES") {
+    if (
+      command === LoopCommand.Plan ||
+      command === LoopCommand.RequestChanges
+    ) {
       artifacts = readPlanOutputs(claudeWorkDir);
-    } else if (command === "EXECUTE") {
-      artifacts = readExecuteOutputs(claudeWorkDir);
+    } else if (command === LoopCommand.Execute) {
+      const baseBranch = body.repo?.branch ?? "main";
 
-      // Git operations for EXECUTE
-      if (worktreeDir) {
-        const baseBranch = body.repo?.branch ?? "main";
-
-        // Cancellation gate: skip git operations if cancelled during main process
-        if (isCancelled(jobStore, loopId)) {
-          const cancelJob = jobStore?.getByLoopId(loopId);
-          if (cancelJob && jobStore) {
-            const now = new Date().toISOString();
-            jobStore.upsert({
-              ...cancelJob,
-              status: "CANCELLED",
-              updatedAt: now,
-              completedAt: now,
-            });
-          }
-          if (tempCleanupDir) {
-            fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(
-              () => {},
-            );
-          }
-          loopTokenStore?.deleteLoopToken(loopId);
-          return;
+      // Cancellation gate: skip execute finalization if cancelled during main process
+      if (isCancelled(jobStore, loopId)) {
+        const cancelJob = jobStore?.getByLoopId(loopId);
+        if (cancelJob && jobStore) {
+          const now = new Date().toISOString();
+          jobStore.upsert({
+            ...cancelJob,
+            status: "CANCELLED",
+            updatedAt: now,
+            completedAt: now,
+          });
         }
+        if (tempCleanupDir) {
+          fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(
+            () => {},
+          );
+        }
+        loopTokenStore?.deleteLoopToken(loopId);
+        return;
+      }
 
-        // Try LLM-assisted commit first; fall back to executeGitOperations if it
-        // returns null.  Never call both.
-        const llmResult = await attemptLlmCommit(
-          worktreeDir,
-          baseBranch,
-          loopId,
-          command,
-          body.artifactSlug,
-          webAppOrigin ?? "",
-          committer,
-          getAllowedDirectories,
-          expectedMcpUrl,
-          () => {
-            warnings.push(
-              sanitizeErrorMessage("LLM commit timed out after 30m"),
-            );
-          },
-          jobStore,
-          claudeWorkDir,
+      executeFinalization = await runExecuteFinalization({
+        worktreeDir,
+        claudeWorkDir,
+        loopId,
+        artifactSlug: body.artifactSlug,
+        baseBranch,
+        webAppOrigin: webAppOrigin ?? "",
+        committer,
+        getAllowedDirectories,
+        expectedMcpUrl,
+        jobStore,
+        source: "live-exit",
+        primaryFullName: resolveLoopPrimaryFullName(body, expandedRepoPath),
+      });
+
+      // Cancellation gate: skip finalization upload/event work if cancellation won
+      // while execute post-processing was running.
+      if (isCancelled(jobStore, loopId)) {
+        const cancelJob = jobStore?.getByLoopId(loopId);
+        if (cancelJob && jobStore) {
+          const now = new Date().toISOString();
+          jobStore.upsert({
+            ...cancelJob,
+            status: "CANCELLED",
+            updatedAt: now,
+            completedAt: now,
+          });
+        }
+        if (tempCleanupDir) {
+          fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(
+            () => {},
+          );
+        }
+        loopTokenStore?.deleteLoopToken(loopId);
+        return;
+      }
+
+      if (executeFinalization.status === "no-changes") {
+        gatewayLog.info(
+          "loop-harness",
+          "no local changes detected, skipping PR creation, loopId=" + loopId,
         );
+      } else if (executeFinalization.status === "error") {
+        gatewayLog.warn(
+          "loop-harness",
+          "execute finalization failed: " +
+            sanitizeErrorMessage(
+              executeFinalization.reason ??
+                "unknown execute finalization error",
+            ) +
+            ", loopId=" +
+            loopId,
+        );
+        warnings.push("GIT_PUSH_FAILED");
+      }
 
-        // Clean up any remaining LLM scratch files before fallback to prevent
-        // them from being committed by executeGitOperations.  attemptLlmCommit
-        // already cleans up on success, but these guards cover edge cases where
-        // the process was killed before the cleanup ran.
-        if (!llmResult) {
-          try {
-            unlinkSync(
-              path.join(worktreeDir, LoopArtifactFile.ExecutionResult),
-            );
-          } catch {
-            /* may not exist */
-          }
-          try {
-            unlinkSync(path.join(worktreeDir, "pr-body.md"));
-          } catch {
-            /* may not exist */
-          }
-        }
+      // Additional repos are finalized after the primary so the primary PR info
+      // is not overwritten by a second clean-worktree check. Recovery calls the
+      // same helper from `finalizeLoopFromRuntime` so this work is replayed if
+      // the desktop crashes after primary finalization but before this block
+      // persists the combined V2 envelope.
+      if (additionalWorktreeDirs.length > 0 && worktreeDir) {
+        const primaryFullName = resolveLoopPrimaryFullName(
+          body,
+          expandedRepoPath,
+        );
+        await finalizeAdditionalReposAndPersist({
+          additionalEntries: additionalWorktreeDirs,
+          primaryFullName,
+          primaryBaseBranch: baseBranch,
+          executeFinalization,
+          claudeWorkDir,
+          loopId,
+          apiBaseUrl,
+          token: body.closedLoopAuthToken,
+          webAppOrigin: webAppOrigin ?? "",
+          getAllowedDirectories,
+          artifactSlug: body.artifactSlug,
+          expectedMcpUrl,
+          committer,
+        });
+      }
 
-        // Cancellation gate: skip fallback git operations if cancelled during LLM commit
-        if (isCancelled(jobStore, loopId)) {
-          const cancelJob = jobStore?.getByLoopId(loopId);
-          if (cancelJob && jobStore) {
-            const now = new Date().toISOString();
-            jobStore.upsert({
-              ...cancelJob,
-              status: "CANCELLED",
-              updatedAt: now,
-              completedAt: now,
-            });
-          }
-          if (tempCleanupDir) {
-            fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(
-              () => {},
-            );
-          }
-          loopTokenStore?.deleteLoopToken(loopId);
-          return;
-        }
-
-        const gitShellPath = await getShellPath();
-        const gitResult: GitOperationResult = llmResult
-          ? { status: "success" as const, ...llmResult }
-          : executeGitOperations(
-              worktreeDir,
-              committer,
-              baseBranch,
-              loopId,
-              command,
-              body.artifactSlug,
-              webAppOrigin ?? "",
-              gitShellPath,
-            );
-
-        if (gitResult.status === "success") {
-          // Merge git info into execution result
-          const execResult =
-            (artifacts.executionResult as Record<string, unknown>) ?? {};
-          execResult.pr_url = gitResult.prUrl;
-          execResult.pr_number = gitResult.prNumber;
-          execResult.branch_name = gitResult.branchName;
-          execResult.commit_sha = gitResult.commitSha;
-          execResult.has_changes = true;
-          execResult.base_ref = baseBranch;
-          artifacts.executionResult = execResult;
-          metadata.branchName = gitResult.branchName;
-          // Persist merged execute metadata for reboot-time finalization replay.
-          try {
-            writeFileSync(
-              path.join(claudeWorkDir, LoopArtifactFile.ExecutionResult),
-              JSON.stringify(execResult),
-            );
-          } catch (err) {
-            loopLog(loopId, "Failed to persist execution-result.json:", err);
-          }
-        } else if (gitResult.status === "no-changes") {
-          gatewayLog.info(
-            "loop-harness",
-            "no local changes detected, skipping PR creation, loopId=" + loopId,
-          );
-        } else if (gitResult.status === "error") {
-          gatewayLog.warn(
-            "loop-harness",
-            "git operations failed: " +
-              sanitizeErrorMessage(gitResult.reason) +
-              ", loopId=" +
-              loopId,
-          );
-          warnings.push("GIT_PUSH_FAILED");
+      artifacts = readExecuteOutputs(claudeWorkDir);
+      if (executeFinalization.branchName) {
+        metadata.branchName = executeFinalization.branchName;
+      }
+      if (!jobStore) {
+        metadata.finalizationSource = "live-exit";
+        metadata.executeFinalizationStatus = executeFinalization.status;
+        metadata.executeFinalizationPath = executeFinalization.path;
+        if (executeFinalization.reason) {
+          metadata.executeFinalizationReason = executeFinalization.reason;
         }
       }
-    } else if (command === "DECOMPOSE") {
+    } else if (command === LoopCommand.Decompose) {
       artifacts = readDecomposeOutputs(worktreeDir ?? claudeWorkDir);
-    } else if (command === "EVALUATE_PRD") {
-      artifacts = readEvaluatePrdOutputs(claudeWorkDir);
-    } else if (command === "EVALUATE_PLAN") {
-      artifacts = readEvaluatePlanOutputs(claudeWorkDir);
-    } else if (command === "EVALUATE_CODE") {
-      artifacts = readEvaluateCodeOutputs(claudeWorkDir);
-    } else if (command === "GENERATE_PRD") {
+    } else if (
+      command === LoopCommand.EvaluatePrd ||
+      command === LoopCommand.EvaluatePlan ||
+      command === LoopCommand.EvaluateCode ||
+      command === LoopCommand.EvaluateFeature
+    ) {
+      artifacts = readEvaluateOutputs(
+        claudeWorkDir,
+        EVALUATE_COMMAND_ARTIFACT[command],
+      );
+    } else if (
+      command === LoopCommand.GeneratePrd ||
+      command === LoopCommand.RequestPrdChanges
+    ) {
+      // REQUEST_PRD_CHANGES re-runs the same PRD agent and writes prd.md to
+      // the same worktree path; the read-side artifact extraction is identical.
       artifacts = readGeneratePrdOutputs(worktreeDir ?? claudeWorkDir);
+    } else if (command === LoopCommand.Bootstrap) {
+      artifacts = readBootstrapOutputs(claudeWorkDir);
     }
 
     // Validate result bundle — warn if required artifacts are missing for this command
@@ -2585,15 +4365,8 @@ export async function handleProcessCompletion(
     );
 
     // Detect 0-token EXECUTE completions as failures (ghost loop)
-    if (
-      command === "EXECUTE" &&
-      tokensUsed.inputTokens === 0 &&
-      tokensUsed.outputTokens === 0 &&
-      tokensUsed.cacheCreationInputTokens === 0 &&
-      tokensUsed.cacheReadInputTokens === 0
-    ) {
-      const noWorkMsg =
-        "EXECUTE loop completed with 0 tokens -- no work was done";
+    if (!jobStore && isExecuteNoWorkCompletion(command, tokensUsed)) {
+      const noWorkMsg = EXECUTE_NO_WORK_MESSAGE;
       loopError(loopId, noWorkMsg);
       gatewayLog.error("loop-harness", `${noWorkMsg}, loopId=${loopId}`);
       runningLoops.delete(loopId);
@@ -2602,21 +4375,9 @@ export async function handleProcessCompletion(
         code: LoopErrorCode.NoWorkProduced,
         message: noWorkMsg,
         loopId,
+        abortReason: "ghost-loop",
+        elapsedMs,
       });
-      if (jobStore) {
-        const existingJob = jobStore.getByLoopId(loopId);
-        if (existingJob) {
-          const now = new Date().toISOString();
-          jobStore.upsert({
-            ...existingJob,
-            status: "FAILED",
-            liveActivity: "Error: Loop produced no output (0 tokens)",
-            exitCode: 0,
-            updatedAt: now,
-            completedAt: now,
-          });
-        }
-      }
       if (tempCleanupDir) {
         fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(() => {});
       }
@@ -2639,7 +4400,8 @@ export async function handleProcessCompletion(
       if (tempCleanupDir) {
         fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(() => {});
       } else if (
-        command === "GENERATE_PRD" &&
+        (command === LoopCommand.GeneratePrd ||
+          command === LoopCommand.RequestPrdChanges) &&
         worktreeDir &&
         expandedRepoPath
       ) {
@@ -2661,6 +4423,17 @@ export async function handleProcessCompletion(
       }
     }
 
+    if (command === LoopCommand.Execute) {
+      const currentJob = jobStore?.getByLoopId(loopId);
+      emitExecuteDecisionTableVerificationTelemetry({
+        loopId,
+        commandId: commandId ?? currentJob?.commandId,
+        operationId: operationId ?? currentJob?.operationId,
+        claudeWorkDir,
+        decisionTableVerificationStartOffset,
+      });
+    }
+
     runningLoops.delete(loopId);
     const existingJob = jobStore?.getByLoopId(loopId);
     if (existingJob && jobStore) {
@@ -2674,6 +4447,7 @@ export async function handleProcessCompletion(
         apiAuthToken: closedLoopAuthToken,
         apiBaseUrl,
         isProcessRunning,
+        getAllowedDirectories,
         loopTokenStore,
       };
       const outcome = await finalizeLoopFromRuntime(
@@ -2707,13 +4481,34 @@ export async function handleProcessCompletion(
         exitCode,
         subtype: command.toLowerCase(),
       };
-      if (command === "EXECUTE" && artifacts.executionResult) {
-        const parsed = parseExecutionResultFile(artifacts.executionResult);
-        if (parsed) {
-          result.prUrl = parsed.prUrl;
-          result.prNumber = parsed.prNumber;
-          result.branchName = parsed.branchName;
-          result.has_changes = parsed.hasChanges;
+      if (command === LoopCommand.Execute && artifacts.executionResult) {
+        const parsed = parseExecutionResultFile(
+          artifacts.executionResult,
+          "",
+        );
+        const lookupName = parsed.ok ? (parsed.results[0]?.fullName ?? "") : "";
+        const primary = parsed.ok
+          ? getPrimaryRepoResult(parsed.results, lookupName)
+          : null;
+        if (primary?.status === "success") {
+          result.prUrl = primary.prUrl;
+          result.prNumber = primary.prNumber;
+          result.branchName = primary.branchName;
+          result.has_changes = primary.hasChanges;
+        } else if (primary?.status === "skipped") {
+          // A skipped repo had no changes to push; surface the standard
+          // no-changes shape so consumers handle it uniformly.
+          result.prUrl = null;
+          result.prNumber = null;
+          result.has_changes = false;
+        }
+      }
+      if (command === LoopCommand.Execute && executeFinalization) {
+        result.finalizationSource = "live-exit";
+        result.executeFinalizationStatus = executeFinalization.status;
+        result.executeFinalizationPath = executeFinalization.path;
+        if (executeFinalization.reason) {
+          result.executeFinalizationReason = executeFinalization.reason;
         }
       }
       if (worktreeDir && !result.branchName) {
@@ -2766,7 +4561,12 @@ export async function handleProcessCompletion(
     // Clean up temp claude workdir after all reads and uploads are complete
     if (tempCleanupDir) {
       fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(() => {});
-    } else if (command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
+    } else if (
+      (command === LoopCommand.GeneratePrd ||
+        command === LoopCommand.RequestPrdChanges) &&
+      worktreeDir &&
+      expandedRepoPath
+    ) {
       await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
 
@@ -2777,6 +4577,329 @@ export async function handleProcessCompletion(
     // clients can receive the exit notification before the buffer is freed.
     setTimeout(() => removeSession(loopId), 30_000);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Additional-repo worktree provisioning shared by PLAN and EXECUTE branches.
+// On failure, unwinds the partially-created worktree set (already-pushed
+// additionals + primary), posts a LoopEvent.Error, writes the HTTP error, and
+// returns false so the caller can `return` early.
+// ---------------------------------------------------------------------------
+
+async function provisionAdditionalRepoWorktrees(args: {
+  resolvedAdditionalRepos: readonly ResolvedAdditionalRepo[];
+  worktreeKey: string;
+  worktreeDir: string;
+  primaryRepoPath: string;
+  additionalWorktreeDirs: AdditionalWorktreeEntry[];
+  allowedDirs: string[];
+  body: LoopRequestBody;
+  apiBaseUrl: string;
+  context: OperationRequestContext;
+  wt: WorktreeProvider;
+  freshLabel: string;
+  // True only when the caller created the primary worktree fresh in this
+  // request. EXECUTE/REQUEST_CHANGES that reuse a parent PLAN's worktree
+  // must pass false so failures here do not delete the parent's checkout.
+  ownsPrimaryWorktree: boolean;
+  // PLAN passes false: stale additional-repo worktrees are force-removed so
+  // PLAN starts fresh. EXECUTE/REQUEST_CHANGES pass true so a retained dirty
+  // worktree from a prior failed/cancelled attempt (kept by
+  // cleanupAdditionalWorktrees to avoid data loss) is reused instead of
+  // force-removed by --force/fs.rm.
+  reuseStaleWorktree: boolean;
+}): Promise<boolean> {
+  const {
+    resolvedAdditionalRepos,
+    worktreeKey,
+    worktreeDir,
+    primaryRepoPath,
+    additionalWorktreeDirs,
+    allowedDirs,
+    body,
+    apiBaseUrl,
+    context,
+    wt,
+    freshLabel,
+    ownsPrimaryWorktree,
+    reuseStaleWorktree,
+  } = args;
+
+  for (let addIdx = 0; addIdx < resolvedAdditionalRepos.length; addIdx++) {
+    const addRepo = resolvedAdditionalRepos[addIdx];
+    const requestEntry = body.additionalRepos?.[addIdx];
+    // Best identifier for the offending peer in user-visible event messages:
+    // prefer the requested fullName, fall back to the resolved local repo's
+    // git config, and finally the bare repoPath. Used by both the
+    // RepoNotAllowed and BranchCreateFailed envelopes below.
+    const peerOffenderLabel = (): string =>
+      requestEntry?.fullName ??
+      resolveRepoFullName(addRepo.repoPath) ??
+      addRepo.repoPath;
+    const addRepoSlug = slugifyLoopId(addRepo.branch);
+    const addRepoKey = `${worktreeKey}-${addRepoSlug}-${additionalRepoDisambiguator(addRepo.repoPath)}`;
+    const canonicalAddWorktreeDir = resolveLoopWorktreeDir(
+      addRepo.repoPath,
+      addRepoKey,
+    );
+    const addBranchName = `symphony/${addRepoKey}`;
+
+    const staleAddWorktree = wt.findWorktreeForBranch(
+      addRepo.repoPath,
+      addBranchName,
+    );
+    const reuseExisting = reuseStaleWorktree && staleAddWorktree !== null;
+    const addWorktreeDir =
+      reuseExisting && staleAddWorktree
+        ? staleAddWorktree
+        : canonicalAddWorktreeDir;
+
+    try {
+      assertPathAllowed(addWorktreeDir, allowedDirs);
+    } catch (e) {
+      if (e instanceof DirectoryNotAllowedError) {
+        await cleanupAdditionalWorktrees(
+          additionalWorktreeDirs,
+          body.loopId,
+          wt,
+        );
+        if (ownsPrimaryWorktree) {
+          await wt
+            .removeWorktree(worktreeDir, primaryRepoPath, body.loopId)
+            .catch(() => {});
+        }
+        const offender = peerOffenderLabel();
+        await postLoopEventBounded(
+          apiBaseUrl,
+          body.loopId,
+          body.closedLoopAuthToken,
+          {
+            type: LoopEventType.Error,
+            code: LoopErrorCode.RepoNotAllowed,
+            message: `Additional repo worktree path not allowed for ${offender}: ${addWorktreeDir}`,
+          },
+        );
+        json(context, 403, {
+          error: `Additional repo worktree path not allowed for ${offender}: ${addWorktreeDir}`,
+        });
+        return false;
+      }
+      throw e;
+    }
+
+    try {
+      if (reuseExisting) {
+        loopLog(
+          body.loopId,
+          `Reusing retained additional-repo worktree for ${freshLabel}: ${addWorktreeDir} (branch: ${addBranchName})`,
+        );
+      } else {
+        if (staleAddWorktree) {
+          loopLog(
+            body.loopId,
+            `Removing stale additional-repo worktree for fresh ${freshLabel}: ${staleAddWorktree}`,
+          );
+          await wt.removeWorktree(
+            staleAddWorktree,
+            addRepo.repoPath,
+            body.loopId,
+          );
+        }
+        await wt.ensureWorktree(
+          addRepo.repoPath,
+          addWorktreeDir,
+          addBranchName,
+          addRepo.branch,
+          body.loopId,
+        );
+      }
+    } catch (checkoutErr) {
+      const msg =
+        checkoutErr instanceof Error
+          ? checkoutErr.message
+          : String(checkoutErr);
+      loopError(
+        body.loopId,
+        `ensureWorktree failed for additional repo ${addRepo.repoPath}:`,
+        checkoutErr,
+      );
+      await wt
+        .removeWorktree(addWorktreeDir, addRepo.repoPath, body.loopId)
+        .catch(() => {});
+      await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
+      if (ownsPrimaryWorktree) {
+        await wt
+          .removeWorktree(worktreeDir, primaryRepoPath, body.loopId)
+          .catch(() => {});
+      }
+      const offender = peerOffenderLabel();
+      await postLoopEventBounded(
+        apiBaseUrl,
+        body.loopId,
+        body.closedLoopAuthToken,
+        {
+          type: LoopEventType.Error,
+          code: LoopErrorCode.BranchCreateFailed,
+          message: `Failed to checkout additional repo worktree for ${offender}: ${msg}`,
+        },
+      );
+      json(context, 500, {
+        error: `Failed to checkout additional repo worktree for ${offender}: ${msg}`,
+      });
+      return false;
+    }
+
+    additionalWorktreeDirs.push({
+      dir: addWorktreeDir,
+      repoPath: addRepo.repoPath,
+      fullName:
+        requestEntry?.fullName ??
+        resolveRepoFullName(addRepo.repoPath) ??
+        undefined,
+      baseBranch: requestEntry?.branch ?? addRepo.branch,
+    });
+    loopLog(
+      body.loopId,
+      reuseExisting
+        ? `Reused additional repo worktree: ${addWorktreeDir} (branch: ${addBranchName})`
+        : `Created additional repo worktree: ${addWorktreeDir} (branch: ${addBranchName} based on ${addRepo.branch})`,
+    );
+  }
+  return true;
+}
+
+/**
+ * Branch-prefix metadata for the two PRD-side commands. Both produce
+ * always-fresh worktrees on a dedicated `symphony/<prefix>-...` branch
+ * namespace (see MultiRepoCommandPolicy.worktreeFreshness === "always-fresh");
+ * the only differences are the prefix string and the freshLabel used in logs
+ * and provisionAdditionalRepoWorktrees event messages.
+ */
+const PRD_BRANCH_CONFIG = {
+  [LoopCommand.GeneratePrd]: {
+    prefix: "generate-prd",
+    label: LoopCommand.GeneratePrd,
+  },
+  [LoopCommand.RequestPrdChanges]: {
+    prefix: "request-prd-changes",
+    label: LoopCommand.RequestPrdChanges,
+  },
+} as const;
+
+/**
+ * Provision the primary worktree, peer worktrees, and claude work dir for a
+ * PRD-side command (GENERATE_PRD or REQUEST_PRD_CHANGES). Both commands share
+ * an identical setup pipeline differing only in branch prefix; this helper
+ * eliminates the previous near-byte-identical 80-line duplication between the
+ * two branches in handleLoopRequest.
+ *
+ * On success: returns { worktreeDir, claudeWorkDir }.
+ * On failure: returns null AFTER having sent the appropriate JSON response
+ * (403 / etc.) and torn down any partial worktree state.
+ */
+async function setupPrdWorktree(args: {
+  command:
+    | typeof LoopCommand.GeneratePrd
+    | typeof LoopCommand.RequestPrdChanges;
+  body: LoopRequestBody;
+  expandedRepoPath: string;
+  resolvedAdditionalRepos: readonly ResolvedAdditionalRepo[];
+  additionalWorktreeDirs: AdditionalWorktreeEntry[];
+  allowedDirs: string[];
+  apiBaseUrl: string;
+  context: OperationRequestContext;
+  wt: WorktreeProvider;
+}): Promise<{ worktreeDir: string; claudeWorkDir: string } | null> {
+  const {
+    command,
+    body,
+    expandedRepoPath,
+    resolvedAdditionalRepos,
+    additionalWorktreeDirs,
+    allowedDirs,
+    apiBaseUrl,
+    context,
+    wt,
+  } = args;
+  const { prefix, label } = PRD_BRANCH_CONFIG[command];
+
+  const sanitizedSlug = body.artifactSlug
+    ? slugifyLoopId(body.artifactSlug)
+    : null;
+  const worktreeKey = sanitizedSlug ?? pickStableId(body);
+  const branchName = `symphony/${prefix}-${worktreeKey}`;
+  const worktreeDir = resolveLoopWorktreeDir(
+    expandedRepoPath,
+    `${prefix}-${worktreeKey}`,
+  );
+
+  // Always-fresh per policy — destroy any prior worktree at this branch.
+  const staleWorktree = wt.findWorktreeForBranch(expandedRepoPath, branchName);
+  if (staleWorktree) {
+    loopLog(
+      body.loopId,
+      `Removing stale worktree for fresh ${command}: ${staleWorktree}`,
+    );
+    await wt.removeWorktree(staleWorktree, expandedRepoPath, body.loopId);
+  }
+
+  await wt.ensureWorktree(
+    expandedRepoPath,
+    worktreeDir,
+    branchName,
+    body.repo?.branch ?? "main",
+    body.loopId,
+  );
+  loopLog(
+    body.loopId,
+    `Created worktree for ${command}: ${worktreeDir} (branch: ${branchName})`,
+  );
+
+  try {
+    assertPathAllowed(worktreeDir, allowedDirs);
+  } catch (e) {
+    if (e instanceof DirectoryNotAllowedError) {
+      await wt.removeWorktree(worktreeDir, expandedRepoPath, body.loopId);
+      json(context, 403, {
+        error: `Worktree path not allowed: ${worktreeDir}`,
+      });
+      return null;
+    }
+    throw e;
+  }
+
+  const additionalsOk = await provisionAdditionalRepoWorktrees({
+    resolvedAdditionalRepos,
+    worktreeKey: `${prefix}-${worktreeKey}`,
+    worktreeDir,
+    primaryRepoPath: expandedRepoPath,
+    additionalWorktreeDirs,
+    allowedDirs,
+    body,
+    apiBaseUrl,
+    context,
+    wt,
+    freshLabel: label,
+    ownsPrimaryWorktree: true,
+    reuseStaleWorktree:
+      getMultiRepoPolicy(body.command).worktreeFreshness === "reuse-stale",
+  });
+  if (!additionalsOk) return null;
+
+  // claudeWorkDir is a separate operational dir inside the worktree (same
+  // pattern as PLAN/EXECUTE). Spawn uses cwd: worktreeDir so Claude writes
+  // prd.md to the repo root; logs, PID, prompt file go to claudeWorkDir.
+  const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await writeArtifactsForGeneratePrd(
+    worktreeDir,
+    body.artifacts,
+    body.prompt!,
+    body.repo,
+    additionalWorktreeDirs,
+  );
+
+  return { worktreeDir, claudeWorkDir };
 }
 
 // ---------------------------------------------------------------------------
@@ -2870,7 +4993,7 @@ async function handleLoopRequest(
     return;
   }
 
-  if (body.command === "EVALUATE_PLAN") {
+  if (body.command === LoopCommand.EvaluatePlan) {
     const hasPrdArtifact = body.artifacts.some(
       (a) =>
         a.type === LoopArtifactType.Prd || a.type === LoopArtifactType.Feature,
@@ -2894,7 +5017,7 @@ async function handleLoopRequest(
     }
   }
 
-  if (body.command === "EVALUATE_CODE") {
+  if (body.command === LoopCommand.EvaluateCode) {
     const hasPlanArtifact = body.artifacts.some((a) =>
       PLAN_ARTIFACT_TYPES.includes(a.type),
     );
@@ -2908,6 +5031,28 @@ async function handleLoopRequest(
       json(context, 400, {
         error:
           "EVALUATE_CODE requires a repository (repo.fullName or localRepoPath)",
+      });
+      return;
+    }
+  }
+
+  if (body.command === LoopCommand.EvaluateFeature) {
+    const hasFeatureArtifact = body.artifacts.some(
+      (a) => a.type === LoopArtifactType.Feature,
+    );
+    if (!hasFeatureArtifact) {
+      json(context, 400, {
+        error: "EVALUATE_FEATURE requires a feature artifact",
+      });
+      return;
+    }
+  }
+
+  if (body.command === LoopCommand.Bootstrap) {
+    const bootstrapParams = parseBootstrapParams(body.prompt);
+    if (!bootstrapParams || bootstrapParams.repos.length === 0) {
+      json(context, 400, {
+        error: "BOOTSTRAP requires a JSON prompt with a non-empty repos array",
       });
       return;
     }
@@ -2941,7 +5086,7 @@ async function handleLoopRequest(
 
   let spawnedSuccessfully = false;
   let expandedRepoPath: string | null = null;
-  const additionalWorktreeDirs: { dir: string; repoPath: string }[] = [];
+  const additionalWorktreeDirs: AdditionalWorktreeEntry[] = [];
   try {
     const allowedDirs = getAllowedDirectories();
 
@@ -3039,14 +5184,18 @@ async function handleLoopRequest(
             `Skipping auto-clone for ${body.repo.fullName}: symphony directory not configured`,
           );
         }
-        const cloneResult = configDir !== null
-          ? await cloneRepoViaGh(
-              body.repo.fullName,
-              allowedDirs,
-              body.loopId,
-              configDir,
-            )
-          : { ok: false as const, reason: "symphony directory not configured" };
+        const cloneResult =
+          configDir !== null
+            ? await cloneRepoViaGh(
+                body.repo.fullName,
+                allowedDirs,
+                body.loopId,
+                configDir,
+              )
+            : {
+                ok: false as const,
+                reason: "symphony directory not configured",
+              };
         if (cloneResult.ok) {
           expandedRepoPath = cloneResult.path;
         } else {
@@ -3080,7 +5229,14 @@ async function handleLoopRequest(
     }
 
     let resolvedAdditionalRepos: ResolvedAdditionalRepo[] = [];
-    if (body.command === "PLAN" && body.additionalRepos && body.additionalRepos.length > 0) {
+    // Policy-driven gate: every command whose MultiRepoCommandPolicy enables
+    // peer repos receives the same resolution + worktree treatment. Adding a
+    // new peer-aware command is a one-line table edit in @closedloop-ai/loops-api.
+    if (
+      getMultiRepoPolicy(body.command).supportsAdditionalRepos &&
+      body.additionalRepos &&
+      body.additionalRepos.length > 0
+    ) {
       try {
         resolvedAdditionalRepos = await resolveAdditionalRepos(
           body.additionalRepos,
@@ -3108,13 +5264,78 @@ async function handleLoopRequest(
         }
         throw err;
       }
+
+      // Deduplication guard: reject if any fullName or repoPath appears more than once
+      // across the primary repo and all additional repos.
+      const seenFullNames = new Set<string>();
+      const seenRepoPaths = new Set<string>();
+
+      if (body.repo?.fullName) {
+        seenFullNames.add(body.repo.fullName);
+      }
+      if (expandedRepoPath) {
+        seenRepoPaths.add(path.resolve(expandedRepoPath));
+      }
+
+      for (let i = 0; i < resolvedAdditionalRepos.length; i++) {
+        const resolved = resolvedAdditionalRepos[i];
+        const entry = body.additionalRepos![i];
+        const entryFullName = entry.fullName;
+
+        if (entryFullName) {
+          if (seenFullNames.has(entryFullName)) {
+            const dupMsg = `Duplicate repository fullName across repos: ${entryFullName}`;
+            await postLoopEventBounded(
+              apiBaseUrl,
+              body.loopId,
+              body.closedLoopAuthToken,
+              {
+                type: LoopEventType.Error,
+                code: LoopErrorCode.PreRunValidationFailed,
+                message: dupMsg,
+              },
+            );
+            gatewayLog.error(
+              "loop-harness",
+              `additionalRepo deduplication failed for loopId=${body.loopId}: ${dupMsg}`,
+            );
+            json(context, 400, { error: dupMsg });
+            return;
+          }
+          seenFullNames.add(entryFullName);
+        }
+
+        const resolvedCanonical = path.resolve(resolved.repoPath);
+        if (seenRepoPaths.has(resolvedCanonical)) {
+          const dupMsg = `Duplicate repository path across repos: ${resolved.repoPath}`;
+          await postLoopEventBounded(
+            apiBaseUrl,
+            body.loopId,
+            body.closedLoopAuthToken,
+            {
+              type: LoopEventType.Error,
+              code: LoopErrorCode.PreRunValidationFailed,
+              message: dupMsg,
+            },
+          );
+          gatewayLog.error(
+            "loop-harness",
+            `additionalRepo deduplication failed for loopId=${body.loopId}: ${dupMsg}`,
+          );
+          json(context, 400, { error: dupMsg });
+          return;
+        }
+        seenRepoPaths.add(resolvedCanonical);
+      }
     }
 
     let worktreeDir: string | null = null;
     let claudeWorkDir: string;
     let usedTempDir = false;
+    let executeImportedPlanFile: string | null = null;
+    let requestChangesImportedPlanFile: string | null = null;
 
-    if (body.command === "DECOMPOSE") {
+    if (body.command === LoopCommand.Decompose) {
       // DECOMPOSE uses a single temp dir for everything: context pack, logs, and output.
       // No repo/worktree needed — artifacts go to .closedloop-ai/context/artifacts/
       // so Claude's prompt can reference them by relative path.
@@ -3147,11 +5368,12 @@ async function handleLoopRequest(
         return;
       }
     } else if (
-      body.command === "EVALUATE_PRD" ||
-      body.command === "EVALUATE_PLAN" ||
-      body.command === "EVALUATE_CODE"
+      body.command === LoopCommand.EvaluatePrd ||
+      body.command === LoopCommand.EvaluatePlan ||
+      body.command === LoopCommand.EvaluateCode ||
+      body.command === LoopCommand.EvaluateFeature
     ) {
-      // EVALUATE_PRD, EVALUATE_PLAN, and EVALUATE_CODE: use temp dir, no worktree needed.
+      // EVALUATE_PRD, EVALUATE_PLAN, EVALUATE_CODE, and EVALUATE_FEATURE: use temp dir, no worktree needed.
       // Temp dir is intentionally exempt from assertPathAllowed.
       usedTempDir = true;
       const label = body.command.toLowerCase().replace(/_/g, "-");
@@ -3163,12 +5385,32 @@ async function handleLoopRequest(
       await fs.mkdir(tmpDir, { recursive: true });
       claudeWorkDir = tmpDir;
       try {
-        if (body.command === "EVALUATE_PRD") {
-          await writePrdArtifact(claudeWorkDir, body.artifacts, body.prompt);
-        } else if (body.command === "EVALUATE_PLAN") {
-          await writePlanArtifact(claudeWorkDir, body.artifacts, body.prompt);
-        } else if (body.command === "EVALUATE_CODE") {
-          await writeCodeArtifact(claudeWorkDir, body.artifacts);
+        if (body.command === LoopCommand.EvaluatePrd) {
+          await writePrdArtifact(
+            claudeWorkDir,
+            body.artifacts,
+            body.prompt,
+            body.primaryArtifactId,
+          );
+        } else if (body.command === LoopCommand.EvaluatePlan) {
+          await writePlanArtifact(
+            claudeWorkDir,
+            body.artifacts,
+            body.prompt,
+            body.primaryArtifactId,
+          );
+        } else if (body.command === LoopCommand.EvaluateCode) {
+          await writeCodeArtifact(
+            claudeWorkDir,
+            body.artifacts,
+            body.primaryArtifactId,
+          );
+        } else if (body.command === LoopCommand.EvaluateFeature) {
+          await writeFeatureArtifact(
+            claudeWorkDir,
+            body.artifacts,
+            body.primaryArtifactId,
+          );
         }
       } catch (artifactErr) {
         await fs.rm(claudeWorkDir, { recursive: true, force: true });
@@ -3190,9 +5432,9 @@ async function handleLoopRequest(
       });
       return;
     } else if (
-      body.command === "PLAN" ||
-      body.command === "EXECUTE" ||
-      body.command === "REQUEST_CHANGES"
+      body.command === LoopCommand.Plan ||
+      body.command === LoopCommand.Execute ||
+      body.command === LoopCommand.RequestChanges
     ) {
       // expandedRepoPath is guaranteed non-null here: the repoRequirement === "REQUIRED"
       // guard above already returned 400 when it was missing.
@@ -3211,7 +5453,7 @@ async function handleLoopRequest(
 
       worktreeDir = resolveLoopWorktreeDir(repoPath, worktreeKey);
 
-      if (body.command === "PLAN") {
+      if (body.command === LoopCommand.Plan) {
         // PLAN always starts fresh — remove stale worktree if it exists.
         // PLAN has requiresParent: false, so it must not inherit prior state.
         const staleWorktree = wt.findWorktreeForBranch(repoPath, branchName);
@@ -3237,96 +5479,34 @@ async function handleLoopRequest(
         // Create additional repo worktrees for PLAN command.
         // Mirror the primary-repo pattern: create a fresh scratch branch
         // based on the user-specified branch so loop work does not mutate it.
-        for (const addRepo of resolvedAdditionalRepos) {
-          const addRepoSlug = slugifyLoopId(addRepo.branch);
-          const addRepoKey = `${worktreeKey}-${addRepoSlug}-${additionalRepoDisambiguator(addRepo.repoPath)}`;
-          const addWorktreeDir = resolveLoopWorktreeDir(
-            addRepo.repoPath,
-            addRepoKey,
-          );
-          const addBranchName = `symphony/${addRepoKey}`;
-
-          // Validate the additional-repo worktree path against the sandbox
-          // roots BEFORE any git checkout is materialized. SYMPHONY_WORKTREE_PARENT_DIR
-          // is untrusted config; if it points outside allowedDirs, we must
-          // refuse to write the checkout at all, not clean it up after the fact.
-          try {
-            assertPathAllowed(addWorktreeDir, allowedDirs);
-          } catch (e) {
-            if (e instanceof DirectoryNotAllowedError) {
-              // Unwind already-created additional-repo worktrees from prior
-              // iterations of this loop *before* the primary, so a failure on
-              // iteration N doesn't leak iterations 0..N-1 on disk.
-              await cleanupAdditionalWorktrees(
-                additionalWorktreeDirs,
-                body.loopId,
-                wt,
-                "cleanup additional worktree failed (allowlist reject):",
-              );
-              await wt.removeWorktree(worktreeDir, repoPath, body.loopId).catch(() => {});
-              await postLoopEventBounded(
-                apiBaseUrl,
-                body.loopId,
-                body.closedLoopAuthToken,
-                {
-                  type: LoopEventType.Error,
-                  code: LoopErrorCode.RepoNotAllowed,
-                  message: `Additional repo worktree path not allowed: ${addWorktreeDir}`,
-                },
-              );
-              json(context, 403, { error: `Additional repo worktree path not allowed: ${addWorktreeDir}` });
-              return;
-            }
-            throw e;
-          }
-
-          try {
-            const staleAddWorktree = wt.findWorktreeForBranch(addRepo.repoPath, addBranchName);
-            if (staleAddWorktree) {
-              loopLog(
-                body.loopId,
-                `Removing stale additional-repo worktree for fresh PLAN: ${staleAddWorktree}`,
-              );
-              await wt.removeWorktree(staleAddWorktree, addRepo.repoPath, body.loopId);
-            }
-            await wt.ensureWorktree(addRepo.repoPath, addWorktreeDir, addBranchName, addRepo.branch, body.loopId);
-          } catch (checkoutErr) {
-            const msg = checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr);
-            loopError(body.loopId, `ensureWorktree failed for additional repo ${addRepo.repoPath}:`, checkoutErr);
-            // Clean up the half-materialized current worktree, then any
-            // successfully-checked-out worktrees from prior iterations, then
-            // the primary worktree. Order matters only for log readability;
-            // all operations are independent best-effort.
-            await wt.removeWorktree(addWorktreeDir, addRepo.repoPath, body.loopId).catch(() => {});
-            await cleanupAdditionalWorktrees(
-              additionalWorktreeDirs,
-              body.loopId,
-              wt,
-              "cleanup additional worktree failed (checkout reject):",
-            );
-            await wt.removeWorktree(worktreeDir, repoPath, body.loopId).catch(() => {});
-            await postLoopEventBounded(
-              apiBaseUrl,
-              body.loopId,
-              body.closedLoopAuthToken,
-              {
-                type: LoopEventType.Error,
-                code: LoopErrorCode.BranchCreateFailed,
-                message: `Failed to checkout additional repo worktree: ${msg}`,
-              },
-            );
-            json(context, 500, { error: `Failed to checkout additional repo worktree: ${msg}` });
-            return;
-          }
-          additionalWorktreeDirs.push({ dir: addWorktreeDir, repoPath: addRepo.repoPath });
-          loopLog(body.loopId, `Created additional repo worktree: ${addWorktreeDir} (branch: ${addBranchName} based on ${addRepo.branch})`);
-        }
+        const planAdditionalsOk = await provisionAdditionalRepoWorktrees({
+          resolvedAdditionalRepos,
+          worktreeKey,
+          worktreeDir,
+          primaryRepoPath: repoPath,
+          additionalWorktreeDirs,
+          allowedDirs,
+          body,
+          apiBaseUrl,
+          context,
+          wt,
+          freshLabel: LoopCommand.Plan,
+          ownsPrimaryWorktree: true,
+          // Driven by MultiRepoCommandPolicy.worktreeFreshness — `always-fresh`
+          // for PLAN means any prior worktree at this branch is destroyed.
+          reuseStaleWorktree:
+            getMultiRepoPolicy(body.command).worktreeFreshness ===
+            "reuse-stale",
+        });
+        if (!planAdditionalsOk) return;
       } else {
         // EXECUTE/REQUEST_CHANGES: reuse existing worktree.
         // Try artifact slug first, then parentLoopId fallback, then create new.
+        let reusedPrimaryWorktree = false;
         const existingWorktree = wt.findWorktreeForBranch(repoPath, branchName);
         if (existingWorktree) {
           worktreeDir = existingWorktree;
+          reusedPrimaryWorktree = true;
           loopLog(
             body.loopId,
             `Reusing worktree via artifact slug: ${worktreeDir} (branch: ${branchName})`,
@@ -3340,6 +5520,7 @@ async function handleLoopRequest(
           );
           if (parentWorktree) {
             worktreeDir = parentWorktree;
+            reusedPrimaryWorktree = true;
             loopLog(
               body.loopId,
               `Reusing worktree via parentLoopId fallback: ${worktreeDir} (branch: ${parentBranch})`,
@@ -3356,10 +5537,95 @@ async function handleLoopRequest(
             body.repo?.branch ?? "main",
             body.loopId,
           );
+          reusedPrimaryWorktree = false;
           loopLog(
             body.loopId,
             `Created new worktree: ${worktreeDir} (branch: ${branchName})`,
           );
+        }
+
+        // Create additional repo worktrees for EXECUTE/REQUEST_CHANGES command.
+        // Mirror the primary-repo pattern: create a fresh scratch branch
+        // based on the user-specified branch so loop work does not mutate it.
+        const executeAdditionalsOk = await provisionAdditionalRepoWorktrees({
+          resolvedAdditionalRepos,
+          worktreeKey,
+          worktreeDir,
+          primaryRepoPath: repoPath,
+          additionalWorktreeDirs,
+          allowedDirs,
+          body,
+          apiBaseUrl,
+          context,
+          wt,
+          freshLabel: LoopCommand.Execute,
+          // Only allow primary worktree removal on failure when we created it
+          // fresh in this request. Reused parent PLAN worktrees must not be
+          // destroyed by an additional-repo provisioning failure.
+          ownsPrimaryWorktree: !reusedPrimaryWorktree,
+          // Driven by MultiRepoCommandPolicy.worktreeFreshness — `reuse-stale`
+          // for EXECUTE retains uncommitted in-progress agent state across
+          // retries (matches today's behavior).
+          reuseStaleWorktree:
+            getMultiRepoPolicy(body.command).worktreeFreshness ===
+            "reuse-stale",
+        });
+        if (!executeAdditionalsOk) return;
+
+        // Bootstrap additional-repo worktrees sequentially.
+        // On failure, clean up only the additional worktrees — the primary
+        // here may be a reused parent PLAN's worktree, and an additional-repo
+        // bootstrap blip (npm install hiccup, transient network) must not
+        // destroy parent state. `cleanupAdditionalWorktrees` runs the smart
+        // retention check and keeps any prior entry that has uncommitted
+        // changes (typically bootstrap output like package-lock.json or
+        // node_modules) so the user does not lose work; retained trees are
+        // reused on retry via `reuseStaleWorktree: true` in
+        // `provisionAdditionalRepoWorktrees`.
+        for (const addEntry of additionalWorktreeDirs) {
+          try {
+            await runBootstrapIfNeeded(addEntry.dir, body.loopId);
+          } catch (bootstrapErr) {
+            loopError(
+              body.loopId,
+              `bootstrap failed for additional repo worktree: ${addEntry.dir}`,
+              bootstrapErr,
+            );
+            gatewayLog.error(
+              "bootstrap-additional-repo-failed",
+              `loopId=${body.loopId} dir=${addEntry.dir} error=${String(bootstrapErr)}`,
+            );
+            // Remove the failed worktree
+            try {
+              await wt.removeWorktree(
+                addEntry.dir,
+                addEntry.repoPath,
+                body.loopId,
+              );
+            } catch {
+              /* ignore */
+            }
+            // Clean up all prior additional worktrees
+            await cleanupAdditionalWorktrees(
+              additionalWorktreeDirs.filter((e) => e !== addEntry),
+              body.loopId,
+              wt,
+            );
+            additionalWorktreeDirs.length = 0;
+            await postLoopEventBounded(
+              apiBaseUrl,
+              body.loopId,
+              body.closedLoopAuthToken,
+              {
+                type: LoopEventType.Error,
+                code: LoopErrorCode.BranchCreateFailed,
+                message: `Bootstrap failed for additional repo worktree: ${addEntry.dir}`,
+              },
+            );
+            return json(context, 500, {
+              error: "Bootstrap failed for additional repo worktree",
+            });
+          }
         }
       }
 
@@ -3374,10 +5640,11 @@ async function handleLoopRequest(
         }
         throw e;
       }
+      await runBootstrapIfNeeded(worktreeDir, body.loopId);
       claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
       await fs.mkdir(claudeWorkDir, { recursive: true });
 
-      if (body.command === "PLAN") {
+      if (body.command === LoopCommand.Plan) {
         await writeArtifactsForPlan(
           claudeWorkDir,
           body.artifacts,
@@ -3385,88 +5652,67 @@ async function handleLoopRequest(
           body.userContext,
           body.attachments,
         );
-      } else if (body.command === "EXECUTE") {
-        await writeArtifactsForExecuteOrAmend(
+      } else if (body.command === LoopCommand.Execute) {
+        const executeArtifacts = await writeArtifactsForExecuteOrAmend(
           claudeWorkDir,
           body.artifacts,
           undefined,
           body.attachments,
+          {
+            command: LoopCommand.Execute,
+            loopId: body.loopId,
+            commandId,
+            operationId,
+          },
         );
+        executeImportedPlanFile = executeArtifacts.importedPlanFile;
       } else {
         // REQUEST_CHANGES
-        await writeArtifactsForExecuteOrAmend(
+        const requestChangesArtifacts = await writeArtifactsForExecuteOrAmend(
           claudeWorkDir,
           body.artifacts,
           body.prompt,
           body.attachments,
+          {
+            command: LoopCommand.RequestChanges,
+            loopId: body.loopId,
+            commandId,
+            operationId,
+          },
         );
+        requestChangesImportedPlanFile =
+          requestChangesArtifacts.importedPlanFile;
       }
-    } else if (body.command === "GENERATE_PRD") {
-      // expandedRepoPath is guaranteed non-null here: the repoRequirement === "REQUIRED"
-      // guard above already returned 400 when it was missing.
-      const repoPath = expandedRepoPath!;
-
-      // Use a dedicated branch namespace to avoid collisions with PLAN/EXECUTE worktrees.
-      // GENERATE_PRD always starts fresh -- it must not inherit a prior PLAN worktree.
-      const sanitizedSlug = body.artifactSlug
-        ? slugifyLoopId(body.artifactSlug)
-        : null;
-      const worktreeKey = sanitizedSlug ?? pickStableId(body);
-      const branchName = sanitizedSlug
-        ? `symphony/generate-prd-${sanitizedSlug}`
-        : `symphony/generate-prd-${pickStableId(body)}`;
-
-      worktreeDir = resolveLoopWorktreeDir(
-        repoPath,
-        `generate-prd-${worktreeKey}`,
+    } else if (
+      body.command === LoopCommand.GeneratePrd ||
+      body.command === LoopCommand.RequestPrdChanges
+    ) {
+      // expandedRepoPath is guaranteed non-null here: REPO_REQUIREMENT_BY_COMMAND
+      // marks both PRD commands REQUIRED, so the guard above already returned
+      // 400 when it was missing.
+      const dirs = await setupPrdWorktree({
+        command: body.command,
+        body,
+        expandedRepoPath: expandedRepoPath!,
+        resolvedAdditionalRepos,
+        additionalWorktreeDirs,
+        allowedDirs,
+        apiBaseUrl,
+        context,
+        wt,
+      });
+      if (!dirs) return; // helper already sent the response + cleaned up
+      worktreeDir = dirs.worktreeDir;
+      claudeWorkDir = dirs.claudeWorkDir;
+    } else if (body.command === LoopCommand.Bootstrap) {
+      usedTempDir = true;
+      const tmpDir = path.join(
+        os.tmpdir(),
+        `symphony-bootstrap-${body.loopId.slice(0, 8)}`,
       );
-
-      // Always start fresh: remove any stale worktree for this branch before creation.
-      const staleWorktree = wt.findWorktreeForBranch(repoPath, branchName);
-      if (staleWorktree) {
-        loopLog(
-          body.loopId,
-          `Removing stale worktree for fresh GENERATE_PRD: ${staleWorktree}`,
-        );
-        await wt.removeWorktree(staleWorktree, repoPath, body.loopId);
-      }
-
-      await wt.ensureWorktree(
-        repoPath,
-        worktreeDir,
-        branchName,
-        body.repo?.branch ?? "main",
-        body.loopId,
-      );
-      loopLog(
-        body.loopId,
-        `Created worktree for GENERATE_PRD: ${worktreeDir} (branch: ${branchName})`,
-      );
-
-      try {
-        assertPathAllowed(worktreeDir, allowedDirs);
-      } catch (e) {
-        if (e instanceof DirectoryNotAllowedError) {
-          await wt.removeWorktree(worktreeDir, repoPath, body.loopId);
-          json(context, 403, {
-            error: `Worktree path not allowed: ${worktreeDir}`,
-          });
-          return;
-        }
-        throw e;
-      }
-
-      // claudeWorkDir is a separate operational dir inside the worktree (same pattern as PLAN/EXECUTE).
-      // Spawn uses cwd: worktreeDir so Claude writes prd.md to the repo root.
-      // Logs, PID, and prompt file go to claudeWorkDir, not the repo root.
-      claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
-      await fs.mkdir(claudeWorkDir, { recursive: true });
-      await writeArtifactsForGeneratePrd(
-        worktreeDir,
-        body.artifacts,
-        body.prompt!,
-        body.repo,
-      );
+      await fs.rm(tmpDir, { recursive: true, force: true });
+      await fs.mkdir(tmpDir, { recursive: true });
+      claudeWorkDir = tmpDir;
     } else {
       json(context, 400, { error: `Unknown command: ${body.command}` });
       return;
@@ -3480,7 +5726,12 @@ async function handleLoopRequest(
           .rm(tempRootDir, { recursive: true, force: true })
           .catch(() => {});
       }
-      if (body.command === "GENERATE_PRD" && worktreeDir && expandedRepoPath) {
+      if (
+        (body.command === LoopCommand.GeneratePrd ||
+          body.command === LoopCommand.RequestPrdChanges) &&
+        worktreeDir &&
+        expandedRepoPath
+      ) {
         await wt.removeWorktree(worktreeDir, expandedRepoPath, body.loopId);
       }
       await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
@@ -3488,10 +5739,15 @@ async function handleLoopRequest(
 
     // Pre-flight: verify required binaries exist BEFORE posting 'started' event.
     // All commands need claude CLI. PLAN/EXECUTE additionally need run-loop.sh.
-    const usesRunLoop = body.command === "PLAN" || body.command === "EXECUTE";
+    const usesRunLoop =
+      body.command === LoopCommand.Plan || body.command === LoopCommand.Execute;
     let scriptPath: string | null = null;
 
-    const resolved = resolveBinarySync("claude", overrideGetBinaryPaths?.()?.claude);
+    // Every command needs claude — verify it consistently for all paths.
+    const resolved = resolveBinarySync(
+      "claude",
+      overrideGetBinaryPaths?.()?.claude,
+    );
     if (resolved.source === "fallback") {
       await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
         type: LoopEventType.Error,
@@ -3580,18 +5836,68 @@ async function handleLoopRequest(
     // Spawn process
     const logFile = path.join(claudeWorkDir, "symphony-loop.log");
     let ptySession: PtySession;
+    let spawnStartedAt = 0;
+    let decisionTableVerificationStartOffset = 0;
+    const collectedSpawnMeta: {
+      command: string;
+      args: string[];
+      cwd: string;
+      claudeVersion?: string;
+      binaryPath: string;
+      authFilesExist: boolean;
+      envSnapshot: Record<string, string>;
+    } = {
+      command: "",
+      args: [],
+      cwd: claudeWorkDir,
+      binaryPath: "",
+      authFilesExist: false,
+      envSnapshot: {},
+    };
+    let userVisibleLoopFailureSecret: string | undefined;
 
     try {
       // Reuse the path from pre-flight so validation and execution stay aligned.
       const claudeBinary = resolved.path;
 
+      const closedLoopPlanFile =
+        executeImportedPlanFile ?? requestChangesImportedPlanFile ?? "";
+
+      userVisibleLoopFailureSecret =
+        body.command === LoopCommand.Plan ||
+        body.command === LoopCommand.Execute
+          ? crypto.randomBytes(32).toString("base64url")
+          : undefined;
       const spawnEnv: Record<string, string> = await getShellEnv({
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
+        CLOSEDLOOP_PLAN_FILE: closedLoopPlanFile,
+        ...(userVisibleLoopFailureSecret
+          ? {
+              [USER_VISIBLE_LOOP_FAILURE_SECRET_ENV]:
+                userVisibleLoopFailureSecret,
+            }
+          : {}),
         // Pass resolved claude path so run-loop.sh uses the same binary
         // the desktop app validated in pre-flight (avoids PATH mismatches
         // between Electron's env and the user's login shell).
         CLAUDE_BIN: claudeBinary,
       });
+      clearUserVisibleLoopFailureMarker(claudeWorkDir);
+
+      // Collect non-sensitive env snapshot: NODE_ENV + CLAUDE_CODE_USE_* keys only
+      const envSnapshot: Record<string, string> = {};
+      for (const [key, value] of Object.entries(spawnEnv)) {
+        if (key === "NODE_ENV" || key.startsWith("CLAUDE_CODE_USE_")) {
+          envSnapshot[key] = value;
+        }
+      }
+
+      collectedSpawnMeta.command = claudeBinary;
+      collectedSpawnMeta.binaryPath = claudeBinary;
+      collectedSpawnMeta.authFilesExist = existsSync(
+        path.join(os.homedir(), ".claude"),
+      );
+      collectedSpawnMeta.envSnapshot = envSnapshot;
 
       // Interactive claude args — no -p, no stream-json so the PTY session
       // supports live keyboard input from attached terminal clients.
@@ -3610,11 +5916,13 @@ async function handleLoopRequest(
       ];
       const jsonlFile = path.join(claudeWorkDir, "claude-output.jsonl");
 
-      if (body.command === "DECOMPOSE") {
+      if (body.command === LoopCommand.Decompose) {
         const promptContent = body.prompt ?? "Decompose the PRD into features.";
         const promptFile = path.join(claudeWorkDir, "decompose-prompt.txt");
         await fs.writeFile(promptFile, promptContent);
 
+        collectedSpawnMeta.args = redactSpawnArgs([promptContent, ...interactiveClaudeArgs]);
+        spawnStartedAt = Date.now();
         ptySession = spawnPtySession({
           loopId: body.loopId,
           file: claudeBinary,
@@ -3624,35 +5932,24 @@ async function handleLoopRequest(
           logFile,
           jsonlFile,
         });
-      } else if (body.command === "EVALUATE_PRD") {
-        let evaluatePrdPrompt = `Activate judges:run-judges skill --artifact-type prd --workdir ${claudeWorkDir}.\n`;
-        if (expandedRepoPath) {
-          evaluatePrdPrompt += `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`;
-        }
-        const promptFile = path.join(claudeWorkDir, "evaluate-prd-prompt.txt");
-        await fs.writeFile(promptFile, evaluatePrdPrompt);
-
-        ptySession = spawnPtySession({
-          loopId: body.loopId,
-          file: claudeBinary,
-          args: [evaluatePrdPrompt, ...interactiveClaudeArgs],
-          cwd: claudeWorkDir,
-          env: spawnEnv,
-          logFile,
-          jsonlFile,
-        });
       } else if (
-        body.command === "EVALUATE_PLAN" ||
-        body.command === "EVALUATE_CODE"
+        body.command === LoopCommand.EvaluatePrd ||
+        body.command === LoopCommand.EvaluateFeature
       ) {
-        const artifactType = body.command === "EVALUATE_PLAN" ? "plan" : "code";
+        // EVALUATE_PRD and EVALUATE_FEATURE share identical spawn logic:
+        // REPO_PATH is optional — only added when a target repo is linked.
+        const artifactType =
+          body.command === LoopCommand.EvaluatePrd ? "prd" : "feature";
         const label = `evaluate-${artifactType}`;
-        const prompt =
-          `Activate judges:run-judges skill --artifact-type ${artifactType} --workdir ${claudeWorkDir}.\n` +
-          `REPO_PATH=${expandedRepoPath}\n`;
+        let prompt = `Activate judges:run-judges skill --artifact-type ${artifactType} --workdir ${claudeWorkDir}.\n`;
+        if (expandedRepoPath) {
+          prompt += `REPO_PATH=${expandedRepoPath} (search here for relevant code).\n`;
+        }
         const promptFile = path.join(claudeWorkDir, `${label}-prompt.txt`);
         await fs.writeFile(promptFile, prompt);
 
+        collectedSpawnMeta.args = redactSpawnArgs([prompt, ...interactiveClaudeArgs]);
+        spawnStartedAt = Date.now();
         ptySession = spawnPtySession({
           loopId: body.loopId,
           file: claudeBinary,
@@ -3662,7 +5959,37 @@ async function handleLoopRequest(
           logFile,
           jsonlFile,
         });
-      } else if (body.command === "REQUEST_CHANGES") {
+      } else if (
+        body.command === LoopCommand.EvaluatePlan ||
+        body.command === LoopCommand.EvaluateCode
+      ) {
+        // EVALUATE_PLAN and EVALUATE_CODE share identical spawn logic,
+        // differing only in the artifact type passed to run-judges.
+        // Unlike EVALUATE_PRD/EVALUATE_FEATURE (where REPO_PATH is optional),
+        // plan and code judges need the implementation tree, so the request must resolve to
+        // a local repo and expandedRepoPath is always set on this path.
+        const artifactType =
+          body.command === LoopCommand.EvaluatePlan ? "plan" : "code";
+        const label = `evaluate-${artifactType}`;
+        const prompt =
+          `Activate judges:run-judges skill --artifact-type ${artifactType} --workdir ${claudeWorkDir}.\n` +
+          `REPO_PATH=${expandedRepoPath}\n`;
+        const promptFile = path.join(claudeWorkDir, `${label}-prompt.txt`);
+        await fs.writeFile(promptFile, prompt);
+
+        collectedSpawnMeta.args = redactSpawnArgs([prompt, ...interactiveClaudeArgs]);
+        spawnStartedAt = Date.now();
+        ptySession = spawnPtySession({
+          loopId: body.loopId,
+          file: claudeBinary,
+          args: [prompt, ...interactiveClaudeArgs],
+          cwd: claudeWorkDir,
+          env: spawnEnv,
+          logFile,
+          jsonlFile,
+        });
+      } else if (body.command === LoopCommand.RequestChanges) {
+        // REQUEST_CHANGES: use claude directly with /code:amend-plan.
         const claudeArgs = [...interactiveClaudeArgs];
 
         if (body.parentSessionId) {
@@ -3683,6 +6010,9 @@ async function handleLoopRequest(
           `/code:amend-plan --workdir "${claudeWorkDir}" --message "${sanitized}"`,
         );
 
+        collectedSpawnMeta.args = redactSpawnArgs(claudeArgs);
+        collectedSpawnMeta.cwd = worktreeDir!;
+        spawnStartedAt = Date.now();
         ptySession = spawnPtySession({
           loopId: body.loopId,
           file: claudeBinary,
@@ -3692,25 +6022,174 @@ async function handleLoopRequest(
           logFile,
           jsonlFile,
         });
-      } else if (body.command === "GENERATE_PRD") {
-        const promptFile = path.join(claudeWorkDir, "generate-prd-prompt.txt");
-        await fs.writeFile(promptFile, body.prompt!);
+      } else if (
+        body.command === LoopCommand.GeneratePrd ||
+        body.command === LoopCommand.RequestPrdChanges
+      ) {
+        // Build resolved peer metadata once and use it as the single source of
+        // truth for both --add-dir flags and the prompt's "## Mounted paths"
+        // footer (mirrors the ECS harness contract: footer paths cannot drift
+        // from --add-dir paths).
+        const peerRefs = toPeerWorktreeRefs(additionalWorktreeDirs);
 
+        const promptFileName =
+          body.command === LoopCommand.GeneratePrd
+            ? "generate-prd-prompt.txt"
+            : "request-prd-changes-prompt.txt";
+        const promptFile = path.join(claudeWorkDir, promptFileName);
+        await fs.writeFile(
+          promptFile,
+          body.prompt! + buildMountPathsFooter(peerRefs),
+        );
+
+        // Inject --add-dir per peer when the policy enables peers. The orchestrator
+        // and validators are the primary gate; this is defense-in-depth so a
+        // peer-disabled command can never receive --add-dir flags.
+        const claudeArgsWithPeers = [...interactiveClaudeArgs];
+        if (getMultiRepoPolicy(body.command).supportsAdditionalRepos) {
+          for (const peer of peerRefs) {
+            claudeArgsWithPeers.push("--add-dir", peer.localPath);
+          }
+        }
+
+        collectedSpawnMeta.args = redactSpawnArgs([body.prompt!, ...claudeArgsWithPeers]);
+        collectedSpawnMeta.cwd = worktreeDir!;
+        spawnStartedAt = Date.now();
         ptySession = spawnPtySession({
           loopId: body.loopId,
           file: claudeBinary,
-          args: [body.prompt!, ...interactiveClaudeArgs],
+          args: [body.prompt! + buildMountPathsFooter(peerRefs), ...claudeArgsWithPeers],
           cwd: worktreeDir!,
           env: spawnEnv,
           logFile,
           jsonlFile,
+        });
+      } else if (body.command === LoopCommand.Bootstrap) {
+        const params = parseBootstrapParams(body.prompt);
+        if (!params || params.repos.length === 0) {
+          throw new Error("BOOTSTRAP requires repos in prompt JSON");
+        }
+
+        const allowedDirs = getAllowedDirectories();
+        const manifest: BootstrapManifestEntry[] = [];
+        for (const repo of params.repos) {
+          const branch = repo.branch ?? "main";
+          const localPath = repo.localPath
+            ? expandHome(repo.localPath)
+            : findLocalRepo(repo.fullName, allowedDirs);
+          if (!localPath) {
+            manifest.push({
+              fullName: repo.fullName,
+              localPath: "",
+              branch,
+              skip: true,
+              skipReason: "not found locally",
+            });
+            continue;
+          }
+          try {
+            const st = statSync(localPath);
+            if (!st.isDirectory()) {
+              manifest.push({
+                fullName: repo.fullName,
+                localPath,
+                branch,
+                skip: true,
+                skipReason: "path is not a directory",
+              });
+              continue;
+            }
+          } catch {
+            manifest.push({
+              fullName: repo.fullName,
+              localPath,
+              branch,
+              skip: true,
+              skipReason: "path does not exist",
+            });
+            continue;
+          }
+          try {
+            assertPathAllowed(localPath, allowedDirs);
+          } catch {
+            manifest.push({
+              fullName: repo.fullName,
+              localPath: "",
+              branch,
+              skip: true,
+              skipReason: "outside sandbox",
+            });
+            continue;
+          }
+          if (!params.options?.update && hasBootstrapArtifacts(localPath)) {
+            manifest.push({
+              fullName: repo.fullName,
+              localPath,
+              branch,
+              skip: true,
+              skipReason: "artifacts already exist",
+            });
+            continue;
+          }
+          manifest.push({
+            fullName: repo.fullName,
+            localPath,
+            branch,
+            skip: false,
+          });
+        }
+
+        writeFileSync(
+          path.join(claudeWorkDir, "bootstrap-manifest.json"),
+          JSON.stringify(manifest, null, 2),
+        );
+
+        const runnableRepos = manifest.filter((e) => !e.skip);
+        const scriptLines: string[] = [
+          "#!/bin/bash",
+          `CLAUDE_BIN=${shellEscape(claudeBinary)}`,
+          "",
+        ];
+        for (const [i, entry] of runnableRepos.entries()) {
+          const marker = path.join(claudeWorkDir, `repo-${i}-done`);
+          const stderrLog = path.join(claudeWorkDir, `repo-${i}-stderr.log`);
+          scriptLines.push(
+            `echo "=== BOOTSTRAP ${i}: ${shellEscape(entry.fullName)} ==="`,
+            `if ! cd ${shellEscape(entry.localPath)}; then`,
+            `  echo "fail:cd" > ${shellEscape(marker)}`,
+            `else`,
+            `  if "$CLAUDE_BIN" -p "/agent-bootstrap" 2>${shellEscape(stderrLog)}; then`,
+            `    echo "ok" > ${shellEscape(marker)}`,
+            `  else`,
+            `    echo "fail:$?" > ${shellEscape(marker)}`,
+            `  fi`,
+            `fi`,
+            "",
+          );
+        }
+
+        const bootstrapScript = path.join(claudeWorkDir, "bootstrap.sh");
+        writeFileSync(bootstrapScript, scriptLines.join("\n"), { mode: 0o755 });
+
+        collectedSpawnMeta.command = "bash";
+        collectedSpawnMeta.args = [bootstrapScript];
+        spawnStartedAt = Date.now();
+        ptySession = spawnPtySession({
+          loopId: body.loopId,
+          file: "bash",
+          args: [bootstrapScript],
+          cwd: claudeWorkDir,
+          env: spawnEnv,
+          logFile,
         });
       } else {
         // PLAN, EXECUTE: spawn run-loop.sh for multi-iteration execution.
         // run-loop.sh manages iteration boundaries and context-refresh
         // relaunching internally; the PTY gives us terminal attach capability.
         const scriptArgs = [claudeWorkDir];
-        const maxIterations = body.command === "EXECUTE" ? "150" : "50";
+
+        const maxIterations =
+          body.command === LoopCommand.Execute ? "150" : "50";
         scriptArgs.push("--max-iterations", maxIterations);
 
         const prdPath = path.join(claudeWorkDir, LoopArtifactFile.Prd);
@@ -3718,12 +6197,24 @@ async function handleLoopRequest(
           scriptArgs.push("--prd", prdPath);
         }
 
-        if (body.command === "PLAN") {
+        // Defense-in-depth: only inject --add-dir when the policy enables peers.
+        // For the run-loop path (PLAN/EXECUTE today) this is equivalent to the
+        // prior literal check; if a future command joins the policy table with
+        // run-loop semantics, it lights up automatically.
+        if (getMultiRepoPolicy(body.command).supportsAdditionalRepos) {
           for (const addEntry of additionalWorktreeDirs) {
             scriptArgs.push("--add-dir", addEntry.dir);
           }
         }
 
+        collectedSpawnMeta.command = scriptPath!;
+        collectedSpawnMeta.args = redactSpawnArgs(scriptArgs);
+        collectedSpawnMeta.cwd = worktreeDir!;
+        if (body.command === LoopCommand.Execute) {
+          decisionTableVerificationStartOffset =
+            getDecisionTableVerificationTelemetryOffset(claudeWorkDir);
+        }
+        spawnStartedAt = Date.now();
         ptySession = spawnPtySession({
           loopId: body.loopId,
           file: scriptPath!,
@@ -3764,7 +6255,10 @@ async function handleLoopRequest(
       stop: () => {},
       flush: () => Promise.resolve(),
     };
-    const onceComplete = async (code: number): Promise<void> => {
+    const onceComplete = async (
+      code: number,
+      signal?: string,
+    ): Promise<void> => {
       if (completionHandled) return;
       completionHandled = true;
       loopLog(body.loopId, `onceComplete fired, code=${code}`);
@@ -3774,7 +6268,11 @@ async function handleLoopRequest(
       if (jobStore) {
         const j = jobStore.getByLoopId(body.loopId);
         if (j && j.exitCode == null) {
-          jobStore.upsert({ ...j, exitCode: code, updatedAt: new Date().toISOString() });
+          jobStore.upsert({
+            ...j,
+            exitCode: code,
+            updatedAt: new Date().toISOString(),
+          });
         }
       }
       try {
@@ -3799,6 +6297,11 @@ async function handleLoopRequest(
         wt,
         loopTokenStore,
         additionalWorktreeDirs,
+        signal,
+        spawnStartedAt,
+        collectedSpawnMeta,
+        decisionTableVerificationStartOffset,
+        userVisibleLoopFailureSecret,
       ).catch((err) => {
         loopError(body.loopId, "Completion handler error:", err);
         gatewayLog.error(
@@ -3844,9 +6347,10 @@ async function handleLoopRequest(
             const job = jobStore.getByLoopId(body.loopId);
             if (job) {
               jobStore.upsert({ ...job, lastObservedJsonlOffset: offset });
-            }
           }
+        }
         : undefined,
+      claudeWorkDir,
     );
     spawnedSuccessfully = true;
     loopLog(body.loopId, `Spawned pid=${pid}, worktree=${worktreeDir}`);
@@ -3874,6 +6378,14 @@ async function handleLoopRequest(
         ...existing,
         ...(commandId ? { commandId } : {}),
         ...(operationId ? { operationId } : {}),
+        artifactSlug: body.artifactSlug ?? existing?.artifactSlug,
+        baseBranch: body.repo?.branch ?? existing?.baseBranch ?? "main",
+        primaryRepoFullName:
+          resolveLoopPrimaryFullName(body, expandedRepoPath) ||
+          existing?.primaryRepoFullName,
+        webAppOrigin: webAppOrigin || existing?.webAppOrigin,
+        expectedMcpUrl: expectedMcpUrl ?? existing?.expectedMcpUrl,
+        committer: body.committer ?? existing?.committer,
         worktreeDir: worktreeDir ?? undefined,
         claudeWorkDir,
         // Persist so finalizer/boot-recovery can remove these after a crash
@@ -3912,7 +6424,7 @@ async function handleLoopRequest(
       runningLoops.delete(body.loopId);
       loopTokenStore?.deleteLoopToken(body.loopId);
       // Best-effort cleanup of any additional repo worktrees created before spawn failed
-      void cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt, "finally: cleanup additional worktree failed:");
+      void cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
     }
   }
 }
@@ -4027,22 +6539,18 @@ export function registerSymphonyLoopRoutes(
   loopTokenStore?: LoopTokenStore,
   getSymphonyDir?: () => string,
 ): void {
-  dispatcher.register(
-    "POST",
-    "/api/gateway/symphony/loop",
-    async (context) => {
-      await handleLoopRequest(
-        context,
-        getAllowedDirectories,
-        getApiOrigin,
-        jobStore,
-        getWebAppOrigin,
-        worktreeProvider,
-        loopTokenStore,
-        getSymphonyDir,
-      );
-    },
-  );
+  dispatcher.register("POST", "/api/gateway/symphony/loop", async (context) => {
+    await handleLoopRequest(
+      context,
+      getAllowedDirectories,
+      getApiOrigin,
+      jobStore,
+      getWebAppOrigin,
+      worktreeProvider,
+      loopTokenStore,
+      getSymphonyDir,
+    );
+  });
 
   dispatcher.register(
     "POST",

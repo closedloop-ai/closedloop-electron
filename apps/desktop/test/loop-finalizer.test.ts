@@ -5,8 +5,11 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
+import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { JobStore, type LocalJob } from "../src/main/job-store.js";
 import {
+  EXECUTE_NO_WORK_LIVE_ACTIVITY,
   emitFinalizationTelemetry,
   finalizeLoopFromRuntime,
   parseJobWarnings,
@@ -16,13 +19,20 @@ import {
   tryUploadArtifacts,
 } from "../src/main/loop-finalizer.js";
 import { LoopTokenStore } from "../src/main/loop-token-store.js";
+import { resetResolvedClaudePath } from "../src/server/operations/symphony-loop.js";
+import {
+  resetShellPathCache,
+  setShellPathForTest,
+} from "../src/server/shell-path.js";
 import type { TelemetryEventPayload } from "../src/main/telemetry-protocol.js";
 import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
+import { makeV2ExecutionResult } from "./helpers/execution-result-fixtures.js";
 
 let tempRoot = "";
 let fetchCalls: Array<{ url: string; body: string }> = [];
 let telemetryEvents: TelemetryEventPayload[] = [];
 const originalFetch = globalThis.fetch;
+const originalPath = process.env.PATH;
 
 beforeEach(async () => {
   tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "loop-finalizer-test-"));
@@ -42,6 +52,9 @@ beforeEach(async () => {
 
 afterEach(async () => {
   globalThis.fetch = originalFetch;
+  process.env.PATH = originalPath;
+  resetResolvedClaudePath();
+  resetShellPathCache();
   if (tempRoot) {
     await fs.rm(tempRoot, { recursive: true, force: true });
   }
@@ -57,7 +70,7 @@ function createBaseJob(overrides?: Partial<LocalJob>): LocalJob {
     id: "loop-1",
     kind: "SYMPHONY_LOOP",
     loopId: "loop-1",
-    command: "PLAN",
+    command: LoopCommand.Plan,
     localRepoPath: path.join(tempRoot, "repo"),
     claudeWorkDir,
     status: "RUNNING",
@@ -337,6 +350,45 @@ test("finalizeLoopFromRuntime preserves FAILED jobs and posts an error event", a
   assert.equal(telemetryEvents[0]?.severity, "error");
 });
 
+test("finalizeLoopFromRuntime replays persisted user-visible runner failure", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jobStore = createStore("finalizer-user-visible-failure");
+  const job = createBaseJob({
+    claudeWorkDir,
+    status: "FAILED",
+    exitCode: 1,
+    liveActivity: "Claude rate limit reached.",
+    userVisibleLoopFailure: {
+      code: LoopErrorCode.RunnerError,
+      message: "Claude rate limit reached.",
+      result: { subcode: "CLAUDE_RATE_LIMIT" },
+    },
+  });
+  jobStore.upsert(job);
+
+  await finalizeLoopFromRuntime(job, "boot-recovery", {
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+  });
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.status, "FAILED");
+  assert.ok(persisted.completedEventPostedAt);
+  assert.equal(fetchCalls.length, 1);
+  const eventBody = JSON.parse(fetchCalls[0]?.body ?? "{}") as Record<
+    string,
+    unknown
+  >;
+  assert.equal(eventBody.code, "RUNNER_ERROR");
+  assert.equal(eventBody.message, "Claude rate limit reached.");
+  assert.deepEqual(eventBody.result, { subcode: "CLAUDE_RATE_LIMIT" });
+});
+
 test("finalizeLoopFromRuntime preserves CANCELLED jobs without posting loop events", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
@@ -586,10 +638,14 @@ test("parseJobWarnings splits on semicolon, trims, and drops empty segments", ()
   assert.deepEqual(parseJobWarnings({ warning: "a; b;  ;c" }), ["a", "b", "c"]);
 });
 
-const artifactDeps = (jobStore: JobStore) => ({
+const artifactDeps = (
+  jobStore: JobStore,
+  getAllowedDirectories?: () => string[],
+) => ({
   jobStore,
   apiAuthToken: "token",
   apiBaseUrl: "http://127.0.0.1:12345",
+  getAllowedDirectories,
 });
 
 /** Minimal git repo for branchName fallback tests (requires git on PATH). */
@@ -619,7 +675,7 @@ test("tryUploadArtifacts POSTs artifacts and sets artifactsUploadedAt on success
   const warnings: string[] = [];
   const { failed } = await tryUploadArtifacts(
     job,
-    "PLAN",
+    LoopCommand.Plan,
     claudeWorkDir,
     undefined,
     warnings,
@@ -663,14 +719,14 @@ test("tryUploadArtifacts includes current plan state on EXECUTE uploads", async 
   const jobStore = createStore("step-upload-execute-plan");
   const job = createBaseJob({
     claudeWorkDir,
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
   });
   jobStore.upsert(job);
 
   const warnings: string[] = [];
   const { failed } = await tryUploadArtifacts(
     job,
-    "EXECUTE",
+    LoopCommand.Execute,
     claudeWorkDir,
     undefined,
     warnings,
@@ -699,6 +755,56 @@ test("tryUploadArtifacts includes current plan state on EXECUTE uploads", async 
   assert.deepEqual(uploadBody.artifacts?.codeJudges, { score: 0.9 });
 });
 
+test("tryUploadArtifacts falls back to imported-plan markdown for EXECUTE uploads", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(
+    path.join(claudeWorkDir, "imported-plan.md"),
+    "# Imported fallback plan\n\n- preserve staged markdown",
+  );
+  await fs.writeFile(
+    path.join(claudeWorkDir, "execution-result.json"),
+    JSON.stringify({ has_changes: false }),
+  );
+  await fs.writeFile(
+    path.join(claudeWorkDir, "code-judges.json"),
+    JSON.stringify({ score: 0.9 }),
+  );
+
+  const jobStore = createStore("step-upload-execute-imported-plan");
+  const job = createBaseJob({
+    claudeWorkDir,
+    command: LoopCommand.Execute,
+  });
+  jobStore.upsert(job);
+
+  const warnings: string[] = [];
+  const { failed } = await tryUploadArtifacts(
+    job,
+    LoopCommand.Execute,
+    claudeWorkDir,
+    undefined,
+    warnings,
+    artifactDeps(jobStore),
+  );
+
+  assert.equal(failed, false);
+  const uploadBody = JSON.parse(fetchCalls[0]?.body ?? "{}") as {
+    artifacts?: {
+      plan?: Record<string, unknown>;
+      executionResult?: Record<string, unknown>;
+      codeJudges?: Record<string, unknown>;
+    };
+  };
+  assert.deepEqual(uploadBody.artifacts?.plan, {
+    content: "# Imported fallback plan\n\n- preserve staged markdown",
+  });
+  assert.deepEqual(uploadBody.artifacts?.executionResult, {
+    has_changes: false,
+  });
+  assert.deepEqual(uploadBody.artifacts?.codeJudges, { score: 0.9 });
+});
+
 test("tryUploadArtifacts skips upload when artifactsUploadedAt already set", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
@@ -710,7 +816,7 @@ test("tryUploadArtifacts skips upload when artifactsUploadedAt already set", asy
   jobStore.upsert(job);
 
   const warnings: string[] = [];
-  await tryUploadArtifacts(job, "PLAN", claudeWorkDir, undefined, warnings, artifactDeps(jobStore));
+  await tryUploadArtifacts(job, LoopCommand.Plan, claudeWorkDir, undefined, warnings, artifactDeps(jobStore));
 
   assert.equal(fetchCalls.length, 0);
   assert.equal(warnings.length, 0);
@@ -737,7 +843,7 @@ test("tryUploadArtifacts records ARTIFACT_UPLOAD_FAILED when HTTP fails", async 
   const warnings: string[] = [];
   const { failed } = await tryUploadArtifacts(
     job,
-    "PLAN",
+    LoopCommand.Plan,
     claudeWorkDir,
     undefined,
     warnings,
@@ -789,7 +895,7 @@ test("tryPostCompletedEvent posts completed event and sets completedEventPostedA
   const warnings: string[] = [];
   const result = await tryPostCompletedEvent(
     job,
-    "PLAN",
+    LoopCommand.Plan,
     claudeWorkDir,
     { plan: {} },
     warnings,
@@ -826,7 +932,7 @@ test("tryPostCompletedEvent skips when completedEventPostedAt is set", async () 
 
   const result = await tryPostCompletedEvent(
     job,
-    "PLAN",
+    LoopCommand.Plan,
     claudeWorkDir,
     {},
     [],
@@ -844,22 +950,21 @@ test("tryPostCompletedEvent adds EXECUTE PR fields from artifacts", async () => 
   const jobStore = createStore("step-complete-execute");
   const job = createBaseJob({
     claudeWorkDir,
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
   });
   jobStore.upsert(job);
 
   const artifacts = {
-    executionResult: {
-      pr_url: "https://example.com/pr/1",
-      pr_number: 1,
-      branch_name: "feat/x",
-      has_changes: true,
-    },
+    executionResult: makeV2ExecutionResult({
+      fullName: "acme/repo",
+      prNumber: 1,
+      branchName: "feat/x",
+    }) as unknown as Record<string, unknown>,
   };
 
   await tryPostCompletedEvent(
     job,
-    "EXECUTE",
+    LoopCommand.Execute,
     claudeWorkDir,
     artifacts,
     [],
@@ -867,7 +972,7 @@ test("tryPostCompletedEvent adds EXECUTE PR fields from artifacts", async () => 
   );
 
   const body = fetchCalls[0]?.body ?? "";
-  assert.match(body, /"prUrl":"https:\/\/example.com\/pr\/1"/);
+  assert.match(body, /"prUrl":"https:\/\/github.com\/acme\/repo\/pull\/1"/);
   assert.match(body, /"prNumber":1/);
   assert.match(body, /"branchName":"feat\/x"/);
   assert.match(body, /"has_changes":true/);
@@ -882,7 +987,7 @@ test("tryPostCompletedEvent includes sessionId from session-id.txt", async () =>
   const job = createBaseJob({ claudeWorkDir });
   jobStore.upsert(job);
 
-  await tryPostCompletedEvent(job, "PLAN", claudeWorkDir, { plan: {} }, [], artifactDeps(jobStore));
+  await tryPostCompletedEvent(job, LoopCommand.Plan, claudeWorkDir, { plan: {} }, [], artifactDeps(jobStore));
 
   const body = fetchCalls[0]?.body ?? "";
   assert.match(body, /"sessionId":"claude-sess-abc"/);
@@ -899,7 +1004,7 @@ test("tryPostCompletedEvent adds branchName from worktree git for non-EXECUTE", 
   const job = createBaseJob({ claudeWorkDir, worktreeDir });
   jobStore.upsert(job);
 
-  await tryPostCompletedEvent(job, "PLAN", claudeWorkDir, { plan: {} }, [], artifactDeps(jobStore));
+  await tryPostCompletedEvent(job, LoopCommand.Plan, claudeWorkDir, { plan: {} }, [], artifactDeps(jobStore));
 
   const body = fetchCalls[0]?.body ?? "";
   assert.match(body, /"branchName":"plan-worktree-branch"/);
@@ -916,19 +1021,22 @@ test("tryPostCompletedEvent EXECUTE uses git branch when executionResult omits b
   const job = createBaseJob({
     claudeWorkDir,
     worktreeDir,
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
   });
   jobStore.upsert(job);
 
+  // Worktree-branch fallback: when the primary entry is skipped (no branchName
+  // on the V2 entry), getCompletionCorrelationFields falls back to git HEAD
+  // of the worktree.
   const artifacts = {
-    executionResult: {
-      pr_url: "https://example.com/pr/2",
-      pr_number: 2,
-      has_changes: true,
-    },
+    executionResult: makeV2ExecutionResult({
+      status: "skipped",
+      fullName: "acme/repo",
+      reason: "no_changes",
+    }) as unknown as Record<string, unknown>,
   };
 
-  await tryPostCompletedEvent(job, "EXECUTE", claudeWorkDir, artifacts, [], artifactDeps(jobStore));
+  await tryPostCompletedEvent(job, LoopCommand.Execute, claudeWorkDir, artifacts, [], artifactDeps(jobStore));
 
   const body = fetchCalls[0]?.body ?? "";
   assert.match(body, /"branchName":"execute-git-fallback"/);
@@ -945,24 +1053,67 @@ test("tryPostCompletedEvent EXECUTE prefers executionResult branch_name over git
   const job = createBaseJob({
     claudeWorkDir,
     worktreeDir,
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
   });
   jobStore.upsert(job);
 
   const artifacts = {
-    executionResult: {
-      pr_url: "https://example.com/pr/3",
-      pr_number: 3,
-      branch_name: "feat/from-artifact",
-      has_changes: true,
-    },
+    executionResult: makeV2ExecutionResult({
+      fullName: "acme/repo",
+      prNumber: 3,
+      branchName: "feat/from-artifact",
+    }) as unknown as Record<string, unknown>,
   };
 
-  await tryPostCompletedEvent(job, "EXECUTE", claudeWorkDir, artifacts, [], artifactDeps(jobStore));
+  await tryPostCompletedEvent(job, LoopCommand.Execute, claudeWorkDir, artifacts, [], artifactDeps(jobStore));
 
   const body = fetchCalls[0]?.body ?? "";
   assert.match(body, /"branchName":"feat\/from-artifact"/);
   assert.ok(!body.includes('"branchName":"git-head-branch"'));
+});
+
+test("tryPostCompletedEvent includes execute finalization metadata for EXECUTE jobs", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const jobStore = createStore("step-complete-exec-finalization-metadata");
+  const job = createBaseJob({
+    claudeWorkDir,
+    command: LoopCommand.Execute,
+    finalizationSource: "boot-recovery",
+    executeFinalizationStatus: "success",
+    executeFinalizationPath: "artifact-existing",
+    executeFinalizationReason: "existing execution-result.json reused",
+  });
+  jobStore.upsert(job);
+
+  const artifacts = {
+    executionResult: makeV2ExecutionResult({
+      fullName: "acme/repo",
+      prNumber: 4,
+      branchName: "feat/recovered-complete",
+    }) as unknown as Record<string, unknown>,
+  };
+
+  await tryPostCompletedEvent(
+    job,
+    LoopCommand.Execute,
+    claudeWorkDir,
+    artifacts,
+    [],
+    artifactDeps(jobStore),
+  );
+
+  const parsed = JSON.parse(fetchCalls[0]?.body ?? "{}") as {
+    result?: Record<string, unknown>;
+  };
+  assert.equal(parsed.result?.finalizationSource, "boot-recovery");
+  assert.equal(parsed.result?.executeFinalizationStatus, "success");
+  assert.equal(parsed.result?.executeFinalizationPath, "artifact-existing");
+  assert.equal(
+    parsed.result?.executeFinalizationReason,
+    "existing execution-result.json reused",
+  );
 });
 
 test("tryUploadArtifacts sends sessionId and branchName in metadata", async () => {
@@ -982,7 +1133,7 @@ test("tryUploadArtifacts sends sessionId and branchName in metadata", async () =
   const warnings: string[] = [];
   const { failed } = await tryUploadArtifacts(
     job,
-    "PLAN",
+    LoopCommand.Plan,
     claudeWorkDir,
     worktreeDir,
     warnings,
@@ -995,6 +1146,108 @@ test("tryUploadArtifacts sends sessionId and branchName in metadata", async () =
   const parsed = JSON.parse(uploadCall.body) as { metadata?: Record<string, unknown> };
   assert.equal(parsed.metadata?.sessionId, "upload-sess-xyz");
   assert.equal(parsed.metadata?.branchName, "upload-md-branch");
+});
+
+test("tryUploadArtifacts includes execute finalization metadata for EXECUTE jobs", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(
+    path.join(claudeWorkDir, "execution-result.json"),
+    JSON.stringify(
+      makeV2ExecutionResult({
+        fullName: "acme/repo",
+        prNumber: 11,
+        branchName: "feat/recovered-upload",
+        commitSha: "abc123",
+      }),
+    ),
+  );
+
+  const jobStore = createStore("step-upload-exec-finalization-metadata");
+  const job = createBaseJob({
+    claudeWorkDir,
+    command: LoopCommand.Execute,
+    finalizationSource: "boot-recovery",
+    executeFinalizationStatus: "success",
+    executeFinalizationPath: "artifact-existing",
+    executeFinalizationReason: "existing execution-result.json reused",
+  });
+  jobStore.upsert(job);
+
+  const warnings: string[] = [];
+  const { failed } = await tryUploadArtifacts(
+    job,
+    LoopCommand.Execute,
+    claudeWorkDir,
+    undefined,
+    warnings,
+    artifactDeps(jobStore),
+  );
+
+  assert.equal(failed, false);
+  const uploadCall = fetchCalls.find((c) => c.url.includes("/upload-artifacts"));
+  assert.ok(uploadCall);
+  const parsed = JSON.parse(uploadCall.body) as { metadata?: Record<string, unknown> };
+  assert.equal(parsed.metadata?.finalizationSource, "boot-recovery");
+  assert.equal(parsed.metadata?.executeFinalizationStatus, "success");
+  assert.equal(parsed.metadata?.executeFinalizationPath, "artifact-existing");
+  assert.equal(
+    parsed.metadata?.executeFinalizationReason,
+    "existing execution-result.json reused",
+  );
+});
+
+test("tryUploadArtifacts omits branchName fallback when worktree is outside allowed directories", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ tasks: [] }));
+  await fs.writeFile(path.join(claudeWorkDir, "session-id.txt"), "upload-sess-xyz\n", "utf-8");
+
+  const worktreeDir = path.join(tempRoot, "blocked", "wt-upload");
+  await fs.mkdir(worktreeDir, { recursive: true });
+
+  const allowedDir = path.join(tempRoot, "allowed");
+  await fs.mkdir(allowedDir, { recursive: true });
+
+  const fakeBin = path.join(tempRoot, "fake-bin");
+  const gitCapture = path.join(tempRoot, "git-capture.txt");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(
+    path.join(fakeBin, "git"),
+    [
+      "#!/bin/sh",
+      `printf '%s\\n' \"$@\" >> ${JSON.stringify(gitCapture)}`,
+      'if [ "$1" = "rev-parse" ] && [ "$2" = "--abbrev-ref" ]; then',
+      '  echo "blocked-branch"',
+      "  exit 0",
+      "fi",
+      "exit 0",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+
+  const jobStore = createStore("step-upload-disallowed-worktree");
+  const job = createBaseJob({ claudeWorkDir, worktreeDir });
+  jobStore.upsert(job);
+
+  const warnings: string[] = [];
+  const { failed } = await tryUploadArtifacts(
+    job,
+    LoopCommand.Plan,
+    claudeWorkDir,
+    worktreeDir,
+    warnings,
+    artifactDeps(jobStore, () => [allowedDir]),
+  );
+
+  assert.equal(failed, false);
+  const uploadCall = fetchCalls.find((c) => c.url.includes("/upload-artifacts"));
+  assert.ok(uploadCall);
+  const parsed = JSON.parse(uploadCall.body) as { metadata?: Record<string, unknown> };
+  assert.equal(parsed.metadata?.sessionId, "upload-sess-xyz");
+  assert.equal(parsed.metadata?.branchName, undefined);
+  assert.equal(await fs.readFile(gitCapture, "utf-8").catch(() => ""), "");
 });
 
 test("tryPostCompletedEvent records EVENT_POST_FAILED when HTTP fails", async () => {
@@ -1020,7 +1273,7 @@ test("tryPostCompletedEvent records EVENT_POST_FAILED when HTTP fails", async ()
   const warnings: string[] = [];
   const result = await tryPostCompletedEvent(
     job,
-    "PLAN",
+    LoopCommand.Plan,
     claudeWorkDir,
     {},
     warnings,
@@ -1099,6 +1352,48 @@ test("tryPostErrorEvent uses PROCESS_STOPPED for STOPPED status", async () => {
 
   assert.match(fetchCalls[0]?.body ?? "", /"code":"PROCESS_STOPPED"/);
   assert.match(fetchCalls[0]?.body ?? "", /STOPPED/);
+});
+
+test("tryPostErrorEvent uses NO_WORK_PRODUCED for shared EXECUTE no-work failures", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(
+    path.join(claudeWorkDir, "claude-output.jsonl"),
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+      },
+    }) + "\n",
+    "utf-8",
+  );
+
+  const jobStore = createStore("step-error-no-work-produced");
+  const job = createBaseJob({
+    claudeWorkDir,
+    command: LoopCommand.Execute,
+    status: "FAILED",
+    exitCode: 0,
+    liveActivity: EXECUTE_NO_WORK_LIVE_ACTIVITY,
+  });
+  jobStore.upsert(job);
+
+  await tryPostErrorEvent(job, claudeWorkDir, [], artifactDeps(jobStore));
+
+  assert.match(fetchCalls[0]?.body ?? "", /"code":"NO_WORK_PRODUCED"/);
+  assert.match(
+    fetchCalls[0]?.body ?? "",
+    /"message":"EXECUTE loop completed with 0 tokens -- no work was done"/,
+  );
+  const parsed = JSON.parse(fetchCalls[0]?.body ?? "{}") as {
+    tokenUsage?: Record<string, unknown>;
+  };
+  assert.equal(parsed.tokenUsage, undefined);
 });
 
 test("tryPostErrorEvent skips when completedEventPostedAt is set", async () => {
@@ -1395,4 +1690,291 @@ test("finalizeLoopFromRuntime tolerates a throwing cleanup callback and still cl
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
   assert.equal(persisted.additionalWorktreeDirs, undefined);
+});
+
+test("finalizeLoopFromRuntime retries EXECUTE finalization after a prior error on boot-recovery", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  const worktreeDir = path.join(repoDir, "worktree");
+  const remoteDir = path.join(tempRoot, "remote.git");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.mkdir(worktreeDir, { recursive: true });
+  await fs.mkdir(remoteDir, { recursive: true });
+  await fs.writeFile(
+    path.join(claudeWorkDir, "claude-output.jsonl"),
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        usage: {
+          input_tokens: 12,
+          output_tokens: 6,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+      },
+    }) + "\n",
+    "utf-8",
+  );
+
+  initGitRepoAt(worktreeDir, "feat/retry-finalization");
+  execSync("git init --bare", { cwd: remoteDir, stdio: "pipe" });
+  execSync(`git remote add origin ${JSON.stringify(remoteDir)}`, {
+    cwd: worktreeDir,
+    stdio: "pipe",
+  });
+  execSync("git push -u origin feat/retry-finalization", {
+    cwd: worktreeDir,
+    stdio: "pipe",
+  });
+  await fs.writeFile(path.join(worktreeDir, "feature.txt"), "changed once\n", "utf-8");
+
+  const fakeBin = path.join(tempRoot, "fake-bin");
+  const failOnceMarker = path.join(tempRoot, "git-status-failed-once");
+  const realGit = execSync("which git", { encoding: "utf-8" }).trim();
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+  await fs.writeFile(
+    path.join(fakeBin, "gh"),
+    [
+      "#!/bin/sh",
+      'if [ "$1" = "pr" ] && [ "$2" = "create" ]; then',
+      '  echo "https://github.com/acme/repo/pull/123"',
+      "  exit 0",
+      "fi",
+      'if [ "$1" = "pr" ] && [ "$2" = "edit" ]; then',
+      "  exit 0",
+      "fi",
+      'if [ "$1" = "pr" ] && [ "$2" = "view" ]; then',
+      "  exit 1",
+      "fi",
+      "exit 0",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  await fs.writeFile(
+    path.join(fakeBin, "git"),
+    [
+      "#!/bin/sh",
+      `FAIL_ONCE_MARKER=${JSON.stringify(failOnceMarker)}`,
+      'if [ "$1" = "status" ] && [ ! -f "$FAIL_ONCE_MARKER" ]; then',
+      '  touch "$FAIL_ONCE_MARKER"',
+      '  echo "status failed once" >&2',
+      "  exit 1",
+      "fi",
+      `exec ${JSON.stringify(realGit)} "$@"`,
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  process.env.PATH = `${fakeBin}:${path.dirname(realGit)}:/usr/bin:/bin`;
+  resetResolvedClaudePath();
+  setShellPathForTest();
+
+  let failCloudFinalization = true;
+  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    fetchCalls.push({
+      url: String(input),
+      body: typeof init?.body === "string" ? init.body : "",
+    });
+    if (failCloudFinalization) {
+      return new Response("retry later", { status: 502 });
+    }
+    return new Response(JSON.stringify({ success: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  const jobStore = createStore("finalizer-execute-retry-after-error");
+  const job = createBaseJob({
+    claudeWorkDir,
+    worktreeDir,
+    command: LoopCommand.Execute,
+    baseBranch: "main",
+    webAppOrigin: "https://app.closedloop.ai",
+    primaryRepoFullName: "acme/repo",
+    committer: {
+      name: "Test User",
+      email: "test@example.com",
+    },
+  });
+  jobStore.upsert(job);
+
+  await finalizeLoopFromRuntime(job, "live-exit", {
+    jobStore,
+    telemetry: { emit: () => {} },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+    getAllowedDirectories: () => [tempRoot],
+  });
+
+  const afterLiveError = jobStore.getByLoopId("loop-1");
+  assert.ok(afterLiveError);
+  assert.equal(afterLiveError.executeFinalizationStatus, "error");
+  assert.equal(afterLiveError.executeFinalizationPath, "git-fallback");
+  assert.equal(afterLiveError.cloudFinalizedAt, undefined);
+
+  failCloudFinalization = false;
+  fetchCalls = [];
+
+  await finalizeLoopFromRuntime(afterLiveError, "boot-recovery", {
+    jobStore,
+    telemetry: { emit: () => {} },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+    getAllowedDirectories: () => [tempRoot],
+  });
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.executeFinalizationStatus, "success");
+  assert.equal(persisted.executeFinalizationPath, "git-fallback");
+  assert.ok(persisted.cloudFinalizedAt);
+
+  const uploadCall = fetchCalls.find((call) =>
+    call.url.includes("/upload-artifacts"),
+  );
+  assert.ok(uploadCall, "expected upload-artifacts on recovery retry");
+  const uploadBody = JSON.parse(uploadCall.body) as {
+    metadata?: Record<string, unknown>;
+    artifacts?: {
+      executionResult?: {
+        schemaVersion?: number;
+        results?: Array<{ status: string; prUrl?: string }>;
+      };
+    };
+  };
+  assert.equal(uploadBody.metadata?.executeFinalizationStatus, "success");
+  assert.equal(uploadBody.artifacts?.executionResult?.schemaVersion, 2);
+  assert.equal(
+    uploadBody.artifacts?.executionResult?.results?.[0]?.prUrl,
+    "https://github.com/acme/repo/pull/123",
+  );
+
+  const completedEventCall = fetchCalls.find((call) =>
+    call.body.includes('"type":"completed"'),
+  );
+  assert.ok(completedEventCall, "expected completed event on recovery retry");
+});
+
+test("tryPostCompletedEvent includes V2 top-level results and primary PR fields", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const jobStore = createStore("v2-repo-results");
+  const job = createBaseJob({
+    claudeWorkDir,
+    command: LoopCommand.Execute,
+    primaryRepoFullName: "acme/main-repo",
+  });
+  jobStore.upsert(job);
+
+  await tryPostCompletedEvent(
+    job,
+    LoopCommand.Execute,
+    claudeWorkDir,
+    {
+      executionResult: makeV2ExecutionResult([
+        {
+          fullName: "acme/main-repo",
+          prNumber: 10,
+          branchName: "feat/v2-multi",
+          commitSha: "cafebabe",
+        },
+        {
+          status: "skipped",
+          fullName: "acme/side-repo",
+          reason: "nothing changed",
+        },
+      ]) as unknown as Record<string, unknown>,
+    },
+    [],
+    artifactDeps(jobStore),
+  );
+
+  const body = fetchCalls[0]?.body ?? "";
+  const parsed = JSON.parse(body) as {
+    result?: Record<string, unknown>;
+    results?: Array<{ status?: string; fullName?: string }>;
+  };
+  const repoResults = parsed.results as
+    | Array<{ status?: string; fullName?: string }>
+    | undefined;
+  assert.ok(repoResults, "top-level results must be present for v2 envelope");
+  assert.equal(repoResults.length, 2);
+  assert.equal(repoResults[0]?.status, "success");
+  assert.equal(repoResults[1]?.status, "skipped");
+  assert.equal(parsed.result?.prUrl, "https://github.com/acme/main-repo/pull/10");
+  assert.equal(parsed.result?.prNumber, 10);
+  assert.equal(parsed.result?.branchName, "feat/v2-multi");
+  assert.equal(parsed.result?.has_changes, true);
+});
+
+test("tryPostCompletedEvent treats skipped V2 primary as no changes", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const jobStore = createStore("v2-primary-skipped");
+  const job = createBaseJob({ claudeWorkDir, command: LoopCommand.Execute });
+  jobStore.upsert(job);
+
+  await tryPostCompletedEvent(
+    job,
+    LoopCommand.Execute,
+    claudeWorkDir,
+    {
+      executionResult: makeV2ExecutionResult({
+        status: "skipped",
+        fullName: "acme/primary",
+        reason: "branch already has an open PR",
+      }) as unknown as Record<string, unknown>,
+    },
+    [],
+    artifactDeps(jobStore),
+  );
+
+  const body = fetchCalls[0]?.body ?? "";
+  const parsed = JSON.parse(body) as { result?: Record<string, unknown> };
+  assert.equal(parsed.result?.has_changes, false, "has_changes must be false for skipped primary");
+  assert.equal(parsed.result?.prUrl, null, "prUrl must normalize to null for skipped status");
+  assert.equal(parsed.result?.prNumber, null, "prNumber must normalize to null for skipped status");
+});
+
+test("unsupported execution-result schema results in no-changes fields", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const unrecognizedArtifact = {
+    has_changes: true,
+    pr_url: "https://github.com/acme/repo/pull/99",
+    pr_number: 99,
+    branch_name: "feat/unknown-schema",
+    base_ref: "main",
+  };
+
+  const jobStore = createStore("unsupported-schema");
+  const job = createBaseJob({
+    claudeWorkDir,
+    command: LoopCommand.Execute,
+    primaryRepoFullName: "acme/repo",
+  });
+  jobStore.upsert(job);
+
+  await tryPostCompletedEvent(
+    job,
+    LoopCommand.Execute,
+    claudeWorkDir,
+    { executionResult: unrecognizedArtifact },
+    [],
+    artifactDeps(jobStore),
+  );
+
+  const body = fetchCalls[0]?.body ?? "";
+  const parsed = JSON.parse(body) as { result?: Record<string, unknown> };
+  assert.equal(parsed.result?.has_changes, false, "unsupported schema must produce has_changes=false");
+  assert.equal(parsed.result?.prUrl, null, "unsupported schema must produce prUrl=null");
+  assert.equal(parsed.result?.prNumber, null, "unsupported schema must produce prNumber=null");
 });

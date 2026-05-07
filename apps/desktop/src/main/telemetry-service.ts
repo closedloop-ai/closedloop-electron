@@ -81,15 +81,22 @@ export class TelemetryService {
       };
     }
 
-    const diagnostics = event.diagnostics?.logTail
-      ? {
-          ...event.diagnostics,
-          logTail: truncateToBytes(
-            event.diagnostics.logTail,
-            TELEMETRY_MAX_FIELD_BYTES,
-          ),
-        }
-      : event.diagnostics;
+    let diagnostics = event.diagnostics;
+    if (diagnostics?.logTail) {
+      diagnostics = {
+        ...diagnostics,
+        logTail: truncateToBytes(diagnostics.logTail, TELEMETRY_MAX_FIELD_BYTES),
+      };
+    }
+    if (diagnostics?.stderrTail) {
+      diagnostics = {
+        ...diagnostics,
+        stderrTail: truncateToBytes(
+          diagnostics.stderrTail,
+          TELEMETRY_MAX_FIELD_BYTES,
+        ),
+      };
+    }
 
     return {
       ...event,

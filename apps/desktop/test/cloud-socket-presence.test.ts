@@ -1,9 +1,21 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { afterEach, describe, test } from "node:test";
-import { CloudSocketService, type CloudSocketOptions } from "../src/main/cloud-socket.js";
+import {
+  CloudSocketService,
+  buildRelayValidationPopHeaders,
+  refreshRelayValidationPopHeadersForSocket,
+  type CloudSocketOptions,
+} from "../src/main/cloud-socket.js";
 import { GATEWAY_PROTOCOL_VERSION } from "../src/shared/contracts.js";
 import { gatewayLog } from "../src/main/gateway-logger.js";
+import {
+  DesktopPopUnavailableError,
+  DESKTOP_POP_GATEWAY_ID_HEADER,
+  DESKTOP_POP_SIGNATURE_HEADER,
+  DESKTOP_POP_TIMESTAMP_HEADER,
+  RELAY_API_KEY_VERIFY_PATH,
+} from "../src/main/desktop-pop.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -76,6 +88,118 @@ describe("T-6.1: Presence state log deduplication", () => {
       (e) => e.tag === "cloud-socket" && e.message.includes("Sending presence:"),
     );
     assert.equal(afterBackOnline.length, 3, "Transition back to online should log");
+  });
+});
+
+describe("relay validation PoP headers", () => {
+  test("managed keys sign the relay API-key verification path", async () => {
+    let capturedRequest: unknown;
+    const headers = await buildRelayValidationPopHeaders(
+      "DESKTOP_MANAGED",
+      (request) => {
+        capturedRequest = request;
+        return {
+          [DESKTOP_POP_GATEWAY_ID_HEADER]: "gateway-1",
+          [DESKTOP_POP_TIMESTAMP_HEADER]: "1713984000",
+          [DESKTOP_POP_SIGNATURE_HEADER]: "signature",
+        };
+      },
+    );
+
+    assert.deepEqual(capturedRequest, {
+      method: "POST",
+      pathname: RELAY_API_KEY_VERIFY_PATH,
+    });
+    assert.deepEqual(headers, {
+      [DESKTOP_POP_GATEWAY_ID_HEADER]: "gateway-1",
+      [DESKTOP_POP_TIMESTAMP_HEADER]: "1713984000",
+      [DESKTOP_POP_SIGNATURE_HEADER]: "signature",
+    });
+  });
+
+  test("manual keys omit relay PoP headers and do not call signer", async () => {
+    let signerCalled = false;
+    const headers = await buildRelayValidationPopHeaders(
+      "USER_CREATED",
+      () => {
+        signerCalled = true;
+        return null;
+      },
+    );
+
+    assert.equal(headers, undefined);
+    assert.equal(signerCalled, false);
+  });
+
+  test("managed signing unavailable falls back to bearer-only compatibility", async () => {
+    const unavailableReports: Array<{ surface: string; reason: string }> = [];
+    const headers = await buildRelayValidationPopHeaders(
+      "DESKTOP_MANAGED",
+      () => null,
+      (surface, reason) => unavailableReports.push({ surface, reason }),
+    );
+
+    assert.equal(headers, undefined);
+    assert.deepEqual(unavailableReports, [{
+      surface: RELAY_API_KEY_VERIFY_PATH,
+      reason: "sign_failed_or_null",
+    }]);
+    assert.equal(
+      gatewayLog.getEntries().some(
+        (entry) =>
+          entry.tag === "desktop-pop" &&
+          entry.message.includes("continuing bearer-only compatibility mode"),
+      ),
+      true,
+    );
+  });
+
+  test("managed signing reports precise redacted unavailable reasons", async () => {
+    const unavailableReports: Array<{ surface: string; reason: string }> = [];
+
+    const headers = await buildRelayValidationPopHeaders(
+      "DESKTOP_MANAGED",
+      () => {
+        throw new DesktopPopUnavailableError("safe_storage_unavailable");
+      },
+      (surface, reason) => unavailableReports.push({ surface, reason }),
+    );
+
+    assert.equal(headers, undefined);
+    assert.deepEqual(unavailableReports, [{
+      surface: RELAY_API_KEY_VERIFY_PATH,
+      reason: "safe_storage_unavailable",
+    }]);
+  });
+
+  test("manual reconnect refreshes stale relay PoP extraHeaders", async () => {
+    const socket = {
+      io: {
+        opts: {
+          extraHeaders: {
+            [DESKTOP_POP_GATEWAY_ID_HEADER]: "gateway-1",
+            [DESKTOP_POP_TIMESTAMP_HEADER]: "1713984000",
+            [DESKTOP_POP_SIGNATURE_HEADER]: "old-signature",
+          },
+        },
+      },
+    };
+
+    await refreshRelayValidationPopHeadersForSocket(
+      socket as unknown as Parameters<typeof refreshRelayValidationPopHeadersForSocket>[0],
+      "DESKTOP_MANAGED",
+      () => ({
+        [DESKTOP_POP_GATEWAY_ID_HEADER]: "gateway-1",
+        [DESKTOP_POP_TIMESTAMP_HEADER]: "1713984060",
+        [DESKTOP_POP_SIGNATURE_HEADER]: "new-signature",
+      }),
+    );
+
+    assert.deepEqual(socket.io.opts.extraHeaders, {
+      [DESKTOP_POP_GATEWAY_ID_HEADER]: "gateway-1",
+      [DESKTOP_POP_TIMESTAMP_HEADER]: "1713984060",
+      [DESKTOP_POP_SIGNATURE_HEADER]: "new-signature",
+    });
   });
 });
 

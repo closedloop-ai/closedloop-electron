@@ -12,8 +12,13 @@ import { gatewayLog } from "../main/gateway-logger.js";
 import type { LocalSessionStore } from "../main/local-session-store.js";
 import type { JobStore } from "../main/job-store.js";
 import type { LoopTokenStore } from "../main/loop-token-store.js";
+import type { ApiKeyProvenance } from "../main/api-key-store.js";
+import type { DesktopPopSigner } from "../main/desktop-pop.js";
+import type { DesktopPopUnavailableReporter } from "../main/desktop-pop-sign-utils.js";
 import {
   GatewayRouter,
+  type DesktopSecurityUpgradePayload,
+  type DesktopSecurityUpgradeResult,
   type GatewayActivityEvent,
   type GatewayApprovalRequest,
   type GatewayApprovalResult,
@@ -39,9 +44,13 @@ export interface DesktopGatewayServerOptions {
   machineName: string;
   version: string;
   capabilities: ComputeTargetCapabilities;
+  getOnboardingCompleted?: () => boolean;
   discoveryFilePath?: string;
   sessionStore?: LocalSessionStore;
   getApiKey?: () => string | null;
+  getApiKeyProvenance?: () => ApiKeyProvenance | null;
+  signDesktopRequest?: DesktopPopSigner;
+  onDesktopPopUnavailable?: DesktopPopUnavailableReporter;
   getApiOrigin?: () => string;
   prodOriginsOnly?: boolean;
   jobStore?: JobStore;
@@ -49,7 +58,11 @@ export interface DesktopGatewayServerOptions {
   retrySpawnDeps?: RetrySpawnDeps;
   onUnexpectedClose?: () => void;
   loopTokenStore?: LoopTokenStore;
-  getGatewayId: () => string;
+  getGatewayId?: () => string;
+  getComputeTargetId?: () => string | null;
+  handleSecurityUpgrade?: (
+    payload: DesktopSecurityUpgradePayload
+  ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult;
   getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
   applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
 }
@@ -64,6 +77,7 @@ export class DesktopGatewayServer {
   constructor(options: DesktopGatewayServerOptions) {
     this.options = {
       ...options,
+      getGatewayId: options.getGatewayId ?? (() => ""),
       discoveryFilePath:
         options.discoveryFilePath ??
         path.join(os.homedir(), ".closedloop-ai", "electron-port"),
@@ -76,6 +90,7 @@ export class DesktopGatewayServer {
       machineName: this.options.machineName,
       version: this.options.version,
       capabilities: this.options.capabilities,
+      getOnboardingCompleted: this.options.getOnboardingCompleted,
       getActivePort: () => this.activePort,
       getAllowedDirectories: this.options.getAllowedDirectories,
       getSymphonyDir: this.options.getSymphonyDir,
@@ -84,13 +99,18 @@ export class DesktopGatewayServer {
       evaluateApproval: this.options.evaluateApproval,
       sessionStore: this.options.sessionStore,
       getApiKey: this.options.getApiKey,
+      getApiKeyProvenance: this.options.getApiKeyProvenance,
+      signDesktopRequest: this.options.signDesktopRequest,
+      onDesktopPopUnavailable: this.options.onDesktopPopUnavailable,
       getApiOrigin: this.options.getApiOrigin,
       prodOriginsOnly: this.options.prodOriginsOnly,
       jobStore: this.options.jobStore,
       worktreeProvider: this.options.worktreeProvider,
       loopTokenStore: this.options.loopTokenStore,
       retrySpawnDeps: this.options.retrySpawnDeps,
-      getGatewayId: this.options.getGatewayId,
+      getGatewayId: this.options.getGatewayId ?? (() => ""),
+      getComputeTargetId: this.options.getComputeTargetId,
+      handleSecurityUpgrade: this.options.handleSecurityUpgrade,
       getBinaryPaths: this.options.getBinaryPaths,
       applyBinaryPathPatch: this.options.applyBinaryPathPatch,
     });
@@ -120,6 +140,14 @@ export class DesktopGatewayServer {
     getGatewayId: () => string = () => "",
     getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string },
     applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string },
+    getApiKeyProvenance?: () => ApiKeyProvenance | null,
+    signDesktopRequest?: DesktopPopSigner,
+    onDesktopPopUnavailable?: DesktopPopUnavailableReporter,
+    getComputeTargetId?: () => string | null,
+    handleSecurityUpgrade?: (
+      payload: DesktopSecurityUpgradePayload
+    ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult,
+    getOnboardingCompleted?: () => boolean,
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -138,6 +166,9 @@ export class DesktopGatewayServer {
       capabilities,
       sessionStore,
       getApiKey,
+      getApiKeyProvenance,
+      signDesktopRequest,
+      onDesktopPopUnavailable,
       getApiOrigin,
       prodOriginsOnly,
       jobStore,
@@ -145,6 +176,9 @@ export class DesktopGatewayServer {
       loopTokenStore,
       retrySpawnDeps,
       getGatewayId,
+      getComputeTargetId,
+      handleSecurityUpgrade,
+      getOnboardingCompleted,
       getBinaryPaths,
       applyBinaryPathPatch,
     });
@@ -163,6 +197,8 @@ export class DesktopGatewayServer {
       status: "ok",
       machineName: this.options.machineName,
       capabilities: this.options.capabilities,
+      gatewayId: this.options.getGatewayId?.() || undefined,
+      onboardingCompleted: this.options.getOnboardingCompleted?.() ?? false,
       version: this.options.version,
       port: this.activePort,
     };

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs/promises";
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 
 async function waitForCondition(
   fn: () => boolean,
@@ -23,8 +25,10 @@ import { BootRecoveryService } from "../src/main/boot-recovery.js";
 import { JobStore, type LocalJob } from "../src/main/job-store.js";
 import { LoopTokenStore } from "../src/main/loop-token-store.js";
 import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
-import { restoreEnv } from "./symphony-test-utils.js";
+import { initGitRepo, restoreEnv } from "./symphony-test-utils.js";
 import type { TelemetryEventPayload } from "../src/main/telemetry-protocol.js";
+import { cleanupAdditionalWorktrees } from "../src/server/operations/symphony-loop.js";
+import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 
 let tempRoot = "";
 let fetchCalls: Array<{ url: string; body: string; authHeader?: string | null }> = [];
@@ -87,7 +91,7 @@ function createJob(overrides?: Partial<LocalJob>): LocalJob {
     id: "loop-1",
     kind: "SYMPHONY_LOOP",
     loopId: "loop-1",
-    command: "PLAN",
+    command: LoopCommand.Plan,
     status: "RUNNING",
     startedAt: now,
     updatedAt: now,
@@ -752,6 +756,244 @@ test("preserves COMPLETED status when terminal snapshot is available during boot
   service.dispose();
 });
 
+test("replays zero-token EXECUTE recovery as NO_WORK_PRODUCED instead of a completed event", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const statePath = path.join(claudeWorkDir, "state.json");
+  await fs.writeFile(statePath, JSON.stringify({ status: "COMPLETED" }));
+  await fs.writeFile(
+    path.join(claudeWorkDir, "claude-output.jsonl"),
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+      },
+    }) + "\n",
+    "utf-8",
+  );
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-execute-no-work-tokens");
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
+
+  const jobStore = createStore("boot-recovery-execute-no-work");
+  const deadJob = createJob({
+    command: LoopCommand.Execute,
+    status: "RUNNING",
+    claudeWorkDir,
+    statePath,
+  });
+  jobStore.upsert(deadJob);
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: () => {} },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4014",
+    loopTokenStore,
+  });
+  await service.run([deadJob]);
+  service.dispose();
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.status, "FAILED");
+  assert.equal(persisted.exitCode, 0);
+  assert.equal(persisted.executeFinalizationStatus, undefined);
+  assert.ok(persisted.cloudFinalizedAt);
+  assert.equal(loopTokenStore.getLoopToken("loop-1"), null);
+
+  assert.equal(
+    fetchCalls.filter((entry) => entry.url.endsWith("/upload-artifacts")).length,
+    0,
+  );
+  assert.ok(
+    fetchCalls.some(
+      (entry) =>
+        entry.url.endsWith("/loops/loop-1/events") &&
+        entry.body.includes('"type":"error"') &&
+        entry.body.includes('"code":"NO_WORK_PRODUCED"') &&
+        entry.body.includes(
+          '"message":"EXECUTE loop completed with 0 tokens -- no work was done"',
+        ),
+    ),
+    "expected NO_WORK_PRODUCED error event for zero-token EXECUTE recovery",
+  );
+  assert.ok(
+    !fetchCalls.some((entry) => entry.body.includes('"type":"completed"')),
+    "expected no completed event for zero-token EXECUTE recovery",
+  );
+});
+
+test("boot-recovery replays terminal user-visible runner failure", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+
+  const loopTokenStore = createLoopTokenStore(
+    "boot-recovery-terminal-runner-failure-tokens",
+  );
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
+
+  const persistedAt = new Date().toISOString();
+  const jobStore = createStore("boot-recovery-terminal-runner-failure");
+  jobStore.upsert(
+    createJob({
+      command: LoopCommand.Execute,
+      status: "FAILED",
+      exitCode: 1,
+      claudeWorkDir,
+      completedAt: persistedAt,
+      finalStatusPersistedAt: persistedAt,
+      userVisibleLoopFailure: {
+        code: "RUNNER_ERROR",
+        message: "Claude rate limit reached.",
+        result: { subcode: "CLAUDE_RATE_LIMIT" },
+      },
+    }),
+  );
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: () => {} },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4014",
+    loopTokenStore,
+  });
+  await service.run([]);
+  service.dispose();
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.status, "FAILED");
+  assert.ok(persisted.cloudFinalizedAt);
+  assert.equal(persisted.recoveryAttempts, 1);
+  assert.equal(loopTokenStore.getLoopToken("loop-1"), null);
+
+  const eventCall = fetchCalls.find((entry) =>
+    entry.url.endsWith("/loops/loop-1/events"),
+  );
+  assert.ok(eventCall, "expected recovered runner failure event");
+  const body = JSON.parse(eventCall.body) as Record<string, unknown>;
+  assert.equal(body.type, "error");
+  assert.equal(body.code, "RUNNER_ERROR");
+  assert.equal(body.message, "Claude rate limit reached.");
+  assert.deepEqual(body.result, { subcode: "CLAUDE_RATE_LIMIT" });
+});
+
+test("replays EXECUTE completion from persisted execution-result artifacts during boot-recovery", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
+  await fs.writeFile(
+    path.join(claudeWorkDir, "claude-output.jsonl"),
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        usage: {
+          input_tokens: 3,
+          output_tokens: 2,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: 0,
+        },
+      },
+    }) + "\n",
+    "utf-8",
+  );
+  await fs.writeFile(
+    path.join(claudeWorkDir, "execution-result.json"),
+    JSON.stringify({
+      schemaVersion: 2,
+      results: [
+        {
+          status: "success",
+          fullName: "owner/repo",
+          prUrl: "https://github.com/owner/repo/pull/123",
+          prNumber: 123,
+          branchName: "feat/recovered-execute",
+          baseBranch: "main",
+          hasChanges: true,
+          commitSha: "abc123",
+        },
+      ],
+    }),
+  );
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-execute-artifact-existing-tokens");
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
+
+  const persistedAt = new Date().toISOString();
+  const jobStore = createStore("boot-recovery-execute-artifact-existing");
+  const finalizedJob = createJob({
+    command: LoopCommand.Execute,
+    status: "COMPLETED",
+    finalStatusPersistedAt: persistedAt,
+    completedAt: persistedAt,
+    claudeWorkDir,
+  });
+  jobStore.upsert(finalizedJob);
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: () => {} },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4014",
+    loopTokenStore,
+  });
+  await service.run([]);
+  service.dispose();
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.status, "COMPLETED");
+  assert.ok(persisted.cloudFinalizedAt);
+  assert.equal(persisted.recoveryAttempts, 1);
+  assert.equal(persisted.finalizationSource, "boot-recovery");
+  assert.equal(persisted.executeFinalizationStatus, "success");
+  assert.equal(persisted.executeFinalizationPath, "artifact-existing");
+  assert.equal(
+    persisted.executeFinalizationReason,
+    "existing execution-result.json reused",
+  );
+  assert.equal(persisted.executeFinalizationPreExecutionResultPresent, true);
+  assert.equal(persisted.executeFinalizationPostExecutionResultPresent, true);
+  assert.equal(loopTokenStore.getLoopToken("loop-1"), null);
+
+  const uploadCall = fetchCalls.find((entry) => entry.url.endsWith("/upload-artifacts"));
+  assert.ok(uploadCall, "expected /upload-artifacts call for recovered EXECUTE job");
+  const uploadBody = JSON.parse(uploadCall.body) as {
+    metadata?: Record<string, unknown>;
+    artifacts?: { executionResult?: Record<string, unknown> };
+  };
+  assert.equal(uploadBody.metadata?.finalizationSource, "boot-recovery");
+  assert.equal(uploadBody.metadata?.executeFinalizationStatus, "success");
+  assert.equal(uploadBody.metadata?.executeFinalizationPath, "artifact-existing");
+  const executionResultV2 = uploadBody.artifacts?.executionResult as {
+    schemaVersion?: number;
+    results?: Array<{ branchName?: string }>;
+  } | undefined;
+  assert.equal(executionResultV2?.schemaVersion, 2);
+  assert.equal(executionResultV2?.results?.[0]?.branchName, "feat/recovered-execute");
+
+  const completedEventCall = fetchCalls.find((entry) =>
+    entry.body.includes('"type":"completed"'),
+  );
+  assert.ok(completedEventCall, "expected type:completed event to be posted");
+  const completedEvent = JSON.parse(completedEventCall.body) as {
+    result?: Record<string, unknown>;
+  };
+  assert.equal(completedEvent.result?.finalizationSource, "boot-recovery");
+  assert.equal(completedEvent.result?.executeFinalizationStatus, "success");
+  assert.equal(completedEvent.result?.executeFinalizationPath, "artifact-existing");
+  assert.equal(completedEvent.result?.branchName, "feat/recovered-execute");
+});
+
 test("sweepOrphanedTokens removes tokens for finalized and unknown loops, keeps active", async () => {
   const jobStore = createStore("boot-recovery-sweep");
   const loopTokenStore = createLoopTokenStore("boot-recovery-sweep-tokens");
@@ -799,4 +1041,97 @@ test("sweepOrphanedTokens removes tokens for finalized and unknown loops, keeps 
   assert.equal(loopTokenStore.getLoopToken("loop-finalized"), null);
   assert.equal(loopTokenStore.getLoopToken("loop-unknown"), null);
   assert.equal(loopTokenStore.getLoopToken("loop-active"), "token-active");
+});
+
+function makeSimpleRemoveProvider(): WorktreeProvider {
+  return {
+    async ensureWorktree(_repoPath, worktreeDir) {
+      await fs.mkdir(worktreeDir, { recursive: true });
+    },
+    findWorktreeForBranch() {
+      return null;
+    },
+    async removeWorktree(worktreeDir) {
+      await fs.rm(worktreeDir, { recursive: true, force: true });
+    },
+    getCurrentBranch() {
+      return null;
+    },
+    branchExists: async () => false,
+  };
+}
+
+async function runAdditionalCleanup(dir: string): Promise<void> {
+  await cleanupAdditionalWorktrees(
+    [{ dir, repoPath: dir }],
+    "test-loop",
+    makeSimpleRemoveProvider(),
+  );
+}
+
+test("cleanupAdditionalWorktrees removes worktree with no code changes", async () => {
+  const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "cleanup-clean-"));
+  try {
+    await initGitRepo(repoRoot);
+    await runAdditionalCleanup(repoRoot);
+    assert.ok(!existsSync(repoRoot), "expected clean worktree to be removed");
+  } finally {
+    await fs.rm(repoRoot, { recursive: true, force: true });
+  }
+});
+
+for (const scenario of [
+  {
+    name: "staged changes",
+    setup: async (repoRoot: string) => {
+      await fs.writeFile(path.join(repoRoot, "work.txt"), "work in progress");
+      execFileSync("git", ["add", "work.txt"], {
+        cwd: repoRoot,
+        stdio: "pipe",
+      });
+    },
+  },
+  {
+    name: "committed-only changes on a symphony branch",
+    setup: async (repoRoot: string) => {
+      execFileSync("git", ["checkout", "-b", "symphony/test-loop"], {
+        cwd: repoRoot,
+        stdio: "pipe",
+      });
+      await fs.writeFile(path.join(repoRoot, "feature.txt"), "committed work");
+      execFileSync("git", ["add", "feature.txt"], {
+        cwd: repoRoot,
+        stdio: "pipe",
+      });
+      execFileSync("git", ["commit", "-m", "wip"], {
+        cwd: repoRoot,
+        stdio: "pipe",
+      });
+    },
+  },
+] as const) {
+  test(`cleanupAdditionalWorktrees retains worktree with ${scenario.name}`, async () => {
+    const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "cleanup-retain-"));
+    try {
+      await initGitRepo(repoRoot);
+      await scenario.setup(repoRoot);
+      await runAdditionalCleanup(repoRoot);
+      assert.ok(existsSync(repoRoot), "expected worktree to be retained");
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+}
+
+test("cleanupAdditionalWorktrees retains worktree when git status fails unexpectedly", async () => {
+  const nonRepoDir = await fs.mkdtemp(path.join(os.tmpdir(), "cleanup-nonrepo-"));
+  try {
+    const sentinel = path.join(nonRepoDir, "user-work.txt");
+    await fs.writeFile(sentinel, "do not delete");
+    await runAdditionalCleanup(nonRepoDir);
+    assert.ok(existsSync(nonRepoDir), "expected worktree to be retained");
+    assert.ok(existsSync(sentinel), "expected user files to remain on git error");
+  } finally {
+    await fs.rm(nonRepoDir, { recursive: true, force: true });
+  }
 });
