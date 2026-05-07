@@ -137,23 +137,30 @@ export function spawnPtySession(opts: SpawnSessionOpts): PtySession {
     logStream.end();
     jsonlStream?.end();
 
+    const notifyExitListeners = () => {
+      for (const listener of session.exitListeners) {
+        try {
+          listener({ exitCode });
+        } catch {
+          // Ignore listener errors
+        }
+      }
+    };
+
     // After streams close, do a full re-extraction of JSON lines from the
     // session log into the JSONL file. Interactive mode output may contain
     // ANSI sequences and interleaved user input that the real-time extractor
     // missed due to PTY chunking. This complete sweep ensures parseTokenUsage,
     // output-tailer, and error detection have all available structured data.
+    // Exit listeners are deferred until extraction completes so that
+    // handleProcessCompletion reads the final JSONL content.
     if (opts.jsonlFile && opts.logFile) {
       logStream.once("finish", () => {
         extractJsonlFromLog(opts.logFile, opts.jsonlFile!);
+        notifyExitListeners();
       });
-    }
-
-    for (const listener of session.exitListeners) {
-      try {
-        listener({ exitCode });
-      } catch {
-        // Ignore listener errors
-      }
+    } else {
+      notifyExitListeners();
     }
   });
 

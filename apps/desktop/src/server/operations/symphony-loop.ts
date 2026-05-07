@@ -5899,15 +5899,16 @@ async function handleLoopRequest(
       );
       collectedSpawnMeta.envSnapshot = envSnapshot;
 
-      // Interactive claude args — no -p, no stream-json so the PTY session
-      // supports live keyboard input from attached terminal clients.
-      // The JSONL extractor in pty-session-store captures JSON lines from
-      // Claude's output for downstream token parsing and telemetry.
+      // Base claude CLI args for direct invocations — includes -p (print mode)
+      // so the process exits after completing the query. Without -p, unattended
+      // commands would stay in interactive mode and never finalize.
+      // The PTY still captures output for streaming and log management.
       const allowedTools = await withMcpTools(
         "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
         expectedMcpUrl,
       );
-      const interactiveClaudeArgs: string[] = [
+      const baseClaudeArgs: string[] = [
+        "-p",
         "--verbose",
         "--allowedTools",
         allowedTools,
@@ -5921,12 +5922,12 @@ async function handleLoopRequest(
         const promptFile = path.join(claudeWorkDir, "decompose-prompt.txt");
         await fs.writeFile(promptFile, promptContent);
 
-        collectedSpawnMeta.args = redactSpawnArgs([promptContent, ...interactiveClaudeArgs]);
+        collectedSpawnMeta.args = redactSpawnArgs([...baseClaudeArgs, promptContent]);
         spawnStartedAt = Date.now();
         ptySession = spawnPtySession({
           loopId: body.loopId,
           file: claudeBinary,
-          args: [promptContent, ...interactiveClaudeArgs],
+          args: [...baseClaudeArgs, promptContent],
           cwd: claudeWorkDir,
           env: spawnEnv,
           logFile,
@@ -5948,12 +5949,12 @@ async function handleLoopRequest(
         const promptFile = path.join(claudeWorkDir, `${label}-prompt.txt`);
         await fs.writeFile(promptFile, prompt);
 
-        collectedSpawnMeta.args = redactSpawnArgs([prompt, ...interactiveClaudeArgs]);
+        collectedSpawnMeta.args = redactSpawnArgs([...baseClaudeArgs, prompt]);
         spawnStartedAt = Date.now();
         ptySession = spawnPtySession({
           loopId: body.loopId,
           file: claudeBinary,
-          args: [prompt, ...interactiveClaudeArgs],
+          args: [...baseClaudeArgs, prompt],
           cwd: claudeWorkDir,
           env: spawnEnv,
           logFile,
@@ -5977,12 +5978,12 @@ async function handleLoopRequest(
         const promptFile = path.join(claudeWorkDir, `${label}-prompt.txt`);
         await fs.writeFile(promptFile, prompt);
 
-        collectedSpawnMeta.args = redactSpawnArgs([prompt, ...interactiveClaudeArgs]);
+        collectedSpawnMeta.args = redactSpawnArgs([...baseClaudeArgs, prompt]);
         spawnStartedAt = Date.now();
         ptySession = spawnPtySession({
           loopId: body.loopId,
           file: claudeBinary,
-          args: [prompt, ...interactiveClaudeArgs],
+          args: [...baseClaudeArgs, prompt],
           cwd: claudeWorkDir,
           env: spawnEnv,
           logFile,
@@ -5990,7 +5991,7 @@ async function handleLoopRequest(
         });
       } else if (body.command === LoopCommand.RequestChanges) {
         // REQUEST_CHANGES: use claude directly with /code:amend-plan.
-        const claudeArgs = [...interactiveClaudeArgs];
+        const claudeArgs = [...baseClaudeArgs];
 
         if (body.parentSessionId) {
           claudeArgs.push("--resume", body.parentSessionId);
@@ -6045,20 +6046,21 @@ async function handleLoopRequest(
         // Inject --add-dir per peer when the policy enables peers. The orchestrator
         // and validators are the primary gate; this is defense-in-depth so a
         // peer-disabled command can never receive --add-dir flags.
-        const claudeArgsWithPeers = [...interactiveClaudeArgs];
+        const claudeArgsWithPeers = [...baseClaudeArgs];
         if (getMultiRepoPolicy(body.command).supportsAdditionalRepos) {
           for (const peer of peerRefs) {
             claudeArgsWithPeers.push("--add-dir", peer.localPath);
           }
         }
 
-        collectedSpawnMeta.args = redactSpawnArgs([body.prompt!, ...claudeArgsWithPeers]);
+        const prdPrompt = body.prompt! + buildMountPathsFooter(peerRefs);
+        collectedSpawnMeta.args = redactSpawnArgs([...claudeArgsWithPeers, prdPrompt]);
         collectedSpawnMeta.cwd = worktreeDir!;
         spawnStartedAt = Date.now();
         ptySession = spawnPtySession({
           loopId: body.loopId,
           file: claudeBinary,
-          args: [body.prompt! + buildMountPathsFooter(peerRefs), ...claudeArgsWithPeers],
+          args: [...claudeArgsWithPeers, prdPrompt],
           cwd: worktreeDir!,
           env: spawnEnv,
           logFile,
