@@ -1,17 +1,75 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { afterEach, test } from "node:test";
 import { DesktopGatewayServer } from "../src/server/server.js";
+import { GatewayRouter } from "../src/server/router.js";
 import { LocalSessionStore } from "../src/main/local-session-store.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
+
+const EXCHANGE_LIMIT_BYTES = 4 * 1024;
 
 const serversToClose: DesktopGatewayServer[] = [];
 const fakeApiServersToClose: http.Server[] = [];
 const tempPathsToClean: string[] = [];
+
+class TestResponse extends EventEmitter {
+  statusCode = 200;
+  finished = false;
+  readonly headers = new Map<string, string | number | readonly string[]>();
+  readonly chunks: Buffer[] = [];
+
+  setHeader(name: string, value: string | number | readonly string[]): void {
+    this.headers.set(name.toLowerCase(), value);
+  }
+
+  write(chunk: unknown, encodingOrCallback?: BufferEncoding | ((error?: Error) => void)): boolean {
+    this.appendChunk(chunk, encodingOrCallback);
+    return true;
+  }
+
+  end(chunk?: unknown, encodingOrCallback?: BufferEncoding | (() => void)): this {
+    if (chunk != null && typeof chunk !== "function") {
+      this.appendChunk(chunk, encodingOrCallback);
+    }
+    this.finished = true;
+    this.emit("finish");
+    return this;
+  }
+
+  text(): string {
+    return Buffer.concat(this.chunks).toString("utf-8");
+  }
+
+  json(): Record<string, unknown> {
+    return JSON.parse(this.text()) as Record<string, unknown>;
+  }
+
+  private appendChunk(
+    chunk: unknown,
+    encodingOrCallback?: BufferEncoding | ((error?: Error) => void) | (() => void)
+  ): void {
+    if (typeof chunk === "string") {
+      this.chunks.push(Buffer.from(
+        chunk,
+        typeof encodingOrCallback === "string" ? encodingOrCallback : "utf8"
+      ));
+      return;
+    }
+    if (Buffer.isBuffer(chunk)) {
+      this.chunks.push(chunk);
+      return;
+    }
+    if (chunk instanceof Uint8Array) {
+      this.chunks.push(Buffer.from(chunk));
+    }
+  }
+}
 
 afterEach(async () => {
   for (const server of serversToClose.splice(0)) {
@@ -58,6 +116,58 @@ function makeServer(
   });
   serversToClose.push(server);
   return server;
+}
+
+function makeRouter(
+  tmpDir: string,
+  store: LocalSessionStore,
+  overrides: Partial<ConstructorParameters<typeof GatewayRouter>[0]> = {}
+): GatewayRouter {
+  return new GatewayRouter({
+    webAppOrigin: "https://app.test.com",
+    getAllowedDirectories: () => [tmpDir],
+    getGatewayAuthToken: () => "test-gateway-token-hex",
+    machineName: "test-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    getActivePort: () => 0,
+    sessionStore: store,
+    getApiKey: () => "sk_live_testkey",
+    getApiOrigin: () => "https://api.test.com",
+    getGatewayId: () => "test-gateway-id",
+    ...overrides,
+  });
+}
+
+async function dispatchMockExchange(input: {
+  router: GatewayRouter;
+  headers?: http.IncomingHttpHeaders;
+  chunks?: Array<string | Buffer>;
+}): Promise<TestResponse> {
+  const request = Readable.from(input.chunks ?? []) as Readable & {
+    method?: string;
+    url?: string;
+    headers: http.IncomingHttpHeaders;
+    socket: { remoteAddress?: string };
+  };
+  request.method = "POST";
+  request.url = "/gateway-auth/exchange";
+  request.headers = {
+    origin: "http://localhost:3000",
+    "content-type": "application/json",
+    ...input.headers,
+  };
+  request.socket = { remoteAddress: "127.0.0.1" };
+
+  const response = new TestResponse();
+  await input.router.handle(
+    request as unknown as http.IncomingMessage,
+    response as unknown as http.ServerResponse
+  );
+  if (!response.finished) {
+    await new Promise<void>((resolve) => response.once("finish", () => resolve()));
+  }
+  return response;
 }
 
 test("gateway route rejects spoofed origin without session token (401)", async () => {
@@ -355,6 +465,79 @@ test("exchange handler passes REST API origin (getApiOrigin) to verifyChallenge,
     `Expected fake API server (${fakeApiOrigin}) to receive /compute-targets/local-auth/verify but got: ${JSON.stringify(verifyRequests)}. ` +
       `This proves getApiOrigin() (REST API) is used for auth, not the relay origin (${relayOrigin}).`
   );
+});
+
+test("exchange route rejects oversized body before challenge verification", async () => {
+  const tmpDir = await makeTempDir("exchange-oversized");
+  const store = new LocalSessionStore();
+  let verifyCalled = false;
+  const fakeApiServer = http.createServer((_req, res) => {
+    verifyCalled = true;
+    res.statusCode = 200;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ success: true }));
+  });
+  fakeApiServersToClose.push(fakeApiServer);
+  await new Promise<void>((resolve, reject) => {
+    fakeApiServer.listen(0, "127.0.0.1", () => resolve());
+    fakeApiServer.once("error", reject);
+  });
+  const fakeApiAddress = fakeApiServer.address() as net.AddressInfo;
+  const router = makeRouter(tmpDir, store, {
+    getApiOrigin: () => `http://127.0.0.1:${fakeApiAddress.port}`,
+  });
+
+  const response = await dispatchMockExchange({
+    router,
+    headers: { "content-length": String(EXCHANGE_LIMIT_BYTES + 1) },
+  });
+
+  assert.equal(response.statusCode, 413);
+  assert.deepEqual(response.json(), {
+    error: "request body too large",
+    code: "request_body_too_large",
+    maxBytes: EXCHANGE_LIMIT_BYTES,
+  });
+  assert.equal(verifyCalled, false);
+  assert.equal(response.text().includes("sessionToken"), false);
+});
+
+test("exchange route treats malformed Content-Length as absent for under-limit challenge JSON", async () => {
+  const tmpDir = await makeTempDir("exchange-malformed-length");
+  const store = new LocalSessionStore();
+  const verifyRequests: string[] = [];
+  const fakeApiServer = http.createServer((req, res) => {
+    verifyRequests.push(req.url ?? "");
+    res.statusCode = 401;
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ error: "test-rejected" }));
+  });
+  fakeApiServersToClose.push(fakeApiServer);
+  await new Promise<void>((resolve, reject) => {
+    fakeApiServer.listen(0, "127.0.0.1", () => resolve());
+    fakeApiServer.once("error", reject);
+  });
+  const fakeApiAddress = fakeApiServer.address() as net.AddressInfo;
+  const body = JSON.stringify({ challengeToken: "under-limit-token" });
+  assert.ok(Buffer.byteLength(body) < EXCHANGE_LIMIT_BYTES);
+
+  const router = makeRouter(tmpDir, store, {
+    getApiOrigin: () => `http://127.0.0.1:${fakeApiAddress.port}`,
+  });
+  const response = await dispatchMockExchange({
+    router,
+    headers: { "content-length": "malformed" },
+    chunks: [body],
+  });
+
+  assert.equal(response.statusCode, 401);
+  assert.equal(response.json().error, "test-rejected");
+  assert.deepEqual(verifyRequests, ["/compute-targets/local-auth/verify"]);
+});
+
+test("normal exchange challenge-token JSON stays under the 4 KiB route limit", async () => {
+  const body = JSON.stringify({ challengeToken: "some-challenge-jwt" });
+  assert.ok(Buffer.byteLength(body) < EXCHANGE_LIMIT_BYTES);
 });
 
 test("CORS preflight includes X-Desktop-Session-Token in Access-Control-Allow-Headers", async () => {
