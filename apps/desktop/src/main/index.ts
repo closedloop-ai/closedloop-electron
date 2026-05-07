@@ -5,6 +5,10 @@ import { handleUncaughtException, handleUnhandledRejection } from "./error-handl
 import { gatewayLog } from "./gateway-logger.js";
 
 app.setName("ClosedLoop");
+app.setAboutPanelOptions({
+  applicationName: "ClosedLoop",
+  applicationVersion: app.getVersion(),
+});
 
 process.on("uncaughtException", (err) =>
   handleUncaughtException(err, {

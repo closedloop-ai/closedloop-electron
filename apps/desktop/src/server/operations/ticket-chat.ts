@@ -3,7 +3,7 @@ import os from "node:os";
 import type { ServerResponse } from "node:http";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import type { ProcessManager } from "../process-manager.js";
-import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getShellEnv, resolveBinaryFromLoginShell } from "../shell-path.js";
 import { getOverrideBinaryPaths } from "./symphony-loop.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
@@ -114,6 +114,7 @@ export function registerTicketChatRoutes(
     writeEvent(context.response, { type: "status", status: "spawning", resuming: isResuming });
 
     const shellEnv = await getShellEnv();
+    const claudeBin = (await resolveBinaryFromLoginShell("claude", getOverrideBinaryPaths()?.claude)).path;
 
     await new Promise<void>((resolve) => {
       const streamState = createStreamState(async (sessionId) => {
@@ -150,7 +151,7 @@ export function registerTicketChatRoutes(
 
       void processManager
         .spawnStreaming({
-          command: resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path,
+          command: claudeBin,
           args: [
             "-p",
             "--verbose",

@@ -152,12 +152,12 @@ export type BinaryResolveResult = {
 };
 
 /**
- * Resolve a binary path asynchronously.
- * If an override is set and executable, returns it with source "override".
- * If an override is set but not executable, returns it with source "override_invalid" (no PATH fallthrough).
- * Otherwise falls back to resolveExecutablesOnPath, then a bare name fallback.
+ * Resolve a binary path asynchronously using the user's login-shell PATH
+ * (via `getShellPath()`, which spawns `$SHELL -ilc`). Picks up entries added
+ * by `~/.zshrc` / `~/.bashrc` (nvm, fnm, asdf, Volta, mise, Homebrew on Apple
+ * Silicon, etc.). Override semantics: see body.
  */
-export async function resolveBinary(
+export async function resolveBinaryFromLoginShell(
   logicalName: BinaryName,
   override?: string
 ): Promise<BinaryResolveResult> {
@@ -180,12 +180,15 @@ export async function resolveBinary(
 }
 
 /**
- * Resolve a binary path synchronously.
- * If an override is set and executable, returns it with source "override".
- * If an override is set but not executable, returns it with source "override_invalid" (no PATH fallthrough).
- * Otherwise tries `which` via execFileSync, then a login shell `which`, then a bare name fallback.
+ * Resolve a binary path synchronously using Electron's INHERITED PATH (via
+ * `execFileSync('which', ...)`), with a `bash -lc which` fallback. Does NOT
+ * consult the user's login-shell PATH; for that, use
+ * `resolveBinaryFromLoginShell`. This helper exists for sync code paths that
+ * consume `execFileSync`/`spawnSync` directly (e.g. `getResolvedGitPath`/
+ * `getResolvedGhPath`/`getResolvedClaudePath` in symphony-loop.ts). Tracked
+ * for replacement in FEA-956.
  */
-export function resolveBinarySync(
+export function resolveBinaryFromInheritedPath(
   logicalName: BinaryName,
   override?: string
 ): BinaryResolveResult {

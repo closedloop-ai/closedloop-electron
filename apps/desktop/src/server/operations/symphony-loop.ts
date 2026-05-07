@@ -74,7 +74,12 @@ import type {
 } from "../operation-dispatcher.js";
 import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
-import { getShellEnv, getShellPath, resolveBinarySync } from "../shell-path.js";
+import {
+  getShellEnv,
+  getShellPath,
+  resolveBinaryFromLoginShell,
+  resolveBinaryFromInheritedPath,
+} from "../shell-path.js";
 import { withMcpTools } from "./chat-tools.js";
 import {
   findWorktreeForBranch as findWorktreeForBranchImpl,
@@ -202,11 +207,11 @@ export function getOverrideBinaryPaths(): {
 }
 
 export function getResolvedGitPath(): string {
-  return resolveBinarySync("git", overrideGetBinaryPaths?.()?.git).path;
+  return resolveBinaryFromInheritedPath("git", overrideGetBinaryPaths?.()?.git).path;
 }
 
 export function getResolvedGhPath(): string {
-  return resolveBinarySync("gh", overrideGetBinaryPaths?.()?.gh).path;
+  return resolveBinaryFromInheritedPath("gh", overrideGetBinaryPaths?.()?.gh).path;
 }
 
 /**
@@ -228,13 +233,13 @@ export function getResolvedClaudePath(): string {
   resolvedClaudePath = null;
 
   // Strategy 0: check for a user-configured override path first.
-  // resolveBinarySync returns "override" (executable) or "override_invalid"
+  // resolveBinaryFromInheritedPath returns "override" (executable) or "override_invalid"
   // (set but not executable). Both are returned as-is -- "override_invalid"
   // lets the spawn produce a descriptive ENOENT rather than silently falling
   // back to a different binary.
   const claudeOverride = overrideGetBinaryPaths?.()?.claude;
   if (claudeOverride !== undefined) {
-    const resolved = resolveBinarySync("claude", claudeOverride);
+    const resolved = resolveBinaryFromInheritedPath("claude", claudeOverride);
     resolvedClaudePath = resolved.path;
     return resolvedClaudePath;
   }
@@ -1403,7 +1408,7 @@ async function postLoopEvent(
       );
       gatewayLog.error(
         "loop-event",
-        `POST ${payload.type} to ${url} failed: ${resp.status} ${resp.statusText} ${text}`,
+        `POST loopEvent type=${payload.type} loopId=${loopId} url=${url} failed: ${resp.status} ${resp.statusText} ${text}`,
       );
       return {
         success: false,
@@ -1413,7 +1418,7 @@ async function postLoopEvent(
     loopLog(loopId, `Event POST success: ${resp.status}`);
     gatewayLog.info(
       "loop-event",
-      `POST ${payload.type} for loopId=${loopId}: ${resp.status}`,
+      `POST loopEvent type=${payload.type} loopId=${loopId} status=${resp.status}`,
     );
     return { success: true };
   } catch (err) {
@@ -1421,7 +1426,7 @@ async function postLoopEvent(
     loopError(loopId, "Failed to post event:", err);
     gatewayLog.error(
       "loop-event",
-      `POST ${payload.type} network error: ${msg}`,
+      `POST loopEvent type=${payload.type} loopId=${loopId} network error: ${msg}`,
     );
     return { success: false, error: msg };
   }
@@ -5795,7 +5800,12 @@ async function handleLoopRequest(
     let scriptPath: string | null = null;
 
     // Every command needs claude — verify it consistently for all paths.
-    const resolved = resolveBinarySync(
+    // Use the async resolveBinaryFromLoginShell (not resolveBinaryFromInheritedPath)
+    // so the preflight honors the same login-shell PATH discovery the health check
+    // uses (getShellPath spawns `$SHELL -ilc`). The sync variant only consults
+    // Electron's bare PATH and `bash -lc which`, which misses zsh/nvm/fnm/asdf/
+    // Volta/Bun/mise installs and contradicts a green health check.
+    const resolved = await resolveBinaryFromLoginShell(
       "claude",
       overrideGetBinaryPaths?.()?.claude,
     );
