@@ -52,7 +52,7 @@ test("deploy health route returns compatibility-safe denial without fetching", a
   });
 });
 
-test("deploy health route allows app.localhost and disables redirects", async () => {
+test("deploy health route allows app.localhost and does not follow redirects", async () => {
   const handler = registerAndFindDeployHealthHandler();
   const calls: RequestInit[] = [];
   globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
@@ -69,7 +69,25 @@ test("deploy health route allows app.localhost and disables redirects", async ()
     statusCode: 204,
   });
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].redirect, "error");
+  assert.equal(calls[0].redirect, "manual");
+});
+
+test("deploy health route treats loopback redirects as alive", async () => {
+  const handler = registerAndFindDeployHealthHandler();
+  globalThis.fetch = async () =>
+    new Response(null, {
+      status: 302,
+      headers: { location: "http://app.localhost:3000/login" },
+    });
+
+  const context = buildContext({ url: "http://app.localhost:3000/" });
+  await handler(context);
+
+  assert.equal(context._responseStatus, 200);
+  assert.deepEqual(JSON.parse(context._responseBody), {
+    alive: true,
+    statusCode: 302,
+  });
 });
 
 test("startHealthPoll fail-closes disallowed stored healthCheckUrl without fetching", async () => {
@@ -96,6 +114,35 @@ test("startHealthPoll fail-closes disallowed stored healthCheckUrl without fetch
   assert.equal(exitInfo.exitCode, -1);
   assert.equal(exitInfo.failedCommand, DEPLOY_HEALTH_POLICY_FAILED_COMMAND);
   await assert.rejects(fs.stat(resultJsonPath));
+});
+
+test("startHealthPoll treats loopback redirect responses as healthy", async () => {
+  const workDir = await makeTempDir();
+  const resultJsonPath = path.join(workDir, "deploy-result.json");
+  const exitJsonPath = path.join(workDir, "deploy-exit.json");
+  const calls: RequestInit[] = [];
+  globalThis.fetch = async (_input: string | URL | Request, init?: RequestInit) => {
+    calls.push(init ?? {});
+    return new Response(null, {
+      status: 302,
+      headers: { location: "http://app.localhost:3000/login" },
+    });
+  };
+
+  startHealthPoll(
+    "http://app.localhost:3000/",
+    resultJsonPath,
+    exitJsonPath,
+  );
+
+  const result = await readJsonEventually<{ url: string }>(
+    resultJsonPath,
+    3_000
+  );
+  assert.equal(result.url, "http://app.localhost:3000/");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].redirect, "manual");
+  await assert.rejects(fs.stat(exitJsonPath));
 });
 
 function registerAndFindDeployHealthHandler(): OperationHandler {
@@ -173,8 +220,11 @@ async function makeTempDir(): Promise<string> {
   return dir;
 }
 
-async function readJsonEventually<T>(filePath: string): Promise<T> {
-  const deadline = Date.now() + 1_000;
+async function readJsonEventually<T>(
+  filePath: string,
+  timeoutMs = 1_000
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
   while (Date.now() < deadline) {
     try {

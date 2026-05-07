@@ -25,6 +25,10 @@ export const DEPLOY_HEALTH_POLICY_FAILED_COMMAND = "health-check-policy";
 const DEPLOY_HEALTH_POLICY_DENIAL_ERROR =
   "url blocked by desktop outbound policy";
 
+function isDeployHealthAlive(response: Response): boolean {
+  return response.ok || (response.status >= 300 && response.status < 400);
+}
+
 export function registerDeployRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[],
@@ -203,11 +207,11 @@ export function registerDeployRoutes(
       Observability.outboundNetworkDecision(policyDecision.diagnostics);
       const response = await fetch(url, {
         method: "HEAD",
-        redirect: "error",
+        redirect: "manual",
         signal: AbortSignal.timeout(10_000)
       });
       json(context, 200, {
-        alive: response.ok,
+        alive: isDeployHealthAlive(response),
         statusCode: response.status
       });
     } catch {
@@ -928,11 +932,11 @@ export function startHealthPoll(
     try {
       const response = await fetch(healthCheckUrl, {
         method: "HEAD",
-        redirect: "error",
+        redirect: "manual",
         signal: AbortSignal.timeout(3_000)
       });
 
-      if (response.ok) {
+      if (isDeployHealthAlive(response)) {
         clearInterval(interval);
         await fs.writeFile(resultJsonPath, JSON.stringify({ url: healthCheckUrl }), "utf-8");
         return;
