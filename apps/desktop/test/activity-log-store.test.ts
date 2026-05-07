@@ -48,12 +48,12 @@ function createStore(dir: string, name: string, maxEntries = 200) {
   return new ActivityLogStore({ maxEntries, cwd: dir, name });
 }
 
-// --- truncateBody via add() ---
+// --- body sanitization via add() ---
 
-describe("ActivityLogStore body truncation", () => {
-  test("preserves short bodies unchanged", () => {
+describe("ActivityLogStore body sanitization", () => {
+  test("deletes raw bodies and preserves safe size metadata", () => {
     const dir = makeTempDir();
-    const store = createStore(dir, "truncate-short", 10);
+    const store = createStore(dir, "sanitize-bodies", 10);
     const event = store.add({
       timestamp: new Date().toISOString(),
       method: "POST",
@@ -62,15 +62,19 @@ describe("ActivityLogStore body truncation", () => {
       durationMs: 5,
       requestBody: "short body",
       responseBody: '{"ok": true}',
+      requestSizeBytes: 10,
+      responseSizeBytes: 12,
     });
 
-    assert.equal(event.requestBody, "short body");
-    assert.equal(event.responseBody, '{"ok": true}');
+    assert.equal(Object.hasOwn(event, "requestBody"), false);
+    assert.equal(Object.hasOwn(event, "responseBody"), false);
+    assert.equal(event.requestSizeBytes, 10);
+    assert.equal(event.responseSizeBytes, 12);
   });
 
-  test("truncates bodies exceeding 8192 bytes", () => {
+  test("does not retain large raw bodies", () => {
     const dir = makeTempDir();
-    const store = createStore(dir, "truncate-large", 10);
+    const store = createStore(dir, "sanitize-large", 10);
     const largeBody = "x".repeat(20_000);
     const event = store.add({
       timestamp: new Date().toISOString(),
@@ -82,16 +86,13 @@ describe("ActivityLogStore body truncation", () => {
       responseBody: largeBody,
     });
 
-    assert.ok(event.requestBody!.length < largeBody.length);
-    assert.ok(event.requestBody!.startsWith("x".repeat(100)));
-    assert.ok(event.requestBody!.includes("truncated"));
-    assert.ok(event.requestBody!.includes("20000 chars total"));
-    assert.ok(event.responseBody!.includes("truncated"));
+    assert.equal(Object.hasOwn(event, "requestBody"), false);
+    assert.equal(Object.hasOwn(event, "responseBody"), false);
   });
 
-  test("preserves undefined bodies", () => {
+  test("keeps safe events unchanged", () => {
     const dir = makeTempDir();
-    const store = createStore(dir, "truncate-undef", 10);
+    const store = createStore(dir, "sanitize-safe", 10);
     const event = store.add({
       timestamp: new Date().toISOString(),
       method: "GET",
@@ -100,44 +101,48 @@ describe("ActivityLogStore body truncation", () => {
       durationMs: 5,
     });
 
-    assert.equal(event.requestBody, undefined);
-    assert.equal(event.responseBody, undefined);
+    assert.equal(Object.hasOwn(event, "requestBody"), false);
+    assert.equal(Object.hasOwn(event, "responseBody"), false);
   });
 });
 
 // --- Constructor migration ---
 
 describe("ActivityLogStore startup migration", () => {
-  test("truncates oversized bodies from persisted events on startup", () => {
+  test("deletes raw bodies from persisted events on startup", () => {
     const dir = makeTempDir();
     const name = "migrate-bodies";
     const largeBody = "y".repeat(20_000);
     writeStoreFile(dir, name, [
-      makeEvent({ requestBody: largeBody, responseBody: largeBody }),
-      makeEvent({ requestBody: "small", responseBody: "small" }),
+      makeEvent({ requestBody: largeBody, responseBody: largeBody, requestSizeBytes: 20_000 }),
+      makeEvent({ requestBody: "small", responseBody: "small", responseSizeBytes: 5 }),
     ]);
 
     const store = createStore(dir, name);
-    const events = store.list();
+    const events = store.list() as Array<Record<string, unknown>>;
 
     assert.equal(events.length, 2);
-    assert.ok(events[0].requestBody!.includes("truncated"));
-    assert.equal(events[1].requestBody, "small");
-    assert.equal(events[1].responseBody, "small");
+    assert.equal(Object.hasOwn(events[0], "requestBody"), false);
+    assert.equal(Object.hasOwn(events[0], "responseBody"), false);
+    assert.equal(events[0].requestSizeBytes, 20_000);
+    assert.equal(Object.hasOwn(events[1], "requestBody"), false);
+    assert.equal(Object.hasOwn(events[1], "responseBody"), false);
+    assert.equal(events[1].responseSizeBytes, 5);
 
-    // Verify the truncated data was persisted to disk
+    // Verify the sanitized data was persisted to disk
     const persisted = readStoreFile(dir, name);
     const persistedEvents = persisted.events as Array<Record<string, unknown>>;
-    assert.ok((persistedEvents[0].requestBody as string).includes("truncated"));
-    assert.equal(persistedEvents[1].requestBody, "small");
+    assert.equal(Object.hasOwn(persistedEvents[0], "requestBody"), false);
+    assert.equal(Object.hasOwn(persistedEvents[0], "responseBody"), false);
+    assert.equal(persistedEvents[0].requestSizeBytes, 20_000);
+    assert.equal(Object.hasOwn(persistedEvents[1], "requestBody"), false);
+    assert.equal(Object.hasOwn(persistedEvents[1], "responseBody"), false);
   });
 
   test("trims event count to maxEntries on startup", () => {
     const dir = makeTempDir();
     const name = "migrate-count";
-    const events = Array.from({ length: 50 }, (_, i) =>
-      makeEvent({ id: `evt-${i}`, requestBody: "ok" })
-    );
+    const events = Array.from({ length: 50 }, (_, i) => makeEvent({ id: `evt-${i}` }));
     writeStoreFile(dir, name, events);
 
     const store = createStore(dir, name, 10);
@@ -151,7 +156,7 @@ describe("ActivityLogStore startup migration", () => {
   test("does not rewrite file when nothing needs migration", () => {
     const dir = makeTempDir();
     const name = "migrate-noop";
-    writeStoreFile(dir, name, [makeEvent({ requestBody: "small" })]);
+    writeStoreFile(dir, name, [makeEvent({ requestSizeBytes: 5 })]);
     const statBefore = fs.statSync(path.join(dir, `${name}.json`));
 
     createStore(dir, name);

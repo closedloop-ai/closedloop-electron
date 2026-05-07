@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, test } from "node:test";
 import { expandTildes, extractPathFromOutput, getShellPath, getShellEnv, resetShellPathCache } from "../src/server/shell-path.js";
 
@@ -116,14 +118,48 @@ describe("getShellPath", () => {
   });
 
   test("cache can be reset", async () => {
-    const first = await getShellPath();
-    resetShellPathCache();
-    const second = await getShellPath();
-    // After reset it re-resolves, but the value should still be valid
-    assert.ok(typeof second === "string");
-    assert.ok(second.length > 0);
-    // Values should be the same since the shell hasn't changed
-    assert.equal(first, second);
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "shell-path-test-"));
+    const fakeShell = path.join(tempDir, "fake-shell");
+    const previousShell = process.env.SHELL;
+    const previousOutput = process.env.CL_TEST_SHELL_PATH_OUTPUT;
+    await writeFile(
+      fakeShell,
+      [
+        "#!/bin/sh",
+        "printf '__CLPATH_START__%s__CLPATH_END__\\n' \"$CL_TEST_SHELL_PATH_OUTPUT\""
+      ].join("\n")
+    );
+    await chmod(fakeShell, 0o755);
+
+    try {
+      process.env.SHELL = fakeShell;
+      process.env.CL_TEST_SHELL_PATH_OUTPUT = "/tmp/fake-bin-1:/usr/bin";
+      resetShellPathCache();
+
+      const first = await getShellPath();
+      process.env.CL_TEST_SHELL_PATH_OUTPUT = "/tmp/fake-bin-2:/usr/bin";
+      const cached = await getShellPath();
+
+      assert.equal(first, "/tmp/fake-bin-1:/usr/bin");
+      assert.equal(cached, first);
+
+      resetShellPathCache();
+      const second = await getShellPath();
+      assert.equal(second, "/tmp/fake-bin-2:/usr/bin");
+    } finally {
+      if (previousShell === undefined) {
+        delete process.env.SHELL;
+      } else {
+        process.env.SHELL = previousShell;
+      }
+      if (previousOutput === undefined) {
+        delete process.env.CL_TEST_SHELL_PATH_OUTPUT;
+      } else {
+        process.env.CL_TEST_SHELL_PATH_OUTPUT = previousOutput;
+      }
+      resetShellPathCache();
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 });
 

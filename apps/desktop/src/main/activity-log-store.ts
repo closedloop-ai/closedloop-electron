@@ -10,15 +10,31 @@ export type ActivityEvent = {
   statusCode: number;
   durationMs: number;
   detail?: string;
-  requestBody?: string;
-  responseBody?: string;
+  requestSizeBytes?: number;
+  responseSizeBytes?: number;
 };
 
 type ActivityStoreSchema = {
   events: ActivityEvent[];
 };
 
-const MAX_BODY_LENGTH = 8_192;
+type LegacyActivityEvent = ActivityEvent & {
+  requestBody?: unknown;
+  responseBody?: unknown;
+};
+
+const SAFE_ACTIVITY_EVENT_KEYS = new Set([
+  "id",
+  "type",
+  "timestamp",
+  "method",
+  "path",
+  "statusCode",
+  "durationMs",
+  "detail",
+  "requestSizeBytes",
+  "responseSizeBytes",
+]);
 
 export interface ActivityLogStoreOptions {
   maxEntries?: number;
@@ -43,15 +59,11 @@ export class ActivityLogStore {
     });
     const persistedEvents = this.store.get("events", []);
     const raw = Array.isArray(persistedEvents) ? persistedEvents : [];
-    this.events = raw.slice(0, this.maxEntries);
-    // Migrate: truncate oversized bodies from existing events and persist
+    const selected = raw.slice(0, this.maxEntries) as LegacyActivityEvent[];
+    this.events = selected.map((event) => sanitizeActivityEvent(event));
     let needsPersist = raw.length > this.maxEntries;
-    for (const event of this.events) {
-      const trimmedReq = truncateBody(event.requestBody);
-      const trimmedRes = truncateBody(event.responseBody);
-      if (trimmedReq !== event.requestBody || trimmedRes !== event.responseBody) {
-        event.requestBody = trimmedReq;
-        event.responseBody = trimmedRes;
+    for (const event of selected) {
+      if (hasUnsafeActivityFields(event)) {
         needsPersist = true;
       }
     }
@@ -60,13 +72,16 @@ export class ActivityLogStore {
     }
   }
 
-  add(event: Omit<ActivityEvent, "id">): ActivityEvent {
-    const withId: ActivityEvent = {
+  add(
+    event: Omit<ActivityEvent, "id"> & {
+      requestBody?: unknown;
+      responseBody?: unknown;
+    }
+  ): ActivityEvent {
+    const withId = sanitizeActivityEvent({
       id: randomUUID(),
       ...event,
-      requestBody: truncateBody(event.requestBody),
-      responseBody: truncateBody(event.responseBody),
-    };
+    });
     this.events.unshift(withId);
     if (this.events.length > this.maxEntries) {
       this.events.length = this.maxEntries;
@@ -89,9 +104,30 @@ export class ActivityLogStore {
   }
 }
 
-function truncateBody(body: string | undefined): string | undefined {
-  if (!body || body.length <= MAX_BODY_LENGTH) {
-    return body;
+function sanitizeActivityEvent(event: LegacyActivityEvent): ActivityEvent {
+  const safeEvent: ActivityEvent = {
+    id: event.id,
+    timestamp: event.timestamp,
+    method: event.method,
+    path: event.path,
+    statusCode: event.statusCode,
+    durationMs: event.durationMs,
+  };
+  if (event.type !== undefined) {
+    safeEvent.type = event.type;
   }
-  return `${body.slice(0, MAX_BODY_LENGTH)}… (truncated, ${body.length} chars total)`;
+  if (event.detail !== undefined) {
+    safeEvent.detail = event.detail;
+  }
+  if (event.requestSizeBytes !== undefined) {
+    safeEvent.requestSizeBytes = event.requestSizeBytes;
+  }
+  if (event.responseSizeBytes !== undefined) {
+    safeEvent.responseSizeBytes = event.responseSizeBytes;
+  }
+  return safeEvent;
+}
+
+function hasUnsafeActivityFields(event: LegacyActivityEvent): boolean {
+  return Object.keys(event).some((key) => !SAFE_ACTIVITY_EVENT_KEYS.has(key));
 }
