@@ -6,7 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { Observability } from "../../main/observability.js";
 import type { OperationDispatcher } from "../operation-dispatcher.js";
-import { getShellEnv, resolveBinary, resolveExecutablesOnPath } from "../shell-path.js";
+import { getShellEnv, resolveBinaryFromLoginShell, resolveExecutablesOnPath } from "../shell-path.js";
 import { detectMcpAvailability, type McpDetectionResult } from "./mcp-detection.js";
 import { getInstalledPluginVersions, isPluginInstalled } from "./plugin-cache.js";
 import type { ProcessManager } from "../process-manager.js";
@@ -387,7 +387,7 @@ function classifyBinaryRemediation(binaryName: string, spawnError: CommandError,
 }
 
 async function checkGit(_processManager: ProcessManager, override?: string): Promise<CheckResult> {
-  const resolved = await resolveBinary("git", override);
+  const resolved = await resolveBinaryFromLoginShell("git", override);
   if (resolved.source === "override_invalid") {
     return {
       id: "git",
@@ -421,7 +421,7 @@ async function checkGit(_processManager: ProcessManager, override?: string): Pro
 }
 
 async function checkClaudeCli(_processManager: ProcessManager, override?: string): Promise<CheckResult> {
-  const resolved = await resolveBinary("claude", override);
+  const resolved = await resolveBinaryFromLoginShell("claude", override);
   if (resolved.source === "override_invalid") {
     return {
       id: "claude-cli",
@@ -461,7 +461,7 @@ async function checkClaudeCli(_processManager: ProcessManager, override?: string
 }
 
 async function checkGhCli(_processManager: ProcessManager, override?: string): Promise<CheckResult> {
-  const resolved = await resolveBinary("gh", override);
+  const resolved = await resolveBinaryFromLoginShell("gh", override);
   if (resolved.source === "override_invalid") {
     return {
       id: "gh-cli",
@@ -501,7 +501,7 @@ async function checkGhCli(_processManager: ProcessManager, override?: string): P
 }
 
 async function checkGhAuth(_processManager: ProcessManager, override?: string): Promise<CheckResult> {
-  const resolved = await resolveBinary("gh", override);
+  const resolved = await resolveBinaryFromLoginShell("gh", override);
   if (resolved.source === "override_invalid") {
     return {
       id: "gh-auth",
@@ -580,7 +580,7 @@ async function checkWorktreeDir(getConfigDir: () => string): Promise<CheckResult
 }
 
 async function checkCodex(_processManager: ProcessManager, override?: string): Promise<CheckResult> {
-  const resolved = await resolveBinary("codex", override);
+  const resolved = await resolveBinaryFromLoginShell("codex", override);
   if (resolved.source === "override_invalid") {
     return {
       id: "codex",
@@ -617,7 +617,7 @@ async function checkPython3(_processManager: ProcessManager, override?: string):
   const REMEDIATION = process.platform === "darwin"
     ? "Install Python 3.10 or later: brew install python@3.13"
     : "Install Python 3.10 or later: sudo apt-get install python3 (or your distro's package manager)";
-  const resolved = await resolveBinary("python3", override);
+  const resolved = await resolveBinaryFromLoginShell("python3", override);
   if (resolved.source === "override_invalid") {
     return {
       id: "python3",

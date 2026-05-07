@@ -5,7 +5,7 @@ import type { ServerResponse } from "node:http";
 import path from "node:path";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError } from "../security.js";
-import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getShellEnv, resolveBinaryFromInheritedPath, resolveBinaryFromLoginShell } from "../shell-path.js";
 import { getOverrideBinaryPaths, getResolvedGitPath } from "./symphony-loop.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
@@ -1151,7 +1151,8 @@ export function registerCodexRoutes(
     ];
 
     try {
-      const child = spawn(resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path, args, {
+      const claudeBin = (await resolveBinaryFromLoginShell("claude", getOverrideBinaryPaths()?.claude)).path;
+      const child = spawn(claudeBin, args, {
         cwd: worktreeDir,
         stdio: ["pipe", "pipe", "pipe"],
         env: await getShellEnv(),
@@ -1498,8 +1499,9 @@ function similarityScore(messageA: string, messageB: string, fileA: string, file
 
 async function spawnClaudeReview(cwd: string, model: string): Promise<ChildProcess> {
   const allowedTools = await withMcpTools("Bash,Read,Glob,Grep,Task,TodoWrite");
+  const claudeBin = (await resolveBinaryFromLoginShell("claude", getOverrideBinaryPaths()?.claude)).path;
   return spawn(
-    resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path,
+    claudeBin,
     [
       "-p",
       "--verbose",
@@ -1659,7 +1661,7 @@ function applyMergedPrDiff(
   }
   console.log("[codex-review] Merged PR detected. Applying gh pr diff.");
 
-  const ghBin = resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path;
+  const ghBin = resolveBinaryFromInheritedPath("gh", getOverrideBinaryPaths()?.gh).path;
   const diffResult = spawnSync(ghBin, ["pr", "diff", prNum], {
     cwd: worktreeDir, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024, timeout: 30_000,
   });
@@ -1726,7 +1728,8 @@ async function spawnCodexReviewProcess(options: {
 
   args.push("-c", `model=${options.model}`, "-c", `model_reasoning_effort=${options.reasoningEffort}`);
 
-  return spawn(resolveBinarySync("codex", getOverrideBinaryPaths()?.codex).path, args, {
+  const codexBin = (await resolveBinaryFromLoginShell("codex", getOverrideBinaryPaths()?.codex)).path;
+  return spawn(codexBin, args, {
     cwd: options.cwd,
     detached: false,
     stdio: ["ignore", "pipe", "pipe"],
@@ -1840,7 +1843,8 @@ async function streamCodexConversation(
   onSessionId: (sessionId: string) => Promise<void>
 ): Promise<void> {
   try {
-    const child = spawn(resolveBinarySync("codex", getOverrideBinaryPaths()?.codex).path, args, {
+    const codexBin = (await resolveBinaryFromLoginShell("codex", getOverrideBinaryPaths()?.codex)).path;
+    const child = spawn(codexBin, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
       env: await getShellEnv({ FORCE_COLOR: "0" }),
@@ -2278,8 +2282,9 @@ function extractClaudeVerdictLine(trimmedLine: string): string | null {
 }
 
 async function runCodexVerdict(worktreeDir: string, sessionId: string): Promise<string> {
+  const codexBin = (await resolveBinaryFromLoginShell("codex", getOverrideBinaryPaths()?.codex)).path;
   return runVerdictProcess(
-    resolveBinarySync("codex", getOverrideBinaryPaths()?.codex).path,
+    codexBin,
     ["exec", "resume", sessionId, VERDICT_PROMPT, "--full-auto", "--json"],
     { cwd: worktreeDir, env: await getShellEnv({ FORCE_COLOR: "0" }) },
     extractCodexVerdictLine
@@ -2292,8 +2297,9 @@ async function runClaudeVerdict(
   expectedMcpUrl?: string
 ): Promise<string> {
   const allowedTools = await withMcpTools("Read,Glob,Grep", expectedMcpUrl);
+  const claudeBin = (await resolveBinaryFromLoginShell("claude", getOverrideBinaryPaths()?.claude)).path;
   return runVerdictProcess(
-    resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path,
+    claudeBin,
     [
       "-p",
       "--verbose",

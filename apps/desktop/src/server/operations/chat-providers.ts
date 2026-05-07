@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { statSync } from "node:fs";
 import type { ProcessManager } from "../process-manager.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
-import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getShellEnv, resolveBinaryFromLoginShell } from "../shell-path.js";
 import { getOverrideBinaryPaths } from "./symphony-loop.js";
 import { createStreamState, processStreamEvent } from "./stream-events.js";
 
@@ -144,6 +144,7 @@ export class ClaudeProvider implements ChatProvider {
       args.push("--resume", params.sessionId);
     }
     const shellEnv = await getShellEnv();
+    const claudeBin = (await resolveBinaryFromLoginShell("claude", getOverrideBinaryPaths()?.claude)).path;
     const streamState = createStreamState();
     let stderrBuffer = "";
 
@@ -182,7 +183,7 @@ export class ClaudeProvider implements ChatProvider {
 
       this.processManager
         .spawnStreaming({
-          command: resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path,
+          command: claudeBin,
           args,
           cwd: resolveSpawnCwd(params.cwd),
           env: shellEnv,
@@ -330,6 +331,7 @@ export class CodexProvider implements ChatProvider {
     // /opt/homebrew/bin and spawn fails with ENOENT. Mirrors how ClaudeProvider
     // and every other codex spawn site in the repo resolves its environment.
     const shellEnv = await getShellEnv();
+    const codexBin = (await resolveBinaryFromLoginShell("codex", getOverrideBinaryPaths()?.codex)).path;
 
     return new Promise<SpawnResult>((resolve) => {
       let settled = false;
@@ -343,7 +345,7 @@ export class CodexProvider implements ChatProvider {
 
       let child: ChildProcess;
       try {
-        child = spawn(resolveBinarySync("codex", getOverrideBinaryPaths()?.codex).path, args, {
+        child = spawn(codexBin, args, {
           cwd: resolvedCwd,
           stdio: ["ignore", "pipe", "pipe"],
           env: { ...shellEnv, FORCE_COLOR: "0" },

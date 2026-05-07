@@ -77,8 +77,8 @@ import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import {
   getShellEnv,
   getShellPath,
-  resolveBinary,
-  resolveBinarySync,
+  resolveBinaryFromLoginShell,
+  resolveBinaryFromInheritedPath,
 } from "../shell-path.js";
 import { withMcpTools } from "./chat-tools.js";
 import {
@@ -207,11 +207,11 @@ export function getOverrideBinaryPaths(): {
 }
 
 export function getResolvedGitPath(): string {
-  return resolveBinarySync("git", overrideGetBinaryPaths?.()?.git).path;
+  return resolveBinaryFromInheritedPath("git", overrideGetBinaryPaths?.()?.git).path;
 }
 
 export function getResolvedGhPath(): string {
-  return resolveBinarySync("gh", overrideGetBinaryPaths?.()?.gh).path;
+  return resolveBinaryFromInheritedPath("gh", overrideGetBinaryPaths?.()?.gh).path;
 }
 
 /**
@@ -233,13 +233,13 @@ export function getResolvedClaudePath(): string {
   resolvedClaudePath = null;
 
   // Strategy 0: check for a user-configured override path first.
-  // resolveBinarySync returns "override" (executable) or "override_invalid"
+  // resolveBinaryFromInheritedPath returns "override" (executable) or "override_invalid"
   // (set but not executable). Both are returned as-is -- "override_invalid"
   // lets the spawn produce a descriptive ENOENT rather than silently falling
   // back to a different binary.
   const claudeOverride = overrideGetBinaryPaths?.()?.claude;
   if (claudeOverride !== undefined) {
-    const resolved = resolveBinarySync("claude", claudeOverride);
+    const resolved = resolveBinaryFromInheritedPath("claude", claudeOverride);
     resolvedClaudePath = resolved.path;
     return resolvedClaudePath;
   }
@@ -5796,12 +5796,12 @@ async function handleLoopRequest(
     let scriptPath: string | null = null;
 
     // Every command needs claude — verify it consistently for all paths.
-    // Use the async resolveBinary (not resolveBinarySync) so the preflight
-    // honors the same login-shell PATH discovery the health check uses
-    // (getShellPath spawns `$SHELL -ilc`). The sync variant only consults
-    // Electron's bare PATH and `bash -lc which`, which misses zsh/nvm/fnm/
-    // asdf/Volta/Bun/mise installs and contradicts a green health check.
-    const resolved = await resolveBinary(
+    // Use the async resolveBinaryFromLoginShell (not resolveBinaryFromInheritedPath)
+    // so the preflight honors the same login-shell PATH discovery the health check
+    // uses (getShellPath spawns `$SHELL -ilc`). The sync variant only consults
+    // Electron's bare PATH and `bash -lc which`, which misses zsh/nvm/fnm/asdf/
+    // Volta/Bun/mise installs and contradicts a green health check.
+    const resolved = await resolveBinaryFromLoginShell(
       "claude",
       overrideGetBinaryPaths?.()?.claude,
     );
