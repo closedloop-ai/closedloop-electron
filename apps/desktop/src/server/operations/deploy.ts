@@ -3,7 +3,9 @@ import { closeSync, existsSync, openSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import net from "node:net";
+import { Observability } from "../../main/observability.js";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
+import { validateOutboundUrlForSurface } from "../outbound-url-policy.js";
 import { getShellEnv, getShellPath } from "../shell-path.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import {
@@ -18,6 +20,14 @@ import { json } from "./response-utils.js";
 type DeployStatus = "running" | "completed" | "failed" | "not-started";
 
 const SAFE_COMMAND_TIMEOUT_MS = 120_000;
+export const DEPLOY_HEALTH_POLICY_DENIAL_CODE = "OUTBOUND_URL_DENIED";
+export const DEPLOY_HEALTH_POLICY_FAILED_COMMAND = "health-check-policy";
+const DEPLOY_HEALTH_POLICY_DENIAL_ERROR =
+  "url blocked by desktop outbound policy";
+
+function isDeployHealthAlive(response: Response): boolean {
+  return response.ok || (response.status >= 300 && response.status < 400);
+}
 
 export function registerDeployRoutes(
   dispatcher: OperationDispatcher,
@@ -179,12 +189,29 @@ export function registerDeployRoutes(
     }
 
     try {
+      const policyDecision = validateOutboundUrlForSurface(
+        "deploy_health_check",
+        url,
+      );
+      if (!policyDecision.allowed) {
+        Observability.outboundNetworkDecision(policyDecision.diagnostics);
+        json(context, 200, {
+          alive: false,
+          statusCode: null,
+          error: DEPLOY_HEALTH_POLICY_DENIAL_ERROR,
+          code: DEPLOY_HEALTH_POLICY_DENIAL_CODE
+        });
+        return;
+      }
+
+      Observability.outboundNetworkDecision(policyDecision.diagnostics);
       const response = await fetch(url, {
         method: "HEAD",
+        redirect: "manual",
         signal: AbortSignal.timeout(10_000)
       });
       json(context, 200, {
-        alive: response.ok,
+        alive: isDeployHealthAlive(response),
         statusCode: response.status
       });
     } catch {
@@ -583,6 +610,7 @@ function normalizeDeployConfig(config: RepoDeploymentConfig): RepoDeploymentConf
   }
 
   if (!normalized.healthCheckUrl && normalized.port) {
+    // The default remains loopback; use-time policy enforcement is the guard if future config changes widen this.
     normalized.healthCheckUrl = `http://localhost:${normalized.port}`;
   }
 
@@ -871,11 +899,30 @@ async function runTeardownCommand(command: string, worktreePath: string): Promis
   }
 }
 
-function startHealthPoll(
+/** @internal Exported for policy-focused tests. */
+export function startHealthPoll(
   healthCheckUrl: string,
   resultJsonPath: string,
   exitJsonPath: string
 ): void {
+  const policyDecision = validateOutboundUrlForSurface(
+    "deploy_health_check",
+    healthCheckUrl,
+  );
+  if (!policyDecision.allowed) {
+    Observability.outboundNetworkDecision(policyDecision.diagnostics);
+    void fs.writeFile(
+      exitJsonPath,
+      JSON.stringify({
+        exitCode: -1,
+        failedCommand: DEPLOY_HEALTH_POLICY_FAILED_COMMAND
+      }),
+      "utf-8"
+    ).catch(() => undefined);
+    return;
+  }
+
+  Observability.outboundNetworkDecision(policyDecision.diagnostics);
   const maxAttempts = 30;
   let attempt = 0;
 
@@ -885,10 +932,11 @@ function startHealthPoll(
     try {
       const response = await fetch(healthCheckUrl, {
         method: "HEAD",
+        redirect: "manual",
         signal: AbortSignal.timeout(3_000)
       });
 
-      if (response.ok) {
+      if (isDeployHealthAlive(response)) {
         clearInterval(interval);
         await fs.writeFile(resultJsonPath, JSON.stringify({ url: healthCheckUrl }), "utf-8");
         return;
