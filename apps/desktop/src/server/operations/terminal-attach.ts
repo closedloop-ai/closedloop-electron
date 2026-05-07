@@ -1,24 +1,11 @@
 import type http from "node:http";
-import { timingSafeEqual } from "node:crypto";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
   getSession,
   writeToPty,
   resizePty,
 } from "../../main/pty-session-store.js";
-
-// ---------------------------------------------------------------------------
-// Terminal WebSocket attach endpoint
-// ---------------------------------------------------------------------------
-
-function safeEqualToken(left: string, right: string): boolean {
-  const leftBuf = Buffer.from(left);
-  const rightBuf = Buffer.from(right);
-  if (leftBuf.length !== rightBuf.length) {
-    return false;
-  }
-  return timingSafeEqual(leftBuf, rightBuf);
-}
+import { safeEqualToken } from "../auth-utils.js";
 
 /**
  * Initialise a WebSocket upgrade handler on the given HTTP server.
@@ -94,19 +81,7 @@ export function initTerminalAttachWebSocket(
         return;
       }
 
-      // 1. Send replay buffer so the terminal shows historical output
-      if (session.outputBuffer.length > 0) {
-        ws.send(JSON.stringify({ type: "replay", data: session.outputBuffer }));
-      }
-
-      // 2. If already exited, send exit immediately
-      if (session.exited) {
-        ws.send(
-          JSON.stringify({ type: "exit", exitCode: session.exitCode ?? 1 }),
-        );
-      }
-
-      // 3. Forward live PTY data to the WebSocket
+      // Forward live PTY data to the WebSocket
       const onData = (data: string): void => {
         if (ws.readyState === ws.OPEN) {
           ws.send(JSON.stringify({ type: "data", data }));
@@ -114,7 +89,25 @@ export function initTerminalAttachWebSocket(
       };
       session.dataListeners.add(onData);
 
-      // 4. Forward exit event
+      // 1. Send replay buffer so the terminal shows historical output
+      if (session.outputBuffer.length > 0) {
+        ws.send(JSON.stringify({ type: "replay", data: session.outputBuffer }));
+      }
+
+      // 2. If already exited, send exit immediately and return — do NOT
+      //    register an exit listener that would fire a second exit message
+      //    when deferred notifyExitListeners() runs.
+      if (session.exited) {
+        ws.send(
+          JSON.stringify({ type: "exit", exitCode: session.exitCode ?? 1 }),
+        );
+        ws.on("close", () => {
+          session.dataListeners.delete(onData);
+        });
+        return;
+      }
+
+      // 3. Forward exit event
       const onExit = ({ exitCode }: { exitCode: number }): void => {
         if (ws.readyState === ws.OPEN) {
           ws.send(JSON.stringify({ type: "exit", exitCode }));
@@ -122,7 +115,7 @@ export function initTerminalAttachWebSocket(
       };
       session.exitListeners.add(onExit);
 
-      // 5. Handle incoming messages from the client
+      // 4. Handle incoming messages from the client
       ws.on("message", (raw: Buffer | ArrayBuffer | Buffer[]) => {
         try {
           const msg = JSON.parse(String(raw)) as Record<string, unknown>;
@@ -140,7 +133,7 @@ export function initTerminalAttachWebSocket(
         }
       });
 
-      // 6. Clean up listeners on close — do NOT kill the job
+      // 5. Clean up listeners on close — do NOT kill the job
       ws.on("close", () => {
         session.dataListeners.delete(onData);
         session.exitListeners.delete(onExit);

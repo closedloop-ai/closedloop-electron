@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { timingSafeEqual } from "node:crypto";
+import { safeEqualToken } from "./auth-utils.js";
 import type { ComputeTargetCapabilities, HealthResponse } from "../shared/contracts.js";
 import { isLoopbackIPv4 } from "../shared/network-utils.js";
 import type { JobStore } from "../main/job-store.js";
@@ -754,15 +754,6 @@ function parseBooleanHeader(value: string | string[] | undefined): boolean {
     return false;
   }
   return first === "1" || first.toLowerCase() === "true";
-}
-
-function safeEqualToken(left: string, right: string): boolean {
-  const leftBuffer = Buffer.from(left);
-  const rightBuffer = Buffer.from(right);
-  if (leftBuffer.length !== rightBuffer.length) {
-    return false;
-  }
-  return timingSafeEqual(leftBuffer, rightBuffer);
 }
 
 function sameOrigin(left: string, right: string): boolean {

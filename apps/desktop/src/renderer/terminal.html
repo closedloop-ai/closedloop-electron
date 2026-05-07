@@ -5,10 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Terminal</title>
   <script>
-    // Extract auth token and clear it from the URL before any external scripts load
+    // Extract auth token and clear it from the URL + global BEFORE any
+    // external scripts load. The token is stashed in a closure-local variable
+    // via a custom event so CDN scripts never see it on window.
     (function () {
       var p = new URLSearchParams(window.location.search);
-      window.__termParams = {
+      var params = {
         loopId: p.get("loopId") || "",
         port: p.get("port") || "19432",
         command: p.get("command") || "",
@@ -18,6 +20,11 @@
         p.delete("token");
         history.replaceState(null, "", window.location.pathname + "?" + p.toString());
       }
+      // Pass params to the app script via a custom event — never on window.
+      document.addEventListener("__termReady", function handler() {
+        document.removeEventListener("__termReady", handler);
+        document.dispatchEvent(new CustomEvent("__termParams", { detail: params }));
+      });
     })();
   </script>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
@@ -71,12 +78,25 @@
   </div>
   <div id="terminal-container"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"
+    integrity="sha384-KdckZE7oJC74TOSa/eWjgvB8PLc34srqU20NA7YAsHK2p6yHCdA3j1NX7VybMeom"
+    crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"
+    integrity="sha384-V3EjAdUixveFAPRccYczsGDpHEa+Wv7StB8in/bhbPKDhmwS3Uuy1APrbM2tTIbQ"
+    crossorigin="anonymous"></script>
   <script>
     (function () {
-      const { loopId, port, command, token: authToken } = window.__termParams;
-      delete window.__termParams;
+      // Request params from the first inline script via custom event — the
+      // token was never exposed on window, so CDN scripts cannot read it.
+      let loopId = "", port = "19432", command = "", authToken = "";
+      document.addEventListener("__termParams", function handler(e) {
+        document.removeEventListener("__termParams", handler);
+        loopId = e.detail.loopId;
+        port = e.detail.port;
+        command = e.detail.command;
+        authToken = e.detail.token;
+      });
+      document.dispatchEvent(new Event("__termReady"));
 
       const statusDot = document.getElementById("status-dot");
       const statusText = document.getElementById("status-text");

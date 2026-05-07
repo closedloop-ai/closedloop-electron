@@ -1,12 +1,13 @@
 import {
+  appendFileSync,
   createWriteStream,
   openSync,
   closeSync,
   readFileSync,
-  writeFileSync,
   type WriteStream,
 } from "node:fs";
 import pty, { type IPty } from "node-pty";
+import { stripAnsi } from "./diagnostics-helpers.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -56,6 +57,12 @@ const sessions = new Map<string, PtySession>();
 // ---------------------------------------------------------------------------
 
 export function spawnPtySession(opts: SpawnSessionOpts): PtySession {
+  // Fail-fast if a session already exists for this loopId — prevents
+  // silent overwrites that leak the old PTY process and open streams.
+  if (sessions.has(opts.loopId)) {
+    throw new Error(`PTY session already exists for loopId=${opts.loopId}`);
+  }
+
   // Validate log file is writable before spawning (fails fast on EISDIR, EACCES, etc.)
   const logFd = openSync(opts.logFile, "a");
   closeSync(logFd);
@@ -66,13 +73,21 @@ export function spawnPtySession(opts: SpawnSessionOpts): PtySession {
   // Buffer for accumulating partial lines to extract JSON from PTY output
   let jsonlLineBuf = "";
 
-  const ptyProcess = pty.spawn(opts.file, opts.args, {
-    name: "xterm-256color",
-    cols: opts.cols ?? 120,
-    rows: opts.rows ?? 40,
-    cwd: opts.cwd,
-    env: opts.env,
-  });
+  let ptyProcess: IPty;
+  try {
+    ptyProcess = pty.spawn(opts.file, opts.args, {
+      name: "xterm-256color",
+      cols: opts.cols ?? 120,
+      rows: opts.rows ?? 40,
+      cwd: opts.cwd,
+      env: opts.env,
+    });
+  } catch (err) {
+    // Clean up streams opened before the failed spawn to avoid FD leaks
+    logStream.destroy();
+    jsonlStream?.destroy();
+    throw err;
+  }
 
   const session: PtySession = {
     loopId: opts.loopId,
@@ -213,37 +228,46 @@ export function removeSession(loopId: string): void {
 // Post-exit JSONL extraction
 // ---------------------------------------------------------------------------
 
-/** Strip ANSI escape sequences so JSON buried in terminal output can be found. */
-function stripAnsi(text: string): string {
-  return text.replaceAll(
-    /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g,
-    "",
-  );
-}
-
 /**
- * Read the full session log, extract every JSON line, and overwrite the JSONL
- * file with the complete set. This catches anything the real-time extractor
- * missed due to PTY chunking or ANSI interleaving in interactive mode.
+ * Read the full session log, extract every JSON line, and append any that
+ * are missing from the JSONL file. Uses append mode so the output-tailer's
+ * byte offset remains valid (no truncation).
  */
 function extractJsonlFromLog(logFile: string, jsonlFile: string): void {
   try {
     const raw = readFileSync(logFile, "utf-8");
     const cleaned = stripAnsi(raw);
-    const extracted: string[] = [];
+
+    // Build a set of lines already in the JSONL file to avoid duplicates
+    let existing = "";
+    try {
+      existing = readFileSync(jsonlFile, "utf-8");
+    } catch {
+      // File may not exist yet — that's fine
+    }
+    const existingSet = new Set(
+      existing
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean),
+    );
+
+    const newLines: string[] = [];
     for (const line of cleaned.split("\n")) {
       const trimmed = line.trim();
       if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
         try {
           JSON.parse(trimmed);
-          extracted.push(trimmed);
+          if (!existingSet.has(trimmed)) {
+            newLines.push(trimmed);
+          }
         } catch {
           // Not valid JSON — skip
         }
       }
     }
-    if (extracted.length > 0) {
-      writeFileSync(jsonlFile, extracted.join("\n") + "\n");
+    if (newLines.length > 0) {
+      appendFileSync(jsonlFile, newLines.join("\n") + "\n");
     }
   } catch {
     // Best effort — don't fail the exit path

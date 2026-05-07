@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -1882,10 +1882,17 @@ export class DesktopApplication {
       const command = job?.command ?? "";
       const authToken = this.isNoAuthMode() ? "" : this.gatewayAuthToken;
 
-      // Resolve terminal.html path
-      const htmlPath = app.isPackaged
-        ? path.join(__dirname, "..", "..", "src", "renderer", "terminal.html")
-        : path.join(process.cwd(), "src", "renderer", "terminal.html");
+      // Resolve terminal.html path (same two-probe pattern as window.ts)
+      let htmlPath: string;
+      if (app.isPackaged) {
+        htmlPath = path.join(__dirname, "..", "..", "src", "renderer", "terminal.html");
+      } else {
+        const cwd = process.cwd();
+        const inDesktopCwd = path.join(cwd, "src", "renderer", "terminal.html");
+        htmlPath = existsSync(inDesktopCwd)
+          ? inDesktopCwd
+          : path.join(cwd, "apps", "desktop", "src", "renderer", "terminal.html");
+      }
 
       const win = new BrowserWindow({
         width: 900,
