@@ -396,12 +396,16 @@ describe("AUTH_CHALLENGE_PATTERN", () => {
   const positives = [
     "authentication_error",
     "Invalid bearer token",
+    "invalid token",
+    "authentication required",
     "rate_limit_error",
     "Rate limit reached for model claude-3-5-sonnet",
     "Claude usage limit reached. Your limit will reset at 2pm.",
     "Usage limit exceeded",
     "billing_error: payment required",
     "permission_error: forbidden",
+    "forbidden",
+    "access denied",
     "overloaded_error",
     "API overloaded, try again",
     "unauthorized",
@@ -415,6 +419,9 @@ describe("AUTH_CHALLENGE_PATTERN", () => {
     "Command failed with exit code 1",
     "ENOENT: no such file or directory",
     "File content exceeds maximum allowed tokens",
+    "session",
+    "new session started",
+    "session data",
     "",
   ];
 
@@ -528,6 +535,35 @@ describe("detectAuthChallengeFromJsonl", () => {
   test("ignores synthetic entry with non-auth error", () => {
     writeJsonl([
       { type: "assistant", isApiErrorMessage: true, error: "Prompt is too long" },
+    ]);
+    assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
+  });
+
+  // apiErrorStatus-based detection (HTTP 401/403 regardless of error text)
+
+  test("detects apiErrorStatus=401 even when error text does not match AUTH_CHALLENGE_PATTERN", () => {
+    writeJsonl([
+      { type: "assistant", isApiErrorMessage: true, error: "something went wrong", apiErrorStatus: 401 },
+    ]);
+    const result = detectAuthChallengeFromJsonl(tmpDir);
+    assert.ok(result);
+    assert.ok(result.includes("401"));
+    assert.ok(result.includes("something went wrong"));
+  });
+
+  test("detects apiErrorStatus=403 even when error text does not match AUTH_CHALLENGE_PATTERN", () => {
+    writeJsonl([
+      { type: "assistant", isApiErrorMessage: true, error: "generic error", apiErrorStatus: 403 },
+    ]);
+    const result = detectAuthChallengeFromJsonl(tmpDir);
+    assert.ok(result);
+    assert.ok(result.includes("403"));
+    assert.ok(result.includes("generic error"));
+  });
+
+  test("does NOT detect apiErrorStatus=500 when error text does not match AUTH_CHALLENGE_PATTERN", () => {
+    writeJsonl([
+      { type: "assistant", isApiErrorMessage: true, error: "something went wrong", apiErrorStatus: 500 },
     ]);
     assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
   });

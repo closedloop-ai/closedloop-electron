@@ -2280,7 +2280,7 @@ export function isSessionLimitError(logTail: string): boolean {
 
 /** Pattern that matches known auth/rate-limit/billing error messages from Claude CLI. */
 export const AUTH_CHALLENGE_PATTERN =
-  /authentication_error|invalid bearer token|rate_limit_error|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|token.*expired/i;
+  /authentication_error|authentication required|invalid bearer token|invalid token|rate_limit_error|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|\bforbidden\b|access denied|token.*expired/i;
 
 /**
  * Scan the current Claude JSONL output for a result record with
@@ -2312,16 +2312,20 @@ export function detectAuthChallengeFromJsonl(
         }
         // Synthetic API-error entries emitted by Claude CLI mid-conversation
         // carry `isApiErrorMessage: true` and the error string in `error`.
-        if (
-          entry.isApiErrorMessage === true &&
-          typeof entry.error === "string" &&
-          AUTH_CHALLENGE_PATTERN.test(entry.error)
-        ) {
-          const status =
-            typeof entry.apiErrorStatus === "number"
-              ? ` (status ${entry.apiErrorStatus})`
-              : "";
-          return `Claude API ${entry.error} error${status}`;
+        if (entry.isApiErrorMessage === true) {
+          const errorText =
+            typeof entry.error === "string" ? entry.error : "unknown error";
+          if (AUTH_CHALLENGE_PATTERN.test(errorText)) {
+            const status =
+              typeof entry.apiErrorStatus === "number"
+                ? ` (status ${entry.apiErrorStatus})`
+                : "";
+            return `Claude API ${errorText} error${status}`;
+          }
+          // HTTP 401/403 is an auth challenge regardless of error text.
+          if (entry.apiErrorStatus === 401 || entry.apiErrorStatus === 403) {
+            return `API returned HTTP ${entry.apiErrorStatus}: ${errorText}`;
+          }
         }
       } catch {
         // skip malformed lines
