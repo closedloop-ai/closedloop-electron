@@ -18,6 +18,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import {
   AUTH_CHALLENGE_PATTERN,
+  AUTH_STATUS_PATTERN,
   SESSION_LIMIT_PATTERN,
   detectAuthChallengeFromJsonl,
   detectSessionLimitFromJsonl,
@@ -404,8 +405,6 @@ describe("AUTH_CHALLENGE_PATTERN", () => {
     "Usage limit exceeded",
     "billing_error: payment required",
     "permission_error: forbidden",
-    "forbidden",
-    "access denied",
     "overloaded_error",
     "API overloaded, try again",
     "unauthorized",
@@ -422,6 +421,13 @@ describe("AUTH_CHALLENGE_PATTERN", () => {
     "session",
     "new session started",
     "session data",
+    // Generic permission/forbidden phrasing must NOT match the narrow pattern
+    // applied to raw stderr — these terms can appear in filesystem, git, or
+    // network errors and would cause false-positive auth-challenge recovery.
+    "forbidden",
+    "access denied",
+    "access denied opening /Users/foo/.config",
+    "git: forbidden by remote",
     "",
   ];
 
@@ -434,6 +440,48 @@ describe("AUTH_CHALLENGE_PATTERN", () => {
   for (const input of negatives) {
     test(`does not match: "${input || "(empty)"}"`, () => {
       assert.strictEqual(AUTH_CHALLENGE_PATTERN.test(input), false);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AUTH_STATUS_PATTERN — broader pattern, only applied to synthetic
+// `isApiErrorMessage` entries from the Claude CLI.
+// ---------------------------------------------------------------------------
+
+describe("AUTH_STATUS_PATTERN", () => {
+  const positives = [
+    "authentication_error",
+    "Invalid bearer token",
+    "rate_limit_error",
+    // Bare `rate_limit` token — Claude CLI emits this in the synthetic
+    // `error` field for HTTP 429 entries. Must match without `_error` suffix.
+    "rate_limit",
+    "forbidden",
+    "access denied",
+    "unauthorized",
+  ];
+
+  const negatives = [
+    "Prompt is too long",
+    "context limit reached",
+    "Command failed with exit code 1",
+    // Defensive: `rate_limit` must be a whole token, not a substring of an
+    // unrelated key like `rate_limited` or `rate_limit_window`.
+    "rate_limited",
+    "rate_limit_window=60",
+    "",
+  ];
+
+  for (const input of positives) {
+    test(`matches: "${input}"`, () => {
+      assert.ok(AUTH_STATUS_PATTERN.test(input));
+    });
+  }
+
+  for (const input of negatives) {
+    test(`does not match: "${input || "(empty)"}"`, () => {
+      assert.strictEqual(AUTH_STATUS_PATTERN.test(input), false);
     });
   }
 });
@@ -566,6 +614,34 @@ describe("detectAuthChallengeFromJsonl", () => {
       { type: "assistant", isApiErrorMessage: true, error: "something went wrong", apiErrorStatus: 500 },
     ]);
     assert.strictEqual(detectAuthChallengeFromJsonl(tmpDir), null);
+  });
+
+  // Regression: real-world synthetic entry observed from Claude CLI 2.1.126
+  // carries `error: "rate_limit"` (bare token, no `_error` suffix) with
+  // `apiErrorStatus: 429`. Both the widened text pattern and the 429 status
+  // fallback must independently catch it.
+  test("detects synthetic rate_limit entry (bare token, no _error suffix)", () => {
+    writeJsonl([
+      {
+        type: "assistant",
+        isApiErrorMessage: true,
+        error: "rate_limit",
+        apiErrorStatus: 429,
+      },
+    ]);
+    const result = detectAuthChallengeFromJsonl(tmpDir);
+    assert.ok(result);
+    assert.ok(result.includes("rate_limit"));
+  });
+
+  test("detects apiErrorStatus=429 even when error text does not match AUTH_CHALLENGE_PATTERN", () => {
+    writeJsonl([
+      { type: "assistant", isApiErrorMessage: true, error: "quota exceeded", apiErrorStatus: 429 },
+    ]);
+    const result = detectAuthChallengeFromJsonl(tmpDir);
+    assert.ok(result);
+    assert.ok(result.includes("429"));
+    assert.ok(result.includes("quota exceeded"));
   });
 
   test("detects synthetic entry in mixed JSONL alongside success result", () => {
