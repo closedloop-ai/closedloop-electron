@@ -3,6 +3,7 @@ import { PostHogAnalytics } from "./posthog-analytics.js";
 import { gatewayLog } from "./gateway-logger.js";
 import type {
   ExecutePlanSourceDiagnostics,
+  OutboundNetworkDiagnostics,
   TelemetryCategory,
   TelemetryDiagnostics,
   TelemetryEmitter,
@@ -240,6 +241,23 @@ export class Observability {
       { extra: { surface, reason } },
     );
     Observability.capturePostHog("desktop_pop_unavailable", { surface, reason });
+  }
+
+  /** Emits a descriptor-only outbound network policy decision for SSRF-sensitive fetches. */
+  static outboundNetworkDecision(input: OutboundNetworkDiagnostics): void {
+    const severity: TelemetrySeverity =
+      input.decision === "denied" ? "warn" : "info";
+    const message =
+      input.decision === "denied"
+        ? "Outbound network request denied"
+        : "Outbound network request allowed";
+    Observability.emitTelemetry(
+      severity,
+      "desktop.outbound_network_decision",
+      message,
+      {},
+      { outboundNetwork: input },
+    );
   }
 
   // --- Sandbox (PostHog only) ---

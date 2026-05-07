@@ -8,6 +8,8 @@ import type { TelemetryCategory } from "../src/main/telemetry-protocol.js";
 // Compile-time regression guard: fails tsc if "queue.stats_changed" is removed from TelemetryCategory.
 const _queueStatsCategoryCheck: TelemetryCategory = "queue.stats_changed";
 const _desktopPopUnavailableCategoryCheck: TelemetryCategory = "desktop_pop.unavailable";
+const _outboundNetworkDecisionCategoryCheck: TelemetryCategory =
+  "desktop.outbound_network_decision";
 const _jobPlanSourceResolvedCategoryCheck: TelemetryCategory =
   "job.plan_source_resolved";
 const _jobDecisionTableVerificationCategoryCheck: TelemetryCategory =
@@ -79,6 +81,44 @@ describe("Observability", () => {
     assert.equal(telemetryEvents.length, 1);
     assert.equal(telemetryEvents[0].category, "job.started");
     assert.equal(captureCalls.length, 0);
+  });
+
+  test("outboundNetworkDecision emits descriptor-only telemetry", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.outboundNetworkDecision({
+      surface: "loop_attachment_download",
+      decision: "denied",
+      reason: "attachment_host_not_allowed",
+      destinationClass: "external",
+      protocol: "https:",
+      hostname: "attacker.example.com",
+      port: "443",
+    });
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(
+      telemetryEvents[0].category,
+      "desktop.outbound_network_decision",
+    );
+    assert.equal(telemetryEvents[0].severity, "warn");
+    assert.deepEqual(telemetryEvents[0].diagnostics?.outboundNetwork, {
+      surface: "loop_attachment_download",
+      decision: "denied",
+      reason: "attachment_host_not_allowed",
+      destinationClass: "external",
+      protocol: "https:",
+      hostname: "attacker.example.com",
+      port: "443",
+    });
+
+    const serialized = JSON.stringify(telemetryEvents[0]);
+    assert.equal(serialized.includes("/private/object.txt"), false);
+    assert.equal(serialized.includes("X-Amz-Credential"), false);
+    assert.equal(serialized.includes("X-Amz-Signature"), false);
   });
 
   test("jobPlanSourceResolved emits redacted EXECUTE plan diagnostics", () => {

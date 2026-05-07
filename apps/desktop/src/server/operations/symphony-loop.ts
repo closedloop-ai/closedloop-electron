@@ -72,6 +72,7 @@ import type {
   OperationDispatcher,
   OperationRequestContext,
 } from "../operation-dispatcher.js";
+import { validateOutboundUrlForSurface } from "../outbound-url-policy.js";
 import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import {
@@ -614,6 +615,8 @@ export function readEvaluateOutputs(
 type LoopCommitter = LocalJobCommitter;
 
 type ContextPackAttachment = SharedContextPackAttachment;
+
+export const SKIPPED_ATTACHMENTS_WARNING_FILE = "skipped-attachments.json";
 
 interface ExecutionResult {
   prUrl: string;
@@ -1650,6 +1653,10 @@ async function downloadAttachmentsToDisk(
 
   const attachmentsDir = path.join(claudeWorkDir, "attachments");
   mkdirSync(attachmentsDir, { recursive: true });
+  const skippedAttachments: Array<{
+    id: string;
+    reason: string;
+  }> = [];
 
   for (const attachment of attachments) {
     try {
@@ -1677,7 +1684,24 @@ async function downloadAttachmentsToDisk(
         continue;
       }
 
-      const response = await fetch(attachment.signedUrl);
+      const policyDecision = validateOutboundUrlForSurface(
+        "loop_attachment_download",
+        attachment.signedUrl,
+      );
+      if (!policyDecision.allowed) {
+        Observability.outboundNetworkDecision(policyDecision.diagnostics);
+        skippedAttachments.push({
+          id: attachment.id,
+          reason: policyDecision.diagnostics.reason,
+        });
+        console.warn(
+          `[downloadAttachmentsToDisk] Attachment ${attachment.id} denied by outbound policy: ${policyDecision.diagnostics.reason}`,
+        );
+        continue;
+      }
+
+      Observability.outboundNetworkDecision(policyDecision.diagnostics);
+      const response = await fetch(attachment.signedUrl, { redirect: "error" });
       if (!response.ok) {
         console.warn(
           `[downloadAttachmentsToDisk] Attachment ${attachment.id} fetch failed: ${response.status} ${response.statusText}, skipping`,
@@ -1703,11 +1727,31 @@ async function downloadAttachmentsToDisk(
       writeFileSync(diskPath, buffer);
     } catch (err) {
       console.warn(
-        `[downloadAttachmentsToDisk] Failed to download attachment ${attachment.id}:`,
-        err,
+        `[downloadAttachmentsToDisk] Failed to download attachment ${attachment.id}: ${formatAttachmentDownloadError(err)}`,
       );
     }
   }
+
+  if (skippedAttachments.length > 0) {
+    await fs.writeFile(
+      path.join(claudeWorkDir, SKIPPED_ATTACHMENTS_WARNING_FILE),
+      JSON.stringify(
+        {
+          skippedAttachments,
+          allAttachmentsSkipped: skippedAttachments.length === attachments.length,
+        },
+        null,
+        2,
+      ),
+    );
+  }
+}
+
+function formatAttachmentDownloadError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.name || "Error";
+  }
+  return typeof error;
 }
 
 /**
