@@ -14,6 +14,7 @@ export type TelemetryCategory =
   | "command.cancelled"
   | "command.gateway_error"
   | "desktop.outbound_network_decision"
+  | "desktop.support_upload"
   | "job.started"
   | "job.plan_source_resolved"
   | "job.decision_table_verification"
@@ -121,6 +122,7 @@ export type DecisionTableVerificationTelemetryDiagnostics =
 
 export type OutboundNetworkSurface =
   | "loop_attachment_download"
+  | "loop_support_upload"
   | "deploy_health_check";
 
 export type OutboundNetworkDecision = "allowed" | "denied";
@@ -160,6 +162,32 @@ export interface OutboundNetworkDiagnostics {
   statusCode?: number;
 }
 
+export type SupportUploadOutcome = "started" | "skipped" | "succeeded" | "failed";
+export type SupportUploadReason =
+  | "already_uploaded"
+  | "missing_s3_state_key"
+  | "no_uploadable_files"
+  | "upload_url_http_error"
+  | "upload_url_malformed_response"
+  | "upload_url_success_false"
+  | "upload_url_missing_url"
+  | "upload_url_request_failed"
+  | "put_url_denied"
+  | "put_http_error"
+  | "put_request_failed"
+  | "event_post_failed";
+
+export interface SupportUploadDiagnostics {
+  outcome: SupportUploadOutcome;
+  loopId?: string;
+  s3StateKeySuffix?: string;
+  attemptedLogicalNames?: string[];
+  attemptedUploadedNames?: string[];
+  reason?: SupportUploadReason;
+  uploadedCount?: number;
+  durationMs?: number;
+}
+
 export interface TelemetryDiagnostics {
   exitCode?: number;
   logTail?: string;
@@ -181,6 +209,7 @@ export interface TelemetryDiagnostics {
   tokenUsage?: { inputTokens: number; outputTokens: number };
   decisionTableVerification?: DecisionTableVerificationTelemetryDiagnostics;
   outboundNetwork?: OutboundNetworkDiagnostics;
+  supportUpload?: SupportUploadDiagnostics;
   diagnosticsVersion?: number;
   errorStack?: string;
   extra?: Record<string, unknown>;

@@ -35,6 +35,7 @@ import { gatewayLog } from "../../main/gateway-logger.js";
 import type { ExecutePlanSourceDiagnostics } from "../../main/telemetry-protocol.js";
 import type {
   JobStore,
+  LocalJob,
   LocalJobCommand,
   LocalJobCommitter,
   LocalJobExecuteFinalizationPath,
@@ -47,6 +48,7 @@ import {
   isExecuteNoWorkCompletion,
   isRetryableFinalizationError,
   tryUploadArtifacts,
+  tryUploadSupportBundle,
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
 import type { LoopTokenStore } from "../../main/loop-token-store.js";
@@ -3967,6 +3969,41 @@ export async function handleProcessCompletion(
       }
     }
 
+    if (!wasCancelled) {
+      const rawBody = body as unknown as { s3StateKey?: unknown };
+      const bodyS3StateKey =
+        typeof rawBody.s3StateKey === "string" && rawBody.s3StateKey
+          ? rawBody.s3StateKey
+          : undefined;
+      const supportJob =
+        existingJob ??
+        ({
+          id: loopId,
+          kind: "SYMPHONY_LOOP",
+          loopId,
+          command: command as LocalJobCommand,
+          claudeWorkDir,
+          status: "FAILED",
+          startedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          ...(bodyS3StateKey ? { s3StateKey: bodyS3StateKey } : {}),
+        } satisfies LocalJob);
+      const supportResult = await tryUploadSupportBundle({
+        job: supportJob,
+        claudeWorkDir,
+        apiBaseUrl,
+        token: closedLoopAuthToken,
+        jobStore,
+      });
+      if (supportResult.failed) {
+        failureWarnings.push("SUPPORT_UPLOAD_FAILED");
+        gatewayLog.warn(
+          "loop-harness",
+          `Support upload failed for loopId=${loopId}: ${supportResult.error}`,
+        );
+      }
+    }
+
     // Determine abort reason
     const abortReason: string | undefined = wasCancelled
       ? "cancelled"
@@ -6545,6 +6582,10 @@ async function handleLoopRequest(
       const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
       const statePath = path.join(claudeWorkDir, "state.json");
       const command = body.command as LocalJobCommand;
+      const s3StateKey =
+        typeof rawBody.s3StateKey === "string" && rawBody.s3StateKey.length > 0
+          ? rawBody.s3StateKey
+          : existing?.s3StateKey;
       jobStore.upsert({
         id: body.loopId,
         kind: "SYMPHONY_LOOP",
@@ -6563,6 +6604,7 @@ async function handleLoopRequest(
         committer: body.committer ?? existing?.committer,
         worktreeDir: worktreeDir ?? undefined,
         claudeWorkDir,
+        ...(s3StateKey ? { s3StateKey } : {}),
         // Persist so finalizer/boot-recovery can remove these after a crash
         // or graceful shutdown; in-process spawn keeps its own local copy for
         // live cleanup on exit.

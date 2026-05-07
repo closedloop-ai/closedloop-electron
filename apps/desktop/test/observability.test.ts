@@ -121,6 +121,38 @@ describe("Observability", () => {
     assert.equal(serialized.includes("X-Amz-Signature"), false);
   });
 
+  test("supportUploadLifecycle emits structured support upload diagnostics", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.supportUploadLifecycle({
+      outcome: "failed",
+      loopId: "loop-1",
+      s3StateKeySuffix: "run-1",
+      attemptedLogicalNames: ["claude-output.jsonl", "perf.jsonl"],
+      attemptedUploadedNames: ["claude-output.jsonl"],
+      reason: "event_post_failed",
+      uploadedCount: 1,
+      durationMs: 123,
+    });
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "desktop.support_upload");
+    assert.equal(telemetryEvents[0].severity, "warn");
+    assert.deepEqual(telemetryEvents[0].diagnostics?.supportUpload, {
+      outcome: "failed",
+      loopId: "loop-1",
+      s3StateKeySuffix: "run-1",
+      attemptedLogicalNames: ["claude-output.jsonl", "perf.jsonl"],
+      attemptedUploadedNames: ["claude-output.jsonl"],
+      reason: "event_post_failed",
+      uploadedCount: 1,
+      durationMs: 123,
+    });
+  });
+
   test("jobPlanSourceResolved emits redacted EXECUTE plan diagnostics", () => {
     const telemetryEvents: EnrichedTelemetryEvent[] = [];
     Observability.init({

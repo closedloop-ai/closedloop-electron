@@ -162,6 +162,64 @@ async function completeFailedLoopWithMarkerSecret(args: {
   );
 }
 
+test("handleProcessCompletion uploads support bundle for failed loops without JobStore state", async () => {
+  const loopId = "loop-support-upload-no-jobstore";
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "claude-output.jsonl"), "{}\n");
+  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    const url = String(input);
+    fetchCalls.push({
+      url,
+      body: typeof init?.body === "string" ? init.body : "",
+    });
+    if (url.includes("upload-artifacts")) {
+      return new Response("nope", {
+        status: 500,
+        statusText: "Internal Server Error",
+      });
+    }
+    if (url.includes("/upload-urls")) {
+      return Response.json({
+        success: true,
+        data: {
+          urls: [
+            {
+              key: "org-1/loops/loop-1/run-1/support/claude-output.jsonl",
+              url: "https://closedloop-files.s3.us-east-1.amazonaws.com/claude",
+            },
+          ],
+        },
+      });
+    }
+    return Response.json({ success: true });
+  }) as typeof fetch;
+
+  await handleProcessCompletion(
+    1,
+    {
+      loopId,
+      command: LoopCommand.Execute,
+      closedLoopAuthToken: "token",
+      s3StateKey: "org-1/loops/loop-1/run-1",
+    } as Parameters<typeof handleProcessCompletion>[1],
+    "http://127.0.0.1:12345",
+    null,
+    claudeWorkDir,
+    false,
+    null,
+    () => [tempRoot],
+  );
+
+  const eventBodies = fetchCalls
+    .filter((call) => call.url.includes("/events"))
+    .map((call) => JSON.parse(call.body) as { type?: string });
+  assert.deepEqual(
+    eventBodies.map((body) => body.type),
+    ["support_bundle_uploaded", "error"],
+  );
+});
+
 test("handleProcessCompletion merges existing warnings with failure upload warnings", async () => {
   const loopId = "loop-merge-failure-warning";
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");

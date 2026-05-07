@@ -43,7 +43,10 @@ export function validateOutboundUrlForSurface(
     return deny(surface, "credentialed_url", "external", descriptor);
   }
 
-  if (surface === "loop_attachment_download") {
+  if (
+    surface === "loop_attachment_download" ||
+    surface === "loop_support_upload"
+  ) {
     return validateAttachmentUrl(surface, parsed, descriptor);
   }
 
