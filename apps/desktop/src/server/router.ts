@@ -9,6 +9,7 @@ import { verifyChallenge } from "../main/local-auth-verifier.js";
 import type { ApiKeyProvenance } from "../main/api-key-store.js";
 import type { DesktopPopSigner } from "../main/desktop-pop.js";
 import type { DesktopPopUnavailableReporter } from "../main/desktop-pop-sign-utils.js";
+import { gatewayLog } from "../main/gateway-logger.js";
 import { OperationDispatcher } from "./operation-dispatcher.js";
 import { registerFilesystemDirectoriesRoutes } from "./operations/filesystem-directories.js";
 import { registerFilesystemSearchRoutes } from "./operations/filesystem-search.js";
@@ -95,8 +96,8 @@ export interface GatewayActivityEvent {
   statusCode: number;
   durationMs: number;
   detail?: string;
-  requestBody?: string;
-  responseBody?: string;
+  requestSizeBytes?: number;
+  responseSizeBytes?: number;
 }
 
 export interface GatewayApprovalRequest {
@@ -127,6 +128,41 @@ export type DesktopSecurityUpgradePayload = {
 export type DesktopSecurityUpgradeResult =
   | { ok: true }
   | { ok: false; code: string; retryable: boolean; statusCode?: number };
+
+const GATEWAY_AUTH_EXCHANGE_LIMIT_BYTES = 4 * 1024;
+const GENERIC_JSON_LIMIT_BYTES = 256 * 1024;
+// Matches the current symphony-alpha /dispatch 1 MiB relay-envelope cap.
+const SYMPHONY_LOOP_LIMIT_BYTES = 1 * 1024 * 1024;
+const SYMPHONY_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024;
+const RUN_VIEWER_EXTRACT_LIMIT_BYTES = 210 * 1024 * 1024;
+const REQUEST_BODY_TOO_LARGE_CODE = "request_body_too_large";
+
+type RequestBodyLimit = {
+  limitBytes: number;
+  routeName: string;
+};
+
+class RequestBodyTooLargeError extends Error {
+  readonly code = REQUEST_BODY_TOO_LARGE_CODE;
+  readonly limitBytes: number;
+  readonly routeName: string;
+  readonly declaredSizeBytes?: number;
+  readonly observedSizeBytes?: number;
+
+  constructor(input: {
+    limitBytes: number;
+    routeName: string;
+    declaredSizeBytes?: number;
+    observedSizeBytes?: number;
+  }) {
+    super("request body too large");
+    this.name = "RequestBodyTooLargeError";
+    this.limitBytes = input.limitBytes;
+    this.routeName = input.routeName;
+    this.declaredSizeBytes = input.declaredSizeBytes;
+    this.observedSizeBytes = input.observedSizeBytes;
+  }
+}
 
 export class GatewayRouter {
   private readonly options: GatewayRouterOptions;
@@ -229,7 +265,7 @@ export class GatewayRouter {
       this.operationDispatcher,
       this.options.getAllowedDirectories,
       this.options.retrySpawnDeps ?? {
-        log: (_level, msg) => console.warn('[spawn-retry fallback]', msg),
+        log: (_level, msg) => gatewayLog.warn("spawn-retry", `fallback: ${msg}`),
         refreshTray: () => {},
         isShuttingDown: () => false,
         delay: (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -290,8 +326,8 @@ export class GatewayRouter {
     const startedAt = Date.now();
     let activityType: GatewayActivityEvent["type"] = "request";
     let activityDetail: string | undefined;
-    let capturedRequestBody: string | undefined;
-    let capturedResponseBody = "";
+    let requestSizeBytes: number | undefined;
+    let responseSizeBytes = 0;
 
     if ((isGatewayRoute || isExchangeRoute) && method !== "OPTIONS") {
       const origWrite = response.write.bind(response) as typeof response.write;
@@ -301,15 +337,7 @@ export class GatewayRouter {
         chunk: unknown,
         ...rest: unknown[]
       ): boolean {
-        if (chunk != null) {
-          const s =
-            typeof chunk === "string"
-              ? chunk
-              : Buffer.isBuffer(chunk)
-                ? chunk.toString("utf-8")
-                : "";
-          capturedResponseBody += s;
-        }
+        responseSizeBytes += byteLengthOfResponseChunk(chunk, rest[0]);
         return origWrite(chunk as string, ...rest as [BufferEncoding]);
       } as typeof response.write;
 
@@ -318,13 +346,7 @@ export class GatewayRouter {
         ...rest: unknown[]
       ): ServerResponse {
         if (chunk != null && typeof chunk !== "function") {
-          const s =
-            typeof chunk === "string"
-              ? chunk
-              : Buffer.isBuffer(chunk)
-                ? chunk.toString("utf-8")
-                : "";
-          capturedResponseBody += s;
+          responseSizeBytes += byteLengthOfResponseChunk(chunk, rest[0]);
         }
         return origEnd(chunk as string, ...rest as [BufferEncoding]);
       } as typeof response.end;
@@ -338,8 +360,8 @@ export class GatewayRouter {
           statusCode: response.statusCode,
           durationMs: Math.max(0, Date.now() - startedAt),
           detail: activityDetail,
-          requestBody: capturedRequestBody,
-          responseBody: capturedResponseBody || undefined
+          requestSizeBytes,
+          responseSizeBytes
         });
       });
     }
@@ -355,6 +377,7 @@ export class GatewayRouter {
       if (exchangeResult) {
         activityType = exchangeResult.activityType;
         activityDetail = exchangeResult.activityDetail;
+        requestSizeBytes = exchangeResult.requestSizeBytes;
       }
       return;
     }
@@ -386,9 +409,23 @@ export class GatewayRouter {
     }
 
     if (isGatewayRoute) {
-      const rawBody = await this.readBody(request);
+      const requestBodyLimit = resolveRequestBodyLimit(method, url.pathname);
+      let rawBody: Buffer;
+      try {
+        rawBody = await this.readBody(request, requestBodyLimit);
+      } catch (error) {
+        if (error instanceof RequestBodyTooLargeError) {
+          activityType = "security";
+          activityDetail = REQUEST_BODY_TOO_LARGE_CODE;
+          requestSizeBytes = error.observedSizeBytes ?? error.declaredSizeBytes;
+          this.logOversizedRequest(method, url.pathname, error);
+          this.writeRequestTooLargeResponse(response, error);
+          return;
+        }
+        throw error;
+      }
+      requestSizeBytes = rawBody.byteLength;
       const body = rawBody.toString("utf-8");
-      capturedRequestBody = body || undefined;
 
       const approval = this.options.evaluateApproval?.({
         method,
@@ -542,7 +579,11 @@ export class GatewayRouter {
   private async handleExchange(
     request: IncomingMessage,
     response: ServerResponse
-  ): Promise<{ activityType: GatewayActivityEvent["type"]; activityDetail: string } | null> {
+  ): Promise<{
+    activityType: GatewayActivityEvent["type"];
+    activityDetail?: string;
+    requestSizeBytes?: number;
+  } | null> {
     const requestOrigin = firstHeaderValue(request.headers.origin);
 
     if (!requestOrigin || requestOrigin === "null") {
@@ -611,7 +652,25 @@ export class GatewayRouter {
       return null;
     }
 
-    const rawBody = await this.readBody(request);
+    let rawBody: Buffer;
+    try {
+      rawBody = await this.readBody(
+        request,
+        resolveRequestBodyLimit(request.method?.toUpperCase() ?? "POST", "/gateway-auth/exchange")
+      );
+    } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        this.logOversizedRequest(request.method?.toUpperCase() ?? "POST", "/gateway-auth/exchange", error);
+        this.writeRequestTooLargeResponse(response, error);
+        return {
+          activityType: "security",
+          activityDetail: REQUEST_BODY_TOO_LARGE_CODE,
+          requestSizeBytes: error.observedSizeBytes ?? error.declaredSizeBytes,
+        };
+      }
+      throw error;
+    }
+    const exchangeRequestSizeBytes = rawBody.byteLength;
     let challengeToken: string;
     try {
       const parsed = JSON.parse(rawBody.toString("utf-8")) as Record<string, unknown>;
@@ -624,7 +683,7 @@ export class GatewayRouter {
       response.setHeader("content-type", "application/json");
       response.setHeader("Cache-Control", "no-store");
       response.end(JSON.stringify({ error: "invalid request body: challengeToken required" }));
-      return null;
+      return { activityType: "request", requestSizeBytes: exchangeRequestSizeBytes };
     }
 
     const userAgent = firstHeaderValue(request.headers["user-agent"]) ?? undefined;
@@ -645,7 +704,11 @@ export class GatewayRouter {
       response.setHeader("content-type", "application/json");
       response.setHeader("Cache-Control", "no-store");
       response.end(JSON.stringify({ error: result.error }));
-      return { activityType: "security", activityDetail: `exchange rejected: ${result.error}` };
+      return {
+        activityType: "security",
+        activityDetail: `exchange rejected: ${result.error}`,
+        requestSizeBytes: exchangeRequestSizeBytes,
+      };
     }
 
     const sessionStore = this.options.sessionStore;
@@ -654,7 +717,7 @@ export class GatewayRouter {
       response.setHeader("content-type", "application/json");
       response.setHeader("Cache-Control", "no-store");
       response.end(JSON.stringify({ error: "session store not available" }));
-      return null;
+      return { activityType: "request", requestSizeBytes: exchangeRequestSizeBytes };
     }
 
     const session = sessionStore.create(requestOrigin, result.sessionTtlSeconds);
@@ -666,14 +729,42 @@ export class GatewayRouter {
       sessionToken: session.sessionToken,
       expiresAt: session.expiresAt,
     }));
-    return null;
+    return { activityType: "request", requestSizeBytes: exchangeRequestSizeBytes };
   }
 
-  private async readBody(request: IncomingMessage): Promise<Buffer> {
+  private async readBody(
+    request: IncomingMessage,
+    bodyLimit: RequestBodyLimit
+  ): Promise<Buffer> {
+    // Only a strictly numeric Content-Length can reject early; relayed
+    // requests often omit it and are enforced by streamed byte counting.
+    const declaredSizeBytes = parseStrictContentLength(
+      firstHeaderValue(request.headers["content-length"])
+    );
+    if (declaredSizeBytes !== null && declaredSizeBytes > BigInt(bodyLimit.limitBytes)) {
+      throw new RequestBodyTooLargeError({
+        limitBytes: bodyLimit.limitBytes,
+        routeName: bodyLimit.routeName,
+        declaredSizeBytes: bigintToSafeNumber(declaredSizeBytes),
+      });
+    }
+
     const chunks: Buffer[] = [];
+    let observedSizeBytes = 0;
 
     for await (const chunk of request) {
-      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+      const buffer = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+      observedSizeBytes += buffer.byteLength;
+      if (observedSizeBytes > bodyLimit.limitBytes) {
+        throw new RequestBodyTooLargeError({
+          limitBytes: bodyLimit.limitBytes,
+          routeName: bodyLimit.routeName,
+          declaredSizeBytes:
+            declaredSizeBytes === null ? undefined : bigintToSafeNumber(declaredSizeBytes),
+          observedSizeBytes,
+        });
+      }
+      chunks.push(buffer);
     }
 
     if (chunks.length === 0) {
@@ -681,6 +772,42 @@ export class GatewayRouter {
     }
 
     return Buffer.concat(chunks);
+  }
+
+  private writeRequestTooLargeResponse(
+    response: ServerResponse,
+    error: RequestBodyTooLargeError
+  ): void {
+    response.statusCode = 413;
+    response.setHeader("content-type", "application/json");
+    response.setHeader("Cache-Control", "no-store");
+    response.end(
+      JSON.stringify({
+        error: "request body too large",
+        code: REQUEST_BODY_TOO_LARGE_CODE,
+        maxBytes: error.limitBytes,
+      })
+    );
+  }
+
+  private logOversizedRequest(
+    method: string,
+    path: string,
+    error: RequestBodyTooLargeError
+  ): void {
+    gatewayLog.warn(
+      "gateway-router",
+      [
+        REQUEST_BODY_TOO_LARGE_CODE,
+        `method=${method}`,
+        `path=${path}`,
+        "status=413",
+        `route=${error.routeName}`,
+        `limitBytes=${error.limitBytes}`,
+        `declaredSizeBytes=${error.declaredSizeBytes ?? "absent"}`,
+        `observedSizeBytes=${error.observedSizeBytes ?? "absent"}`,
+      ].join(" ")
+    );
   }
 
   private async proxyToFallback(
@@ -754,6 +881,76 @@ function parseBooleanHeader(value: string | string[] | undefined): boolean {
     return false;
   }
   return first === "1" || first.toLowerCase() === "true";
+}
+
+/** Selects the in-code request cap for the current gateway route. */
+function resolveRequestBodyLimit(method: string, pathname: string): RequestBodyLimit {
+  const normalizedMethod = method.toUpperCase();
+  if (normalizedMethod === "POST" && pathname === "/gateway-auth/exchange") {
+    return {
+      limitBytes: GATEWAY_AUTH_EXCHANGE_LIMIT_BYTES,
+      routeName: "gateway-auth-exchange",
+    };
+  }
+  if (normalizedMethod === "POST" && pathname === "/api/gateway/symphony/loop") {
+    return {
+      limitBytes: SYMPHONY_LOOP_LIMIT_BYTES,
+      routeName: "symphony-loop",
+    };
+  }
+  if (
+    normalizedMethod === "POST" &&
+    /^\/api\/gateway\/symphony\/upload\/[^/]+$/.test(pathname)
+  ) {
+    return {
+      limitBytes: SYMPHONY_UPLOAD_LIMIT_BYTES,
+      routeName: "symphony-upload",
+    };
+  }
+  if (normalizedMethod === "POST" && pathname === "/api/gateway/run-viewer-extract") {
+    return {
+      limitBytes: RUN_VIEWER_EXTRACT_LIMIT_BYTES,
+      routeName: "run-viewer-extract",
+    };
+  }
+  return {
+    limitBytes: GENERIC_JSON_LIMIT_BYTES,
+    routeName: "generic-json",
+  };
+}
+
+function parseStrictContentLength(value: string | null): bigint | null {
+  if (!value || !/^\d+$/.test(value)) {
+    return null;
+  }
+  try {
+    return BigInt(value);
+  } catch {
+    return null;
+  }
+}
+
+function bigintToSafeNumber(value: bigint): number | undefined {
+  if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+    return undefined;
+  }
+  return Number(value);
+}
+
+function byteLengthOfResponseChunk(chunk: unknown, encoding: unknown): number {
+  if (typeof chunk === "string") {
+    return Buffer.byteLength(
+      chunk,
+      typeof encoding === "string" ? encoding as BufferEncoding : "utf8"
+    );
+  }
+  if (Buffer.isBuffer(chunk)) {
+    return chunk.byteLength;
+  }
+  if (chunk instanceof Uint8Array) {
+    return chunk.byteLength;
+  }
+  return 0;
 }
 
 function safeEqualToken(left: string, right: string): boolean {

@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
+import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { afterEach, mock, test } from "node:test";
 import { DesktopGatewayServer } from "../src/server/server.js";
+import { GatewayRouter, type GatewayActivityEvent } from "../src/server/router.js";
 import { Observability } from "../src/main/observability.js";
 import type { EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
 import { saveCodexChatSession } from "../src/server/operations/codex.js";
@@ -20,6 +24,10 @@ import { SymphonyDirNotConfiguredError, tryAssertRepoAllowed, tryAssertPathAllow
 import { JobStore } from "../src/main/job-store.js";
 import type { LocalJob, LocalJobStatus } from "../src/main/job-store.js";
 
+const GENERIC_JSON_LIMIT_BYTES = 256 * 1024;
+const SYMPHONY_LOOP_LIMIT_BYTES = 1024 * 1024;
+const RELAY_DISPATCH_LIMIT_BYTES = 1_048_576;
+
 const serversToClose: DesktopGatewayServer[] = [];
 const blockersToClose: net.Server[] = [];
 const tempPathsToClean: string[] = [];
@@ -28,6 +36,59 @@ const originalSymphonyWorktreeParentDir = process.env.SYMPHONY_WORKTREE_PARENT_D
 const originalHome = process.env.HOME;
 const originalPath = process.env.PATH;
 const originalFetch = globalThis.fetch;
+
+class TestResponse extends EventEmitter {
+  statusCode = 200;
+  finished = false;
+  readonly headers = new Map<string, string | number | readonly string[]>();
+  readonly chunks: Buffer[] = [];
+
+  setHeader(name: string, value: string | number | readonly string[]): void {
+    this.headers.set(name.toLowerCase(), value);
+  }
+
+  write(chunk: unknown, encodingOrCallback?: BufferEncoding | ((error?: Error) => void)): boolean {
+    this.appendChunk(chunk, encodingOrCallback);
+    return true;
+  }
+
+  end(chunk?: unknown, encodingOrCallback?: BufferEncoding | (() => void)): this {
+    if (chunk != null && typeof chunk !== "function") {
+      this.appendChunk(chunk, encodingOrCallback);
+    }
+    this.finished = true;
+    this.emit("finish");
+    return this;
+  }
+
+  text(): string {
+    return Buffer.concat(this.chunks).toString("utf-8");
+  }
+
+  json(): Record<string, unknown> {
+    return JSON.parse(this.text()) as Record<string, unknown>;
+  }
+
+  private appendChunk(
+    chunk: unknown,
+    encodingOrCallback?: BufferEncoding | ((error?: Error) => void) | (() => void)
+  ): void {
+    if (typeof chunk === "string") {
+      this.chunks.push(Buffer.from(
+        chunk,
+        typeof encodingOrCallback === "string" ? encodingOrCallback : "utf8"
+      ));
+      return;
+    }
+    if (Buffer.isBuffer(chunk)) {
+      this.chunks.push(chunk);
+      return;
+    }
+    if (chunk instanceof Uint8Array) {
+      this.chunks.push(Buffer.from(chunk));
+    }
+  }
+}
 
 afterEach(async () => {
   globalThis.fetch = originalFetch;
@@ -80,6 +141,148 @@ afterEach(async () => {
   Observability.reset();
   mock.restoreAll();
 });
+
+function createGatewayRouter(
+  overrides: Partial<ConstructorParameters<typeof GatewayRouter>[0]> = {}
+): GatewayRouter {
+  return new GatewayRouter({
+    webAppOrigin: "https://app.closedloop.ai",
+    getAllowedDirectories: () => [os.tmpdir()],
+    machineName: "router-test-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    getActivePort: () => 0,
+    getGatewayId: () => "test-gateway-id",
+    ...overrides,
+  });
+}
+
+async function dispatchMockRequest(input: {
+  router: GatewayRouter;
+  method?: string;
+  path: string;
+  headers?: http.IncomingHttpHeaders;
+  chunks?: Array<string | Buffer>;
+  remoteAddress?: string;
+}): Promise<TestResponse> {
+  const request = Readable.from(input.chunks ?? []) as Readable & {
+    method?: string;
+    url?: string;
+    headers: http.IncomingHttpHeaders;
+    socket: { remoteAddress?: string };
+  };
+  request.method = input.method ?? "POST";
+  request.url = input.path;
+  request.headers = input.headers ?? {};
+  request.socket = { remoteAddress: input.remoteAddress ?? "127.0.0.1" };
+
+  const response = new TestResponse();
+  await input.router.handle(
+    request as unknown as http.IncomingMessage,
+    response as unknown as http.ServerResponse
+  );
+  if (!response.finished) {
+    await new Promise<void>((resolve) => response.once("finish", () => resolve()));
+  }
+  return response;
+}
+
+function sizeOfJson(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+function buildRelayEnvelope(loopBody: Record<string, unknown>): Record<string, unknown> {
+  return {
+    targetId: "019e0-loop-target",
+    operation: {
+      protocolVersion: "1",
+      messageId: "019e0-message",
+      timestamp: "2026-05-07T00:00:00.000Z",
+      type: "command",
+      commandId: "019e0-command",
+      operationId: "symphony_loop",
+      params: {
+        request: {
+          method: "POST",
+          path: "/api/gateway/symphony/loop",
+          headers: {
+            "content-type": "application/json",
+            "x-desktop-source": "cloud-socket",
+          },
+          body: { kind: "json", value: loopBody },
+        },
+        commandId: "019e0-command",
+        lockKey: null,
+        timeoutMs: null,
+        requiresApproval: null,
+        approvalReason: null,
+      },
+      streaming: false,
+    },
+  };
+}
+
+function buildCloudCompatibleLoopFixture(): {
+  body: Record<string, unknown>;
+  bodySizeBytes: number;
+  envelopeSizeBytes: number;
+  envelopeOverheadBytes: number;
+} {
+  const body = {
+    loopId: "019e0-loop",
+    command: "execute",
+    closedLoopAuthToken: "clt_" + "t".repeat(96),
+    apiBaseUrl: "https://api.closedloop.ai",
+    artifacts: [
+      {
+        id: "019e0-artifact",
+        type: "IMPLEMENTATION_PLAN",
+        title: "Synthetic maximum relay-compatible plan",
+        content: "",
+        raw: {
+          slug: "PLN-507",
+          content: "raw-plan-" + "r".repeat(24_000),
+        },
+      },
+    ],
+    prompt: "Implement the approved plan with compatibility checks.",
+    repo: { fullName: "closedloop-ai/closedloop-electron", branch: "main" },
+    committer: { name: "Desktop User", email: "desktop@example.com" },
+    artifactSlug: "PLN-507",
+    parentLoopId: "019e0-parent-loop",
+    parentBranchName: "main",
+    parentSessionId: "019e0-parent-session",
+    localRepoPath: "/Users/test/Source/closedloop-electron",
+    userContext: "u".repeat(16_000),
+    attachments: Array.from({ length: 3 }, (_, index) => ({
+      id: `019e0-attachment-${index}`,
+      filename: `attachment-${index}.txt`,
+      mimeType: "text/plain",
+      sizeBytes: 1024 * (index + 1),
+      signedUrl: `https://closedloop-files.s3.us-east-1.amazonaws.com/context/${index}?X-Amz-Credential=test&X-Amz-Signature=${"a".repeat(64)}`,
+      signedUrlExpiresAt: "2026-05-07T01:00:00.000Z",
+    })),
+    additionalRepos: [
+      { fullName: "closedloop-ai/symphony-alpha", branch: "main" },
+      { fullName: "closedloop-ai/claude-plugins", branch: "main" },
+    ],
+    primaryArtifactId: "019e0-artifact",
+  };
+
+  const baseEnvelopeSize = sizeOfJson(buildRelayEnvelope(body));
+  const fillerBytes = RELAY_DISPATCH_LIMIT_BYTES - baseEnvelopeSize - 2048;
+  assert.ok(fillerBytes > GENERIC_JSON_LIMIT_BYTES);
+  (body.artifacts[0] as { content: string }).content = "a".repeat(fillerBytes);
+
+  const bodySizeBytes = sizeOfJson(body);
+  const envelopeSizeBytes = sizeOfJson(buildRelayEnvelope(body));
+  return {
+    body,
+    bodySizeBytes,
+    envelopeSizeBytes,
+    envelopeOverheadBytes: envelopeSizeBytes - bodySizeBytes,
+  };
+}
 
 test("uses closedloop-ai discovery file path by default", () => {
   const server = new DesktopGatewayServer({
@@ -434,7 +637,7 @@ test("prodOriginsOnly: loopback webAppOrigin preflight from that origin echoes i
 test("requires gateway token when configured", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-auth-token-"));
   tempPathsToClean.push(tmpDir);
-  const activityEvents: Array<{ type: string; statusCode: number; path: string; detail?: string }> = [];
+  const activityEvents: GatewayActivityEvent[] = [];
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -448,12 +651,7 @@ test("requires gateway token when configured", async () => {
     capabilities: EMPTY_CAPABILITIES,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     onActivityEvent: (event) => {
-      activityEvents.push({
-        type: event.type,
-        statusCode: event.statusCode,
-        path: event.path,
-        detail: event.detail
-      });
+      activityEvents.push(event);
     }
   });
   serversToClose.push(server);
@@ -475,9 +673,325 @@ test("requires gateway token when configured", async () => {
   assert.equal(activityEvents[0].type, "security");
   assert.equal(activityEvents[0].statusCode, 401);
   assert.equal(activityEvents[0].path, "/api/gateway/unimplemented-route");
+  assert.equal(Object.hasOwn(activityEvents[0], "requestBody"), false);
+  assert.equal(Object.hasOwn(activityEvents[0], "responseBody"), false);
   assert.equal(activityEvents[1].type, "request");
   assert.equal(activityEvents[1].statusCode, 501);
   assert.equal(activityEvents[1].path, "/api/gateway/unimplemented-route");
+  assert.equal(Object.hasOwn(activityEvents[1], "requestBody"), false);
+  assert.equal(Object.hasOwn(activityEvents[1], "responseBody"), false);
+});
+
+test("records gateway activity byte counts without raw request or response bodies", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-safe-activity-"));
+  tempPathsToClean.push(tmpDir);
+  const activityEvents: GatewayActivityEvent[] = [];
+  const requestBody = JSON.stringify({ secret: "do-not-store", value: "hello" });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "safe-activity-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    onActivityEvent: (event) => activityEvents.push(event),
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: requestBody,
+    }
+  );
+  const responseText = await response.text();
+
+  assert.equal(response.status, 501);
+  assert.equal(activityEvents.length, 1);
+  const [event] = activityEvents;
+  assert.equal(event.requestSizeBytes, Buffer.byteLength(requestBody));
+  assert.equal(event.responseSizeBytes, Buffer.byteLength(responseText));
+  assert.equal(Object.hasOwn(event, "requestBody"), false);
+  assert.equal(Object.hasOwn(event, "responseBody"), false);
+});
+
+test("keeps approval and dispatch body available while activity capture stays payload-free", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-body-preserved-"));
+  tempPathsToClean.push(tmpDir);
+  const activityEvents: GatewayActivityEvent[] = [];
+  const requestBody = JSON.stringify({ approval: "body survives" });
+  let approvalBody: string | null = null;
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "body-preserved-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    onActivityEvent: (event) => activityEvents.push(event),
+    evaluateApproval: (request) => {
+      approvalBody = request.body;
+      return { allow: false, statusCode: 202, payload: { error: "approval required" } };
+    },
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: requestBody,
+    }
+  );
+
+  assert.equal(response.status, 202);
+  assert.equal(approvalBody, requestBody);
+  assert.equal(activityEvents.length, 1);
+  assert.equal(activityEvents[0].detail, "approval required");
+  assert.equal(Object.hasOwn(activityEvents[0], "requestBody"), false);
+  assert.equal(Object.hasOwn(activityEvents[0], "responseBody"), false);
+});
+
+test("rejects oversized numeric Content-Length before dispatch with safe 413 activity", async () => {
+  const activityEvents: GatewayActivityEvent[] = [];
+  const router = createGatewayRouter({
+    onActivityEvent: (event) => activityEvents.push(event),
+    evaluateApproval: () => {
+      throw new Error("approval should not run for oversized requests");
+    },
+  });
+
+  const response = await dispatchMockRequest({
+    router,
+    method: "POST",
+    path: "/api/gateway/unimplemented-route",
+    headers: { "content-length": String(GENERIC_JSON_LIMIT_BYTES + 1) },
+  });
+
+  assert.equal(response.statusCode, 413);
+  assert.deepEqual(response.json(), {
+    error: "request body too large",
+    code: "request_body_too_large",
+    maxBytes: GENERIC_JSON_LIMIT_BYTES,
+  });
+  assert.equal(activityEvents.length, 1);
+  assert.equal(activityEvents[0].type, "security");
+  assert.equal(activityEvents[0].detail, "request_body_too_large");
+  assert.equal(activityEvents[0].requestSizeBytes, GENERIC_JSON_LIMIT_BYTES + 1);
+  assert.equal(Object.hasOwn(activityEvents[0], "requestBody"), false);
+  assert.equal(Object.hasOwn(activityEvents[0], "responseBody"), false);
+});
+
+test("treats malformed or absent Content-Length as absent and enforces streamed byte count", async () => {
+  const acceptedBodies: string[] = [];
+  const router = createGatewayRouter({
+    evaluateApproval: (request) => {
+      acceptedBodies.push(request.body);
+      return { allow: false, statusCode: 202, payload: { error: "accepted under limit" } };
+    },
+  });
+  const body = JSON.stringify({ ok: true });
+
+  const malformed = await dispatchMockRequest({
+    router,
+    method: "POST",
+    path: "/api/gateway/unimplemented-route",
+    headers: { "content-length": "not-a-number" },
+    chunks: [body],
+  });
+  const absent = await dispatchMockRequest({
+    router,
+    method: "POST",
+    path: "/api/gateway/unimplemented-route",
+    chunks: [body],
+  });
+
+  assert.equal(malformed.statusCode, 202);
+  assert.equal(absent.statusCode, 202);
+  assert.deepEqual(acceptedBodies, [body, body]);
+});
+
+test("rejects chunked gateway bodies once streamed bytes exceed the route limit", async () => {
+  const activityEvents: GatewayActivityEvent[] = [];
+  const router = createGatewayRouter({
+    onActivityEvent: (event) => activityEvents.push(event),
+    evaluateApproval: () => {
+      throw new Error("approval should not run after streamed overflow");
+    },
+  });
+
+  const response = await dispatchMockRequest({
+    router,
+    method: "POST",
+    path: "/api/gateway/unimplemented-route",
+    chunks: [
+      Buffer.alloc(GENERIC_JSON_LIMIT_BYTES, "a"),
+      Buffer.from("b"),
+    ],
+  });
+
+  assert.equal(response.statusCode, 413);
+  assert.equal(response.json().code, "request_body_too_large");
+  assert.equal(activityEvents[0].requestSizeBytes, GENERIC_JSON_LIMIT_BYTES + 1);
+});
+
+test("accepts cloud-relay-compatible symphony loop body above the generic JSON cap", async () => {
+  const fixture = buildCloudCompatibleLoopFixture();
+  assert.ok(fixture.bodySizeBytes > GENERIC_JSON_LIMIT_BYTES);
+  assert.ok(fixture.bodySizeBytes <= SYMPHONY_LOOP_LIMIT_BYTES);
+  assert.ok(fixture.envelopeSizeBytes <= RELAY_DISPATCH_LIMIT_BYTES);
+  assert.ok(fixture.envelopeOverheadBytes > 0);
+
+  const activityEvents: GatewayActivityEvent[] = [];
+  let approvalBodySize = 0;
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [os.tmpdir()],
+    machineName: "loop-limit-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(os.tmpdir(), `loop-limit-${Date.now()}`),
+    onActivityEvent: (event) => activityEvents.push(event),
+    evaluateApproval: (request) => {
+      approvalBodySize = Buffer.byteLength(request.body);
+      return { allow: false, statusCode: 202, payload: { error: "accepted for approval" } };
+    },
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(fixture.body),
+    }
+  );
+
+  assert.equal(response.status, 202);
+  assert.equal(approvalBodySize, fixture.bodySizeBytes);
+  assert.equal(activityEvents.length, 1);
+  assert.equal(activityEvents[0].requestSizeBytes, fixture.bodySizeBytes);
+});
+
+test("uses large route-specific limits for upload and run-viewer multipart routes", async () => {
+  const body = Buffer.alloc(GENERIC_JSON_LIMIT_BYTES + 1, "x");
+  const router = createGatewayRouter();
+
+  const uploadResponse = await dispatchMockRequest({
+    router,
+    method: "POST",
+    path: "/api/gateway/symphony/upload/TICKET-1",
+    headers: {
+      "content-length": String(body.byteLength),
+      "content-type": "application/json",
+    },
+    chunks: [body],
+  });
+  const runViewerResponse = await dispatchMockRequest({
+    router,
+    method: "POST",
+    path: "/api/gateway/run-viewer-extract",
+    headers: {
+      "content-length": String(body.byteLength),
+      "content-type": "application/json",
+    },
+    chunks: [body],
+  });
+
+  assert.equal(uploadResponse.statusCode, 400);
+  assert.equal(uploadResponse.json().error, "repo parameter is required");
+  assert.equal(runViewerResponse.statusCode, 400);
+  assert.equal(runViewerResponse.json().error, "Invalid form data");
+});
+
+test("counts streaming fallback responses without capturing response bodies", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-stream-activity-"));
+  tempPathsToClean.push(tmpDir);
+  const activityEvents: GatewayActivityEvent[] = [];
+  const chunks = Array.from({ length: 25 }, (_, index) =>
+    JSON.stringify({ type: "text", index, content: "x".repeat(512) }) + "\n"
+  );
+  const upstream = http.createServer((_request, response) => {
+    response.statusCode = 200;
+    response.setHeader("content-type", "application/x-ndjson");
+    for (const chunk of chunks) {
+      response.write(chunk);
+    }
+    response.end();
+  });
+  blockersToClose.push(upstream);
+  await new Promise<void>((resolve, reject) => {
+    upstream.listen(0, "127.0.0.1", () => resolve());
+    upstream.once("error", reject);
+  });
+  const address = upstream.address();
+  assert.ok(address && typeof address !== "string");
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "stream-activity-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    fallbackGatewayOrigin: `http://127.0.0.1:${address.port}`,
+    onActivityEvent: (event) => activityEvents.push(event),
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/fallback-stream`
+  );
+  const responseText = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.equal(responseText, chunks.join(""));
+  assert.equal(activityEvents.length, 1);
+  assert.equal(activityEvents[0].responseSizeBytes, Buffer.byteLength(responseText));
+  assert.equal(Object.hasOwn(activityEvents[0], "responseBody"), false);
+});
+
+test("Desktop 413 body preserves gateway returned 413 parsing shape", async () => {
+  const router = createGatewayRouter();
+  const response = await dispatchMockRequest({
+    router,
+    method: "POST",
+    path: "/api/gateway/unimplemented-route",
+    headers: { "content-length": String(GENERIC_JSON_LIMIT_BYTES + 1) },
+  });
+
+  const terminalError = `gateway returned ${response.statusCode}: ${response.text()}`;
+  const statusMatch = /^gateway returned (\d{3})/.exec(terminalError);
+  const body = JSON.parse(terminalError.slice(terminalError.indexOf(": ") + 2)) as {
+    code?: string;
+    maxBytes?: number;
+  };
+
+  assert.equal(statusMatch?.[1], "413");
+  assert.equal(body.code, "request_body_too_large");
+  assert.equal(body.maxBytes, GENERIC_JSON_LIMIT_BYTES);
 });
 
 test("rejects trusted browser origin without session token (origin-only bypass removed)", async () => {
@@ -2014,6 +2528,231 @@ test("supports core git action routes", async () => {
   assert.equal(branchesResponse.status, 200);
   const branchesBody = (await branchesResponse.json()) as { branches: Array<{ name: string }> };
   assert.equal(branchesBody.branches.some((branch) => branch.name === "feature/AI-501"), true);
+});
+
+test("classifies git action failures with additive structured error fields", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-git-action-errors-"));
+  tempPathsToClean.push(tmpDir);
+  const repoPath = path.join(tmpDir, "repo-git-errors");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'case "$1" in',
+    '  rev-parse) echo "main" ;;',
+    '  add) exit 0 ;;',
+    '  commit) echo "pre-commit hook: eslint failed" >&2; exit 1 ;;',
+    '  push) echo "Permission denied (publickey)." >&2; exit 128 ;;',
+    '  status) echo "fatal: not a git repository" >&2; exit 128 ;;',
+    '  *) exit 0 ;;',
+    'esac',
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "git-action-errors-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const commitResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "commit", message: "test", repoPath })
+  });
+  assert.equal(commitResponse.status, 500);
+  const commitBody = await commitResponse.json() as {
+    error: string;
+    code: string;
+    details: { action: string; category: string; hookType: string; stderrExcerpt: string };
+  };
+  assert.equal(commitBody.error, "Pre-commit hook failed");
+  assert.equal(commitBody.code, LoopErrorCode.ProcessFailed);
+  assert.equal(commitBody.details.category, "pre_commit_hook");
+  assert.equal(commitBody.details.action, "commit");
+  assert.equal(commitBody.details.hookType, "lint");
+  assert.match(commitBody.details.stderrExcerpt, /eslint failed/);
+
+  const pushResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "push", repoPath })
+  });
+  assert.equal(pushResponse.status, 500);
+  const pushBody = await pushResponse.json() as {
+    error: string;
+    code: string;
+    details: { action: string; category: string; stderrExcerpt: string };
+  };
+  assert.equal(pushBody.error, "Git push authentication failed");
+  assert.equal(pushBody.code, LoopErrorCode.ProcessFailed);
+  assert.equal(pushBody.details.category, "git_push_auth");
+  assert.equal(pushBody.details.action, "push");
+  assert.match(pushBody.details.stderrExcerpt, /Permission denied/);
+
+  const statusResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "status", repoPath })
+  });
+  assert.equal(statusResponse.status, 500);
+  const statusBody = await statusResponse.json() as {
+    error: string;
+    code: string;
+    details: { action: string; category: string; exitCode: number; stderrExcerpt: string };
+  };
+  assert.equal(statusBody.code, LoopErrorCode.ProcessFailed);
+  assert.equal(statusBody.details.category, "git_command_failed");
+  assert.equal(statusBody.details.action, "status");
+  assert.equal(statusBody.details.exitCode, 128);
+  assert.match(statusBody.details.stderrExcerpt, /not a git repository/);
+});
+
+test("classifies pre-commit hook failures written to stdout", async () => {
+  const tmpDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "desktop-gateway-git-hook-stdout-")
+  );
+  tempPathsToClean.push(tmpDir);
+  const repoPath = path.join(tmpDir, "repo-git-hook-stdout");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'case "$1" in',
+    '  rev-parse) echo "main" ;;',
+    '  add) exit 0 ;;',
+    '  commit) echo "pre-commit hook: tsc type error"; exit 1 ;;',
+    '  *) exit 0 ;;',
+    'esac',
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "git-hook-stdout-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const commitResponse = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/git`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "commit", message: "test", repoPath })
+    }
+  );
+  assert.equal(commitResponse.status, 500);
+  const commitBody = await commitResponse.json() as {
+    error: string;
+    code: string;
+    details: {
+      action: string;
+      category: string;
+      hookType: string;
+      stderrExcerpt: string;
+    };
+  };
+  assert.equal(commitBody.error, "Pre-commit hook failed");
+  assert.equal(commitBody.code, LoopErrorCode.ProcessFailed);
+  assert.equal(commitBody.details.category, "pre_commit_hook");
+  assert.equal(commitBody.details.hookType, "typecheck");
+  assert.match(commitBody.details.stderrExcerpt, /type error/);
+});
+
+test("classifies git repo policy, missing repo, and spawn failures", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-git-repo-errors-"));
+  tempPathsToClean.push(tmpDir);
+  const allowedRepoPath = path.join(tmpDir, "repo");
+  await fs.mkdir(allowedRepoPath, { recursive: true });
+  const missingRepoPath = path.join(tmpDir, "missing-repo");
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  process.env.PATH = fakeBin;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [allowedRepoPath, tmpDir],
+    machineName: "git-repo-errors-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const missingResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "status", repoPath: missingRepoPath })
+  });
+  assert.equal(missingResponse.status, 404);
+  const missingBody = await missingResponse.json() as {
+    error: string;
+    code: string;
+    details: { category: string };
+  };
+  assert.equal(missingBody.error, "repository not found");
+  assert.equal(missingBody.code, LoopErrorCode.RepoNotFound);
+  assert.equal(missingBody.details.category, "repo_not_found");
+
+  const disallowedResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "status", repoPath: path.join(os.homedir(), ".ssh") })
+  });
+  assert.equal(disallowedResponse.status, 403);
+  const disallowedBody = await disallowedResponse.json() as {
+    error: string;
+    code: string;
+    details: { category: string };
+  };
+  assert.equal(disallowedBody.error, "directory not allowed");
+  assert.equal(disallowedBody.code, LoopErrorCode.RepoNotAllowed);
+  assert.equal(disallowedBody.details.category, "repo_not_allowed");
+
+  const spawnResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "status", repoPath: allowedRepoPath })
+  });
+  assert.equal(spawnResponse.status, 500);
+  const spawnBody = await spawnResponse.json() as {
+    error: string;
+    code: string;
+    details: { category: string; action: string };
+  };
+  assert.equal(spawnBody.code, LoopErrorCode.SpawnFailed);
+  assert.equal(spawnBody.details.category, "spawn_failed");
+  assert.equal(spawnBody.details.action, "status");
 });
 
 test("supports git diff route for working tree changes", async () => {

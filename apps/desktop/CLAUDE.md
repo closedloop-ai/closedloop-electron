@@ -115,3 +115,15 @@ If you merge desktop changes **without** bumping the version, the workflow will 
 
 - **Packaged builds** (DMG installs) use `electron-updater` to check GitHub Releases every 5 minutes. Users are notified in-app when a new version is available, and it auto-installs on quit.
 - **Dev builds** (running from source) compare `origin/main` commit hashes via `git fetch` and offer to pull + rebuild.
+
+## Persistent Desktop Logs
+
+Packaged and dev builds write a durable `main.log` through `electron-log`. The only allowlisted console transport remains `src/main/gateway-logger.ts`; production code in `src/main/**` and `src/server/**` should use `gatewayLog` rather than direct `console.log`, `console.warn`, or `console.error`.
+
+Typical log locations:
+
+- macOS: `~/Library/Logs/ClosedLoop/main.log`
+- Windows: `%APPDATA%/ClosedLoop/logs/main.log`
+- Linux: `~/.config/ClosedLoop/logs/main.log`
+
+The Diagnostics tab shows the current in-memory gateway log plus a bounded previous-session tail read from `main.log` at startup. First-run or unreadable log files must not block boot; return an empty previous-session tail and continue.

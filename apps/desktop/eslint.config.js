@@ -24,4 +24,16 @@ export default tseslint.config(
       "no-empty": ["error", { allowEmptyCatch: true }],
     },
   },
+  {
+    files: ["src/main/**/*.ts", "src/server/**/*.ts"],
+    rules: {
+      "no-console": "error",
+    },
+  },
+  {
+    files: ["src/main/gateway-logger.ts"],
+    rules: {
+      "no-console": ["error", { allow: ["error", "warn", "log"] }],
+    },
+  },
 );

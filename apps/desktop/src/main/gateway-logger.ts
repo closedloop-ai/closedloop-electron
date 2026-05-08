@@ -4,13 +4,18 @@
  * buffered in-memory so the UI can display recent entries.
  */
 
+import { writeGatewayLogEntry } from "./persistent-log.js";
+
 export type LogLevel = "info" | "warn" | "error";
+export type LogSession = "current" | "previous";
+export type LogMessageFactory = string | (() => string);
 
 export interface LogEntry {
   timestamp: string;
   level: LogLevel;
   tag: string;
   message: string;
+  session?: LogSession;
 }
 
 const MAX_BUFFER_SIZE = 500;
@@ -20,6 +25,8 @@ export class GatewayLogger {
   private readonly buffer: LogEntry[] = [];
   private onChange?: (entries: LogEntry[]) => void;
   private lastMessage = "";
+
+  constructor(private readonly persistentSink = writeGatewayLogEntry) {}
 
   setVerbose(enabled: boolean): void {
     if (this.verbose === enabled) return;
@@ -47,10 +54,10 @@ export class GatewayLogger {
     this.log("error", tag, message);
   }
 
-  /** Verbose-only log -- skipped when verbose mode is off. */
-  debug(tag: string, message: string): void {
+  /** Verbose-only log -- skipped without invoking lazy formatting when off. */
+  debug(tag: string, message: LogMessageFactory): void {
     if (!this.verbose) return;
-    this.log("info", tag, message);
+    this.log("info", tag, typeof message === "function" ? message() : message);
   }
 
   getEntries(): LogEntry[] {
@@ -63,6 +70,22 @@ export class GatewayLogger {
     this.onChange?.([]);
   }
 
+  seedPreviousSessionEntries(entries: LogEntry[]): void {
+    if (entries.length === 0) {
+      return;
+    }
+
+    const previousEntries = entries.map((entry) => ({
+      ...entry,
+      session: "previous" as const,
+    }));
+    this.buffer.push(...previousEntries);
+    if (this.buffer.length > MAX_BUFFER_SIZE) {
+      this.buffer.splice(0, this.buffer.length - MAX_BUFFER_SIZE);
+    }
+    this.onChange?.([...this.buffer]);
+  }
+
   private log(level: LogLevel, tag: string, message: string): void {
     const key = `${level}:${tag}:${message}`;
     if (key === this.lastMessage) return;
@@ -70,18 +93,18 @@ export class GatewayLogger {
 
     const now = new Date();
     const ts = now.toISOString();
-    const entry: LogEntry = { timestamp: ts, level, tag, message };
+    const entry: LogEntry = { timestamp: ts, level, tag, message, session: "current" };
 
     this.buffer.push(entry);
     if (this.buffer.length > MAX_BUFFER_SIZE) {
       this.buffer.splice(0, this.buffer.length - MAX_BUFFER_SIZE);
     }
 
-    const short = now.toLocaleTimeString('en-US', {
+    const short = now.toLocaleTimeString("en-US", {
       hour12: false,
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
       fractionalSecondDigits: 3,
     });
     const prefix = `[${tag}][${short}]`;
@@ -93,6 +116,7 @@ export class GatewayLogger {
       console.log(prefix, message);
     }
 
+    this.persistentSink(entry);
     this.onChange?.([...this.buffer]);
   }
 }

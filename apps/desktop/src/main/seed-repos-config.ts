@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import { normalizeScopePath } from "../shared/sandbox-policy.js";
 import { computeSymphonyDir } from "../server/operations/symphony-utils.js";
 import { loadReposConfig, saveReposConfig } from "../server/operations/repos-config-utils.js";
+import { gatewayLog } from "./gateway-logger.js";
 
 /**
  * Seeds repos.json within the symphony config directory for the given sandbox.
@@ -80,6 +81,7 @@ export async function seedReposConfig(
     }
   } catch (err) {
     // Best-effort — never block onboarding/settings/boot
-    console.error("seedReposConfig failed:", err);
+    const message = err instanceof Error ? err.message : String(err);
+    gatewayLog.error("seed-repos-config", `seedReposConfig failed: ${message}`);
   }
 }

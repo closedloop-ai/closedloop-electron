@@ -183,6 +183,68 @@ test("finalizes dead jobs without promoting UNKNOWN status to completed", async 
   );
 });
 
+test("boot recovery uploads support bundle for failed dead jobs before terminal error event", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "claude-output.jsonl"), "{}\n");
+  const loopTokenStore = createLoopTokenStore("boot-recovery-support-tokens");
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
+
+  const jobStore = createStore("boot-recovery-support-upload");
+  const deadJob = createJob({
+    status: "FAILED",
+    exitCode: 1,
+    pid: 9_999_999,
+    claudeWorkDir,
+    s3StateKey: "org-1/loops/loop-1/run-1",
+  });
+  jobStore.upsert(deadJob);
+  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    const url = String(input);
+    const headers = new Headers(init?.headers);
+    fetchCalls.push({
+      url,
+      body: typeof init?.body === "string" ? init.body : "",
+      authHeader: headers.get("Authorization"),
+    });
+    if (url.includes("/upload-urls")) {
+      return Response.json({
+        success: true,
+        data: {
+          urls: [
+            {
+              key: "org-1/loops/loop-1/run-1/support/claude-output.jsonl",
+              url: "https://closedloop-files.s3.us-east-1.amazonaws.com/claude",
+            },
+          ],
+        },
+      });
+    }
+    return Response.json({ success: true });
+  }) as typeof fetch;
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4010",
+    loopTokenStore,
+  });
+  await service.run([deadJob]);
+  service.dispose();
+
+  const eventBodies = fetchCalls
+    .filter((call) => call.url.endsWith("/events"))
+    .map((call) => JSON.parse(call.body) as { type?: string });
+  assert.deepEqual(
+    eventBodies.map((body) => body.type),
+    ["support_bundle_uploaded", "error"],
+  );
+  assert.ok(jobStore.getByLoopId("loop-1")?.supportBundleUploadedAt);
+  assert.equal(loopTokenStore.getLoopToken("loop-1"), null);
+});
+
 test("finalizes dead jobs using LoopTokenStore and clears token after UNKNOWN replay", async () => {
   const repoDir = path.join(tempRoot, "repo");
   const claudeWorkDir = path.join(repoDir, "workdir");

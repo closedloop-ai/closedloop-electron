@@ -2,7 +2,11 @@ import { TelemetryService, type EnrichedTelemetryEvent } from "./telemetry-servi
 import { PostHogAnalytics } from "./posthog-analytics.js";
 import { gatewayLog } from "./gateway-logger.js";
 import type {
+  DesktopShutdownDiagnostics,
+  DesktopUpdateDiagnostics,
   ExecutePlanSourceDiagnostics,
+  OutboundNetworkDiagnostics,
+  SupportUploadDiagnostics,
   TelemetryCategory,
   TelemetryDiagnostics,
   TelemetryEmitter,
@@ -240,6 +244,69 @@ export class Observability {
       { extra: { surface, reason } },
     );
     Observability.capturePostHog("desktop_pop_unavailable", { surface, reason });
+  }
+
+  /** Emits a descriptor-only outbound network policy decision for SSRF-sensitive fetches. */
+  static outboundNetworkDecision(input: OutboundNetworkDiagnostics): void {
+    const severity: TelemetrySeverity =
+      input.decision === "denied" ? "warn" : "info";
+    const message =
+      input.decision === "denied"
+        ? "Outbound network request denied"
+        : "Outbound network request allowed";
+    Observability.emitTelemetry(
+      severity,
+      "desktop.outbound_network_decision",
+      message,
+      {},
+      { outboundNetwork: input },
+    );
+  }
+
+  /** Emits structured lifecycle diagnostics for failure support bundle uploads. */
+  static supportUploadLifecycle(input: SupportUploadDiagnostics): void {
+    const severity: TelemetrySeverity =
+      input.outcome === "failed" ? "warn" : "info";
+    Observability.emitTelemetry(
+      severity,
+      "desktop.support_upload",
+      `Support upload ${input.outcome}`,
+      { loopId: input.loopId, jobId: input.loopId },
+      { supportUpload: input },
+    );
+  }
+
+  /** Emits bounded Desktop auto-update telemetry through the relay path. */
+  static electronUpdateInitiated(input: DesktopUpdateDiagnostics): void {
+    Observability.emitTelemetry(
+      "info",
+      "electron_update.initiated",
+      "Electron update initiated",
+      {},
+      { desktopUpdate: input },
+    );
+  }
+
+  /** Emits bounded Desktop auto-update failure telemetry through the relay path. */
+  static electronUpdateFailed(input: DesktopUpdateDiagnostics): void {
+    Observability.emitTelemetry(
+      "error",
+      "electron_update.failed",
+      "Electron update failed",
+      {},
+      { desktopUpdate: input },
+    );
+  }
+
+  /** Emits bounded Desktop shutdown failure telemetry through the relay path. */
+  static desktopShutdownFailed(input: DesktopShutdownDiagnostics): void {
+    Observability.emitTelemetry(
+      "error",
+      "desktop.shutdown_failed",
+      "Desktop shutdown failed",
+      {},
+      { desktopShutdown: input },
+    );
   }
 
   // --- Sandbox (PostHog only) ---

@@ -487,9 +487,9 @@ export function registerSymphonyInteractiveRoutes(
           source: "claude",
         });
       } catch (err) {
-        console.error(
-          "[commit-message] generation failed:",
-          err instanceof Error ? err.message : err
+        gatewayLog.error(
+          "commit-message",
+          `generation failed: ${err instanceof Error ? err.message : String(err)}`,
         );
         json(context, 200, {
           title: `Work on ${ticketId}`,
@@ -1014,11 +1014,11 @@ async function generateCommitWithClaude(
       clearTimeout(timer);
 
       if (stderr) {
-        console.error("[commit-message] claude stderr:", stderr.slice(0, 500));
+        gatewayLog.error("commit-message", `claude stderr: ${stderr.slice(0, 500)}`);
       }
 
       if (code !== 0) {
-        console.error(`[commit-message] claude exited with code ${code}`);
+        gatewayLog.error("commit-message", `claude exited with code ${code}`);
       }
 
       // Parse stdout regardless of exit code — claude may produce
@@ -1047,7 +1047,7 @@ async function generateCommitWithClaude(
 
     child.on("error", (err) => {
       clearTimeout(timer);
-      console.error("[commit-message] failed to spawn claude:", err.message);
+      gatewayLog.error("commit-message", `failed to spawn claude: ${err.message}`);
       reject(err);
     });
   }), deps);
