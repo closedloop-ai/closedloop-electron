@@ -12,6 +12,9 @@ export interface ExecResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  errorCode?: string;
+  errorPath?: string;
+  errorSyscall?: string;
 }
 
 export interface StreamingSpawnOptions {
@@ -178,9 +181,14 @@ export class ProcessManager {
         stdout?: string;
         stderr?: string;
         code?: string | number;
+        path?: string;
+        syscall?: string;
       };
 
       return {
+        ...(typeof execError.code === "string" ? { errorCode: execError.code } : {}),
+        ...(typeof execError.path === "string" ? { errorPath: execError.path } : {}),
+        ...(typeof execError.syscall === "string" ? { errorSyscall: execError.syscall } : {}),
         stdout: execError.stdout ?? "",
         stderr: execError.stderr ?? execError.message,
         exitCode: typeof execError.code === "number" ? execError.code : 1
