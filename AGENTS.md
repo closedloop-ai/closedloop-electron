@@ -34,6 +34,7 @@ TypeScript is strict-mode (`tsconfig.base.json`) and ESM (`NodeNext`).
 - Prefer `kebab-case` file names (for example, `gateway-auth.ts`).
 - Keep boundaries clear between `main`, `server`, and `shared` modules.
 - Use `.js` extensions in ESM imports.
+- In Desktop main/server NodeNext ESM code, dependency subpath imports must either use an exported package subpath or the concrete runtime file extension, and new subpath imports should be validated against built output before shipping.
 - Prefix intentionally unused variables/args with `_` to satisfy lint rules.
 - Do not edit `apps/desktop/src/shared/build-info.ts` manually (auto-generated in prebuild).
 - Avoid unnecessary TypeScript casts. Prefer importing concrete shared types, narrowing with type guards, or shaping helper return types so call sites do not need `as` to satisfy the compiler.

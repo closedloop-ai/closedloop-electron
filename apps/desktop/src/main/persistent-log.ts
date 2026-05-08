@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import electron from "electron";
-import electronLog from "electron-log/main";
+import electronLog from "electron-log/main.js";
 import type { LogEntry, LogLevel } from "./gateway-logger.js";
 
 const MAIN_LOG_FILE_NAME = "main.log";
