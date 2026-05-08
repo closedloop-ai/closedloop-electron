@@ -589,7 +589,7 @@ describe("detectAuthChallengeFromJsonl", () => {
 
   // apiErrorStatus-based detection (HTTP 401/403 regardless of error text)
 
-  test("detects apiErrorStatus=401 even when error text does not match AUTH_CHALLENGE_PATTERN", () => {
+  test("detects apiErrorStatus=401 even when error text does not match AUTH_STATUS_PATTERN", () => {
     writeJsonl([
       { type: "assistant", isApiErrorMessage: true, error: "something went wrong", apiErrorStatus: 401 },
     ]);
@@ -599,7 +599,7 @@ describe("detectAuthChallengeFromJsonl", () => {
     assert.ok(result.includes("something went wrong"));
   });
 
-  test("detects apiErrorStatus=403 even when error text does not match AUTH_CHALLENGE_PATTERN", () => {
+  test("detects apiErrorStatus=403 even when error text does not match AUTH_STATUS_PATTERN", () => {
     writeJsonl([
       { type: "assistant", isApiErrorMessage: true, error: "generic error", apiErrorStatus: 403 },
     ]);
@@ -609,7 +609,7 @@ describe("detectAuthChallengeFromJsonl", () => {
     assert.ok(result.includes("generic error"));
   });
 
-  test("does NOT detect apiErrorStatus=500 when error text does not match AUTH_CHALLENGE_PATTERN", () => {
+  test("does NOT detect apiErrorStatus=500 when error text does not match AUTH_STATUS_PATTERN", () => {
     writeJsonl([
       { type: "assistant", isApiErrorMessage: true, error: "something went wrong", apiErrorStatus: 500 },
     ]);
@@ -634,7 +634,7 @@ describe("detectAuthChallengeFromJsonl", () => {
     assert.ok(result.includes("rate_limit"));
   });
 
-  test("detects apiErrorStatus=429 even when error text does not match AUTH_CHALLENGE_PATTERN", () => {
+  test("detects apiErrorStatus=429 even when error text does not match AUTH_STATUS_PATTERN", () => {
     writeJsonl([
       { type: "assistant", isApiErrorMessage: true, error: "quota exceeded", apiErrorStatus: 429 },
     ]);
