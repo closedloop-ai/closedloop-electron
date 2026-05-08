@@ -13,6 +13,8 @@ export type TelemetryCategory =
   | "command.timeout"
   | "command.cancelled"
   | "command.gateway_error"
+  | "desktop.outbound_network_decision"
+  | "desktop.support_upload"
   | "job.started"
   | "job.plan_source_resolved"
   | "job.decision_table_verification"
@@ -118,6 +120,74 @@ export type DecisionTableVerificationTelemetryDiagnostics =
   | DecisionTableVerificationRecordDiagnostics
   | DecisionTableVerificationMissingDiagnostics;
 
+export type OutboundNetworkSurface =
+  | "loop_attachment_download"
+  | "loop_support_upload"
+  | "deploy_health_check";
+
+export type OutboundNetworkDecision = "allowed" | "denied";
+
+export type OutboundNetworkDestinationClass =
+  | "external"
+  | "invalid"
+  | "ip_literal"
+  | "link_local"
+  | "loopback"
+  | "metadata"
+  | "private"
+  | "s3_path_style"
+  | "s3_virtual_hosted";
+
+export type OutboundNetworkDecisionReason =
+  | "allowed"
+  | "attachment_host_not_allowed"
+  | "credentialed_url"
+  | "deploy_host_not_allowed"
+  | "invalid_url"
+  | "ip_literal_not_allowed"
+  | "link_local_address_not_allowed"
+  | "metadata_address_not_allowed"
+  | "path_style_s3_not_allowed"
+  | "private_address_not_allowed"
+  | "unsupported_protocol";
+
+export interface OutboundNetworkDiagnostics {
+  surface: OutboundNetworkSurface;
+  decision: OutboundNetworkDecision;
+  reason: OutboundNetworkDecisionReason;
+  destinationClass: OutboundNetworkDestinationClass;
+  protocol?: string;
+  hostname?: string;
+  port?: string;
+  statusCode?: number;
+}
+
+export type SupportUploadOutcome = "started" | "skipped" | "succeeded" | "failed";
+export type SupportUploadReason =
+  | "already_uploaded"
+  | "missing_s3_state_key"
+  | "no_uploadable_files"
+  | "upload_url_http_error"
+  | "upload_url_malformed_response"
+  | "upload_url_success_false"
+  | "upload_url_missing_url"
+  | "upload_url_request_failed"
+  | "put_url_denied"
+  | "put_http_error"
+  | "put_request_failed"
+  | "event_post_failed";
+
+export interface SupportUploadDiagnostics {
+  outcome: SupportUploadOutcome;
+  loopId?: string;
+  s3StateKeySuffix?: string;
+  attemptedLogicalNames?: string[];
+  attemptedUploadedNames?: string[];
+  reason?: SupportUploadReason;
+  uploadedCount?: number;
+  durationMs?: number;
+}
+
 export interface TelemetryDiagnostics {
   exitCode?: number;
   logTail?: string;
@@ -138,6 +208,8 @@ export interface TelemetryDiagnostics {
   };
   tokenUsage?: { inputTokens: number; outputTokens: number };
   decisionTableVerification?: DecisionTableVerificationTelemetryDiagnostics;
+  outboundNetwork?: OutboundNetworkDiagnostics;
+  supportUpload?: SupportUploadDiagnostics;
   diagnosticsVersion?: number;
   errorStack?: string;
   extra?: Record<string, unknown>;
