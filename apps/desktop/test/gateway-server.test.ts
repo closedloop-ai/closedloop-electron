@@ -7,6 +7,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { Readable } from "node:stream";
+import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { afterEach, mock, test } from "node:test";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { GatewayRouter, type GatewayActivityEvent } from "../src/server/router.js";
@@ -2527,6 +2528,168 @@ test("supports core git action routes", async () => {
   assert.equal(branchesResponse.status, 200);
   const branchesBody = (await branchesResponse.json()) as { branches: Array<{ name: string }> };
   assert.equal(branchesBody.branches.some((branch) => branch.name === "feature/AI-501"), true);
+});
+
+test("classifies git action failures with additive structured error fields", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-git-action-errors-"));
+  tempPathsToClean.push(tmpDir);
+  const repoPath = path.join(tmpDir, "repo-git-errors");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'case "$1" in',
+    '  rev-parse) echo "main" ;;',
+    '  add) exit 0 ;;',
+    '  commit) echo "pre-commit hook: eslint failed" >&2; exit 1 ;;',
+    '  push) echo "Permission denied (publickey)." >&2; exit 128 ;;',
+    '  status) echo "fatal: not a git repository" >&2; exit 128 ;;',
+    '  *) exit 0 ;;',
+    'esac',
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "git-action-errors-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const commitResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "commit", message: "test", repoPath })
+  });
+  assert.equal(commitResponse.status, 500);
+  const commitBody = await commitResponse.json() as {
+    error: string;
+    code: string;
+    details: { action: string; category: string; hookType: string; stderrExcerpt: string };
+  };
+  assert.equal(commitBody.error, "Pre-commit hook failed");
+  assert.equal(commitBody.code, LoopErrorCode.ProcessFailed);
+  assert.equal(commitBody.details.category, "pre_commit_hook");
+  assert.equal(commitBody.details.action, "commit");
+  assert.equal(commitBody.details.hookType, "lint");
+  assert.match(commitBody.details.stderrExcerpt, /eslint failed/);
+
+  const pushResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "push", repoPath })
+  });
+  assert.equal(pushResponse.status, 500);
+  const pushBody = await pushResponse.json() as {
+    error: string;
+    code: string;
+    details: { action: string; category: string; stderrExcerpt: string };
+  };
+  assert.equal(pushBody.error, "Git push authentication failed");
+  assert.equal(pushBody.code, LoopErrorCode.ProcessFailed);
+  assert.equal(pushBody.details.category, "git_push_auth");
+  assert.equal(pushBody.details.action, "push");
+  assert.match(pushBody.details.stderrExcerpt, /Permission denied/);
+
+  const statusResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "status", repoPath })
+  });
+  assert.equal(statusResponse.status, 500);
+  const statusBody = await statusResponse.json() as {
+    error: string;
+    code: string;
+    details: { action: string; category: string; exitCode: number; stderrExcerpt: string };
+  };
+  assert.equal(statusBody.code, LoopErrorCode.ProcessFailed);
+  assert.equal(statusBody.details.category, "git_command_failed");
+  assert.equal(statusBody.details.action, "status");
+  assert.equal(statusBody.details.exitCode, 128);
+  assert.match(statusBody.details.stderrExcerpt, /not a git repository/);
+});
+
+test("classifies git repo policy, missing repo, and spawn failures", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-git-repo-errors-"));
+  tempPathsToClean.push(tmpDir);
+  const allowedRepoPath = path.join(tmpDir, "repo");
+  await fs.mkdir(allowedRepoPath, { recursive: true });
+  const missingRepoPath = path.join(tmpDir, "missing-repo");
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  process.env.PATH = fakeBin;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [allowedRepoPath, tmpDir],
+    machineName: "git-repo-errors-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const missingResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "status", repoPath: missingRepoPath })
+  });
+  assert.equal(missingResponse.status, 404);
+  const missingBody = await missingResponse.json() as {
+    error: string;
+    code: string;
+    details: { category: string };
+  };
+  assert.equal(missingBody.error, "repository not found");
+  assert.equal(missingBody.code, LoopErrorCode.RepoNotFound);
+  assert.equal(missingBody.details.category, "repo_not_found");
+
+  const disallowedResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "status", repoPath: path.join(os.homedir(), ".ssh") })
+  });
+  assert.equal(disallowedResponse.status, 403);
+  const disallowedBody = await disallowedResponse.json() as {
+    error: string;
+    code: string;
+    details: { category: string };
+  };
+  assert.equal(disallowedBody.error, "directory not allowed");
+  assert.equal(disallowedBody.code, LoopErrorCode.RepoNotAllowed);
+  assert.equal(disallowedBody.details.category, "repo_not_allowed");
+
+  const spawnResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "status", repoPath: allowedRepoPath })
+  });
+  assert.equal(spawnResponse.status, 500);
+  const spawnBody = await spawnResponse.json() as {
+    error: string;
+    code: string;
+    details: { category: string; action: string };
+  };
+  assert.equal(spawnBody.code, LoopErrorCode.SpawnFailed);
+  assert.equal(spawnBody.details.category, "spawn_failed");
+  assert.equal(spawnBody.details.action, "status");
 });
 
 test("supports git diff route for working tree changes", async () => {
