@@ -2620,6 +2620,69 @@ test("classifies git action failures with additive structured error fields", asy
   assert.match(statusBody.details.stderrExcerpt, /not a git repository/);
 });
 
+test("classifies pre-commit hook failures written to stdout", async () => {
+  const tmpDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "desktop-gateway-git-hook-stdout-")
+  );
+  tempPathsToClean.push(tmpDir);
+  const repoPath = path.join(tmpDir, "repo-git-hook-stdout");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'case "$1" in',
+    '  rev-parse) echo "main" ;;',
+    '  add) exit 0 ;;',
+    '  commit) echo "pre-commit hook: tsc type error"; exit 1 ;;',
+    '  *) exit 0 ;;',
+    'esac',
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "git-hook-stdout-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const commitResponse = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/git`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "commit", message: "test", repoPath })
+    }
+  );
+  assert.equal(commitResponse.status, 500);
+  const commitBody = await commitResponse.json() as {
+    error: string;
+    code: string;
+    details: {
+      action: string;
+      category: string;
+      hookType: string;
+      stderrExcerpt: string;
+    };
+  };
+  assert.equal(commitBody.error, "Pre-commit hook failed");
+  assert.equal(commitBody.code, LoopErrorCode.ProcessFailed);
+  assert.equal(commitBody.details.category, "pre_commit_hook");
+  assert.equal(commitBody.details.hookType, "typecheck");
+  assert.match(commitBody.details.stderrExcerpt, /type error/);
+});
+
 test("classifies git repo policy, missing repo, and spawn failures", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-git-repo-errors-"));
   tempPathsToClean.push(tmpDir);

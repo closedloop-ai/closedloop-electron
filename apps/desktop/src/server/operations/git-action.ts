@@ -420,13 +420,14 @@ function classifyGitActionError(error: GitActionError) {
   }
 
   if (isCommitHookFailure(error)) {
+    const output = getGitActionOutput(error);
     return {
       error: "Pre-commit hook failed",
       code: LoopErrorCode.ProcessFailed,
       details: {
         action: "commit",
         category: "pre_commit_hook",
-        hookType: classifyHookType(error.stderr),
+        hookType: classifyHookType(output),
         stderrExcerpt: error.stderrExcerpt
       }
     };
@@ -460,27 +461,51 @@ function isCommitHookFailure(error: GitActionError): boolean {
   if (error.action !== "commit" || error.args[0] !== "commit") {
     return false;
   }
-  const output = error.stderr.toLowerCase();
+  const output = getGitActionOutput(error);
+  const normalizedOutput = output.toLowerCase();
   return (
-    output.includes("pre-commit") ||
-    output.includes("husky") ||
-    output.includes("hook") ||
-    classifyHookType(error.stderr) !== "unknown"
+    normalizedOutput.includes("pre-commit") ||
+    normalizedOutput.includes("husky") ||
+    normalizedOutput.includes("hook") ||
+    classifyHookType(output) !== "unknown"
   );
 }
 
-function classifyHookType(stderr: string): "lint" | "test" | "typecheck" | "format" | "unknown" {
-  const output = stderr.toLowerCase();
-  if (output.includes("eslint") || output.includes("lint")) {
+function getGitActionOutput(error: GitActionError): string {
+  return (
+    [error.stderr, error.stdout].filter(Boolean).join("\n") ||
+    error.stderrExcerpt
+  );
+}
+
+function classifyHookType(
+  output: string
+): "lint" | "test" | "typecheck" | "format" | "unknown" {
+  const normalizedOutput = output.toLowerCase();
+  if (
+    normalizedOutput.includes("eslint") ||
+    normalizedOutput.includes("lint")
+  ) {
     return "lint";
   }
-  if (output.includes("typecheck") || output.includes("tsc") || output.includes("type error")) {
+  if (
+    normalizedOutput.includes("typecheck") ||
+    normalizedOutput.includes("tsc") ||
+    normalizedOutput.includes("type error")
+  ) {
     return "typecheck";
   }
-  if (output.includes("prettier") || output.includes("format")) {
+  if (
+    normalizedOutput.includes("prettier") ||
+    normalizedOutput.includes("format")
+  ) {
     return "format";
   }
-  if (output.includes("vitest") || output.includes("jest") || output.includes("test failed")) {
+  if (
+    normalizedOutput.includes("vitest") ||
+    normalizedOutput.includes("jest") ||
+    normalizedOutput.includes("test failed")
+  ) {
     return "test";
   }
   return "unknown";
