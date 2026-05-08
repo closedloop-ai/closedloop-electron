@@ -910,6 +910,21 @@
         gap: 4px;
       }
 
+      .logs-paused-banner {
+        display: none;
+        margin: 0 0 10px;
+        padding: 7px 10px;
+        border: 1px solid rgba(245, 158, 11, 0.35);
+        border-radius: 8px;
+        color: #fbbf24;
+        background: rgba(245, 158, 11, 0.08);
+        font-size: 12px;
+      }
+
+      .logs-paused-banner.visible {
+        display: block;
+      }
+
       .logs-btn {
         display: inline-flex;
         align-items: center;
@@ -963,6 +978,10 @@
         background: rgba(245, 158, 11, 0.04);
       }
 
+      .log-row.log-previous {
+        opacity: 0.72;
+      }
+
       .log-ts {
         color: var(--muted);
         opacity: 0.7;
@@ -973,6 +992,16 @@
         color: var(--accent);
         flex-shrink: 0;
         min-width: 110px;
+      }
+
+      .log-session {
+        color: var(--muted);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 1px 6px;
+        font-size: 10px;
+        line-height: 1.2;
+        white-space: nowrap;
       }
 
       .log-msg {
@@ -1963,7 +1992,7 @@
     <main>
       <div id="updateBanner">
         <span id="updateBannerText">A new version is available</span>
-        <button id="updateBannerBtn">Update &amp; Restart</button>
+        <button id="updateBannerBtn">Update &amp; restart</button>
       </div>
       <section id="dashboard" class="panel active">
         <div class="dashboard-summary">
@@ -2050,11 +2079,18 @@
             <button class="logs-btn" id="refreshLogsBtn" title="Refresh logs">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 1.5v4.5h4.5"/><path d="M2.3 10a6 6 0 1 0 .9-4.8L1.5 6"/></svg>
             </button>
+            <button class="logs-btn" id="pauseLogsBtn" title="Pause logs">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><rect x="4" y="3" width="2.5" height="10" rx="0.8"/><rect x="9.5" y="3" width="2.5" height="10" rx="0.8"/></svg>
+            </button>
+            <button class="logs-btn" id="openLogFileBtn" title="Open log file">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2H4.5A1.5 1.5 0 0 0 3 3.5v9A1.5 1.5 0 0 0 4.5 14h7a1.5 1.5 0 0 0 1.5-1.5V6"/><path d="M9 2v4h4"/><path d="M6 10h4"/></svg>
+            </button>
             <button class="logs-btn" id="clearLogsBtn" title="Clear logs">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="2" x2="14" y2="14"/><line x1="14" y1="2" x2="2" y2="14"/></svg>
             </button>
           </div>
         </div>
+        <div id="logsPausedBanner" class="logs-paused-banner">Paused - 0 new entries queued</div>
         <div id="logsList" class="logs-container"></div>
       </section>
       <section id="settings" class="panel">
@@ -3840,12 +3876,18 @@
 
       // --- Logs tab ---
       const logsList = document.getElementById("logsList");
+      const logsPausedBanner = document.getElementById("logsPausedBanner");
+      const pauseLogsBtn = document.getElementById("pauseLogsBtn");
+      const openLogFileBtn = document.getElementById("openLogFileBtn");
 
       let logsAutoRefreshTimer = null;
+      let logsPaused = false;
+      let lastVisibleLogCount = 0;
+      const renderedLogKeys = new Set();
 
       function startLogsAutoRefresh() {
         stopLogsAutoRefresh();
-        logsAutoRefreshTimer = setInterval(() => void renderLogs(), 3000);
+        logsAutoRefreshTimer = setInterval(() => void pollLogs(), 3000);
       }
 
       function stopLogsAutoRefresh() {
@@ -3855,28 +3897,149 @@
         }
       }
 
-      async function renderLogs() {
-        const wasAtBottom = logsList.scrollTop + logsList.clientHeight >= logsList.scrollHeight - 20;
+      async function pollLogs() {
         const entries = await api.getLogs();
         if (!entries || !entries.length) {
-          logsList.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;color:var(--muted);text-align:center;gap:6px"><div style="font-size:13px">No log entries yet</div><div style="font-size:11px;opacity:0.7">Turn on Verbose to capture detailed diagnostics.</div></div>';
+          updatePausedBanner(0);
+          if (!logsPaused) {
+            renderLogs([]);
+          }
           return;
         }
-        const html = entries.map(e => {
-          const isError = e.level === "error";
-          const isWarn = e.level === "warn";
-          const rowClass = isError ? "log-row log-error" : isWarn ? "log-row log-warn" : "log-row";
-          const ts = e.timestamp.slice(11, 23);
-          return `<div class="${rowClass}"><span class="log-ts">${ts}</span><span class="log-tag">${escapeHtml(e.tag)}</span><span class="log-msg">${escapeHtml(e.message)}</span></div>`;
-        }).join("");
-        logsList.innerHTML = html;
+
+        const queued = Math.max(0, entries.length - lastVisibleLogCount);
+        updatePausedBanner(queued);
+        if (logsPaused || isSelectingLogs()) {
+          return;
+        }
+
+        renderLogs(entries);
+      }
+
+      function renderLogs(entries) {
+        const wasAtBottom = logsList.scrollTop + logsList.clientHeight >= logsList.scrollHeight - 20;
+        if (!entries.length) {
+          logsList.textContent = "";
+          renderedLogKeys.clear();
+          lastVisibleLogCount = 0;
+          logsList.appendChild(buildEmptyLogsMessage());
+          return;
+        }
+
+        const placeholder = logsList.querySelector("[data-empty-logs]");
+        placeholder?.remove();
+        for (const entry of entries) {
+          const key = logEntryKey(entry);
+          if (renderedLogKeys.has(key)) {
+            continue;
+          }
+          renderedLogKeys.add(key);
+          logsList.appendChild(buildLogRow(entry));
+        }
+        trimRenderedLogs(500);
+        lastVisibleLogCount = entries.length;
         if (wasAtBottom) {
           logsList.scrollTop = logsList.scrollHeight;
         }
       }
 
-      function escapeHtml(s) {
-        return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      function buildEmptyLogsMessage() {
+        const empty = document.createElement("div");
+        empty.dataset.emptyLogs = "true";
+        empty.style.display = "flex";
+        empty.style.flexDirection = "column";
+        empty.style.alignItems = "center";
+        empty.style.justifyContent = "center";
+        empty.style.padding = "40px 20px";
+        empty.style.color = "var(--muted)";
+        empty.style.textAlign = "center";
+        empty.style.gap = "6px";
+        const title = document.createElement("div");
+        title.style.fontSize = "13px";
+        title.textContent = "No log entries yet";
+        const hint = document.createElement("div");
+        hint.style.fontSize = "11px";
+        hint.style.opacity = "0.7";
+        hint.textContent = "Turn on Verbose to capture detailed diagnostics.";
+        empty.append(title, hint);
+        return empty;
+      }
+
+      function buildLogRow(entry) {
+        const row = document.createElement("div");
+        const isError = entry.level === "error";
+        const isWarn = entry.level === "warn";
+        row.className = isError
+          ? "log-row log-error"
+          : isWarn
+            ? "log-row log-warn"
+            : "log-row";
+        if (entry.session === "previous") {
+          row.classList.add("log-previous");
+        }
+        row.dataset.logKey = logEntryKey(entry);
+
+        const timestamp = document.createElement("span");
+        timestamp.className = "log-ts";
+        timestamp.textContent = typeof entry.timestamp === "string"
+          ? entry.timestamp.slice(11, 23)
+          : "";
+        const tag = document.createElement("span");
+        tag.className = "log-tag";
+        tag.textContent = entry.tag || "desktop";
+        const message = document.createElement("span");
+        message.className = "log-msg";
+        message.textContent = entry.message || "";
+        row.append(timestamp, tag);
+        if (entry.session === "previous") {
+          const session = document.createElement("span");
+          session.className = "log-session";
+          session.textContent = "previous session";
+          row.append(session);
+        }
+        row.append(message);
+        return row;
+      }
+
+      function logEntryKey(entry) {
+        return [
+          entry.timestamp || "",
+          entry.level || "",
+          entry.tag || "",
+          entry.message || "",
+          entry.session || "current"
+        ].join("|");
+      }
+
+      function trimRenderedLogs(maxRows) {
+        while (logsList.children.length > maxRows) {
+          const first = logsList.firstElementChild;
+          if (!first) break;
+          if (first.dataset.emptyLogs) {
+            first.remove();
+            continue;
+          }
+          renderedLogKeys.delete(first.dataset.logKey || "");
+          first.remove();
+        }
+      }
+
+      function isSelectingLogs() {
+        const selection = window.getSelection();
+        if (!selection || selection.isCollapsed) {
+          return false;
+        }
+        const node = selection.anchorNode;
+        if (!node) {
+          return false;
+        }
+        const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+        return Boolean(element && logsList.contains(element));
+      }
+
+      function updatePausedBanner(queuedCount) {
+        logsPausedBanner.textContent = `Paused - ${queuedCount} new entries queued`;
+        logsPausedBanner.classList.toggle("visible", logsPaused);
       }
 
       const verboseToggle = document.getElementById("verboseLogging");
@@ -3884,10 +4047,33 @@
         await api.updateSettings({ verboseLogging: verboseToggle.checked });
       });
 
-      document.getElementById("refreshLogsBtn").addEventListener("click", renderLogs);
+      document.getElementById("refreshLogsBtn").addEventListener("click", () => void pollLogs());
+      pauseLogsBtn.addEventListener("click", async () => {
+        logsPaused = !logsPaused;
+        pauseLogsBtn.title = logsPaused ? "Resume logs" : "Pause logs";
+        updatePausedBanner(0);
+        if (!logsPaused) {
+          await pollLogs();
+        }
+      });
+      openLogFileBtn.addEventListener("click", async () => {
+        const result = await api.openLogFile();
+        if (result && result.ok === false) {
+          logsPausedBanner.textContent = `Failed to open log file: ${result.error || "unknown error"}`;
+          logsPausedBanner.classList.add("visible");
+        }
+      });
+      api.getLogFilePath?.().then((logPath) => {
+        if (logPath) {
+          openLogFileBtn.title = `Open log file: ${logPath}`;
+        }
+      }).catch(() => {});
       document.getElementById("clearLogsBtn").addEventListener("click", async () => {
         await api.clearLogs();
-        await renderLogs();
+        logsList.textContent = "";
+        renderedLogKeys.clear();
+        lastVisibleLogCount = 0;
+        await pollLogs();
       });
 
       document.getElementById("saveRelayGateway").addEventListener("click", saveRelayGatewaySettings);
@@ -3995,7 +4181,13 @@
             ? result.remoteHash.slice(0, 7)
             : "unknown";
         updateBannerText.textContent = `A new version is available (${label})`;
+        updateBannerBtn.disabled = false;
         updateBanner.classList.add("visible");
+      }
+
+      function hideUpdateBanner() {
+        updateBanner.classList.remove("visible");
+        updateBannerBtn.disabled = true;
       }
 
       async function triggerUpdate() {
@@ -4006,12 +4198,27 @@
           updateBannerText.textContent = "Restarting\u2026";
         } catch (error) {
           updateBannerText.textContent = `Update failed: ${error.message || error}`;
-          updateBannerBtn.disabled = false;
+          updateBannerBtn.disabled = true;
         }
       }
 
       window.addEventListener("desktop:update-available", (event) => {
+        if (event.detail?.readyToInstall === false) {
+          hideUpdateBanner();
+          return;
+        }
         showUpdateBanner(event.detail);
+      });
+
+      window.addEventListener("desktop:update-status", (event) => {
+        const status = event.detail;
+        if (status?.readyToInstall === true || status?.status === "downloaded") {
+          showUpdateBanner(status);
+          return;
+        }
+        if (status?.status === "available" || status?.status === "downloading" || status?.status === "not-available" || status?.status === "error") {
+          hideUpdateBanner();
+        }
       });
 
       window.addEventListener("desktop:onboarding-state-changed", () => {

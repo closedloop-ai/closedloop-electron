@@ -18,7 +18,8 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
+import { inspect, promisify } from "node:util";
+import { gatewayLog } from "../../main/gateway-logger.js";
 import { expandHomePath } from "../../shared/path-utils.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { getShellEnv } from "../shell-path.js";
@@ -42,14 +43,20 @@ export const CLONE_GIT_TIMEOUT = 300_000;
 
 export function loopLog(loopId: string, ...args: unknown[]): void {
   const short = loopId.slice(0, 8);
-  const ts = new Date().toISOString().slice(11, 23);
-  console.log(`[symphony-loop][${ts}][${short}]`, ...args);
+  gatewayLog.info("symphony-loop", `[${short}] ${formatLoopLogArgs(args)}`);
 }
 
 export function loopError(loopId: string, ...args: unknown[]): void {
   const short = loopId.slice(0, 8);
-  const ts = new Date().toISOString().slice(11, 23);
-  console.error(`[symphony-loop][${ts}][${short}]`, ...args);
+  gatewayLog.error("symphony-loop", `[${short}] ${formatLoopLogArgs(args)}`);
+}
+
+function formatLoopLogArgs(args: unknown[]): string {
+  return args
+    .map((arg) =>
+      typeof arg === "string" ? arg : inspect(arg, { depth: 4, breakLength: 120 }),
+    )
+    .join(" ");
 }
 
 export class SymphonyDirNotConfiguredError extends Error {
