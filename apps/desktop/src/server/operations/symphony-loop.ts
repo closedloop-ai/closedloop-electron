@@ -2329,9 +2329,26 @@ export function isSessionLimitError(logTail: string): boolean {
 // Auth challenge detection
 // ---------------------------------------------------------------------------
 
-/** Pattern that matches known auth/rate-limit/billing error messages from Claude CLI. */
+/**
+ * Pattern that matches known auth/rate-limit/billing error messages from Claude CLI.
+ *
+ * Kept narrow because it is applied to arbitrary text — raw stderr (`logTail`)
+ * and `entry.result` strings — where loose terms like `forbidden` or
+ * `access denied` would produce false positives (filesystem permission errors,
+ * git errors, etc.). For synthetic `isApiErrorMessage` entries, see
+ * `AUTH_STATUS_PATTERN`.
+ */
 export const AUTH_CHALLENGE_PATTERN =
-  /authentication_error|invalid bearer token|rate_limit_error|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|token.*expired/i;
+  /authentication_error|authentication required|invalid bearer token|invalid token|rate_limit_error|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|token.*expired/i;
+
+/**
+ * Broader auth pattern that adds generic HTTP-status phrasing
+ * (`forbidden`, `access denied`). Only safe to apply to synthetic
+ * `isApiErrorMessage` entries from the Claude CLI, which are guaranteed
+ * to describe an API error rather than arbitrary log content.
+ */
+export const AUTH_STATUS_PATTERN =
+  /authentication_error|authentication required|invalid bearer token|invalid token|\brate_limit(_error)?\b|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|\bforbidden\b|access denied|token.*expired/i;
 
 /**
  * Scan the current Claude JSONL output for a result record with
@@ -2363,16 +2380,28 @@ export function detectAuthChallengeFromJsonl(
         }
         // Synthetic API-error entries emitted by Claude CLI mid-conversation
         // carry `isApiErrorMessage: true` and the error string in `error`.
-        if (
-          entry.isApiErrorMessage === true &&
-          typeof entry.error === "string" &&
-          AUTH_CHALLENGE_PATTERN.test(entry.error)
-        ) {
-          const status =
-            typeof entry.apiErrorStatus === "number"
-              ? ` (status ${entry.apiErrorStatus})`
-              : "";
-          return `Claude API ${entry.error} error${status}`;
+        if (entry.isApiErrorMessage === true) {
+          const errorText =
+            typeof entry.error === "string" ? entry.error : "unknown error";
+          if (AUTH_STATUS_PATTERN.test(errorText)) {
+            const status =
+              typeof entry.apiErrorStatus === "number"
+                ? ` (status ${entry.apiErrorStatus})`
+                : "";
+            return `Claude API ${errorText} error${status}`;
+          }
+          // HTTP 401/403/429 is an auth/quota challenge regardless of error text.
+          // 429 is the canonical rate-limit / over-quota status; treating it as
+          // a challenge here ensures we catch entries like
+          // {error: "rate_limit", apiErrorStatus: 429} even if Anthropic drops
+          // or renames the textual error token in a future CLI version.
+          if (
+            entry.apiErrorStatus === 401 ||
+            entry.apiErrorStatus === 403 ||
+            entry.apiErrorStatus === 429
+          ) {
+            return `API returned HTTP ${entry.apiErrorStatus}: ${errorText}`;
+          }
         }
       } catch {
         // skip malformed lines
