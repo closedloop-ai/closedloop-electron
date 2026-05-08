@@ -2801,6 +2801,7 @@ export interface ExecuteFinalizationResult {
   prNumber?: number;
   branchName?: string;
   commitSha?: string;
+  isAuthChallenge?: boolean;
 }
 
 interface ExecuteFinalizationParams {
@@ -3207,6 +3208,7 @@ export async function runExecuteFinalization(
         path: "llm",
         reason: "LLM commit failed: auth_challenge detected",
         executionResultPersisted: false,
+        isAuthChallenge: true,
       },
       preArtifacts,
     );
@@ -4342,13 +4344,24 @@ export async function handleProcessCompletion(
       } else if (executeFinalization.status === "error") {
         const finalizationReason =
           executeFinalization.reason ?? "unknown execute finalization error";
-        if (finalizationReason.includes("auth_challenge")) {
+        if (executeFinalization.isAuthChallenge === true) {
           gatewayLog.error(
             "loop-harness",
             "execute finalization auth challenge detected: " +
               sanitizeErrorMessage(finalizationReason) +
               ", loopId=" +
               loopId,
+          );
+          const finalizationSessionId = readTextFile(
+            path.join(claudeWorkDir, "session-id.txt"),
+          )?.trim();
+          Observability.jobAuthChallenge(
+            commandId,
+            operationId,
+            loopId,
+            0,
+            elapsedMs !== undefined ? { elapsedMs } : undefined,
+            finalizationSessionId,
           );
           runningLoops.delete(loopId);
           await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
