@@ -65,6 +65,7 @@ export interface DesktopGatewayServerOptions {
   ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult;
   getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
   applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
+  getInteractiveTerminal?: () => boolean;
 }
 
 export class DesktopGatewayServer {
@@ -148,6 +149,7 @@ export class DesktopGatewayServer {
       payload: DesktopSecurityUpgradePayload
     ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult,
     getOnboardingCompleted?: () => boolean,
+    getInteractiveTerminal?: () => boolean,
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -181,6 +183,7 @@ export class DesktopGatewayServer {
       getOnboardingCompleted,
       getBinaryPaths,
       applyBinaryPathPatch,
+      getInteractiveTerminal,
     });
   }
 
@@ -238,7 +241,9 @@ export class DesktopGatewayServer {
             this.options.onUnexpectedClose?.();
           }
         });
-        initTerminalAttachWebSocket(candidateServer, this.options.getGatewayAuthToken);
+        if (this.options.getInteractiveTerminal?.()) {
+          initTerminalAttachWebSocket(candidateServer, this.options.getGatewayAuthToken);
+        }
         await this.writeDiscoveryFile();
         return;
       } catch (error) {

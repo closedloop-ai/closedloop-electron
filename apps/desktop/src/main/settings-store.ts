@@ -160,6 +160,10 @@ export class SettingsStore {
     return this.store.get("cloudConnectionEnabled", DEFAULT_DESKTOP_SETTINGS.cloudConnectionEnabled);
   }
 
+  getInteractiveTerminal(): boolean {
+    return this.store.get("interactiveTerminal", DEFAULT_DESKTOP_SETTINGS.interactiveTerminal);
+  }
+
   getDefaultApprovalTier(): RiskTier {
     return this.store.get("defaultApprovalTier", DEFAULT_DESKTOP_SETTINGS.defaultApprovalTier);
   }

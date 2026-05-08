@@ -244,6 +244,7 @@ export class DesktopApplication {
         this.cloudStatus.state === "online" ? this.cloudStatus.targetId : null,
       (payload) => this.handleSecurityUpgradeCommand(payload),
       () => this.isDesktopSetupComplete(),
+      () => this.settingsStore.getInteractiveTerminal(),
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -1874,6 +1875,9 @@ export class DesktopApplication {
       },
     );
     ipcMain.handle("desktop:open-job-terminal", (_event, loopId: string) => {
+      if (!this.settingsStore.getInteractiveTerminal()) {
+        throw new Error("Interactive terminal is not enabled");
+      }
       if (typeof loopId !== "string" || !loopId.trim()) {
         throw new Error("loopId is required");
       }
