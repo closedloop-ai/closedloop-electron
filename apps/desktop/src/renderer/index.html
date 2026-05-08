@@ -2334,7 +2334,7 @@
           document.getElementById(tabName)?.classList.add("active");
         }
         if (tabName === "logs") {
-          void renderLogs();
+          void pollLogs();
           startLogsAutoRefresh();
           api.getSettings().then(s => { verboseToggle.checked = !!s.verboseLogging; });
         } else {
@@ -3916,7 +3916,7 @@
         renderLogs(entries);
       }
 
-      function renderLogs(entries) {
+      function renderLogs(entries = []) {
         const wasAtBottom = logsList.scrollTop + logsList.clientHeight >= logsList.scrollHeight - 20;
         if (!entries.length) {
           logsList.textContent = "";

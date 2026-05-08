@@ -21,6 +21,8 @@ describe("renderer Diagnostics and update banner wiring", () => {
     assert.match(html, /previous session/);
     assert.match(html, /api\.openLogFile/);
     assert.match(html, /api\.getLogFilePath/);
+    assert.match(html, /void pollLogs\(\);/);
+    assert.match(html, /function renderLogs\(entries = \[\]\)/);
   });
 
   test("packaged update banner listens for update-status and gates on downloaded readiness", () => {

@@ -56,6 +56,8 @@ Tests run with `tsx --test` (Node test runner) via `just desktop-test`.
 
 - Place tests in `apps/desktop/test/` and name files `*.test.ts`.
 - Add or update tests with behavior changes, especially gateway auth, process spawning, and telemetry flows.
+- Keep tests portable in CI: avoid shelling out to optional host tools such as `rg` when Node or TypeScript APIs can prove the invariant. If a test truly requires an external CLI, make the dependency explicit in the workflow before relying on it.
+- Renderer tests that cover IPC-backed panels should exercise the initial activation path or make render helpers tolerate absent/empty data, so a tab can open before its first async poll resolves.
 - Before opening a PR, run: `just desktop-lint && just desktop-typecheck && just desktop-test`.
 
 ## Breaking Changes
