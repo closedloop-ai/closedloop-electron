@@ -265,7 +265,7 @@ export class GatewayRouter {
       this.operationDispatcher,
       this.options.getAllowedDirectories,
       this.options.retrySpawnDeps ?? {
-        log: (_level, msg) => console.warn('[spawn-retry fallback]', msg),
+        log: (_level, msg) => gatewayLog.warn("spawn-retry", `fallback: ${msg}`),
         refreshTray: () => {},
         isShuttingDown: () => false,
         delay: (ms) => new Promise((r) => setTimeout(r, ms)),
