@@ -4,6 +4,7 @@ import { gatewayLog } from "./gateway-logger.js";
 import type {
   ExecutePlanSourceDiagnostics,
   OutboundNetworkDiagnostics,
+  SupportUploadDiagnostics,
   TelemetryCategory,
   TelemetryDiagnostics,
   TelemetryEmitter,
@@ -257,6 +258,19 @@ export class Observability {
       message,
       {},
       { outboundNetwork: input },
+    );
+  }
+
+  /** Emits structured lifecycle diagnostics for failure support bundle uploads. */
+  static supportUploadLifecycle(input: SupportUploadDiagnostics): void {
+    const severity: TelemetrySeverity =
+      input.outcome === "failed" ? "warn" : "info";
+    Observability.emitTelemetry(
+      severity,
+      "desktop.support_upload",
+      `Support upload ${input.outcome}`,
+      { loopId: input.loopId, jobId: input.loopId },
+      { supportUpload: input },
     );
   }
 

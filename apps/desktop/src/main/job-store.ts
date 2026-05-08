@@ -69,6 +69,11 @@ export type LocalJob = {
   worktreeDir?: string;
   claudeWorkDir?: string;
   /**
+   * Loop-scoped S3 prefix assigned by symphony-alpha for failure support files.
+   * Persisted so live finalization and boot recovery upload to the same scope.
+   */
+  s3StateKey?: string;
+  /**
    * Additional-repo worktrees created for multi-repo PLAN/EXECUTE runs.
    * Persisted so boot recovery / finalizer can finalize their git work and
    * remove the worktrees after an Electron restart; in-process spawn logic
@@ -109,6 +114,11 @@ export type LocalJob = {
   lastObservedJsonlOffset?: number;
   artifactsUploadedAt?: string;
   completedEventPostedAt?: string;
+  /**
+   * Set only after raw support files are uploaded and the cloud support event
+   * is posted. Absence keeps recovery retries eligible after partial failures.
+   */
+  supportBundleUploadedAt?: string;
   finalStatusPersistedAt?: string;
   /** Set once cloud-side finalization is fully persisted. */
   cloudFinalizedAt?: string;
