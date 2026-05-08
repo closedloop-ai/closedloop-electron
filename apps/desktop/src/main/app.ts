@@ -92,7 +92,7 @@ const { autoUpdater } = pkg;
 import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
 import { BootRecoveryService } from "./boot-recovery.js";
 import { LoopTokenStore } from "./loop-token-store.js";
-import { fetchLoopExecutionCredentials } from "./loop-execution-credentials-client.js";
+import { prepareLoopCommandForExecution } from "./loop-command-preparer.js";
 import { GatewayIdentityStore } from "./gateway-identity.js";
 import {
   createQueueStatsDebounce,
@@ -677,41 +677,16 @@ export class DesktopApplication {
   private async prepareCloudCommandForExecution(
     command: DesktopCommandEvent,
   ): Promise<DesktopCommandEvent> {
-    if (
-      command.path !== "/api/gateway/symphony/loop" &&
-      command.path !== "/api/gateway/symphony/loop/kill"
-    ) {
-      return command;
-    }
-    const body =
-      command.body && typeof command.body === "object" && !Array.isArray(command.body)
-        ? (command.body as Record<string, unknown>)
-        : {};
-    const loopId = typeof body.loopId === "string" ? body.loopId : null;
-    if (!loopId || body.userIntent === undefined) {
-      return command;
-    }
-    const apiKey = this.apiKeyStore.getApiKey();
-    const computeTargetId =
-      this.cloudStatus.state === "online" ? this.cloudStatus.targetId : null;
-    if (!(apiKey && computeTargetId)) {
-      throw new Error("loop execution credentials unavailable");
-    }
-    return {
-      ...command,
-      body: await fetchLoopExecutionCredentials({
-        apiOrigin: this.settingsStore.getApiOrigin(),
-        apiKey,
-        apiKeyProvenance:
-          this.apiKeyStore.getApiKeyProvenance() ?? "USER_CREATED",
-        computeTargetId,
-        loopId,
-        commandId: command.commandId,
-        signDesktopRequest: (request) => this.signDesktopRequest(request),
-        onDesktopPopUnavailable: (surface, reason) =>
-          this.reportDesktopPopUnavailable(surface, reason),
-      }),
-    };
+    return prepareLoopCommandForExecution(command, {
+      getApiOrigin: () => this.settingsStore.getApiOrigin(),
+      getApiKey: () => this.apiKeyStore.getApiKey(),
+      getApiKeyProvenance: () => this.apiKeyStore.getApiKeyProvenance(),
+      getComputeTargetId: () =>
+        this.cloudStatus.state === "online" ? this.cloudStatus.targetId : null,
+      signDesktopRequest: (request) => this.signDesktopRequest(request),
+      onDesktopPopUnavailable: (surface, reason) =>
+        this.reportDesktopPopUnavailable(surface, reason),
+    });
   }
 
   private getUpgradeCapableGatewayId(): string | null {
