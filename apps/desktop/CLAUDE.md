@@ -61,29 +61,6 @@ and you have a localhost dev instance open. This blocks requests from all origin
 the configured webAppOrigin, so dev traffic doesn't leak into the production relay.
 Cross-origin browser reads of /health will also fail for blocked origins.
 
-### Interactive Terminal (Feature-Flagged)
-
-The interactive terminal allows attaching to running loop jobs via a PTY-backed
-WebSocket endpoint and a dedicated BrowserWindow. It is **disabled by default**
-(fail-closed) behind the `interactiveTerminal` setting.
-
-To enable, set `interactiveTerminal` to `true` in the desktop settings store:
-
-```jsonc
-// In electron-store settings (persisted at ~/Library/Application Support/desktop/settings.json)
-{ "interactiveTerminal": true }
-```
-
-When disabled (default):
-- The WebSocket upgrade handler at `/api/engineer/jobs/:id/terminal` is not registered
-- The `desktop:open-job-terminal` IPC handler rejects with an error
-- Loop jobs still spawn via PTY internally (functionally equivalent to prior `child_process.spawn` behavior)
-
-When enabled:
-- The WebSocket terminal attach endpoint is initialized on server start
-- The IPC handler opens a BrowserWindow with an xterm.js terminal connected to the job's PTY
-- Clients can stream live output and send keyboard input to running jobs
-
 ### Sandbox Directory Enforcement
 
 Every API route checks target paths against the sandbox base directory via `isPathAllowed()` in `src/server/security.ts`. Paths outside the sandbox return HTTP 403 `{"error": "directory not allowed"}`.
