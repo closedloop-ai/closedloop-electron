@@ -23,6 +23,11 @@ import {
   normalizeScopePath,
 } from "../shared/sandbox-policy.js";
 import { ApiKeyStore } from "./api-key-store.js";
+import { AuthorizedCommandKeyStore } from "./authorized-command-key-store.js";
+import {
+  fetchOrganizationCommandKeys,
+  type OrganizationCommandPublicKey,
+} from "./authorized-public-keys-client.js";
 import {
   claimDesktopManagedApiKey,
   isRetryableBootstrapClaimFailure,
@@ -30,8 +35,9 @@ import {
   type BootstrapClaimResult,
 } from "./bootstrap-claim.js";
 import { CloudCommandExecutor } from "./cloud-command-executor.js";
-import type { CloudSocketStatus } from "./cloud-protocol.js";
+import type { CloudSocketStatus, DesktopCommandEvent } from "./cloud-protocol.js";
 import { CloudSocketService } from "./cloud-socket.js";
+import { CommandSignatureVerifier } from "./command-signature-verifier.js";
 import {
   DesktopPopUnavailableError,
   signDesktopPopHeaders,
@@ -86,6 +92,7 @@ const { autoUpdater } = pkg;
 import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
 import { BootRecoveryService } from "./boot-recovery.js";
 import { LoopTokenStore } from "./loop-token-store.js";
+import { fetchLoopExecutionCredentials } from "./loop-execution-credentials-client.js";
 import { GatewayIdentityStore } from "./gateway-identity.js";
 import {
   createQueueStatsDebounce,
@@ -133,6 +140,8 @@ type ManagedOnboardingState = {
 export class DesktopApplication {
   private readonly settingsStore: SettingsStore;
   private readonly apiKeyStore: ApiKeyStore;
+  private readonly authorizedCommandKeys: AuthorizedCommandKeyStore;
+  private readonly commandSignatureVerifier: CommandSignatureVerifier;
   private readonly gatewaySigningKeyStore: GatewaySigningKeyStore;
   private readonly loopTokenStore: LoopTokenStore;
   private readonly tray: DesktopTray;
@@ -153,6 +162,7 @@ export class DesktopApplication {
   private cloudStatus: CloudSocketStatus = { state: "idle" };
   private cloudCommandsPaused: boolean;
   private cloudConnectionEnabled: boolean;
+  private serverCommandSigningSupported = false;
   private updateCheckTimer: NodeJS.Timeout | null = null;
   private readonly onboardingHandoffPath = getCanonicalOnboardingHandoffPath();
   private bootReadyForOnboarding = false;
@@ -181,6 +191,10 @@ export class DesktopApplication {
     this.cloudConnectionEnabled =
       this.settingsStore.getCloudConnectionEnabled();
     this.apiKeyStore = new ApiKeyStore();
+    this.authorizedCommandKeys = new AuthorizedCommandKeyStore();
+    this.commandSignatureVerifier = new CommandSignatureVerifier({
+      authorizedKeys: this.authorizedCommandKeys,
+    });
     this.loopTokenStore = new LoopTokenStore();
     this.gatewaySigningKeyStore = new GatewaySigningKeyStore();
     this.tray = new DesktopTray();
@@ -251,6 +265,10 @@ export class DesktopApplication {
       maxInFlightCommands: MAX_IN_FLIGHT_COMMANDS,
       sendCommandAck: (event) => this.cloudSocket.sendCommandAck(event),
       sendCommandEvent: (event) => this.cloudSocket.sendCommandEvent(event),
+      commandSignatureVerifier: this.commandSignatureVerifier,
+      isCommandSigningEnforced: () => this.serverCommandSigningSupported,
+      prepareCommandForExecution: (command) =>
+        this.prepareCloudCommandForExecution(command),
       onQueueStatsChange: (stats) => {
         const presenceState =
           this.cloudStatus.state === "online" &&
@@ -276,6 +294,7 @@ export class DesktopApplication {
       signDesktopRequest: (request) => this.signDesktopRequest(request),
       onDesktopPopUnavailable: (surface, reason) => this.reportDesktopPopUnavailable(surface, reason),
       getAllowedDirectories: () => this.getAllowedDirectoriesFromSandbox(),
+      getCapabilities: () => EMPTY_CAPABILITIES as unknown as Record<string, unknown>,
       getMaxInFlightCommands: () => MAX_IN_FLIGHT_COMMANDS,
       getGatewayId: () => this.getUpgradeCapableGatewayId(),
       machineName: os.hostname(),
@@ -284,8 +303,13 @@ export class DesktopApplication {
       gatewayProtocolVersion: GATEWAY_PROTOCOL_VERSION,
       supportedOperations: [...SUPPORTED_OPERATION_IDS],
       onStatusChange: (status) => this.onCloudSocketStatus(status),
-      onDisconnect: (reason) => { Observability.connectionLost(reason); },
+      onDisconnect: (reason) => {
+        this.serverCommandSigningSupported = false;
+        Observability.connectionLost(reason);
+      },
       onHelloAck: (event) => {
+        this.serverCommandSigningSupported =
+          event.serverCapabilities?.computeTargetSigning === true;
         Observability.setTargetId(event.computeTargetId);
         if (event.sessionId) {
           Observability.setGatewaySessionId(event.sessionId);
@@ -385,6 +409,15 @@ export class DesktopApplication {
 
     this.tray.init({
       onOpen: () => this.desktopWindow.show(),
+      onManageCommandKeys: () => {
+        this.desktopWindow.show();
+        this.desktopWindow
+          .getWindow()
+          ?.webContents.send("desktop:navigate-tab", "settings");
+        this.desktopWindow
+          .getWindow()
+          ?.webContents.send("desktop:navigate-settings-tab", "security");
+      },
       onTogglePaused: (paused) => this.setCloudCommandsPaused(paused),
     });
     this.tray.setPaused(this.cloudCommandsPaused);
@@ -639,6 +672,46 @@ export class DesktopApplication {
       sandboxBaseDirectory: this.settingsStore.getSandboxBaseDirectory(),
       hasApiKey: this.apiKeyStore.getApiKey() !== null,
     });
+  }
+
+  private async prepareCloudCommandForExecution(
+    command: DesktopCommandEvent,
+  ): Promise<DesktopCommandEvent> {
+    if (
+      command.path !== "/api/gateway/symphony/loop" &&
+      command.path !== "/api/gateway/symphony/loop/kill"
+    ) {
+      return command;
+    }
+    const body =
+      command.body && typeof command.body === "object" && !Array.isArray(command.body)
+        ? (command.body as Record<string, unknown>)
+        : {};
+    const loopId = typeof body.loopId === "string" ? body.loopId : null;
+    if (!loopId || body.userIntent === undefined) {
+      return command;
+    }
+    const apiKey = this.apiKeyStore.getApiKey();
+    const computeTargetId =
+      this.cloudStatus.state === "online" ? this.cloudStatus.targetId : null;
+    if (!(apiKey && computeTargetId)) {
+      throw new Error("loop execution credentials unavailable");
+    }
+    return {
+      ...command,
+      body: await fetchLoopExecutionCredentials({
+        apiOrigin: this.settingsStore.getApiOrigin(),
+        apiKey,
+        apiKeyProvenance:
+          this.apiKeyStore.getApiKeyProvenance() ?? "USER_CREATED",
+        computeTargetId,
+        loopId,
+        commandId: command.commandId,
+        signDesktopRequest: (request) => this.signDesktopRequest(request),
+        onDesktopPopUnavailable: (surface, reason) =>
+          this.reportDesktopPopUnavailable(surface, reason),
+      }),
+    };
   }
 
   private getUpgradeCapableGatewayId(): string | null {
@@ -1197,6 +1270,58 @@ export class DesktopApplication {
     }
   }
 
+  private async fetchAvailableCommandSigningKeys(): Promise<
+    OrganizationCommandPublicKey[]
+  > {
+    const apiKey = this.apiKeyStore.getApiKey();
+    if (!apiKey) {
+      return [];
+    }
+    return fetchOrganizationCommandKeys({
+      apiOrigin: this.settingsStore.getApiOrigin(),
+      apiKey,
+      apiKeyProvenance:
+        this.apiKeyStore.getApiKeyProvenance() ?? "USER_CREATED",
+      signDesktopRequest: (request) => this.signDesktopRequest(request),
+      onDesktopPopUnavailable: (surface, reason) =>
+        this.reportDesktopPopUnavailable(surface, reason),
+    });
+  }
+
+  private async listCommandSigningKeys(): Promise<{
+    available: OrganizationCommandPublicKey[];
+    authorized: ReturnType<AuthorizedCommandKeyStore["list"]>;
+    rejectedFingerprints: string[];
+    serverSupported: boolean;
+    availableError?: string;
+  }> {
+    const authorizedFingerprints = new Set(
+      this.authorizedCommandKeys.list().map((key) => key.fingerprint),
+    );
+    const rejectedFingerprints = new Set(
+      this.authorizedCommandKeys.listRejectedFingerprints(),
+    );
+    let available: OrganizationCommandPublicKey[] = [];
+    let availableError: string | undefined;
+    try {
+      available = await this.fetchAvailableCommandSigningKeys();
+    } catch (error) {
+      availableError =
+        error instanceof Error ? error.message : "Failed to list public keys";
+    }
+    return {
+      available: available.filter(
+        (key) =>
+          !authorizedFingerprints.has(key.fingerprint) &&
+          !rejectedFingerprints.has(key.fingerprint),
+      ),
+      authorized: this.authorizedCommandKeys.list(),
+      rejectedFingerprints: [...rejectedFingerprints],
+      serverSupported: this.serverCommandSigningSupported,
+      ...(availableError ? { availableError } : {}),
+    };
+  }
+
   private onCloudSocketStatus(status: CloudSocketStatus): void {
     if (!this.cloudConnectionEnabled) {
       this.cloudStatus = {
@@ -1230,6 +1355,7 @@ export class DesktopApplication {
     }
 
     this.commandExecutor.setConnected(false);
+    this.serverCommandSigningSupported = false;
 
     if (status.state === "degraded") {
       Observability.connectionDegraded(status.error);
@@ -1273,6 +1399,7 @@ export class DesktopApplication {
     this.settingsStore.setCloudConnectionEnabled(enabled);
     if (!enabled) {
       this.cloudSocket.stop();
+      this.serverCommandSigningSupported = false;
       this.cloudStatus = {
         state: "degraded",
         error: "Cloud connection disabled by user",
@@ -1293,6 +1420,7 @@ export class DesktopApplication {
     if (!this.cloudConnectionEnabled) {
       return;
     }
+    this.serverCommandSigningSupported = false;
     this.cloudSocket.restart();
   }
 
@@ -1804,9 +1932,109 @@ export class DesktopApplication {
       commandsPaused: this.cloudCommandsPaused,
       connectionEnabled: this.cloudConnectionEnabled,
       connectionSecurity: this.getConnectionSecurityStatus(),
+      commandSigning: {
+        serverSupported: this.serverCommandSigningSupported,
+        authorizedKeyCount: this.authorizedCommandKeys.list().length,
+      },
       serverAlive: this.server.isAlive(),
       gatewayHealthy: this.recovery.gatewayHealthy,
     }));
+    ipcMain.handle("desktop:list-command-signing-keys", async () =>
+      this.listCommandSigningKeys(),
+    );
+    ipcMain.handle("desktop:list-authorized-keys", () =>
+      this.authorizedCommandKeys.list(),
+    );
+    ipcMain.handle("desktop:authorize-key", (_event, payload: unknown) => {
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+        throw new Error("public key payload is required");
+      }
+      const input = payload as Record<string, unknown>;
+      if (typeof input.publicKeyBase64 !== "string") {
+        throw new Error("publicKeyBase64 is required");
+      }
+      this.authorizedCommandKeys.authorize({
+        publicKeyBase64: input.publicKeyBase64,
+        ownerName:
+          typeof input.label === "string"
+            ? input.label
+            : typeof input.ownerName === "string"
+              ? input.ownerName
+              : undefined,
+        ownerEmail:
+          typeof input.ownerEmail === "string" ? input.ownerEmail : undefined,
+        fingerprint:
+          typeof input.fingerprint === "string" ? input.fingerprint : undefined,
+      });
+      return this.authorizedCommandKeys.list();
+    });
+    ipcMain.handle("desktop:remove-authorized-key", (_event, fingerprint: string) => {
+      if (typeof fingerprint !== "string" || !fingerprint.trim()) {
+        throw new Error("fingerprint is required");
+      }
+      this.authorizedCommandKeys.remove(fingerprint);
+      return this.authorizedCommandKeys.list();
+    });
+    ipcMain.handle("desktop:list-org-public-keys", async () =>
+      (await this.listCommandSigningKeys()).available,
+    );
+    ipcMain.handle(
+      "desktop:approve-org-public-key",
+      async (_event, fingerprint: string) => {
+        if (typeof fingerprint !== "string" || !fingerprint.trim()) {
+          throw new Error("fingerprint is required");
+        }
+        const keys = await this.fetchAvailableCommandSigningKeys();
+        const key = keys.find((entry) => entry.fingerprint === fingerprint.trim());
+        if (!key) {
+          throw new Error("Command signing key not found");
+        }
+        this.authorizedCommandKeys.authorize({
+          fingerprint: key.fingerprint,
+          publicKeyBase64: key.publicKeyBase64,
+          ownerName: key.ownerEmail || key.ownerName || key.fingerprint,
+          ...(key.ownerEmail ? { ownerEmail: key.ownerEmail } : {}),
+        });
+        return this.listCommandSigningKeys();
+      },
+    );
+    ipcMain.handle(
+      "desktop:reject-org-public-key",
+      (_event, fingerprint: string) => {
+        if (typeof fingerprint !== "string" || !fingerprint.trim()) {
+          throw new Error("fingerprint is required");
+        }
+        this.authorizedCommandKeys.reject(fingerprint);
+        return this.listCommandSigningKeys();
+      },
+    );
+    ipcMain.handle(
+      "desktop:authorize-command-signing-key",
+      async (_event, fingerprint: string) => {
+        const keys = await this.fetchAvailableCommandSigningKeys();
+        const key = keys.find((entry) => entry.fingerprint === fingerprint);
+        if (!key) {
+          throw new Error("Command signing key not found");
+        }
+        this.authorizedCommandKeys.authorize({
+          fingerprint: key.fingerprint,
+          publicKeyBase64: key.publicKeyBase64,
+          ownerName: key.ownerEmail || key.ownerName || key.fingerprint,
+          ...(key.ownerEmail ? { ownerEmail: key.ownerEmail } : {}),
+        });
+        return this.listCommandSigningKeys();
+      },
+    );
+    ipcMain.handle(
+      "desktop:revoke-command-signing-key",
+      (_event, fingerprint: string) => {
+        if (typeof fingerprint !== "string" || !fingerprint.trim()) {
+          throw new Error("fingerprint is required");
+        }
+        this.authorizedCommandKeys.remove(fingerprint.trim());
+        return this.listCommandSigningKeys();
+      },
+    );
     ipcMain.handle("desktop:list-running-jobs", async () => {
       const jobs = this.jobStore.listRunning();
       const snapshots = await Promise.all(

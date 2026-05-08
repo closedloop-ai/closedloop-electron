@@ -2140,6 +2140,23 @@
               <p class="muted warning-text" id="sandboxBaseWarning"></p>
             </div>
           </div>
+          <div class="settings-group">
+            <h3 class="settings-group-title">Browser Command Keys</h3>
+            <p class="settings-group-desc">Authorize registered browser public keys before this Desktop accepts signed cloud commands.</p>
+            <div class="row">
+              <label for="commandKeyPublicKey">Paste Public Key</label>
+              <textarea id="commandKeyPublicKey" rows="3" placeholder="Base64 Ed25519 public key"></textarea>
+              <input id="commandKeyLabel" placeholder="Label" />
+              <div class="actions" style="margin-top: 8px">
+                <button id="authorizePastedCommandKey">Authorize Key</button>
+              </div>
+              <p class="muted" id="commandKeyMessage"></p>
+            </div>
+            <div class="actions" style="margin-bottom: 10px">
+              <button class="secondary" id="refreshCommandKeys">Refresh Keys</button>
+            </div>
+            <div id="commandSigningKeysList" class="saved-configs-list"></div>
+          </div>
           <div class="settings-tab-footer">
             <button id="saveSecurity">Save</button>
             <button class="secondary" id="reloadSecurity">Reload</button>
@@ -2338,6 +2355,11 @@
         btn.addEventListener("click", () => activateSettingsTab(btn.dataset.settingsTab));
       });
 
+      window.addEventListener("desktop:navigate-settings-tab", (event) => {
+        activateTab("settings");
+        activateSettingsTab(event.detail);
+      });
+
       const relayOrigin = document.getElementById("relayOrigin");
       const apiOrigin = document.getElementById("apiOrigin");
       const webAppOrigin = document.getElementById("webAppOrigin");
@@ -2353,6 +2375,12 @@
       const alwaysAllowRulesContainer = document.getElementById("alwaysAllowRulesContainer");
       const relayGatewayMessage = document.getElementById("relayGatewayMessage");
       const securityMessage = document.getElementById("securityMessage");
+      const commandSigningKeysList = document.getElementById("commandSigningKeysList");
+      const refreshCommandKeys = document.getElementById("refreshCommandKeys");
+      const commandKeyPublicKey = document.getElementById("commandKeyPublicKey");
+      const commandKeyLabel = document.getElementById("commandKeyLabel");
+      const authorizePastedCommandKey = document.getElementById("authorizePastedCommandKey");
+      const commandKeyMessage = document.getElementById("commandKeyMessage");
       const policiesMessage = document.getElementById("policiesMessage");
       const setCliToolHint = (name, text) => {
         const hint = document.querySelector(`[data-tool-hint="${name}"]`);
@@ -3060,6 +3088,112 @@
         renderTierOverrides(settings.autoApprovalRules || {});
         renderAlwaysAllowRules(settings.alwaysAllowRules || []);
         updateSandboxBaseWarning();
+        void refreshCommandSigningKeys();
+      }
+
+      async function refreshCommandSigningKeys() {
+        if (!commandSigningKeysList) return;
+        commandSigningKeysList.textContent = "Loading keys...";
+        try {
+          const state = await api.listCommandSigningKeys();
+          const available = Array.isArray(state.available) ? state.available : [];
+          const authorized = Array.isArray(state.authorized) ? state.authorized : [];
+          const availableError = typeof state.availableError === "string" ? state.availableError : "";
+          commandSigningKeysList.innerHTML = "";
+          if (!available.length && !authorized.length) {
+            const empty = document.createElement("p");
+            empty.className = "muted";
+            empty.textContent = availableError
+              ? `Failed to load org keys: ${availableError}`
+              : "No registered browser keys found.";
+            commandSigningKeysList.appendChild(empty);
+            return;
+          }
+          for (const key of authorized) {
+            const row = document.createElement("div");
+            row.className = "saved-config-row";
+            const info = document.createElement("div");
+            info.className = "saved-config-info";
+            const name = document.createElement("div");
+            name.className = "saved-config-name";
+            name.textContent = key.ownerName || key.ownerEmail || key.fingerprint;
+            const meta = document.createElement("div");
+            meta.className = "saved-config-meta";
+            meta.textContent = `Authorized ${key.fingerprint}`;
+            info.append(name, meta);
+            const action = document.createElement("button");
+            action.className = "secondary";
+            action.textContent = "Remove";
+            action.addEventListener("click", async () => {
+              await (api.removeAuthorizedKey
+                ? api.removeAuthorizedKey(key.fingerprint)
+                : api.revokeCommandSigningKey(key.fingerprint));
+              await refreshCommandSigningKeys();
+            });
+            row.append(info, action);
+            commandSigningKeysList.appendChild(row);
+          }
+          for (const key of available) {
+            const row = document.createElement("div");
+            row.className = "saved-config-row";
+            const info = document.createElement("div");
+            info.className = "saved-config-info";
+            const name = document.createElement("div");
+            name.className = "saved-config-name";
+            name.textContent = key.ownerEmail || key.ownerName || key.fingerprint;
+            const meta = document.createElement("div");
+            meta.className = "saved-config-meta";
+            meta.textContent = `Pending org key ${key.fingerprint}`;
+            info.append(name, meta);
+            const approve = document.createElement("button");
+            approve.textContent = "Approve";
+            approve.addEventListener("click", async () => {
+              await (api.approveOrgPublicKey
+                ? api.approveOrgPublicKey(key.fingerprint)
+                : api.authorizeCommandSigningKey(key.fingerprint));
+              await refreshCommandSigningKeys();
+            });
+            const reject = document.createElement("button");
+            reject.className = "secondary";
+            reject.textContent = "Reject";
+            reject.addEventListener("click", async () => {
+              if (api.rejectOrgPublicKey) {
+                await api.rejectOrgPublicKey(key.fingerprint);
+              }
+              await refreshCommandSigningKeys();
+            });
+            const actions = document.createElement("div");
+            actions.className = "actions";
+            actions.append(approve, reject);
+            row.append(info, actions);
+            commandSigningKeysList.appendChild(row);
+          }
+          if (availableError) {
+            const warning = document.createElement("p");
+            warning.className = "muted warning-text";
+            warning.textContent = `Failed to load org keys: ${availableError}`;
+            commandSigningKeysList.appendChild(warning);
+          }
+        } catch (error) {
+          commandSigningKeysList.textContent = `Failed to load keys: ${error.message}`;
+        }
+      }
+
+      async function authorizePastedCommandSigningKey() {
+        if (!commandKeyPublicKey || !commandKeyMessage) return;
+        commandKeyMessage.textContent = "";
+        try {
+          await api.authorizeKey({
+            publicKeyBase64: commandKeyPublicKey.value,
+            label: commandKeyLabel?.value || undefined
+          });
+          commandKeyPublicKey.value = "";
+          if (commandKeyLabel) commandKeyLabel.value = "";
+          commandKeyMessage.textContent = "Key authorized.";
+          await refreshCommandSigningKeys();
+        } catch (error) {
+          commandKeyMessage.textContent = `Failed to authorize key: ${error.message}`;
+        }
       }
 
       const binaryPathInputs = {
@@ -3936,6 +4070,8 @@
       document.getElementById("clearActivity").addEventListener("click", clearActivity);
       showRequestEvents.addEventListener("change", renderActivity);
       showSecurityEvents.addEventListener("change", renderActivity);
+      refreshCommandKeys?.addEventListener("click", () => void refreshCommandSigningKeys());
+      authorizePastedCommandKey?.addEventListener("click", () => void authorizePastedCommandSigningKey());
 
       const debugAuthSection = document.getElementById("debugAuthSection");
       const debugTokenOutput = document.getElementById("debugTokenOutput");

@@ -30,6 +30,7 @@ export interface DesktopHelloEvent extends ProtocolEnvelope {
   supportedOperations: string[];
   maxInFlightCommands: number;
   allowedDirectoriesHash: string;
+  capabilities?: Record<string, unknown>;
 }
 
 export interface DesktopHelloAckEvent extends ProtocolEnvelope {
@@ -37,6 +38,9 @@ export interface DesktopHelloAckEvent extends ProtocolEnvelope {
   sessionId: string;
   serverTime: string;
   resumeFromSequence?: Record<string, number>;
+  serverCapabilities?: {
+    computeTargetSigning?: boolean;
+  };
 }
 
 export type HttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -54,6 +58,9 @@ export interface DesktopCommandEvent extends ProtocolEnvelope {
   lockKey?: string;
   requiresApproval?: boolean;
   approvalReason?: string;
+  signature?: string;
+  signaturePayload?: string;
+  publicKeyFingerprint?: string;
 }
 
 export interface DesktopCommandAckEvent extends ProtocolEnvelope {

@@ -5,6 +5,24 @@ const desktopApi = {
   updateSettings: (partial: unknown) =>
     ipcRenderer.invoke("desktop:update-settings", partial) as Promise<unknown>,
   getRuntimeStatus: () => ipcRenderer.invoke("desktop:get-runtime-status") as Promise<unknown>,
+  listCommandSigningKeys: () =>
+    ipcRenderer.invoke("desktop:list-command-signing-keys") as Promise<unknown>,
+  listAuthorizedKeys: () =>
+    ipcRenderer.invoke("desktop:list-authorized-keys") as Promise<unknown>,
+  authorizeKey: (payload: unknown) =>
+    ipcRenderer.invoke("desktop:authorize-key", payload) as Promise<unknown>,
+  removeAuthorizedKey: (fingerprint: string) =>
+    ipcRenderer.invoke("desktop:remove-authorized-key", fingerprint) as Promise<unknown>,
+  listOrgPublicKeys: () =>
+    ipcRenderer.invoke("desktop:list-org-public-keys") as Promise<unknown>,
+  approveOrgPublicKey: (fingerprint: string) =>
+    ipcRenderer.invoke("desktop:approve-org-public-key", fingerprint) as Promise<unknown>,
+  rejectOrgPublicKey: (fingerprint: string) =>
+    ipcRenderer.invoke("desktop:reject-org-public-key", fingerprint) as Promise<unknown>,
+  authorizeCommandSigningKey: (fingerprint: string) =>
+    ipcRenderer.invoke("desktop:authorize-command-signing-key", fingerprint) as Promise<unknown>,
+  revokeCommandSigningKey: (fingerprint: string) =>
+    ipcRenderer.invoke("desktop:revoke-command-signing-key", fingerprint) as Promise<unknown>,
   getActivityEvents: () => ipcRenderer.invoke("desktop:get-activity-events") as Promise<unknown>,
   clearActivityEvents: () =>
     ipcRenderer.invoke("desktop:clear-activity-events") as Promise<unknown>,

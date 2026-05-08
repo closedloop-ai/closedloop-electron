@@ -3,6 +3,18 @@ export const FALLBACK_GATEWAY_PORTS = [19433, 19434, 19435] as const;
 export const PORT_PROBE_ORDER = [DEFAULT_GATEWAY_PORT, ...FALLBACK_GATEWAY_PORTS] as const;
 export const GATEWAY_PROTOCOL_VERSION = "0.1.0";
 
+export const COMMAND_SIGNING_REJECTION_REASONS = {
+  noKeysAuthorized: "unauthorized: no keys authorized",
+  unsignedCommand: "unauthorized: unsigned command",
+  unknownSigningKey: "unauthorized: unknown signing key",
+  invalidSignature: "unauthorized: invalid signature",
+  staleOrReplayedCommand: "unauthorized: stale or replayed command",
+  payloadMismatch: "unauthorized: payload_mismatch"
+} as const;
+
+export type CommandSigningRejectionReason =
+  (typeof COMMAND_SIGNING_REJECTION_REASONS)[keyof typeof COMMAND_SIGNING_REJECTION_REASONS];
+
 /** WebSocket relay host — the electron app connects here for cloud commands, not the REST API. */
 export const DEFAULT_RELAY_ORIGIN = process.env.CL_RELAY_ORIGIN ?? "https://relay.closedloop.ai";
 export const DEFAULT_WEB_APP_ORIGIN = process.env.CL_WEB_APP_ORIGIN ?? "https://app.closedloop.ai";
@@ -15,6 +27,8 @@ export type CapabilityToolName = "claude" | "codex" | "git" | "gh" | "python3";
 export interface ComputeTargetCapabilities {
   tools: Record<CapabilityToolName, boolean>;
   versions: Partial<Record<CapabilityToolName, string>>;
+  /** Desktop can verify browser-origin Ed25519 command signatures. */
+  commandSigning?: boolean;
 }
 
 export const EMPTY_CAPABILITIES: ComputeTargetCapabilities = {
@@ -25,7 +39,8 @@ export const EMPTY_CAPABILITIES: ComputeTargetCapabilities = {
     gh: false,
     python3: false
   },
-  versions: {}
+  versions: {},
+  commandSigning: true
 };
 
 export interface HealthResponse {

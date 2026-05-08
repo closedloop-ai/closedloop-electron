@@ -4,6 +4,7 @@ import { afterEach, describe, test } from "node:test";
 import {
   CloudSocketService,
   buildRelayValidationPopHeaders,
+  parseServerCapabilities,
   refreshRelayValidationPopHeadersForSocket,
   type CloudSocketOptions,
 } from "../src/main/cloud-socket.js";
@@ -244,12 +245,13 @@ class FakeSocket extends EventEmitter {
 }
 
 describe("T-3.1: hello payload version fields", () => {
-  test("CloudSocketService emits all three version fields in desktop.hello", () => {
+  test("CloudSocketService emits version fields and local capabilities in desktop.hello", () => {
     const service = new CloudSocketService(
       createStubOptions({
         desktopClientVersion: "0.13.9-test",
         gatewayProtocolVersion: "0.1.0",
         pluginVersion: "1.0.0-test",
+        getCapabilities: () => ({ commandSigning: true }),
       }),
     );
 
@@ -272,7 +274,23 @@ describe("T-3.1: hello payload version fields", () => {
     assert.equal(hello["desktopClientVersion"], "0.13.9-test", "desktopClientVersion must match");
     assert.equal(hello["gatewayProtocolVersion"], "0.1.0", "gatewayProtocolVersion must match");
     assert.equal(hello["pluginVersion"], "1.0.0-test", "pluginVersion must match");
+    assert.deepEqual(hello["capabilities"], { commandSigning: true });
 
     service.stop();
+  });
+
+  test("parseServerCapabilities requires explicit computeTargetSigning true", () => {
+    assert.deepEqual(parseServerCapabilities({ computeTargetSigning: true }), {
+      computeTargetSigning: true,
+    });
+    assert.equal(
+      parseServerCapabilities({ computeTargetSigning: false }),
+      undefined,
+    );
+    assert.equal(
+      parseServerCapabilities({ computeTargetSigning: "true" }),
+      undefined,
+    );
+    assert.equal(parseServerCapabilities(undefined), undefined);
   });
 });
