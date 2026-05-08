@@ -3,7 +3,7 @@
  *
  * T-5.1: No-changes paths
  *   - executeGitOperations returns null when git status --porcelain is empty
- *   - attemptLlmCommit returns null when claude exits 0 without writing execution-result.json
+ *   - attemptLlmCommit returns { status: "failed", reason: "other", logTail: "..." } when claude exits 0 without writing execution-result.json
  *
  * T-5.2: Existing-PR paths
  *   - executeGitOperations returns existing PR URL when gh pr view succeeds (no gh pr create)
@@ -24,6 +24,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
 import { LoopCommand } from "@closedloop-ai/loops-api/commands";
+import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { JobStore } from "../src/main/job-store.js";
 import { Observability } from "../src/main/observability.js";
 import type { EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
@@ -121,7 +122,7 @@ afterEach(async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Test 1: No-changes → executeGitOperations returns null (no PR URL in upload)
+// Test 1: No-changes → executeGitOperations returns { status: "no-changes" } (no PR URL in upload)
 // ---------------------------------------------------------------------------
 
 test("EXECUTE: no PR URL in upload when worktree has no changes (git status empty)", async () => {
@@ -141,7 +142,8 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
   await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
 
   // fake-bin: claude that exits 0 without writing execution-result.json
-  //   (simulates attemptLlmCommit finding no result file → returns null)
+  //   (simulates attemptLlmCommit finding no result file →
+  //    returns { status: "failed", reason: "other", logTail: "..." })
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
   await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
@@ -584,7 +586,8 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
   await fs.mkdir(fakeBin, { recursive: true });
 
   // fake claude for attemptLlmCommit: exits 0 without writing execution-result.json
-  // → attemptLlmCommit returns null → falls through to executeGitOperations
+  // → attemptLlmCommit returns { status: "failed", reason: "other", logTail: "..." }
+  // → falls through to executeGitOperations
   await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
     mode: 0o755,
   });
@@ -733,7 +736,8 @@ test("EXECUTE: git status failure sets GIT_PUSH_FAILED in completed event warnin
   await fs.mkdir(fakeBin, { recursive: true });
 
   // fake claude: exits 0 without writing execution-result.json
-  // → attemptLlmCommit returns null → falls through to executeGitOperations
+  // → attemptLlmCommit returns { status: "failed", reason: "other", logTail: "..." }
+  // → falls through to executeGitOperations
   await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
     mode: 0o755,
   });
@@ -3063,5 +3067,580 @@ test("EXECUTE: non-zero exit with CANCEL_PENDING skips PROCESS_FAILED and ends a
     errorEvents.length,
     0,
     `Expected no PROCESS_FAILED event when cancelled, got ${errorEvents.length}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test: attemptLlmCommit returns { status: "failed", reason: "other", logTail: ... }
+//       when claude exits 0 without writing execution-result.json
+//       → code falls through to executeGitOperations (git-fallback path)
+// ---------------------------------------------------------------------------
+
+test("EXECUTE: attemptLlmCommit returns status:failed reason:other when claude exits 0 without execution-result.json, falls through to git fallback", async () => {
+  const tmpDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "execute-llm-failed-nojson-"),
+  );
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-llm-failed-nojson");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  // fake run-loop.sh: writes a file so the worktree has changes for git status
+  await createFakeRunLoopScript(
+    tmpDir,
+    ["#!/bin/sh", "echo 'work done' > output.txt", "exit 0"].join("\n"),
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+
+  // fake claude for attemptLlmCommit: exits 0 without writing execution-result.json
+  // This causes attemptLlmCommit to return:
+  //   { status: "failed", reason: "other", logTail: "LLM commit succeeded but execution-result.json was missing or invalid" }
+  // The code then falls through to executeGitOperations (git-fallback path).
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+
+  const repoFullName = `llm-failed-nojson/${path.basename(repoPath)}`;
+  const expectedPrUrl = `https://github.com/${repoFullName}/pull/55`;
+
+  // fake gh: pr view exits non-zero so code calls gh pr create
+  const fakeGhScript = [
+    "#!/bin/sh",
+    'if [ "$1" = pr ] && [ "$2" = view ] && [ "$3" != "--json" ]; then exit 1; fi',
+    'if [ "$1" = pr ] && [ "$2" = view ] && [ "$3" = "--json" ]; then printf \'{"body":""}\\n\'; exit 0; fi',
+    'if [ "$1" = pr ] && [ "$2" = create ]; then',
+    `  printf '${expectedPrUrl}\\n'`,
+    "  exit 0",
+    "fi",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "gh"), fakeGhScript, { mode: 0o755 });
+
+  // fake git: status returns changes; all other commands succeed
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'if [ "$1" = status ]; then printf "M output.txt\\n"; exit 0; fi',
+    'if [ "$1" = push ]; then exit 0; fi',
+    'if [ "$1" = add ]; then exit 0; fi',
+    'if [ "$1" = commit ]; then exit 0; fi',
+    'if [ "$1" = fetch ]; then exit 0; fi',
+    'if [ "$1" = "rev-parse" ]; then',
+    '  if [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+    '  echo "abc1234"; exit 0',
+    "fi",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  resetResolvedClaudePath();
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-llm-failed-nojson-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000001300";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: LoopCommand.Execute,
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [],
+        repo: {
+          fullName: repoFullName,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  // Wait for upload-artifacts to confirm the loop completed
+  const uploadReq = await mock.waitForRequest("upload-artifacts");
+  const uploadBody = JSON.parse(uploadReq.body) as {
+    metadata: Record<string, unknown>;
+  };
+
+  // The LLM commit returned { status: "failed", reason: "other" } so the code
+  // fell through to executeGitOperations. Verify via the observable
+  // executeFinalizationPath in the upload metadata.
+  assert.equal(
+    uploadBody.metadata.executeFinalizationPath,
+    "git-fallback",
+    `Expected executeFinalizationPath=git-fallback after attemptLlmCommit status:failed reason:other (no json), got: ${String(uploadBody.metadata.executeFinalizationPath)}`,
+  );
+
+  // The completed event should also reflect git-fallback finalization
+  const completedEvent = await waitForCompletedEvent(mock.requests, loopId);
+  assert.equal(
+    completedEvent.result?.executeFinalizationPath,
+    "git-fallback",
+    `Expected completed event executeFinalizationPath=git-fallback, got: ${String(completedEvent.result?.executeFinalizationPath)}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test: attemptLlmCommit returns { status: "failed", reason: "other", logTail: ... }
+//       when claude exits with non-zero exit code
+//       → code falls through to executeGitOperations (git-fallback path)
+// ---------------------------------------------------------------------------
+
+test("EXECUTE: attemptLlmCommit returns status:failed reason:other when claude exits non-zero, falls through to git fallback", async () => {
+  const tmpDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "execute-llm-failed-nonzero-"),
+  );
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-llm-failed-nonzero");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  // fake run-loop.sh: writes a file so the worktree has changes for git status
+  await createFakeRunLoopScript(
+    tmpDir,
+    ["#!/bin/sh", "echo 'work done' > output.txt", "exit 0"].join("\n"),
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+
+  // fake claude for attemptLlmCommit: exits 1 (non-zero) without writing execution-result.json
+  // This causes attemptLlmCommit to return:
+  //   { status: "failed", reason: "other", logTail: "LLM commit process exited with code 1" }
+  // The code then falls through to executeGitOperations (git-fallback path).
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 1\n", {
+    mode: 0o755,
+  });
+
+  const repoFullName = `llm-failed-nonzero/${path.basename(repoPath)}`;
+  const expectedPrUrl = `https://github.com/${repoFullName}/pull/66`;
+
+  // fake gh: pr view exits non-zero so code calls gh pr create
+  const fakeGhScript = [
+    "#!/bin/sh",
+    'if [ "$1" = pr ] && [ "$2" = view ] && [ "$3" != "--json" ]; then exit 1; fi',
+    'if [ "$1" = pr ] && [ "$2" = view ] && [ "$3" = "--json" ]; then printf \'{"body":""}\\n\'; exit 0; fi',
+    'if [ "$1" = pr ] && [ "$2" = create ]; then',
+    `  printf '${expectedPrUrl}\\n'`,
+    "  exit 0",
+    "fi",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "gh"), fakeGhScript, { mode: 0o755 });
+
+  // fake git: status returns changes; all other commands succeed
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'if [ "$1" = status ]; then printf "M output.txt\\n"; exit 0; fi',
+    'if [ "$1" = push ]; then exit 0; fi',
+    'if [ "$1" = add ]; then exit 0; fi',
+    'if [ "$1" = commit ]; then exit 0; fi',
+    'if [ "$1" = fetch ]; then exit 0; fi',
+    'if [ "$1" = "rev-parse" ]; then',
+    '  if [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+    '  echo "def5678"; exit 0',
+    "fi",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  resetResolvedClaudePath();
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-llm-failed-nonzero-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000001400";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: LoopCommand.Execute,
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [],
+        repo: {
+          fullName: repoFullName,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  // Wait for upload-artifacts to confirm the loop completed
+  const uploadReq = await mock.waitForRequest("upload-artifacts");
+  const uploadBody = JSON.parse(uploadReq.body) as {
+    metadata: Record<string, unknown>;
+  };
+
+  // The LLM commit returned { status: "failed", reason: "other" } (non-zero exit) so the
+  // code fell through to executeGitOperations. Verify via the observable
+  // executeFinalizationPath in the upload metadata.
+  assert.equal(
+    uploadBody.metadata.executeFinalizationPath,
+    "git-fallback",
+    `Expected executeFinalizationPath=git-fallback after attemptLlmCommit status:failed reason:other (non-zero exit), got: ${String(uploadBody.metadata.executeFinalizationPath)}`,
+  );
+
+  // The completed event should also reflect git-fallback finalization
+  const completedEvent = await waitForCompletedEvent(mock.requests, loopId);
+  assert.equal(
+    completedEvent.result?.executeFinalizationPath,
+    "git-fallback",
+    `Expected completed event executeFinalizationPath=git-fallback, got: ${String(completedEvent.result?.executeFinalizationPath)}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test (T-3.2): Rate-limited LLM-commit spawn emits FAILED event with
+//               LoopErrorCode.AuthChallenge
+//   - fake claude writes JSONL with isApiErrorMessage: true and
+//     apiErrorStatus: 429 to stdout, then exits with code 1
+//   - attemptLlmCommit detects auth challenge via detectAuthChallengeFromJsonl
+//   - loop emits a FAILED event with LoopErrorCode.AuthChallenge
+// ---------------------------------------------------------------------------
+
+test("EXECUTE: rate-limited LLM commit spawn emits FAILED event with LoopErrorCode.AuthChallenge", async () => {
+  const tmpDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "execute-llm-ratelimit-"),
+  );
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-llm-ratelimit");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  // fake run-loop.sh: exits 0 so the execute phase proceeds to attemptLlmCommit
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+
+  // fake claude for attemptLlmCommit:
+  //   - outputs a JSONL line with isApiErrorMessage: true and apiErrorStatus: 429
+  //     to stdout (detectable by detectAuthChallengeFromJsonl via AUTH_CHALLENGE_PATTERN
+  //     matching "rate_limit_error" in the error field)
+  //   - exits with code 1 (non-zero) to trigger the auth-challenge detection path
+  const rateLimitJsonl = JSON.stringify({
+    type: "error",
+    error: "rate_limit_error",
+    isApiErrorMessage: true,
+    apiErrorStatus: 429,
+  });
+  const claudeScript = [
+    "#!/bin/sh",
+    `printf '%s\\n' ${JSON.stringify(rateLimitJsonl)}`,
+    "exit 1",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "claude"), claudeScript, {
+    mode: 0o755,
+  });
+
+  // fake git: all commands succeed (git status returns empty so no-changes path
+  // would be taken if we ever reach executeGitOperations; with an auth challenge
+  // error we do not)
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'if [ "$1" = status ]; then exit 0; fi',
+    'if [ "$1" = push ]; then exit 0; fi',
+    'if [ "$1" = add ]; then exit 0; fi',
+    'if [ "$1" = commit ]; then exit 0; fi',
+    'if [ "$1" = fetch ]; then exit 0; fi',
+    'if [ "$1" = "rev-parse" ]; then',
+    '  if [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+    "  exit 0",
+    "fi",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  resetResolvedClaudePath();
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-llm-ratelimit-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000001500";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: LoopCommand.Execute,
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [],
+        repo: {
+          fullName: `llm-ratelimit/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  // Wait for a terminal event (error or completed). The auth challenge path
+  // should produce an error event with LoopErrorCode.AuthChallenge.
+  const terminalEvent = await waitForTerminalEvent(mock.requests, loopId);
+
+  assert.equal(
+    terminalEvent.type,
+    "error",
+    `Expected terminal event type=error (FAILED), got: ${String(terminalEvent.type)}`,
+  );
+  assert.equal(
+    terminalEvent.code,
+    LoopErrorCode.AuthChallenge,
+    `Expected error code=${LoopErrorCode.AuthChallenge}, got: ${String(terminalEvent.code)}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test (T-3.3): LLM-commit spawn killed by SIGTERM (timeout simulation)
+//               returns { status: "failed", reason: "timeout" }
+//               → code falls through to git-fallback path and completes normally
+//
+//   - fake claude kills itself with SIGTERM so Node.js sees code:null
+//     (same observable outcome as the 30-minute kill timer firing)
+//   - attemptLlmCommit resolves with { status: "failed", reason: "timeout" }
+//   - the non-auth failure falls through to executeGitOperations (git-fallback)
+//   - loop completes with executeFinalizationPath="git-fallback"
+// ---------------------------------------------------------------------------
+
+test("EXECUTE: attemptLlmCommit returns status:failed reason:timeout when LLM process killed by SIGTERM, falls through to git fallback", async () => {
+  const tmpDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "execute-llm-timeout-"),
+  );
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-llm-timeout");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+
+  // fake run-loop.sh: writes a file so the worktree has changes for git status
+  await createFakeRunLoopScript(
+    tmpDir,
+    ["#!/bin/sh", "echo 'work done' > output.txt", "exit 0"].join("\n"),
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+
+  // fake claude for attemptLlmCommit: kills itself with SIGTERM so Node.js
+  // sees code=null (signal exit). This is the same observable outcome as the
+  // 30-minute kill timer firing, causing attemptLlmCommit to resolve with:
+  //   { status: "failed", reason: "timeout", logTail: ... }
+  // The code then falls through to executeGitOperations (git-fallback path).
+  await fs.writeFile(
+    path.join(fakeBin, "claude"),
+    "#!/bin/sh\nkill -TERM $$\n",
+    { mode: 0o755 },
+  );
+
+  const repoFullName = `llm-timeout/${path.basename(repoPath)}`;
+  const expectedPrUrl = `https://github.com/${repoFullName}/pull/77`;
+
+  // fake gh: pr view exits non-zero so code calls gh pr create
+  const fakeGhScript = [
+    "#!/bin/sh",
+    'if [ "$1" = pr ] && [ "$2" = view ] && [ "$3" != "--json" ]; then exit 1; fi',
+    'if [ "$1" = pr ] && [ "$2" = view ] && [ "$3" = "--json" ]; then printf \'{"body":""}\\n\'; exit 0; fi',
+    'if [ "$1" = pr ] && [ "$2" = create ]; then',
+    `  printf '${expectedPrUrl}\\n'`,
+    "  exit 0",
+    "fi",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "gh"), fakeGhScript, { mode: 0o755 });
+
+  // fake git: status returns changes; all other commands succeed
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'if [ "$1" = status ]; then printf "M output.txt\\n"; exit 0; fi',
+    'if [ "$1" = push ]; then exit 0; fi',
+    'if [ "$1" = add ]; then exit 0; fi',
+    'if [ "$1" = commit ]; then exit 0; fi',
+    'if [ "$1" = fetch ]; then exit 0; fi',
+    'if [ "$1" = "rev-parse" ]; then',
+    '  if [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
+    '  echo "ghi9012"; exit 0',
+    "fi",
+    "exit 0",
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+
+  resetResolvedClaudePath();
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "execute-llm-timeout-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000001600";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: LoopCommand.Execute,
+        closedLoopAuthToken: "tok",
+        prompt: "test",
+        artifacts: [],
+        repo: {
+          fullName: repoFullName,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  // Wait for upload-artifacts to confirm the loop completed
+  const uploadReq = await mock.waitForRequest("upload-artifacts");
+  const uploadBody = JSON.parse(uploadReq.body) as {
+    metadata: Record<string, unknown>;
+  };
+
+  // The LLM commit returned { status: "failed", reason: "timeout" } (SIGTERM kill)
+  // so the code fell through to executeGitOperations. Verify via the observable
+  // executeFinalizationPath in the upload metadata.
+  assert.equal(
+    uploadBody.metadata.executeFinalizationPath,
+    "git-fallback",
+    `Expected executeFinalizationPath=git-fallback after attemptLlmCommit status:failed reason:timeout (SIGTERM), got: ${String(uploadBody.metadata.executeFinalizationPath)}`,
+  );
+
+  // The completed event should also reflect git-fallback finalization
+  const completedEvent = await waitForCompletedEvent(mock.requests, loopId);
+  assert.equal(
+    completedEvent.result?.executeFinalizationPath,
+    "git-fallback",
+    `Expected completed event executeFinalizationPath=git-fallback, got: ${String(completedEvent.result?.executeFinalizationPath)}`,
   );
 });
