@@ -98,11 +98,7 @@ import {
   spawnPtySession,
 } from "../../main/pty-session-store.js";
 import { startOutputTailer } from "./output-tailer.js";
-import {
-  findPluginScript,
-  findPluginVersions,
-  getPluginCacheRoot,
-} from "./plugin-cache.js";
+import { findPluginScript } from "./plugin-cache.js";
 import { addRepo } from "./repos-config-utils.js";
 import { sanitizeCommitMessage } from "./symphony-interactive.js";
 import {
