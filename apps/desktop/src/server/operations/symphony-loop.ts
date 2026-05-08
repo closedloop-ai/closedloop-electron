@@ -2350,17 +2350,22 @@ export function isAuthChallengeError(logTail: string): boolean {
 // LLM-assisted commit (EXECUTE only)
 // ---------------------------------------------------------------------------
 
+type LlmCommitFailureReason =
+  | { kind: "auth_challenge"; authChallengeMessage: string }
+  | { kind: "timeout" }
+  | { kind: "other" };
+
 type LlmCommitResult =
   | { status: "success"; result: ExecutionResult }
   | {
       status: "failed";
-      reason: "auth_challenge" | "timeout" | "other";
+      reason: LlmCommitFailureReason;
       logTail: string;
     };
 
 /** Shorthand for a non-auth, non-timeout LLM commit failure. */
 function llmCommitFailed(logTail: string): LlmCommitResult {
-  return { status: "failed", reason: "other", logTail };
+  return { status: "failed", reason: { kind: "other" }, logTail };
 }
 
 async function attemptLlmCommit(
@@ -2646,7 +2651,7 @@ async function attemptLlmCommit(
         loopError(loopId, `LLM commit exited with code ${code ?? "killed"}`);
         resolve({
           status: "failed",
-          reason: "timeout",
+          reason: { kind: "timeout" },
           logTail: fallbackLogTail(String(code ?? "killed")),
         });
         return;
@@ -2684,9 +2689,13 @@ async function attemptLlmCommit(
             `LLM commit detected auth challenge: ${authChallengeMsg}`,
           );
         }
+        const failureReason: LlmCommitFailureReason =
+          authChallengeMsg !== null
+            ? { kind: "auth_challenge", authChallengeMessage: authChallengeMsg }
+            : { kind: "other" };
         resolve({
           status: "failed",
-          reason: authChallengeMsg !== null ? "auth_challenge" : "other",
+          reason: failureReason,
           logTail: fallbackLogTail(String(code)),
         });
         return;
@@ -3195,7 +3204,7 @@ export async function runExecuteFinalization(
 
   if (
     llmResult.status === "failed" &&
-    llmResult.reason === "auth_challenge"
+    llmResult.reason.kind === "auth_challenge"
   ) {
     return completeExecuteFinalization(
       params.jobStore,
@@ -3206,7 +3215,7 @@ export async function runExecuteFinalization(
       {
         status: "error",
         path: "llm",
-        reason: "LLM commit failed: auth_challenge detected",
+        reason: `LLM commit failed: ${llmResult.reason.authChallengeMessage}`,
         executionResultPersisted: false,
         isAuthChallenge: true,
       },
