@@ -2788,12 +2788,17 @@
         }
       }
 
+      function formatByteCount(value) {
+        const bytes = Number(value);
+        if (!Number.isFinite(bytes) || bytes < 0) return null;
+        if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + " MB";
+        if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KB";
+        return bytes + " B";
+      }
+
       function renderActivityCard(event) {
         const card = document.createElement("div");
         card.className = "activity-card";
-
-        const hasExpand = Boolean(event.requestBody || event.responseBody);
-        if (hasExpand) card.classList.add("expandable");
 
         const top = document.createElement("div");
         top.className = "activity-top";
@@ -2821,13 +2826,6 @@
         badge.textContent = kind === "security" ? "Security" : statusLabel(statusCode);
         top.appendChild(badge);
 
-        if (hasExpand) {
-          const chevron = document.createElement("span");
-          chevron.className = "activity-chevron";
-          chevron.textContent = "\u25BE";
-          top.appendChild(chevron);
-        }
-
         card.appendChild(top);
 
         const meta = document.createElement("div");
@@ -2841,7 +2839,13 @@
           : duration >= 1000
             ? (duration / 1000).toFixed(1) + "s"
             : duration + "ms";
-        meta.textContent = `Received ${timeFmt(receivedAt)} \u2192 Responded ${timeFmt(respondedAt)} (${durationFmt})`;
+        const sizeParts = [];
+        const requestSize = formatByteCount(event.requestSizeBytes);
+        const responseSize = formatByteCount(event.responseSizeBytes);
+        if (requestSize) sizeParts.push(`Req ${requestSize}`);
+        if (responseSize) sizeParts.push(`Res ${responseSize}`);
+        meta.textContent = `Received ${timeFmt(receivedAt)} \u2192 Responded ${timeFmt(respondedAt)} (${durationFmt})` +
+          (sizeParts.length ? ` | ${sizeParts.join(" | ")}` : "");
         card.appendChild(meta);
 
         if (event.detail) {
@@ -2849,70 +2853,6 @@
           detail.className = "activity-detail";
           detail.textContent = String(event.detail);
           card.appendChild(detail);
-        }
-
-        if (hasExpand) {
-          const expand = document.createElement("div");
-          expand.className = "activity-expand";
-          const inner = document.createElement("div");
-          inner.className = "activity-expand-inner";
-
-          const sep = document.createElement("hr");
-          sep.className = "activity-separator";
-          inner.appendChild(sep);
-
-          const methodPath = document.createElement("div");
-          methodPath.className = "activity-method-path";
-          methodPath.textContent = `${event.method} ${event.path}`;
-          inner.appendChild(methodPath);
-
-          if (event.requestBody) {
-            const section = document.createElement("div");
-            section.className = "activity-body-section";
-            const label = document.createElement("div");
-            label.className = "activity-body-label";
-            label.textContent = "Request Body";
-            section.appendChild(label);
-            const block = document.createElement("pre");
-            const reqFmt = formatBody(event.requestBody);
-            block.className = "activity-body-block" + (reqFmt.isJson ? " json" : "");
-            block.innerHTML = reqFmt.html;
-            section.appendChild(block);
-            inner.appendChild(section);
-          }
-
-          if (event.responseBody) {
-            const section = document.createElement("div");
-            section.className = "activity-body-section";
-            const label = document.createElement("div");
-            label.className = "activity-body-label";
-            label.textContent = "Response Body";
-            section.appendChild(label);
-            const block = document.createElement("pre");
-            const resFmt = formatBody(event.responseBody);
-            block.className = "activity-body-block" + (resFmt.isJson ? " json" : "");
-            block.innerHTML = resFmt.html;
-            section.appendChild(block);
-            inner.appendChild(section);
-          }
-
-          expand.appendChild(inner);
-          card.appendChild(expand);
-
-          if (event.id && expandedActivityIds.has(event.id)) {
-            card.classList.add("expanded");
-          }
-
-          top.addEventListener("click", () => {
-            const nowExpanded = card.classList.toggle("expanded");
-            if (event.id) {
-              if (nowExpanded) {
-                expandedActivityIds.add(event.id);
-              } else {
-                expandedActivityIds.delete(event.id);
-              }
-            }
-          });
         }
 
         return card;

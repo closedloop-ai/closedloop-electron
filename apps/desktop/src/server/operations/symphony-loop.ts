@@ -70,9 +70,15 @@ import type {
   OperationDispatcher,
   OperationRequestContext,
 } from "../operation-dispatcher.js";
+import { validateOutboundUrlForSurface } from "../outbound-url-policy.js";
 import { readJsonFileSync } from "../read-json-file-sync.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
-import { getShellEnv, getShellPath, resolveBinarySync } from "../shell-path.js";
+import {
+  getShellEnv,
+  getShellPath,
+  resolveBinaryFromLoginShell,
+  resolveBinaryFromInheritedPath,
+} from "../shell-path.js";
 import { withMcpTools } from "./chat-tools.js";
 import {
   findWorktreeForBranch as findWorktreeForBranchImpl,
@@ -205,11 +211,11 @@ export function getOverrideBinaryPaths(): {
 }
 
 export function getResolvedGitPath(): string {
-  return resolveBinarySync("git", overrideGetBinaryPaths?.()?.git).path;
+  return resolveBinaryFromInheritedPath("git", overrideGetBinaryPaths?.()?.git).path;
 }
 
 export function getResolvedGhPath(): string {
-  return resolveBinarySync("gh", overrideGetBinaryPaths?.()?.gh).path;
+  return resolveBinaryFromInheritedPath("gh", overrideGetBinaryPaths?.()?.gh).path;
 }
 
 /**
@@ -231,13 +237,13 @@ export function getResolvedClaudePath(): string {
   resolvedClaudePath = null;
 
   // Strategy 0: check for a user-configured override path first.
-  // resolveBinarySync returns "override" (executable) or "override_invalid"
+  // resolveBinaryFromInheritedPath returns "override" (executable) or "override_invalid"
   // (set but not executable). Both are returned as-is -- "override_invalid"
   // lets the spawn produce a descriptive ENOENT rather than silently falling
   // back to a different binary.
   const claudeOverride = overrideGetBinaryPaths?.()?.claude;
   if (claudeOverride !== undefined) {
-    const resolved = resolveBinarySync("claude", claudeOverride);
+    const resolved = resolveBinaryFromInheritedPath("claude", claudeOverride);
     resolvedClaudePath = resolved.path;
     return resolvedClaudePath;
   }
@@ -612,6 +618,8 @@ export function readEvaluateOutputs(
 type LoopCommitter = LocalJobCommitter;
 
 type ContextPackAttachment = SharedContextPackAttachment;
+
+export const SKIPPED_ATTACHMENTS_WARNING_FILE = "skipped-attachments.json";
 
 interface ExecutionResult {
   prUrl: string;
@@ -1342,7 +1350,7 @@ async function postLoopEvent(
       );
       gatewayLog.error(
         "loop-event",
-        `POST ${payload.type} to ${url} failed: ${resp.status} ${resp.statusText} ${text}`,
+        `POST loopEvent type=${payload.type} loopId=${loopId} url=${url} failed: ${resp.status} ${resp.statusText} ${text}`,
       );
       return {
         success: false,
@@ -1352,7 +1360,7 @@ async function postLoopEvent(
     loopLog(loopId, `Event POST success: ${resp.status}`);
     gatewayLog.info(
       "loop-event",
-      `POST ${payload.type} for loopId=${loopId}: ${resp.status}`,
+      `POST loopEvent type=${payload.type} loopId=${loopId} status=${resp.status}`,
     );
     return { success: true };
   } catch (err) {
@@ -1360,7 +1368,7 @@ async function postLoopEvent(
     loopError(loopId, "Failed to post event:", err);
     gatewayLog.error(
       "loop-event",
-      `POST ${payload.type} network error: ${msg}`,
+      `POST loopEvent type=${payload.type} loopId=${loopId} network error: ${msg}`,
     );
     return { success: false, error: msg };
   }
@@ -1588,6 +1596,10 @@ async function downloadAttachmentsToDisk(
 
   const attachmentsDir = path.join(claudeWorkDir, "attachments");
   mkdirSync(attachmentsDir, { recursive: true });
+  const skippedAttachments: Array<{
+    id: string;
+    reason: string;
+  }> = [];
 
   for (const attachment of attachments) {
     try {
@@ -1621,7 +1633,24 @@ async function downloadAttachmentsToDisk(
         continue;
       }
 
-      const response = await fetch(attachment.signedUrl);
+      const policyDecision = validateOutboundUrlForSurface(
+        "loop_attachment_download",
+        attachment.signedUrl,
+      );
+      if (!policyDecision.allowed) {
+        Observability.outboundNetworkDecision(policyDecision.diagnostics);
+        skippedAttachments.push({
+          id: attachment.id,
+          reason: policyDecision.diagnostics.reason,
+        });
+        console.warn(
+          `[downloadAttachmentsToDisk] Attachment ${attachment.id} denied by outbound policy: ${policyDecision.diagnostics.reason}`,
+        );
+        continue;
+      }
+
+      Observability.outboundNetworkDecision(policyDecision.diagnostics);
+      const response = await fetch(attachment.signedUrl, { redirect: "error" });
       if (!response.ok) {
         console.warn(
           `[downloadAttachmentsToDisk] Attachment ${attachment.id} fetch failed: ${response.status} ${response.statusText}, skipping`,
@@ -1647,11 +1676,31 @@ async function downloadAttachmentsToDisk(
       writeFileSync(diskPath, buffer);
     } catch (err) {
       console.warn(
-        `[downloadAttachmentsToDisk] Failed to download attachment ${attachment.id}:`,
-        err,
+        `[downloadAttachmentsToDisk] Failed to download attachment ${attachment.id}: ${formatAttachmentDownloadError(err)}`,
       );
     }
   }
+
+  if (skippedAttachments.length > 0) {
+    await fs.writeFile(
+      path.join(claudeWorkDir, SKIPPED_ATTACHMENTS_WARNING_FILE),
+      JSON.stringify(
+        {
+          skippedAttachments,
+          allAttachmentsSkipped: skippedAttachments.length === attachments.length,
+        },
+        null,
+        2,
+      ),
+    );
+  }
+}
+
+function formatAttachmentDownloadError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.name || "Error";
+  }
+  return typeof error;
 }
 
 /**
@@ -5744,7 +5793,12 @@ async function handleLoopRequest(
     let scriptPath: string | null = null;
 
     // Every command needs claude — verify it consistently for all paths.
-    const resolved = resolveBinarySync(
+    // Use the async resolveBinaryFromLoginShell (not resolveBinaryFromInheritedPath)
+    // so the preflight honors the same login-shell PATH discovery the health check
+    // uses (getShellPath spawns `$SHELL -ilc`). The sync variant only consults
+    // Electron's bare PATH and `bash -lc which`, which misses zsh/nvm/fnm/asdf/
+    // Volta/Bun/mise installs and contradicts a green health check.
+    const resolved = await resolveBinaryFromLoginShell(
       "claude",
       overrideGetBinaryPaths?.()?.claude,
     );

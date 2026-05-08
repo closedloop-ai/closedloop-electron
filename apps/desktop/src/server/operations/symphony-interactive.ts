@@ -8,7 +8,7 @@ import type {
   OperationRequestContext,
 } from "../operation-dispatcher.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
-import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getShellEnv, resolveBinaryFromLoginShell } from "../shell-path.js";
 import { getOverrideBinaryPaths, getResolvedGitPath } from "./symphony-loop.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { retrySpawn, type RetrySpawnDeps } from "../../main/spawn-retry.js";
@@ -972,6 +972,7 @@ async function generateCommitWithClaude(
   deps: RetrySpawnDeps
 ): Promise<{ title: string; description: string }> {
   const env = await getShellEnv();
+  const claudeBin = (await resolveBinaryFromLoginShell("claude", getOverrideBinaryPaths()?.claude)).path;
   return retrySpawn(() => new Promise<{ title: string; description: string }>((resolve, reject) => {
     const prompt = [
       `Generate a git commit message for ticket ${ticketId}.`,
@@ -987,7 +988,7 @@ async function generateCommitWithClaude(
       "Do NOT include AI or assistant references.",
     ].join("\n");
 
-    const child = spawn(resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path, ["--model", "haiku", "-p", prompt], {
+    const child = spawn(claudeBin, ["--model", "haiku", "-p", prompt], {
       cwd: worktreeDir,
       stdio: ["ignore", "pipe", "pipe"],
       env,

@@ -1,7 +1,7 @@
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
-import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getShellEnv, resolveBinaryFromLoginShell } from "../shell-path.js";
 import { getOverrideBinaryPaths, getResolvedGitPath } from "./symphony-loop.js";
 import { isNetworkError } from "../../main/gateway-logger.js";
 import { DirectoryNotAllowedError } from "../security.js";
@@ -62,6 +62,8 @@ export function registerGitPrRoutes(
       throw error;
     }
 
+    const ghBin = (await resolveBinaryFromLoginShell("gh", getOverrideBinaryPaths()?.gh)).path;
+
     const fullBody = ticketUrl
       ? `${description}\n\n---\nLinear: ${ticketUrl}`.trim()
       : description;
@@ -70,7 +72,7 @@ export function registerGitPrRoutes(
       const currentBranch = await runRead(cwd, getResolvedGitPath(), ["rev-parse", "--abbrev-ref", "HEAD"]);
       await run(cwd, getResolvedGitPath(), ["push", "-u", "origin", currentBranch]);
 
-      const createOutput = await runRead(cwd, resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, [
+      const createOutput = await runRead(cwd, ghBin, [
         "pr",
         "create",
         "--head",
@@ -92,7 +94,7 @@ export function registerGitPrRoutes(
         return;
       }
 
-      const view = await runRead(cwd, resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, ["pr", "view", "--json", "url,number"]);
+      const view = await runRead(cwd, ghBin, ["pr", "view", "--json", "url,number"]);
       const parsedView = JSON.parse(view) as { url?: string; number?: number };
       json(context, 200, {
         success: true,
@@ -104,7 +106,7 @@ export function registerGitPrRoutes(
       const message = String(error);
       if (message.includes("already exists")) {
         try {
-          const view = await runRead(cwd, resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, ["pr", "view", "--json", "url,number"]);
+          const view = await runRead(cwd, ghBin, ["pr", "view", "--json", "url,number"]);
           const parsedView = JSON.parse(view) as { url?: string; number?: number };
           json(context, 200, {
             success: true,
@@ -146,8 +148,10 @@ export function registerGitPrRoutes(
       throw error;
     }
 
+    const ghBin = (await resolveBinaryFromLoginShell("gh", getOverrideBinaryPaths()?.gh)).path;
+
     try {
-      const output = await runRead(cwd, resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, [
+      const output = await runRead(cwd, ghBin, [
         "pr",
         "list",
         "--state",
@@ -211,8 +215,10 @@ export function registerGitPrRoutes(
       throw error;
     }
 
+    const ghBin = (await resolveBinaryFromLoginShell("gh", getOverrideBinaryPaths()?.gh)).path;
+
     try {
-      const prDataOutput = await runRead(cwd, resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, [
+      const prDataOutput = await runRead(cwd, ghBin, [
         "pr",
         "view",
         prNumber,
@@ -297,7 +303,7 @@ export function registerGitPrRoutes(
       const repoSlug = await getRepoSlug(cwd);
       if (repoSlug) {
         const inlineResult = spawnSync(
-          resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path,
+          ghBin,
           ["api", `repos/${repoSlug}/pulls/${prNumber}/comments`, "--paginate"],
           {
             cwd,
@@ -371,8 +377,10 @@ export function registerGitPrRoutes(
       return;
     }
 
+    const ghBin = (await resolveBinaryFromLoginShell("gh", getOverrideBinaryPaths()?.gh)).path;
+
     try {
-      const output = await runRead(undefined, resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, [
+      const output = await runRead(undefined, ghBin, [
         "pr",
         "view",
         number,
@@ -464,6 +472,8 @@ export function registerGitPrRoutes(
       throw error;
     }
 
+    const ghBin = (await resolveBinaryFromLoginShell("gh", getOverrideBinaryPaths()?.gh)).path;
+
     try {
       const repoSlug = await getRepoSlug(cwd);
 
@@ -473,7 +483,7 @@ export function registerGitPrRoutes(
         if (repoSlug) {
           args.push("-R", repoSlug);
         }
-        const result = await ghPrCommentViaStdin(args, replyBody, cwd);
+        const result = await ghPrCommentViaStdin(args, replyBody, cwd, ghBin);
         json(context, 200, {
           success: true,
           message: "Changes requested",
@@ -486,7 +496,8 @@ export function registerGitPrRoutes(
         const result = await ghApiViaStdin(
           `repos/${repoSlug}/pulls/${prNumber}/comments/${commentId}/replies`,
           { body: replyBody },
-          cwd
+          cwd,
+          ghBin
         );
 
         json(context, 200, {
@@ -501,7 +512,7 @@ export function registerGitPrRoutes(
       if (repoSlug) {
         args.push("-R", repoSlug);
       }
-      const result = await ghPrCommentViaStdin(args, replyBody, cwd);
+      const result = await ghPrCommentViaStdin(args, replyBody, cwd, ghBin);
 
       json(context, 200, {
         success: true,
@@ -533,6 +544,8 @@ export function registerGitPrRoutes(
       throw error;
     }
 
+    const ghBin = (await resolveBinaryFromLoginShell("gh", getOverrideBinaryPaths()?.gh)).path;
+
     try {
       const repoSlug = await getRepoSlug(cwd);
       if (!repoSlug) {
@@ -540,7 +553,7 @@ export function registerGitPrRoutes(
         return;
       }
 
-      const output = await runRead(cwd, resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, [
+      const output = await runRead(cwd, ghBin, [
         "api",
         `repos/${repoSlug}/pulls/${prNumber}/files`,
         "--paginate",
@@ -578,6 +591,8 @@ export function registerGitPrRoutes(
       throw error;
     }
 
+    const ghBin = (await resolveBinaryFromLoginShell("gh", getOverrideBinaryPaths()?.gh)).path;
+
     try {
       const repoSlug = await getRepoSlug(cwd);
       if (!repoSlug) {
@@ -585,7 +600,7 @@ export function registerGitPrRoutes(
         return;
       }
 
-      const sha = await runRead(cwd, resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, [
+      const sha = await runRead(cwd, ghBin, [
         "api",
         `repos/${repoSlug}/pulls/${prNumber}`,
         "--jq",
@@ -641,6 +656,8 @@ export function registerGitPrRoutes(
       throw error;
     }
 
+    const ghBin = (await resolveBinaryFromLoginShell("gh", getOverrideBinaryPaths()?.gh)).path;
+
     try {
       const repoSlug = await getRepoSlug(cwd);
       if (!repoSlug) {
@@ -659,7 +676,8 @@ export function registerGitPrRoutes(
               commit_id: commitSha,
               side: "RIGHT"
             },
-            cwd
+            cwd,
+            ghBin
           );
           json(context, 200, { success: true, output: result.stdout.trim() });
           return;
@@ -678,7 +696,8 @@ export function registerGitPrRoutes(
               commit_id: commitSha,
               subject_type: "file"
             },
-            cwd
+            cwd,
+            ghBin
           );
           json(context, 200, { success: true, output: result.stdout.trim() });
           return;
@@ -690,7 +709,8 @@ export function registerGitPrRoutes(
       const result = await ghPrCommentViaStdin(
         ["pr", "comment", String(prNumber), "-R", repoSlug],
         commentBody,
-        cwd
+        cwd,
+        ghBin
       );
       json(context, 200, { success: true, output: result.stdout.trim() });
     } catch (error) {
@@ -703,7 +723,8 @@ export function registerGitPrRoutes(
 
   dispatcher.register("GET", "/api/gateway/git/user", async (context) => {
     try {
-      const login = await runRead(undefined, resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, ["api", "user", "--jq", ".login"]);
+      const ghBin = (await resolveBinaryFromLoginShell("gh", getOverrideBinaryPaths()?.gh)).path;
+      const login = await runRead(undefined, ghBin, ["api", "user", "--jq", ".login"]);
       if (!login) {
         json(context, 500, { error: "Could not determine GitHub user" });
         return;
@@ -796,11 +817,12 @@ async function withPathEnv(): Promise<NodeJS.ProcessEnv> {
 async function ghApiViaStdin(
   apiPath: string,
   payload: Record<string, unknown>,
-  cwd: string
+  cwd: string,
+  ghBin: string
 ): Promise<{ stdout: string; stderr: string }> {
   const env = await withPathEnv();
   return new Promise((resolve, reject) => {
-    const process = spawn(resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, ["api", apiPath, "--method", "POST", "--input", "-"], {
+    const process = spawn(ghBin, ["api", apiPath, "--method", "POST", "--input", "-"], {
       cwd,
       env
     });
@@ -833,11 +855,12 @@ async function ghApiViaStdin(
 async function ghPrCommentViaStdin(
   args: string[],
   body: string,
-  cwd: string
+  cwd: string,
+  ghBin: string
 ): Promise<{ stdout: string; stderr: string }> {
   const env = await withPathEnv();
   return new Promise((resolve, reject) => {
-    const process = spawn(resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path, [...args, "--body-file", "-"], {
+    const process = spawn(ghBin, [...args, "--body-file", "-"], {
       cwd,
       env
     });

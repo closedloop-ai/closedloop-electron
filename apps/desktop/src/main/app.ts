@@ -52,7 +52,7 @@ import {
 } from "../server/operations/symphony-utils.js";
 import { getResolvedGitPath, resetResolvedClaudePath } from "../server/operations/symphony-loop.js";
 import { resetMcpDetectionCache } from "../server/operations/mcp-detection.js";
-import { resolveBinary } from "../server/shell-path.js";
+import { resolveBinaryFromLoginShell } from "../server/shell-path.js";
 import { getCodePluginVersion } from "../server/operations/plugin-cache.js";
 import { seedReposConfig } from "./seed-repos-config.js";
 import {
@@ -2118,7 +2118,7 @@ export class DesktopApplication {
       const results = await Promise.all(
         names.map(async (name) => {
           const override = overrides[name];
-          const resolved = await resolveBinary(name, override);
+          const resolved = await resolveBinaryFromLoginShell(name, override);
           return {
             name,
             override: override ?? null,
