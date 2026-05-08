@@ -31,6 +31,12 @@ import {
   emitDecisionTableVerificationTelemetry,
   getDecisionTableVerificationTelemetryOffset,
 } from "../../main/decision-table-verification-telemetry.js";
+import {
+  getLoopPerfTelemetryOffset,
+  reconcileLoopPerfTelemetry,
+  startLoopPerfTelemetryWatcher,
+  type LoopPerfTelemetryWatcherHandle,
+} from "../../main/loop-perf-telemetry.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import type { ExecutePlanSourceDiagnostics } from "../../main/telemetry-protocol.js";
 import type {
@@ -3893,6 +3899,8 @@ export async function handleProcessCompletion(
   },
   decisionTableVerificationStartOffset = 0,
   userVisibleLoopFailureSecret?: string,
+  loopPerfTelemetryStartOffset = 0,
+  loopPerfWatcherHandle?: LoopPerfTelemetryWatcherHandle,
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
   // Temp-dir commands (DECOMPOSE, EVALUATE_*) need the entire temp tree removed on cleanup.
@@ -3900,6 +3908,39 @@ export async function handleProcessCompletion(
   const elapsedMs = spawnStartedAt ? Date.now() - spawnStartedAt : undefined;
 
   loopLog(loopId, `Process exited with code ${exitCode}, command=${command}`);
+
+  // Stop the loop perf watcher and reconcile any remaining records.
+  // Gated on `loopPerfWatcherHandle` because the watcher and the captured
+  // startOffset travel together: only the run-loop.sh spawn path
+  // (PLAN/EXECUTE) sets them. Commands that reuse a prior PLAN's
+  // claudeWorkDir without starting the watcher (notably REQUEST_CHANGES)
+  // would otherwise reconcile from byte 0 and re-emit every PLAN-era
+  // perf.jsonl record under the new command's trace context, polluting
+  // loop.perf.* telemetry. The no-op handle returned when fs.watch fails
+  // is still defined (it carries the captured startOffset), so the
+  // fail-open path keeps reconciling correctly.
+  // Wrapped in try/catch so scanner failures never affect the Loop outcome (AC-004).
+  try {
+    if (loopPerfWatcherHandle) {
+      await loopPerfWatcherHandle.stop();
+      reconcileLoopPerfTelemetry(claudeWorkDir, {
+        startOffset: loopPerfTelemetryStartOffset,
+        traceContext: {
+          commandId,
+          operationId,
+          loopId,
+          jobId: loopId,
+        },
+        telemetryEmitter: Observability.getTelemetryEmitter(),
+        watcherHandle: loopPerfWatcherHandle,
+      });
+    }
+  } catch (loopPerfErr) {
+    gatewayLog.warn(
+      "loop-perf-telemetry",
+      `Loop perf telemetry reconciliation failed for loopId=${loopId}: ${loopPerfErr instanceof Error ? loopPerfErr.message : loopPerfErr}`,
+    );
+  }
 
   if (exitCode !== 0) {
     // Collect diagnostics (log tail + stderr + token usage) for the failure event
@@ -6025,6 +6066,8 @@ async function handleLoopRequest(
     let child: ReturnType<typeof spawn>;
     let spawnStartedAt = 0;
     let decisionTableVerificationStartOffset = 0;
+    let loopPerfTelemetryStartOffset = 0;
+    let loopPerfWatcherHandle: LoopPerfTelemetryWatcherHandle | undefined;
     const collectedSpawnMeta: {
       command: string;
       args: string[];
@@ -6436,6 +6479,24 @@ async function handleLoopRequest(
           decisionTableVerificationStartOffset =
             getDecisionTableVerificationTelemetryOffset(claudeWorkDir);
         }
+        loopPerfTelemetryStartOffset = getLoopPerfTelemetryOffset(claudeWorkDir);
+        // Start the perf watcher BEFORE spawning the child so its
+        // `.tool-calls/` baseline snapshot is taken while the directory
+        // contains only prior-run sentinels (or is empty/missing). Starting
+        // it post-spawn would race the child: any sentinel the child writes
+        // before the watcher initialises would be folded into the baseline
+        // and reconcileLoopPerfTelemetry() would later skip it as stale,
+        // dropping legitimate current-run orphan telemetry.
+        loopPerfWatcherHandle = startLoopPerfTelemetryWatcher(claudeWorkDir, {
+          startOffset: loopPerfTelemetryStartOffset,
+          traceContext: {
+            commandId,
+            operationId,
+            loopId: body.loopId,
+            jobId: body.loopId,
+          },
+          telemetryEmitter: Observability.getTelemetryEmitter(),
+        });
         spawnStartedAt = Date.now();
         child = spawn(scriptPath!, scriptArgs, {
           cwd: worktreeDir!,
@@ -6447,6 +6508,17 @@ async function handleLoopRequest(
       }
     } catch (spawnErr) {
       closeSync(logFd);
+      // The perf watcher is started before spawn() so its baseline snapshot
+      // does not race the child. If spawn throws, the watcher is already
+      // running — stop it before cleanup to release its fs.watch handle.
+      if (loopPerfWatcherHandle) {
+        try {
+          await loopPerfWatcherHandle.stop();
+        } catch {
+          // Ignore — watcher errors must not mask the spawn failure.
+        }
+        loopPerfWatcherHandle = undefined;
+      }
       const msg =
         spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
       await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
@@ -6524,6 +6596,8 @@ async function handleLoopRequest(
         collectedSpawnMeta,
         decisionTableVerificationStartOffset,
         userVisibleLoopFailureSecret,
+        loopPerfTelemetryStartOffset,
+        loopPerfWatcherHandle,
       ).catch((err) => {
         loopError(body.loopId, "Completion handler error:", err);
         gatewayLog.error(

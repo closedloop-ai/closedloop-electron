@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import type {
@@ -6,6 +6,10 @@ import type {
   DecisionTableVerificationRecordDiagnostics,
   TelemetryEmitter,
 } from "./telemetry-protocol.js";
+import {
+  countNewlinesBeforeOffset,
+  getJsonlFileOffset,
+} from "./telemetry-file-utils.js";
 
 export const DECISION_TABLE_VERIFICATION_RELATIVE_PATH = path.join(
   "decision-table-verifications.jsonl",
@@ -65,13 +69,9 @@ export type DecisionTableVerificationEmissionSummary = {
 export function getDecisionTableVerificationTelemetryOffset(
   closedLoopWorkDir: string,
 ): number {
-  const filePath =
-    getDecisionTableVerificationTelemetryFilePath(closedLoopWorkDir);
-  try {
-    return existsSync(filePath) ? statSync(filePath).size : 0;
-  } catch {
-    return 0;
-  }
+  return getJsonlFileOffset(
+    getDecisionTableVerificationTelemetryFilePath(closedLoopWorkDir),
+  );
 }
 
 /**
@@ -282,16 +282,6 @@ function normalizeStartOffset(startOffset: number | undefined): number {
     return 0;
   }
   return Math.floor(startOffset);
-}
-
-function countNewlinesBeforeOffset(buffer: Buffer, offset: number): number {
-  let count = 0;
-  for (let index = 0; index < offset; index += 1) {
-    if (buffer[index] === 0x0a) {
-      count += 1;
-    }
-  }
-  return count;
 }
 
 function toTelemetryRecord(
