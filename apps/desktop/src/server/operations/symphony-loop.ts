@@ -6412,11 +6412,12 @@ async function handleLoopRequest(
           const outputDir = path.join(claudeWorkDir, `repo-${i}-agents`);
           scriptLines.push(
             `echo "=== BOOTSTRAP ${i}: ${shellEscape(entry.fullName)} ==="`,
-            `mkdir -p ${shellEscape(outputDir)}`,
+            `OUTPUT_DIR=${shellEscape(outputDir)}`,
+            `mkdir -p "$OUTPUT_DIR"`,
             `if ! cd ${shellEscape(entry.localPath)}; then`,
             `  echo "fail:cd" > ${shellEscape(marker)}`,
             `else`,
-            `  if "$CLAUDE_BIN" -p "/agent-bootstrap --output-dir ${shellEscape(outputDir)}" 2>${shellEscape(stderrLog)}; then`,
+            `  if "$CLAUDE_BIN" -p "/agent-bootstrap --output-dir $OUTPUT_DIR" 2>${shellEscape(stderrLog)}; then`,
             `    echo "ok" > ${shellEscape(marker)}`,
             `  else`,
             `    echo "fail:$?" > ${shellEscape(marker)}`,
