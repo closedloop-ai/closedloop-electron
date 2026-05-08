@@ -29,10 +29,17 @@ import {
   emitDecisionTableVerificationTelemetry,
   getDecisionTableVerificationTelemetryOffset,
 } from "../../main/decision-table-verification-telemetry.js";
+import {
+  getLoopPerfTelemetryOffset,
+  reconcileLoopPerfTelemetry,
+  startLoopPerfTelemetryWatcher,
+  type LoopPerfTelemetryWatcherHandle,
+} from "../../main/loop-perf-telemetry.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import type { ExecutePlanSourceDiagnostics } from "../../main/telemetry-protocol.js";
 import type {
   JobStore,
+  LocalJob,
   LocalJobCommand,
   LocalJobCommitter,
   LocalJobExecuteFinalizationPath,
@@ -45,6 +52,7 @@ import {
   isExecuteNoWorkCompletion,
   isRetryableFinalizationError,
   tryUploadArtifacts,
+  tryUploadSupportBundle,
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
 import type { LoopTokenStore } from "../../main/loop-token-store.js";
@@ -2276,9 +2284,26 @@ export function isSessionLimitError(logTail: string): boolean {
 // Auth challenge detection
 // ---------------------------------------------------------------------------
 
-/** Pattern that matches known auth/rate-limit/billing error messages from Claude CLI. */
+/**
+ * Pattern that matches known auth/rate-limit/billing error messages from Claude CLI.
+ *
+ * Kept narrow because it is applied to arbitrary text — raw stderr (`logTail`)
+ * and `entry.result` strings — where loose terms like `forbidden` or
+ * `access denied` would produce false positives (filesystem permission errors,
+ * git errors, etc.). For synthetic `isApiErrorMessage` entries, see
+ * `AUTH_STATUS_PATTERN`.
+ */
 export const AUTH_CHALLENGE_PATTERN =
-  /authentication_error|invalid bearer token|rate_limit_error|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|token.*expired/i;
+  /authentication_error|authentication required|invalid bearer token|invalid token|rate_limit_error|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|token.*expired/i;
+
+/**
+ * Broader auth pattern that adds generic HTTP-status phrasing
+ * (`forbidden`, `access denied`). Only safe to apply to synthetic
+ * `isApiErrorMessage` entries from the Claude CLI, which are guaranteed
+ * to describe an API error rather than arbitrary log content.
+ */
+export const AUTH_STATUS_PATTERN =
+  /authentication_error|authentication required|invalid bearer token|invalid token|\brate_limit(_error)?\b|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|\bforbidden\b|access denied|token.*expired/i;
 
 /**
  * Scan the current Claude JSONL output for a result record with
@@ -2310,16 +2335,28 @@ export function detectAuthChallengeFromJsonl(
         }
         // Synthetic API-error entries emitted by Claude CLI mid-conversation
         // carry `isApiErrorMessage: true` and the error string in `error`.
-        if (
-          entry.isApiErrorMessage === true &&
-          typeof entry.error === "string" &&
-          AUTH_CHALLENGE_PATTERN.test(entry.error)
-        ) {
-          const status =
-            typeof entry.apiErrorStatus === "number"
-              ? ` (status ${entry.apiErrorStatus})`
-              : "";
-          return `Claude API ${entry.error} error${status}`;
+        if (entry.isApiErrorMessage === true) {
+          const errorText =
+            typeof entry.error === "string" ? entry.error : "unknown error";
+          if (AUTH_STATUS_PATTERN.test(errorText)) {
+            const status =
+              typeof entry.apiErrorStatus === "number"
+                ? ` (status ${entry.apiErrorStatus})`
+                : "";
+            return `Claude API ${errorText} error${status}`;
+          }
+          // HTTP 401/403/429 is an auth/quota challenge regardless of error text.
+          // 429 is the canonical rate-limit / over-quota status; treating it as
+          // a challenge here ensures we catch entries like
+          // {error: "rate_limit", apiErrorStatus: 429} even if Anthropic drops
+          // or renames the textual error token in a future CLI version.
+          if (
+            entry.apiErrorStatus === 401 ||
+            entry.apiErrorStatus === 403 ||
+            entry.apiErrorStatus === 429
+          ) {
+            return `API returned HTTP ${entry.apiErrorStatus}: ${errorText}`;
+          }
         }
       } catch {
         // skip malformed lines
@@ -3811,6 +3848,8 @@ export async function handleProcessCompletion(
   },
   decisionTableVerificationStartOffset = 0,
   userVisibleLoopFailureSecret?: string,
+  loopPerfTelemetryStartOffset = 0,
+  loopPerfWatcherHandle?: LoopPerfTelemetryWatcherHandle,
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
   // Temp-dir commands (DECOMPOSE, EVALUATE_*) need the entire temp tree removed on cleanup.
@@ -3818,6 +3857,39 @@ export async function handleProcessCompletion(
   const elapsedMs = spawnStartedAt ? Date.now() - spawnStartedAt : undefined;
 
   loopLog(loopId, `Process exited with code ${exitCode}, command=${command}`);
+
+  // Stop the loop perf watcher and reconcile any remaining records.
+  // Gated on `loopPerfWatcherHandle` because the watcher and the captured
+  // startOffset travel together: only the run-loop.sh spawn path
+  // (PLAN/EXECUTE) sets them. Commands that reuse a prior PLAN's
+  // claudeWorkDir without starting the watcher (notably REQUEST_CHANGES)
+  // would otherwise reconcile from byte 0 and re-emit every PLAN-era
+  // perf.jsonl record under the new command's trace context, polluting
+  // loop.perf.* telemetry. The no-op handle returned when fs.watch fails
+  // is still defined (it carries the captured startOffset), so the
+  // fail-open path keeps reconciling correctly.
+  // Wrapped in try/catch so scanner failures never affect the Loop outcome (AC-004).
+  try {
+    if (loopPerfWatcherHandle) {
+      await loopPerfWatcherHandle.stop();
+      reconcileLoopPerfTelemetry(claudeWorkDir, {
+        startOffset: loopPerfTelemetryStartOffset,
+        traceContext: {
+          commandId,
+          operationId,
+          loopId,
+          jobId: loopId,
+        },
+        telemetryEmitter: Observability.getTelemetryEmitter(),
+        watcherHandle: loopPerfWatcherHandle,
+      });
+    }
+  } catch (loopPerfErr) {
+    gatewayLog.warn(
+      "loop-perf-telemetry",
+      `Loop perf telemetry reconciliation failed for loopId=${loopId}: ${loopPerfErr instanceof Error ? loopPerfErr.message : loopPerfErr}`,
+    );
+  }
 
   if (exitCode !== 0) {
     // Collect diagnostics (log tail + stderr + token usage) for the failure event
@@ -3913,6 +3985,41 @@ export async function handleProcessCompletion(
             `EXECUTE failure artifact upload failed for loopId=${loopId}: ${uploadResult.error ?? "unknown error"}`,
           );
         }
+      }
+    }
+
+    if (!wasCancelled) {
+      const rawBody = body as unknown as { s3StateKey?: unknown };
+      const bodyS3StateKey =
+        typeof rawBody.s3StateKey === "string" && rawBody.s3StateKey
+          ? rawBody.s3StateKey
+          : undefined;
+      const supportJob =
+        existingJob ??
+        ({
+          id: loopId,
+          kind: "SYMPHONY_LOOP",
+          loopId,
+          command: command as LocalJobCommand,
+          claudeWorkDir,
+          status: "FAILED",
+          startedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          ...(bodyS3StateKey ? { s3StateKey: bodyS3StateKey } : {}),
+        } satisfies LocalJob);
+      const supportResult = await tryUploadSupportBundle({
+        job: supportJob,
+        claudeWorkDir,
+        apiBaseUrl,
+        token: closedLoopAuthToken,
+        jobStore,
+      });
+      if (supportResult.failed) {
+        failureWarnings.push("SUPPORT_UPLOAD_FAILED");
+        gatewayLog.warn(
+          "loop-harness",
+          `Support upload failed for loopId=${loopId}: ${supportResult.error}`,
+        );
       }
     }
 
@@ -5892,6 +5999,8 @@ async function handleLoopRequest(
     let ptySession: PtySession;
     let spawnStartedAt = 0;
     let decisionTableVerificationStartOffset = 0;
+    let loopPerfTelemetryStartOffset = 0;
+    let loopPerfWatcherHandle: LoopPerfTelemetryWatcherHandle | undefined;
     const collectedSpawnMeta: {
       command: string;
       args: string[];
@@ -6270,6 +6379,24 @@ async function handleLoopRequest(
           decisionTableVerificationStartOffset =
             getDecisionTableVerificationTelemetryOffset(claudeWorkDir);
         }
+        loopPerfTelemetryStartOffset = getLoopPerfTelemetryOffset(claudeWorkDir);
+        // Start the perf watcher BEFORE spawning the child so its
+        // `.tool-calls/` baseline snapshot is taken while the directory
+        // contains only prior-run sentinels (or is empty/missing). Starting
+        // it post-spawn would race the child: any sentinel the child writes
+        // before the watcher initialises would be folded into the baseline
+        // and reconcileLoopPerfTelemetry() would later skip it as stale,
+        // dropping legitimate current-run orphan telemetry.
+        loopPerfWatcherHandle = startLoopPerfTelemetryWatcher(claudeWorkDir, {
+          startOffset: loopPerfTelemetryStartOffset,
+          traceContext: {
+            commandId,
+            operationId,
+            loopId: body.loopId,
+            jobId: body.loopId,
+          },
+          telemetryEmitter: Observability.getTelemetryEmitter(),
+        });
         spawnStartedAt = Date.now();
         ptySession = spawnPtySession({
           loopId: body.loopId,
@@ -6282,6 +6409,17 @@ async function handleLoopRequest(
         });
       }
     } catch (spawnErr) {
+      // The perf watcher is started before spawn() so its baseline snapshot
+      // does not race the child. If spawn throws, the watcher is already
+      // running — stop it before cleanup to release its fs.watch handle.
+      if (loopPerfWatcherHandle) {
+        try {
+          await loopPerfWatcherHandle.stop();
+        } catch {
+          // Ignore — watcher errors must not mask the spawn failure.
+        }
+        loopPerfWatcherHandle = undefined;
+      }
       const msg =
         spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
       await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
@@ -6358,6 +6496,8 @@ async function handleLoopRequest(
         collectedSpawnMeta,
         decisionTableVerificationStartOffset,
         userVisibleLoopFailureSecret,
+        loopPerfTelemetryStartOffset,
+        loopPerfWatcherHandle,
       ).catch((err) => {
         loopError(body.loopId, "Completion handler error:", err);
         gatewayLog.error(
@@ -6426,6 +6566,10 @@ async function handleLoopRequest(
       const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
       const statePath = path.join(claudeWorkDir, "state.json");
       const command = body.command as LocalJobCommand;
+      const s3StateKey =
+        typeof rawBody.s3StateKey === "string" && rawBody.s3StateKey.length > 0
+          ? rawBody.s3StateKey
+          : existing?.s3StateKey;
       jobStore.upsert({
         id: body.loopId,
         kind: "SYMPHONY_LOOP",
@@ -6444,6 +6588,7 @@ async function handleLoopRequest(
         committer: body.committer ?? existing?.committer,
         worktreeDir: worktreeDir ?? undefined,
         claudeWorkDir,
+        ...(s3StateKey ? { s3StateKey } : {}),
         // Persist so finalizer/boot-recovery can remove these after a crash
         // or graceful shutdown; in-process spawn keeps its own local copy for
         // live cleanup on exit.

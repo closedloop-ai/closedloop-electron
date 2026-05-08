@@ -17,8 +17,10 @@ import {
   tryPostCompletedEvent,
   tryPostErrorEvent,
   tryUploadArtifacts,
+  tryUploadSupportBundle,
 } from "../src/main/loop-finalizer.js";
 import { LoopTokenStore } from "../src/main/loop-token-store.js";
+import { Observability } from "../src/main/observability.js";
 import { resetResolvedClaudePath } from "../src/server/operations/symphony-loop.js";
 import {
   resetShellPathCache,
@@ -52,6 +54,8 @@ beforeEach(async () => {
 
 afterEach(async () => {
   globalThis.fetch = originalFetch;
+  await Observability.shutdown();
+  Observability.reset();
   process.env.PATH = originalPath;
   resetResolvedClaudePath();
   resetShellPathCache();
@@ -78,6 +82,12 @@ function createBaseJob(overrides?: Partial<LocalJob>): LocalJob {
     updatedAt: new Date().toISOString(),
     ...overrides,
   };
+}
+
+function supportUploadReason(): unknown {
+  return telemetryEvents
+    .filter((event) => event.category === "desktop.support_upload")
+    .at(-1)?.diagnostics?.supportUpload?.reason;
 }
 
 test("finalizeLoopFromRuntime uploads, posts completion, and persists terminal state", async () => {
@@ -753,6 +763,447 @@ test("tryUploadArtifacts includes current plan state on EXECUTE uploads", async 
     has_changes: false,
   });
   assert.deepEqual(uploadBody.artifacts?.codeJudges, { score: 0.9 });
+});
+
+test("tryUploadSupportBundle uploads renamed claude output and perf, posts event, and persists idempotence", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(
+    path.join(claudeWorkDir, "claude-output.name.txt"),
+    "claude-output-run-1.jsonl\n",
+  );
+  await fs.writeFile(
+    path.join(claudeWorkDir, "claude-output-run-1.jsonl"),
+    "{\"type\":\"result\"}\n",
+  );
+  await fs.writeFile(path.join(claudeWorkDir, "perf.jsonl"), "{}\n");
+
+  const jobStore = createStore("support-upload-ok");
+  const job = createBaseJob({
+    claudeWorkDir,
+    status: "FAILED",
+    s3StateKey: "org-1/loops/loop-1/run-1",
+  });
+  jobStore.upsert(job);
+  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    fetchCalls.push({
+      url: String(input),
+      body: typeof init?.body === "string" ? init.body : "",
+    });
+    if (String(input).includes("/upload-urls")) {
+      return Response.json({
+        success: true,
+        data: {
+          urls: [
+            {
+              key: "org-1/loops/loop-1/run-1/support/claude-output.jsonl",
+              url: "https://closedloop-files.s3.us-east-1.amazonaws.com/claude",
+            },
+            {
+              key: "org-1/loops/loop-1/run-1/support/perf.jsonl",
+              url: "https://closedloop-files.s3.us-east-1.amazonaws.com/perf",
+            },
+          ],
+        },
+      });
+    }
+    return Response.json({ success: true });
+  }) as typeof fetch;
+
+  const result = await tryUploadSupportBundle({
+    job,
+    claudeWorkDir,
+    apiBaseUrl: "http://127.0.0.1:12345",
+    token: "token",
+    jobStore,
+  });
+
+  assert.equal(result.failed, false);
+  assert.equal(fetchCalls[0]?.url, "http://127.0.0.1:12345/loops/loop-1/upload-urls");
+  assert.deepEqual(JSON.parse(fetchCalls[0]?.body ?? "{}"), {
+    keys: [
+      "org-1/loops/loop-1/run-1/support/claude-output.jsonl",
+      "org-1/loops/loop-1/run-1/support/perf.jsonl",
+    ],
+  });
+  assert.equal(
+    fetchCalls.filter((call) =>
+      call.url.startsWith("https://closedloop-files.s3.us-east-1.amazonaws.com/"),
+    ).length,
+    2,
+  );
+  const eventBody = JSON.parse(fetchCalls[3]?.body ?? "{}") as {
+    type?: string;
+    keys?: string[];
+    files?: Array<{ name: string; key: string; sizeBytes: number }>;
+  };
+  assert.equal(eventBody.type, "support_bundle_uploaded");
+  assert.deepEqual(eventBody.keys, [
+    "org-1/loops/loop-1/run-1/support/claude-output.jsonl",
+    "org-1/loops/loop-1/run-1/support/perf.jsonl",
+  ]);
+  assert.deepEqual(
+    eventBody.files?.map((file) => file.name),
+    ["claude-output.jsonl", "perf.jsonl"],
+  );
+  assert.ok(jobStore.getByLoopId("loop-1")?.supportBundleUploadedAt);
+});
+
+test("tryUploadSupportBundle uploads legacy pre-rename claude output with stable support key", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "claude-output.jsonl"), "{}\n");
+
+  const job = createBaseJob({
+    claudeWorkDir,
+    status: "FAILED",
+    s3StateKey: "org-1/loops/loop-1/run-1",
+  });
+  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    fetchCalls.push({
+      url: String(input),
+      body: typeof init?.body === "string" ? init.body : "",
+    });
+    if (String(input).includes("/upload-urls")) {
+      return Response.json({
+        success: true,
+        data: {
+          urls: [
+            {
+              key: "org-1/loops/loop-1/run-1/support/claude-output.jsonl",
+              url: "https://closedloop-files.s3.us-east-1.amazonaws.com/claude",
+            },
+          ],
+        },
+      });
+    }
+    return Response.json({ success: true });
+  }) as typeof fetch;
+
+  const result = await tryUploadSupportBundle({
+    job,
+    claudeWorkDir,
+    apiBaseUrl: "http://127.0.0.1:12345",
+    token: "token",
+  });
+
+  assert.equal(result.failed, false);
+  assert.deepEqual(JSON.parse(fetchCalls[0]?.body ?? "{}"), {
+    keys: ["org-1/loops/loop-1/run-1/support/claude-output.jsonl"],
+  });
+  assert.equal(
+    fetchCalls[1]?.url,
+    "https://closedloop-files.s3.us-east-1.amazonaws.com/claude",
+  );
+  const eventBody = JSON.parse(fetchCalls[2]?.body ?? "{}") as {
+    files?: Array<{ name: string; key: string }>;
+  };
+  assert.deepEqual(eventBody.files, [
+    {
+      name: "claude-output.jsonl",
+      key: "org-1/loops/loop-1/run-1/support/claude-output.jsonl",
+      sizeBytes: 3,
+    },
+  ]);
+});
+
+test("tryUploadSupportBundle skips when files are missing or too large", async () => {
+  Observability.init({
+    telemetrySend: (event) => telemetryEvents.push(event),
+  });
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const perfPath = path.join(claudeWorkDir, "perf.jsonl");
+  await fs.writeFile(perfPath, "");
+  await fs.truncate(perfPath, 51 * 1024 * 1024);
+  const job = createBaseJob({
+    claudeWorkDir,
+    status: "FAILED",
+    s3StateKey: "org-1/loops/loop-1/run-1",
+  });
+
+  const result = await tryUploadSupportBundle({
+    job,
+    claudeWorkDir,
+    apiBaseUrl: "http://127.0.0.1:12345",
+    token: "token",
+  });
+
+  assert.equal(result.failed, false);
+  assert.equal(result.outcome, "skipped");
+  assert.equal(supportUploadReason(), "no_uploadable_files");
+  assert.equal(fetchCalls.length, 0);
+});
+
+test("tryUploadSupportBundle skips idempotently after support bundle upload is recorded", async () => {
+  Observability.init({
+    telemetrySend: (event) => telemetryEvents.push(event),
+  });
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "claude-output.jsonl"), "{}\n");
+  const job = createBaseJob({
+    claudeWorkDir,
+    status: "FAILED",
+    s3StateKey: "org-1/loops/loop-1/run-1",
+    supportBundleUploadedAt: new Date().toISOString(),
+  });
+
+  const result = await tryUploadSupportBundle({
+    job,
+    claudeWorkDir,
+    apiBaseUrl: "http://127.0.0.1:12345",
+    token: "token",
+  });
+
+  assert.equal(result.failed, false);
+  assert.equal(result.outcome, "skipped");
+  assert.equal(result.reason, "already_uploaded");
+  assert.equal(supportUploadReason(), "already_uploaded");
+  assert.equal(fetchCalls.length, 0);
+});
+
+for (const scenario of [
+  {
+    name: "upload-url HTTP failure",
+    expectedReason: "upload_url_http_error",
+    fetch: () =>
+      new Response("loop-specific response body", {
+        status: 503,
+        statusText: "Service Unavailable",
+      }),
+  },
+  {
+    name: "malformed upload-url envelope",
+    expectedReason: "upload_url_malformed_response",
+    fetch: () => Response.json({ success: true, data: { urls: {} } }),
+  },
+  {
+    name: "upload-url success false",
+    expectedReason: "upload_url_success_false",
+    fetch: () => Response.json({ success: false, data: { urls: [] } }),
+  },
+  {
+    name: "missing returned upload URL",
+    expectedReason: "upload_url_missing_url",
+    fetch: () => Response.json({ success: true, data: { urls: [] } }),
+  },
+] as const) {
+  test(`tryUploadSupportBundle emits bounded reason for ${scenario.name}`, async () => {
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+    const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+    await fs.mkdir(claudeWorkDir, { recursive: true });
+    await fs.writeFile(path.join(claudeWorkDir, "claude-output.jsonl"), "{}\n");
+    const job = createBaseJob({
+      claudeWorkDir,
+      status: "FAILED",
+      s3StateKey: "org-1/loops/loop-1/run-1",
+    });
+    globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+      fetchCalls.push({
+        url: String(input),
+        body: typeof init?.body === "string" ? init.body : "",
+      });
+      return scenario.fetch();
+    }) as typeof fetch;
+
+    const result = await tryUploadSupportBundle({
+      job,
+      claudeWorkDir,
+      apiBaseUrl: "http://127.0.0.1:12345",
+      token: "token",
+    });
+
+    assert.equal(result.failed, true);
+    assert.equal(supportUploadReason(), scenario.expectedReason);
+    assert.equal(
+      JSON.stringify(
+        telemetryEvents.find(
+          (event) => event.category === "desktop.support_upload",
+        ),
+      ).includes("loop-specific response body"),
+      false,
+    );
+  });
+}
+
+for (const scenario of [
+  {
+    name: "denied outbound URL",
+    expectedReason: "put_url_denied",
+    uploadUrl: "http://127.0.0.1/internal",
+    putResponse: () => Response.json({ success: true }),
+  },
+  {
+    name: "redirect error",
+    expectedReason: "put_request_failed",
+    uploadUrl: "https://closedloop-files.s3.us-east-1.amazonaws.com/redirect",
+    putResponse: () => {
+      throw new TypeError("redirect disallowed");
+    },
+  },
+  {
+    name: "PUT HTTP failure",
+    expectedReason: "put_http_error",
+    uploadUrl: "https://closedloop-files.s3.us-east-1.amazonaws.com/put-fail",
+    putResponse: () =>
+      new Response("nope", { status: 500, statusText: "Server Error" }),
+  },
+] as const) {
+  test(`tryUploadSupportBundle emits bounded reason for ${scenario.name}`, async () => {
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+    const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+    await fs.mkdir(claudeWorkDir, { recursive: true });
+    await fs.writeFile(path.join(claudeWorkDir, "claude-output.jsonl"), "{}\n");
+    const job = createBaseJob({
+      claudeWorkDir,
+      status: "FAILED",
+      s3StateKey: "org-1/loops/loop-1/run-1",
+    });
+    globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+      fetchCalls.push({
+        url: String(input),
+        body: typeof init?.body === "string" ? init.body : "",
+      });
+      if (String(input).includes("/upload-urls")) {
+        return Response.json({
+          success: true,
+          data: {
+            urls: [
+              {
+                key: "org-1/loops/loop-1/run-1/support/claude-output.jsonl",
+                url: scenario.uploadUrl,
+              },
+            ],
+          },
+        });
+      }
+      assert.equal(init?.redirect, "error");
+      return scenario.putResponse();
+    }) as typeof fetch;
+
+    const result = await tryUploadSupportBundle({
+      job,
+      claudeWorkDir,
+      apiBaseUrl: "http://127.0.0.1:12345",
+      token: "token",
+    });
+
+    assert.equal(result.failed, true);
+    assert.equal(supportUploadReason(), scenario.expectedReason);
+  });
+}
+
+test("tryUploadSupportBundle leaves idempotence unset when support event POST fails", async () => {
+  Observability.init({
+    telemetrySend: (event) => telemetryEvents.push(event),
+  });
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "claude-output.jsonl"), "{}\n");
+
+  const jobStore = createStore("support-upload-event-fails");
+  const job = createBaseJob({
+    claudeWorkDir,
+    status: "FAILED",
+    s3StateKey: "org-1/loops/loop-1/run-1",
+  });
+  jobStore.upsert(job);
+  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    fetchCalls.push({
+      url: String(input),
+      body: typeof init?.body === "string" ? init.body : "",
+    });
+    if (String(input).includes("/upload-urls")) {
+      return Response.json({
+        success: true,
+        data: {
+          urls: [
+            {
+              key: "org-1/loops/loop-1/run-1/support/claude-output.jsonl",
+              url: "https://closedloop-files.s3.us-east-1.amazonaws.com/claude",
+            },
+          ],
+        },
+      });
+    }
+    if (String(input).includes("/events")) {
+      return new Response("nope", { status: 500, statusText: "Server Error" });
+    }
+    return Response.json({ success: true });
+  }) as typeof fetch;
+
+  const result = await tryUploadSupportBundle({
+    job,
+    claudeWorkDir,
+    apiBaseUrl: "http://127.0.0.1:12345",
+    token: "token",
+    jobStore,
+  });
+
+  assert.equal(result.failed, true);
+  assert.equal(supportUploadReason(), "event_post_failed");
+  assert.equal(
+    jobStore.getByLoopId("loop-1")?.supportBundleUploadedAt,
+    undefined,
+  );
+});
+
+test("finalizeLoopFromRuntime attempts support upload for failed jobs before error event", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "claude-output.jsonl"), "{}\n");
+
+  const jobStore = createStore("support-upload-finalize-failed");
+  const job = createBaseJob({
+    claudeWorkDir,
+    status: "FAILED",
+    exitCode: 1,
+    s3StateKey: "org-1/loops/loop-1/run-1",
+  });
+  jobStore.upsert(job);
+  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    fetchCalls.push({
+      url: String(input),
+      body: typeof init?.body === "string" ? init.body : "",
+    });
+    if (String(input).includes("/upload-urls")) {
+      return Response.json({
+        success: true,
+        data: {
+          urls: [
+            {
+              key: "org-1/loops/loop-1/run-1/support/claude-output.jsonl",
+              url: "https://closedloop-files.s3.us-east-1.amazonaws.com/claude",
+            },
+          ],
+        },
+      });
+    }
+    return Response.json({ success: true });
+  }) as typeof fetch;
+
+  const outcome = await finalizeLoopFromRuntime(job, "live-exit", {
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    apiAuthToken: "token",
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+  });
+
+  assert.equal(outcome.cloudFinalized, true);
+  const eventBodies = fetchCalls
+    .filter((call) => call.url.endsWith("/events"))
+    .map((call) => JSON.parse(call.body) as { type?: string });
+  assert.deepEqual(
+    eventBodies.map((body) => body.type),
+    ["support_bundle_uploaded", "error"],
+  );
+  assert.ok(jobStore.getByLoopId("loop-1")?.supportBundleUploadedAt);
 });
 
 test("tryUploadArtifacts falls back to imported-plan markdown for EXECUTE uploads", async () => {

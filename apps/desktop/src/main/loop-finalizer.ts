@@ -8,7 +8,7 @@ import {
 } from "@closedloop-ai/loops-api/execution-result";
 import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, promises as fs, readFileSync } from "node:fs";
 import path from "node:path";
 import { readEffectiveStatusFromState } from "../server/operations/symphony-job-snapshot.js";
 import {
@@ -23,6 +23,7 @@ import {
   assertPathAllowed,
   DirectoryNotAllowedError,
 } from "../server/security.js";
+import { validateOutboundUrlForSurface } from "../server/outbound-url-policy.js";
 import {
   IMPORTED_PLAN_MARKDOWN_FILE,
   toUploadedPlanArtifact,
@@ -39,8 +40,16 @@ import {
   type LocalJob,
 } from "./job-store.js";
 import type { LoopTokenStore } from "./loop-token-store.js";
-import type { TelemetryEmitter } from "./telemetry-protocol.js";
-import { parseApiKeySource, parseTokenUsage } from "./token-usage.js";
+import { Observability } from "./observability.js";
+import type {
+  SupportUploadReason,
+  TelemetryEmitter,
+} from "./telemetry-protocol.js";
+import {
+  parseApiKeySource,
+  parseTokenUsage,
+  resolveClaudeOutputPath,
+} from "./token-usage.js";
 import { parseUserVisibleLoopFailurePayload } from "./user-visible-loop-failure.js";
 
 export interface LoopFinalizerDeps {
@@ -88,6 +97,29 @@ type TokenUsageActivity = Pick<
   | "cacheCreationInputTokens"
   | "cacheReadInputTokens"
 >;
+
+const SUPPORT_BUNDLE_UPLOADED_EVENT_TYPE = "support_bundle_uploaded";
+const SUPPORT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
+
+type SupportUploadCandidate = {
+  name: "claude-output.jsonl" | "perf.jsonl";
+  path: string;
+  key: string;
+  sizeBytes: number;
+};
+
+export type SupportUploadResult =
+  | { outcome: "skipped"; failed: false; reason: string }
+  | { outcome: "succeeded"; failed: false; uploadedKeys: string[] }
+  | { outcome: "failed"; failed: true; error: string };
+
+export type SupportUploadDeps = {
+  job: LocalJob;
+  claudeWorkDir: string;
+  apiBaseUrl: string;
+  token: string;
+  jobStore?: JobStore;
+};
 
 export function parseJobWarnings(job: Pick<LocalJob, "warning">): string[] {
   if (!job.warning) {
@@ -818,6 +850,359 @@ async function uploadArtifacts(
   }
 }
 
+function supportUploadSuffix(s3StateKey: string | undefined): string | undefined {
+  if (!s3StateKey) {
+    return undefined;
+  }
+  const parts = s3StateKey.split("/").filter(Boolean);
+  return parts.at(-1);
+}
+
+function emitSupportUploadLifecycle(
+  job: LocalJob,
+  outcome: "started" | "skipped" | "succeeded" | "failed",
+  details: {
+    attemptedLogicalNames?: string[];
+    attemptedUploadedNames?: string[];
+    reason?: SupportUploadReason;
+    uploadedCount?: number;
+    durationMs?: number;
+  } = {},
+): void {
+  Observability.supportUploadLifecycle({
+    outcome,
+    loopId: job.loopId,
+    s3StateKeySuffix: supportUploadSuffix(job.s3StateKey),
+    ...details,
+  });
+}
+
+async function collectSupportUploadCandidates(
+  job: LocalJob,
+  claudeWorkDir: string,
+): Promise<{ candidates: SupportUploadCandidate[]; skippedReasons: string[] }> {
+  const skippedReasons: string[] = [];
+  const candidates: SupportUploadCandidate[] = [];
+  const s3StateKey = job.s3StateKey;
+  if (!s3StateKey) {
+    return { candidates, skippedReasons: ["missing_s3_state_key"] };
+  }
+
+  const paths: Array<{ name: SupportUploadCandidate["name"]; path: string | null }> = [
+    {
+      name: "claude-output.jsonl",
+      path: resolveClaudeOutputPath(claudeWorkDir),
+    },
+    {
+      name: "perf.jsonl",
+      path: path.join(claudeWorkDir, "perf.jsonl"),
+    },
+  ];
+
+  for (const candidate of paths) {
+    if (!candidate.path) {
+      skippedReasons.push(`${candidate.name}:missing`);
+      gatewayLog.warn(
+        "loop-finalizer",
+        `Support upload skipped missing ${candidate.name} for loopId=${job.loopId}`,
+      );
+      continue;
+    }
+    let stat;
+    try {
+      stat = await fs.stat(candidate.path);
+    } catch {
+      skippedReasons.push(`${candidate.name}:missing`);
+      gatewayLog.warn(
+        "loop-finalizer",
+        `Support upload skipped missing ${candidate.name} for loopId=${job.loopId}`,
+      );
+      continue;
+    }
+    if (!stat.isFile()) {
+      skippedReasons.push(`${candidate.name}:not_file`);
+      continue;
+    }
+    if (stat.size > SUPPORT_UPLOAD_MAX_BYTES) {
+      skippedReasons.push(`${candidate.name}:too_large`);
+      gatewayLog.warn(
+        "loop-finalizer",
+        `Support upload skipped ${candidate.name} larger than 50MB for loopId=${job.loopId}`,
+      );
+      continue;
+    }
+    candidates.push({
+      name: candidate.name,
+      path: candidate.path,
+      key: `${s3StateKey}/support/${candidate.name}`,
+      sizeBytes: stat.size,
+    });
+  }
+
+  return { candidates, skippedReasons };
+}
+
+async function requestSupportUploadUrls(
+  apiBaseUrl: string,
+  loopId: string,
+  token: string,
+  keys: string[],
+): Promise<
+  | { success: true; urlsByKey: Map<string, string> }
+  | { success: false; reason: SupportUploadReason; error: string }
+> {
+  const url = `${apiBaseUrl}/loops/${loopId}/upload-urls`;
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ keys }),
+    });
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      return {
+        success: false,
+        reason: "upload_url_http_error",
+        error: `upload-url HTTP ${response.status} ${response.statusText} ${text}`,
+      };
+    }
+    const envelope = (await response.json().catch(() => null)) as
+      | {
+          success?: unknown;
+          data?: { urls?: unknown };
+        }
+      | null;
+    if (!envelope || typeof envelope !== "object") {
+      return {
+        success: false,
+        reason: "upload_url_malformed_response",
+        error: "malformed upload-url envelope",
+      };
+    }
+    if (envelope.success !== true) {
+      return {
+        success: false,
+        reason: "upload_url_success_false",
+        error: "upload-url response success was false or missing",
+      };
+    }
+    if (!Array.isArray(envelope.data?.urls)) {
+      return {
+        success: false,
+        reason: "upload_url_malformed_response",
+        error: "malformed upload-url envelope",
+      };
+    }
+    const urlsByKey = new Map<string, string>();
+    for (const entry of envelope.data.urls) {
+      if (
+        entry &&
+        typeof entry === "object" &&
+        typeof (entry as { key?: unknown }).key === "string" &&
+        typeof (entry as { url?: unknown }).url === "string"
+      ) {
+        urlsByKey.set(
+          (entry as { key: string }).key,
+          (entry as { url: string }).url,
+        );
+      }
+    }
+    for (const key of keys) {
+      if (!urlsByKey.has(key)) {
+        return {
+          success: false,
+          reason: "upload_url_missing_url",
+          error: `missing upload URL for ${key}`,
+        };
+      }
+    }
+    return { success: true, urlsByKey };
+  } catch (err) {
+    return {
+      success: false,
+      reason: "upload_url_request_failed",
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+async function putSupportFile(
+  candidate: SupportUploadCandidate,
+  url: string,
+): Promise<
+  | { success: true }
+  | { success: false; reason: SupportUploadReason; error: string }
+> {
+  const policyDecision = validateOutboundUrlForSurface("loop_support_upload", url);
+  Observability.outboundNetworkDecision(policyDecision.diagnostics);
+  if (!policyDecision.allowed) {
+    return {
+      success: false,
+      reason: "put_url_denied",
+      error: `upload URL denied: ${policyDecision.diagnostics.reason}`,
+    };
+  }
+  try {
+    const body = await fs.readFile(candidate.path);
+    const response = await fetch(url, {
+      method: "PUT",
+      body,
+      redirect: "error",
+    });
+    if (!response.ok) {
+      return {
+        success: false,
+        reason: "put_http_error",
+        error: `PUT ${candidate.name} HTTP ${response.status} ${response.statusText}`,
+      };
+    }
+    return { success: true };
+  } catch (err) {
+    return {
+      success: false,
+      reason: "put_request_failed",
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * Upload raw failure support files and publish their S3 keys to the cloud.
+ * Best-effort by design: callers continue terminal finalization on failure.
+ */
+export async function tryUploadSupportBundle({
+  job,
+  claudeWorkDir,
+  apiBaseUrl,
+  token,
+  jobStore,
+}: SupportUploadDeps): Promise<SupportUploadResult> {
+  const startedAt = Date.now();
+  if (job.supportBundleUploadedAt) {
+    emitSupportUploadLifecycle(job, "skipped", {
+      reason: "already_uploaded",
+      durationMs: Date.now() - startedAt,
+    });
+    return { outcome: "skipped", failed: false, reason: "already_uploaded" };
+  }
+  if (!job.s3StateKey) {
+    emitSupportUploadLifecycle(job, "skipped", {
+      reason: "missing_s3_state_key",
+      durationMs: Date.now() - startedAt,
+    });
+    return { outcome: "skipped", failed: false, reason: "missing_s3_state_key" };
+  }
+
+  emitSupportUploadLifecycle(job, "started");
+  const { candidates } = await collectSupportUploadCandidates(
+    job,
+    claudeWorkDir,
+  );
+  const attemptedLogicalNames = candidates.map((candidate) => candidate.name);
+  if (candidates.length === 0) {
+    const reason: SupportUploadReason = "no_uploadable_files";
+    emitSupportUploadLifecycle(job, "skipped", {
+      attemptedLogicalNames,
+      reason,
+      durationMs: Date.now() - startedAt,
+    });
+    return { outcome: "skipped", failed: false, reason };
+  }
+
+  const uploadUrls = await requestSupportUploadUrls(
+    apiBaseUrl,
+    job.loopId,
+    token,
+    candidates.map((candidate) => candidate.key),
+  );
+  if (!uploadUrls.success) {
+    gatewayLog.warn(
+      "loop-finalizer",
+      `Support upload URL request failed for loopId=${job.loopId}: ${uploadUrls.error}`,
+    );
+    emitSupportUploadLifecycle(job, "failed", {
+      attemptedLogicalNames,
+      reason: uploadUrls.reason,
+      durationMs: Date.now() - startedAt,
+    });
+    return { outcome: "failed", failed: true, error: uploadUrls.error };
+  }
+
+  const uploaded: SupportUploadCandidate[] = [];
+  for (const candidate of candidates) {
+    const uploadUrl = uploadUrls.urlsByKey.get(candidate.key);
+    if (!uploadUrl) {
+      const error = `missing upload URL for ${candidate.key}`;
+      emitSupportUploadLifecycle(job, "failed", {
+        attemptedLogicalNames,
+        reason: "upload_url_missing_url",
+        uploadedCount: uploaded.length,
+        durationMs: Date.now() - startedAt,
+      });
+      return { outcome: "failed", failed: true, error };
+    }
+    const putResult = await putSupportFile(candidate, uploadUrl);
+    if (!putResult.success) {
+      gatewayLog.warn(
+        "loop-finalizer",
+        `Support upload failed for ${candidate.name} loopId=${job.loopId}: ${putResult.error}`,
+      );
+      emitSupportUploadLifecycle(job, "failed", {
+        attemptedLogicalNames,
+        attemptedUploadedNames: uploaded.map((item) => item.name),
+        reason: putResult.reason,
+        uploadedCount: uploaded.length,
+        durationMs: Date.now() - startedAt,
+      });
+      return { outcome: "failed", failed: true, error: putResult.error };
+    }
+    uploaded.push(candidate);
+  }
+
+  const eventResult = await postLoopEvent(apiBaseUrl, job.loopId, token, {
+    type: SUPPORT_BUNDLE_UPLOADED_EVENT_TYPE,
+    keys: uploaded.map((candidate) => candidate.key),
+    files: uploaded.map((candidate) => ({
+      name: candidate.name,
+      key: candidate.key,
+      sizeBytes: candidate.sizeBytes,
+    })),
+  });
+  if (!eventResult.success) {
+    const error = eventResult.error ?? "support event post failed";
+    emitSupportUploadLifecycle(job, "failed", {
+      attemptedLogicalNames,
+      attemptedUploadedNames: uploaded.map((item) => item.name),
+      reason: "event_post_failed",
+      uploadedCount: uploaded.length,
+      durationMs: Date.now() - startedAt,
+    });
+    return { outcome: "failed", failed: true, error };
+  }
+
+  const now = new Date().toISOString();
+  const current = jobStore?.getByLoopId(job.loopId) ?? job;
+  jobStore?.upsert({
+    ...current,
+    supportBundleUploadedAt: now,
+    updatedAt: now,
+  });
+  emitSupportUploadLifecycle(job, "succeeded", {
+    attemptedLogicalNames,
+    attemptedUploadedNames: uploaded.map((item) => item.name),
+    uploadedCount: uploaded.length,
+    durationMs: Date.now() - startedAt,
+  });
+  return {
+    outcome: "succeeded",
+    failed: false,
+    uploadedKeys: uploaded.map((candidate) => candidate.key),
+  };
+}
+
 /**
  * Remove any persisted additional-repo worktrees for this job and clear the
  * field so subsequent finalizer retries skip the work. Safe to call with an
@@ -1107,6 +1492,20 @@ export async function finalizeLoopFromRuntime(
       cloudFinalized = true;
     }
   } else if (shouldPostErrorEvent) {
+    const supportResult = await tryUploadSupportBundle({
+      job: resolvedJob,
+      claudeWorkDir,
+      apiBaseUrl,
+      token: apiAuthToken,
+      jobStore,
+    });
+    if (supportResult.failed) {
+      warnings.push("SUPPORT_UPLOAD_FAILED");
+      gatewayLog.warn(
+        "loop-finalizer",
+        `Support upload failed for loopId=${resolvedJob.loopId}: ${supportResult.error}`,
+      );
+    }
     const postResult = await tryPostErrorEvent(
       resolvedJob,
       claudeWorkDir,
