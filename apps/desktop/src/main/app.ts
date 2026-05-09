@@ -81,6 +81,22 @@ import { GatewayRecoveryManager } from "./gateway-recovery.js";
 import { runShutdownSequence } from "./shutdown.js";
 import type { ShutdownResult } from "./shutdown.js";
 import type { RetrySpawnDeps } from "./spawn-retry.js";
+import {
+  electronLog,
+  getMainLogFilePath,
+  openMainLogFile,
+  readPreviousSessionLogTail,
+} from "./persistent-log.js";
+import type { DesktopShutdownDiagnostics } from "./telemetry-protocol.js";
+import {
+  assertPackagedUpdateReadyToInstall,
+  createInitialPackagedUpdateState,
+  mergePackagedUpdateState,
+  PACKAGED_UPDATE_NOT_DOWNLOADED_MESSAGE,
+  toPackagedUpdateStatusPayload,
+  type PackagedUpdateState,
+  type PackagedUpdateStatusPayload,
+} from "./packaged-update-state.js";
 import pkg from "electron-updater";
 const { autoUpdater } = pkg;
 import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
@@ -154,6 +170,9 @@ export class DesktopApplication {
   private cloudCommandsPaused: boolean;
   private cloudConnectionEnabled: boolean;
   private updateCheckTimer: NodeJS.Timeout | null = null;
+  private packagedUpdateState: PackagedUpdateState =
+    createInitialPackagedUpdateState();
+  private applyingDownloadedUpdate = false;
   private readonly onboardingHandoffPath = getCanonicalOnboardingHandoffPath();
   private bootReadyForOnboarding = false;
   private processingOnboardingHandoff = false;
@@ -396,6 +415,12 @@ export class DesktopApplication {
     void this.processCanonicalOnboardingHandoff("cold-start");
 
     gatewayLog.setVerbose(this.settingsStore.getAll().verboseLogging);
+    const previousLogEntries = await readPreviousSessionLogTail(200);
+    gatewayLog.seedPreviousSessionEntries(previousLogEntries);
+    gatewayLog.info(
+      "startup",
+      `Desktop boot starting version=${app.getVersion()} log=${getMainLogFilePath()}`,
+    );
     const deadJobs = this.reconcileJobStore();
     await this.bootRecovery.reattachLiveJobs();
     this.bootRecovery.sweepOrphanedTokens();
@@ -434,19 +459,99 @@ export class DesktopApplication {
       }
 
       if (app.isPackaged) {
+        autoUpdater.logger = electronLog;
         autoUpdater.autoDownload = true;
         autoUpdater.autoInstallOnAppQuit = true;
         autoUpdater.on("error", (err) => {
           const level = isNetworkError(err.message) ? "debug" : "error";
           gatewayLog[level]("auto-update", `Auto-update error: ${err.message}`);
+          this.setPackagedUpdateState({
+            status: "error",
+            available: false,
+            downloaded: false,
+            error: err.message,
+            percent: undefined,
+          });
+          this.notifyPackagedUpdateStatus();
+          Observability.electronUpdateFailed({
+            trigger: "updater-error",
+            status: this.packagedUpdateState.status,
+            version: this.packagedUpdateState.version,
+            error: err.message,
+            downloaded: this.packagedUpdateState.downloaded,
+            readyToInstall: this.packagedUpdateState.downloaded,
+          });
         });
         autoUpdater.on("update-available", (info) => {
+          this.setPackagedUpdateState({
+            status: "available",
+            available: true,
+            downloaded: false,
+            version: info.version,
+            error: undefined,
+            percent: undefined,
+          });
+          gatewayLog.info(
+            "auto-update",
+            `Update available version=${info.version}; waiting for download`,
+          );
+          this.notifyPackagedUpdateStatus();
           this.desktopWindow
             .getWindow()
             ?.webContents.send("desktop:update-available", {
               updateAvailable: true,
               version: info.version,
+              readyToInstall: false,
             });
+        });
+        autoUpdater.on("download-progress", (progress) => {
+          const percent =
+            typeof progress.percent === "number"
+              ? Math.max(0, Math.min(100, progress.percent))
+              : undefined;
+          this.setPackagedUpdateState({
+            status: "downloading",
+            available: true,
+            downloaded: false,
+            percent,
+            error: undefined,
+          });
+          gatewayLog.debug(
+            "auto-update",
+            () =>
+              `Update download progress version=${this.packagedUpdateState.version ?? "unknown"} percent=${percent?.toFixed(1) ?? "unknown"}`,
+          );
+          this.notifyPackagedUpdateStatus();
+        });
+        autoUpdater.on("update-downloaded", (info) => {
+          this.setPackagedUpdateState({
+            status: "downloaded",
+            available: true,
+            downloaded: true,
+            version: info.version,
+            percent: 100,
+            error: undefined,
+          });
+          gatewayLog.info(
+            "auto-update",
+            `Update downloaded version=${info.version}; ready to restart`,
+          );
+          this.notifyPackagedUpdateStatus();
+        });
+        autoUpdater.on("update-not-available", (info) => {
+          this.setPackagedUpdateState({
+            status: "not-available",
+            available: false,
+            downloaded: false,
+            version: info.version,
+            percent: undefined,
+            error: undefined,
+          });
+          gatewayLog.debug(
+            "auto-update",
+            () => `No packaged update available version=${info.version ?? "unknown"}`,
+          );
+          this.notifyPackagedUpdateStatus();
         });
         void autoUpdater.checkForUpdates().catch((err: unknown) => {
           const msg = err instanceof Error ? err.message : String(err);
@@ -454,6 +559,22 @@ export class DesktopApplication {
             "auto-update",
             `Failed to check for updates: ${msg}`,
           );
+          this.setPackagedUpdateState({
+            status: "error",
+            available: false,
+            downloaded: false,
+            error: msg,
+            percent: undefined,
+          });
+          this.notifyPackagedUpdateStatus();
+          Observability.electronUpdateFailed({
+            trigger: "check-for-updates",
+            status: this.packagedUpdateState.status,
+            version: this.packagedUpdateState.version,
+            error: msg,
+            downloaded: this.packagedUpdateState.downloaded,
+            readyToInstall: this.packagedUpdateState.downloaded,
+          });
         });
         if (this.updateCheckTimer) clearInterval(this.updateCheckTimer);
         this.updateCheckTimer = setInterval(() => {
@@ -1156,8 +1277,37 @@ export class DesktopApplication {
       ?.webContents.send("desktop:onboarding-state-changed");
   }
 
+  private setPackagedUpdateState(patch: Partial<PackagedUpdateState>): void {
+    this.packagedUpdateState = mergePackagedUpdateState(
+      this.packagedUpdateState,
+      patch,
+    );
+  }
+
+  private getPackagedUpdateStatusPayload(): PackagedUpdateStatusPayload {
+    return toPackagedUpdateStatusPayload(this.packagedUpdateState);
+  }
+
+  private notifyPackagedUpdateStatus(): void {
+    this.desktopWindow
+      .getWindow()
+      ?.webContents.send(
+        "desktop:update-status",
+        this.getPackagedUpdateStatusPayload(),
+      );
+  }
+
   setQuitting(): void {
     this.desktopWindow.setQuitting();
+  }
+
+  reportShutdownFailure(
+    input: Omit<DesktopShutdownDiagnostics, "duringUpdate">,
+  ): void {
+    Observability.desktopShutdownFailed({
+      ...input,
+      duringUpdate: this.applyingDownloadedUpdate,
+    });
   }
 
   async shutdown(): Promise<ShutdownResult> {
@@ -1183,6 +1333,16 @@ export class DesktopApplication {
       server: this.server,
       desktopWindow: this.desktopWindow,
       tray: this.tray,
+      log: (message) => gatewayLog.info("shutdown", message),
+      reportFailure: (failure) =>
+        Observability.desktopShutdownFailed({
+          trigger: "shutdown-sequence",
+          result: failure.result,
+          phase: failure.phase,
+          elapsedMs: failure.elapsedMs,
+          error: failure.error,
+          duringUpdate: this.applyingDownloadedUpdate,
+        }),
     });
   }
 
@@ -1681,6 +1841,8 @@ export class DesktopApplication {
     ipcMain.handle("desktop:clear-logs", () => {
       gatewayLog.clear();
     });
+    ipcMain.handle("desktop:get-log-file-path", () => getMainLogFilePath());
+    ipcMain.handle("desktop:open-log-file", () => openMainLogFile());
 
     ipcMain.handle("desktop:get-settings", () => {
       const settings = this.settingsStore.getAll();
@@ -2172,23 +2334,82 @@ export class DesktopApplication {
         if (app.isPackaged) {
           const result = await autoUpdater.checkForUpdates();
           const remoteVersion = result?.updateInfo?.version;
-          return {
-            updateAvailable:
-              remoteVersion != null && remoteVersion !== app.getVersion(),
-            version: remoteVersion,
-          };
+          if (
+            remoteVersion != null &&
+            remoteVersion !== app.getVersion() &&
+            this.packagedUpdateState.status === "idle"
+          ) {
+            this.setPackagedUpdateState({
+              status: "available",
+              available: true,
+              downloaded: false,
+              version: remoteVersion,
+            });
+          }
+          return this.getPackagedUpdateStatusPayload();
         }
         return await this.checkForUpdate();
       } catch (error) {
+        const message = error instanceof Error ? error.message : "unknown error";
+        if (app.isPackaged) {
+          this.setPackagedUpdateState({
+            status: "error",
+            available: false,
+            downloaded: false,
+            error: message,
+          });
+          this.notifyPackagedUpdateStatus();
+          Observability.electronUpdateFailed({
+            trigger: "manual-check",
+            status: this.packagedUpdateState.status,
+            version: this.packagedUpdateState.version,
+            error: message,
+            downloaded: this.packagedUpdateState.downloaded,
+            readyToInstall: this.packagedUpdateState.downloaded,
+          });
+          return this.getPackagedUpdateStatusPayload();
+        }
         return {
           updateAvailable: false,
-          error: error instanceof Error ? error.message : "unknown error",
+          error: message,
         };
       }
     });
     ipcMain.handle("desktop:apply-update", async () => {
       if (app.isPackaged) {
-        autoUpdater.quitAndInstall();
+        gatewayLog.info(
+          "auto-update",
+          `apply-update IPC invoked status=${this.packagedUpdateState.status} downloaded=${this.packagedUpdateState.downloaded}`,
+        );
+        try {
+          assertPackagedUpdateReadyToInstall(this.packagedUpdateState);
+        } catch {
+          const message = PACKAGED_UPDATE_NOT_DOWNLOADED_MESSAGE;
+          gatewayLog.warn("auto-update", message);
+          Observability.electronUpdateFailed({
+            trigger: "apply-before-downloaded",
+            status: this.packagedUpdateState.status,
+            version: this.packagedUpdateState.version,
+            error: message,
+            downloaded: this.packagedUpdateState.downloaded,
+            readyToInstall: false,
+          });
+          throw new Error(message);
+        }
+
+        this.applyingDownloadedUpdate = true;
+        Observability.electronUpdateInitiated({
+          trigger: "renderer-apply-update",
+          status: this.packagedUpdateState.status,
+          version: this.packagedUpdateState.version,
+          downloaded: true,
+          readyToInstall: true,
+        });
+        gatewayLog.info(
+          "auto-update",
+          "calling quitAndInstall(isSilent=true, isForceRunAfter=true)",
+        );
+        autoUpdater.quitAndInstall(true, true);
         return;
       }
       await this.applyUpdate();

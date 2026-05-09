@@ -34,6 +34,7 @@ TypeScript is strict-mode (`tsconfig.base.json`) and ESM (`NodeNext`).
 - Prefer `kebab-case` file names (for example, `gateway-auth.ts`).
 - Keep boundaries clear between `main`, `server`, and `shared` modules.
 - Use `.js` extensions in ESM imports.
+- In Desktop main/server NodeNext ESM code, dependency subpath imports must either use an exported package subpath or the concrete runtime file extension, and new subpath imports should be validated against built output before shipping.
 - Prefix intentionally unused variables/args with `_` to satisfy lint rules.
 - Do not edit `apps/desktop/src/shared/build-info.ts` manually (auto-generated in prebuild).
 - Avoid unnecessary TypeScript casts. Prefer importing concrete shared types, narrowing with type guards, or shaping helper return types so call sites do not need `as` to satisfy the compiler.
@@ -50,12 +51,15 @@ Gateway route handlers live under `apps/desktop/src/server/operations/`.
 - Before adding a helper to an operation file, check existing shared modules such as `response-utils.ts` for `json()` and `symphony-utils.ts` for `expandHome()`. If helper logic is used by more than one operation, extract it into a shared module instead of copying it.
 - Follow the route registration pattern: export `registerXxxRoutes(dispatcher, ...deps)` from the operation module and register it from `router.ts`.
 - Do not duplicate local response helpers across operation files.
+- When classifying failed spawned commands or gateway operations, inspect every captured output stream that can feed the user-facing excerpt or diagnostic payload, not only `stderr`. Add focused coverage for stdout-only and stderr-only failure markers when the classification depends on process output.
 
 ## Testing Guidelines
 Tests run with `tsx --test` (Node test runner) via `just desktop-test`.
 
 - Place tests in `apps/desktop/test/` and name files `*.test.ts`.
 - Add or update tests with behavior changes, especially gateway auth, process spawning, and telemetry flows.
+- Keep tests portable in CI: avoid shelling out to optional host tools such as `rg` when Node or TypeScript APIs can prove the invariant. If a test truly requires an external CLI, make the dependency explicit in the workflow before relying on it.
+- Renderer tests that cover IPC-backed panels should exercise the initial activation path or make render helpers tolerate absent/empty data, so a tab can open before its first async poll resolves.
 - Before opening a PR, run: `just desktop-lint && just desktop-typecheck && just desktop-test`.
 
 ## Breaking Changes

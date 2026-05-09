@@ -1615,8 +1615,9 @@ async function downloadAttachmentsToDisk(
         continue;
       }
       if (expiresAt <= new Date()) {
-        console.warn(
-          `[downloadAttachmentsToDisk] Attachment ${attachment.id} signedUrl expired at ${attachment.signedUrlExpiresAt}, skipping`,
+        gatewayLog.warn(
+          "loop-attachment",
+          `Attachment ${attachment.id} signedUrl expired at ${attachment.signedUrlExpiresAt}, skipping`,
         );
         continue;
       }
@@ -1631,8 +1632,9 @@ async function downloadAttachmentsToDisk(
         !diskPath.startsWith(attachmentsDir + path.sep) &&
         diskPath !== attachmentsDir
       ) {
-        console.warn(
-          `[downloadAttachmentsToDisk] Attachment ${attachment.id} resolved path escapes attachmentsDir, skipping`,
+        gatewayLog.warn(
+          "loop-attachment",
+          `Attachment ${attachment.id} resolved path escapes attachmentsDir, skipping`,
         );
         continue;
       }
@@ -1647,8 +1649,9 @@ async function downloadAttachmentsToDisk(
           id: attachment.id,
           reason: policyDecision.diagnostics.reason,
         });
-        console.warn(
-          `[downloadAttachmentsToDisk] Attachment ${attachment.id} denied by outbound policy: ${policyDecision.diagnostics.reason}`,
+        gatewayLog.warn(
+          "loop-attachment",
+          `Attachment ${attachment.id} denied by outbound policy: ${policyDecision.diagnostics.reason}`,
         );
         continue;
       }
@@ -1656,8 +1659,9 @@ async function downloadAttachmentsToDisk(
       Observability.outboundNetworkDecision(policyDecision.diagnostics);
       const response = await fetch(attachment.signedUrl, { redirect: "error" });
       if (!response.ok) {
-        console.warn(
-          `[downloadAttachmentsToDisk] Attachment ${attachment.id} fetch failed: ${response.status} ${response.statusText}, skipping`,
+        gatewayLog.warn(
+          "loop-attachment",
+          `Attachment ${attachment.id} fetch failed: ${response.status} ${response.statusText}, skipping`,
         );
         continue;
       }
@@ -1666,21 +1670,24 @@ async function downloadAttachmentsToDisk(
       const buffer = Buffer.from(arrayBuffer);
 
       if (buffer.length > attachment.sizeBytes) {
-        console.warn(
-          `[downloadAttachmentsToDisk] Attachment ${attachment.id} buffer size ${buffer.length} exceeds declared sizeBytes ${attachment.sizeBytes}, skipping`,
+        gatewayLog.warn(
+          "loop-attachment",
+          `Attachment ${attachment.id} buffer size ${buffer.length} exceeds declared sizeBytes ${attachment.sizeBytes}, skipping`,
         );
         continue;
       }
       if (buffer.length < attachment.sizeBytes) {
-        console.warn(
-          `[downloadAttachmentsToDisk] Attachment ${attachment.id} downloaded ${buffer.length} bytes but expected ${attachment.sizeBytes}, may be truncated — writing anyway`,
+        gatewayLog.warn(
+          "loop-attachment",
+          `Attachment ${attachment.id} downloaded ${buffer.length} bytes but expected ${attachment.sizeBytes}, may be truncated -- writing anyway`,
         );
       }
 
       writeFileSync(diskPath, buffer);
     } catch (err) {
-      console.warn(
-        `[downloadAttachmentsToDisk] Failed to download attachment ${attachment.id}: ${formatAttachmentDownloadError(err)}`,
+      gatewayLog.warn(
+        "loop-attachment",
+        `Failed to download attachment ${attachment.id}: ${formatAttachmentDownloadError(err)}`,
       );
     }
   }
