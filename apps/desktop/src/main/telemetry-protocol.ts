@@ -14,7 +14,10 @@ export type TelemetryCategory =
   | "command.cancelled"
   | "command.gateway_error"
   | "desktop.outbound_network_decision"
+  | "desktop.shutdown_failed"
   | "desktop.support_upload"
+  | "electron_update.initiated"
+  | "electron_update.failed"
   | "job.started"
   | "job.plan_source_resolved"
   | "job.decision_table_verification"
@@ -376,6 +379,39 @@ export interface SupportUploadDiagnostics {
   durationMs?: number;
 }
 
+export type DesktopUpdateTelemetryTrigger =
+  | "updater-error"
+  | "check-for-updates"
+  | "manual-check"
+  | "apply-before-downloaded"
+  | "renderer-apply-update";
+
+export interface DesktopUpdateDiagnostics {
+  trigger: DesktopUpdateTelemetryTrigger;
+  status?: string;
+  version?: string;
+  percent?: number;
+  error?: string;
+  downloaded?: boolean;
+  readyToInstall?: boolean;
+}
+
+export type DesktopShutdownTelemetryTrigger =
+  | "before-quit"
+  | "shutdown-sequence"
+  | "shutdown-rejected"
+  | "outer-hard-exit";
+
+export interface DesktopShutdownDiagnostics {
+  trigger: DesktopShutdownTelemetryTrigger;
+  result?: "timed_out" | "failed";
+  phase?: string;
+  duringUpdate?: boolean;
+  outerHardExit?: boolean;
+  elapsedMs?: number;
+  error?: string;
+}
+
 export interface TelemetryDiagnostics {
   exitCode?: number;
   logTail?: string;
@@ -396,6 +432,8 @@ export interface TelemetryDiagnostics {
   };
   tokenUsage?: { inputTokens: number; outputTokens: number };
   decisionTableVerification?: DecisionTableVerificationTelemetryDiagnostics;
+  desktopUpdate?: DesktopUpdateDiagnostics;
+  desktopShutdown?: DesktopShutdownDiagnostics;
   outboundNetwork?: OutboundNetworkDiagnostics;
   supportUpload?: SupportUploadDiagnostics;
   diagnosticsVersion?: number;

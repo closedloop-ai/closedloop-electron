@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { gatewayLog } from "../../main/gateway-logger.js";
 import { getShellPath, resolveExecutablesOnPath, sanitizeSpawnEnv } from "../shell-path.js";
 
 const execFileAsync = promisify(execFile);
@@ -511,7 +512,7 @@ async function runListDetection(
       ? "Discovery timed out"
       : "Discovery failed";
     const message = error instanceof Error ? error.message : String(error);
-    console.warn(`[mcp-detection] ${provider} mcp list failed: ${message}`);
+    gatewayLog.warn("mcp-detection", `${provider} mcp list failed: ${message}`);
     return createDetectionResult(checkedAt, { error: detectionError });
   }
 }

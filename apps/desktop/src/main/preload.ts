@@ -76,6 +76,9 @@ const desktopApi = {
     ipcRenderer.invoke("desktop:get-job-log-tail", jobId, lines) as Promise<unknown>,
   getLogs: () => ipcRenderer.invoke("desktop:get-logs") as Promise<unknown>,
   clearLogs: () => ipcRenderer.invoke("desktop:clear-logs") as Promise<unknown>,
+  getLogFilePath: () =>
+    ipcRenderer.invoke("desktop:get-log-file-path") as Promise<string>,
+  openLogFile: () => ipcRenderer.invoke("desktop:open-log-file") as Promise<unknown>,
   getAppVersion: () => ipcRenderer.invoke("desktop:get-app-version") as Promise<string>,
   getBinaryPaths: () => ipcRenderer.invoke("desktop:get-binary-paths") as Promise<unknown>,
   patchBinaryPaths: (patch: unknown) =>
@@ -104,6 +107,10 @@ ipcRenderer.on("desktop:navigate-tab", (_event, tab: string) => {
 
 ipcRenderer.on("desktop:update-available", (_event, result) => {
   window.dispatchEvent(new CustomEvent("desktop:update-available", { detail: result }));
+});
+
+ipcRenderer.on("desktop:update-status", (_event, result) => {
+  window.dispatchEvent(new CustomEvent("desktop:update-status", { detail: result }));
 });
 
 ipcRenderer.on("desktop:onboarding-state-changed", () => {

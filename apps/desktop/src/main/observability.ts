@@ -2,6 +2,8 @@ import { TelemetryService, type EnrichedTelemetryEvent } from "./telemetry-servi
 import { PostHogAnalytics } from "./posthog-analytics.js";
 import { gatewayLog } from "./gateway-logger.js";
 import type {
+  DesktopShutdownDiagnostics,
+  DesktopUpdateDiagnostics,
   ExecutePlanSourceDiagnostics,
   OutboundNetworkDiagnostics,
   SupportUploadDiagnostics,
@@ -271,6 +273,39 @@ export class Observability {
       `Support upload ${input.outcome}`,
       { loopId: input.loopId, jobId: input.loopId },
       { supportUpload: input },
+    );
+  }
+
+  /** Emits bounded Desktop auto-update telemetry through the relay path. */
+  static electronUpdateInitiated(input: DesktopUpdateDiagnostics): void {
+    Observability.emitTelemetry(
+      "info",
+      "electron_update.initiated",
+      "Electron update initiated",
+      {},
+      { desktopUpdate: input },
+    );
+  }
+
+  /** Emits bounded Desktop auto-update failure telemetry through the relay path. */
+  static electronUpdateFailed(input: DesktopUpdateDiagnostics): void {
+    Observability.emitTelemetry(
+      "error",
+      "electron_update.failed",
+      "Electron update failed",
+      {},
+      { desktopUpdate: input },
+    );
+  }
+
+  /** Emits bounded Desktop shutdown failure telemetry through the relay path. */
+  static desktopShutdownFailed(input: DesktopShutdownDiagnostics): void {
+    Observability.emitTelemetry(
+      "error",
+      "desktop.shutdown_failed",
+      "Desktop shutdown failed",
+      {},
+      { desktopShutdown: input },
     );
   }
 
