@@ -6,7 +6,7 @@ import type { ApiKeyProvenance } from "./api-key-store.js";
 import type { DesktopPopSigner } from "./desktop-pop.js";
 
 export type OrganizationCommandPublicKey = {
-  id: string;
+  id?: string;
   userId: string;
   organizationId: string;
   publicKeyBase64: string;
@@ -63,5 +63,33 @@ export async function fetchOrganizationCommandKeys(
       payload && !payload.success ? payload.error : "Failed to list public keys"
     );
   }
+  if (!isOrganizationCommandPublicKeyArray(payload.data)) {
+    throw new Error("Invalid public keys response");
+  }
   return payload.data;
+}
+
+function isOrganizationCommandPublicKeyArray(
+  value: unknown,
+): value is OrganizationCommandPublicKey[] {
+  return Array.isArray(value) && value.every(isOrganizationCommandPublicKey);
+}
+
+function isOrganizationCommandPublicKey(
+  value: unknown,
+): value is OrganizationCommandPublicKey {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const record = value as Partial<OrganizationCommandPublicKey>;
+  return (
+    (record.id === undefined || typeof record.id === "string") &&
+    typeof record.userId === "string" &&
+    typeof record.organizationId === "string" &&
+    typeof record.publicKeyBase64 === "string" &&
+    typeof record.fingerprint === "string" &&
+    typeof record.createdAt === "string" &&
+    typeof record.ownerName === "string" &&
+    (record.ownerEmail === undefined || typeof record.ownerEmail === "string")
+  );
 }

@@ -18,6 +18,10 @@ import {
   type RiskTier,
 } from "../shared/contracts.js";
 import {
+  buildCommandSigningCapabilities,
+  shouldEnforceCommandSigning,
+} from "../shared/command-signing-policy.js";
+import {
   buildAllowedDirectories,
   isRiskyAllowedDirectory,
   normalizeScopePath,
@@ -38,6 +42,15 @@ import { CloudCommandExecutor } from "./cloud-command-executor.js";
 import type { CloudSocketStatus, DesktopCommandEvent } from "./cloud-protocol.js";
 import { CloudSocketService } from "./cloud-socket.js";
 import { CommandSignatureVerifier } from "./command-signature-verifier.js";
+import { CommandKeyReconciler } from "./command-key-reconciler.js";
+import {
+  classifyBrowserCommandKeyApprovalRequestCommand,
+  handleBrowserCommandKeyApprovalRequestCommand as handleReservedBrowserCommandKeyApprovalRequest,
+} from "./browser-command-key-approval-request.js";
+import {
+  classifyBrowserCommandKeyRevocationCommand,
+  handleBrowserCommandKeyRevocationCommand as handleReservedBrowserCommandKeyRevocation,
+} from "./browser-command-key-revocation.js";
 import {
   DesktopPopUnavailableError,
   signDesktopPopHeaders,
@@ -133,6 +146,7 @@ import {
 } from "./onboarding-handoff.js";
 import { isSecurityUpgradeProvisioned } from "./security-upgrade-result.js";
 import { isDesktopSetupCompleteFromState } from "./setup-readiness.js";
+import { PendingCommandKeyNotifier } from "./pending-command-key-notifier.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -158,6 +172,8 @@ export class DesktopApplication {
   private readonly apiKeyStore: ApiKeyStore;
   private readonly authorizedCommandKeys: AuthorizedCommandKeyStore;
   private readonly commandSignatureVerifier: CommandSignatureVerifier;
+  private readonly pendingCommandKeyNotifier: PendingCommandKeyNotifier;
+  private readonly commandKeyReconciler: CommandKeyReconciler;
   private readonly gatewaySigningKeyStore: GatewaySigningKeyStore;
   private readonly loopTokenStore: LoopTokenStore;
   private readonly tray: DesktopTray;
@@ -213,6 +229,35 @@ export class DesktopApplication {
     this.authorizedCommandKeys = new AuthorizedCommandKeyStore();
     this.commandSignatureVerifier = new CommandSignatureVerifier({
       authorizedKeys: this.authorizedCommandKeys,
+    });
+    this.pendingCommandKeyNotifier = new PendingCommandKeyNotifier({
+      getPendingKeys: () => this.getPendingCommandSigningKeysForNotification(),
+      createNotification: (options) => new Notification(options),
+      supportsActions: () => process.platform === "darwin",
+      onOpenSettings: () => this.openBrowserCommandKeysSettings(),
+      onApprove: async (fingerprint) => {
+        await this.approveOrganizationCommandPublicKey(fingerprint);
+      },
+      onDecline: async (fingerprint) => {
+        await this.rejectOrganizationCommandPublicKey(fingerprint);
+      },
+      onChanged: () => this.notifyCommandKeysChanged(),
+      log: (message) => gatewayLog.debug("command-keys", message),
+    });
+    this.commandKeyReconciler = new CommandKeyReconciler({
+      hasApiKey: () => Boolean(this.apiKeyStore.getApiKey()),
+      fetchOrganizationKeys: () =>
+        this.fetchAvailableCommandSigningKeys({ requireApiKey: true }),
+      reconcileOrganizationKeys: (fingerprints) =>
+        this.authorizedCommandKeys.reconcileOrganizationKeys(fingerprints),
+      notifyPendingKeys: (organizationKeys) =>
+        this.notifyPendingCommandSigningKeysForOrganizationKeys(
+          organizationKeys,
+        ),
+      onChanged: () => this.notifyCommandKeysChanged(),
+      log: (level, message) => {
+        gatewayLog[level]("command-keys", message);
+      },
     });
     this.loopTokenStore = new LoopTokenStore();
     this.gatewaySigningKeyStore = new GatewaySigningKeyStore();
@@ -285,7 +330,7 @@ export class DesktopApplication {
       sendCommandAck: (event) => this.cloudSocket.sendCommandAck(event),
       sendCommandEvent: (event) => this.cloudSocket.sendCommandEvent(event),
       commandSignatureVerifier: this.commandSignatureVerifier,
-      isCommandSigningEnforced: () => this.serverCommandSigningSupported,
+      isCommandSigningEnforced: () => this.isCommandSigningEnforced(),
       prepareCommandForExecution: (command) =>
         this.prepareCloudCommandForExecution(command),
       onQueueStatsChange: (stats) => {
@@ -313,7 +358,7 @@ export class DesktopApplication {
       signDesktopRequest: (request) => this.signDesktopRequest(request),
       onDesktopPopUnavailable: (surface, reason) => this.reportDesktopPopUnavailable(surface, reason),
       getAllowedDirectories: () => this.getAllowedDirectoriesFromSandbox(),
-      getCapabilities: () => EMPTY_CAPABILITIES as unknown as Record<string, unknown>,
+      getCapabilities: () => this.getLocalCapabilities() as unknown as Record<string, unknown>,
       getMaxInFlightCommands: () => MAX_IN_FLIGHT_COMMANDS,
       getGatewayId: () => this.getUpgradeCapableGatewayId(),
       machineName: os.hostname(),
@@ -324,11 +369,18 @@ export class DesktopApplication {
       onStatusChange: (status) => this.onCloudSocketStatus(status),
       onDisconnect: (reason) => {
         this.serverCommandSigningSupported = false;
+        this.commandKeyReconciler.stop();
         Observability.connectionLost(reason);
       },
       onHelloAck: (event) => {
         this.serverCommandSigningSupported =
           event.serverCapabilities?.computeTargetSigning === true;
+        if (this.serverCommandSigningSupported) {
+          this.commandKeyReconciler.start();
+          void this.commandKeyReconciler.reconcileNow("hello_ack");
+        } else {
+          this.commandKeyReconciler.stop();
+        }
         Observability.setTargetId(event.computeTargetId);
         if (event.sessionId) {
           Observability.setGatewaySessionId(event.sessionId);
@@ -344,6 +396,36 @@ export class DesktopApplication {
         );
       },
       onCommand: (command) => {
+        const keyApprovalRequestMatch =
+          classifyBrowserCommandKeyApprovalRequestCommand(command);
+        if (keyApprovalRequestMatch === "match") {
+          this.handleBrowserCommandKeyApprovalRequestCommand(command);
+          return;
+        }
+        if (keyApprovalRequestMatch === "mismatch") {
+          this.cloudSocket.sendCommandAck({
+            commandId: command.commandId,
+            accepted: false,
+            state: "failed",
+            reason: "operationId/path mismatch",
+          });
+          return;
+        }
+        const keyRevocationMatch =
+          classifyBrowserCommandKeyRevocationCommand(command);
+        if (keyRevocationMatch === "match") {
+          this.handleBrowserCommandKeyRevocationCommand(command);
+          return;
+        }
+        if (keyRevocationMatch === "mismatch") {
+          this.cloudSocket.sendCommandAck({
+            commandId: command.commandId,
+            accepted: false,
+            state: "failed",
+            reason: "operationId/path mismatch",
+          });
+          return;
+        }
         if (!this.isDesktopSetupComplete()) {
           this.cloudSocket.sendCommandAck({
             commandId: command.commandId,
@@ -428,15 +510,7 @@ export class DesktopApplication {
 
     this.tray.init({
       onOpen: () => this.desktopWindow.show(),
-      onManageCommandKeys: () => {
-        this.desktopWindow.show();
-        this.desktopWindow
-          .getWindow()
-          ?.webContents.send("desktop:navigate-tab", "settings");
-        this.desktopWindow
-          .getWindow()
-          ?.webContents.send("desktop:navigate-settings-tab", "security");
-      },
+      onManageCommandKeys: () => this.openBrowserCommandKeysSettings(),
       onTogglePaused: (paused) => this.setCloudCommandsPaused(paused),
     });
     this.tray.setPaused(this.cloudCommandsPaused);
@@ -1038,6 +1112,63 @@ export class DesktopApplication {
     this.showWindow();
   }
 
+  private openBrowserCommandKeysSettings(): void {
+    this.desktopWindow.show();
+    this.desktopWindow
+      .getWindow()
+      ?.webContents.send("desktop:navigate-tab", "settings");
+    this.desktopWindow
+      .getWindow()
+      ?.webContents.send("desktop:navigate-settings-tab", "security");
+  }
+
+  private notifyCommandKeysChanged(): void {
+    this.desktopWindow
+      .getWindow()
+      ?.webContents.send("desktop:command-keys-changed");
+  }
+
+  private handleBrowserCommandKeyRevocationCommand(
+    command: DesktopCommandEvent,
+  ): void {
+    handleReservedBrowserCommandKeyRevocation(command, {
+      removeAuthorizedKey: (fingerprint) =>
+        this.authorizedCommandKeys.remove(fingerprint),
+      sendCommandAck: (event) => this.cloudSocket.sendCommandAck(event),
+      sendCommandEvent: (event) => this.cloudSocket.sendCommandEvent(event),
+      onChanged: () => this.notifyCommandKeysChanged(),
+      log: (level, message) => gatewayLog[level]("command-keys", message),
+    });
+  }
+
+  private handleBrowserCommandKeyApprovalRequestCommand(
+    command: DesktopCommandEvent,
+  ): void {
+    handleReservedBrowserCommandKeyApprovalRequest(command, {
+      notifyPendingKeys: (fingerprint) =>
+        this.notifyPendingCommandSigningKeyByFingerprint(fingerprint),
+      sendCommandAck: (event) => this.cloudSocket.sendCommandAck(event),
+      sendCommandEvent: (event) => this.cloudSocket.sendCommandEvent(event),
+      onChanged: () => this.notifyCommandKeysChanged(),
+      log: (level, message) => gatewayLog[level]("command-keys", message),
+    });
+  }
+
+  private getLocalCapabilities(): ReturnType<typeof buildCommandSigningCapabilities> {
+    return buildCommandSigningCapabilities({
+      commandSigningEnforcementEnabled:
+        this.settingsStore.getCommandSigningEnforcementEnabled(),
+    });
+  }
+
+  private isCommandSigningEnforced(): boolean {
+    return shouldEnforceCommandSigning({
+      serverCommandSigningSupported: this.serverCommandSigningSupported,
+      commandSigningEnforcementEnabled:
+        this.settingsStore.getCommandSigningEnforcementEnabled(),
+    });
+  }
+
   private async handleSecurityUpgradeCommand(
     payload: DesktopSecurityUpgradePayload,
   ): Promise<DesktopSecurityUpgradeResult> {
@@ -1365,6 +1496,7 @@ export class DesktopApplication {
     this.bootRecovery.dispose();
     await this.bootRecovery.quiesce(1_000);
     this.queueStatsTelemetryDebounce.cancel();
+    this.commandKeyReconciler.stop();
     return runShutdownSequence({
       observability: Observability,
       updateCheckTimer: this.updateCheckTimer,
@@ -1405,11 +1537,14 @@ export class DesktopApplication {
     }
   }
 
-  private async fetchAvailableCommandSigningKeys(): Promise<
-    OrganizationCommandPublicKey[]
-  > {
+  private async fetchAvailableCommandSigningKeys(options?: {
+    requireApiKey?: boolean;
+  }): Promise<OrganizationCommandPublicKey[]> {
     const apiKey = this.apiKeyStore.getApiKey();
     if (!apiKey) {
+      if (options?.requireApiKey) {
+        throw new Error("missing API key");
+      }
       return [];
     }
     return fetchOrganizationCommandKeys({
@@ -1428,6 +1563,7 @@ export class DesktopApplication {
     authorized: ReturnType<AuthorizedCommandKeyStore["list"]>;
     rejectedFingerprints: string[];
     serverSupported: boolean;
+    enforcementEnabled: boolean;
     availableError?: string;
   }> {
     const authorizedFingerprints = new Set(
@@ -1453,8 +1589,97 @@ export class DesktopApplication {
       authorized: this.authorizedCommandKeys.list(),
       rejectedFingerprints: [...rejectedFingerprints],
       serverSupported: this.serverCommandSigningSupported,
+      enforcementEnabled: this.settingsStore.getCommandSigningEnforcementEnabled(),
       ...(availableError ? { availableError } : {}),
     };
+  }
+
+  private async getPendingCommandSigningKeysForNotification(): Promise<
+    OrganizationCommandPublicKey[]
+  > {
+    if (!this.apiKeyStore.getApiKey()) {
+      return [];
+    }
+    const state = await this.listCommandSigningKeys();
+    if (state.availableError) {
+      return [];
+    }
+    return state.available;
+  }
+
+  private getPendingCommandSigningKeysFromOrganizationKeys(
+    organizationKeys: OrganizationCommandPublicKey[],
+  ): OrganizationCommandPublicKey[] {
+    const authorizedFingerprints = new Set(
+      this.authorizedCommandKeys.list().map((key) => key.fingerprint),
+    );
+    const rejectedFingerprints = new Set(
+      this.authorizedCommandKeys.listRejectedFingerprints(),
+    );
+    return organizationKeys.filter(
+      (key) =>
+        !authorizedFingerprints.has(key.fingerprint) &&
+        !rejectedFingerprints.has(key.fingerprint),
+    );
+  }
+
+  private async notifyPendingCommandSigningKeysForOrganizationKeys(
+    organizationKeys: OrganizationCommandPublicKey[],
+  ): Promise<void> {
+    await this.pendingCommandKeyNotifier.notifyPendingKeys(
+      this.getPendingCommandSigningKeysFromOrganizationKeys(organizationKeys),
+    );
+  }
+
+  private async notifyPendingCommandSigningKeyByFingerprint(
+    fingerprint: string,
+  ): Promise<void> {
+    await this.pendingCommandKeyNotifier.notifyPendingKeys([
+      {
+        fingerprint,
+        ownerName: "A browser session",
+      },
+    ]);
+  }
+
+  private async approveOrganizationCommandPublicKey(
+    fingerprint: unknown,
+  ): Promise<Awaited<ReturnType<DesktopApplication["listCommandSigningKeys"]>>> {
+    const trimmedFingerprint = typeof fingerprint === "string" ? fingerprint.trim() : "";
+    if (!trimmedFingerprint) {
+      throw new Error("fingerprint is required");
+    }
+    const keys = await this.fetchAvailableCommandSigningKeys();
+    const key = keys.find((entry) => entry.fingerprint === trimmedFingerprint);
+    if (!key) {
+      throw new Error("Command signing key not found");
+    }
+    this.authorizedCommandKeys.authorize({
+      fingerprint: key.fingerprint,
+      publicKeyBase64: key.publicKeyBase64,
+      ownerName: key.ownerEmail || key.ownerName || key.fingerprint,
+      ...(key.ownerEmail ? { ownerEmail: key.ownerEmail } : {}),
+      source: "org",
+      ...(key.id ? { sourceUserPublicKeyId: key.id } : {}),
+    });
+    this.pendingCommandKeyNotifier.dismiss(key.fingerprint);
+    const state = await this.listCommandSigningKeys();
+    this.notifyCommandKeysChanged();
+    return state;
+  }
+
+  private async rejectOrganizationCommandPublicKey(
+    fingerprint: unknown,
+  ): Promise<Awaited<ReturnType<DesktopApplication["listCommandSigningKeys"]>>> {
+    const trimmedFingerprint = typeof fingerprint === "string" ? fingerprint.trim() : "";
+    if (!trimmedFingerprint) {
+      throw new Error("fingerprint is required");
+    }
+    this.authorizedCommandKeys.reject(trimmedFingerprint);
+    this.pendingCommandKeyNotifier.dismiss(trimmedFingerprint);
+    const state = await this.listCommandSigningKeys();
+    this.notifyCommandKeysChanged();
+    return state;
   }
 
   private onCloudSocketStatus(status: CloudSocketStatus): void {
@@ -1471,6 +1696,9 @@ export class DesktopApplication {
     const stats = this.commandExecutor.getStats();
 
     if (status.state === "online") {
+      if (this.serverCommandSigningSupported) {
+        this.commandKeyReconciler.start();
+      }
       this.persistActiveConfigManagedMetadata({
         lastComputeTargetId: status.targetId,
       });
@@ -1491,6 +1719,7 @@ export class DesktopApplication {
 
     this.commandExecutor.setConnected(false);
     this.serverCommandSigningSupported = false;
+    this.commandKeyReconciler.stop();
 
     if (status.state === "degraded") {
       Observability.connectionDegraded(status.error);
@@ -1535,6 +1764,7 @@ export class DesktopApplication {
     if (!enabled) {
       this.cloudSocket.stop();
       this.serverCommandSigningSupported = false;
+      this.commandKeyReconciler.stop();
       this.cloudStatus = {
         state: "degraded",
         error: "Cloud connection disabled by user",
@@ -1556,6 +1786,7 @@ export class DesktopApplication {
       return;
     }
     this.serverCommandSigningSupported = false;
+    this.commandKeyReconciler.stop();
     this.cloudSocket.restart();
   }
 
@@ -1974,6 +2205,7 @@ export class DesktopApplication {
             "auto" | "none" | "low" | "medium" | "high"
           >;
           verboseLogging?: boolean;
+          commandSigningEnforcementEnabled?: boolean;
         },
       ) => {
         if ("binaryPaths" in partial) {
@@ -2004,6 +2236,10 @@ export class DesktopApplication {
           nextPartial.webAppOrigin = normalizeWebAppOrigin(
             partial.webAppOrigin,
           );
+        }
+        if (typeof partial.commandSigningEnforcementEnabled === "boolean") {
+          nextPartial.commandSigningEnforcementEnabled =
+            partial.commandSigningEnforcementEnabled;
         }
         const selectedSandbox =
           typeof partial.sandboxBaseDirectory === "string"
@@ -2071,6 +2307,8 @@ export class DesktopApplication {
       connectionSecurity: this.getConnectionSecurityStatus(),
       commandSigning: {
         serverSupported: this.serverCommandSigningSupported,
+        enforcementEnabled:
+          this.settingsStore.getCommandSigningEnforcementEnabled(),
         authorizedKeyCount: this.authorizedCommandKeys.list().length,
       },
       serverAlive: this.server.isAlive(),
@@ -2102,7 +2340,9 @@ export class DesktopApplication {
           typeof input.ownerEmail === "string" ? input.ownerEmail : undefined,
         fingerprint:
           typeof input.fingerprint === "string" ? input.fingerprint : undefined,
+        source: "manual",
       });
+      this.notifyCommandKeysChanged();
       return this.authorizedCommandKeys.list();
     });
     ipcMain.handle("desktop:remove-authorized-key", (_event, fingerprint: string) => {
@@ -2110,6 +2350,7 @@ export class DesktopApplication {
         throw new Error("fingerprint is required");
       }
       this.authorizedCommandKeys.remove(fingerprint);
+      this.notifyCommandKeysChanged();
       return this.authorizedCommandKeys.list();
     });
     ipcMain.handle("desktop:list-org-public-keys", async () =>
@@ -2118,58 +2359,31 @@ export class DesktopApplication {
     ipcMain.handle(
       "desktop:approve-org-public-key",
       async (_event, fingerprint: string) => {
-        if (typeof fingerprint !== "string" || !fingerprint.trim()) {
-          throw new Error("fingerprint is required");
-        }
-        const keys = await this.fetchAvailableCommandSigningKeys();
-        const key = keys.find((entry) => entry.fingerprint === fingerprint.trim());
-        if (!key) {
-          throw new Error("Command signing key not found");
-        }
-        this.authorizedCommandKeys.authorize({
-          fingerprint: key.fingerprint,
-          publicKeyBase64: key.publicKeyBase64,
-          ownerName: key.ownerEmail || key.ownerName || key.fingerprint,
-          ...(key.ownerEmail ? { ownerEmail: key.ownerEmail } : {}),
-        });
-        return this.listCommandSigningKeys();
+        return this.approveOrganizationCommandPublicKey(fingerprint);
       },
     );
     ipcMain.handle(
       "desktop:reject-org-public-key",
       (_event, fingerprint: string) => {
-        if (typeof fingerprint !== "string" || !fingerprint.trim()) {
-          throw new Error("fingerprint is required");
-        }
-        this.authorizedCommandKeys.reject(fingerprint);
-        return this.listCommandSigningKeys();
+        return this.rejectOrganizationCommandPublicKey(fingerprint);
       },
     );
     ipcMain.handle(
       "desktop:authorize-command-signing-key",
       async (_event, fingerprint: string) => {
-        const keys = await this.fetchAvailableCommandSigningKeys();
-        const key = keys.find((entry) => entry.fingerprint === fingerprint);
-        if (!key) {
-          throw new Error("Command signing key not found");
-        }
-        this.authorizedCommandKeys.authorize({
-          fingerprint: key.fingerprint,
-          publicKeyBase64: key.publicKeyBase64,
-          ownerName: key.ownerEmail || key.ownerName || key.fingerprint,
-          ...(key.ownerEmail ? { ownerEmail: key.ownerEmail } : {}),
-        });
-        return this.listCommandSigningKeys();
+        return this.approveOrganizationCommandPublicKey(fingerprint);
       },
     );
     ipcMain.handle(
       "desktop:revoke-command-signing-key",
-      (_event, fingerprint: string) => {
+      async (_event, fingerprint: string) => {
         if (typeof fingerprint !== "string" || !fingerprint.trim()) {
           throw new Error("fingerprint is required");
         }
         this.authorizedCommandKeys.remove(fingerprint.trim());
-        return this.listCommandSigningKeys();
+        const state = await this.listCommandSigningKeys();
+        this.notifyCommandKeysChanged();
+        return state;
       },
     );
     ipcMain.handle("desktop:list-running-jobs", async () => {

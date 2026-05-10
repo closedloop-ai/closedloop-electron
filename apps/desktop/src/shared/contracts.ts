@@ -15,6 +15,21 @@ export const COMMAND_SIGNING_REJECTION_REASONS = {
 export type CommandSigningRejectionReason =
   (typeof COMMAND_SIGNING_REJECTION_REASONS)[keyof typeof COMMAND_SIGNING_REJECTION_REASONS];
 
+export const BROWSER_COMMAND_KEY_REVOKE_OPERATION_ID =
+  "browser_key_revoke";
+export const BROWSER_COMMAND_KEY_REVOKE_PATH =
+  "/api/gateway/internal/browser-key/revoke";
+export const BROWSER_COMMAND_KEY_REVOKE_METHOD = "POST";
+export const BROWSER_COMMAND_KEY_REVOKE_INVALID_REASON =
+  "invalid browser command key revocation payload";
+export const BROWSER_COMMAND_KEY_APPROVAL_REQUEST_OPERATION_ID =
+  "browser_key_approval_request";
+export const BROWSER_COMMAND_KEY_APPROVAL_REQUEST_PATH =
+  "/api/gateway/internal/browser-key/approval-request";
+export const BROWSER_COMMAND_KEY_APPROVAL_REQUEST_METHOD = "POST";
+export const BROWSER_COMMAND_KEY_APPROVAL_REQUEST_INVALID_REASON =
+  "invalid browser command key approval request payload";
+
 /** WebSocket relay host — the electron app connects here for cloud commands, not the REST API. */
 export const DEFAULT_RELAY_ORIGIN = process.env.CL_RELAY_ORIGIN ?? "https://relay.closedloop.ai";
 export const DEFAULT_WEB_APP_ORIGIN = process.env.CL_WEB_APP_ORIGIN ?? "https://app.closedloop.ai";
@@ -29,6 +44,8 @@ export interface ComputeTargetCapabilities {
   versions: Partial<Record<CapabilityToolName, string>>;
   /** Desktop can verify browser-origin Ed25519 command signatures. */
   commandSigning?: boolean;
+  /** Desktop requires browser-origin Ed25519 command signatures for cloud commands. */
+  commandSigningRequired?: boolean;
 }
 
 export const EMPTY_CAPABILITIES: ComputeTargetCapabilities = {
@@ -97,6 +114,8 @@ export interface DesktopSettings {
   onboardingCompleted: boolean;
   cloudCommandsPaused: boolean;
   cloudConnectionEnabled: boolean;
+  /** Desktop-local opt-in that requires trusted browser command signatures. */
+  commandSigningEnforcementEnabled: boolean;
   defaultApprovalTier: RiskTier;
   relayOrigin: string;
   apiOrigin: string;
@@ -120,6 +139,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   onboardingCompleted: false,
   cloudCommandsPaused: false,
   cloudConnectionEnabled: true,
+  commandSigningEnforcementEnabled: false,
   defaultApprovalTier: "high",
   relayOrigin: DEFAULT_RELAY_ORIGIN,
   apiOrigin: DEFAULT_AUTH_API_ORIGIN,

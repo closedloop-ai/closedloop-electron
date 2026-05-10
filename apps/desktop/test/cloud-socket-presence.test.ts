@@ -9,6 +9,7 @@ import {
   type CloudSocketOptions,
 } from "../src/main/cloud-socket.js";
 import { GATEWAY_PROTOCOL_VERSION } from "../src/shared/contracts.js";
+import { buildCommandSigningCapabilities } from "../src/shared/command-signing-policy.js";
 import { gatewayLog } from "../src/main/gateway-logger.js";
 import {
   DesktopPopUnavailableError,
@@ -275,6 +276,63 @@ describe("T-3.1: hello payload version fields", () => {
     assert.equal(hello["gatewayProtocolVersion"], "0.1.0", "gatewayProtocolVersion must match");
     assert.equal(hello["pluginVersion"], "1.0.0-test", "pluginVersion must match");
     assert.deepEqual(hello["capabilities"], { commandSigning: true });
+
+    service.stop();
+  });
+
+  test("CloudSocketService omits commandSigningRequired until enforcement opt-in is enabled", () => {
+    const service = new CloudSocketService(
+      createStubOptions({
+        getCapabilities: () =>
+          buildCommandSigningCapabilities({
+            commandSigningEnforcementEnabled: false,
+          }),
+      }),
+    );
+    const fakeSocket = new FakeSocket();
+    (service as unknown as Record<string, unknown>)["socket"] = fakeSocket;
+
+    const proto = Object.getPrototypeOf(service) as Record<string, (...args: unknown[]) => void>;
+    proto["emitHello"].call(service);
+
+    const hello = fakeSocket.emittedEvents.find((e) => e.name === "desktop.hello")
+      ?.payload as Record<string, unknown>;
+    assert.deepEqual(hello["capabilities"], {
+      tools: {
+        claude: false,
+        codex: false,
+        git: false,
+        gh: false,
+        python3: false,
+      },
+      versions: {},
+      commandSigning: true,
+    });
+
+    service.stop();
+  });
+
+  test("CloudSocketService includes commandSigningRequired when enforcement opt-in is enabled", () => {
+    const service = new CloudSocketService(
+      createStubOptions({
+        getCapabilities: () =>
+          buildCommandSigningCapabilities({
+            commandSigningEnforcementEnabled: true,
+          }),
+      }),
+    );
+    const fakeSocket = new FakeSocket();
+    (service as unknown as Record<string, unknown>)["socket"] = fakeSocket;
+
+    const proto = Object.getPrototypeOf(service) as Record<string, (...args: unknown[]) => void>;
+    proto["emitHello"].call(service);
+
+    const hello = fakeSocket.emittedEvents.find((e) => e.name === "desktop.hello")
+      ?.payload as Record<string, unknown>;
+    assert.equal(
+      (hello["capabilities"] as Record<string, unknown>).commandSigningRequired,
+      true,
+    );
 
     service.stop();
   });

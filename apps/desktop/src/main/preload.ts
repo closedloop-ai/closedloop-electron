@@ -105,6 +105,14 @@ ipcRenderer.on("desktop:navigate-tab", (_event, tab: string) => {
   window.dispatchEvent(new CustomEvent("desktop:navigate-tab", { detail: tab }));
 });
 
+ipcRenderer.on("desktop:navigate-settings-tab", (_event, tab: string) => {
+  window.dispatchEvent(new CustomEvent("desktop:navigate-settings-tab", { detail: tab }));
+});
+
+ipcRenderer.on("desktop:command-keys-changed", () => {
+  window.dispatchEvent(new CustomEvent("desktop:command-keys-changed"));
+});
+
 ipcRenderer.on("desktop:update-available", (_event, result) => {
   window.dispatchEvent(new CustomEvent("desktop:update-available", { detail: result }));
 });

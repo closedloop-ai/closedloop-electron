@@ -8,18 +8,34 @@ const ED25519_RAW_PUBLIC_KEY_LENGTH = 32;
 const PUBLIC_KEY_BASE64_PATTERN = /^[A-Za-z0-9+/]+={0,2}$/;
 const FINGERPRINT_PATTERN = /^cl:[A-Za-z0-9_-]{16,64}$/;
 
+export type AuthorizedCommandKeySource = "org" | "manual" | "unknown";
+
 export type AuthorizedCommandKey = {
   fingerprint: string;
   publicKeyBase64: string;
   ownerName: string;
   ownerEmail?: string;
   authorizedAt: string;
+  source: AuthorizedCommandKeySource;
+  sourceUserPublicKeyId?: string;
 };
 
 type AuthorizedKeysFile = {
   version: 1;
   keys: AuthorizedCommandKey[];
   rejectedFingerprints?: string[];
+};
+
+export type RegisteredOrganizationCommandKey =
+  | string
+  | {
+      fingerprint: unknown;
+      sourceUserPublicKeyId?: unknown;
+    };
+
+export type CommandKeyReconciliationResult = {
+  removed: AuthorizedCommandKey[];
+  promoted: AuthorizedCommandKey[];
 };
 
 export interface AuthorizedCommandKeyStoreOptions {
@@ -32,6 +48,8 @@ export type AuthorizeCommandKeyInput = {
   ownerName?: string;
   ownerEmail?: string;
   fingerprint?: string;
+  source?: Exclude<AuthorizedCommandKeySource, "unknown">;
+  sourceUserPublicKeyId?: string;
 };
 
 /**
@@ -75,6 +93,10 @@ export class AuthorizedCommandKeyStore {
       ownerName: input.ownerName?.trim() || normalized.fingerprint,
       ...(input.ownerEmail?.trim() ? { ownerEmail: input.ownerEmail.trim() } : {}),
       authorizedAt: new Date().toISOString(),
+      source: input.source ?? "manual",
+      ...(input.source === "org" && input.sourceUserPublicKeyId?.trim()
+        ? { sourceUserPublicKeyId: input.sourceUserPublicKeyId.trim() }
+        : {}),
     };
     this.writeFile({
       ...current,
@@ -86,17 +108,79 @@ export class AuthorizedCommandKeyStore {
     return authorized;
   }
 
-  remove(fingerprint: string): void {
+  remove(fingerprint: string): boolean {
     const trimmed = fingerprint.trim();
     const current = this.readFile();
+    const keys = current.keys.filter((key) => key.fingerprint !== trimmed);
+    if (keys.length === current.keys.length) {
+      return false;
+    }
     this.writeFile({
       ...current,
-      keys: current.keys.filter((key) => key.fingerprint !== trimmed),
+      keys,
     });
+    return true;
   }
 
-  revoke(fingerprint: string): void {
-    this.remove(fingerprint);
+  revoke(fingerprint: string): boolean {
+    return this.remove(fingerprint);
+  }
+
+  reconcileOrganizationKeys(
+    registeredKeys: Iterable<RegisteredOrganizationCommandKey>,
+  ): CommandKeyReconciliationResult {
+    const registered = new Map<string, { sourceUserPublicKeyId?: string }>();
+    for (const registeredKey of registeredKeys) {
+      const fingerprint = normalizeRegisteredOrganizationKeyFingerprint(
+        registeredKey,
+      );
+      if (!fingerprint) {
+        continue;
+      }
+      const sourceUserPublicKeyId =
+        typeof registeredKey === "string"
+          ? undefined
+          : normalizeOptionalString(registeredKey.sourceUserPublicKeyId);
+      registered.set(fingerprint, {
+        ...(sourceUserPublicKeyId ? { sourceUserPublicKeyId } : {}),
+      });
+    }
+    const current = this.readFile();
+    const staleOrgKeys = current.keys.filter(
+      (key) => key.source === "org" && !registered.has(key.fingerprint),
+    );
+    const promoted: AuthorizedCommandKey[] = [];
+    const keys = current.keys.flatMap((key) => {
+      if (key.source === "org" && !registered.has(key.fingerprint)) {
+        return [];
+      }
+      if (key.source !== "unknown" || !registered.has(key.fingerprint)) {
+        return [key];
+      }
+
+      const registration = registered.get(key.fingerprint);
+      const promotedKey: AuthorizedCommandKey = {
+        fingerprint: key.fingerprint,
+        publicKeyBase64: key.publicKeyBase64,
+        ownerName: key.ownerName,
+        ...(key.ownerEmail ? { ownerEmail: key.ownerEmail } : {}),
+        authorizedAt: key.authorizedAt,
+        source: "org",
+        ...(registration?.sourceUserPublicKeyId
+          ? { sourceUserPublicKeyId: registration.sourceUserPublicKeyId }
+          : {}),
+      };
+      promoted.push(promotedKey);
+      return [promotedKey];
+    });
+    if (staleOrgKeys.length === 0 && promoted.length === 0) {
+      return { removed: [], promoted: [] };
+    }
+    this.writeFile({
+      ...current,
+      keys,
+    });
+    return { removed: staleOrgKeys, promoted };
   }
 
   reject(fingerprint: string): void {
@@ -151,6 +235,26 @@ export function fingerprintCommandPublicKey(rawPublicKey: Uint8Array): string {
   return `cl:${digest.slice(0, 22)}`;
 }
 
+export function normalizeCommandKeyFingerprint(value: unknown): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return FINGERPRINT_PATTERN.test(trimmed) ? trimmed : null;
+}
+
+function normalizeRegisteredOrganizationKeyFingerprint(
+  value: RegisteredOrganizationCommandKey,
+): string | null {
+  return typeof value === "string"
+    ? normalizeCommandKeyFingerprint(value)
+    : normalizeCommandKeyFingerprint(value.fingerprint);
+}
+
+function normalizeOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
 function normalizePublicKeyInput(input: AuthorizeCommandKeyInput): {
   publicKeyBase64: string;
   fingerprint: string;
@@ -203,7 +307,10 @@ function isStoredKey(value: unknown): value is AuthorizedCommandKey {
     typeof record.publicKeyBase64 === "string" &&
     typeof record.ownerName === "string" &&
     typeof record.authorizedAt === "string" &&
-    (record.ownerEmail === undefined || typeof record.ownerEmail === "string")
+    (record.ownerEmail === undefined || typeof record.ownerEmail === "string") &&
+    (record.source === undefined || typeof record.source === "string") &&
+    (record.sourceUserPublicKeyId === undefined ||
+      typeof record.sourceUserPublicKeyId === "string")
   );
 }
 
@@ -219,5 +326,17 @@ function normalizeStoredKey(key: AuthorizedCommandKey): AuthorizedCommandKey {
     ownerName: key.ownerName.trim() || fingerprint,
     ...(key.ownerEmail?.trim() ? { ownerEmail: key.ownerEmail.trim() } : {}),
     authorizedAt: key.authorizedAt,
+    source: normalizeStoredKeySource(key.source),
+    ...(key.sourceUserPublicKeyId?.trim()
+      ? { sourceUserPublicKeyId: key.sourceUserPublicKeyId.trim() }
+      : {}),
   };
+}
+
+function normalizeStoredKeySource(
+  source: AuthorizedCommandKeySource | string | undefined,
+): AuthorizedCommandKeySource {
+  return source === "org" || source === "manual" || source === "unknown"
+    ? source
+    : "unknown";
 }

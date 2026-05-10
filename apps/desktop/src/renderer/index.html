@@ -2168,6 +2168,53 @@
       }
 
       /* Browser command keys --------------------------------------- */
+      .sec-enforcement {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 12px;
+        align-items: center;
+        padding: 14px 16px;
+        margin-bottom: 16px;
+        background: color-mix(in srgb, var(--accent) 6%, var(--surface-alt));
+        border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+        border-radius: 10px;
+      }
+
+      .sec-enforcement-title {
+        margin: 0;
+        font-size: 13.5px;
+        font-weight: 600;
+      }
+
+      .sec-enforcement-copy {
+        margin: 4px 0 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .sec-toggle {
+        display: inline-flex;
+        align-items: center;
+        align-self: center;
+        justify-self: end;
+        gap: 8px;
+        margin: 0;
+        color: var(--ink);
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 18px;
+        white-space: nowrap;
+      }
+
+      .sec-toggle input {
+        display: block;
+        width: 18px;
+        height: 18px;
+        margin: 0;
+        accent-color: var(--accent);
+      }
+
       .sec-keys-zone {
         margin-top: 6px;
       }
@@ -2845,14 +2892,25 @@
           </section>
 
           <!-- Browser command keys -->
-          <section class="sec-section">
+          <section class="sec-section" id="browserCommandKeysSection">
             <div class="sec-section-head">
               <div>
                 <p class="sec-eyebrow">Authorization</p>
                 <h3 class="sec-section-title">Browser Command Keys</h3>
-                <p class="sec-section-desc">Each browser session signs cloud commands with an Ed25519 keypair. This Desktop only accepts commands from keys you have explicitly trusted.</p>
+                <p class="sec-section-desc" id="commandSigningEnforcementIntro">Browser command keys let this Desktop trust specific web browsers. Enable trusted keys when commands should require an approved browser key.</p>
               </div>
               <button class="secondary" id="refreshCommandKeys" type="button" style="padding:6px 12px;border-radius:8px;font-size:12px;cursor:pointer;background:var(--surface);color:var(--ink);border:1px solid var(--border);">Refresh</button>
+            </div>
+
+            <div class="sec-enforcement" id="commandSigningEnforcementState">
+              <div>
+                <p class="sec-enforcement-title">Trusted browser enforcement</p>
+                <p class="sec-enforcement-copy" id="commandSigningEnforcementCopy">Enforcement is off, so signed-in browser sessions with access to this Desktop can send commands without an approved key.</p>
+              </div>
+              <label class="sec-toggle" for="commandSigningEnforcementEnabled">
+                <input id="commandSigningEnforcementEnabled" type="checkbox" />
+                Require trusted keys
+              </label>
             </div>
 
             <div id="commandSigningKeysList"></div>
@@ -3079,6 +3137,17 @@
       window.addEventListener("desktop:navigate-settings-tab", (event) => {
         activateTab("settings");
         activateSettingsTab(event.detail);
+        if (event.detail === "security") {
+          setTimeout(() => {
+            document.getElementById("browserCommandKeysSection")?.scrollIntoView({
+              block: "start"
+            });
+          }, 0);
+        }
+      });
+
+      window.addEventListener("desktop:command-keys-changed", () => {
+        void refreshCommandSigningKeys();
       });
 
       const relayOrigin = document.getElementById("relayOrigin");
@@ -3098,6 +3167,9 @@
       const securityMessage = document.getElementById("securityMessage");
       const commandSigningKeysList = document.getElementById("commandSigningKeysList");
       const refreshCommandKeys = document.getElementById("refreshCommandKeys");
+      const commandSigningEnforcementEnabled = document.getElementById("commandSigningEnforcementEnabled");
+      const commandSigningEnforcementCopy = document.getElementById("commandSigningEnforcementCopy");
+      const commandSigningEnforcementIntro = document.getElementById("commandSigningEnforcementIntro");
       const commandKeyPublicKey = document.getElementById("commandKeyPublicKey");
       const commandKeyLabel = document.getElementById("commandKeyLabel");
       const authorizePastedCommandKey = document.getElementById("authorizePastedCommandKey");
@@ -3145,6 +3217,9 @@
       let cachedCommandsPaused = false;
       let cachedConnectionEnabled = true;
       let cachedPort = 19432;
+      let cachedCommandSigningEnforcementEnabled = false;
+      let cachedCommandSigningAuthorizedCount = 0;
+      let cachedCommandSigningPendingCount = 0;
 
       async function refreshRuntime() {
         const status = await api.getRuntimeStatus();
@@ -3808,6 +3883,10 @@
         apiOrigin.value = settings.apiOrigin || "";
         webAppOrigin.value = settings.webAppOrigin || "";
         sandboxBaseDirectory.value = settings.sandboxBaseDirectory || "";
+        cachedCommandSigningEnforcementEnabled = settings.commandSigningEnforcementEnabled === true;
+        if (commandSigningEnforcementEnabled) {
+          commandSigningEnforcementEnabled.checked = cachedCommandSigningEnforcementEnabled;
+        }
         defaultApprovalTier.value = settings.defaultApprovalTier === "auto" ? "high" : (settings.defaultApprovalTier || "high");
         renderTierOverrides(settings.autoApprovalRules || {});
         renderAlwaysAllowRules(settings.alwaysAllowRules || []);
@@ -3823,9 +3902,17 @@
           const available = Array.isArray(state.available) ? state.available : [];
           const authorized = Array.isArray(state.authorized) ? state.authorized : [];
           const availableError = typeof state.availableError === "string" ? state.availableError : "";
+          const enforcementEnabled = state.enforcementEnabled === true;
+          cachedCommandSigningEnforcementEnabled = enforcementEnabled;
+          cachedCommandSigningAuthorizedCount = authorized.length;
+          cachedCommandSigningPendingCount = available.length;
+          if (commandSigningEnforcementEnabled) {
+            commandSigningEnforcementEnabled.checked = enforcementEnabled;
+          }
 
           commandSigningKeysList.innerHTML = "";
           updateSigningPosture(authorized.length, available.length, availableError);
+          updateCommandSigningEnforcementCopy(enforcementEnabled, authorized.length, available.length);
 
           // Trusted zone
           const trustedZone = document.createElement("div");
@@ -3913,7 +4000,35 @@
           err.textContent = `Failed to load keys: ${error.message}`;
           commandSigningKeysList.appendChild(err);
           updateSigningPosture(0, 0, error.message);
+          updateCommandSigningEnforcementCopy(
+            cachedCommandSigningEnforcementEnabled,
+            cachedCommandSigningAuthorizedCount,
+            cachedCommandSigningPendingCount
+          );
         }
+      }
+
+      function updateCommandSigningEnforcementCopy(enforcementEnabled, authorizedCount, pendingCount) {
+        if (!commandSigningEnforcementCopy || !commandSigningEnforcementIntro) return;
+        if (enforcementEnabled && authorizedCount > 0) {
+          commandSigningEnforcementIntro.textContent = "Only trusted browser keys can send cloud commands to this Desktop.";
+          commandSigningEnforcementCopy.textContent =
+            authorizedCount === 1
+              ? "Enforcement is enabled. Only the trusted browser key can send cloud commands to this Desktop."
+              : `Enforcement is enabled. Only ${authorizedCount} trusted browser keys can send cloud commands to this Desktop.`;
+          return;
+        }
+        if (enforcementEnabled) {
+          commandSigningEnforcementIntro.textContent = "Trusted browser enforcement is enabled with no trusted keys.";
+          commandSigningEnforcementCopy.textContent =
+            "Browser commands will be rejected until a key is approved.";
+          return;
+        }
+        commandSigningEnforcementIntro.textContent =
+          "Browser command keys let this Desktop trust specific web browsers. Enable trusted keys when commands should require an approved browser key.";
+        commandSigningEnforcementCopy.textContent = pendingCount > 0
+          ? "Enforcement is off, so signed-in browser sessions with access to this Desktop can send commands without an approved key. Approve pending keys, then require trusted keys when ready."
+          : "Enforcement is off, so signed-in browser sessions with access to this Desktop can send commands without an approved key. If you require trusted keys before approving one, browser commands will be rejected.";
       }
 
       async function authorizePastedCommandSigningKey() {
@@ -4424,11 +4539,27 @@
 
       async function saveSecuritySettings() {
         clearAllSettingsMessages();
+        const nextEnforcementEnabled = commandSigningEnforcementEnabled?.checked === true;
+        if (
+          nextEnforcementEnabled &&
+          !cachedCommandSigningEnforcementEnabled &&
+          cachedCommandSigningAuthorizedCount === 0
+        ) {
+          const confirmed = window.confirm(
+            "Requiring trusted keys before approving a browser key will reject browser commands until a key is approved. Enable anyway?"
+          );
+          if (!confirmed) {
+            securityMessage.textContent = "Trusted browser enforcement was not enabled.";
+            return;
+          }
+        }
         await api.updateSettings({
-          sandboxBaseDirectory: sandboxBaseDirectory.value.trim()
+          sandboxBaseDirectory: sandboxBaseDirectory.value.trim(),
+          commandSigningEnforcementEnabled: nextEnforcementEnabled
         });
+        cachedCommandSigningEnforcementEnabled = nextEnforcementEnabled;
         securityMessage.textContent = "Saved.";
-        await refreshRuntime();
+        await Promise.all([refreshRuntime(), refreshCommandSigningKeys()]);
       }
 
       async function savePoliciesSettings() {
