@@ -50,8 +50,10 @@ Gateway route handlers live under `apps/desktop/src/server/operations/`.
 
 - Before adding a helper to an operation file, check existing shared modules such as `response-utils.ts` for `json()` and `symphony-utils.ts` for `expandHome()`. If helper logic is used by more than one operation, extract it into a shared module instead of copying it.
 - Follow the route registration pattern: export `registerXxxRoutes(dispatcher, ...deps)` from the operation module and register it from `router.ts`.
+- Cloud relay commands are parsed before operation handlers run, and the parser accepts only paths that start with `/api/gateway/`. New server-control or internal relay commands must use the `/api/gateway/` namespace, and any intentional legacy namespace support must update and test the parser before relying on the handler.
 - Do not duplicate local response helpers across operation files.
 - When classifying failed spawned commands or gateway operations, inspect every captured output stream that can feed the user-facing excerpt or diagnostic payload, not only `stderr`. Add focused coverage for stdout-only and stderr-only failure markers when the classification depends on process output.
+- When adapting cloud relay command bodies before forwarding them to local gateway routes, preserve each route handler's request contract. Add focused coverage for every route whose body is transformed, especially when one route swaps credentials and another route must keep its original payload fields.
 
 ## Testing Guidelines
 Tests run with `tsx --test` (Node test runner) via `just desktop-test`.
