@@ -1609,8 +1609,9 @@ async function downloadAttachmentsToDisk(
     try {
       const expiresAt = new Date(attachment.signedUrlExpiresAt);
       if (Number.isNaN(expiresAt.getTime())) {
-        console.warn(
-          `[downloadAttachmentsToDisk] Attachment ${attachment.id} invalid signedUrlExpiresAt: ${attachment.signedUrlExpiresAt}, skipping`,
+        gatewayLog.warn(
+          "downloadAttachmentsToDisk",
+          `Attachment ${attachment.id} invalid signedUrlExpiresAt: ${attachment.signedUrlExpiresAt}, skipping`,
         );
         continue;
       }
