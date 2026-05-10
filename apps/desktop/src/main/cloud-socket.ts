@@ -236,18 +236,23 @@ export class CloudSocketService {
       this.hadSuccessfulConnection = true;
       this.degradedSince = null;
       this.clearHelloAckTimer();
-      gatewayLog.info("cloud-socket", `Hello ack received, targetId=${computeTargetId}`);
+      const rawServerCapabilities = asObject(event.serverCapabilities);
+      const parsedServerCapabilities = parseServerCapabilities(
+        event.serverCapabilities,
+      );
+      const rawComputeTargetSigning =
+        rawServerCapabilities.computeTargetSigning;
+      gatewayLog.info(
+        "cloud-socket",
+        `Hello ack received, targetId=${computeTargetId}, serverCapabilityKeys=${formatObjectKeysForLog(rawServerCapabilities)}, computeTargetSigning=${formatPrimitiveForLog(rawComputeTargetSigning)}, parsedComputeTargetSigning=${parsedServerCapabilities?.computeTargetSigning === true}`,
+      );
       const ackEvent: DesktopHelloAckEvent = {
         ...createEnvelope(),
         computeTargetId,
         sessionId: asNonEmptyString(event.sessionId) ?? "",
         serverTime: asNonEmptyString(event.serverTime) ?? new Date().toISOString(),
-        ...(parseServerCapabilities(event.serverCapabilities)
-          ? {
-              serverCapabilities: parseServerCapabilities(
-                event.serverCapabilities,
-              ),
-            }
+        ...(parsedServerCapabilities
+          ? { serverCapabilities: parsedServerCapabilities }
           : {}),
         resumeFromSequence:
           event.resumeFromSequence && typeof event.resumeFromSequence === "object"
@@ -562,6 +567,21 @@ function asNonEmptyString(value: unknown): string | null {
   }
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
+}
+
+function formatObjectKeysForLog(value: Record<string, unknown>): string {
+  const keys = Object.keys(value).sort();
+  return keys.length > 0 ? keys.join(",") : "none";
+}
+
+function formatPrimitiveForLog(value: unknown): string {
+  if (
+    value === null ||
+    ["boolean", "number", "string", "undefined"].includes(typeof value)
+  ) {
+    return String(value);
+  }
+  return typeof value;
 }
 
 function asFiniteInteger(value: unknown): number | null {

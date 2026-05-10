@@ -41,6 +41,11 @@ describe("renderer Diagnostics and update banner wiring", () => {
     const html = readRenderer();
 
     assert.match(html, /id="commandSigningEnforcementEnabled"/);
+    assert.match(html, /<section class="sec-section" hidden id="browserCommandKeysSection">/);
+    assert.match(html, /const serverSupported = state\.serverSupported === true;/);
+    assert.match(html, /browserCommandKeysSection\.hidden = !serverSupported;/);
+    assert.match(html, /updateSigningPostureUnavailable\(\);/);
+    assert.match(html, /Current server does not support trusted browser keys/);
     assert.match(html, /Browser command keys let this Desktop trust specific web browsers/);
     assert.match(html, /signed-in browser sessions with access to this Desktop can send commands without an approved key/);
     assert.match(html, /If you require trusted keys before approving one, browser commands will be rejected/);

@@ -3,6 +3,10 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const appSource = readFileSync(new URL("../src/main/app.ts", import.meta.url), "utf8");
+const cloudSocketSource = readFileSync(
+  new URL("../src/main/cloud-socket.ts", import.meta.url),
+  "utf8",
+);
 
 test("DesktopApplication wires command key reconciliation to signing hello ack", () => {
   assert.match(
@@ -12,6 +16,10 @@ test("DesktopApplication wires command key reconciliation to signing hello ack",
   assert.match(
     appSource,
     /if \(this\.serverCommandSigningSupported\) \{[\s\S]*this\.commandKeyReconciler\.start\(\);[\s\S]*this\.commandKeyReconciler\.reconcileNow\("hello_ack"\);[\s\S]*\} else \{[\s\S]*this\.commandKeyReconciler\.stop\(\);/,
+  );
+  assert.match(
+    appSource,
+    /onHelloAck: \(event\) => \{[\s\S]*this\.serverCommandSigningSupported =[\s\S]*this\.notifyCommandKeysChanged\(\);/,
   );
   assert.doesNotMatch(
     appSource,
@@ -41,10 +49,40 @@ test("DesktopApplication dismisses pending command key notifications after setti
   );
 });
 
+test("DesktopApplication hides command key state from settings when server support is absent", () => {
+  const unsupportedBlock = appSource.slice(
+    appSource.indexOf("if (!this.serverCommandSigningSupported)"),
+    appSource.indexOf("const authorizedFingerprints = new Set"),
+  );
+  assert.match(
+    appSource,
+    /private async listCommandSigningKeys\(\): Promise<[\s\S]*if \(!this\.serverCommandSigningSupported\) \{[\s\S]*available: \[\],[\s\S]*authorized: \[\],[\s\S]*rejectedFingerprints: \[\],[\s\S]*serverSupported: false,[\s\S]*enforcementEnabled: this\.settingsStore\.getCommandSigningEnforcementEnabled\(\),[\s\S]*\};[\s\S]*\}[\s\S]*const authorizedFingerprints = new Set/,
+  );
+  assert.equal(
+    unsupportedBlock.includes("this.fetchAvailableCommandSigningKeys("),
+    false,
+  );
+  assert.match(
+    unsupportedBlock,
+    /List browser command keys skipped; server support is disabled/,
+  );
+});
+
+test("DesktopApplication logs command-signing support decisions from hello ack", () => {
+  assert.match(
+    appSource,
+    /Server support from hello ack: computeTargetId=\$\{event\.computeTargetId\}, computeTargetSigning=\$\{event\.serverCapabilities\?\.computeTargetSigning === true\}/,
+  );
+  assert.match(
+    cloudSocketSource,
+    /Hello ack received, targetId=\$\{computeTargetId\}, serverCapabilityKeys=\$\{formatObjectKeysForLog\(rawServerCapabilities\)\}, computeTargetSigning=\$\{formatPrimitiveForLog\(rawComputeTargetSigning\)\}, parsedComputeTargetSigning=\$\{parsedServerCapabilities\?\.computeTargetSigning === true\}/,
+  );
+});
+
 test("DesktopApplication stops command key reconciliation on disconnect and shutdown paths", () => {
   assert.match(
     appSource,
-    /onDisconnect: \(reason\) => \{[\s\S]*this\.commandKeyReconciler\.stop\(\);/,
+    /onDisconnect: \(reason\) => \{[\s\S]*this\.commandKeyReconciler\.stop\(\);[\s\S]*this\.notifyCommandKeysChanged\(\);/,
   );
   assert.match(
     appSource,

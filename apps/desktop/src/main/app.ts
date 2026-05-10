@@ -370,17 +370,23 @@ export class DesktopApplication {
       onDisconnect: (reason) => {
         this.serverCommandSigningSupported = false;
         this.commandKeyReconciler.stop();
+        this.notifyCommandKeysChanged();
         Observability.connectionLost(reason);
       },
       onHelloAck: (event) => {
         this.serverCommandSigningSupported =
           event.serverCapabilities?.computeTargetSigning === true;
+        gatewayLog.info(
+          "command-signing",
+          `Server support from hello ack: computeTargetId=${event.computeTargetId}, computeTargetSigning=${event.serverCapabilities?.computeTargetSigning === true}`,
+        );
         if (this.serverCommandSigningSupported) {
           this.commandKeyReconciler.start();
           void this.commandKeyReconciler.reconcileNow("hello_ack");
         } else {
           this.commandKeyReconciler.stop();
         }
+        this.notifyCommandKeysChanged();
         Observability.setTargetId(event.computeTargetId);
         if (event.sessionId) {
           Observability.setGatewaySessionId(event.sessionId);
@@ -1566,6 +1572,20 @@ export class DesktopApplication {
     enforcementEnabled: boolean;
     availableError?: string;
   }> {
+    if (!this.serverCommandSigningSupported) {
+      gatewayLog.info(
+        "command-signing",
+        "List browser command keys skipped; server support is disabled",
+      );
+      return {
+        available: [],
+        authorized: [],
+        rejectedFingerprints: [],
+        serverSupported: false,
+        enforcementEnabled: this.settingsStore.getCommandSigningEnforcementEnabled(),
+      };
+    }
+
     const authorizedFingerprints = new Set(
       this.authorizedCommandKeys.list().map((key) => key.fingerprint),
     );

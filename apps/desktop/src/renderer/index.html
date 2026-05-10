@@ -2892,7 +2892,7 @@
           </section>
 
           <!-- Browser command keys -->
-          <section class="sec-section" id="browserCommandKeysSection">
+          <section class="sec-section" hidden id="browserCommandKeysSection">
             <div class="sec-section-head">
               <div>
                 <p class="sec-eyebrow">Authorization</p>
@@ -3165,6 +3165,7 @@
       const alwaysAllowRulesContainer = document.getElementById("alwaysAllowRulesContainer");
       const relayGatewayMessage = document.getElementById("relayGatewayMessage");
       const securityMessage = document.getElementById("securityMessage");
+      const browserCommandKeysSection = document.getElementById("browserCommandKeysSection");
       const commandSigningKeysList = document.getElementById("commandSigningKeysList");
       const refreshCommandKeys = document.getElementById("refreshCommandKeys");
       const commandSigningEnforcementEnabled = document.getElementById("commandSigningEnforcementEnabled");
@@ -3899,6 +3900,21 @@
         commandSigningKeysList.innerHTML = '<p class="sec-empty">Loading keys...</p>';
         try {
           const state = await api.listCommandSigningKeys();
+          const serverSupported = state.serverSupported === true;
+          if (browserCommandKeysSection) {
+            browserCommandKeysSection.hidden = !serverSupported;
+          }
+          if (!serverSupported) {
+            cachedCommandSigningAuthorizedCount = 0;
+            cachedCommandSigningPendingCount = 0;
+            cachedCommandSigningEnforcementEnabled = state.enforcementEnabled === true;
+            if (commandSigningEnforcementEnabled) {
+              commandSigningEnforcementEnabled.checked = cachedCommandSigningEnforcementEnabled;
+            }
+            commandSigningKeysList.innerHTML = "";
+            updateSigningPostureUnavailable();
+            return;
+          }
           const available = Array.isArray(state.available) ? state.available : [];
           const authorized = Array.isArray(state.authorized) ? state.authorized : [];
           const availableError = typeof state.availableError === "string" ? state.availableError : "";
@@ -4385,6 +4401,16 @@
         postureSigning.classList.add("tone-warn");
         if (valueEl) valueEl.textContent = "None";
         if (detailEl) detailEl.textContent = "No browser keys are trusted yet.";
+      }
+
+      function updateSigningPostureUnavailable() {
+        if (!postureSigning) return;
+        postureSigning.classList.remove("tone-ok", "tone-warn", "tone-danger");
+        postureSigning.classList.add("tone-warn");
+        const valueEl = postureSigning.querySelector(".sec-tile-value");
+        const detailEl = postureSigning.querySelector(".sec-tile-detail");
+        if (valueEl) valueEl.textContent = "Unavailable";
+        if (detailEl) detailEl.textContent = "Current server does not support trusted browser keys.";
       }
 
       function avatarColorsFor(seed) {
