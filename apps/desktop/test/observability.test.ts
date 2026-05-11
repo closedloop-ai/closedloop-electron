@@ -22,6 +22,12 @@ afterEach(async () => {
 });
 
 describe("Observability", () => {
+  type PostHogCaptureCall = {
+    distinctId: string;
+    event: string;
+    properties: Record<string, unknown>;
+  };
+
   test("static facade methods call telemetry backend", () => {
     const telemetryEvents: EnrichedTelemetryEvent[] = [];
     Observability.init({
@@ -240,6 +246,79 @@ describe("Observability", () => {
     assert.equal(captureCalls[0].event, "desktop_connection_established");
     assert.equal(captureCalls[0].properties.desktop_id, "desktop-1");
     assert.equal(captureCalls[0].properties.desktop_client_version, "0.9.6");
+  });
+
+  test("PostHog captures use gateway-owner Clerk identity and common properties", () => {
+    const captureCalls: PostHogCaptureCall[] = [];
+    mock.method(PostHogAnalytics.prototype, "capture", (
+      distinctId: string,
+      event: string,
+      properties: Record<string, unknown>,
+    ) => {
+      captureCalls.push({ distinctId, event, properties });
+    });
+
+    Observability.init({
+      telemetrySend: () => {},
+      posthog: { apiKey: "phc_test", host: "https://us.i.posthog.com" },
+      desktopClientVersion: "0.15.3",
+    });
+    Observability.setTargetId("target-1");
+    Observability.setUserContext({
+      clerkUserId: "clerk_user_1",
+      organizationId: "org-1",
+    });
+
+    Observability.commandInitiated("cmd-1", "GENERATE_PRD");
+    Observability.commandCompleted("cmd-1", "GENERATE_PRD", 1234);
+    Observability.connectionEstablished("target-1", "0.15.3", "production");
+
+    assert.deepEqual(
+      captureCalls.map((call) => call.event),
+      [
+        "command_initiated",
+        "command_completed",
+        "desktop_connection_established",
+      ],
+    );
+    for (const call of captureCalls) {
+      assert.equal(call.distinctId, "clerk_user_1");
+      assert.equal(call.properties.compute_target_id, "target-1");
+      assert.equal(call.properties.desktop_client_version, "0.15.3");
+      assert.equal(call.properties.platform, process.platform);
+      assert.equal(call.properties.desktop_attribution_model, "gateway_owner");
+      assert.equal(call.properties.organization_id, "org-1");
+    }
+  });
+
+  test("PostHog captures fall back to unknown identity without Clerk context", () => {
+    const captureCalls: PostHogCaptureCall[] = [];
+    mock.method(PostHogAnalytics.prototype, "capture", (
+      distinctId: string,
+      event: string,
+      properties: Record<string, unknown>,
+    ) => {
+      captureCalls.push({ distinctId, event, properties });
+    });
+
+    Observability.init({
+      telemetrySend: () => {},
+      posthog: { apiKey: "phc_test", host: "https://us.i.posthog.com" },
+      desktopClientVersion: "0.15.3",
+    });
+    Observability.setTargetId("target-1");
+    Observability.setUserContext({ clerkUserId: "   ", organizationId: "org-1" });
+
+    Observability.commandCompleted("cmd-1", "GENERATE_PRD", 1234);
+
+    assert.equal(captureCalls.length, 1);
+    assert.equal(captureCalls[0].distinctId, "unknown");
+    assert.equal(captureCalls[0].properties.compute_target_id, "target-1");
+    assert.equal(captureCalls[0].properties.organization_id, undefined);
+    assert.equal(
+      captureCalls[0].properties.desktop_attribution_model,
+      "gateway_owner",
+    );
   });
 
   test("desktopPopUnavailable emits redacted telemetry and PostHog diagnostics", () => {

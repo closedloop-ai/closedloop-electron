@@ -37,6 +37,10 @@ export interface DesktopHelloAckEvent extends ProtocolEnvelope {
   computeTargetId: string;
   sessionId: string;
   serverTime: string;
+  /** Gateway-owner Clerk identity supplied by the Desktop hello-ack producer. */
+  clerkUserId?: string;
+  /** Gateway-owner organization context supplied with `clerkUserId` when known. */
+  organizationId?: string;
   resumeFromSequence?: Record<string, number>;
   serverCapabilities?: {
     computeTargetSigning?: boolean;

@@ -10,7 +10,6 @@ import { app, dialog, ipcMain, nativeImage, Notification, safeStorage, shell } f
 import {
   type AlwaysAllowRule,
   DEFAULT_DESKTOP_SETTINGS,
-  DEFAULT_POSTHOG_HOST,
   GATEWAY_PROTOCOL_VERSION,
   EMPTY_CAPABILITIES,
   type SavedConfig,
@@ -85,6 +84,7 @@ import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
 import { JobStore, isTerminalJobStatus, type LocalJob } from "./job-store.js";
 import { Observability } from "./observability.js";
+import { resolvePostHogConfig } from "./posthog-config.js";
 import type {
   DesktopSecurityUpgradePayload,
   DesktopSecurityUpgradeResult,
@@ -217,9 +217,10 @@ export class DesktopApplication {
     this.sessionStore = new LocalSessionStore();
     Observability.init({
       telemetrySend: (event) => this.cloudSocket?.sendTelemetry(event),
-      posthog: process.env.CL_POSTHOG_API_KEY
-        ? { apiKey: process.env.CL_POSTHOG_API_KEY, host: DEFAULT_POSTHOG_HOST }
-        : undefined,
+      posthog: resolvePostHogConfig({
+        isPackaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+      }),
       desktopClientVersion: app.getVersion(),
     });
     this.settingsStore = new SettingsStore();
@@ -389,6 +390,10 @@ export class DesktopApplication {
         }
         this.notifyCommandKeysChanged();
         Observability.setTargetId(event.computeTargetId);
+        Observability.setUserContext({
+          clerkUserId: event.clerkUserId,
+          organizationId: event.organizationId,
+        });
         if (event.sessionId) {
           Observability.setGatewaySessionId(event.sessionId);
         }

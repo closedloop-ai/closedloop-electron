@@ -225,13 +225,13 @@ export class CloudSocketService {
 
     socket.on("desktop.hello.ack", (payload: unknown) => {
       const event = asObject(payload);
-      const computeTargetId = asNonEmptyString(event.computeTargetId);
-      if (!computeTargetId) {
+      const ackEvent = parseDesktopHelloAck(payload);
+      if (!ackEvent) {
         gatewayLog.warn("cloud-socket", "hello.ack missing computeTargetId, ignoring");
         return;
       }
 
-      this.targetId = computeTargetId;
+      this.targetId = ackEvent.computeTargetId;
       this.awaitingHelloAck = false;
       this.hadSuccessfulConnection = true;
       this.degradedSince = null;
@@ -244,23 +244,10 @@ export class CloudSocketService {
         rawServerCapabilities.computeTargetSigning;
       gatewayLog.info(
         "cloud-socket",
-        `Hello ack received, targetId=${computeTargetId}, serverCapabilityKeys=${formatObjectKeysForLog(rawServerCapabilities)}, computeTargetSigning=${formatPrimitiveForLog(rawComputeTargetSigning)}, parsedComputeTargetSigning=${parsedServerCapabilities?.computeTargetSigning === true}`,
+        `Hello ack received, targetId=${ackEvent.computeTargetId}, serverCapabilityKeys=${formatObjectKeysForLog(rawServerCapabilities)}, computeTargetSigning=${formatPrimitiveForLog(rawComputeTargetSigning)}, parsedComputeTargetSigning=${parsedServerCapabilities?.computeTargetSigning === true}`,
       );
-      const ackEvent: DesktopHelloAckEvent = {
-        ...createEnvelope(),
-        computeTargetId,
-        sessionId: asNonEmptyString(event.sessionId) ?? "",
-        serverTime: asNonEmptyString(event.serverTime) ?? new Date().toISOString(),
-        ...(parsedServerCapabilities
-          ? { serverCapabilities: parsedServerCapabilities }
-          : {}),
-        resumeFromSequence:
-          event.resumeFromSequence && typeof event.resumeFromSequence === "object"
-            ? (event.resumeFromSequence as Record<string, number>)
-            : undefined
-      };
       this.options.onHelloAck?.(ackEvent);
-      this.notifyStatus({ state: "online", targetId: computeTargetId });
+      this.notifyStatus({ state: "online", targetId: ackEvent.computeTargetId });
       this.sendPresence({
         state: "online"
       });
@@ -552,6 +539,37 @@ export function parseServerCapabilities(value: unknown):
   return record.computeTargetSigning === true
     ? { computeTargetSigning: true }
     : undefined;
+}
+
+export function parseDesktopHelloAck(
+  payload: unknown,
+): DesktopHelloAckEvent | null {
+  const event = asObject(payload);
+  const computeTargetId = asNonEmptyString(event.computeTargetId);
+  if (!computeTargetId) {
+    return null;
+  }
+  const clerkUserId = asNonEmptyString(event.clerkUserId);
+  const organizationId = asNonEmptyString(event.organizationId);
+  const parsedServerCapabilities = parseServerCapabilities(
+    event.serverCapabilities,
+  );
+
+  return {
+    ...createEnvelope(),
+    computeTargetId,
+    sessionId: asNonEmptyString(event.sessionId) ?? "",
+    serverTime: asNonEmptyString(event.serverTime) ?? new Date().toISOString(),
+    ...(clerkUserId ? { clerkUserId } : {}),
+    ...(organizationId ? { organizationId } : {}),
+    ...(parsedServerCapabilities
+      ? { serverCapabilities: parsedServerCapabilities }
+      : {}),
+    resumeFromSequence:
+      event.resumeFromSequence && typeof event.resumeFromSequence === "object"
+        ? (event.resumeFromSequence as Record<string, number>)
+        : undefined
+  };
 }
 
 function asObject(value: unknown): Record<string, unknown> {

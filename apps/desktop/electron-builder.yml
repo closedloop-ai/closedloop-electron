@@ -7,6 +7,8 @@ files:
   - package.json
 
 extraResources:
+  - from: resources/generated
+    to: generated
   - from: resources/icon-1024.png
     to: icon-1024.png
   - from: resources/trayIconTemplate.png

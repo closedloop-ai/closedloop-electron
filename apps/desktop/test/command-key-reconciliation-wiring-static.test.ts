@@ -75,7 +75,7 @@ test("DesktopApplication logs command-signing support decisions from hello ack",
   );
   assert.match(
     cloudSocketSource,
-    /Hello ack received, targetId=\$\{computeTargetId\}, serverCapabilityKeys=\$\{formatObjectKeysForLog\(rawServerCapabilities\)\}, computeTargetSigning=\$\{formatPrimitiveForLog\(rawComputeTargetSigning\)\}, parsedComputeTargetSigning=\$\{parsedServerCapabilities\?\.computeTargetSigning === true\}/,
+    /Hello ack received, targetId=\$\{ackEvent\.computeTargetId\}, serverCapabilityKeys=\$\{formatObjectKeysForLog\(rawServerCapabilities\)\}, computeTargetSigning=\$\{formatPrimitiveForLog\(rawComputeTargetSigning\)\}, parsedComputeTargetSigning=\$\{parsedServerCapabilities\?\.computeTargetSigning === true\}/,
   );
 });
 

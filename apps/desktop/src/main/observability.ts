@@ -21,6 +21,11 @@ export interface ObservabilityOptions {
   desktopClientVersion?: string;
 }
 
+export type GatewayOwnerUserContext = {
+  clerkUserId?: string;
+  organizationId?: string;
+};
+
 type HealthCheckTelemetryInput = {
   id: string;
   passed: boolean;
@@ -39,7 +44,9 @@ export class Observability {
   private static telemetry: TelemetryService | null = null;
   private static posthog: PostHogAnalytics | null = null;
   private static desktopClientVersion = "";
-  private static desktopId = "";
+  private static computeTargetId = "";
+  private static posthogDistinctId = "";
+  private static organizationId = "";
 
   // Checks for which healthcheck telemetry is emitted. Extend this allowlist in future PRs.
   private static readonly HEALTH_CHECK_TELEMETRY_IDS = new Set(["claude-cli"]);
@@ -63,7 +70,9 @@ export class Observability {
       sendTelemetry: options.telemetrySend,
     });
     Observability.desktopClientVersion = options.desktopClientVersion ?? "";
-    Observability.desktopId = "";
+    Observability.computeTargetId = "";
+    Observability.posthogDistinctId = "";
+    Observability.organizationId = "";
     Observability.healthCheckState.clear();
 
     if (options.posthog) {
@@ -84,7 +93,9 @@ export class Observability {
     Observability.telemetry = null;
     Observability.posthog = null;
     Observability.desktopClientVersion = "";
-    Observability.desktopId = "";
+    Observability.computeTargetId = "";
+    Observability.posthogDistinctId = "";
+    Observability.organizationId = "";
     Observability.healthCheckState.clear();
   }
 
@@ -96,7 +107,21 @@ export class Observability {
 
   static setTargetId(id: string): void {
     Observability.telemetry?.setTargetId(id);
-    Observability.desktopId = id;
+    Observability.computeTargetId = id;
+  }
+
+  /**
+   * Sets PostHog user context from the Desktop gateway owner's hello-ack
+   * identity. This is not a per-command requester switch for org-shared
+   * compute targets.
+   */
+  static setUserContext(context: GatewayOwnerUserContext): void {
+    const clerkUserId = context.clerkUserId?.trim();
+    if (!clerkUserId) {
+      return;
+    }
+    Observability.posthogDistinctId = clerkUserId;
+    Observability.organizationId = context.organizationId?.trim() ?? "";
   }
 
   static setGatewaySessionId(id: string): void {
@@ -572,9 +597,15 @@ export class Observability {
   }
 
   private static capturePostHog(event: string, properties: Record<string, unknown>): void {
-    Observability.posthog?.capture(Observability.desktopId || "unknown", event, {
+    Observability.posthog?.capture(Observability.posthogDistinctId || "unknown", event, {
       ...properties,
       desktop_client_version: Observability.desktopClientVersion,
+      platform: process.platform,
+      compute_target_id: Observability.computeTargetId || "unknown",
+      desktop_attribution_model: "gateway_owner",
+      ...(Observability.organizationId
+        ? { organization_id: Observability.organizationId }
+        : {}),
     });
   }
 }
