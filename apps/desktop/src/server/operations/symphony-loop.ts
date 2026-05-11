@@ -2889,17 +2889,39 @@ export type ExecuteFinalizationPath = LocalJobExecuteFinalizationPath;
 
 export type ExecuteFinalizationSource = LocalJobFinalizationSource;
 
-export interface ExecuteFinalizationResult {
-  status: ExecuteFinalizationStatus;
-  path: ExecuteFinalizationPath;
-  reason?: string;
-  executionResultPersisted: boolean;
-  prUrl?: string;
-  prNumber?: number;
-  branchName?: string;
-  commitSha?: string;
-  isAuthChallenge?: boolean;
-}
+export type ExecuteFinalizationResult =
+  | {
+      status: "success";
+      path: ExecuteFinalizationPath;
+      executionResultPersisted: boolean;
+      reason?: string;
+      prUrl?: string;
+      prNumber?: number;
+      branchName?: string;
+      commitSha?: string;
+    }
+  | {
+      status: "no-changes";
+      path: ExecuteFinalizationPath;
+      executionResultPersisted: boolean;
+      reason?: string;
+      branchName?: string;
+      commitSha?: string;
+    }
+  | {
+      status: "skipped";
+      path: ExecuteFinalizationPath;
+      executionResultPersisted: boolean;
+      reason?: string;
+    }
+  | {
+      status: "error";
+      path: ExecuteFinalizationPath;
+      executionResultPersisted: boolean;
+      reason: string;
+      isAuthChallenge?: boolean;
+      branchName?: string;
+    };
 
 interface ExecuteFinalizationParams {
   worktreeDir: string | null | undefined;
@@ -3142,10 +3164,11 @@ function completeExecuteFinalization(
       postArtifacts.executionResultPresent,
     executeFinalizationPostPrBodyPresent: postArtifacts.prBodyPresent,
   });
-  return {
-    ...result,
-    reason: sanitizeExecuteFinalizationReason(result.reason),
-  };
+  const sanitizedReason = sanitizeExecuteFinalizationReason(result.reason);
+  if (result.status === "error") {
+    return { ...result, reason: sanitizedReason ?? result.reason };
+  }
+  return { ...result, reason: sanitizedReason };
 }
 
 export async function runExecuteFinalization(
@@ -4531,11 +4554,18 @@ export async function handleProcessCompletion(
             finalizationSessionId,
           );
           runningLoops.delete(loopId);
+          const finalizationBranchName = worktreeDir
+            ? (wt.getCurrentBranch(worktreeDir) ?? undefined)
+            : undefined;
           await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
             type: LoopEventType.Error,
             code: LoopErrorCode.AuthChallenge,
             message: finalizationReason,
             loopId,
+            sessionId: finalizationSessionId,
+            ...(finalizationBranchName
+              ? { branchName: finalizationBranchName }
+              : {}),
             elapsedMs,
           });
           if (jobStore) {
@@ -4604,7 +4634,10 @@ export async function handleProcessCompletion(
       }
 
       artifacts = readExecuteOutputs(claudeWorkDir);
-      if (executeFinalization.branchName) {
+      if (
+        "branchName" in executeFinalization &&
+        executeFinalization.branchName
+      ) {
         metadata.branchName = executeFinalization.branchName;
       }
       if (!jobStore) {
