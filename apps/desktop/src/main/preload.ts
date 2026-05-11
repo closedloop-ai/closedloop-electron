@@ -57,7 +57,12 @@ const desktopApi = {
     ipcRenderer.invoke("desktop:complete-onboarding", payload) as Promise<unknown>,
   startDeviceOnboarding: (payload: unknown) =>
     ipcRenderer.invoke("desktop:start-device-onboarding", payload) as Promise<unknown>,
-  pickSandboxDirectory: () => ipcRenderer.invoke("desktop:pick-sandbox-directory") as Promise<unknown>,
+  pickSandboxDirectory: () =>
+    ipcRenderer.invoke("desktop:pick-sandbox-directory") as Promise<{
+      path: string;
+      isGitRepo: boolean;
+      suggestedPath: string | undefined;
+    } | null>,
   getDangerousAutoApprove: () =>
     ipcRenderer.invoke("desktop:get-dangerous-auto-approve") as Promise<boolean>,
   setDangerousAutoApprove: (enabled: boolean) =>

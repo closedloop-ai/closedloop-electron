@@ -26,6 +26,7 @@ import {
   isRiskyAllowedDirectory,
   normalizeScopePath,
 } from "../shared/sandbox-policy.js";
+import { isGitRepository } from "../shared/git-utils.js";
 import { ApiKeyStore } from "./api-key-store.js";
 import { AuthorizedCommandKeyStore } from "./authorized-command-key-store.js";
 import {
@@ -2702,7 +2703,10 @@ export class DesktopApplication {
       if (result.canceled || result.filePaths.length === 0) {
         return null;
       }
-      return result.filePaths[0];
+      const selectedPath = result.filePaths[0];
+      const isGitRepo = isGitRepository(selectedPath);
+      const suggestedPath = isGitRepo ? path.dirname(selectedPath) : undefined;
+      return { path: selectedPath, isGitRepo, suggestedPath };
     });
     ipcMain.handle(
       "desktop:get-dangerous-auto-approve",

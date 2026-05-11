@@ -4337,7 +4337,7 @@
         }
       }
 
-      function updateSandboxBaseWarning() {
+      function updateSandboxBaseWarning({ isGitRepo, suggestedPath } = {}) {
         const sandbox = sandboxBaseDirectory.value.trim();
         renderSandboxPathDisplay(sandbox);
         if (!sandbox) {
@@ -4349,6 +4349,11 @@
           sandboxBaseWarning.textContent =
             "Warning: this sandbox is broad or sensitive. Choose a tighter directory such as ~/Source.";
           updateSandboxPosture("warn", "Broad scope", "Tighten to a project directory.");
+          return;
+        }
+        if (isGitRepo) {
+          sandboxBaseWarning.textContent = gitRepoWarningMessage(suggestedPath);
+          updateSandboxPosture("warn", "Git repo", "Consider a parent directory.");
           return;
         }
         sandboxBaseWarning.textContent = "";
@@ -4499,6 +4504,11 @@
         heading.textContent = variant === "authorized" ? "No trusted keys yet" : "Nothing waiting";
         empty.append(heading, detail);
         container.appendChild(empty);
+      }
+
+      function gitRepoWarningMessage(suggestedPath) {
+        const suggestion = suggestedPath ? ` Consider using the parent directory instead: ${suggestedPath}` : "";
+        return `Warning: this directory is a git repository. Sandboxing a git repo may expose source history to agents.${suggestion}`;
       }
 
       function isRiskyAllowedDirectory(input) {
@@ -4916,13 +4926,14 @@
       }
 
       async function pickDirectoryForInput(targetInput, warningUpdater) {
-        const selectedPath = await api.pickSandboxDirectory();
-        if (!selectedPath || typeof selectedPath !== "string") {
+        const result = await api.pickSandboxDirectory();
+        if (!result) {
           return;
         }
-        targetInput.value = selectedPath;
+        const { path, isGitRepo, suggestedPath } = result;
+        targetInput.value = path;
         if (typeof warningUpdater === "function") {
-          warningUpdater();
+          warningUpdater({ isGitRepo, suggestedPath });
         }
       }
 
@@ -4948,7 +4959,7 @@
         }
       }
 
-      function updateOnboardingSandboxWarning() {
+      function updateOnboardingSandboxWarning({ isGitRepo, suggestedPath } = {}) {
         const sandbox = onboardingSandboxDir.value.trim();
         if (!sandbox) {
           onboardingSandboxWarning.textContent = "Sandbox base directory is required.";
@@ -4957,6 +4968,10 @@
         if (isRiskyAllowedDirectory(sandbox)) {
           onboardingSandboxWarning.textContent =
             "Warning: this directory is broad/sensitive and may expose personal files or secrets. Choose a scoped directory like ~/Source.";
+          return;
+        }
+        if (isGitRepo) {
+          onboardingSandboxWarning.textContent = gitRepoWarningMessage(suggestedPath);
           return;
         }
         onboardingSandboxWarning.textContent = "";
