@@ -6268,6 +6268,13 @@ async function handleLoopRequest(
       const spawnEnv: Record<string, string> = await getShellEnv({
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
         CLOSEDLOOP_PLAN_FILE: closedLoopPlanFile,
+        // Propagate the canonical command name (PLAN, EXECUTE, REQUEST_CHANGES,
+        // DECOMPOSE) to the harness so loop.perf.* events and runs.log rows
+        // are attributed to the actual slash-command the user invoked, not the
+        // "interactive" / "plan_execute" fallbacks. The plugin side
+        // (run-loop.sh) gives env-var precedence over --prompt; see PRD-254
+        // §FR-1 / §FR-5 and FEA-936.
+        CLOSEDLOOP_COMMAND: body.command,
         ...(userVisibleLoopFailureSecret
           ? {
               [USER_VISIBLE_LOOP_FAILURE_SECRET_ENV]:

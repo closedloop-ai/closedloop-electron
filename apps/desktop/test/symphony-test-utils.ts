@@ -130,19 +130,32 @@ export async function findFileRecursive(
   return null;
 }
 
-export async function findSpawnArgsFile(
+/**
+ * Poll for a file by name under `searchRoot` until found or the deadline
+ * expires. Useful when a test spawns a subprocess that creates the file at
+ * an a-priori-unknown path inside the search tree (e.g., a per-loop workdir).
+ */
+export async function findFilePolling(
   searchRoot: string,
+  filename: string,
   timeoutMs = 20_000,
 ): Promise<string> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const found = await findFileRecursive(searchRoot, "spawn-args.txt");
+    const found = await findFileRecursive(searchRoot, filename);
     if (found !== null) return found;
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(
-    `Timed out waiting for spawn-args.txt under ${searchRoot} after ${timeoutMs}ms`,
+    `Timed out waiting for ${filename} under ${searchRoot} after ${timeoutMs}ms`,
   );
+}
+
+export async function findSpawnArgsFile(
+  searchRoot: string,
+  timeoutMs = 20_000,
+): Promise<string> {
+  return findFilePolling(searchRoot, "spawn-args.txt", timeoutMs);
 }
 
 // ---------------------------------------------------------------------------
