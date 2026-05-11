@@ -3891,7 +3891,7 @@
         defaultApprovalTier.value = settings.defaultApprovalTier === "auto" ? "high" : (settings.defaultApprovalTier || "high");
         renderTierOverrides(settings.autoApprovalRules || {});
         renderAlwaysAllowRules(settings.alwaysAllowRules || []);
-        updateSandboxBaseWarning();
+        void refreshSandboxWarningFromPath(sandboxBaseDirectory, updateSandboxBaseWarning);
         void refreshCommandSigningKeys();
       }
 
@@ -4950,7 +4950,7 @@
           : "No stored API key found. Enter one now or later in Settings.";
         const managedProvisioning = state?.managedProvisioning;
         onboardingMessage.textContent = managedProvisioning?.message || "";
-        updateOnboardingSandboxWarning();
+        void refreshSandboxWarningFromPath(onboardingSandboxDir, updateOnboardingSandboxWarning);
 
         if (state?.completed) {
           onboardingOverlay.classList.add("hidden");
@@ -4975,6 +4975,41 @@
           return;
         }
         onboardingSandboxWarning.textContent = "";
+      }
+
+      async function refreshSandboxWarningFromPath(inputEl, warningUpdater) {
+        const sandbox = inputEl.value.trim();
+        if (!sandbox) {
+          warningUpdater();
+          return;
+        }
+        if (isRiskyAllowedDirectory(sandbox)) {
+          warningUpdater();
+          return;
+        }
+        try {
+          const result = await api.inspectSandboxPath(sandbox);
+          if (inputEl.value.trim() !== sandbox) return;
+          if (!result) {
+            warningUpdater();
+            return;
+          }
+          warningUpdater({ isGitRepo: result.isGitRepo, suggestedPath: result.suggestedPath });
+        } catch {
+          warningUpdater();
+        }
+      }
+
+      function debouncedSandboxWarning(inputEl, warningUpdater, delayMs = 200) {
+        let timer = null;
+        return () => {
+          warningUpdater();
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(() => {
+            timer = null;
+            void refreshSandboxWarningFromPath(inputEl, warningUpdater);
+          }, delayMs);
+        };
       }
 
       async function completeOnboarding() {
@@ -5254,8 +5289,14 @@
         .addEventListener("click", () => void pickDirectoryForInput(onboardingSandboxDir, updateOnboardingSandboxWarning));
       document.getElementById("completeOnboarding").addEventListener("click", () => void completeOnboarding());
       document.getElementById("connectInBrowser").addEventListener("click", () => void connectInBrowser());
-      sandboxBaseDirectory.addEventListener("input", updateSandboxBaseWarning);
-      onboardingSandboxDir.addEventListener("input", updateOnboardingSandboxWarning);
+      sandboxBaseDirectory.addEventListener(
+        "input",
+        debouncedSandboxWarning(sandboxBaseDirectory, updateSandboxBaseWarning),
+      );
+      onboardingSandboxDir.addEventListener(
+        "input",
+        debouncedSandboxWarning(onboardingSandboxDir, updateOnboardingSandboxWarning),
+      );
       document.getElementById("refreshApprovals").addEventListener("click", refreshApprovals);
       document.getElementById("clearApprovals").addEventListener("click", clearApprovals);
       const dangerAutoApproveToggle = document.getElementById("dangerAutoApproveToggle");

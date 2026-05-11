@@ -63,6 +63,12 @@ const desktopApi = {
       isGitRepo: boolean;
       suggestedPath: string | undefined;
     } | null>,
+  inspectSandboxPath: (path: string) =>
+    ipcRenderer.invoke("desktop:inspect-sandbox-path", path) as Promise<{
+      path: string;
+      isGitRepo: boolean;
+      suggestedPath: string | undefined;
+    } | null>,
   getDangerousAutoApprove: () =>
     ipcRenderer.invoke("desktop:get-dangerous-auto-approve") as Promise<boolean>,
   setDangerousAutoApprove: (enabled: boolean) =>
