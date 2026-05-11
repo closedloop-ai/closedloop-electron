@@ -16,6 +16,7 @@ import {
   type ExecuteFinalizationResult,
   finalizeAdditionalReposAndPersist,
   getResolvedGitPath,
+  readBootstrapOutputs,
   readEvaluateOutputs,
   runExecuteFinalization,
 } from "../server/operations/symphony-loop.js";
@@ -777,6 +778,9 @@ function readArtifacts(
     const baseDir = worktreeDir ?? claudeWorkDir;
     const prdContent = readTextFile(path.join(baseDir, "prd.md"));
     return { prd: prdContent ? { content: prdContent } : undefined };
+  }
+  if (command === LoopCommand.Bootstrap) {
+    return readBootstrapOutputs(claudeWorkDir);
   }
   return {};
 }

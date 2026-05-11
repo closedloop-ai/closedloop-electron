@@ -2140,7 +2140,7 @@ function readGeneratePrdOutputs(worktreeDir: string): LoopOutputArtifacts {
   };
 }
 
-function readBootstrapOutputs(claudeWorkDir: string): LoopOutputArtifacts {
+export function readBootstrapOutputs(claudeWorkDir: string): LoopOutputArtifacts {
   const manifestFile = path.join(claudeWorkDir, "bootstrap-manifest.json");
   const manifest = readJsonFileSync(manifestFile) as
     | BootstrapManifestEntry[]
@@ -6582,7 +6582,7 @@ async function handleLoopRequest(
             `if ! cd ${shellEscape(entry.localPath)}; then`,
             `  echo "fail:cd" > ${shellEscape(marker)}`,
             `else`,
-            `  if "$CLAUDE_BIN" -p "/agent-bootstrap --output-dir $OUTPUT_DIR" 2>${shellEscape(stderrLog)}; then`,
+            `  if "$CLAUDE_BIN" -p "/bootstrap:agent-bootstrap --output-dir $OUTPUT_DIR" 2>${shellEscape(stderrLog)}; then`,
             `    echo "ok" > ${shellEscape(marker)}`,
             `  else`,
             `    echo "fail:$?" > ${shellEscape(marker)}`,
