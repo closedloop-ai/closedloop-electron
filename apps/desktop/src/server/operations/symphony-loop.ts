@@ -2366,9 +2366,61 @@ export const AUTH_STATUS_PATTERN =
   /authentication_error|authentication required|invalid bearer token|invalid token|\brate_limit(_error)?\b|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|\bforbidden\b|access denied|token.*expired/i;
 
 /**
- * Scan the current Claude JSONL output for a result record with
- * `is_error: true` whose message matches a known auth/rate-limit/billing pattern.
- * Returns the error text or null if not found.
+ * Scan an in-memory JSONL buffer for a result record with `is_error: true`
+ * (or an `isApiErrorMessage` API-error entry) matching a known
+ * auth/rate-limit/billing pattern. Returns the error text or null if not found.
+ */
+export function scanJsonlForAuthChallenge(content: string): string | null {
+  for (const line of content.split("\n")) {
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      const entry = JSON.parse(line) as Record<string, unknown>;
+      if (
+        entry.type === "result" &&
+        entry.is_error === true &&
+        typeof entry.result === "string" &&
+        AUTH_CHALLENGE_PATTERN.test(entry.result)
+      ) {
+        return entry.result;
+      }
+      // Synthetic API-error entries emitted by Claude CLI mid-conversation
+      // carry `isApiErrorMessage: true` and the error string in `error`.
+      if (entry.isApiErrorMessage === true) {
+        const errorText =
+          typeof entry.error === "string" ? entry.error : "unknown error";
+        if (AUTH_STATUS_PATTERN.test(errorText)) {
+          const status =
+            typeof entry.apiErrorStatus === "number"
+              ? ` (status ${entry.apiErrorStatus})`
+              : "";
+          return `Claude API ${errorText} error${status}`;
+        }
+        // HTTP 401/403/429 is an auth/quota challenge regardless of error text.
+        // 429 is the canonical rate-limit / over-quota status; treating it as
+        // a challenge here ensures we catch entries like
+        // {error: "rate_limit", apiErrorStatus: 429} even if Anthropic drops
+        // or renames the textual error token in a future CLI version.
+        if (
+          entry.apiErrorStatus === 401 ||
+          entry.apiErrorStatus === 403 ||
+          entry.apiErrorStatus === 429
+        ) {
+          return `API returned HTTP ${entry.apiErrorStatus}: ${errorText}`;
+        }
+      }
+    } catch {
+      // skip malformed lines
+    }
+  }
+  return null;
+}
+
+/**
+ * Scan the current Claude JSONL output file for an auth/rate-limit/billing
+ * error record. Thin wrapper that reads the file then delegates to
+ * `scanJsonlForAuthChallenge`.
  */
 export function detectAuthChallengeFromJsonl(
   claudeWorkDir: string,
@@ -2378,54 +2430,11 @@ export function detectAuthChallengeFromJsonl(
     return null;
   }
   try {
-    const content = readFileSync(outputFile, "utf-8");
-    for (const line of content.split("\n")) {
-      if (!line.trim()) {
-        continue;
-      }
-      try {
-        const entry = JSON.parse(line) as Record<string, unknown>;
-        if (
-          entry.type === "result" &&
-          entry.is_error === true &&
-          typeof entry.result === "string" &&
-          AUTH_CHALLENGE_PATTERN.test(entry.result)
-        ) {
-          return entry.result;
-        }
-        // Synthetic API-error entries emitted by Claude CLI mid-conversation
-        // carry `isApiErrorMessage: true` and the error string in `error`.
-        if (entry.isApiErrorMessage === true) {
-          const errorText =
-            typeof entry.error === "string" ? entry.error : "unknown error";
-          if (AUTH_STATUS_PATTERN.test(errorText)) {
-            const status =
-              typeof entry.apiErrorStatus === "number"
-                ? ` (status ${entry.apiErrorStatus})`
-                : "";
-            return `Claude API ${errorText} error${status}`;
-          }
-          // HTTP 401/403/429 is an auth/quota challenge regardless of error text.
-          // 429 is the canonical rate-limit / over-quota status; treating it as
-          // a challenge here ensures we catch entries like
-          // {error: "rate_limit", apiErrorStatus: 429} even if Anthropic drops
-          // or renames the textual error token in a future CLI version.
-          if (
-            entry.apiErrorStatus === 401 ||
-            entry.apiErrorStatus === 403 ||
-            entry.apiErrorStatus === 429
-          ) {
-            return `API returned HTTP ${entry.apiErrorStatus}: ${errorText}`;
-          }
-        }
-      } catch {
-        // skip malformed lines
-      }
-    }
+    return scanJsonlForAuthChallenge(readFileSync(outputFile, "utf-8"));
   } catch {
     // file read error
+    return null;
   }
-  return null;
 }
 
 /**
@@ -2750,28 +2759,9 @@ async function attemptLlmCommit(
       if (code !== 0) {
         loopError(loopId, `LLM commit exited with code ${code}`);
 
-        // Write stdout to a temp JSONL file so detectAuthChallengeFromJsonl can
-        // scan it for auth/rate-limit/billing error records. The LLM commit
-        // spawn uses --output-format stream-json, so stdout is valid JSONL.
-        // We write it as "claude-output.jsonl" (the name resolveClaudeOutputPath
-        // expects) inside a uniquely-named temp directory, then clean it up.
-        let authChallengeMsg: string | null = null;
-        const tmpDir = path.join(
-          os.tmpdir(),
-          `llm-commit-${loopId}-${Date.now()}`,
-        );
-        try {
-          mkdirSync(tmpDir, { recursive: true });
-          writeFileSync(path.join(tmpDir, "claude-output.jsonl"), stdout, "utf-8");
-          authChallengeMsg = detectAuthChallengeFromJsonl(tmpDir);
-        } catch (writeErr) {
-          loopLog(
-            loopId,
-            `LLM commit: failed to write stdout to temp JSONL for auth detection: ${String(writeErr)}`,
-          );
-        } finally {
-          fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-        }
+        // The LLM commit spawn uses --output-format stream-json, so stdout is
+        // valid JSONL — scan it directly for auth/rate-limit/billing errors.
+        const authChallengeMsg = scanJsonlForAuthChallenge(stdout);
 
         if (authChallengeMsg !== null) {
           loopError(

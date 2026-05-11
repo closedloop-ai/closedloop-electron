@@ -3309,20 +3309,12 @@ test("EXECUTE: rate-limited LLM commit spawn emits FAILED event with LoopErrorCo
     mode: 0o755,
   });
 
-  // fake git: all commands succeed (git status returns empty so no-changes path
-  // would be taken if we ever reach executeGitOperations; with an auth challenge
-  // error we do not)
+  // fake git: only `git status` is reachable from the auth-challenge path
+  // (production short-circuits via completeExecuteFinalization before
+  // executeGitOperations runs). All other commands are unreachable here.
   const fakeGitScript = [
     "#!/bin/sh",
     'if [ "$1" = status ]; then exit 0; fi',
-    'if [ "$1" = push ]; then exit 0; fi',
-    'if [ "$1" = add ]; then exit 0; fi',
-    'if [ "$1" = commit ]; then exit 0; fi',
-    'if [ "$1" = fetch ]; then exit 0; fi',
-    'if [ "$1" = "rev-parse" ]; then',
-    '  if [ "$2" = "--abbrev-ref" ]; then echo "symphony/execute-test"; exit 0; fi',
-    "  exit 0",
-    "fi",
     "exit 0",
   ].join("\n");
   await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
