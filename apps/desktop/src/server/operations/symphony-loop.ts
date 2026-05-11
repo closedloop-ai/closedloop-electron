@@ -106,7 +106,6 @@ import {
   CLONE_GIT_TIMEOUT,
   expandHome,
   fetchOrigin,
-  hasBootstrapArtifacts,
   isProcessRunning,
   loopError,
   loopLog,
@@ -856,19 +855,21 @@ function parseAgentFrontmatter(content: string): {
   };
 }
 
-function readBootstrapRepoOutputs(
+export function readBootstrapRepoOutputs(
   repoPath: string,
+  agentsDir?: string,
 ): Omit<
   BootstrapRepoResult,
   "fullName" | "branch" | "success" | "error" | "duration"
 > {
   const agents: BootstrapRepoResult["agents"] = [];
-  const agentsDir = path.join(repoPath, ".claude", "agents");
+  const effectiveAgentsDir =
+    agentsDir ?? path.join(repoPath, ".claude", "agents");
   try {
-    for (const file of readdirSync(agentsDir)) {
+    for (const file of readdirSync(effectiveAgentsDir)) {
       if (!file.endsWith(".md")) continue;
       const slug = file.slice(0, -3);
-      const content = readFileSync(path.join(agentsDir, file), "utf-8");
+      const content = readFileSync(path.join(effectiveAgentsDir, file), "utf-8");
       const { name, description } = parseAgentFrontmatter(content);
       agents.push({
         name: name || slug,
@@ -2168,8 +2169,9 @@ function readBootstrapOutputs(claudeWorkDir: string): LoopOutputArtifacts {
     const success = marker === "ok";
     const error = success ? undefined : marker.replace(/^fail:/, "");
 
+    const outputDir = path.join(claudeWorkDir, `repo-${runnableIndex}-agents`);
     const outputs = success
-      ? readBootstrapRepoOutputs(entry.localPath)
+      ? readBootstrapRepoOutputs(entry.localPath, outputDir)
       : { agents: [], criticGates: null, metadata: null };
 
     repos.push({
@@ -6392,16 +6394,6 @@ async function handleLoopRequest(
             });
             continue;
           }
-          if (!params.options?.update && hasBootstrapArtifacts(localPath)) {
-            manifest.push({
-              fullName: repo.fullName,
-              localPath,
-              branch,
-              skip: true,
-              skipReason: "artifacts already exist",
-            });
-            continue;
-          }
           manifest.push({
             fullName: repo.fullName,
             localPath,
@@ -6424,12 +6416,15 @@ async function handleLoopRequest(
         for (const [i, entry] of runnableRepos.entries()) {
           const marker = path.join(claudeWorkDir, `repo-${i}-done`);
           const stderrLog = path.join(claudeWorkDir, `repo-${i}-stderr.log`);
+          const outputDir = path.join(claudeWorkDir, `repo-${i}-agents`);
           scriptLines.push(
             `echo "=== BOOTSTRAP ${i}: ${shellEscape(entry.fullName)} ==="`,
+            `OUTPUT_DIR=${shellEscape(outputDir)}`,
+            `mkdir -p "$OUTPUT_DIR"`,
             `if ! cd ${shellEscape(entry.localPath)}; then`,
             `  echo "fail:cd" > ${shellEscape(marker)}`,
             `else`,
-            `  if "$CLAUDE_BIN" -p "/agent-bootstrap" 2>${shellEscape(stderrLog)}; then`,
+            `  if "$CLAUDE_BIN" -p "/agent-bootstrap --output-dir $OUTPUT_DIR" 2>${shellEscape(stderrLog)}; then`,
             `    echo "ok" > ${shellEscape(marker)}`,
             `  else`,
             `    echo "fail:$?" > ${shellEscape(marker)}`,
