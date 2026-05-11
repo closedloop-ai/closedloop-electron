@@ -6,6 +6,7 @@ import type {
   DesktopUpdateDiagnostics,
   ExecutePlanSourceDiagnostics,
   OutboundNetworkDiagnostics,
+  PluginUpdateDiagnostics,
   SupportUploadDiagnostics,
   TelemetryCategory,
   TelemetryDiagnostics,
@@ -307,6 +308,52 @@ export class Observability {
       {},
       { desktopShutdown: input },
     );
+  }
+
+  /** Emits bounded ClosedLoop plugin update attempt telemetry through the relay path. */
+  static pluginUpdateAttempted(input: PluginUpdateDiagnostics): void {
+    Observability.emitTelemetry(
+      "info",
+      "plugin_update.attempted",
+      "Plugin update attempted",
+      {},
+      { pluginUpdate: input },
+    );
+    Observability.capturePostHog("plugin_update_attempted", {
+      plugin_count: input.pluginIds.length,
+      duration_ms: input.durationMs,
+    });
+  }
+
+  /** Emits bounded ClosedLoop plugin update success telemetry through the relay path. */
+  static pluginUpdateSucceeded(input: PluginUpdateDiagnostics): void {
+    Observability.emitTelemetry(
+      "info",
+      "plugin_update.succeeded",
+      "Plugin update succeeded",
+      {},
+      { pluginUpdate: input },
+    );
+    Observability.capturePostHog("plugin_update_succeeded", {
+      plugin_count: input.pluginIds.length,
+      duration_ms: input.durationMs,
+    });
+  }
+
+  /** Emits bounded ClosedLoop plugin update failure telemetry through the relay path. */
+  static pluginUpdateFailed(input: PluginUpdateDiagnostics): void {
+    Observability.emitTelemetry(
+      "error",
+      "plugin_update.failed",
+      "Plugin update failed",
+      {},
+      { pluginUpdate: input },
+    );
+    Observability.capturePostHog("plugin_update_failed", {
+      plugin_count: input.pluginIds.length,
+      duration_ms: input.durationMs,
+      failure_reason: input.failureReason,
+    });
   }
 
   // --- Sandbox (PostHog only) ---

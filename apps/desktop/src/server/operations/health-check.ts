@@ -5,6 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { Observability } from "../../main/observability.js";
+import { gatewayLog } from "../../main/gateway-logger.js";
+import type {
+  PluginUpdateDiagnostics,
+  PluginUpdateFailureReason,
+  PluginUpdateOutcome,
+} from "../../main/telemetry-protocol.js";
 import type { OperationDispatcher } from "../operation-dispatcher.js";
 import { getShellEnv, resolveBinaryFromLoginShell, resolveExecutablesOnPath } from "../shell-path.js";
 import { detectMcpAvailability, type McpDetectionResult } from "./mcp-detection.js";
@@ -15,6 +21,45 @@ import { json } from "./response-utils.js";
 const execFileAsync = promisify(execFile);
 const VERSION_REGEX = /(\d+\.\d+[\w.-]*)/;
 const VERSION_PREFIX_REGEX = /^[vV]/;
+const PLUGIN_UPDATE_TIMEOUT_MS = 30_000;
+const STDERR_TAIL_MAX_CHARS = 512;
+const PLUGIN_AUTOUPDATE_DOCS_LINK = {
+  label: "Enable ClosedLoop plugin autoupdate",
+  url: "https://github.com/closedloop-ai/claude-plugins#quick-start",
+} as const;
+
+const CLOSEDLOOP_USER_PLUGINS = [
+  {
+    folder: "code",
+    key: "code@closedloop-ai",
+    label: "Symphony Plugin",
+    required: true,
+  },
+  {
+    folder: "platform",
+    key: "platform@closedloop-ai",
+    label: "Platform Plugin",
+    required: true,
+  },
+  {
+    folder: "judges",
+    key: "judges@closedloop-ai",
+    label: "Judges Plugin",
+    required: true,
+  },
+  {
+    folder: "code-review",
+    key: "code-review@closedloop-ai",
+    label: "Code Review Plugin",
+    required: true,
+  },
+  {
+    folder: "self-learning",
+    key: "self-learning@closedloop-ai",
+    label: "Self-Learning Plugin",
+    required: true,
+  },
+] as const;
 
 type CheckResult = {
   id: string;
@@ -24,6 +69,10 @@ type CheckResult = {
   version?: string;
   error?: string;
   remediation?: string;
+  updateAttempted?: boolean;
+  updateOutcome?: PluginUpdateOutcome;
+  updatePluginIds?: string[];
+  remediationLinks?: Array<{ label: string; url: string }>;
   debug?: {
     errorCode?: string;       // "ENOENT" | "EACCES" | "ETIMEDOUT" | "EPERM" | other
     stderr?: string;          // trimmed, capped at 512 chars
@@ -50,6 +99,21 @@ type CommandError = {
   message: string;
 };
 
+type PluginManifest = {
+  plugin: (typeof CLOSEDLOOP_USER_PLUGINS)[number];
+  latestVersion?: string;
+  error?: "manifest_unavailable";
+};
+
+type PluginUpdateCommandResult = {
+  outcome: PluginUpdateOutcome;
+  exitCode?: number;
+  stdout: string;
+  stderrTail?: string;
+  elapsedMs: number;
+  failureReason?: PluginUpdateFailureReason;
+};
+
 export function registerHealthCheckRoutes(
   dispatcher: OperationDispatcher,
   processManager: ProcessManager,
@@ -66,6 +130,7 @@ export function registerHealthCheckRoutes(
 
   dispatcher.register("GET", "/api/gateway/health-check", async (context) => {
     const expectedMcpUrl = context.query.get("expectedMcpUrl")?.trim() || undefined;
+    const pluginAutoUpdateEnabled = context.query.get("pluginAutoUpdate") === "1";
     const paths = getBinaryPaths?.();
     const [baseChecks, claudeMcp, codexMcp] = await Promise.all([
       Promise.all([
@@ -73,11 +138,9 @@ export function registerHealthCheckRoutes(
         checkClaudeCli(processManager, paths?.claude),
         checkGhCli(processManager, paths?.gh),
         checkGhAuth(processManager, paths?.gh),
-        Promise.resolve(checkPlugin("code", "Symphony Plugin", true)),
-        Promise.resolve(checkPlugin("platform", "Platform Plugin", true)),
-        Promise.resolve(checkPlugin("judges", "Judges Plugin", true)),
-        Promise.resolve(checkPlugin("code-review", "Code Review Plugin", true)),
-        Promise.resolve(checkPlugin("self-learning", "Self-Learning Plugin", true)),
+        ...CLOSEDLOOP_USER_PLUGINS.map((plugin) =>
+          Promise.resolve(checkPlugin(plugin.folder, plugin.label, plugin.required))
+        ),
         Promise.resolve(await checkWorktreeDir(configDir)),
         checkCodex(processManager, paths?.codex),
         checkPython3(processManager, paths?.python3)
@@ -93,7 +156,11 @@ export function registerHealthCheckRoutes(
       .every((c) => c.passed);
     if (allPluginsInstalled) {
       const installed = getInstalledPluginVersions();
-      checks = await applyPluginVersionChecks(checks, installed);
+      checks = await applyPluginVersionChecks(checks, installed, {
+        pluginAutoUpdateEnabled,
+        claudeOverride: paths?.claude,
+        readInstalledVersions: () => getInstalledPluginVersions(),
+      });
     }
 
     for (const check of checks) {
@@ -143,6 +210,70 @@ const defaultRunCommand: RunCommand = async (cmd, args, options) => {
 
 let runCommand: RunCommand = defaultRunCommand;
 
+type PluginUpdateRunner = (
+  pluginRef: string,
+  options?: { claudeOverride?: string; timeoutMs?: number }
+) => Promise<PluginUpdateCommandResult>;
+
+async function defaultRunPluginUpdateCommand(
+  pluginRef: string,
+  options: { claudeOverride?: string; timeoutMs?: number } = {}
+): Promise<PluginUpdateCommandResult> {
+  const startedAt = Date.now();
+  const resolved = await resolveBinaryFromLoginShell(
+    "claude",
+    options.claudeOverride
+  );
+  if (resolved.source === "override_invalid") {
+    return {
+      outcome: "failed",
+      stdout: "",
+      elapsedMs: Date.now() - startedAt,
+      failureReason: "cli_unavailable",
+      stderrTail: "Claude binary override path does not exist or is not executable",
+    };
+  }
+
+  const env = await getShellEnv();
+  try {
+    const { stdout } = await execFileAsync(
+      resolved.path,
+      ["plugin", "update", pluginRef, "--scope", "user"],
+      {
+        timeout: options.timeoutMs ?? PLUGIN_UPDATE_TIMEOUT_MS,
+        env,
+      }
+    );
+    return {
+      outcome: "success",
+      stdout: stdout.trim(),
+      elapsedMs: Date.now() - startedAt,
+    };
+  } catch (err) {
+    const error = err as NodeJS.ErrnoException & {
+      stderr?: string | Buffer;
+      stdout?: string | Buffer;
+      killed?: boolean;
+      code?: string | number;
+    };
+    const timeout = error.killed || error.code === "ETIMEDOUT";
+    return {
+      outcome: timeout ? "timeout" : "failed",
+      exitCode: typeof error.code === "number" ? error.code : undefined,
+      stdout: (error.stdout ?? "").toString().trim(),
+      stderrTail: (error.stderr ?? "")
+        .toString()
+        .trim()
+        .slice(0, STDERR_TAIL_MAX_CHARS),
+      elapsedMs: Date.now() - startedAt,
+      failureReason: timeout ? "timeout" : "command_failed",
+    };
+  }
+}
+
+let runPluginUpdateCommand: PluginUpdateRunner = defaultRunPluginUpdateCommand;
+const failedPluginUpdateAttempts = new Map<string, PluginUpdateOutcome>();
+
 /**
  * @internal Test-only. Replace the binary command runner with a stub to
  * simulate ENOENT / EACCES / ETIMEDOUT without spawning real processes.
@@ -153,14 +284,32 @@ export function _setRunCommandForTesting(fn?: RunCommand): void {
 }
 
 /**
+ * @internal Test-only. Replace the plugin update runner and reset session
+ * suppression state.
+ */
+export function _setPluginUpdateCommandForTesting(
+  fn?: PluginUpdateRunner
+): void {
+  runPluginUpdateCommand = fn ?? defaultRunPluginUpdateCommand;
+  failedPluginUpdateAttempts.clear();
+}
+
+/**
  * @internal Test-only. Exposes plugin-version enrichment without relying
  * on a developer machine's real Claude plugin registry.
  */
 export async function _applyPluginVersionChecksForTesting(
   checks: CheckResult[],
-  installed: Record<string, string>
+  installed: Record<string, string>,
+  options: {
+    pluginAutoUpdateEnabled?: boolean;
+    readInstalledVersions?: () => Record<string, string>;
+  } = {}
 ): Promise<CheckResult[]> {
-  return applyPluginVersionChecks(checks, installed);
+  return applyPluginVersionChecks(checks, installed, {
+    pluginAutoUpdateEnabled: options.pluginAutoUpdateEnabled ?? false,
+    readInstalledVersions: options.readInstalledVersions ?? (() => installed),
+  });
 }
 
 /**
@@ -676,14 +825,6 @@ async function checkPython3(_processManager: ProcessManager, override?: string):
   }
 }
 
-const PLUGIN_VERSION_MAP: Record<string, string> = {
-  "code@closedloop-ai": "code",
-  "self-learning@closedloop-ai": "self-learning",
-  "judges@closedloop-ai": "judges",
-  "code-review@closedloop-ai": "code-review",
-  "platform@closedloop-ai": "platform",
-};
-
 function parseStrictSemver(version: string): [number, number, number] | undefined {
   const parts = version.split(".");
   if (parts.length !== 3) {
@@ -751,81 +892,50 @@ function checkAppVersion(currentVersion: string, latestVersion: string): CheckRe
 
 async function applyPluginVersionChecks(
   checks: CheckResult[],
-  installed: Record<string, string>
+  installed: Record<string, string>,
+  options: {
+    pluginAutoUpdateEnabled: boolean;
+    claudeOverride?: string;
+    readInstalledVersions: () => Record<string, string>;
+  }
 ): Promise<CheckResult[]> {
-  const entries = Object.entries(PLUGIN_VERSION_MAP);
-
-  const results = await Promise.allSettled(
-    entries.map(([, folder]) =>
-      fetch(
-        `https://raw.githubusercontent.com/closedloop-ai/claude-plugins/main/plugins/${folder}/.claude-plugin/plugin.json`,
-        { signal: AbortSignal.timeout(3000) }
-      )
-    )
-  );
-
+  const manifests = await fetchPluginManifests();
   const versionChecks = new Map<string, Partial<CheckResult>>();
+  const outdatedPlugins: Array<{
+    plugin: (typeof CLOSEDLOOP_USER_PLUGINS)[number];
+    installedVersion: string;
+    latestVersion: string;
+  }> = [];
 
-  for (let i = 0; i < entries.length; i++) {
-    const [pluginKey, folder] = entries[i];
-    const checkId = `plugin-${folder}`;
-    const installedVer = installed[pluginKey] ?? "";
-    const result = results[i];
+  for (const manifest of manifests) {
+    const { plugin } = manifest;
+    const checkId = `plugin-${plugin.folder}`;
+    const installedVer = installed[plugin.key] ?? "";
 
-    if (result.status === "rejected") {
-      versionChecks.set(checkId, {
-        passed: false,
-        error: "Could not verify latest version",
-        remediation: "Check your network connection and re-run System Check",
-      });
+    if (manifest.error || !manifest.latestVersion) {
+      versionChecks.set(checkId, manifestUnavailableResult());
       continue;
     }
 
-    const response = result.value;
-    if (!response.ok) {
-      versionChecks.set(checkId, {
-        passed: false,
-        error: "Could not verify latest version",
-        remediation: "Check your network connection and re-run System Check",
-      });
-      continue;
-    }
-
-    let latestVer: string;
-    try {
-      const body = (await response.json()) as { version?: unknown };
-      if (typeof body.version !== "string") {
-        versionChecks.set(checkId, {
-          passed: false,
-          error: "Could not verify latest version",
-          remediation: "Check your network connection and re-run System Check",
-        });
-        continue;
-      }
-      latestVer = body.version;
-    } catch {
-      versionChecks.set(checkId, {
-        passed: false,
-        error: "Could not verify latest version",
-        remediation: "Check your network connection and re-run System Check",
-      });
-      continue;
-    }
-
-    const cmp = compareStrictSemver(installedVer, latestVer);
+    const cmp = compareStrictSemver(installedVer, manifest.latestVersion);
 
     if (cmp === undefined) {
       versionChecks.set(checkId, {
         passed: false,
         error: "Could not verify installed version",
-        remediation: `Reinstall the plugin: claude plugin install ${pluginKey}`,
+        remediation: `Reinstall the plugin: claude plugin install ${plugin.key}`,
       });
     } else if (cmp === false) {
+      outdatedPlugins.push({
+        plugin,
+        installedVersion: installedVer,
+        latestVersion: manifest.latestVersion,
+      });
       versionChecks.set(checkId, {
         passed: false,
         version: installedVer,
-        error: `Update available: ${latestVer}`,
-        remediation: `claude plugin update ${pluginKey}`,
+        error: `Update available: ${manifest.latestVersion}`,
+        remediation: `claude plugin update ${plugin.key}`,
       });
     } else {
       versionChecks.set(checkId, {
@@ -835,10 +945,249 @@ async function applyPluginVersionChecks(
     }
   }
 
+  if (options.pluginAutoUpdateEnabled && outdatedPlugins.length > 0) {
+    const updateResults = await runPluginUpdates(outdatedPlugins, options);
+    const finalInstalled = options.readInstalledVersions();
+    const affectedCheckIds = outdatedPlugins.map(
+      ({ plugin }) => `plugin-${plugin.folder}`
+    );
+
+    for (const outdated of outdatedPlugins) {
+      const { plugin, latestVersion } = outdated;
+      const checkId = `plugin-${plugin.folder}`;
+      const finalVersion =
+        finalInstalled[plugin.key] ?? installed[plugin.key] ?? "";
+      const current =
+        compareStrictSemver(finalVersion, latestVersion) === true;
+      if (current) {
+        versionChecks.set(checkId, {
+          passed: true,
+          version: finalVersion,
+          updateAttempted: true,
+          updateOutcome: "success",
+          updatePluginIds: affectedCheckIds,
+        });
+        continue;
+      }
+
+      const updateResult = updateResults.get(plugin.key);
+      versionChecks.set(checkId, {
+        passed: false,
+        version: finalVersion,
+        error: `Automatic update was attempted but did not succeed. Latest version: ${latestVersion}`,
+        remediation: buildPluginUpdateRemediation(plugin.key),
+        remediationLinks: [PLUGIN_AUTOUPDATE_DOCS_LINK],
+        updateAttempted: true,
+        updateOutcome: updateResult?.outcome ?? "failed",
+        updatePluginIds: affectedCheckIds,
+      });
+    }
+  }
+
   return checks.map((check) => {
     const versionCheck = versionChecks.get(check.id);
     return versionCheck === undefined ? check : { ...check, ...versionCheck };
   });
+}
+
+async function fetchPluginManifests(): Promise<PluginManifest[]> {
+  const results = await Promise.allSettled(
+    CLOSEDLOOP_USER_PLUGINS.map((plugin) =>
+      fetch(
+        `https://raw.githubusercontent.com/closedloop-ai/claude-plugins/main/plugins/${plugin.folder}/.claude-plugin/plugin.json`,
+        { signal: AbortSignal.timeout(3000) }
+      )
+    )
+  );
+
+  return Promise.all(
+    CLOSEDLOOP_USER_PLUGINS.map(
+      async (plugin, index): Promise<PluginManifest> => {
+        const result = results[index];
+        if (result.status === "rejected" || !result.value.ok) {
+          return { plugin, error: "manifest_unavailable" };
+        }
+        try {
+          const body = (await result.value.json()) as { version?: unknown };
+          return typeof body.version === "string"
+            ? { plugin, latestVersion: body.version }
+            : { plugin, error: "manifest_unavailable" };
+        } catch {
+          return { plugin, error: "manifest_unavailable" };
+        }
+      }
+    )
+  );
+}
+
+function manifestUnavailableResult(): Partial<CheckResult> {
+  return {
+    passed: false,
+    error: "Could not verify latest version",
+    remediation: "Check your network connection and re-run System Check",
+  };
+}
+
+async function runPluginUpdates(
+  outdatedPlugins: Array<{
+    plugin: (typeof CLOSEDLOOP_USER_PLUGINS)[number];
+    installedVersion: string;
+    latestVersion: string;
+  }>,
+  options: {
+    claudeOverride?: string;
+    readInstalledVersions: () => Record<string, string>;
+  }
+): Promise<Map<string, PluginUpdateCommandResult>> {
+  const updateResults = new Map<string, PluginUpdateCommandResult>();
+  const startedAt = Date.now();
+  const pluginIds = outdatedPlugins.map(({ plugin }) => plugin.key);
+  const versionsBefore = Object.fromEntries(
+    outdatedPlugins.map(({ plugin, installedVersion }) => [
+      plugin.key,
+      installedVersion,
+    ])
+  );
+
+  gatewayLog.info(
+    "health-check",
+    `Starting ClosedLoop plugin update attempt ${JSON.stringify({
+      pluginIds,
+      versionsBefore,
+    })}`
+  );
+
+  Observability.pluginUpdateAttempted({
+    pluginIds,
+    versionsBefore,
+    versionsAfter: versionsBefore,
+    outcomes: Object.fromEntries(
+      pluginIds.map((pluginId) => [pluginId, "skipped"])
+    ) as Record<string, PluginUpdateOutcome>,
+    durationMs: 0,
+    command: "claude plugin update",
+    scope: "user",
+  });
+
+  for (const { plugin, installedVersion, latestVersion } of outdatedPlugins) {
+    const suppressionKey = getFailedPluginUpdateAttemptKey(
+      plugin.key,
+      installedVersion,
+      latestVersion
+    );
+    const suppressedOutcome = failedPluginUpdateAttempts.get(suppressionKey);
+    if (suppressedOutcome) {
+      updateResults.set(plugin.key, {
+        outcome: "skipped",
+        stdout: "",
+        elapsedMs: 0,
+        failureReason:
+          suppressedOutcome === "timeout" ? "timeout" : "still_outdated",
+      });
+      continue;
+    }
+
+    const result = await runPluginUpdateCommand(plugin.key, {
+      claudeOverride: options.claudeOverride,
+      timeoutMs: PLUGIN_UPDATE_TIMEOUT_MS,
+    });
+    updateResults.set(plugin.key, result);
+    if (result.outcome === "failed" || result.outcome === "timeout") {
+      failedPluginUpdateAttempts.set(suppressionKey, result.outcome);
+    }
+  }
+
+  const versionsAfterRecord = options.readInstalledVersions();
+  const versionsAfter = Object.fromEntries(
+    pluginIds.map((pluginId) => [pluginId, versionsAfterRecord[pluginId] ?? ""])
+  );
+  const outcomes = Object.fromEntries(
+    outdatedPlugins.map(({ plugin, latestVersion }) => {
+      const finalVersion = versionsAfterRecord[plugin.key] ?? "";
+      const current = compareStrictSemver(finalVersion, latestVersion) === true;
+      return [
+        plugin.key,
+        current
+          ? "success"
+          : (updateResults.get(plugin.key)?.outcome ?? "failed"),
+      ];
+    })
+  ) as Record<string, PluginUpdateOutcome>;
+  const failedResult = [...updateResults.values()].find(
+    (result) => result.outcome === "failed" || result.outcome === "timeout"
+  );
+  const anyStillOutdated = outdatedPlugins.some(
+    ({ plugin, latestVersion }) =>
+      compareStrictSemver(versionsAfterRecord[plugin.key] ?? "", latestVersion) !==
+      true
+  );
+  for (const { plugin, installedVersion, latestVersion } of outdatedPlugins) {
+    if (compareStrictSemver(versionsAfterRecord[plugin.key] ?? "", latestVersion) === true) {
+      continue;
+    }
+    failedPluginUpdateAttempts.set(
+      getFailedPluginUpdateAttemptKey(plugin.key, installedVersion, latestVersion),
+      outcomes[plugin.key] === "timeout" ? "timeout" : "failed"
+    );
+  }
+  const diagnostics: PluginUpdateDiagnostics = {
+    pluginIds,
+    versionsBefore,
+    versionsAfter,
+    outcomes,
+    durationMs: Date.now() - startedAt,
+    command: "claude plugin update",
+    scope: "user",
+    ...(failedResult?.exitCode !== undefined && {
+      exitCode: failedResult.exitCode,
+    }),
+    ...(failedResult?.failureReason !== undefined
+      ? { failureReason: failedResult.failureReason }
+      : anyStillOutdated
+        ? { failureReason: "still_outdated" as const }
+        : {}),
+    ...(failedResult?.stderrTail ? { stderrTail: failedResult.stderrTail } : {}),
+  };
+
+  gatewayLog.info(
+    "health-check",
+    `Completed ClosedLoop plugin update attempt ${JSON.stringify({
+      pluginIds,
+      versionsBefore,
+      versionsAfter,
+      outcomes,
+      durationMs: diagnostics.durationMs,
+      exitCode: diagnostics.exitCode,
+      failureReason: diagnostics.failureReason,
+      stderrTail: diagnostics.stderrTail,
+    })}`
+  );
+
+  if (anyStillOutdated) {
+    Observability.pluginUpdateFailed(diagnostics);
+  } else {
+    Observability.pluginUpdateSucceeded(diagnostics);
+  }
+
+  return updateResults;
+}
+
+function getFailedPluginUpdateAttemptKey(
+  pluginRef: string,
+  installedVersion: string,
+  latestVersion: string
+): string {
+  return `${pluginRef}\u0000${installedVersion}\u0000${latestVersion}`;
+}
+
+function buildPluginUpdateRemediation(pluginRef: string): string {
+  return [
+    "1. Open Claude Code.",
+    "2. Open the plugin marketplace and update ClosedLoop plugins manually, or run:",
+    `claude plugin update ${pluginRef} --scope user`,
+    "3. Restart Claude Code if needed.",
+    "4. Re-run System Check.",
+  ].join("\n");
 }
 
 async function loadReposConfig(configDir: string): Promise<ReposConfig> {

@@ -18,6 +18,9 @@ export type TelemetryCategory =
   | "desktop.support_upload"
   | "electron_update.initiated"
   | "electron_update.failed"
+  | "plugin_update.attempted"
+  | "plugin_update.succeeded"
+  | "plugin_update.failed"
   | "job.started"
   | "job.plan_source_resolved"
   | "job.decision_table_verification"
@@ -412,6 +415,29 @@ export interface DesktopShutdownDiagnostics {
   error?: string;
 }
 
+export type PluginUpdateOutcome = "success" | "failed" | "timeout" | "skipped";
+
+export type PluginUpdateFailureReason =
+  | "command_failed"
+  | "timeout"
+  | "still_outdated"
+  | "cli_unavailable"
+  | "manifest_unavailable"
+  | "unknown";
+
+export interface PluginUpdateDiagnostics {
+  pluginIds: string[];
+  versionsBefore: Record<string, string>;
+  versionsAfter: Record<string, string>;
+  outcomes: Record<string, PluginUpdateOutcome>;
+  durationMs: number;
+  command: "claude plugin update";
+  scope: "user";
+  exitCode?: number;
+  failureReason?: PluginUpdateFailureReason;
+  stderrTail?: string;
+}
+
 export interface TelemetryDiagnostics {
   exitCode?: number;
   logTail?: string;
@@ -434,6 +460,7 @@ export interface TelemetryDiagnostics {
   decisionTableVerification?: DecisionTableVerificationTelemetryDiagnostics;
   desktopUpdate?: DesktopUpdateDiagnostics;
   desktopShutdown?: DesktopShutdownDiagnostics;
+  pluginUpdate?: PluginUpdateDiagnostics;
   outboundNetwork?: OutboundNetworkDiagnostics;
   supportUpload?: SupportUploadDiagnostics;
   diagnosticsVersion?: number;

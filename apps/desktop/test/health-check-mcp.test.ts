@@ -5,6 +5,7 @@ import { afterEach, describe, test } from "node:test";
 import { OperationDispatcher } from "../src/server/operation-dispatcher.js";
 import {
   _applyPluginVersionChecksForTesting,
+  _setPluginUpdateCommandForTesting,
   registerHealthCheckRoutes,
 } from "../src/server/operations/health-check.js";
 import type { McpDetectionResult } from "../src/server/operations/mcp-detection.js";
@@ -25,6 +26,10 @@ type CheckResultPayload = {
   version?: string;
   error?: string;
   remediation?: string;
+  updateAttempted?: boolean;
+  updateOutcome?: "success" | "failed" | "timeout" | "skipped";
+  updatePluginIds?: string[];
+  remediationLinks?: Array<{ label: string; url: string }>;
 };
 
 const CLOSEDLOOP_PLUGINS = [
@@ -50,6 +55,7 @@ const originalFetch = globalThis.fetch;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+  _setPluginUpdateCommandForTesting();
 });
 
 function makeResponse(): CapturedResponse {
@@ -414,6 +420,11 @@ describe("plugin-version check", () => {
 
   test("marks outdated plugin rows as required health check failures", async () => {
     mockPluginManifestVersion("2.0.0");
+    let updateCalls = 0;
+    _setPluginUpdateCommandForTesting(async () => {
+      updateCalls += 1;
+      return { outcome: "success", stdout: "", elapsedMs: 1 };
+    });
 
     const checks = await _applyPluginVersionChecksForTesting(
       buildPassingPluginChecks(),
@@ -434,6 +445,110 @@ describe("plugin-version check", () => {
       codePlugin?.remediation ?? "",
       /claude plugin update code@closedloop-ai/
     );
+    assert.equal(codePlugin?.updateAttempted, undefined);
+    assert.equal(updateCalls, 0);
+  });
+
+  test("auto-update success returns post-update passing metadata only when opted in", async () => {
+    mockPluginManifestVersion("2.0.0");
+    const calls: string[] = [];
+    _setPluginUpdateCommandForTesting(async (pluginRef) => {
+      calls.push(pluginRef);
+      return { outcome: "success", stdout: "", elapsedMs: 5 };
+    });
+
+    const checks = await _applyPluginVersionChecksForTesting(
+      buildPassingPluginChecks(),
+      buildInstalledPluginVersions("1.0.0"),
+      {
+        pluginAutoUpdateEnabled: true,
+        readInstalledVersions: () => buildInstalledPluginVersions("2.0.0"),
+      }
+    );
+    const codePlugin = findPluginCheck(checks, "code");
+
+    assert.deepEqual(
+      calls.sort(),
+      CLOSEDLOOP_PLUGINS.map((plugin) => plugin.key).sort()
+    );
+    assert.equal(codePlugin?.passed, true);
+    assert.equal(codePlugin?.version, "2.0.0");
+    assert.equal(codePlugin?.updateAttempted, true);
+    assert.equal(codePlugin?.updateOutcome, "success");
+    assert.ok(codePlugin?.updatePluginIds?.includes("plugin-code"));
+  });
+
+  test("auto-update failure returns explicit failure metadata and structured remediation link", async () => {
+    mockPluginManifestVersion("2.0.0");
+    _setPluginUpdateCommandForTesting(async () => ({
+      outcome: "failed",
+      stdout: "",
+      stderrTail: "permission denied",
+      elapsedMs: 5,
+      exitCode: 1,
+      failureReason: "command_failed",
+    }));
+
+    const checks = await _applyPluginVersionChecksForTesting(
+      buildPassingPluginChecks(),
+      buildInstalledPluginVersions("1.0.0"),
+      {
+        pluginAutoUpdateEnabled: true,
+        readInstalledVersions: () => buildInstalledPluginVersions("1.0.0"),
+      }
+    );
+    const codePlugin = findPluginCheck(checks, "code");
+
+    assert.equal(codePlugin?.passed, false);
+    assert.match(codePlugin?.error ?? "", /Automatic update was attempted/);
+    assert.match(
+      codePlugin?.remediation ?? "",
+      /claude plugin update code@closedloop-ai --scope user/
+    );
+    assert.equal(codePlugin?.updateAttempted, true);
+    assert.equal(codePlugin?.updateOutcome, "failed");
+    assert.deepEqual(codePlugin?.remediationLinks, [
+      {
+        label: "Enable ClosedLoop plugin autoupdate",
+        url: "https://github.com/closedloop-ai/claude-plugins#quick-start",
+      },
+    ]);
+  });
+
+  test("repeated failed auto-update tuple is suppressed in the same session", async () => {
+    mockPluginManifestVersion("2.0.0");
+    let calls = 0;
+    _setPluginUpdateCommandForTesting(async () => {
+      calls += 1;
+      return {
+        outcome: "timeout",
+        stdout: "",
+        stderrTail: "timed out",
+        elapsedMs: 30_000,
+        failureReason: "timeout",
+      };
+    });
+
+    await _applyPluginVersionChecksForTesting(
+      buildPassingPluginChecks(),
+      buildInstalledPluginVersions("1.0.0"),
+      {
+        pluginAutoUpdateEnabled: true,
+        readInstalledVersions: () => buildInstalledPluginVersions("1.0.0"),
+      }
+    );
+    const secondChecks = await _applyPluginVersionChecksForTesting(
+      buildPassingPluginChecks(),
+      buildInstalledPluginVersions("1.0.0"),
+      {
+        pluginAutoUpdateEnabled: true,
+        readInstalledVersions: () => buildInstalledPluginVersions("1.0.0"),
+      }
+    );
+    const codePlugin = findPluginCheck(secondChecks, "code");
+
+    assert.equal(calls, CLOSEDLOOP_PLUGINS.length);
+    assert.equal(codePlugin?.updateOutcome, "skipped");
   });
 
   test("marks unverifiable plugin rows as required health check failures", async () => {
