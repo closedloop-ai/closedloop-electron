@@ -9,7 +9,9 @@ import type {
   DesktopCommandStreamEvent,
   ProtocolEnvelope,
 } from "./cloud-protocol.js";
+import type { CommandSignatureVerifier } from "./command-signature-verifier.js";
 import { Observability } from "./observability.js";
+import { COMMAND_SIGNING_REJECTION_REASONS } from "../shared/contracts.js";
 
 const COMMAND_RETENTION_MS = 10 * 60_000;
 const MAX_RETAINED_TERMINAL_COMMANDS = 200;
@@ -28,6 +30,11 @@ export interface CloudCommandExecutorOptions {
     activeCommands: number;
     queueDepth: number;
   }) => void;
+  commandSignatureVerifier?: CommandSignatureVerifier;
+  isCommandSigningEnforced?: () => boolean;
+  prepareCommandForExecution?: (
+    command: DesktopCommandEvent,
+  ) => Promise<DesktopCommandEvent>;
 }
 
 export class CloudCommandExecutor {
@@ -65,6 +72,35 @@ export class CloudCommandExecutor {
         this.replayBuffered(command.commandId, 0);
       }
       return;
+    }
+
+    const signatureBodyOverride = getSignatureBodyOverride(command);
+    if (this.options.isCommandSigningEnforced?.()) {
+      const verification = this.options.commandSignatureVerifier?.verify(
+        command,
+        signatureBodyOverride,
+      ) ?? {
+        ok: false as const,
+        reason: COMMAND_SIGNING_REJECTION_REASONS.noKeysAuthorized,
+      };
+      if (!verification.ok) {
+        gatewayLog.warn(
+          "command-executor",
+          `Rejected command ${command.commandId}: ${verification.reason}`,
+        );
+        this.options.sendCommandAck({
+          commandId: command.commandId,
+          accepted: false,
+          state: "failed",
+          reason: verification.reason,
+        });
+        return;
+      }
+    } else if (command.signature || command.signaturePayload || command.publicKeyFingerprint) {
+      gatewayLog.debug(
+        "command-executor",
+        `Ignoring command signature fields for ${command.commandId}; server support is disabled`,
+      );
     }
 
     const validationError = validateCommand(command);
@@ -251,7 +287,10 @@ export class CloudCommandExecutor {
     Observability.commandStarted(command.commandId, command.operationId);
 
     try {
-      await this.executeViaGateway(command, abortController.signal);
+      const preparedCommand = this.options.prepareCommandForExecution
+        ? await this.options.prepareCommandForExecution(command)
+        : command;
+      await this.executeViaGateway(preparedCommand, abortController.signal);
       if (!isTerminalState(tracked.terminalState)) {
         this.emitTrackedEvent(command.commandId, "done", { type: "done" });
         Observability.commandCompleted(
@@ -624,6 +663,19 @@ function asRecord(value: unknown): Record<string, unknown> {
     return {};
   }
   return value as Record<string, unknown>;
+}
+
+function getSignatureBodyOverride(command: DesktopCommandEvent): unknown {
+  if (
+    command.path === "/api/gateway/symphony/loop" ||
+    command.path === "/api/gateway/symphony/loop/kill"
+  ) {
+    const body = asRecord(command.body);
+    if (body.userIntent !== undefined) {
+      return body.userIntent;
+    }
+  }
+  return undefined;
 }
 
 function asNonEmptyString(value: unknown): string | null {

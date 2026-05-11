@@ -35,6 +35,7 @@ export interface CloudSocketOptions {
   signDesktopRequest?: DesktopPopSigner;
   onDesktopPopUnavailable?: DesktopPopUnavailableReporter;
   getAllowedDirectories: () => string[];
+  getCapabilities?: () => Record<string, unknown>;
   getMaxInFlightCommands: () => number;
   getGatewayId?: () => string | null;
   machineName: string;
@@ -235,12 +236,24 @@ export class CloudSocketService {
       this.hadSuccessfulConnection = true;
       this.degradedSince = null;
       this.clearHelloAckTimer();
-      gatewayLog.info("cloud-socket", `Hello ack received, targetId=${computeTargetId}`);
+      const rawServerCapabilities = asObject(event.serverCapabilities);
+      const parsedServerCapabilities = parseServerCapabilities(
+        event.serverCapabilities,
+      );
+      const rawComputeTargetSigning =
+        rawServerCapabilities.computeTargetSigning;
+      gatewayLog.info(
+        "cloud-socket",
+        `Hello ack received, targetId=${computeTargetId}, serverCapabilityKeys=${formatObjectKeysForLog(rawServerCapabilities)}, computeTargetSigning=${formatPrimitiveForLog(rawComputeTargetSigning)}, parsedComputeTargetSigning=${parsedServerCapabilities?.computeTargetSigning === true}`,
+      );
       const ackEvent: DesktopHelloAckEvent = {
         ...createEnvelope(),
         computeTargetId,
         sessionId: asNonEmptyString(event.sessionId) ?? "",
         serverTime: asNonEmptyString(event.serverTime) ?? new Date().toISOString(),
+        ...(parsedServerCapabilities
+          ? { serverCapabilities: parsedServerCapabilities }
+          : {}),
         resumeFromSequence:
           event.resumeFromSequence && typeof event.resumeFromSequence === "object"
             ? (event.resumeFromSequence as Record<string, number>)
@@ -308,7 +321,10 @@ export class CloudSocketService {
       gatewayProtocolVersion: this.options.gatewayProtocolVersion,
       supportedOperations: this.options.supportedOperations,
       maxInFlightCommands: Math.max(1, this.options.getMaxInFlightCommands()),
-      allowedDirectoriesHash: hashAllowedDirectories(this.options.getAllowedDirectories())
+      allowedDirectoriesHash: hashAllowedDirectories(this.options.getAllowedDirectories()),
+      ...(this.options.getCapabilities
+        ? { capabilities: this.options.getCapabilities() }
+        : {})
     };
     this.socket?.emit("desktop.hello", hello);
   }
@@ -508,8 +524,34 @@ function parseDesktopCommand(payload: unknown): DesktopCommandEvent | null {
     queuedAt: asNonEmptyString(event.queuedAt) ?? undefined,
     lockKey: asNonEmptyString(event.lockKey) ?? undefined,
     requiresApproval: Boolean(event.requiresApproval),
-    approvalReason: asNonEmptyString(event.approvalReason) ?? undefined
+    approvalReason: asNonEmptyString(event.approvalReason) ?? undefined,
+    ...(asNonEmptyString(event.signature)
+      ? { signature: asNonEmptyString(event.signature)! }
+      : {}),
+    ...(asNonEmptyString(event.signaturePayload)
+      ? { signaturePayload: asNonEmptyString(event.signaturePayload)! }
+      : {}),
+    ...(asNonEmptyString(event.publicKeyFingerprint)
+      ? {
+          publicKeyFingerprint:
+            asNonEmptyString(event.publicKeyFingerprint)!,
+        }
+      : {})
   };
+}
+
+/**
+ * Parses server-advertised Desktop capabilities. Only an explicit boolean true
+ * enables command-signing enforcement; missing, false, or malformed values
+ * preserve legacy unsigned command compatibility.
+ */
+export function parseServerCapabilities(value: unknown):
+  | { computeTargetSigning?: boolean }
+  | undefined {
+  const record = asObject(value);
+  return record.computeTargetSigning === true
+    ? { computeTargetSigning: true }
+    : undefined;
 }
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -525,6 +567,21 @@ function asNonEmptyString(value: unknown): string | null {
   }
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
+}
+
+function formatObjectKeysForLog(value: Record<string, unknown>): string {
+  const keys = Object.keys(value).sort();
+  return keys.length > 0 ? keys.join(",") : "none";
+}
+
+function formatPrimitiveForLog(value: unknown): string {
+  if (
+    value === null ||
+    ["boolean", "number", "string", "undefined"].includes(typeof value)
+  ) {
+    return String(value);
+  }
+  return typeof value;
 }
 
 function asFiniteInteger(value: unknown): number | null {

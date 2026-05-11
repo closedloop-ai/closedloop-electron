@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import http from "node:http";
 import { afterEach, test } from "node:test";
-import { CloudCommandExecutor } from "../src/main/cloud-command-executor.js";
+import {
+  CloudCommandExecutor,
+  type CloudCommandExecutorOptions,
+} from "../src/main/cloud-command-executor.js";
+import { COMMAND_SIGNING_REJECTION_REASONS } from "../src/shared/contracts.js";
 import type {
   DesktopCancelEvent,
   DesktopCommandAckEvent,
@@ -568,8 +572,96 @@ test("Observability.commandFailed is called on gateway error", async () => {
   }
 });
 
+test("rejects unsigned commands before queueing when server signing support is enforced", () => {
+  const acks: Array<
+    Omit<DesktopCommandAckEvent, "protocolVersion" | "messageId" | "timestamp">
+  > = [];
+  const events: Array<
+    Omit<
+      DesktopCommandStreamEvent,
+      "protocolVersion" | "messageId" | "timestamp"
+    >
+  > = [];
+  const commandId = "0196b1bb-7a00-7000-8000-000000000006";
+
+  executor = createExecutor({
+    maxInFlightCommands: 1,
+    onAck: (ack) => acks.push(ack),
+    onEvent: (event) => events.push(event),
+    isCommandSigningEnforced: () => true,
+    commandSignatureVerifier: {
+      verify: () => ({
+        ok: false,
+        reason: COMMAND_SIGNING_REJECTION_REASONS.unsignedCommand,
+      }),
+    },
+  });
+  executor.setConnected(true);
+  executor.enqueue(buildCommand(commandId, { command: "status" }));
+
+  assert.deepEqual(acks, [
+    {
+      commandId,
+      accepted: false,
+      state: "failed",
+      reason: COMMAND_SIGNING_REJECTION_REASONS.unsignedCommand,
+    },
+  ]);
+  assert.deepEqual(events, []);
+  assert.deepEqual(executor.getStats(), { activeCommands: 0, queueDepth: 0 });
+});
+
+test("ignores invalid signed envelopes when server signing support is disabled", async () => {
+  await startGateway(async (_request, response) => {
+    response.statusCode = 200;
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ ok: true }));
+  });
+
+  const acks: Array<
+    Omit<DesktopCommandAckEvent, "protocolVersion" | "messageId" | "timestamp">
+  > = [];
+  const events: Array<
+    Omit<
+      DesktopCommandStreamEvent,
+      "protocolVersion" | "messageId" | "timestamp"
+    >
+  > = [];
+  const commandId = "0196b1bb-7a00-7000-8000-000000000007";
+
+  executor = createExecutor({
+    maxInFlightCommands: 1,
+    onAck: (ack) => acks.push(ack),
+    onEvent: (event) => events.push(event),
+    isCommandSigningEnforced: () => false,
+    commandSignatureVerifier: {
+      verify: () => ({
+        ok: false,
+        reason: COMMAND_SIGNING_REJECTION_REASONS.invalidSignature,
+      }),
+    },
+  });
+  executor.setConnected(true);
+  executor.enqueue({
+    ...buildCommand(commandId, { command: "status" }),
+    signature: "not-valid",
+    signaturePayload: "{",
+    publicKeyFingerprint: "cl:unknown",
+  });
+
+  await waitFor(() => countDone(events, commandId) === 1);
+  assert.equal(acks[0].accepted, true);
+  assert.deepEqual(executor.getStats(), { activeCommands: 0, queueDepth: 0 });
+});
+
 function createExecutor(options: {
   maxInFlightCommands: number;
+  onAck?: (
+    event: Omit<
+      DesktopCommandAckEvent,
+      "protocolVersion" | "messageId" | "timestamp"
+    >,
+  ) => void;
   onEvent: (
     event: Omit<
       DesktopCommandStreamEvent,
@@ -580,14 +672,26 @@ function createExecutor(options: {
     activeCommands: number;
     queueDepth: number;
   }) => void;
+  commandSignatureVerifier?: CloudCommandExecutorOptions["commandSignatureVerifier"];
+  isCommandSigningEnforced?: CloudCommandExecutorOptions["isCommandSigningEnforced"];
+  prepareCommandForExecution?: CloudCommandExecutorOptions["prepareCommandForExecution"];
 }): CloudCommandExecutor {
   return new CloudCommandExecutor({
     getGatewayPort: () => gatewayPort,
     getGatewayAuthToken: () => "test-gateway-token",
     maxInFlightCommands: options.maxInFlightCommands,
-    sendCommandAck: () => {},
+    sendCommandAck: options.onAck ?? (() => {}),
     sendCommandEvent: options.onEvent,
     onQueueStatsChange: options.onQueueStatsChange,
+    ...(options.commandSignatureVerifier
+      ? { commandSignatureVerifier: options.commandSignatureVerifier }
+      : {}),
+    ...(options.isCommandSigningEnforced
+      ? { isCommandSigningEnforced: options.isCommandSigningEnforced }
+      : {}),
+    ...(options.prepareCommandForExecution
+      ? { prepareCommandForExecution: options.prepareCommandForExecution }
+      : {}),
   });
 }
 
