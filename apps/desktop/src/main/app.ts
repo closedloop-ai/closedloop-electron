@@ -2705,7 +2705,13 @@ export class DesktopApplication {
       }
       const selectedPath = result.filePaths[0];
       const isGitRepo = isGitRepository(selectedPath);
-      const suggestedPath = isGitRepo ? path.dirname(selectedPath) : undefined;
+      let suggestedPath: string | undefined;
+      if (isGitRepo) {
+        const candidate = path.dirname(selectedPath);
+        if (candidate !== selectedPath && !isRiskyAllowedDirectory(candidate)) {
+          suggestedPath = candidate;
+        }
+      }
       return { path: selectedPath, isGitRepo, suggestedPath };
     });
     ipcMain.handle(
