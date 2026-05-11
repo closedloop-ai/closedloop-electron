@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import os from "node:os";
 import { afterEach, describe, test } from "node:test";
+import { Observability } from "../src/main/observability.js";
+import type { EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
 import { OperationDispatcher } from "../src/server/operation-dispatcher.js";
 import {
   _applyPluginVersionChecksForTesting,
+  _getPluginUpdateStderrTailForTesting,
   _setPluginUpdateCommandForTesting,
+  _shouldEnablePluginAutoUpdateForTesting,
   registerHealthCheckRoutes,
 } from "../src/server/operations/health-check.js";
 import type { McpDetectionResult } from "../src/server/operations/mcp-detection.js";
@@ -53,9 +57,11 @@ const CLOSEDLOOP_PLUGINS = [
 ] as const;
 const originalFetch = globalThis.fetch;
 
-afterEach(() => {
+afterEach(async () => {
   globalThis.fetch = originalFetch;
   _setPluginUpdateCommandForTesting();
+  await Observability.shutdown();
+  Observability.reset();
 });
 
 function makeResponse(): CapturedResponse {
@@ -478,6 +484,102 @@ describe("plugin-version check", () => {
     assert.ok(codePlugin?.updatePluginIds?.includes("plugin-code"));
   });
 
+  test("plugin auto-update is gated on a passing Claude CLI row", () => {
+    assert.equal(
+      _shouldEnablePluginAutoUpdateForTesting(true, [
+        { id: "claude-cli", passed: false },
+        { id: "plugin-code", passed: true },
+      ]),
+      false
+    );
+    assert.equal(
+      _shouldEnablePluginAutoUpdateForTesting(true, [
+        { id: "claude-cli", passed: true },
+        { id: "plugin-code", passed: true },
+      ]),
+      true
+    );
+    assert.equal(
+      _shouldEnablePluginAutoUpdateForTesting(false, [
+        { id: "claude-cli", passed: true },
+      ]),
+      false
+    );
+  });
+
+  test("auto-update success that remains outdated reports failed metadata and telemetry", async () => {
+    mockPluginManifestVersion("2.0.0");
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+    _setPluginUpdateCommandForTesting(async () => ({
+      outcome: "success",
+      stdout: "",
+      elapsedMs: 5,
+    }));
+
+    const checks = await _applyPluginVersionChecksForTesting(
+      buildPassingPluginChecks(),
+      buildInstalledPluginVersions("1.0.0"),
+      {
+        pluginAutoUpdateEnabled: true,
+        readInstalledVersions: () => buildInstalledPluginVersions("1.0.0"),
+      }
+    );
+    const codePlugin = findPluginCheck(checks, "code");
+    const failureTelemetry = telemetryEvents.find(
+      (event) => event.category === "plugin_update.failed"
+    );
+
+    assert.equal(codePlugin?.passed, false);
+    assert.equal(codePlugin?.version, "1.0.0");
+    assert.equal(codePlugin?.updateAttempted, true);
+    assert.equal(codePlugin?.updateOutcome, "failed");
+    assert.equal(
+      failureTelemetry?.diagnostics?.pluginUpdate?.failureReason,
+      "still_outdated"
+    );
+    assert.equal(
+      failureTelemetry?.diagnostics?.pluginUpdate?.outcomes[
+        "code@closedloop-ai"
+      ],
+      "failed"
+    );
+  });
+
+  test("plugin update failure telemetry falls back to bounded stdout tail", async () => {
+    mockPluginManifestVersion("2.0.0");
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+    _setPluginUpdateCommandForTesting(async () => ({
+      outcome: "failed",
+      stdout: `stdout-prefix-${"x".repeat(700)}-stdout-tail-cause`,
+      elapsedMs: 5,
+      exitCode: 1,
+      failureReason: "command_failed",
+    }));
+
+    await _applyPluginVersionChecksForTesting(
+      buildPassingPluginChecks(),
+      buildInstalledPluginVersions("1.0.0"),
+      {
+        pluginAutoUpdateEnabled: true,
+        readInstalledVersions: () => buildInstalledPluginVersions("1.0.0"),
+      }
+    );
+    const failureTelemetry = telemetryEvents.find(
+      (event) => event.category === "plugin_update.failed"
+    );
+    const stderrTail = failureTelemetry?.diagnostics?.pluginUpdate?.stderrTail;
+
+    assert.equal(stderrTail?.length, 512);
+    assert.equal(stderrTail?.includes("stdout-prefix-"), false);
+    assert.equal(stderrTail?.endsWith("-stdout-tail-cause"), true);
+  });
+
   test("auto-update failure returns explicit failure metadata and structured remediation link", async () => {
     mockPluginManifestVersion("2.0.0");
     _setPluginUpdateCommandForTesting(async () => ({
@@ -549,6 +651,15 @@ describe("plugin-version check", () => {
 
     assert.equal(calls, CLOSEDLOOP_PLUGINS.length);
     assert.equal(codePlugin?.updateOutcome, "skipped");
+  });
+
+  test("plugin update stderrTail preserves the stderr suffix", () => {
+    const stderr = `prefix-${"x".repeat(700)}-tail-cause`;
+    const tail = _getPluginUpdateStderrTailForTesting(stderr);
+
+    assert.equal(tail.length, 512);
+    assert.equal(tail.includes("prefix-"), false);
+    assert.equal(tail.endsWith("-tail-cause"), true);
   });
 
   test("marks unverifiable plugin rows as required health check failures", async () => {

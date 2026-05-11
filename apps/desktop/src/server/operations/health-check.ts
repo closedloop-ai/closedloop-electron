@@ -114,6 +114,39 @@ type PluginUpdateCommandResult = {
   failureReason?: PluginUpdateFailureReason;
 };
 
+function getPluginUpdateOutputTail(output: string | Buffer | undefined): string {
+  return (output ?? "")
+    .toString()
+    .trim()
+    .slice(-STDERR_TAIL_MAX_CHARS);
+}
+
+function shouldEnablePluginAutoUpdate(
+  requested: boolean,
+  checks: Array<Pick<CheckResult, "id" | "passed">>
+): boolean {
+  return (
+    requested &&
+    checks.some((check) => check.id === "claude-cli" && check.passed)
+  );
+}
+
+function resolvePostUpdateOutcome(
+  current: boolean,
+  updateResult?: PluginUpdateCommandResult
+): PluginUpdateOutcome {
+  if (current) {
+    return "success";
+  }
+  if (
+    updateResult?.outcome === "timeout" ||
+    updateResult?.outcome === "skipped"
+  ) {
+    return updateResult.outcome;
+  }
+  return "failed";
+}
+
 export function registerHealthCheckRoutes(
   dispatcher: OperationDispatcher,
   processManager: ProcessManager,
@@ -130,7 +163,8 @@ export function registerHealthCheckRoutes(
 
   dispatcher.register("GET", "/api/gateway/health-check", async (context) => {
     const expectedMcpUrl = context.query.get("expectedMcpUrl")?.trim() || undefined;
-    const pluginAutoUpdateEnabled = context.query.get("pluginAutoUpdate") === "1";
+    const requestedPluginAutoUpdate =
+      context.query.get("pluginAutoUpdate") === "1";
     const paths = getBinaryPaths?.();
     const [baseChecks, claudeMcp, codexMcp] = await Promise.all([
       Promise.all([
@@ -157,7 +191,10 @@ export function registerHealthCheckRoutes(
     if (allPluginsInstalled) {
       const installed = getInstalledPluginVersions();
       checks = await applyPluginVersionChecks(checks, installed, {
-        pluginAutoUpdateEnabled,
+        pluginAutoUpdateEnabled: shouldEnablePluginAutoUpdate(
+          requestedPluginAutoUpdate,
+          checks
+        ),
         claudeOverride: paths?.claude,
         readInstalledVersions: () => getInstalledPluginVersions(),
       });
@@ -261,10 +298,7 @@ async function defaultRunPluginUpdateCommand(
       outcome: timeout ? "timeout" : "failed",
       exitCode: typeof error.code === "number" ? error.code : undefined,
       stdout: (error.stdout ?? "").toString().trim(),
-      stderrTail: (error.stderr ?? "")
-        .toString()
-        .trim()
-        .slice(0, STDERR_TAIL_MAX_CHARS),
+      stderrTail: getPluginUpdateOutputTail(error.stderr),
       elapsedMs: Date.now() - startedAt,
       failureReason: timeout ? "timeout" : "command_failed",
     };
@@ -292,6 +326,21 @@ export function _setPluginUpdateCommandForTesting(
 ): void {
   runPluginUpdateCommand = fn ?? defaultRunPluginUpdateCommand;
   failedPluginUpdateAttempts.clear();
+}
+
+/** @internal Test-only. Returns the bounded plugin-update stderr suffix. */
+export function _getPluginUpdateStderrTailForTesting(
+  stderr: string | Buffer | undefined
+): string {
+  return getPluginUpdateOutputTail(stderr);
+}
+
+/** @internal Test-only. Mirrors the route-level auto-update safety gate. */
+export function _shouldEnablePluginAutoUpdateForTesting(
+  requested: boolean,
+  checks: Array<Pick<CheckResult, "id" | "passed">>
+): boolean {
+  return shouldEnablePluginAutoUpdate(requested, checks);
 }
 
 /**
@@ -971,6 +1020,7 @@ async function applyPluginVersionChecks(
       }
 
       const updateResult = updateResults.get(plugin.key);
+      const updateOutcome = resolvePostUpdateOutcome(false, updateResult);
       versionChecks.set(checkId, {
         passed: false,
         version: finalVersion,
@@ -978,7 +1028,7 @@ async function applyPluginVersionChecks(
         remediation: buildPluginUpdateRemediation(plugin.key),
         remediationLinks: [PLUGIN_AUTOUPDATE_DOCS_LINK],
         updateAttempted: true,
-        updateOutcome: updateResult?.outcome ?? "failed",
+        updateOutcome,
         updatePluginIds: affectedCheckIds,
       });
     }
@@ -1107,15 +1157,15 @@ async function runPluginUpdates(
       const current = compareStrictSemver(finalVersion, latestVersion) === true;
       return [
         plugin.key,
-        current
-          ? "success"
-          : (updateResults.get(plugin.key)?.outcome ?? "failed"),
+        resolvePostUpdateOutcome(current, updateResults.get(plugin.key)),
       ];
     })
   ) as Record<string, PluginUpdateOutcome>;
   const failedResult = [...updateResults.values()].find(
     (result) => result.outcome === "failed" || result.outcome === "timeout"
   );
+  const failedOutputTail =
+    failedResult?.stderrTail || getPluginUpdateOutputTail(failedResult?.stdout);
   const anyStillOutdated = outdatedPlugins.some(
     ({ plugin, latestVersion }) =>
       compareStrictSemver(versionsAfterRecord[plugin.key] ?? "", latestVersion) !==
@@ -1146,7 +1196,7 @@ async function runPluginUpdates(
       : anyStillOutdated
         ? { failureReason: "still_outdated" as const }
         : {}),
-    ...(failedResult?.stderrTail ? { stderrTail: failedResult.stderrTail } : {}),
+    ...(failedOutputTail ? { stderrTail: failedOutputTail } : {}),
   };
 
   gatewayLog.info(
