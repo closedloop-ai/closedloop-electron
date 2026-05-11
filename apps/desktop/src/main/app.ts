@@ -26,6 +26,7 @@ import {
   isRiskyAllowedDirectory,
   normalizeScopePath,
 } from "../shared/sandbox-policy.js";
+import { isGitRepository } from "../shared/git-utils.js";
 import { ApiKeyStore } from "./api-key-store.js";
 import { AuthorizedCommandKeyStore } from "./authorized-command-key-store.js";
 import {
@@ -2695,6 +2696,19 @@ export class DesktopApplication {
       );
       return Object.fromEntries(results.map((r) => [r.name, r]));
     });
+    const inspectSandboxPath = (
+      targetPath: string,
+    ): { path: string; isGitRepo: boolean; suggestedPath: string | undefined } => {
+      const isGitRepo = isGitRepository(targetPath);
+      let suggestedPath: string | undefined;
+      if (isGitRepo) {
+        const candidate = path.dirname(targetPath);
+        if (candidate !== targetPath && !isRiskyAllowedDirectory(candidate)) {
+          suggestedPath = candidate;
+        }
+      }
+      return { path: targetPath, isGitRepo, suggestedPath };
+    };
     ipcMain.handle("desktop:pick-sandbox-directory", async () => {
       const result = await dialog.showOpenDialog({
         properties: ["openDirectory", "createDirectory"],
@@ -2702,8 +2716,17 @@ export class DesktopApplication {
       if (result.canceled || result.filePaths.length === 0) {
         return null;
       }
-      return result.filePaths[0];
+      return inspectSandboxPath(result.filePaths[0]);
     });
+    ipcMain.handle(
+      "desktop:inspect-sandbox-path",
+      (_event, targetPath: unknown) => {
+        if (typeof targetPath !== "string") return null;
+        const trimmed = targetPath.trim();
+        if (!trimmed) return null;
+        return inspectSandboxPath(trimmed);
+      },
+    );
     ipcMain.handle(
       "desktop:get-dangerous-auto-approve",
       () => this.dangerousAutoApprove,
