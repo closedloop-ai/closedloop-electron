@@ -786,7 +786,7 @@ export async function runBootstrapIfNeeded(
     loopLog(loopId, "Running bootstrap (no artifacts detected)...");
     const claudePath = getResolvedClaudePath();
     const env = await getShellEnv();
-    await execFileAsync(claudePath, ["-p", "/agent-bootstrap"], {
+    await execFileAsync(claudePath, ["-p", "/bootstrap:agent-bootstrap"], {
       cwd: worktreeDir,
       env,
       timeout: 15 * 60 * 1000,
