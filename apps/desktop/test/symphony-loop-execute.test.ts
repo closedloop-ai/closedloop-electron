@@ -3,7 +3,7 @@
  *
  * T-5.1: No-changes paths
  *   - executeGitOperations returns null when git status --porcelain is empty
- *   - attemptLlmCommit returns { status: "failed", reason: "other", logTail: "..." } when claude exits 0 without writing execution-result.json
+ *   - attemptLlmCommit returns { status: "failed", reason: { kind: "other" }, logTail: "..." } when claude exits 0 without writing execution-result.json
  *
  * T-5.2: Existing-PR paths
  *   - executeGitOperations returns existing PR URL when gh pr view succeeds (no gh pr create)
@@ -143,7 +143,7 @@ test("EXECUTE: no PR URL in upload when worktree has no changes (git status empt
 
   // fake-bin: claude that exits 0 without writing execution-result.json
   //   (simulates attemptLlmCommit finding no result file →
-  //    returns { status: "failed", reason: "other", logTail: "..." })
+  //    returns { status: "failed", reason: { kind: "other" }, logTail: "..." })
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
   await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
@@ -586,7 +586,7 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
   await fs.mkdir(fakeBin, { recursive: true });
 
   // fake claude for attemptLlmCommit: exits 0 without writing execution-result.json
-  // → attemptLlmCommit returns { status: "failed", reason: "other", logTail: "..." }
+  // → attemptLlmCommit returns { status: "failed", reason: { kind: "other" }, logTail: "..." }
   // → falls through to executeGitOperations
   await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
     mode: 0o755,
@@ -736,7 +736,7 @@ test("EXECUTE: git status failure sets GIT_PUSH_FAILED in completed event warnin
   await fs.mkdir(fakeBin, { recursive: true });
 
   // fake claude: exits 0 without writing execution-result.json
-  // → attemptLlmCommit returns { status: "failed", reason: "other", logTail: "..." }
+  // → attemptLlmCommit returns { status: "failed", reason: { kind: "other" }, logTail: "..." }
   // → falls through to executeGitOperations
   await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
     mode: 0o755,
@@ -3220,7 +3220,7 @@ async function runLlmFallbackTest(opts: {
 }
 
 // ---------------------------------------------------------------------------
-// Test: attemptLlmCommit returns { status: "failed", reason: "other", logTail: ... }
+// Test: attemptLlmCommit returns { status: "failed", reason: { kind: "other" }, logTail: ... }
 //       when claude exits 0 without writing execution-result.json
 //       → code falls through to executeGitOperations (git-fallback path)
 // ---------------------------------------------------------------------------
@@ -3240,7 +3240,7 @@ test("EXECUTE: attemptLlmCommit returns status:failed reason:other when claude e
 });
 
 // ---------------------------------------------------------------------------
-// Test: attemptLlmCommit returns { status: "failed", reason: "other", logTail: ... }
+// Test: attemptLlmCommit returns { status: "failed", reason: { kind: "other" }, logTail: ... }
 //       when claude exits with non-zero exit code
 //       → code falls through to executeGitOperations (git-fallback path)
 // ---------------------------------------------------------------------------
@@ -3396,12 +3396,12 @@ test("EXECUTE: rate-limited LLM commit spawn emits FAILED event with LoopErrorCo
 
 // ---------------------------------------------------------------------------
 // Test (T-3.3): LLM-commit spawn killed by SIGTERM (timeout simulation)
-//               returns { status: "failed", reason: "timeout" }
+//               returns { status: "failed", reason: { kind: "timeout" } }
 //               → code falls through to git-fallback path and completes normally
 //
 //   - fake claude kills itself with SIGTERM so Node.js sees code:null
 //     (same observable outcome as the 30-minute kill timer firing)
-//   - attemptLlmCommit resolves with { status: "failed", reason: "timeout" }
+//   - attemptLlmCommit resolves with { status: "failed", reason: { kind: "timeout" } }
 //   - the non-auth failure falls through to executeGitOperations (git-fallback)
 //   - loop completes with executeFinalizationPath="git-fallback"
 // ---------------------------------------------------------------------------
