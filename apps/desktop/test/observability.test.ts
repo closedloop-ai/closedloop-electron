@@ -4,6 +4,7 @@ import type { DesktopAnalyticsEvent } from "../src/main/cloud-protocol.js";
 import { Observability } from "../src/main/observability.js";
 import type { EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
 import type { TelemetryCategory } from "../src/main/telemetry-protocol.js";
+import { validateOutboundUrlForSurface } from "../src/server/outbound-url-policy.js";
 
 type AnalyticsEvent = Omit<
   DesktopAnalyticsEvent,
@@ -229,5 +230,163 @@ describe("Observability", () => {
     assert.equal(telemetryEvents.length, 1);
     assert.equal(telemetryEvents[0].category, "queue.stats_changed");
     assert.equal(analyticsEvents.length, 0);
+  });
+
+  test("outbound network decisions emit descriptor-only telemetry", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    const signedUrl =
+      "https://bucket.s3.us-east-1.amazonaws.com/users/123/report.txt" +
+      "?X-Amz-Credential=AKIASECRET&X-Amz-Signature=signature-secret";
+    const decision = validateOutboundUrlForSurface(
+      "loop_attachment_download",
+      signedUrl,
+    );
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.outboundNetworkDecision(decision.diagnostics);
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "desktop.outbound_network_decision");
+    assert.equal(telemetryEvents[0].severity, "info");
+    assert.deepEqual(
+      telemetryEvents[0].diagnostics?.outboundNetwork,
+      decision.diagnostics,
+    );
+
+    const serialized = JSON.stringify(telemetryEvents[0]);
+    assert.equal(serialized.includes("users/123"), false);
+    assert.equal(serialized.includes("report.txt"), false);
+    assert.equal(serialized.includes("X-Amz-Credential"), false);
+    assert.equal(serialized.includes("X-Amz-Signature"), false);
+    assert.equal(serialized.includes("AKIASECRET"), false);
+    assert.equal(serialized.includes("signature-secret"), false);
+    assert.equal(serialized.includes("Authorization"), false);
+  });
+
+  test("support upload lifecycle emits direct diagnostics", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.supportUploadLifecycle({
+      outcome: "failed",
+      loopId: "loop-1",
+      s3StateKeySuffix: "state.json",
+      attemptedLogicalNames: ["stdout", "stderr"],
+      attemptedUploadedNames: ["stdout.txt"],
+      reason: "put_http_error",
+      uploadedCount: 1,
+      durationMs: 250,
+    });
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "desktop.support_upload");
+    assert.equal(telemetryEvents[0].severity, "warn");
+    assert.equal(telemetryEvents[0].trace?.loopId, "loop-1");
+    assert.equal(telemetryEvents[0].trace?.jobId, "loop-1");
+    assert.deepEqual(telemetryEvents[0].diagnostics?.supportUpload, {
+      outcome: "failed",
+      loopId: "loop-1",
+      s3StateKeySuffix: "state.json",
+      attemptedLogicalNames: ["stdout", "stderr"],
+      attemptedUploadedNames: ["stdout.txt"],
+      reason: "put_http_error",
+      uploadedCount: 1,
+      durationMs: 250,
+    });
+  });
+
+  test("job plan source resolution emits direct diagnostics", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    const planSource = {
+      source: "raw-artifact" as const,
+      rawPlanPayload: true,
+      rawPlanAligned: true,
+      localPlanJsonPresent: true,
+      localPlanJsonAligned: true,
+      importedPlanFileStaged: false,
+      closedLoopPlanFileSet: true,
+      planArtifactContentLength: 1024,
+      rawPlanContentLength: 1024,
+      planArtifactContentHash: "plan-hash",
+      rawPlanContentHash: "raw-hash",
+    };
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.jobPlanSourceResolved(
+      "cmd-1",
+      "EXECUTE",
+      "loop-1",
+      planSource,
+    );
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "job.plan_source_resolved");
+    assert.equal(telemetryEvents[0].severity, "info");
+    assert.equal(telemetryEvents[0].trace?.commandId, "cmd-1");
+    assert.equal(telemetryEvents[0].trace?.operationId, "EXECUTE");
+    assert.equal(telemetryEvents[0].trace?.loopId, "loop-1");
+    assert.equal(telemetryEvents[0].trace?.jobId, "loop-1");
+    assert.deepEqual(telemetryEvents[0].diagnostics?.planSource, planSource);
+  });
+
+  test("telemetry emitter facade forwards events", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.getTelemetryEmitter().emit({
+      severity: "info",
+      category: "job.decision_table_verification",
+      message: "Decision table aligned",
+      trace: { commandId: "cmd-1", operationId: "EXECUTE", loopId: "loop-1" },
+      diagnostics: {
+        decisionTableVerification: {
+          telemetryStatus: "reported",
+          telemetryFilePath: "/tmp/decision-table-verifications.jsonl",
+          lineNumber: 7,
+          timestamp: "2026-05-12T00:00:00.000Z",
+          workdir: "/tmp/work",
+          decisionTablePath: ".closedloop-ai/decision-tables/PLN-536.md",
+          finalStatus: "aligned",
+          iterations: 1,
+          driftKindCounts: {
+            codeDrift: 0,
+            testDrift: 0,
+            planAmbiguity: 0,
+          },
+          fixesAttempted: 0,
+          parseFailures: 0,
+          verifierInvocations: 1,
+          phaseDurationMs: 25,
+        },
+      },
+    });
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "job.decision_table_verification");
+    assert.equal(telemetryEvents[0].message, "Decision table aligned");
+    assert.equal(
+      telemetryEvents[0].diagnostics?.decisionTableVerification?.telemetryStatus,
+      "reported",
+    );
+  });
+
+  test("telemetry facade emission never throws", () => {
+    Observability.init({
+      telemetrySend: () => {
+        throw new Error("transport unavailable");
+      },
+    });
+
+    assert.doesNotThrow(() => {
+      Observability.commandInitiated("cmd-1", "GENERATE_PRD");
+    });
   });
 });

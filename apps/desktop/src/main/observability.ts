@@ -46,7 +46,6 @@ export class Observability {
   private static telemetry: TelemetryService | null = null;
   private static analytics: ProductAnalyticsTransport | null = null;
   private static desktopClientVersion = "";
-  private static computeTargetId = "";
 
   // Checks for which healthcheck telemetry is emitted. Extend this allowlist in future PRs.
   private static readonly HEALTH_CHECK_TELEMETRY_IDS = new Set(["claude-cli"]);
@@ -68,7 +67,6 @@ export class Observability {
     });
     Observability.analytics = options.analytics ?? null;
     Observability.desktopClientVersion = options.desktopClientVersion ?? "";
-    Observability.computeTargetId = "";
     Observability.healthCheckState.clear();
   }
 
@@ -80,7 +78,6 @@ export class Observability {
     Observability.telemetry = null;
     Observability.analytics = null;
     Observability.desktopClientVersion = "";
-    Observability.computeTargetId = "";
     Observability.healthCheckState.clear();
   }
 
@@ -92,7 +89,6 @@ export class Observability {
 
   static setTargetId(id: string): void {
     Observability.telemetry?.setTargetId(id);
-    Observability.computeTargetId = id;
   }
 
   static setGatewaySessionId(id: string): void {
