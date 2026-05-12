@@ -4264,6 +4264,7 @@ export async function handleProcessCompletion(
         exitCode,
         diagnostics,
         failureSessionId,
+        command,
       );
       await postFailureLoopEvent({
         ...failureEventBase,
@@ -4278,6 +4279,7 @@ export async function handleProcessCompletion(
         exitCode,
         diagnostics,
         failureSessionId,
+        command,
       );
     }
 
@@ -4846,6 +4848,7 @@ export async function handleProcessCompletion(
         normalizedSessionId && normalizedSessionId.length > 0
           ? normalizedSessionId
           : undefined,
+        body.command,
       );
     } else {
       // Legacy completion path: route-level behavior when no JobStore is present.
@@ -4927,6 +4930,7 @@ export async function handleProcessCompletion(
         loopId,
         undefined,
         legacySessionId,
+        body.command,
       );
       loopTokenStore?.deleteLoopToken(loopId);
     }
@@ -6894,7 +6898,7 @@ async function handleLoopRequest(
       });
     }
 
-    Observability.jobStarted(commandId, operationId, body.loopId, pid);
+    Observability.jobStarted(commandId, operationId, body.loopId, pid, body.command);
 
     // Write PID file (safe to await now — close handler is already registered)
     await fs.writeFile(path.join(claudeWorkDir, "process.pid"), String(pid));

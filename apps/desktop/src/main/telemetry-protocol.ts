@@ -1,3 +1,4 @@
+import type { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import type { ProtocolEnvelope } from "./cloud-protocol.js";
 
 // Constants for log tail collection
@@ -467,6 +468,9 @@ export interface TelemetryDiagnostics {
   errorStack?: string;
   extra?: Record<string, unknown>;
   loopPerf?: LoopPerfEventDiagnostics;
+  lifecycle?: {
+    command?: LoopCommand;
+  };
 }
 
 /** Telemetry event payload without protocol envelope fields (added by transport layer). */
