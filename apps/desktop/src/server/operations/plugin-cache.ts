@@ -155,9 +155,10 @@ export function parseClaudePluginListJson(
 }
 
 const TEXT_PLUGIN_ID_REGEX = /([A-Za-z0-9_-]+@closedloop-ai)/;
-const TEXT_STATUS_ENABLED_REGEX = /Status:\s*(?:✔|✓|\[x\]|enabled)\s*enabled/i;
+const TEXT_STATUS_ENABLED_REGEX =
+  /Status:\s*(?:(?:✔|✓|\[x\])\s*)?enabled/i;
 const TEXT_STATUS_DISABLED_REGEX =
-  /Status:\s*(?:✘|x|\[ \]|disabled)\s*disabled/i;
+  /Status:\s*(?:(?:✘|x|\[ \])\s*)?disabled/i;
 
 /**
  * Parse human-readable `claude plugin list` output. This is a compatibility

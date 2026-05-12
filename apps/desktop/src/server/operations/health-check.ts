@@ -287,7 +287,15 @@ type PluginUpdateRunner = (
   options?: { claudeOverride?: string; timeoutMs?: number }
 ) => Promise<PluginUpdateCommandResult>;
 
-async function defaultRunPluginUpdateCommand(
+type PluginSubcommand = "update" | "enable";
+
+/**
+ * Run a `claude plugin` subcommand with shared binary resolution, timeout, and
+ * failure shaping so update and enable remediation paths stay behaviorally
+ * identical except for the CLI verb.
+ */
+async function runClaudePluginSubcommand(
+  subcommand: PluginSubcommand,
   pluginRef: string,
   options: { claudeOverride?: string; timeoutMs?: number } = {}
 ): Promise<PluginUpdateCommandResult> {
@@ -310,7 +318,7 @@ async function defaultRunPluginUpdateCommand(
   try {
     const { stdout } = await execFileAsync(
       resolved.path,
-      ["plugin", "update", pluginRef, "--scope", "user"],
+      ["plugin", subcommand, pluginRef, "--scope", "user"],
       {
         timeout: options.timeoutMs ?? PLUGIN_UPDATE_TIMEOUT_MS,
         env,
@@ -340,57 +348,18 @@ async function defaultRunPluginUpdateCommand(
   }
 }
 
+async function defaultRunPluginUpdateCommand(
+  pluginRef: string,
+  options: { claudeOverride?: string; timeoutMs?: number } = {}
+): Promise<PluginUpdateCommandResult> {
+  return runClaudePluginSubcommand("update", pluginRef, options);
+}
+
 async function defaultRunPluginEnableCommand(
   pluginRef: string,
   options: { claudeOverride?: string; timeoutMs?: number } = {}
 ): Promise<PluginUpdateCommandResult> {
-  const startedAt = Date.now();
-  const resolved = await resolveBinaryFromLoginShell(
-    "claude",
-    options.claudeOverride
-  );
-  if (resolved.source === "override_invalid") {
-    return {
-      outcome: "failed",
-      stdout: "",
-      elapsedMs: Date.now() - startedAt,
-      failureReason: "cli_unavailable",
-      stderrTail: "Claude binary override path does not exist or is not executable",
-    };
-  }
-
-  const env = await getShellEnv();
-  try {
-    const { stdout } = await execFileAsync(
-      resolved.path,
-      ["plugin", "enable", pluginRef, "--scope", "user"],
-      {
-        timeout: options.timeoutMs ?? PLUGIN_UPDATE_TIMEOUT_MS,
-        env,
-      }
-    );
-    return {
-      outcome: "success",
-      stdout: stdout.trim(),
-      elapsedMs: Date.now() - startedAt,
-    };
-  } catch (err) {
-    const error = err as NodeJS.ErrnoException & {
-      stderr?: string | Buffer;
-      stdout?: string | Buffer;
-      killed?: boolean;
-      code?: string | number;
-    };
-    const timeout = error.killed || error.code === "ETIMEDOUT";
-    return {
-      outcome: timeout ? "timeout" : "failed",
-      exitCode: typeof error.code === "number" ? error.code : undefined,
-      stdout: (error.stdout ?? "").toString().trim(),
-      stderrTail: getPluginUpdateOutputTail(error.stderr),
-      elapsedMs: Date.now() - startedAt,
-      failureReason: timeout ? "timeout" : "command_failed",
-    };
-  }
+  return runClaudePluginSubcommand("enable", pluginRef, options);
 }
 
 let runPluginUpdateCommand: PluginUpdateRunner = defaultRunPluginUpdateCommand;

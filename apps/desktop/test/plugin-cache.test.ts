@@ -164,6 +164,21 @@ platform@closedloop-ai
     ]);
   });
 
+  test("parses text fallback status without symbol prefixes", () => {
+    const entries = parseClaudePluginListText(`
+code@closedloop-ai
+  Status: enabled
+
+platform@closedloop-ai
+  Status: disabled
+`);
+
+    assert.deepEqual(entries, [
+      { id: "code@closedloop-ai", enabled: true },
+      { id: "platform@closedloop-ai", enabled: false },
+    ]);
+  });
+
   test("required ClosedLoop plugin inventory includes bootstrap and six plugins", () => {
     assert.deepEqual([...CLOSEDLOOP_REQUIRED_PLUGIN_IDS], [
       "bootstrap@closedloop-ai",
