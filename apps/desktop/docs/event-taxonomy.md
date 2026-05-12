@@ -1,6 +1,9 @@
-# PostHog Event Taxonomy
+# Desktop Product Analytics Event Taxonomy
 
-Living reference of all PostHog analytics events emitted by the desktop app.
+Living reference of product analytics events captured by the desktop app and
+relayed to `symphony-alpha` over the authenticated gateway socket. Electron
+does not package, read, or send a PostHog token; `symphony-alpha` validates,
+enriches, feature-gates, and forwards accepted events server-side.
 
 ## Naming Convention
 
@@ -42,7 +45,7 @@ Living reference of all PostHog analytics events emitted by the desktop app.
 
 ## Telemetry Events (Datadog-bound)
 
-Structured events emitted via `TelemetryService` (`src/main/telemetry-service.ts`), transported through the cloud relay socket to Datadog. These are distinct from the PostHog analytics events above — they carry operational diagnostics, not user-behavior analytics. Categories are defined in the `TelemetryCategory` string-literal union type in `src/main/telemetry-protocol.ts`.
+Structured events emitted via `TelemetryService` (`src/main/telemetry-service.ts`), transported through the cloud relay socket to Datadog. These are distinct from the product analytics events above because they carry operational diagnostics, not user-behavior analytics. Categories are defined in the `TelemetryCategory` string-literal union type in `src/main/telemetry-protocol.ts`.
 
 ### Connection Lifecycle
 
@@ -120,15 +123,18 @@ These fields from `TelemetryTraceContext` are **not** added by `enrichEvent()`. 
 
 ## Common Properties
 
-All events automatically include:
-- `distinct_id` — gateway-owner Clerk user id from hello-ack `clerkUserId`; falls back to `unknown` when the server omits identity
-- `compute_target_id` — compute target identity from relay hello-ack `computeTargetId`; falls back to `unknown` before handshake
-- `desktop_client_version` — Electron app version from `app.getVersion()`
-- `platform` — Node/Electron `process.platform`
-- `desktop_attribution_model` — always `gateway_owner`
-- `organization_id` — gateway-owner organization id when hello-ack provides it
+Desktop sends only bounded non-sensitive event properties. `symphony-alpha`
+adds the server-owned common properties before forwarding:
 
-Desktop PostHog event names remain underscore-separated and non-namespaced for parity with the existing Desktop taxonomy.
+- `distinct_id` — gateway-owner Clerk user id from authenticated socket context
+- `compute_target_id` — authenticated compute target id from socket/session context
+- `organization_id` — gateway-owner organization id from authenticated socket context
+- `origin` — always `desktop`
+- `desktop_attribution_model` — always `gateway_owner`
+- `desktop_client_version` — Electron app version when Desktop supplied it
+- `platform` — Node/Electron `process.platform` when Desktop supplied it
+
+Desktop product analytics event names remain underscore-separated and non-namespaced for parity with the existing taxonomy.
 
 ### Joining Desktop and Web Events
 
@@ -136,20 +142,30 @@ Web analytics identify users with Clerk user ids. To join Desktop and web behavi
 
 ### Shared Gateway Attribution
 
-Desktop-originated PostHog events are gateway-owner/device analytics. When a compute target is shared with the organization and another user dispatches a command, events emitted by the owner's Electron gateway still use the owner's Clerk id as `distinct_id` and include `desktop_attribution_model = "gateway_owner"`. Per-requester Desktop attribution is not available in this feature because the current `desktop.command` payload does not carry requester Clerk identity; use server-side or web events for requester analytics until a separate per-command attribution feature exists.
+Desktop-originated product analytics are gateway-owner/device analytics. When a compute target is shared with the organization and another user dispatches a command, events emitted by the owner's Electron gateway still use the owner's Clerk id as server-enriched `distinct_id` and include `desktop_attribution_model = "gateway_owner"`. Per-requester Desktop attribution is not available in this feature because the current `desktop.command` payload does not carry requester Clerk identity; use server-side or web events for requester analytics until a separate per-command attribution feature exists.
+
+### Rollout Control
+
+Server forwarding is controlled by the `desktop-server-analytics-relay` feature
+flag in `symphony-alpha`. When disabled, the server returns a feature-disabled
+ack and Desktop drops analytics without affecting command/control traffic.
 
 ### Manual Validation
 
-1. Set `CL_POSTHOG_API_KEY=phc_...`.
-2. Run `just desktop-package`.
-3. Install and run the packaged DMG.
-4. Connect to cloud with a gateway-owner account that has Clerk identity.
-5. Trigger a command, then quit immediately after the command event.
-6. Verify `command_initiated`, `command_completed`, and `desktop_connection_established` appear in PostHog within about 60 seconds with owner `distinct_id`, `compute_target_id`, `desktop_client_version`, and `desktop_attribution_model = "gateway_owner"`.
+1. Ensure the server environment has PostHog configured and the server relay
+   flag enabled for the gateway owner.
+2. Run Desktop and connect to cloud with a gateway-owner account that has Clerk
+   identity.
+3. Trigger a command, then quit immediately after the command event.
+4. Verify `command_initiated`, `command_completed`, and
+   `desktop_connection_established` appear in PostHog within about 60 seconds
+   with server-owned `distinct_id`, `compute_target_id`,
+   `desktop_client_version`, `platform`, `organization_id`, and
+   `desktop_attribution_model = "gateway_owner"`.
 
 ## Adding New Events
 
-### Adding a PostHog (analytics) event
+### Adding a product analytics event
 
 1. Add a typed method to `Observability` class in `src/main/observability.ts`
 2. Add tests in `test/observability.test.ts`

@@ -1,6 +1,8 @@
 import { TelemetryService, type EnrichedTelemetryEvent } from "./telemetry-service.js";
-import { PostHogAnalytics } from "./posthog-analytics.js";
-import { gatewayLog } from "./gateway-logger.js";
+import type {
+  DesktopAnalyticsEvent,
+  DesktopAnalyticsEventName,
+} from "./cloud-protocol.js";
 import type {
   DesktopShutdownDiagnostics,
   DesktopUpdateDiagnostics,
@@ -17,13 +19,13 @@ import type {
 
 export interface ObservabilityOptions {
   telemetrySend: (event: EnrichedTelemetryEvent) => void;
-  posthog?: { apiKey: string; host: string };
+  analytics?: ProductAnalyticsTransport;
   desktopClientVersion?: string;
 }
 
-export type GatewayOwnerUserContext = {
-  clerkUserId?: string;
-  organizationId?: string;
+export type ProductAnalyticsTransport = {
+  send: (event: Omit<DesktopAnalyticsEvent, "protocolVersion" | "messageId" | "timestamp">) => void;
+  flush: (options: { timeoutMs: number }) => Promise<void>;
 };
 
 type HealthCheckTelemetryInput = {
@@ -42,11 +44,9 @@ type HealthCheckTelemetryInput = {
 
 export class Observability {
   private static telemetry: TelemetryService | null = null;
-  private static posthog: PostHogAnalytics | null = null;
+  private static analytics: ProductAnalyticsTransport | null = null;
   private static desktopClientVersion = "";
   private static computeTargetId = "";
-  private static posthogDistinctId = "";
-  private static organizationId = "";
 
   // Checks for which healthcheck telemetry is emitted. Extend this allowlist in future PRs.
   private static readonly HEALTH_CHECK_TELEMETRY_IDS = new Set(["claude-cli"]);
@@ -63,24 +63,13 @@ export class Observability {
   >();
 
   static init(options: ObservabilityOptions): void {
-    // Shut down any previous PostHog client to avoid leaking flush timers
-    Observability.posthog?.shutdown().catch(() => {});
-
     Observability.telemetry = new TelemetryService({
       sendTelemetry: options.telemetrySend,
     });
+    Observability.analytics = options.analytics ?? null;
     Observability.desktopClientVersion = options.desktopClientVersion ?? "";
     Observability.computeTargetId = "";
-    Observability.posthogDistinctId = "";
-    Observability.organizationId = "";
     Observability.healthCheckState.clear();
-
-    if (options.posthog) {
-      Observability.posthog = new PostHogAnalytics(options.posthog);
-      gatewayLog.info("observability", "PostHog analytics initialized");
-    } else {
-      Observability.posthog = null;
-    }
   }
 
   static initNoOp(): void {
@@ -88,19 +77,15 @@ export class Observability {
   }
 
   static reset(): void {
-    // Shut down PostHog client to avoid leaking flush timers
-    Observability.posthog?.shutdown().catch(() => {});
     Observability.telemetry = null;
-    Observability.posthog = null;
+    Observability.analytics = null;
     Observability.desktopClientVersion = "";
     Observability.computeTargetId = "";
-    Observability.posthogDistinctId = "";
-    Observability.organizationId = "";
     Observability.healthCheckState.clear();
   }
 
   static async shutdown(): Promise<void> {
-    await Observability.posthog?.shutdown();
+    await Observability.analytics?.flush({ timeoutMs: 1_500 });
   }
 
   // --- Context injection ---
@@ -108,22 +93,6 @@ export class Observability {
   static setTargetId(id: string): void {
     Observability.telemetry?.setTargetId(id);
     Observability.computeTargetId = id;
-  }
-
-  /**
-   * Sets PostHog user context from the Desktop gateway owner's hello-ack
-   * identity. This is not a per-command requester switch for org-shared
-   * compute targets.
-   */
-  static setUserContext(context: GatewayOwnerUserContext): void {
-    const clerkUserId = context.clerkUserId?.trim();
-    if (!clerkUserId) {
-      Observability.posthogDistinctId = "";
-      Observability.organizationId = "";
-      return;
-    }
-    Observability.posthogDistinctId = clerkUserId;
-    Observability.organizationId = context.organizationId?.trim() ?? "";
   }
 
   static setGatewaySessionId(id: string): void {
@@ -145,7 +114,7 @@ export class Observability {
       commandId,
       operationId,
     });
-    Observability.capturePostHog("command_initiated", {
+    Observability.captureAnalytics("command_initiated", {
       command_id: commandId,
       operation_type: operationId,
     });
@@ -156,7 +125,7 @@ export class Observability {
       commandId,
       operationId,
     });
-    Observability.capturePostHog("command_started", {
+    Observability.captureAnalytics("command_started", {
       command_id: commandId,
       operation_type: operationId,
     });
@@ -167,7 +136,7 @@ export class Observability {
       commandId,
       operationId,
     }, { extra: { latencyMs } });
-    Observability.capturePostHog("command_completed", {
+    Observability.captureAnalytics("command_completed", {
       command_id: commandId,
       operation_type: operationId,
       latency_ms: latencyMs,
@@ -179,7 +148,7 @@ export class Observability {
       commandId,
       operationId,
     });
-    Observability.capturePostHog("command_failed", {
+    Observability.captureAnalytics("command_failed", {
       command_id: commandId,
       operation_type: operationId,
       error_class: "timeout",
@@ -191,7 +160,7 @@ export class Observability {
       commandId,
       operationId,
     });
-    Observability.capturePostHog("command_failed", {
+    Observability.captureAnalytics("command_failed", {
       command_id: commandId,
       operation_type: operationId,
       error_class: "cancelled",
@@ -203,17 +172,17 @@ export class Observability {
       commandId,
       operationId,
     });
-    Observability.capturePostHog("command_failed", {
+    Observability.captureAnalytics("command_failed", {
       command_id: commandId,
       operation_type: operationId,
       error_class: "gateway_error",
     });
   }
 
-  // --- Approval lifecycle (PostHog only) ---
+  // --- Approval lifecycle (product analytics only) ---
 
   static approvalRequested(operationId: string, commandId?: string): void {
-    Observability.capturePostHog("approval_requested", {
+    Observability.captureAnalytics("approval_requested", {
       operation_type: operationId,
       ...(commandId ? { command_id: commandId } : {}),
     });
@@ -225,7 +194,7 @@ export class Observability {
     timeToResolveMs: number,
     commandId?: string,
   ): void {
-    Observability.capturePostHog("approval_resolved", {
+    Observability.captureAnalytics("approval_resolved", {
       operation_type: operationId,
       outcome,
       time_to_resolve_ms: timeToResolveMs,
@@ -237,8 +206,7 @@ export class Observability {
 
   static connectionEstablished(desktopId: string, version: string, environment: string): void {
     Observability.emitTelemetry("info", "connection.established", "Connection established", { computeTargetId: desktopId });
-    Observability.capturePostHog("desktop_connection_established", {
-      desktop_id: desktopId,
+    Observability.captureAnalytics("desktop_connection_established", {
       version,
       environment,
     });
@@ -246,7 +214,7 @@ export class Observability {
 
   static reconnectionResumed(reason: string, replayCommandCount: number): void {
     Observability.emitTelemetry("info", "connection.reconnection_resumed", "Reconnection resumed", {}, { extra: { reason, replayCommandCount } });
-    Observability.capturePostHog("desktop_reconnection_resumed", {
+    Observability.captureAnalytics("desktop_reconnection_resumed", {
       reason,
       replay_command_count: replayCommandCount,
     });
@@ -254,12 +222,12 @@ export class Observability {
 
   static connectionDegraded(error: string): void {
     Observability.emitTelemetry("warn", "connection.degraded", error, {});
-    Observability.capturePostHog("desktop_connection_degraded", { error });
+    Observability.captureAnalytics("desktop_connection_degraded", { error });
   }
 
   static connectionLost(reason?: string): void {
     Observability.emitTelemetry("warn", "connection.lost", reason ?? "Connection lost", {});
-    Observability.capturePostHog("desktop_connection_lost", { reason });
+    Observability.captureAnalytics("desktop_connection_lost", { reason });
   }
 
   /** Emits a redacted diagnostic when Desktop PoP cannot sign a managed-key request. */
@@ -271,7 +239,7 @@ export class Observability {
       {},
       { extra: { surface, reason } },
     );
-    Observability.capturePostHog("desktop_pop_unavailable", { surface, reason });
+    Observability.captureAnalytics("desktop_pop_unavailable", { surface, reason });
   }
 
   /** Emits a descriptor-only outbound network policy decision for SSRF-sensitive fetches. */
@@ -346,7 +314,7 @@ export class Observability {
       {},
       { pluginUpdate: input },
     );
-    Observability.capturePostHog("plugin_update_attempted", {
+    Observability.captureAnalytics("plugin_update_attempted", {
       plugin_count: input.pluginIds.length,
       duration_ms: input.durationMs,
     });
@@ -361,7 +329,7 @@ export class Observability {
       {},
       { pluginUpdate: input },
     );
-    Observability.capturePostHog("plugin_update_succeeded", {
+    Observability.captureAnalytics("plugin_update_succeeded", {
       plugin_count: input.pluginIds.length,
       duration_ms: input.durationMs,
     });
@@ -376,17 +344,17 @@ export class Observability {
       {},
       { pluginUpdate: input },
     );
-    Observability.capturePostHog("plugin_update_failed", {
+    Observability.captureAnalytics("plugin_update_failed", {
       plugin_count: input.pluginIds.length,
       duration_ms: input.durationMs,
       failure_reason: input.failureReason,
     });
   }
 
-  // --- Sandbox (PostHog only) ---
+  // --- Sandbox (product analytics only) ---
 
   static sandboxBlocked(operationClass: string): void {
-    Observability.capturePostHog("sandbox_blocked_operation", {
+    Observability.captureAnalytics("sandbox_blocked_operation", {
       operation_class: operationClass,
     });
   }
@@ -564,13 +532,19 @@ export class Observability {
         stderr: check.debug?.stderr,
       },
     });
-    Observability.capturePostHog(category, {
-      check_id: check.id,
-      error_code: errorCode,
-      found_elsewhere: (check.debug?.foundAt?.length ?? 0) > 0,
-      platform: check.debug?.platform,
-      shell: check.debug?.shell,
-    });
+    if (
+      category === "healthcheck.failure_detected" ||
+      category === "healthcheck.failure_persistent" ||
+      category === "healthcheck.recovered"
+    ) {
+      Observability.captureAnalytics(category, {
+        check_id: check.id,
+        error_code: errorCode,
+        found_elsewhere: (check.debug?.foundAt?.length ?? 0) > 0,
+        platform: check.debug?.platform,
+        shell: check.debug?.shell,
+      });
+    }
   }
 
   // --- Queue stats (telemetry only) ---
@@ -598,16 +572,30 @@ export class Observability {
     });
   }
 
-  private static capturePostHog(event: string, properties: Record<string, unknown>): void {
-    Observability.posthog?.capture(Observability.posthogDistinctId || "unknown", event, {
-      ...properties,
-      desktop_client_version: Observability.desktopClientVersion,
-      platform: process.platform,
-      compute_target_id: Observability.computeTargetId || "unknown",
-      desktop_attribution_model: "gateway_owner",
-      ...(Observability.organizationId
-        ? { organization_id: Observability.organizationId }
-        : {}),
+  private static captureAnalytics(
+    event: DesktopAnalyticsEventName,
+    properties: Record<string, unknown>,
+  ): void {
+    Observability.analytics?.send({
+      event,
+      properties: sanitizeAnalyticsProperties({
+        ...properties,
+        desktop_client_version: Observability.desktopClientVersion,
+        platform: process.platform,
+      }),
+      occurredAt: new Date().toISOString(),
     });
   }
+}
+
+function sanitizeAnalyticsProperties(
+  properties: Record<string, unknown>,
+): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(properties)) {
+    if (value !== undefined) {
+      sanitized[key] = value;
+    }
+  }
+  return sanitized;
 }

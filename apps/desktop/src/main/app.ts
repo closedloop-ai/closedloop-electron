@@ -84,7 +84,6 @@ import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
 import { JobStore, isTerminalJobStatus, type LocalJob } from "./job-store.js";
 import { Observability } from "./observability.js";
-import { resolvePostHogConfig } from "./posthog-config.js";
 import type {
   DesktopSecurityUpgradePayload,
   DesktopSecurityUpgradeResult,
@@ -217,10 +216,11 @@ export class DesktopApplication {
     this.sessionStore = new LocalSessionStore();
     Observability.init({
       telemetrySend: (event) => this.cloudSocket?.sendTelemetry(event),
-      posthog: resolvePostHogConfig({
-        isPackaged: app.isPackaged,
-        resourcesPath: process.resourcesPath,
-      }),
+      analytics: {
+        send: (event) => this.cloudSocket?.emitAnalytics(event),
+        flush: (options) =>
+          this.cloudSocket?.flushAnalytics(options) ?? Promise.resolve(),
+      },
       desktopClientVersion: app.getVersion(),
     });
     this.settingsStore = new SettingsStore();
@@ -390,10 +390,6 @@ export class DesktopApplication {
         }
         this.notifyCommandKeysChanged();
         Observability.setTargetId(event.computeTargetId);
-        Observability.setUserContext({
-          clerkUserId: event.clerkUserId,
-          organizationId: event.organizationId,
-        });
         if (event.sessionId) {
           Observability.setGatewaySessionId(event.sessionId);
         }

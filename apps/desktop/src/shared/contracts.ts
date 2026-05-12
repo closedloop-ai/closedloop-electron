@@ -35,8 +35,6 @@ export const DEFAULT_RELAY_ORIGIN = process.env.CL_RELAY_ORIGIN ?? "https://rela
 export const DEFAULT_WEB_APP_ORIGIN = process.env.CL_WEB_APP_ORIGIN ?? "https://app.closedloop.ai";
 /** REST API origin — used for auth verification and other REST calls (not the Socket.IO relay). */
 export const DEFAULT_AUTH_API_ORIGIN = process.env.CL_AUTH_API_ORIGIN ?? "https://api.closedloop.ai";
-export const POSTHOG_DEFAULT_HOST = "https://us.i.posthog.com";
-export const DEFAULT_POSTHOG_HOST = process.env.CL_POSTHOG_HOST ?? POSTHOG_DEFAULT_HOST;
 
 export type CapabilityToolName = "claude" | "codex" | "git" | "gh" | "python3";
 

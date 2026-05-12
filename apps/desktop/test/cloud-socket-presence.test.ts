@@ -353,7 +353,7 @@ describe("T-3.1: hello payload version fields", () => {
     assert.equal(parseServerCapabilities(undefined), undefined);
   });
 
-  test("parseDesktopHelloAck passes through gateway-owner identity and ignores userId", () => {
+  test("parseDesktopHelloAck ignores identity fields owned by server analytics", () => {
     const ack = parseDesktopHelloAck({
       computeTargetId: "target-1",
       sessionId: "session-1",
@@ -367,8 +367,14 @@ describe("T-3.1: hello payload version fields", () => {
 
     assert.ok(ack);
     assert.equal(ack.computeTargetId, "target-1");
-    assert.equal(ack.clerkUserId, "clerk_user_1");
-    assert.equal(ack.organizationId, "org-1");
+    assert.equal(
+      (ack as unknown as Record<string, unknown>).clerkUserId,
+      undefined,
+    );
+    assert.equal(
+      (ack as unknown as Record<string, unknown>).organizationId,
+      undefined,
+    );
     assert.equal(
       (ack as unknown as Record<string, unknown>).userId,
       undefined,
@@ -386,7 +392,13 @@ describe("T-3.1: hello payload version fields", () => {
 
     assert.ok(ack);
     assert.equal(ack.computeTargetId, "target-1");
-    assert.equal(ack.clerkUserId, undefined);
-    assert.equal(ack.organizationId, undefined);
+    assert.equal(
+      (ack as unknown as Record<string, unknown>).clerkUserId,
+      undefined,
+    );
+    assert.equal(
+      (ack as unknown as Record<string, unknown>).organizationId,
+      undefined,
+    );
   });
 });
