@@ -286,11 +286,17 @@ const FAKE_TOKEN_JSONL =
  * the 0-token EXECUTE guard from converting the completed event into an error.
  * Pass `skipTokens: true` to keep the original script as-is (for tests that
  * intentionally exercise the 0-token path).
+ *
+ * Pass `captureEnv: true` to inject lines that write multi-repo env vars
+ * (CLOSEDLOOP_ADD_DIRS, CLOSEDLOOP_ADD_DIR_NAMES, CLOSEDLOOP_REPO_MAP) to
+ * `$CLOSEDLOOP_WORKDIR/spawn-env.txt` using `printf 'KEY=%s\n' "$VAR"` format.
+ * The helper does NOT sanitize inherited env: all vars set by the spawning
+ * process are visible to the generated script exactly as received.
  */
 export async function createFakeRunLoopScript(
   homeDir: string,
   scriptContent: string,
-  opts?: { skipTokens?: boolean }
+  opts?: { skipTokens?: boolean; captureEnv?: boolean }
 ): Promise<string> {
   const scriptDir = path.join(
     homeDir,
@@ -311,9 +317,27 @@ export async function createFakeRunLoopScript(
     // non-zero, preventing the NO_WORK_PRODUCED guard from firing.
     const tokenLine = `mkdir -p "$CLOSEDLOOP_WORKDIR" 2>/dev/null; echo '${FAKE_TOKEN_JSONL}' >> "$CLOSEDLOOP_WORKDIR/claude-output.jsonl"\n`;
     // Insert after the shebang line
-    finalContent = scriptContent.replace(
+    finalContent = finalContent.replace(
       /^(#!\/bin\/sh\n)/,
       `$1${tokenLine}`
+    );
+  }
+
+  if (opts?.captureEnv) {
+    // Inject lines that write multi-repo env vars to spawn-env.txt so tests
+    // can assert on them. Uses printf rather than echo to avoid interpretation
+    // of escape sequences or platform-specific newline differences.
+    // The helper intentionally does NOT sanitize inherited env: the script
+    // receives every var exactly as the spawning process set it.
+    const captureLines = [
+      `mkdir -p "$CLOSEDLOOP_WORKDIR" 2>/dev/null`,
+      `printf 'CLOSEDLOOP_ADD_DIRS=%s\\n' "$CLOSEDLOOP_ADD_DIRS" >> "$CLOSEDLOOP_WORKDIR/spawn-env.txt"`,
+      `printf 'CLOSEDLOOP_ADD_DIR_NAMES=%s\\n' "$CLOSEDLOOP_ADD_DIR_NAMES" >> "$CLOSEDLOOP_WORKDIR/spawn-env.txt"`,
+      `printf 'CLOSEDLOOP_REPO_MAP=%s\\n' "$CLOSEDLOOP_REPO_MAP" >> "$CLOSEDLOOP_WORKDIR/spawn-env.txt"`,
+    ].join("\n") + "\n";
+    finalContent = finalContent.replace(
+      /^(#!\/bin\/sh\n)/,
+      `$1${captureLines}`
     );
   }
 

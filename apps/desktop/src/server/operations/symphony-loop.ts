@@ -312,6 +312,7 @@ import {
 import { getMultiRepoPolicy } from "@closedloop-ai/loops-api/multi-repo-policy";
 import {
   buildMountPathsFooter,
+  type PeerWorktreeRef,
   toPeerWorktreeRefs,
   writePeerReposManifest,
 } from "./peer-context.js";
@@ -754,6 +755,40 @@ function buildClaudePipeline(
     `tee -a ${shellEscape(jsonlFile)}`,
   ].join(" | ");
   return { cmd: "bash", args: ["-c", `${pipeline}; exit \${PIPESTATUS[0]}`] };
+}
+
+/**
+ * Extract the short repo name from a fullName (e.g. "org/repo" -> "repo").
+ * Pipe characters are replaced with "_" to preserve the pipe delimiter
+ * invariant used by CLOSEDLOOP_ADD_DIRS and friends.
+ */
+function sanitizedShortName(fullName: string): string {
+  const short = fullName.includes("/")
+    ? fullName.split("/").at(-1)!
+    : fullName;
+  return short.replace(/\|/g, "_");
+}
+
+/**
+ * Build the peer-repo env vars (CLOSEDLOOP_ADD_DIRS, CLOSEDLOOP_ADD_DIR_NAMES,
+ * CLOSEDLOOP_REPO_MAP) for the spawn environment. Returns an empty object when
+ * there are no peers so the keys are absent rather than empty strings.
+ */
+function buildPeerEnvVars(
+  peers: ReadonlyArray<PeerWorktreeRef>,
+): Record<string, string> {
+  if (peers.length === 0) {
+    return {};
+  }
+  return {
+    CLOSEDLOOP_ADD_DIRS: peers.map((r) => r.localPath).join("|"),
+    CLOSEDLOOP_ADD_DIR_NAMES: peers
+      .map((r) => sanitizedShortName(r.fullName))
+      .join("|"),
+    CLOSEDLOOP_REPO_MAP: peers
+      .map((r) => `${sanitizedShortName(r.fullName)}:${r.localPath}`)
+      .join("|"),
+  };
 }
 
 /** Find the local repo path for a given fullName (e.g. "org/repo"). */
@@ -6269,6 +6304,14 @@ async function handleLoopRequest(
         body.command === LoopCommand.Execute
           ? crypto.randomBytes(32).toString("base64url")
           : undefined;
+
+      // Resolve peer worktree metadata once here so it can be used both in
+      // spawnEnv (sharing contract: run-loop.sh reads CLOSEDLOOP_ADD_DIRS,
+      // CLOSEDLOOP_ADD_DIR_NAMES, and CLOSEDLOOP_REPO_MAP to know about peer
+      // repos without needing --add-dir flags) and in command-specific logic
+      // below (e.g. GeneratePrd prompt footer, writePeerReposManifest).
+      const peerRefs = toPeerWorktreeRefs(additionalWorktreeDirs);
+
       const spawnEnv: Record<string, string> = await getShellEnv({
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
         CLOSEDLOOP_PLAN_FILE: closedLoopPlanFile,
@@ -6289,7 +6332,19 @@ async function handleLoopRequest(
         // the desktop app validated in pre-flight (avoids PATH mismatches
         // between Electron's env and the user's login shell).
         CLAUDE_BIN: claudeBinary,
+        // Sharing contract: when peer worktrees are present, expose them to
+        // the harness via env vars so every command branch (PLAN, EXECUTE,
+        // GENERATE_PRD, etc.) sees the peer list without each branch
+        // independently reconstructing it.
+        //
+        // Absent-not-empty-string contract: these vars are omitted entirely
+        // when there are no peers so the harness can use a simple presence
+        // check (`[ -n "$CLOSEDLOOP_ADD_DIRS" ]`) rather than guarding
+        // against an empty-string value that would split into a single empty
+        // element.
+        ...buildPeerEnvVars(peerRefs),
       });
+
       clearUserVisibleLoopFailureMarker(claudeWorkDir);
 
       // Collect non-sensitive env snapshot: NODE_ENV + CLAUDE_CODE_USE_* keys only
@@ -6463,12 +6518,8 @@ async function handleLoopRequest(
         body.command === LoopCommand.GeneratePrd ||
         body.command === LoopCommand.RequestPrdChanges
       ) {
-        // Build resolved peer metadata once and use it as the single source of
-        // truth for both --add-dir flags and the prompt's "## Mounted paths"
-        // footer (mirrors the ECS harness contract: footer paths cannot drift
-        // from --add-dir paths).
-        const peerRefs = toPeerWorktreeRefs(additionalWorktreeDirs);
-
+        // peerRefs is hoisted to the outer try block so spawnEnv and all
+        // command branches share the same resolved metadata.
         const promptFileName =
           body.command === LoopCommand.GeneratePrd
             ? "generate-prd-prompt.txt"

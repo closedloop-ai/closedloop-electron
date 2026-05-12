@@ -1,14 +1,14 @@
 packages:
   - apps/*
+# blockExoticSubdeps: refuse non-registry specifiers (git:, github:, http(s):,
+# file:, link:) introduced via transitive deps — closes the github-ref bypass.
+blockExoticSubdeps: true
 
 # Supply-chain hardening (Shai-Hulud / TanStack-style npm worm mitigations).
 # minimumReleaseAge: refuse to install package versions younger than 7 days
 # (10080 minutes), giving the registry time to detect and yank compromised
 # releases before they land in our lockfile.
 minimumReleaseAge: 10080
-# blockExoticSubdeps: refuse non-registry specifiers (git:, github:, http(s):,
-# file:, link:) introduced via transitive deps — closes the github-ref bypass.
-blockExoticSubdeps: true
 
 # pnpm 10 disables postinstall lifecycle scripts by default — also a
 # supply-chain mitigation, since malicious packages typically run their
