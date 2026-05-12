@@ -321,6 +321,38 @@ describe("Observability", () => {
     );
   });
 
+  test("PostHog clears stale identity when later Clerk context is blank", () => {
+    const captureCalls: PostHogCaptureCall[] = [];
+    mock.method(PostHogAnalytics.prototype, "capture", (
+      distinctId: string,
+      event: string,
+      properties: Record<string, unknown>,
+    ) => {
+      captureCalls.push({ distinctId, event, properties });
+    });
+
+    Observability.init({
+      telemetrySend: () => {},
+      posthog: { apiKey: "phc_test", host: "https://us.i.posthog.com" },
+      desktopClientVersion: "0.15.3",
+    });
+    Observability.setTargetId("target-1");
+    Observability.setUserContext({
+      clerkUserId: "clerk_user_1",
+      organizationId: "org-1",
+    });
+    Observability.commandCompleted("cmd-1", "GENERATE_PRD", 1234);
+
+    Observability.setUserContext({ clerkUserId: "   ", organizationId: "org-2" });
+    Observability.commandCompleted("cmd-2", "GENERATE_PRD", 2345);
+
+    assert.equal(captureCalls.length, 2);
+    assert.equal(captureCalls[0].distinctId, "clerk_user_1");
+    assert.equal(captureCalls[0].properties.organization_id, "org-1");
+    assert.equal(captureCalls[1].distinctId, "unknown");
+    assert.equal(captureCalls[1].properties.organization_id, undefined);
+  });
+
   test("desktopPopUnavailable emits redacted telemetry and PostHog diagnostics", () => {
     const telemetryEvents: EnrichedTelemetryEvent[] = [];
     const captureCalls: Array<{ event: string; properties: Record<string, unknown> }> = [];

@@ -118,6 +118,8 @@ export class Observability {
   static setUserContext(context: GatewayOwnerUserContext): void {
     const clerkUserId = context.clerkUserId?.trim();
     if (!clerkUserId) {
+      Observability.posthogDistinctId = "";
+      Observability.organizationId = "";
       return;
     }
     Observability.posthogDistinctId = clerkUserId;

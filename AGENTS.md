@@ -80,6 +80,11 @@ shapes are producer contracts consumed by `symphony-alpha`. When adding or
 changing a Desktop telemetry payload, include the `symphony-alpha` consumer
 update in the same PR stack or call out the required companion PR explicitly.
 
+Long-lived telemetry context setters that consume optional or version-skewed
+gateway payload fields must clear stale state when the latest payload omits or
+blanks that context. Add regression coverage for reconnects, user switches, or
+legacy payloads that should fall back instead of preserving a previous identity.
+
 At minimum, verify the companion change covers:
 
 - `packages/observability/telemetry/schema.ts` accepts the new Desktop-origin
