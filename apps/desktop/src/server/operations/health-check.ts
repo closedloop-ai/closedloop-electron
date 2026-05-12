@@ -28,10 +28,11 @@ import { json } from "./response-utils.js";
 const execFileAsync = promisify(execFile);
 const VERSION_REGEX = /(\d+\.\d+[\w.-]*)/;
 const VERSION_PREFIX_REGEX = /^[vV]/;
+const CLOSEDLOOP_MARKETPLACE_NAME = "closedloop-ai";
 const PLUGIN_UPDATE_TIMEOUT_MS = 30_000;
 const STDERR_TAIL_MAX_CHARS = 512;
 const PLUGIN_AUTOUPDATE_DOCS_LINK = {
-  label: "Enable ClosedLoop plugin autoupdate",
+  label: "Update ClosedLoop plugins manually",
   url: "https://github.com/closedloop-ai/claude-plugins#quick-start",
 } as const;
 
@@ -113,6 +114,13 @@ type PluginManifest = {
   plugin: (typeof CLOSEDLOOP_USER_PLUGINS)[number];
   latestVersion?: string;
   error?: "manifest_unavailable";
+};
+
+type ClaudeMarketplaceListEntry = {
+  name?: unknown;
+  source?: unknown;
+  path?: unknown;
+  installLocation?: unknown;
 };
 
 type PluginUpdateCommandResult = {
@@ -299,6 +307,67 @@ type PluginUpdateRunner = (
   options?: { claudeOverride?: string; timeoutMs?: number }
 ) => Promise<PluginUpdateCommandResult>;
 
+type PluginMarketplaceUpdateRunner = (
+  options?: { claudeOverride?: string; timeoutMs?: number }
+) => Promise<PluginUpdateCommandResult>;
+
+async function defaultRunPluginMarketplaceUpdateCommand(
+  options: { claudeOverride?: string; timeoutMs?: number } = {}
+): Promise<PluginUpdateCommandResult> {
+  const startedAt = Date.now();
+  const resolved = await resolveBinaryFromLoginShell(
+    "claude",
+    options.claudeOverride
+  );
+  if (resolved.source === "override_invalid") {
+    return {
+      outcome: "failed",
+      stdout: "",
+      elapsedMs: Date.now() - startedAt,
+      failureReason: "cli_unavailable",
+      stderrTail: "Claude binary override path does not exist or is not executable",
+    };
+  }
+
+  const env = await getShellEnv();
+  try {
+    const { stdout } = await execFileAsync(
+      resolved.path,
+      [
+        "plugin",
+        "marketplace",
+        "update",
+        CLOSEDLOOP_MARKETPLACE_NAME,
+      ],
+      {
+        timeout: options.timeoutMs ?? PLUGIN_UPDATE_TIMEOUT_MS,
+        env,
+      }
+    );
+    return {
+      outcome: "success",
+      stdout: stdout.trim(),
+      elapsedMs: Date.now() - startedAt,
+    };
+  } catch (err) {
+    const error = err as NodeJS.ErrnoException & {
+      stderr?: string | Buffer;
+      stdout?: string | Buffer;
+      killed?: boolean;
+      code?: string | number;
+    };
+    const timeout = error.killed || error.code === "ETIMEDOUT";
+    return {
+      outcome: timeout ? "timeout" : "failed",
+      exitCode: typeof error.code === "number" ? error.code : undefined,
+      stdout: (error.stdout ?? "").toString().trim(),
+      stderrTail: getPluginUpdateOutputTail(error.stderr),
+      elapsedMs: Date.now() - startedAt,
+      failureReason: timeout ? "timeout" : "command_failed",
+    };
+  }
+}
+
 async function defaultRunPluginUpdateCommand(
   pluginRef: string,
   options: { claudeOverride?: string; timeoutMs?: number } = {}
@@ -407,6 +476,8 @@ async function defaultRunPluginEnableCommand(
 
 let runPluginUpdateCommand: PluginUpdateRunner = defaultRunPluginUpdateCommand;
 let runPluginEnableCommand: PluginUpdateRunner = defaultRunPluginEnableCommand;
+let runPluginMarketplaceUpdateCommand: PluginMarketplaceUpdateRunner =
+  defaultRunPluginMarketplaceUpdateCommand;
 const failedPluginUpdateAttempts = new Map<string, PluginUpdateOutcome>();
 
 /**
@@ -427,6 +498,14 @@ export function _setPluginUpdateCommandForTesting(
 ): void {
   runPluginUpdateCommand = fn ?? defaultRunPluginUpdateCommand;
   failedPluginUpdateAttempts.clear();
+}
+
+/** @internal Test-only. Replace the plugin marketplace refresh runner. */
+export function _setPluginMarketplaceUpdateCommandForTesting(
+  fn?: PluginMarketplaceUpdateRunner
+): void {
+  runPluginMarketplaceUpdateCommand =
+    fn ?? defaultRunPluginMarketplaceUpdateCommand;
 }
 
 /** @internal Test-only. Replace the plugin enable runner. */
@@ -461,11 +540,13 @@ export async function _applyPluginVersionChecksForTesting(
   options: {
     pluginAutoUpdateEnabled?: boolean;
     readInstalledVersions?: () => Record<string, string>;
+    preferConfiguredMarketplace?: boolean;
   } = {}
 ): Promise<CheckResult[]> {
   return applyPluginVersionChecks(checks, installed, {
     pluginAutoUpdateEnabled: options.pluginAutoUpdateEnabled ?? false,
     readInstalledVersions: options.readInstalledVersions ?? (() => installed),
+    preferConfiguredMarketplace: options.preferConfiguredMarketplace ?? false,
   });
 }
 
@@ -1265,9 +1346,13 @@ async function applyPluginVersionChecks(
     pluginAutoUpdateEnabled: boolean;
     claudeOverride?: string;
     readInstalledVersions: () => Record<string, string>;
+    preferConfiguredMarketplace?: boolean;
   }
 ): Promise<CheckResult[]> {
-  const manifests = await fetchPluginManifests();
+  const manifests = await fetchPluginManifests({
+    claudeOverride: options.claudeOverride,
+    preferConfiguredMarketplace: options.preferConfiguredMarketplace ?? true,
+  });
   const versionChecks = new Map<string, Partial<CheckResult>>();
   const outdatedPlugins: Array<{
     plugin: (typeof CLOSEDLOOP_USER_PLUGINS)[number];
@@ -1359,7 +1444,18 @@ async function applyPluginVersionChecks(
   });
 }
 
-async function fetchPluginManifests(): Promise<PluginManifest[]> {
+async function fetchPluginManifests(options: {
+  claudeOverride?: string;
+  preferConfiguredMarketplace: boolean;
+}): Promise<PluginManifest[]> {
+  if (options.preferConfiguredMarketplace) {
+    const configuredMarketplaceManifests =
+      await readConfiguredDirectoryMarketplaceManifests(options.claudeOverride);
+    if (configuredMarketplaceManifests) {
+      return configuredMarketplaceManifests;
+    }
+  }
+
   const results = await Promise.allSettled(
     CLOSEDLOOP_USER_PLUGINS.map((plugin) =>
       fetch(
@@ -1387,6 +1483,113 @@ async function fetchPluginManifests(): Promise<PluginManifest[]> {
       }
     )
   );
+}
+
+async function readConfiguredDirectoryMarketplaceManifests(
+  claudeOverride?: string
+): Promise<PluginManifest[] | null> {
+  const root = await resolveConfiguredDirectoryMarketplaceRoot(claudeOverride);
+  if (!root) {
+    return null;
+  }
+
+  let marketplacePlugins: Array<Record<string, unknown>>;
+  try {
+    const marketplaceJson = JSON.parse(
+      await fs.readFile(
+        path.join(root, ".claude-plugin", "marketplace.json"),
+        "utf-8"
+      )
+    ) as { plugins?: unknown };
+    marketplacePlugins = Array.isArray(marketplaceJson.plugins)
+      ? marketplaceJson.plugins.filter(
+          (entry): entry is Record<string, unknown> =>
+            typeof entry === "object" && entry !== null
+        )
+      : [];
+  } catch {
+    return CLOSEDLOOP_USER_PLUGINS.map((plugin) => ({
+      plugin,
+      error: "manifest_unavailable",
+    }));
+  }
+
+  return Promise.all(
+    CLOSEDLOOP_USER_PLUGINS.map(async (plugin): Promise<PluginManifest> => {
+      const marketplaceEntry = marketplacePlugins.find(
+        (entry) => entry.name === plugin.folder
+      );
+      const source =
+        typeof marketplaceEntry?.source === "string"
+          ? marketplaceEntry.source
+          : undefined;
+      if (!source) {
+        return { plugin, error: "manifest_unavailable" };
+      }
+
+      try {
+        const pluginJsonPath = path.resolve(
+          root,
+          source,
+          ".claude-plugin",
+          "plugin.json"
+        );
+        const body = JSON.parse(
+          await fs.readFile(pluginJsonPath, "utf-8")
+        ) as { version?: unknown };
+        return typeof body.version === "string"
+          ? { plugin, latestVersion: body.version }
+          : { plugin, error: "manifest_unavailable" };
+      } catch {
+        return { plugin, error: "manifest_unavailable" };
+      }
+    })
+  );
+}
+
+async function resolveConfiguredDirectoryMarketplaceRoot(
+  claudeOverride?: string
+): Promise<string | null> {
+  const resolved = await resolveBinaryFromLoginShell("claude", claudeOverride);
+  if (resolved.source === "override_invalid") {
+    return null;
+  }
+
+  try {
+    const { stdout } = await runCommand(resolved.path, [
+      "plugin",
+      "marketplace",
+      "list",
+      "--json",
+    ]);
+    const entries = JSON.parse(stdout) as unknown;
+    if (!Array.isArray(entries)) {
+      return null;
+    }
+
+    const marketplace = entries.find((entry): entry is ClaudeMarketplaceListEntry => {
+      if (typeof entry !== "object" || entry === null) {
+        return false;
+      }
+      const record = entry as ClaudeMarketplaceListEntry;
+      return record.name === CLOSEDLOOP_MARKETPLACE_NAME;
+    });
+    if (marketplace?.source !== "directory") {
+      return null;
+    }
+
+    const directoryPath =
+      typeof marketplace.path === "string"
+        ? marketplace.path
+        : typeof marketplace.installLocation === "string"
+          ? marketplace.installLocation
+          : undefined;
+    return directoryPath && path.isAbsolute(directoryPath)
+      ? directoryPath
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function manifestUnavailableResult(): Partial<CheckResult> {
@@ -1426,6 +1629,26 @@ async function runPluginUpdates(
     })}`
   );
 
+  const marketplaceRefresh = await runPluginMarketplaceUpdateCommand({
+    claudeOverride: options.claudeOverride,
+    timeoutMs: PLUGIN_UPDATE_TIMEOUT_MS,
+  });
+  const marketplaceRefreshSucceeded =
+    marketplaceRefresh.outcome === "success";
+  if (!marketplaceRefreshSucceeded) {
+    gatewayLog.warn(
+      "health-check",
+      `ClosedLoop plugin marketplace refresh failed ${JSON.stringify({
+        marketplace: CLOSEDLOOP_MARKETPLACE_NAME,
+        outcome: marketplaceRefresh.outcome,
+        exitCode: marketplaceRefresh.exitCode,
+        failureReason: marketplaceRefresh.failureReason,
+        stderrTail: marketplaceRefresh.stderrTail ||
+          getPluginUpdateOutputTail(marketplaceRefresh.stdout),
+      })}`
+    );
+  }
+
   Observability.pluginUpdateAttempted({
     pluginIds,
     versionsBefore,
@@ -1438,31 +1661,40 @@ async function runPluginUpdates(
     scope: "user",
   });
 
-  for (const { plugin, installedVersion, latestVersion } of outdatedPlugins) {
-    const suppressionKey = getFailedPluginUpdateAttemptKey(
-      plugin.key,
-      installedVersion,
-      latestVersion
-    );
-    const suppressedOutcome = failedPluginUpdateAttempts.get(suppressionKey);
-    if (suppressedOutcome) {
-      updateResults.set(plugin.key, {
-        outcome: "skipped",
-        stdout: "",
-        elapsedMs: 0,
-        failureReason:
-          suppressedOutcome === "timeout" ? "timeout" : "still_outdated",
-      });
-      continue;
-    }
+  if (marketplaceRefreshSucceeded) {
+    for (const { plugin, installedVersion, latestVersion } of outdatedPlugins) {
+      const suppressionKey = getFailedPluginUpdateAttemptKey(
+        plugin.key,
+        installedVersion,
+        latestVersion
+      );
+      const suppressedOutcome = failedPluginUpdateAttempts.get(suppressionKey);
+      if (suppressedOutcome) {
+        updateResults.set(plugin.key, {
+          outcome: "skipped",
+          stdout: "",
+          elapsedMs: 0,
+          failureReason:
+            suppressedOutcome === "timeout" ? "timeout" : "still_outdated",
+        });
+        continue;
+      }
 
-    const result = await runPluginUpdateCommand(plugin.key, {
-      claudeOverride: options.claudeOverride,
-      timeoutMs: PLUGIN_UPDATE_TIMEOUT_MS,
-    });
-    updateResults.set(plugin.key, result);
-    if (result.outcome === "failed" || result.outcome === "timeout") {
-      failedPluginUpdateAttempts.set(suppressionKey, result.outcome);
+      const result = await runPluginUpdateCommand(plugin.key, {
+        claudeOverride: options.claudeOverride,
+        timeoutMs: PLUGIN_UPDATE_TIMEOUT_MS,
+      });
+      updateResults.set(plugin.key, result);
+      if (result.outcome === "failed" || result.outcome === "timeout") {
+        failedPluginUpdateAttempts.set(suppressionKey, result.outcome);
+      }
+    }
+  } else {
+    for (const { plugin } of outdatedPlugins) {
+      updateResults.set(plugin.key, {
+        ...marketplaceRefresh,
+        stdout: marketplaceRefresh.stdout,
+      });
     }
   }
 
@@ -1490,14 +1722,16 @@ async function runPluginUpdates(
       compareStrictSemver(versionsAfterRecord[plugin.key] ?? "", latestVersion) !==
       true
   );
-  for (const { plugin, installedVersion, latestVersion } of outdatedPlugins) {
-    if (compareStrictSemver(versionsAfterRecord[plugin.key] ?? "", latestVersion) === true) {
-      continue;
+  if (marketplaceRefreshSucceeded) {
+    for (const { plugin, installedVersion, latestVersion } of outdatedPlugins) {
+      if (compareStrictSemver(versionsAfterRecord[plugin.key] ?? "", latestVersion) === true) {
+        continue;
+      }
+      failedPluginUpdateAttempts.set(
+        getFailedPluginUpdateAttemptKey(plugin.key, installedVersion, latestVersion),
+        outcomes[plugin.key] === "timeout" ? "timeout" : "failed"
+      );
     }
-    failedPluginUpdateAttempts.set(
-      getFailedPluginUpdateAttemptKey(plugin.key, installedVersion, latestVersion),
-      outcomes[plugin.key] === "timeout" ? "timeout" : "failed"
-    );
   }
   const diagnostics: PluginUpdateDiagnostics = {
     pluginIds,
@@ -1552,7 +1786,8 @@ function getFailedPluginUpdateAttemptKey(
 function buildPluginUpdateRemediation(pluginRef: string): string {
   return [
     "1. Open Claude Code.",
-    "2. Open the plugin marketplace and update ClosedLoop plugins manually, or run:",
+    "2. Open the plugin marketplace and update the closedloop-ai marketplace, then update ClosedLoop plugins manually, or run:",
+    `claude plugin marketplace update ${CLOSEDLOOP_MARKETPLACE_NAME}`,
     `claude plugin update ${pluginRef} --scope user`,
     "3. Restart Claude Code if needed.",
     "4. Re-run System Check.",

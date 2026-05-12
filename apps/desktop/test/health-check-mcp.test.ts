@@ -11,6 +11,7 @@ import {
   _applyPluginVersionChecksForTesting,
   _getPluginUpdateStderrTailForTesting,
   _setPluginEnableCommandForTesting,
+  _setPluginMarketplaceUpdateCommandForTesting,
   _setPluginUpdateCommandForTesting,
   _setRunCommandForTesting,
   _shouldEnablePluginAutoUpdateForTesting,
@@ -69,6 +70,7 @@ const tempDirs: string[] = [];
 afterEach(async () => {
   globalThis.fetch = originalFetch;
   _setPluginEnableCommandForTesting();
+  _setPluginMarketplaceUpdateCommandForTesting();
   _setPluginUpdateCommandForTesting();
   _setRunCommandForTesting();
   if (originalHome === undefined) {
@@ -193,6 +195,48 @@ function findPluginCheck(
 
 function mockPluginManifestVersion(version: string): void {
   globalThis.fetch = (async () => Response.json({ version })) as typeof fetch;
+}
+
+async function writeDirectoryMarketplace(version: string): Promise<string> {
+  const marketplaceRoot = await fs.mkdtemp(
+    path.join(os.tmpdir(), "closedloop-marketplace-")
+  );
+  tempDirs.push(marketplaceRoot);
+  await fs.mkdir(path.join(marketplaceRoot, ".claude-plugin"), {
+    recursive: true,
+  });
+  await fs.writeFile(
+    path.join(marketplaceRoot, ".claude-plugin", "marketplace.json"),
+    JSON.stringify({
+      name: "closedloop-ai",
+      plugins: CLOSEDLOOP_PLUGINS.map((plugin) => ({
+        name: plugin.folder,
+        source: `./plugins/${plugin.folder}`,
+      })),
+    })
+  );
+  for (const plugin of CLOSEDLOOP_PLUGINS) {
+    const pluginManifestDir = path.join(
+      marketplaceRoot,
+      "plugins",
+      plugin.folder,
+      ".claude-plugin"
+    );
+    await fs.mkdir(pluginManifestDir, { recursive: true });
+    await fs.writeFile(
+      path.join(pluginManifestDir, "plugin.json"),
+      JSON.stringify({ name: plugin.folder, version })
+    );
+  }
+  return marketplaceRoot;
+}
+
+function stubSuccessfulMarketplaceUpdate(): void {
+  _setPluginMarketplaceUpdateCommandForTesting(async () => ({
+    outcome: "success",
+    stdout: "",
+    elapsedMs: 5,
+  }));
 }
 
 async function makeTempHome(): Promise<string> {
@@ -789,11 +833,46 @@ describe("plugin-version check", () => {
     assert.equal(updateCalls, 0);
   });
 
+  test("uses the configured directory marketplace as latest-version source", async () => {
+    const marketplaceRoot = await writeDirectoryMarketplace("3.0.0");
+    _setRunCommandForTesting(async (_cmd, args) => {
+      if (args.join(" ") === "plugin marketplace list --json") {
+        return {
+          stdout: JSON.stringify([
+            {
+              name: "closedloop-ai",
+              source: "directory",
+              path: marketplaceRoot,
+              installLocation: marketplaceRoot,
+            },
+          ]),
+        };
+      }
+      return { stdout: "1.0.0" };
+    });
+
+    const checks = await _applyPluginVersionChecksForTesting(
+      buildPassingPluginChecks(),
+      buildInstalledPluginVersions("1.0.0"),
+      {
+        preferConfiguredMarketplace: true,
+      }
+    );
+    const codePlugin = findPluginCheck(checks, "code");
+
+    assert.equal(codePlugin?.passed, false);
+    assert.equal(codePlugin?.error, "Update available: 3.0.0");
+  });
+
   test("auto-update success returns post-update passing metadata only when opted in", async () => {
     mockPluginManifestVersion("2.0.0");
     const calls: string[] = [];
+    _setPluginMarketplaceUpdateCommandForTesting(async () => {
+      calls.push("marketplace:update:closedloop-ai");
+      return { outcome: "success", stdout: "", elapsedMs: 5 };
+    });
     _setPluginUpdateCommandForTesting(async (pluginRef) => {
-      calls.push(pluginRef);
+      calls.push(`plugin:update:${pluginRef}`);
       return { outcome: "success", stdout: "", elapsedMs: 5 };
     });
 
@@ -807,9 +886,10 @@ describe("plugin-version check", () => {
     );
     const codePlugin = findPluginCheck(checks, "code");
 
+    assert.equal(calls[0], "marketplace:update:closedloop-ai");
     assert.deepEqual(
-      calls.sort(),
-      CLOSEDLOOP_PLUGINS.map((plugin) => plugin.key).sort()
+      calls.slice(1).sort(),
+      CLOSEDLOOP_PLUGINS.map((plugin) => `plugin:update:${plugin.key}`).sort()
     );
     assert.equal(codePlugin?.passed, true);
     assert.equal(codePlugin?.version, "2.0.0");
@@ -847,6 +927,7 @@ describe("plugin-version check", () => {
     Observability.init({
       telemetrySend: (event) => telemetryEvents.push(event),
     });
+    stubSuccessfulMarketplaceUpdate();
     _setPluginUpdateCommandForTesting(async () => ({
       outcome: "success",
       stdout: "",
@@ -888,6 +969,7 @@ describe("plugin-version check", () => {
     Observability.init({
       telemetrySend: (event) => telemetryEvents.push(event),
     });
+    stubSuccessfulMarketplaceUpdate();
     _setPluginUpdateCommandForTesting(async () => ({
       outcome: "failed",
       stdout: `stdout-prefix-${"x".repeat(700)}-stdout-tail-cause`,
@@ -916,6 +998,7 @@ describe("plugin-version check", () => {
 
   test("auto-update failure returns explicit failure metadata and structured remediation link", async () => {
     mockPluginManifestVersion("2.0.0");
+    stubSuccessfulMarketplaceUpdate();
     _setPluginUpdateCommandForTesting(async () => ({
       outcome: "failed",
       stdout: "",
@@ -945,7 +1028,7 @@ describe("plugin-version check", () => {
     assert.equal(codePlugin?.updateOutcome, "failed");
     assert.deepEqual(codePlugin?.remediationLinks, [
       {
-        label: "Enable ClosedLoop plugin autoupdate",
+        label: "Update ClosedLoop plugins manually",
         url: "https://github.com/closedloop-ai/claude-plugins#quick-start",
       },
     ]);
@@ -954,6 +1037,7 @@ describe("plugin-version check", () => {
   test("repeated failed auto-update tuple is suppressed in the same session", async () => {
     mockPluginManifestVersion("2.0.0");
     let calls = 0;
+    stubSuccessfulMarketplaceUpdate();
     _setPluginUpdateCommandForTesting(async () => {
       calls += 1;
       return {
