@@ -7,6 +7,26 @@ type InstalledPluginsFile = {
   plugins?: Record<string, Array<{ installPath?: string; version?: string }>>;
 };
 
+export const CLOSEDLOOP_REQUIRED_PLUGIN_IDS = [
+  "code@closedloop-ai",
+  "code-review@closedloop-ai",
+  "judges@closedloop-ai",
+  "platform@closedloop-ai",
+  "self-learning@closedloop-ai",
+] as const;
+
+export type ClosedLoopRequiredPluginId =
+  (typeof CLOSEDLOOP_REQUIRED_PLUGIN_IDS)[number];
+
+export type PluginEnabledState = boolean | "unknown";
+
+export type ClaudePluginInventoryEntry = {
+  id: string;
+  version?: string;
+  enabled: PluginEnabledState;
+  installPath?: string;
+};
+
 export function getPluginCacheRoot(override?: string): string {
   return override ?? path.join(os.homedir(), ".claude", "plugins", "cache", "closedloop-ai");
 }
@@ -67,6 +87,120 @@ export function isPluginInstalled(pluginName: string, registryPath?: string): bo
   } catch {
     return false;
   }
+}
+
+function readStringField(
+  record: Record<string, unknown>,
+  field: string
+): string | undefined {
+  const value = record[field];
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : undefined;
+}
+
+function parseEnabledField(value: unknown): PluginEnabledState {
+  return typeof value === "boolean" ? value : "unknown";
+}
+
+function normalizePluginInventoryEntry(
+  value: unknown
+): ClaudePluginInventoryEntry | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const id = readStringField(record, "id") ?? readStringField(record, "name");
+  if (!id) {
+    return null;
+  }
+
+  return {
+    id,
+    enabled: parseEnabledField(record.enabled),
+    ...(readStringField(record, "version")
+      ? { version: readStringField(record, "version") }
+      : {}),
+    ...(readStringField(record, "installPath")
+      ? { installPath: readStringField(record, "installPath") }
+      : {}),
+  };
+}
+
+/**
+ * Parse `claude plugin list --json` output into canonical inventory entries.
+ * Missing `enabled` fields are preserved as `unknown`, which health checks
+ * treat as not ready for required slash-command plugins.
+ */
+export function parseClaudePluginListJson(
+  output: string
+): ClaudePluginInventoryEntry[] {
+  const parsed = JSON.parse(output) as unknown;
+  const entries = Array.isArray(parsed)
+    ? parsed
+    : typeof parsed === "object" && parsed !== null
+      ? (parsed as { installed?: unknown; plugins?: unknown }).installed ??
+        (parsed as { plugins?: unknown }).plugins
+      : null;
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+
+  return entries.flatMap((entry) => {
+    const normalized = normalizePluginInventoryEntry(entry);
+    return normalized ? [normalized] : [];
+  });
+}
+
+const TEXT_PLUGIN_ID_REGEX = /([A-Za-z0-9_-]+@closedloop-ai)/;
+const TEXT_STATUS_ENABLED_REGEX =
+  /Status:\s*(?:(?:✔|✓|\[x\])\s*)?enabled/i;
+const TEXT_STATUS_DISABLED_REGEX =
+  /Status:\s*(?:(?:✘|x|\[ \])\s*)?disabled/i;
+
+/**
+ * Parse human-readable `claude plugin list` output. This is a compatibility
+ * fallback for CLI builds where JSON output is unavailable or malformed.
+ */
+export function parseClaudePluginListText(
+  output: string
+): ClaudePluginInventoryEntry[] {
+  const entries: ClaudePluginInventoryEntry[] = [];
+  let current: ClaudePluginInventoryEntry | null = null;
+
+  for (const line of output.split(/\r?\n/)) {
+    const idMatch = TEXT_PLUGIN_ID_REGEX.exec(line);
+    if (idMatch?.[1]) {
+      if (current) {
+        entries.push(current);
+      }
+      current = { id: idMatch[1], enabled: "unknown" };
+    }
+
+    if (!current) {
+      continue;
+    }
+
+    if (TEXT_STATUS_ENABLED_REGEX.test(line)) {
+      current.enabled = true;
+    } else if (TEXT_STATUS_DISABLED_REGEX.test(line)) {
+      current.enabled = false;
+    }
+  }
+
+  if (current) {
+    entries.push(current);
+  }
+
+  return entries;
+}
+
+/** Convert inventory entries to an ID-keyed map for health-check lookups. */
+export function toPluginInventoryMap(
+  entries: ClaudePluginInventoryEntry[]
+): Map<string, ClaudePluginInventoryEntry> {
+  return new Map(entries.map((entry) => [entry.id, entry]));
 }
 
 /**
