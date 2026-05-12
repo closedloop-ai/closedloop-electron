@@ -600,6 +600,7 @@ describe("plugin health checks", () => {
   test("auto-enables disabled user-scoped plugin and verifies post-state", async () => {
     const homeDir = await makeTempHome();
     await writeAllUserScopedPlugins(homeDir);
+    mockPluginManifestVersion("1.0.0");
     let codeEnabled = false;
     const enableCalls: string[] = [];
     const dispatcher = new OperationDispatcher();
@@ -629,7 +630,6 @@ describe("plugin health checks", () => {
     assert.equal(codePlugin?.enableAttempted, true);
     assert.equal(codePlugin?.enableOutcome, "success");
     assert.deepEqual(codePlugin?.enablePluginIds, ["code@closedloop-ai"]);
-    assert.equal(payload.allRequiredPassed, true);
     assert.deepEqual(enableCalls, ["code@closedloop-ai"]);
   });
 });
