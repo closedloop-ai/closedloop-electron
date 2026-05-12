@@ -140,6 +140,10 @@ export async function getShellPath(): Promise<string> {
  * Resolve the user's login-shell PATH synchronously for sync-only gateway code.
  * Shares the same module-level cache, sentinels, env sanitization, tilde
  * expansion, timeout, and fallback PATH as `getShellPath()`.
+ *
+ * Limitation: if `getShellPath()` is already resolving and has not populated
+ * the cache yet, this sync API cannot await that promise. In that in-flight
+ * window it may spawn a separate login shell and cache the sync result.
  */
 export function getShellPathSync(): string {
   const testContext = activeTestContext();

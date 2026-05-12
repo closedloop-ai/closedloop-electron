@@ -12,40 +12,26 @@ import {
   resolveBinaryFromLoginShellSync,
   resetShellPathCache,
   setShellPathForTest,
+  withShellPathEnvForTest,
   type BinaryName,
   type BinaryResolveResult,
 } from "../src/server/shell-path.js";
+import { restoreEnvVars, saveEnvVars } from "./symphony-test-utils.js";
 
 const tempDirs: string[] = [];
-const originalPath = process.env.PATH;
-const originalShell = process.env.SHELL;
-const originalShellPathOutput = process.env.CL_TEST_SHELL_PATH_OUTPUT;
+const originalEnv = saveEnvVars([
+  "PATH",
+  "SHELL",
+  "CL_TEST_SHELL_PATH_OUTPUT",
+]);
 
 afterEach(() => {
-  restoreProcessEnv();
+  restoreEnvVars(originalEnv);
   resetShellPathCache();
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
-
-function restoreProcessEnv(): void {
-  if (originalPath === undefined) {
-    delete process.env.PATH;
-  } else {
-    process.env.PATH = originalPath;
-  }
-  if (originalShell === undefined) {
-    delete process.env.SHELL;
-  } else {
-    process.env.SHELL = originalShell;
-  }
-  if (originalShellPathOutput === undefined) {
-    delete process.env.CL_TEST_SHELL_PATH_OUTPUT;
-  } else {
-    process.env.CL_TEST_SHELL_PATH_OUTPUT = originalShellPathOutput;
-  }
-}
 
 function makeTempDir(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -293,12 +279,16 @@ describe("resolveBinaryFromLoginShell sync/async parity", () => {
 describe("resolveBinaryFromLoginShellSync: login shell drives discovery, not process.env.PATH", () => {
   test("finds claude via fake login shell when inherited PATH excludes its dir", () => {
     const { dir, binPath } = makeTempBin("claude");
-    process.env.SHELL = makeFakeShell();
-    process.env.CL_TEST_SHELL_PATH_OUTPUT = dir;
-    process.env.PATH = makeTempDir("resolve-binary-gui-empty-");
-    resetShellPathCache();
+    const env = {
+      ...process.env,
+      SHELL: makeFakeShell(),
+      CL_TEST_SHELL_PATH_OUTPUT: dir,
+      PATH: makeTempDir("resolve-binary-gui-empty-"),
+    };
 
-    const result = resolveBinaryFromLoginShellSync("claude");
+    const result = withShellPathEnvForTest(env, () =>
+      resolveBinaryFromLoginShellSync("claude"),
+    );
 
     assert.equal(result.source, "path");
     assert.equal(result.path, binPath);

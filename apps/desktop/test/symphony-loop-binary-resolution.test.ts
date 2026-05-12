@@ -7,6 +7,7 @@ import {
   resolveBinaryFromLoginShell,
   resolveBinaryFromLoginShellSync,
   resetShellPathCache,
+  withShellPathEnvForTest,
   type BinaryName,
 } from "../src/server/shell-path.js";
 import {
@@ -16,39 +17,24 @@ import {
   getResolvedGitPath,
   resetResolvedClaudePath,
 } from "../src/server/operations/symphony-loop.js";
+import { restoreEnvVars, saveEnvVars } from "./symphony-test-utils.js";
 
 const tempDirs: string[] = [];
-const originalPath = process.env.PATH;
-const originalShell = process.env.SHELL;
-const originalShellPathOutput = process.env.CL_TEST_SHELL_PATH_OUTPUT;
+const originalEnv = saveEnvVars([
+  "PATH",
+  "SHELL",
+  "CL_TEST_SHELL_PATH_OUTPUT",
+]);
 
 afterEach(() => {
   configureBinaryPathsResolver(null);
   resetResolvedClaudePath();
   resetShellPathCache();
-  restoreProcessEnv();
+  restoreEnvVars(originalEnv);
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
-
-function restoreProcessEnv(): void {
-  if (originalPath === undefined) {
-    delete process.env.PATH;
-  } else {
-    process.env.PATH = originalPath;
-  }
-  if (originalShell === undefined) {
-    delete process.env.SHELL;
-  } else {
-    process.env.SHELL = originalShell;
-  }
-  if (originalShellPathOutput === undefined) {
-    delete process.env.CL_TEST_SHELL_PATH_OUTPUT;
-  } else {
-    process.env.CL_TEST_SHELL_PATH_OUTPUT = originalShellPathOutput;
-  }
-}
 
 function makeTempDir(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -62,7 +48,7 @@ function makeFakeBinary(dir: string, name: BinaryName): string {
   return binPath;
 }
 
-function makeFakeShell(pathOutput: string): string {
+function makeFakeShell(): string {
   const dir = makeTempDir("symphony-loop-binary-shell-");
   const shellPath = path.join(dir, "fake-shell");
   fs.writeFileSync(
@@ -74,46 +60,58 @@ function makeFakeShell(pathOutput: string): string {
     ].join("\n"),
     { mode: 0o755 },
   );
-  process.env.SHELL = shellPath;
-  process.env.CL_TEST_SHELL_PATH_OUTPUT = pathOutput;
-  process.env.PATH = makeTempDir("symphony-loop-binary-empty-path-");
-  resetShellPathCache();
   return shellPath;
 }
 
-function setupFakeLoginShellBinaries(): Record<"claude" | "git" | "gh", string> {
+function makeFakeShellEnv(pathOutput: string): NodeJS.ProcessEnv {
+  return {
+    ...process.env,
+    SHELL: makeFakeShell(),
+    CL_TEST_SHELL_PATH_OUTPUT: pathOutput,
+    PATH: makeTempDir("symphony-loop-binary-empty-path-"),
+  };
+}
+
+function setupFakeLoginShellBinaries(): {
+  paths: Record<"claude" | "git" | "gh", string>;
+  env: NodeJS.ProcessEnv;
+} {
   const binDir = makeTempDir("symphony-loop-binary-bin-");
   const paths = {
     claude: makeFakeBinary(binDir, "claude"),
     git: makeFakeBinary(binDir, "git"),
     gh: makeFakeBinary(binDir, "gh"),
   };
-  makeFakeShell(binDir);
+  const env = makeFakeShellEnv(binDir);
   configureBinaryPathsResolver(null);
   resetResolvedClaudePath();
-  return paths;
+  return { paths, env };
 }
 
 describe("symphony-loop binary wrappers", () => {
   test("sync wrappers delegate to the shared login-shell resolver", () => {
-    const paths = setupFakeLoginShellBinaries();
+    const { paths, env } = setupFakeLoginShellBinaries();
 
-    assert.equal(getResolvedClaudePath(), paths.claude);
-    assert.equal(getResolvedGitPath(), paths.git);
-    assert.equal(getResolvedGhPath(), paths.gh);
-    assert.equal(resolveBinaryFromLoginShellSync("claude").path, paths.claude);
-    assert.equal(resolveBinaryFromLoginShellSync("git").path, paths.git);
-    assert.equal(resolveBinaryFromLoginShellSync("gh").path, paths.gh);
+    withShellPathEnvForTest(env, () => {
+      assert.equal(getResolvedClaudePath(), paths.claude);
+      assert.equal(getResolvedGitPath(), paths.git);
+      assert.equal(getResolvedGhPath(), paths.gh);
+      assert.equal(resolveBinaryFromLoginShellSync("claude").path, paths.claude);
+      assert.equal(resolveBinaryFromLoginShellSync("git").path, paths.git);
+      assert.equal(resolveBinaryFromLoginShellSync("gh").path, paths.gh);
+    });
   });
 
   test("getResolvedClaudePath matches the async resolver path", async () => {
-    const paths = setupFakeLoginShellBinaries();
+    const { paths, env } = setupFakeLoginShellBinaries();
 
-    const syncClaudePath = getResolvedClaudePath();
-    const asyncClaude = await resolveBinaryFromLoginShell("claude");
+    await withShellPathEnvForTest(env, async () => {
+      const syncClaudePath = getResolvedClaudePath();
+      const asyncClaude = await resolveBinaryFromLoginShell("claude");
 
-    assert.equal(syncClaudePath, paths.claude);
-    assert.equal(asyncClaude.source, "path");
-    assert.equal(asyncClaude.path, syncClaudePath);
+      assert.equal(syncClaudePath, paths.claude);
+      assert.equal(asyncClaude.source, "path");
+      assert.equal(asyncClaude.path, syncClaudePath);
+    });
   });
 });

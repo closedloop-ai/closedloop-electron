@@ -15,39 +15,19 @@ import {
   setShellPathForTest,
   withShellPathEnvForTest,
 } from "../src/server/shell-path.js";
+import { restoreEnvVars, saveEnvVars } from "./symphony-test-utils.js";
 
-const originalPath = process.env.PATH;
-const originalShell = process.env.SHELL;
-const originalShellPathOutput = process.env.CL_TEST_SHELL_PATH_OUTPUT;
-const originalShellCounter = process.env.CL_TEST_SHELL_COUNTER;
+const originalEnv = saveEnvVars([
+  "PATH",
+  "SHELL",
+  "CL_TEST_SHELL_PATH_OUTPUT",
+  "CL_TEST_SHELL_COUNTER",
+]);
 
 afterEach(() => {
-  restoreProcessEnv();
+  restoreEnvVars(originalEnv);
   resetShellPathCache();
 });
-
-function restoreProcessEnv(): void {
-  if (originalPath === undefined) {
-    delete process.env.PATH;
-  } else {
-    process.env.PATH = originalPath;
-  }
-  if (originalShell === undefined) {
-    delete process.env.SHELL;
-  } else {
-    process.env.SHELL = originalShell;
-  }
-  if (originalShellPathOutput === undefined) {
-    delete process.env.CL_TEST_SHELL_PATH_OUTPUT;
-  } else {
-    process.env.CL_TEST_SHELL_PATH_OUTPUT = originalShellPathOutput;
-  }
-  if (originalShellCounter === undefined) {
-    delete process.env.CL_TEST_SHELL_COUNTER;
-  } else {
-    process.env.CL_TEST_SHELL_COUNTER = originalShellCounter;
-  }
-}
 
 async function writeFakeShell(tempDir: string): Promise<string> {
   const fakeShell = path.join(tempDir, "fake-shell");
