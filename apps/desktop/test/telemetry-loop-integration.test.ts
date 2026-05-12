@@ -282,6 +282,12 @@ test("telemetry: job.failed emitted with correct category/trace/diagnostics on p
     (diag.diagnosticsVersion ?? 0) >= 1,
     "diagnosticsVersion must be >= 1",
   );
+  // job.failed includes lifecycle.command when a command is provided on the request
+  assert.equal(
+    diag.lifecycle?.command,
+    LoopCommand.Decompose,
+    "job.failed must include lifecycle.command matching the request",
+  );
 });
 
 // ---------------------------------------------------------------------------
