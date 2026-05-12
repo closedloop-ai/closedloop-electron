@@ -141,7 +141,8 @@ export function parseClaudePluginListJson(
   const entries = Array.isArray(parsed)
     ? parsed
     : typeof parsed === "object" && parsed !== null
-      ? (parsed as { plugins?: unknown }).plugins
+      ? (parsed as { installed?: unknown; plugins?: unknown }).installed ??
+        (parsed as { plugins?: unknown }).plugins
       : null;
   if (!Array.isArray(entries)) {
     return [];

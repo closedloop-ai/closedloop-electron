@@ -99,6 +99,42 @@ describe("Claude plugin inventory parsing", () => {
     ]);
   });
 
+  test("parses real CLI JSON object with installed plugins", () => {
+    const entries = parseClaudePluginListJson(
+      JSON.stringify({
+        installed: [
+          {
+            name: "code@closedloop-ai",
+            version: "1.2.3",
+            enabled: true,
+            installPath: "/tmp/code",
+          },
+        ],
+      })
+    );
+
+    assert.deepEqual(entries, [
+      {
+        id: "code@closedloop-ai",
+        version: "1.2.3",
+        enabled: true,
+        installPath: "/tmp/code",
+      },
+    ]);
+  });
+
+  test("keeps plugin-list plugins object compatibility", () => {
+    const entries = parseClaudePluginListJson(
+      JSON.stringify({
+        plugins: [{ id: "platform@closedloop-ai", enabled: true }],
+      })
+    );
+
+    assert.deepEqual(entries, [
+      { id: "platform@closedloop-ai", enabled: true },
+    ]);
+  });
+
   test("treats missing JSON enabled field as unknown", () => {
     const entries = parseClaudePluginListJson(
       JSON.stringify([{ id: "judges@closedloop-ai", version: "1.0.0" }])
