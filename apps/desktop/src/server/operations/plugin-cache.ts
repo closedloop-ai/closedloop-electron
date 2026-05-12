@@ -268,10 +268,19 @@ function entryHasExistingInstallPath(entry: Pick<InstalledPluginEntry, "installP
   return Boolean(entry.installPath && existsSync(entry.installPath));
 }
 
+function isUserScopedRegistryEntry(entry: InstalledPluginEntry): boolean {
+  return (
+    entry.scope === "user" ||
+    (entry.scope === undefined && entryHasExistingInstallPath(entry))
+  );
+}
+
 /**
  * Classify a ClosedLoop plugin install across the registry and optional
  * `claude plugin list --json` snapshot. A valid install must be user scoped,
- * point at an existing install path, and have no disabled signal.
+ * point at an existing install path, and have no disabled signal. Legacy
+ * registry entries that predate `scope` are treated as user-scoped when their
+ * install path still exists.
  */
 export function getPluginInstallStatus(
   pluginName: string,
@@ -281,7 +290,7 @@ export function getPluginInstallStatus(
   const pluginRef = `${pluginName}@closedloop-ai`;
   const data = readInstalledPluginsFile(registryPath);
   const registryEntries = data?.plugins?.[pluginRef] ?? [];
-  const userRegistryEntries = registryEntries.filter((entry) => entry.scope === "user");
+  const userRegistryEntries = registryEntries.filter(isUserScopedRegistryEntry);
   const projectRegistryEntries = registryEntries.filter((entry) => entry.scope === "project");
   const existingUserEntries = userRegistryEntries.filter(entryHasExistingInstallPath);
   const hasExistingUserInstallPath = existingUserEntries.length > 0;

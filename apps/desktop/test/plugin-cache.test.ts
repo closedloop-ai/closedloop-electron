@@ -296,14 +296,30 @@ describe("isPluginInstalled", () => {
     assert.equal(isPluginInstalled("code", registryPath), false);
   });
 
-  test("returns false for missing-scope entries", async () => {
+  test("returns true for legacy missing-scope entries with an existing install path", async () => {
     const tmpDir = await makeTempDir();
-    const installPath = path.join(tmpDir, "unknown-scope-plugin");
+    const installPath = path.join(tmpDir, "legacy-user-plugin");
     await fs.mkdir(installPath, { recursive: true });
     const registry = {
       version: 2,
       plugins: {
         "code@closedloop-ai": [{ installPath, version: "1.0.0" }]
+      }
+    };
+    const registryPath = path.join(tmpDir, "installed_plugins.json");
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+
+    assert.equal(isPluginInstalled("code", registryPath), true);
+  });
+
+  test("returns false for missing-scope entries without an existing install path", async () => {
+    const tmpDir = await makeTempDir();
+    const registry = {
+      version: 2,
+      plugins: {
+        "code@closedloop-ai": [
+          { installPath: path.join(tmpDir, "missing-plugin"), version: "1.0.0" }
+        ]
       }
     };
     const registryPath = path.join(tmpDir, "installed_plugins.json");
@@ -383,6 +399,27 @@ describe("getPluginInstallStatus", () => {
     assert.equal(status.hasValidUserScopedEntry, false);
     assert.equal(status.hasProjectScopedEntry, true);
     assert.deepEqual(status.projectScopedPaths, []);
+  });
+
+  test("classifies legacy missing-scope registry entries as user scoped", async () => {
+    const tmpDir = await makeTempDir();
+    const installPath = path.join(tmpDir, "legacy-user-plugin");
+    await fs.mkdir(installPath, { recursive: true });
+    const registry = {
+      version: 1,
+      plugins: {
+        "code@closedloop-ai": [{ installPath, version: "1.2.3" }]
+      }
+    };
+    const registryPath = path.join(tmpDir, "installed_plugins.json");
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+
+    const status = getPluginInstallStatus("code", registryPath);
+
+    assert.equal(status.hasValidUserScopedEntry, true);
+    assert.equal(status.hasUserScopedEntry, true);
+    assert.equal(status.hasExistingUserInstallPath, true);
+    assert.equal(status.selectedUserVersion, "1.2.3");
   });
 
   test("marks list parse failures as unverifiable when a user install path exists", async () => {
