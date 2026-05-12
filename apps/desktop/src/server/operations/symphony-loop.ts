@@ -5716,7 +5716,7 @@ async function handleLoopRequest(
       usedTempDir = true;
       const tmpDir = path.join(
         os.tmpdir(),
-        `symphony-decompose-${body.loopId.slice(0, 8)}`,
+        `symphony-decompose-${slugifyLoopId(body.loopId)}`,
       );
       await fs.rm(tmpDir, { recursive: true, force: true });
       await fs.mkdir(tmpDir, { recursive: true });

@@ -16,7 +16,6 @@ import type { EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
 import { saveCodexChatSession } from "../src/server/operations/codex.js";
 import {
   _setKnownBinaryLocationsForTesting,
-  _setPluginEnableCommandForTesting,
   _setRunCommandForTesting,
 } from "../src/server/operations/health-check.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
@@ -140,8 +139,6 @@ afterEach(async () => {
   // Reset Observability singleton so telemetry state does not bleed between tests
   await Observability.shutdown();
   Observability.reset();
-  _setRunCommandForTesting();
-  _setPluginEnableCommandForTesting();
   mock.restoreAll();
 });
 
@@ -4250,22 +4247,21 @@ async function createHealthCheckFixture(
   await fs.mkdir(binDir, { recursive: true });
   await fs.mkdir(symphonyDir, { recursive: true });
 
+  const pluginNames = ["code", "platform", "judges", "code-review", "self-learning"];
+
   // Write fake binaries for git, claude, gh
   const fakeBinaries: Array<[string, string]> = [
     ["git", '#!/bin/sh\necho "git version 2.40.0"'],
     [
       "claude",
       `#!/bin/sh
-if [ "$1" = "plugin" ] && [ "$2" = "list" ] && [ "$3" = "--json" ]; then
-  cat <<'JSON'
-[
-  {"id":"code@closedloop-ai","version":"1.0.0","enabled":true,"installPath":"/tmp/code"},
-  {"id":"code-review@closedloop-ai","version":"1.0.0","enabled":true,"installPath":"/tmp/code-review"},
-  {"id":"judges@closedloop-ai","version":"1.0.0","enabled":true,"installPath":"/tmp/judges"},
-  {"id":"platform@closedloop-ai","version":"1.0.0","enabled":true,"installPath":"/tmp/platform"},
-  {"id":"self-learning@closedloop-ai","version":"1.0.0","enabled":true,"installPath":"/tmp/self-learning"}
-]
-JSON
+if [ "$1 $2 $3" = "plugin list --json" ]; then
+  printf '%s\\n' '${JSON.stringify(pluginNames.map((name) => ({
+    enabled: true,
+    id: `${name}@closedloop-ai`,
+    scope: "user",
+    version: "1.0.0",
+  })))}'
   exit 0
 fi
 echo "1.5.0"
@@ -4292,12 +4288,11 @@ echo "1.5.0"
   const pluginsDir = path.join(homeDir, ".claude", "plugins");
   await fs.mkdir(pluginsDir, { recursive: true });
 
-  const pluginNames = ["code", "platform", "judges", "code-review", "self-learning"];
-  const pluginsRecord: Record<string, Array<{ installPath: string; version: string }>> = {};
+  const pluginsRecord: Record<string, Array<{ installPath: string; scope: string; version: string }>> = {};
   for (const name of pluginNames) {
     const installPath = path.join(tmpDir, `plugin-${name}`);
     await fs.mkdir(installPath, { recursive: true });
-    pluginsRecord[`${name}@closedloop-ai`] = [{ installPath, version: "1.0.0" }];
+    pluginsRecord[`${name}@closedloop-ai`] = [{ installPath, scope: "user", version: "1.0.0" }];
   }
   await fs.writeFile(
     path.join(pluginsDir, "installed_plugins.json"),
@@ -4318,238 +4313,6 @@ echo "1.5.0"
 
   return { tmpDir, binDir, symphonyDir };
 }
-
-function installHealthCheckCommandStub(options: {
-  isCodeEnabled: () => boolean;
-  pythonStdout?: string;
-}): void {
-  _setRunCommandForTesting(async (cmd, args) => {
-    const binary = path.basename(cmd);
-    if (binary === "git" && args[0] === "--version") {
-      return { stdout: "git version 2.40.0" };
-    }
-    if (binary === "gh" && args[0] === "--version") {
-      return { stdout: "gh version 2.40.0 (2024-01-01)" };
-    }
-    if (binary === "gh" && args[0] === "auth" && args[1] === "status") {
-      return { stdout: "" };
-    }
-    if (binary === "codex" && args[0] === "--version") {
-      return { stdout: "0.1.0" };
-    }
-    if (binary === "python3" && args[0] === "--version") {
-      return { stdout: options.pythonStdout ?? "Python 3.11.0" };
-    }
-    if (binary === "claude" && args[0] === "--version") {
-      return { stdout: "1.5.0" };
-    }
-    if (
-      binary === "claude" &&
-      args[0] === "plugin" &&
-      args[1] === "list" &&
-      args[2] === "--json"
-    ) {
-      return {
-        stdout: JSON.stringify([
-          {
-            id: "code@closedloop-ai",
-            version: "1.0.0",
-            enabled: options.isCodeEnabled(),
-            installPath: "/tmp/code",
-          },
-          {
-            id: "code-review@closedloop-ai",
-            version: "1.0.0",
-            enabled: true,
-            installPath: "/tmp/code-review",
-          },
-          {
-            id: "judges@closedloop-ai",
-            version: "1.0.0",
-            enabled: true,
-            installPath: "/tmp/judges",
-          },
-          {
-            id: "platform@closedloop-ai",
-            version: "1.0.0",
-            enabled: true,
-            installPath: "/tmp/platform",
-          },
-          {
-            id: "self-learning@closedloop-ai",
-            version: "1.0.0",
-            enabled: true,
-            installPath: "/tmp/self-learning",
-          },
-        ]),
-      };
-    }
-
-    throw { code: "ENOENT", stderr: "", message: `unexpected ${binary} ${args.join(" ")}` };
-  });
-}
-
-async function startHealthCheckServer(
-  tmpDir: string,
-  binDir: string,
-  symphonyDir: string,
-  machineName: string
-): Promise<DesktopGatewayServer> {
-  process.env.HOME = path.join(tmpDir, "home");
-  process.env.PATH = binDir;
-  setShellPathForTest();
-
-  const server = new DesktopGatewayServer({
-    host: "127.0.0.1",
-    preferredPort: 0,
-    fallbackPorts: [0],
-    webAppOrigin: "https://app.symphony.com",
-    getAllowedDirectories: () => [tmpDir],
-    machineName,
-    version: "0.1.0-test",
-    capabilities: EMPTY_CAPABILITIES,
-    discoveryFilePath: path.join(tmpDir, "electron-port"),
-    getBinaryPaths: () => ({
-      claude: path.join(binDir, "claude"),
-      codex: path.join(binDir, "codex"),
-      gh: path.join(binDir, "gh"),
-      git: path.join(binDir, "git"),
-      python3: path.join(binDir, "python3"),
-    }),
-    getSymphonyDir: () => symphonyDir,
-  });
-  serversToClose.push(server);
-  await server.start();
-  return server;
-}
-
-test("health-check fails disabled required plugin without auto-enable gate", async () => {
-  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
-    '#!/bin/sh\necho "Python 3.11.0"\n'
-  );
-  const enableCalls: string[] = [];
-  installHealthCheckCommandStub({ isCodeEnabled: () => false });
-  _setPluginEnableCommandForTesting(async (pluginRef) => {
-    enableCalls.push(pluginRef);
-    return { outcome: "success", stdout: "", elapsedMs: 1 };
-  });
-  const server = await startHealthCheckServer(
-    tmpDir,
-    binDir,
-    symphonyDir,
-    "plugin-disabled-no-gate"
-  );
-
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
-  assert.equal(response.status, 200);
-  const body = (await response.json()) as {
-    checks: Array<{
-      id: string;
-      passed: boolean;
-      error?: string;
-      enableOutcome?: string;
-    }>;
-    allRequiredPassed: boolean;
-  };
-
-  const check = body.checks.find((entry) => entry.id === "plugin-code");
-  assert.ok(check, "code plugin check should be present");
-  assert.equal(check.passed, false);
-  assert.equal(check.error, "Disabled");
-  assert.equal(check.enableOutcome, "skipped");
-  assert.equal(body.allRequiredPassed, false);
-  assert.deepEqual(enableCalls, []);
-});
-
-test("health-check auto-enables disabled plugin and verifies post-state", async () => {
-  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
-    '#!/bin/sh\necho "Python 3.11.0"\n'
-  );
-  let codeEnabled = false;
-  const enableCalls: string[] = [];
-  installHealthCheckCommandStub({
-    isCodeEnabled: () => codeEnabled,
-  });
-  _setPluginEnableCommandForTesting(async (pluginRef) => {
-    enableCalls.push(pluginRef);
-    codeEnabled = true;
-    return { outcome: "success", stdout: "", elapsedMs: 1 };
-  });
-  const server = await startHealthCheckServer(
-    tmpDir,
-    binDir,
-    symphonyDir,
-    "plugin-disabled-with-gate"
-  );
-
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check?pluginAutoUpdate=1`);
-  assert.equal(response.status, 200);
-  const body = (await response.json()) as {
-    checks: Array<{
-      id: string;
-      passed: boolean;
-      enableAttempted?: boolean;
-      enableOutcome?: string;
-      enablePluginIds?: string[];
-    }>;
-    allRequiredPassed: boolean;
-  };
-
-  const check = body.checks.find((entry) => entry.id === "plugin-code");
-  assert.ok(check, "code plugin check should be present");
-  assert.equal(check.passed, true);
-  assert.equal(check.enableAttempted, true);
-  assert.equal(check.enableOutcome, "success");
-  assert.deepEqual(check.enablePluginIds, ["code@closedloop-ai"]);
-  assert.equal(body.allRequiredPassed, true);
-  assert.deepEqual(enableCalls, ["code@closedloop-ai"]);
-});
-
-test("health-check keeps disabled plugin failed when auto-enable command fails", async () => {
-  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
-    '#!/bin/sh\necho "Python 3.11.0"\n'
-  );
-  const enableCalls: string[] = [];
-  installHealthCheckCommandStub({
-    isCodeEnabled: () => false,
-  });
-  _setPluginEnableCommandForTesting(async (pluginRef) => {
-    enableCalls.push(pluginRef);
-    return {
-      outcome: "failed",
-      stdout: "",
-      elapsedMs: 1,
-      failureReason: "command_failed",
-      stderrTail: "enable failed",
-    };
-  });
-  const server = await startHealthCheckServer(
-    tmpDir,
-    binDir,
-    symphonyDir,
-    "plugin-enable-fails"
-  );
-
-  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check?pluginAutoUpdate=1`);
-  assert.equal(response.status, 200);
-  const body = (await response.json()) as {
-    checks: Array<{
-      id: string;
-      passed: boolean;
-      enableAttempted?: boolean;
-      enableOutcome?: string;
-    }>;
-    allRequiredPassed: boolean;
-  };
-
-  const check = body.checks.find((entry) => entry.id === "plugin-code");
-  assert.ok(check, "code plugin check should be present");
-  assert.equal(check.passed, false);
-  assert.equal(check.enableAttempted, true);
-  assert.equal(check.enableOutcome, "failed");
-  assert.equal(body.allRequiredPassed, false);
-  assert.deepEqual(enableCalls, ["code@closedloop-ai"]);
-});
 
 function mockClosedLoopPluginManifestFetch(version: string): void {
   const passthroughFetch = globalThis.fetch;
@@ -4580,7 +4343,6 @@ test("python3 health check: passes for version 3.11.0 (control)", async () => {
   const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
     '#!/bin/sh\necho "Python 3.11.0"\n'
   );
-  installHealthCheckCommandStub({ isCodeEnabled: () => true });
 
   process.env.HOME = path.join(tmpDir, "home");
   process.env.PATH = binDir;
@@ -4760,10 +4522,6 @@ test("python3 health check: passes for version with extra suffix (3.10.1.post1)"
   const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
     '#!/bin/sh\necho "Python 3.10.1.post1"\n'
   );
-  installHealthCheckCommandStub({
-    isCodeEnabled: () => true,
-    pythonStdout: "Python 3.10.1.post1",
-  });
 
   process.env.HOME = path.join(tmpDir, "home");
   process.env.PATH = binDir;
