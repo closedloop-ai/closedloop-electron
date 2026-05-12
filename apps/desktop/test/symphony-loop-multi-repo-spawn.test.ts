@@ -78,10 +78,22 @@ test("PLAN with 2 additionalRepos passes --add-dir for each worktree to run-loop
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
 
-  // The fake script writes its args to spawn-args.txt then exits 0.
+  // The fake script writes its args to spawn-args.txt and the multi-repo
+  // env vars to spawn-env.txt then exits 0. Capturing env in addition to
+  // args lets the assertions below verify both wiring paths.
   await createFakeRunLoopScript(
     tmpDir,
-    '#!/bin/sh\necho "$@" > "$CLOSEDLOOP_WORKDIR/spawn-args.txt"\nexit 0\n',
+    [
+      "#!/bin/sh",
+      'echo "$@" > "$CLOSEDLOOP_WORKDIR/spawn-args.txt"',
+      "{",
+      '  printf "CLOSEDLOOP_ADD_DIRS=%s\\n" "${CLOSEDLOOP_ADD_DIRS-__UNSET__}"',
+      '  printf "CLOSEDLOOP_ADD_DIR_NAMES=%s\\n" "${CLOSEDLOOP_ADD_DIR_NAMES-__UNSET__}"',
+      '  printf "CLOSEDLOOP_REPO_MAP=%s\\n" "${CLOSEDLOOP_REPO_MAP-__UNSET__}"',
+      '} > "$CLOSEDLOOP_WORKDIR/spawn-env.txt"',
+      "exit 0",
+      "",
+    ].join("\n"),
   );
 
   const fakeBin = path.join(tmpDir, "fake-bin");
@@ -157,6 +169,166 @@ test("PLAN with 2 additionalRepos passes --add-dir for each worktree to run-loop
       `Expected --add-dir path "${addDir}" to start with worktreeParent "${worktreeParent}"`,
     );
   }
+
+  // FEA-1088: the same multi-repo data must also reach the spawn env so that
+  // every bash subshell Claude's agents launch sees CLOSEDLOOP_ADD_DIRS and
+  // the plan-draft-writer skill's multi-repo gate evaluates true. Without
+  // this the agent silently produces a single-repo plan.
+  const spawnEnvFile = path.join(path.dirname(spawnArgsFile), "spawn-env.txt");
+  const spawnEnv = await fs.readFile(spawnEnvFile, "utf-8");
+  const envMap = new Map<string, string>();
+  for (const line of spawnEnv.split("\n")) {
+    const eq = line.indexOf("=");
+    if (eq > 0) envMap.set(line.slice(0, eq), line.slice(eq + 1));
+  }
+
+  const addDirs = envMap.get("CLOSEDLOOP_ADD_DIRS") ?? "";
+  assert.notEqual(
+    addDirs,
+    "__UNSET__",
+    `CLOSEDLOOP_ADD_DIRS must be set in spawn env, got UNSET. Captured: ${spawnEnv}`,
+  );
+  const addDirParts = addDirs.split("|").filter((s) => s.length > 0);
+  assert.equal(
+    addDirParts.length,
+    2,
+    `CLOSEDLOOP_ADD_DIRS must contain 2 pipe-joined paths, got ${addDirParts.length}: ${addDirs}`,
+  );
+  for (const dir of addDirParts) {
+    assert.ok(
+      dir.startsWith(worktreeParent),
+      `CLOSEDLOOP_ADD_DIRS entry "${dir}" must live under worktreeParent "${worktreeParent}"`,
+    );
+  }
+
+  const repoMap = envMap.get("CLOSEDLOOP_REPO_MAP") ?? "";
+  const repoMapParts = repoMap.split("|").filter((s) => s.length > 0);
+  assert.equal(
+    repoMapParts.length,
+    2,
+    `CLOSEDLOOP_REPO_MAP must contain 2 name=path entries, got ${repoMapParts.length}: ${repoMap}`,
+  );
+  for (const part of repoMapParts) {
+    assert.ok(
+      /^[^=]+=.+/.test(part),
+      `CLOSEDLOOP_REPO_MAP entry "${part}" must match name=path`,
+    );
+    const [, p] = part.split("=", 2);
+    assert.ok(
+      p.startsWith(worktreeParent),
+      `CLOSEDLOOP_REPO_MAP path "${p}" must live under worktreeParent`,
+    );
+  }
+
+  const addDirNames = envMap.get("CLOSEDLOOP_ADD_DIR_NAMES") ?? "";
+  const nameParts = addDirNames.split("|").filter((s) => s.length > 0);
+  assert.equal(
+    nameParts.length,
+    2,
+    `CLOSEDLOOP_ADD_DIR_NAMES must contain 2 names, got ${nameParts.length}: ${addDirNames}`,
+  );
+  // Names must be unique within the dispatch — the skill's @{name}:path
+  // prefix breaks if two peers collide.
+  assert.equal(
+    new Set(nameParts).size,
+    nameParts.length,
+    `CLOSEDLOOP_ADD_DIR_NAMES entries must be unique: ${addDirNames}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// FEA-1088: single-repo PLAN must not leak multi-repo env vars into spawn env
+// ---------------------------------------------------------------------------
+
+test("PLAN with no additionalRepos: multi-repo env vars are absent from spawn env", async () => {
+  const tmpDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "multi-repo-spawn-plan0-"),
+  );
+  tempPathsToClean.push(tmpDir);
+
+  const primaryRepo = path.join(tmpDir, "primary-repo");
+  await fs.mkdir(primaryRepo, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+  await createFakeRunLoopScript(
+    tmpDir,
+    [
+      "#!/bin/sh",
+      'echo "$@" > "$CLOSEDLOOP_WORKDIR/spawn-args.txt"',
+      "{",
+      '  printf "CLOSEDLOOP_ADD_DIRS=%s\\n" "${CLOSEDLOOP_ADD_DIRS-__UNSET__}"',
+      '  printf "CLOSEDLOOP_ADD_DIR_NAMES=%s\\n" "${CLOSEDLOOP_ADD_DIR_NAMES-__UNSET__}"',
+      '  printf "CLOSEDLOOP_REPO_MAP=%s\\n" "${CLOSEDLOOP_REPO_MAP-__UNSET__}"',
+      '} > "$CLOSEDLOOP_WORKDIR/spawn-env.txt"',
+      "exit 0",
+      "",
+    ].join("\n"),
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+  const server = await createTestGateway(tmpDir, mock.port);
+
+  const loopId = "00000000-0000-0000-0000-000000007002";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: LoopCommand.Plan,
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        repo: {
+          fullName: `spawn-test/${path.basename(primaryRepo)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(response.status, 200);
+  const terminalEvent = await waitForTerminalEvent(mock.requests, loopId);
+  assert.equal(
+    terminalEvent.type,
+    "completed",
+    `Expected completed, got '${terminalEvent.type}': ${JSON.stringify(terminalEvent)}`,
+  );
+
+  const spawnArgsFile = await findSpawnArgsFile(tmpDir);
+  const spawnEnvFile = path.join(path.dirname(spawnArgsFile), "spawn-env.txt");
+  const spawnEnv = await fs.readFile(spawnEnvFile, "utf-8");
+
+  // Single-repo path: the harness must not set any of the multi-repo env
+  // vars, so the bash check sees the literal __UNSET__ sentinel.
+  assert.ok(
+    spawnEnv.includes("CLOSEDLOOP_ADD_DIRS=__UNSET__"),
+    `Single-repo PLAN must not set CLOSEDLOOP_ADD_DIRS; got: ${spawnEnv}`,
+  );
+  assert.ok(
+    spawnEnv.includes("CLOSEDLOOP_ADD_DIR_NAMES=__UNSET__"),
+    `Single-repo PLAN must not set CLOSEDLOOP_ADD_DIR_NAMES; got: ${spawnEnv}`,
+  );
+  assert.ok(
+    spawnEnv.includes("CLOSEDLOOP_REPO_MAP=__UNSET__"),
+    `Single-repo PLAN must not set CLOSEDLOOP_REPO_MAP; got: ${spawnEnv}`,
+  );
 });
 
 // ---------------------------------------------------------------------------
