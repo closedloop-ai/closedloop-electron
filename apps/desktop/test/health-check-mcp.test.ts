@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, test } from "node:test";
 import { Observability } from "../src/main/observability.js";
 import type { EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
@@ -8,7 +10,9 @@ import { OperationDispatcher } from "../src/server/operation-dispatcher.js";
 import {
   _applyPluginVersionChecksForTesting,
   _getPluginUpdateStderrTailForTesting,
+  _setPluginEnableCommandForTesting,
   _setPluginUpdateCommandForTesting,
+  _setRunCommandForTesting,
   _shouldEnablePluginAutoUpdateForTesting,
   registerHealthCheckRoutes,
 } from "../src/server/operations/health-check.js";
@@ -30,6 +34,9 @@ type CheckResultPayload = {
   version?: string;
   error?: string;
   remediation?: string;
+  enableAttempted?: boolean;
+  enableOutcome?: "success" | "failed" | "timeout" | "skipped";
+  enablePluginIds?: string[];
   updateAttempted?: boolean;
   updateOutcome?: "success" | "failed" | "timeout" | "skipped";
   updatePluginIds?: string[];
@@ -56,10 +63,22 @@ const CLOSEDLOOP_PLUGINS = [
   },
 ] as const;
 const originalFetch = globalThis.fetch;
+const originalHome = process.env["HOME"];
+const tempDirs: string[] = [];
 
 afterEach(async () => {
   globalThis.fetch = originalFetch;
+  _setPluginEnableCommandForTesting();
   _setPluginUpdateCommandForTesting();
+  _setRunCommandForTesting();
+  if (originalHome === undefined) {
+    delete process.env["HOME"];
+  } else {
+    process.env["HOME"] = originalHome;
+  }
+  for (const dir of tempDirs.splice(0)) {
+    await fs.rm(dir, { recursive: true, force: true });
+  }
   await Observability.shutdown();
   Observability.reset();
 });
@@ -106,7 +125,11 @@ function makeResponse(): CapturedResponse {
 
 async function dispatchHealthCheck(
   dispatcher: OperationDispatcher,
-  options: { expectedMcpUrl?: string; latestVersion?: string } = {}
+  options: {
+    expectedMcpUrl?: string;
+    latestVersion?: string;
+    pluginAutoUpdate?: boolean;
+  } = {}
 ): Promise<CapturedResponse> {
   const captured = makeResponse();
   const query = new URLSearchParams();
@@ -115,6 +138,9 @@ async function dispatchHealthCheck(
   }
   if (options.latestVersion !== undefined) {
     query.set("latestVersion", options.latestVersion);
+  }
+  if (options.pluginAutoUpdate) {
+    query.set("pluginAutoUpdate", "1");
   }
 
   await dispatcher.dispatch({
@@ -167,6 +193,101 @@ function findPluginCheck(
 
 function mockPluginManifestVersion(version: string): void {
   globalThis.fetch = (async () => Response.json({ version })) as typeof fetch;
+}
+
+async function makeTempHome(): Promise<string> {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "health-check-home-"));
+  tempDirs.push(tempDir);
+  process.env["HOME"] = tempDir;
+  return tempDir;
+}
+
+async function writePluginRegistry(
+  homeDir: string,
+  entries: Record<string, Array<Record<string, unknown>>>
+): Promise<void> {
+  const registryDir = path.join(homeDir, ".claude", "plugins");
+  await fs.mkdir(registryDir, { recursive: true });
+  await fs.writeFile(
+    path.join(registryDir, "installed_plugins.json"),
+    JSON.stringify({ version: 2, plugins: entries })
+  );
+}
+
+async function createInstallPath(homeDir: string, plugin: string): Promise<string> {
+  const installPath = path.join(
+    homeDir,
+    ".claude",
+    "plugins",
+    "cache",
+    "closedloop-ai",
+    plugin,
+    "1.0.0"
+  );
+  await fs.mkdir(installPath, { recursive: true });
+  return installPath;
+}
+
+async function writeAllUserScopedPlugins(
+  homeDir: string,
+  overrides: Record<string, Array<Record<string, unknown>>> = {}
+): Promise<Record<string, Array<Record<string, unknown>>>> {
+  const entries: Record<string, Array<Record<string, unknown>>> = {};
+  for (const plugin of CLOSEDLOOP_PLUGINS) {
+    entries[plugin.key] = [
+      {
+        installPath: await createInstallPath(homeDir, plugin.folder),
+        scope: "user",
+        version: "1.0.0",
+      },
+    ];
+  }
+  await writePluginRegistry(homeDir, { ...entries, ...overrides });
+  return { ...entries, ...overrides };
+}
+
+function buildPluginListJson(
+  overrides: Array<Record<string, unknown>> = []
+): string {
+  return JSON.stringify([
+    ...CLOSEDLOOP_PLUGINS.map((plugin) => ({
+      enabled: true,
+      id: plugin.key,
+      scope: "user",
+      version: "1.0.0",
+    })),
+    ...overrides,
+  ]);
+}
+
+function registerHealthCheckWithPluginList(
+  dispatcher: OperationDispatcher,
+  pluginListJson: string | null | (() => string | null)
+): void {
+  _setRunCommandForTesting(async (_cmd, args) => {
+    if (args.join(" ") === "plugin list --json") {
+      const currentList =
+        typeof pluginListJson === "function" ? pluginListJson() : pluginListJson;
+      if (currentList === null) {
+        throw { code: "EUNKNOWN", stderr: "", message: "plugin list failed" };
+      }
+      return { stdout: currentList };
+    }
+    return { stdout: "1.0.0" };
+  });
+  registerHealthCheckRoutes(
+    dispatcher,
+    {} as unknown as ProcessManager,
+    () => os.tmpdir(),
+    unavailableMcp,
+    () => ({
+      claude: "/usr/bin/true",
+      codex: "/usr/bin/true",
+      gh: "/usr/bin/true",
+      git: "/usr/bin/true",
+      python3: "/usr/bin/true",
+    })
+  );
 }
 
 const unavailableMcp = async (): Promise<McpDetectionResult> => ({
@@ -297,6 +418,219 @@ describe("registerHealthCheckRoutes — MCP injection", () => {
     assert.equal(mcpServers.codex.available, false);
     assert.equal(mcpServers.codex.serverName, null);
     assert.equal(mcpServers.codex.closedloopAvailable, false);
+  });
+});
+
+describe("plugin health checks", () => {
+  test("fails project-scoped plugin entries with user-scope remediation", async () => {
+    const homeDir = await makeTempHome();
+    const projectPath = path.join(homeDir, "project");
+    const projectInstallPath = path.join(projectPath, "code-plugin");
+    await fs.mkdir(projectInstallPath, { recursive: true });
+    await writeAllUserScopedPlugins(homeDir, {
+      "code@closedloop-ai": [
+        {
+          installPath: projectInstallPath,
+          projectPath,
+          scope: "project",
+          version: "1.0.0",
+        },
+      ],
+    });
+    const pluginListJson = JSON.stringify(
+      CLOSEDLOOP_PLUGINS.map((plugin) =>
+        plugin.folder === "code"
+          ? {
+              id: plugin.key,
+              projectPath,
+              scope: "project",
+              version: "1.0.0",
+            }
+          : {
+              enabled: true,
+              id: plugin.key,
+              scope: "user",
+              version: "1.0.0",
+            }
+      )
+    );
+    const dispatcher = new OperationDispatcher();
+    registerHealthCheckWithPluginList(dispatcher, pluginListJson);
+
+    const captured = await dispatchHealthCheck(dispatcher);
+    const payload = parsePayload(captured);
+    const codePlugin = findPluginCheck(getChecks(payload), "code");
+
+    assert.equal(codePlugin?.passed, false);
+    assert.equal(codePlugin?.error, "Installed at project scope");
+    assert.match(
+      codePlugin?.remediation ?? "",
+      /claude plugin uninstall code@closedloop-ai --scope project/
+    );
+    assert.match(
+      codePlugin?.remediation ?? "",
+      /claude plugin install code@closedloop-ai --scope user/
+    );
+    assert.equal(payload.allRequiredPassed, false);
+  });
+
+  test("fails project-scoped plugin entries without projectPath with user-scope remediation", async () => {
+    const homeDir = await makeTempHome();
+    await writeAllUserScopedPlugins(homeDir, {
+      "code@closedloop-ai": [
+        {
+          scope: "project",
+          version: "1.0.0",
+        },
+      ],
+    });
+    const pluginListJson = JSON.stringify(
+      CLOSEDLOOP_PLUGINS.map((plugin) =>
+        plugin.folder === "code"
+          ? {
+              id: plugin.key,
+              scope: "project",
+              version: "1.0.0",
+            }
+          : {
+              enabled: true,
+              id: plugin.key,
+              scope: "user",
+              version: "1.0.0",
+            }
+      )
+    );
+    const dispatcher = new OperationDispatcher();
+    registerHealthCheckWithPluginList(dispatcher, pluginListJson);
+
+    const captured = await dispatchHealthCheck(dispatcher);
+    const payload = parsePayload(captured);
+    const codePlugin = findPluginCheck(getChecks(payload), "code");
+
+    assert.equal(codePlugin?.passed, false);
+    assert.equal(codePlugin?.error, "Installed at project scope");
+    assert.match(
+      codePlugin?.remediation ?? "",
+      /claude plugin uninstall code@closedloop-ai --scope project/
+    );
+    assert.match(
+      codePlugin?.remediation ?? "",
+      /claude plugin install code@closedloop-ai --scope user/
+    );
+    assert.equal(payload.allRequiredPassed, false);
+  });
+
+  test("fails disabled user-scoped entries with enable remediation", async () => {
+    const homeDir = await makeTempHome();
+    await writeAllUserScopedPlugins(homeDir);
+    const pluginListJson = buildPluginListJson([
+      { enabled: false, id: "code@closedloop-ai", scope: "user", version: "1.0.0" },
+    ]);
+    const dispatcher = new OperationDispatcher();
+    registerHealthCheckWithPluginList(dispatcher, pluginListJson);
+
+    const captured = await dispatchHealthCheck(dispatcher);
+    const codePlugin = findPluginCheck(getChecks(parsePayload(captured)), "code");
+
+    assert.equal(codePlugin?.passed, false);
+    assert.equal(codePlugin?.error, "Disabled");
+    assert.equal(
+      codePlugin?.remediation,
+      "Run: claude plugin enable code@closedloop-ai --scope user"
+    );
+  });
+
+  test("fails user-scoped entries when enabled state cannot be verified", async () => {
+    const homeDir = await makeTempHome();
+    await writeAllUserScopedPlugins(homeDir);
+    const dispatcher = new OperationDispatcher();
+    registerHealthCheckWithPluginList(dispatcher, null);
+
+    const captured = await dispatchHealthCheck(dispatcher);
+    const codePlugin = findPluginCheck(getChecks(parsePayload(captured)), "code");
+
+    assert.equal(codePlugin?.passed, false);
+    assert.equal(codePlugin?.error, "Could not verify enabled state");
+    assert.equal(
+      codePlugin?.remediation,
+      "Run: claude plugin enable code@closedloop-ai --scope user, then rerun System Check"
+    );
+  });
+
+  test("passes enabled user-scoped entries and omits bootstrap readiness", async () => {
+    const homeDir = await makeTempHome();
+    const projectPath = path.join(homeDir, "project");
+    const projectInstallPath = path.join(projectPath, "code-plugin");
+    await fs.mkdir(projectInstallPath, { recursive: true });
+    const allEntries = await writeAllUserScopedPlugins(homeDir);
+    await writePluginRegistry(homeDir, {
+      ...allEntries,
+      "code@closedloop-ai": [
+        {
+          installPath: projectInstallPath,
+          projectPath,
+          scope: "project",
+          version: "0.9.0",
+        },
+        ...(allEntries["code@closedloop-ai"] ?? []),
+      ],
+    });
+    mockPluginManifestVersion("1.0.0");
+    const pluginListJson = buildPluginListJson([
+      {
+        id: "code@closedloop-ai",
+        projectPath,
+        scope: "project",
+        version: "0.9.0",
+      },
+    ]);
+    const dispatcher = new OperationDispatcher();
+    registerHealthCheckWithPluginList(dispatcher, pluginListJson);
+
+    const captured = await dispatchHealthCheck(dispatcher);
+    const checks = getChecks(parsePayload(captured));
+    const codePlugin = findPluginCheck(checks, "code");
+    const bootstrapPlugin = findPluginCheck(checks, "bootstrap");
+
+    assert.equal(codePlugin?.passed, true);
+    assert.equal(codePlugin?.version, "1.0.0");
+    assert.equal(bootstrapPlugin, undefined);
+  });
+
+  test("auto-enables disabled user-scoped plugin and verifies post-state", async () => {
+    const homeDir = await makeTempHome();
+    await writeAllUserScopedPlugins(homeDir);
+    let codeEnabled = false;
+    const enableCalls: string[] = [];
+    const dispatcher = new OperationDispatcher();
+    registerHealthCheckWithPluginList(dispatcher, () =>
+      buildPluginListJson([
+        {
+          enabled: codeEnabled,
+          id: "code@closedloop-ai",
+          scope: "user",
+          version: "1.0.0",
+        },
+      ])
+    );
+    _setPluginEnableCommandForTesting(async (pluginRef) => {
+      enableCalls.push(pluginRef);
+      codeEnabled = true;
+      return { outcome: "success", stdout: "", elapsedMs: 1 };
+    });
+
+    const captured = await dispatchHealthCheck(dispatcher, {
+      pluginAutoUpdate: true,
+    });
+    const payload = parsePayload(captured);
+    const codePlugin = findPluginCheck(getChecks(payload), "code");
+
+    assert.equal(codePlugin?.passed, true);
+    assert.equal(codePlugin?.enableAttempted, true);
+    assert.equal(codePlugin?.enableOutcome, "success");
+    assert.deepEqual(codePlugin?.enablePluginIds, ["code@closedloop-ai"]);
+    assert.equal(payload.allRequiredPassed, true);
+    assert.deepEqual(enableCalls, ["code@closedloop-ai"]);
   });
 });
 

@@ -16,9 +16,8 @@ import { getShellEnv, resolveBinaryFromLoginShell, resolveExecutablesOnPath } fr
 import { detectMcpAvailability, type McpDetectionResult } from "./mcp-detection.js";
 import {
   type ClaudePluginInventoryEntry,
-  CLOSEDLOOP_REQUIRED_PLUGIN_IDS,
   getInstalledPluginVersions,
-  isPluginInstalled,
+  getPluginInstallStatus,
   parseClaudePluginListJson,
   parseClaudePluginListText,
   toPluginInventoryMap,
@@ -183,30 +182,31 @@ export function registerHealthCheckRoutes(
     const requestedPluginAutoUpdate =
       context.query.get("pluginAutoUpdate") === "1";
     const paths = getBinaryPaths?.();
-    const [baseChecks, claudeMcp, codexMcp] = await Promise.all([
+    const [
+      pluginListJson,
+      baseChecks,
+      claudeMcp,
+      codexMcp,
+    ] = await Promise.all([
+      readClaudePluginListJson(paths?.claude),
       Promise.all([
         checkGit(processManager, paths?.git),
         checkClaudeCli(processManager, paths?.claude),
         checkGhCli(processManager, paths?.gh),
         checkGhAuth(processManager, paths?.gh),
-        Promise.resolve(await checkWorktreeDir(configDir)),
+        checkWorktreeDir(configDir),
         checkCodex(processManager, paths?.codex),
         checkPython3(processManager, paths?.python3)
       ]),
       detectMcp("claude", expectedMcpUrl),
       detectMcp("codex", expectedMcpUrl),
     ]);
-    const pluginInventory = baseChecks.some(
-      (check) => check.id === "claude-cli" && check.passed
-    )
-      ? await readClaudePluginInventory(paths?.claude)
-      : { source: "unavailable" as const, entries: new Map() };
     const pluginAutoUpdateEnabled = shouldEnablePluginAutoUpdate(
       requestedPluginAutoUpdate,
       baseChecks
     );
     let pluginChecks = CLOSEDLOOP_USER_PLUGINS.map((plugin) =>
-      checkPlugin(plugin, pluginInventory, pluginAutoUpdateEnabled)
+      checkPlugin(plugin, pluginListJson, pluginAutoUpdateEnabled)
     );
     if (pluginAutoUpdateEnabled) {
       pluginChecks = await applyPluginEnableChecks(pluginChecks, {
@@ -214,7 +214,11 @@ export function registerHealthCheckRoutes(
         readInventory: () => readClaudePluginInventory(paths?.claude),
       });
     }
-    let checks: CheckResult[] = [...baseChecks, ...pluginChecks];
+    let checks: CheckResult[] = [
+      ...baseChecks.slice(0, 4),
+      ...pluginChecks,
+      ...baseChecks.slice(4),
+    ];
 
     // Check plugin versions if all plugins are installed
     const allPluginsInstalled = checks
@@ -276,20 +280,26 @@ const defaultRunCommand: RunCommand = async (cmd, args, options) => {
 
 let runCommand: RunCommand = defaultRunCommand;
 
+async function readClaudePluginListJson(claudeOverride?: string): Promise<string | null> {
+  const resolved = await resolveBinaryFromLoginShell("claude", claudeOverride);
+  if (resolved.source === "override_invalid") {
+    return null;
+  }
+
+  try {
+    const { stdout } = await runCommand(resolved.path, ["plugin", "list", "--json"]);
+    return stdout;
+  } catch {
+    return null;
+  }
+}
+
 type PluginUpdateRunner = (
   pluginRef: string,
   options?: { claudeOverride?: string; timeoutMs?: number }
 ) => Promise<PluginUpdateCommandResult>;
 
-type PluginSubcommand = "update" | "enable";
-
-/**
- * Run a `claude plugin` subcommand with shared binary resolution, timeout, and
- * failure shaping so update and enable remediation paths stay behaviorally
- * identical except for the CLI verb.
- */
-async function runClaudePluginSubcommand(
-  subcommand: PluginSubcommand,
+async function defaultRunPluginUpdateCommand(
   pluginRef: string,
   options: { claudeOverride?: string; timeoutMs?: number } = {}
 ): Promise<PluginUpdateCommandResult> {
@@ -312,7 +322,7 @@ async function runClaudePluginSubcommand(
   try {
     const { stdout } = await execFileAsync(
       resolved.path,
-      ["plugin", subcommand, pluginRef, "--scope", "user"],
+      ["plugin", "update", pluginRef, "--scope", "user"],
       {
         timeout: options.timeoutMs ?? PLUGIN_UPDATE_TIMEOUT_MS,
         env,
@@ -342,18 +352,57 @@ async function runClaudePluginSubcommand(
   }
 }
 
-async function defaultRunPluginUpdateCommand(
-  pluginRef: string,
-  options: { claudeOverride?: string; timeoutMs?: number } = {}
-): Promise<PluginUpdateCommandResult> {
-  return runClaudePluginSubcommand("update", pluginRef, options);
-}
-
 async function defaultRunPluginEnableCommand(
   pluginRef: string,
   options: { claudeOverride?: string; timeoutMs?: number } = {}
 ): Promise<PluginUpdateCommandResult> {
-  return runClaudePluginSubcommand("enable", pluginRef, options);
+  const startedAt = Date.now();
+  const resolved = await resolveBinaryFromLoginShell(
+    "claude",
+    options.claudeOverride
+  );
+  if (resolved.source === "override_invalid") {
+    return {
+      outcome: "failed",
+      stdout: "",
+      elapsedMs: Date.now() - startedAt,
+      failureReason: "cli_unavailable",
+      stderrTail: "Claude binary override path does not exist or is not executable",
+    };
+  }
+
+  const env = await getShellEnv();
+  try {
+    const { stdout } = await execFileAsync(
+      resolved.path,
+      ["plugin", "enable", pluginRef, "--scope", "user"],
+      {
+        timeout: options.timeoutMs ?? PLUGIN_UPDATE_TIMEOUT_MS,
+        env,
+      }
+    );
+    return {
+      outcome: "success",
+      stdout: stdout.trim(),
+      elapsedMs: Date.now() - startedAt,
+    };
+  } catch (err) {
+    const error = err as NodeJS.ErrnoException & {
+      stderr?: string | Buffer;
+      stdout?: string | Buffer;
+      killed?: boolean;
+      code?: string | number;
+    };
+    const timeout = error.killed || error.code === "ETIMEDOUT";
+    return {
+      outcome: timeout ? "timeout" : "failed",
+      exitCode: typeof error.code === "number" ? error.code : undefined,
+      stdout: (error.stdout ?? "").toString().trim(),
+      stderrTail: getPluginUpdateOutputTail(error.stderr),
+      elapsedMs: Date.now() - startedAt,
+      failureReason: timeout ? "timeout" : "command_failed",
+    };
+  }
 }
 
 let runPluginUpdateCommand: PluginUpdateRunner = defaultRunPluginUpdateCommand;
@@ -380,10 +429,7 @@ export function _setPluginUpdateCommandForTesting(
   failedPluginUpdateAttempts.clear();
 }
 
-/**
- * @internal Test-only. Replace the plugin enable runner and reset session
- * suppression state.
- */
+/** @internal Test-only. Replace the plugin enable runner. */
 export function _setPluginEnableCommandForTesting(
   fn?: PluginUpdateRunner
 ): void {
@@ -403,11 +449,6 @@ export function _shouldEnablePluginAutoUpdateForTesting(
   checks: Array<Pick<CheckResult, "id" | "passed">>
 ): boolean {
   return shouldEnablePluginAutoUpdate(requested, checks);
-}
-
-/** @internal Test-only. Exposes the required ClosedLoop plugin contract. */
-export function _getClosedLoopRequiredPluginIdsForTesting(): readonly string[] {
-  return CLOSEDLOOP_REQUIRED_PLUGIN_IDS;
 }
 
 /**
@@ -948,48 +989,65 @@ async function applyPluginEnableChecks(
 }
 
 function buildPluginInstallRemediation(pluginRef: string): string {
-  return `Install or enable the ${pluginRef} plugin in Claude Code, then re-run System Check`;
+  return `Run: claude plugin install ${pluginRef} --scope user, then claude plugin enable ${pluginRef} --scope user`;
 }
 
 function checkPlugin(
   plugin: (typeof CLOSEDLOOP_USER_PLUGINS)[number],
-  inventory: PluginInventoryResult,
+  pluginListJson: string | null,
   pluginAutoUpdateEnabled: boolean
 ): CheckResult {
-  const installedInRegistry = isPluginInstalled(plugin.folder);
-  const entry = inventory.entries.get(plugin.key);
+  const status = getPluginInstallStatus(plugin.folder, undefined, pluginListJson);
   const base = {
     id: `plugin-${plugin.folder}`,
     label: plugin.label,
     required: plugin.required,
-    ...(entry?.version ? { version: entry.version } : {}),
+    ...(status.selectedUserVersion ? { version: status.selectedUserVersion } : {}),
   };
 
-  if (entry?.enabled === true) {
+  if (status.hasValidUserScopedEntry) {
     return { ...base, passed: true };
   }
 
-  if (entry?.enabled === false) {
+  if (status.enabledStateUnverified) {
     return {
       ...base,
       passed: false,
-      error: "Disabled",
-      remediation: buildPluginInstallRemediation(plugin.key),
+      error: "Could not verify enabled state",
+      remediation: `Run: claude plugin enable ${status.pluginRef} --scope user, then rerun System Check`,
       enableAttempted: false,
-      enablePluginIds: [plugin.key],
+      enablePluginIds: [status.pluginRef],
       ...(!pluginAutoUpdateEnabled ? { enableOutcome: "skipped" as const } : {}),
     };
   }
 
-  if (entry || installedInRegistry) {
+  if (status.disabled) {
     return {
       ...base,
       passed: false,
-      error: "Enabled state unavailable",
-      remediation: buildPluginInstallRemediation(plugin.key),
+      error: "Disabled",
+      remediation: `Run: claude plugin enable ${status.pluginRef} --scope user`,
       enableAttempted: false,
-      enablePluginIds: [plugin.key],
+      enablePluginIds: [status.pluginRef],
       ...(!pluginAutoUpdateEnabled ? { enableOutcome: "skipped" as const } : {}),
+    };
+  }
+
+  if (!status.hasExistingUserInstallPath && status.hasProjectScopedEntry) {
+    return {
+      ...base,
+      passed: false,
+      error: "Installed at project scope",
+      remediation: `Run: claude plugin uninstall ${status.pluginRef} --scope project, then claude plugin install ${status.pluginRef} --scope user`
+    };
+  }
+
+  if (status.hasUserScopedEntry && !status.hasExistingUserInstallPath) {
+    return {
+      ...base,
+      passed: false,
+      error: "Install path missing",
+      remediation: `Run: claude plugin install ${status.pluginRef} --scope user`
     };
   }
 
@@ -997,15 +1055,7 @@ function checkPlugin(
     ...base,
     passed: false,
     error: "Not found",
-    remediation: buildPluginInstallRemediation(plugin.key),
-    ...(inventory.source === "unavailable"
-      ? {
-          debug: {
-            errorCode: "PLUGIN_LIST_UNAVAILABLE",
-            stderr: inventory.error?.slice(0, STDERR_TAIL_MAX_CHARS),
-          },
-        }
-      : {}),
+    remediation: `Run: claude plugin install ${status.pluginRef} --scope user`
   };
 }
 
@@ -1241,7 +1291,7 @@ async function applyPluginVersionChecks(
       versionChecks.set(checkId, {
         passed: false,
         error: "Could not verify installed version",
-        remediation: `Reinstall the plugin: claude plugin install ${plugin.key}`,
+        remediation: `Reinstall the plugin: claude plugin install ${plugin.key} --scope user`,
       });
     } else if (cmp === false) {
       outdatedPlugins.push({
@@ -1253,7 +1303,7 @@ async function applyPluginVersionChecks(
         passed: false,
         version: installedVer,
         error: `Update available: ${manifest.latestVersion}`,
-        remediation: `claude plugin update ${plugin.key}`,
+        remediation: `claude plugin update ${plugin.key} --scope user`,
       });
     } else {
       versionChecks.set(checkId, {

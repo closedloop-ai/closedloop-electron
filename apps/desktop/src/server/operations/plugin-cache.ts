@@ -4,7 +4,38 @@ import path from "node:path";
 
 type InstalledPluginsFile = {
   version?: number;
-  plugins?: Record<string, Array<{ installPath?: string; version?: string }>>;
+  plugins?: Record<string, InstalledPluginEntry[]>;
+};
+
+type InstalledPluginEntry = {
+  installPath?: string;
+  version?: string;
+  scope?: string;
+  projectPath?: string;
+  enabled?: boolean;
+};
+
+type PluginListEntry = {
+  id?: string;
+  name?: string;
+  installPath?: string;
+  version?: string;
+  scope?: string;
+  projectPath?: string;
+  enabled?: boolean;
+};
+
+export type PluginInstallStatus = {
+  pluginRef: string;
+  hasValidUserScopedEntry: boolean;
+  hasUserScopedEntry: boolean;
+  hasExistingUserInstallPath: boolean;
+  hasAnyInstallPath: boolean;
+  disabled: boolean;
+  enabledStateUnverified: boolean;
+  hasProjectScopedEntry: boolean;
+  projectScopedPaths: string[];
+  selectedUserVersion?: string;
 };
 
 export const CLOSEDLOOP_REQUIRED_PLUGIN_IDS = [
@@ -75,17 +106,18 @@ export function findPluginScript(
 }
 
 export function isPluginInstalled(pluginName: string, registryPath?: string): boolean {
-  registryPath ??= path.join(os.homedir(), ".claude", "plugins", "installed_plugins.json");
+  return getPluginInstallStatus(pluginName, registryPath).hasValidUserScopedEntry;
+}
+
+function getDefaultRegistryPath(): string {
+  return path.join(os.homedir(), ".claude", "plugins", "installed_plugins.json");
+}
+
+function readInstalledPluginsFile(registryPath?: string): InstalledPluginsFile | null {
   try {
-    const data = JSON.parse(readFileSync(registryPath, "utf-8")) as InstalledPluginsFile;
-    const key = `${pluginName}@closedloop-ai`;
-    const entries = data.plugins?.[key];
-    if (!entries || entries.length === 0) {
-      return false;
-    }
-    return entries.some((entry) => entry.installPath && existsSync(entry.installPath));
+    return JSON.parse(readFileSync(registryPath ?? getDefaultRegistryPath(), "utf-8")) as InstalledPluginsFile;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -128,6 +160,18 @@ function normalizePluginInventoryEntry(
   };
 }
 
+function extractPluginListEntries(parsed: unknown): unknown[] | null {
+  if (Array.isArray(parsed)) {
+    return parsed;
+  }
+  if (typeof parsed !== "object" || parsed === null) {
+    return null;
+  }
+  const record = parsed as { installed?: unknown; plugins?: unknown };
+  const entries = record.installed ?? record.plugins;
+  return Array.isArray(entries) ? entries : null;
+}
+
 /**
  * Parse `claude plugin list --json` output into canonical inventory entries.
  * Missing `enabled` fields are preserved as `unknown`, which health checks
@@ -136,14 +180,8 @@ function normalizePluginInventoryEntry(
 export function parseClaudePluginListJson(
   output: string
 ): ClaudePluginInventoryEntry[] {
-  const parsed = JSON.parse(output) as unknown;
-  const entries = Array.isArray(parsed)
-    ? parsed
-    : typeof parsed === "object" && parsed !== null
-      ? (parsed as { installed?: unknown; plugins?: unknown }).installed ??
-        (parsed as { plugins?: unknown }).plugins
-      : null;
-  if (!Array.isArray(entries)) {
+  const entries = extractPluginListEntries(JSON.parse(output) as unknown);
+  if (!entries) {
     return [];
   }
 
@@ -203,25 +241,113 @@ export function toPluginInventoryMap(
   return new Map(entries.map((entry) => [entry.id, entry]));
 }
 
+function parsePluginListEntries(listJson: string): PluginListEntry[] | null {
+  try {
+    const entries = extractPluginListEntries(JSON.parse(listJson) as unknown);
+    if (!entries) {
+      return null;
+    }
+    return entries
+      .filter((entry): entry is PluginListEntry => (
+        typeof entry === "object" && entry !== null
+      ))
+      .map((entry) => ({
+        ...entry,
+        id: entry.id ?? entry.name,
+      }));
+  } catch {
+    return null;
+  }
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values));
+}
+
+function entryHasExistingInstallPath(entry: Pick<InstalledPluginEntry, "installPath">): boolean {
+  return Boolean(entry.installPath && existsSync(entry.installPath));
+}
+
+/**
+ * Classify a ClosedLoop plugin install across the registry and optional
+ * `claude plugin list --json` snapshot. A valid install must be user scoped,
+ * point at an existing install path, and have no disabled signal.
+ */
+export function getPluginInstallStatus(
+  pluginName: string,
+  registryPath?: string,
+  listJson?: string | null
+): PluginInstallStatus {
+  const pluginRef = `${pluginName}@closedloop-ai`;
+  const data = readInstalledPluginsFile(registryPath);
+  const registryEntries = data?.plugins?.[pluginRef] ?? [];
+  const userRegistryEntries = registryEntries.filter((entry) => entry.scope === "user");
+  const projectRegistryEntries = registryEntries.filter((entry) => entry.scope === "project");
+  const existingUserEntries = userRegistryEntries.filter(entryHasExistingInstallPath);
+  const hasExistingUserInstallPath = existingUserEntries.length > 0;
+
+  let listEntries: PluginListEntry[] | null | undefined;
+  if (listJson !== undefined && listJson !== null) {
+    listEntries = parsePluginListEntries(listJson);
+  }
+
+  const matchingListEntries = listEntries?.filter((entry) => entry.id === pluginRef) ?? [];
+  const userListEntries = matchingListEntries.filter((entry) => entry.scope === "user");
+  const projectListEntries = matchingListEntries.filter((entry) => entry.scope === "project");
+  const listWasRequested = listJson !== undefined;
+  const listParseFailed = listJson !== undefined && listJson !== null && listEntries === null;
+  const listUnavailable = listJson === null;
+  const enabledStateUnverified =
+    hasExistingUserInstallPath &&
+    (
+      listUnavailable ||
+      listParseFailed ||
+      (listWasRequested && !listUnavailable && !listParseFailed && userListEntries.length === 0)
+    );
+  const disabled =
+    listEntries === undefined
+      ? existingUserEntries.some((entry) => entry.enabled === false)
+      : userListEntries.some((entry) => entry.enabled === false);
+  const selectedUserEntry = [...existingUserEntries].reverse().find((entry) => entry.enabled !== false);
+  const hasProjectScopedEntry = projectRegistryEntries.length > 0 || projectListEntries.length > 0;
+  const projectScopedPaths = uniqueStrings([
+    ...projectRegistryEntries.map((entry) => entry.projectPath ?? "").filter(Boolean),
+    ...projectListEntries.map((entry) => entry.projectPath ?? "").filter(Boolean),
+  ]);
+
+  return {
+    pluginRef,
+    hasValidUserScopedEntry: hasExistingUserInstallPath && !disabled && !enabledStateUnverified,
+    hasUserScopedEntry: userRegistryEntries.length > 0,
+    hasExistingUserInstallPath,
+    hasAnyInstallPath: registryEntries.some(entryHasExistingInstallPath),
+    disabled,
+    enabledStateUnverified,
+    hasProjectScopedEntry,
+    projectScopedPaths,
+    selectedUserVersion: selectedUserEntry?.version,
+  };
+}
+
 /**
  * Read installed plugin versions from the manifest.
  * Returns a map of "name@closedloop-ai" -> version string.
  */
 export function getInstalledPluginVersions(registryPath?: string): Record<string, string> {
-  registryPath ??= path.join(os.homedir(), ".claude", "plugins", "installed_plugins.json");
   try {
-    const data = JSON.parse(readFileSync(registryPath, "utf-8")) as InstalledPluginsFile;
+    const data = readInstalledPluginsFile(registryPath);
     const result: Record<string, string> = {};
-    if (!data.plugins) {
+    if (!data?.plugins) {
       return result;
     }
     for (const [key, entries] of Object.entries(data.plugins)) {
       if (!key.endsWith("@closedloop-ai") || !entries || entries.length === 0) {
         continue;
       }
-      const lastEntry = entries.at(-1);
-      if (lastEntry?.installPath && existsSync(lastEntry.installPath)) {
-        result[key] = lastEntry.version ?? "installed";
+      const pluginName = key.replace(/@closedloop-ai$/, "");
+      const status = getPluginInstallStatus(pluginName, registryPath);
+      if (status.hasValidUserScopedEntry) {
+        result[key] = status.selectedUserVersion ?? "installed";
       }
     }
     return result;

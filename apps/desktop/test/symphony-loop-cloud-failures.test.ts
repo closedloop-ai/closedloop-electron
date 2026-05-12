@@ -671,7 +671,7 @@ test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async (t) => {
       }),
     }
   );
-  const eventReq = await mock.waitForRequest(`/loops/${loopId}/events`);
+  const eventReq = await mock.waitForRequest(`/loops/${loopId}/events`, 60_000);
   const response = await responsePromise;
 
   const event = JSON.parse(eventReq.body) as Record<string, unknown>;

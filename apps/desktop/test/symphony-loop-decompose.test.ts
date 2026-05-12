@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
 import { LoopCommand } from "@closedloop-ai/loops-api/commands";
+import { resetResolvedClaudePath } from "../src/server/operations/symphony-loop.js";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
@@ -35,6 +36,7 @@ afterEach(async () => {
     process.env.PATH = originalPath;
   }
   resetShellPathCache();
+  resetResolvedClaudePath();
 
   if (originalHome === undefined) {
     delete process.env.HOME;
@@ -108,6 +110,7 @@ test("DECOMPOSE: writes context pack with artifacts in .closedloop-ai/context/ar
   process.env.HOME = tmpDir;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
+  resetResolvedClaudePath();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -195,6 +198,7 @@ test("DECOMPOSE: uploads { features: ... } when features.json is written", async
   process.env.HOME = tmpDir;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
+  resetResolvedClaudePath();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -255,6 +259,7 @@ test("DECOMPOSE: uploads empty artifacts when features.json is not written", asy
   process.env.HOME = tmpDir;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
+  resetResolvedClaudePath();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);

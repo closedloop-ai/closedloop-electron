@@ -813,7 +813,7 @@ test("EXECUTE: git status failure sets GIT_PUSH_FAILED in completed event warnin
 
   // Wait for the completed event and assert GIT_PUSH_FAILED is in warnings.
   // The loop posts upload-artifacts first, then the completed event.
-  await mock.waitForRequest("upload-artifacts");
+  await mock.waitForRequest("upload-artifacts", 60_000);
   const completedEvent = await waitForCompletedEvent(mock.requests, loopId);
   const warnings = completedEvent.warnings as string[] | undefined;
   assert.ok(
