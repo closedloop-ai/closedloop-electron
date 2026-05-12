@@ -10,7 +10,6 @@ import { app, dialog, ipcMain, nativeImage, Notification, safeStorage, shell } f
 import {
   type AlwaysAllowRule,
   DEFAULT_DESKTOP_SETTINGS,
-  DEFAULT_POSTHOG_HOST,
   GATEWAY_PROTOCOL_VERSION,
   EMPTY_CAPABILITIES,
   type SavedConfig,
@@ -217,9 +216,11 @@ export class DesktopApplication {
     this.sessionStore = new LocalSessionStore();
     Observability.init({
       telemetrySend: (event) => this.cloudSocket?.sendTelemetry(event),
-      posthog: process.env.CL_POSTHOG_API_KEY
-        ? { apiKey: process.env.CL_POSTHOG_API_KEY, host: DEFAULT_POSTHOG_HOST }
-        : undefined,
+      analytics: {
+        send: (event) => this.cloudSocket?.emitAnalytics(event),
+        flush: (options) =>
+          this.cloudSocket?.flushAnalytics(options) ?? Promise.resolve(),
+      },
       desktopClientVersion: app.getVersion(),
     });
     this.settingsStore = new SettingsStore();
@@ -398,7 +399,6 @@ export class DesktopApplication {
         }
         Observability.connectionEstablished(
           event.computeTargetId,
-          app.getVersion(),
           process.env.NODE_ENV ?? "production",
         );
       },

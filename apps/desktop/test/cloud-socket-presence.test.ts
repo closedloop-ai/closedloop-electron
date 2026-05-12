@@ -4,6 +4,7 @@ import { afterEach, describe, test } from "node:test";
 import {
   CloudSocketService,
   buildRelayValidationPopHeaders,
+  parseDesktopHelloAck,
   parseServerCapabilities,
   refreshRelayValidationPopHeadersForSocket,
   type CloudSocketOptions,
@@ -350,5 +351,54 @@ describe("T-3.1: hello payload version fields", () => {
       undefined,
     );
     assert.equal(parseServerCapabilities(undefined), undefined);
+  });
+
+  test("parseDesktopHelloAck ignores identity fields owned by server analytics", () => {
+    const ack = parseDesktopHelloAck({
+      computeTargetId: "target-1",
+      sessionId: "session-1",
+      serverTime: "2026-05-11T00:00:00.000Z",
+      clerkUserId: " clerk_user_1 ",
+      organizationId: " org-1 ",
+      userId: "user_db_1",
+      serverCapabilities: { computeTargetSigning: true },
+      resumeFromSequence: { "cmd-1": 2 },
+    });
+
+    assert.ok(ack);
+    assert.equal(ack.computeTargetId, "target-1");
+    assert.equal(
+      (ack as unknown as Record<string, unknown>).clerkUserId,
+      undefined,
+    );
+    assert.equal(
+      (ack as unknown as Record<string, unknown>).organizationId,
+      undefined,
+    );
+    assert.equal(
+      (ack as unknown as Record<string, unknown>).userId,
+      undefined,
+    );
+    assert.deepEqual(ack.serverCapabilities, { computeTargetSigning: true });
+    assert.deepEqual(ack.resumeFromSequence, { "cmd-1": 2 });
+  });
+
+  test("parseDesktopHelloAck accepts older ack payloads without identity", () => {
+    const ack = parseDesktopHelloAck({
+      computeTargetId: "target-1",
+      sessionId: "session-1",
+      serverTime: "2026-05-11T00:00:00.000Z",
+    });
+
+    assert.ok(ack);
+    assert.equal(ack.computeTargetId, "target-1");
+    assert.equal(
+      (ack as unknown as Record<string, unknown>).clerkUserId,
+      undefined,
+    );
+    assert.equal(
+      (ack as unknown as Record<string, unknown>).organizationId,
+      undefined,
+    );
   });
 });
