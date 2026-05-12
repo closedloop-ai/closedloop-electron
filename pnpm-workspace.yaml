@@ -10,3 +10,15 @@ minimumReleaseAge: 10080
 # file:, link:) introduced via transitive deps — closes the github-ref bypass.
 blockExoticSubdeps: true
 
+# pnpm 10 disables postinstall lifecycle scripts by default — also a
+# supply-chain mitigation, since malicious packages typically run their
+# payload via postinstall. Explicitly allowlist the few packages whose
+# postinstall is load-bearing for this Electron app:
+#   - electron: downloads the platform-specific Electron binary
+#   - electron-winstaller: builds the Windows installer toolchain
+#   - esbuild: installs the platform-specific native binary
+# Add to this list intentionally, after auditing the package's install script.
+onlyBuiltDependencies:
+  - electron
+  - electron-winstaller
+  - esbuild
