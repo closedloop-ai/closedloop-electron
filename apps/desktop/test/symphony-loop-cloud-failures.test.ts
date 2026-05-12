@@ -23,7 +23,6 @@ import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { JobStore } from "../src/main/job-store.js";
 import { LoopTokenStore } from "../src/main/loop-token-store.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
-import { configureBinaryPathsResolver } from "../src/server/operations/symphony-loop.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
@@ -615,7 +614,7 @@ test("PLAN: non-zero exit cleans up persisted loop token", async () => {
 // Test 6: Repo not found emits REPO_NOT_FOUND error event and returns 404
 // ---------------------------------------------------------------------------
 
-test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async (t) => {
+test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cloud-fail-repo-not-found-"));
   tempPathsToClean.push(tmpDir);
 
@@ -625,6 +624,8 @@ test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async (t) => {
   // fails immediately rather than invoking the real gh (which would make a
   // network call and time out).
   const fakeGhPath = await writeFakeFailingGh(tmpDir);
+  process.env.PATH = `${path.dirname(fakeGhPath)}:${process.env.PATH ?? "/usr/bin:/bin"}`;
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -644,15 +645,11 @@ test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async (t) => {
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
     getSymphonyDir: () => tmpDir,
+    getBinaryPaths: () => ({ gh: fakeGhPath }),
     jobStore,
   });
   serversToClose.push(server);
   await server.start();
-
-  // Configure after server.start() so the router's own configureBinaryPathsResolver
-  // call (which resets to null) doesn't overwrite our fake gh.
-  configureBinaryPathsResolver(() => ({ gh: fakeGhPath }));
-  t.after(() => configureBinaryPathsResolver(null));
 
   const loopId = "00000000-0000-0000-0000-000000001001";
 

@@ -1,13 +1,72 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, test } from "node:test";
-import { expandTildes, extractPathFromOutput, getShellPath, getShellEnv, resetShellPathCache } from "../src/server/shell-path.js";
+import {
+  expandTildes,
+  extractPathFromOutput,
+  getShellEnv,
+  getShellPath,
+  getShellPathSync,
+  resetShellPathCache,
+  resetShellPathCacheOnlyForTest,
+  setShellPathForTest,
+  withShellPathEnvForTest,
+} from "../src/server/shell-path.js";
+
+const originalPath = process.env.PATH;
+const originalShell = process.env.SHELL;
+const originalShellPathOutput = process.env.CL_TEST_SHELL_PATH_OUTPUT;
+const originalShellCounter = process.env.CL_TEST_SHELL_COUNTER;
 
 afterEach(() => {
+  restoreProcessEnv();
   resetShellPathCache();
 });
+
+function restoreProcessEnv(): void {
+  if (originalPath === undefined) {
+    delete process.env.PATH;
+  } else {
+    process.env.PATH = originalPath;
+  }
+  if (originalShell === undefined) {
+    delete process.env.SHELL;
+  } else {
+    process.env.SHELL = originalShell;
+  }
+  if (originalShellPathOutput === undefined) {
+    delete process.env.CL_TEST_SHELL_PATH_OUTPUT;
+  } else {
+    process.env.CL_TEST_SHELL_PATH_OUTPUT = originalShellPathOutput;
+  }
+  if (originalShellCounter === undefined) {
+    delete process.env.CL_TEST_SHELL_COUNTER;
+  } else {
+    process.env.CL_TEST_SHELL_COUNTER = originalShellCounter;
+  }
+}
+
+async function writeFakeShell(tempDir: string): Promise<string> {
+  const fakeShell = path.join(tempDir, "fake-shell");
+  await writeFile(
+    fakeShell,
+    [
+      "#!/bin/sh",
+      "if [ -n \"$CL_TEST_SHELL_COUNTER\" ]; then",
+      "  count=$(cat \"$CL_TEST_SHELL_COUNTER\" 2>/dev/null || printf '0')",
+      "  count=$((count + 1))",
+      "  printf '%s' \"$count\" > \"$CL_TEST_SHELL_COUNTER\"",
+      "fi",
+      "printf '__CLPATH_START__%s__CLPATH_END__\\n' \"$CL_TEST_SHELL_PATH_OUTPUT\"",
+      "",
+    ].join("\n"),
+  );
+  await chmod(fakeShell, 0o755);
+  return fakeShell;
+}
 
 describe("expandTildes", () => {
   const home = os.homedir();
@@ -120,8 +179,6 @@ describe("getShellPath", () => {
   test("cache can be reset", async () => {
     const tempDir = await mkdtemp(path.join(os.tmpdir(), "shell-path-test-"));
     const fakeShell = path.join(tempDir, "fake-shell");
-    const previousShell = process.env.SHELL;
-    const previousOutput = process.env.CL_TEST_SHELL_PATH_OUTPUT;
     await writeFile(
       fakeShell,
       [
@@ -132,32 +189,158 @@ describe("getShellPath", () => {
     await chmod(fakeShell, 0o755);
 
     try {
-      process.env.SHELL = fakeShell;
-      process.env.CL_TEST_SHELL_PATH_OUTPUT = "/tmp/fake-bin-1:/usr/bin";
-      resetShellPathCache();
+      const env = {
+        ...process.env,
+        SHELL: fakeShell,
+        CL_TEST_SHELL_PATH_OUTPUT: "/tmp/fake-bin-1:/usr/bin",
+      };
 
-      const first = await getShellPath();
-      process.env.CL_TEST_SHELL_PATH_OUTPUT = "/tmp/fake-bin-2:/usr/bin";
-      const cached = await getShellPath();
+      await withShellPathEnvForTest(env, async () => {
+        const first = await getShellPath();
+        env.CL_TEST_SHELL_PATH_OUTPUT = "/tmp/fake-bin-2:/usr/bin";
+        const cached = await getShellPath();
 
-      assert.equal(first, "/tmp/fake-bin-1:/usr/bin");
-      assert.equal(cached, first);
+        assert.equal(first, "/tmp/fake-bin-1:/usr/bin");
+        assert.equal(cached, first);
 
-      resetShellPathCache();
-      const second = await getShellPath();
-      assert.equal(second, "/tmp/fake-bin-2:/usr/bin");
+        resetShellPathCacheOnlyForTest();
+        const second = await getShellPath();
+        assert.equal(second, "/tmp/fake-bin-2:/usr/bin");
+      });
     } finally {
-      if (previousShell === undefined) {
-        delete process.env.SHELL;
-      } else {
-        process.env.SHELL = previousShell;
-      }
-      if (previousOutput === undefined) {
-        delete process.env.CL_TEST_SHELL_PATH_OUTPUT;
-      } else {
-        process.env.CL_TEST_SHELL_PATH_OUTPUT = previousOutput;
-      }
       resetShellPathCache();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("test PATH pins are isolated across async contexts", async () => {
+    async function readPinnedPath(shellPath: string, waitMs: number): Promise<string> {
+      return await withShellPathEnvForTest({ ...process.env, PATH: shellPath }, async () => {
+        setShellPathForTest();
+        await delay(waitMs);
+
+        assert.equal(getShellPathSync(), shellPath);
+        return await getShellPath();
+      });
+    }
+
+    const firstPath = "/tmp/context-shell-a:/usr/bin";
+    const secondPath = "/tmp/context-shell-b:/usr/bin";
+
+    const [first, second] = await Promise.all([
+      readPinnedPath(firstPath, 10),
+      readPinnedPath(secondPath, 0),
+    ]);
+
+    assert.equal(first, firstPath);
+    assert.equal(second, secondPath);
+  });
+});
+
+describe("getShellPathSync", () => {
+  test("extracts sentinels and expands tildes", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "shell-path-sync-test-"));
+    try {
+      const env = {
+        ...process.env,
+        SHELL: await writeFakeShell(tempDir),
+        CL_TEST_SHELL_PATH_OUTPUT: "~/fake-bin:/usr/bin",
+      };
+
+      const result = withShellPathEnvForTest(env, () => getShellPathSync());
+
+      assert.equal(result, `${os.homedir()}/fake-bin:/usr/bin`);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("falls back when the configured shell is missing", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "shell-path-sync-missing-"));
+    try {
+      const env = {
+        ...process.env,
+        PATH: "/tmp/fallback-bin",
+        SHELL: path.join(tempDir, "missing-shell"),
+      };
+
+      const result = withShellPathEnvForTest(env, () => getShellPathSync());
+
+      assert.equal(result, "/tmp/fallback-bin:/opt/homebrew/bin:/usr/local/bin");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("shares cache after async resolves first", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "shell-path-cache-async-first-"));
+    const counterPath = path.join(tempDir, "counter");
+    try {
+      const env = {
+        ...process.env,
+        SHELL: await writeFakeShell(tempDir),
+        CL_TEST_SHELL_PATH_OUTPUT: "/tmp/cache-async-first:/usr/bin",
+        CL_TEST_SHELL_COUNTER: counterPath,
+      };
+
+      await withShellPathEnvForTest(env, async () => {
+        const first = await getShellPath();
+        const second = getShellPathSync();
+
+        assert.equal(first, "/tmp/cache-async-first:/usr/bin");
+        assert.equal(second, first);
+        assert.equal(await readFile(counterPath, "utf8"), "1");
+      });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("shares cache after sync resolves first", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "shell-path-cache-sync-first-"));
+    const counterPath = path.join(tempDir, "counter");
+    try {
+      const env = {
+        ...process.env,
+        SHELL: await writeFakeShell(tempDir),
+        CL_TEST_SHELL_PATH_OUTPUT: "/tmp/cache-sync-first:/usr/bin",
+        CL_TEST_SHELL_COUNTER: counterPath,
+      };
+
+      await withShellPathEnvForTest(env, async () => {
+        const first = getShellPathSync();
+        const second = await getShellPath();
+
+        assert.equal(first, "/tmp/cache-sync-first:/usr/bin");
+        assert.equal(second, first);
+        assert.equal(await readFile(counterPath, "utf8"), "1");
+      });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test("reset clears sync and async cache state", async () => {
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), "shell-path-cache-reset-"));
+    try {
+      const env = {
+        ...process.env,
+        SHELL: await writeFakeShell(tempDir),
+        CL_TEST_SHELL_PATH_OUTPUT: "/tmp/cache-reset-1:/usr/bin",
+      };
+
+      await withShellPathEnvForTest(env, async () => {
+        const first = getShellPathSync();
+        env.CL_TEST_SHELL_PATH_OUTPUT = "/tmp/cache-reset-2:/usr/bin";
+        const cached = await getShellPath();
+        resetShellPathCacheOnlyForTest();
+        const second = await getShellPath();
+
+        assert.equal(first, "/tmp/cache-reset-1:/usr/bin");
+        assert.equal(cached, first);
+        assert.equal(second, "/tmp/cache-reset-2:/usr/bin");
+      });
+    } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
   });
