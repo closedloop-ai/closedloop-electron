@@ -179,9 +179,8 @@ platform@closedloop-ai
     ]);
   });
 
-  test("required ClosedLoop plugin inventory includes bootstrap and six plugins", () => {
+  test("required ClosedLoop plugin inventory includes Symphony runtime plugins", () => {
     assert.deepEqual([...CLOSEDLOOP_REQUIRED_PLUGIN_IDS], [
-      "bootstrap@closedloop-ai",
       "code@closedloop-ai",
       "code-review@closedloop-ai",
       "judges@closedloop-ai",

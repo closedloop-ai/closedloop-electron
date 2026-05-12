@@ -38,12 +38,6 @@ const PLUGIN_AUTOUPDATE_DOCS_LINK = {
 
 const CLOSEDLOOP_USER_PLUGINS = [
   {
-    folder: "bootstrap",
-    key: "bootstrap@closedloop-ai",
-    label: "Bootstrap Plugin",
-    required: true,
-  },
-  {
     folder: "code",
     key: "code@closedloop-ai",
     label: "Symphony Plugin",

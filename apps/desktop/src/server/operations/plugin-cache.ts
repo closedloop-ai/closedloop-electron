@@ -8,7 +8,6 @@ type InstalledPluginsFile = {
 };
 
 export const CLOSEDLOOP_REQUIRED_PLUGIN_IDS = [
-  "bootstrap@closedloop-ai",
   "code@closedloop-ai",
   "code-review@closedloop-ai",
   "judges@closedloop-ai",

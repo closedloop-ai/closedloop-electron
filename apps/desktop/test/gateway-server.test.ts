@@ -4259,7 +4259,6 @@ async function createHealthCheckFixture(
 if [ "$1" = "plugin" ] && [ "$2" = "list" ] && [ "$3" = "--json" ]; then
   cat <<'JSON'
 [
-  {"id":"bootstrap@closedloop-ai","version":"1.0.0","enabled":true,"installPath":"/tmp/bootstrap"},
   {"id":"code@closedloop-ai","version":"1.0.0","enabled":true,"installPath":"/tmp/code"},
   {"id":"code-review@closedloop-ai","version":"1.0.0","enabled":true,"installPath":"/tmp/code-review"},
   {"id":"judges@closedloop-ai","version":"1.0.0","enabled":true,"installPath":"/tmp/judges"},
@@ -4293,7 +4292,7 @@ echo "1.5.0"
   const pluginsDir = path.join(homeDir, ".claude", "plugins");
   await fs.mkdir(pluginsDir, { recursive: true });
 
-  const pluginNames = ["bootstrap", "code", "platform", "judges", "code-review", "self-learning"];
+  const pluginNames = ["code", "platform", "judges", "code-review", "self-learning"];
   const pluginsRecord: Record<string, Array<{ installPath: string; version: string }>> = {};
   for (const name of pluginNames) {
     const installPath = path.join(tmpDir, `plugin-${name}`);
@@ -4321,7 +4320,7 @@ echo "1.5.0"
 }
 
 function installHealthCheckCommandStub(options: {
-  isBootstrapEnabled: () => boolean;
+  isCodeEnabled: () => boolean;
   pythonStdout?: string;
 }): void {
   _setRunCommandForTesting(async (cmd, args) => {
@@ -4353,15 +4352,9 @@ function installHealthCheckCommandStub(options: {
       return {
         stdout: JSON.stringify([
           {
-            id: "bootstrap@closedloop-ai",
-            version: "1.0.0",
-            enabled: options.isBootstrapEnabled(),
-            installPath: "/tmp/bootstrap",
-          },
-          {
             id: "code@closedloop-ai",
             version: "1.0.0",
-            enabled: true,
+            enabled: options.isCodeEnabled(),
             installPath: "/tmp/code",
           },
           {
@@ -4435,7 +4428,7 @@ test("health-check fails disabled required plugin without auto-enable gate", asy
     '#!/bin/sh\necho "Python 3.11.0"\n'
   );
   const enableCalls: string[] = [];
-  installHealthCheckCommandStub({ isBootstrapEnabled: () => false });
+  installHealthCheckCommandStub({ isCodeEnabled: () => false });
   _setPluginEnableCommandForTesting(async (pluginRef) => {
     enableCalls.push(pluginRef);
     return { outcome: "success", stdout: "", elapsedMs: 1 };
@@ -4459,8 +4452,8 @@ test("health-check fails disabled required plugin without auto-enable gate", asy
     allRequiredPassed: boolean;
   };
 
-  const check = body.checks.find((entry) => entry.id === "plugin-bootstrap");
-  assert.ok(check, "bootstrap plugin check should be present");
+  const check = body.checks.find((entry) => entry.id === "plugin-code");
+  assert.ok(check, "code plugin check should be present");
   assert.equal(check.passed, false);
   assert.equal(check.error, "Disabled");
   assert.equal(check.enableOutcome, "skipped");
@@ -4472,14 +4465,14 @@ test("health-check auto-enables disabled plugin and verifies post-state", async 
   const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
     '#!/bin/sh\necho "Python 3.11.0"\n'
   );
-  let bootstrapEnabled = false;
+  let codeEnabled = false;
   const enableCalls: string[] = [];
   installHealthCheckCommandStub({
-    isBootstrapEnabled: () => bootstrapEnabled,
+    isCodeEnabled: () => codeEnabled,
   });
   _setPluginEnableCommandForTesting(async (pluginRef) => {
     enableCalls.push(pluginRef);
-    bootstrapEnabled = true;
+    codeEnabled = true;
     return { outcome: "success", stdout: "", elapsedMs: 1 };
   });
   const server = await startHealthCheckServer(
@@ -4502,14 +4495,14 @@ test("health-check auto-enables disabled plugin and verifies post-state", async 
     allRequiredPassed: boolean;
   };
 
-  const check = body.checks.find((entry) => entry.id === "plugin-bootstrap");
-  assert.ok(check, "bootstrap plugin check should be present");
+  const check = body.checks.find((entry) => entry.id === "plugin-code");
+  assert.ok(check, "code plugin check should be present");
   assert.equal(check.passed, true);
   assert.equal(check.enableAttempted, true);
   assert.equal(check.enableOutcome, "success");
-  assert.deepEqual(check.enablePluginIds, ["bootstrap@closedloop-ai"]);
+  assert.deepEqual(check.enablePluginIds, ["code@closedloop-ai"]);
   assert.equal(body.allRequiredPassed, true);
-  assert.deepEqual(enableCalls, ["bootstrap@closedloop-ai"]);
+  assert.deepEqual(enableCalls, ["code@closedloop-ai"]);
 });
 
 test("health-check keeps disabled plugin failed when auto-enable command fails", async () => {
@@ -4518,7 +4511,7 @@ test("health-check keeps disabled plugin failed when auto-enable command fails",
   );
   const enableCalls: string[] = [];
   installHealthCheckCommandStub({
-    isBootstrapEnabled: () => false,
+    isCodeEnabled: () => false,
   });
   _setPluginEnableCommandForTesting(async (pluginRef) => {
     enableCalls.push(pluginRef);
@@ -4549,13 +4542,13 @@ test("health-check keeps disabled plugin failed when auto-enable command fails",
     allRequiredPassed: boolean;
   };
 
-  const check = body.checks.find((entry) => entry.id === "plugin-bootstrap");
-  assert.ok(check, "bootstrap plugin check should be present");
+  const check = body.checks.find((entry) => entry.id === "plugin-code");
+  assert.ok(check, "code plugin check should be present");
   assert.equal(check.passed, false);
   assert.equal(check.enableAttempted, true);
   assert.equal(check.enableOutcome, "failed");
   assert.equal(body.allRequiredPassed, false);
-  assert.deepEqual(enableCalls, ["bootstrap@closedloop-ai"]);
+  assert.deepEqual(enableCalls, ["code@closedloop-ai"]);
 });
 
 function mockClosedLoopPluginManifestFetch(version: string): void {
@@ -4587,7 +4580,7 @@ test("python3 health check: passes for version 3.11.0 (control)", async () => {
   const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
     '#!/bin/sh\necho "Python 3.11.0"\n'
   );
-  installHealthCheckCommandStub({ isBootstrapEnabled: () => true });
+  installHealthCheckCommandStub({ isCodeEnabled: () => true });
 
   process.env.HOME = path.join(tmpDir, "home");
   process.env.PATH = binDir;
@@ -4768,7 +4761,7 @@ test("python3 health check: passes for version with extra suffix (3.10.1.post1)"
     '#!/bin/sh\necho "Python 3.10.1.post1"\n'
   );
   installHealthCheckCommandStub({
-    isBootstrapEnabled: () => true,
+    isCodeEnabled: () => true,
     pythonStdout: "Python 3.10.1.post1",
   });
 
