@@ -44,6 +44,7 @@ TypeScript is strict-mode (`tsconfig.base.json`) and ESM (`NodeNext`).
 - Prefer schema-based object validation and narrowing at JSON, IPC, persisted-store, and HTTP boundaries instead of ad hoc `Record<string, unknown>` casts or manual `typeof value === "object"` checks. Reuse or colocate schemas when the shape is shared.
 - For expected service outcomes such as conflicts, invalid state transitions, missing records, validation failures, or unsupported operations, return typed domain results instead of throwing custom Error classes for control flow.
 - Avoid `instanceof` and `in` checks for routine error/result handling when a typed result discriminant or shared error code can express the branch more clearly. Reserve thrown errors and exception-style narrowing for unexpected failures or third-party APIs that require it.
+- Do not keep private fields, module-level variables, or setter assignments that are never read after a refactor. If identity or context moves to another service or server-side enrichment path, remove the stale client-side state instead of preserving misleading dead writes.
 
 ## Gateway Operations
 Gateway route handlers live under `apps/desktop/src/server/operations/`.
@@ -60,6 +61,7 @@ Tests run with `tsx --test` (Node test runner) via `just desktop-test`.
 
 - Place tests in `apps/desktop/test/` and name files `*.test.ts`.
 - Add or update tests with behavior changes, especially gateway auth, process spawning, and telemetry flows.
+- Observability and telemetry refactors must preserve direct facade coverage for security-sensitive redaction and resilience invariants, including descriptor-only outbound network telemetry and "telemetry emission never throws" behavior. Do not rely only on lower-level policy tests when the facade serializes the emitted event.
 - Keep tests portable in CI: avoid shelling out to optional host tools such as `rg` when Node or TypeScript APIs can prove the invariant. If a test truly requires an external CLI, make the dependency explicit in the workflow before relying on it.
 - Renderer tests that cover IPC-backed panels should exercise the initial activation path or make render helpers tolerate absent/empty data, so a tab can open before its first async poll resolves.
 - Before opening a PR, run: `just desktop-lint && just desktop-typecheck && just desktop-test`.
