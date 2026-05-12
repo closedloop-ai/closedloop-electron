@@ -4,12 +4,15 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, test } from "node:test";
 import {
+  CLOSEDLOOP_REQUIRED_PLUGIN_IDS,
   compareSemverDescending,
   findPluginScript,
   findPluginVersions,
   getCodePluginVersion,
   getPluginCacheRoot,
-  isPluginInstalled
+  isPluginInstalled,
+  parseClaudePluginListJson,
+  parseClaudePluginListText,
 } from "../src/server/operations/plugin-cache.js";
 
 const tempDirs: string[] = [];
@@ -60,6 +63,80 @@ describe("compareSemverDescending", () => {
 
   test("compares patch versions", () => {
     assert.ok(compareSemverDescending("1.0.2", "1.0.1") < 0);
+  });
+});
+
+describe("Claude plugin inventory parsing", () => {
+  test("parses JSON inventory with enabled plugin fields", () => {
+    const entries = parseClaudePluginListJson(
+      JSON.stringify([
+        {
+          id: "code@closedloop-ai",
+          version: "1.2.3",
+          enabled: true,
+          installPath: "/tmp/code",
+        },
+      ])
+    );
+
+    assert.deepEqual(entries, [
+      {
+        id: "code@closedloop-ai",
+        version: "1.2.3",
+        enabled: true,
+        installPath: "/tmp/code",
+      },
+    ]);
+  });
+
+  test("parses disabled JSON inventory", () => {
+    const entries = parseClaudePluginListJson(
+      JSON.stringify([{ id: "platform@closedloop-ai", enabled: false }])
+    );
+
+    assert.deepEqual(entries, [
+      { id: "platform@closedloop-ai", enabled: false },
+    ]);
+  });
+
+  test("treats missing JSON enabled field as unknown", () => {
+    const entries = parseClaudePluginListJson(
+      JSON.stringify([{ id: "judges@closedloop-ai", version: "1.0.0" }])
+    );
+
+    assert.deepEqual(entries, [
+      {
+        id: "judges@closedloop-ai",
+        version: "1.0.0",
+        enabled: "unknown",
+      },
+    ]);
+  });
+
+  test("parses text fallback enabled and disabled status", () => {
+    const entries = parseClaudePluginListText(`
+code@closedloop-ai
+  Status: ✔ enabled
+
+platform@closedloop-ai
+  Status: ✘ disabled
+`);
+
+    assert.deepEqual(entries, [
+      { id: "code@closedloop-ai", enabled: true },
+      { id: "platform@closedloop-ai", enabled: false },
+    ]);
+  });
+
+  test("required ClosedLoop plugin inventory includes bootstrap and six plugins", () => {
+    assert.deepEqual([...CLOSEDLOOP_REQUIRED_PLUGIN_IDS], [
+      "bootstrap@closedloop-ai",
+      "code@closedloop-ai",
+      "code-review@closedloop-ai",
+      "judges@closedloop-ai",
+      "platform@closedloop-ai",
+      "self-learning@closedloop-ai",
+    ]);
   });
 });
 
