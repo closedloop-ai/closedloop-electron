@@ -359,11 +359,11 @@ test("telemetry: job.completed emitted with correct category/trace on process ex
   assert.ok(event.trace, "trace must be present");
   assert.equal(event.trace?.loopId, loopId, "trace.loopId must match");
   assert.equal(event.trace?.jobId, loopId, "trace.jobId must match loopId");
-  // job.completed has no diagnostics
+  // job.completed includes lifecycle.command when a command is provided
   assert.equal(
-    event.diagnostics,
-    undefined,
-    "job.completed must not emit diagnostics",
+    event.diagnostics?.lifecycle?.command,
+    LoopCommand.Decompose,
+    "job.completed must include lifecycle.command matching the request",
   );
 });
 

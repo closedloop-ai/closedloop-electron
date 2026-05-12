@@ -1,6 +1,7 @@
 import { TelemetryService, type EnrichedTelemetryEvent } from "./telemetry-service.js";
 import { PostHogAnalytics } from "./posthog-analytics.js";
 import { gatewayLog } from "./gateway-logger.js";
+import type { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import type {
   DesktopShutdownDiagnostics,
   DesktopUpdateDiagnostics,
@@ -366,13 +367,13 @@ export class Observability {
 
   // --- Job lifecycle (telemetry only) ---
 
-  static jobStarted(commandId: string | undefined, operationId: string | undefined, loopId: string, pid: number): void {
+  static jobStarted(commandId: string | undefined, operationId: string | undefined, loopId: string, pid: number, command?: LoopCommand): void {
     Observability.emitTelemetry("info", "job.started", `Job started with pid=${pid}`, {
       commandId,
       operationId,
       loopId,
       jobId: loopId,
-    });
+    }, Observability.withLifecycleCommand(undefined, command));
   }
 
   static jobPlanSourceResolved(
@@ -401,6 +402,7 @@ export class Observability {
     loopId: string,
     diagnostics?: TelemetryDiagnostics,
     loopSessionId?: string,
+    command?: LoopCommand,
   ): void {
     Observability.emitTelemetry("info", "job.completed", "Job completed successfully", {
       commandId,
@@ -408,7 +410,7 @@ export class Observability {
       loopId,
       jobId: loopId,
       loopSessionId,
-    }, diagnostics);
+    }, Observability.withLifecycleCommand(diagnostics, command));
   }
 
   static jobFailed(
@@ -418,13 +420,15 @@ export class Observability {
     exitCode: number,
     diagnostics?: TelemetryDiagnostics,
     loopSessionId?: string,
+    command?: LoopCommand,
   ): void {
+    const baseDiagnostics: TelemetryDiagnostics = diagnostics ? { ...diagnostics, exitCode } : { exitCode };
     Observability.emitTelemetry(
       "error",
       "job.failed",
       `Process exited with code ${exitCode}`,
       { commandId, operationId, loopId, jobId: loopId, loopSessionId },
-      diagnostics ? { ...diagnostics, exitCode } : { exitCode },
+      Observability.withLifecycleCommand(baseDiagnostics, command),
     );
   }
 
@@ -435,13 +439,15 @@ export class Observability {
     exitCode: number,
     diagnostics?: TelemetryDiagnostics,
     loopSessionId?: string,
+    command?: LoopCommand,
   ): void {
+    const baseDiagnostics: TelemetryDiagnostics = diagnostics ? { ...diagnostics, exitCode } : { exitCode };
     Observability.emitTelemetry(
       "info",
       "job.cancelled",
       `Process cancelled (exit code ${exitCode})`,
       { commandId, operationId, loopId, jobId: loopId, loopSessionId },
-      diagnostics ? { ...diagnostics, exitCode } : { exitCode },
+      Observability.withLifecycleCommand(baseDiagnostics, command),
     );
   }
 
@@ -553,6 +559,14 @@ export class Observability {
   }
 
   // --- Internal helpers ---
+
+  private static withLifecycleCommand(
+    diagnostics: TelemetryDiagnostics | undefined,
+    command: LoopCommand | undefined,
+  ): TelemetryDiagnostics | undefined {
+    if (command === undefined) return diagnostics;
+    return { ...diagnostics, lifecycle: { ...diagnostics?.lifecycle, command } };
+  }
 
   // commandId is a log/event attribute for correlation only — must not be promoted to a Datadog metric tag dimension
   private static emitTelemetry(
