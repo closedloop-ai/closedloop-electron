@@ -399,7 +399,6 @@ export class DesktopApplication {
         }
         Observability.connectionEstablished(
           event.computeTargetId,
-          app.getVersion(),
           process.env.NODE_ENV ?? "production",
         );
       },

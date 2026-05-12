@@ -98,7 +98,7 @@ describe("Observability", () => {
       desktopClientVersion: "0.15.3",
     });
 
-    Observability.connectionEstablished("target-1", "0.15.3", "production");
+    Observability.connectionEstablished("target-1", "production");
     Observability.reconnectionResumed("relay_resumed", 2);
     Observability.connectionDegraded("temporary relay error");
     Observability.connectionLost();
@@ -121,10 +121,8 @@ describe("Observability", () => {
         "desktop_connection_lost",
       ],
     );
-    assert.equal(analyticsEvents[0].properties?.version, "0.15.3");
     assert.equal(analyticsEvents[0].properties?.environment, "production");
     assert.deepEqual(analyticsEvents[0].properties, {
-      version: "0.15.3",
       environment: "production",
       desktop_client_version: "0.15.3",
       platform: process.platform,

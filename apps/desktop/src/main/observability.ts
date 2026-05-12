@@ -200,10 +200,9 @@ export class Observability {
 
   // --- Connection lifecycle ---
 
-  static connectionEstablished(desktopId: string, version: string, environment: string): void {
+  static connectionEstablished(desktopId: string, environment: string): void {
     Observability.emitTelemetry("info", "connection.established", "Connection established", { computeTargetId: desktopId });
     Observability.captureAnalytics("desktop_connection_established", {
-      version,
       environment,
     });
   }
