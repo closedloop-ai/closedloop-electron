@@ -44,20 +44,24 @@ TypeScript is strict-mode (`tsconfig.base.json`) and ESM (`NodeNext`).
 - Prefer schema-based object validation and narrowing at JSON, IPC, persisted-store, and HTTP boundaries instead of ad hoc `Record<string, unknown>` casts or manual `typeof value === "object"` checks. Reuse or colocate schemas when the shape is shared.
 - For expected service outcomes such as conflicts, invalid state transitions, missing records, validation failures, or unsupported operations, return typed domain results instead of throwing custom Error classes for control flow.
 - Avoid `instanceof` and `in` checks for routine error/result handling when a typed result discriminant or shared error code can express the branch more clearly. Reserve thrown errors and exception-style narrowing for unexpected failures or third-party APIs that require it.
+- Do not keep private fields, module-level variables, or setter assignments that are never read after a refactor. If identity or context moves to another service or server-side enrichment path, remove the stale client-side state instead of preserving misleading dead writes.
 
 ## Gateway Operations
 Gateway route handlers live under `apps/desktop/src/server/operations/`.
 
 - Before adding a helper to an operation file, check existing shared modules such as `response-utils.ts` for `json()` and `symphony-utils.ts` for `expandHome()`. If helper logic is used by more than one operation, extract it into a shared module instead of copying it.
 - Follow the route registration pattern: export `registerXxxRoutes(dispatcher, ...deps)` from the operation module and register it from `router.ts`.
+- Cloud relay commands are parsed before operation handlers run, and the parser accepts only paths that start with `/api/gateway/`. New server-control or internal relay commands must use the `/api/gateway/` namespace, and any intentional legacy namespace support must update and test the parser before relying on the handler.
 - Do not duplicate local response helpers across operation files.
 - When classifying failed spawned commands or gateway operations, inspect every captured output stream that can feed the user-facing excerpt or diagnostic payload, not only `stderr`. Add focused coverage for stdout-only and stderr-only failure markers when the classification depends on process output.
+- When adapting cloud relay command bodies before forwarding them to local gateway routes, preserve each route handler's request contract. Add focused coverage for every route whose body is transformed, especially when one route swaps credentials and another route must keep its original payload fields.
 
 ## Testing Guidelines
 Tests run with `tsx --test` (Node test runner) via `just desktop-test`.
 
 - Place tests in `apps/desktop/test/` and name files `*.test.ts`.
 - Add or update tests with behavior changes, especially gateway auth, process spawning, and telemetry flows.
+- Observability and telemetry refactors must preserve direct facade coverage for security-sensitive redaction and resilience invariants, including descriptor-only outbound network telemetry and "telemetry emission never throws" behavior. Do not rely only on lower-level policy tests when the facade serializes the emitted event.
 - Keep tests portable in CI: avoid shelling out to optional host tools such as `rg` when Node or TypeScript APIs can prove the invariant. If a test truly requires an external CLI, make the dependency explicit in the workflow before relying on it.
 - Renderer tests that cover IPC-backed panels should exercise the initial activation path or make render helpers tolerate absent/empty data, so a tab can open before its first async poll resolves.
 - Before opening a PR, run: `just desktop-lint && just desktop-typecheck && just desktop-test`.
@@ -77,6 +81,11 @@ Desktop telemetry categories, diagnostics fields, and relay/API event payload
 shapes are producer contracts consumed by `symphony-alpha`. When adding or
 changing a Desktop telemetry payload, include the `symphony-alpha` consumer
 update in the same PR stack or call out the required companion PR explicitly.
+
+Long-lived telemetry context setters that consume optional or version-skewed
+gateway payload fields must clear stale state when the latest payload omits or
+blanks that context. Add regression coverage for reconnects, user switches, or
+legacy payloads that should fall back instead of preserving a previous identity.
 
 At minimum, verify the companion change covers:
 

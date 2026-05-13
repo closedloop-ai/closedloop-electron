@@ -4,10 +4,13 @@ import { afterEach, describe, test } from "node:test";
 import {
   CloudSocketService,
   buildRelayValidationPopHeaders,
+  parseDesktopHelloAck,
+  parseServerCapabilities,
   refreshRelayValidationPopHeadersForSocket,
   type CloudSocketOptions,
 } from "../src/main/cloud-socket.js";
 import { GATEWAY_PROTOCOL_VERSION } from "../src/shared/contracts.js";
+import { buildCommandSigningCapabilities } from "../src/shared/command-signing-policy.js";
 import { gatewayLog } from "../src/main/gateway-logger.js";
 import {
   DesktopPopUnavailableError,
@@ -244,12 +247,13 @@ class FakeSocket extends EventEmitter {
 }
 
 describe("T-3.1: hello payload version fields", () => {
-  test("CloudSocketService emits all three version fields in desktop.hello", () => {
+  test("CloudSocketService emits version fields and local capabilities in desktop.hello", () => {
     const service = new CloudSocketService(
       createStubOptions({
         desktopClientVersion: "0.13.9-test",
         gatewayProtocolVersion: "0.1.0",
         pluginVersion: "1.0.0-test",
+        getCapabilities: () => ({ commandSigning: true }),
       }),
     );
 
@@ -272,7 +276,129 @@ describe("T-3.1: hello payload version fields", () => {
     assert.equal(hello["desktopClientVersion"], "0.13.9-test", "desktopClientVersion must match");
     assert.equal(hello["gatewayProtocolVersion"], "0.1.0", "gatewayProtocolVersion must match");
     assert.equal(hello["pluginVersion"], "1.0.0-test", "pluginVersion must match");
+    assert.deepEqual(hello["capabilities"], { commandSigning: true });
 
     service.stop();
+  });
+
+  test("CloudSocketService omits commandSigningRequired until enforcement opt-in is enabled", () => {
+    const service = new CloudSocketService(
+      createStubOptions({
+        getCapabilities: () =>
+          buildCommandSigningCapabilities({
+            commandSigningEnforcementEnabled: false,
+          }),
+      }),
+    );
+    const fakeSocket = new FakeSocket();
+    (service as unknown as Record<string, unknown>)["socket"] = fakeSocket;
+
+    const proto = Object.getPrototypeOf(service) as Record<string, (...args: unknown[]) => void>;
+    proto["emitHello"].call(service);
+
+    const hello = fakeSocket.emittedEvents.find((e) => e.name === "desktop.hello")
+      ?.payload as Record<string, unknown>;
+    assert.deepEqual(hello["capabilities"], {
+      tools: {
+        claude: false,
+        codex: false,
+        git: false,
+        gh: false,
+        python3: false,
+      },
+      versions: {},
+      commandSigning: true,
+    });
+
+    service.stop();
+  });
+
+  test("CloudSocketService includes commandSigningRequired when enforcement opt-in is enabled", () => {
+    const service = new CloudSocketService(
+      createStubOptions({
+        getCapabilities: () =>
+          buildCommandSigningCapabilities({
+            commandSigningEnforcementEnabled: true,
+          }),
+      }),
+    );
+    const fakeSocket = new FakeSocket();
+    (service as unknown as Record<string, unknown>)["socket"] = fakeSocket;
+
+    const proto = Object.getPrototypeOf(service) as Record<string, (...args: unknown[]) => void>;
+    proto["emitHello"].call(service);
+
+    const hello = fakeSocket.emittedEvents.find((e) => e.name === "desktop.hello")
+      ?.payload as Record<string, unknown>;
+    assert.equal(
+      (hello["capabilities"] as Record<string, unknown>).commandSigningRequired,
+      true,
+    );
+
+    service.stop();
+  });
+
+  test("parseServerCapabilities requires explicit computeTargetSigning true", () => {
+    assert.deepEqual(parseServerCapabilities({ computeTargetSigning: true }), {
+      computeTargetSigning: true,
+    });
+    assert.equal(
+      parseServerCapabilities({ computeTargetSigning: false }),
+      undefined,
+    );
+    assert.equal(
+      parseServerCapabilities({ computeTargetSigning: "true" }),
+      undefined,
+    );
+    assert.equal(parseServerCapabilities(undefined), undefined);
+  });
+
+  test("parseDesktopHelloAck ignores identity fields owned by server analytics", () => {
+    const ack = parseDesktopHelloAck({
+      computeTargetId: "target-1",
+      sessionId: "session-1",
+      serverTime: "2026-05-11T00:00:00.000Z",
+      clerkUserId: " clerk_user_1 ",
+      organizationId: " org-1 ",
+      userId: "user_db_1",
+      serverCapabilities: { computeTargetSigning: true },
+      resumeFromSequence: { "cmd-1": 2 },
+    });
+
+    assert.ok(ack);
+    assert.equal(ack.computeTargetId, "target-1");
+    assert.equal(
+      (ack as unknown as Record<string, unknown>).clerkUserId,
+      undefined,
+    );
+    assert.equal(
+      (ack as unknown as Record<string, unknown>).organizationId,
+      undefined,
+    );
+    assert.equal(
+      (ack as unknown as Record<string, unknown>).userId,
+      undefined,
+    );
+    assert.deepEqual(ack.serverCapabilities, { computeTargetSigning: true });
+    assert.deepEqual(ack.resumeFromSequence, { "cmd-1": 2 });
+  });
+
+  test("parseDesktopHelloAck accepts older ack payloads without identity", () => {
+    const ack = parseDesktopHelloAck({
+      computeTargetId: "target-1",
+      sessionId: "session-1",
+      serverTime: "2026-05-11T00:00:00.000Z",
+    });
+
+    assert.ok(ack);
+    assert.equal(ack.computeTargetId, "target-1");
+    assert.equal(
+      (ack as unknown as Record<string, unknown>).clerkUserId,
+      undefined,
+    );
+    assert.equal(
+      (ack as unknown as Record<string, unknown>).organizationId,
+      undefined,
+    );
   });
 });

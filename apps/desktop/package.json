@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "version": "0.14.31",
+  "version": "0.15.5",
   "description": "ClosedLoop Desktop",
   "author": "ClosedLoop AI <support@closedloop.ai>",
   "private": true,
@@ -9,14 +9,16 @@
   "scripts": {
     "dev": "pnpm build && ELECTRON_BIN=$(bash scripts/patch-electron-plist.sh | tail -1) && \"$ELECTRON_BIN\" .",
     "start": "ELECTRON_BIN=$(bash scripts/patch-electron-plist.sh | tail -1) && \"$ELECTRON_BIN\" .",
+    "clean:dist": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "clean:package": "node -e \"require('fs').rmSync('dist-dmg',{recursive:true,force:true})\"",
     "prebuild": "node -e \"const{execSync:e}=require('child_process'),{writeFileSync:w}=require('fs');const h=e('git rev-parse HEAD').toString().trim();w('src/shared/build-info.ts','// AUTO-GENERATED — do not edit\\nexport const BUILD_COMMIT_HASH = \\\"'+h+'\\\";\\n');\"",
-    "build": "pnpm prebuild && tsc -p tsconfig.json",
+    "build": "pnpm clean:dist && pnpm prebuild && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src/",
     "test": "tsx --test test/*.test.ts",
-    "package": "pnpm build && electron-builder --mac --config electron-builder.yml",
+    "package": "pnpm clean:package && pnpm build && electron-builder --mac --config electron-builder.yml",
     "postinstall": "electron-rebuild -o node-pty",
-    "release": "pnpm build && electron-builder --mac --publish always --config electron-builder.yml"
+    "release": "pnpm clean:package && pnpm build && electron-builder --mac --publish always --config electron-builder.yml"
   },
   "dependencies": {
     "@closedloop-ai/loops-api": "0.2.10",

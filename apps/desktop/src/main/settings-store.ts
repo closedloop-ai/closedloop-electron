@@ -164,6 +164,13 @@ export class SettingsStore {
     return this.store.get("interactiveTerminal", DEFAULT_DESKTOP_SETTINGS.interactiveTerminal);
   }
 
+  getCommandSigningEnforcementEnabled(): boolean {
+    return this.store.get(
+      "commandSigningEnforcementEnabled",
+      DEFAULT_DESKTOP_SETTINGS.commandSigningEnforcementEnabled,
+    );
+  }
+
   getDefaultApprovalTier(): RiskTier {
     return this.store.get("defaultApprovalTier", DEFAULT_DESKTOP_SETTINGS.defaultApprovalTier);
   }
@@ -182,6 +189,13 @@ export class SettingsStore {
 
   setCloudConnectionEnabled(cloudConnectionEnabled: boolean): void {
     this.store.set("cloudConnectionEnabled", cloudConnectionEnabled);
+  }
+
+  setCommandSigningEnforcementEnabled(commandSigningEnforcementEnabled: boolean): void {
+    this.store.set(
+      "commandSigningEnforcementEnabled",
+      commandSigningEnforcementEnabled,
+    );
   }
 
   setDefaultApprovalTier(defaultApprovalTier: RiskTier): void {
@@ -516,6 +530,12 @@ export class SettingsStore {
     }
     if (typeof partial.cloudConnectionEnabled === "boolean") {
       this.store.set("cloudConnectionEnabled", partial.cloudConnectionEnabled);
+    }
+    if (typeof partial.commandSigningEnforcementEnabled === "boolean") {
+      this.store.set(
+        "commandSigningEnforcementEnabled",
+        partial.commandSigningEnforcementEnabled,
+      );
     }
     if (typeof partial.verboseLogging === "boolean") {
       this.store.set("verboseLogging", partial.verboseLogging);

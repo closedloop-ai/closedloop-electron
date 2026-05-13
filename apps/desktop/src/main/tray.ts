@@ -8,6 +8,7 @@ export type TrayState = "starting" | "ready" | "degraded" | "error";
 
 export interface DesktopTrayHandlers {
   onOpen?: () => void;
+  onManageCommandKeys?: () => void;
   onTogglePaused?: (paused: boolean) => void;
 }
 
@@ -92,6 +93,12 @@ export class DesktopTray {
               : "Open Symphony",
           click: () => {
             this.handlers.onOpen?.();
+          }
+        },
+        {
+          label: "Manage Browser Command Keys",
+          click: () => {
+            this.handlers.onManageCommandKeys?.();
           }
         },
         {

@@ -7,6 +7,9 @@ import { afterEach, describe, test } from "node:test";
 import {
   hasBootstrapArtifacts,
 } from "../src/server/operations/symphony-utils.js";
+import {
+  readBootstrapRepoOutputs,
+} from "../src/server/operations/symphony-loop.js";
 
 const tempPaths: string[] = [];
 
@@ -152,5 +155,53 @@ describe("bootstrap output locations", () => {
     const content = JSON.parse(raw) as Record<string, unknown>;
     assert.equal(content.bootstrap_version, "1.0");
     assert.ok(content.agents);
+  });
+});
+
+// --- readBootstrapRepoOutputs with agentsDir ---
+
+describe("readBootstrapRepoOutputs with agentsDir", () => {
+  test("reads agents from specified dir instead of repo .claude/agents", () => {
+    const repoDir = makeTempDir();
+    const outputDir = makeTempDir();
+
+    writeFileSync(
+      path.join(outputDir, "test-agent.md"),
+      [
+        "---",
+        "name: Test Agent",
+        "description: A test agent",
+        "---",
+        "",
+        "Agent prompt here",
+      ].join("\n"),
+    );
+
+    mkdirSync(path.join(repoDir, ".closedloop-ai"), { recursive: true });
+    writeFileSync(
+      path.join(repoDir, ".closedloop-ai", "bootstrap-metadata.json"),
+      JSON.stringify({ agents: ["test-agent"] }),
+    );
+
+    const result = readBootstrapRepoOutputs(repoDir, outputDir);
+    assert.equal(result.agents.length, 1);
+    assert.equal(result.agents[0]?.slug, "test-agent");
+    assert.equal(result.agents[0]?.name, "Test Agent");
+    assert.ok(result.metadata !== null);
+  });
+
+  test("falls back to repo .claude/agents when agentsDir not provided", () => {
+    const repoDir = makeTempDir();
+    const agentsDir = path.join(repoDir, ".claude", "agents");
+    mkdirSync(agentsDir, { recursive: true });
+
+    writeFileSync(
+      path.join(agentsDir, "repo-agent.md"),
+      "---\nname: Repo Agent\n---\nPrompt",
+    );
+
+    const result = readBootstrapRepoOutputs(repoDir);
+    assert.equal(result.agents.length, 1);
+    assert.equal(result.agents[0]?.slug, "repo-agent");
   });
 });

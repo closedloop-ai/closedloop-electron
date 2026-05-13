@@ -111,7 +111,6 @@ import {
   CLONE_GIT_TIMEOUT,
   expandHome,
   fetchOrigin,
-  hasBootstrapArtifacts,
   isProcessRunning,
   loopError,
   loopLog,
@@ -873,19 +872,21 @@ function parseAgentFrontmatter(content: string): {
   };
 }
 
-function readBootstrapRepoOutputs(
+export function readBootstrapRepoOutputs(
   repoPath: string,
+  agentsDir?: string,
 ): Omit<
   BootstrapRepoResult,
   "fullName" | "branch" | "success" | "error" | "duration"
 > {
   const agents: BootstrapRepoResult["agents"] = [];
-  const agentsDir = path.join(repoPath, ".claude", "agents");
+  const effectiveAgentsDir =
+    agentsDir ?? path.join(repoPath, ".claude", "agents");
   try {
-    for (const file of readdirSync(agentsDir)) {
+    for (const file of readdirSync(effectiveAgentsDir)) {
       if (!file.endsWith(".md")) continue;
       const slug = file.slice(0, -3);
-      const content = readFileSync(path.join(agentsDir, file), "utf-8");
+      const content = readFileSync(path.join(effectiveAgentsDir, file), "utf-8");
       const { name, description } = parseAgentFrontmatter(content);
       agents.push({
         name: name || slug,
@@ -2167,7 +2168,7 @@ function readGeneratePrdOutputs(worktreeDir: string): LoopOutputArtifacts {
   };
 }
 
-function readBootstrapOutputs(claudeWorkDir: string): LoopOutputArtifacts {
+export function readBootstrapOutputs(claudeWorkDir: string): LoopOutputArtifacts {
   const manifestFile = path.join(claudeWorkDir, "bootstrap-manifest.json");
   const manifest = readJsonFileSync(manifestFile) as
     | BootstrapManifestEntry[]
@@ -2196,8 +2197,9 @@ function readBootstrapOutputs(claudeWorkDir: string): LoopOutputArtifacts {
     const success = marker === "ok";
     const error = success ? undefined : marker.replace(/^fail:/, "");
 
+    const outputDir = path.join(claudeWorkDir, `repo-${runnableIndex}-agents`);
     const outputs = success
-      ? readBootstrapRepoOutputs(entry.localPath)
+      ? readBootstrapRepoOutputs(entry.localPath, outputDir)
       : { agents: [], criticGates: null, metadata: null };
 
     repos.push({
@@ -2392,9 +2394,61 @@ export const AUTH_STATUS_PATTERN =
   /authentication_error|authentication required|invalid bearer token|invalid token|\brate_limit(_error)?\b|rate limit reached|usage limit|billing_error|permission_error|overloaded_error|api overloaded|\bunauthorized\b|\bforbidden\b|access denied|token.*expired/i;
 
 /**
- * Scan the current Claude JSONL output for a result record with
- * `is_error: true` whose message matches a known auth/rate-limit/billing pattern.
- * Returns the error text or null if not found.
+ * Scan an in-memory JSONL buffer for a result record with `is_error: true`
+ * (or an `isApiErrorMessage` API-error entry) matching a known
+ * auth/rate-limit/billing pattern. Returns the error text or null if not found.
+ */
+export function scanJsonlForAuthChallenge(content: string): string | null {
+  for (const line of content.split("\n")) {
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      const entry = JSON.parse(line) as Record<string, unknown>;
+      if (
+        entry.type === "result" &&
+        entry.is_error === true &&
+        typeof entry.result === "string" &&
+        AUTH_CHALLENGE_PATTERN.test(entry.result)
+      ) {
+        return entry.result;
+      }
+      // Synthetic API-error entries emitted by Claude CLI mid-conversation
+      // carry `isApiErrorMessage: true` and the error string in `error`.
+      if (entry.isApiErrorMessage === true) {
+        const errorText =
+          typeof entry.error === "string" ? entry.error : "unknown error";
+        if (AUTH_STATUS_PATTERN.test(errorText)) {
+          const status =
+            typeof entry.apiErrorStatus === "number"
+              ? ` (status ${entry.apiErrorStatus})`
+              : "";
+          return `Claude API ${errorText} error${status}`;
+        }
+        // HTTP 401/403/429 is an auth/quota challenge regardless of error text.
+        // 429 is the canonical rate-limit / over-quota status; treating it as
+        // a challenge here ensures we catch entries like
+        // {error: "rate_limit", apiErrorStatus: 429} even if Anthropic drops
+        // or renames the textual error token in a future CLI version.
+        if (
+          entry.apiErrorStatus === 401 ||
+          entry.apiErrorStatus === 403 ||
+          entry.apiErrorStatus === 429
+        ) {
+          return `API returned HTTP ${entry.apiErrorStatus}: ${errorText}`;
+        }
+      }
+    } catch {
+      // skip malformed lines
+    }
+  }
+  return null;
+}
+
+/**
+ * Scan the current Claude JSONL output file for an auth/rate-limit/billing
+ * error record. Thin wrapper that reads the file then delegates to
+ * `scanJsonlForAuthChallenge`.
  */
 export function detectAuthChallengeFromJsonl(
   claudeWorkDir: string,
@@ -2404,54 +2458,11 @@ export function detectAuthChallengeFromJsonl(
     return null;
   }
   try {
-    const content = readFileSync(outputFile, "utf-8");
-    for (const line of content.split("\n")) {
-      if (!line.trim()) {
-        continue;
-      }
-      try {
-        const entry = JSON.parse(line) as Record<string, unknown>;
-        if (
-          entry.type === "result" &&
-          entry.is_error === true &&
-          typeof entry.result === "string" &&
-          AUTH_CHALLENGE_PATTERN.test(entry.result)
-        ) {
-          return entry.result;
-        }
-        // Synthetic API-error entries emitted by Claude CLI mid-conversation
-        // carry `isApiErrorMessage: true` and the error string in `error`.
-        if (entry.isApiErrorMessage === true) {
-          const errorText =
-            typeof entry.error === "string" ? entry.error : "unknown error";
-          if (AUTH_STATUS_PATTERN.test(errorText)) {
-            const status =
-              typeof entry.apiErrorStatus === "number"
-                ? ` (status ${entry.apiErrorStatus})`
-                : "";
-            return `Claude API ${errorText} error${status}`;
-          }
-          // HTTP 401/403/429 is an auth/quota challenge regardless of error text.
-          // 429 is the canonical rate-limit / over-quota status; treating it as
-          // a challenge here ensures we catch entries like
-          // {error: "rate_limit", apiErrorStatus: 429} even if Anthropic drops
-          // or renames the textual error token in a future CLI version.
-          if (
-            entry.apiErrorStatus === 401 ||
-            entry.apiErrorStatus === 403 ||
-            entry.apiErrorStatus === 429
-          ) {
-            return `API returned HTTP ${entry.apiErrorStatus}: ${errorText}`;
-          }
-        }
-      } catch {
-        // skip malformed lines
-      }
-    }
+    return scanJsonlForAuthChallenge(readFileSync(outputFile, "utf-8"));
   } catch {
     // file read error
+    return null;
   }
-  return null;
 }
 
 /**
@@ -2466,6 +2477,24 @@ export function isAuthChallengeError(logTail: string): boolean {
 // LLM-assisted commit (EXECUTE only)
 // ---------------------------------------------------------------------------
 
+type LlmCommitFailureReason =
+  | { kind: "auth_challenge"; authChallengeMessage: string }
+  | { kind: "timeout" }
+  | { kind: "other" };
+
+type LlmCommitResult =
+  | { status: "success"; result: ExecutionResult }
+  | {
+      status: "failed";
+      reason: LlmCommitFailureReason;
+      logTail: string;
+    };
+
+/** Shorthand for a non-auth, non-timeout LLM commit failure. */
+function llmCommitFailed(logTail: string): LlmCommitResult {
+  return { status: "failed", reason: { kind: "other" }, logTail };
+}
+
 async function attemptLlmCommit(
   worktreeDir: string,
   baseBranch: string,
@@ -2479,7 +2508,7 @@ async function attemptLlmCommit(
   onTimeout?: () => void,
   jobStore?: JobStore,
   claudeWorkDir?: string,
-): Promise<ExecutionResult | null> {
+): Promise<LlmCommitResult> {
   // Build metadata footer for PR body
   // Strip newlines from user-controlled fields to prevent prompt injection
   const safeBranch = baseBranch.replace(/[\r\n]/g, "");
@@ -2583,7 +2612,7 @@ async function attemptLlmCommit(
         loopId,
         `LLM commit aborted: worktreeDir not in allowed sandbox: ${worktreeDir}`,
       );
-      return null;
+      return llmCommitFailed("Sandbox gate failed: worktree not in allowed directory");
     }
     throw sandboxErr;
   }
@@ -2608,10 +2637,18 @@ async function attemptLlmCommit(
     "Bash,Read,Write,Glob,Grep",
     expectedMcpUrl,
   );
-  const spawnArgs = ["-p", prompt, "--allowedTools", allowedTools];
+  const spawnArgs = [
+    "-p",
+    prompt,
+    "--allowedTools",
+    allowedTools,
+    "--output-format",
+    "stream-json",
+    "--verbose",
+  ];
   loopLog(
     loopId,
-    `LLM commit spawn: binary=${claudeBinary} args=["-p", "<prompt omitted>", "--allowedTools", "${allowedTools}"] cwd=${worktreeDir} PATH=${spawnEnv.PATH ?? "(unset)"}`,
+    `LLM commit spawn: binary=${claudeBinary} args=["-p", "<prompt omitted>", "--allowedTools", "${allowedTools}", "--output-format", "stream-json", "--verbose"] cwd=${worktreeDir} PATH=${spawnEnv.PATH ?? "(unset)"}`,
   );
 
   let child: ReturnType<typeof spawn>;
@@ -2633,13 +2670,17 @@ async function attemptLlmCommit(
       `LLM commit spawn failed [code=${code}${enoentDetail}]`,
       err,
     );
-    return null;
+    return llmCommitFailed(
+      code === "ENOENT"
+        ? `Claude binary not found at path: ${claudeBinary}`
+        : `Spawn failed with code: ${code}`,
+    );
   }
 
   const pid = child.pid ?? null;
   if (!pid) {
     loopError(loopId, "LLM commit: spawn returned no PID");
-    return null;
+    return llmCommitFailed("Failed to get PID from spawned process");
   }
 
   // Track the LLM commit PID so kill routes and snapshot enrichment see the current process
@@ -2672,7 +2713,7 @@ async function attemptLlmCommit(
     }
   }
 
-  return new Promise<ExecutionResult | null>((resolve) => {
+  return new Promise<LlmCommitResult>((resolve) => {
     let killed = false;
 
     // Process group kill behavior:
@@ -2726,10 +2767,45 @@ async function attemptLlmCommit(
         loopLog(loopId, `LLM commit stderr (tail): ${stderr.slice(-1000)}`);
       }
 
+      const logOutput = [stdout.slice(-2000), stderr.slice(-1000)]
+        .filter(Boolean)
+        .join("\n");
+      const fallbackLogTail = (codeLabel: string): string =>
+        logOutput || `LLM commit process exited with code ${codeLabel}`;
+
       // code is null when the process was killed by a signal
-      if (killed || code == null || code !== 0) {
+      if (killed || code == null) {
         loopError(loopId, `LLM commit exited with code ${code ?? "killed"}`);
-        resolve(null);
+        resolve({
+          status: "failed",
+          reason: { kind: "timeout" },
+          logTail: fallbackLogTail(String(code ?? "killed")),
+        });
+        return;
+      }
+
+      if (code !== 0) {
+        loopError(loopId, `LLM commit exited with code ${code}`);
+
+        // The LLM commit spawn uses --output-format stream-json, so stdout is
+        // valid JSONL — scan it directly for auth/rate-limit/billing errors.
+        const authChallengeMsg = scanJsonlForAuthChallenge(stdout);
+
+        if (authChallengeMsg !== null) {
+          loopError(
+            loopId,
+            `LLM commit detected auth challenge: ${authChallengeMsg}`,
+          );
+        }
+        const failureReason: LlmCommitFailureReason =
+          authChallengeMsg !== null
+            ? { kind: "auth_challenge", authChallengeMessage: authChallengeMsg }
+            : { kind: "other" };
+        resolve({
+          status: "failed",
+          reason: failureReason,
+          logTail: fallbackLogTail(String(code)),
+        });
         return;
       }
 
@@ -2774,7 +2850,14 @@ async function attemptLlmCommit(
       } catch {
         /* may not exist */
       }
-      resolve(result);
+      if (result) {
+        resolve({ status: "success", result });
+      } else {
+        resolve(llmCommitFailed(
+          logOutput ||
+            "LLM commit succeeded but execution-result.json was missing or invalid",
+        ));
+      }
     });
 
     child.on("error", (err: Error) => {
@@ -2789,7 +2872,11 @@ async function attemptLlmCommit(
         `LLM commit process error [code=${code}${enoentDetail}]:`,
         err,
       );
-      resolve(null);
+      resolve(llmCommitFailed(
+        code === "ENOENT"
+          ? `Claude binary not found at path: ${claudeBinary}`
+          : `LLM commit process error: ${code}`,
+      ));
     });
 
     // unref AFTER event listeners are attached so the ChildProcess handle
@@ -2822,16 +2909,39 @@ export type ExecuteFinalizationPath = LocalJobExecuteFinalizationPath;
 
 export type ExecuteFinalizationSource = LocalJobFinalizationSource;
 
-export interface ExecuteFinalizationResult {
-  status: ExecuteFinalizationStatus;
-  path: ExecuteFinalizationPath;
-  reason?: string;
-  executionResultPersisted: boolean;
-  prUrl?: string;
-  prNumber?: number;
-  branchName?: string;
-  commitSha?: string;
-}
+export type ExecuteFinalizationResult =
+  | {
+      status: "success";
+      path: ExecuteFinalizationPath;
+      executionResultPersisted: boolean;
+      reason?: string;
+      prUrl?: string;
+      prNumber?: number;
+      branchName?: string;
+      commitSha?: string;
+    }
+  | {
+      status: "no-changes";
+      path: ExecuteFinalizationPath;
+      executionResultPersisted: boolean;
+      reason?: string;
+      branchName?: string;
+      commitSha?: string;
+    }
+  | {
+      status: "skipped";
+      path: ExecuteFinalizationPath;
+      executionResultPersisted: boolean;
+      reason?: string;
+    }
+  | {
+      status: "error";
+      path: ExecuteFinalizationPath;
+      executionResultPersisted: boolean;
+      reason: string;
+      isAuthChallenge?: boolean;
+      branchName?: string;
+    };
 
 interface ExecuteFinalizationParams {
   worktreeDir: string | null | undefined;
@@ -3074,10 +3184,11 @@ function completeExecuteFinalization(
       postArtifacts.executionResultPresent,
     executeFinalizationPostPrBodyPresent: postArtifacts.prBodyPresent,
   });
-  return {
-    ...result,
-    reason: sanitizeExecuteFinalizationReason(result.reason),
-  };
+  const sanitizedReason = sanitizeExecuteFinalizationReason(result.reason);
+  if (result.status === "error") {
+    return { ...result, reason: sanitizedReason ?? result.reason };
+  }
+  return { ...result, reason: sanitizedReason };
 }
 
 export async function runExecuteFinalization(
@@ -3174,20 +3285,21 @@ export async function runExecuteFinalization(
     params.claudeWorkDir,
   );
 
-  if (llmResult) {
+  if (llmResult.status === "success") {
+    const { result: llmExecResult } = llmResult;
     const executionResult = buildExecutionResultV2([
       {
         status: "success",
         fullName: getSuccessExecutionResultFullName(
           params.primaryFullName,
-          llmResult.prUrl,
+          llmExecResult.prUrl,
         ),
-        prUrl: llmResult.prUrl,
-        prNumber: llmResult.prNumber,
-        branchName: llmResult.branchName,
+        prUrl: llmExecResult.prUrl,
+        prNumber: llmExecResult.prNumber,
+        branchName: llmExecResult.branchName,
         baseBranch: params.baseBranch,
         hasChanges: true,
-        commitSha: llmResult.commitSha,
+        commitSha: llmExecResult.commitSha,
       },
     ]);
     const persisted = persistExecutionResultArtifact(
@@ -3205,10 +3317,10 @@ export async function runExecuteFinalization(
             status: "success",
             path: "llm",
             executionResultPersisted: true,
-            prUrl: llmResult.prUrl,
-            prNumber: llmResult.prNumber,
-            branchName: llmResult.branchName,
-            commitSha: llmResult.commitSha,
+            prUrl: llmExecResult.prUrl,
+            prNumber: llmExecResult.prNumber,
+            branchName: llmExecResult.branchName,
+            commitSha: llmExecResult.commitSha,
           }
         : {
             status: "error",
@@ -3217,6 +3329,27 @@ export async function runExecuteFinalization(
               "failed to persist execution-result.json after LLM commit finalization",
             executionResultPersisted: false,
           },
+      preArtifacts,
+    );
+  }
+
+  if (
+    llmResult.status === "failed" &&
+    llmResult.reason.kind === "auth_challenge"
+  ) {
+    return completeExecuteFinalization(
+      params.jobStore,
+      params.loopId,
+      params.source,
+      params.claudeWorkDir,
+      startedAt,
+      {
+        status: "error",
+        path: "llm",
+        reason: `LLM commit failed: ${llmResult.reason.authChallengeMessage}`,
+        executionResultPersisted: false,
+        isAuthChallenge: true,
+      },
       preArtifacts,
     );
   }
@@ -4133,6 +4266,24 @@ export async function handleProcessCompletion(
       });
     }
 
+    // Shared fields for all failure event posts — keeps each branch focused
+    // on its unique code/message rather than repeating diagnostics.
+    const failureEventBase: Record<string, unknown> = {
+      type: LoopEventType.Error,
+      loopId,
+      sessionId: failureSessionId,
+      ...(failureBranchName ? { branchName: failureBranchName } : {}),
+      tokenUsage: diagnostics.tokenUsage,
+      tokensByModel: diagnostics.tokensByModel,
+      logTail: diagnostics.logTail,
+      stderrTail: diagnostics.stderrTail,
+      exitSignal: diagnostics.exitSignal,
+      elapsedMs: diagnostics.elapsedMs,
+      abortReason: diagnostics.abortReason,
+      diagnosticsVersion: String(diagnostics.diagnosticsVersion),
+      ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
+    };
+
     if (wasCancelled) {
       Observability.jobCancelled(
         commandId ?? existingJob?.commandId,
@@ -4143,21 +4294,9 @@ export async function handleProcessCompletion(
         failureSessionId,
       );
       await postFailureLoopEvent({
-        type: LoopEventType.Error,
+        ...failureEventBase,
         code: LoopErrorCode.Cancelled,
         message: "Loop cancelled",
-        loopId,
-        sessionId: failureSessionId,
-        ...(failureBranchName ? { branchName: failureBranchName } : {}),
-        tokenUsage: diagnostics.tokenUsage,
-        tokensByModel: diagnostics.tokensByModel,
-        logTail: diagnostics.logTail,
-        stderrTail: diagnostics.stderrTail,
-        exitSignal: diagnostics.exitSignal,
-        elapsedMs: diagnostics.elapsedMs,
-        abortReason: diagnostics.abortReason,
-        diagnosticsVersion: String(diagnostics.diagnosticsVersion),
-        ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
       });
     } else {
       Observability.jobFailed(
@@ -4223,22 +4362,10 @@ export async function handleProcessCompletion(
           `${command} reported user-visible runner failure, loopId=${loopId}, code=${trustedUserVisibleFailure.code}, subcode=${trustedUserVisibleFailure.result.subcode}`,
         );
         await postFailureLoopEvent({
-          type: LoopEventType.Error,
+          ...failureEventBase,
           code: trustedUserVisibleFailure.code,
           message: trustedUserVisibleFailure.message,
           result: trustedUserVisibleFailure.result,
-          loopId,
-          sessionId: failureSessionId,
-          ...(failureBranchName ? { branchName: failureBranchName } : {}),
-          tokenUsage: diagnostics.tokenUsage,
-          tokensByModel: diagnostics.tokensByModel,
-          logTail: diagnostics.logTail,
-          stderrTail: diagnostics.stderrTail,
-          exitSignal: diagnostics.exitSignal,
-          elapsedMs: diagnostics.elapsedMs,
-          abortReason: diagnostics.abortReason,
-          diagnosticsVersion: String(diagnostics.diagnosticsVersion),
-          ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
         });
       } else if (isContextLimit) {
         const limitMsg = jsonlError ?? "Context limit exceeded";
@@ -4248,21 +4375,9 @@ export async function handleProcessCompletion(
           `${command} hit context limit, loopId=${loopId}: ${limitMsg}`,
         );
         await postFailureLoopEvent({
-          type: LoopEventType.Error,
+          ...failureEventBase,
           code: LoopErrorCode.ContextLimitExceeded,
           message: limitMsg,
-          loopId,
-          sessionId: failureSessionId,
-          ...(failureBranchName ? { branchName: failureBranchName } : {}),
-          tokenUsage: diagnostics.tokenUsage,
-          tokensByModel: diagnostics.tokensByModel,
-          logTail: diagnostics.logTail,
-          stderrTail: diagnostics.stderrTail,
-          exitSignal: diagnostics.exitSignal,
-          elapsedMs: diagnostics.elapsedMs,
-          abortReason: diagnostics.abortReason,
-          diagnosticsVersion: String(diagnostics.diagnosticsVersion),
-          ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
         });
       } else if (isAuthChallenge) {
         const authMsg = jsonlAuthError ?? "Claude auth challenge detected";
@@ -4280,21 +4395,9 @@ export async function handleProcessCompletion(
           failureSessionId,
         );
         await postFailureLoopEvent({
-          type: LoopEventType.Error,
+          ...failureEventBase,
           code: LoopErrorCode.AuthChallenge,
           message: authMsg,
-          loopId,
-          sessionId: failureSessionId,
-          ...(failureBranchName ? { branchName: failureBranchName } : {}),
-          tokenUsage: diagnostics.tokenUsage,
-          tokensByModel: diagnostics.tokensByModel,
-          logTail: diagnostics.logTail,
-          stderrTail: diagnostics.stderrTail,
-          exitSignal: diagnostics.exitSignal,
-          elapsedMs: diagnostics.elapsedMs,
-          abortReason: diagnostics.abortReason,
-          diagnosticsVersion: String(diagnostics.diagnosticsVersion),
-          ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
         });
       } else {
         loopError(loopId, `Process failed with exit code ${exitCode}`);
@@ -4303,21 +4406,9 @@ export async function handleProcessCompletion(
           `${command} failed with exit code ${exitCode}, loopId=${loopId}`,
         );
         await postFailureLoopEvent({
-          type: LoopEventType.Error,
+          ...failureEventBase,
           code: LoopErrorCode.ProcessFailed,
           message: `Process exited with code ${exitCode}`,
-          loopId,
-          sessionId: failureSessionId,
-          ...(failureBranchName ? { branchName: failureBranchName } : {}),
-          tokenUsage: diagnostics.tokenUsage,
-          tokensByModel: diagnostics.tokensByModel,
-          logTail: diagnostics.logTail,
-          stderrTail: diagnostics.stderrTail,
-          exitSignal: diagnostics.exitSignal,
-          elapsedMs: diagnostics.elapsedMs,
-          abortReason: diagnostics.abortReason,
-          diagnosticsVersion: String(diagnostics.diagnosticsVersion),
-          ...(failureWarnings.length > 0 ? { warnings: failureWarnings } : {}),
         });
       }
     }
@@ -4325,17 +4416,22 @@ export async function handleProcessCompletion(
     if (existingJob && jobStore) {
       const now = new Date().toISOString();
       const latestJob = jobStore.getByLoopId(loopId) ?? existingJob;
+
+      let liveActivity: string | undefined;
+      if (!wasCancelled) {
+        if (trustedUserVisibleFailure) {
+          liveActivity = trustedUserVisibleFailure.message;
+        } else if (isContextLimit) {
+          liveActivity = "Context limit exceeded";
+        } else if (isAuthChallenge) {
+          liveActivity = `Auth challenge: ${jsonlAuthError ?? "authentication error"}`;
+        }
+      }
+
       jobStore.upsert({
         ...latestJob,
         status: wasCancelled ? "CANCELLED" : "FAILED",
-        liveActivity:
-          !wasCancelled && trustedUserVisibleFailure
-            ? trustedUserVisibleFailure.message
-            : !wasCancelled && isContextLimit
-            ? "Context limit exceeded"
-            : !wasCancelled && isAuthChallenge
-              ? `Auth challenge: ${jsonlAuthError ?? "authentication error"}`
-              : undefined,
+        liveActivity,
         exitCode,
         warning: mergeWarningEntries(latestJob.warning, failureWarnings),
         updatedAt: now,
@@ -4457,13 +4553,74 @@ export async function handleProcessCompletion(
           "no local changes detected, skipping PR creation, loopId=" + loopId,
         );
       } else if (executeFinalization.status === "error") {
+        const finalizationReason =
+          executeFinalization.reason ?? "unknown execute finalization error";
+        if (executeFinalization.isAuthChallenge === true) {
+          gatewayLog.error(
+            "loop-harness",
+            "execute finalization auth challenge detected: " +
+              sanitizeErrorMessage(finalizationReason) +
+              ", loopId=" +
+              loopId,
+          );
+          const finalizationSessionId = readTextFile(
+            path.join(claudeWorkDir, "session-id.txt"),
+          )?.trim();
+          Observability.jobAuthChallenge(
+            commandId,
+            operationId,
+            loopId,
+            0,
+            elapsedMs !== undefined ? { elapsedMs } : undefined,
+            finalizationSessionId,
+          );
+          runningLoops.delete(loopId);
+          const finalizationBranchName = worktreeDir
+            ? (wt.getCurrentBranch(worktreeDir) ?? undefined)
+            : undefined;
+          await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
+            type: LoopEventType.Error,
+            code: LoopErrorCode.AuthChallenge,
+            message: finalizationReason,
+            loopId,
+            sessionId: finalizationSessionId,
+            ...(finalizationBranchName
+              ? { branchName: finalizationBranchName }
+              : {}),
+            elapsedMs,
+          });
+          if (jobStore) {
+            const latestJob = jobStore.getByLoopId(loopId);
+            if (latestJob) {
+              const now = new Date().toISOString();
+              jobStore.upsert({
+                ...latestJob,
+                status: "FAILED",
+                liveActivity: `Auth challenge: ${finalizationReason}`,
+                updatedAt: now,
+                completedAt: now,
+                finalStatusPersistedAt:
+                  latestJob.finalStatusPersistedAt ?? now,
+              });
+            }
+          }
+          if (tempCleanupDir) {
+            fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(
+              () => {},
+            );
+          }
+          await cleanupAdditionalWorktrees(
+            additionalWorktreeDirs,
+            loopId,
+            wt,
+          );
+          loopTokenStore?.deleteLoopToken(loopId);
+          return;
+        }
         gatewayLog.warn(
           "loop-harness",
           "execute finalization failed: " +
-            sanitizeErrorMessage(
-              executeFinalization.reason ??
-                "unknown execute finalization error",
-            ) +
+            sanitizeErrorMessage(finalizationReason) +
             ", loopId=" +
             loopId,
         );
@@ -4498,7 +4655,10 @@ export async function handleProcessCompletion(
       }
 
       artifacts = readExecuteOutputs(claudeWorkDir);
-      if (executeFinalization.branchName) {
+      if (
+        "branchName" in executeFinalization &&
+        executeFinalization.branchName
+      ) {
         metadata.branchName = executeFinalization.branchName;
       }
       if (!jobStore) {
@@ -6123,6 +6283,13 @@ async function handleLoopRequest(
       const spawnEnv: Record<string, string> = await getShellEnv({
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
         CLOSEDLOOP_PLAN_FILE: closedLoopPlanFile,
+        // Propagate the canonical command name (PLAN, EXECUTE, REQUEST_CHANGES,
+        // DECOMPOSE) to the harness so loop.perf.* events and runs.log rows
+        // are attributed to the actual slash-command the user invoked, not the
+        // "interactive" / "plan_execute" fallbacks. The plugin side
+        // (run-loop.sh) gives env-var precedence over --prompt; see PRD-254
+        // §FR-1 / §FR-5 and FEA-936.
+        CLOSEDLOOP_COMMAND: body.command,
         ...(userVisibleLoopFailureSecret
           ? {
               [USER_VISIBLE_LOOP_FAILURE_SECRET_ENV]:
@@ -6382,16 +6549,6 @@ async function handleLoopRequest(
             });
             continue;
           }
-          if (!params.options?.update && hasBootstrapArtifacts(localPath)) {
-            manifest.push({
-              fullName: repo.fullName,
-              localPath,
-              branch,
-              skip: true,
-              skipReason: "artifacts already exist",
-            });
-            continue;
-          }
           manifest.push({
             fullName: repo.fullName,
             localPath,
@@ -6414,12 +6571,15 @@ async function handleLoopRequest(
         for (const [i, entry] of runnableRepos.entries()) {
           const marker = path.join(claudeWorkDir, `repo-${i}-done`);
           const stderrLog = path.join(claudeWorkDir, `repo-${i}-stderr.log`);
+          const outputDir = path.join(claudeWorkDir, `repo-${i}-agents`);
           scriptLines.push(
             `echo "=== BOOTSTRAP ${i}: ${shellEscape(entry.fullName)} ==="`,
+            `OUTPUT_DIR=${shellEscape(outputDir)}`,
+            `mkdir -p "$OUTPUT_DIR"`,
             `if ! cd ${shellEscape(entry.localPath)}; then`,
             `  echo "fail:cd" > ${shellEscape(marker)}`,
             `else`,
-            `  if "$CLAUDE_BIN" -p "/agent-bootstrap" 2>${shellEscape(stderrLog)}; then`,
+            `  if "$CLAUDE_BIN" -p "/bootstrap:agent-bootstrap --output-dir $OUTPUT_DIR" 2>${shellEscape(stderrLog)}; then`,
             `    echo "ok" > ${shellEscape(marker)}`,
             `  else`,
             `    echo "fail:$?" > ${shellEscape(marker)}`,
