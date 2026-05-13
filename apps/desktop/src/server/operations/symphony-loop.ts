@@ -837,6 +837,65 @@ export function readBootstrapRepoOutputs(
 }
 
 // ---------------------------------------------------------------------------
+// ContextPack agent/config materialization
+// ---------------------------------------------------------------------------
+
+// TODO: Replace with imports from @closedloop-ai/loops-api/context-pack once
+// FEA-656 bumps the package to include these types.
+type ContextPackAgentPayload = {
+  slug: string;
+  name: string;
+  prompt: string;
+};
+
+type ContextPackRepoConfigPayload = {
+  repoFullName: string;
+  criticGates: Record<string, unknown>;
+};
+
+export async function materializeAgents(
+  worktreeDir: string,
+  agents: ContextPackAgentPayload[],
+): Promise<number> {
+  if (agents.length === 0) return 0;
+
+  const agentsDir = path.join(worktreeDir, ".claude", "agents");
+  await fs.mkdir(agentsDir, { recursive: true });
+
+  for (const agent of agents) {
+    const filePath = path.join(agentsDir, `${agent.slug}.md`);
+    let content = agent.prompt;
+    if (!content.endsWith("\n")) {
+      content += "\n";
+    }
+    await fs.writeFile(filePath, content, "utf-8");
+  }
+
+  return agents.length;
+}
+
+export async function materializeCriticGates(
+  worktreeDir: string,
+  repoFullName: string,
+  repoConfigs: ContextPackRepoConfigPayload[],
+): Promise<boolean> {
+  const config = repoConfigs.find((c) => c.repoFullName === repoFullName);
+  if (!config) return false;
+
+  const settingsDir = path.join(worktreeDir, ".closedloop-ai", "settings");
+  await fs.mkdir(settingsDir, { recursive: true });
+
+  const filePath = path.join(settingsDir, "critic-gates.json");
+  await fs.writeFile(
+    filePath,
+    JSON.stringify(config.criticGates, null, 2) + "\n",
+    "utf-8",
+  );
+
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Auto-clone helper
 // ---------------------------------------------------------------------------
 
@@ -5239,6 +5298,16 @@ async function handleLoopRequest(
       ? rawBody.expectedMcpUrl
       : undefined;
 
+  // ContextPack agent/config payloads (FEA-654). These fields are added to
+  // LoopRequestBody by FEA-656; read from rawBody until the loops-api package
+  // is bumped with the new fields.
+  const bodyAgents = Array.isArray(rawBody.agents)
+    ? (rawBody.agents as ContextPackAgentPayload[])
+    : undefined;
+  const bodyRepoConfigs = Array.isArray(rawBody.repoConfigs)
+    ? (rawBody.repoConfigs as ContextPackRepoConfigPayload[])
+    : undefined;
+
   // Extract tracing headers forwarded by the cloud command executor.
   // Use typeof guards because IncomingMessage headers values are string | string[] | undefined.
   const commandId =
@@ -5884,6 +5953,16 @@ async function handleLoopRequest(
         // `provisionAdditionalRepoWorktrees`.
         for (const addEntry of additionalWorktreeDirs) {
           try {
+            if (bodyAgents && bodyAgents.length > 0) {
+              const n = await materializeAgents(addEntry.dir, bodyAgents);
+              loopLog(body.loopId, `Materialized ${n} agents to ${addEntry.dir}`);
+            }
+            if (bodyRepoConfigs && addEntry.fullName) {
+              const wrote = await materializeCriticGates(addEntry.dir, addEntry.fullName, bodyRepoConfigs);
+              if (wrote) {
+                loopLog(body.loopId, `Materialized critic-gates for ${addEntry.fullName}`);
+              }
+            }
             await runBootstrapIfNeeded(addEntry.dir, body.loopId);
           } catch (bootstrapErr) {
             loopError(
@@ -5939,6 +6018,17 @@ async function handleLoopRequest(
           return;
         }
         throw e;
+      }
+      const primaryRepoFullName = body.repo?.fullName ?? "";
+      if (bodyAgents && bodyAgents.length > 0) {
+        const n = await materializeAgents(worktreeDir, bodyAgents);
+        loopLog(body.loopId, `Materialized ${n} agents to ${worktreeDir}`);
+      }
+      if (bodyRepoConfigs && primaryRepoFullName) {
+        const wrote = await materializeCriticGates(worktreeDir, primaryRepoFullName, bodyRepoConfigs);
+        if (wrote) {
+          loopLog(body.loopId, `Materialized critic-gates for ${primaryRepoFullName}`);
+        }
       }
       await runBootstrapIfNeeded(worktreeDir, body.loopId);
       claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
