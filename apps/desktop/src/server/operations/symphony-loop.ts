@@ -2087,8 +2087,6 @@ function buildEvaluateRepoInfo(
   }
   if (expandedRepoPath) {
     repoInfo.localRepoPath = expandedRepoPath;
-  } else if (body.localRepoPath) {
-    repoInfo.localRepoPath = body.localRepoPath;
   }
   return Object.keys(repoInfo).length > 0 ? repoInfo : null;
 }
@@ -2154,10 +2152,8 @@ function buildCodeContextFile(
     }
   }
 
-  const localRepoPath =
-    expandedRepoPath ?? provided.localRepoPath ?? body.localRepoPath ?? null;
-  if (localRepoPath !== null) {
-    codeContext.localRepoPath = localRepoPath;
+  if (expandedRepoPath !== null) {
+    codeContext.localRepoPath = expandedRepoPath;
   }
 
   const parentBranchName = provided.parentBranchName ?? body.parentBranchName ?? null;

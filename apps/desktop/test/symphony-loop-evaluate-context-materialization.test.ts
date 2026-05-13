@@ -180,6 +180,45 @@ describe("evaluate runtime context materialization", () => {
     }
   });
 
+  test("optional repo commands do not materialize rejected localRepoPath", async () => {
+    const tmpDir = makeTempDir("evaluate-prd-rejected-path");
+    const rejectedRepoPath = path.join(
+      os.tmpdir(),
+      `outside-fea-585-repo-${process.pid}-${Date.now()}`,
+    );
+    await fs.mkdir(rejectedRepoPath, { recursive: true });
+
+    const run = await startBlockedEvaluateLoop({
+      tmpDir,
+      loopId: "58500007-0000-0000-0000-000000000007",
+      allowedDirs: [tmpDir],
+      body: {
+        loopId: "58500007-0000-0000-0000-000000000007",
+        command: LoopCommand.EvaluatePrd,
+        closedLoopAuthToken: "cl-token",
+        localRepoPath: rejectedRepoPath,
+        artifacts: [{ id: "primary-prd", type: "PRD", content: "# Primary PRD" }],
+        supportingArtifacts: [
+          { id: "support-prd", type: "PRD", content: "# Supporting PRD" },
+        ],
+      },
+    });
+
+    try {
+      const contextDir = path.join(run.claudeWorkDir, ".closedloop-ai", "context");
+      assert.equal(await pathExists(path.join(contextDir, "repo-info.json")), false);
+      assert.equal(
+        await fs.readFile(
+          path.join(contextDir, "artifacts", "000-prd-support-prd.md"),
+          "utf-8",
+        ),
+        "# Supporting PRD",
+      );
+    } finally {
+      await finishBlockedEvaluateLoop(run);
+    }
+  });
+
   test("EVALUATE_CODE materializes repo-known code context and attachments", async () => {
     const tmpDir = makeTempDir("evaluate-code-context");
     const repoDir = path.join(tmpDir, "repo");
