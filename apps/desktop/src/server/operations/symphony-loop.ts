@@ -241,6 +241,7 @@ import {
 import { getMultiRepoPolicy } from "@closedloop-ai/loops-api/multi-repo-policy";
 import {
   buildMountPathsFooter,
+  buildPeerEnvVars,
   toPeerWorktreeRefs,
   writePeerReposManifest,
 } from "./peer-context.js";
@@ -6192,6 +6193,19 @@ async function handleLoopRequest(
         body.command === LoopCommand.Execute
           ? crypto.randomBytes(32).toString("base64url")
           : undefined;
+      // Multi-repo env vars must travel in Claude's spawn env, not only in
+      // setup-closedloop.sh's config.env file or the SubagentStart hook's
+      // additionalContext. Without them, every bash subshell the agents launch
+      // sees CLOSEDLOOP_ADD_DIRS as empty and the plan-draft-writer skill
+      // silently skips its multi-repo section, producing a single-repo plan.
+      // Gated on getMultiRepoPolicy().supportsAdditionalRepos to mirror the
+      // --add-dir injection at lines 6488 and 6642 — single-repo and
+      // peer-disabled commands stay byte-identical to today. See FEA-1088.
+      const peerEnvVars =
+        additionalWorktreeDirs.length > 0 &&
+        getMultiRepoPolicy(body.command).supportsAdditionalRepos
+          ? buildPeerEnvVars(additionalWorktreeDirs)
+          : {};
       const spawnEnv: Record<string, string> = await getShellEnv({
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
         CLOSEDLOOP_PLAN_FILE: closedLoopPlanFile,
@@ -6212,6 +6226,7 @@ async function handleLoopRequest(
         // the desktop app validated in pre-flight (avoids PATH mismatches
         // between Electron's env and the user's login shell).
         CLAUDE_BIN: claudeBinary,
+        ...peerEnvVars,
       });
       clearUserVisibleLoopFailureMarker(claudeWorkDir);
 
