@@ -3,13 +3,13 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { getPackagingStageAppDir } from "./packaging-stage-path.mjs";
+import { getPackagingStageRoot } from "./packaging-stage-path.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const appDir = path.resolve(scriptDir, "..");
-const stageAppDir = getPackagingStageAppDir();
+const stageRoot = getPackagingStageRoot();
 
-await stat(stageAppDir).catch(() => {
+await stat(stageRoot).catch(() => {
   throw new Error("Packaging app is missing. Run `pnpm stage:package` before invoking electron-builder.");
 });
 
@@ -17,7 +17,7 @@ const electronBuilderArgs = [
   "--mac",
   "--config",
   "electron-builder.yml",
-  `-c.directories.app=${stageAppDir}`,
+  `-c.directories.app=${stageRoot}`,
   ...process.argv.slice(2),
 ];
 
