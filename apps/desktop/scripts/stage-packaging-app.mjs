@@ -1,40 +1,126 @@
 import { spawnSync } from "node:child_process";
-import { cp, mkdir, rm, stat } from "node:fs/promises";
+import { cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { getPackagingStageAppDir, getPackagingStageRoot } from "./packaging-stage-path.mjs";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const appDir = path.resolve(scriptDir, "..");
 const repoRoot = path.resolve(appDir, "../..");
-const stageRoot = path.join(appDir, ".electron-builder");
-const stageAppDir = path.join(stageRoot, "app");
+const stageRoot = getPackagingStageRoot();
+const stageAppDir = getPackagingStageAppDir();
 const buildOutputDir = path.join(appDir, "dist");
+const packageJsonFile = path.join(appDir, "package.json");
+const repoNpmrcFile = path.join(repoRoot, ".npmrc");
 const stageBuildOutputDir = path.join(stageAppDir, "dist");
 const rendererEntryFile = path.join(appDir, "src/renderer/index.html");
 const stageRendererDir = path.join(stageAppDir, "src/renderer");
+const stageNpmrcFile = path.join(stageAppDir, ".npmrc");
+
+function parseJsonFromCommandOutput(output) {
+  const trimmedOutput = output.trim();
+
+  try {
+    return JSON.parse(trimmedOutput);
+  } catch {
+    // pnpm may emit warnings before the JSON payload.
+  }
+
+  const startIndexCandidates = [
+    trimmedOutput.indexOf("["),
+    trimmedOutput.indexOf("{"),
+  ].filter((index) => index >= 0);
+
+  const startIndex = startIndexCandidates.length > 0 ? Math.min(...startIndexCandidates) : 0;
+
+  for (let index = startIndex; index < trimmedOutput.length; index += 1) {
+    const candidate = trimmedOutput.slice(startIndex, index + 1);
+
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // Keep scanning until the JSON closes.
+    }
+  }
+
+  throw new Error("Failed to parse pnpm dependency output.");
+}
+
+const installedDependencyResult = spawnSync(
+  "pnpm",
+  ["list", "--prod", "--json", "--depth", "0", "--silent", "--loglevel=error"],
+  {
+    cwd: appDir,
+    encoding: "utf8",
+  },
+);
+
+if (installedDependencyResult.error) {
+  throw installedDependencyResult.error;
+}
+
+if (installedDependencyResult.status !== 0) {
+  process.stderr.write(installedDependencyResult.stdout ?? "");
+  process.stderr.write(installedDependencyResult.stderr ?? "");
+  process.exit(installedDependencyResult.status ?? 1);
+}
+
+const installedDependencyTree = parseJsonFromCommandOutput(installedDependencyResult.stdout ?? "");
+const installedDependencies = installedDependencyTree[0]?.dependencies;
+
+if (installedDependencies == null || Object.keys(installedDependencies).length === 0) {
+  throw new Error("No installed production dependencies were found in apps/desktop.");
+}
 
 await rm(stageRoot, { recursive: true, force: true });
-await mkdir(stageRoot, { recursive: true });
+await mkdir(stageAppDir, { recursive: true });
 
-const deployResult = spawnSync(
+const packageJson = JSON.parse(await readFile(packageJsonFile, "utf8"));
+const repoNpmrc = await readFile(repoNpmrcFile, "utf8");
+const stagePackageJson = {
+  name: packageJson.name,
+  version: packageJson.version,
+  description: packageJson.description,
+  author: packageJson.author,
+  private: packageJson.private,
+  type: packageJson.type,
+  main: packageJson.main,
+  dependencies: Object.fromEntries(
+    Object.entries(installedDependencies).map(([dependencyName, dependency]) => [
+      dependencyName,
+      dependency.version,
+    ]),
+  ),
+};
+
+await writeFile(
+  path.join(stageAppDir, "package.json"),
+  `${JSON.stringify(stagePackageJson, null, 2)}\n`,
+);
+await writeFile(stageNpmrcFile, `${repoNpmrc.trimEnd()}\nnode-linker=hoisted\n`);
+
+const installResult = spawnSync(
   "pnpm",
   [
-    "--dir",
-    repoRoot,
-    "--filter",
-    "desktop",
-    "deploy",
-    "--legacy",
+    "install",
     "--prod",
-    stageAppDir,
+    "--ignore-workspace",
+    "--prefer-offline",
+    "--no-frozen-lockfile",
   ],
   {
+    cwd: stageAppDir,
     stdio: "inherit",
   },
 );
 
-if (deployResult.status !== 0) {
-  process.exit(deployResult.status ?? 1);
+if (installResult.error) {
+  throw installResult.error;
+}
+
+if (installResult.status !== 0) {
+  process.exit(installResult.status ?? 1);
 }
 
 await stat(buildOutputDir).catch(() => {

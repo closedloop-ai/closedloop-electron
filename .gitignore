@@ -1,6 +1,5 @@
 node_modules
 dist
-.electron-builder
 .DS_Store
 .idea
 .vscode
