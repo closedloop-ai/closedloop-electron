@@ -258,6 +258,7 @@ export class GatewayRouter {
       this.options.loopTokenStore,
       getSymphonyDir,
       this.options.getInteractiveTerminal,
+      this.options.getBinaryPaths,
     );
     registerSymphonyLogsRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerSymphonyPlanRoutes(this.operationDispatcher, this.options.getAllowedDirectories);

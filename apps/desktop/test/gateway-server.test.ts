@@ -4250,22 +4250,21 @@ async function createHealthCheckFixture(
   await fs.mkdir(binDir, { recursive: true });
   await fs.mkdir(symphonyDir, { recursive: true });
 
+  const pluginNames = ["code", "platform", "judges", "code-review", "self-learning"];
+
   // Write fake binaries for git, claude, gh
   const fakeBinaries: Array<[string, string]> = [
     ["git", '#!/bin/sh\necho "git version 2.40.0"'],
     [
       "claude",
       `#!/bin/sh
-if [ "$1" = "plugin" ] && [ "$2" = "list" ] && [ "$3" = "--json" ]; then
-  cat <<'JSON'
-[
-  {"id":"code@closedloop-ai","version":"1.0.0","enabled":true,"installPath":"/tmp/code"},
-  {"id":"code-review@closedloop-ai","version":"1.0.0","enabled":true,"installPath":"/tmp/code-review"},
-  {"id":"judges@closedloop-ai","version":"1.0.0","enabled":true,"installPath":"/tmp/judges"},
-  {"id":"platform@closedloop-ai","version":"1.0.0","enabled":true,"installPath":"/tmp/platform"},
-  {"id":"self-learning@closedloop-ai","version":"1.0.0","enabled":true,"installPath":"/tmp/self-learning"}
-]
-JSON
+if [ "$1 $2 $3" = "plugin list --json" ]; then
+  printf '%s\\n' '${JSON.stringify(pluginNames.map((name) => ({
+    enabled: true,
+    id: `${name}@closedloop-ai`,
+    scope: "user",
+    version: "1.0.0",
+  })))}'
   exit 0
 fi
 echo "1.5.0"
@@ -4292,12 +4291,11 @@ echo "1.5.0"
   const pluginsDir = path.join(homeDir, ".claude", "plugins");
   await fs.mkdir(pluginsDir, { recursive: true });
 
-  const pluginNames = ["code", "platform", "judges", "code-review", "self-learning"];
-  const pluginsRecord: Record<string, Array<{ installPath: string; version: string }>> = {};
+  const pluginsRecord: Record<string, Array<{ installPath: string; scope: string; version: string }>> = {};
   for (const name of pluginNames) {
     const installPath = path.join(tmpDir, `plugin-${name}`);
     await fs.mkdir(installPath, { recursive: true });
-    pluginsRecord[`${name}@closedloop-ai`] = [{ installPath, version: "1.0.0" }];
+    pluginsRecord[`${name}@closedloop-ai`] = [{ installPath, scope: "user", version: "1.0.0" }];
   }
   await fs.writeFile(
     path.join(pluginsDir, "installed_plugins.json"),
@@ -4356,30 +4354,35 @@ function installHealthCheckCommandStub(options: {
             version: "1.0.0",
             enabled: options.isCodeEnabled(),
             installPath: "/tmp/code",
+            scope: "user",
           },
           {
             id: "code-review@closedloop-ai",
             version: "1.0.0",
             enabled: true,
             installPath: "/tmp/code-review",
+            scope: "user",
           },
           {
             id: "judges@closedloop-ai",
             version: "1.0.0",
             enabled: true,
             installPath: "/tmp/judges",
+            scope: "user",
           },
           {
             id: "platform@closedloop-ai",
             version: "1.0.0",
             enabled: true,
             installPath: "/tmp/platform",
+            scope: "user",
           },
           {
             id: "self-learning@closedloop-ai",
             version: "1.0.0",
             enabled: true,
             installPath: "/tmp/self-learning",
+            scope: "user",
           },
         ]),
       };
@@ -4551,6 +4554,22 @@ test("health-check keeps disabled plugin failed when auto-enable command fails",
   assert.deepEqual(enableCalls, ["code@closedloop-ai"]);
 });
 
+function getHealthCheckBinaryPaths(binDir: string): () => {
+  claude: string;
+  gh: string;
+  codex: string;
+  python3: string;
+  git: string;
+} {
+  return () => ({
+    claude: path.join(binDir, "claude"),
+    gh: path.join(binDir, "gh"),
+    codex: path.join(binDir, "codex"),
+    python3: path.join(binDir, "python3"),
+    git: path.join(binDir, "git"),
+  });
+}
+
 function mockClosedLoopPluginManifestFetch(version: string): void {
   const passthroughFetch = globalThis.fetch;
   globalThis.fetch = (async (
@@ -4580,7 +4599,6 @@ test("python3 health check: passes for version 3.11.0 (control)", async () => {
   const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
     '#!/bin/sh\necho "Python 3.11.0"\n'
   );
-  installHealthCheckCommandStub({ isCodeEnabled: () => true });
 
   process.env.HOME = path.join(tmpDir, "home");
   process.env.PATH = binDir;
@@ -4635,6 +4653,7 @@ test("python3 health check: fails when python3 not found", async () => {
     capabilities: EMPTY_CAPABILITIES,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getSymphonyDir: () => symphonyDir,
+    getBinaryPaths: getHealthCheckBinaryPaths(binDir),
   });
   serversToClose.push(server);
   await server.start();
@@ -4650,13 +4669,13 @@ test("python3 health check: fails when python3 not found", async () => {
   assert.ok(pythonCheck, "python3 check should be present");
   assert.equal(pythonCheck.passed, false, "python3 not found should fail");
   assert.equal(pythonCheck.required, true, "python3 check should be required");
-  // Remediation is either an install hint (binary not found anywhere) or a PATH hint
-  // (binary found at a known location like /usr/bin/python3 but not on the test PATH).
-  // Both are valid and informative; accept either.
+  // Remediation may point to the configured missing test override, an install
+  // hint, or a PATH hint if a known host location is found.
   assert.ok(
-    pythonCheck.remediation?.includes("Install Python 3.10 or later") ||
+    pythonCheck.remediation?.includes("Update python3 binary path") ||
+      pythonCheck.remediation?.includes("Install Python 3.10 or later") ||
       pythonCheck.remediation?.includes("PATH"),
-    `remediation should mention install or PATH, got: ${pythonCheck.remediation}`
+    `remediation should mention settings, install, or PATH, got: ${pythonCheck.remediation}`
   );
   assert.equal(body.allRequiredPassed, false, "allRequiredPassed should be false when python3 missing");
 });
@@ -4681,6 +4700,7 @@ test("python3 health check: fails for version below floor (3.9.7)", async () => 
     capabilities: EMPTY_CAPABILITIES,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getSymphonyDir: () => symphonyDir,
+    getBinaryPaths: getHealthCheckBinaryPaths(binDir),
   });
   serversToClose.push(server);
   await server.start();
@@ -4730,6 +4750,7 @@ test("python3 health check: fails for suffixed below-floor version (3.9rc1)", as
     capabilities: EMPTY_CAPABILITIES,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getSymphonyDir: () => symphonyDir,
+    getBinaryPaths: getHealthCheckBinaryPaths(binDir),
   });
   serversToClose.push(server);
   await server.start();
@@ -4760,10 +4781,6 @@ test("python3 health check: passes for version with extra suffix (3.10.1.post1)"
   const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
     '#!/bin/sh\necho "Python 3.10.1.post1"\n'
   );
-  installHealthCheckCommandStub({
-    isCodeEnabled: () => true,
-    pythonStdout: "Python 3.10.1.post1",
-  });
 
   process.env.HOME = path.join(tmpDir, "home");
   process.env.PATH = binDir;
@@ -4780,6 +4797,7 @@ test("python3 health check: passes for version with extra suffix (3.10.1.post1)"
     capabilities: EMPTY_CAPABILITIES,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getSymphonyDir: () => symphonyDir,
+    getBinaryPaths: getHealthCheckBinaryPaths(binDir),
   });
   serversToClose.push(server);
   await server.start();
@@ -4819,6 +4837,7 @@ test("python3 health check: fails for unparseable version string", async () => {
     capabilities: EMPTY_CAPABILITIES,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getSymphonyDir: () => symphonyDir,
+    getBinaryPaths: getHealthCheckBinaryPaths(binDir),
   });
   serversToClose.push(server);
   await server.start();

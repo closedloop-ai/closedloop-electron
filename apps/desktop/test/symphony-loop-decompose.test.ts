@@ -11,7 +11,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
 import { LoopCommand } from "@closedloop-ai/loops-api/commands";
-import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
+import { resetResolvedClaudePath } from "../src/server/operations/symphony-loop.js";
+import { resetShellPathCache } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { startMockApiServer, waitForTerminalEvent } from "./symphony-test-utils.js";
@@ -25,16 +26,11 @@ const DECOMPOSE_TEST_PORTS = [39532, 39533, 39534, 39535] as const;
 const serversToClose: DesktopGatewayServer[] = [];
 const mockServersToClose: http.Server[] = [];
 const tempPathsToClean: string[] = [];
-const originalPath = process.env.PATH;
 const originalHome = process.env.HOME;
 
 afterEach(async () => {
-  if (originalPath === undefined) {
-    delete process.env.PATH;
-  } else {
-    process.env.PATH = originalPath;
-  }
   resetShellPathCache();
+  resetResolvedClaudePath();
 
   if (originalHome === undefined) {
     delete process.env.HOME;
@@ -63,6 +59,7 @@ afterEach(async () => {
 
 function makeServer(
   tmpDir: string,
+  fakeBin: string,
   mockPort: number,
   port: number,
 ): DesktopGatewayServer {
@@ -77,6 +74,7 @@ function makeServer(
     capabilities: EMPTY_CAPABILITIES,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mockPort}`,
+    getBinaryPaths: () => ({ claude: path.join(fakeBin, "claude") }),
   });
 }
 
@@ -110,17 +108,15 @@ test("DECOMPOSE: writes context pack with artifacts in .closedloop-ai/context/ar
   await fs.writeFile(path.join(fakeBin, "claude"), spyScript, { mode: 0o755 });
 
   process.env.HOME = tmpDir;
-  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
 
-  const server = makeServer(tmpDir, mock.port, DECOMPOSE_TEST_PORTS[0]);
+  const server = makeServer(tmpDir, fakeBin, mock.port, DECOMPOSE_TEST_PORTS[0]);
   serversToClose.push(server);
   await server.start();
 
-  const loopId = "00000000-0000-0000-0000-aaaaaaaaaaaa";
+  const loopId = "dcc00001-0000-0000-0000-aaaaaaaaaaaa";
   const response = await fetch(
     `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
@@ -212,17 +208,15 @@ test("DECOMPOSE: uploads { features: ... } when features.json is written", async
   await fs.writeFile(path.join(fakeBin, "claude"), fakeScript, { mode: 0o755 });
 
   process.env.HOME = tmpDir;
-  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
 
-  const server = makeServer(tmpDir, mock.port, DECOMPOSE_TEST_PORTS[0]);
+  const server = makeServer(tmpDir, fakeBin, mock.port, DECOMPOSE_TEST_PORTS[0]);
   serversToClose.push(server);
   await server.start();
 
-  const loopId = "00000000-0000-0000-0000-bbbbbbbbbbbb";
+  const loopId = "dcc00002-0000-0000-0000-bbbbbbbbbbbb";
   const response = await fetch(
     `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
@@ -272,17 +266,15 @@ test("DECOMPOSE: uploads empty artifacts when features.json is not written", asy
   );
 
   process.env.HOME = tmpDir;
-  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
 
-  const server = makeServer(tmpDir, mock.port, DECOMPOSE_TEST_PORTS[0]);
+  const server = makeServer(tmpDir, fakeBin, mock.port, DECOMPOSE_TEST_PORTS[0]);
   serversToClose.push(server);
   await server.start();
 
-  const loopId = "00000000-0000-0000-0000-cccccccccccc";
+  const loopId = "dcc00003-0000-0000-0000-cccccccccccc";
   const response = await fetch(
     `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {

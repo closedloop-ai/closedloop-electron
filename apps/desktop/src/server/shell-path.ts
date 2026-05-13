@@ -1,6 +1,7 @@
 import { execFile, execFileSync } from "node:child_process";
-import { accessSync } from "node:fs";
-import { access, constants } from "node:fs/promises";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { accessSync, constants } from "node:fs";
+import { access } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -32,23 +33,141 @@ export function expandTildes(rawPath: string): string {
 const PATH_SENTINEL_START = "__CLPATH_START__";
 const PATH_SENTINEL_END = "__CLPATH_END__";
 
-let resolvedPathPromise: Promise<string> | undefined;
+let cachedShellPath: string | null = null;
+let cachedShellPathPromise: Promise<string> | null = null;
+type ShellPathTestContext = {
+  pathOverride?: string;
+  env?: NodeJS.ProcessEnv;
+  shell?: string;
+  cachedShellPath: string | null;
+  cachedShellPathPromise: Promise<string> | null;
+};
+// Node's test runner can execute desktop test files concurrently in one process,
+// so fake shells and PATH pins must follow the active async test context instead
+// of relying only on process.env and the process-wide production cache.
+const testShellPathContext = new AsyncLocalStorage<ShellPathTestContext | null>();
+
+function activeTestContext(): ShellPathTestContext | null {
+  return testShellPathContext.getStore() ?? null;
+}
+
+function shellPathEnv(): NodeJS.ProcessEnv {
+  return activeTestContext()?.env ?? process.env;
+}
+
+function configuredShell(env: NodeJS.ProcessEnv): string {
+  return activeTestContext()?.shell ?? env.SHELL ?? "/bin/zsh";
+}
+
+function shellPathFallback(env: NodeJS.ProcessEnv): string {
+  return expandTildes(`${env.PATH ?? ""}:/opt/homebrew/bin:/usr/local/bin`);
+}
+
+function shellPathCommand(): string {
+  return `echo ${PATH_SENTINEL_START}\${PATH}${PATH_SENTINEL_END}`;
+}
+
+async function resolveShellPathFromShell(env: NodeJS.ProcessEnv): Promise<string> {
+  try {
+    const shell = configuredShell(env);
+    const { stdout } = await execFileAsync(shell, ["-ilc", shellPathCommand()], {
+      timeout: 3000,
+      env: sanitizeSpawnEnv(env),
+    });
+    return expandTildes(extractPathFromOutput(stdout));
+  } catch {
+    return shellPathFallback(env);
+  }
+}
+
+function resolveShellPathFromShellSync(env: NodeJS.ProcessEnv): string {
+  try {
+    const shell = configuredShell(env);
+    const stdout = execFileSync(shell, ["-ilc", shellPathCommand()], {
+      timeout: 3000,
+      env: sanitizeSpawnEnv(env),
+      encoding: "utf8",
+    });
+    return expandTildes(extractPathFromOutput(stdout));
+  } catch {
+    return shellPathFallback(env);
+  }
+}
 
 export async function getShellPath(): Promise<string> {
-  resolvedPathPromise ??= (async () => {
-    try {
-      const shell = process.env.SHELL || "/bin/zsh";
-      const cmd = `echo ${PATH_SENTINEL_START}\${PATH}${PATH_SENTINEL_END}`;
-      const { stdout } = await execFileAsync(shell, ["-ilc", cmd], {
-        timeout: 3000,
-        env: sanitizeSpawnEnv(process.env),
-      });
-      return expandTildes(extractPathFromOutput(stdout));
-    } catch {
-      return expandTildes(`${process.env.PATH ?? ""}:/opt/homebrew/bin:/usr/local/bin`);
+  const testContext = activeTestContext();
+  if (testContext?.pathOverride !== undefined) {
+    return testContext.pathOverride;
+  }
+
+  if (testContext !== null) {
+    if (testContext.cachedShellPath !== null) {
+      return testContext.cachedShellPath;
     }
-  })();
-  return resolvedPathPromise;
+    if (testContext.cachedShellPathPromise !== null) {
+      return testContext.cachedShellPathPromise;
+    }
+
+    testContext.cachedShellPathPromise = resolveShellPathFromShell(
+      testContext.env ?? process.env,
+    );
+    try {
+      testContext.cachedShellPath = await testContext.cachedShellPathPromise;
+      return testContext.cachedShellPath;
+    } finally {
+      testContext.cachedShellPathPromise = null;
+    }
+  }
+
+  if (cachedShellPath !== null) {
+    return cachedShellPath;
+  }
+  if (cachedShellPathPromise !== null) {
+    return cachedShellPathPromise;
+  }
+
+  cachedShellPathPromise = resolveShellPathFromShell(process.env);
+
+  try {
+    cachedShellPath = await cachedShellPathPromise;
+    return cachedShellPath;
+  } finally {
+    cachedShellPathPromise = null;
+  }
+}
+
+/**
+ * Resolve the user's login-shell PATH synchronously for sync-only gateway code.
+ * Shares the same module-level cache, sentinels, env sanitization, tilde
+ * expansion, timeout, and fallback PATH as `getShellPath()`.
+ *
+ * Limitation: if `getShellPath()` is already resolving and has not populated
+ * the cache yet, this sync API cannot await that promise. In that in-flight
+ * window it may spawn a separate login shell and cache the sync result.
+ */
+export function getShellPathSync(): string {
+  const testContext = activeTestContext();
+  if (testContext?.pathOverride !== undefined) {
+    return testContext.pathOverride;
+  }
+
+  if (testContext !== null) {
+    if (testContext.cachedShellPath !== null) {
+      return testContext.cachedShellPath;
+    }
+    testContext.cachedShellPath = resolveShellPathFromShellSync(
+      testContext.env ?? process.env,
+    );
+    return testContext.cachedShellPath;
+  }
+
+  if (cachedShellPath !== null) {
+    return cachedShellPath;
+  }
+
+  cachedShellPath = resolveShellPathFromShellSync(process.env);
+
+  return cachedShellPath;
 }
 
 /**
@@ -89,18 +208,45 @@ export async function getShellEnv(
   extra?: Record<string, string>
 ): Promise<Record<string, string>> {
   const shellPath = await getShellPath();
+  const env = shellPathEnv();
   return {
-    ...(sanitizeSpawnEnv(process.env) as Record<string, string>),
+    ...(sanitizeSpawnEnv(env) as Record<string, string>),
     PATH: shellPath,
     ...extra,
   };
+}
+
+function resetActiveShellPathCache(): void {
+  const testContext = activeTestContext();
+  if (testContext !== null) {
+    testContext.cachedShellPath = null;
+    testContext.cachedShellPathPromise = null;
+    return;
+  }
+  cachedShellPath = null;
+  cachedShellPathPromise = null;
 }
 
 /**
  * Reset the cached shell PATH.  Only needed in tests.
  */
 export function resetShellPathCache(): void {
-  resolvedPathPromise = undefined;
+  cachedShellPath = null;
+  cachedShellPathPromise = null;
+  const testContext = activeTestContext();
+  if (testContext !== null) {
+    testContext.cachedShellPath = null;
+    testContext.cachedShellPathPromise = null;
+  }
+  testShellPathContext.enterWith(null);
+}
+
+/**
+ * Reset only the shell PATH cache for the active test context.
+ * Use this inside `withShellPathEnvForTest()` when the fake shell env changes.
+ */
+export function resetShellPathCacheOnlyForTest(): void {
+  resetActiveShellPathCache();
 }
 
 /**
@@ -111,7 +257,41 @@ export function resetShellPathCache(): void {
  * rebuild PATH via macOS path_helper.
  */
 export function setShellPathForTest(): void {
-  resolvedPathPromise = Promise.resolve(process.env.PATH ?? "");
+  const testContext = activeTestContext();
+  const shellPath = testContext?.env?.PATH ?? process.env.PATH ?? "";
+  if (testContext !== null) {
+    testContext.pathOverride = shellPath;
+    testContext.cachedShellPath = shellPath;
+    testContext.cachedShellPathPromise = Promise.resolve(shellPath);
+  } else {
+    testShellPathContext.enterWith({
+      pathOverride: shellPath,
+      cachedShellPath: shellPath,
+      cachedShellPathPromise: Promise.resolve(shellPath),
+    });
+  }
+  cachedShellPath = shellPath;
+  cachedShellPathPromise = Promise.resolve(shellPath);
+}
+
+/**
+ * Run a test with an isolated fake process env for login-shell PATH resolution.
+ * The env object is caller-owned, so tests can mutate it before resetting the
+ * active context cache to exercise cache invalidation.
+ */
+export function withShellPathEnvForTest<T>(
+  env: NodeJS.ProcessEnv,
+  fn: () => T,
+): T {
+  return testShellPathContext.run(
+    {
+      env,
+      shell: env.SHELL,
+      cachedShellPath: null,
+      cachedShellPathPromise: null,
+    },
+    fn,
+  );
 }
 
 /**
@@ -136,6 +316,32 @@ export async function resolveExecutablesOnPath(
     seen.add(candidate);
     try {
       await access(candidate, constants.X_OK);
+      hits.push(candidate);
+    } catch {
+      // not found or not executable
+    }
+  }
+  return hits;
+}
+
+function resolveExecutablesOnPathSync(
+  binary: string,
+  searchPath: string
+): string[] {
+  const segments = searchPath
+    .split(path.delimiter)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  const seen = new Set<string>();
+  const hits: string[] = [];
+  for (const segment of segments) {
+    const candidate = path.join(segment, binary);
+    if (seen.has(candidate)) {
+      continue;
+    }
+    seen.add(candidate);
+    try {
+      accessSync(candidate, constants.X_OK);
       hits.push(candidate);
     } catch {
       // not found or not executable
@@ -180,15 +386,12 @@ export async function resolveBinaryFromLoginShell(
 }
 
 /**
- * Resolve a binary path synchronously using Electron's INHERITED PATH (via
- * `execFileSync('which', ...)`), with a `bash -lc which` fallback. Does NOT
- * consult the user's login-shell PATH; for that, use
- * `resolveBinaryFromLoginShell`. This helper exists for sync code paths that
- * consume `execFileSync`/`spawnSync` directly (e.g. `getResolvedGitPath`/
- * `getResolvedGhPath`/`getResolvedClaudePath` in symphony-loop.ts). Tracked
- * for replacement in FEA-956.
+ * Resolve a binary path synchronously using the user's login-shell PATH.
+ * Mirrors `resolveBinaryFromLoginShell()` exactly for override handling,
+ * executable PATH discovery, and bare-name fallback, without invoking host
+ * discovery tools.
  */
-export function resolveBinaryFromInheritedPath(
+export function resolveBinaryFromLoginShellSync(
   logicalName: BinaryName,
   override?: string
 ): BinaryResolveResult {
@@ -201,28 +404,10 @@ export function resolveBinaryFromInheritedPath(
     }
   }
 
-  try {
-    const result = execFileSync("which", [logicalName], {
-      encoding: "utf8",
-      timeout: 5_000,
-    }).trim();
-    if (result) {
-      return { path: result, source: "path" };
-    }
-  } catch {
-    // fall through
-  }
-
-  try {
-    const result = execFileSync("bash", ["-lc", `which ${logicalName}`], {
-      encoding: "utf8",
-      timeout: 5_000,
-    }).trim();
-    if (result) {
-      return { path: result, source: "path" };
-    }
-  } catch {
-    // fall through
+  const shellPath = getShellPathSync();
+  const matches = resolveExecutablesOnPathSync(logicalName, shellPath);
+  if (matches.length > 0) {
+    return { path: matches[0], source: "path" };
   }
 
   return { path: logicalName, source: "fallback" };

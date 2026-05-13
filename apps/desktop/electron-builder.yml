@@ -2,9 +2,11 @@ appId: ai.closedloop.desktop
 productName: ClosedLoop
 
 files:
-  - dist/**/*
+  - app/**/*
   - src/renderer/**/*
   - package.json
+
+beforeBuild: ./scripts/use-staged-node-modules.mjs
 
 extraResources:
   - from: resources/icon-1024.png

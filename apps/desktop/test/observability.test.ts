@@ -4,6 +4,7 @@ import type { DesktopAnalyticsEvent } from "../src/main/cloud-protocol.js";
 import { Observability } from "../src/main/observability.js";
 import type { EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
 import type { TelemetryCategory } from "../src/main/telemetry-protocol.js";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { validateOutboundUrlForSurface } from "../src/server/outbound-url-policy.js";
 
 type AnalyticsEvent = Omit<
@@ -84,6 +85,118 @@ describe("Observability", () => {
     assert.equal(telemetryEvents.length, 1);
     assert.equal(telemetryEvents[0].category, "job.started");
     assert.equal(analyticsEvents.length, 0);
+  });
+
+  test("jobStarted threads command into diagnostics.lifecycle.command", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.jobStarted("cmd-1", "symphony_loop", "loop-1", 12345, LoopCommand.Execute);
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "job.started");
+    assert.equal(telemetryEvents[0].diagnostics?.lifecycle?.command, LoopCommand.Execute);
+  });
+
+  test("jobStarted without command does not set diagnostics.lifecycle.command", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.jobStarted("cmd-1", "symphony_loop", "loop-1", 12345);
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "job.started");
+    assert.equal(telemetryEvents[0].diagnostics, undefined);
+  });
+
+  test("jobCompleted threads command into diagnostics.lifecycle.command", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.jobCompleted("cmd-1", "symphony_loop", "loop-1", undefined, undefined, LoopCommand.Plan);
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "job.completed");
+    assert.equal(telemetryEvents[0].diagnostics?.lifecycle?.command, LoopCommand.Plan);
+  });
+
+  test("jobCompleted merges command into existing diagnostics.lifecycle", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.jobCompleted(
+      "cmd-1",
+      "symphony_loop",
+      "loop-1",
+      { tokenUsage: { inputTokens: 10, outputTokens: 20 } },
+      undefined,
+      LoopCommand.Execute,
+    );
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "job.completed");
+    assert.equal(telemetryEvents[0].diagnostics?.lifecycle?.command, LoopCommand.Execute);
+    assert.equal(telemetryEvents[0].diagnostics?.tokenUsage?.inputTokens, 10);
+  });
+
+  test("jobFailed threads command into diagnostics.lifecycle.command", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.jobFailed("cmd-1", "symphony_loop", "loop-1", 1, undefined, undefined, LoopCommand.Execute);
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "job.failed");
+    assert.equal(telemetryEvents[0].diagnostics?.lifecycle?.command, LoopCommand.Execute);
+  });
+
+  test("jobFailed without command does not set diagnostics.lifecycle.command", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.jobFailed("cmd-1", "symphony_loop", "loop-1", 1);
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "job.failed");
+    assert.equal(telemetryEvents[0].diagnostics?.lifecycle, undefined);
+  });
+
+  test("jobCancelled threads command into diagnostics.lifecycle.command", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.jobCancelled("cmd-1", "symphony_loop", "loop-1", 0, undefined, undefined, LoopCommand.Plan);
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "job.cancelled");
+    assert.equal(telemetryEvents[0].diagnostics?.lifecycle?.command, LoopCommand.Plan);
+  });
+
+  test("jobCancelled without command does not set diagnostics.lifecycle.command", () => {
+    const telemetryEvents: EnrichedTelemetryEvent[] = [];
+    Observability.init({
+      telemetrySend: (event) => telemetryEvents.push(event),
+    });
+
+    Observability.jobCancelled("cmd-1", "symphony_loop", "loop-1", 0);
+
+    assert.equal(telemetryEvents.length, 1);
+    assert.equal(telemetryEvents[0].category, "job.cancelled");
+    assert.equal(telemetryEvents[0].diagnostics?.lifecycle, undefined);
   });
 
   test("connection lifecycle emits telemetry and server-relayed analytics", () => {

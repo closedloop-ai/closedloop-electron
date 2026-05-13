@@ -4,6 +4,14 @@
 
 **Any commit that touches files in `apps/desktop/` MUST include a version bump in `apps/desktop/package.json`.** Before committing, check whether `package.json` is already modified in the staged changes. If the version was already bumped (e.g. by a prior edit in the same branch), do not bump again. If it was not bumped, increment the patch version (e.g. `0.4.0` -> `0.4.1`) and stage it alongside the other changes. A CI check will fail the PR if desktop files changed without a version bump.
 
+## Gateway Operations
+
+Binary path discovery is centralized in `src/server/shell-path.ts`. Use
+`getShellPath()` / `getShellPathSync()` for login-shell PATH discovery and
+`resolveBinaryFromLoginShell()` / `resolveBinaryFromLoginShellSync()` for CLI
+binary lookup. Binary overrides must flow through these helpers, and direct
+`which` or shell reimplementations are forbidden.
+
 ## Testing the Local Gateway (HTTP API)
 
 The desktop Electron app runs a localhost HTTP gateway. To test it manually:
