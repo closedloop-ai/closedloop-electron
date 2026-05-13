@@ -42,6 +42,26 @@ const { serversToClose, mockServersToClose, tempPathsToClean, cleanup } =
   makeMultiRepoTestHarness();
 afterEach(cleanup);
 
+/**
+ * Fake run-loop.sh body shared by the FEA-1088 PLAN spawn tests. Captures the
+ * script's argv to spawn-args.txt and the three multi-repo env vars to
+ * spawn-env.txt — falling back to the literal `__UNSET__` sentinel when a var
+ * is unset so the negative test can distinguish "absent" from "empty string".
+ * Kept module-level so both the 2-peer and 0-peer tests stay in sync if the
+ * capture contract changes.
+ */
+const MULTI_REPO_CAPTURE_SCRIPT = [
+  "#!/bin/sh",
+  'echo "$@" > "$CLOSEDLOOP_WORKDIR/spawn-args.txt"',
+  "{",
+  '  printf "CLOSEDLOOP_ADD_DIRS=%s\\n" "${CLOSEDLOOP_ADD_DIRS-__UNSET__}"',
+  '  printf "CLOSEDLOOP_ADD_DIR_NAMES=%s\\n" "${CLOSEDLOOP_ADD_DIR_NAMES-__UNSET__}"',
+  '  printf "CLOSEDLOOP_REPO_MAP=%s\\n" "${CLOSEDLOOP_REPO_MAP-__UNSET__}"',
+  '} > "$CLOSEDLOOP_WORKDIR/spawn-env.txt"',
+  "exit 0",
+  "",
+].join("\n");
+
 /** Create a gateway server with a mock API backend and the worktreeProvider. */
 function createTestGateway(tmpDir: string, mockPort: number) {
   return makeMultiRepoGateway({
@@ -78,23 +98,7 @@ test("PLAN with 2 additionalRepos passes --add-dir for each worktree to run-loop
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
 
-  // The fake script writes its args to spawn-args.txt and the multi-repo
-  // env vars to spawn-env.txt then exits 0. Capturing env in addition to
-  // args lets the assertions below verify both wiring paths.
-  await createFakeRunLoopScript(
-    tmpDir,
-    [
-      "#!/bin/sh",
-      'echo "$@" > "$CLOSEDLOOP_WORKDIR/spawn-args.txt"',
-      "{",
-      '  printf "CLOSEDLOOP_ADD_DIRS=%s\\n" "${CLOSEDLOOP_ADD_DIRS-__UNSET__}"',
-      '  printf "CLOSEDLOOP_ADD_DIR_NAMES=%s\\n" "${CLOSEDLOOP_ADD_DIR_NAMES-__UNSET__}"',
-      '  printf "CLOSEDLOOP_REPO_MAP=%s\\n" "${CLOSEDLOOP_REPO_MAP-__UNSET__}"',
-      '} > "$CLOSEDLOOP_WORKDIR/spawn-env.txt"',
-      "exit 0",
-      "",
-    ].join("\n"),
-  );
+  await createFakeRunLoopScript(tmpDir, MULTI_REPO_CAPTURE_SCRIPT);
 
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
@@ -256,20 +260,7 @@ test("PLAN with no additionalRepos: multi-repo env vars are absent from spawn en
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
 
-  await createFakeRunLoopScript(
-    tmpDir,
-    [
-      "#!/bin/sh",
-      'echo "$@" > "$CLOSEDLOOP_WORKDIR/spawn-args.txt"',
-      "{",
-      '  printf "CLOSEDLOOP_ADD_DIRS=%s\\n" "${CLOSEDLOOP_ADD_DIRS-__UNSET__}"',
-      '  printf "CLOSEDLOOP_ADD_DIR_NAMES=%s\\n" "${CLOSEDLOOP_ADD_DIR_NAMES-__UNSET__}"',
-      '  printf "CLOSEDLOOP_REPO_MAP=%s\\n" "${CLOSEDLOOP_REPO_MAP-__UNSET__}"',
-      '} > "$CLOSEDLOOP_WORKDIR/spawn-env.txt"',
-      "exit 0",
-      "",
-    ].join("\n"),
-  );
+  await createFakeRunLoopScript(tmpDir, MULTI_REPO_CAPTURE_SCRIPT);
 
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
