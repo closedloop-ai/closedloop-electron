@@ -1,5 +1,5 @@
 /**
- * T-3.14: Tests for resolveBinaryFromLoginShell and resolveBinaryFromInheritedPath from shell-path.ts.
+ * Tests for async and sync login-shell binary resolution from shell-path.ts.
  */
 
 import assert from "node:assert/strict";
@@ -9,30 +9,42 @@ import path from "node:path";
 import { afterEach, describe, test } from "node:test";
 import {
   resolveBinaryFromLoginShell,
-  resolveBinaryFromInheritedPath,
+  resolveBinaryFromLoginShellSync,
   resetShellPathCache,
   setShellPathForTest,
+  withShellPathEnvForTest,
   type BinaryName,
+  type BinaryResolveResult,
 } from "../src/server/shell-path.js";
+import { restoreEnvVars, saveEnvVars } from "./symphony-test-utils.js";
 
 const tempDirs: string[] = [];
-const originalPath = process.env.PATH;
+const originalEnv = saveEnvVars([
+  "PATH",
+  "SHELL",
+  "CL_TEST_SHELL_PATH_OUTPUT",
+]);
 
 afterEach(() => {
-  process.env.PATH = originalPath;
+  restoreEnvVars(originalEnv);
   resetShellPathCache();
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
+function makeTempDir(prefix: string): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
 /**
  * Create a temporary directory with an executable file at the given name.
  * Returns the directory path and the full path to the fake binary.
  */
 function makeTempBin(name: string): { dir: string; binPath: string } {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "resolve-binary-test-"));
-  tempDirs.push(dir);
+  const dir = makeTempDir("resolve-binary-test-");
   const binPath = path.join(dir, name);
   fs.writeFileSync(binPath, "#!/bin/sh\necho fake\n", { mode: 0o755 });
   return { dir, binPath };
@@ -43,11 +55,37 @@ function makeTempBin(name: string): { dir: string; binPath: string } {
  * Returns the directory path and the full path to the fake binary.
  */
 function makeTempNonExecutableBin(name: string): { dir: string; binPath: string } {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "resolve-binary-noexec-"));
-  tempDirs.push(dir);
+  const dir = makeTempDir("resolve-binary-noexec-");
   const binPath = path.join(dir, name);
   fs.writeFileSync(binPath, "#!/bin/sh\necho fake\n", { mode: 0o644 });
   return { dir, binPath };
+}
+
+function makeFakeShell(): string {
+  const dir = makeTempDir("resolve-binary-shell-");
+  const shellPath = path.join(dir, "fake-shell");
+  fs.writeFileSync(
+    shellPath,
+    [
+      "#!/bin/sh",
+      "printf '__CLPATH_START__%s__CLPATH_END__\\n' \"$CL_TEST_SHELL_PATH_OUTPUT\"",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  return shellPath;
+}
+
+async function expectParity(
+  name: BinaryName,
+  override: string | undefined,
+  expected: BinaryResolveResult,
+): Promise<void> {
+  const asyncResult = await resolveBinaryFromLoginShell(name, override);
+  const syncResult = resolveBinaryFromLoginShellSync(name, override);
+
+  assert.deepEqual(asyncResult, expected);
+  assert.deepEqual(syncResult, expected);
 }
 
 const ALL_BINARY_NAMES: BinaryName[] = ["claude", "gh", "codex", "python3", "git"];
@@ -70,12 +108,9 @@ describe("resolveBinaryFromLoginShell: override valid (file exists and is execut
 describe("resolveBinaryFromLoginShell: override invalid (file does not exist)", () => {
   for (const name of ALL_BINARY_NAMES) {
     test(`${name}: returns source "override_invalid" with override path (no PATH fallback)`, async () => {
-      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "resolve-binary-missing-"));
-      tempDirs.push(dir);
+      const dir = makeTempDir("resolve-binary-missing-");
       const nonExistentPath = path.join(dir, name);
-      // Do NOT create the file -- it should not exist
 
-      // Put a real binary on PATH to confirm no fallback occurs
       const { dir: binDir, binPath: realBin } = makeTempBin(name);
       process.env.PATH = binDir;
       setShellPathForTest();
@@ -83,7 +118,6 @@ describe("resolveBinaryFromLoginShell: override invalid (file does not exist)", 
       const result = await resolveBinaryFromLoginShell(name, nonExistentPath);
       assert.equal(result.source, "override_invalid");
       assert.equal(result.path, nonExistentPath);
-      // Confirm the result is NOT the PATH-based binary
       assert.notEqual(result.path, realBin);
     });
   }
@@ -117,10 +151,7 @@ describe("resolveBinaryFromLoginShell: no override, binary on PATH", () => {
 describe("resolveBinaryFromLoginShell: no override, binary not on PATH", () => {
   for (const name of ALL_BINARY_NAMES) {
     test(`${name}: returns source "fallback" with bare binary name`, async () => {
-      // Use an empty PATH so no binary is found
-      const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "resolve-binary-empty-"));
-      tempDirs.push(emptyDir);
-      process.env.PATH = emptyDir;
+      process.env.PATH = makeTempDir("resolve-binary-empty-");
       setShellPathForTest();
 
       const result = await resolveBinaryFromLoginShell(name);
@@ -131,117 +162,160 @@ describe("resolveBinaryFromLoginShell: no override, binary not on PATH", () => {
 });
 
 // ---------------------------------------------------------------------------
-// resolveBinaryFromInheritedPath
+// resolveBinaryFromLoginShellSync (sync)
 // ---------------------------------------------------------------------------
 
-describe("resolveBinaryFromInheritedPath: override valid (file exists and is executable)", () => {
+describe("resolveBinaryFromLoginShellSync: override valid (file exists and is executable)", () => {
   for (const name of ALL_BINARY_NAMES) {
     test(`${name}: returns source "override" with override path`, () => {
       const { binPath } = makeTempBin(name);
-      const result = resolveBinaryFromInheritedPath(name, binPath);
+      const result = resolveBinaryFromLoginShellSync(name, binPath);
       assert.equal(result.source, "override");
       assert.equal(result.path, binPath);
     });
   }
 });
 
-describe("resolveBinaryFromInheritedPath: override invalid (file does not exist)", () => {
+describe("resolveBinaryFromLoginShellSync: override invalid (file does not exist)", () => {
   for (const name of ALL_BINARY_NAMES) {
-    test(`${name}: returns source "override_invalid" (no PATH fallback)`, () => {
-      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "resolve-binary-sync-missing-"));
-      tempDirs.push(dir);
+    test(`${name}: returns source "override_invalid" with override path (no PATH fallback)`, () => {
+      const dir = makeTempDir("resolve-binary-sync-missing-");
       const nonExistentPath = path.join(dir, name);
-      // Do NOT create the file
 
-      const result = resolveBinaryFromInheritedPath(name, nonExistentPath);
+      const { dir: binDir, binPath: realBin } = makeTempBin(name);
+      process.env.PATH = binDir;
+      setShellPathForTest();
+
+      const result = resolveBinaryFromLoginShellSync(name, nonExistentPath);
       assert.equal(result.source, "override_invalid");
       assert.equal(result.path, nonExistentPath);
+      assert.notEqual(result.path, realBin);
     });
   }
 });
 
-describe("resolveBinaryFromInheritedPath: override invalid (file exists but not executable)", () => {
+describe("resolveBinaryFromLoginShellSync: override invalid (file exists but not executable)", () => {
   for (const name of ALL_BINARY_NAMES) {
     test(`${name}: returns source "override_invalid"`, () => {
       const { binPath } = makeTempNonExecutableBin(name);
-      const result = resolveBinaryFromInheritedPath(name, binPath);
+      const result = resolveBinaryFromLoginShellSync(name, binPath);
       assert.equal(result.source, "override_invalid");
       assert.equal(result.path, binPath);
     });
   }
 });
 
-describe("resolveBinaryFromInheritedPath: no override, binary on PATH", () => {
-  test("git: returns source 'path' when git is on PATH (uses system which)", () => {
-    // resolveBinaryFromInheritedPath uses execFileSync("which", ...) -- system git is available in CI
-    const result = resolveBinaryFromInheritedPath("git");
-    // git is almost always available in the test environment
-    assert.ok(
-      result.source === "path" || result.source === "fallback",
-      `expected 'path' or 'fallback', got '${result.source}'`
-    );
-  });
+describe("resolveBinaryFromLoginShellSync: no override, binary on PATH", () => {
+  for (const name of ALL_BINARY_NAMES) {
+    test(`${name}: returns source "path"`, () => {
+      const { dir, binPath } = makeTempBin(name);
+      process.env.PATH = dir;
+      setShellPathForTest();
+
+      const result = resolveBinaryFromLoginShellSync(name);
+      assert.equal(result.source, "path");
+      assert.equal(result.path, binPath);
+    });
+  }
 });
 
-describe("resolveBinaryFromInheritedPath: no override, binary not on PATH (via override invalid path)", () => {
+describe("resolveBinaryFromLoginShellSync: no override, binary not on PATH", () => {
   for (const name of ALL_BINARY_NAMES) {
-    test(`${name}: override_invalid for non-existent override path`, () => {
-      const fakeDir = fs.mkdtempSync(path.join(os.tmpdir(), "resolve-binary-sync-fake-"));
-      tempDirs.push(fakeDir);
-      const fakePath = path.join(fakeDir, `definitely-not-${name}`);
-      // Path does not exist
-      const result = resolveBinaryFromInheritedPath(name, fakePath);
-      assert.equal(result.source, "override_invalid");
-      assert.equal(result.path, fakePath);
+    test(`${name}: returns source "fallback" with bare binary name`, () => {
+      process.env.PATH = makeTempDir("resolve-binary-sync-empty-");
+      setShellPathForTest();
+
+      const result = resolveBinaryFromLoginShellSync(name);
+      assert.equal(result.source, "fallback");
+      assert.equal(result.path, name);
     });
   }
 });
 
 // ---------------------------------------------------------------------------
-// FEA-935: PATH-discovery asymmetry between resolveBinaryFromLoginShell and resolveBinaryFromInheritedPath
+// Sync/async parity
 // ---------------------------------------------------------------------------
-//
-// The symphony-loop preflight previously called resolveBinaryFromInheritedPath("claude"),
-// which consulted Electron's bare process.env.PATH (and a bash -lc fallback).
-// That misses common installs (nvm/fnm/asdf/Volta/Bun/mise, /opt/homebrew on
-// Apple Silicon when ~/.zshrc owns the PATH munging) even when the in-app
-// health check — which uses getShellPath() via the async resolveBinaryFromLoginShell —
-// confirms the binary is reachable. This caused the user-visible failure:
-// green health check + every loop returning 500 "claude CLI not found in
-// PATH". The fix was to switch the preflight to await resolveBinaryFromLoginShell(...).
-//
-// These tests guard the contract that resolveBinaryFromLoginShell honors getShellPath()
-// independently of process.env.PATH.
+
+describe("resolveBinaryFromLoginShell sync/async parity", () => {
+  for (const name of ALL_BINARY_NAMES) {
+    test(`${name}: valid override`, async () => {
+      const { binPath } = makeTempBin(name);
+      await expectParity(name, binPath, { path: binPath, source: "override" });
+    });
+
+    test(`${name}: invalid missing override`, async () => {
+      const missingOverride = path.join(makeTempDir("resolve-binary-parity-missing-"), name);
+      const { dir } = makeTempBin(name);
+      process.env.PATH = dir;
+      setShellPathForTest();
+
+      await expectParity(name, missingOverride, {
+        path: missingOverride,
+        source: "override_invalid",
+      });
+    });
+
+    test(`${name}: login-shell PATH hit`, async () => {
+      const { dir, binPath } = makeTempBin(name);
+      process.env.PATH = dir;
+      setShellPathForTest();
+
+      await expectParity(name, undefined, { path: binPath, source: "path" });
+    });
+
+    test(`${name}: missing binary fallback`, async () => {
+      process.env.PATH = makeTempDir("resolve-binary-parity-empty-");
+      setShellPathForTest();
+
+      await expectParity(name, undefined, { path: name, source: "fallback" });
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GUI PATH regression coverage
+// ---------------------------------------------------------------------------
+
+describe("resolveBinaryFromLoginShellSync: login shell drives discovery, not process.env.PATH", () => {
+  test("finds claude via fake login shell when inherited PATH excludes its dir", () => {
+    const { dir, binPath } = makeTempBin("claude");
+    const env = {
+      ...process.env,
+      SHELL: makeFakeShell(),
+      CL_TEST_SHELL_PATH_OUTPUT: dir,
+      PATH: makeTempDir("resolve-binary-gui-empty-"),
+    };
+
+    const result = withShellPathEnvForTest(env, () =>
+      resolveBinaryFromLoginShellSync("claude"),
+    );
+
+    assert.equal(result.source, "path");
+    assert.equal(result.path, binPath);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FEA-935: async resolver honors getShellPath independently of inherited PATH
+// ---------------------------------------------------------------------------
 
 describe("resolveBinaryFromLoginShell: getShellPath drives discovery, not process.env.PATH (FEA-935)", () => {
   test("finds binary via getShellPath() even when process.env.PATH excludes its dir", async () => {
     const { dir, binPath } = makeTempBin("claude");
 
-    // Lock getShellPath() to a PATH that includes the fake binary's dir.
-    // This mirrors what `$SHELL -ilc echo $PATH` returns on a real machine
-    // where claude is installed via a version manager / Homebrew.
     process.env.PATH = dir;
     setShellPathForTest();
 
-    // Now strip the fake-bin dir from process.env.PATH. This simulates
-    // Electron's bare GUI-launched PATH on macOS, which does NOT include
-    // any dirs added by the user's interactive shell init.
-    const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "fea935-empty-"));
-    tempDirs.push(emptyDir);
+    const emptyDir = makeTempDir("fea935-empty-");
     process.env.PATH = emptyDir;
 
-    // resolveBinaryFromLoginShell (async) consults getShellPath() and finds the binary —
-    // the OLD preflight (resolveBinaryFromInheritedPath) consulted process.env.PATH and
-    // missed it, returning "fallback" and 500ing the loop request.
     const result = await resolveBinaryFromLoginShell("claude");
     assert.equal(result.source, "path");
     assert.equal(result.path, binPath);
   });
 
-  test("returns 'fallback' only when binary is absent from BOTH getShellPath() and process.env.PATH", async () => {
-    const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "fea935-truly-empty-"));
-    tempDirs.push(emptyDir);
-    process.env.PATH = emptyDir;
+  test("returns 'fallback' only when binary is absent from getShellPath", async () => {
+    process.env.PATH = makeTempDir("fea935-truly-empty-");
     setShellPathForTest();
 
     const result = await resolveBinaryFromLoginShell("claude");

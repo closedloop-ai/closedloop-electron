@@ -56,15 +56,17 @@ const ENV_KEYS = [
   "CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE",
 ] as const;
 
-export function saveEnv(): Record<string, string | undefined> {
+export function saveEnvVars(
+  keys: readonly string[],
+): Record<string, string | undefined> {
   const saved: Record<string, string | undefined> = {};
-  for (const key of ENV_KEYS) {
+  for (const key of keys) {
     saved[key] = process.env[key];
   }
   return saved;
 }
 
-export function restoreEnv(saved: Record<string, string | undefined>): void {
+export function restoreEnvVars(saved: Record<string, string | undefined>): void {
   for (const [key, value] of Object.entries(saved)) {
     if (value === undefined) {
       delete process.env[key];
@@ -72,6 +74,14 @@ export function restoreEnv(saved: Record<string, string | undefined>): void {
       process.env[key] = value;
     }
   }
+}
+
+export function saveEnv(): Record<string, string | undefined> {
+  return saveEnvVars(ENV_KEYS);
+}
+
+export function restoreEnv(saved: Record<string, string | undefined>): void {
+  restoreEnvVars(saved);
 }
 
 // ---------------------------------------------------------------------------

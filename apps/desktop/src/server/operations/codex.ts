@@ -7,7 +7,7 @@ import { inspect } from "node:util";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError } from "../security.js";
-import { getShellEnv, resolveBinaryFromInheritedPath, resolveBinaryFromLoginShell } from "../shell-path.js";
+import { getShellEnv, resolveBinaryFromLoginShell, resolveBinaryFromLoginShellSync } from "../shell-path.js";
 import { getOverrideBinaryPaths, getResolvedGitPath } from "./symphony-loop.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
@@ -1673,7 +1673,7 @@ function applyMergedPrDiff(
   }
   gatewayLog.debug("codex-review", "Merged PR detected. Applying gh pr diff.");
 
-  const ghBin = resolveBinaryFromInheritedPath("gh", getOverrideBinaryPaths()?.gh).path;
+  const ghBin = resolveBinaryFromLoginShellSync("gh", getOverrideBinaryPaths()?.gh).path;
   const diffResult = spawnSync(ghBin, ["pr", "diff", prNum], {
     cwd: worktreeDir, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024, timeout: 30_000,
   });
@@ -1817,6 +1817,15 @@ export function streamCodexReview(
 ): Promise<void> {
   const logStream = createWriteStream(logPath, { flags: "a", encoding: "utf-8" });
   let eventCount = 0;
+  const keepaliveInterval = setInterval(() => {
+    if (!response.destroyed && response.writable) {
+      writeEvent(response, { type: "keepalive" });
+    }
+  }, 25_000);
+  keepaliveInterval.unref();
+  const stopKeepalive = () => clearInterval(keepaliveInterval);
+
+  response.once?.("close", stopKeepalive);
 
   child.stdout?.setEncoding("utf-8");
   child.stdout?.on("data", (chunk: string | Buffer) => {
@@ -1847,6 +1856,7 @@ export function streamCodexReview(
   });
 
   child.on("close", () => {
+    stopKeepalive();
     gatewayLog.debug(
       "codex-stream",
       `child closed, total events: ${eventCount}, response destroyed: ${response.destroyed}`,
