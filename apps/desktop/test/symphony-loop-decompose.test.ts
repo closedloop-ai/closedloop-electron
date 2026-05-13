@@ -89,6 +89,8 @@ test("DECOMPOSE: writes context pack with artifacts in .closedloop-ai/context/ar
   tempPathsToClean.push(tmpDir);
 
   const captureFile = path.join(tmpDir, "capture.txt");
+  const capturedArgvFile = path.join(tmpDir, "captured-argv.txt");
+  const capturedPromptFile = path.join(tmpDir, "captured-prompt.txt");
 
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
@@ -96,6 +98,8 @@ test("DECOMPOSE: writes context pack with artifacts in .closedloop-ai/context/ar
   // Spy script: capture cwd, context files, and stdin prompt
   const spyScript = [
     "#!/bin/sh",
+    `cat > ${JSON.stringify(capturedPromptFile)}`,
+    `printf '%s' "$*" > ${JSON.stringify(capturedArgvFile)}`,
     `echo "CWD=$(pwd)" > ${JSON.stringify(captureFile)}`,
     `echo "PROMPT_MD=$(cat .closedloop-ai/context/prompt.md 2>/dev/null || echo MISSING)" >> ${JSON.stringify(captureFile)}`,
     `echo "ARTIFACTS=$(find .closedloop-ai/context/artifacts -maxdepth 1 -type f 2>/dev/null | sort | tr '\\n' ',')" >> ${JSON.stringify(captureFile)}`,
@@ -158,6 +162,21 @@ test("DECOMPOSE: writes context pack with artifacts in .closedloop-ai/context/ar
   // prompt.md should contain the decompose prompt
   const promptMd = getValue("PROMPT_MD=");
   assert.equal(promptMd, "Decompose this PRD into features");
+  const promptFromStdin = await fs.readFile(capturedPromptFile, "utf-8");
+  assert.equal(
+    promptFromStdin,
+    "Decompose this PRD into features",
+    "Expected decompose prompt to be piped through stdin",
+  );
+  const argv = await fs.readFile(capturedArgvFile, "utf-8");
+  assert.ok(
+    argv.includes("--output-format stream-json"),
+    `Expected decompose argv to include stream-json, got: ${argv}`,
+  );
+  assert.ok(
+    !argv.includes("Decompose this PRD into features"),
+    `Prompt text must stay off argv, got: ${argv}`,
+  );
 
   // Artifacts should be in context/artifacts/
   const artifactsRaw = getValue("ARTIFACTS=");

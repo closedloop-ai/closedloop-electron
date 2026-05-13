@@ -2664,7 +2664,7 @@
           card.appendChild(phase);
         }
 
-        if (job.status === "RUNNING") {
+        if (job.status === "RUNNING" && job.interactiveTerminalAvailable === true) {
           card.style.cursor = "pointer";
           const hint = document.createElement("div");
           hint.style.cssText = "color: #a6e3a1; font-size: 11px; margin-top: 4px;";

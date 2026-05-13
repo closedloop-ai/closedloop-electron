@@ -27,7 +27,7 @@
       });
     })();
   </script>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
+  <link rel="stylesheet" href="./vendor/xterm.min.css" />
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
@@ -78,12 +78,8 @@
   </div>
   <div id="terminal-container"></div>
 
-  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"
-    integrity="sha384-KdckZE7oJC74TOSa/eWjgvB8PLc34srqU20NA7YAsHK2p6yHCdA3j1NX7VybMeom"
-    crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"
-    integrity="sha384-V3EjAdUixveFAPRccYczsGDpHEa+Wv7StB8in/bhbPKDhmwS3Uuy1APrbM2tTIbQ"
-    crossorigin="anonymous"></script>
+  <script src="./vendor/xterm.min.js"></script>
+  <script src="./vendor/addon-fit.min.js"></script>
   <script>
     (function () {
       // Request params from the first inline script via custom event — the

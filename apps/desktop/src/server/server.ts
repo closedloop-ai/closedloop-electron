@@ -114,6 +114,7 @@ export class DesktopGatewayServer {
       handleSecurityUpgrade: this.options.handleSecurityUpgrade,
       getBinaryPaths: this.options.getBinaryPaths,
       applyBinaryPathPatch: this.options.applyBinaryPathPatch,
+      getInteractiveTerminal: this.options.getInteractiveTerminal,
     });
   }
 

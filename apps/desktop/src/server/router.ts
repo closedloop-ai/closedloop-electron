@@ -86,6 +86,7 @@ export interface GatewayRouterOptions {
   ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult;
   getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
   applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
+  getInteractiveTerminal?: () => boolean;
 }
 
 export interface GatewayActivityEvent {
@@ -255,7 +256,8 @@ export class GatewayRouter {
       this.options.getWebAppOrigin ?? (() => this.options.webAppOrigin),
       this.options.worktreeProvider,
       this.options.loopTokenStore,
-      getSymphonyDir
+      getSymphonyDir,
+      this.options.getInteractiveTerminal,
     );
     registerSymphonyLogsRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerSymphonyPlanRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
