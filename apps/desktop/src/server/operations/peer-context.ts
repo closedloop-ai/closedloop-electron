@@ -96,3 +96,73 @@ export function buildMountPathsFooter(
   );
   return `\n\n## Mounted paths\n\n${lines.join("\n")}\n`;
 }
+
+/**
+ * Derive the short repo label that the multi-repo skills (plan-draft-writer,
+ * pre-explorer) use as the `@{repo-name}:path` prefix. Mirrors
+ * setup-closedloop.sh's behavior: prefer the GitHub basename
+ * (`org/repo` → `repo`), falling back to the worktree directory basename when
+ * the entry was supplied via `localRepoPath` only.
+ */
+function shortRepoName(ref: PeerWorktreeRef): string {
+  if (ref.fullName.includes("/")) {
+    return ref.fullName.split("/").pop() ?? path.basename(ref.localPath);
+  }
+  return ref.fullName.length > 0 ? ref.fullName : path.basename(ref.localPath);
+}
+
+/**
+ * Disambiguate colliding short names by suffixing `-2`, `-3`, … in input
+ * order. ADDITIONAL_REPOS_MAX is 5, so a numeric suffix is sufficient.
+ * Stability across a single dispatch is what matters — the skill consumes
+ * these as opaque labels for `@{name}:path` prefixes.
+ */
+function dedupeNames(names: ReadonlyArray<string>): string[] {
+  const used = new Set<string>();
+  const out: string[] = [];
+  for (const raw of names) {
+    if (!used.has(raw)) {
+      used.add(raw);
+      out.push(raw);
+      continue;
+    }
+    let counter = 2;
+    let candidate = `${raw}-${counter}`;
+    while (used.has(candidate)) {
+      counter += 1;
+      candidate = `${raw}-${counter}`;
+    }
+    used.add(candidate);
+    out.push(candidate);
+  }
+  return out;
+}
+
+/**
+ * Build the multi-repo env vars Claude (and every bash subshell its agents
+ * spawn) needs to satisfy the plan-draft-writer / pre-explorer skill gates.
+ *
+ * The skills explicitly skip their multi-repo sections when
+ * `CLOSEDLOOP_ADD_DIRS` is empty or unset, so without these vars the agent
+ * silently produces a single-repo plan. See FEA-1088 for the failure
+ * reproduction. Format mirrors setup-closedloop.sh's pipe-joined contract.
+ *
+ * Returns an empty object when no peers are present so the caller can spread
+ * unconditionally and stay byte-identical to the single-repo path.
+ */
+export function buildPeerEnvVars(
+  entries: ReadonlyArray<PeerWorktreeEntryShape>
+): Record<string, string> {
+  if (entries.length === 0) {
+    return {};
+  }
+  const refs = toPeerWorktreeRefs(entries);
+  const names = dedupeNames(refs.map(shortRepoName));
+  return {
+    CLOSEDLOOP_ADD_DIRS: refs.map((r) => r.localPath).join("|"),
+    CLOSEDLOOP_ADD_DIR_NAMES: names.join("|"),
+    CLOSEDLOOP_REPO_MAP: refs
+      .map((r, i) => `${names[i]}=${r.localPath}`)
+      .join("|"),
+  };
+}
