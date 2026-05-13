@@ -2,6 +2,7 @@ import type {
   ExecutionResultV2,
   RepoExecutionResult,
 } from "@closedloop-ai/loops-api/execution-result";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile, execFileSync, execSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import {
@@ -87,7 +88,8 @@ import {
   getShellEnv,
   getShellPath,
   resolveBinaryFromLoginShell,
-  resolveBinaryFromInheritedPath,
+  resolveBinaryFromLoginShellSync,
+  resetShellPathCache,
 } from "../shell-path.js";
 import { withMcpTools } from "./chat-tools.js";
 import {
@@ -157,135 +159,62 @@ export const defaultWorktreeProvider: WorktreeProvider = {
 const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
-// Claude binary resolution
+// Binary path resolution
 // ---------------------------------------------------------------------------
 
 /**
- * Cached absolute path to the `claude` binary, resolved once at first use.
- *
- * Resolution strategy (tried in order):
- *   1. `which claude` using the current process.env.PATH (fast; works in
- *      tests where PATH is set to a fake-bin directory, and in dev shells).
- *   2. `bash -lc 'which claude'` in a login shell so that nvm/homebrew/local
- *      bin directories are found even when Electron strips PATH at launch via
- *      the .app bundle, launchd (macOS), or systemd (Linux).
- *   3. Falls back to the bare string "claude" so that the caller can still
- *      attempt spawn and receive a descriptive ENOENT error.
+ * User-configured binary path overrides returned by Desktop settings.
  */
-let resolvedClaudePath: string | null = null;
-
-/**
- * Module-level binary paths resolver, configured once in GatewayRouter constructor.
- * When set, getResolvedClaudePath() will check the claude override before falling
- * back to its existing which/login-shell resolution strategies.
- */
-let overrideGetBinaryPaths:
-  | (() => {
-      claude?: string;
-      gh?: string;
-      codex?: string;
-      python3?: string;
-      git?: string;
-    })
-  | null = null;
-
-export function configureBinaryPathsResolver(
-  resolver:
-    | (() => {
-        claude?: string;
-        gh?: string;
-        codex?: string;
-        python3?: string;
-        git?: string;
-      })
-    | null,
-): void {
-  overrideGetBinaryPaths = resolver;
-  resetResolvedClaudePath();
-}
-
-export function getOverrideBinaryPaths(): {
+type BinaryPathOverrides = {
   claude?: string;
   gh?: string;
   codex?: string;
   python3?: string;
   git?: string;
-} | null {
-  return overrideGetBinaryPaths?.() ?? null;
+};
+
+type BinaryPathsResolver = () => BinaryPathOverrides;
+
+/**
+ * Module-level binary paths resolver, configured once in GatewayRouter constructor.
+ * Loop requests can bind their router's resolver through async-local storage so
+ * concurrent gateway instances in tests cannot race each other's overrides.
+ */
+let overrideGetBinaryPaths: BinaryPathsResolver | null = null;
+const binaryPathsResolverContext = new AsyncLocalStorage<BinaryPathsResolver>();
+
+function getActiveBinaryPathsResolver(): BinaryPathsResolver | null {
+  return binaryPathsResolverContext.getStore() ?? overrideGetBinaryPaths;
+}
+
+export function configureBinaryPathsResolver(
+  resolver: BinaryPathsResolver | null,
+): void {
+  overrideGetBinaryPaths = resolver;
+}
+
+export function getOverrideBinaryPaths(): BinaryPathOverrides | null {
+  return getActiveBinaryPathsResolver()?.() ?? null;
 }
 
 export function getResolvedGitPath(): string {
-  return resolveBinaryFromInheritedPath("git", overrideGetBinaryPaths?.()?.git).path;
+  return resolveBinaryFromLoginShellSync("git", getOverrideBinaryPaths()?.git).path;
 }
 
 export function getResolvedGhPath(): string {
-  return resolveBinaryFromInheritedPath("gh", overrideGetBinaryPaths?.()?.gh).path;
+  return resolveBinaryFromLoginShellSync("gh", getOverrideBinaryPaths()?.gh).path;
 }
 
 /**
- * Reset the cached claude binary path. Intended for use in tests where PATH
- * changes between test cases — production code should not call this.
+ * Reset the shared login-shell PATH cache used by sync binary wrappers.
+ * Intended for tests where PATH changes between cases.
  */
 export function resetResolvedClaudePath(): void {
-  resolvedClaudePath = null;
+  resetShellPathCache();
 }
 
 export function getResolvedClaudePath(): string {
-  // If we have a cached path, return it only if the binary still exists on
-  // disk. This handles test scenarios where a fake binary directory is cleaned
-  // up between test cases, causing the cached path to become stale.
-  if (resolvedClaudePath !== null && existsSync(resolvedClaudePath)) {
-    return resolvedClaudePath;
-  }
-  // Invalidate stale cache entry before re-resolving
-  resolvedClaudePath = null;
-
-  // Strategy 0: check for a user-configured override path first.
-  // resolveBinaryFromInheritedPath returns "override" (executable) or "override_invalid"
-  // (set but not executable). Both are returned as-is -- "override_invalid"
-  // lets the spawn produce a descriptive ENOENT rather than silently falling
-  // back to a different binary.
-  const claudeOverride = overrideGetBinaryPaths?.()?.claude;
-  if (claudeOverride !== undefined) {
-    const resolved = resolveBinaryFromInheritedPath("claude", claudeOverride);
-    resolvedClaudePath = resolved.path;
-    return resolvedClaudePath;
-  }
-
-  // Strategy 1: which via current process PATH (works in tests and dev shells)
-  try {
-    const result = execFileSync("which", ["claude"], {
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 5_000,
-    }).trim();
-    if (result) {
-      resolvedClaudePath = result;
-      return resolvedClaudePath;
-    }
-  } catch {
-    // Not found in current PATH — try login shell
-  }
-
-  // Strategy 2: login shell which — sources ~/.nvm/nvm.sh and similar to
-  // populate the full user PATH that Electron strips on launch.
-  try {
-    const result = execFileSync("bash", ["-lc", "which claude"], {
-      encoding: "utf-8",
-      stdio: "pipe",
-      timeout: 5_000,
-    }).trim();
-    if (result) {
-      resolvedClaudePath = result;
-      return resolvedClaudePath;
-    }
-  } catch {
-    // Login shell which also failed — fall through to bare name fallback
-  }
-
-  // Fall back to bare name; spawn will throw ENOENT with a descriptive message
-  resolvedClaudePath = "claude";
-  return resolvedClaudePath;
+  return resolveBinaryFromLoginShellSync("claude", getOverrideBinaryPaths()?.claude).path;
 }
 
 // ---------------------------------------------------------------------------
@@ -2598,13 +2527,10 @@ async function attemptLlmCommit(
     spawnEnv.GIT_COMMITTER_EMAIL = committer.email;
   }
 
-  // Resolve the absolute path to the `claude` binary once at first use.
-  // Electron strips PATH to a minimal system set when launching via the .app
-  // bundle or launchd (macOS) / systemd (Linux), so the bare name "claude"
-  // typically resolves to ENOENT even though it works in a terminal. Running
-  // `which claude` in a login shell picks up the full user PATH including
-  // nvm/homebrew/local bin directories. getResolvedClaudePath() caches the
-  // result for the process lifetime.
+  // Resolve the absolute path to the `claude` binary through the shared
+  // login-shell PATH cache. Electron strips PATH to a minimal system set when
+  // launching via the app bundle or service managers, so sync callers must use
+  // the same resolver path as async health and preflight checks.
   const claudeBinary = getResolvedClaudePath();
   const allowedTools = await withMcpTools(
     "Bash,Read,Write,Glob,Grep",
@@ -6118,15 +6044,12 @@ async function handleLoopRequest(
       body.command === LoopCommand.Plan || body.command === LoopCommand.Execute;
     let scriptPath: string | null = null;
 
-    // Every command needs claude — verify it consistently for all paths.
-    // Use the async resolveBinaryFromLoginShell (not resolveBinaryFromInheritedPath)
-    // so the preflight honors the same login-shell PATH discovery the health check
-    // uses (getShellPath spawns `$SHELL -ilc`). The sync variant only consults
-    // Electron's bare PATH and `bash -lc which`, which misses zsh/nvm/fnm/asdf/
-    // Volta/Bun/mise installs and contradicts a green health check.
+    // Every command needs claude. The async and sync resolver variants share
+    // the same login-shell PATH cache, so preflight, health checks, and sync
+    // spawn wrappers agree on the selected binary.
     const resolved = await resolveBinaryFromLoginShell(
       "claude",
-      overrideGetBinaryPaths?.()?.claude,
+      getOverrideBinaryPaths()?.claude,
     );
     if (resolved.source === "fallback") {
       await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
@@ -6735,6 +6658,7 @@ async function handleLoopRequest(
       stop: () => {},
       flush: () => Promise.resolve(),
     };
+    const requestBinaryPathsResolver = getActiveBinaryPathsResolver();
     const onceComplete = async (
       code: number,
       signal?: string,
@@ -6760,51 +6684,57 @@ async function handleLoopRequest(
       } catch (err) {
         loopError(body.loopId, "Tailer flush error:", err);
       }
-      handleProcessCompletion(
-        code,
-        body,
-        apiBaseUrl,
-        worktreeDir,
-        claudeWorkDir,
-        usedTempDir,
-        expandedRepoPath,
-        getAllowedDirectories,
-        expectedMcpUrl,
-        jobStore,
-        webAppOrigin,
-        commandId,
-        operationId,
-        wt,
-        loopTokenStore,
-        additionalWorktreeDirs,
-        signal,
-        spawnStartedAt,
-        collectedSpawnMeta,
-        decisionTableVerificationStartOffset,
-        userVisibleLoopFailureSecret,
-        loopPerfTelemetryStartOffset,
-        loopPerfWatcherHandle,
-      ).catch((err) => {
-        loopError(body.loopId, "Completion handler error:", err);
-        gatewayLog.error(
-          "loop-harness",
-          `Completion handler error for loopId=${body.loopId}: ${err instanceof Error ? err.message : err}`,
-        );
-        // Safety net: ensure the job reaches a terminal status even when
-        // handleProcessCompletion throws, so the IPC exitCode guard does
-        // not leave the job stuck as RUNNING forever.
-        if (jobStore) {
-          const j = jobStore.getByLoopId(body.loopId);
-          if (j && j.status === "RUNNING") {
-            jobStore.upsert({
-              ...j,
-              status: "FAILED",
-              updatedAt: new Date().toISOString(),
-              completedAt: new Date().toISOString(),
-            });
+      const runCompletion = () =>
+        handleProcessCompletion(
+          code,
+          body,
+          apiBaseUrl,
+          worktreeDir,
+          claudeWorkDir,
+          usedTempDir,
+          expandedRepoPath,
+          getAllowedDirectories,
+          expectedMcpUrl,
+          jobStore,
+          webAppOrigin,
+          commandId,
+          operationId,
+          wt,
+          loopTokenStore,
+          additionalWorktreeDirs,
+          signal,
+          spawnStartedAt,
+          collectedSpawnMeta,
+          decisionTableVerificationStartOffset,
+          userVisibleLoopFailureSecret,
+          loopPerfTelemetryStartOffset,
+          loopPerfWatcherHandle,
+        ).catch((err) => {
+          loopError(body.loopId, "Completion handler error:", err);
+          gatewayLog.error(
+            "loop-harness",
+            `Completion handler error for loopId=${body.loopId}: ${err instanceof Error ? err.message : err}`,
+          );
+          // Safety net: ensure the job reaches a terminal status even when
+          // handleProcessCompletion throws, so the IPC exitCode guard does
+          // not leave the job stuck as RUNNING forever.
+          if (jobStore) {
+            const j = jobStore.getByLoopId(body.loopId);
+            if (j && j.status === "RUNNING") {
+              jobStore.upsert({
+                ...j,
+                status: "FAILED",
+                updatedAt: new Date().toISOString(),
+                completedAt: new Date().toISOString(),
+              });
+            }
           }
-        }
-      });
+        });
+      if (requestBinaryPathsResolver) {
+        void binaryPathsResolverContext.run(requestBinaryPathsResolver, runCompletion);
+      } else {
+        void runCompletion();
+      }
     };
 
     // Prevent unhandled 'error' events (e.g. ENOENT if binary vanishes
@@ -7044,18 +6974,27 @@ export function registerSymphonyLoopRoutes(
   worktreeProvider?: WorktreeProvider,
   loopTokenStore?: LoopTokenStore,
   getSymphonyDir?: () => string,
+  getBinaryPaths?: BinaryPathsResolver,
 ): void {
   dispatcher.register("POST", "/api/gateway/symphony/loop", async (context) => {
-    await handleLoopRequest(
-      context,
-      getAllowedDirectories,
-      getApiOrigin,
-      jobStore,
-      getWebAppOrigin,
-      worktreeProvider,
-      loopTokenStore,
-      getSymphonyDir,
-    );
+    const run = () =>
+      handleLoopRequest(
+        context,
+        getAllowedDirectories,
+        getApiOrigin,
+        jobStore,
+        getWebAppOrigin,
+        worktreeProvider,
+        loopTokenStore,
+        getSymphonyDir,
+      );
+
+    if (getBinaryPaths) {
+      await binaryPathsResolverContext.run(getBinaryPaths, run);
+      return;
+    }
+
+    await run();
   });
 
   dispatcher.register(

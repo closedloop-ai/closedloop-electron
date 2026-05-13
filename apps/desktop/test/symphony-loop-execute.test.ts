@@ -31,7 +31,11 @@ import type { EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { resetResolvedClaudePath } from "../src/server/operations/symphony-loop.js";
-import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
+import {
+  resetShellPathCache,
+  setShellPathForTest,
+  withShellPathEnvForTest,
+} from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
   initGitRepo,
@@ -97,6 +101,22 @@ async function waitForTelemetryCategory(
   }
   throw new Error(
     `Timed out waiting for telemetry category ${category} loopId=${loopId}`,
+  );
+}
+
+async function withFakeShellPath<T>(
+  fakeBin: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return await withShellPathEnvForTest(
+    {
+      ...process.env,
+      PATH: `${fakeBin}:/usr/bin:/bin`,
+    },
+    async () => {
+      setShellPathForTest();
+      return await fn();
+    },
   );
 }
 
@@ -631,83 +651,88 @@ test("EXECUTE: uses existing PR URL from gh pr view without calling gh pr create
 
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
-  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
-  setShellPathForTest();
 
-  const mock = await startMockApiServer();
-  mockServersToClose.push(mock.server);
+  await withFakeShellPath(fakeBin, async () => {
+    const mock = await startMockApiServer();
+    mockServersToClose.push(mock.server);
 
-  const server = new DesktopGatewayServer({
-    host: "127.0.0.1",
-    preferredPort: 0,
-    fallbackPorts: [0],
-    webAppOrigin: "https://app.symphony.com",
-    getAllowedDirectories: () => [tmpDir],
-    machineName: "execute-existingpr-machine",
-    version: "0.1.0-test",
-    capabilities: EMPTY_CAPABILITIES,
-    worktreeProvider: fakeWorktreeProvider,
-    discoveryFilePath: path.join(tmpDir, "electron-port"),
-    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
-  });
-  serversToClose.push(server);
-  await server.start();
-
-  const loopId = "00000000-0000-0000-0000-000000000300";
-  const response = await fetch(
-    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        loopId,
-        command: LoopCommand.Execute,
-        closedLoopAuthToken: "tok",
-        prompt: "test",
-        artifacts: [],
-        repo: {
-          fullName: repoFullName,
-          branch: "main",
-        },
+    const server = new DesktopGatewayServer({
+      host: "127.0.0.1",
+      preferredPort: 0,
+      fallbackPorts: [0],
+      webAppOrigin: "https://app.symphony.com",
+      getAllowedDirectories: () => [tmpDir],
+      machineName: "execute-existingpr-machine",
+      version: "0.1.0-test",
+      capabilities: EMPTY_CAPABILITIES,
+      worktreeProvider: fakeWorktreeProvider,
+      discoveryFilePath: path.join(tmpDir, "electron-port"),
+      getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+      getBinaryPaths: () => ({
+        claude: path.join(fakeBin, "claude"),
+        git: path.join(fakeBin, "git"),
+        gh: path.join(fakeBin, "gh"),
       }),
-    },
-  );
+    });
+    serversToClose.push(server);
+    await server.start();
 
-  assert.equal(
-    response.status,
-    200,
-    `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
-  );
+    const loopId = "00000000-0000-0000-0000-000000000300";
+    const response = await fetch(
+      `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          loopId,
+          command: LoopCommand.Execute,
+          closedLoopAuthToken: "tok",
+          prompt: "test",
+          artifacts: [],
+          repo: {
+            fullName: repoFullName,
+            branch: "main",
+          },
+        }),
+      },
+    );
 
-  // Wait for upload — signals that git ops + PR lookup completed
-  const uploadReq = await mock.waitForRequest("upload-artifacts");
-  const uploadBody = JSON.parse(uploadReq.body) as {
-    artifacts: {
-      executionResult?: {
-        schemaVersion?: number;
-        results?: Array<{ status: string; prUrl?: string; prNumber?: number }>;
+    assert.equal(
+      response.status,
+      200,
+      `Expected 200 but got ${response.status}: ${await response.text().catch(() => "")}`,
+    );
+
+    // Wait for upload — signals that git ops + PR lookup completed
+    const uploadReq = await mock.waitForRequest("upload-artifacts");
+    const uploadBody = JSON.parse(uploadReq.body) as {
+      artifacts: {
+        executionResult?: {
+          schemaVersion?: number;
+          results?: Array<{ status: string; prUrl?: string; prNumber?: number }>;
+        };
       };
+      metadata: Record<string, unknown>;
     };
-    metadata: Record<string, unknown>;
-  };
 
-  const primary = uploadBody.artifacts.executionResult?.results?.[0];
-  assert.equal(uploadBody.artifacts.executionResult?.schemaVersion, 2);
-  assert.equal(primary?.status, "success");
-  assert.equal(
-    primary?.prUrl,
-    expectedPrUrl,
-    `Expected existing PR URL in primary entry prUrl, got: ${String(primary?.prUrl)}`,
-  );
-  assert.equal(primary?.prNumber, 42);
+    const primary = uploadBody.artifacts.executionResult?.results?.[0];
+    assert.equal(uploadBody.artifacts.executionResult?.schemaVersion, 2);
+    assert.equal(primary?.status, "success");
+    assert.equal(
+      primary?.prUrl,
+      expectedPrUrl,
+      `Expected existing PR URL in primary entry prUrl, got: ${String(primary?.prUrl)}`,
+    );
+    assert.equal(primary?.prNumber, 42);
 
-  // gh pr create must NOT have been called
-  const ghCalls = await fs.readFile(captureFile, "utf-8").catch(() => "");
-  assert.equal(
-    ghCalls.trim(),
-    "",
-    `gh pr create should not have been called, but capture file contains: ${ghCalls}`,
-  );
+    // gh pr create must NOT have been called
+    const ghCalls = await fs.readFile(captureFile, "utf-8").catch(() => "");
+    assert.equal(
+      ghCalls.trim(),
+      "",
+      `gh pr create should not have been called, but capture file contains: ${ghCalls}`,
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -2570,6 +2595,11 @@ test("EXECUTE: artifact links use /implementation-plans/ in PR body and LLM prom
     capabilities: EMPTY_CAPABILITIES,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    getBinaryPaths: () => ({
+      claude: path.join(fakeBin, "claude"),
+      git: path.join(fakeBin, "git"),
+      gh: path.join(fakeBin, "gh"),
+    }),
   });
   serversToClose.push(server);
   await server.start();

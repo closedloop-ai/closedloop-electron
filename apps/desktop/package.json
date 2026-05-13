@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "version": "0.15.8",
+  "version": "0.15.12",
   "description": "ClosedLoop Desktop",
   "author": "ClosedLoop AI <support@closedloop.ai>",
   "private": true,
@@ -13,11 +13,12 @@
     "clean:package": "node -e \"require('fs').rmSync('dist-dmg',{recursive:true,force:true})\"",
     "prebuild": "node -e \"const{execSync:e}=require('child_process'),{writeFileSync:w}=require('fs');const h=e('git rev-parse HEAD').toString().trim();w('src/shared/build-info.ts','// AUTO-GENERATED — do not edit\\nexport const BUILD_COMMIT_HASH = \\\"'+h+'\\\";\\n');\"",
     "build": "pnpm clean:dist && pnpm prebuild && tsc -p tsconfig.json",
+    "stage:package": "node scripts/stage-packaging-app.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src/",
     "test": "tsx --test test/*.test.ts",
-    "package": "pnpm clean:package && pnpm build && electron-builder --mac --config electron-builder.yml",
-    "release": "pnpm clean:package && pnpm build && electron-builder --mac --publish always --config electron-builder.yml"
+    "package": "pnpm clean:package && pnpm build && pnpm stage:package && node scripts/run-electron-builder.mjs",
+    "release": "pnpm clean:package && pnpm build && pnpm stage:package && node scripts/run-electron-builder.mjs --publish always"
   },
   "dependencies": {
     "@closedloop-ai/loops-api": "0.2.10",
