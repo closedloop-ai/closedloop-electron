@@ -34,4 +34,5 @@ publish:
   repo: closedloop-electron
 
 directories:
+  app: .electron-builder/app
   output: dist-dmg
