@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "version": "0.15.12",
+  "version": "0.15.13",
   "description": "ClosedLoop Desktop",
   "author": "ClosedLoop AI <support@closedloop.ai>",
   "private": true,
@@ -29,7 +29,6 @@
     "electron-updater": "^6.8.3",
     "glob": "^11.0.1",
     "node-pty": "^1.0.0",
-    "posthog-node": "^5.28.8",
     "socket.io-client": "^4.8.1",
     "ws": "^8.18.0",
     "zod": "^4.0.0"

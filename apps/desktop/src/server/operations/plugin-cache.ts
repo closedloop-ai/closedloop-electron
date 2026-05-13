@@ -353,11 +353,19 @@ export function getInstalledPluginVersions(registryPath?: string): Record<string
       if (!key.endsWith("@closedloop-ai") || !entries || entries.length === 0) {
         continue;
       }
-      const pluginName = key.replace(/@closedloop-ai$/, "");
-      const status = getPluginInstallStatus(pluginName, registryPath);
-      if (status.hasValidUserScopedEntry) {
-        result[key] = status.selectedUserVersion ?? "installed";
+      const pluginRef = key;
+      const registryEntries = entries;
+      const userRegistryEntries = registryEntries.filter(isUserScopedRegistryEntry);
+      const existingUserEntries = userRegistryEntries.filter(entryHasExistingInstallPath);
+      if (existingUserEntries.length === 0) {
+        continue;
       }
+      const disabled = existingUserEntries.some((entry) => entry.enabled === false);
+      if (disabled) {
+        continue;
+      }
+      const selectedUserEntry = [...existingUserEntries].reverse().find((entry) => entry.enabled !== false);
+      result[pluginRef] = selectedUserEntry?.version ?? "installed";
     }
     return result;
   } catch {
