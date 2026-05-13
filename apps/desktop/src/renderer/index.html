@@ -34,6 +34,8 @@
         --border: oklch(0.5 0.008 267 / 0.1);
         --input-border: oklch(0.5 0.008 267 / 0.14);
         --ring: oklch(0.861 0.04 250);
+        --sidebar: oklch(0.96 0.005 267);
+        --sidebar-foreground: oklch(0.253 0 0);
         --radius: 0.5rem;
 
         color-scheme: light;
@@ -68,6 +70,8 @@
           --border: oklch(1 0.005 270 / 0.06);
           --input-border: oklch(0.5 0.01 270 / 0.25);
           --ring: oklch(0.5 0.1 270 / 0.8);
+          --sidebar: oklch(0.22 0 0);
+          --sidebar-foreground: oklch(0.887 0 0);
 
           color-scheme: dark;
         }
@@ -80,7 +84,7 @@
       body {
         margin: 0;
         font-family: "Avenir Next", "Segoe UI", sans-serif;
-        background: radial-gradient(circle at 10% 20%, var(--muted), var(--background) 60%);
+        background: var(--sidebar);
         color: var(--foreground);
       }
 
@@ -1597,10 +1601,9 @@
         border: none;
         border-bottom: 2px solid transparent;
         color: var(--muted-foreground);
-        padding: 10px 16px;
-        font-size: 12px;
-        font-weight: 600;
-        letter-spacing: 0.02em;
+        padding: 10px 12px;
+        font-size: 13px;
+        font-weight: 500;
         cursor: pointer;
         transition: color 0.15s, border-color 0.15s;
       }
@@ -1610,8 +1613,9 @@
       }
 
       .settings-sub-nav button.active {
-        color: var(--primary);
+        color: var(--foreground);
         border-bottom-color: var(--primary);
+        font-weight: 600;
       }
 
       .settings-sub-panel {
