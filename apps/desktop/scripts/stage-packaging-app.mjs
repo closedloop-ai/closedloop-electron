@@ -13,6 +13,7 @@ const stageAppDir = getPackagingStageAppDir();
 const buildOutputDir = path.join(appDir, "dist");
 const packageJsonFile = path.join(appDir, "package.json");
 const repoNpmrcFile = path.join(repoRoot, ".npmrc");
+const stageRootPackageJsonFile = path.join(stageRoot, "package.json");
 const stageBuildOutputDir = path.join(stageAppDir, "dist");
 const rendererEntryFile = path.join(appDir, "src/renderer/index.html");
 const stageRendererDir = path.join(stageAppDir, "src/renderer");
@@ -93,10 +94,23 @@ const stagePackageJson = {
     ]),
   ),
 };
+const stageRootPackageJson = {
+  name: packageJson.name,
+  version: packageJson.version,
+  description: packageJson.description,
+  author: packageJson.author,
+  private: packageJson.private,
+  type: packageJson.type,
+  main: "app/dist/main/index.js",
+};
 
 await writeFile(
   path.join(stageAppDir, "package.json"),
   `${JSON.stringify(stagePackageJson, null, 2)}\n`,
+);
+await writeFile(
+  stageRootPackageJsonFile,
+  `${JSON.stringify(stageRootPackageJson, null, 2)}\n`,
 );
 await writeFile(stageNpmrcFile, `${repoNpmrc.trimEnd()}\nnode-linker=hoisted\n`);
 
