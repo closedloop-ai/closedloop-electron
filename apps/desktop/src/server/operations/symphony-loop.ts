@@ -98,6 +98,7 @@ import {
 } from "./git-helpers.js";
 import {
   type PtySession,
+  killPty,
   removeSession,
   spawnPtySession,
 } from "../../main/pty-session-store.js";
@@ -617,11 +618,23 @@ function isExecutionResult(value: unknown): value is ExecutionResult {
 }
 
 /** Track running loop processes for cancellation and to prevent GC of ChildProcess. */
+interface LoopSpawnConfig {
+  claudeBinary: string;
+  baseClaudeArgs: string[];
+  cwd: string;
+  spawnEnv: Record<string, string>;
+  logFile: string;
+  claudeWorkDir: string;
+}
+
 interface RunningLoop {
   pid: number;
   child?: ReturnType<typeof spawn>;
   ptySession?: PtySession;
   stage: "running" | "post-processing";
+  spawnConfig?: LoopSpawnConfig;
+  /** When true, the process was killed for a mode switch — suppress finalization. */
+  modeSwitching?: boolean;
 }
 const runningLoops = new Map<string, RunningLoop>();
 
@@ -636,6 +649,138 @@ export function registerRecoveredLoop(loopId: string, pid: number): void {
 
 export function unregisterLoop(loopId: string): void {
   runningLoops.delete(loopId);
+}
+
+// ---------------------------------------------------------------------------
+// Interactive terminal mode switching
+// ---------------------------------------------------------------------------
+
+/**
+ * Kill the current detached process and respawn Claude with --resume in a PTY
+ * so the user can interact with it in the terminal window.
+ */
+export function switchToInteractive(loopId: string): PtySession {
+  const entry = runningLoops.get(loopId);
+  if (!entry) {
+    throw new Error(`No running loop for loopId=${loopId}`);
+  }
+  if (!entry.spawnConfig) {
+    throw new Error(`No spawn config stored for loopId=${loopId}`);
+  }
+  if (entry.ptySession) {
+    // Already in interactive mode — return existing session
+    return entry.ptySession;
+  }
+  const config = entry.spawnConfig;
+
+  // Mark as mode-switching so onceComplete suppresses finalization
+  entry.modeSwitching = true;
+
+  // Kill the detached process
+  try {
+    process.kill(-entry.pid, "SIGTERM");
+  } catch {
+    try { process.kill(entry.pid, "SIGTERM"); } catch { /* already dead */ }
+  }
+
+  // Build interactive args: --resume (no -p), keep --output-format stream-json
+  const interactiveArgs = config.baseClaudeArgs.filter(
+    (arg, i, arr) =>
+      arg !== "-p" &&
+      !(arg === "-" && i > 0 && arr[i - 1] === "-p"),
+  );
+  interactiveArgs.unshift("--resume");
+
+  const jsonlFile = path.join(config.claudeWorkDir, "claude-output.jsonl");
+  const session = spawnPtySession({
+    loopId,
+    file: config.claudeBinary,
+    args: interactiveArgs,
+    cwd: config.cwd,
+    env: config.spawnEnv,
+    logFile: config.logFile,
+    jsonlFile,
+  });
+
+  // Update the running loop entry
+  runningLoops.set(loopId, {
+    pid: session.pid,
+    ptySession: session,
+    stage: "running",
+    spawnConfig: config,
+  });
+
+  // Wire exit listener for finalization (this is a real exit, not a mode switch)
+  session.exitListeners.add(({ exitCode }) => {
+    const current = runningLoops.get(loopId);
+    if (current?.modeSwitching) return;
+    loopLog(loopId, `Interactive process exit, code=${exitCode}`);
+  });
+
+  return session;
+}
+
+/**
+ * Kill the interactive PTY session and respawn Claude with --resume + -p
+ * in a detached child process so it continues unattended.
+ */
+export function switchToDetached(loopId: string): void {
+  const entry = runningLoops.get(loopId);
+  if (!entry) return;
+  if (!entry.spawnConfig) return;
+  if (!entry.ptySession) {
+    // Already in detached mode
+    return;
+  }
+  const config = entry.spawnConfig;
+
+  // Mark as mode-switching so onceComplete suppresses finalization
+  entry.modeSwitching = true;
+
+  // Kill the PTY
+  killPty(loopId);
+  removeSession(loopId);
+
+  // Build detached args: --resume + -p + original format args
+  const detachedArgs = ["--resume", ...config.baseClaudeArgs];
+  const pipeline = buildClaudePipeline(
+    detachedArgs,
+    config.claudeWorkDir,
+    config.claudeBinary,
+  );
+
+  // Spawn detached
+  let logFd: number;
+  try {
+    logFd = openSync(config.logFile, "a");
+  } catch {
+    return;
+  }
+  try {
+    const child = spawn(pipeline.cmd, pipeline.args, {
+      cwd: config.cwd,
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      env: config.spawnEnv,
+    });
+    child.unref();
+
+    const pid = child.pid ?? 0;
+    runningLoops.set(loopId, {
+      pid,
+      child,
+      stage: "running",
+      spawnConfig: config,
+    });
+
+    child.on("exit", (code) => {
+      const current = runningLoops.get(loopId);
+      if (current?.modeSwitching) return;
+      loopLog(loopId, `Detached resume process exit, code=${code}`);
+    });
+  } finally {
+    closeSync(logFd);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -6457,6 +6602,7 @@ async function handleLoopRequest(
     let loopPerfTelemetryStartOffset = 0;
     let loopPerfWatcherHandle: LoopPerfTelemetryWatcherHandle | undefined;
     let interactiveTerminalAvailable = false;
+    let loopSpawnConfig: LoopSpawnConfig | undefined;
     const collectedSpawnMeta: {
       command: string;
       args: string[];
@@ -6601,40 +6747,17 @@ async function handleLoopRequest(
         collectedSpawnMeta.args = redactSpawnArgs(pipeline.args);
         collectedSpawnMeta.cwd = cwd;
         spawnStartedAt = Date.now();
+        // Store config for mode-switching (interactive ↔ detached)
+        loopSpawnConfig = {
+          claudeBinary,
+          baseClaudeArgs: claudeArgs,
+          cwd,
+          spawnEnv,
+          logFile,
+          claudeWorkDir,
+        };
         if (shouldUseInteractiveTerminal) {
-          // Spawn claude directly in interactive mode — strip only -p
-          // (print mode) so Claude stays in its TUI after responding.
-          // Keep --output-format stream-json so JSONL extraction and
-          // token usage parsing still work on exit.
-          // Spawning claude directly (not via bash pipeline) avoids
-          // posix_spawnp failures in packaged builds.
-          const interactiveArgs = claudeArgs.filter(
-            (arg, i, arr) =>
-              arg !== "-p" &&
-              !(arg === "-" && i > 0 && arr[i - 1] === "-p"),
-          );
-          if (promptFile) {
-            try {
-              const promptContent = readFileSync(promptFile, "utf-8");
-              interactiveArgs.push(promptContent);
-            } catch {
-              // Fall back to no initial prompt
-            }
-          }
-          const jsonlFile = path.join(claudeWorkDir, "claude-output.jsonl");
-          collectedSpawnMeta.command = claudeBinary;
-          collectedSpawnMeta.args = redactSpawnArgs(interactiveArgs);
-          ptySession = spawnPtySession({
-            loopId: body.loopId,
-            file: claudeBinary,
-            args: interactiveArgs,
-            cwd,
-            env: spawnEnv,
-            logFile,
-            jsonlFile,
-          });
           interactiveTerminalAvailable = true;
-          return;
         }
         spawnDetachedProcess(pipeline.cmd, pipeline.args, cwd);
       };
@@ -6939,6 +7062,13 @@ async function handleLoopRequest(
       signal?: string,
     ): Promise<void> => {
       if (completionHandled) return;
+      // If the process was killed for a mode switch (interactive ↔ detached),
+      // suppress finalization — a replacement process is about to start.
+      const entry = runningLoops.get(body.loopId);
+      if (entry?.modeSwitching) {
+        loopLog(body.loopId, `Mode-switch kill detected, suppressing finalization`);
+        return;
+      }
       completionHandled = true;
       loopLog(body.loopId, `onceComplete fired, code=${code}`);
       // Persist exitCode synchronously (before any await) so the IPC
@@ -7019,7 +7149,7 @@ async function handleLoopRequest(
         void onceComplete(exitCode);
       });
       pid = ptySession.pid;
-      runningLoops.set(body.loopId, { pid, ptySession, stage: "running" });
+      runningLoops.set(body.loopId, { pid, ptySession, stage: "running", spawnConfig: loopSpawnConfig });
     } else if (child) {
       child.on("error", (err) => {
         loopError(body.loopId, "Spawn error:", err.message);
@@ -7037,7 +7167,7 @@ async function handleLoopRequest(
         json(context, 500, { error: "Failed to spawn process" });
         return;
       }
-      runningLoops.set(body.loopId, { pid, child, stage: "running" });
+      runningLoops.set(body.loopId, { pid, child, stage: "running", spawnConfig: loopSpawnConfig });
     }
 
     if (!pid) {

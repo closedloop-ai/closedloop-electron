@@ -69,7 +69,7 @@ import {
   computeSymphonyDir,
   SymphonyDirNotConfiguredError,
 } from "../server/operations/symphony-utils.js";
-import { getResolvedGitPath, resetResolvedClaudePath } from "../server/operations/symphony-loop.js";
+import { getResolvedGitPath, resetResolvedClaudePath, switchToInteractive, switchToDetached } from "../server/operations/symphony-loop.js";
 import { resetMcpDetectionCache } from "../server/operations/mcp-detection.js";
 import { resolveBinaryFromLoginShell } from "../server/shell-path.js";
 import { getCodePluginVersion } from "../server/operations/plugin-cache.js";
@@ -2481,7 +2481,12 @@ export class DesktopApplication {
       if (typeof loopId !== "string" || !loopId.trim()) {
         throw new Error("loopId is required");
       }
-      const job = this.jobStore.getByLoopId(loopId.trim());
+      const trimmedLoopId = loopId.trim();
+
+      // Switch the running loop from detached (-p) to interactive (--resume, no -p)
+      switchToInteractive(trimmedLoopId);
+
+      const job = this.jobStore.getByLoopId(trimmedLoopId);
       const port = this.server?.getActivePort() ?? 19432;
       const command = job?.command ?? "";
       const authToken = this.isNoAuthMode() ? "" : this.gatewayAuthToken;
@@ -2501,12 +2506,18 @@ export class DesktopApplication {
       const win = new BrowserWindow({
         width: 900,
         height: 600,
-        title: `Terminal — ${command} ${loopId.slice(0, 8)}`,
+        title: `Terminal — ${command} ${trimmedLoopId.slice(0, 8)}`,
         webPreferences: { contextIsolation: true, sandbox: true },
       });
       void win.loadFile(htmlPath, {
-        query: { loopId: loopId.trim(), port: String(port), command, token: authToken },
+        query: { loopId: trimmedLoopId, port: String(port), command, token: authToken },
       });
+
+      // When the terminal window closes, switch back to detached mode
+      win.on("closed", () => {
+        switchToDetached(trimmedLoopId);
+      });
+
       return { opened: true };
     });
     ipcMain.handle("desktop:get-activity-events", () =>
