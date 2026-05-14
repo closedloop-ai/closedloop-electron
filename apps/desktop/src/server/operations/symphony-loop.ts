@@ -6602,13 +6602,38 @@ async function handleLoopRequest(
         collectedSpawnMeta.cwd = cwd;
         spawnStartedAt = Date.now();
         if (shouldUseInteractiveTerminal) {
+          // Spawn claude directly in interactive mode (no -p, no
+          // --output-format) so the user can type to Claude in the
+          // attached terminal. Strip print-mode flags so Claude stays
+          // in its interactive TUI instead of processing and exiting.
+          // Spawning claude directly (not via bash pipeline) avoids
+          // posix_spawnp failures in packaged builds.
+          const interactiveArgs = claudeArgs.filter(
+            (arg, i, arr) =>
+              arg !== "-p" &&
+              arg !== "stream-json" &&
+              !(arg === "--output-format" && arr[i + 1] === "stream-json") &&
+              !(arg === "-" && i > 0 && arr[i - 1] === "-p"),
+          );
+          if (promptFile) {
+            try {
+              const promptContent = readFileSync(promptFile, "utf-8");
+              interactiveArgs.push(promptContent);
+            } catch {
+              // Fall back to no initial prompt
+            }
+          }
+          const jsonlFile = path.join(claudeWorkDir, "claude-output.jsonl");
+          collectedSpawnMeta.command = claudeBinary;
+          collectedSpawnMeta.args = redactSpawnArgs(interactiveArgs);
           ptySession = spawnPtySession({
             loopId: body.loopId,
-            file: pipeline.cmd,
-            args: pipeline.args,
+            file: claudeBinary,
+            args: interactiveArgs,
             cwd,
             env: spawnEnv,
             logFile,
+            jsonlFile,
           });
           interactiveTerminalAvailable = true;
           return;
