@@ -6,6 +6,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile, execFileSync, execSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
 import {
+  appendFileSync,
   closeSync,
   existsSync,
   mkdirSync,
@@ -7068,6 +7069,24 @@ async function handleLoopRequest(
 
       completionHandled = true;
       loopLog(body.loopId, `onceComplete fired, code=${code}`);
+
+      // Merge interactive sidecar output into the main files so
+      // handleProcessCompletion sees the combined token usage, logs,
+      // and JSONL events from both the headless and interactive sessions.
+      const interactiveJsonl = path.join(claudeWorkDir, "claude-output-interactive.jsonl");
+      const interactiveLog = path.join(claudeWorkDir, "symphony-loop-interactive.log");
+      const mainJsonl = path.join(claudeWorkDir, "claude-output.jsonl");
+      const mainLog = path.join(claudeWorkDir, "symphony-loop.log");
+      try {
+        if (existsSync(interactiveJsonl)) {
+          appendFileSync(mainJsonl, readFileSync(interactiveJsonl));
+        }
+      } catch { /* best effort */ }
+      try {
+        if (existsSync(interactiveLog)) {
+          appendFileSync(mainLog, readFileSync(interactiveLog));
+        }
+      } catch { /* best effort */ }
       // Persist exitCode synchronously (before any await) so the IPC
       // desktop:list-running-jobs reconciliation sees the exit handler has
       // claimed this job and does not race-override the status to STOPPED.
