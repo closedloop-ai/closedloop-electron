@@ -143,12 +143,16 @@ export function initTerminalAttachWebSocket(
         return;
       }
 
-      // Forward live PTY data to the WebSocket and buffer for JSONL logging
+      // Forward live PTY data to the WebSocket and buffer for JSONL logging.
+      // Suppress logging while the user is typing to avoid capturing
+      // keystroke echoes as assistant output.
       const baseLoopId = loopId.replace(/-interactive$/, "");
+      let typingUntil = 0;
       const onData = (data: string): void => {
         if (ws.readyState === ws.OPEN) {
           ws.send(JSON.stringify({ type: "data", data }));
         }
+        if (Date.now() < typingUntil) return;
         bufferAssistantOutput(baseLoopId, data);
       };
       session.dataListeners.add(onData);
@@ -185,8 +189,10 @@ export function initTerminalAttachWebSocket(
           const msg = JSON.parse(String(raw)) as Record<string, unknown>;
           if (msg.type === "input" && typeof msg.data === "string") {
             writeToPty(loopId, msg.data);
+            // Suppress assistant output logging for 1s after each keystroke
+            // to avoid capturing PTY echo as assistant output.
+            typingUntil = Date.now() + 1000;
             // Accumulate user keystrokes and log when Enter is pressed
-            const baseLoopId = loopId.replace(/-interactive$/, "");
             userInputBuffer = (userInputBuffer ?? "") + msg.data;
             if (msg.data.includes("\r") || msg.data.includes("\n")) {
               const line = userInputBuffer.replace(/[\r\n]+/g, "").trim();
