@@ -748,7 +748,11 @@ export function markTerminalWindowClosed(loopId: string): void {
     child.on("exit", (code, signal) => {
       loopLog(loopId, `Resume process exit, code=${code}, signal=${signal ?? "none"}`);
       if (savedOnceComplete) {
-        void savedOnceComplete(code ?? 0, signal ?? undefined);
+        // Pass exit code 0 — the resume is a continuation mechanism.
+        // --resume -p may exit non-zero even when work completed
+        // successfully. handleProcessCompletion determines actual
+        // success by checking artifacts on disk.
+        void savedOnceComplete(0, signal ?? undefined);
       }
     });
   } finally {
