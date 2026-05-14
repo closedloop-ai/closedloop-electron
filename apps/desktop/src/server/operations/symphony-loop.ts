@@ -690,12 +690,10 @@ export function markTerminalWindowClosed(loopId: string): void {
     return;
   }
 
-  // Kill the paused original — it has stale conversation context.
-  // We'll replace it with a resume that has the sidecar's full context.
-  try { process.kill(-entry.pid, "SIGKILL"); } catch {
-    try { process.kill(entry.pid, "SIGKILL"); } catch { /* already exited */ }
-  }
-  loopLog(loopId, `Killed paused original (pid=${entry.pid}) — replacing with resume`);
+  // Leave the original paused — don't kill it. Its onceComplete never
+  // fires because a SIGSTOP'd process never exits. The resume process
+  // handles finalization via its own onceComplete wiring.
+  loopLog(loopId, `Original stays paused (pid=${entry.pid}) — spawning resume with sidecar context`);
 
   // Spawn --resume <sessionId> -p with a continuation prompt.
   // Claude loads the sidecar's full conversation (including the user's
