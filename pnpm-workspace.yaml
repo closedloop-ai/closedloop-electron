@@ -6,6 +6,10 @@ packages:
 # (10080 minutes), giving the registry time to detect and yank compromised
 # releases before they land in our lockfile.
 minimumReleaseAge: 10080
+# Our own internal packages ship frequently and are trusted — exempt from the
+# 7-day quarantine so we can consume new versions immediately.
+minimumReleaseAgeExclude:
+  - "@closedloop-ai/loops-api"
 # blockExoticSubdeps: refuse non-registry specifiers (git:, github:, http(s):,
 # file:, link:) introduced via transitive deps — closes the github-ref bypass.
 blockExoticSubdeps: true

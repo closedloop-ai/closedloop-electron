@@ -230,7 +230,11 @@ import {
   LoopCommand,
   validateCommandInputs,
 } from "@closedloop-ai/loops-api/commands";
-import type { ContextPackAttachment as SharedContextPackAttachment } from "@closedloop-ai/loops-api/context-pack";
+import type {
+  ContextPackAgent,
+  ContextPackAttachment as SharedContextPackAttachment,
+  ContextPackRepoConfig,
+} from "@closedloop-ai/loops-api/context-pack";
 import type { LoopRequestBody } from "@closedloop-ai/loops-api/desktop-request";
 import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
@@ -284,6 +288,7 @@ const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
   [LoopCommand.EvaluateCode]: "REQUIRED",
   [LoopCommand.EvaluateFeature]: "OPTIONAL",
   [LoopCommand.Bootstrap]: "NOT_REQUIRED",
+  [LoopCommand.Manual]: "NOT_REQUIRED",
 };
 const LOCAL_CALLBACK_FAIL_FAST_COMMANDS = new Set<LoopCommand>([
   LoopCommand.Plan,
@@ -862,22 +867,9 @@ export function readBootstrapRepoOutputs(
 // ContextPack agent/config materialization
 // ---------------------------------------------------------------------------
 
-// TODO: Replace with imports from @closedloop-ai/loops-api/context-pack once
-// FEA-656 bumps the package to include these types.
-type ContextPackAgentPayload = {
-  slug: string;
-  name: string;
-  prompt: string;
-};
-
-type ContextPackRepoConfigPayload = {
-  repoFullName: string;
-  criticGates: Record<string, unknown>;
-};
-
 export async function materializeAgents(
   worktreeDir: string,
-  agents: ContextPackAgentPayload[],
+  agents: ContextPackAgent[],
 ): Promise<number> {
   if (agents.length === 0) return 0;
 
@@ -906,7 +898,7 @@ export async function materializeAgents(
 export async function materializeCriticGates(
   worktreeDir: string,
   repoFullName: string,
-  repoConfigs: ContextPackRepoConfigPayload[],
+  repoConfigs: ContextPackRepoConfig[],
 ): Promise<boolean> {
   const config = repoConfigs.find((c) => c.repoFullName === repoFullName);
   if (!config) return false;
@@ -2207,7 +2199,7 @@ function buildCodeContextFile(
   body: SymphonyLoopRequestBody,
   expandedRepoPath: string | null,
 ): CodeContextFile {
-  const provided = body.codeEvaluationContext ?? {};
+  const provided = body.codeEvaluationContext ?? ({} as Partial<CodeContextFile>);
   const codeContext: CodeContextFile = { schemaVersion: 1 };
 
   if (provided.repo !== undefined) {
@@ -5580,15 +5572,8 @@ async function handleLoopRequest(
       ? rawBody.expectedMcpUrl
       : undefined;
 
-  // ContextPack agent/config payloads (FEA-654). These fields are added to
-  // LoopRequestBody by FEA-656; read from rawBody until the loops-api package
-  // is bumped with the new fields.
-  const bodyAgents = Array.isArray(rawBody.agents)
-    ? (rawBody.agents as ContextPackAgentPayload[])
-    : undefined;
-  const bodyRepoConfigs = Array.isArray(rawBody.repoConfigs)
-    ? (rawBody.repoConfigs as ContextPackRepoConfigPayload[])
-    : undefined;
+  const bodyAgents = body.agents;
+  const bodyRepoConfigs = body.repoConfigs;
 
   // Extract tracing headers forwarded by the cloud command executor.
   // Use typeof guards because IncomingMessage headers values are string | string[] | undefined.
