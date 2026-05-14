@@ -7160,15 +7160,6 @@ async function handleLoopRequest(
     ): Promise<void> => {
       if (completionHandled) return;
 
-      // If a replacement process is being spawned (terminal window closed,
-      // merging from interactive session), skip this exit — the replacement
-      // will call onceComplete when it finishes.
-      const currentEntry = runningLoops.get(body.loopId);
-      if (currentEntry?.replacementPending) {
-        loopLog(body.loopId, `Replacement pending — skipping finalization for killed process`);
-        return;
-      }
-
       // If the interactive terminal window is open, defer finalization —
       // the user is actively interacting and may be adding work (judges,
       // guidance) that should be included in the final results.
