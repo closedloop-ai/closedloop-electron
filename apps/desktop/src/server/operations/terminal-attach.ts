@@ -1,12 +1,12 @@
 import type http from "node:http";
 import { appendFileSync } from "node:fs";
 import { WebSocketServer, type WebSocket } from "ws";
+import { Terminal } from "@xterm/headless";
 import {
   getSession,
   writeToPty,
   resizePty,
 } from "../../main/pty-session-store.js";
-import { stripAnsi } from "../../main/diagnostics-helpers.js";
 import { safeEqualToken } from "../auth-utils.js";
 
 /**
@@ -26,6 +26,7 @@ import { safeEqualToken } from "../auth-utils.js";
  *   { type: "input",  data: string }   — keyboard input forwarded to PTY
  *   { type: "resize", cols: number, rows: number }
  */
+
 /** Map of loopId → interactive JSONL path for event logging. */
 const interactiveJsonlPaths = new Map<string, string>();
 
@@ -33,15 +34,6 @@ export function registerInteractiveJsonlPath(loopId: string, jsonlPath: string):
   interactiveJsonlPaths.set(loopId, jsonlPath);
 }
 
-/**
- * Write an event to the interactive JSONL file in the format the
- * output-tailer recognizes (type: "user"/"assistant" with content blocks).
- */
-/**
- * Write an event to the interactive JSONL in the same format as
- * --output-format stream-json so parseTokenUsage and the output-tailer
- * both recognize it. Includes estimated token usage based on text length.
- */
 function appendInteractiveEvent(
   loopId: string,
   type: "user" | "assistant",
@@ -50,8 +42,6 @@ function appendInteractiveEvent(
   const jsonlPath = interactiveJsonlPaths.get(loopId);
   if (!jsonlPath || !text.trim()) return;
   try {
-    // Don't include token usage on text events — real token counts
-    // come from the TUI token counter extracted in bufferAssistantOutput.
     const record = {
       type,
       message: { content: [{ type: "text", text }] },
@@ -62,36 +52,77 @@ function appendInteractiveEvent(
   }
 }
 
-/** Track last seen token count per loop for delta computation. */
-const lastTokenCounts = new Map<string, number>();
+// ---------------------------------------------------------------------------
+// Headless terminal for clean text extraction
+// ---------------------------------------------------------------------------
 
-/** Buffer for accumulating PTY output and emitting complete lines. */
-const outputLineBuffers = new Map<string, string>();
+interface TerminalCapture {
+  term: Terminal;
+  lastLineCount: number;
+  lastLine: string;
+  flushTimer: ReturnType<typeof setTimeout> | null;
+  typingUntil: number;
+  lastTokenCount: number;
+}
+
+const captures = new Map<string, TerminalCapture>();
 
 /**
- * Accumulate PTY output, strip ANSI/TUI artifacts, and emit each
- * complete line as a separate event. Partial lines stay in the buffer
- * until a newline arrives.
+ * Feed PTY data into a headless xterm instance and periodically
+ * extract clean text lines — no ANSI, no partial redraws, no
+ * hand-rolled parsing.
  */
-function bufferAssistantOutput(loopId: string, data: string): void {
-  const existing = outputLineBuffers.get(loopId) ?? "";
-  const combined = existing + data;
-  const lines = combined.split("\n");
-  // Last element is the incomplete line — keep it in the buffer
-  outputLineBuffers.set(loopId, lines.pop() ?? "");
+function feedAndExtract(loopId: string, data: string): void {
+  let cap = captures.get(loopId);
+  if (!cap) {
+    const term = new Terminal({ cols: 120, rows: 40, scrollback: 1000 });
+    cap = { term, lastLineCount: 0, lastLine: "", flushTimer: null, typingUntil: 0, lastTokenCount: 0 };
+    captures.set(loopId, cap);
+  }
 
-  for (const raw of lines) {
-    const cleaned = stripAnsi(raw).replace(/\s+/g, " ").trim();
+  cap.term.write(data);
 
-    // Extract token counts from TUI status lines (e.g. "esctointerrupt52215tokens")
-    const tokenMatch = cleaned.match(/(\d{3,})tokens?/i);
+  // Debounce: extract after 1s of no new data
+  if (cap.flushTimer) clearTimeout(cap.flushTimer);
+  cap.flushTimer = setTimeout(() => {
+    if (Date.now() < cap!.typingUntil) return;
+    flushTerminalLines(loopId, cap!);
+  }, 1000);
+}
+
+function flushTerminalLines(loopId: string, cap: TerminalCapture): void {
+  const buf = cap.term.buffer.active;
+  const newLines: string[] = [];
+
+  // Read all lines from the terminal buffer
+  for (let i = 0; i < buf.length; i++) {
+    const line = buf.getLine(i);
+    if (!line) continue;
+    const text = line.translateToString(true).trim();
+    if (!text) continue;
+    newLines.push(text);
+  }
+
+  // Only emit lines we haven't seen
+  const startFrom = cap.lastLineCount;
+  cap.lastLineCount = newLines.length;
+
+  for (let i = startFrom; i < newLines.length; i++) {
+    const text = newLines[i];
+
+    // Dedup spinner animation: skip if same as last line minus leading symbol
+    const stripped = text.replace(/^[·✢✳✶✻✽⠀-⣿]\s*/, "");
+    const lastStripped = cap.lastLine.replace(/^[·✢✳✶✻✽⠀-⣿]\s*/, "");
+    if (stripped === lastStripped && stripped.length > 0) continue;
+    cap.lastLine = text;
+
+    // Extract token counts
+    const tokenMatch = text.match(/(\d{3,})\s*tokens?/i);
     if (tokenMatch) {
       const currentTokens = parseInt(tokenMatch[1], 10);
-      const lastTokens = lastTokenCounts.get(loopId) ?? 0;
-      if (currentTokens > lastTokens) {
-        const delta = currentTokens - lastTokens;
-        lastTokenCounts.set(loopId, currentTokens);
-        // Emit a token usage record with the delta
+      if (currentTokens > cap.lastTokenCount) {
+        const delta = currentTokens - cap.lastTokenCount;
+        cap.lastTokenCount = currentTokens;
         const jsonlPath = interactiveJsonlPaths.get(loopId);
         if (jsonlPath) {
           try {
@@ -114,13 +145,30 @@ function bufferAssistantOutput(loopId: string, data: string): void {
       continue;
     }
 
-    if (cleaned.length < 3) continue;
-    // Skip only pure TUI noise — let everything else through
-    if (/^[·✢✳✶✻✽⠀-⣿│─┌┐└┘├┤╭╮╰╯═║\s]+$/.test(cleaned)) continue;
-    if (/^esctointerrupt\d*tokens?$/i.test(cleaned)) continue;
-    appendInteractiveEvent(loopId, "assistant", cleaned);
+    if (text.length < 3) continue;
+    // Skip pure symbol noise
+    if (/^[·✢✳✶✻✽⠀-⣿│─┌┐└┘├┤╭╮╰╯═║\s]+$/.test(text)) continue;
+    appendInteractiveEvent(loopId, "assistant", text);
   }
 }
+
+function markTyping(loopId: string): void {
+  const cap = captures.get(loopId);
+  if (cap) cap.typingUntil = Date.now() + 1500;
+}
+
+function cleanupCapture(loopId: string): void {
+  const cap = captures.get(loopId);
+  if (cap) {
+    if (cap.flushTimer) clearTimeout(cap.flushTimer);
+    cap.term.dispose();
+    captures.delete(loopId);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket handler
+// ---------------------------------------------------------------------------
 
 export function initTerminalAttachWebSocket(
   server: http.Server,
@@ -180,17 +228,14 @@ export function initTerminalAttachWebSocket(
         return;
       }
 
-      // Forward live PTY data to the WebSocket and buffer for JSONL logging.
-      // Suppress logging while the user is typing to avoid capturing
-      // keystroke echoes as assistant output.
       const baseLoopId = loopId.replace(/-interactive$/, "");
-      let typingUntil = 0;
+
+      // Forward live PTY data to the WebSocket and feed headless terminal
       const onData = (data: string): void => {
         if (ws.readyState === ws.OPEN) {
           ws.send(JSON.stringify({ type: "data", data }));
         }
-        if (Date.now() < typingUntil) return;
-        bufferAssistantOutput(baseLoopId, data);
+        feedAndExtract(baseLoopId, data);
       };
       session.dataListeners.add(onData);
 
@@ -208,6 +253,7 @@ export function initTerminalAttachWebSocket(
         );
         ws.on("close", () => {
           session.dataListeners.delete(onData);
+          cleanupCapture(baseLoopId);
         });
         return;
       }
@@ -226,19 +272,10 @@ export function initTerminalAttachWebSocket(
           const msg = JSON.parse(String(raw)) as Record<string, unknown>;
           if (msg.type === "input" && typeof msg.data === "string") {
             writeToPty(loopId, msg.data);
-            // Suppress assistant output logging while typing. Extend to 3s
-            // after Enter to skip the echoed input and TUI redraw before
-            // Claude's actual response starts.
-            const isEnter = msg.data.includes("\r") || msg.data.includes("\n");
-            typingUntil = Date.now() + (isEnter ? 1500 : 500);
-            if (isEnter) {
-              // Clear the assistant line buffer — everything in it is
-              // echoed user keystrokes, not Claude's response.
-              outputLineBuffers.delete(baseLoopId);
-            }
+            markTyping(baseLoopId);
             // Accumulate user keystrokes and log when Enter is pressed
             userInputBuffer = (userInputBuffer ?? "") + msg.data;
-            if (isEnter) {
+            if (msg.data.includes("\r") || msg.data.includes("\n")) {
               const line = userInputBuffer.replace(/[\r\n]+/g, "").trim();
               if (line.length > 0) {
                 appendInteractiveEvent(baseLoopId, "user", line);
@@ -251,6 +288,9 @@ export function initTerminalAttachWebSocket(
             typeof msg.rows === "number"
           ) {
             resizePty(loopId, msg.cols, msg.rows);
+            // Resize the headless terminal too
+            const cap = captures.get(baseLoopId);
+            if (cap) cap.term.resize(msg.cols, msg.rows);
           }
         } catch {
           // Ignore malformed messages
@@ -261,6 +301,10 @@ export function initTerminalAttachWebSocket(
       ws.on("close", () => {
         session.dataListeners.delete(onData);
         session.exitListeners.delete(onExit);
+        // Flush any remaining lines before cleanup
+        const cap = captures.get(baseLoopId);
+        if (cap) flushTerminalLines(baseLoopId, cap);
+        cleanupCapture(baseLoopId);
       });
     },
   );
