@@ -98,6 +98,8 @@ import {
 } from "./git-helpers.js";
 import {
   type PtySession,
+  getSession,
+  hasSession,
   removeSession,
   spawnPtySession,
 } from "../../main/pty-session-store.js";
@@ -679,6 +681,18 @@ export function spawnInteractiveSidecar(
   loopId: string,
   cwd: string,
 ): PtySession | null {
+  const sidecarId = `${loopId}-interactive`;
+
+  // If a sidecar session already exists (user reopened the terminal),
+  // return the existing one if still alive, or clean up and re-spawn.
+  if (hasSession(sidecarId)) {
+    const existing = getSession(sidecarId);
+    if (existing && !existing.exited) {
+      return existing;
+    }
+    removeSession(sidecarId);
+  }
+
   const sessionId = readSessionId(claudeWorkDir);
   if (!sessionId) return null;
 
@@ -689,7 +703,7 @@ export function spawnInteractiveSidecar(
   const args = ["--resume", sessionId];
 
   return spawnPtySession({
-    loopId: `${loopId}-interactive`,
+    loopId: sidecarId,
     file: claudeBinary,
     args,
     cwd,
