@@ -1,7 +1,8 @@
 import type http from "node:http";
 import { appendFileSync } from "node:fs";
 import { WebSocketServer, type WebSocket } from "ws";
-import { Terminal } from "@xterm/headless";
+import pkg from "@xterm/headless";
+const { Terminal } = pkg;
 import {
   getSession,
   writeToPty,
@@ -59,7 +60,8 @@ function appendInteractiveEvent(
 interface TerminalCapture {
   term: Terminal;
   lastLineCount: number;
-  lastLine: string;
+  /** Recently emitted lines (stripped of spinner prefixes) for dedup. */
+  recentLines: Set<string>;
   flushTimer: ReturnType<typeof setTimeout> | null;
   typingUntil: number;
   lastTokenCount: number;
@@ -76,7 +78,7 @@ function feedAndExtract(loopId: string, data: string): void {
   let cap = captures.get(loopId);
   if (!cap) {
     const term = new Terminal({ cols: 120, rows: 40, scrollback: 1000 });
-    cap = { term, lastLineCount: 0, lastLine: "", flushTimer: null, typingUntil: 0, lastTokenCount: 0 };
+    cap = { term, lastLineCount: 0, recentLines: new Set(), flushTimer: null, typingUntil: 0, lastTokenCount: 0 };
     captures.set(loopId, cap);
   }
 
@@ -110,11 +112,15 @@ function flushTerminalLines(loopId: string, cap: TerminalCapture): void {
   for (let i = startFrom; i < newLines.length; i++) {
     const text = newLines[i];
 
-    // Dedup spinner animation: skip if same as last line minus leading symbol
+    // Dedup: strip leading spinner symbols and skip if already emitted
     const stripped = text.replace(/^[·✢✳✶✻✽⠀-⣿]\s*/, "");
-    const lastStripped = cap.lastLine.replace(/^[·✢✳✶✻✽⠀-⣿]\s*/, "");
-    if (stripped === lastStripped && stripped.length > 0) continue;
-    cap.lastLine = text;
+    if (cap.recentLines.has(stripped)) continue;
+    cap.recentLines.add(stripped);
+    // Cap the set size to prevent unbounded growth
+    if (cap.recentLines.size > 500) {
+      const first = cap.recentLines.values().next().value;
+      if (first !== undefined) cap.recentLines.delete(first);
+    }
 
     // Extract token counts
     const tokenMatch = text.match(/(\d{3,})\s*tokens?/i);
