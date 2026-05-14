@@ -2489,13 +2489,17 @@ export class DesktopApplication {
 
       // Spawn an interactive sidecar that resumes the Claude session.
       // The original -p process keeps running — this is an independent
-      // process for the user to interact with.
-      const sidecarSession = spawnInteractiveSidecar(
+      // process for the user to interact with. Pass API params so the
+      // sidecar's JSONL streams back to the server with an "interactive:" prefix.
+      const loopToken = this.loopTokenStore.getLoopToken(trimmedLoopId);
+      const sidecarResult = spawnInteractiveSidecar(
         job.claudeWorkDir,
         trimmedLoopId,
         job.claudeWorkDir,
+        job.apiBaseUrl,
+        loopToken ?? undefined,
       );
-      if (!sidecarSession) {
+      if (!sidecarResult) {
         throw new Error("Claude session not ready yet — try again in a moment");
       }
 

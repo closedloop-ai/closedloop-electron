@@ -676,11 +676,18 @@ function readSessionId(claudeWorkDir: string): string | null {
  *
  * Returns the PTY session, or null if the session ID can't be found yet.
  */
+export interface SidecarResult {
+  session: PtySession;
+  stopTailer: { stop: () => void; flush: () => Promise<void> };
+}
+
 export function spawnInteractiveSidecar(
   claudeWorkDir: string,
   loopId: string,
   cwd: string,
-): PtySession | null {
+  apiBaseUrl?: string,
+  authToken?: string,
+): SidecarResult | null {
   const sidecarId = `${loopId}-interactive`;
 
   // If a sidecar session already exists (user reopened the terminal),
@@ -688,7 +695,11 @@ export function spawnInteractiveSidecar(
   if (hasSession(sidecarId)) {
     const existing = getSession(sidecarId);
     if (existing && !existing.exited) {
-      return existing;
+      // Already running — return with a no-op tailer (original tailer is active)
+      return {
+        session: existing,
+        stopTailer: { stop: () => {}, flush: () => Promise.resolve() },
+      };
     }
     removeSession(sidecarId);
   }
@@ -704,7 +715,7 @@ export function spawnInteractiveSidecar(
 
   const args = ["--resume", sessionId];
 
-  return spawnPtySession({
+  const session = spawnPtySession({
     loopId: sidecarId,
     file: claudeBinary,
     args,
@@ -713,6 +724,24 @@ export function spawnInteractiveSidecar(
     logFile,
     jsonlFile,
   });
+
+  // Start a tailer for the interactive JSONL so events stream back to
+  // the server with an "interactive:" prefix on the loopId.
+  let stopTailer: { stop: () => void; flush: () => Promise<void> } = {
+    stop: () => {},
+    flush: () => Promise.resolve(),
+  };
+  if (apiBaseUrl && authToken) {
+    stopTailer = startOutputTailer(
+      jsonlFile,
+      apiBaseUrl,
+      `interactive:${loopId}`,
+      authToken,
+      0,
+    );
+  }
+
+  return { session, stopTailer };
 }
 
 // ---------------------------------------------------------------------------
