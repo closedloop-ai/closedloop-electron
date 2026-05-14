@@ -23,6 +23,7 @@ import {
   type GatewayApprovalRequest,
   type GatewayApprovalResult,
 } from "./router.js";
+import { initTerminalAttachWebSocket } from "./operations/terminal-attach.js";
 import type { WorktreeProvider } from "./operations/symphony-loop.js";
 import type { RetrySpawnDeps } from "../main/spawn-retry.js";
 
@@ -64,6 +65,7 @@ export interface DesktopGatewayServerOptions {
   ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult;
   getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
   applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
+  getInteractiveTerminal?: () => boolean;
 }
 
 export class DesktopGatewayServer {
@@ -112,6 +114,7 @@ export class DesktopGatewayServer {
       handleSecurityUpgrade: this.options.handleSecurityUpgrade,
       getBinaryPaths: this.options.getBinaryPaths,
       applyBinaryPathPatch: this.options.applyBinaryPathPatch,
+      getInteractiveTerminal: this.options.getInteractiveTerminal,
     });
   }
 
@@ -147,6 +150,7 @@ export class DesktopGatewayServer {
       payload: DesktopSecurityUpgradePayload
     ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult,
     getOnboardingCompleted?: () => boolean,
+    getInteractiveTerminal?: () => boolean,
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -180,6 +184,7 @@ export class DesktopGatewayServer {
       getOnboardingCompleted,
       getBinaryPaths,
       applyBinaryPathPatch,
+      getInteractiveTerminal,
     });
   }
 
@@ -237,6 +242,9 @@ export class DesktopGatewayServer {
             this.options.onUnexpectedClose?.();
           }
         });
+        if (this.options.getInteractiveTerminal?.()) {
+          initTerminalAttachWebSocket(candidateServer, this.options.getGatewayAuthToken);
+        }
         await this.writeDiscoveryFile();
         return;
       } catch (error) {

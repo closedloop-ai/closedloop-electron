@@ -1,12 +1,12 @@
 import os from "node:os";
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { app, dialog, ipcMain, nativeImage, Notification, safeStorage, shell } from "electron";
+import { BrowserWindow, app, dialog, ipcMain, nativeImage, Notification, safeStorage, shell } from "electron";
 import {
   type AlwaysAllowRule,
   DEFAULT_DESKTOP_SETTINGS,
@@ -324,6 +324,7 @@ export class DesktopApplication {
         this.cloudStatus.state === "online" ? this.cloudStatus.targetId : null,
       (payload) => this.handleSecurityUpgradeCommand(payload),
       () => this.isDesktopSetupComplete(),
+      () => this.settingsStore.getInteractiveTerminal(),
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -536,6 +537,7 @@ export class DesktopApplication {
     );
     const deadJobs = this.reconcileJobStore();
     await this.bootRecovery.reattachLiveJobs();
+    this.bootRecovery.sweepOrphanedTokens();
 
     const bootSandbox = this.settingsStore.getSandboxBaseDirectory();
     if (bootSandbox?.trim()) {
@@ -2472,6 +2474,41 @@ export class DesktopApplication {
         }
       },
     );
+    ipcMain.handle("desktop:open-job-terminal", (_event, loopId: string) => {
+      if (!this.settingsStore.getInteractiveTerminal()) {
+        throw new Error("Interactive terminal is not enabled");
+      }
+      if (typeof loopId !== "string" || !loopId.trim()) {
+        throw new Error("loopId is required");
+      }
+      const job = this.jobStore.getByLoopId(loopId.trim());
+      const port = this.server?.getActivePort() ?? 19432;
+      const command = job?.command ?? "";
+      const authToken = this.isNoAuthMode() ? "" : this.gatewayAuthToken;
+
+      // Resolve terminal.html path (same two-probe pattern as window.ts)
+      let htmlPath: string;
+      if (app.isPackaged) {
+        htmlPath = path.join(__dirname, "..", "..", "src", "renderer", "terminal.html");
+      } else {
+        const cwd = process.cwd();
+        const inDesktopCwd = path.join(cwd, "src", "renderer", "terminal.html");
+        htmlPath = existsSync(inDesktopCwd)
+          ? inDesktopCwd
+          : path.join(cwd, "apps", "desktop", "src", "renderer", "terminal.html");
+      }
+
+      const win = new BrowserWindow({
+        width: 900,
+        height: 600,
+        title: `Terminal — ${command} ${loopId.slice(0, 8)}`,
+        webPreferences: { contextIsolation: true, sandbox: true },
+      });
+      void win.loadFile(htmlPath, {
+        query: { loopId: loopId.trim(), port: String(port), command, token: authToken },
+      });
+      return { opened: true };
+    });
     ipcMain.handle("desktop:get-activity-events", () =>
       this.activityLog.list(),
     );

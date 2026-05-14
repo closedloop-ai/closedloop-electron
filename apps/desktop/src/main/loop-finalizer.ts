@@ -611,7 +611,7 @@ export function persistFinalJobStatus(
   jobStore.upsert({
     ...current,
     status: resolvedStatus,
-    exitCode: job.exitCode ?? 0,
+    exitCode: job.exitCode ?? (isSuccessStatus ? 0 : 1),
     liveActivity: job.liveActivity ?? current.liveActivity,
     updatedAt: now,
     completedAt: current.completedAt ?? now,

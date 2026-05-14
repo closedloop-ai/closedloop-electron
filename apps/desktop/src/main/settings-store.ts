@@ -125,6 +125,12 @@ export class SettingsStore {
       this.store.set("activeConfigId", null as DesktopSettings["activeConfigId"]);
     }
 
+    // Migration: flip interactiveTerminal default from false → true.
+    // Existing installs have `false` persisted; delete it so the new default applies.
+    if ("interactiveTerminal" in raw && raw.interactiveTerminal === false) {
+      this.store.delete("interactiveTerminal" as keyof DesktopSettings);
+    }
+
     this.migrateSavedConfigManagedFields();
   }
 
@@ -158,6 +164,10 @@ export class SettingsStore {
 
   getCloudConnectionEnabled(): boolean {
     return this.store.get("cloudConnectionEnabled", DEFAULT_DESKTOP_SETTINGS.cloudConnectionEnabled);
+  }
+
+  getInteractiveTerminal(): boolean {
+    return this.store.get("interactiveTerminal", DEFAULT_DESKTOP_SETTINGS.interactiveTerminal);
   }
 
   getCommandSigningEnforcementEnabled(): boolean {
