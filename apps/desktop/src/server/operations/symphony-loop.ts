@@ -692,7 +692,7 @@ export function switchToInteractive(loopId: string, jobStore?: JobStore): PtySes
       arg !== "-p" &&
       !(arg === "-" && i > 0 && arr[i - 1] === "-p"),
   );
-  interactiveArgs.unshift("--resume");
+  interactiveArgs.unshift("--continue");
 
   const jsonlFile = path.join(config.claudeWorkDir, "claude-output.jsonl");
   const session = spawnPtySession({
@@ -750,8 +750,13 @@ export function switchToDetached(loopId: string, jobStore?: JobStore): void {
   killPty(loopId);
   removeSession(loopId);
 
-  // Build detached args: --resume + -p + original format args
-  const detachedArgs = ["--resume", ...config.baseClaudeArgs];
+  // Build detached args: --resume + -p + original format args.
+  // Filter out stdin marker "-" since --resume picks up from the
+  // existing conversation — no prompt file is needed.
+  const detachedArgs = [
+    "--continue",
+    ...config.baseClaudeArgs.filter((arg) => arg !== "-"),
+  ];
   const pipeline = buildClaudePipeline(
     detachedArgs,
     config.claudeWorkDir,
