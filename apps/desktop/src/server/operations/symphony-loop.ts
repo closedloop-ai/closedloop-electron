@@ -6602,13 +6602,20 @@ async function handleLoopRequest(
         collectedSpawnMeta.cwd = cwd;
         spawnStartedAt = Date.now();
         if (shouldUseInteractiveTerminal) {
+          // Spawn claude directly via PTY instead of wrapping in a bash
+          // pipeline. The PTY onData handler + extractJsonlFromLog already
+          // capture JSONL output, so the bash grep|tee pipeline is redundant.
+          // Spawning claude directly avoids posix_spawnp("bash") failures in
+          // packaged builds where /bin/bash may not be in the PTY's PATH.
+          const jsonlFile = path.join(claudeWorkDir, "claude-output.jsonl");
           ptySession = spawnPtySession({
             loopId: body.loopId,
-            file: pipeline.cmd,
-            args: pipeline.args,
+            file: claudeBinary,
+            args: claudeArgs,
             cwd,
             env: spawnEnv,
             logFile,
+            jsonlFile,
           });
           interactiveTerminalAvailable = true;
           return;
