@@ -721,7 +721,7 @@ function buildClaudePipeline(
     "grep --line-buffered '^{'",
     `tee -a ${shellEscape(jsonlFile)}`,
   ].join(" | ");
-  return { cmd: "bash", args: ["-c", `${pipeline}; exit \${PIPESTATUS[0]}`] };
+  return { cmd: "/bin/bash", args: ["-c", `${pipeline}; exit \${PIPESTATUS[0]}`] };
 }
 
 /** Find the local repo path for a given fullName (e.g. "org/repo"). */
