@@ -762,7 +762,8 @@ export function spawnInteractiveSidecar(
   });
 
   // Start a tailer for the interactive JSONL so events stream back to
-  // the server with an "interactive:" prefix on the loopId.
+  // the server under the same loopId. The interactive session's JSONL
+  // records carry a distinct session_id for delineation.
   let stopTailer: { stop: () => void; flush: () => Promise<void> } = {
     stop: () => {},
     flush: () => Promise.resolve(),
@@ -771,7 +772,7 @@ export function spawnInteractiveSidecar(
     stopTailer = startOutputTailer(
       jsonlFile,
       apiBaseUrl,
-      `interactive:${loopId}`,
+      loopId,
       authToken,
       0,
     );
