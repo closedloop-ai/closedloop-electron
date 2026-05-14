@@ -644,10 +644,30 @@ const openTerminalWindows = new Set<string>();
 
 export function markTerminalWindowOpen(loopId: string): void {
   openTerminalWindows.add(loopId);
+  // Pause the headless -p process so it doesn't race the sidecar
+  const pid = getActiveLoopPid(loopId);
+  if (pid) {
+    try {
+      process.kill(pid, "SIGSTOP");
+      loopLog(loopId, `Paused headless process (pid=${pid}) — terminal window opened`);
+    } catch {
+      // Process may have already exited
+    }
+  }
 }
 
 export function markTerminalWindowClosed(loopId: string): void {
   openTerminalWindows.delete(loopId);
+  // Resume the headless -p process
+  const pid = getActiveLoopPid(loopId);
+  if (pid) {
+    try {
+      process.kill(pid, "SIGCONT");
+      loopLog(loopId, `Resumed headless process (pid=${pid}) — terminal window closed`);
+    } catch {
+      // Process may have already exited
+    }
+  }
 }
 
 export function isTerminalWindowOpen(loopId: string): boolean {
