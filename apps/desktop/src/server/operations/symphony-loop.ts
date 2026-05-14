@@ -664,12 +664,15 @@ export function switchToInteractive(loopId: string): PtySession {
   if (!entry) {
     throw new Error(`No running loop for loopId=${loopId}`);
   }
-  if (!entry.spawnConfig) {
-    throw new Error(`No spawn config stored for loopId=${loopId}`);
-  }
   if (entry.ptySession) {
     // Already in interactive mode — return existing session
     return entry.ptySession;
+  }
+  if (!entry.spawnConfig) {
+    throw new Error(
+      `Cannot switch to interactive mode: no spawn config for loopId=${loopId}. ` +
+      `The job may have been started by an older version or recovered after a restart.`,
+    );
   }
   const config = entry.spawnConfig;
 
@@ -7009,6 +7012,18 @@ async function handleLoopRequest(
           telemetryEmitter: Observability.getTelemetryEmitter(),
         });
         spawnStartedAt = Date.now();
+        // Store spawn config for the run-loop path too (PLAN/EXECUTE).
+        // Mode-switching uses claude --resume directly, so it only works
+        // for direct-claude commands, but having the field prevents crashes
+        // if the UI ever shows the terminal button for these commands.
+        loopSpawnConfig = {
+          claudeBinary,
+          baseClaudeArgs: [],
+          cwd: worktreeDir!,
+          spawnEnv,
+          logFile,
+          claudeWorkDir,
+        };
         spawnDetachedProcess(scriptPath!, scriptArgs, worktreeDir!);
       }
     } catch (spawnErr) {
