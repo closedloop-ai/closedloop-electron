@@ -676,6 +676,16 @@ export function switchToInteractive(loopId: string, jobStore?: JobStore): PtySes
   }
   const config = entry.spawnConfig;
 
+  // Read session ID so we resume the exact right conversation
+  const sessionIdFile = path.join(config.claudeWorkDir, "session-id.txt");
+  const sessionId = readTextFile(sessionIdFile)?.trim();
+  if (!sessionId) {
+    throw new Error(
+      `Cannot switch to interactive mode: no session-id.txt in ${config.claudeWorkDir}. ` +
+      `The Claude process may not have started yet.`,
+    );
+  }
+
   // Suppress finalization in the original onceComplete closure
   entry.suppressCompletion?.();
 
@@ -686,13 +696,13 @@ export function switchToInteractive(loopId: string, jobStore?: JobStore): PtySes
     try { process.kill(entry.pid, "SIGTERM"); } catch { /* already dead */ }
   }
 
-  // Build interactive args: --resume (no -p), keep --output-format stream-json
+  // Build interactive args: --resume <sessionId> (no -p), keep --output-format stream-json
   const interactiveArgs = config.baseClaudeArgs.filter(
     (arg, i, arr) =>
       arg !== "-p" &&
       !(arg === "-" && i > 0 && arr[i - 1] === "-p"),
   );
-  interactiveArgs.unshift("--continue");
+  interactiveArgs.unshift("--resume", sessionId);
 
   const jsonlFile = path.join(config.claudeWorkDir, "claude-output.jsonl");
   const session = spawnPtySession({
@@ -750,11 +760,20 @@ export function switchToDetached(loopId: string, jobStore?: JobStore): void {
   killPty(loopId);
   removeSession(loopId);
 
-  // Build detached args: --resume + -p + original format args.
+  // Read session ID so we resume the exact right conversation
+  const sessionIdFile = path.join(config.claudeWorkDir, "session-id.txt");
+  const sessionId = readTextFile(sessionIdFile)?.trim();
+  if (!sessionId) {
+    // No session to resume — the job is effectively done
+    loopLog(loopId, `No session-id.txt found, skipping detached resume`);
+    return;
+  }
+
+  // Build detached args: --resume <sessionId> + -p + original format args.
   // Filter out stdin marker "-" since --resume picks up from the
   // existing conversation — no prompt file is needed.
   const detachedArgs = [
-    "--continue",
+    "--resume", sessionId,
     ...config.baseClaudeArgs.filter((arg) => arg !== "-"),
   ];
   const pipeline = buildClaudePipeline(
