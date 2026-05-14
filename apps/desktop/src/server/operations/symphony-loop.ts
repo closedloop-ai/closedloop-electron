@@ -6684,11 +6684,10 @@ async function handleLoopRequest(
     const logFile = path.join(claudeWorkDir, "symphony-loop.log");
     let child: ReturnType<typeof spawn> | undefined;
     let spawnStartedAt = 0;
+    let loopSpawnConfig: LoopSpawnConfig | undefined;
     let decisionTableVerificationStartOffset = 0;
     let loopPerfTelemetryStartOffset = 0;
     let loopPerfWatcherHandle: LoopPerfTelemetryWatcherHandle | undefined;
-    let interactiveTerminalAvailable = false;
-    let loopSpawnConfig: LoopSpawnConfig | undefined;
     const collectedSpawnMeta: {
       command: string;
       args: string[];
@@ -6832,10 +6831,7 @@ async function handleLoopRequest(
         collectedSpawnMeta.args = redactSpawnArgs(pipeline.args);
         collectedSpawnMeta.cwd = cwd;
         spawnStartedAt = Date.now();
-        if (shouldUseInteractiveTerminal) {
-          interactiveTerminalAvailable = true;
-          loopSpawnConfig = { claudeBinary, baseClaudeArgs: claudeArgs, cwd, spawnEnv, logFile, claudeWorkDir };
-        }
+        loopSpawnConfig = { claudeBinary, baseClaudeArgs: claudeArgs, cwd, spawnEnv, logFile, claudeWorkDir };
         spawnDetachedProcess(pipeline.cmd, pipeline.args, cwd);
       };
 
@@ -7090,6 +7086,7 @@ async function handleLoopRequest(
           telemetryEmitter: Observability.getTelemetryEmitter(),
         });
         spawnStartedAt = Date.now();
+        loopSpawnConfig = { claudeBinary, baseClaudeArgs: [], cwd: worktreeDir!, spawnEnv, logFile, claudeWorkDir };
         spawnDetachedProcess(scriptPath!, scriptArgs, worktreeDir!);
       }
     } catch (spawnErr) {
@@ -7347,7 +7344,7 @@ async function handleLoopRequest(
         updatedAt: now,
         startedAt: existing?.startedAt ?? now,
         apiBaseUrl,
-        interactiveTerminalAvailable,
+        interactiveTerminalAvailable: shouldUseInteractiveTerminal,
         lastObservedJsonlOffset:
           existing?.lastObservedJsonlOffset ?? jsonlPreSpawnOffset,
       });
