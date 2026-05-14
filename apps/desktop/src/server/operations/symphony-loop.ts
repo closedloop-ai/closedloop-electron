@@ -884,8 +884,12 @@ export async function materializeAgents(
   const agentsDir = path.join(worktreeDir, ".claude", "agents");
   await fs.mkdir(agentsDir, { recursive: true });
 
+  const resolvedAgentsDir = path.resolve(agentsDir);
   for (const agent of agents) {
-    const filePath = path.join(agentsDir, `${agent.slug}.md`);
+    const safeSlug = slugifyLoopId(agent.slug);
+    if (!safeSlug) continue;
+    const filePath = path.resolve(agentsDir, `${safeSlug}.md`);
+    if (!filePath.startsWith(resolvedAgentsDir + path.sep)) continue;
     let content = agent.prompt;
     if (!content.endsWith("\n")) {
       content += "\n";
@@ -6148,6 +6152,19 @@ async function handleLoopRequest(
             "reuse-stale",
         });
         if (!planAdditionalsOk) return;
+
+        for (const addEntry of additionalWorktreeDirs) {
+          if (bodyAgents && bodyAgents.length > 0) {
+            const n = await materializeAgents(addEntry.dir, bodyAgents);
+            loopLog(body.loopId, `Materialized ${n} agents to ${addEntry.dir}`);
+          }
+          if (bodyRepoConfigs && addEntry.fullName) {
+            const wrote = await materializeCriticGates(addEntry.dir, addEntry.fullName, bodyRepoConfigs);
+            if (wrote) {
+              loopLog(body.loopId, `Materialized critic-gates for ${addEntry.fullName}`);
+            }
+          }
+        }
       } else {
         // EXECUTE/REQUEST_CHANGES: reuse existing worktree.
         // Try artifact slug first, then parentLoopId fallback, then create new.
