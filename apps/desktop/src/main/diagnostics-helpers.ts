@@ -18,9 +18,16 @@ import {
   TELEMETRY_LOG_TAIL_MAX_BYTES,
 } from "./telemetry-protocol.js";
 
-/** Remove ANSI escape sequences from a string. */
+/** Remove ANSI escape sequences from a string (from ansi-regex@6). */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI escape detection requires matching control characters
-const ANSI_PATTERN = /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g;
+const ANSI_PATTERN = new RegExp(
+  // OSC sequences: ESC ] ... ST (BEL, ESC\, or 0x9c)
+  "(?:\\u001B\\][\\s\\S]*?(?:\\u0007|\\u001B\\u005C|\\u009C))" +
+  "|" +
+  // CSI and related sequences
+  "[\\u001B\\u009B][[\\]()#;?]*(?:\\d{1,4}(?:[;:]\\d{0,4})*)?[\\dA-PR-TZcf-nq-uy=><~]",
+  "g",
+);
 
 export function stripAnsi(text: string): string {
   return text.replace(ANSI_PATTERN, "");

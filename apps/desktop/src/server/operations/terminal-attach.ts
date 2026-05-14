@@ -71,13 +71,7 @@ function bufferAssistantOutput(loopId: string, data: string): void {
   outputLineBuffers.set(loopId, lines.pop() ?? "");
 
   for (const raw of lines) {
-    // Strip ANSI escape codes, then strip common TUI artifacts:
-    // braille spinners (⠐⠂⠒⠰⠤⠆), status symbols (✢✳✶✻✽), box drawing, etc.
-    const cleaned = stripAnsi(raw)
-      .replace(/[⠀-⣿✢✳✶✻✽╭╮╰╯│─┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬·;]/g, "")
-      .replace(/Claude Code/g, "")
-      .replace(/\s+/g, " ")
-      .trim();
+    const cleaned = stripAnsi(raw).replace(/\s+/g, " ").trim();
     if (cleaned.length >= 10) {
       appendInteractiveEvent(loopId, "assistant", cleaned);
     }
