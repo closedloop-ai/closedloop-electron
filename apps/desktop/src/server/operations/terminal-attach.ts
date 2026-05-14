@@ -101,9 +101,15 @@ function bufferAssistantOutput(loopId: string, data: string): void {
 
   for (const raw of lines) {
     const cleaned = stripAnsi(raw).replace(/\s+/g, " ").trim();
-    if (cleaned.length >= 10) {
-      appendInteractiveEvent(loopId, "assistant", cleaned);
-    }
+    if (cleaned.length < 20) continue;
+    // Skip TUI chrome: spinners, status lines, key hints, token counters
+    if (/^(esc|enter|ctrl)\w*to/i.test(cleaned)) continue;
+    if (/^\d+tokens?$/i.test(cleaned)) continue;
+    if (/^[·✢✳✶✻✽⠀-⣿\s]+$/.test(cleaned)) continue;
+    if (/^(Thinking|Actioning|Churning|Drizzling|Choreograph)/i.test(cleaned)) continue;
+    if (/tokens?\s*·\s*thinking/i.test(cleaned)) continue;
+    if (/esctointerrupt/i.test(cleaned)) continue;
+    appendInteractiveEvent(loopId, "assistant", cleaned);
   }
 }
 
