@@ -32,14 +32,52 @@ export function registerInteractiveJsonlPath(loopId: string, jsonlPath: string):
   interactiveJsonlPaths.set(loopId, jsonlPath);
 }
 
-function appendInteractiveEvent(loopId: string, event: Record<string, unknown>): void {
+/**
+ * Write an event to the interactive JSONL file in the format the
+ * output-tailer recognizes (type: "user"/"assistant" with content blocks).
+ */
+function appendInteractiveEvent(
+  loopId: string,
+  type: "user" | "assistant",
+  text: string,
+): void {
   const jsonlPath = interactiveJsonlPaths.get(loopId);
-  if (!jsonlPath) return;
+  if (!jsonlPath || !text.trim()) return;
   try {
-    appendFileSync(jsonlPath, JSON.stringify({ ...event, timestamp: new Date().toISOString() }) + "\n");
+    const record = {
+      type,
+      message: { content: [{ type: "text", text }] },
+    };
+    appendFileSync(jsonlPath, JSON.stringify(record) + "\n");
   } catch {
     // Best effort
   }
+}
+
+/** Buffer for accumulating PTY output chunks into logical lines. */
+const outputBuffers = new Map<string, string>();
+const OUTPUT_FLUSH_MS = 500;
+const outputFlushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * Accumulate PTY output and flush as a single event after a pause.
+ * Prevents flooding the JSONL with per-character events.
+ */
+function bufferAssistantOutput(loopId: string, data: string): void {
+  const existing = outputBuffers.get(loopId) ?? "";
+  outputBuffers.set(loopId, existing + data);
+
+  const existingTimer = outputFlushTimers.get(loopId);
+  if (existingTimer) clearTimeout(existingTimer);
+
+  outputFlushTimers.set(loopId, setTimeout(() => {
+    const buffered = outputBuffers.get(loopId);
+    if (buffered) {
+      appendInteractiveEvent(loopId, "assistant", buffered);
+      outputBuffers.delete(loopId);
+    }
+    outputFlushTimers.delete(loopId);
+  }, OUTPUT_FLUSH_MS));
 }
 
 export function initTerminalAttachWebSocket(
@@ -99,13 +137,13 @@ export function initTerminalAttachWebSocket(
         return;
       }
 
-      // Forward live PTY data to the WebSocket and log as interactive event
+      // Forward live PTY data to the WebSocket and buffer for JSONL logging
       const baseLoopId = loopId.replace(/-interactive$/, "");
       const onData = (data: string): void => {
         if (ws.readyState === ws.OPEN) {
           ws.send(JSON.stringify({ type: "data", data }));
         }
-        appendInteractiveEvent(baseLoopId, { type: "assistant_output", data });
+        bufferAssistantOutput(baseLoopId, data);
       };
       session.dataListeners.add(onData);
 
@@ -141,9 +179,8 @@ export function initTerminalAttachWebSocket(
           const msg = JSON.parse(String(raw)) as Record<string, unknown>;
           if (msg.type === "input" && typeof msg.data === "string") {
             writeToPty(loopId, msg.data);
-            // Extract base loopId (strip "-interactive" suffix) for event logging
             const baseLoopId = loopId.replace(/-interactive$/, "");
-            appendInteractiveEvent(baseLoopId, { type: "user_input", data: msg.data });
+            appendInteractiveEvent(baseLoopId, "user", msg.data);
           } else if (
             msg.type === "resize" &&
             typeof msg.cols === "number" &&

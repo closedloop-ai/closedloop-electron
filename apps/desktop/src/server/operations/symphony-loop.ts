@@ -646,28 +646,30 @@ const openTerminalWindows = new Set<string>();
 
 export function markTerminalWindowOpen(loopId: string): void {
   openTerminalWindows.add(loopId);
-  // Pause the headless -p process so it doesn't race the sidecar
+  // Pause the headless -p process group so child processes (tool calls,
+  // subagents) are also frozen. The detached spawn creates a new process
+  // group with the parent's PID as the PGID.
   const pid = getActiveLoopPid(loopId);
   if (pid) {
     try {
-      process.kill(pid, "SIGSTOP");
-      loopLog(loopId, `Paused headless process (pid=${pid}) — terminal window opened`);
+      process.kill(-pid, "SIGSTOP");
+      loopLog(loopId, `Paused headless process group (pid=${pid}) — terminal window opened`);
     } catch {
-      // Process may have already exited
+      try { process.kill(pid, "SIGSTOP"); } catch { /* already exited */ }
     }
   }
 }
 
 export function markTerminalWindowClosed(loopId: string): void {
   openTerminalWindows.delete(loopId);
-  // Resume the headless -p process
+  // Resume the headless -p process group
   const pid = getActiveLoopPid(loopId);
   if (pid) {
     try {
-      process.kill(pid, "SIGCONT");
-      loopLog(loopId, `Resumed headless process (pid=${pid}) — terminal window closed`);
+      process.kill(-pid, "SIGCONT");
+      loopLog(loopId, `Resumed headless process group (pid=${pid}) — terminal window closed`);
     } catch {
-      // Process may have already exited
+      try { process.kill(pid, "SIGCONT"); } catch { /* already exited */ }
     }
   }
 }
