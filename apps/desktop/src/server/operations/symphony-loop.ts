@@ -230,7 +230,11 @@ import {
   LoopCommand,
   validateCommandInputs,
 } from "@closedloop-ai/loops-api/commands";
-import type { ContextPackAttachment as SharedContextPackAttachment } from "@closedloop-ai/loops-api/context-pack";
+import type {
+  ContextPackAgent,
+  ContextPackAttachment as SharedContextPackAttachment,
+  ContextPackRepoConfig,
+} from "@closedloop-ai/loops-api/context-pack";
 import type { LoopRequestBody } from "@closedloop-ai/loops-api/desktop-request";
 import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
@@ -284,6 +288,7 @@ const REPO_REQUIREMENT_BY_COMMAND: Record<LoopCommand, RepoRequirement> = {
   [LoopCommand.EvaluateCode]: "REQUIRED",
   [LoopCommand.EvaluateFeature]: "OPTIONAL",
   [LoopCommand.Bootstrap]: "NOT_REQUIRED",
+  [LoopCommand.Manual]: "NOT_REQUIRED",
 };
 const LOCAL_CALLBACK_FAIL_FAST_COMMANDS = new Set<LoopCommand>([
   LoopCommand.Plan,
@@ -856,6 +861,78 @@ export function readBootstrapRepoOutputs(
   > | null;
 
   return { agents, criticGates, metadata };
+}
+
+// ---------------------------------------------------------------------------
+// ContextPack agent/config materialization
+// ---------------------------------------------------------------------------
+
+export async function materializeAgents(
+  worktreeDir: string,
+  agents: ContextPackAgent[],
+): Promise<number> {
+  if (agents.length === 0) return 0;
+
+  const agentsDir = path.join(worktreeDir, ".claude", "agents");
+  await fs.mkdir(agentsDir, { recursive: true });
+
+  const resolvedAgentsDir = path.resolve(agentsDir);
+  let written = 0;
+  for (const agent of agents) {
+    if (typeof agent.slug !== "string" || typeof agent.prompt !== "string") continue;
+    const safeSlug = slugifyLoopId(agent.slug);
+    if (!safeSlug) continue;
+    const filePath = path.resolve(agentsDir, `${safeSlug}.md`);
+    if (!filePath.startsWith(resolvedAgentsDir + path.sep)) continue;
+    let content = agent.prompt;
+    if (!content.endsWith("\n")) {
+      content += "\n";
+    }
+    await fs.writeFile(filePath, content, "utf-8");
+    written++;
+  }
+
+  return written;
+}
+
+export async function materializeCriticGates(
+  worktreeDir: string,
+  repoFullName: string,
+  repoConfigs: ContextPackRepoConfig[],
+): Promise<boolean> {
+  const config = repoConfigs.find((c) => c.repoFullName === repoFullName);
+  if (!config) return false;
+
+  const settingsDir = path.join(worktreeDir, ".closedloop-ai", "settings");
+  await fs.mkdir(settingsDir, { recursive: true });
+
+  const filePath = path.join(settingsDir, "critic-gates.json");
+  await fs.writeFile(
+    filePath,
+    JSON.stringify(config.criticGates, null, 2) + "\n",
+    "utf-8",
+  );
+
+  return true;
+}
+
+async function materializeContextPack(
+  worktreeDir: string,
+  repoFullName: string | undefined,
+  loopId: string,
+  agents: ContextPackAgent[] | undefined,
+  repoConfigs: ContextPackRepoConfig[] | undefined,
+): Promise<void> {
+  if (agents && agents.length > 0) {
+    const n = await materializeAgents(worktreeDir, agents);
+    loopLog(loopId, `Materialized ${n} agents to ${worktreeDir}`);
+  }
+  if (repoConfigs && repoFullName) {
+    const wrote = await materializeCriticGates(worktreeDir, repoFullName, repoConfigs);
+    if (wrote) {
+      loopLog(loopId, `Materialized critic-gates for ${repoFullName}`);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2141,7 +2218,7 @@ function buildCodeContextFile(
   body: SymphonyLoopRequestBody,
   expandedRepoPath: string | null,
 ): CodeContextFile {
-  const provided = body.codeEvaluationContext ?? {};
+  const provided = body.codeEvaluationContext ?? ({} as Partial<CodeContextFile>);
   const codeContext: CodeContextFile = { schemaVersion: 1 };
 
   if (provided.repo !== undefined) {
@@ -5514,6 +5591,9 @@ async function handleLoopRequest(
       ? rawBody.expectedMcpUrl
       : undefined;
 
+  const bodyAgents = body.agents;
+  const bodyRepoConfigs = body.repoConfigs;
+
   // Extract tracing headers forwarded by the cloud command executor.
   // Use typeof guards because IncomingMessage headers values are string | string[] | undefined.
   const commandId =
@@ -6079,6 +6159,18 @@ async function handleLoopRequest(
             "reuse-stale",
         });
         if (!planAdditionalsOk) return;
+
+        for (const addEntry of additionalWorktreeDirs) {
+          try {
+            await materializeContextPack(addEntry.dir, addEntry.fullName, body.loopId, bodyAgents, bodyRepoConfigs);
+          } catch (matErr) {
+            loopError(
+              body.loopId,
+              `context-pack materialization failed for PLAN additional worktree: ${addEntry.dir}`,
+              matErr,
+            );
+          }
+        }
       } else {
         // EXECUTE/REQUEST_CHANGES: reuse existing worktree.
         // Try artifact slug first, then parentLoopId fallback, then create new.
@@ -6164,6 +6256,7 @@ async function handleLoopRequest(
         // `provisionAdditionalRepoWorktrees`.
         for (const addEntry of additionalWorktreeDirs) {
           try {
+            await materializeContextPack(addEntry.dir, addEntry.fullName, body.loopId, bodyAgents, bodyRepoConfigs);
             await runBootstrapIfNeeded(addEntry.dir, body.loopId);
           } catch (bootstrapErr) {
             loopError(
@@ -6219,6 +6312,15 @@ async function handleLoopRequest(
           return;
         }
         throw e;
+      }
+      try {
+        await materializeContextPack(worktreeDir, body.repo?.fullName, body.loopId, bodyAgents, bodyRepoConfigs);
+      } catch (matErr) {
+        loopError(
+          body.loopId,
+          `context-pack materialization failed for primary worktree: ${worktreeDir}`,
+          matErr,
+        );
       }
       await runBootstrapIfNeeded(worktreeDir, body.loopId);
       claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
