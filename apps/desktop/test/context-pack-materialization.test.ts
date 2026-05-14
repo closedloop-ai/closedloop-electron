@@ -94,6 +94,36 @@ describe("materializeAgents", () => {
     assert.equal(readFileSync(path.join(agentsDir, "db-agent.md"), "utf-8"), "db prompt\n");
   });
 
+  test("sanitizes path-traversal slugs and blocks escapes", async () => {
+    const dir = makeTempDir();
+    const agents = [
+      { slug: "../../etc/evil", name: "Evil", prompt: "pwned\n" },
+      { slug: "../escape", name: "Escape", prompt: "escaped\n" },
+      { slug: "good-agent", name: "Good", prompt: "safe\n" },
+    ];
+
+    const count = await materializeAgents(dir, agents);
+
+    assert.equal(existsSync(path.join(dir, "..", "etc", "evil.md")), false);
+    assert.equal(existsSync(path.join(dir, "..", "escape.md")), false);
+    assert.equal(readFileSync(path.join(dir, ".claude", "agents", "good-agent.md"), "utf-8"), "safe\n");
+    assert.ok(count <= 3);
+  });
+
+  test("skips agents with missing or non-string prompt", async () => {
+    const dir = makeTempDir();
+    const agents = [
+      { slug: "no-prompt", name: "No Prompt", prompt: null as unknown as string },
+      { slug: "valid", name: "Valid", prompt: "content\n" },
+    ];
+
+    const count = await materializeAgents(dir, agents);
+
+    assert.equal(count, 1);
+    assert.equal(existsSync(path.join(dir, ".claude", "agents", "no-prompt.md")), false);
+    assert.equal(readFileSync(path.join(dir, ".claude", "agents", "valid.md"), "utf-8"), "content\n");
+  });
+
   test("overwrites conflicting repo agent files (DB wins)", async () => {
     const dir = makeTempDir();
     const agentsDir = path.join(dir, ".claude", "agents");
