@@ -639,6 +639,21 @@ export function unregisterLoop(loopId: string): void {
   runningLoops.delete(loopId);
 }
 
+/** Track which loops have an open interactive terminal window. */
+const openTerminalWindows = new Set<string>();
+
+export function markTerminalWindowOpen(loopId: string): void {
+  openTerminalWindows.add(loopId);
+}
+
+export function markTerminalWindowClosed(loopId: string): void {
+  openTerminalWindows.delete(loopId);
+}
+
+export function isTerminalWindowOpen(loopId: string): boolean {
+  return openTerminalWindows.has(loopId);
+}
+
 // ---------------------------------------------------------------------------
 // Interactive terminal sidecar
 // ---------------------------------------------------------------------------
@@ -7012,6 +7027,25 @@ async function handleLoopRequest(
       signal?: string,
     ): Promise<void> => {
       if (completionHandled) return;
+
+      // If the interactive terminal window is open, defer finalization —
+      // the user is actively interacting and may be adding work (judges,
+      // guidance) that should be included in the final results.
+      // If the window is closed, finalize immediately regardless of
+      // whether the sidecar process is still running.
+      if (isTerminalWindowOpen(body.loopId)) {
+        const sidecarId = `${body.loopId}-interactive`;
+        const sidecar = getSession(sidecarId);
+        if (sidecar && !sidecar.exited) {
+          loopLog(body.loopId, `Deferring finalization — terminal window is open`);
+          sidecar.exitListeners.add(() => {
+            loopLog(body.loopId, `Interactive sidecar exited, resuming finalization`);
+            void onceComplete(code, signal);
+          });
+          return;
+        }
+      }
+
       completionHandled = true;
       loopLog(body.loopId, `onceComplete fired, code=${code}`);
       // Persist exitCode synchronously (before any await) so the IPC

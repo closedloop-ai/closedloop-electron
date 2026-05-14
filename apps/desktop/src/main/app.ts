@@ -69,7 +69,7 @@ import {
   computeSymphonyDir,
   SymphonyDirNotConfiguredError,
 } from "../server/operations/symphony-utils.js";
-import { getResolvedGitPath, resetResolvedClaudePath, spawnInteractiveSidecar } from "../server/operations/symphony-loop.js";
+import { getResolvedGitPath, resetResolvedClaudePath, spawnInteractiveSidecar, markTerminalWindowOpen, markTerminalWindowClosed } from "../server/operations/symphony-loop.js";
 import { resetMcpDetectionCache } from "../server/operations/mcp-detection.js";
 import { resolveBinaryFromLoginShell } from "../server/shell-path.js";
 import { getCodePluginVersion } from "../server/operations/plugin-cache.js";
@@ -2531,6 +2531,12 @@ export class DesktopApplication {
       void win.loadFile(htmlPath, {
         query: { loopId: sidecarLoopId, port: String(port), command, token: authToken },
       });
+
+      markTerminalWindowOpen(trimmedLoopId);
+      win.on("closed", () => {
+        markTerminalWindowClosed(trimmedLoopId);
+      });
+
       return { opened: true };
     });
     ipcMain.handle("desktop:get-activity-events", () =>
