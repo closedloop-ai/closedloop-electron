@@ -6602,18 +6602,28 @@ async function handleLoopRequest(
         collectedSpawnMeta.cwd = cwd;
         spawnStartedAt = Date.now();
         if (shouldUseInteractiveTerminal) {
-          // Spawn claude via PTY with -p so it runs to completion
-          // unattended. The PTY provides a terminal the user can attach
-          // to for live observation and stdin forwarding. Closing the
-          // terminal window just detaches the view — the process keeps
-          // running and finalizes normally via onceComplete.
+          // Spawn claude directly via PTY with -p so it runs to completion
+          // unattended. The PTY provides a terminal the user can attach to
+          // for live observation and stdin forwarding.
+          //
+          // The bash pipeline uses stdin redirect (< promptFile) to feed the
+          // prompt, but PTY spawn has no stdin redirect. Replace "-p -" with
+          // "-p <prompt content>" so the prompt is passed as a positional arg.
+          const ptyArgs = claudeArgs.filter((arg) => arg !== "-");
+          if (promptFile) {
+            try {
+              ptyArgs.push(readFileSync(promptFile, "utf-8"));
+            } catch {
+              // Prompt file missing — Claude will run without initial prompt
+            }
+          }
           const jsonlFile = path.join(claudeWorkDir, "claude-output.jsonl");
           collectedSpawnMeta.command = claudeBinary;
-          collectedSpawnMeta.args = redactSpawnArgs(claudeArgs);
+          collectedSpawnMeta.args = redactSpawnArgs(ptyArgs);
           ptySession = spawnPtySession({
             loopId: body.loopId,
             file: claudeBinary,
-            args: claudeArgs,
+            args: ptyArgs,
             cwd,
             env: spawnEnv,
             logFile,
