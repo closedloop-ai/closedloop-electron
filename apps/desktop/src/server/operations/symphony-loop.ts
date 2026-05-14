@@ -620,11 +620,26 @@ function isExecutionResult(value: unknown): value is ExecutionResult {
   return true;
 }
 
+/** Minimal config needed to spawn a resume process. */
+interface LoopSpawnConfig {
+  claudeBinary: string;
+  baseClaudeArgs: string[];
+  cwd: string;
+  spawnEnv: Record<string, string>;
+  logFile: string;
+  claudeWorkDir: string;
+}
+
 /** Track running loop processes for cancellation and to prevent GC of ChildProcess. */
 interface RunningLoop {
   pid: number;
   child?: ReturnType<typeof spawn>;
   stage: "running" | "post-processing";
+  spawnConfig?: LoopSpawnConfig;
+  /** When true, a replacement process is being spawned — skip finalization for the current exit. */
+  replacementPending?: boolean;
+  /** Reference to the finalization handler from handleLoopRequest. */
+  onceComplete?: (code: number, signal?: string) => Promise<void>;
 }
 const runningLoops = new Map<string, RunningLoop>();
 
@@ -660,17 +675,115 @@ export function markTerminalWindowOpen(loopId: string): void {
   }
 }
 
-export function markTerminalWindowClosed(loopId: string): void {
+export function markTerminalWindowClosed(loopId: string, jobStore?: JobStore): void {
   openTerminalWindows.delete(loopId);
-  // Resume the headless -p process group
-  const pid = getActiveLoopPid(loopId);
-  if (pid) {
-    try {
-      process.kill(-pid, "SIGCONT");
-      loopLog(loopId, `Resumed headless process group (pid=${pid}) — terminal window closed`);
-    } catch {
-      try { process.kill(pid, "SIGCONT"); } catch { /* already exited */ }
+  const entry = runningLoops.get(loopId);
+  if (!entry) return;
+
+  // Read the session ID — this is the shared session that the sidecar
+  // operated on. A --resume with this ID picks up from the sidecar's
+  // conversation endpoint (the "merge" from the feature branch).
+  const config = entry.spawnConfig;
+  const claudeWorkDir = config?.claudeWorkDir;
+  if (!config || !claudeWorkDir) {
+    // No spawn config — just SIGCONT the original process
+    const pid = getActiveLoopPid(loopId);
+    if (pid) {
+      try { process.kill(-pid, "SIGCONT"); } catch {
+        try { process.kill(pid, "SIGCONT"); } catch { /* already exited */ }
+      }
     }
+    loopLog(loopId, `No spawn config — resumed original process`);
+    return;
+  }
+
+  const sessionId = readSessionId(claudeWorkDir);
+  if (!sessionId) {
+    // No session ID yet — just SIGCONT the original
+    const pid = getActiveLoopPid(loopId);
+    if (pid) {
+      try { process.kill(-pid, "SIGCONT"); } catch {
+        try { process.kill(pid, "SIGCONT"); } catch { /* already exited */ }
+      }
+    }
+    loopLog(loopId, `No session ID — resumed original process`);
+    return;
+  }
+
+  // Mark replacement pending so onceComplete skips the killed process's exit
+  entry.replacementPending = true;
+
+  // Kill the original process group (don't SIGCONT — it's stale)
+  const oldPid = entry.pid;
+  try { process.kill(-oldPid, "SIGTERM"); } catch {
+    try { process.kill(oldPid, "SIGTERM"); } catch { /* already exited */ }
+  }
+  loopLog(loopId, `Killed stale headless process (pid=${oldPid}) — merging from interactive session`);
+
+  // Spawn --resume <sessionId> -p to continue from the sidecar's conversation
+  const resumeArgs = [
+    "--resume", sessionId,
+    ...config.baseClaudeArgs.filter((arg) => arg !== "-"),
+  ];
+  const pipeline = buildClaudePipeline(
+    resumeArgs,
+    config.claudeWorkDir,
+    config.claudeBinary,
+  );
+
+  let logFd: number;
+  try {
+    logFd = openSync(config.logFile, "a");
+  } catch {
+    loopLog(loopId, `Failed to open log file for resume spawn`);
+    return;
+  }
+  try {
+    const child = spawn(pipeline.cmd, pipeline.args, {
+      cwd: config.cwd,
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      env: config.spawnEnv,
+    });
+    child.unref();
+
+    const newPid = child.pid ?? 0;
+    loopLog(loopId, `Spawned resume process (pid=${newPid}) with session ${sessionId}`);
+
+    // Update running loop entry — clear replacementPending so the new
+    // process's exit will trigger onceComplete
+    runningLoops.set(loopId, {
+      pid: newPid,
+      child,
+      stage: "running",
+      spawnConfig: config,
+    });
+
+    // Update job store PID
+    if (jobStore) {
+      const job = jobStore.getByLoopId(loopId);
+      if (job) {
+        jobStore.upsert({ ...job, pid: newPid, updatedAt: new Date().toISOString() });
+      }
+    }
+
+    // The new child's exit will trigger onceComplete via the child.on("exit")
+    // handler that handleLoopRequest registers... but wait, that handler is
+    // on the OLD child object. We need to wire the NEW child's exit.
+    // Since onceComplete checks completionHandled (still false because we
+    // skipped it via replacementPending), we fire it directly.
+    // Wire the replacement's exit into the original onceComplete.
+    // This is the "merge" — the resume process's exit triggers the
+    // same finalization pipeline as the original would have.
+    const savedOnceComplete = entry.onceComplete;
+    child.on("exit", (code, signal) => {
+      loopLog(loopId, `Resume process exit, code=${code}, signal=${signal ?? "none"}`);
+      if (savedOnceComplete) {
+        void savedOnceComplete(code ?? 0, signal ?? undefined);
+      }
+    });
+  } finally {
+    closeSync(logFd);
   }
 }
 
@@ -6606,6 +6719,7 @@ async function handleLoopRequest(
     let loopPerfTelemetryStartOffset = 0;
     let loopPerfWatcherHandle: LoopPerfTelemetryWatcherHandle | undefined;
     let interactiveTerminalAvailable = false;
+    let loopSpawnConfig: LoopSpawnConfig | undefined;
     const collectedSpawnMeta: {
       command: string;
       args: string[];
@@ -6752,6 +6866,14 @@ async function handleLoopRequest(
         spawnStartedAt = Date.now();
         if (shouldUseInteractiveTerminal) {
           interactiveTerminalAvailable = true;
+          loopSpawnConfig = {
+            claudeBinary,
+            baseClaudeArgs: claudeArgs,
+            cwd,
+            spawnEnv,
+            logFile,
+            claudeWorkDir,
+          };
         }
         spawnDetachedProcess(pipeline.cmd, pipeline.args, cwd);
       };
@@ -7057,6 +7179,15 @@ async function handleLoopRequest(
     ): Promise<void> => {
       if (completionHandled) return;
 
+      // If a replacement process is being spawned (terminal window closed,
+      // merging from interactive session), skip this exit — the replacement
+      // will call onceComplete when it finishes.
+      const currentEntry = runningLoops.get(body.loopId);
+      if (currentEntry?.replacementPending) {
+        loopLog(body.loopId, `Replacement pending — skipping finalization for killed process`);
+        return;
+      }
+
       // If the interactive terminal window is open, defer finalization —
       // the user is actively interacting and may be adding work (judges,
       // guidance) that should be included in the final results.
@@ -7184,7 +7315,7 @@ async function handleLoopRequest(
         json(context, 500, { error: "Failed to spawn process" });
         return;
       }
-      runningLoops.set(body.loopId, { pid, child, stage: "running" });
+      runningLoops.set(body.loopId, { pid, child, stage: "running", spawnConfig: loopSpawnConfig, onceComplete });
     }
 
     if (!pid) {

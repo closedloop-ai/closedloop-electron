@@ -2534,7 +2534,7 @@ export class DesktopApplication {
 
       markTerminalWindowOpen(trimmedLoopId);
       win.on("closed", () => {
-        markTerminalWindowClosed(trimmedLoopId);
+        markTerminalWindowClosed(trimmedLoopId, this.jobStore);
       });
 
       return { opened: true };
