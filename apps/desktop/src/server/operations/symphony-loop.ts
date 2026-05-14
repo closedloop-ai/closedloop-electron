@@ -633,8 +633,10 @@ interface RunningLoop {
   ptySession?: PtySession;
   stage: "running" | "post-processing";
   spawnConfig?: LoopSpawnConfig;
-  /** Call to suppress finalization when killing for a mode switch. */
-  suppressCompletion?: () => void;
+  /** Increment mode-switch generation to suppress the current exit handler. */
+  bumpGeneration?: () => number;
+  /** Wire a new process exit into the original onceComplete handler. */
+  onceComplete?: (code: number, signal?: string, generation?: number) => Promise<void>;
 }
 const runningLoops = new Map<string, RunningLoop>();
 
@@ -685,8 +687,9 @@ export function switchToInteractive(loopId: string, jobStore?: JobStore): PtySes
     );
   }
 
-  // Suppress finalization in the original onceComplete closure
-  entry.suppressCompletion?.();
+  // Bump generation to suppress the killed process's exit handler
+  const newGen = entry.bumpGeneration?.() ?? 0;
+  const { onceComplete: completeHandler } = entry;
 
   // Kill the detached process
   try {
@@ -714,12 +717,14 @@ export function switchToInteractive(loopId: string, jobStore?: JobStore): PtySes
     jsonlFile,
   });
 
-  // Update the running loop entry
+  // Update the running loop entry — carry forward bumpGeneration and onceComplete
   runningLoops.set(loopId, {
     pid: session.pid,
     ptySession: session,
     stage: "running",
     spawnConfig: config,
+    bumpGeneration: entry.bumpGeneration,
+    onceComplete: completeHandler,
   });
 
   // Update job store PID so enrichJobSnapshot sees the new process as alive
@@ -730,9 +735,13 @@ export function switchToInteractive(loopId: string, jobStore?: JobStore): PtySes
     }
   }
 
-  // Wire exit listener for finalization (this is a real exit, not a mode switch)
+  // Wire exit into the original onceComplete — this fires finalization
+  // unless another mode switch bumps the generation first
   session.exitListeners.add(({ exitCode }) => {
     loopLog(loopId, `Interactive process exit, code=${exitCode}`);
+    if (completeHandler) {
+      void completeHandler(exitCode, undefined, newGen);
+    }
   });
 
   return session;
@@ -752,8 +761,9 @@ export function switchToDetached(loopId: string, jobStore?: JobStore): void {
   }
   const config = entry.spawnConfig;
 
-  // Suppress finalization in the PTY's exit listener
-  entry.suppressCompletion?.();
+  // Bump generation to suppress the killed PTY's exit handler
+  const newGen = entry.bumpGeneration?.() ?? 0;
+  const { onceComplete: completeHandler } = entry;
 
   // Kill the PTY
   killPty(loopId);
@@ -801,6 +811,8 @@ export function switchToDetached(loopId: string, jobStore?: JobStore): void {
       child,
       stage: "running",
       spawnConfig: config,
+      bumpGeneration: entry.bumpGeneration,
+      onceComplete: completeHandler,
     });
 
     // Update job store PID so enrichJobSnapshot sees the new process as alive
@@ -811,8 +823,13 @@ export function switchToDetached(loopId: string, jobStore?: JobStore): void {
       }
     }
 
-    child.on("exit", (code) => {
+    // Wire exit into the original onceComplete — this fires finalization
+    // unless another mode switch bumps the generation first
+    child.on("exit", (code, signal) => {
       loopLog(loopId, `Detached resume process exit, code=${code}`);
+      if (completeHandler) {
+        void completeHandler(code ?? 1, signal ?? undefined, newGen);
+      }
     });
   } finally {
     closeSync(logFd);
@@ -7126,11 +7143,12 @@ async function handleLoopRequest(
       : 0;
 
     // Guard against double-firing: both 'error' and 'exit' can emit.
-    // modeSwitchSuppressed is set by switchToInteractive/switchToDetached
-    // via the closure so onceComplete can check it even after the
-    // runningLoops entry has been replaced with the new process.
+    // modeSwitchGeneration tracks mode-switch kills. Each kill increments
+    // the generation; exit handlers capture the generation at registration
+    // time and only fire onceComplete if it still matches (meaning no
+    // mode switch happened since they were registered).
     let completionHandled = false;
-    let modeSwitchSuppressed = false;
+    let modeSwitchGeneration = 0;
     let stopTailer: { stop: () => void; flush: () => Promise<void> } = {
       stop: () => {},
       flush: () => Promise.resolve(),
@@ -7139,14 +7157,13 @@ async function handleLoopRequest(
     const onceComplete = async (
       code: number,
       signal?: string,
+      expectedGeneration?: number,
     ): Promise<void> => {
       if (completionHandled) return;
-      // If the process was killed for a mode switch (interactive ↔ detached),
-      // suppress finalization — a replacement process is about to start.
-      // Check the closure variable (not the map entry, which may already be
-      // replaced by the new process).
-      if (modeSwitchSuppressed) {
-        loopLog(body.loopId, `Mode-switch kill detected, suppressing finalization`);
+      // If a mode switch happened after this exit handler was registered,
+      // the generation won't match — suppress finalization.
+      if (expectedGeneration !== undefined && expectedGeneration !== modeSwitchGeneration) {
+        loopLog(body.loopId, `Mode-switch kill detected (gen=${expectedGeneration} vs current=${modeSwitchGeneration}), suppressing finalization`);
         return;
       }
       completionHandled = true;
@@ -7223,31 +7240,32 @@ async function handleLoopRequest(
     };
 
     let pid: number | null = null;
+    const initialGeneration = modeSwitchGeneration;
     if (ptySession) {
       ptySession.exitListeners.add(({ exitCode }) => {
         loopLog(body.loopId, `Process exit event, code=${exitCode}`);
-        void onceComplete(exitCode);
+        void onceComplete(exitCode, undefined, initialGeneration);
       });
       pid = ptySession.pid;
-      runningLoops.set(body.loopId, { pid, ptySession, stage: "running", spawnConfig: loopSpawnConfig, suppressCompletion: () => { modeSwitchSuppressed = true; } });
+      runningLoops.set(body.loopId, { pid, ptySession, stage: "running", spawnConfig: loopSpawnConfig, bumpGeneration: () => ++modeSwitchGeneration, onceComplete });
     } else if (child) {
       child.on("error", (err) => {
         loopError(body.loopId, "Spawn error:", err.message);
-        void onceComplete(1);
+        void onceComplete(1, undefined, initialGeneration);
       });
       child.on("exit", (code, signal) => {
         loopLog(
           body.loopId,
           `Process exit event, code=${code}, signal=${signal ?? "none"}`,
         );
-        void onceComplete(code ?? 1, signal ?? undefined);
+        void onceComplete(code ?? 1, signal ?? undefined, initialGeneration);
       });
       pid = child.pid ?? null;
       if (!pid) {
         json(context, 500, { error: "Failed to spawn process" });
         return;
       }
-      runningLoops.set(body.loopId, { pid, child, stage: "running", spawnConfig: loopSpawnConfig, suppressCompletion: () => { modeSwitchSuppressed = true; } });
+      runningLoops.set(body.loopId, { pid, child, stage: "running", spawnConfig: loopSpawnConfig, bumpGeneration: () => ++modeSwitchGeneration, onceComplete });
     }
 
     if (!pid) {
