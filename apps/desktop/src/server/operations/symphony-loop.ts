@@ -697,8 +697,10 @@ export function spawnInteractiveSidecar(
   if (!sessionId) return null;
 
   const claudeBinary = getResolvedClaudePath();
-  const logFile = path.join(claudeWorkDir, "symphony-loop.log");
-  const jsonlFile = path.join(claudeWorkDir, "claude-output.jsonl");
+  // Separate log and JSONL so the sidecar's output doesn't pollute
+  // the main loop's metrics (token usage, turn counts, result events).
+  const logFile = path.join(claudeWorkDir, "symphony-loop-interactive.log");
+  const jsonlFile = path.join(claudeWorkDir, "claude-output-interactive.jsonl");
 
   const args = ["--resume", sessionId];
 
