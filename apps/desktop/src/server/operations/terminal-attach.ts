@@ -58,7 +58,7 @@ function appendInteractiveEvent(
 // ---------------------------------------------------------------------------
 
 interface TerminalCapture {
-  term: Terminal;
+  term: InstanceType<typeof Terminal>;
   lastLineCount: number;
   /** Recently emitted lines (stripped of spinner prefixes) for dedup. */
   recentLines: Set<string>;
