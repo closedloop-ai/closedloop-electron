@@ -676,12 +676,11 @@ export function switchToInteractive(loopId: string, jobStore?: JobStore): PtySes
   }
   const config = entry.spawnConfig;
 
-  // Read session ID so we resume the exact right conversation
-  const sessionIdFile = path.join(config.claudeWorkDir, "session-id.txt");
-  const sessionId = readTextFile(sessionIdFile)?.trim();
+  // Read session ID from session-id.txt or first line of claude-output.jsonl
+  const sessionId = readSessionId(config.claudeWorkDir);
   if (!sessionId) {
     throw new Error(
-      `Cannot switch to interactive mode: no session-id.txt in ${config.claudeWorkDir}. ` +
+      `Cannot switch to interactive mode: no session ID found in ${config.claudeWorkDir}. ` +
       `The Claude process may not have started yet.`,
     );
   }
@@ -760,12 +759,10 @@ export function switchToDetached(loopId: string, jobStore?: JobStore): void {
   killPty(loopId);
   removeSession(loopId);
 
-  // Read session ID so we resume the exact right conversation
-  const sessionIdFile = path.join(config.claudeWorkDir, "session-id.txt");
-  const sessionId = readTextFile(sessionIdFile)?.trim();
+  // Read session ID from session-id.txt or first line of claude-output.jsonl
+  const sessionId = readSessionId(config.claudeWorkDir);
   if (!sessionId) {
-    // No session to resume — the job is effectively done
-    loopLog(loopId, `No session-id.txt found, skipping detached resume`);
+    loopLog(loopId, `No session ID found, skipping detached resume`);
     return;
   }
 
@@ -820,6 +817,33 @@ export function switchToDetached(loopId: string, jobStore?: JobStore): void {
   } finally {
     closeSync(logFd);
   }
+}
+
+/**
+ * Read the Claude session ID from the work directory.
+ * Checks session-id.txt first, then falls back to parsing the first line
+ * of claude-output.jsonl for the session_id field.
+ */
+function readSessionId(claudeWorkDir: string): string | null {
+  // Primary: session-id.txt (written by plan/execute run-loop path)
+  const txtFile = path.join(claudeWorkDir, "session-id.txt");
+  const fromTxt = readTextFile(txtFile)?.trim();
+  if (fromTxt) return fromTxt;
+
+  // Fallback: first JSONL line contains session_id in stream-json output
+  const jsonlFile = path.join(claudeWorkDir, "claude-output.jsonl");
+  try {
+    const content = readFileSync(jsonlFile, "utf-8");
+    const firstLine = content.split("\n").find((l) => l.trim().startsWith("{"));
+    if (firstLine) {
+      const parsed = JSON.parse(firstLine);
+      if (typeof parsed.session_id === "string") return parsed.session_id;
+      if (typeof parsed.sessionId === "string") return parsed.sessionId;
+    }
+  } catch {
+    // File doesn't exist or isn't valid JSON
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
