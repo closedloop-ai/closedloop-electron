@@ -2365,15 +2365,14 @@ export function readBootstrapOutputs(claudeWorkDir: string): LoopOutputArtifacts
     const error = success ? undefined : marker.replace(/^fail:/, "");
 
     const outputDir = path.join(claudeWorkDir, `repo-${runnableIndex}-agents`);
-    const outputs = success
-      ? readBootstrapRepoOutputs(entry.localPath, outputDir)
-      : { agents: [], criticGates: null, metadata: null };
+    const outputs = readBootstrapRepoOutputs(entry.localPath, outputDir);
+    const hasAgents = outputs.agents.length > 0;
 
     repos.push({
       fullName: entry.fullName,
       branch: entry.branch ?? "main",
-      success,
-      error,
+      success: success || hasAgents,
+      error: hasAgents && !success ? `partial:${error}` : error,
       ...outputs,
       duration: 0,
     });
