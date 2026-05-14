@@ -96,11 +96,6 @@ import {
   findWorktreeForBranch as findWorktreeForBranchImpl,
   resolveRepoFullName,
 } from "./git-helpers.js";
-import {
-  type PtySession,
-  removeSession,
-  spawnPtySession,
-} from "../../main/pty-session-store.js";
 import { startOutputTailer } from "./output-tailer.js";
 import {
   findPluginScript,
@@ -296,16 +291,6 @@ const LOCAL_CALLBACK_FAIL_FAST_COMMANDS = new Set<LoopCommand>([
   LoopCommand.RequestChanges,
   LoopCommand.RequestPrdChanges,
   LoopCommand.GeneratePrd,
-]);
-const INTERACTIVE_TERMINAL_COMMANDS = new Set<LoopCommand>([
-  LoopCommand.Decompose,
-  LoopCommand.RequestChanges,
-  LoopCommand.RequestPrdChanges,
-  LoopCommand.EvaluatePrd,
-  LoopCommand.GeneratePrd,
-  LoopCommand.EvaluatePlan,
-  LoopCommand.EvaluateCode,
-  LoopCommand.EvaluateFeature,
 ]);
 interface LoopArtifact {
   id: string;
@@ -620,7 +605,6 @@ function isExecutionResult(value: unknown): value is ExecutionResult {
 interface RunningLoop {
   pid: number;
   child?: ReturnType<typeof spawn>;
-  ptySession?: PtySession;
   stage: "running" | "post-processing";
 }
 const runningLoops = new Map<string, RunningLoop>();
@@ -671,24 +655,19 @@ function findStreamFormatter(): string | null {
   }
   const pluginDir = path.join(getPluginCacheRoot(), "code");
   const versions = findPluginVersions(pluginDir);
-  for (const version of versions) {
-    const formatterPath = path.join(
-      pluginDir,
-      version,
-      "tools",
-      "python",
-      "stream_formatter.py",
-    );
-    if (existsSync(formatterPath)) {
-      return formatterPath;
+  for (const v of versions) {
+    const p = path.join(pluginDir, v, "tools", "python", "stream_formatter.py");
+    if (existsSync(p)) {
+      return p;
     }
   }
   return null;
 }
 
 /**
- * Build a bash pipeline that keeps prompts off argv, tees Claude JSONL output,
- * and preserves readable terminal/log output when the formatter is available.
+ * Build a bash pipeline command that runs claude with stream-json output,
+ * filters JSON lines, tees to a jsonl log, and formats for human reading.
+ * Falls back to raw claude if formatter is not available.
  */
 function buildClaudePipeline(
   claudeArgs: string[],
@@ -700,6 +679,7 @@ function buildClaudePipeline(
   const stderrFile = path.join(claudeWorkDir, "claude-stderr.log");
   const jsonlFile = path.join(claudeWorkDir, "claude-output.jsonl");
 
+  // Build the claude command with properly escaped args
   const escapedArgs = claudeArgs.map(shellEscape).join(" ");
   const escapedBinary = shellEscape(claudeBinary);
   const claudeCmd = stdinFile
@@ -707,6 +687,8 @@ function buildClaudePipeline(
     : `${escapedBinary} ${escapedArgs}`;
 
   if (formatter) {
+    // Full pipeline matching run-loop.sh:
+    // claude ... 2>stderr | grep JSON | tee jsonl | formatter
     const pipeline = [
       `${claudeCmd} 2>${shellEscape(stderrFile)}`,
       "grep --line-buffered '^{'",
@@ -716,6 +698,7 @@ function buildClaudePipeline(
     return { cmd: "bash", args: ["-c", `${pipeline}; exit \${PIPESTATUS[0]}`] };
   }
 
+  // No formatter — wrap in bash pipeline so grep|tee still writes claude-output.jsonl
   const pipeline = [
     `${claudeCmd} 2>${shellEscape(stderrFile)}`,
     "grep --line-buffered '^{'",
@@ -1422,17 +1405,13 @@ async function postLoopEventBounded(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const result = await postLoopEvent(
+    return await postLoopEvent(
       apiBaseUrl,
       loopId,
       token,
       eventBody,
       controller.signal,
     );
-    if (controller.signal.aborted) {
-      return { success: false, error: "timeout" };
-    }
-    return result;
   } catch {
     return { success: false, error: "timeout" };
   } finally {
@@ -1645,13 +1624,6 @@ async function downloadAttachmentsToDisk(
   for (const attachment of attachments) {
     try {
       const expiresAt = new Date(attachment.signedUrlExpiresAt);
-      if (Number.isNaN(expiresAt.getTime())) {
-        gatewayLog.warn(
-          "downloadAttachmentsToDisk",
-          `Attachment ${attachment.id} invalid signedUrlExpiresAt: ${attachment.signedUrlExpiresAt}, skipping`,
-        );
-        continue;
-      }
       if (expiresAt <= new Date()) {
         gatewayLog.warn(
           "loop-attachment",
@@ -4659,7 +4631,6 @@ export async function handleProcessCompletion(
     if (wasCancelled || failureCloudFinalized || !failureRetryableFailure) {
       loopTokenStore?.deleteLoopToken(loopId);
     }
-    setTimeout(() => removeSession(loopId), 30_000);
     return;
   }
 
@@ -5171,9 +5142,6 @@ export async function handleProcessCompletion(
     await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt);
   } finally {
     runningLoops.delete(loopId);
-    // Clean up PTY session after a short delay so any attached terminal
-    // clients can receive the exit notification before the buffer is freed.
-    setTimeout(() => removeSession(loopId), 30_000);
   }
 }
 
@@ -5513,7 +5481,6 @@ async function handleLoopRequest(
   worktreeProvider?: WorktreeProvider,
   loopTokenStore?: LoopTokenStore,
   getSymphonyDir?: () => string,
-  getInteractiveTerminal?: () => boolean,
 ): Promise<void> {
   const wt = worktreeProvider ?? defaultWorktreeProvider;
   // Derive the callback URL from the gateway's trusted configuration.
@@ -6450,13 +6417,31 @@ async function handleLoopRequest(
 
     // Spawn process
     const logFile = path.join(claudeWorkDir, "symphony-loop.log");
-    let child: ReturnType<typeof spawn> | undefined;
-    let ptySession: PtySession | undefined;
+    let logFd: number;
+    try {
+      logFd = openSync(logFile, "a");
+    } catch (logErr) {
+      const msg = logErr instanceof Error ? logErr.message : String(logErr);
+      await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
+        type: LoopEventType.Error,
+        code: LoopErrorCode.SpawnFailed,
+        message: `Cannot open log file: ${msg}`,
+      });
+      Observability.preflightSpawnFailed(
+        commandId,
+        operationId,
+        body.loopId,
+        `Cannot open log file: ${msg}`,
+      );
+      await cleanupOnError();
+      json(context, 500, { error: `Cannot open log file: ${msg}` });
+      return;
+    }
+    let child: ReturnType<typeof spawn>;
     let spawnStartedAt = 0;
     let decisionTableVerificationStartOffset = 0;
     let loopPerfTelemetryStartOffset = 0;
     let loopPerfWatcherHandle: LoopPerfTelemetryWatcherHandle | undefined;
-    let interactiveTerminalAvailable = false;
     const collectedSpawnMeta: {
       command: string;
       args: string[];
@@ -6539,9 +6524,8 @@ async function handleLoopRequest(
       );
       collectedSpawnMeta.envSnapshot = envSnapshot;
 
-      // Base claude CLI args for direct invocations — includes -p (print mode)
-      // so the process exits after completing the query. Without -p, unattended
-      // commands would stay in interactive mode and never finalize.
+      // Shared claude CLI args for commands that run claude directly.
+      // REQUEST_CHANGES omits "-" (stdin) because it passes the prompt as a CLI argument.
       const allowedTools = await withMcpTools(
         "Bash,Glob,Grep,Read,Write,Edit,Task,Skill,SlashCommand,TodoWrite",
         expectedMcpUrl,
@@ -6557,71 +6541,32 @@ async function handleLoopRequest(
         "200",
       ];
       const stdinClaudeArgs = ["-p", "-", ...baseClaudeArgs.slice(1)];
-      const shouldUseInteractiveTerminal =
-        getInteractiveTerminal?.() === true &&
-        INTERACTIVE_TERMINAL_COMMANDS.has(body.command);
 
-      const spawnDetachedProcess = (
-        command: string,
-        args: string[],
-        cwd: string,
-      ): void => {
-        let logFd: number;
-        try {
-          logFd = openSync(logFile, "a");
-        } catch (logErr) {
-          const msg = logErr instanceof Error ? logErr.message : String(logErr);
-          throw new Error(`Cannot open log file: ${msg}`);
-        }
-        try {
-          child = spawn(command, args, {
-            cwd,
-            detached: true,
-            stdio: ["ignore", logFd, logFd],
-            env: spawnEnv,
-          });
-          child.unref();
-        } finally {
-          closeSync(logFd);
-        }
-      };
+      if (body.command === LoopCommand.Decompose) {
+        // DECOMPOSE: prompt piped via stdin, cwd is the temp dir which contains
+        // .closedloop-ai/context/artifacts/ so Claude can find them by relative path.
+        const promptFile = path.join(claudeWorkDir, "decompose-prompt.txt");
+        await fs.writeFile(
+          promptFile,
+          body.prompt ?? "Decompose the PRD into features.",
+        );
 
-      const spawnClaudePipeline = (
-        claudeArgs: string[],
-        cwd: string,
-        promptFile?: string,
-      ): void => {
         const pipeline = buildClaudePipeline(
-          claudeArgs,
+          stdinClaudeArgs,
           claudeWorkDir,
           claudeBinary,
           promptFile,
         );
         collectedSpawnMeta.command = pipeline.cmd;
         collectedSpawnMeta.args = redactSpawnArgs(pipeline.args);
-        collectedSpawnMeta.cwd = cwd;
         spawnStartedAt = Date.now();
-        if (shouldUseInteractiveTerminal) {
-          ptySession = spawnPtySession({
-            loopId: body.loopId,
-            file: pipeline.cmd,
-            args: pipeline.args,
-            cwd,
-            env: spawnEnv,
-            logFile,
-          });
-          interactiveTerminalAvailable = true;
-          return;
-        }
-        spawnDetachedProcess(pipeline.cmd, pipeline.args, cwd);
-      };
-
-      if (body.command === LoopCommand.Decompose) {
-        const promptContent = body.prompt ?? "Decompose the PRD into features.";
-        const promptFile = path.join(claudeWorkDir, "decompose-prompt.txt");
-        await fs.writeFile(promptFile, promptContent);
-
-        spawnClaudePipeline(stdinClaudeArgs, claudeWorkDir, promptFile);
+        child = spawn(pipeline.cmd, pipeline.args, {
+          cwd: claudeWorkDir,
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: spawnEnv,
+        });
+        child.unref();
       } else if (
         body.command === LoopCommand.EvaluatePrd ||
         body.command === LoopCommand.EvaluateFeature
@@ -6638,7 +6583,22 @@ async function handleLoopRequest(
         const promptFile = path.join(claudeWorkDir, `${label}-prompt.txt`);
         await fs.writeFile(promptFile, prompt);
 
-        spawnClaudePipeline(stdinClaudeArgs, claudeWorkDir, promptFile);
+        const pipeline = buildClaudePipeline(
+          stdinClaudeArgs,
+          claudeWorkDir,
+          claudeBinary,
+          promptFile,
+        );
+        collectedSpawnMeta.command = pipeline.cmd;
+        collectedSpawnMeta.args = redactSpawnArgs(pipeline.args);
+        spawnStartedAt = Date.now();
+        child = spawn(pipeline.cmd, pipeline.args, {
+          cwd: claudeWorkDir,
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: spawnEnv,
+        });
+        child.unref();
       } else if (
         body.command === LoopCommand.EvaluatePlan ||
         body.command === LoopCommand.EvaluateCode
@@ -6657,31 +6617,65 @@ async function handleLoopRequest(
         const promptFile = path.join(claudeWorkDir, `${label}-prompt.txt`);
         await fs.writeFile(promptFile, prompt);
 
-        spawnClaudePipeline(stdinClaudeArgs, claudeWorkDir, promptFile);
+        const pipeline = buildClaudePipeline(
+          stdinClaudeArgs,
+          claudeWorkDir,
+          claudeBinary,
+          promptFile,
+        );
+        collectedSpawnMeta.command = pipeline.cmd;
+        collectedSpawnMeta.args = redactSpawnArgs(pipeline.args);
+        spawnStartedAt = Date.now();
+        child = spawn(pipeline.cmd, pipeline.args, {
+          cwd: claudeWorkDir,
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: spawnEnv,
+        });
+        child.unref();
       } else if (body.command === LoopCommand.RequestChanges) {
-        const claudeArgs = [...stdinClaudeArgs];
+        // REQUEST_CHANGES: use claude directly with /code:amend-plan.
+        // Must use -p (headless mode) so --allowedTools grants full permission
+        // without prompting. Pipes through stream_formatter.py for readable logs.
+        const claudeArgs = [...baseClaudeArgs];
 
+        // Resume from parent session if available (matches harness --resume)
         if (body.parentSessionId) {
           claudeArgs.push("--resume", body.parentSessionId);
         }
 
-        const existingPromptFile = path.join(claudeWorkDir, "prompt.md");
+        // Build /code:amend-plan invocation matching harness
+        const promptFile = path.join(claudeWorkDir, "prompt.md");
         let amendPrompt =
           "Please amend the plan based on the requested changes.";
-        if (existsSync(existingPromptFile)) {
-          amendPrompt = readFileSync(existingPromptFile, "utf-8");
+        if (existsSync(promptFile)) {
+          amendPrompt = readFileSync(promptFile, "utf-8");
         }
+        // Sanitize prompt matching harness's prepare-message step
         const sanitized = amendPrompt
           .replaceAll(/[\n\r]+/g, " ")
           .replaceAll(/\s{2,}/g, " ")
           .replaceAll(/"/g, '\\"');
-        const promptFile = path.join(claudeWorkDir, "request-changes-prompt.txt");
-        await fs.writeFile(
-          promptFile,
-          `/code:amend-plan --workdir "${claudeWorkDir}" --message "${sanitized}"`,
+        claudeArgs.push(
+          `/code:amend-plan --workdir ${claudeWorkDir} --message "${sanitized}"`,
         );
 
-        spawnClaudePipeline(claudeArgs, worktreeDir!, promptFile);
+        const pipeline = buildClaudePipeline(
+          claudeArgs,
+          claudeWorkDir,
+          claudeBinary,
+        );
+        collectedSpawnMeta.command = pipeline.cmd;
+        collectedSpawnMeta.args = redactSpawnArgs(pipeline.args);
+        collectedSpawnMeta.cwd = worktreeDir!;
+        spawnStartedAt = Date.now();
+        child = spawn(pipeline.cmd, pipeline.args, {
+          cwd: worktreeDir!,
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: spawnEnv,
+        });
+        child.unref();
       } else if (
         body.command === LoopCommand.GeneratePrd ||
         body.command === LoopCommand.RequestPrdChanges
@@ -6712,7 +6706,23 @@ async function handleLoopRequest(
           }
         }
 
-        spawnClaudePipeline(claudeArgsWithPeers, worktreeDir!, promptFile);
+        const pipeline = buildClaudePipeline(
+          claudeArgsWithPeers,
+          claudeWorkDir,
+          claudeBinary,
+          promptFile,
+        );
+        collectedSpawnMeta.command = pipeline.cmd;
+        collectedSpawnMeta.args = redactSpawnArgs(pipeline.args);
+        collectedSpawnMeta.cwd = worktreeDir!;
+        spawnStartedAt = Date.now();
+        child = spawn(pipeline.cmd, pipeline.args, {
+          cwd: worktreeDir!,
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: spawnEnv,
+        });
+        child.unref();
       } else if (body.command === LoopCommand.Bootstrap) {
         const params = parseBootstrapParams(body.prompt);
         if (!params || params.repos.length === 0) {
@@ -6816,10 +6826,19 @@ async function handleLoopRequest(
         collectedSpawnMeta.command = "bash";
         collectedSpawnMeta.args = [bootstrapScript];
         spawnStartedAt = Date.now();
-        spawnDetachedProcess("bash", [bootstrapScript], claudeWorkDir);
+        child = spawn("bash", [bootstrapScript], {
+          cwd: claudeWorkDir,
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: spawnEnv,
+        });
+        child.unref();
       } else {
-        // PLAN, EXECUTE: keep the detached run-loop process-group semantics so
-        // boot recovery survives Desktop quits, crashes, and updates.
+        // PLAN, EXECUTE: spawn run-loop.sh
+        // Build args matching ECS harness-agent's buildRunLoopArgs():
+        // 1. workdir (positional)
+        // 2. --max-iterations (EXECUTE=150, PLAN=50)
+        // 3. --prd (when prd.md exists)
         const scriptArgs = [claudeWorkDir];
 
         const maxIterations =
@@ -6867,9 +6886,16 @@ async function handleLoopRequest(
           telemetryEmitter: Observability.getTelemetryEmitter(),
         });
         spawnStartedAt = Date.now();
-        spawnDetachedProcess(scriptPath!, scriptArgs, worktreeDir!);
+        child = spawn(scriptPath!, scriptArgs, {
+          cwd: worktreeDir!,
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: spawnEnv,
+        });
+        child.unref();
       }
     } catch (spawnErr) {
+      closeSync(logFd);
       // The perf watcher is started before spawn() so its baseline snapshot
       // does not race the child. If spawn throws, the watcher is already
       // running — stop it before cleanup to release its fs.watch handle.
@@ -6898,6 +6924,7 @@ async function handleLoopRequest(
       json(context, 500, { error: `Failed to spawn process: ${msg}` });
       return;
     }
+    closeSync(logFd);
 
     const tailerJsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
     const jsonlPreSpawnOffset = existsSync(tailerJsonlPath)
@@ -6989,39 +7016,35 @@ async function handleLoopRequest(
       }
     };
 
-    let pid: number | null = null;
-    if (ptySession) {
-      ptySession.exitListeners.add(({ exitCode }) => {
-        loopLog(body.loopId, `Process exit event, code=${exitCode}`);
-        void onceComplete(exitCode);
-      });
-      pid = ptySession.pid;
-      runningLoops.set(body.loopId, { pid, ptySession, stage: "running" });
-    } else if (child) {
-      child.on("error", (err) => {
-        loopError(body.loopId, "Spawn error:", err.message);
-        void onceComplete(1);
-      });
-      child.on("exit", (code, signal) => {
-        loopLog(
-          body.loopId,
-          `Process exit event, code=${code}, signal=${signal ?? "none"}`,
-        );
-        void onceComplete(code ?? 1, signal ?? undefined);
-      });
-      pid = child.pid ?? null;
-      if (!pid) {
-        json(context, 500, { error: "Failed to spawn process" });
-        return;
-      }
-      runningLoops.set(body.loopId, { pid, child, stage: "running" });
-    }
+    // Prevent unhandled 'error' events (e.g. ENOENT if binary vanishes
+    // between pre-flight check and spawn) from crashing Electron.
+    child.on("error", (err) => {
+      loopError(body.loopId, "Spawn error:", err.message);
+      void onceComplete(1);
+    });
+
+    // Use 'exit' instead of 'close' — with detached processes using
+    // inherited file descriptors (not pipes), 'close' may never fire
+    // because there are no Node.js streams to track closure of.
+    child.on("exit", (code, signal) => {
+      loopLog(
+        body.loopId,
+        `Process exit event, code=${code}, signal=${signal ?? "none"}`,
+      );
+      void onceComplete(code ?? 1, signal ?? undefined);
+    });
+
+    const pid = child.pid ?? null;
 
     if (!pid) {
+      // error handler above will fire asynchronously — respond immediately
       json(context, 500, { error: "Failed to spawn process" });
       return;
     }
 
+    // Replace sentinel with real entry — storing `child` prevents GC of the
+    // ChildProcess handle which would silently drop the exit listener.
+    runningLoops.set(body.loopId, { pid, child, stage: "running" });
     stopTailer = startOutputTailer(
       tailerJsonlPath,
       apiBaseUrl,
@@ -7094,7 +7117,6 @@ async function handleLoopRequest(
         updatedAt: now,
         startedAt: existing?.startedAt ?? now,
         apiBaseUrl,
-        interactiveTerminalAvailable,
         lastObservedJsonlOffset:
           existing?.lastObservedJsonlOffset ?? jsonlPreSpawnOffset,
       });
@@ -7231,7 +7253,6 @@ export function registerSymphonyLoopRoutes(
   worktreeProvider?: WorktreeProvider,
   loopTokenStore?: LoopTokenStore,
   getSymphonyDir?: () => string,
-  getInteractiveTerminal?: () => boolean,
   getBinaryPaths?: BinaryPathsResolver,
 ): void {
   dispatcher.register("POST", "/api/gateway/symphony/loop", async (context) => {
@@ -7245,7 +7266,6 @@ export function registerSymphonyLoopRoutes(
         worktreeProvider,
         loopTokenStore,
         getSymphonyDir,
-        getInteractiveTerminal,
       );
 
     if (getBinaryPaths) {

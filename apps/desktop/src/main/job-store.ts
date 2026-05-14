@@ -94,7 +94,6 @@ export type LocalJob = {
   jsonlPath?: string;
   statePath?: string;
   pid?: number;
-  interactiveTerminalAvailable?: boolean;
   status: LocalJobStatus;
   phase?: string;
   liveActivity?: string;
