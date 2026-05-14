@@ -5,17 +5,19 @@ const nullableString = z.string().nullable().optional();
 
 const supportingArtifactSchema = z
   .object({
-    id: z.string().optional(),
-    type: z.string().optional(),
-    title: z.string().optional(),
+    id: z.string().default(""),
+    type: z.string().default(""),
+    title: z.string().default(""),
+    content: z.string(),
+    raw: z.record(z.string(), z.unknown()).optional(),
     filename: z.string().optional(),
     fileName: z.string().optional(),
-    content: z.string(),
   })
   .passthrough();
 
 const codeEvaluationContextSchema = z
   .object({
+    schemaVersion: z.literal(1).default(1),
     repo: z
       .object({
         fullName: nullableString,
