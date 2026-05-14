@@ -2373,7 +2373,9 @@ export function readBootstrapOutputs(claudeWorkDir: string): LoopOutputArtifacts
       branch: entry.branch ?? "main",
       success: success || hasAgents,
       error: hasAgents && !success ? `partial:${error}` : error,
-      ...outputs,
+      ...(success || hasAgents
+        ? outputs
+        : { agents: [], criticGates: null, metadata: null }),
       duration: 0,
     });
     runnableIndex += 1;
