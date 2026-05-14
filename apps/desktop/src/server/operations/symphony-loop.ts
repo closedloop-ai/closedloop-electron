@@ -301,16 +301,8 @@ const LOCAL_CALLBACK_FAIL_FAST_COMMANDS = new Set<LoopCommand>([
   LoopCommand.RequestPrdChanges,
   LoopCommand.GeneratePrd,
 ]);
-const INTERACTIVE_TERMINAL_COMMANDS = new Set<LoopCommand>([
-  LoopCommand.Decompose,
-  LoopCommand.RequestChanges,
-  LoopCommand.RequestPrdChanges,
-  LoopCommand.EvaluatePrd,
-  LoopCommand.GeneratePrd,
-  LoopCommand.EvaluatePlan,
-  LoopCommand.EvaluateCode,
-  LoopCommand.EvaluateFeature,
-]);
+// All commands support interactive terminal — the sidecar model is
+// independent of how the original process was spawned.
 interface LoopArtifact {
   id: string;
   type: LoopArtifactType;
@@ -6802,8 +6794,7 @@ async function handleLoopRequest(
       ];
       const stdinClaudeArgs = ["-p", "-", ...baseClaudeArgs.slice(1)];
       const shouldUseInteractiveTerminal =
-        getInteractiveTerminal?.() === true &&
-        INTERACTIVE_TERMINAL_COMMANDS.has(body.command);
+        getInteractiveTerminal?.() === true;
 
       const spawnDetachedProcess = (
         command: string,
