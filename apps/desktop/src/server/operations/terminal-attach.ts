@@ -112,8 +112,10 @@ function flushTerminalLines(loopId: string, cap: TerminalCapture): void {
   for (let i = startFrom; i < newLines.length; i++) {
     const text = newLines[i];
 
-    // Dedup: strip leading spinner symbols and skip if already emitted
-    const stripped = text.replace(/^[·✢✳✶✻✽⠀-⣿]\s*/, "");
+    // Clean residual escape fragments and leading spinner symbols
+    const cleaned = text.replace(/^\[?[A-Z]/, "").trim();
+    if (!cleaned || cleaned.length < 3) continue;
+    const stripped = cleaned.replace(/^[·✢✳✶✻✽⠀-⣿]\s*/, "");
     if (cap.recentLines.has(stripped)) continue;
     cap.recentLines.add(stripped);
     // Cap the set size to prevent unbounded growth
@@ -151,16 +153,22 @@ function flushTerminalLines(loopId: string, cap: TerminalCapture): void {
       continue;
     }
 
-    if (text.length < 3) continue;
     // Skip pure symbol noise
-    if (/^[·✢✳✶✻✽⠀-⣿│─┌┐└┘├┤╭╮╰╯═║\s]+$/.test(text)) continue;
-    appendInteractiveEvent(loopId, "assistant", text);
+    if (/^[·✢✳✶✻✽⠀-⣿│─┌┐└┘├┤╭╮╰╯═║\s]+$/.test(cleaned)) continue;
+    appendInteractiveEvent(loopId, "assistant", cleaned);
   }
 }
 
-function markTyping(loopId: string): void {
+function markTyping(loopId: string, isEnter: boolean): void {
   const cap = captures.get(loopId);
-  if (cap) cap.typingUntil = Date.now() + 1500;
+  if (!cap) return;
+  cap.typingUntil = Date.now() + (isEnter ? 2000 : 500);
+  if (isEnter) {
+    // Reset the line counter to the current buffer length so
+    // everything already in the buffer (including echoed keystrokes)
+    // is treated as "already seen" and won't be emitted.
+    cap.lastLineCount = cap.term.buffer.active.length;
+  }
 }
 
 function cleanupCapture(loopId: string): void {
@@ -278,10 +286,11 @@ export function initTerminalAttachWebSocket(
           const msg = JSON.parse(String(raw)) as Record<string, unknown>;
           if (msg.type === "input" && typeof msg.data === "string") {
             writeToPty(loopId, msg.data);
-            markTyping(baseLoopId);
+            const isEnter = msg.data.includes("\r") || msg.data.includes("\n");
+            markTyping(baseLoopId, isEnter);
             // Accumulate user keystrokes and log when Enter is pressed
             userInputBuffer = (userInputBuffer ?? "") + msg.data;
-            if (msg.data.includes("\r") || msg.data.includes("\n")) {
+            if (isEnter) {
               const line = userInputBuffer.replace(/[\r\n]+/g, "").trim();
               if (line.length > 0) {
                 appendInteractiveEvent(baseLoopId, "user", line);
