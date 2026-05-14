@@ -37,6 +37,16 @@ export function registerInteractiveJsonlPath(loopId: string, jsonlPath: string):
  * Write an event to the interactive JSONL file in the format the
  * output-tailer recognizes (type: "user"/"assistant" with content blocks).
  */
+/** Estimate token count from text length (~4 chars per token). */
+function estimateTokens(text: string): number {
+  return Math.max(1, Math.ceil(text.length / 4));
+}
+
+/**
+ * Write an event to the interactive JSONL in the same format as
+ * --output-format stream-json so parseTokenUsage and the output-tailer
+ * both recognize it. Includes estimated token usage based on text length.
+ */
 function appendInteractiveEvent(
   loopId: string,
   type: "user" | "assistant",
@@ -45,10 +55,29 @@ function appendInteractiveEvent(
   const jsonlPath = interactiveJsonlPaths.get(loopId);
   if (!jsonlPath || !text.trim()) return;
   try {
-    const record = {
+    const tokens = estimateTokens(text);
+    const record: Record<string, unknown> = {
       type,
-      message: { content: [{ type: "text", text }] },
+      message: {
+        content: [{ type: "text", text }],
+        ...(type === "assistant" ? {
+          usage: {
+            input_tokens: 0,
+            output_tokens: tokens,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+        } : {}),
+      },
     };
+    if (type === "user") {
+      (record.message as Record<string, unknown>).usage = {
+        input_tokens: tokens,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      };
+    }
     appendFileSync(jsonlPath, JSON.stringify(record) + "\n");
   } catch {
     // Best effort
