@@ -749,7 +749,7 @@ export function spawnInteractiveSidecar(
   const logFile = path.join(claudeWorkDir, "symphony-loop-interactive.log");
   const jsonlFile = path.join(claudeWorkDir, "claude-output-interactive.jsonl");
 
-  const args = ["--resume", sessionId];
+  const args = ["--resume", sessionId, "--output-format", "stream-json", "--verbose"];
 
   const session = spawnPtySession({
     loopId: sidecarId,
