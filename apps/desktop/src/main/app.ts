@@ -69,7 +69,7 @@ import {
   computeSymphonyDir,
   SymphonyDirNotConfiguredError,
 } from "../server/operations/symphony-utils.js";
-import { getResolvedGitPath, resetResolvedClaudePath, switchToInteractive, switchToDetached } from "../server/operations/symphony-loop.js";
+import { getResolvedGitPath, resetResolvedClaudePath } from "../server/operations/symphony-loop.js";
 import { resetMcpDetectionCache } from "../server/operations/mcp-detection.js";
 import { resolveBinaryFromLoginShell } from "../server/shell-path.js";
 import { getCodePluginVersion } from "../server/operations/plugin-cache.js";
@@ -2482,10 +2482,6 @@ export class DesktopApplication {
         throw new Error("loopId is required");
       }
       const trimmedLoopId = loopId.trim();
-
-      // Switch the running loop from detached (-p) to interactive (--resume, no -p)
-      switchToInteractive(trimmedLoopId, this.jobStore);
-
       const job = this.jobStore.getByLoopId(trimmedLoopId);
       const port = this.server?.getActivePort() ?? 19432;
       const command = job?.command ?? "";
@@ -2503,6 +2499,8 @@ export class DesktopApplication {
           : path.join(cwd, "apps", "desktop", "src", "renderer", "terminal.html");
       }
 
+      // Terminal window is just a view into the PTY — closing it does not
+      // affect the running Claude process.
       const win = new BrowserWindow({
         width: 900,
         height: 600,
@@ -2512,12 +2510,6 @@ export class DesktopApplication {
       void win.loadFile(htmlPath, {
         query: { loopId: trimmedLoopId, port: String(port), command, token: authToken },
       });
-
-      // When the terminal window closes, switch back to detached mode
-      win.on("closed", () => {
-        switchToDetached(trimmedLoopId, this.jobStore);
-      });
-
       return { opened: true };
     });
     ipcMain.handle("desktop:get-activity-events", () =>

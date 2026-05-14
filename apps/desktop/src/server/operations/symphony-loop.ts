@@ -98,7 +98,6 @@ import {
 } from "./git-helpers.js";
 import {
   type PtySession,
-  killPty,
   removeSession,
   spawnPtySession,
 } from "../../main/pty-session-store.js";
@@ -618,25 +617,11 @@ function isExecutionResult(value: unknown): value is ExecutionResult {
 }
 
 /** Track running loop processes for cancellation and to prevent GC of ChildProcess. */
-interface LoopSpawnConfig {
-  claudeBinary: string;
-  baseClaudeArgs: string[];
-  cwd: string;
-  spawnEnv: Record<string, string>;
-  logFile: string;
-  claudeWorkDir: string;
-}
-
 interface RunningLoop {
   pid: number;
   child?: ReturnType<typeof spawn>;
   ptySession?: PtySession;
   stage: "running" | "post-processing";
-  spawnConfig?: LoopSpawnConfig;
-  /** Increment mode-switch generation to suppress the current exit handler. */
-  bumpGeneration?: () => number;
-  /** Wire a new process exit into the original onceComplete handler. */
-  onceComplete?: (code: number, signal?: string, generation?: number) => Promise<void>;
 }
 const runningLoops = new Map<string, RunningLoop>();
 
@@ -651,218 +636,6 @@ export function registerRecoveredLoop(loopId: string, pid: number): void {
 
 export function unregisterLoop(loopId: string): void {
   runningLoops.delete(loopId);
-}
-
-// ---------------------------------------------------------------------------
-// Interactive terminal mode switching
-// ---------------------------------------------------------------------------
-
-/**
- * Kill the current detached process and respawn Claude with --resume in a PTY
- * so the user can interact with it in the terminal window.
- */
-export function switchToInteractive(loopId: string, jobStore?: JobStore): PtySession {
-  const entry = runningLoops.get(loopId);
-  if (!entry) {
-    throw new Error(`No running loop for loopId=${loopId}`);
-  }
-  if (entry.ptySession) {
-    // Already in interactive mode — return existing session
-    return entry.ptySession;
-  }
-  if (!entry.spawnConfig) {
-    throw new Error(
-      `Cannot switch to interactive mode: no spawn config for loopId=${loopId}. ` +
-      `The job may have been started by an older version or recovered after a restart.`,
-    );
-  }
-  const config = entry.spawnConfig;
-
-  // Read session ID from session-id.txt or first line of claude-output.jsonl
-  const sessionId = readSessionId(config.claudeWorkDir);
-  if (!sessionId) {
-    throw new Error(
-      `Cannot switch to interactive mode: no session ID found in ${config.claudeWorkDir}. ` +
-      `The Claude process may not have started yet.`,
-    );
-  }
-
-  // Bump generation to suppress the killed process's exit handler
-  const newGen = entry.bumpGeneration?.() ?? 0;
-  const { onceComplete: completeHandler } = entry;
-
-  // Kill the detached process
-  try {
-    process.kill(-entry.pid, "SIGTERM");
-  } catch {
-    try { process.kill(entry.pid, "SIGTERM"); } catch { /* already dead */ }
-  }
-
-  // Build interactive args: --resume <sessionId> (no -p), keep --output-format stream-json
-  const interactiveArgs = config.baseClaudeArgs.filter(
-    (arg, i, arr) =>
-      arg !== "-p" &&
-      !(arg === "-" && i > 0 && arr[i - 1] === "-p"),
-  );
-  interactiveArgs.unshift("--resume", sessionId);
-
-  const jsonlFile = path.join(config.claudeWorkDir, "claude-output.jsonl");
-  const session = spawnPtySession({
-    loopId,
-    file: config.claudeBinary,
-    args: interactiveArgs,
-    cwd: config.cwd,
-    env: config.spawnEnv,
-    logFile: config.logFile,
-    jsonlFile,
-  });
-
-  // Update the running loop entry — carry forward bumpGeneration and onceComplete
-  runningLoops.set(loopId, {
-    pid: session.pid,
-    ptySession: session,
-    stage: "running",
-    spawnConfig: config,
-    bumpGeneration: entry.bumpGeneration,
-    onceComplete: completeHandler,
-  });
-
-  // Update job store PID so enrichJobSnapshot sees the new process as alive
-  if (jobStore) {
-    const job = jobStore.getByLoopId(loopId);
-    if (job) {
-      jobStore.upsert({ ...job, pid: session.pid, updatedAt: new Date().toISOString() });
-    }
-  }
-
-  // Wire exit into the original onceComplete — this fires finalization
-  // unless another mode switch bumps the generation first
-  session.exitListeners.add(({ exitCode }) => {
-    loopLog(loopId, `Interactive process exit, code=${exitCode}`);
-    if (completeHandler) {
-      void completeHandler(exitCode, undefined, newGen);
-    }
-  });
-
-  return session;
-}
-
-/**
- * Kill the interactive PTY session and respawn Claude with --resume + -p
- * in a detached child process so it continues unattended.
- */
-export function switchToDetached(loopId: string, jobStore?: JobStore): void {
-  const entry = runningLoops.get(loopId);
-  if (!entry) return;
-  if (!entry.spawnConfig) return;
-  if (!entry.ptySession) {
-    // Already in detached mode
-    return;
-  }
-  const config = entry.spawnConfig;
-  const { onceComplete: completeHandler } = entry;
-
-  // Bump generation to suppress the killed PTY's exit handler
-  const newGen = entry.bumpGeneration?.() ?? 0;
-
-  // Kill the PTY (no-op if already exited)
-  if (!entry.ptySession.exited) {
-    killPty(loopId);
-  }
-  removeSession(loopId);
-
-  // Read session ID from session-id.txt or first line of claude-output.jsonl
-  const sessionId = readSessionId(config.claudeWorkDir);
-  if (!sessionId) {
-    loopLog(loopId, `No session ID found, skipping detached resume`);
-    return;
-  }
-
-  // Build detached args: --resume <sessionId> + -p + original format args.
-  // Filter out stdin marker "-" since --resume picks up from the
-  // existing conversation — no prompt file is needed.
-  const detachedArgs = [
-    "--resume", sessionId,
-    ...config.baseClaudeArgs.filter((arg) => arg !== "-"),
-  ];
-  const pipeline = buildClaudePipeline(
-    detachedArgs,
-    config.claudeWorkDir,
-    config.claudeBinary,
-  );
-
-  // Spawn detached
-  let logFd: number;
-  try {
-    logFd = openSync(config.logFile, "a");
-  } catch {
-    return;
-  }
-  try {
-    const child = spawn(pipeline.cmd, pipeline.args, {
-      cwd: config.cwd,
-      detached: true,
-      stdio: ["ignore", logFd, logFd],
-      env: config.spawnEnv,
-    });
-    child.unref();
-
-    const pid = child.pid ?? 0;
-    runningLoops.set(loopId, {
-      pid,
-      child,
-      stage: "running",
-      spawnConfig: config,
-      bumpGeneration: entry.bumpGeneration,
-      onceComplete: completeHandler,
-    });
-
-    // Update job store PID so enrichJobSnapshot sees the new process as alive
-    if (jobStore) {
-      const job = jobStore.getByLoopId(loopId);
-      if (job) {
-        jobStore.upsert({ ...job, pid, updatedAt: new Date().toISOString() });
-      }
-    }
-
-    // Wire exit into the original onceComplete — this fires finalization
-    // unless another mode switch bumps the generation first
-    child.on("exit", (code, signal) => {
-      loopLog(loopId, `Detached resume process exit, code=${code}`);
-      if (completeHandler) {
-        void completeHandler(code ?? 1, signal ?? undefined, newGen);
-      }
-    });
-  } finally {
-    closeSync(logFd);
-  }
-}
-
-/**
- * Read the Claude session ID from the work directory.
- * Checks session-id.txt first, then falls back to parsing the first line
- * of claude-output.jsonl for the session_id field.
- */
-function readSessionId(claudeWorkDir: string): string | null {
-  // Primary: session-id.txt (written by plan/execute run-loop path)
-  const txtFile = path.join(claudeWorkDir, "session-id.txt");
-  const fromTxt = readTextFile(txtFile)?.trim();
-  if (fromTxt) return fromTxt;
-
-  // Fallback: first JSONL line contains session_id in stream-json output
-  const jsonlFile = path.join(claudeWorkDir, "claude-output.jsonl");
-  try {
-    const content = readFileSync(jsonlFile, "utf-8");
-    const firstLine = content.split("\n").find((l) => l.trim().startsWith("{"));
-    if (firstLine) {
-      const parsed = JSON.parse(firstLine);
-      if (typeof parsed.session_id === "string") return parsed.session_id;
-      if (typeof parsed.sessionId === "string") return parsed.sessionId;
-    }
-  } catch {
-    // File doesn't exist or isn't valid JSON
-  }
-  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -6684,7 +6457,6 @@ async function handleLoopRequest(
     let loopPerfTelemetryStartOffset = 0;
     let loopPerfWatcherHandle: LoopPerfTelemetryWatcherHandle | undefined;
     let interactiveTerminalAvailable = false;
-    let loopSpawnConfig: LoopSpawnConfig | undefined;
     const collectedSpawnMeta: {
       command: string;
       args: string[];
@@ -6829,17 +6601,26 @@ async function handleLoopRequest(
         collectedSpawnMeta.args = redactSpawnArgs(pipeline.args);
         collectedSpawnMeta.cwd = cwd;
         spawnStartedAt = Date.now();
-        // Store config for mode-switching (interactive ↔ detached)
-        loopSpawnConfig = {
-          claudeBinary,
-          baseClaudeArgs: claudeArgs,
-          cwd,
-          spawnEnv,
-          logFile,
-          claudeWorkDir,
-        };
         if (shouldUseInteractiveTerminal) {
+          // Spawn claude via PTY with -p so it runs to completion
+          // unattended. The PTY provides a terminal the user can attach
+          // to for live observation and stdin forwarding. Closing the
+          // terminal window just detaches the view — the process keeps
+          // running and finalizes normally via onceComplete.
+          const jsonlFile = path.join(claudeWorkDir, "claude-output.jsonl");
+          collectedSpawnMeta.command = claudeBinary;
+          collectedSpawnMeta.args = redactSpawnArgs(claudeArgs);
+          ptySession = spawnPtySession({
+            loopId: body.loopId,
+            file: claudeBinary,
+            args: claudeArgs,
+            cwd,
+            env: spawnEnv,
+            logFile,
+            jsonlFile,
+          });
           interactiveTerminalAvailable = true;
+          return;
         }
         spawnDetachedProcess(pipeline.cmd, pipeline.args, cwd);
       };
@@ -7095,18 +6876,6 @@ async function handleLoopRequest(
           telemetryEmitter: Observability.getTelemetryEmitter(),
         });
         spawnStartedAt = Date.now();
-        // Store spawn config for the run-loop path too (PLAN/EXECUTE).
-        // Mode-switching uses claude --resume directly, so it only works
-        // for direct-claude commands, but having the field prevents crashes
-        // if the UI ever shows the terminal button for these commands.
-        loopSpawnConfig = {
-          claudeBinary,
-          baseClaudeArgs: [],
-          cwd: worktreeDir!,
-          spawnEnv,
-          logFile,
-          claudeWorkDir,
-        };
         spawnDetachedProcess(scriptPath!, scriptArgs, worktreeDir!);
       }
     } catch (spawnErr) {
@@ -7145,12 +6914,7 @@ async function handleLoopRequest(
       : 0;
 
     // Guard against double-firing: both 'error' and 'exit' can emit.
-    // modeSwitchGeneration tracks mode-switch kills. Each kill increments
-    // the generation; exit handlers capture the generation at registration
-    // time and only fire onceComplete if it still matches (meaning no
-    // mode switch happened since they were registered).
     let completionHandled = false;
-    let modeSwitchGeneration = 0;
     let stopTailer: { stop: () => void; flush: () => Promise<void> } = {
       stop: () => {},
       flush: () => Promise.resolve(),
@@ -7159,15 +6923,8 @@ async function handleLoopRequest(
     const onceComplete = async (
       code: number,
       signal?: string,
-      expectedGeneration?: number,
     ): Promise<void> => {
       if (completionHandled) return;
-      // If a mode switch happened after this exit handler was registered,
-      // the generation won't match — suppress finalization.
-      if (expectedGeneration !== undefined && expectedGeneration !== modeSwitchGeneration) {
-        loopLog(body.loopId, `Mode-switch kill detected (gen=${expectedGeneration} vs current=${modeSwitchGeneration}), suppressing finalization`);
-        return;
-      }
       completionHandled = true;
       loopLog(body.loopId, `onceComplete fired, code=${code}`);
       // Persist exitCode synchronously (before any await) so the IPC
@@ -7242,32 +6999,31 @@ async function handleLoopRequest(
     };
 
     let pid: number | null = null;
-    const initialGeneration = modeSwitchGeneration;
     if (ptySession) {
       ptySession.exitListeners.add(({ exitCode }) => {
         loopLog(body.loopId, `Process exit event, code=${exitCode}`);
-        void onceComplete(exitCode, undefined, initialGeneration);
+        void onceComplete(exitCode);
       });
       pid = ptySession.pid;
-      runningLoops.set(body.loopId, { pid, ptySession, stage: "running", spawnConfig: loopSpawnConfig, bumpGeneration: () => ++modeSwitchGeneration, onceComplete });
+      runningLoops.set(body.loopId, { pid, ptySession, stage: "running" });
     } else if (child) {
       child.on("error", (err) => {
         loopError(body.loopId, "Spawn error:", err.message);
-        void onceComplete(1, undefined, initialGeneration);
+        void onceComplete(1);
       });
       child.on("exit", (code, signal) => {
         loopLog(
           body.loopId,
           `Process exit event, code=${code}, signal=${signal ?? "none"}`,
         );
-        void onceComplete(code ?? 1, signal ?? undefined, initialGeneration);
+        void onceComplete(code ?? 1, signal ?? undefined);
       });
       pid = child.pid ?? null;
       if (!pid) {
         json(context, 500, { error: "Failed to spawn process" });
         return;
       }
-      runningLoops.set(body.loopId, { pid, child, stage: "running", spawnConfig: loopSpawnConfig, bumpGeneration: () => ++modeSwitchGeneration, onceComplete });
+      runningLoops.set(body.loopId, { pid, child, stage: "running" });
     }
 
     if (!pid) {
