@@ -105,6 +105,7 @@ import {
   spawnPtySession,
 } from "../../main/pty-session-store.js";
 import { startOutputTailer } from "./output-tailer.js";
+import { registerInteractiveJsonlPath } from "./terminal-attach.js";
 import {
   findPluginScript,
   findPluginVersions,
@@ -749,7 +750,11 @@ export function spawnInteractiveSidecar(
   const logFile = path.join(claudeWorkDir, "symphony-loop-interactive.log");
   const jsonlFile = path.join(claudeWorkDir, "claude-output-interactive.jsonl");
 
-  const args = ["--resume", sessionId, "--output-format", "stream-json", "--verbose"];
+  const args = ["--resume", sessionId, "--verbose"];
+
+  // Register the JSONL path so terminal-attach can log user input
+  // and Claude output as structured events.
+  registerInteractiveJsonlPath(loopId, jsonlFile);
 
   const session = spawnPtySession({
     loopId: sidecarId,

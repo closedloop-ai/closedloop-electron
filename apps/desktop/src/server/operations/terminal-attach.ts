@@ -1,4 +1,5 @@
 import type http from "node:http";
+import { appendFileSync } from "node:fs";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
   getSession,
@@ -24,6 +25,23 @@ import { safeEqualToken } from "../auth-utils.js";
  *   { type: "input",  data: string }   — keyboard input forwarded to PTY
  *   { type: "resize", cols: number, rows: number }
  */
+/** Map of loopId → interactive JSONL path for event logging. */
+const interactiveJsonlPaths = new Map<string, string>();
+
+export function registerInteractiveJsonlPath(loopId: string, jsonlPath: string): void {
+  interactiveJsonlPaths.set(loopId, jsonlPath);
+}
+
+function appendInteractiveEvent(loopId: string, event: Record<string, unknown>): void {
+  const jsonlPath = interactiveJsonlPaths.get(loopId);
+  if (!jsonlPath) return;
+  try {
+    appendFileSync(jsonlPath, JSON.stringify({ ...event, timestamp: new Date().toISOString() }) + "\n");
+  } catch {
+    // Best effort
+  }
+}
+
 export function initTerminalAttachWebSocket(
   server: http.Server,
   getGatewayAuthToken?: () => string | undefined,
@@ -81,11 +99,13 @@ export function initTerminalAttachWebSocket(
         return;
       }
 
-      // Forward live PTY data to the WebSocket
+      // Forward live PTY data to the WebSocket and log as interactive event
+      const baseLoopId = loopId.replace(/-interactive$/, "");
       const onData = (data: string): void => {
         if (ws.readyState === ws.OPEN) {
           ws.send(JSON.stringify({ type: "data", data }));
         }
+        appendInteractiveEvent(baseLoopId, { type: "assistant_output", data });
       };
       session.dataListeners.add(onData);
 
@@ -121,6 +141,9 @@ export function initTerminalAttachWebSocket(
           const msg = JSON.parse(String(raw)) as Record<string, unknown>;
           if (msg.type === "input" && typeof msg.data === "string") {
             writeToPty(loopId, msg.data);
+            // Extract base loopId (strip "-interactive" suffix) for event logging
+            const baseLoopId = loopId.replace(/-interactive$/, "");
+            appendInteractiveEvent(baseLoopId, { type: "user_input", data: msg.data });
           } else if (
             msg.type === "resize" &&
             typeof msg.cols === "number" &&
