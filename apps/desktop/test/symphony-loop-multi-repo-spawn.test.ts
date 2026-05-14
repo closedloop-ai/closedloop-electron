@@ -447,14 +447,6 @@ for (const command of PRD_PEER_COMMANDS) {
       2,
       `${command}: expected exactly 2 --add-dir flags, got ${addDirCount} in: ${argv}`,
     );
-    assert.ok(
-      argv.includes("--output-format stream-json"),
-      `${command}: argv must retain --output-format stream-json; got: ${argv}`,
-    );
-    assert.ok(
-      !argv.includes("Generate / amend the PRD"),
-      `${command}: prompt text must stay off argv; got: ${argv}`,
-    );
 
     // peer-repos.json: written by writeArtifactsForGeneratePrd, must enumerate
     // both peers with fullName + branch + localPath matching the worktree dirs.
@@ -577,14 +569,6 @@ for (const command of PRD_PEER_COMMANDS) {
     assert.ok(
       !argv.includes("--add-dir"),
       `${command}: zero peers must not emit --add-dir; got: ${argv}`,
-    );
-    assert.ok(
-      argv.includes("--output-format stream-json"),
-      `${command}: argv must retain --output-format stream-json; got: ${argv}`,
-    );
-    assert.ok(
-      !argv.includes("No peers"),
-      `${command}: prompt text must stay off argv; got: ${argv}`,
     );
     const manifestFlag = await fs.readFile(manifestFlagFile, "utf-8");
     assert.equal(

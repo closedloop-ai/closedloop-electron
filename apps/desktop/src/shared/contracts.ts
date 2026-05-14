@@ -127,7 +127,6 @@ export interface DesktopSettings {
     python3?: string;
     git?: string;
   };
-  interactiveTerminal: boolean;
   savedConfigs: SavedConfig[];
   activeConfigId: string | null;
 }
@@ -145,7 +144,6 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   apiOrigin: DEFAULT_AUTH_API_ORIGIN,
   webAppOrigin: DEFAULT_WEB_APP_ORIGIN,
   verboseLogging: false,
-  interactiveTerminal: true,
   binaryPaths: {},
   savedConfigs: [],
   activeConfigId: null

@@ -3,7 +3,6 @@ productName: ClosedLoop
 
 files:
   - app/**/*
-  - src/renderer/**/*
   - package.json
 
 beforeBuild: ./scripts/use-staged-node-modules.mjs

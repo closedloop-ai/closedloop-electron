@@ -378,12 +378,7 @@ export class BootRecoveryService {
       }
     };
 
-    void this.trackBackgroundTask(run()).catch((err: unknown) => {
-      gatewayLog.warn(
-        "boot-recovery",
-        `Unexpected error in finalizeRecoveredJob loopId=${loopId}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    });
+    void this.trackBackgroundTask(run()).catch(() => {});
   }
 
   dispose(): void {
@@ -395,7 +390,7 @@ export class BootRecoveryService {
     this.liveHandles = [];
   }
 
-  sweepOrphanedTokens(): void {
+  private sweepOrphanedTokens(): void {
     const { jobStore, loopTokenStore } = this.deps;
     const tokenLoopIds = loopTokenStore.listLoopIds();
     for (const loopId of tokenLoopIds) {

@@ -15,6 +15,7 @@ const packageJsonFile = path.join(appDir, "package.json");
 const repoNpmrcFile = path.join(repoRoot, ".npmrc");
 const stageRootPackageJsonFile = path.join(stageRoot, "package.json");
 const stageBuildOutputDir = path.join(stageAppDir, "dist");
+const rendererEntryFile = path.join(appDir, "src/renderer/index.html");
 const stageRendererDir = path.join(stageAppDir, "src/renderer");
 const stageNpmrcFile = path.join(stageAppDir, ".npmrc");
 
@@ -27,24 +28,20 @@ function parseJsonFromCommandOutput(output) {
     // pnpm may emit warnings before the JSON payload.
   }
 
-  // Collect every `[` and `{` position as potential JSON start offsets.
-  // pnpm warnings may contain braces before the real payload, so we try
-  // each start position rather than only the first.
-  const startPositions = [];
-  for (let i = 0; i < trimmedOutput.length; i += 1) {
-    if (trimmedOutput[i] === "[" || trimmedOutput[i] === "{") {
-      startPositions.push(i);
-    }
-  }
+  const startIndexCandidates = [
+    trimmedOutput.indexOf("["),
+    trimmedOutput.indexOf("{"),
+  ].filter((index) => index >= 0);
 
-  for (const startIndex of startPositions) {
-    for (let index = startIndex; index < trimmedOutput.length; index += 1) {
-      const candidate = trimmedOutput.slice(startIndex, index + 1);
-      try {
-        return JSON.parse(candidate);
-      } catch {
-        // Keep scanning until the JSON closes.
-      }
+  const startIndex = startIndexCandidates.length > 0 ? Math.min(...startIndexCandidates) : 0;
+
+  for (let index = startIndex; index < trimmedOutput.length; index += 1) {
+    const candidate = trimmedOutput.slice(startIndex, index + 1);
+
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // Keep scanning until the JSON closes.
     }
   }
 
@@ -145,4 +142,5 @@ await stat(buildOutputDir).catch(() => {
 });
 
 await cp(buildOutputDir, stageBuildOutputDir, { recursive: true });
-await cp(path.join(appDir, "src", "renderer"), stageRendererDir, { recursive: true });
+await mkdir(stageRendererDir, { recursive: true });
+await cp(rendererEntryFile, path.join(stageRendererDir, "index.html"));
