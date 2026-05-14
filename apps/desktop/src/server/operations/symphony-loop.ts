@@ -675,31 +675,6 @@ export function isTerminalWindowOpen(loopId: string): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Read the Claude session ID from the work directory.
- * Checks session-id.txt first, then falls back to parsing the first line
- * of claude-output.jsonl for the session_id field.
- */
-function readSessionId(claudeWorkDir: string): string | null {
-  const txtFile = path.join(claudeWorkDir, "session-id.txt");
-  const fromTxt = readTextFile(txtFile)?.trim();
-  if (fromTxt) return fromTxt;
-
-  const jsonlFile = path.join(claudeWorkDir, "claude-output.jsonl");
-  try {
-    const content = readFileSync(jsonlFile, "utf-8");
-    const firstLine = content.split("\n").find((l) => l.trim().startsWith("{"));
-    if (firstLine) {
-      const parsed = JSON.parse(firstLine);
-      if (typeof parsed.session_id === "string") return parsed.session_id;
-      if (typeof parsed.sessionId === "string") return parsed.sessionId;
-    }
-  } catch {
-    // File doesn't exist or isn't valid JSON
-  }
-  return null;
-}
-
-/**
  * Spawn an interactive Claude sidecar that resumes the session from the
  * given job's work directory. The sidecar runs alongside the original -p
  * process — it does NOT kill or replace it. The user can attach a terminal
@@ -741,12 +716,10 @@ export function spawnInteractiveSidecar(
   const logFile = path.join(claudeWorkDir, "symphony-loop-interactive.log");
   const jsonlFile = path.join(claudeWorkDir, "claude-output-interactive.jsonl");
 
-  // Try to resume the original session. If the session ID is available,
-  // use --resume; otherwise start a fresh session in the same workdir.
-  const sessionId = readSessionId(claudeWorkDir);
-  const args = sessionId
-    ? ["--resume", sessionId, "--verbose"]
-    : ["--verbose"];
+  // Start a fresh session in the same workdir. Don't --resume the
+  // original session — it's locked by the paused process. The sidecar
+  // can read/modify files and tasks on the shared disk.
+  const args = ["--verbose"];
 
   // Register the JSONL path so terminal-attach can log user input
   // and Claude output as structured events.
