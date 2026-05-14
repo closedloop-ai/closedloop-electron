@@ -885,7 +885,9 @@ export async function materializeAgents(
   await fs.mkdir(agentsDir, { recursive: true });
 
   const resolvedAgentsDir = path.resolve(agentsDir);
+  let written = 0;
   for (const agent of agents) {
+    if (typeof agent.prompt !== "string") continue;
     const safeSlug = slugifyLoopId(agent.slug);
     if (!safeSlug) continue;
     const filePath = path.resolve(agentsDir, `${safeSlug}.md`);
@@ -895,9 +897,10 @@ export async function materializeAgents(
       content += "\n";
     }
     await fs.writeFile(filePath, content, "utf-8");
+    written++;
   }
 
-  return agents.length;
+  return written;
 }
 
 export async function materializeCriticGates(
@@ -6154,15 +6157,23 @@ async function handleLoopRequest(
         if (!planAdditionalsOk) return;
 
         for (const addEntry of additionalWorktreeDirs) {
-          if (bodyAgents && bodyAgents.length > 0) {
-            const n = await materializeAgents(addEntry.dir, bodyAgents);
-            loopLog(body.loopId, `Materialized ${n} agents to ${addEntry.dir}`);
-          }
-          if (bodyRepoConfigs && addEntry.fullName) {
-            const wrote = await materializeCriticGates(addEntry.dir, addEntry.fullName, bodyRepoConfigs);
-            if (wrote) {
-              loopLog(body.loopId, `Materialized critic-gates for ${addEntry.fullName}`);
+          try {
+            if (bodyAgents && bodyAgents.length > 0) {
+              const n = await materializeAgents(addEntry.dir, bodyAgents);
+              loopLog(body.loopId, `Materialized ${n} agents to ${addEntry.dir}`);
             }
+            if (bodyRepoConfigs && addEntry.fullName) {
+              const wrote = await materializeCriticGates(addEntry.dir, addEntry.fullName, bodyRepoConfigs);
+              if (wrote) {
+                loopLog(body.loopId, `Materialized critic-gates for ${addEntry.fullName}`);
+              }
+            }
+          } catch (matErr) {
+            loopError(
+              body.loopId,
+              `context-pack materialization failed for PLAN additional worktree: ${addEntry.dir}`,
+              matErr,
+            );
           }
         }
       } else {
