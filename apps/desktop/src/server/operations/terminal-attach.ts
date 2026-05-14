@@ -55,34 +55,33 @@ function appendInteractiveEvent(
   }
 }
 
-/** Buffer for accumulating PTY output into meaningful chunks. */
-const outputBuffers = new Map<string, string>();
-const OUTPUT_FLUSH_MS = 2000;
-const outputFlushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** Buffer for accumulating PTY output and emitting complete lines. */
+const outputLineBuffers = new Map<string, string>();
 
 /**
- * Accumulate PTY output, strip ANSI codes, and flush as a single event
- * after a 2s pause. Only logs content with at least 10 visible characters
- * to skip TUI rendering noise (cursor moves, redraws, spinners).
+ * Accumulate PTY output, strip ANSI/TUI artifacts, and emit each
+ * complete line as a separate event. Partial lines stay in the buffer
+ * until a newline arrives.
  */
 function bufferAssistantOutput(loopId: string, data: string): void {
-  const existing = outputBuffers.get(loopId) ?? "";
-  outputBuffers.set(loopId, existing + data);
+  const existing = outputLineBuffers.get(loopId) ?? "";
+  const combined = existing + data;
+  const lines = combined.split("\n");
+  // Last element is the incomplete line — keep it in the buffer
+  outputLineBuffers.set(loopId, lines.pop() ?? "");
 
-  const existingTimer = outputFlushTimers.get(loopId);
-  if (existingTimer) clearTimeout(existingTimer);
-
-  outputFlushTimers.set(loopId, setTimeout(() => {
-    const raw = outputBuffers.get(loopId) ?? "";
-    outputBuffers.delete(loopId);
-    outputFlushTimers.delete(loopId);
-
-    // Strip ANSI escape codes and collapse whitespace
-    const cleaned = stripAnsi(raw).replace(/\s+/g, " ").trim();
+  for (const raw of lines) {
+    // Strip ANSI escape codes, then strip common TUI artifacts:
+    // braille spinners (⠐⠂⠒⠰⠤⠆), status symbols (✢✳✶✻✽), box drawing, etc.
+    const cleaned = stripAnsi(raw)
+      .replace(/[⠀-⣿✢✳✶✻✽╭╮╰╯│─┌┐└┘├┤┬┴┼═║╔╗╚╝╠╣╦╩╬·;]/g, "")
+      .replace(/Claude Code/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
     if (cleaned.length >= 10) {
       appendInteractiveEvent(loopId, "assistant", cleaned);
     }
-  }, OUTPUT_FLUSH_MS));
+  }
 }
 
 export function initTerminalAttachWebSocket(
