@@ -713,7 +713,7 @@ function buildClaudePipeline(
       `tee -a ${shellEscape(jsonlFile)}`,
       `python3 ${shellEscape(formatter)}`,
     ].join(" | ");
-    return { cmd: "bash", args: ["-c", `${pipeline}; exit \${PIPESTATUS[0]}`] };
+    return { cmd: "/bin/bash", args: ["-c", `${pipeline}; exit \${PIPESTATUS[0]}`] };
   }
 
   const pipeline = [
