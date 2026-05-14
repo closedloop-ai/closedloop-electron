@@ -114,11 +114,10 @@ function bufferAssistantOutput(loopId: string, data: string): void {
       continue;
     }
 
-    if (cleaned.length < 20) continue;
-    // Skip TUI chrome: key hints, symbol-only lines
-    if (/^(esc|enter|ctrl)\w*to/i.test(cleaned)) continue;
-    if (/^[·✢✳✶✻✽⠀-⣿\s]+$/.test(cleaned)) continue;
-    if (/esctointerrupt/i.test(cleaned)) continue;
+    if (cleaned.length < 3) continue;
+    // Skip only pure TUI noise — let everything else through
+    if (/^[·✢✳✶✻✽⠀-⣿│─┌┐└┘├┤╭╮╰╯═║\s]+$/.test(cleaned)) continue;
+    if (/^esctointerrupt\d*tokens?$/i.test(cleaned)) continue;
     appendInteractiveEvent(loopId, "assistant", cleaned);
   }
 }
@@ -231,7 +230,7 @@ export function initTerminalAttachWebSocket(
             // after Enter to skip the echoed input and TUI redraw before
             // Claude's actual response starts.
             const isEnter = msg.data.includes("\r") || msg.data.includes("\n");
-            typingUntil = Date.now() + (isEnter ? 3000 : 1000);
+            typingUntil = Date.now() + (isEnter ? 1500 : 500);
             if (isEnter) {
               // Clear the assistant line buffer — everything in it is
               // echoed user keystrokes, not Claude's response.
