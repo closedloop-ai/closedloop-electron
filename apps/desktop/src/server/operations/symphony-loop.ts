@@ -7348,7 +7348,7 @@ async function handleLoopRequest(
         updatedAt: now,
         startedAt: existing?.startedAt ?? now,
         apiBaseUrl,
-        interactiveTerminalAvailable: shouldUseInteractiveTerminal,
+        interactiveTerminalAvailable: getInteractiveTerminal?.() === true,
         lastObservedJsonlOffset:
           existing?.lastObservedJsonlOffset ?? jsonlPreSpawnOffset,
       });
