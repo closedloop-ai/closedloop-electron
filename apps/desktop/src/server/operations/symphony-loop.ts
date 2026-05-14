@@ -6602,16 +6602,34 @@ async function handleLoopRequest(
         collectedSpawnMeta.cwd = cwd;
         spawnStartedAt = Date.now();
         if (shouldUseInteractiveTerminal) {
-          // Spawn claude directly via PTY instead of wrapping in a bash
-          // pipeline. The PTY onData handler + extractJsonlFromLog already
-          // capture JSONL output, so the bash grep|tee pipeline is redundant.
-          // Spawning claude directly avoids posix_spawnp("bash") failures in
-          // packaged builds where /bin/bash may not be in the PTY's PATH.
+          // Spawn claude in interactive mode (no -p, no --output-format)
+          // so the user can type to Claude in the attached terminal.
+          // The PTY onData handler + extractJsonlFromLog capture JSONL
+          // output without needing a bash grep|tee pipeline.
+          const interactiveArgs = claudeArgs.filter(
+            (arg, i, arr) =>
+              arg !== "-p" &&
+              arg !== "stream-json" &&
+              !(arg === "--output-format" && arr[i + 1] === "stream-json") &&
+              !(arg === "-" && i > 0 && arr[i - 1] === "-p"),
+          );
+          // Pass prompt file content as initial prompt so Claude starts
+          // with context but stays in interactive mode after responding.
+          if (promptFile) {
+            try {
+              const promptContent = readFileSync(promptFile, "utf-8");
+              interactiveArgs.push(promptContent);
+            } catch {
+              // Fall back to no initial prompt
+            }
+          }
           const jsonlFile = path.join(claudeWorkDir, "claude-output.jsonl");
+          collectedSpawnMeta.command = claudeBinary;
+          collectedSpawnMeta.args = redactSpawnArgs(interactiveArgs);
           ptySession = spawnPtySession({
             loopId: body.loopId,
             file: claudeBinary,
-            args: claudeArgs,
+            args: interactiveArgs,
             cwd,
             env: spawnEnv,
             logFile,
