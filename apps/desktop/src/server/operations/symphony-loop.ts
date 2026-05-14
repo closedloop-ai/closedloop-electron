@@ -762,27 +762,13 @@ export function switchToDetached(loopId: string, jobStore?: JobStore): void {
   const config = entry.spawnConfig;
   const { onceComplete: completeHandler } = entry;
 
-  // If the interactive session already exited (Claude finished the work),
-  // run finalization directly instead of spawning a pointless --resume.
-  // The artifacts are already on disk from the interactive session.
-  if (entry.ptySession.exited) {
-    const exitCode = entry.ptySession.exitCode ?? 0;
-    loopLog(loopId, `Interactive session already exited (code=${exitCode}), finalizing directly`);
-    removeSession(loopId);
-    runningLoops.delete(loopId);
-    if (completeHandler) {
-      // Use current generation so the check passes
-      const gen = entry.bumpGeneration?.() ?? 0;
-      void completeHandler(exitCode, undefined, gen);
-    }
-    return;
-  }
-
   // Bump generation to suppress the killed PTY's exit handler
   const newGen = entry.bumpGeneration?.() ?? 0;
 
-  // Kill the PTY
-  killPty(loopId);
+  // Kill the PTY (no-op if already exited)
+  if (!entry.ptySession.exited) {
+    killPty(loopId);
+  }
   removeSession(loopId);
 
   // Read session ID from session-id.txt or first line of claude-output.jsonl
