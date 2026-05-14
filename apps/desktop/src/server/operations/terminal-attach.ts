@@ -6,6 +6,7 @@ import {
   writeToPty,
   resizePty,
 } from "../../main/pty-session-store.js";
+import { stripAnsi } from "../../main/diagnostics-helpers.js";
 import { safeEqualToken } from "../auth-utils.js";
 
 /**
@@ -54,14 +55,15 @@ function appendInteractiveEvent(
   }
 }
 
-/** Buffer for accumulating PTY output chunks into logical lines. */
+/** Buffer for accumulating PTY output into meaningful chunks. */
 const outputBuffers = new Map<string, string>();
-const OUTPUT_FLUSH_MS = 500;
+const OUTPUT_FLUSH_MS = 2000;
 const outputFlushTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 /**
- * Accumulate PTY output and flush as a single event after a pause.
- * Prevents flooding the JSONL with per-character events.
+ * Accumulate PTY output, strip ANSI codes, and flush as a single event
+ * after a 2s pause. Only logs content with at least 10 visible characters
+ * to skip TUI rendering noise (cursor moves, redraws, spinners).
  */
 function bufferAssistantOutput(loopId: string, data: string): void {
   const existing = outputBuffers.get(loopId) ?? "";
@@ -71,12 +73,15 @@ function bufferAssistantOutput(loopId: string, data: string): void {
   if (existingTimer) clearTimeout(existingTimer);
 
   outputFlushTimers.set(loopId, setTimeout(() => {
-    const buffered = outputBuffers.get(loopId);
-    if (buffered) {
-      appendInteractiveEvent(loopId, "assistant", buffered);
-      outputBuffers.delete(loopId);
-    }
+    const raw = outputBuffers.get(loopId) ?? "";
+    outputBuffers.delete(loopId);
     outputFlushTimers.delete(loopId);
+
+    // Strip ANSI escape codes and collapse whitespace
+    const cleaned = stripAnsi(raw).replace(/\s+/g, " ").trim();
+    if (cleaned.length >= 10) {
+      appendInteractiveEvent(loopId, "assistant", cleaned);
+    }
   }, OUTPUT_FLUSH_MS));
 }
 
@@ -124,6 +129,7 @@ export function initTerminalAttachWebSocket(
   wss.on(
     "connection",
     (ws: WebSocket, _request: http.IncomingMessage, loopId: string) => {
+      let userInputBuffer = "";
       const session = getSession(loopId);
 
       if (!session) {
@@ -179,8 +185,16 @@ export function initTerminalAttachWebSocket(
           const msg = JSON.parse(String(raw)) as Record<string, unknown>;
           if (msg.type === "input" && typeof msg.data === "string") {
             writeToPty(loopId, msg.data);
+            // Accumulate user keystrokes and log when Enter is pressed
             const baseLoopId = loopId.replace(/-interactive$/, "");
-            appendInteractiveEvent(baseLoopId, "user", msg.data);
+            userInputBuffer = (userInputBuffer ?? "") + msg.data;
+            if (msg.data.includes("\r") || msg.data.includes("\n")) {
+              const line = userInputBuffer.replace(/[\r\n]+/g, "").trim();
+              if (line.length > 0) {
+                appendInteractiveEvent(baseLoopId, "user", line);
+              }
+              userInputBuffer = "";
+            }
           } else if (
             msg.type === "resize" &&
             typeof msg.cols === "number" &&
