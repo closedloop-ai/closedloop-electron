@@ -633,8 +633,8 @@ interface RunningLoop {
   ptySession?: PtySession;
   stage: "running" | "post-processing";
   spawnConfig?: LoopSpawnConfig;
-  /** When true, the process was killed for a mode switch — suppress finalization. */
-  modeSwitching?: boolean;
+  /** Call to suppress finalization when killing for a mode switch. */
+  suppressCompletion?: () => void;
 }
 const runningLoops = new Map<string, RunningLoop>();
 
@@ -673,8 +673,8 @@ export function switchToInteractive(loopId: string): PtySession {
   }
   const config = entry.spawnConfig;
 
-  // Mark as mode-switching so onceComplete suppresses finalization
-  entry.modeSwitching = true;
+  // Suppress finalization in the original onceComplete closure
+  entry.suppressCompletion?.();
 
   // Kill the detached process
   try {
@@ -712,8 +712,6 @@ export function switchToInteractive(loopId: string): PtySession {
 
   // Wire exit listener for finalization (this is a real exit, not a mode switch)
   session.exitListeners.add(({ exitCode }) => {
-    const current = runningLoops.get(loopId);
-    if (current?.modeSwitching) return;
     loopLog(loopId, `Interactive process exit, code=${exitCode}`);
   });
 
@@ -734,8 +732,8 @@ export function switchToDetached(loopId: string): void {
   }
   const config = entry.spawnConfig;
 
-  // Mark as mode-switching so onceComplete suppresses finalization
-  entry.modeSwitching = true;
+  // Suppress finalization in the PTY's exit listener
+  entry.suppressCompletion?.();
 
   // Kill the PTY
   killPty(loopId);
@@ -774,8 +772,6 @@ export function switchToDetached(loopId: string): void {
     });
 
     child.on("exit", (code) => {
-      const current = runningLoops.get(loopId);
-      if (current?.modeSwitching) return;
       loopLog(loopId, `Detached resume process exit, code=${code}`);
     });
   } finally {
@@ -7051,7 +7047,11 @@ async function handleLoopRequest(
       : 0;
 
     // Guard against double-firing: both 'error' and 'exit' can emit.
+    // modeSwitchSuppressed is set by switchToInteractive/switchToDetached
+    // via the closure so onceComplete can check it even after the
+    // runningLoops entry has been replaced with the new process.
     let completionHandled = false;
+    let modeSwitchSuppressed = false;
     let stopTailer: { stop: () => void; flush: () => Promise<void> } = {
       stop: () => {},
       flush: () => Promise.resolve(),
@@ -7064,8 +7064,9 @@ async function handleLoopRequest(
       if (completionHandled) return;
       // If the process was killed for a mode switch (interactive ↔ detached),
       // suppress finalization — a replacement process is about to start.
-      const entry = runningLoops.get(body.loopId);
-      if (entry?.modeSwitching) {
+      // Check the closure variable (not the map entry, which may already be
+      // replaced by the new process).
+      if (modeSwitchSuppressed) {
         loopLog(body.loopId, `Mode-switch kill detected, suppressing finalization`);
         return;
       }
@@ -7149,7 +7150,7 @@ async function handleLoopRequest(
         void onceComplete(exitCode);
       });
       pid = ptySession.pid;
-      runningLoops.set(body.loopId, { pid, ptySession, stage: "running", spawnConfig: loopSpawnConfig });
+      runningLoops.set(body.loopId, { pid, ptySession, stage: "running", spawnConfig: loopSpawnConfig, suppressCompletion: () => { modeSwitchSuppressed = true; } });
     } else if (child) {
       child.on("error", (err) => {
         loopError(body.loopId, "Spawn error:", err.message);
@@ -7167,7 +7168,7 @@ async function handleLoopRequest(
         json(context, 500, { error: "Failed to spawn process" });
         return;
       }
-      runningLoops.set(body.loopId, { pid, child, stage: "running", spawnConfig: loopSpawnConfig });
+      runningLoops.set(body.loopId, { pid, child, stage: "running", spawnConfig: loopSpawnConfig, suppressCompletion: () => { modeSwitchSuppressed = true; } });
     }
 
     if (!pid) {
