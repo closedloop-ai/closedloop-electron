@@ -636,8 +636,6 @@ interface RunningLoop {
   child?: ReturnType<typeof spawn>;
   stage: "running" | "post-processing";
   spawnConfig?: LoopSpawnConfig;
-  /** When true, a replacement process is being spawned — skip finalization for the current exit. */
-  replacementPending?: boolean;
   /** Reference to the finalization handler from handleLoopRequest. */
   onceComplete?: (code: number, signal?: string) => Promise<void>;
 }
@@ -675,52 +673,52 @@ export function markTerminalWindowOpen(loopId: string): void {
   }
 }
 
-export function markTerminalWindowClosed(loopId: string, jobStore?: JobStore): void {
+export function markTerminalWindowClosed(loopId: string): void {
   openTerminalWindows.delete(loopId);
   const entry = runningLoops.get(loopId);
   if (!entry) return;
 
-  // Read the session ID — this is the shared session that the sidecar
-  // operated on. A --resume with this ID picks up from the sidecar's
-  // conversation endpoint (the "merge" from the feature branch).
   const config = entry.spawnConfig;
   const claudeWorkDir = config?.claudeWorkDir;
+
+  // If no spawn config or no session ID, just SIGCONT the original
   if (!config || !claudeWorkDir) {
-    // No spawn config — just SIGCONT the original process
-    const pid = getActiveLoopPid(loopId);
-    if (pid) {
-      try { process.kill(-pid, "SIGCONT"); } catch {
-        try { process.kill(pid, "SIGCONT"); } catch { /* already exited */ }
-      }
+    try { process.kill(-entry.pid, "SIGCONT"); } catch {
+      try { process.kill(entry.pid, "SIGCONT"); } catch { /* already exited */ }
     }
     loopLog(loopId, `No spawn config — resumed original process`);
     return;
   }
 
-  const sessionId = readSessionId(claudeWorkDir);
+  // Read sidecar's session ID from the interactive JSONL
+  const interactiveJsonl = path.join(claudeWorkDir, "claude-output-interactive.jsonl");
+  let sidecarSessionId: string | null = null;
+  try {
+    const content = readFileSync(interactiveJsonl, "utf-8");
+    const firstLine = content.split("\n").find((l) => l.trim().startsWith("{"));
+    if (firstLine) {
+      const parsed = JSON.parse(firstLine);
+      if (typeof parsed.session_id === "string") sidecarSessionId = parsed.session_id;
+      if (typeof parsed.sessionId === "string") sidecarSessionId = parsed.sessionId;
+    }
+  } catch { /* file may not exist */ }
+
+  // Fall back to original session ID, then to SIGCONT
+  const sessionId = sidecarSessionId ?? readSessionId(claudeWorkDir);
   if (!sessionId) {
-    // No session ID yet — just SIGCONT the original
-    const pid = getActiveLoopPid(loopId);
-    if (pid) {
-      try { process.kill(-pid, "SIGCONT"); } catch {
-        try { process.kill(pid, "SIGCONT"); } catch { /* already exited */ }
-      }
+    try { process.kill(-entry.pid, "SIGCONT"); } catch {
+      try { process.kill(entry.pid, "SIGCONT"); } catch { /* already exited */ }
     }
     loopLog(loopId, `No session ID — resumed original process`);
     return;
   }
 
-  // Mark replacement pending so onceComplete skips the killed process's exit
-  entry.replacementPending = true;
+  // Keep original alive but paused. Spawn a NEW headless --resume -p
+  // that continues from the sidecar's conversation. When the resume
+  // finishes, call onceComplete to trigger finalization, then kill
+  // the stale original.
+  loopLog(loopId, `Spawning headless resume from sidecar session ${sessionId}`);
 
-  // Kill the original process group (don't SIGCONT — it's stale)
-  const oldPid = entry.pid;
-  try { process.kill(-oldPid, "SIGTERM"); } catch {
-    try { process.kill(oldPid, "SIGTERM"); } catch { /* already exited */ }
-  }
-  loopLog(loopId, `Killed stale headless process (pid=${oldPid}) — merging from interactive session`);
-
-  // Spawn --resume <sessionId> -p to continue from the sidecar's conversation
   const resumeArgs = [
     "--resume", sessionId,
     ...config.baseClaudeArgs.filter((arg) => arg !== "-"),
@@ -736,6 +734,7 @@ export function markTerminalWindowClosed(loopId: string, jobStore?: JobStore): v
     logFd = openSync(config.logFile, "a");
   } catch {
     loopLog(loopId, `Failed to open log file for resume spawn`);
+    try { process.kill(-entry.pid, "SIGCONT"); } catch { /* fallback */ }
     return;
   }
   try {
@@ -748,36 +747,18 @@ export function markTerminalWindowClosed(loopId: string, jobStore?: JobStore): v
     child.unref();
 
     const newPid = child.pid ?? 0;
-    loopLog(loopId, `Spawned resume process (pid=${newPid}) with session ${sessionId}`);
+    loopLog(loopId, `Spawned resume process (pid=${newPid})`);
 
-    // Update running loop entry — clear replacementPending so the new
-    // process's exit will trigger onceComplete
-    runningLoops.set(loopId, {
-      pid: newPid,
-      child,
-      stage: "running",
-      spawnConfig: config,
-    });
-
-    // Update job store PID
-    if (jobStore) {
-      const job = jobStore.getByLoopId(loopId);
-      if (job) {
-        jobStore.upsert({ ...job, pid: newPid, updatedAt: new Date().toISOString() });
-      }
-    }
-
-    // The new child's exit will trigger onceComplete via the child.on("exit")
-    // handler that handleLoopRequest registers... but wait, that handler is
-    // on the OLD child object. We need to wire the NEW child's exit.
-    // Since onceComplete checks completionHandled (still false because we
-    // skipped it via replacementPending), we fire it directly.
-    // Wire the replacement's exit into the original onceComplete.
-    // This is the "merge" — the resume process's exit triggers the
-    // same finalization pipeline as the original would have.
+    const originalPid = entry.pid;
     const savedOnceComplete = entry.onceComplete;
+
     child.on("exit", (code, signal) => {
       loopLog(loopId, `Resume process exit, code=${code}, signal=${signal ?? "none"}`);
+
+      // Kill the stale paused original — it's no longer needed
+      try { process.kill(-originalPid, "SIGKILL"); } catch { /* already exited */ }
+
+      // Trigger finalization via the original onceComplete
       if (savedOnceComplete) {
         void savedOnceComplete(code ?? 0, signal ?? undefined);
       }
