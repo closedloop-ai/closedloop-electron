@@ -241,10 +241,18 @@ import {
 import { getMultiRepoPolicy } from "@closedloop-ai/loops-api/multi-repo-policy";
 import {
   buildMountPathsFooter,
+  buildPeerEnvVars,
   toPeerWorktreeRefs,
   writePeerReposManifest,
 } from "./peer-context.js";
 import { json } from "./response-utils.js";
+import {
+  parseSymphonyLoopRequestBody,
+  SymphonyLoopRequestValidationError,
+  type CodeContextFile,
+  type SymphonyLoopRequestBody,
+  type SymphonyLoopSupportingArtifact,
+} from "./symphony-loop-request.js";
 
 /** Commands that have full spawn/dispatch support in this gateway version. */
 const SUPPORTED_COMMANDS = new Set<LoopCommand>([
@@ -529,8 +537,14 @@ export async function writeFeatureArtifact(
     LoopArtifactType.Feature,
     primaryArtifactId,
   );
+  // Keep prd.md for legacy Feature judges while also exposing the primary
+  // Feature on its own runtime path for judge-input mapping.
   await fs.writeFile(
     path.join(workDir, LoopArtifactFile.Prd),
+    featureArtifact.content,
+  );
+  await fs.writeFile(
+    path.join(workDir, FEATURE_PRIMARY_FILE),
     featureArtifact.content,
   );
 }
@@ -551,6 +565,14 @@ export function readEvaluateOutputs(
 type LoopCommitter = LocalJobCommitter;
 
 type ContextPackAttachment = SharedContextPackAttachment;
+
+const EVALUATE_CONTEXT_DIR = path.join(".closedloop-ai", "context");
+const EVALUATE_ATTACHMENTS_DIR = path.join(
+  ".closedloop-ai",
+  "work",
+  "attachments",
+);
+const FEATURE_PRIMARY_FILE = "feature.md";
 
 export const SKIPPED_ATTACHMENTS_WARNING_FILE = "skipped-attachments.json";
 
@@ -1637,18 +1659,21 @@ function getCurrentBranchImpl(worktreeDir: string): string | null {
 // ---------------------------------------------------------------------------
 
 /**
- * Download attachment files to {claudeWorkDir}/attachments/{attachmentId}-{sanitizedFilename}.
+ * Download attachment files under the command's runtime attachment root.
  * Non-fatal: logs warnings and skips individual failures without aborting.
  */
 async function downloadAttachmentsToDisk(
   claudeWorkDir: string,
   attachments?: ContextPackAttachment[],
+  options?: { useEvaluateRuntimePath?: boolean },
 ): Promise<void> {
   if (!attachments || attachments.length === 0) {
     return;
   }
 
-  const attachmentsDir = path.join(claudeWorkDir, "attachments");
+  const attachmentsDir = options?.useEvaluateRuntimePath
+    ? path.join(claudeWorkDir, EVALUATE_ATTACHMENTS_DIR)
+    : path.join(claudeWorkDir, "attachments");
   mkdirSync(attachmentsDir, { recursive: true });
   const skippedAttachments: Array<{
     id: string;
@@ -2047,6 +2072,247 @@ async function writeArtifactsForGeneratePrd(
       path.join(artifactsDir, `${safeName}-${safeId}.md`),
       header + artifact.content,
     );
+  }
+}
+
+/**
+ * Materialize FEA-585 evaluate context into the same runtime tree passed to
+ * judges:run-judges. The helper is local to Desktop until loops-api publishes
+ * the expanded request contract.
+ */
+async function materializeEvaluateRuntimeContext(
+  claudeWorkDir: string,
+  body: SymphonyLoopRequestBody,
+  expandedRepoPath: string | null,
+): Promise<void> {
+  const contextDir = path.join(claudeWorkDir, EVALUATE_CONTEXT_DIR);
+  let contextDirCreated = false;
+
+  async function ensureContextDir(): Promise<string> {
+    if (!contextDirCreated) {
+      await fs.mkdir(contextDir, { recursive: true });
+      contextDirCreated = true;
+    }
+    return contextDir;
+  }
+
+  if (body.prompt?.trim()) {
+    await fs.writeFile(
+      path.join(await ensureContextDir(), "prompt.md"),
+      body.prompt,
+    );
+  }
+
+  const repoInfo = buildEvaluateRepoInfo(body, expandedRepoPath);
+  if (repoInfo !== null) {
+    await fs.writeFile(
+      path.join(await ensureContextDir(), "repo-info.json"),
+      JSON.stringify(repoInfo, null, 2),
+    );
+  }
+
+  if (body.priorLoopSummaries !== undefined) {
+    await fs.writeFile(
+      path.join(await ensureContextDir(), "prior-loop-summaries.json"),
+      JSON.stringify(body.priorLoopSummaries, null, 2),
+    );
+  }
+
+  if (body.supportingArtifacts.length > 0) {
+    await writeEvaluateSupportingArtifacts(
+      path.join(await ensureContextDir(), "artifacts"),
+      body.supportingArtifacts,
+    );
+  }
+
+  if (body.command === LoopCommand.EvaluateCode) {
+    await fs.writeFile(
+      path.join(await ensureContextDir(), "code-context.json"),
+      JSON.stringify(buildCodeContextFile(body, expandedRepoPath), null, 2),
+    );
+  }
+
+  await downloadAttachmentsToDisk(claudeWorkDir, body.attachments, {
+    useEvaluateRuntimePath: true,
+  });
+}
+
+function buildEvaluateRepoInfo(
+  body: SymphonyLoopRequestBody,
+  expandedRepoPath: string | null,
+): Record<string, unknown> | null {
+  const repoInfo: Record<string, unknown> = {};
+  if (body.repo) {
+    repoInfo.repo = body.repo;
+  }
+  if (expandedRepoPath) {
+    repoInfo.localRepoPath = expandedRepoPath;
+  }
+  return Object.keys(repoInfo).length > 0 ? repoInfo : null;
+}
+
+async function writeEvaluateSupportingArtifacts(
+  artifactsDir: string,
+  artifacts: readonly SymphonyLoopSupportingArtifact[],
+): Promise<void> {
+  await fs.mkdir(artifactsDir, { recursive: true });
+  for (let index = 0; index < artifacts.length; index += 1) {
+    const artifact = artifacts[index];
+    const filename = buildSupportingArtifactFilename(artifact, index);
+    const artifactPath = path.resolve(artifactsDir, filename);
+    if (!isPathWithinDirectory(artifactPath, artifactsDir)) {
+      throw new Error(`Supporting artifact ${artifact.id ?? index} path escapes context directory`);
+    }
+    await fs.writeFile(artifactPath, artifact.content);
+  }
+}
+
+function buildSupportingArtifactFilename(
+  artifact: SymphonyLoopSupportingArtifact,
+  index: number,
+): string {
+  const typeSlug = sanitizePathSegment(artifact.type ?? "artifact");
+  const idSlug = sanitizePathSegment(
+    artifact.id ?? artifact.title ?? `item-${index}`,
+  );
+  const suppliedName = artifact.filename ?? artifact.fileName;
+  const suppliedExt = suppliedName ? path.extname(path.basename(suppliedName)) : "";
+  const ext = suppliedExt && /^[.][A-Za-z0-9]+$/.test(suppliedExt)
+    ? suppliedExt.toLowerCase()
+    : ".md";
+  return `${String(index).padStart(3, "0")}-${typeSlug}-${idSlug}${ext}`;
+}
+
+function sanitizePathSegment(value: string): string {
+  const sanitized = value
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9]+/g, "-")
+    .replaceAll(/^-|-$/g, "");
+  return sanitized || "item";
+}
+
+function isPathWithinDirectory(filePath: string, directory: string): boolean {
+  const resolvedDir = path.resolve(directory);
+  return filePath === resolvedDir || filePath.startsWith(resolvedDir + path.sep);
+}
+
+function buildCodeContextFile(
+  body: SymphonyLoopRequestBody,
+  expandedRepoPath: string | null,
+): CodeContextFile {
+  const provided = body.codeEvaluationContext ?? {};
+  const codeContext: CodeContextFile = { schemaVersion: 1 };
+
+  if (provided.repo !== undefined) {
+    codeContext.repo = provided.repo;
+  } else {
+    const repo = buildCodeContextRepo(body);
+    if (repo !== null) {
+      codeContext.repo = repo;
+    }
+  }
+
+  if (expandedRepoPath !== null) {
+    codeContext.localRepoPath = expandedRepoPath;
+  }
+
+  const parentBranchName = provided.parentBranchName ?? body.parentBranchName ?? null;
+  if (parentBranchName !== null) {
+    codeContext.parentBranchName = parentBranchName;
+  }
+
+  const parentSessionId = provided.parentSessionId ?? body.parentSessionId ?? null;
+  if (parentSessionId !== null) {
+    codeContext.parentSessionId = parentSessionId;
+  }
+
+  const artifactSlug = provided.artifactSlug ?? body.artifactSlug ?? null;
+  if (artifactSlug !== null) {
+    codeContext.artifactSlug = artifactSlug;
+  }
+
+  if (provided.pullRequest !== undefined) {
+    codeContext.pullRequest = provided.pullRequest;
+  }
+
+  const detected =
+    expandedRepoPath !== null
+      ? {
+          ...(provided.detected ?? {}),
+          ...detectGitContext(expandedRepoPath),
+        }
+      : provided.detected;
+  if (detected !== undefined) {
+    codeContext.detected = detected;
+  }
+
+  return codeContext;
+}
+
+function buildCodeContextRepo(
+  body: SymphonyLoopRequestBody,
+): NonNullable<CodeContextFile["repo"]> | null {
+  if (!body.repo) {
+    return null;
+  }
+  const repo: NonNullable<CodeContextFile["repo"]> = {};
+  if (body.repo.fullName !== undefined) {
+    repo.fullName = body.repo.fullName;
+  }
+  if (body.repo.branch !== undefined) {
+    repo.branch = body.repo.branch;
+  }
+  return Object.keys(repo).length > 0 ? repo : null;
+}
+
+function detectGitContext(
+  repoPath: string,
+): NonNullable<CodeContextFile["detected"]> {
+  const detected: NonNullable<CodeContextFile["detected"]> = {};
+  const errors: string[] = [];
+
+  const branchResult = readGitMetadata(repoPath, [
+    "rev-parse",
+    "--abbrev-ref",
+    "HEAD",
+  ]);
+  if (branchResult.ok) {
+    detected.branch = branchResult.value;
+  } else {
+    errors.push(`branch: ${branchResult.error}`);
+  }
+
+  const headResult = readGitMetadata(repoPath, ["rev-parse", "HEAD"]);
+  if (headResult.ok) {
+    detected.headSha = headResult.value;
+  } else {
+    errors.push(`headSha: ${headResult.error}`);
+  }
+
+  detected.gitDetectionError =
+    errors.length > 0 ? errors.join("; ") : null;
+  return detected;
+}
+
+function readGitMetadata(
+  repoPath: string,
+  args: readonly string[],
+): { ok: true; value: string } | { ok: false; error: string } {
+  try {
+    const output = execFileSync(getResolvedGitPath(), [...args], {
+      cwd: repoPath,
+      encoding: "utf-8",
+      stdio: "pipe",
+      timeout: 5_000,
+    }).trim();
+    return { ok: true, value: output };
+  } catch (err) {
+    return {
+      ok: false,
+      error: sanitizeErrorMessage(
+        err instanceof Error ? err.message : String(err),
+      ),
+    };
   }
 }
 // ---------------------------------------------------------------------------
@@ -5292,7 +5558,16 @@ async function handleLoopRequest(
     return;
   }
 
-  const body = rawBody as unknown as LoopRequestBody;
+  let body: SymphonyLoopRequestBody;
+  try {
+    body = parseSymphonyLoopRequestBody(rawBody);
+  } catch (err) {
+    if (err instanceof SymphonyLoopRequestValidationError) {
+      json(context, 400, { error: err.message });
+      return;
+    }
+    throw err;
+  }
   const expectedMcpUrl =
     typeof rawBody.expectedMcpUrl === "string"
       ? rawBody.expectedMcpUrl
@@ -5781,6 +6056,11 @@ async function handleLoopRequest(
             body.primaryArtifactId,
           );
         }
+        await materializeEvaluateRuntimeContext(
+          claudeWorkDir,
+          body,
+          expandedRepoPath,
+        );
       } catch (artifactErr) {
         await fs.rm(claudeWorkDir, { recursive: true, force: true });
         await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
@@ -6282,6 +6562,19 @@ async function handleLoopRequest(
         body.command === LoopCommand.Execute
           ? crypto.randomBytes(32).toString("base64url")
           : undefined;
+      // Multi-repo env vars must travel in Claude's spawn env, not only in
+      // setup-closedloop.sh's config.env file or the SubagentStart hook's
+      // additionalContext. Without them, every bash subshell the agents launch
+      // sees CLOSEDLOOP_ADD_DIRS as empty and the plan-draft-writer skill
+      // silently skips its multi-repo section, producing a single-repo plan.
+      // Gated on getMultiRepoPolicy().supportsAdditionalRepos to mirror the
+      // --add-dir injection at lines 6488 and 6642 — single-repo and
+      // peer-disabled commands stay byte-identical to today. See FEA-1088.
+      const peerEnvVars =
+        additionalWorktreeDirs.length > 0 &&
+        getMultiRepoPolicy(body.command).supportsAdditionalRepos
+          ? buildPeerEnvVars(additionalWorktreeDirs)
+          : {};
       const spawnEnv: Record<string, string> = await getShellEnv({
         CLOSEDLOOP_WORKDIR: claudeWorkDir,
         CLOSEDLOOP_PLAN_FILE: closedLoopPlanFile,
@@ -6302,6 +6595,7 @@ async function handleLoopRequest(
         // the desktop app validated in pre-flight (avoids PATH mismatches
         // between Electron's env and the user's login shell).
         CLAUDE_BIN: claudeBinary,
+        ...peerEnvVars,
       });
       clearUserVisibleLoopFailureMarker(claudeWorkDir);
 
