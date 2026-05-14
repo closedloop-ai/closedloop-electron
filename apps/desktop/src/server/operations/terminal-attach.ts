@@ -227,12 +227,19 @@ export function initTerminalAttachWebSocket(
           const msg = JSON.parse(String(raw)) as Record<string, unknown>;
           if (msg.type === "input" && typeof msg.data === "string") {
             writeToPty(loopId, msg.data);
-            // Suppress assistant output logging for 1s after each keystroke
-            // to avoid capturing PTY echo as assistant output.
-            typingUntil = Date.now() + 1000;
+            // Suppress assistant output logging while typing. Extend to 3s
+            // after Enter to skip the echoed input and TUI redraw before
+            // Claude's actual response starts.
+            const isEnter = msg.data.includes("\r") || msg.data.includes("\n");
+            typingUntil = Date.now() + (isEnter ? 3000 : 1000);
+            if (isEnter) {
+              // Clear the assistant line buffer — everything in it is
+              // echoed user keystrokes, not Claude's response.
+              outputLineBuffers.delete(baseLoopId);
+            }
             // Accumulate user keystrokes and log when Enter is pressed
             userInputBuffer = (userInputBuffer ?? "") + msg.data;
-            if (msg.data.includes("\r") || msg.data.includes("\n")) {
+            if (isEnter) {
               const line = userInputBuffer.replace(/[\r\n]+/g, "").trim();
               if (line.length > 0) {
                 appendInteractiveEvent(baseLoopId, "user", line);
