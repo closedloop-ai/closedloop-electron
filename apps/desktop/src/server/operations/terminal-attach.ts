@@ -37,11 +37,6 @@ export function registerInteractiveJsonlPath(loopId: string, jsonlPath: string):
  * Write an event to the interactive JSONL file in the format the
  * output-tailer recognizes (type: "user"/"assistant" with content blocks).
  */
-/** Estimate token count from text length (~4 chars per token). */
-function estimateTokens(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
-}
-
 /**
  * Write an event to the interactive JSONL in the same format as
  * --output-format stream-json so parseTokenUsage and the output-tailer
@@ -55,34 +50,20 @@ function appendInteractiveEvent(
   const jsonlPath = interactiveJsonlPaths.get(loopId);
   if (!jsonlPath || !text.trim()) return;
   try {
-    const tokens = estimateTokens(text);
-    const record: Record<string, unknown> = {
+    // Don't include token usage on text events — real token counts
+    // come from the TUI token counter extracted in bufferAssistantOutput.
+    const record = {
       type,
-      message: {
-        content: [{ type: "text", text }],
-        ...(type === "assistant" ? {
-          usage: {
-            input_tokens: 0,
-            output_tokens: tokens,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-          },
-        } : {}),
-      },
+      message: { content: [{ type: "text", text }] },
     };
-    if (type === "user") {
-      (record.message as Record<string, unknown>).usage = {
-        input_tokens: tokens,
-        output_tokens: 0,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
-      };
-    }
     appendFileSync(jsonlPath, JSON.stringify(record) + "\n");
   } catch {
     // Best effort
   }
 }
+
+/** Track last seen token count per loop for delta computation. */
+const lastTokenCounts = new Map<string, number>();
 
 /** Buffer for accumulating PTY output and emitting complete lines. */
 const outputLineBuffers = new Map<string, string>();
@@ -101,13 +82,42 @@ function bufferAssistantOutput(loopId: string, data: string): void {
 
   for (const raw of lines) {
     const cleaned = stripAnsi(raw).replace(/\s+/g, " ").trim();
+
+    // Extract token counts from TUI status lines (e.g. "esctointerrupt52215tokens")
+    const tokenMatch = cleaned.match(/(\d{3,})tokens?/i);
+    if (tokenMatch) {
+      const currentTokens = parseInt(tokenMatch[1], 10);
+      const lastTokens = lastTokenCounts.get(loopId) ?? 0;
+      if (currentTokens > lastTokens) {
+        const delta = currentTokens - lastTokens;
+        lastTokenCounts.set(loopId, currentTokens);
+        // Emit a token usage record with the delta
+        const jsonlPath = interactiveJsonlPaths.get(loopId);
+        if (jsonlPath) {
+          try {
+            const record = {
+              type: "assistant",
+              message: {
+                content: [],
+                usage: {
+                  input_tokens: Math.ceil(delta * 0.8),
+                  output_tokens: Math.ceil(delta * 0.2),
+                  cache_creation_input_tokens: 0,
+                  cache_read_input_tokens: 0,
+                },
+              },
+            };
+            appendFileSync(jsonlPath, JSON.stringify(record) + "\n");
+          } catch { /* best effort */ }
+        }
+      }
+      continue;
+    }
+
     if (cleaned.length < 20) continue;
-    // Skip TUI chrome: spinners, status lines, key hints, token counters
+    // Skip TUI chrome: key hints, symbol-only lines
     if (/^(esc|enter|ctrl)\w*to/i.test(cleaned)) continue;
-    if (/^\d+tokens?$/i.test(cleaned)) continue;
     if (/^[·✢✳✶✻✽⠀-⣿\s]+$/.test(cleaned)) continue;
-    if (/^(Thinking|Actioning|Churning|Drizzling|Choreograph)/i.test(cleaned)) continue;
-    if (/tokens?\s*·\s*thinking/i.test(cleaned)) continue;
     if (/esctointerrupt/i.test(cleaned)) continue;
     appendInteractiveEvent(loopId, "assistant", cleaned);
   }
