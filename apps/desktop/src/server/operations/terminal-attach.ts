@@ -77,7 +77,7 @@ const captures = new Map<string, TerminalCapture>();
 function feedAndExtract(loopId: string, data: string): void {
   let cap = captures.get(loopId);
   if (!cap) {
-    const term = new Terminal({ cols: 120, rows: 40, scrollback: 1000 });
+    const term = new Terminal({ cols: 120, rows: 40, scrollback: 1000, allowProposedApi: true });
     cap = { term, lastLineCount: 0, recentLines: new Set(), flushTimer: null, typingUntil: 0, lastTokenCount: 0 };
     captures.set(loopId, cap);
   }
