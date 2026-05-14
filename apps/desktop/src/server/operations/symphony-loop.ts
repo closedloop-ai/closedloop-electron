@@ -879,7 +879,7 @@ export async function materializeAgents(
   const resolvedAgentsDir = path.resolve(agentsDir);
   let written = 0;
   for (const agent of agents) {
-    if (typeof agent.prompt !== "string") continue;
+    if (typeof agent.slug !== "string" || typeof agent.prompt !== "string") continue;
     const safeSlug = slugifyLoopId(agent.slug);
     if (!safeSlug) continue;
     const filePath = path.resolve(agentsDir, `${safeSlug}.md`);
@@ -914,6 +914,25 @@ export async function materializeCriticGates(
   );
 
   return true;
+}
+
+async function materializeContextPack(
+  worktreeDir: string,
+  repoFullName: string | undefined,
+  loopId: string,
+  agents: ContextPackAgent[] | undefined,
+  repoConfigs: ContextPackRepoConfig[] | undefined,
+): Promise<void> {
+  if (agents && agents.length > 0) {
+    const n = await materializeAgents(worktreeDir, agents);
+    loopLog(loopId, `Materialized ${n} agents to ${worktreeDir}`);
+  }
+  if (repoConfigs && repoFullName) {
+    const wrote = await materializeCriticGates(worktreeDir, repoFullName, repoConfigs);
+    if (wrote) {
+      loopLog(loopId, `Materialized critic-gates for ${repoFullName}`);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -6143,16 +6162,7 @@ async function handleLoopRequest(
 
         for (const addEntry of additionalWorktreeDirs) {
           try {
-            if (bodyAgents && bodyAgents.length > 0) {
-              const n = await materializeAgents(addEntry.dir, bodyAgents);
-              loopLog(body.loopId, `Materialized ${n} agents to ${addEntry.dir}`);
-            }
-            if (bodyRepoConfigs && addEntry.fullName) {
-              const wrote = await materializeCriticGates(addEntry.dir, addEntry.fullName, bodyRepoConfigs);
-              if (wrote) {
-                loopLog(body.loopId, `Materialized critic-gates for ${addEntry.fullName}`);
-              }
-            }
+            await materializeContextPack(addEntry.dir, addEntry.fullName, body.loopId, bodyAgents, bodyRepoConfigs);
           } catch (matErr) {
             loopError(
               body.loopId,
@@ -6246,16 +6256,7 @@ async function handleLoopRequest(
         // `provisionAdditionalRepoWorktrees`.
         for (const addEntry of additionalWorktreeDirs) {
           try {
-            if (bodyAgents && bodyAgents.length > 0) {
-              const n = await materializeAgents(addEntry.dir, bodyAgents);
-              loopLog(body.loopId, `Materialized ${n} agents to ${addEntry.dir}`);
-            }
-            if (bodyRepoConfigs && addEntry.fullName) {
-              const wrote = await materializeCriticGates(addEntry.dir, addEntry.fullName, bodyRepoConfigs);
-              if (wrote) {
-                loopLog(body.loopId, `Materialized critic-gates for ${addEntry.fullName}`);
-              }
-            }
+            await materializeContextPack(addEntry.dir, addEntry.fullName, body.loopId, bodyAgents, bodyRepoConfigs);
             await runBootstrapIfNeeded(addEntry.dir, body.loopId);
           } catch (bootstrapErr) {
             loopError(
@@ -6312,16 +6313,14 @@ async function handleLoopRequest(
         }
         throw e;
       }
-      const primaryRepoFullName = body.repo?.fullName ?? "";
-      if (bodyAgents && bodyAgents.length > 0) {
-        const n = await materializeAgents(worktreeDir, bodyAgents);
-        loopLog(body.loopId, `Materialized ${n} agents to ${worktreeDir}`);
-      }
-      if (bodyRepoConfigs && primaryRepoFullName) {
-        const wrote = await materializeCriticGates(worktreeDir, primaryRepoFullName, bodyRepoConfigs);
-        if (wrote) {
-          loopLog(body.loopId, `Materialized critic-gates for ${primaryRepoFullName}`);
-        }
+      try {
+        await materializeContextPack(worktreeDir, body.repo?.fullName, body.loopId, bodyAgents, bodyRepoConfigs);
+      } catch (matErr) {
+        loopError(
+          body.loopId,
+          `context-pack materialization failed for primary worktree: ${worktreeDir}`,
+          matErr,
+        );
       }
       await runBootstrapIfNeeded(worktreeDir, body.loopId);
       claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
