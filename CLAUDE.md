@@ -32,7 +32,16 @@ This rule does NOT apply to internal contracts that ship as a single unit with t
 
 ## Learned Patterns
 
+### Code Organization
 - **[mistake]**: When adding new operation files, do not copy-paste helper functions from existing files. Check for shared modules first. The `json()` response helper was duplicated across 33 files before being extracted into `response-utils.ts`.
+
+### Testing
+- **[mistake]**: When writing tests, check for existing shared test helpers (conftest, test_helpers, shared fixtures) before defining local helpers. Duplicated test setup functions drift silently when the shared contract changes. (context: tests|duplication|helpers)
+
+### Code Quality
+- **[mistake]**: When adding code comments, verify they describe the current behavior — not a prior design or planned feature. Comments referencing non-existent files, removed fields, or superseded workflows mislead future readers. (context: comments|accuracy|stale)
+- **[mistake]**: Never fabricate history in changelogs, commit messages, or comments. Do not claim code "replaces" or "fixes" a prior implementation unless that implementation verifiably exists in the codebase or git history. (context: changelog|hallucination|fabrication)
+- **[mistake]**: Before adding a fallback or recovery path, verify the triggering condition can actually occur. Dead fallbacks that read from files never written or variables never set create false confidence in error handling. (context: dead-code|fallback|unreachable)
 
 ## Commit Messages
 
