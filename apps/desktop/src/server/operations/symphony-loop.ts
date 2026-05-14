@@ -6602,17 +6602,15 @@ async function handleLoopRequest(
         collectedSpawnMeta.cwd = cwd;
         spawnStartedAt = Date.now();
         if (shouldUseInteractiveTerminal) {
-          // Spawn claude directly in interactive mode (no -p, no
-          // --output-format) so the user can type to Claude in the
-          // attached terminal. Strip print-mode flags so Claude stays
-          // in its interactive TUI instead of processing and exiting.
+          // Spawn claude directly in interactive mode — strip only -p
+          // (print mode) so Claude stays in its TUI after responding.
+          // Keep --output-format stream-json so JSONL extraction and
+          // token usage parsing still work on exit.
           // Spawning claude directly (not via bash pipeline) avoids
           // posix_spawnp failures in packaged builds.
           const interactiveArgs = claudeArgs.filter(
             (arg, i, arr) =>
               arg !== "-p" &&
-              arg !== "stream-json" &&
-              !(arg === "--output-format" && arr[i + 1] === "stream-json") &&
               !(arg === "-" && i > 0 && arr[i - 1] === "-p"),
           );
           if (promptFile) {
