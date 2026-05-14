@@ -612,24 +612,11 @@ function isExecutionResult(value: unknown): value is ExecutionResult {
   return true;
 }
 
-/** Minimal config needed to spawn a resume process. */
-interface LoopSpawnConfig {
-  claudeBinary: string;
-  baseClaudeArgs: string[];
-  cwd: string;
-  spawnEnv: Record<string, string>;
-  logFile: string;
-  claudeWorkDir: string;
-}
-
 /** Track running loop processes for cancellation and to prevent GC of ChildProcess. */
 interface RunningLoop {
   pid: number;
   child?: ReturnType<typeof spawn>;
   stage: "running" | "post-processing";
-  spawnConfig?: LoopSpawnConfig;
-  /** Reference to the finalization handler from handleLoopRequest. */
-  onceComplete?: (code: number, signal?: string) => Promise<void>;
 }
 const runningLoops = new Map<string, RunningLoop>();
 
@@ -682,82 +669,13 @@ export function markTerminalWindowClosed(loopId: string): void {
     return;
   }
 
-  // Read sidecar's session ID from the interactive JSONL
-  const interactiveJsonl = path.join(claudeWorkDir, "claude-output-interactive.jsonl");
-  let sidecarSessionId: string | null = null;
-  try {
-    const content = readFileSync(interactiveJsonl, "utf-8");
-    const firstLine = content.split("\n").find((l) => l.trim().startsWith("{"));
-    if (firstLine) {
-      const parsed = JSON.parse(firstLine);
-      if (typeof parsed.session_id === "string") sidecarSessionId = parsed.session_id;
-      if (typeof parsed.sessionId === "string") sidecarSessionId = parsed.sessionId;
-    }
-  } catch { /* file may not exist */ }
-
-  // Fall back to original session ID, then to SIGCONT
-  const sessionId = sidecarSessionId ?? readSessionId(claudeWorkDir);
-  if (!sessionId) {
-    try { process.kill(-entry.pid, "SIGCONT"); } catch {
-      try { process.kill(entry.pid, "SIGCONT"); } catch { /* already exited */ }
-    }
-    loopLog(loopId, `No session ID — resumed original process`);
-    return;
+  // Just SIGCONT the original — let it finish its own work.
+  // The sidecar's contributions (task changes, guidance) are on disk
+  // and the original picks them up as it continues.
+  try { process.kill(-entry.pid, "SIGCONT"); } catch {
+    try { process.kill(entry.pid, "SIGCONT"); } catch { /* already exited */ }
   }
-
-  // Keep original alive but paused. Spawn a NEW headless --resume -p
-  // that continues from the sidecar's conversation. When the resume
-  // finishes, call onceComplete to trigger finalization, then kill
-  // the stale original.
-  loopLog(loopId, `Spawning headless resume from sidecar session ${sessionId}`);
-
-  const resumeArgs = [
-    "--resume", sessionId,
-    ...config.baseClaudeArgs.filter((arg) => arg !== "-"),
-  ];
-  const pipeline = buildClaudePipeline(
-    resumeArgs,
-    config.claudeWorkDir,
-    config.claudeBinary,
-  );
-
-  let logFd: number;
-  try {
-    logFd = openSync(config.logFile, "a");
-  } catch {
-    loopLog(loopId, `Failed to open log file for resume spawn`);
-    try { process.kill(-entry.pid, "SIGCONT"); } catch { /* fallback */ }
-    return;
-  }
-  try {
-    const child = spawn(pipeline.cmd, pipeline.args, {
-      cwd: config.cwd,
-      detached: true,
-      stdio: ["ignore", logFd, logFd],
-      env: config.spawnEnv,
-    });
-    child.unref();
-
-    const newPid = child.pid ?? 0;
-    loopLog(loopId, `Spawned resume process (pid=${newPid})`);
-
-    const originalPid = entry.pid;
-    const savedOnceComplete = entry.onceComplete;
-
-    child.on("exit", (code, signal) => {
-      loopLog(loopId, `Resume process exit, code=${code}, signal=${signal ?? "none"}`);
-
-      // Kill the stale paused original — it's no longer needed
-      try { process.kill(-originalPid, "SIGKILL"); } catch { /* already exited */ }
-
-      // Trigger finalization via the original onceComplete
-      if (savedOnceComplete) {
-        void savedOnceComplete(code ?? 0, signal ?? undefined);
-      }
-    });
-  } finally {
-    closeSync(logFd);
-  }
+  loopLog(loopId, `Resumed headless process group (pid=${entry.pid}) — terminal window closed`);
 }
 
 export function isTerminalWindowOpen(loopId: string): boolean {
@@ -6692,7 +6610,6 @@ async function handleLoopRequest(
     let loopPerfTelemetryStartOffset = 0;
     let loopPerfWatcherHandle: LoopPerfTelemetryWatcherHandle | undefined;
     let interactiveTerminalAvailable = false;
-    let loopSpawnConfig: LoopSpawnConfig | undefined;
     const collectedSpawnMeta: {
       command: string;
       args: string[];
@@ -6838,14 +6755,6 @@ async function handleLoopRequest(
         spawnStartedAt = Date.now();
         if (shouldUseInteractiveTerminal) {
           interactiveTerminalAvailable = true;
-          loopSpawnConfig = {
-            claudeBinary,
-            baseClaudeArgs: claudeArgs,
-            cwd,
-            spawnEnv,
-            logFile,
-            claudeWorkDir,
-          };
         }
         spawnDetachedProcess(pipeline.cmd, pipeline.args, cwd);
       };
@@ -7278,7 +7187,7 @@ async function handleLoopRequest(
         json(context, 500, { error: "Failed to spawn process" });
         return;
       }
-      runningLoops.set(body.loopId, { pid, child, stage: "running", spawnConfig: loopSpawnConfig, onceComplete });
+      runningLoops.set(body.loopId, { pid, child, stage: "running" });
     }
 
     if (!pid) {
