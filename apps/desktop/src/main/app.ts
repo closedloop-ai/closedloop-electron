@@ -2484,7 +2484,7 @@ export class DesktopApplication {
       const trimmedLoopId = loopId.trim();
 
       // Switch the running loop from detached (-p) to interactive (--resume, no -p)
-      switchToInteractive(trimmedLoopId);
+      switchToInteractive(trimmedLoopId, this.jobStore);
 
       const job = this.jobStore.getByLoopId(trimmedLoopId);
       const port = this.server?.getActivePort() ?? 19432;
@@ -2515,7 +2515,7 @@ export class DesktopApplication {
 
       // When the terminal window closes, switch back to detached mode
       win.on("closed", () => {
-        switchToDetached(trimmedLoopId);
+        switchToDetached(trimmedLoopId, this.jobStore);
       });
 
       return { opened: true };

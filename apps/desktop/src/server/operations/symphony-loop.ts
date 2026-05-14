@@ -659,7 +659,7 @@ export function unregisterLoop(loopId: string): void {
  * Kill the current detached process and respawn Claude with --resume in a PTY
  * so the user can interact with it in the terminal window.
  */
-export function switchToInteractive(loopId: string): PtySession {
+export function switchToInteractive(loopId: string, jobStore?: JobStore): PtySession {
   const entry = runningLoops.get(loopId);
   if (!entry) {
     throw new Error(`No running loop for loopId=${loopId}`);
@@ -713,6 +713,14 @@ export function switchToInteractive(loopId: string): PtySession {
     spawnConfig: config,
   });
 
+  // Update job store PID so enrichJobSnapshot sees the new process as alive
+  if (jobStore) {
+    const job = jobStore.getByLoopId(loopId);
+    if (job) {
+      jobStore.upsert({ ...job, pid: session.pid, updatedAt: new Date().toISOString() });
+    }
+  }
+
   // Wire exit listener for finalization (this is a real exit, not a mode switch)
   session.exitListeners.add(({ exitCode }) => {
     loopLog(loopId, `Interactive process exit, code=${exitCode}`);
@@ -725,7 +733,7 @@ export function switchToInteractive(loopId: string): PtySession {
  * Kill the interactive PTY session and respawn Claude with --resume + -p
  * in a detached child process so it continues unattended.
  */
-export function switchToDetached(loopId: string): void {
+export function switchToDetached(loopId: string, jobStore?: JobStore): void {
   const entry = runningLoops.get(loopId);
   if (!entry) return;
   if (!entry.spawnConfig) return;
@@ -773,6 +781,14 @@ export function switchToDetached(loopId: string): void {
       stage: "running",
       spawnConfig: config,
     });
+
+    // Update job store PID so enrichJobSnapshot sees the new process as alive
+    if (jobStore) {
+      const job = jobStore.getByLoopId(loopId);
+      if (job) {
+        jobStore.upsert({ ...job, pid, updatedAt: new Date().toISOString() });
+      }
+    }
 
     child.on("exit", (code) => {
       loopLog(loopId, `Detached resume process exit, code=${code}`);
