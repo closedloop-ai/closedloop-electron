@@ -620,7 +620,6 @@ function isExecutionResult(value: unknown): value is ExecutionResult {
 interface RunningLoop {
   pid: number;
   child?: ReturnType<typeof spawn>;
-  ptySession?: PtySession;
   stage: "running" | "post-processing";
 }
 const runningLoops = new Map<string, RunningLoop>();
@@ -636,6 +635,68 @@ export function registerRecoveredLoop(loopId: string, pid: number): void {
 
 export function unregisterLoop(loopId: string): void {
   runningLoops.delete(loopId);
+}
+
+// ---------------------------------------------------------------------------
+// Interactive terminal sidecar
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the Claude session ID from the work directory.
+ * Checks session-id.txt first, then falls back to parsing the first line
+ * of claude-output.jsonl for the session_id field.
+ */
+function readSessionId(claudeWorkDir: string): string | null {
+  const txtFile = path.join(claudeWorkDir, "session-id.txt");
+  const fromTxt = readTextFile(txtFile)?.trim();
+  if (fromTxt) return fromTxt;
+
+  const jsonlFile = path.join(claudeWorkDir, "claude-output.jsonl");
+  try {
+    const content = readFileSync(jsonlFile, "utf-8");
+    const firstLine = content.split("\n").find((l) => l.trim().startsWith("{"));
+    if (firstLine) {
+      const parsed = JSON.parse(firstLine);
+      if (typeof parsed.session_id === "string") return parsed.session_id;
+      if (typeof parsed.sessionId === "string") return parsed.sessionId;
+    }
+  } catch {
+    // File doesn't exist or isn't valid JSON
+  }
+  return null;
+}
+
+/**
+ * Spawn an interactive Claude sidecar that resumes the session from the
+ * given job's work directory. The sidecar runs alongside the original -p
+ * process — it does NOT kill or replace it. The user can attach a terminal
+ * window to interact with Claude while the original process continues.
+ *
+ * Returns the PTY session, or null if the session ID can't be found yet.
+ */
+export function spawnInteractiveSidecar(
+  claudeWorkDir: string,
+  loopId: string,
+  cwd: string,
+): PtySession | null {
+  const sessionId = readSessionId(claudeWorkDir);
+  if (!sessionId) return null;
+
+  const claudeBinary = getResolvedClaudePath();
+  const logFile = path.join(claudeWorkDir, "symphony-loop.log");
+  const jsonlFile = path.join(claudeWorkDir, "claude-output.jsonl");
+
+  const args = ["--resume", sessionId];
+
+  return spawnPtySession({
+    loopId: `${loopId}-interactive`,
+    file: claudeBinary,
+    args,
+    cwd,
+    env: process.env as Record<string, string>,
+    logFile,
+    jsonlFile,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -6451,7 +6512,6 @@ async function handleLoopRequest(
     // Spawn process
     const logFile = path.join(claudeWorkDir, "symphony-loop.log");
     let child: ReturnType<typeof spawn> | undefined;
-    let ptySession: PtySession | undefined;
     let spawnStartedAt = 0;
     let decisionTableVerificationStartOffset = 0;
     let loopPerfTelemetryStartOffset = 0;
@@ -6602,35 +6662,7 @@ async function handleLoopRequest(
         collectedSpawnMeta.cwd = cwd;
         spawnStartedAt = Date.now();
         if (shouldUseInteractiveTerminal) {
-          // Spawn claude directly via PTY with -p so it runs to completion
-          // unattended. The PTY provides a terminal the user can attach to
-          // for live observation and stdin forwarding.
-          //
-          // The bash pipeline uses stdin redirect (< promptFile) to feed the
-          // prompt, but PTY spawn has no stdin redirect. Replace "-p -" with
-          // "-p <prompt content>" so the prompt is passed as a positional arg.
-          const ptyArgs = claudeArgs.filter((arg) => arg !== "-");
-          if (promptFile) {
-            try {
-              ptyArgs.push(readFileSync(promptFile, "utf-8"));
-            } catch {
-              // Prompt file missing — Claude will run without initial prompt
-            }
-          }
-          const jsonlFile = path.join(claudeWorkDir, "claude-output.jsonl");
-          collectedSpawnMeta.command = claudeBinary;
-          collectedSpawnMeta.args = redactSpawnArgs(ptyArgs);
-          ptySession = spawnPtySession({
-            loopId: body.loopId,
-            file: claudeBinary,
-            args: ptyArgs,
-            cwd,
-            env: spawnEnv,
-            logFile,
-            jsonlFile,
-          });
           interactiveTerminalAvailable = true;
-          return;
         }
         spawnDetachedProcess(pipeline.cmd, pipeline.args, cwd);
       };
@@ -7009,14 +7041,7 @@ async function handleLoopRequest(
     };
 
     let pid: number | null = null;
-    if (ptySession) {
-      ptySession.exitListeners.add(({ exitCode }) => {
-        loopLog(body.loopId, `Process exit event, code=${exitCode}`);
-        void onceComplete(exitCode);
-      });
-      pid = ptySession.pid;
-      runningLoops.set(body.loopId, { pid, ptySession, stage: "running" });
-    } else if (child) {
+    if (child) {
       child.on("error", (err) => {
         loopError(body.loopId, "Spawn error:", err.message);
         void onceComplete(1);

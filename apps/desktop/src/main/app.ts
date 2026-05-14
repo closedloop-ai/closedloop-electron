@@ -69,7 +69,7 @@ import {
   computeSymphonyDir,
   SymphonyDirNotConfiguredError,
 } from "../server/operations/symphony-utils.js";
-import { getResolvedGitPath, resetResolvedClaudePath } from "../server/operations/symphony-loop.js";
+import { getResolvedGitPath, resetResolvedClaudePath, spawnInteractiveSidecar } from "../server/operations/symphony-loop.js";
 import { resetMcpDetectionCache } from "../server/operations/mcp-detection.js";
 import { resolveBinaryFromLoginShell } from "../server/shell-path.js";
 import { getCodePluginVersion } from "../server/operations/plugin-cache.js";
@@ -2483,8 +2483,24 @@ export class DesktopApplication {
       }
       const trimmedLoopId = loopId.trim();
       const job = this.jobStore.getByLoopId(trimmedLoopId);
+      if (!job?.claudeWorkDir) {
+        throw new Error("Job has no work directory");
+      }
+
+      // Spawn an interactive sidecar that resumes the Claude session.
+      // The original -p process keeps running — this is an independent
+      // process for the user to interact with.
+      const sidecarSession = spawnInteractiveSidecar(
+        job.claudeWorkDir,
+        trimmedLoopId,
+        job.claudeWorkDir,
+      );
+      if (!sidecarSession) {
+        throw new Error("Claude session not ready yet — try again in a moment");
+      }
+
       const port = this.server?.getActivePort() ?? 19432;
-      const command = job?.command ?? "";
+      const command = job.command ?? "";
       const authToken = this.isNoAuthMode() ? "" : this.gatewayAuthToken;
 
       // Resolve terminal.html path (same two-probe pattern as window.ts)
@@ -2499,8 +2515,9 @@ export class DesktopApplication {
           : path.join(cwd, "apps", "desktop", "src", "renderer", "terminal.html");
       }
 
-      // Terminal window is just a view into the PTY — closing it does not
-      // affect the running Claude process.
+      // The terminal window attaches to the sidecar PTY session.
+      // Closing the window does not kill the sidecar or the original process.
+      const sidecarLoopId = `${trimmedLoopId}-interactive`;
       const win = new BrowserWindow({
         width: 900,
         height: 600,
@@ -2508,7 +2525,7 @@ export class DesktopApplication {
         webPreferences: { contextIsolation: true, sandbox: true },
       });
       void win.loadFile(htmlPath, {
-        query: { loopId: trimmedLoopId, port: String(port), command, token: authToken },
+        query: { loopId: sidecarLoopId, port: String(port), command, token: authToken },
       });
       return { opened: true };
     });
