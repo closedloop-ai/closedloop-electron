@@ -125,12 +125,6 @@ export class SettingsStore {
       this.store.set("activeConfigId", null as DesktopSettings["activeConfigId"]);
     }
 
-    // Migration: flip interactiveTerminal default from false → true.
-    // Existing installs have `false` persisted; delete it so the new default applies.
-    if ("interactiveTerminal" in raw && raw.interactiveTerminal === false) {
-      this.store.delete("interactiveTerminal" as keyof DesktopSettings);
-    }
-
     this.migrateSavedConfigManagedFields();
   }
 
