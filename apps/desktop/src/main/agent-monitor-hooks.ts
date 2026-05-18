@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  renameSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -104,7 +105,7 @@ function makeHookCommand(handler: string, hookType: string): string {
   // (ELECTRON_RUN_AS_NODE) so no system `node` is required. Port defaults to
   // 4820 inside hook-handler.js, which matches our fixed sidecar port — so no
   // per-hook env is needed (avoids depending on Claude Code honoring it).
-  return `ELECTRON_RUN_AS_NODE=1 "${process.execPath}" "${handler}" ${hookType}`;
+  return `ELECTRON_RUN_AS_NODE=1 "${process.execPath}" "${handler}" ${JSON.stringify(hookType)}`;
 }
 
 function makeHookEntry(
@@ -128,8 +129,14 @@ function readSettings(file: string): Record<string, unknown> {
 }
 
 function writeSettings(file: string, settings: unknown): void {
-  mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify(settings, null, 2) + "\n", "utf8");
+  const dir = path.dirname(file);
+  mkdirSync(dir, { recursive: true });
+  const tempFile = path.join(
+    dir,
+    `${path.basename(file)}.${process.pid}.${Date.now()}.tmp`,
+  );
+  writeFileSync(tempFile, JSON.stringify(settings, null, 2) + "\n", "utf8");
+  renameSync(tempFile, file);
 }
 
 // Idempotent: replaces a stale entry of ours in place (self-heals a moved

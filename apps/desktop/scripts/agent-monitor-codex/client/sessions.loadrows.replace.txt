@@ -1,6 +1,4 @@
         let rows = res.sessions;
-        if (filter === "waiting") rows = rows.filter(isSessionAwaitingInput);
-        if (harness)
-          rows = rows.filter((s) => (s.harness || "claude").toLowerCase() === harness);
+        rows = rows.filter(isSessionAwaitingInput);
         setTotal(rows.length);
         setSessions(rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE));

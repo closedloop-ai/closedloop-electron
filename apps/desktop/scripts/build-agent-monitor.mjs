@@ -45,12 +45,21 @@ const sourceClientDir = resolvePackageRoot(SOURCE_CLIENT_PACKAGE);
 const sourceRootPkg = path.join(sourceRootDir, "package.json");
 const sourceClientPkg = path.join(sourceClientDir, "package.json");
 const sourceServerEntry = path.join(sourceRootDir, "server", "index.js");
+const sourceSessionsRoute = path.join(sourceRootDir, "server", "routes", "sessions.js");
 const sourceDbFile = path.join(sourceRootDir, "server", "db.js");
 const sourceCompatSqlite = path.join(sourceRootDir, "server", "compat-sqlite.js");
+const sourcePushLib = path.join(sourceRootDir, "server", "lib", "push.js");
 const sourceClientIndex = path.join(sourceClientDir, "index.html");
 const sourceClientDistDir = path.join(sourceClientDir, "dist");
 const generatedServerEntry = path.join(generatedRootDir, "server", "index.js");
+const generatedSessionsRoute = path.join(
+  generatedRootDir,
+  "server",
+  "routes",
+  "sessions.js",
+);
 const generatedDbFile = path.join(generatedRootDir, "server", "db.js");
+const generatedPushLib = path.join(generatedRootDir, "server", "lib", "push.js");
 const generatedClientIndex = path.join(
   generatedRootDir,
   "client",
@@ -71,7 +80,9 @@ const viteBin = resolvePackageBin("vite", "vite");
 // architecture-independent — relative requires resolve identically in the
 // generated tree as they did in the old vendored tree.
 const codexModulesDir = path.join(appDir, "scripts", "agent-monitor-codex");
+const clientSnippetDir = path.join(codexModulesDir, "client");
 const CODEX_MODULES = ["codex-home", "codex-parser", "codex-import", "codex-watcher"];
+const CLIENT_SNIPPET_FILES = readdirSync(clientSnippetDir).sort();
 
 const force =
   process.argv.includes("--force") ||
@@ -139,8 +150,10 @@ function assertSourcePackages() {
 
   for (const required of [
     sourceServerEntry,
+    sourceSessionsRoute,
     sourceDbFile,
     sourceCompatSqlite,
+    sourcePushLib,
     path.join(sourceRootDir, "scripts", "install-hooks.js"),
     path.join(sourceRootDir, "scripts", "hook-handler.js"),
     path.join(sourceRootDir, "LICENSE"),
@@ -162,10 +175,13 @@ function currentStamp() {
     sourceRootPkg,
     sourceClientPkg,
     sourceServerEntry,
+    sourceSessionsRoute,
     sourceDbFile,
+    sourcePushLib,
     sourceClientIndex,
     fileURLToPath(import.meta.url),
     ...CODEX_MODULES.map((m) => path.join(codexModulesDir, `${m}.js`)),
+    ...CLIENT_SNIPPET_FILES.map((file) => path.join(clientSnippetDir, file)),
   ]) {
     h.update(readFileSync(file));
   }
@@ -215,12 +231,64 @@ function materializeRuntimeTree() {
   cpSync(path.join(sourceRootDir, "LICENSE"), path.join(generatedRootDir, "LICENSE"));
 
   patchServerIndex(generatedServerEntry);
+  patchSessionsRoute(generatedSessionsRoute);
   patchDbFile(generatedDbFile);
+  patchPushFile(generatedPushLib);
   writeFileSync(generatedUninstallHooks, UNINSTALL_HOOKS_SOURCE, "utf8");
 }
 
 function patchServerIndex(file) {
   let source = readFileSync(file, "utf8");
+
+  if (!source.includes("function isAllowedDashboardOrigin(origin)")) {
+    const corsHelperNeedle = 'const runRouter = require("./routes/run");\n\nfunction createApp() {';
+    if (!source.includes(corsHelperNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the run-router require block for CORS tightening.`,
+      );
+    }
+    source = source.replace(
+      corsHelperNeedle,
+      [
+        'const runRouter = require("./routes/run");',
+        "",
+        "function isAllowedDashboardOrigin(origin) {",
+        "  if (!origin) return true;",
+        "  try {",
+        "    const url = new URL(origin);",
+        '    const expectedPort = String(process.env.DASHBOARD_PORT || "4820");',
+        '    const isLoopback = url.protocol === "http:" && (url.hostname === "127.0.0.1" || url.hostname === "localhost");',
+        "    return isLoopback && url.port === expectedPort;",
+        "  } catch {",
+        "    return false;",
+        "  }",
+        "}",
+        "",
+        "function createApp() {",
+      ].join("\n"),
+    );
+  }
+
+  if (!source.includes("callback(null, isAllowedDashboardOrigin(origin));")) {
+    const corsNeedle = "  app.use(cors());";
+    if (!source.includes(corsNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected \`${corsNeedle}\` for tightened CORS.`,
+      );
+    }
+    source = source.replace(
+      corsNeedle,
+      [
+        "  app.use(",
+        "    cors({",
+        "      origin(origin, callback) {",
+        "        callback(null, isAllowedDashboardOrigin(origin));",
+        "      },",
+        "    })",
+        "  );",
+      ].join("\n"),
+    );
+  }
 
   if (!source.includes('server.listen(port, "127.0.0.1", () => {')) {
     const listenNeedle = "server.listen(port, () => {";
@@ -232,6 +300,23 @@ function patchServerIndex(file) {
     source = source.replace(
       listenNeedle,
       'server.listen(port, "127.0.0.1", () => {',
+    );
+  }
+
+  if (!source.includes('process.env.CCAM_ENABLE_RUN === "1"')) {
+    const runNeedle = '  app.use("/api/run", runRouter);';
+    if (!source.includes(runNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected \`${runNeedle}\` for run-route gating.`,
+      );
+    }
+    source = source.replace(
+      runNeedle,
+      [
+        '  if (process.env.CCAM_ENABLE_RUN === "1") {',
+        '    app.use("/api/run", runRouter);',
+        "  }",
+      ].join("\n"),
     );
   }
 
@@ -339,6 +424,50 @@ function patchServerIndex(file) {
   writeFileSync(file, source, "utf8");
 }
 
+function patchSessionsRoute(file) {
+  let source = readFileSync(file, "utf8");
+
+  if (!source.includes('req.query.harness')) {
+    const queryNeedle = "  const cwd = req.query.cwd;";
+    if (!source.includes(queryNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the query parsing block for harness filtering.`,
+      );
+    }
+    source = source.replace(
+      queryNeedle,
+      [
+        "  const cwd = req.query.cwd;",
+        '  const harness = typeof req.query.harness === "string" ? req.query.harness.trim().toLowerCase() : "";',
+      ].join("\n"),
+    );
+
+    const whereNeedle = [
+      "  if (cwd) {",
+      '    where.push("s.cwd = ?");',
+      "    params.push(cwd);",
+      "  }",
+    ].join("\n");
+    if (!source.includes(whereNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the cwd filter block for harness filtering.`,
+      );
+    }
+    source = source.replace(
+      whereNeedle,
+      [
+        whereNeedle,
+        "  if (harness) {",
+        `    where.push("COALESCE(NULLIF(LOWER(s.harness), ''), 'claude') = ?");`,
+        "    params.push(harness);",
+        "  }",
+      ].join("\n"),
+    );
+  }
+
+  writeFileSync(file, source, "utf8");
+}
+
 function patchDbFile(file) {
   let source = readFileSync(file, "utf8");
 
@@ -390,8 +519,6 @@ function patchDbFile(file) {
 // idempotent anchor approach as patchServerIndex/patchDbFile. Replacement
 // bodies live as reviewable snippet files (no escaping) under
 // scripts/agent-monitor-codex/client/.
-const clientSnippetDir = path.join(codexModulesDir, "client");
-
 function snippet(name) {
   return readFileSync(path.join(clientSnippetDir, name), "utf8");
 }
@@ -403,6 +530,19 @@ function patchClientSource() {
       guard: "harness?: string | null",
       find: "  cost?: number;",
       replace: "  cost?: number;\n  harness?: string | null;",
+    },
+    {
+      rel: "src/lib/api.ts",
+      guard: "      harness?: string;",
+      find: "      cwd?: string;\n      sort_by?: string;",
+      replace: "      cwd?: string;\n      harness?: string;\n      sort_by?: string;",
+    },
+    {
+      rel: "src/lib/api.ts",
+      guard: 'if (params?.harness) qs.set("harness", params.harness);',
+      find: '      if (params?.cwd) qs.set("cwd", params.cwd);',
+      replace:
+        '      if (params?.cwd) qs.set("cwd", params.cwd);\n      if (params?.harness) qs.set("harness", params.harness);',
     },
     {
       rel: "src/components/StatusBadge.tsx",
@@ -436,15 +576,34 @@ function patchClientSource() {
     },
     {
       rel: "src/pages/Sessions.tsx",
-      guard: 'filter === "waiting" || harness',
-      findFile: "sessions.loadtop.find.txt",
+      guard: "server-side status + harness filters",
+      findFiles: [
+        "sessions.loadtop.find.txt",
+        "sessions.loadtop.legacy.find.txt",
+      ],
       replaceFile: "sessions.loadtop.replace.txt",
     },
     {
       rel: "src/pages/Sessions.tsx",
-      guard: "let rows = res.sessions;",
-      findFile: "sessions.loadrows.find.txt",
+      guard: "rows = rows.filter(isSessionAwaitingInput);",
+      findFiles: [
+        "sessions.loadrows.find.txt",
+        "sessions.loadrows.legacy.find.txt",
+      ],
       replaceFile: "sessions.loadrows.replace.txt",
+    },
+    {
+      rel: "src/pages/Sessions.tsx",
+      guard: "        harness?: string;",
+      find: "        cwd?: string;\n        sort_by?: string;",
+      replace:
+        "        cwd?: string;\n        harness?: string;\n        sort_by?: string;",
+    },
+    {
+      rel: "src/pages/Sessions.tsx",
+      guard: "      if (harness) params.harness = harness;",
+      find: "      if (cwd) params.cwd = cwd;",
+      replace: "      if (cwd) params.cwd = cwd;\n      if (harness) params.harness = harness;",
     },
     {
       rel: "src/pages/Sessions.tsx",
@@ -480,9 +639,12 @@ function patchClientSource() {
     if (e.append) {
       src = src + snippet(e.append);
     } else {
-      const find = e.findFile ? snippet(e.findFile) : e.find;
+      const finds = e.findFiles
+        ? e.findFiles.map((name) => snippet(name))
+        : [e.findFile ? snippet(e.findFile) : e.find];
+      const find = finds.find((candidate) => src.includes(candidate));
       const replace = e.replaceFile ? snippet(e.replaceFile) : e.replace;
-      if (!src.includes(find)) {
+      if (!find || !replace) {
         throw new Error(
           `Unable to patch client ${e.rel} (Codex Addition #6): anchor not ` +
             `found — upstream client layout may have changed. Re-derive per ` +
@@ -500,7 +662,9 @@ function assertGeneratedTree() {
     path.join(generatedRootDir, "package.json"),
     path.join(generatedRootDir, "LICENSE"),
     generatedServerEntry,
+    generatedSessionsRoute,
     generatedDbFile,
+    generatedPushLib,
     path.join(generatedRootDir, "server", "compat-sqlite.js"),
     generatedClientIndex,
     path.join(generatedRootDir, "scripts", "install-hooks.js"),
@@ -520,6 +684,12 @@ function assertGeneratedTree() {
     throw new Error(
       "Generated server/index.js is missing the CCAM_AUTO_INSTALL_HOOKS guard.",
     );
+  }
+  if (!serverIndex.includes('process.env.CCAM_ENABLE_RUN === "1"')) {
+    throw new Error("Generated server/index.js is missing the run-route gate.");
+  }
+  if (!serverIndex.includes("isAllowedDashboardOrigin")) {
+    throw new Error("Generated server/index.js is missing the tightened CORS guard.");
   }
 
   const dbSource = readFileSync(generatedDbFile, "utf8");
@@ -551,6 +721,40 @@ function assertGeneratedTree() {
       );
     }
   }
+
+  const sessionsSource = readFileSync(generatedSessionsRoute, "utf8");
+  if (!sessionsSource.includes("req.query.harness")) {
+    throw new Error(
+      "Generated server/routes/sessions.js is missing the server-side harness filter.",
+    );
+  }
+
+  const pushSource = readFileSync(generatedPushLib, "utf8");
+  if (!pushSource.includes("CCAM_VAPID_KEYS_PATH")) {
+    throw new Error(
+      "Generated server/lib/push.js is missing the writable VAPID keys path override.",
+    );
+  }
+}
+
+function patchPushFile(file) {
+  let source = readFileSync(file, "utf8");
+
+  if (!source.includes("process.env.CCAM_VAPID_KEYS_PATH")) {
+    const keysNeedle =
+      'const KEYS_PATH = path.join(__dirname, "../../data/vapid-keys.json");';
+    if (!source.includes(keysNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the VAPID key path constant.`,
+      );
+    }
+    source = source.replace(
+      keysNeedle,
+      'const KEYS_PATH = process.env.CCAM_VAPID_KEYS_PATH || path.join(__dirname, "../../data/vapid-keys.json");',
+    );
+  }
+
+  writeFileSync(file, source, "utf8");
 }
 
 function runSqliteGate() {

@@ -58,6 +58,7 @@ export class AgentMonitorSidecar {
     try {
       await this.launch();
     } catch (error) {
+      this.started = false;
       gatewayLog.error(TAG, `start failed: ${describe(error)}`);
     }
   }
@@ -82,21 +83,29 @@ export class AgentMonitorSidecar {
   }
 
   async stop(): Promise<void> {
+    this.started = false;
     this.stopping = true;
     const child = this.child;
     this.child = null;
     this.ready = false;
     this.flushReady(false);
     if (!child?.pid) {
+      this.restartAttempts = 0;
+      this.stopping = false;
       return;
     }
     const { pid } = child;
-    killGroup(pid, "SIGTERM");
-    await delay(STOP_GRACE_MS);
-    if (isRunning(pid)) {
-      killGroup(pid, "SIGKILL");
+    try {
+      killGroup(pid, "SIGTERM");
+      await delay(STOP_GRACE_MS);
+      if (isRunning(pid)) {
+        killGroup(pid, "SIGKILL");
+      }
+      gatewayLog.info(TAG, "agent monitor stopped");
+    } finally {
+      this.restartAttempts = 0;
+      this.stopping = false;
     }
-    gatewayLog.info(TAG, "agent monitor stopped");
   }
 
   private flushReady(ok: boolean): void {
@@ -109,7 +118,7 @@ export class AgentMonitorSidecar {
   }
 
   private async launch(): Promise<void> {
-    if (this.stopping) {
+    if (!this.started || this.stopping) {
       return;
     }
 
@@ -119,6 +128,7 @@ export class AgentMonitorSidecar {
         TAG,
         `agent monitor entry not found at ${entryFile} — run \`pnpm -C apps/desktop build:agent-monitor\``,
       );
+      this.started = false;
       this.flushReady(false);
       return;
     }
@@ -128,6 +138,12 @@ export class AgentMonitorSidecar {
       "agent-monitor",
       "dashboard.db",
     );
+    const pushKeysPath = path.join(
+      app.getPath("userData"),
+      "agent-monitor",
+      "data",
+      "vapid-keys.json",
+    );
     const runtimeNodePath = buildRuntimeNodePath();
 
     const child = spawn(process.execPath, [entryFile], {
@@ -135,10 +151,14 @@ export class AgentMonitorSidecar {
       env: {
         ...process.env,
         ELECTRON_RUN_AS_NODE: "1",
+        // The embedded sidecar always serves the generated client/dist tree.
+        // Even in desktop-dev we are not running the upstream Vite dev server.
         NODE_ENV: "production",
         ...(runtimeNodePath ? { NODE_PATH: runtimeNodePath } : {}),
         DASHBOARD_PORT: String(this.port),
         DASHBOARD_DB_PATH: dbPath,
+        CCAM_VAPID_KEYS_PATH: pushKeysPath,
+        CCAM_ENABLE_RUN: "0",
         // Hooks are host-managed via explicit opt-in (agent-monitor-hooks.ts).
         // Never let the generated server silently auto-install them.
         CCAM_AUTO_INSTALL_HOOKS: "0",
@@ -149,6 +169,7 @@ export class AgentMonitorSidecar {
     this.child = child;
 
     if (!child.pid) {
+      this.started = false;
       gatewayLog.error(TAG, "failed to spawn agent monitor process");
       this.flushReady(false);
       return;
@@ -183,9 +204,11 @@ export class AgentMonitorSidecar {
     code: number | null,
     signal: NodeJS.Signals | null,
   ): void {
+    const shouldRestart = this.started && !this.stopping;
     this.child = null;
     this.ready = false;
-    if (this.stopping) {
+    if (!shouldRestart) {
+      this.restartAttempts = 0;
       return;
     }
     gatewayLog.warn(TAG, `agent monitor exited code=${code} signal=${signal}`);
@@ -195,6 +218,7 @@ export class AgentMonitorSidecar {
     // + hard cap degrades to "no monitor" — it never blocks boot, and Claude
     // Code is unaffected (the hook handler fails silently in <=3s).
     if (this.restartAttempts >= MAX_RESTART_ATTEMPTS) {
+      this.started = false;
       gatewayLog.error(
         TAG,
         `giving up after ${this.restartAttempts} restart attempts`,
@@ -211,7 +235,7 @@ export class AgentMonitorSidecar {
       `restarting agent monitor in ${backoff}ms (attempt ${attempt}/${MAX_RESTART_ATTEMPTS})`,
     );
     setTimeout(() => {
-      if (this.stopping) {
+      if (!this.started || this.stopping) {
         return;
       }
       this.launch().catch((error) =>

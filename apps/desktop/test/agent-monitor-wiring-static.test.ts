@@ -21,6 +21,12 @@ const settingsStoreSource = read("../src/main/settings-store.ts");
 const indexHtml = read("../src/renderer/index.html");
 const electronBuilder = read("../electron-builder.yml");
 const gitignoreSource = read("../../../.gitignore");
+const loadTopSnippet = read(
+  "../scripts/agent-monitor-codex/client/sessions.loadtop.replace.txt",
+);
+const loadRowsSnippet = read(
+  "../scripts/agent-monitor-codex/client/sessions.loadrows.replace.txt",
+);
 const desktopPkg = JSON.parse(read("../package.json")) as {
   version: string;
   scripts: Record<string, string>;
@@ -60,9 +66,14 @@ test("build script materializes a generated runtime tree with the host patches",
   assert.match(buildScriptSource, /SOURCE_CLIENT_PACKAGE = "agent-dashboard-client"/);
   assert.match(buildScriptSource, /\.generated", "agent-monitor"/);
   assert.match(buildScriptSource, /vite build/);
+  assert.match(buildScriptSource, /CLIENT_SNIPPET_FILES/);
   assert.match(buildScriptSource, /server\.listen\(port, "127\.0\.0\.1", \(\) => \{/);
+  assert.match(buildScriptSource, /isAllowedDashboardOrigin/);
+  assert.match(buildScriptSource, /CCAM_ENABLE_RUN === "1"/);
   assert.match(buildScriptSource, /CCAM_AUTO_INSTALL_HOOKS === "1"/);
   assert.match(buildScriptSource, /Database = require\("\.\/compat-sqlite"\);/);
+  assert.match(buildScriptSource, /req\.query\.harness/);
+  assert.match(buildScriptSource, /CCAM_VAPID_KEYS_PATH/);
   assert.match(buildScriptSource, /module\.exports = \{ uninstallHooks \};/);
 });
 
@@ -80,6 +91,7 @@ test("electron-builder ships the generated agent-monitor runtime tree unpacked",
 test("runtime resolves the generated tree and sidecar wiring still uses the fixed port", () => {
   assert.match(agentMonitorPathSource, /\.generated", "agent-monitor"/);
   assert.doesNotMatch(agentMonitorPathSource, /vendor\/agent-monitor/);
+  assert.match(agentMonitorPathSource, /gatewayLog\.warn/);
   assert.match(contractsSource, /export const AGENT_MONITOR_PORT = 4820/);
   assert.match(sidecarSource, /AGENT_MONITOR_PORT/);
   // Fixed port: must NOT pick a free port like the gateway sidecar did.
@@ -89,12 +101,19 @@ test("runtime resolves the generated tree and sidecar wiring still uses the fixe
   assert.match(sidecarSource, /ELECTRON_RUN_AS_NODE:\s*"1"/);
   assert.match(sidecarSource, /DASHBOARD_PORT:\s*String\(this\.port\)/);
   assert.match(sidecarSource, /DASHBOARD_DB_PATH/);
+  assert.match(sidecarSource, /CCAM_VAPID_KEYS_PATH/);
+  assert.match(sidecarSource, /CCAM_ENABLE_RUN:\s*"0"/);
   assert.match(sidecarSource, /CCAM_AUTO_INSTALL_HOOKS:\s*"0"/);
   assert.match(sidecarSource, /NODE_PATH/);
   assert.match(sidecarSource, /resolveRuntimeSupportNodePaths\("agent-dashboard"\)/);
   assert.match(sidecarSource, /path\.dirname\(packageRoot\)/);
   assert.match(sidecarSource, /process\.resourcesPath,\s*"app\.asar",\s*"app",\s*"node_modules"/);
   assert.match(sidecarSource, /\/api\/health/);
+  assert.match(
+    sidecarSource,
+    /async stop\(\): Promise<void> \{[\s\S]*this\.started = false;[\s\S]*this\.stopping = true;[\s\S]*this\.restartAttempts = 0;[\s\S]*this\.stopping = false;/,
+  );
+  assert.match(sidecarSource, /const shouldRestart = this\.started && !this\.stopping;/);
 });
 
 test("docs and ignores describe generated pnpm-managed inputs, not vendor source", () => {
@@ -182,6 +201,8 @@ test("hooks are opt-in: default off, silent server auto-install never enabled", 
   assert.doesNotMatch(sidecarSource, /CCAM_AUTO_INSTALL_HOOKS:\s*"1"/);
   assert.match(hooksSource, /store\(\)\.get\("enabled", false\)/);
   assert.match(hooksSource, /ELECTRON_RUN_AS_NODE=1/);
+  assert.match(hooksSource, /JSON\.stringify\(hookType\)/);
+  assert.match(hooksSource, /renameSync/);
   assert.match(hooksSource, /function uninstallHooks/);
   assert.match(appSource, /syncAgentMonitorHooksOnBoot\(\)/);
 });
@@ -261,8 +282,10 @@ test("Codex support (Addition #4/#5/#6) is wired into the generated build", () =
     "sessioncard.badge.replace.txt",
     "sessions.state.replace.txt",
     "sessions.loadtop.find.txt",
+    "sessions.loadtop.legacy.find.txt",
     "sessions.loadtop.replace.txt",
     "sessions.loadrows.find.txt",
+    "sessions.loadrows.legacy.find.txt",
     "sessions.loadrows.replace.txt",
     "sessions.filterui.find.txt",
     "sessions.filterui.replace.txt",
@@ -280,4 +303,14 @@ test("Codex support (Addition #4/#5/#6) is wired into the generated build", () =
   // Docs describe Codex under the generated/pnpm model.
   assert.match(thirdPartyNoticesSource, /Codex/);
   assert.match(claudeDocSource, /Codex/);
+});
+
+test("Codex harness filter now uses server-backed pagination and rebuilds on snippet edits", () => {
+  assert.match(buildScriptSource, /sourceSessionsRoute/);
+  assert.match(buildScriptSource, /sourcePushLib/);
+  assert.match(loadTopSnippet, /server-side status \+ harness filters/);
+  assert.match(loadTopSnippet, /harness: harness \|\| undefined/);
+  assert.doesNotMatch(loadTopSnippet, /filter === "waiting" \|\| harness/);
+  assert.match(loadRowsSnippet, /rows = rows\.filter\(isSessionAwaitingInput\);/);
+  assert.doesNotMatch(loadRowsSnippet, /\(s\.harness \|\| "claude"\)/);
 });

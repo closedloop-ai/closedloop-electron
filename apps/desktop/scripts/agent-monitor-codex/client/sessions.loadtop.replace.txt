@@ -1,9 +1,15 @@
-      // Two UI-only overlays need client-side filtering on a broad fetch so
-      // paging/totals stay consistent with the visible rows:
-      //  - "waiting"  derived from awaiting_input_since (status is "active").
-      //  - harness    derived from the harness column (Addition #6); the
-      //    vendored /api/sessions route is unpatched so we filter here.
-      // Legacy/empty harness counts as "claude" (matches the DB default).
-      if (filter === "waiting" || harness) {
+      // The "waiting" filter is a UI-only overlay derived from the
+      // awaiting_input_since column — the underlying SessionStatus is
+      // still "active". Map it to a client-side filter on top of the
+      // server-side status + harness filters so paging/totals stay
+      // consistent with the visible rows.
+      if (filter === "waiting") {
         const res = await api.sessions.list({
-          status: filter === "waiting" ? "active" : filter || undefined,
+          status: "active",
+          q: search || undefined,
+          cwd: cwd || undefined,
+          harness: harness || undefined,
+          sort_by: sortBy,
+          sort_desc: sortDesc,
+          limit: 10000,
+          offset: 0,

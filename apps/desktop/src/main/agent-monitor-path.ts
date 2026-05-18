@@ -3,7 +3,10 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
+import { gatewayLog } from "./gateway-logger.js";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const TAG = "agent-monitor-path";
 
 export interface AgentMonitorPaths {
   // Directory containing server/, client/dist/, scripts/, package.json.
@@ -43,5 +46,9 @@ function resolveRootDir(): string {
       return candidate;
     }
   }
+  gatewayLog.warn(
+    TAG,
+    `unable to validate generated runtime tree; defaulting to ${candidates[0]}`,
+  );
   return candidates[0];
 }
