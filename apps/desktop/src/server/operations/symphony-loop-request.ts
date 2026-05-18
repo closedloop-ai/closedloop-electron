@@ -133,9 +133,11 @@ export function parseSymphonyLoopRequestBody(
   const branchMaterialization = parseBranchMaterialization(
     rawBody.branchMaterialization,
   );
+  const { branchMaterialization: _rawBranchMaterialization, ...loopBody } =
+    rawBody;
 
   return {
-    ...(rawBody as unknown as LoopRequestBody),
+    ...(loopBody as unknown as LoopRequestBody),
     supportingArtifacts,
     codeEvaluationContext,
     ...(branchMaterialization ? { branchMaterialization } : {}),
@@ -175,7 +177,7 @@ function parseCodeEvaluationContext(
 function parseBranchMaterialization(
   value: unknown,
 ): SymphonyBranchMaterialization | undefined {
-  if (value === undefined) {
+  if (value === undefined || value === null) {
     return undefined;
   }
   const result = branchMaterializationSchema.safeParse(value);

@@ -112,6 +112,19 @@ describe("parseSymphonyLoopRequestBody", () => {
     );
   });
 
+  test("treats null branch materialization as absent", () => {
+    const parsed = parseSymphonyLoopRequestBody({
+      loopId: "eeeeeeee-0000-0000-0000-000000000009",
+      command: LoopCommand.Plan,
+      closedLoopAuthToken: "token",
+      artifacts: [],
+      repo: { fullName: "org/repo", branch: "main" },
+      branchMaterialization: null,
+    });
+
+    assert.equal(parsed.branchMaterialization, undefined);
+  });
+
   test("rejects malformed new optional fields with clear validation errors", () => {
     assert.throws(
       () =>

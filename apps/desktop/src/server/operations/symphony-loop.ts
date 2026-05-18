@@ -6885,25 +6885,8 @@ async function handleLoopRequest(
         }
         if (!worktreeDir || !existsSync(worktreeDir)) {
           // No existing worktree found — create new
-          if (useBranchMaterialization) {
-            let freshBranch: SymphonyBranchMaterializationEntry;
-            try {
-              freshBranch = requireExpectedLoopBranch({
-                body,
-                role: "primary",
-                repositoryFullName,
-                baseBranch,
-              });
-            } catch (err) {
-              await failBranchCreate({
-                body,
-                apiBaseUrl,
-                context,
-                message: `${body.command} branch materialization is not available: ${sanitizeUnknownError(err)}`,
-              });
-              return;
-            }
-            branchName = freshBranch.branchName;
+          if (expectedBranch) {
+            branchName = expectedBranch.branchName;
           }
           worktreeDir = resolveLoopWorktreeDir(repoPath, worktreeKey);
           try {
