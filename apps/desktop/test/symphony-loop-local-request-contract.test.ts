@@ -78,6 +78,40 @@ describe("parseSymphonyLoopRequestBody", () => {
     assert.equal(parsed.codeEvaluationContext?.pullRequest?.number, 123);
   });
 
+  test("accepts valid branch materialization envelope", () => {
+    const parsed = parseSymphonyLoopRequestBody({
+      loopId: "eeeeeeee-0000-0000-0000-000000000005",
+      command: LoopCommand.Plan,
+      closedLoopAuthToken: "token",
+      artifacts: [],
+      repo: { fullName: "org/repo", branch: "main" },
+      branchMaterialization: {
+        schemaVersion: 1,
+        branches: [
+          {
+            role: "primary",
+            repositoryFullName: "org/repo",
+            baseBranch: "main",
+            branchName: "symphony/PLN-604",
+          },
+          {
+            role: "additional",
+            repositoryFullName: "org/peer",
+            baseBranch: "develop",
+            branchName: "symphony/PLN-604-peer",
+          },
+        ],
+      },
+    });
+
+    assert.equal(parsed.branchMaterialization?.schemaVersion, 1);
+    assert.equal(parsed.branchMaterialization?.branches[0].role, "primary");
+    assert.equal(
+      parsed.branchMaterialization?.branches[1].repositoryFullName,
+      "org/peer",
+    );
+  });
+
   test("rejects malformed new optional fields with clear validation errors", () => {
     assert.throws(
       () =>
@@ -111,6 +145,85 @@ describe("parseSymphonyLoopRequestBody", () => {
         err instanceof SymphonyLoopRequestValidationError &&
         err.message.includes("codeEvaluationContext is malformed") &&
         err.message.includes("pullRequest.number"),
+    );
+  });
+
+  test("rejects malformed branch materialization envelope", () => {
+    assert.throws(
+      () =>
+        parseSymphonyLoopRequestBody({
+          loopId: "ffffffff-0000-0000-0000-000000000006",
+          command: LoopCommand.Plan,
+          closedLoopAuthToken: "token",
+          artifacts: [],
+          repo: { fullName: "org/repo", branch: "main" },
+          branchMaterialization: {
+            schemaVersion: 1,
+            branches: [
+              {
+                role: "primary",
+                repositoryFullName: "org/repo",
+                baseBranch: "main",
+              },
+            ],
+          },
+        }),
+      (err) =>
+        err instanceof SymphonyLoopRequestValidationError &&
+        err.message.includes("branchMaterialization is malformed") &&
+        err.message.includes("branchName"),
+    );
+  });
+
+  test("rejects branch materialization entries with malformed repo or ref names", () => {
+    assert.throws(
+      () =>
+        parseSymphonyLoopRequestBody({
+          loopId: "ffffffff-0000-0000-0000-000000000007",
+          command: LoopCommand.Plan,
+          closedLoopAuthToken: "token",
+          artifacts: [],
+          repo: { fullName: "org/repo", branch: "main" },
+          branchMaterialization: {
+            schemaVersion: 1,
+            branches: [
+              {
+                role: "primary",
+                repositoryFullName: "not-a-full-name",
+                baseBranch: "main",
+                branchName: "symphony/PLN-604",
+              },
+            ],
+          },
+        }),
+      (err) =>
+        err instanceof SymphonyLoopRequestValidationError &&
+        err.message.includes("repositoryFullName"),
+    );
+
+    assert.throws(
+      () =>
+        parseSymphonyLoopRequestBody({
+          loopId: "ffffffff-0000-0000-0000-000000000008",
+          command: LoopCommand.Plan,
+          closedLoopAuthToken: "token",
+          artifacts: [],
+          repo: { fullName: "org/repo", branch: "main" },
+          branchMaterialization: {
+            schemaVersion: 1,
+            branches: [
+              {
+                role: "primary",
+                repositoryFullName: "org/repo",
+                baseBranch: "main",
+                branchName: "symphony bad branch",
+              },
+            ],
+          },
+        }),
+      (err) =>
+        err instanceof SymphonyLoopRequestValidationError &&
+        err.message.includes("branchName"),
     );
   });
 });

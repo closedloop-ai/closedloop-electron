@@ -1,7 +1,10 @@
 import type { LoopRequestBody } from "@closedloop-ai/loops-api/desktop-request";
+import { BRANCH_NAME_REGEX } from "@closedloop-ai/loops-api/execution-result";
 import { z } from "zod";
 
 const nullableString = z.string().nullable().optional();
+const REPOSITORY_FULL_NAME_REGEX = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
+const BRANCH_NAME_MAX_LENGTH = 256;
 
 const supportingArtifactSchema = z
   .object({
@@ -50,11 +53,45 @@ const codeEvaluationContextSchema = z
       .optional(),
   });
 
+const branchMaterializationEntrySchema = z
+  .object({
+    role: z.enum(["primary", "additional"]),
+    repositoryFullName: z
+      .string()
+      .trim()
+      .max(256)
+      .regex(REPOSITORY_FULL_NAME_REGEX, "Must be in 'owner/repo' format"),
+    baseBranch: z
+      .string()
+      .trim()
+      .max(BRANCH_NAME_MAX_LENGTH)
+      .regex(BRANCH_NAME_REGEX, "Branch name contains invalid characters"),
+    branchName: z
+      .string()
+      .trim()
+      .max(BRANCH_NAME_MAX_LENGTH)
+      .regex(BRANCH_NAME_REGEX, "Branch name contains invalid characters"),
+  })
+  .strict();
+
+const branchMaterializationSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    branches: z.array(branchMaterializationEntrySchema).min(1),
+  })
+  .strict();
+
 export type SymphonyLoopSupportingArtifact = z.infer<
   typeof supportingArtifactSchema
 >;
 export type SymphonyCodeEvaluationContext = z.infer<
   typeof codeEvaluationContextSchema
+>;
+export type SymphonyBranchMaterialization = z.infer<
+  typeof branchMaterializationSchema
+>;
+export type SymphonyBranchMaterializationEntry = z.infer<
+  typeof branchMaterializationEntrySchema
 >;
 
 export interface CodeContextFile extends SymphonyCodeEvaluationContext {
@@ -68,6 +105,7 @@ export type SymphonyLoopRequestBody = LoopRequestBody & {
   parentBranchName?: string;
   parentSessionId?: string;
   artifactSlug?: string;
+  branchMaterialization?: SymphonyBranchMaterialization;
 };
 
 export class SymphonyLoopRequestValidationError extends Error {
@@ -80,7 +118,8 @@ export class SymphonyLoopRequestValidationError extends Error {
 /**
  * Parses Desktop's locally extended loop request without requiring a new
  * @closedloop-ai/loops-api release. Existing LoopRequestBody fields are left
- * untouched while FEA-585-only fields are normalized for downstream code.
+ * untouched while Desktop-only extension fields are normalized for downstream
+ * code.
  */
 export function parseSymphonyLoopRequestBody(
   rawBody: Record<string, unknown>,
@@ -91,11 +130,15 @@ export function parseSymphonyLoopRequestBody(
   const codeEvaluationContext = parseCodeEvaluationContext(
     rawBody.codeEvaluationContext,
   );
+  const branchMaterialization = parseBranchMaterialization(
+    rawBody.branchMaterialization,
+  );
 
   return {
     ...(rawBody as unknown as LoopRequestBody),
     supportingArtifacts,
     codeEvaluationContext,
+    ...(branchMaterialization ? { branchMaterialization } : {}),
   };
 }
 
@@ -124,6 +167,21 @@ function parseCodeEvaluationContext(
   if (!result.success) {
     throw new SymphonyLoopRequestValidationError(
       `codeEvaluationContext is malformed: ${formatZodIssues(result.error)}`,
+    );
+  }
+  return result.data;
+}
+
+function parseBranchMaterialization(
+  value: unknown,
+): SymphonyBranchMaterialization | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const result = branchMaterializationSchema.safeParse(value);
+  if (!result.success) {
+    throw new SymphonyLoopRequestValidationError(
+      `branchMaterialization is malformed: ${formatZodIssues(result.error)}`,
     );
   }
   return result.data;
