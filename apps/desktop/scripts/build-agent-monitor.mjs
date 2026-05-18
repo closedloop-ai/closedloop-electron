@@ -73,6 +73,19 @@ const viteBin = resolvePackageBin("vite", "vite");
 const codexModulesDir = path.join(appDir, "scripts", "agent-monitor-codex");
 const CODEX_MODULES = ["codex-home", "codex-parser", "codex-import", "codex-watcher"];
 
+// CLOSEDLOOP plan-extraction (FEA-1189 / PLN-613): in-repo modules copied into
+// the generated server/lib (parallel to CODEX_MODULES); plans-route.js copied
+// into server/routes/plans.js; Plans.tsx into the client src/pages before the
+// Vite build. import-history.js, server/db.js and server/index.js are wired via
+// the same idempotent string-anchor + hard-gate approach as the Codex patches.
+const planModulesDir = path.join(appDir, "scripts", "agent-monitor-plans");
+const PLAN_MODULES = ["plan-extractor", "plan-store"];
+const generatedImportHistory = path.join(
+  generatedRootDir,
+  "scripts",
+  "import-history.js",
+);
+
 const force =
   process.argv.includes("--force") ||
   process.env.AGENT_MONITOR_FORCE_BUILD === "1";
@@ -166,6 +179,9 @@ function currentStamp() {
     sourceClientIndex,
     fileURLToPath(import.meta.url),
     ...CODEX_MODULES.map((m) => path.join(codexModulesDir, `${m}.js`)),
+    ...PLAN_MODULES.map((m) => path.join(planModulesDir, `${m}.js`)),
+    path.join(planModulesDir, "plans-route.js"),
+    path.join(planModulesDir, "client", "Plans.tsx"),
   ]) {
     h.update(readFileSync(file));
   }
@@ -202,11 +218,28 @@ function materializeRuntimeTree() {
       path.join(generatedLibDir, `${m}.js`),
     );
   }
+  // CLOSEDLOOP plan-extraction (FEA-1189): plan modules alongside Codex's in
+  // server/lib so relative requires (../lib, ../server/lib) resolve unchanged.
+  for (const m of PLAN_MODULES) {
+    cpSync(
+      path.join(planModulesDir, `${m}.js`),
+      path.join(generatedLibDir, `${m}.js`),
+    );
+  }
   cpSync(
     path.join(sourceRootDir, "scripts"),
     path.join(generatedRootDir, "scripts"),
     { recursive: true },
   );
+  // The plans HTTP route lives in the generated server/routes (server/ was
+  // copied above); import-history.js (just copied with scripts/) is patched to
+  // persist captured plans on the shared import sink — both harnesses, history,
+  // and the default hooks-OFF path.
+  cpSync(
+    path.join(planModulesDir, "plans-route.js"),
+    path.join(generatedRootDir, "server", "routes", "plans.js"),
+  );
+  patchImportHistory(generatedImportHistory);
   mkdirSync(path.join(generatedRootDir, "client"), { recursive: true });
   cpSync(sourceClientDistDir, path.join(generatedRootDir, "client", "dist"), {
     recursive: true,
@@ -336,6 +369,26 @@ function patchServerIndex(file) {
     );
   }
 
+  // CLOSEDLOOP plan-extraction (FEA-1189): register the /api/plans route
+  // (read + confirm/reject triage over plans / plan_versions).
+  if (!source.includes('require("./routes/plans")')) {
+    const requireNeedle = 'const runRouter = require("./routes/run");';
+    const useNeedle = 'app.use("/api/run", runRouter);';
+    if (!source.includes(requireNeedle) || !source.includes(useNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the run-route require/use anchors (plans route, FEA-1189).`,
+      );
+    }
+    source = source.replace(
+      requireNeedle,
+      `${requireNeedle}\nconst plansRouter = require("./routes/plans");`,
+    );
+    source = source.replace(
+      useNeedle,
+      `${useNeedle}\n  app.use("/api/plans", plansRouter);`,
+    );
+  }
+
   writeFileSync(file, source, "utf8");
 }
 
@@ -381,6 +434,78 @@ function patchDbFile(file) {
     source = source.replace(stmtsNeedle, `\n${replacement}`);
   }
 
+  // CLOSEDLOOP plan-extraction (FEA-1189): ensure the strategy §9.2 plans /
+  // plan_versions tables exist at startup, regardless of route load order.
+  // Idempotent CREATE TABLE IF NOT EXISTS — never an ALTER migration.
+  if (!source.includes("ensurePlanSchema")) {
+    const exportNeedle =
+      "module.exports = { db, stmts, DB_PATH, DEFAULT_PRICING };";
+    if (!source.includes(exportNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the db module.exports tail (plan schema, FEA-1189).`,
+      );
+    }
+    source = source.replace(
+      exportNeedle,
+      [
+        "try {",
+        '  require("./lib/plan-store").ensurePlanSchema(db);',
+        "} catch (e) {",
+        '  console.warn("[plans] schema init failed:", e && e.message);',
+        "}",
+        "",
+        exportNeedle,
+      ].join("\n"),
+    );
+  }
+
+  writeFileSync(file, source, "utf8");
+}
+
+// CLOSEDLOOP plan-extraction (FEA-1189): wire plan capture into the single
+// shared import sink so Claude (session.toolUses) AND Codex (session.plans)
+// plans are persisted on the import/watch path — the primary path, since hooks
+// default OFF. Best-effort + idempotent (sha256 dedup in plan-store), so it
+// never blocks an import and re-imports of growing JSONL don't churn.
+function patchImportHistory(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("FEA-1189 plan extraction")) {
+    writeFileSync(file, source, "utf8");
+    return;
+  }
+  const needle =
+    "function importSession(dbModule, session) {\n  const { db, stmts } = dbModule;";
+  if (!source.includes(needle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the importSession head (FEA-1189 plan extraction).`,
+    );
+  }
+  const inject = [
+    needle,
+    "  // FEA-1189 plan extraction — capture ExitPlanMode / plans-dir Write",
+    "  // (Claude) and item.type==='Plan' / <proposed_plan> (Codex) into the",
+    "  // local plans/plan_versions tables. Runs once per importSession call,",
+    "  // covering both the existing-backfill and new-session branches.",
+    "  try {",
+    '    const { extractPlansFromSession } = require("../server/lib/plan-extractor");',
+    '    const { upsertPlanCapture } = require("../server/lib/plan-store");',
+    "    let __planBroadcast = null;",
+    '    try { __planBroadcast = require("../server/websocket").broadcast; } catch (e) { void e; }',
+    '    for (const __cap of extractPlansFromSession(session, "log")) {',
+    "      try {",
+    "        const __r = upsertPlanCapture(dbModule.db, __cap);",
+    "        if (__planBroadcast && __r && !__r.deduped) {",
+    '          __planBroadcast("plan_captured", {',
+    "            plan_id: __r.planId,",
+    "            version: __r.version,",
+    "            session_id: __cap.created_from_session_id,",
+    "          });",
+    "        }",
+    "      } catch (e) { void e; /* idempotent dedup — non-fatal */ }",
+    "    }",
+    "  } catch (e) { void e; /* plan extraction is best-effort; never blocks import */ }",
+  ].join("\n");
+  source = source.replace(needle, inject);
   writeFileSync(file, source, "utf8");
 }
 
@@ -397,6 +522,34 @@ function snippet(name) {
 }
 
 function patchClientSource() {
+  // CLOSEDLOOP plan-extraction (FEA-1189): drop the dedicated Plans page into
+  // the pinned client source before Vite build (the App.tsx route + Sidebar
+  // nav entry below reference it). Overwrite is intentional — the client
+  // source is regenerated from the pinned package each build.
+  cpSync(
+    path.join(planModulesDir, "client", "Plans.tsx"),
+    path.join(sourceClientDir, "src", "pages", "Plans.tsx"),
+  );
+  const plansNavLink = [
+    "        })}",
+    '        <NavLink',
+    '          to="/plans"',
+    '          title={collapsed ? "Plans" : undefined}',
+    "          className={({ isActive }) =>",
+    "            `flex items-center gap-3 rounded-lg text-sm font-medium transition-colors duration-150 ${",
+    '              collapsed ? "justify-center px-2 py-2.5" : "px-3 py-2.5"',
+    "            } ${",
+    "              isActive",
+    '                ? "bg-accent/10 text-accent border border-accent/20"',
+    '                : "text-gray-400 hover:text-gray-200 hover:bg-surface-3 border border-transparent"',
+    "            }`",
+    "          }",
+    "        >",
+    '          <FileText className="w-4 h-4 flex-shrink-0" />',
+    "          {!collapsed && <span>Plans</span>}",
+    "        </NavLink>",
+    "      </nav>",
+  ].join("\n");
   const edits = [
     {
       rel: "src/lib/types.ts",
@@ -469,6 +622,34 @@ function patchClientSource() {
       guard: "<HarnessBadge harness={session.harness} />",
       findFile: "sessions.rowbadge.find.txt",
       replaceFile: "sessions.rowbadge.replace.txt",
+    },
+    // CLOSEDLOOP plan-extraction (FEA-1189): dedicated Plans tab — route +
+    // sidebar nav entry. Plans.tsx itself is copied in above.
+    {
+      rel: "src/App.tsx",
+      guard: 'import { Plans }',
+      find: 'import { NotFound } from "./pages/NotFound";',
+      replace:
+        'import { NotFound } from "./pages/NotFound";\nimport { Plans } from "./pages/Plans";',
+    },
+    {
+      rel: "src/App.tsx",
+      guard: 'path="plans"',
+      find: '          <Route path="run" element={<Run />} />',
+      replace:
+        '          <Route path="run" element={<Run />} />\n          <Route path="plans" element={<Plans />} />',
+    },
+    {
+      rel: "src/components/Sidebar.tsx",
+      guard: "FileText,",
+      find: '  Gauge,\n} from "lucide-react";',
+      replace: '  Gauge,\n  FileText,\n} from "lucide-react";',
+    },
+    {
+      rel: "src/components/Sidebar.tsx",
+      guard: 'to="/plans"',
+      find: "        })}\n      </nav>",
+      replace: plansNavLink,
     },
   ];
 
@@ -550,6 +731,42 @@ function assertGeneratedTree() {
         `Generated server/lib/${m}.js missing (Codex Addition #6).`,
       );
     }
+  }
+
+  // CLOSEDLOOP plan-extraction hard-gates (FEA-1189): a future upstream bump
+  // that breaks an anchor must fail the build, not silently drop plan capture.
+  for (const m of PLAN_MODULES) {
+    if (!existsSync(path.join(generatedRootDir, "server", "lib", `${m}.js`))) {
+      throw new Error(
+        `Generated server/lib/${m}.js missing (plan extraction, FEA-1189).`,
+      );
+    }
+  }
+  if (
+    !existsSync(path.join(generatedRootDir, "server", "routes", "plans.js"))
+  ) {
+    throw new Error(
+      "Generated server/routes/plans.js missing (plan extraction, FEA-1189).",
+    );
+  }
+  if (!dbSource.includes("ensurePlanSchema")) {
+    throw new Error(
+      "Generated server/db.js is missing the plan-schema init (FEA-1189).",
+    );
+  }
+  if (
+    !serverIndex.includes('require("./routes/plans")') ||
+    !serverIndex.includes('app.use("/api/plans", plansRouter)')
+  ) {
+    throw new Error(
+      "Generated server/index.js is missing the /api/plans route wiring (FEA-1189).",
+    );
+  }
+  const importHistorySource = readFileSync(generatedImportHistory, "utf8");
+  if (!importHistorySource.includes("FEA-1189 plan extraction")) {
+    throw new Error(
+      "Generated scripts/import-history.js is missing the plan-capture sink (FEA-1189).",
+    );
   }
 }
 
