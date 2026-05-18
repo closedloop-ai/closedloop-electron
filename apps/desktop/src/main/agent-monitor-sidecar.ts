@@ -25,11 +25,11 @@ const RESTART_MAX_DELAY_MS = 30_000;
 // grace + process-group SIGKILL keeps app shutdown within budget.
 const STOP_GRACE_MS = 2_000;
 
-// Runs the vendored Claude-Code-Agent-Monitor as a managed localhost child
-// process. The Electron binary is reused as the Node runtime via
-// ELECTRON_RUN_AS_NODE (a packaged app ships no standalone `node`). Unlike the
-// gateway, the port is FIXED (see AGENT_MONITOR_PORT) because Claude Code hooks
-// bake a port at install time.
+// Runs the generated Claude-Code-Agent-Monitor runtime tree as a managed
+// localhost child process. The Electron binary is reused as the Node runtime
+// via ELECTRON_RUN_AS_NODE (a packaged app ships no standalone `node`). Unlike
+// the gateway, the port is FIXED (see AGENT_MONITOR_PORT) because Claude Code
+// hooks bake a port at install time.
 export class AgentMonitorSidecar {
   private child: ChildProcess | null = null;
   private readonly port = AGENT_MONITOR_PORT;
@@ -126,6 +126,15 @@ export class AgentMonitorSidecar {
       "agent-monitor",
       "dashboard.db",
     );
+    const packagedNodePath = app.isPackaged
+      ? [
+          path.join(process.resourcesPath, "app.asar", "app", "node_modules"),
+          path.join(process.resourcesPath, "app", "node_modules"),
+          process.env.NODE_PATH,
+        ]
+          .filter((value): value is string => typeof value === "string" && value.length > 0)
+          .join(path.delimiter)
+      : process.env.NODE_PATH;
 
     const child = spawn(process.execPath, [entryFile], {
       cwd: rootDir,
@@ -133,10 +142,11 @@ export class AgentMonitorSidecar {
         ...process.env,
         ELECTRON_RUN_AS_NODE: "1",
         NODE_ENV: "production",
+        ...(packagedNodePath ? { NODE_PATH: packagedNodePath } : {}),
         DASHBOARD_PORT: String(this.port),
         DASHBOARD_DB_PATH: dbPath,
         // Hooks are host-managed via explicit opt-in (agent-monitor-hooks.ts).
-        // Never let the server silently auto-install them (vendor patch #2).
+        // Never let the generated server silently auto-install them.
         CCAM_AUTO_INSTALL_HOOKS: "0",
       },
       detached: true,

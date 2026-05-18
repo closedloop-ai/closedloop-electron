@@ -25,6 +25,7 @@ export class DesktopTray {
   private state: TrayState = "starting";
   private paused = false;
   private pendingApprovals = 0;
+  private agentMonitorEnabled = false;
   private handlers: DesktopTrayHandlers = {};
 
   init(handlers?: DesktopTrayHandlers): void {
@@ -71,6 +72,11 @@ export class DesktopTray {
     this.refreshContextMenu();
   }
 
+  setAgentMonitorEnabled(enabled: boolean): void {
+    this.agentMonitorEnabled = enabled;
+    this.refreshContextMenu();
+  }
+
   dispose(): void {
     if (!this.tray) {
       return;
@@ -102,12 +108,14 @@ export class DesktopTray {
             this.handlers.onManageCommandKeys?.();
           }
         },
-        {
-          label: "Open Claude Dashboard",
-          click: () => {
-            this.handlers.onOpenClaudeDashboard?.();
-          }
-        },
+        ...(this.agentMonitorEnabled
+          ? [{
+              label: "Open Claude Dashboard",
+              click: () => {
+                this.handlers.onOpenClaudeDashboard?.();
+              }
+            }]
+          : []),
         {
           label: this.paused ? "Resume" : "Pause",
           click: () => {

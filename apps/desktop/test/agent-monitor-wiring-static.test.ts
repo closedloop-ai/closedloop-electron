@@ -1,98 +1,85 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const read = (relative: string): string =>
   readFileSync(new URL(relative, import.meta.url), "utf8");
 
 const appSource = read("../src/main/app.ts");
+const agentMonitorPathSource = read("../src/main/agent-monitor-path.ts");
+const buildScriptSource = read("../scripts/build-agent-monitor.mjs");
+const claudeDocSource = read("../CLAUDE.md");
 const shutdownSource = read("../src/main/shutdown.ts");
+const stagePackagingSource = read("../scripts/stage-packaging-app.mjs");
+const thirdPartyNoticesSource = read("../../../THIRD_PARTY_NOTICES.md");
 const traySource = read("../src/main/tray.ts");
 const preloadSource = read("../src/main/preload.ts");
 const sidecarSource = read("../src/main/agent-monitor-sidecar.ts");
 const hooksSource = read("../src/main/agent-monitor-hooks.ts");
 const contractsSource = read("../src/shared/contracts.ts");
+const settingsStoreSource = read("../src/main/settings-store.ts");
 const indexHtml = read("../src/renderer/index.html");
 const electronBuilder = read("../electron-builder.yml");
+const gitignoreSource = read("../../../.gitignore");
 const desktopPkg = JSON.parse(read("../package.json")) as {
   version: string;
   scripts: Record<string, string>;
+  dependencies: Record<string, string>;
+  devDependencies: Record<string, string>;
 };
 
-const vendorUrl = (p: string): URL =>
-  new URL(`../../../vendor/agent-monitor/${p}`, import.meta.url);
-
-test("vendored Claude-Code-Agent-Monitor is present and well-formed", () => {
-  for (const f of [
-    "package.json",
-    "package-lock.json",
-    "LICENSE",
-    "server/index.js",
-    "server/db.js",
-    "server/compat-sqlite.js",
-    "client/package.json",
-    "scripts/install-hooks.js",
-    "scripts/hook-handler.js",
-    "scripts/uninstall-hooks.js",
-  ]) {
-    assert.ok(existsSync(vendorUrl(f)), `vendor/agent-monitor/${f} missing`);
-  }
-  const vendorPkg = JSON.parse(readFileSync(vendorUrl("package.json"), "utf8")) as {
-    name: string;
-    optionalDependencies?: Record<string, string>;
-    dependencies?: Record<string, string>;
-  };
-  assert.equal(vendorPkg.name, "agent-dashboard");
-  // better-sqlite3 must remain OPTIONAL (so node:sqlite fallback engages and
-  // npm ci --omit=optional drops it) — never a hard runtime dependency.
-  assert.ok(
-    vendorPkg.optionalDependencies?.["better-sqlite3"],
-    "better-sqlite3 should be an optionalDependency",
-  );
-  assert.ok(
-    !vendorPkg.dependencies?.["better-sqlite3"],
-    "better-sqlite3 must NOT be a hard dependency",
-  );
-  assert.equal(LICENSE_HAS_MIT(), true);
-});
-
-function LICENSE_HAS_MIT(): boolean {
-  const l = readFileSync(vendorUrl("LICENSE"), "utf8");
-  return /MIT License/.test(l) && /Son Nguyen/.test(l);
-}
-
-test("vendor patches #1/#2 + uninstall addition are applied (VENDOR.md ledger)", () => {
-  const serverIndex = readFileSync(vendorUrl("server/index.js"), "utf8");
-  // Patch #1: bind loopback only.
-  assert.match(serverIndex, /server\.listen\(port,\s*"127\.0\.0\.1"/);
-  // Patch #2: silent hook auto-install gated behind opt-in env.
-  assert.match(serverIndex, /process\.env\.CCAM_AUTO_INSTALL_HOOKS === "1"/);
-  // Addition #3: symmetric uninstall using the same predicate.
-  const uninstall = readFileSync(vendorUrl("scripts/uninstall-hooks.js"), "utf8");
-  assert.match(uninstall, /hook-handler\.js/);
-  assert.match(uninstall, /module\.exports\s*=\s*\{\s*uninstallHooks\s*\}/);
-});
-
-test("build:agent-monitor is wired into build and the version is bumped", () => {
+test("pnpm-managed agent-monitor source packages are declared and wired into build", () => {
   assert.equal(
     desktopPkg.scripts["build:agent-monitor"],
     "node scripts/build-agent-monitor.mjs",
   );
   assert.match(desktopPkg.scripts.build ?? "", /pnpm build:agent-monitor/);
+  assert.equal(
+    desktopPkg.dependencies["agent-dashboard"],
+    "github:hoangsonww/Claude-Code-Agent-Monitor#840c518d7fa69231de049e41b893938228b67e40",
+  );
+  assert.equal(
+    desktopPkg.devDependencies["agent-dashboard-client"],
+    "github:hoangsonww/Claude-Code-Agent-Monitor#840c518d7fa69231de049e41b893938228b67e40&path:/client",
+  );
+  for (const dep of [
+    "@vitejs/plugin-react",
+    "autoprefixer",
+    "postcss",
+    "tailwindcss",
+    "vite",
+  ]) {
+    assert.ok(desktopPkg.devDependencies[dep], `${dep} should be installed for build:agent-monitor`);
+  }
   // Any apps/desktop change requires a version bump (CI-enforced). main was 0.15.19.
   assert.notEqual(desktopPkg.version, "0.15.19");
 });
 
-test("electron-builder ships agent-monitor unpacked via extraResources", () => {
+test("build script materializes a generated runtime tree with the host patches", () => {
+  assert.match(buildScriptSource, /SOURCE_ROOT_PACKAGE = "agent-dashboard"/);
+  assert.match(buildScriptSource, /SOURCE_CLIENT_PACKAGE = "agent-dashboard-client"/);
+  assert.match(buildScriptSource, /\.generated", "agent-monitor"/);
+  assert.match(buildScriptSource, /vite build/);
+  assert.match(buildScriptSource, /server\.listen\(port, "127\.0\.0\.1", \(\) => \{/);
+  assert.match(buildScriptSource, /CCAM_AUTO_INSTALL_HOOKS === "1"/);
+  assert.match(buildScriptSource, /Database = require\("\.\/compat-sqlite"\);/);
+  assert.match(buildScriptSource, /module\.exports = \{ uninstallHooks \};/);
+});
+
+test("electron-builder ships the generated agent-monitor runtime tree unpacked", () => {
   assert.match(
     electronBuilder,
-    /from:\s*\.\.\/\.\.\/vendor\/agent-monitor[\s\S]*to:\s*agent-monitor/,
+    /from:\s*\.generated\/agent-monitor[\s\S]*to:\s*agent-monitor/,
   );
   // Must ship client/dist (built), not client source.
   assert.match(electronBuilder, /client\/dist\/\*\*\/\*/);
+  assert.doesNotMatch(electronBuilder, /node_modules\/\*\*\/\*/);
+  assert.match(stagePackagingSource, /node_modules", "better-sqlite3"/);
 });
 
-test("sidecar uses the fixed loopback port and no --port/--host args", () => {
+test("runtime resolves the generated tree and sidecar wiring still uses the fixed port", () => {
+  assert.match(agentMonitorPathSource, /\.generated", "agent-monitor"/);
+  assert.doesNotMatch(agentMonitorPathSource, /vendor\/agent-monitor/);
   assert.match(contractsSource, /export const AGENT_MONITOR_PORT = 4820/);
   assert.match(sidecarSource, /AGENT_MONITOR_PORT/);
   // Fixed port: must NOT pick a free port like the gateway sidecar did.
@@ -103,11 +90,43 @@ test("sidecar uses the fixed loopback port and no --port/--host args", () => {
   assert.match(sidecarSource, /DASHBOARD_PORT:\s*String\(this\.port\)/);
   assert.match(sidecarSource, /DASHBOARD_DB_PATH/);
   assert.match(sidecarSource, /CCAM_AUTO_INSTALL_HOOKS:\s*"0"/);
+  assert.match(sidecarSource, /NODE_PATH/);
+  assert.match(sidecarSource, /app\.asar", "app", "node_modules"/);
   assert.match(sidecarSource, /\/api\/health/);
 });
 
-test("sidecar is constructed and started unconditionally before the gateway", () => {
+test("docs and ignores describe generated pnpm-managed inputs, not vendor source", () => {
+  assert.match(gitignoreSource, /apps\/desktop\/\.generated\//);
+  assert.doesNotMatch(gitignoreSource, /vendor\/agent-monitor/);
+
+  assert.match(thirdPartyNoticesSource, /Claude-Code-Agent-Monitor/);
+  assert.match(thirdPartyNoticesSource, /pinned in\s+`apps\/desktop\/package\.json`/);
+  assert.match(thirdPartyNoticesSource, /MIT License/);
+  assert.match(thirdPartyNoticesSource, /Son Nguyen/);
+  assert.doesNotMatch(thirdPartyNoticesSource, /vendor\/agent-monitor/);
+
+  assert.match(claudeDocSource, /pnpm-managed\s+upstream packages/);
+  assert.match(claudeDocSource, /\.generated\/agent-monitor/);
+  assert.doesNotMatch(claudeDocSource, /vendor\/agent-monitor/);
+});
+
+test("agent monitor is feature-gated and defaults off in desktop settings", () => {
+  assert.match(contractsSource, /agentMonitorEnabled: boolean/);
+  assert.match(contractsSource, /agentMonitorEnabled: false/);
+  assert.match(settingsStoreSource, /getAgentMonitorEnabled\(\)/);
+  assert.match(settingsStoreSource, /setAgentMonitorEnabled\(agentMonitorEnabled: boolean\)/);
+  assert.match(
+    settingsStoreSource,
+    /if \(typeof partial\.agentMonitorEnabled === "boolean"\) \{[\s\S]*this\.store\.set\("agentMonitorEnabled"/,
+  );
+});
+
+test("sidecar is feature-gated and, when enabled, starts before the gateway", () => {
   assert.match(appSource, /this\.agentMonitor = new AgentMonitorSidecar\(\)/);
+  assert.match(
+    appSource,
+    /if \(this\.settingsStore\.getAgentMonitorEnabled\(\)\) \{[\s\S]*void this\.agentMonitor\.start\(\);[\s\S]*syncAgentMonitorHooksOnBoot\(\);/,
+  );
   const startIdx = appSource.indexOf("void this.agentMonitor.start()");
   const gatewayTryIdx = appSource.indexOf("await this.server.start()");
   assert.ok(startIdx > 0, "sidecar start call missing");
@@ -121,11 +140,11 @@ test("sidecar is constructed and started unconditionally before the gateway", ()
 test("sidecar URL + hooks toggle exposed via IPC + preload", () => {
   assert.match(
     appSource,
-    /ipcMain\.handle\("desktop:get-agent-monitor-url",[\s\S]*this\.agentMonitor\.getUrl\(\)[\s\S]*this\.agentMonitor\.isReady\(\)/,
+    /ipcMain\.handle\("desktop:get-agent-monitor-url",[\s\S]*this\.agentMonitor\.getUrl\(\)[\s\S]*this\.agentMonitor\.isReady\(\)[\s\S]*enabled: this\.isAgentMonitorEnabled\(\)/,
   );
   assert.match(
     appSource,
-    /ipcMain\.handle\(\s*"desktop:set-agent-monitor-hooks-enabled"[\s\S]*setAgentMonitorHooksEnabled/,
+    /ipcMain\.handle\(\s*"desktop:set-agent-monitor-hooks-enabled"[\s\S]*Claude Dashboard is disabled in Settings\.[\s\S]*setAgentMonitorHooksEnabled/,
   );
   assert.match(
     preloadSource,
@@ -137,10 +156,10 @@ test("sidecar URL + hooks toggle exposed via IPC + preload", () => {
   );
 });
 
-test("openClaudeDashboard focuses the window and navigates to the tab", () => {
+test("openClaudeDashboard redirects to settings when disabled and tray access is gated", () => {
   assert.match(
     appSource,
-    /openClaudeDashboard\(\): void \{[\s\S]*this\.desktopWindow\.show\(\);[\s\S]*"desktop:navigate-tab",\s*"claude-dashboard"/,
+    /openClaudeDashboard\(\): void \{[\s\S]*this\.desktopWindow\.show\(\);[\s\S]*if \(!this\.isAgentMonitorEnabled\(\)\) \{[\s\S]*"desktop:navigate-tab", "settings"[\s\S]*"desktop:navigate-settings-tab", "relay-gateway"[\s\S]*return;[\s\S]*"desktop:navigate-tab",\s*"claude-dashboard"/,
   );
   assert.match(
     appSource,
@@ -151,6 +170,8 @@ test("openClaudeDashboard focuses the window and navigates to the tab", () => {
     /ipcMain\.handle\("desktop:open-agent-monitor",[\s\S]*this\.openClaudeDashboard\(\)/,
   );
   assert.match(traySource, /onOpenClaudeDashboard\?: \(\) => void/);
+  assert.match(traySource, /setAgentMonitorEnabled\(enabled: boolean\)/);
+  assert.match(traySource, /this\.agentMonitorEnabled/);
   assert.match(traySource, /label: "Open Claude Dashboard"/);
 });
 
@@ -174,9 +195,12 @@ test("shutdown sequence stops the sidecar before the server", () => {
   assert.ok(amIdx > 0 && srvIdx > 0 && amIdx < srvIdx, "agentMonitor.stop must precede server.stop");
 });
 
-test("renderer embeds the monitor as the Claude Dashboard nav tab", () => {
-  assert.match(indexHtml, /data-tab="claude-dashboard">Claude Dashboard</);
+test("renderer hides the monitor tab by default and exposes the settings toggle", () => {
+  assert.match(indexHtml, /data-tab="claude-dashboard" id="claudeDashboardTabButton" hidden>Claude Dashboard</);
   assert.match(indexHtml, /<section id="claude-dashboard" class="panel">/);
+  assert.match(indexHtml, /id="agentMonitorEnabled"/);
+  assert.match(indexHtml, /function syncAgentMonitorTabVisibility/);
+  assert.match(indexHtml, /tabName === "claude-dashboard" && !cachedAgentMonitorEnabled/);
   assert.match(indexHtml, /id="claudeDashFrame"/);
   assert.match(indexHtml, /tabName === "claude-dashboard"/);
   assert.match(indexHtml, /api\.getAgentMonitorUrl\(\)/);

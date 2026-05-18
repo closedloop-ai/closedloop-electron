@@ -106,6 +106,11 @@ test("migration: fresh install applies defaults", () => {
   assert.equal(all.relayOrigin, DEFAULT_DESKTOP_SETTINGS.relayOrigin, "relayOrigin should be the default relay origin");
   assert.equal(all.apiOrigin, DEFAULT_DESKTOP_SETTINGS.apiOrigin, "apiOrigin should be the default REST API origin");
   assert.equal(
+    all.agentMonitorEnabled,
+    false,
+    "Claude Dashboard should default off",
+  );
+  assert.equal(
     all.commandSigningEnforcementEnabled,
     false,
     "command signing enforcement should default off",
@@ -131,6 +136,24 @@ test("command signing enforcement persists across settings store reloads", () =>
   assert.equal(all.sandboxBaseDirectory, "/Users/test/Source");
 });
 
+test("agent monitor enablement persists across settings store reloads", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "settings-agent-monitor-"));
+  tempDirs.push(tmpDir);
+
+  const storeName = "test-agent-monitor";
+  const store = new SettingsStore({ cwd: tmpDir, name: storeName });
+  store.update({
+    agentMonitorEnabled: true,
+    sandboxBaseDirectory: "/Users/test/Source",
+  });
+
+  const reloaded = new SettingsStore({ cwd: tmpDir, name: storeName });
+  const all = reloaded.getAll();
+
+  assert.equal(all.agentMonitorEnabled, true);
+  assert.equal(all.sandboxBaseDirectory, "/Users/test/Source");
+});
+
 test("partial settings update preserves command signing enforcement", () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "settings-command-signing-partial-"));
   tempDirs.push(tmpDir);
@@ -145,6 +168,24 @@ test("partial settings update preserves command signing enforcement", () => {
   const all = store.getAll();
 
   assert.equal(all.commandSigningEnforcementEnabled, true);
+  assert.equal(all.sandboxBaseDirectory, "/Users/test/Source");
+  assert.equal(all.verboseLogging, true);
+});
+
+test("partial settings update preserves agent monitor enablement", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "settings-agent-monitor-partial-"));
+  tempDirs.push(tmpDir);
+
+  const store = new SettingsStore({ cwd: tmpDir, name: "test-agent-monitor-partial" });
+  store.update({
+    agentMonitorEnabled: true,
+    sandboxBaseDirectory: "/Users/test/Source",
+  });
+  store.update({ verboseLogging: true });
+
+  const all = store.getAll();
+
+  assert.equal(all.agentMonitorEnabled, true);
   assert.equal(all.sandboxBaseDirectory, "/Users/test/Source");
   assert.equal(all.verboseLogging, true);
 });

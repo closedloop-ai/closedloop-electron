@@ -1,188 +1,321 @@
-// Builds the vendored Claude-Code-Agent-Monitor (vendor/agent-monitor) into a
-// runtime-ready tree: server source + a built `client/dist/` + a prod-only,
-// optional-free root `node_modules/`. Uses npm (upstream ships
-// package-lock.json files); npm ignores the repo's pnpm-workspace.yaml, so the
-// hardened root lockfile is never touched.
+// Builds a runtime-ready Claude-Code-Agent-Monitor tree from pnpm-managed
+// upstream imports:
+//   - `agent-dashboard` (server + hook scripts + runtime package metadata)
+//   - `agent-dashboard-client` (client source only)
 //
-// This is a TWO-project build (root server + client Vite app) and it
-// deliberately ships WITHOUT better-sqlite3 so server/db.js falls through to
-// its node:sqlite (compat-sqlite.js) path — see vendor/agent-monitor/VENDOR.md.
+// The generated runtime tree lives at `apps/desktop/.generated/agent-monitor`
+// and contains:
+//   - server/        (copied from agent-dashboard, with ClosedLoop patches)
+//   - scripts/       (copied from agent-dashboard, plus uninstall-hooks.js)
+//   - client/dist/   (built from agent-dashboard-client with Vite)
+//   - package.json / LICENSE
 //
-// Hard gates (fail the build): vendor patches #1/#2 present; built client +
-// server entry exist; better-sqlite3 absent from the shipped tree; the vendored
-// compat-sqlite.js works under the Electron-as-Node runtime (when the Electron
-// binary is resolvable — the #1 risk made a build gate).
-//
-// Idempotent: skips the expensive install/build when the three lockfiles +
-// root package.json are unchanged and a prior build is present. Force with
-// `--force` or AGENT_MONITOR_FORCE_BUILD=1.
+// Unlike the old vendored flow, this does not commit the upstream repo into
+// `/vendor`. The Electron app still ships the generated tree unpacked via
+// extraResources so the sidecar server and hook scripts remain real files.
 
 import { spawnSync } from "node:child_process";
 import { createHash as hash } from "node:crypto";
 import {
+  cpSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
-  readdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+const SOURCE_ROOT_PACKAGE = "agent-dashboard";
+const SOURCE_CLIENT_PACKAGE = "agent-dashboard-client";
+
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const appDir = path.resolve(scriptDir, "..");
 const repoRoot = path.resolve(appDir, "../..");
-const vendorDir = path.join(repoRoot, "vendor", "agent-monitor");
-const clientDir = path.join(vendorDir, "client");
+const requireFromApp = createRequire(path.join(appDir, "package.json"));
+
+const generatedRootDir = path.join(appDir, ".generated", "agent-monitor");
+const sourceRootDir = resolvePackageRoot(SOURCE_ROOT_PACKAGE);
+const sourceClientDir = resolvePackageRoot(SOURCE_CLIENT_PACKAGE);
+const sourceRootPkg = path.join(sourceRootDir, "package.json");
+const sourceClientPkg = path.join(sourceClientDir, "package.json");
+const sourceServerEntry = path.join(sourceRootDir, "server", "index.js");
+const sourceDbFile = path.join(sourceRootDir, "server", "db.js");
+const sourceCompatSqlite = path.join(sourceRootDir, "server", "compat-sqlite.js");
+const sourceClientIndex = path.join(sourceClientDir, "index.html");
+const sourceClientDistDir = path.join(sourceClientDir, "dist");
+const generatedServerEntry = path.join(generatedRootDir, "server", "index.js");
+const generatedDbFile = path.join(generatedRootDir, "server", "db.js");
+const generatedClientIndex = path.join(
+  generatedRootDir,
+  "client",
+  "dist",
+  "index.html",
+);
+const generatedUninstallHooks = path.join(
+  generatedRootDir,
+  "scripts",
+  "uninstall-hooks.js",
+);
+const stampFile = path.join(generatedRootDir, ".build-stamp");
+const viteBin = resolvePackageBin("vite", "vite");
 
 const force =
   process.argv.includes("--force") ||
   process.env.AGENT_MONITOR_FORCE_BUILD === "1";
 
-const rootPkg = path.join(vendorDir, "package.json");
-const rootLock = path.join(vendorDir, "package-lock.json");
-const clientLock = path.join(clientDir, "package-lock.json");
-const serverEntry = path.join(vendorDir, "server", "index.js");
-const builtClientIndex = path.join(vendorDir, "client", "dist", "index.html");
-const nodeModulesDir = path.join(vendorDir, "node_modules");
-const stampFile = path.join(vendorDir, ".build-stamp");
+function resolvePackageRoot(packageName) {
+  try {
+    return path.dirname(requireFromApp.resolve(`${packageName}/package.json`));
+  } catch (error) {
+    throw new Error(
+      `Unable to resolve ${packageName}. Run \`pnpm install\` for apps/desktop before building the agent monitor.`,
+      { cause: error },
+    );
+  }
+}
 
-if (!existsSync(rootPkg)) {
-  throw new Error(
-    `Vendored agent-monitor not found at ${vendorDir} (missing package.json).`,
+function resolvePackageBin(packageName, binName) {
+  const packageRoot = resolvePackageRoot(packageName);
+  const packageJson = JSON.parse(
+    readFileSync(path.join(packageRoot, "package.json"), "utf8"),
   );
+  const relativeBin =
+    typeof packageJson.bin === "string"
+      ? packageJson.bin
+      : packageJson.bin?.[binName];
+
+  if (typeof relativeBin !== "string" || relativeBin.length === 0) {
+    throw new Error(
+      `Unable to resolve the ${binName} binary from ${packageName}. Run \`pnpm install\` for apps/desktop before building the agent monitor.`,
+    );
+  }
+
+  const binPath = path.join(packageRoot, relativeBin);
+  if (!existsSync(binPath)) {
+    throw new Error(
+      `Resolved ${packageName} binary does not exist: ${binPath}.`,
+    );
+  }
+
+  return binPath;
+}
+
+function assertSourcePackages() {
+  const rootPkg = JSON.parse(readFileSync(sourceRootPkg, "utf8"));
+  const clientPkg = JSON.parse(readFileSync(sourceClientPkg, "utf8"));
+
+  if (rootPkg.name !== SOURCE_ROOT_PACKAGE) {
+    throw new Error(
+      `Expected ${sourceRootPkg} to be ${SOURCE_ROOT_PACKAGE}, got ${rootPkg.name}.`,
+    );
+  }
+  if (clientPkg.name !== SOURCE_CLIENT_PACKAGE) {
+    throw new Error(
+      `Expected ${sourceClientPkg} to be ${SOURCE_CLIENT_PACKAGE}, got ${clientPkg.name}.`,
+    );
+  }
+  if (
+    rootPkg.optionalDependencies?.["better-sqlite3"] == null ||
+    rootPkg.dependencies?.["better-sqlite3"] != null
+  ) {
+    throw new Error(
+      `${SOURCE_ROOT_PACKAGE} must keep better-sqlite3 optional so the generated runtime can stay on compat-sqlite.`,
+    );
+  }
+
+  for (const required of [
+    sourceServerEntry,
+    sourceDbFile,
+    sourceCompatSqlite,
+    path.join(sourceRootDir, "scripts", "install-hooks.js"),
+    path.join(sourceRootDir, "scripts", "hook-handler.js"),
+    path.join(sourceRootDir, "LICENSE"),
+    sourceClientIndex,
+    path.join(sourceClientDir, "vite.config.ts"),
+    path.join(sourceClientDir, "public", "favicon.svg"),
+  ]) {
+    if (!existsSync(required)) {
+      throw new Error(`Required agent-monitor source file missing: ${required}`);
+    }
+  }
 }
 
 function currentStamp() {
   const h = hash("sha256");
-  h.update(readFileSync(rootPkg));
-  if (existsSync(rootLock)) h.update(readFileSync(rootLock));
-  if (existsSync(clientLock)) h.update(readFileSync(clientLock));
+  for (const file of [
+    path.join(repoRoot, "pnpm-lock.yaml"),
+    path.join(appDir, "package.json"),
+    sourceRootPkg,
+    sourceClientPkg,
+    sourceServerEntry,
+    sourceDbFile,
+    sourceClientIndex,
+    fileURLToPath(import.meta.url),
+  ]) {
+    h.update(readFileSync(file));
+  }
   return h.digest("hex");
 }
 
-// --- Vendor patch guard (VENDOR.md risk #6): a future upstream re-copy that
-// silently drops Patch #1/#2 must fail the build, not regress security. ---
-function assertVendorPatches() {
-  const src = readFileSync(serverEntry, "utf8");
-  if (!src.includes('server.listen(port, "127.0.0.1"')) {
+function buildClient() {
+  rmSync(sourceClientDistDir, { recursive: true, force: true });
+  runNodeScript("vite build", viteBin, ["build"], sourceClientDir);
+  if (!existsSync(path.join(sourceClientDistDir, "index.html"))) {
     throw new Error(
-      "VENDOR PATCH #1 MISSING: vendor/agent-monitor/server/index.js must bind " +
-        '127.0.0.1 (`server.listen(port, "127.0.0.1", ...)`). Re-apply per ' +
-        "vendor/agent-monitor/VENDOR.md before building.",
-    );
-  }
-  if (!src.includes('process.env.CCAM_AUTO_INSTALL_HOOKS === "1"')) {
-    throw new Error(
-      "VENDOR PATCH #2 MISSING: the silent installHooks() auto-install must be " +
-        "gated behind CCAM_AUTO_INSTALL_HOOKS. Re-apply per VENDOR.md.",
-    );
-  }
-  if (!existsSync(path.join(vendorDir, "scripts", "uninstall-hooks.js"))) {
-    throw new Error(
-      "VENDOR ADDITION #3 MISSING: vendor/agent-monitor/scripts/uninstall-hooks.js " +
-        "is required for the consent-reversal path. Re-add per VENDOR.md.",
+      `Client build completed but ${path.join(sourceClientDistDir, "index.html")} is missing.`,
     );
   }
 }
 
-assertVendorPatches();
+function materializeRuntimeTree() {
+  rmSync(generatedRootDir, { recursive: true, force: true });
+  mkdirSync(generatedRootDir, { recursive: true });
 
-const stamp = currentStamp();
-
-if (
-  !force &&
-  existsSync(builtClientIndex) &&
-  existsSync(nodeModulesDir) &&
-  existsSync(stampFile) &&
-  readFileSync(stampFile, "utf8").trim() === stamp
-) {
-  console.log(
-    "[build:agent-monitor] up to date — skipping (use --force to rebuild).",
+  cpSync(path.join(sourceRootDir, "server"), path.join(generatedRootDir, "server"), {
+    recursive: true,
+  });
+  cpSync(
+    path.join(sourceRootDir, "scripts"),
+    path.join(generatedRootDir, "scripts"),
+    { recursive: true },
   );
-  process.exit(0);
+  mkdirSync(path.join(generatedRootDir, "client"), { recursive: true });
+  cpSync(sourceClientDistDir, path.join(generatedRootDir, "client", "dist"), {
+    recursive: true,
+  });
+  cpSync(sourceRootPkg, path.join(generatedRootDir, "package.json"));
+  cpSync(path.join(sourceRootDir, "LICENSE"), path.join(generatedRootDir, "LICENSE"));
+
+  patchServerIndex(generatedServerEntry);
+  patchDbFile(generatedDbFile);
+  writeFileSync(generatedUninstallHooks, UNINSTALL_HOOKS_SOURCE, "utf8");
 }
 
-function run(cmd, args, cwd) {
-  console.log(`[build:agent-monitor] (${path.relative(repoRoot, cwd)}) ${cmd} ${args.join(" ")}`);
-  const result = spawnSync(cmd, args, { cwd, stdio: "inherit" });
-  if (result.error) {
-    if (result.error.code === "ENOENT") {
+function patchServerIndex(file) {
+  let source = readFileSync(file, "utf8");
+
+  if (!source.includes('server.listen(port, "127.0.0.1", () => {')) {
+    const listenNeedle = "server.listen(port, () => {";
+    if (!source.includes(listenNeedle)) {
       throw new Error(
-        `\`${cmd}\` not found. Node.js (with npm) must be on PATH to build agent-monitor.`,
+        `Unable to patch ${file}: expected \`${listenNeedle}\` for loopback binding.`,
       );
     }
-    throw result.error;
+    source = source.replace(
+      listenNeedle,
+      'server.listen(port, "127.0.0.1", () => {',
+    );
   }
-  if (result.status !== 0) {
-    process.exit(result.status ?? 1);
+
+  if (!source.includes('process.env.CCAM_AUTO_INSTALL_HOOKS === "1"')) {
+    const autoInstallNeedle = [
+      "  try {",
+      '    const { installHooks } = require("../scripts/install-hooks");',
+      "    installHooks(true);",
+      '    console.log("Claude Code hooks auto-configured.");',
+      "  } catch {",
+      "    // Non-fatal — user can run npm run install-hooks manually",
+      "  }",
+    ].join("\n");
+    if (!source.includes(autoInstallNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected upstream hook auto-install block.`,
+      );
+    }
+    source = source.replace(
+      autoInstallNeedle,
+      [
+        "  if (process.env.CCAM_AUTO_INSTALL_HOOKS === \"1\") {",
+        "    try {",
+        '      const { installHooks } = require("../scripts/install-hooks");',
+        "      installHooks(true);",
+        '      console.log("Claude Code hooks auto-configured.");',
+        "    } catch {",
+        "      // Non-fatal — user can run npm run install-hooks manually",
+        "    }",
+        "  }",
+      ].join("\n"),
+    );
   }
+
+  writeFileSync(file, source, "utf8");
 }
 
-// 1. Root runtime deps (pure JS: express/ws/cors/...).
-run("npm", ["ci"], vendorDir);
-// 2. Client: full install + Vite/TS build -> client/dist.
-run("npm", ["ci"], clientDir);
-run("npm", ["run", "build"], clientDir);
-// 3. Reduce the root tree to the runtime closure and drop optionals
-//    (better-sqlite3) so server/db.js uses the node:sqlite fallback.
-run("npm", ["ci", "--omit=dev", "--omit=optional"], vendorDir);
-
-// 3b. Belt-and-suspenders: never ship the native module even if an npm cache
-//     quirk reinstalls it. node:sqlite is the only supported backend here.
-const betterSqlite = path.join(nodeModulesDir, "better-sqlite3");
-if (existsSync(betterSqlite)) {
-  console.log(
-    "[build:agent-monitor] stripping unexpected node_modules/better-sqlite3 " +
-      "(node:sqlite fallback is the shipped backend).",
+function patchDbFile(file) {
+  let source = readFileSync(file, "utf8");
+  const requireNeedle = '  Database = require("better-sqlite3");';
+  if (!source.includes(requireNeedle)) {
+    if (!source.includes('  Database = require("./compat-sqlite");')) {
+      throw new Error(
+        `Unable to patch ${file}: expected better-sqlite3 bootstrap block.`,
+      );
+    }
+    return;
+  }
+  source = source.replace(
+    requireNeedle,
+    '  Database = require("./compat-sqlite");',
   );
-  rmSync(betterSqlite, { recursive: true, force: true });
+  writeFileSync(file, source, "utf8");
 }
 
-// 4. Artifact assertions.
-if (!existsSync(builtClientIndex)) {
-  throw new Error(
-    `Build finished but ${builtClientIndex} is missing — upstream client build ` +
-      "layout may have changed (see vendor/agent-monitor/VENDOR.md).",
-  );
-}
-if (!existsSync(serverEntry)) {
-  throw new Error(`Missing ${serverEntry} — vendored tree is incomplete.`);
-}
-
-// 5. SQLite gate (Phase 0 step 3): prove the vendored compat-sqlite.js works
-//    under the Electron binary as Node. This is the project's #1 risk; when
-//    Electron is resolvable, a failure here fails the build.
-function resolveElectronBinary() {
-  const dist = path.join(appDir, "node_modules", "electron", "dist");
-  if (!existsSync(dist)) return null;
-  for (const entry of readdirSync(dist)) {
-    if (!entry.endsWith(".app")) continue;
-    const macOs = path.join(dist, entry, "Contents", "MacOS");
-    if (!existsSync(macOs)) continue;
-    for (const exe of readdirSync(macOs)) {
-      return path.join(macOs, exe);
+function assertGeneratedTree() {
+  for (const required of [
+    path.join(generatedRootDir, "package.json"),
+    path.join(generatedRootDir, "LICENSE"),
+    generatedServerEntry,
+    generatedDbFile,
+    path.join(generatedRootDir, "server", "compat-sqlite.js"),
+    generatedClientIndex,
+    path.join(generatedRootDir, "scripts", "install-hooks.js"),
+    path.join(generatedRootDir, "scripts", "hook-handler.js"),
+    generatedUninstallHooks,
+  ]) {
+    if (!existsSync(required)) {
+      throw new Error(`Generated agent-monitor file missing: ${required}`);
     }
   }
-  return null;
+
+  const serverIndex = readFileSync(generatedServerEntry, "utf8");
+  if (!serverIndex.includes('server.listen(port, "127.0.0.1", () => {')) {
+    throw new Error("Generated server/index.js is missing the loopback-only bind.");
+  }
+  if (!serverIndex.includes('process.env.CCAM_AUTO_INSTALL_HOOKS === "1"')) {
+    throw new Error(
+      "Generated server/index.js is missing the CCAM_AUTO_INSTALL_HOOKS guard.",
+    );
+  }
+
+  const dbSource = readFileSync(generatedDbFile, "utf8");
+  if (dbSource.includes('require("better-sqlite3")')) {
+    throw new Error(
+      "Generated server/db.js must not load better-sqlite3 directly.",
+    );
+  }
 }
 
-const electronBin = resolveElectronBinary();
-if (!electronBin) {
-  console.warn(
-    "[build:agent-monitor] WARNING: Electron binary not found under " +
-      "apps/desktop/node_modules/electron/dist — skipping the node:sqlite " +
-      "build gate. The runtime sidecar + static wiring test + the " +
-      "clean-machine DMG smoke test still cover this path.",
-  );
-} else {
-  const probeDir = mkdtempSync(path.join(os.tmpdir(), "ccam-build-p0-"));
+function runSqliteGate() {
+  const electronBin = resolveElectronBinary();
+  if (!electronBin) {
+    console.warn(
+      "[build:agent-monitor] WARNING: Electron binary not found under " +
+        "apps/desktop/node_modules/electron/dist — skipping the node:sqlite " +
+        "build gate. The generated runtime tree and desktop wiring tests still cover this path.",
+    );
+    return;
+  }
+
+  const probeDir = fsMkdtemp();
   const probe = `
     "use strict";
     const path = require("node:path");
-    const Database = require(${JSON.stringify(path.join(vendorDir, "server", "compat-sqlite.js"))});
+    const Database = require(${JSON.stringify(path.join(generatedRootDir, "server", "compat-sqlite.js"))});
     const db = new Database(path.join(${JSON.stringify(probeDir)}, "probe.db"));
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA foreign_keys = ON");
@@ -195,8 +328,9 @@ if (!electronBin) {
     db.close();
     process.exit(n === 1 ? 0 : 7);
   `;
+
   console.log(
-    "[build:agent-monitor] SQLite gate: running vendored compat-sqlite.js under Electron-as-Node…",
+    "[build:agent-monitor] SQLite gate: running generated compat-sqlite.js under Electron-as-Node…",
   );
   const result = spawnSync(electronBin, ["-e", probe], {
     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
@@ -205,13 +339,155 @@ if (!electronBin) {
   rmSync(probeDir, { recursive: true, force: true });
   if (result.status !== 0) {
     throw new Error(
-      "SQLite BUILD GATE FAILED: vendored compat-sqlite.js (node:sqlite) did " +
-        "not work under ELECTRON_RUN_AS_NODE. Do NOT ship. See the " +
-        "better-sqlite3 Electron-prebuild fallback in vendor/agent-monitor/VENDOR.md.",
+      "SQLite BUILD GATE FAILED: generated compat-sqlite.js (node:sqlite) did not work under ELECTRON_RUN_AS_NODE. Do NOT ship.",
     );
   }
   console.log("[build:agent-monitor] SQLite gate: PASS.");
 }
+
+function resolveElectronBinary() {
+  let dist;
+  try {
+    dist = path.join(
+      path.dirname(requireFromApp.resolve("electron/package.json")),
+      "dist",
+    );
+  } catch {
+    return null;
+  }
+  if (!existsSync(dist)) {
+    return null;
+  }
+  for (const entry of readdirSync(dist)) {
+    if (!entry.endsWith(".app")) {
+      continue;
+    }
+    const macOs = path.join(dist, entry, "Contents", "MacOS");
+    if (!existsSync(macOs)) {
+      continue;
+    }
+    for (const exe of readdirSync(macOs)) {
+      return path.join(macOs, exe);
+    }
+  }
+  return null;
+}
+
+function runNodeScript(label, scriptPath, args, cwd) {
+  const relativeCwd = path.relative(repoRoot, cwd) || ".";
+  console.log(
+    `[build:agent-monitor] (${relativeCwd}) node ${path.relative(repoRoot, scriptPath)} ${args.join(" ")}`.trim(),
+  );
+  const result = spawnSync(process.execPath, [scriptPath, ...args], {
+    cwd,
+    stdio: "inherit",
+  });
+  if (result.error) {
+    throw result.error;
+  }
+  if (result.status !== 0) {
+    throw new Error(`[build:agent-monitor] ${label} failed with exit code ${result.status ?? 1}.`);
+  }
+}
+
+function fsMkdtemp() {
+  return mkdtempSync(path.join(os.tmpdir(), "ccam-build-"));
+}
+
+const UNINSTALL_HOOKS_SOURCE = `#!/usr/bin/env node
+
+const fs = require("fs");
+
+const { getSettingsPath } = require("../server/lib/claude-home");
+const SETTINGS_PATH = getSettingsPath();
+
+function isOurEntry(entry) {
+  if (entry.command && entry.command.includes("hook-handler.js")) return true;
+  if (Array.isArray(entry.hooks)) {
+    return entry.hooks.some(
+      (hook) => hook.command && hook.command.includes("hook-handler.js"),
+    );
+  }
+  return false;
+}
+
+function uninstallHooks(silent = false) {
+  if (!fs.existsSync(SETTINGS_PATH)) {
+    if (!silent) console.log(\`No settings file at \${SETTINGS_PATH} - nothing to remove.\`);
+    return true;
+  }
+
+  let settings;
+  try {
+    settings = JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf8"));
+  } catch (error) {
+    if (!silent) console.error(\`Failed to parse \${SETTINGS_PATH}:\`, error.message);
+    return false;
+  }
+
+  if (!settings || !settings.hooks) {
+    if (!silent) console.log("No hooks configured - nothing to remove.");
+    return true;
+  }
+
+  let removed = 0;
+  for (const hookType of Object.keys(settings.hooks)) {
+    const list = settings.hooks[hookType];
+    if (!Array.isArray(list)) continue;
+    const kept = list.filter((entry) => {
+      const ours = isOurEntry(entry);
+      if (ours) removed += 1;
+      return !ours;
+    });
+    if (kept.length > 0) {
+      settings.hooks[hookType] = kept;
+    } else {
+      delete settings.hooks[hookType];
+    }
+  }
+
+  if (Object.keys(settings.hooks).length === 0) {
+    delete settings.hooks;
+  }
+
+  fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + "\\n", "utf8");
+
+  if (!silent) {
+    console.log(\`Settings file: \${SETTINGS_PATH}\`);
+    console.log(\`Removed \${removed} dashboard hook entr\${removed === 1 ? "y" : "ies"}.\`);
+  }
+
+  return true;
+}
+
+if (require.main === module) {
+  uninstallHooks(false);
+}
+
+module.exports = { uninstallHooks };
+`;
+
+assertSourcePackages();
+
+const stamp = currentStamp();
+if (
+  !force &&
+  existsSync(generatedServerEntry) &&
+  existsSync(generatedClientIndex) &&
+  existsSync(generatedUninstallHooks) &&
+  existsSync(stampFile) &&
+  readFileSync(stampFile, "utf8").trim() === stamp
+) {
+  console.log(
+    "[build:agent-monitor] up to date — skipping (use --force to rebuild).",
+  );
+  process.exit(0);
+}
+
+buildClient();
+materializeRuntimeTree();
+assertGeneratedTree();
+runSqliteGate();
 
 writeFileSync(stampFile, `${stamp}\n`);
 console.log("[build:agent-monitor] done.");

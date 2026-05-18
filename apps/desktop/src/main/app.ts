@@ -529,6 +529,7 @@ export class DesktopApplication {
       onOpenClaudeDashboard: () => this.openClaudeDashboard(),
       onTogglePaused: (paused) => this.setCloudCommandsPaused(paused),
     });
+    this.tray.setAgentMonitorEnabled(this.settingsStore.getAgentMonitorEnabled());
     this.tray.setPaused(this.cloudCommandsPaused);
     this.syncPendingApprovalsToTray();
     this.desktopWindow.init();
@@ -551,13 +552,15 @@ export class DesktopApplication {
       await seedReposConfig(bootSandbox);
     }
 
-    // Independent of the gateway; started unconditionally and fire-and-forget
-    // BEFORE the gateway try-block so a gateway-start failure never prevents
-    // the Agent Monitor from running, and a sidecar failure never blocks or
-    // fails app boot. Hook repair is opt-in and self-healing (no-op unless the
-    // user previously enabled session tracking).
-    void this.agentMonitor.start();
-    syncAgentMonitorHooksOnBoot();
+    // Independent of the gateway, but fully feature-gated. When enabled, start
+    // the sidecar fire-and-forget BEFORE the gateway try-block so a
+    // gateway-start failure never prevents it from running, and a sidecar
+    // failure never blocks or fails app boot. Hook repair remains opt-in and
+    // self-healing.
+    if (this.settingsStore.getAgentMonitorEnabled()) {
+      void this.agentMonitor.start();
+      syncAgentMonitorHooksOnBoot();
+    }
 
     try {
       await this.server.start();
@@ -1146,8 +1149,49 @@ export class DesktopApplication {
       ?.webContents.send("desktop:navigate-settings-tab", "security");
   }
 
+  private isAgentMonitorEnabled(): boolean {
+    return this.settingsStore.getAgentMonitorEnabled();
+  }
+
+  private async applyAgentMonitorSetting(enabled: boolean): Promise<void> {
+    this.tray.setAgentMonitorEnabled(enabled);
+
+    if (enabled) {
+      void this.agentMonitor.start();
+      syncAgentMonitorHooksOnBoot();
+      return;
+    }
+
+    const hooksResult = isAgentMonitorHooksEnabled()
+      ? setAgentMonitorHooksEnabled(false)
+      : { ok: true, enabled: false };
+    if (!hooksResult.ok) {
+      gatewayLog.warn(
+        "agent-monitor",
+        `feature disabled but hooks could not be removed: ${hooksResult.error ?? "unknown error"}`,
+      );
+    }
+
+    await this.agentMonitor.stop();
+    this.desktopWindow
+      .getWindow()
+      ?.webContents.send("desktop:navigate-tab", "settings");
+    this.desktopWindow
+      .getWindow()
+      ?.webContents.send("desktop:navigate-settings-tab", "relay-gateway");
+  }
+
   openClaudeDashboard(): void {
     this.desktopWindow.show();
+    if (!this.isAgentMonitorEnabled()) {
+      this.desktopWindow
+        .getWindow()
+        ?.webContents.send("desktop:navigate-tab", "settings");
+      this.desktopWindow
+        .getWindow()
+        ?.webContents.send("desktop:navigate-settings-tab", "relay-gateway");
+      return;
+    }
     this.desktopWindow
       .getWindow()
       ?.webContents.send("desktop:navigate-tab", "claude-dashboard");
@@ -2218,17 +2262,26 @@ export class DesktopApplication {
     ipcMain.handle("desktop:get-agent-monitor-url", () => ({
       url: this.agentMonitor.getUrl(),
       ready: this.agentMonitor.isReady(),
+      enabled: this.isAgentMonitorEnabled(),
     }));
     ipcMain.handle("desktop:open-agent-monitor", () =>
       this.openClaudeDashboard(),
     );
     ipcMain.handle("desktop:get-agent-monitor-hooks-enabled", () =>
-      isAgentMonitorHooksEnabled(),
+      this.isAgentMonitorEnabled() && isAgentMonitorHooksEnabled(),
     );
     ipcMain.handle(
       "desktop:set-agent-monitor-hooks-enabled",
-      (_event, enabled: boolean) =>
-        setAgentMonitorHooksEnabled(enabled === true),
+      (_event, enabled: boolean) => {
+        if (!this.isAgentMonitorEnabled()) {
+          return {
+            ok: false,
+            enabled: false,
+            error: "Claude Dashboard is disabled in Settings.",
+          };
+        }
+        return setAgentMonitorHooksEnabled(enabled === true);
+      },
     );
     ipcMain.handle("desktop:get-logs", () => gatewayLog.getEntries());
     ipcMain.handle("desktop:clear-logs", () => {
@@ -2266,6 +2319,7 @@ export class DesktopApplication {
             "auto" | "none" | "low" | "medium" | "high"
           >;
           verboseLogging?: boolean;
+          agentMonitorEnabled?: boolean;
           commandSigningEnforcementEnabled?: boolean;
         },
       ) => {
@@ -2301,6 +2355,9 @@ export class DesktopApplication {
         if (typeof partial.commandSigningEnforcementEnabled === "boolean") {
           nextPartial.commandSigningEnforcementEnabled =
             partial.commandSigningEnforcementEnabled;
+        }
+        if (typeof partial.agentMonitorEnabled === "boolean") {
+          nextPartial.agentMonitorEnabled = partial.agentMonitorEnabled;
         }
         const selectedSandbox =
           typeof partial.sandboxBaseDirectory === "string"
@@ -2342,6 +2399,12 @@ export class DesktopApplication {
         );
         if (typeof nextPartial.verboseLogging === "boolean") {
           gatewayLog.setVerbose(nextPartial.verboseLogging);
+        }
+        if (
+          typeof nextPartial.agentMonitorEnabled === "boolean" &&
+          nextPartial.agentMonitorEnabled !== currentSettings.agentMonitorEnabled
+        ) {
+          await this.applyAgentMonitorSetting(nextPartial.agentMonitorEnabled);
         }
 
         if (

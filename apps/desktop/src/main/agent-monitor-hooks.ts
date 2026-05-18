@@ -16,8 +16,8 @@ import { resolveAgentMonitorPaths } from "./agent-monitor-path.js";
 
 const TAG = "agent-monitor-hooks";
 
-// Mirrors vendor/agent-monitor/scripts/install-hooks.js: same event set, same
-// matcher rule. Kept in sync with the vendor copy (re-verify on upstream bump).
+// Mirrors the upstream install-hooks.js contract: same event set, same matcher
+// rule. Re-verify on every upstream bump.
 const HOOKS_WITH_MATCHER = [
   "PreToolUse",
   "PostToolUse",
@@ -46,9 +46,9 @@ export function isAgentMonitorHooksEnabled(): boolean {
   return store().get("enabled", false) === true;
 }
 
-// Matches vendor install-hooks.js / uninstall-hooks.js isOurEntry: any hook
-// whose command references hook-handler.js. Keeps install/uninstall symmetric
-// with the vendored CLI scripts.
+// Matches install-hooks.js / uninstall-hooks.js isOurEntry: any hook whose
+// command references hook-handler.js. Keeps install/uninstall symmetric with
+// the generated CLI scripts.
 function isOurEntry(entry: unknown): boolean {
   if (!entry || typeof entry !== "object") {
     return false;
@@ -68,7 +68,7 @@ function isOurEntry(entry: unknown): boolean {
   return false;
 }
 
-// Same resolution as vendor/agent-monitor/server/lib/claude-home.js:
+// Same resolution as agent-dashboard/server/lib/claude-home.js:
 // CLAUDE_HOME || ~/.claude, then settings.json.
 function claudeSettingsPath(): string {
   const home = process.env.CLAUDE_HOME || path.join(os.homedir(), ".claude");
@@ -133,7 +133,7 @@ function writeSettings(file: string, settings: unknown): void {
 }
 
 // Idempotent: replaces a stale entry of ours in place (self-heals a moved
-// handler path), otherwise appends. Mirrors vendor install-hooks.js.
+// handler path), otherwise appends. Mirrors upstream install-hooks.js.
 function installHooks(): void {
   const handler = refreshHandlerCopy();
   const file = claudeSettingsPath();

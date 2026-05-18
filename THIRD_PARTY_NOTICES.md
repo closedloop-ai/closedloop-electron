@@ -1,8 +1,9 @@
 # Third-Party Notices
 
-This product bundles vendored copies of third-party open-source software. Their
-source is committed under `vendor/` at pinned commits; build artifacts
-(`node_modules/`, built client assets) are generated and git-ignored.
+This product bundles third-party open-source software pinned in
+`apps/desktop/package.json`. Some upstream source is fetched by `pnpm` during
+development/build, and the desktop build generates a runtime tree under
+`apps/desktop/.generated/agent-monitor/` for packaging.
 
 ---
 
@@ -10,20 +11,19 @@ source is committed under `vendor/` at pinned commits; build artifacts
 
 - **Upstream:** https://github.com/hoangsonww/Claude-Code-Agent-Monitor
 - **Pinned commit:** `840c518d7fa69231de049e41b893938228b67e40`
-- **Vendored at:** `vendor/agent-monitor/`
+- **Imported via:** pnpm dependencies `agent-dashboard` and
+  `agent-dashboard-client`
 - **Usage:** Bundled and run as a local `127.0.0.1` sidecar process by the
-  desktop app (the embedded "Claude Dashboard" tab). Carries local patches —
-  see `vendor/agent-monitor/VENDOR.md` (patch ledger).
-- **License:** MIT — © 2026 Son Nguyen. Full text in
-  `vendor/agent-monitor/LICENSE`.
+  desktop app (the embedded "Claude Dashboard" tab). The desktop build applies
+  three local host patches while generating
+  `apps/desktop/.generated/agent-monitor/`: loopback-only bind, explicit
+  `CCAM_AUTO_INSTALL_HOOKS` gating, and a hook uninstall script.
+- **License:** MIT — © 2026 Son Nguyen.
 
-Bundled runtime dependencies (root, pure JS — no native addons shipped):
-`express`, `ws`, `cors`, `multer`, `swagger-ui-express`, `tar`, `uuid`,
-`web-push`, `adm-zip`, and their transitive dependencies (licenses in the
-bundled `vendor/agent-monitor/node_modules/`). The optional native dependency
-`better-sqlite3` is **deliberately not shipped**; the server uses Node's
-built-in `node:sqlite` instead. The React/Vite client is built to static assets
-(`vendor/agent-monitor/client/dist/`).
+Bundled runtime dependencies remain pure JS. The generated sidecar runtime uses
+Node's built-in `node:sqlite`; `better-sqlite3` is not used by the shipped
+server, and the packaged desktop runtime strips the hoisted `better-sqlite3`
+module from the staged app tree.
 
 ```
 MIT License

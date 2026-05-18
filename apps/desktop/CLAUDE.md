@@ -139,19 +139,21 @@ The Diagnostics tab shows the current in-memory gateway log plus a bounded previ
 ## Agent Monitor Sidecar
 
 The desktop app bundles the MIT-licensed `Claude-Code-Agent-Monitor`
-(`vendor/agent-monitor/`, vendored at a pinned commit — see
-`vendor/agent-monitor/VENDOR.md`, which **carries local patches**) and runs it
-as a managed localhost **sidecar** for local Claude Code session/agent
-observability. It is the single embedded observability tool (the embedded
-**"Claude Dashboard"** nav tab).
+(`agent-dashboard` + `agent-dashboard-client`, pinned in
+`apps/desktop/package.json`) and runs a generated runtime tree as a managed
+localhost **sidecar** for local Claude Code session/agent observability. It is
+the single embedded observability tool (the embedded **"Claude Dashboard"** nav
+tab), but the feature is behind the persisted `agentMonitorEnabled` desktop
+setting and defaults OFF. When disabled, the whole dashboard tab is hidden.
 
-- **Process model:** `src/main/agent-monitor-sidecar.ts` spawns the vendored
-  `server/index.js` using the Electron binary as Node
+- **Process model:** `src/main/agent-monitor-sidecar.ts` spawns the generated
+  `server/index.js` from `apps/desktop/.generated/agent-monitor/` (packaged:
+  unpacked `extraResources/agent-monitor`) using the Electron binary as Node
   (`ELECTRON_RUN_AS_NODE=1`, `process.execPath`) — a packaged app ships no
-  standalone `node`. Started fire-and-forget from `boot()`
-  **unconditionally, before the gateway-start try-block**, so a gateway-start
-  failure never prevents it from running and a sidecar failure never blocks or
-  fails app boot.
+  standalone `node`. Started fire-and-forget from `boot()` **only when
+  `agentMonitorEnabled` is true**, and still before the gateway-start try-block
+  so a gateway-start failure never prevents it from running and a sidecar
+  failure never blocks or fails app boot.
 - **Fixed port (differs from the gateway):** `127.0.0.1:4820`
   (`AGENT_MONITOR_PORT` in `src/shared/contracts.ts`), passed via
   `DASHBOARD_PORT`. It MUST be fixed — Claude Code hooks bake a port at install
@@ -160,22 +162,24 @@ observability. It is the single embedded observability tool (the embedded
   outside `PORT_PROBE_ORDER`, so it never collides with the gateway.
 - **Durable DB:** `DASHBOARD_DB_PATH` is set to
   `app.getPath("userData")/agent-monitor/dashboard.db` (the packaged app dir is
-  read-only). Uses Node's built-in `node:sqlite` — `better-sqlite3` (a native
-  module) is deliberately NOT shipped (see VENDOR.md SQLite note); proven under
-  `ELECTRON_RUN_AS_NODE` (Phase 0).
+  read-only). Uses Node's built-in `node:sqlite`; the generated `server/db.js`
+  is patched to prefer `./compat-sqlite`, and staged packaging removes the
+  hoisted `better-sqlite3` module as a belt-and-suspenders guard.
 - **UI:** embedded as the **"Claude Dashboard"** tab in the main window
   (`src/renderer/index.html`) — a plain `<iframe>` pointed at the sidecar URL
   fetched via `desktop:get-agent-monitor-url` (renderer polls until `ready`,
-  then sets `src` once). No separate window. Tray "Open Claude Dashboard" and
-  the `desktop:open-agent-monitor` IPC focus the window and
-  `desktop:navigate-tab` to the tab. The embed depends on the renderer having
-  **no CSP** — if a CSP is ever added it must include
+  then sets `src` once). No separate window. The tab is hidden unless the user
+  enables Claude Dashboard in Settings → Relay / Gateway; the tray item only
+  appears when enabled, and `desktop:open-agent-monitor` redirects to Settings
+  when disabled. The embed depends on the renderer having **no CSP** — if a
+  CSP is ever added it must include
   `frame-src http://127.0.0.1:*`. Iframes in a `display:none` panel collapse to
   0px, so an explicit px height is set via JS *after* the panel is `.active`,
   re-applied on `resize`.
 - **Hooks are explicit opt-in (consent-bearing).** Upstream silently writes 8
-  hooks into `~/.claude/settings.json` on every startup — **vendor patch #2**
-  gates that behind `CCAM_AUTO_INSTALL_HOOKS` (which the sidecar sets to `"0"`).
+  hooks into `~/.claude/settings.json` on every startup — the generated
+  `server/index.js` gates that behind `CCAM_AUTO_INSTALL_HOOKS` (which the
+  sidecar sets to `"0"`).
   The user enables/disables tracking via the toggle on the Claude Dashboard tab
   → `src/main/agent-monitor-hooks.ts` writes/removes the 8 hook entries. The
   hook command runs the Electron binary as Node against a **userData copy** of
@@ -193,22 +197,22 @@ observability. It is the single embedded observability tool (the embedded
   `server.stop`).
 - **Security model (by design):** the sidecar reads `~/.claude` **directly**,
   *outside* the gateway `isPathAllowed` sandbox. Acceptable and intentional:
-  bound to `127.0.0.1` only (**vendor patch #1**; verified the LAN interface is
-  refused), the user's own local data, no cloud egress, no auth (consistent
+  bound to `127.0.0.1` only (patched at build time; verified the LAN interface
+  is refused), the user's own local data, no cloud egress, no auth (consistent
   with the unauthenticated `/health` precedent). Hooks only mutate global
   Claude config on explicit user opt-in and are fully reversible.
 - **Build/packaging:** `scripts/build-agent-monitor.mjs` (run via
-  `pnpm build:agent-monitor`, chained into `build`) does a two-project **npm**
-  install/build (root server + `client/` Vite app; npm ignores the repo's
-  `pnpm-workspace.yaml`, so the hardened root lockfile is never touched),
-  strips `better-sqlite3`, and **hard-gates** the build on: vendor patches
-  #1/#2 + uninstall script present, built client + server entry exist, and the
-  vendored `compat-sqlite.js` working under Electron-as-Node. Idempotent
-  (3-lockfile stamp; `--force` to rebuild). Shipped via `electron-builder.yml`
-  `extraResources` (unpacked, outside the asar) preserving the
-  `server/` ↔ `client/dist/` relative layout.
-- **Update procedure:** see `vendor/agent-monitor/VENDOR.md` (re-apply the
-  patch ledger). Any change here requires the `apps/desktop/package.json`
-  version bump (CI-enforced) and a clean-machine packaged-DMG smoke test (the
-  highest-risk path: `node:sqlite` from the asar-external, universal-merged
-  binary).
+  `pnpm build:agent-monitor`, chained into `build`) resolves the pnpm-managed
+  upstream packages, builds the client with Vite, generates
+  `apps/desktop/.generated/agent-monitor/`, applies the ClosedLoop host
+  patches (loopback bind, `CCAM_AUTO_INSTALL_HOOKS` gate, uninstall script,
+  `compat-sqlite` bootstrap), and hard-gates the build on the generated
+  `compat-sqlite.js` working under Electron-as-Node. Shipped via
+  `electron-builder.yml` `extraResources` (unpacked, outside the asar)
+  preserving the `server/` ↔ `client/dist/` relative layout.
+- **Update procedure:** bump the git dependency commit(s) in
+  `apps/desktop/package.json`, regenerate the lockfile, and rerun
+  `pnpm -C apps/desktop build:agent-monitor`. Any change here requires the
+  `apps/desktop/package.json` version bump (CI-enforced) and a clean-machine
+  packaged-DMG smoke test (the highest-risk path: `node:sqlite` from the
+  asar-external, universal-merged binary).

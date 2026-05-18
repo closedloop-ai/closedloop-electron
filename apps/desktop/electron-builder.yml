@@ -14,20 +14,18 @@ extraResources:
     to: trayIconTemplate.png
   - from: resources/trayIconTemplate@2x.png
     to: trayIconTemplate@2x.png
-  # Vendored Claude-Code-Agent-Monitor, shipped unpacked (outside the asar) so
-  # the spawned Node server, its prod node_modules, the built client, and the
+  # Generated Claude-Code-Agent-Monitor runtime tree, shipped unpacked
+  # (outside the asar) so the spawned Node server, the built client, and the
   # hook scripts resolve as real files. Built by scripts/build-agent-monitor.mjs
   # before packaging (chained into `build`). `client/dist/**/*` (NOT
   # `client/**/*`) — the server resolves ../client/dist relative to server/, so
-  # the server/ <-> client/dist/ layout must be preserved. Path is relative to
-  # the electron-builder project dir (apps/desktop).
-  - from: ../../vendor/agent-monitor
+  # the server/ <-> client/dist/ layout must be preserved.
+  - from: .generated/agent-monitor
     to: agent-monitor
     filter:
       - server/**/*
       - client/dist/**/*
       - scripts/**/*
-      - node_modules/**/*
       - package.json
       - LICENSE
 

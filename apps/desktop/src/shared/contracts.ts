@@ -4,7 +4,7 @@ export const PORT_PROBE_ORDER = [DEFAULT_GATEWAY_PORT, ...FALLBACK_GATEWAY_PORTS
 export const GATEWAY_PROTOCOL_VERSION = "0.1.0";
 
 /**
- * Fixed loopback port for the vendored Agent Monitor sidecar. It MUST be fixed
+ * Fixed loopback port for the generated Agent Monitor sidecar. It MUST be fixed
  * (not an ephemeral free port like the gateway) because Claude Code hooks bake
  * a port at install time and the hook handler POSTs to
  * `127.0.0.1:${CLAUDE_DASHBOARD_PORT || 4820}` — 4820 is upstream's own default,
@@ -123,6 +123,8 @@ export interface DesktopSettings {
   onboardingCompleted: boolean;
   cloudCommandsPaused: boolean;
   cloudConnectionEnabled: boolean;
+  /** Enables the Claude Dashboard sidecar/tab. Off by default. */
+  agentMonitorEnabled: boolean;
   /** Desktop-local opt-in that requires trusted browser command signatures. */
   commandSigningEnforcementEnabled: boolean;
   defaultApprovalTier: RiskTier;
@@ -148,6 +150,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   onboardingCompleted: false,
   cloudCommandsPaused: false,
   cloudConnectionEnabled: true,
+  agentMonitorEnabled: false,
   commandSigningEnforcementEnabled: false,
   defaultApprovalTier: "high",
   relayOrigin: DEFAULT_RELAY_ORIGIN,

@@ -2644,7 +2644,7 @@
       <button data-tab="approvals">Approvals</button>
       <button data-tab="activity">Requests</button>
       <button data-tab="logs">Diagnostics</button>
-      <button data-tab="claude-dashboard">Claude Dashboard</button>
+      <button data-tab="claude-dashboard" id="claudeDashboardTabButton" hidden>Claude Dashboard</button>
       <button data-tab="settings">Settings</button>
     </nav>
     <main>
@@ -2812,6 +2812,16 @@
               <div class="row">
                 <label for="webAppOrigin">Web App Origin (CORS)</label>
                 <input id="webAppOrigin" />
+              </div>
+              <div class="row">
+                <label for="agentMonitorEnabled">Claude Dashboard</label>
+                <div>
+                  <label class="toggle-switch" title="Runs the local Claude Dashboard sidecar and shows the Claude Dashboard tab. Off by default.">
+                    <input id="agentMonitorEnabled" type="checkbox" />
+                    <span class="toggle-track"></span>
+                  </label>
+                  <p class="field-help" style="margin-top:8px">Runs the local Claude Dashboard sidecar and shows the Claude Dashboard tab. Off by default.</p>
+                </div>
               </div>
             </div>
           </div>
@@ -3088,6 +3098,11 @@
       const panels = document.querySelectorAll(".panel");
 
       function activateTab(tabName) {
+        if (tabName === "claude-dashboard" && !cachedAgentMonitorEnabled) {
+          activateTab("settings");
+          activateSettingsTab("relay-gateway");
+          return;
+        }
         tabs.forEach((button) => button.classList.remove("active"));
         panels.forEach((panel) => panel.classList.remove("active"));
         const tabButton = document.querySelector(`nav button[data-tab="${tabName}"]`);
@@ -3117,12 +3132,57 @@
         activateTab(event.detail);
       });
 
-      // --- Claude Dashboard (vendored Agent Monitor sidecar) ---------------
+      // --- Claude Dashboard (generated Agent Monitor sidecar) --------------
       // Embed the already-running localhost sidecar in an iframe once it is
-      // healthy. The sidecar starts at app boot (fire-and-forget); here we
-      // just poll readiness and lazily set src once.
+      // healthy. When the feature is enabled, the sidecar starts at app boot
+      // (fire-and-forget); here we just poll readiness and lazily set src once.
       let claudeDashTimer = null;
       let claudeDashLoaded = false;
+
+      function syncAgentMonitorTabVisibility(enabled) {
+        cachedAgentMonitorEnabled = enabled === true;
+        if (claudeDashboardTabButton) {
+          claudeDashboardTabButton.hidden = !cachedAgentMonitorEnabled;
+        }
+
+        const frame = document.getElementById("claudeDashFrame");
+        const status = document.getElementById("claudeDashStatus");
+        const toggle = document.getElementById("claudeDashHooksToggle");
+        const hint = document.getElementById("claudeDashHooksHint");
+
+        if (toggle) {
+          toggle.disabled = !cachedAgentMonitorEnabled;
+          if (!cachedAgentMonitorEnabled) {
+            toggle.checked = false;
+          }
+        }
+
+        if (!cachedAgentMonitorEnabled) {
+          stopClaudeDashboardPoll();
+          claudeDashLoaded = false;
+          if (frame) {
+            frame.src = "about:blank";
+            frame.style.display = "none";
+          }
+          if (status) {
+            status.style.display = "block";
+            status.textContent = "Claude Dashboard is disabled in Settings.";
+          }
+          if (hint) {
+            hint.textContent =
+              "— enable Claude Dashboard in Settings to manage session tracking";
+          }
+          if (document.getElementById("claude-dashboard")?.classList.contains("active")) {
+            activateTab("settings");
+            activateSettingsTab("relay-gateway");
+          }
+          return;
+        }
+
+        if (hint) {
+          hint.textContent = "— off (no changes to your global Claude config)";
+        }
+      }
 
       function sizeClaudeFrame() {
         const frame = document.getElementById("claudeDashFrame");
@@ -3142,9 +3202,18 @@
       async function refreshClaudeHooksToggle() {
         const toggle = document.getElementById("claudeDashHooksToggle");
         const hint = document.getElementById("claudeDashHooksHint");
+        if (!cachedAgentMonitorEnabled) {
+          if (toggle) toggle.disabled = true;
+          if (hint) {
+            hint.textContent =
+              "— enable Claude Dashboard in Settings to manage session tracking";
+          }
+          return;
+        }
         try {
           const enabled = await api.getAgentMonitorHooksEnabled();
           toggle.checked = !!enabled;
+          toggle.disabled = false;
           hint.textContent = enabled
             ? "— on (Claude Code hooks installed in ~/.claude/settings.json)"
             : "— off (no changes to your global Claude config)";
@@ -3179,6 +3248,12 @@
       function startClaudeDashboard() {
         const frame = document.getElementById("claudeDashFrame");
         const status = document.getElementById("claudeDashStatus");
+        if (!cachedAgentMonitorEnabled) {
+          frame.style.display = "none";
+          status.style.display = "block";
+          status.textContent = "Claude Dashboard is disabled in Settings.";
+          return;
+        }
         void refreshClaudeHooksToggle();
         if (claudeDashLoaded) { sizeClaudeFrame(); return; }
         status.style.display = "block";
@@ -3260,6 +3335,7 @@
       const relayOrigin = document.getElementById("relayOrigin");
       const apiOrigin = document.getElementById("apiOrigin");
       const webAppOrigin = document.getElementById("webAppOrigin");
+      const agentMonitorEnabled = document.getElementById("agentMonitorEnabled");
       const apiKey = document.getElementById("apiKey");
       const apiKeyStatus = document.getElementById("apiKeyStatus");
       const sandboxBaseDirectory = document.getElementById("sandboxBaseDirectory");
@@ -3296,6 +3372,7 @@
       const dashboardSecurity = document.getElementById("dashboardSecurity");
       const dashboardSecurityDetail = document.getElementById("dashboardSecurityDetail");
       const dashboardApproval = document.getElementById("dashboardApproval");
+      const claudeDashboardTabButton = document.getElementById("claudeDashboardTabButton");
       const approvalsList = document.getElementById("approvalsList");
       const activityList = document.getElementById("activityList");
       const runningJobsList = document.getElementById("runningJobsList");
@@ -3325,6 +3402,7 @@
       let cachedCommandsPaused = false;
       let cachedConnectionEnabled = true;
       let cachedPort = 19432;
+      let cachedAgentMonitorEnabled = false;
       let cachedCommandSigningEnforcementEnabled = false;
       let cachedCommandSigningAuthorizedCount = 0;
       let cachedCommandSigningPendingCount = 0;
@@ -3990,6 +4068,11 @@
         relayOrigin.value = settings.relayOrigin || "";
         apiOrigin.value = settings.apiOrigin || "";
         webAppOrigin.value = settings.webAppOrigin || "";
+        cachedAgentMonitorEnabled = settings.agentMonitorEnabled === true;
+        if (agentMonitorEnabled) {
+          agentMonitorEnabled.checked = cachedAgentMonitorEnabled;
+        }
+        syncAgentMonitorTabVisibility(cachedAgentMonitorEnabled);
         sandboxBaseDirectory.value = settings.sandboxBaseDirectory || "";
         cachedCommandSigningEnforcementEnabled = settings.commandSigningEnforcementEnabled === true;
         if (commandSigningEnforcementEnabled) {
@@ -4674,8 +4757,10 @@
         await api.updateSettings({
           relayOrigin: relayOrigin.value.trim(),
           apiOrigin: apiOrigin.value.trim(),
-          webAppOrigin: webAppOrigin.value.trim()
+          webAppOrigin: webAppOrigin.value.trim(),
+          agentMonitorEnabled: agentMonitorEnabled?.checked === true
         });
+        syncAgentMonitorTabVisibility(agentMonitorEnabled?.checked === true);
         relayGatewayMessage.textContent = "Saved.";
         await Promise.all([refreshRuntime(), refreshApprovals()]);
       }
