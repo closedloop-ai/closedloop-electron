@@ -111,6 +111,8 @@ export interface DesktopSettings {
   alwaysAllowRules: AlwaysAllowRule[];
   sandboxBaseDirectory: string;
   onboardingCompleted: boolean;
+  /** Permanent dismissal of the onboarding reminder popup. Session dismissals are not persisted. */
+  onboardingPopupDismissedPermanent: boolean;
   cloudCommandsPaused: boolean;
   cloudConnectionEnabled: boolean;
   /** Desktop-local opt-in that requires trusted browser command signatures. */
@@ -136,6 +138,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   alwaysAllowRules: [],
   sandboxBaseDirectory: "",
   onboardingCompleted: false,
+  onboardingPopupDismissedPermanent: false,
   cloudCommandsPaused: false,
   cloudConnectionEnabled: true,
   commandSigningEnforcementEnabled: false,

@@ -206,3 +206,31 @@ test("migration: already migrated install is a no-op — both values preserved",
   assert.equal(all.apiOrigin, "https://api.example.test", "apiOrigin should be preserved unchanged");
   assert.equal("authApiOrigin" in all, false, "no stale authApiOrigin key should be added");
 });
+
+test("onboardingPopupDismissedPermanent defaults to false for existing installs", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "settings-onboarding-popup-default-"));
+  tempDirs.push(tmpDir);
+
+  const storeName = "test-settings-popup-default";
+  fs.writeFileSync(
+    path.join(tmpDir, `${storeName}.json`),
+    JSON.stringify({ sandboxBaseDirectory: "/Users/test/Source", onboardingCompleted: true }),
+  );
+
+  const store = new SettingsStore({ cwd: tmpDir, name: storeName });
+
+  assert.equal(store.getOnboardingPopupDismissedPermanent(), false);
+  assert.equal(store.getAll().onboardingPopupDismissedPermanent, false);
+});
+
+test("setOnboardingPopupDismissedPermanent persists across new SettingsStore instances", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "settings-onboarding-popup-persist-"));
+  tempDirs.push(tmpDir);
+
+  const storeName = "test-settings-popup-persist";
+  const store = new SettingsStore({ cwd: tmpDir, name: storeName });
+  store.setOnboardingPopupDismissedPermanent(true);
+
+  const reopened = new SettingsStore({ cwd: tmpDir, name: storeName });
+  assert.equal(reopened.getOnboardingPopupDismissedPermanent(), true);
+});
