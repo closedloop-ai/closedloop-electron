@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 
 const read = (relative: string): string =>
@@ -146,7 +146,7 @@ test("sidecar URL + hooks toggle exposed via IPC + preload", () => {
   );
   assert.match(
     appSource,
-    /ipcMain\.handle\(\s*"desktop:set-agent-monitor-hooks-enabled"[\s\S]*Claude Dashboard is disabled in Settings\.[\s\S]*setAgentMonitorHooksEnabled/,
+    /ipcMain\.handle\(\s*"desktop:set-agent-monitor-hooks-enabled"[\s\S]*Agent Dashboard is disabled in Settings\.[\s\S]*setAgentMonitorHooksEnabled/,
   );
   assert.match(
     preloadSource,
@@ -174,7 +174,7 @@ test("openClaudeDashboard redirects to settings when disabled and tray access is
   assert.match(traySource, /onOpenClaudeDashboard\?: \(\) => void/);
   assert.match(traySource, /setAgentMonitorEnabled\(enabled: boolean\)/);
   assert.match(traySource, /this\.agentMonitorEnabled/);
-  assert.match(traySource, /label: "Open Claude Dashboard"/);
+  assert.match(traySource, /label: "Open Agent Dashboard"/);
 });
 
 test("hooks are opt-in: default off, silent server auto-install never enabled", () => {
@@ -198,7 +198,7 @@ test("shutdown sequence stops the sidecar before the server", () => {
 });
 
 test("renderer hides the monitor tab by default and exposes the settings toggle", () => {
-  assert.match(indexHtml, /data-tab="claude-dashboard" id="claudeDashboardTabButton" hidden>Claude Dashboard</);
+  assert.match(indexHtml, /data-tab="claude-dashboard" id="claudeDashboardTabButton" hidden>Agent Dashboard</);
   assert.match(indexHtml, /<section id="claude-dashboard" class="panel">/);
   assert.match(indexHtml, /id="agentMonitorEnabled"/);
   assert.match(indexHtml, /function syncAgentMonitorTabVisibility/);
@@ -211,4 +211,73 @@ test("renderer hides the monitor tab by default and exposes the settings toggle"
   // Iframe-in-hidden-panel height fix must be present.
   assert.match(indexHtml, /function sizeClaudeFrame/);
   assert.match(indexHtml, /window\.addEventListener\("resize", sizeClaudeFrame\)/);
+});
+
+test("Codex support (Addition #4/#5/#6) is wired into the generated build", () => {
+  // The new model patches the GENERATED tree (like Patches #1/#2/#3): the
+  // build script injects the harness column, the Codex watcher/import wiring,
+  // copies the in-repo Codex modules, and patches the client pre-Vite-build.
+  for (const needle of [
+    "agent-monitor-codex",
+    'CODEX_MODULES = ["codex-home", "codex-parser", "codex-import", "codex-watcher"]',
+    "function patchClientSource",
+    "ADD COLUMN harness",
+    "setSessionHarness",
+    "startCodexWatcher",
+    "importAllCodexSessions",
+    // Hard-gate messages: a future upstream bump that breaks an anchor must
+    // fail the build, not silently drop Codex.
+    "column migration (Codex Patch #4)",
+    "Codex watcher/import wiring (Patch #5)",
+    "(Codex Addition #6)",
+  ]) {
+    assert.ok(
+      buildScriptSource.includes(needle),
+      `build-agent-monitor.mjs missing Codex wiring: ${needle}`,
+    );
+  }
+
+  // Proven Codex modules live in-repo and are copied into the generated tree.
+  for (const m of ["codex-home", "codex-parser", "codex-import", "codex-watcher"]) {
+    assert.ok(
+      existsSync(new URL(`../scripts/agent-monitor-codex/${m}.js`, import.meta.url)),
+      `scripts/agent-monitor-codex/${m}.js missing`,
+    );
+  }
+  assert.match(
+    read("../scripts/agent-monitor-codex/codex-parser.js"),
+    /module\.exports\s*=\s*\{[^}]*parseRolloutFile/,
+  );
+  // Self-heal: the watcher must retry when ~/.codex/sessions is absent at boot
+  // (otherwise a first-ever Codex session needs an app restart).
+  assert.match(
+    read("../scripts/agent-monitor-codex/codex-watcher.js"),
+    /runCatchupImport/,
+  );
+
+  // Client harness badge + filter snippet bodies exist (no-escaping patches).
+  for (const f of [
+    "statusbadge.append.tsx",
+    "sessioncard.badge.replace.txt",
+    "sessions.state.replace.txt",
+    "sessions.loadtop.find.txt",
+    "sessions.loadtop.replace.txt",
+    "sessions.loadrows.find.txt",
+    "sessions.loadrows.replace.txt",
+    "sessions.filterui.find.txt",
+    "sessions.filterui.replace.txt",
+    "sessions.rowbadge.find.txt",
+    "sessions.rowbadge.replace.txt",
+  ]) {
+    assert.ok(
+      existsSync(
+        new URL(`../scripts/agent-monitor-codex/client/${f}`, import.meta.url),
+      ),
+      `client snippet ${f} missing`,
+    );
+  }
+
+  // Docs describe Codex under the generated/pnpm model.
+  assert.match(thirdPartyNoticesSource, /Codex/);
+  assert.match(claudeDocSource, /Codex/);
 });

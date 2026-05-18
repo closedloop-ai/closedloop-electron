@@ -110,7 +110,7 @@ export class DesktopTray {
         },
         ...(this.agentMonitorEnabled
           ? [{
-              label: "Open Claude Dashboard",
+              label: "Open Agent Dashboard",
               click: () => {
                 this.handlers.onOpenClaudeDashboard?.();
               }

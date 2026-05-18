@@ -2277,7 +2277,7 @@ export class DesktopApplication {
           return {
             ok: false,
             enabled: false,
-            error: "Claude Dashboard is disabled in Settings.",
+            error: "Agent Dashboard is disabled in Settings.",
           };
         }
         return setAgentMonitorHooksEnabled(enabled === true);

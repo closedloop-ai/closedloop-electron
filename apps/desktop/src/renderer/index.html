@@ -2644,7 +2644,7 @@
       <button data-tab="approvals">Approvals</button>
       <button data-tab="activity">Requests</button>
       <button data-tab="logs">Diagnostics</button>
-      <button data-tab="claude-dashboard" id="claudeDashboardTabButton" hidden>Claude Dashboard</button>
+      <button data-tab="claude-dashboard" id="claudeDashboardTabButton" hidden>Agent Dashboard</button>
       <button data-tab="settings">Settings</button>
     </nav>
     <main>
@@ -2761,7 +2761,7 @@
           <span id="claudeDashHooksHint" style="color:var(--muted-foreground,#888)">— off (no changes to your global Claude config)</span>
         </div>
         <div id="claudeDashStatus" style="padding:48px 20px;text-align:center;color:var(--muted-foreground,#888)">
-          Starting Claude Dashboard…
+          Starting Agent Dashboard…
         </div>
         <iframe id="claudeDashFrame" title="Claude Code Agent Monitor" style="display:none;width:100%;border:0;background:#fff"></iframe>
       </section>
@@ -2814,13 +2814,13 @@
                 <input id="webAppOrigin" />
               </div>
               <div class="row">
-                <label for="agentMonitorEnabled">Claude Dashboard</label>
+                <label for="agentMonitorEnabled">Agent Dashboard</label>
                 <div>
-                  <label class="toggle-switch" title="Runs the local Claude Dashboard sidecar and shows the Claude Dashboard tab. Off by default.">
+                  <label class="toggle-switch" title="Runs the local Agent Dashboard sidecar and shows the Agent Dashboard tab. Off by default.">
                     <input id="agentMonitorEnabled" type="checkbox" />
                     <span class="toggle-track"></span>
                   </label>
-                  <p class="field-help" style="margin-top:8px">Runs the local Claude Dashboard sidecar and shows the Claude Dashboard tab. Off by default.</p>
+                  <p class="field-help" style="margin-top:8px">Runs the local Agent Dashboard sidecar and shows the Agent Dashboard tab. Off by default.</p>
                 </div>
               </div>
             </div>
@@ -3166,11 +3166,11 @@
           }
           if (status) {
             status.style.display = "block";
-            status.textContent = "Claude Dashboard is disabled in Settings.";
+            status.textContent = "Agent Dashboard is disabled in Settings.";
           }
           if (hint) {
             hint.textContent =
-              "— enable Claude Dashboard in Settings to manage session tracking";
+              "— enable Agent Dashboard in Settings to manage session tracking";
           }
           if (document.getElementById("claude-dashboard")?.classList.contains("active")) {
             activateTab("settings");
@@ -3206,7 +3206,7 @@
           if (toggle) toggle.disabled = true;
           if (hint) {
             hint.textContent =
-              "— enable Claude Dashboard in Settings to manage session tracking";
+              "— enable Agent Dashboard in Settings to manage session tracking";
           }
           return;
         }
@@ -3251,13 +3251,13 @@
         if (!cachedAgentMonitorEnabled) {
           frame.style.display = "none";
           status.style.display = "block";
-          status.textContent = "Claude Dashboard is disabled in Settings.";
+          status.textContent = "Agent Dashboard is disabled in Settings.";
           return;
         }
         void refreshClaudeHooksToggle();
         if (claudeDashLoaded) { sizeClaudeFrame(); return; }
         status.style.display = "block";
-        status.textContent = "Starting Claude Dashboard…";
+        status.textContent = "Starting Agent Dashboard…";
 
         const tick = async () => {
           try {
@@ -3281,7 +3281,7 @@
             if (Date.now() - startedAt > 60000) {
               stopClaudeDashboardPoll();
               status.innerHTML =
-                'Claude Dashboard did not start. ' +
+                'Agent Dashboard did not start. ' +
                 '<button id="claudeDashRetry" class="logs-btn" style="width:auto;padding:4px 10px">Retry</button>';
               document.getElementById("claudeDashRetry")
                 ?.addEventListener("click", () => { claudeDashLoaded = false; startClaudeDashboard(); });

@@ -65,6 +65,14 @@ const generatedUninstallHooks = path.join(
 const stampFile = path.join(generatedRootDir, ".build-stamp");
 const viteBin = resolvePackageBin("vite", "vite");
 
+// CLOSEDLOOP Codex support (Addition #6): proven Codex ingestion modules live
+// in-repo and are copied into the generated server/lib at materialize time
+// (parallel to how uninstall-hooks.js is written). Their logic is
+// architecture-independent — relative requires resolve identically in the
+// generated tree as they did in the old vendored tree.
+const codexModulesDir = path.join(appDir, "scripts", "agent-monitor-codex");
+const CODEX_MODULES = ["codex-home", "codex-parser", "codex-import", "codex-watcher"];
+
 const force =
   process.argv.includes("--force") ||
   process.env.AGENT_MONITOR_FORCE_BUILD === "1";
@@ -157,6 +165,7 @@ function currentStamp() {
     sourceDbFile,
     sourceClientIndex,
     fileURLToPath(import.meta.url),
+    ...CODEX_MODULES.map((m) => path.join(codexModulesDir, `${m}.js`)),
   ]) {
     h.update(readFileSync(file));
   }
@@ -164,6 +173,7 @@ function currentStamp() {
 }
 
 function buildClient() {
+  patchClientSource();
   rmSync(sourceClientDistDir, { recursive: true, force: true });
   runNodeScript("vite build", viteBin, ["build"], sourceClientDir);
   if (!existsSync(path.join(sourceClientDistDir, "index.html"))) {
@@ -180,6 +190,18 @@ function materializeRuntimeTree() {
   cpSync(path.join(sourceRootDir, "server"), path.join(generatedRootDir, "server"), {
     recursive: true,
   });
+  // Codex ingestion modules (Addition #6) into the generated server/lib —
+  // alongside upstream's lib files, same as the old vendored layout so the
+  // modules' relative requires (../db, ../../scripts/import-history,
+  // ./codex-home) resolve unchanged.
+  const generatedLibDir = path.join(generatedRootDir, "server", "lib");
+  mkdirSync(generatedLibDir, { recursive: true });
+  for (const m of CODEX_MODULES) {
+    cpSync(
+      path.join(codexModulesDir, `${m}.js`),
+      path.join(generatedLibDir, `${m}.js`),
+    );
+  }
   cpSync(
     path.join(sourceRootDir, "scripts"),
     path.join(generatedRootDir, "scripts"),
@@ -244,25 +266,233 @@ function patchServerIndex(file) {
     );
   }
 
+  // CLOSEDLOOP Codex support (Addition #6) — start the Codex rollout watcher
+  // next to cc-watcher (Codex has no hooks; the watcher is its only live path).
+  if (!source.includes("startCodexWatcher")) {
+    const ccWatcherBlock = [
+      '      const { startCcWatcher } = require("./lib/cc-watcher");',
+      "      startCcWatcher({ broadcast });",
+      "    } catch (err) {",
+      '      console.warn("cc-watcher failed to start:", err.message);',
+      "    }",
+    ].join("\n");
+    if (!source.includes(ccWatcherBlock)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the cc-watcher start block (Codex).`,
+      );
+    }
+    source = source.replace(
+      ccWatcherBlock,
+      [
+        ccWatcherBlock,
+        "    try {",
+        '      const { startCodexWatcher } = require("./lib/codex-watcher");',
+        "      startCodexWatcher({ broadcast });",
+        "    } catch (err) {",
+        '      console.warn("codex-watcher failed to start:", err.message);',
+        "    }",
+      ].join("\n"),
+    );
+  }
+
+  // CLOSEDLOOP Codex support (Addition #6) — import Codex sessions on every
+  // startup (not gated on a zero-row count, unlike the Claude import: Codex
+  // has no hooks so sessions created while the app was closed must still
+  // appear; the import is idempotent). Fire-and-forget; never blocks boot.
+  if (!source.includes("importAllCodexSessions")) {
+    const tailNeedle = [
+      "  }",
+      "}",
+      "",
+      "module.exports = { createApp, startServer };",
+    ].join("\n");
+    if (!source.includes(tailNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the require.main tail (Codex import).`,
+      );
+    }
+    source = source.replace(
+      tailNeedle,
+      [
+        "  }",
+        "",
+        "  try {",
+        '    const { importAllCodexSessions } = require("./lib/codex-import");',
+        '    importAllCodexSessions(require("./db"))',
+        "      .then(({ imported, errors }) => {",
+        "        if (imported > 0)",
+        '          console.log("Imported " + imported + " Codex sessions from ~/.codex/");',
+        "        if (errors > 0)",
+        '          console.log(errors + " Codex rollout files had errors during import");',
+        "      })",
+        "      .catch(() => {});",
+        "  } catch (err) {",
+        '    console.warn("codex import failed to start:", err.message);',
+        "  }",
+        "}",
+        "",
+        "module.exports = { createApp, startServer };",
+      ].join("\n"),
+    );
+  }
+
   writeFileSync(file, source, "utf8");
 }
 
 function patchDbFile(file) {
   let source = readFileSync(file, "utf8");
+
   const requireNeedle = '  Database = require("better-sqlite3");';
-  if (!source.includes(requireNeedle)) {
-    if (!source.includes('  Database = require("./compat-sqlite");')) {
+  if (source.includes(requireNeedle)) {
+    source = source.replace(
+      requireNeedle,
+      '  Database = require("./compat-sqlite");',
+    );
+  } else if (!source.includes('  Database = require("./compat-sqlite");')) {
+    throw new Error(
+      `Unable to patch ${file}: expected better-sqlite3 bootstrap block.`,
+    );
+  }
+
+  // CLOSEDLOOP Codex support (Addition #4): add a `harness` dimension so one
+  // dashboard shows multiple harnesses. Additive + DEFAULT 'claude' so the
+  // unchanged Claude/manual insert path stays correct; the Codex importer
+  // stamps 'codex' via setSessionHarness. Read paths need no change (routes
+  // use SELECT s.* / SELECT *).
+  if (!source.includes("ADD COLUMN harness")) {
+    const stmtsNeedle = "\nconst stmts = {";
+    if (!source.includes(stmtsNeedle)) {
       throw new Error(
-        `Unable to patch ${file}: expected better-sqlite3 bootstrap block.`,
+        `Unable to patch ${file}: expected the prepared-statements block (harness).`,
       );
     }
-    return;
+    const replacement = [
+      "",
+      "try {",
+      '  db.prepare("SELECT harness FROM sessions LIMIT 1").get();',
+      "} catch {",
+      "  db.prepare(\"ALTER TABLE sessions ADD COLUMN harness TEXT NOT NULL DEFAULT 'claude'\").run();",
+      "}",
+      'db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_harness ON sessions(harness)");',
+      "",
+      "const stmts = {",
+      "  setSessionHarness: db.prepare(\"UPDATE sessions SET harness = ? WHERE id = ? AND COALESCE(harness, '') != ?\"),",
+    ].join("\n");
+    source = source.replace(stmtsNeedle, `\n${replacement}`);
   }
-  source = source.replace(
-    requireNeedle,
-    '  Database = require("./compat-sqlite");',
-  );
+
   writeFileSync(file, source, "utf8");
+}
+
+// CLOSEDLOOP Codex support (Addition #6): surface the harness in the client
+// (Claude/Codex badge + filter). The client source comes from the pinned
+// pnpm package, so we string-patch it in place BEFORE `vite build` — the same
+// idempotent anchor approach as patchServerIndex/patchDbFile. Replacement
+// bodies live as reviewable snippet files (no escaping) under
+// scripts/agent-monitor-codex/client/.
+const clientSnippetDir = path.join(codexModulesDir, "client");
+
+function snippet(name) {
+  return readFileSync(path.join(clientSnippetDir, name), "utf8");
+}
+
+function patchClientSource() {
+  const edits = [
+    {
+      rel: "src/lib/types.ts",
+      guard: "harness?: string | null",
+      find: "  cost?: number;",
+      replace: "  cost?: number;\n  harness?: string | null;",
+    },
+    {
+      rel: "src/components/StatusBadge.tsx",
+      guard: "export function HarnessBadge",
+      append: "statusbadge.append.tsx",
+    },
+    {
+      rel: "src/components/SessionCard.tsx",
+      guard: 'SessionStatusBadge, HarnessBadge } from "./StatusBadge"',
+      find: 'import { SessionStatusBadge } from "./StatusBadge";',
+      replace: 'import { SessionStatusBadge, HarnessBadge } from "./StatusBadge";',
+    },
+    {
+      rel: "src/components/SessionCard.tsx",
+      guard: "<HarnessBadge harness={session.harness} />",
+      find: "        <SessionStatusBadge status={status} />",
+      replaceFile: "sessioncard.badge.replace.txt",
+    },
+    {
+      rel: "src/pages/Sessions.tsx",
+      guard: 'SessionStatusBadge, HarnessBadge } from "../components/StatusBadge"',
+      find: 'import { SessionStatusBadge } from "../components/StatusBadge";',
+      replace:
+        'import { SessionStatusBadge, HarnessBadge } from "../components/StatusBadge";',
+    },
+    {
+      rel: "src/pages/Sessions.tsx",
+      guard: "const [harness, setHarness] = useState",
+      find: "  const [dashboardRunIds, setDashboardRunIds] = useState<Set<string>>(new Set());",
+      replaceFile: "sessions.state.replace.txt",
+    },
+    {
+      rel: "src/pages/Sessions.tsx",
+      guard: 'filter === "waiting" || harness',
+      findFile: "sessions.loadtop.find.txt",
+      replaceFile: "sessions.loadtop.replace.txt",
+    },
+    {
+      rel: "src/pages/Sessions.tsx",
+      guard: "let rows = res.sessions;",
+      findFile: "sessions.loadrows.find.txt",
+      replaceFile: "sessions.loadrows.replace.txt",
+    },
+    {
+      rel: "src/pages/Sessions.tsx",
+      guard: "[filter, harness, search, cwd, sortBy, sortDesc, page]",
+      find: "  }, [filter, search, cwd, sortBy, sortDesc, page]);",
+      replace: "  }, [filter, harness, search, cwd, sortBy, sortDesc, page]);",
+    },
+    {
+      rel: "src/pages/Sessions.tsx",
+      guard: "}, [filter, harness, search, cwd, sortBy, sortDesc]);",
+      find: "  }, [filter, search, cwd, sortBy, sortDesc]);",
+      replace: "  }, [filter, harness, search, cwd, sortBy, sortDesc]);",
+    },
+    {
+      rel: "src/pages/Sessions.tsx",
+      guard: "Harness Filter (Addition #6)",
+      findFile: "sessions.filterui.find.txt",
+      replaceFile: "sessions.filterui.replace.txt",
+    },
+    {
+      rel: "src/pages/Sessions.tsx",
+      guard: "<HarnessBadge harness={session.harness} />",
+      findFile: "sessions.rowbadge.find.txt",
+      replaceFile: "sessions.rowbadge.replace.txt",
+    },
+  ];
+
+  for (const e of edits) {
+    const file = path.join(sourceClientDir, e.rel);
+    let src = readFileSync(file, "utf8");
+    if (src.includes(e.guard)) continue; // already patched (idempotent)
+
+    if (e.append) {
+      src = src + snippet(e.append);
+    } else {
+      const find = e.findFile ? snippet(e.findFile) : e.find;
+      const replace = e.replaceFile ? snippet(e.replaceFile) : e.replace;
+      if (!src.includes(find)) {
+        throw new Error(
+          `Unable to patch client ${e.rel} (Codex Addition #6): anchor not ` +
+            `found — upstream client layout may have changed. Re-derive per ` +
+            `scripts/agent-monitor-codex/client/.`,
+        );
+      }
+      src = src.replace(find, replace);
+    }
+    writeFileSync(file, src, "utf8");
+  }
 }
 
 function assertGeneratedTree() {
@@ -297,6 +527,29 @@ function assertGeneratedTree() {
     throw new Error(
       "Generated server/db.js must not load better-sqlite3 directly.",
     );
+  }
+
+  // CLOSEDLOOP Codex support hard-gates (Addition #4/#5/#6): a future upstream
+  // bump that breaks an anchor must fail the build, not silently drop Codex.
+  if (!dbSource.includes("ADD COLUMN harness")) {
+    throw new Error(
+      "Generated server/db.js is missing the `harness` column migration (Codex Patch #4).",
+    );
+  }
+  if (
+    !serverIndex.includes("startCodexWatcher") ||
+    !serverIndex.includes("importAllCodexSessions")
+  ) {
+    throw new Error(
+      "Generated server/index.js is missing the Codex watcher/import wiring (Patch #5).",
+    );
+  }
+  for (const m of CODEX_MODULES) {
+    if (!existsSync(path.join(generatedRootDir, "server", "lib", `${m}.js`))) {
+      throw new Error(
+        `Generated server/lib/${m}.js missing (Codex Addition #6).`,
+      );
+    }
   }
 }
 
