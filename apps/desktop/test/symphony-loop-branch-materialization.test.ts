@@ -369,6 +369,51 @@ test("fresh PLAN pushes expected primary branch and records branch artifact", as
   assert.equal(await assertRemoteBranch(repo.originPath, branchName), payload.headSha);
 });
 
+test("fresh PLAN matches branch materialization repository names case-insensitively", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "branch-plan-case-"));
+  tempPathsToClean.push(tmpDir);
+  await setupLoopRuntime(tmpDir);
+  const repo = await createRepoWithOrigin(tmpDir, "case-primary-repo");
+  const api = await startBranchApi();
+  const server = await startGateway(tmpDir, api.port);
+
+  const loopId = "00000000-0000-0000-0000-000000113207";
+  const branchName = "symphony/server-owned-plan-branch-case";
+  const declaredFullName = repo.fullName.toUpperCase();
+  const response = await postLoop(server, {
+    loopId,
+    command: LoopCommand.Plan,
+    closedLoopAuthToken: "loop-token",
+    artifacts: [],
+    prompt: "Plan the change",
+    artifactSlug: "PLN-604",
+    repo: { fullName: declaredFullName, branch: "main" },
+    branchMaterialization: branchMaterialization([
+      { role: "primary", repositoryFullName: repo.fullName, branchName },
+    ]),
+  });
+
+  assert.equal(response.status, 200, await response.text());
+  const callback = await api.waitForRequest(`/loops/${loopId}/branch-artifact`);
+  const payload = JSON.parse(callback.body) as Record<string, unknown>;
+  assert.deepEqual(
+    {
+      repositoryFullName: payload.repositoryFullName,
+      branchName: payload.branchName,
+      baseBranch: payload.baseBranch,
+      defaultBranch: payload.defaultBranch,
+    },
+    {
+      repositoryFullName: declaredFullName,
+      branchName,
+      baseBranch: "main",
+      defaultBranch: "main",
+    },
+  );
+  assert.equal(typeof payload.headSha, "string");
+  assert.equal(await assertRemoteBranch(repo.originPath, branchName), payload.headSha);
+});
+
 test("fresh PLAN rejects mismatched local origin before push or branch record", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "branch-repo-mismatch-"));
   tempPathsToClean.push(tmpDir);

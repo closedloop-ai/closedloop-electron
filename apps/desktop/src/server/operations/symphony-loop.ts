@@ -1418,7 +1418,8 @@ function requireExpectedLoopBranch(args: {
   const matches = materialization.branches.filter(
     (entry) =>
       entry.role === args.role &&
-      entry.repositoryFullName === args.repositoryFullName &&
+      normalizeLoopRepoFullName(entry.repositoryFullName) ===
+        normalizeLoopRepoFullName(args.repositoryFullName) &&
       entry.baseBranch === args.baseBranch,
   );
 
