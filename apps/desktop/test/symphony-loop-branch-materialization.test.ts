@@ -387,6 +387,7 @@ test("fresh PLAN matches branch materialization repository names case-insensitiv
     artifacts: [],
     prompt: "Plan the change",
     artifactSlug: "PLN-604",
+    localRepoPath: repo.repoPath,
     repo: { fullName: declaredFullName, branch: "main" },
     branchMaterialization: branchMaterialization([
       { role: "primary", repositoryFullName: repo.fullName, branchName },
