@@ -238,6 +238,54 @@ function extractPlanFromHookEvent(hookType, data) {
   return null;
 }
 
+/**
+ * Scan a Claude plans directory (`~/.claude/plans/*.md`) for plan files. This
+ * is the strategy §8.3 "file capture" method and the strongest gate-independent
+ * Claude signal — these files are exactly the ExitPlanMode / Write targets and
+ * exist on disk regardless of whether their session was ever imported.
+ *
+ * @param {string} plansDir absolute path to the plans directory
+ * @returns {Array<object>} PlanCapture[] (source=claude-plan-file, method=file)
+ */
+function extractPlansFromPlansDir(plansDir) {
+  const fs = require("fs");
+  const path = require("path");
+  const out = [];
+  let entries;
+  try {
+    entries = fs.readdirSync(plansDir, { withFileTypes: true });
+  } catch {
+    return out; // dir absent — nothing to backfill
+  }
+  for (const ent of entries) {
+    if (!ent.isFile() || !/\.mdx?$/i.test(ent.name)) continue;
+    const fp = path.join(plansDir, ent.name);
+    let content;
+    let capturedAt = null;
+    try {
+      content = fs.readFileSync(fp, "utf8");
+      capturedAt = new Date(fs.statSync(fp).mtimeMs).toISOString();
+    } catch {
+      continue;
+    }
+    if (!nonEmpty(content)) continue;
+    out.push(
+      makeCapture({
+        harness: "claude",
+        source: "claude-plan-file",
+        captureMethod: "file",
+        sessionId: null,
+        content,
+        filePath: fp,
+        confidence: 1.0,
+        sourceEventRef: `plansdir:${ent.name}`,
+        capturedAt,
+      }),
+    );
+  }
+  return out;
+}
+
 /** Parse a <proposed_plan> block out of assistant text (Codex fallback). */
 function extractProposedPlanText(text) {
   if (typeof text !== "string") return null;
@@ -249,6 +297,7 @@ function extractProposedPlanText(text) {
 module.exports = {
   extractPlansFromSession,
   extractPlanFromHookEvent,
+  extractPlansFromPlansDir,
   extractProposedPlanText,
   isPlanFilePath,
   titleFromMarkdown,

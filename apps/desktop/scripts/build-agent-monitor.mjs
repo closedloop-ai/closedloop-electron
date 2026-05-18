@@ -79,7 +79,7 @@ const CODEX_MODULES = ["codex-home", "codex-parser", "codex-import", "codex-watc
 // Vite build. import-history.js, server/db.js and server/index.js are wired via
 // the same idempotent string-anchor + hard-gate approach as the Codex patches.
 const planModulesDir = path.join(appDir, "scripts", "agent-monitor-plans");
-const PLAN_MODULES = ["plan-extractor", "plan-store"];
+const PLAN_MODULES = ["plan-extractor", "plan-store", "plan-backfill"];
 const generatedImportHistory = path.join(
   generatedRootDir,
   "scripts",
@@ -365,6 +365,33 @@ function patchServerIndex(file) {
         "}",
         "",
         "module.exports = { createApp, startServer };",
+      ].join("\n"),
+    );
+  }
+
+  // CLOSEDLOOP plan-extraction (FEA-1189): backfill ~/.claude/plans/*.md on
+  // EVERY startup. The upstream Claude legacy import is gated on a zero-row DB
+  // (`if (existingCount === 0)`), so on a populated DB the plan extraction
+  // wired into importSession never runs for pre-existing history. This
+  // gate-independent file scan (idempotent, sha256-deduped) closes that gap.
+  if (!source.includes("runClaudePlanBackfill")) {
+    const dbNeedle =
+      '  const dbModule = require("./db");\n  const existingCount = dbModule.db.prepare("SELECT COUNT(*) AS c FROM sessions").get().c;';
+    if (!source.includes(dbNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the legacy-import dbModule/existingCount anchor (plan backfill, FEA-1189).`,
+      );
+    }
+    source = source.replace(
+      dbNeedle,
+      [
+        '  const dbModule = require("./db");',
+        "  try {",
+        '    require("./lib/plan-backfill").runClaudePlanBackfill(dbModule.db);',
+        "  } catch (e) {",
+        '    console.warn("[plans] backfill failed:", e && e.message);',
+        "  }",
+        '  const existingCount = dbModule.db.prepare("SELECT COUNT(*) AS c FROM sessions").get().c;',
       ].join("\n"),
     );
   }
@@ -766,6 +793,11 @@ function assertGeneratedTree() {
   if (!importHistorySource.includes("FEA-1189 plan extraction")) {
     throw new Error(
       "Generated scripts/import-history.js is missing the plan-capture sink (FEA-1189).",
+    );
+  }
+  if (!serverIndex.includes("runClaudePlanBackfill")) {
+    throw new Error(
+      "Generated server/index.js is missing the ~/.claude/plans backfill (FEA-1189).",
     );
   }
 }

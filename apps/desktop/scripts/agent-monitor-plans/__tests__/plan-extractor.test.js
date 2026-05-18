@@ -12,9 +12,13 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { DatabaseSync } = require("node:sqlite");
 
+const fs = require("node:fs");
+const os = require("node:os");
+const nodePath = require("node:path");
 const {
   extractPlansFromSession,
   extractPlanFromHookEvent,
+  extractPlansFromPlansDir,
   extractProposedPlanText,
   isPlanFilePath,
   titleFromMarkdown,
@@ -149,6 +153,51 @@ test("extractPlanFromHookEvent returns null for non-plan events", () => {
   assert.equal(extractPlanFromHookEvent("PostToolUse", { tool_name: "Bash", tool_input: { command: "ls" } }), null);
   assert.equal(extractPlanFromHookEvent("PostToolUse", { tool_name: "Write", tool_input: { file_path: "/src/a.ts", content: "c" } }), null);
   assert.equal(extractPlanFromHookEvent("Stop", {}), null);
+});
+
+test("extractPlansFromPlansDir scans ~/.claude/plans-style .md files", () => {
+  const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "plansdir-"));
+  fs.writeFileSync(nodePath.join(dir, "a.md"), "# Plan A\nstep 1");
+  fs.writeFileSync(nodePath.join(dir, "b.md"), "no heading body");
+  fs.writeFileSync(nodePath.join(dir, "notes.txt"), "ignored (not .md)");
+  fs.writeFileSync(nodePath.join(dir, "empty.md"), "   ");
+
+  const caps = extractPlansFromPlansDir(dir);
+  assert.equal(caps.length, 2, "only non-empty .md files");
+  const a = caps.find((c) => c.file_path.endsWith("a.md"));
+  assert.equal(a.harness, "claude");
+  assert.equal(a.source, "claude-plan-file");
+  assert.equal(a.capture_method, "file");
+  assert.equal(a.confidence, 1.0);
+  assert.equal(a.needs_confirmation, 0);
+  assert.equal(a.title, "Plan A");
+  assert.equal(a.created_from_session_id, null);
+  assert.ok(/^[0-9a-f]{64}$/.test(a.content_sha256));
+});
+
+test("extractPlansFromPlansDir tolerates a missing directory", () => {
+  assert.deepEqual(
+    extractPlansFromPlansDir("/no/such/dir/at/all/plans"),
+    [],
+  );
+});
+
+test("plans-dir captures upsert + dedupe across runs (gate-independent)", () => {
+  const db = freshDb();
+  const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "plansdir2-"));
+  fs.writeFileSync(nodePath.join(dir, "p.md"), "# P\nv1");
+  const [c1] = extractPlansFromPlansDir(dir);
+  const r1 = upsertPlanCapture(db, c1);
+  assert.equal(r1.created, true);
+  // Second startup, unchanged file → dedupe, no new version.
+  const [c1again] = extractPlansFromPlansDir(dir);
+  assert.equal(upsertPlanCapture(db, c1again).deduped, true);
+  // File edited → new version on the same plan_key.
+  fs.writeFileSync(nodePath.join(dir, "p.md"), "# P\nv2 edited");
+  const [c2] = extractPlansFromPlansDir(dir);
+  const r2 = upsertPlanCapture(db, c2);
+  assert.equal(r2.planId, r1.planId);
+  assert.equal(r2.version, 2);
 });
 
 // ── plan-store: schema, versioning, dedup ──────────────────────────────────
