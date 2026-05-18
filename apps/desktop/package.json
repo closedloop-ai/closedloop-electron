@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "version": "0.15.19",
+  "version": "0.15.20",
   "description": "ClosedLoop Desktop",
   "author": "ClosedLoop AI <support@closedloop.ai>",
   "private": true,
@@ -12,7 +12,8 @@
     "clean:dist": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "clean:package": "node -e \"require('fs').rmSync('dist-dmg',{recursive:true,force:true})\"",
     "prebuild": "node -e \"const{execSync:e}=require('child_process'),{writeFileSync:w}=require('fs');const h=e('git rev-parse HEAD').toString().trim();w('src/shared/build-info.ts','// AUTO-GENERATED — do not edit\\nexport const BUILD_COMMIT_HASH = \\\"'+h+'\\\";\\n');\"",
-    "build": "pnpm clean:dist && pnpm prebuild && tsc -p tsconfig.json",
+    "build": "pnpm clean:dist && pnpm prebuild && tsc -p tsconfig.json && pnpm build:agent-monitor",
+    "build:agent-monitor": "node scripts/build-agent-monitor.mjs",
     "stage:package": "node scripts/stage-packaging-app.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src/",

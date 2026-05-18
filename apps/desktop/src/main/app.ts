@@ -64,6 +64,12 @@ import {
 import { SettingsStore, type SavedConfigManagedPatch } from "./settings-store.js";
 import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
+import { AgentMonitorSidecar } from "./agent-monitor-sidecar.js";
+import {
+  isAgentMonitorHooksEnabled,
+  setAgentMonitorHooksEnabled,
+  syncAgentMonitorHooksOnBoot,
+} from "./agent-monitor-hooks.js";
 import { DesktopGatewayServer } from "../server/server.js";
 import {
   computeSymphonyDir,
@@ -181,6 +187,7 @@ export class DesktopApplication {
   private readonly server: DesktopGatewayServer;
   private readonly cloudSocket: CloudSocketService;
   private readonly commandExecutor: CloudCommandExecutor;
+  private readonly agentMonitor: AgentMonitorSidecar;
   private readonly activityLog: ActivityLogStore;
   private readonly approvalStore: ApprovalStore;
   private readonly jobStore: JobStore;
@@ -265,6 +272,7 @@ export class DesktopApplication {
     this.gatewaySigningKeyStore = new GatewaySigningKeyStore();
     this.tray = new DesktopTray();
     this.desktopWindow = new DesktopWindow();
+    this.agentMonitor = new AgentMonitorSidecar();
     this.activityLog = new ActivityLogStore();
     this.jobStore = new JobStore();
     this.approvalStore = new ApprovalStore({
@@ -518,6 +526,7 @@ export class DesktopApplication {
     this.tray.init({
       onOpen: () => this.desktopWindow.show(),
       onManageCommandKeys: () => this.openBrowserCommandKeysSettings(),
+      onOpenClaudeDashboard: () => this.openClaudeDashboard(),
       onTogglePaused: (paused) => this.setCloudCommandsPaused(paused),
     });
     this.tray.setPaused(this.cloudCommandsPaused);
@@ -541,6 +550,14 @@ export class DesktopApplication {
     if (bootSandbox?.trim()) {
       await seedReposConfig(bootSandbox);
     }
+
+    // Independent of the gateway; started unconditionally and fire-and-forget
+    // BEFORE the gateway try-block so a gateway-start failure never prevents
+    // the Agent Monitor from running, and a sidecar failure never blocks or
+    // fails app boot. Hook repair is opt-in and self-healing (no-op unless the
+    // user previously enabled session tracking).
+    void this.agentMonitor.start();
+    syncAgentMonitorHooksOnBoot();
 
     try {
       await this.server.start();
@@ -1129,6 +1146,13 @@ export class DesktopApplication {
       ?.webContents.send("desktop:navigate-settings-tab", "security");
   }
 
+  openClaudeDashboard(): void {
+    this.desktopWindow.show();
+    this.desktopWindow
+      .getWindow()
+      ?.webContents.send("desktop:navigate-tab", "claude-dashboard");
+  }
+
   private notifyCommandKeysChanged(): void {
     this.desktopWindow
       .getWindow()
@@ -1515,6 +1539,7 @@ export class DesktopApplication {
       },
       cloudSocket: this.cloudSocket,
       commandExecutor: this.commandExecutor,
+      agentMonitor: this.agentMonitor,
       server: this.server,
       desktopWindow: this.desktopWindow,
       tray: this.tray,
@@ -2190,6 +2215,21 @@ export class DesktopApplication {
 
   private registerIpcHandlers(): void {
     ipcMain.handle("desktop:get-app-version", () => app.getVersion());
+    ipcMain.handle("desktop:get-agent-monitor-url", () => ({
+      url: this.agentMonitor.getUrl(),
+      ready: this.agentMonitor.isReady(),
+    }));
+    ipcMain.handle("desktop:open-agent-monitor", () =>
+      this.openClaudeDashboard(),
+    );
+    ipcMain.handle("desktop:get-agent-monitor-hooks-enabled", () =>
+      isAgentMonitorHooksEnabled(),
+    );
+    ipcMain.handle(
+      "desktop:set-agent-monitor-hooks-enabled",
+      (_event, enabled: boolean) =>
+        setAgentMonitorHooksEnabled(enabled === true),
+    );
     ipcMain.handle("desktop:get-logs", () => gatewayLog.getEntries());
     ipcMain.handle("desktop:clear-logs", () => {
       gatewayLog.clear();

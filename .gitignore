@@ -11,3 +11,9 @@ apps/desktop/src/shared/build-info.ts
 apps/desktop/resources/generated/
 .env.local
 dist-dmg/
+
+# Vendored agent-monitor: source is committed, build artifacts are not
+vendor/agent-monitor/node_modules/
+vendor/agent-monitor/client/node_modules/
+vendor/agent-monitor/client/dist/
+vendor/agent-monitor/.build-stamp

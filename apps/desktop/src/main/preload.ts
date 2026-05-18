@@ -107,7 +107,23 @@ const desktopApi = {
   renameConfig: (id: string, name: string) =>
     ipcRenderer.invoke("desktop:rename-config", { id, name }) as Promise<unknown>,
   applyConfig: (id: string) =>
-    ipcRenderer.invoke("desktop:apply-config", { id }) as Promise<unknown>
+    ipcRenderer.invoke("desktop:apply-config", { id }) as Promise<unknown>,
+  getAgentMonitorUrl: () =>
+    ipcRenderer.invoke("desktop:get-agent-monitor-url") as Promise<{
+      url: string | null;
+      ready: boolean;
+    }>,
+  openAgentMonitor: () =>
+    ipcRenderer.invoke("desktop:open-agent-monitor") as Promise<unknown>,
+  getAgentMonitorHooksEnabled: () =>
+    ipcRenderer.invoke(
+      "desktop:get-agent-monitor-hooks-enabled",
+    ) as Promise<boolean>,
+  setAgentMonitorHooksEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke(
+      "desktop:set-agent-monitor-hooks-enabled",
+      enabled,
+    ) as Promise<{ ok: boolean; enabled: boolean; error?: string }>
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);

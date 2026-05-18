@@ -9,6 +9,7 @@ export type TrayState = "starting" | "ready" | "degraded" | "error";
 export interface DesktopTrayHandlers {
   onOpen?: () => void;
   onManageCommandKeys?: () => void;
+  onOpenClaudeDashboard?: () => void;
   onTogglePaused?: (paused: boolean) => void;
 }
 
@@ -99,6 +100,12 @@ export class DesktopTray {
           label: "Manage Browser Command Keys",
           click: () => {
             this.handlers.onManageCommandKeys?.();
+          }
+        },
+        {
+          label: "Open Claude Dashboard",
+          click: () => {
+            this.handlers.onOpenClaudeDashboard?.();
           }
         },
         {

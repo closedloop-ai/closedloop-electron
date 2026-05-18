@@ -29,6 +29,11 @@ function makeStubDeps(overrides?: Partial<ShutdownDeps>) {
         calls.push("commandExecutor.dispose");
       },
     },
+    agentMonitor: {
+      stop: () => {
+        calls.push("agentMonitor.stop");
+      },
+    },
     server: {
       stop: async () => {
         calls.push("server.stop");
@@ -61,6 +66,7 @@ describe("runShutdownSequence", () => {
       "observability.shutdown",
       "cloudSocket.stop",
       "commandExecutor.dispose",
+      "agentMonitor.stop",
       "server.stop",
       "desktopWindow.dispose",
       "tray.dispose",

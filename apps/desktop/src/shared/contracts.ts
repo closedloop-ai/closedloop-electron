@@ -3,6 +3,16 @@ export const FALLBACK_GATEWAY_PORTS = [19433, 19434, 19435] as const;
 export const PORT_PROBE_ORDER = [DEFAULT_GATEWAY_PORT, ...FALLBACK_GATEWAY_PORTS] as const;
 export const GATEWAY_PROTOCOL_VERSION = "0.1.0";
 
+/**
+ * Fixed loopback port for the vendored Agent Monitor sidecar. It MUST be fixed
+ * (not an ephemeral free port like the gateway) because Claude Code hooks bake
+ * a port at install time and the hook handler POSTs to
+ * `127.0.0.1:${CLAUDE_DASHBOARD_PORT || 4820}` — 4820 is upstream's own default,
+ * so hooks work with zero per-hook env. Outside PORT_PROBE_ORDER, so it never
+ * collides with the gateway's port selection.
+ */
+export const AGENT_MONITOR_PORT = 4820;
+
 export const COMMAND_SIGNING_REJECTION_REASONS = {
   noKeysAuthorized: "unauthorized: no keys authorized",
   unsignedCommand: "unauthorized: unsigned command",

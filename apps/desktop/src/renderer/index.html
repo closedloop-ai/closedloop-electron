@@ -2644,6 +2644,7 @@
       <button data-tab="approvals">Approvals</button>
       <button data-tab="activity">Requests</button>
       <button data-tab="logs">Diagnostics</button>
+      <button data-tab="claude-dashboard">Claude Dashboard</button>
       <button data-tab="settings">Settings</button>
     </nav>
     <main>
@@ -2749,6 +2750,20 @@
         </div>
         <div id="logsPausedBanner" class="logs-paused-banner">Paused - 0 new entries queued</div>
         <div id="logsList" class="logs-container"></div>
+      </section>
+      <section id="claude-dashboard" class="panel">
+        <div id="claudeDashConsent" style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border,#2a2a2a);font-size:13px">
+          <label class="toggle-switch" title="Installs Claude Code hooks in ~/.claude/settings.json so this dashboard receives live session events. Off by default; fully removable.">
+            <input type="checkbox" id="claudeDashHooksToggle" />
+            <span class="toggle-track"></span>
+          </label>
+          <span>Enable Claude Code session tracking</span>
+          <span id="claudeDashHooksHint" style="color:var(--muted-foreground,#888)">— off (no changes to your global Claude config)</span>
+        </div>
+        <div id="claudeDashStatus" style="padding:48px 20px;text-align:center;color:var(--muted-foreground,#888)">
+          Starting Claude Dashboard…
+        </div>
+        <iframe id="claudeDashFrame" title="Claude Code Agent Monitor" style="display:none;width:100%;border:0;background:#fff"></iframe>
       </section>
       <section id="settings" class="panel">
         <div class="settings-sub-nav">
@@ -3087,6 +3102,11 @@
         } else {
           stopLogsAutoRefresh();
         }
+        if (tabName === "claude-dashboard") {
+          startClaudeDashboard();
+        } else {
+          stopClaudeDashboardPoll();
+        }
       }
 
       tabs.forEach((tab) => {
@@ -3096,6 +3116,106 @@
       window.addEventListener("desktop:navigate-tab", (event) => {
         activateTab(event.detail);
       });
+
+      // --- Claude Dashboard (vendored Agent Monitor sidecar) ---------------
+      // Embed the already-running localhost sidecar in an iframe once it is
+      // healthy. The sidecar starts at app boot (fire-and-forget); here we
+      // just poll readiness and lazily set src once.
+      let claudeDashTimer = null;
+      let claudeDashLoaded = false;
+
+      function sizeClaudeFrame() {
+        const frame = document.getElementById("claudeDashFrame");
+        if (!frame || frame.style.display === "none") return;
+        // body/html/main have no height and the page scrolls; height:100%
+        // collapses to 0 and any measure while the panel is display:none is 0.
+        // Set an explicit px height AFTER the panel is .active.
+        const top = frame.getBoundingClientRect().top;
+        frame.style.height = Math.max(320, window.innerHeight - top - 24) + "px";
+      }
+      window.addEventListener("resize", sizeClaudeFrame);
+
+      function stopClaudeDashboardPoll() {
+        if (claudeDashTimer) { clearInterval(claudeDashTimer); claudeDashTimer = null; }
+      }
+
+      async function refreshClaudeHooksToggle() {
+        const toggle = document.getElementById("claudeDashHooksToggle");
+        const hint = document.getElementById("claudeDashHooksHint");
+        try {
+          const enabled = await api.getAgentMonitorHooksEnabled();
+          toggle.checked = !!enabled;
+          hint.textContent = enabled
+            ? "— on (Claude Code hooks installed in ~/.claude/settings.json)"
+            : "— off (no changes to your global Claude config)";
+        } catch (_) { /* leave as-is */ }
+      }
+
+      (function wireClaudeHooksToggle() {
+        const toggle = document.getElementById("claudeDashHooksToggle");
+        const hint = document.getElementById("claudeDashHooksHint");
+        if (!toggle) return;
+        toggle.addEventListener("change", async () => {
+          const want = toggle.checked;
+          toggle.disabled = true;
+          hint.textContent = want ? "— enabling…" : "— disabling…";
+          try {
+            const res = await api.setAgentMonitorHooksEnabled(want);
+            if (!res || !res.ok) {
+              toggle.checked = !want;
+              hint.textContent = "— failed: " + ((res && res.error) || "unknown error");
+            } else {
+              await refreshClaudeHooksToggle();
+            }
+          } catch (e) {
+            toggle.checked = !want;
+            hint.textContent = "— failed: " + (e && e.message ? e.message : "error");
+          } finally {
+            toggle.disabled = false;
+          }
+        });
+      })();
+
+      function startClaudeDashboard() {
+        const frame = document.getElementById("claudeDashFrame");
+        const status = document.getElementById("claudeDashStatus");
+        void refreshClaudeHooksToggle();
+        if (claudeDashLoaded) { sizeClaudeFrame(); return; }
+        status.style.display = "block";
+        status.textContent = "Starting Claude Dashboard…";
+
+        const tick = async () => {
+          try {
+            const r = await api.getAgentMonitorUrl();
+            if (r && r.ready && r.url) {
+              frame.src = r.url;
+              frame.style.display = "block";
+              status.style.display = "none";
+              claudeDashLoaded = true;
+              sizeClaudeFrame();
+              stopClaudeDashboardPoll();
+            }
+          } catch (_) { /* keep polling */ }
+        };
+
+        void tick();
+        if (!claudeDashLoaded && !claudeDashTimer) {
+          const startedAt = Date.now();
+          claudeDashTimer = setInterval(() => {
+            if (claudeDashLoaded) { stopClaudeDashboardPoll(); return; }
+            if (Date.now() - startedAt > 60000) {
+              stopClaudeDashboardPoll();
+              status.innerHTML =
+                'Claude Dashboard did not start. ' +
+                '<button id="claudeDashRetry" class="logs-btn" style="width:auto;padding:4px 10px">Retry</button>';
+              document.getElementById("claudeDashRetry")
+                ?.addEventListener("click", () => { claudeDashLoaded = false; startClaudeDashboard(); });
+            } else {
+              void tick();
+            }
+          }, 1000);
+        }
+      }
 
       // Settings sub-tab switching
       const settingsSubTabs = document.querySelectorAll(".settings-sub-nav button");
