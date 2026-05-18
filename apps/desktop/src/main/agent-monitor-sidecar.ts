@@ -1,6 +1,7 @@
 import { app } from "electron";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 
 import { AGENT_MONITOR_PORT } from "../shared/contracts.js";
@@ -24,6 +25,7 @@ const RESTART_MAX_DELAY_MS = 30_000;
 // forced process.exit(0). DB integrity is already flushed by then, so a short
 // grace + process-group SIGKILL keeps app shutdown within budget.
 const STOP_GRACE_MS = 2_000;
+const requireFromHere = createRequire(import.meta.url);
 
 // Runs the generated Claude-Code-Agent-Monitor runtime tree as a managed
 // localhost child process. The Electron binary is reused as the Node runtime
@@ -126,15 +128,7 @@ export class AgentMonitorSidecar {
       "agent-monitor",
       "dashboard.db",
     );
-    const packagedNodePath = app.isPackaged
-      ? [
-          path.join(process.resourcesPath, "app.asar", "app", "node_modules"),
-          path.join(process.resourcesPath, "app", "node_modules"),
-          process.env.NODE_PATH,
-        ]
-          .filter((value): value is string => typeof value === "string" && value.length > 0)
-          .join(path.delimiter)
-      : process.env.NODE_PATH;
+    const runtimeNodePath = buildRuntimeNodePath();
 
     const child = spawn(process.execPath, [entryFile], {
       cwd: rootDir,
@@ -142,7 +136,7 @@ export class AgentMonitorSidecar {
         ...process.env,
         ELECTRON_RUN_AS_NODE: "1",
         NODE_ENV: "production",
-        ...(packagedNodePath ? { NODE_PATH: packagedNodePath } : {}),
+        ...(runtimeNodePath ? { NODE_PATH: runtimeNodePath } : {}),
         DASHBOARD_PORT: String(this.port),
         DASHBOARD_DB_PATH: dbPath,
         // Hooks are host-managed via explicit opt-in (agent-monitor-hooks.ts).
@@ -238,6 +232,41 @@ export class AgentMonitorSidecar {
       await delay(READY_POLL_INTERVAL_MS);
     }
     return false;
+  }
+}
+
+function buildRuntimeNodePath(): string | undefined {
+  const values = [
+    ...resolveRuntimeSupportNodePaths("agent-dashboard"),
+    app.isPackaged
+      ? path.join(process.resourcesPath, "app.asar", "app", "node_modules")
+      : null,
+    app.isPackaged
+      ? path.join(process.resourcesPath, "app", "node_modules")
+      : null,
+    process.env.NODE_PATH,
+  ].filter((value): value is string => typeof value === "string" && value.length > 0);
+
+  if (values.length === 0) {
+    return undefined;
+  }
+
+  return Array.from(new Set(values)).join(path.delimiter);
+}
+
+function resolveRuntimeSupportNodePaths(packageName: string): string[] {
+  try {
+    const packageJsonPath = requireFromHere.resolve(`${packageName}/package.json`);
+    const packageRoot = path.dirname(packageJsonPath);
+    return [
+      // pnpm keeps direct deps alongside the package under .pnpm/.../node_modules.
+      // Prepending that directory lets the generated runtime borrow the
+      // installed dependency graph instead of shipping a second copy.
+      path.dirname(packageRoot),
+      path.join(packageRoot, "node_modules"),
+    ].filter((candidate) => existsSync(candidate));
+  } catch {
+    return [];
   }
 }
 

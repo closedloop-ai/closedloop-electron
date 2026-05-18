@@ -91,7 +91,9 @@ test("runtime resolves the generated tree and sidecar wiring still uses the fixe
   assert.match(sidecarSource, /DASHBOARD_DB_PATH/);
   assert.match(sidecarSource, /CCAM_AUTO_INSTALL_HOOKS:\s*"0"/);
   assert.match(sidecarSource, /NODE_PATH/);
-  assert.match(sidecarSource, /app\.asar", "app", "node_modules"/);
+  assert.match(sidecarSource, /resolveRuntimeSupportNodePaths\("agent-dashboard"\)/);
+  assert.match(sidecarSource, /path\.dirname\(packageRoot\)/);
+  assert.match(sidecarSource, /process\.resourcesPath,\s*"app\.asar",\s*"app",\s*"node_modules"/);
   assert.match(sidecarSource, /\/api\/health/);
 });
 
