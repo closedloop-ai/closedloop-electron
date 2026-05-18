@@ -29,6 +29,8 @@ interface Plan {
   needs_confirmation: number;
   confidence: number | null;
   plan_key: string | null;
+  file_path: string | null;
+  source_log_path: string | null;
   updated_at: string;
   versions?: PlanVersion[];
 }
@@ -107,6 +109,25 @@ export function Plans() {
       }
     },
     [loadList, loadOne],
+  );
+
+  const openFile = useCallback(
+    async (id: string, target: "plan" | "log") => {
+      try {
+        const res = await fetch(
+          `/api/plans/${encodeURIComponent(id)}/open?target=${target}`,
+          { method: "POST", headers: { "Content-Type": "application/json" } },
+        );
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body?.error?.message || `HTTP ${res.status}`);
+        }
+        setError(null);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [],
   );
 
   const latest =
@@ -221,6 +242,39 @@ export function Plans() {
                   </div>
                 )}
               </div>
+
+              {(selected.file_path || selected.source_log_path) && (
+                <div className="mb-3 space-y-1.5">
+                  {selected.file_path && (
+                    <div className="flex items-center gap-2 text-[11px]">
+                      <span className="text-gray-500 w-16 flex-shrink-0">
+                        Plan file
+                      </span>
+                      <button
+                        onClick={() => openFile(selected.id, "plan")}
+                        title={`Open ${selected.file_path}`}
+                        className="font-mono text-accent hover:underline truncate text-left"
+                      >
+                        {selected.file_path}
+                      </button>
+                    </div>
+                  )}
+                  {selected.source_log_path && (
+                    <div className="flex items-center gap-2 text-[11px]">
+                      <span className="text-gray-500 w-16 flex-shrink-0">
+                        Agent log
+                      </span>
+                      <button
+                        onClick={() => openFile(selected.id, "log")}
+                        title={`Open ${selected.source_log_path}`}
+                        className="font-mono text-accent hover:underline truncate text-left"
+                      >
+                        {selected.source_log_path}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {selected.versions && selected.versions.length > 1 && (
                 <div className="mb-3 flex flex-wrap gap-1.5">

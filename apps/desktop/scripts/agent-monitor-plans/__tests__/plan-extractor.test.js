@@ -144,8 +144,11 @@ test("extractPlanFromHookEvent captures PostToolUse ExitPlanMode / plans-dir Wri
     session_id: "h1",
     tool_name: "Write",
     tool_input: { file_path: "/u/.claude/plans/x.md", content: "# W\ny" },
+    transcript_path: "/u/.claude/projects/proj/h1.jsonl",
   });
   assert.equal(b.source, "claude-plan-write");
+  assert.equal(b.file_path, "/u/.claude/plans/x.md");
+  assert.equal(b.source_log_path, "/u/.claude/projects/proj/h1.jsonl");
 });
 
 test("extractPlanFromHookEvent returns null for non-plan events", () => {
@@ -172,7 +175,44 @@ test("extractPlansFromPlansDir scans ~/.claude/plans-style .md files", () => {
   assert.equal(a.needs_confirmation, 0);
   assert.equal(a.title, "Plan A");
   assert.equal(a.created_from_session_id, null);
+  assert.ok(a.file_path.endsWith("a.md"), "plan file path recorded");
+  assert.equal(a.source_log_path, null, "plans-dir file has no agent log");
   assert.ok(/^[0-9a-f]{64}$/.test(a.content_sha256));
+});
+
+test("plan-store persists file_path and backfills source_log_path on dedup", () => {
+  const db = freshDb();
+  // First pass: plans-dir backfill — file_path set, no agent log.
+  const c1 = {
+    harness: "claude",
+    source: "claude-plan-file",
+    capture_method: "file",
+    created_from_session_id: null,
+    title: "Linkable",
+    file_path: "/u/.claude/plans/linkable.md",
+    source_log_path: null,
+    content_markdown: "# Linkable\nbody",
+    content_sha256: require("../plan-extractor").sha256("# Linkable\nbody"),
+    confidence: 1,
+    needs_confirmation: 0,
+    source_event_ref: "plansdir:linkable.md",
+    captured_at: null,
+  };
+  const r1 = upsertPlanCapture(db, c1);
+  let p = getPlan(db, r1.planId);
+  assert.equal(p.file_path, "/u/.claude/plans/linkable.md");
+  assert.equal(p.source_log_path, null);
+
+  // Same file/content later via the import sink, now WITH an agent log →
+  // deduped (same plan_key + sha256) but the log link is backfilled.
+  const r2 = upsertPlanCapture(db, {
+    ...c1,
+    source_log_path: "/u/.claude/projects/p/S1.jsonl",
+  });
+  assert.equal(r2.deduped, true);
+  p = getPlan(db, r1.planId);
+  assert.equal(p.file_path, "/u/.claude/plans/linkable.md");
+  assert.equal(p.source_log_path, "/u/.claude/projects/p/S1.jsonl");
 });
 
 test("extractPlansFromPlansDir tolerates a missing directory", () => {

@@ -47,6 +47,8 @@ function ensurePlanSchema(db) {
       created_from_session_id TEXT,
       created_from_event_id TEXT,
       plan_key TEXT,
+      file_path TEXT,
+      source_log_path TEXT,
       needs_confirmation INTEGER NOT NULL DEFAULT 0,
       confidence REAL,
       sync_state TEXT NOT NULL DEFAULT 'local_only'
@@ -81,6 +83,17 @@ function ensurePlanSchema(db) {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_plans_session_key
       ON plans(created_from_session_id, plan_key);
   `);
+
+  // Idempotent additive migration for DBs created before file_path /
+  // source_log_path existed (CREATE TABLE IF NOT EXISTS is a no-op on those).
+  // Same detect-then-ALTER pattern as upstream server/db.js.
+  for (const col of ["file_path", "source_log_path"]) {
+    try {
+      db.prepare(`SELECT ${col} FROM plans LIMIT 1`).get();
+    } catch {
+      db.prepare(`ALTER TABLE plans ADD COLUMN ${col} TEXT`).run();
+    }
+  }
 }
 
 /** Stable per-(session,plan) grouping key. */
@@ -130,7 +143,21 @@ function upsertPlanCapture(db, capture) {
       .get(planId);
 
     if (latest && latest.content_sha256 === capture.content_sha256) {
-      // Identical content already captured — no-op (dedup).
+      // Identical content already captured — no-op for versioning, but still
+      // backfill the file/log links if they were missing (e.g. rows created
+      // before these columns existed). COALESCE keeps existing non-null values.
+      if (capture.file_path || capture.source_log_path) {
+        db.prepare(
+          `UPDATE plans
+             SET file_path = COALESCE(file_path, ?),
+                 source_log_path = COALESCE(source_log_path, ?)
+           WHERE id = ?`,
+        ).run(
+          capture.file_path || null,
+          capture.source_log_path || null,
+          planId,
+        );
+      }
       return {
         planId,
         versionId: null,
@@ -145,9 +172,9 @@ function upsertPlanCapture(db, capture) {
       `INSERT INTO plans
         (id, organization_id, title, current_version_id, status, source,
          capture_method, harness, created_from_session_id, created_from_event_id,
-         plan_key, needs_confirmation, confidence, sync_state, metadata,
-         created_at, updated_at)
-       VALUES (?, NULL, ?, NULL, 'draft', 'captured', ?, ?, ?, ?, ?, ?, ?,
+         plan_key, file_path, source_log_path, needs_confirmation, confidence,
+         sync_state, metadata, created_at, updated_at)
+       VALUES (?, NULL, ?, NULL, 'draft', 'captured', ?, ?, ?, ?, ?, ?, ?, ?, ?,
                'local_only', NULL, ?, ?)`,
     ).run(
       planId,
@@ -157,6 +184,8 @@ function upsertPlanCapture(db, capture) {
       sessionId,
       capture.source_event_ref || null,
       planKey,
+      capture.file_path || null,
+      capture.source_log_path || null,
       capture.needs_confirmation ? 1 : 0,
       capture.confidence == null ? null : capture.confidence,
       ts,
@@ -199,6 +228,8 @@ function upsertPlanCapture(db, capture) {
            title = COALESCE(?, title),
            capture_method = COALESCE(?, capture_method),
            harness = COALESCE(?, harness),
+           file_path = COALESCE(?, file_path),
+           source_log_path = COALESCE(?, source_log_path),
            needs_confirmation = ?,
            confidence = ?,
            updated_at = ?
@@ -208,6 +239,8 @@ function upsertPlanCapture(db, capture) {
     capture.title || null,
     capture.capture_method || null,
     capture.harness || null,
+    capture.file_path || null,
+    capture.source_log_path || null,
     capture.needs_confirmation ? 1 : 0,
     capture.confidence == null ? null : capture.confidence,
     ts,

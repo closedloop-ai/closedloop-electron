@@ -7,8 +7,27 @@
 "use strict";
 
 const { Router } = require("express");
+const fs = require("fs");
+const { spawn } = require("child_process");
 const { db } = require("../db");
 const planStore = require("../lib/plan-store");
+
+// Open a local file with the OS handler. A file:// link can't escape the
+// sandboxed dashboard iframe, so the sidecar (a local Node process) opens it.
+// Path is never client-supplied — it's the plan's own stored file_path /
+// source_log_path, validated to exist — so there's no arbitrary-open vector.
+function osOpen(filePath) {
+  const cmd =
+    process.platform === "darwin"
+      ? "open"
+      : process.platform === "win32"
+        ? "cmd"
+        : "xdg-open";
+  const args =
+    process.platform === "win32" ? ["/c", "start", "", filePath] : [filePath];
+  const child = spawn(cmd, args, { detached: true, stdio: "ignore" });
+  child.unref();
+}
 
 // Idempotent — also created by the db.js build patch; safe to ensure here so
 // the route works regardless of init ordering.
@@ -97,6 +116,41 @@ router.post("/:id/reject", (req, res) => {
   const plan = planStore.getPlan(db, req.params.id);
   broadcast("plan_updated", plan);
   res.json({ ok: true, plan });
+});
+
+// POST /api/plans/:id/open?target=plan|log  — open the plan .md file or the
+// agent log it was pulled from, in the OS default app.
+router.post("/:id/open", (req, res) => {
+  const plan = planStore.getPlan(db, req.params.id);
+  if (!plan) {
+    return res
+      .status(404)
+      .json({ error: { code: "NOT_FOUND", message: "plan not found" } });
+  }
+  const target = req.query.target === "log" ? "log" : "plan";
+  const filePath =
+    target === "log" ? plan.source_log_path : plan.file_path;
+  if (!filePath) {
+    return res.status(404).json({
+      error: {
+        code: "NO_PATH",
+        message: `no ${target} path recorded for this plan`,
+      },
+    });
+  }
+  if (!fs.existsSync(filePath)) {
+    return res.status(410).json({
+      error: { code: "FILE_GONE", message: `file no longer exists: ${filePath}` },
+    });
+  }
+  try {
+    osOpen(filePath);
+  } catch (e) {
+    return res.status(500).json({
+      error: { code: "OPEN_FAILED", message: e && e.message },
+    });
+  }
+  res.json({ ok: true, target, path: filePath });
 });
 
 module.exports = router;

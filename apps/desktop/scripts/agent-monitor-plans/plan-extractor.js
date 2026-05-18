@@ -70,6 +70,7 @@ function makeCapture({
   sessionId,
   content,
   filePath = null,
+  sourceLogPath = null,
   confidence,
   sourceEventRef = null,
   capturedAt = null,
@@ -86,6 +87,7 @@ function makeCapture({
     created_from_session_id: sessionId || null,
     title,
     file_path: filePath,
+    source_log_path: sourceLogPath,
     content_markdown: contentMarkdown,
     content_sha256: sha256(contentMarkdown),
     confidence,
@@ -93,6 +95,28 @@ function makeCapture({
     source_event_ref: sourceEventRef,
     captured_at: capturedAt,
   };
+}
+
+/**
+ * Best-effort path to the Claude Code session transcript a plan was pulled
+ * from. Claude slugifies cwd by replacing `/` and `.` with `-` and stores the
+ * transcript at `<CLAUDE_HOME>/projects/<slug>/<sessionId>.jsonl` (same
+ * convention the upstream watchdog uses). Returns null if it can't be resolved.
+ */
+function deriveClaudeTranscriptPath(cwd, sessionId) {
+  if (!cwd || !sessionId) return null;
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    const os = require("os");
+    const home =
+      process.env.CLAUDE_HOME || path.join(os.homedir(), ".claude");
+    const slug = String(cwd).replace(/[/.]/g, "-");
+    const p = path.join(home, "projects", slug, `${sessionId}.jsonl`);
+    return fs.existsSync(p) ? p : null;
+  } catch {
+    return null;
+  }
 }
 
 function nonEmpty(s) {
@@ -112,6 +136,8 @@ function extractPlansFromSession(session, captureMethod = "log") {
   if (!session || typeof session !== "object") return [];
   const sessionId = session.sessionId || null;
   const out = [];
+  // The agent log this plan was pulled from (Claude transcript JSONL).
+  const claudeLog = deriveClaudeTranscriptPath(session.cwd, sessionId);
 
   // --- Claude Code: ExitPlanMode + plans-dir Write tool_use blocks ---
   const toolUses = Array.isArray(session.toolUses) ? session.toolUses : [];
@@ -133,6 +159,7 @@ function extractPlansFromSession(session, captureMethod = "log") {
             input.plan_file_path ||
             input.planFile ||
             null,
+          sourceLogPath: claudeLog,
           confidence: 1.0,
           sourceEventRef: `ExitPlanMode@${tu.timestamp || ""}`,
           capturedAt: tu.timestamp || null,
@@ -151,6 +178,7 @@ function extractPlansFromSession(session, captureMethod = "log") {
           sessionId,
           content: input.content,
           filePath: input.file_path,
+          sourceLogPath: claudeLog,
           confidence: 1.0,
           sourceEventRef: `Write@${tu.timestamp || ""}`,
           capturedAt: tu.timestamp || null,
@@ -203,6 +231,11 @@ function extractPlanFromHookEvent(hookType, data) {
   if (!input) return null;
   const sessionId = data.session_id || null;
   const ts = new Date().toISOString();
+  // The hook payload carries the exact transcript path — most reliable source.
+  const logPath =
+    typeof data.transcript_path === "string" && data.transcript_path
+      ? data.transcript_path
+      : null;
 
   if (toolName === "ExitPlanMode" && nonEmpty(input.plan)) {
     return makeCapture({
@@ -213,6 +246,7 @@ function extractPlanFromHookEvent(hookType, data) {
       content: input.plan,
       filePath:
         input.planFilePath || input.plan_file_path || input.planFile || null,
+      sourceLogPath: logPath,
       confidence: 1.0,
       sourceEventRef: `hook:ExitPlanMode@${ts}`,
       capturedAt: ts,
@@ -230,6 +264,7 @@ function extractPlanFromHookEvent(hookType, data) {
       sessionId,
       content: input.content,
       filePath: input.file_path,
+      sourceLogPath: logPath,
       confidence: 1.0,
       sourceEventRef: `hook:Write@${ts}`,
       capturedAt: ts,
