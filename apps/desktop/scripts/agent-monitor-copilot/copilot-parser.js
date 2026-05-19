@@ -12,7 +12,7 @@
 const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
-const { toIso, safeJson } = require("./parser-utils");
+const { toIso, safeJson } = require("../agent-monitor-shared/parser-utils");
 
 /**
  * Parse a Copilot Chat JSON session file (VS Code extension).

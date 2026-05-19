@@ -248,10 +248,16 @@ function materializeRuntimeTree() {
       path.join(generatedLibDir, `${m}.js`),
     );
   }
+  // Shared parser utilities: place at server/agent-monitor-shared/ to match
+  // the source-tree require path (../agent-monitor-shared/parser-utils) used
+  // by all parsers. Both source tests and the generated runtime resolve the
+  // same relative path.
+  const generatedSharedDir = path.join(generatedRootDir, "server", "agent-monitor-shared");
+  mkdirSync(generatedSharedDir, { recursive: true });
   for (const m of SHARED_MODULES) {
     cpSync(
       path.join(sharedModulesDir, `${m}.js`),
-      path.join(generatedLibDir, `${m}.js`),
+      path.join(generatedSharedDir, `${m}.js`),
     );
   }
   cpSync(
@@ -821,10 +827,17 @@ function assertGeneratedTree() {
       );
     }
   }
-  for (const m of [...CODEX_MODULES, ...CURSOR_MODULES, ...COPILOT_MODULES, ...OPENCODE_MODULES, ...SHARED_MODULES]) {
+  for (const m of [...CODEX_MODULES, ...CURSOR_MODULES, ...COPILOT_MODULES, ...OPENCODE_MODULES]) {
     if (!existsSync(path.join(generatedRootDir, "server", "lib", `${m}.js`))) {
       throw new Error(
         `Generated server/lib/${m}.js missing (multi-harness).`,
+      );
+    }
+  }
+  for (const m of SHARED_MODULES) {
+    if (!existsSync(path.join(generatedRootDir, "server", "agent-monitor-shared", `${m}.js`))) {
+      throw new Error(
+        `Generated server/agent-monitor-shared/${m}.js missing (multi-harness).`,
       );
     }
   }

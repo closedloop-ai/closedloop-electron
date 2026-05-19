@@ -11,7 +11,7 @@
 const fs = require("fs");
 const path = require("path");
 const { collectMessageFiles } = require("./opencode-home");
-const { toIso, safeJson } = require("./parser-utils");
+const { toIso, safeJson } = require("../agent-monitor-shared/parser-utils");
 
 /**
  * Parse a single OpenCode session directory into the normalized session object.

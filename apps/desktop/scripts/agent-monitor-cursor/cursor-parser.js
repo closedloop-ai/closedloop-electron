@@ -10,7 +10,7 @@ const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
 const { sessionIdFromTranscriptPath } = require("./cursor-home");
-const { toIso, safeJson } = require("./parser-utils");
+const { toIso, safeJson } = require("../agent-monitor-shared/parser-utils");
 
 /**
  * Parse a single Cursor agent transcript JSONL file.

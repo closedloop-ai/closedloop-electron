@@ -24,7 +24,7 @@ const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
 const { sessionIdFromRolloutPath } = require("./codex-home");
-const { toIso, safeJson } = require("./parser-utils");
+const { toIso, safeJson } = require("../agent-monitor-shared/parser-utils");
 
 const RESPONSE_ITEM_TYPES = new Set([
   "message",
