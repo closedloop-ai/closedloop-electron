@@ -160,6 +160,13 @@ export class SettingsStore {
     return this.store.get("cloudConnectionEnabled", DEFAULT_DESKTOP_SETTINGS.cloudConnectionEnabled);
   }
 
+  getAgentMonitorEnabled(): boolean {
+    return this.store.get(
+      "agentMonitorEnabled",
+      DEFAULT_DESKTOP_SETTINGS.agentMonitorEnabled,
+    );
+  }
+
   getCommandSigningEnforcementEnabled(): boolean {
     return this.store.get(
       "commandSigningEnforcementEnabled",
@@ -185,6 +192,10 @@ export class SettingsStore {
 
   setCloudConnectionEnabled(cloudConnectionEnabled: boolean): void {
     this.store.set("cloudConnectionEnabled", cloudConnectionEnabled);
+  }
+
+  setAgentMonitorEnabled(agentMonitorEnabled: boolean): void {
+    this.store.set("agentMonitorEnabled", agentMonitorEnabled);
   }
 
   setCommandSigningEnforcementEnabled(commandSigningEnforcementEnabled: boolean): void {
@@ -526,6 +537,9 @@ export class SettingsStore {
     }
     if (typeof partial.cloudConnectionEnabled === "boolean") {
       this.store.set("cloudConnectionEnabled", partial.cloudConnectionEnabled);
+    }
+    if (typeof partial.agentMonitorEnabled === "boolean") {
+      this.store.set("agentMonitorEnabled", partial.agentMonitorEnabled);
     }
     if (typeof partial.commandSigningEnforcementEnabled === "boolean") {
       this.store.set(

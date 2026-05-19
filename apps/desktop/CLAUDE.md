@@ -135,3 +135,103 @@ Typical log locations:
 - Linux: `~/.config/ClosedLoop/logs/main.log`
 
 The Diagnostics tab shows the current in-memory gateway log plus a bounded previous-session tail read from `main.log` at startup. First-run or unreadable log files must not block boot; return an empty previous-session tail and continue.
+
+## Agent Monitor Sidecar
+
+The desktop app bundles the MIT-licensed `Claude-Code-Agent-Monitor`
+(`agent-dashboard` + `agent-dashboard-client`, pinned in
+`apps/desktop/package.json`) and runs a generated runtime tree as a managed
+localhost **sidecar** for local Claude Code session/agent observability. It is
+the single embedded observability tool (the embedded **"Claude Dashboard"** nav
+tab), but the feature is behind the persisted `agentMonitorEnabled` desktop
+setting and defaults OFF. When disabled, the whole dashboard tab is hidden.
+
+- **Process model:** `src/main/agent-monitor-sidecar.ts` spawns the generated
+  `server/index.js` from `apps/desktop/.generated/agent-monitor/` (packaged:
+  unpacked `extraResources/agent-monitor`) using the Electron binary as Node
+  (`ELECTRON_RUN_AS_NODE=1`, `process.execPath`) — a packaged app ships no
+  standalone `node`. Started fire-and-forget from `boot()` **only when
+  `agentMonitorEnabled` is true**, and still before the gateway-start try-block
+  so a gateway-start failure never prevents it from running and a sidecar
+  failure never blocks or fails app boot.
+- **Fixed port (differs from the gateway):** `127.0.0.1:4820`
+  (`AGENT_MONITOR_PORT` in `src/shared/contracts.ts`), passed via
+  `DASHBOARD_PORT`. It MUST be fixed — Claude Code hooks bake a port at install
+  time and the hook handler POSTs to `127.0.0.1:${CLAUDE_DASHBOARD_PORT||4820}`,
+  so 4820 (upstream's default) means hooks need zero per-hook env. 4820 is
+  outside `PORT_PROBE_ORDER`, so it never collides with the gateway.
+- **Durable DB:** `DASHBOARD_DB_PATH` is set to
+  `app.getPath("userData")/agent-monitor/dashboard.db` (the packaged app dir is
+  read-only). Uses Node's built-in `node:sqlite`; the generated `server/db.js`
+  is patched to prefer `./compat-sqlite`, and staged packaging removes the
+  hoisted `better-sqlite3` module as a belt-and-suspenders guard.
+- **UI:** embedded as the **"Claude Dashboard"** tab in the main window
+  (`src/renderer/index.html`) — a plain `<iframe>` pointed at the sidecar URL
+  fetched via `desktop:get-agent-monitor-url` (renderer polls until `ready`,
+  then sets `src` once). No separate window. The tab is hidden unless the user
+  enables Claude Dashboard in Settings → Relay / Gateway; the tray item only
+  appears when enabled, and `desktop:open-agent-monitor` redirects to Settings
+  when disabled. The embed depends on the renderer having **no CSP** — if a
+  CSP is ever added it must include
+  `frame-src http://127.0.0.1:*`. Iframes in a `display:none` panel collapse to
+  0px, so an explicit px height is set via JS *after* the panel is `.active`,
+  re-applied on `resize`.
+- **Hooks are explicit opt-in (consent-bearing).** Upstream silently writes 8
+  hooks into `~/.claude/settings.json` on every startup — the generated
+  `server/index.js` gates that behind `CCAM_AUTO_INSTALL_HOOKS` (which the
+  sidecar sets to `"0"`).
+  The user enables/disables tracking via the toggle on the Claude Dashboard tab
+  → `src/main/agent-monitor-hooks.ts` writes/removes the 8 hook entries. The
+  hook command runs the Electron binary as Node against a **userData copy** of
+  `hook-handler.js` (location-independent across app moves/updates), at the
+  fixed port 4820. Default is OFF; disabling fully removes the entries;
+  re-enabling is idempotent and self-heals a stale path (also repaired at boot
+  via `syncAgentMonitorHooksOnBoot()`). Disk state: a dedicated electron-store
+  (`agent-monitor-hooks`, key `enabled`).
+- **Lifecycle:** health-checked readiness on `GET /api/health` (60s ready
+  timeout — first run synchronously imports legacy `~/.claude` sessions; ready
+  ≠ import-complete, the iframe populates progressively), crash-restart with
+  exponential backoff (hard cap; a fixed-port `EADDRINUSE` degrades to "no
+  monitor", never blocks boot or Claude Code), process-group SIGTERM→SIGKILL
+  stop wired into `runShutdownSequence` (`agentMonitor.stop`, before
+  `server.stop`).
+- **Security model (by design):** the sidecar reads `~/.claude` **directly**,
+  *outside* the gateway `isPathAllowed` sandbox. Acceptable and intentional:
+  bound to `127.0.0.1` only (patched at build time; verified the LAN interface
+  is refused), the user's own local data, no cloud egress, no auth (consistent
+  with the unauthenticated `/health` precedent). Hooks only mutate global
+  Claude config on explicit user opt-in and are fully reversible.
+- **Build/packaging:** `scripts/build-agent-monitor.mjs` (run via
+  `pnpm build:agent-monitor`, chained into `build`) resolves the pnpm-managed
+  upstream packages, builds the client with Vite, generates
+  `apps/desktop/.generated/agent-monitor/`, applies the ClosedLoop host
+  patches (loopback bind, `CCAM_AUTO_INSTALL_HOOKS` gate, uninstall script,
+  `compat-sqlite` bootstrap), and hard-gates the build on the generated
+  `compat-sqlite.js` working under Electron-as-Node. Shipped via
+  `electron-builder.yml` `extraResources` (unpacked, outside the asar)
+  preserving the `server/` ↔ `client/dist/` relative layout.
+- **Codex support (multi-harness; Addition #4/#5/#6):** the same dashboard
+  ingests **OpenAI Codex** sessions, not just Claude Code. Codex has **no hook
+  system**, so its data comes from importing/watching the rollout JSONL under
+  `~/.codex/sessions/` (honors `$CODEX_HOME`). The proven, architecture-
+  independent modules live in-repo at
+  `apps/desktop/scripts/agent-monitor-codex/codex-{home,parser,import,watcher}.js`
+  and are copied into the generated `server/lib/` at materialize time;
+  `build-agent-monitor.mjs` also injects a `harness` column + the Codex
+  watcher/import wiring as generated-tree patches (same idempotent
+  string-anchor approach as the loopback/CCAM patches) and patches the client
+  source pre-Vite-build to add a Claude/Codex badge + filter. `codex-parser`
+  emits the same normalized shape as the upstream Claude importer so the
+  shared `importSession()` renders Codex through the unchanged UI; the watcher
+  self-heals if `~/.codex/sessions` does not exist at boot (no app restart
+  needed for a first-ever Codex session). All Codex paths are best-effort and
+  never block boot or the Claude path. The build hard-gates Patches #4/#5 and
+  Addition #6 so a future upstream bump can't silently drop Codex. The
+  user-facing nav/tray label is **"Agent Dashboard"** (internal ids/IPC
+  channels unchanged).
+- **Update procedure:** bump the git dependency commit(s) in
+  `apps/desktop/package.json`, regenerate the lockfile, and rerun
+  `pnpm -C apps/desktop build:agent-monitor`. Any change here requires the
+  `apps/desktop/package.json` version bump (CI-enforced) and a clean-machine
+  packaged-DMG smoke test (the highest-risk path: `node:sqlite` from the
+  asar-external, universal-merged binary).

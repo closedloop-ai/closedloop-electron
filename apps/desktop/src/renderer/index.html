@@ -2644,6 +2644,7 @@
       <button data-tab="approvals">Approvals</button>
       <button data-tab="activity">Requests</button>
       <button data-tab="logs">Diagnostics</button>
+      <button data-tab="claude-dashboard" id="claudeDashboardTabButton" hidden>Agent Dashboard</button>
       <button data-tab="settings">Settings</button>
     </nav>
     <main>
@@ -2750,6 +2751,20 @@
         <div id="logsPausedBanner" class="logs-paused-banner">Paused - 0 new entries queued</div>
         <div id="logsList" class="logs-container"></div>
       </section>
+      <section id="claude-dashboard" class="panel">
+        <div id="claudeDashConsent" style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border,#2a2a2a);font-size:13px">
+          <label class="toggle-switch" title="Installs Claude Code hooks in ~/.claude/settings.json so this dashboard receives live session events. Off by default; fully removable.">
+            <input type="checkbox" id="claudeDashHooksToggle" />
+            <span class="toggle-track"></span>
+          </label>
+          <span>Enable Claude Code session tracking</span>
+          <span id="claudeDashHooksHint" style="color:var(--muted-foreground,#888)">— off (no changes to your global Claude config)</span>
+        </div>
+        <div id="claudeDashStatus" style="padding:48px 20px;text-align:center;color:var(--muted-foreground,#888)">
+          Starting Agent Dashboard…
+        </div>
+        <iframe id="claudeDashFrame" title="Claude Code Agent Monitor" style="display:none;width:100%;border:0;background:#fff"></iframe>
+      </section>
       <section id="settings" class="panel">
         <div class="settings-sub-nav">
           <button data-settings-tab="relay-gateway" class="active">Relay / Gateway</button>
@@ -2797,6 +2812,16 @@
               <div class="row">
                 <label for="webAppOrigin">Web App Origin (CORS)</label>
                 <input id="webAppOrigin" />
+              </div>
+              <div class="row">
+                <label for="agentMonitorEnabled">Agent Dashboard</label>
+                <div>
+                  <label class="toggle-switch" title="Runs the local Agent Dashboard sidecar and shows the Agent Dashboard tab. Off by default.">
+                    <input id="agentMonitorEnabled" type="checkbox" />
+                    <span class="toggle-track"></span>
+                  </label>
+                  <p class="field-help" style="margin-top:8px">Runs the local Agent Dashboard sidecar and shows the Agent Dashboard tab. Off by default.</p>
+                </div>
               </div>
             </div>
           </div>
@@ -3073,6 +3098,11 @@
       const panels = document.querySelectorAll(".panel");
 
       function activateTab(tabName) {
+        if (tabName === "claude-dashboard" && !cachedAgentMonitorEnabled) {
+          activateTab("settings");
+          activateSettingsTab("relay-gateway");
+          return;
+        }
         tabs.forEach((button) => button.classList.remove("active"));
         panels.forEach((panel) => panel.classList.remove("active"));
         const tabButton = document.querySelector(`nav button[data-tab="${tabName}"]`);
@@ -3087,6 +3117,11 @@
         } else {
           stopLogsAutoRefresh();
         }
+        if (tabName === "claude-dashboard") {
+          startClaudeDashboard();
+        } else {
+          stopClaudeDashboardPoll();
+        }
       }
 
       tabs.forEach((tab) => {
@@ -3096,6 +3131,166 @@
       window.addEventListener("desktop:navigate-tab", (event) => {
         activateTab(event.detail);
       });
+
+      // --- Claude Dashboard (generated Agent Monitor sidecar) --------------
+      // Embed the already-running localhost sidecar in an iframe once it is
+      // healthy. When the feature is enabled, the sidecar starts at app boot
+      // (fire-and-forget); here we just poll readiness and lazily set src once.
+      let claudeDashTimer = null;
+      let claudeDashLoaded = false;
+
+      function syncAgentMonitorTabVisibility(enabled) {
+        cachedAgentMonitorEnabled = enabled === true;
+        if (claudeDashboardTabButton) {
+          claudeDashboardTabButton.hidden = !cachedAgentMonitorEnabled;
+        }
+
+        const frame = document.getElementById("claudeDashFrame");
+        const status = document.getElementById("claudeDashStatus");
+        const toggle = document.getElementById("claudeDashHooksToggle");
+        const hint = document.getElementById("claudeDashHooksHint");
+
+        if (toggle) {
+          toggle.disabled = !cachedAgentMonitorEnabled;
+          if (!cachedAgentMonitorEnabled) {
+            toggle.checked = false;
+          }
+        }
+
+        if (!cachedAgentMonitorEnabled) {
+          stopClaudeDashboardPoll();
+          claudeDashLoaded = false;
+          if (frame) {
+            frame.src = "about:blank";
+            frame.style.display = "none";
+          }
+          if (status) {
+            status.style.display = "block";
+            status.textContent = "Agent Dashboard is disabled in Settings.";
+          }
+          if (hint) {
+            hint.textContent =
+              "— enable Agent Dashboard in Settings to manage session tracking";
+          }
+          if (document.getElementById("claude-dashboard")?.classList.contains("active")) {
+            activateTab("settings");
+            activateSettingsTab("relay-gateway");
+          }
+          return;
+        }
+
+        if (hint) {
+          hint.textContent = "— off (no changes to your global Claude config)";
+        }
+      }
+
+      function sizeClaudeFrame() {
+        const frame = document.getElementById("claudeDashFrame");
+        if (!frame || frame.style.display === "none") return;
+        // body/html/main have no height and the page scrolls; height:100%
+        // collapses to 0 and any measure while the panel is display:none is 0.
+        // Set an explicit px height AFTER the panel is .active.
+        const top = frame.getBoundingClientRect().top;
+        frame.style.height = Math.max(320, window.innerHeight - top - 24) + "px";
+      }
+      window.addEventListener("resize", sizeClaudeFrame);
+
+      function stopClaudeDashboardPoll() {
+        if (claudeDashTimer) { clearInterval(claudeDashTimer); claudeDashTimer = null; }
+      }
+
+      async function refreshClaudeHooksToggle() {
+        const toggle = document.getElementById("claudeDashHooksToggle");
+        const hint = document.getElementById("claudeDashHooksHint");
+        if (!cachedAgentMonitorEnabled) {
+          if (toggle) toggle.disabled = true;
+          if (hint) {
+            hint.textContent =
+              "— enable Agent Dashboard in Settings to manage session tracking";
+          }
+          return;
+        }
+        try {
+          const enabled = await api.getAgentMonitorHooksEnabled();
+          toggle.checked = !!enabled;
+          toggle.disabled = false;
+          hint.textContent = enabled
+            ? "— on (Claude Code hooks installed in ~/.claude/settings.json)"
+            : "— off (no changes to your global Claude config)";
+        } catch (_) { /* leave as-is */ }
+      }
+
+      (function wireClaudeHooksToggle() {
+        const toggle = document.getElementById("claudeDashHooksToggle");
+        const hint = document.getElementById("claudeDashHooksHint");
+        if (!toggle) return;
+        toggle.addEventListener("change", async () => {
+          const want = toggle.checked;
+          toggle.disabled = true;
+          hint.textContent = want ? "— enabling…" : "— disabling…";
+          try {
+            const res = await api.setAgentMonitorHooksEnabled(want);
+            if (!res || !res.ok) {
+              toggle.checked = !want;
+              hint.textContent = "— failed: " + ((res && res.error) || "unknown error");
+            } else {
+              await refreshClaudeHooksToggle();
+            }
+          } catch (e) {
+            toggle.checked = !want;
+            hint.textContent = "— failed: " + (e && e.message ? e.message : "error");
+          } finally {
+            toggle.disabled = false;
+          }
+        });
+      })();
+
+      function startClaudeDashboard() {
+        const frame = document.getElementById("claudeDashFrame");
+        const status = document.getElementById("claudeDashStatus");
+        if (!cachedAgentMonitorEnabled) {
+          frame.style.display = "none";
+          status.style.display = "block";
+          status.textContent = "Agent Dashboard is disabled in Settings.";
+          return;
+        }
+        void refreshClaudeHooksToggle();
+        if (claudeDashLoaded) { sizeClaudeFrame(); return; }
+        status.style.display = "block";
+        status.textContent = "Starting Agent Dashboard…";
+
+        const tick = async () => {
+          try {
+            const r = await api.getAgentMonitorUrl();
+            if (r && r.ready && r.url) {
+              frame.src = r.url;
+              frame.style.display = "block";
+              status.style.display = "none";
+              claudeDashLoaded = true;
+              sizeClaudeFrame();
+              stopClaudeDashboardPoll();
+            }
+          } catch (_) { /* keep polling */ }
+        };
+
+        void tick();
+        if (!claudeDashLoaded && !claudeDashTimer) {
+          const startedAt = Date.now();
+          claudeDashTimer = setInterval(() => {
+            if (claudeDashLoaded) { stopClaudeDashboardPoll(); return; }
+            if (Date.now() - startedAt > 60000) {
+              stopClaudeDashboardPoll();
+              status.innerHTML =
+                'Agent Dashboard did not start. ' +
+                '<button id="claudeDashRetry" class="logs-btn" style="width:auto;padding:4px 10px">Retry</button>';
+              document.getElementById("claudeDashRetry")
+                ?.addEventListener("click", () => { claudeDashLoaded = false; startClaudeDashboard(); });
+            } else {
+              void tick();
+            }
+          }, 1000);
+        }
+      }
 
       // Settings sub-tab switching
       const settingsSubTabs = document.querySelectorAll(".settings-sub-nav button");
@@ -3140,6 +3335,7 @@
       const relayOrigin = document.getElementById("relayOrigin");
       const apiOrigin = document.getElementById("apiOrigin");
       const webAppOrigin = document.getElementById("webAppOrigin");
+      const agentMonitorEnabled = document.getElementById("agentMonitorEnabled");
       const apiKey = document.getElementById("apiKey");
       const apiKeyStatus = document.getElementById("apiKeyStatus");
       const sandboxBaseDirectory = document.getElementById("sandboxBaseDirectory");
@@ -3176,6 +3372,7 @@
       const dashboardSecurity = document.getElementById("dashboardSecurity");
       const dashboardSecurityDetail = document.getElementById("dashboardSecurityDetail");
       const dashboardApproval = document.getElementById("dashboardApproval");
+      const claudeDashboardTabButton = document.getElementById("claudeDashboardTabButton");
       const approvalsList = document.getElementById("approvalsList");
       const activityList = document.getElementById("activityList");
       const runningJobsList = document.getElementById("runningJobsList");
@@ -3205,6 +3402,7 @@
       let cachedCommandsPaused = false;
       let cachedConnectionEnabled = true;
       let cachedPort = 19432;
+      let cachedAgentMonitorEnabled = false;
       let cachedCommandSigningEnforcementEnabled = false;
       let cachedCommandSigningAuthorizedCount = 0;
       let cachedCommandSigningPendingCount = 0;
@@ -3870,6 +4068,11 @@
         relayOrigin.value = settings.relayOrigin || "";
         apiOrigin.value = settings.apiOrigin || "";
         webAppOrigin.value = settings.webAppOrigin || "";
+        cachedAgentMonitorEnabled = settings.agentMonitorEnabled === true;
+        if (agentMonitorEnabled) {
+          agentMonitorEnabled.checked = cachedAgentMonitorEnabled;
+        }
+        syncAgentMonitorTabVisibility(cachedAgentMonitorEnabled);
         sandboxBaseDirectory.value = settings.sandboxBaseDirectory || "";
         cachedCommandSigningEnforcementEnabled = settings.commandSigningEnforcementEnabled === true;
         if (commandSigningEnforcementEnabled) {
@@ -4554,8 +4757,10 @@
         await api.updateSettings({
           relayOrigin: relayOrigin.value.trim(),
           apiOrigin: apiOrigin.value.trim(),
-          webAppOrigin: webAppOrigin.value.trim()
+          webAppOrigin: webAppOrigin.value.trim(),
+          agentMonitorEnabled: agentMonitorEnabled?.checked === true
         });
+        syncAgentMonitorTabVisibility(agentMonitorEnabled?.checked === true);
         relayGatewayMessage.textContent = "Saved.";
         await Promise.all([refreshRuntime(), refreshApprovals()]);
       }

@@ -1,0 +1,11 @@
+  const [dashboardRunIds, setDashboardRunIds] = useState<Set<string>>(new Set());
+  // CLOSEDLOOP Codex support (Addition #6): filter by agent harness. "" = all.
+  // Applied client-side (the vendored /api/sessions route is unpatched);
+  // legacy/empty harness values count as "claude" (DB column default).
+  const [harness, setHarness] = useState("");
+
+  const HARNESS_OPTIONS: Array<{ label: string; value: string }> = [
+    { label: "All Harnesses", value: "" },
+    { label: "Claude", value: "claude" },
+    { label: "Codex", value: "codex" },
+  ];
