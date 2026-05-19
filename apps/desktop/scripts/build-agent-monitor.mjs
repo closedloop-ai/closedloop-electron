@@ -93,9 +93,10 @@ const CLIENT_SNIPPET_FILES = readdirSync(clientSnippetDir).sort();
 
 // CLOSEDLOOP plan-extraction (FEA-1189 / PLN-613): in-repo modules copied into
 // the generated server/lib (parallel to CODEX_MODULES); plans-route.js copied
-// into server/routes/plans.js; Plans.tsx into the client src/pages before the
-// Vite build. import-history.js, server/db.js and server/index.js are wired via
-// the same idempotent string-anchor + hard-gate approach as the Codex patches.
+// into server/routes/plans.js; Plans.tsx + a host-owned feature-flag helper
+// into the client src tree before the Vite build. import-history.js,
+// server/db.js and server/index.js are wired via the same idempotent
+// string-anchor + hard-gate approach as the Codex patches.
 const planModulesDir = path.join(appDir, "scripts", "agent-monitor-plans");
 const PLAN_MODULES = ["plan-extractor", "plan-store", "plan-backfill"];
 const generatedImportHistory = path.join(
@@ -207,6 +208,7 @@ function currentStamp() {
     ...PLAN_MODULES.map((m) => path.join(planModulesDir, `${m}.js`)),
     path.join(planModulesDir, "plans-route.js"),
     path.join(planModulesDir, "client", "Plans.tsx"),
+    path.join(planModulesDir, "client", "closedloop-host-flags.ts"),
   ]) {
     h.update(readFileSync(file));
   }
@@ -740,6 +742,52 @@ function snippet(name) {
   return readFileSync(path.join(clientSnippetDir, name), "utf8");
 }
 
+function normalizePlanUiAppSource(file) {
+  const finalImport =
+    'import { isPlanExtractionEnabled } from "./lib/closedloop-host-flags";';
+  const oldImport = 'import { isPlansUiEnabled } from "./lib/closedloop-host-flags";';
+  const finalRoute =
+    '          <Route path="plans" element={isPlanExtractionEnabled() ? <Plans /> : <NotFound />} />';
+  const oldRoute =
+    '          <Route path="plans" element={isPlansUiEnabled() ? <Plans /> : <NotFound />} />';
+  const rawRoute = '          <Route path="plans" element={<Plans />} />';
+
+  let src = readFileSync(file, "utf8");
+  src = src.replace(`${finalImport}\n${oldImport}`, finalImport);
+  src = src.replace(`${oldImport}\n${finalImport}`, finalImport);
+  if (src.includes(finalRoute)) {
+    src = src.replace(`\n${oldRoute}`, "");
+    src = src.replace(`\n${rawRoute}`, "");
+  }
+  writeFileSync(file, src, "utf8");
+}
+
+function normalizePlanUiSidebarSource(file, legacyPlansNavLink, plansNavLink) {
+  const finalImport =
+    'import { api } from "../lib/api";\nimport { isPlanExtractionEnabled } from "../lib/closedloop-host-flags";';
+  const oldImport =
+    'import { api } from "../lib/api";\nimport { isPlansUiEnabled } from "../lib/closedloop-host-flags";';
+  const oldPlansNavLink = plansNavLink.replaceAll(
+    "isPlanExtractionEnabled",
+    "isPlansUiEnabled",
+  );
+
+  let src = readFileSync(file, "utf8");
+  src = src.replace(
+    `${finalImport}\nimport { isPlansUiEnabled } from "../lib/closedloop-host-flags";`,
+    finalImport,
+  );
+  src = src.replace(
+    `${oldImport}\nimport { isPlanExtractionEnabled } from "../lib/closedloop-host-flags";`,
+    finalImport,
+  );
+  if (src.includes(plansNavLink)) {
+    src = src.replace(`\n${oldPlansNavLink}`, "");
+    src = src.replace(`\n${legacyPlansNavLink}`, "");
+  }
+  writeFileSync(file, src, "utf8");
+}
+
 function patchClientSource() {
   // CLOSEDLOOP plan-extraction (FEA-1189): drop the dedicated Plans page into
   // the pinned client source before Vite build (the App.tsx route + Sidebar
@@ -749,7 +797,11 @@ function patchClientSource() {
     path.join(planModulesDir, "client", "Plans.tsx"),
     path.join(sourceClientDir, "src", "pages", "Plans.tsx"),
   );
-  const plansNavLink = [
+  cpSync(
+    path.join(planModulesDir, "client", "closedloop-host-flags.ts"),
+    path.join(sourceClientDir, "src", "lib", "closedloop-host-flags.ts"),
+  );
+  const legacyPlansNavLink = [
     "        })}",
     '        <NavLink',
     '          to="/plans"',
@@ -769,6 +821,34 @@ function patchClientSource() {
     "        </NavLink>",
     "      </nav>",
   ].join("\n");
+  const plansNavLink = [
+    "        })}",
+    "        {isPlanExtractionEnabled() && (",
+    '          <NavLink',
+    '            to="/plans"',
+    '            title={collapsed ? "Plans" : undefined}',
+    "            className={({ isActive }) =>",
+    "              `flex items-center gap-3 rounded-lg text-sm font-medium transition-colors duration-150 ${",
+    '                collapsed ? "justify-center px-2 py-2.5" : "px-3 py-2.5"',
+    "              } ${",
+    "                isActive",
+    '                  ? "bg-accent/10 text-accent border border-accent/20"',
+    '                  : "text-gray-400 hover:text-gray-200 hover:bg-surface-3 border border-transparent"',
+    "              }`",
+    "            }",
+    "          >",
+    '            <FileText className="w-4 h-4 flex-shrink-0" />',
+    "            {!collapsed && <span>Plans</span>}",
+    "          </NavLink>",
+    "        )}",
+    "      </nav>",
+  ].join("\n");
+  normalizePlanUiAppSource(path.join(sourceClientDir, "src", "App.tsx"));
+  normalizePlanUiSidebarSource(
+    path.join(sourceClientDir, "src", "components", "Sidebar.tsx"),
+    legacyPlansNavLink,
+    plansNavLink,
+  );
   const edits = [
     {
       rel: "src/lib/types.ts",
@@ -885,10 +965,21 @@ function patchClientSource() {
     },
     {
       rel: "src/App.tsx",
-      guard: 'path="plans"',
-      find: '          <Route path="run" element={<Run />} />',
+      guard: 'import { isPlanExtractionEnabled } from "./lib/closedloop-host-flags";',
+      find: 'import { Plans } from "./pages/Plans";',
       replace:
+        'import { Plans } from "./pages/Plans";\nimport { isPlanExtractionEnabled } from "./lib/closedloop-host-flags";',
+    },
+    {
+      rel: "src/App.tsx",
+      guard: 'path="plans" element={isPlanExtractionEnabled() ? <Plans /> : <NotFound />}',
+      find: '          <Route path="run" element={<Run />} />',
+      findAlternates: [
         '          <Route path="run" element={<Run />} />\n          <Route path="plans" element={<Plans />} />',
+        '          <Route path="run" element={<Run />} />\n          <Route path="plans" element={isPlansUiEnabled() ? <Plans /> : <NotFound />} />',
+      ],
+      replace:
+        '          <Route path="run" element={<Run />} />\n          <Route path="plans" element={isPlanExtractionEnabled() ? <Plans /> : <NotFound />} />',
     },
     {
       rel: "src/components/Sidebar.tsx",
@@ -898,8 +989,19 @@ function patchClientSource() {
     },
     {
       rel: "src/components/Sidebar.tsx",
-      guard: 'to="/plans"',
+      guard: 'import { isPlanExtractionEnabled } from "../lib/closedloop-host-flags";',
+      find: 'import { api } from "../lib/api";',
+      replace:
+        'import { api } from "../lib/api";\nimport { isPlanExtractionEnabled } from "../lib/closedloop-host-flags";',
+    },
+    {
+      rel: "src/components/Sidebar.tsx",
+      guard: "{isPlanExtractionEnabled() && (",
       find: "        })}\n      </nav>",
+      findAlternates: [
+        legacyPlansNavLink,
+        plansNavLink.replaceAll("isPlanExtractionEnabled", "isPlansUiEnabled"),
+      ],
       replace: plansNavLink,
     },
   ];

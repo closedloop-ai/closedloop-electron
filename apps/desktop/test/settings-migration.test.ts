@@ -111,6 +111,11 @@ test("migration: fresh install applies defaults", () => {
     "Claude Dashboard should default off",
   );
   assert.equal(
+    all.planExtractionEnabled,
+    false,
+    "plan extraction should default off",
+  );
+  assert.equal(
     all.commandSigningEnforcementEnabled,
     false,
     "command signing enforcement should default off",
@@ -154,6 +159,24 @@ test("agent monitor enablement persists across settings store reloads", () => {
   assert.equal(all.sandboxBaseDirectory, "/Users/test/Source");
 });
 
+test("plan extraction enablement persists across settings store reloads", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "settings-plan-extraction-"));
+  tempDirs.push(tmpDir);
+
+  const storeName = "test-plan-extraction";
+  const store = new SettingsStore({ cwd: tmpDir, name: storeName });
+  store.update({
+    planExtractionEnabled: true,
+    sandboxBaseDirectory: "/Users/test/Source",
+  });
+
+  const reloaded = new SettingsStore({ cwd: tmpDir, name: storeName });
+  const all = reloaded.getAll();
+
+  assert.equal(all.planExtractionEnabled, true);
+  assert.equal(all.sandboxBaseDirectory, "/Users/test/Source");
+});
+
 test("partial settings update preserves command signing enforcement", () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "settings-command-signing-partial-"));
   tempDirs.push(tmpDir);
@@ -186,6 +209,24 @@ test("partial settings update preserves agent monitor enablement", () => {
   const all = store.getAll();
 
   assert.equal(all.agentMonitorEnabled, true);
+  assert.equal(all.sandboxBaseDirectory, "/Users/test/Source");
+  assert.equal(all.verboseLogging, true);
+});
+
+test("partial settings update preserves plan extraction enablement", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "settings-plan-extraction-partial-"));
+  tempDirs.push(tmpDir);
+
+  const store = new SettingsStore({ cwd: tmpDir, name: "test-plan-extraction-partial" });
+  store.update({
+    planExtractionEnabled: true,
+    sandboxBaseDirectory: "/Users/test/Source",
+  });
+  store.update({ verboseLogging: true });
+
+  const all = store.getAll();
+
+  assert.equal(all.planExtractionEnabled, true);
   assert.equal(all.sandboxBaseDirectory, "/Users/test/Source");
   assert.equal(all.verboseLogging, true);
 });
