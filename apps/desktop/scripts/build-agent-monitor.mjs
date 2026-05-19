@@ -46,6 +46,7 @@ const sourceRootPkg = path.join(sourceRootDir, "package.json");
 const sourceClientPkg = path.join(sourceClientDir, "package.json");
 const sourceServerEntry = path.join(sourceRootDir, "server", "index.js");
 const sourceSessionsRoute = path.join(sourceRootDir, "server", "routes", "sessions.js");
+const sourceHooksRoute = path.join(sourceRootDir, "server", "routes", "hooks.js");
 const sourceDbFile = path.join(sourceRootDir, "server", "db.js");
 const sourceCompatSqlite = path.join(sourceRootDir, "server", "compat-sqlite.js");
 const sourcePushLib = path.join(sourceRootDir, "server", "lib", "push.js");
@@ -59,6 +60,12 @@ const generatedSessionsRoute = path.join(
   "sessions.js",
 );
 const generatedDbFile = path.join(generatedRootDir, "server", "db.js");
+const generatedHooksRoute = path.join(
+  generatedRootDir,
+  "server",
+  "routes",
+  "hooks.js",
+);
 const generatedPushLib = path.join(generatedRootDir, "server", "lib", "push.js");
 const generatedClientIndex = path.join(
   generatedRootDir,
@@ -83,6 +90,20 @@ const codexModulesDir = path.join(appDir, "scripts", "agent-monitor-codex");
 const clientSnippetDir = path.join(codexModulesDir, "client");
 const CODEX_MODULES = ["codex-home", "codex-parser", "codex-import", "codex-watcher"];
 const CLIENT_SNIPPET_FILES = readdirSync(clientSnippetDir).sort();
+
+// CLOSEDLOOP plan-extraction (FEA-1189 / PLN-613): in-repo modules copied into
+// the generated server/lib (parallel to CODEX_MODULES); plans-route.js copied
+// into server/routes/plans.js; Plans.tsx + a host-owned feature-flag helper
+// into the client src tree before the Vite build. import-history.js,
+// server/db.js and server/index.js are wired via the same idempotent
+// string-anchor + hard-gate approach as the Codex patches.
+const planModulesDir = path.join(appDir, "scripts", "agent-monitor-plans");
+const PLAN_MODULES = ["plan-extractor", "plan-store", "plan-backfill"];
+const generatedImportHistory = path.join(
+  generatedRootDir,
+  "scripts",
+  "import-history.js",
+);
 
 const force =
   process.argv.includes("--force") ||
@@ -151,6 +172,7 @@ function assertSourcePackages() {
   for (const required of [
     sourceServerEntry,
     sourceSessionsRoute,
+    sourceHooksRoute,
     sourceDbFile,
     sourceCompatSqlite,
     sourcePushLib,
@@ -176,12 +198,17 @@ function currentStamp() {
     sourceClientPkg,
     sourceServerEntry,
     sourceSessionsRoute,
+    sourceHooksRoute,
     sourceDbFile,
     sourcePushLib,
     sourceClientIndex,
     fileURLToPath(import.meta.url),
     ...CODEX_MODULES.map((m) => path.join(codexModulesDir, `${m}.js`)),
     ...CLIENT_SNIPPET_FILES.map((file) => path.join(clientSnippetDir, file)),
+    ...PLAN_MODULES.map((m) => path.join(planModulesDir, `${m}.js`)),
+    path.join(planModulesDir, "plans-route.js"),
+    path.join(planModulesDir, "client", "Plans.tsx"),
+    path.join(planModulesDir, "client", "closedloop-host-flags.ts"),
   ]) {
     h.update(readFileSync(file));
   }
@@ -218,11 +245,28 @@ function materializeRuntimeTree() {
       path.join(generatedLibDir, `${m}.js`),
     );
   }
+  // CLOSEDLOOP plan-extraction (FEA-1189): plan modules alongside Codex's in
+  // server/lib so relative requires (../lib, ../server/lib) resolve unchanged.
+  for (const m of PLAN_MODULES) {
+    cpSync(
+      path.join(planModulesDir, `${m}.js`),
+      path.join(generatedLibDir, `${m}.js`),
+    );
+  }
   cpSync(
     path.join(sourceRootDir, "scripts"),
     path.join(generatedRootDir, "scripts"),
     { recursive: true },
   );
+  // The plans HTTP route lives in the generated server/routes (server/ was
+  // copied above); import-history.js (just copied with scripts/) is patched to
+  // persist captured plans on the shared import sink — both harnesses, history,
+  // and the default hooks-OFF path.
+  cpSync(
+    path.join(planModulesDir, "plans-route.js"),
+    path.join(generatedRootDir, "server", "routes", "plans.js"),
+  );
+  patchImportHistory(generatedImportHistory);
   mkdirSync(path.join(generatedRootDir, "client"), { recursive: true });
   cpSync(sourceClientDistDir, path.join(generatedRootDir, "client", "dist"), {
     recursive: true,
@@ -233,6 +277,7 @@ function materializeRuntimeTree() {
   patchServerIndex(generatedServerEntry);
   patchSessionsRoute(generatedSessionsRoute);
   patchDbFile(generatedDbFile);
+  patchHooksRoute(generatedHooksRoute);
   patchPushFile(generatedPushLib);
   writeFileSync(generatedUninstallHooks, UNINSTALL_HOOKS_SOURCE, "utf8");
 }
@@ -421,6 +466,53 @@ function patchServerIndex(file) {
     );
   }
 
+  // CLOSEDLOOP plan-extraction (FEA-1189): backfill ~/.claude/plans/*.md on
+  // EVERY startup. The upstream Claude legacy import is gated on a zero-row DB
+  // (`if (existingCount === 0)`), so on a populated DB the plan extraction
+  // wired into importSession never runs for pre-existing history. This
+  // gate-independent file scan (idempotent, sha256-deduped) closes that gap.
+  if (!source.includes("runClaudePlanBackfill")) {
+    const dbNeedle =
+      '  const dbModule = require("./db");\n  const existingCount = dbModule.db.prepare("SELECT COUNT(*) AS c FROM sessions").get().c;';
+    if (!source.includes(dbNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the legacy-import dbModule/existingCount anchor (plan backfill, FEA-1189).`,
+      );
+    }
+    source = source.replace(
+      dbNeedle,
+      [
+        '  const dbModule = require("./db");',
+        "  try {",
+        '    require("./lib/plan-backfill").runClaudePlanBackfill(dbModule.db);',
+        "  } catch (e) {",
+        '    console.warn("[plans] backfill failed:", e && e.message);',
+        "  }",
+        '  const existingCount = dbModule.db.prepare("SELECT COUNT(*) AS c FROM sessions").get().c;',
+      ].join("\n"),
+    );
+  }
+
+  // CLOSEDLOOP plan-extraction (FEA-1189): register the /api/plans route
+  // (read + confirm/reject triage over plans / plan_versions).
+  if (!source.includes('require("./routes/plans")')) {
+    const requireNeedle = 'const runRouter = require("./routes/run");';
+    const openApiNeedle = '  app.get("/api/openapi.json", (_req, res) => {';
+    if (!source.includes(requireNeedle) || !source.includes(openApiNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the run-route require/openapi anchors (plans route, FEA-1189).`,
+      );
+    }
+    source = source.replace(
+      requireNeedle,
+      `${requireNeedle}\nconst plansRouter = require("./routes/plans");`,
+    );
+    source = source.replace(
+      openApiNeedle,
+      `  app.use("/api/plans", plansRouter);\n${openApiNeedle}`,
+    );
+  }
+
   writeFileSync(file, source, "utf8");
 }
 
@@ -510,6 +602,133 @@ function patchDbFile(file) {
     source = source.replace(stmtsNeedle, `\n${replacement}`);
   }
 
+  // CLOSEDLOOP plan-extraction (FEA-1189): ensure the strategy §9.2 plans /
+  // plan_versions tables exist at startup, regardless of route load order.
+  // Idempotent CREATE TABLE IF NOT EXISTS — never an ALTER migration.
+  if (!source.includes("ensurePlanSchema")) {
+    const exportNeedle =
+      "module.exports = { db, stmts, DB_PATH, DEFAULT_PRICING };";
+    if (!source.includes(exportNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the db module.exports tail (plan schema, FEA-1189).`,
+      );
+    }
+    source = source.replace(
+      exportNeedle,
+      [
+        "try {",
+        '  require("./lib/plan-store").ensurePlanSchema(db);',
+        "} catch (e) {",
+        '  console.warn("[plans] schema init failed:", e && e.message);',
+        "}",
+        "",
+        exportNeedle,
+      ].join("\n"),
+    );
+  }
+
+  writeFileSync(file, source, "utf8");
+}
+
+function patchHooksRoute(file) {
+  let source = readFileSync(file, "utf8");
+
+  if (!source.includes("extractPlanFromHookEvent")) {
+    const requireNeedle =
+      'const { scanAndImportSubagents } = require("../../scripts/import-history");';
+    if (!source.includes(requireNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the hook-route import-history require anchor (plan hooks, FEA-1189).`,
+      );
+    }
+    source = source.replace(
+      requireNeedle,
+      [
+        requireNeedle,
+        'const { extractPlanFromHookEvent } = require("../lib/plan-extractor");',
+        'const { upsertPlanCapture } = require("../lib/plan-store");',
+      ].join("\n"),
+    );
+  }
+
+  if (!source.includes("[plans] hook capture failed")) {
+    const responseNeedle = '\n\n  res.json({ ok: true, event: result });';
+    if (!source.includes(responseNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the hook-route response anchor (plan hooks, FEA-1189).`,
+      );
+    }
+    source = source.replace(
+      responseNeedle,
+      [
+        "",
+        "  try {",
+        "    const capture = extractPlanFromHookEvent(hook_type, data);",
+        "    if (capture) {",
+        "      const planResult = upsertPlanCapture(db, capture);",
+        "      if (planResult && !planResult.deduped) {",
+        '        broadcast("plan_captured", {',
+        "          plan_id: planResult.planId,",
+        "          version: planResult.version,",
+        "          session_id: capture.created_from_session_id,",
+        "        });",
+        "      }",
+        "    }",
+        "  } catch (e) {",
+        '    console.warn("[plans] hook capture failed:", e && e.message);',
+        "  }",
+        responseNeedle,
+      ].join("\n"),
+    );
+  }
+
+  writeFileSync(file, source, "utf8");
+}
+
+// CLOSEDLOOP plan-extraction (FEA-1189): wire plan capture into the single
+// shared import sink so Claude (session.toolUses) AND Codex (session.plans)
+// plans are persisted on the import/watch path — the primary path, since hooks
+// default OFF. Best-effort + idempotent (sha256 dedup in plan-store), so it
+// never blocks an import and re-imports of growing JSONL don't churn.
+function patchImportHistory(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("FEA-1189 plan extraction")) {
+    writeFileSync(file, source, "utf8");
+    return;
+  }
+  const needle =
+    "function importSession(dbModule, session) {\n  const { db, stmts } = dbModule;";
+  if (!source.includes(needle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the importSession head (FEA-1189 plan extraction).`,
+    );
+  }
+  const inject = [
+    needle,
+    "  // FEA-1189 plan extraction — capture ExitPlanMode / plans-dir Write",
+    "  // (Claude) and item.type==='Plan' / <proposed_plan> (Codex) into the",
+    "  // local plans/plan_versions tables. Runs once per importSession call,",
+    "  // covering both the existing-backfill and new-session branches.",
+    "  try {",
+    '    const { extractPlansFromSession } = require("../server/lib/plan-extractor");',
+    '    const { upsertPlanCapture } = require("../server/lib/plan-store");',
+    "    let __planBroadcast = null;",
+    '    try { __planBroadcast = require("../server/websocket").broadcast; } catch (e) { void e; }',
+    '    for (const __cap of extractPlansFromSession(session, "log")) {',
+    "      try {",
+    "        const __r = upsertPlanCapture(dbModule.db, __cap);",
+    "        if (__planBroadcast && __r && !__r.deduped) {",
+    '          __planBroadcast("plan_captured", {',
+    "            plan_id: __r.planId,",
+    "            version: __r.version,",
+    "            session_id: __cap.created_from_session_id,",
+    "          });",
+    "        }",
+    "      } catch (e) { void e; /* idempotent dedup — non-fatal */ }",
+    "    }",
+    "  } catch (e) { void e; /* plan extraction is best-effort; never blocks import */ }",
+  ].join("\n");
+  source = source.replace(needle, inject);
   writeFileSync(file, source, "utf8");
 }
 
@@ -523,7 +742,113 @@ function snippet(name) {
   return readFileSync(path.join(clientSnippetDir, name), "utf8");
 }
 
+function normalizePlanUiAppSource(file) {
+  const finalImport =
+    'import { isPlanExtractionEnabled } from "./lib/closedloop-host-flags";';
+  const oldImport = 'import { isPlansUiEnabled } from "./lib/closedloop-host-flags";';
+  const finalRoute =
+    '          <Route path="plans" element={isPlanExtractionEnabled() ? <Plans /> : <NotFound />} />';
+  const oldRoute =
+    '          <Route path="plans" element={isPlansUiEnabled() ? <Plans /> : <NotFound />} />';
+  const rawRoute = '          <Route path="plans" element={<Plans />} />';
+
+  let src = readFileSync(file, "utf8");
+  src = src.replace(`${finalImport}\n${oldImport}`, finalImport);
+  src = src.replace(`${oldImport}\n${finalImport}`, finalImport);
+  if (src.includes(finalRoute)) {
+    src = src.replace(`\n${oldRoute}`, "");
+    src = src.replace(`\n${rawRoute}`, "");
+  }
+  writeFileSync(file, src, "utf8");
+}
+
+function normalizePlanUiSidebarSource(file, legacyPlansNavLink, plansNavLink) {
+  const finalImport =
+    'import { api } from "../lib/api";\nimport { isPlanExtractionEnabled } from "../lib/closedloop-host-flags";';
+  const oldImport =
+    'import { api } from "../lib/api";\nimport { isPlansUiEnabled } from "../lib/closedloop-host-flags";';
+  const oldPlansNavLink = plansNavLink.replaceAll(
+    "isPlanExtractionEnabled",
+    "isPlansUiEnabled",
+  );
+
+  let src = readFileSync(file, "utf8");
+  src = src.replace(
+    `${finalImport}\nimport { isPlansUiEnabled } from "../lib/closedloop-host-flags";`,
+    finalImport,
+  );
+  src = src.replace(
+    `${oldImport}\nimport { isPlanExtractionEnabled } from "../lib/closedloop-host-flags";`,
+    finalImport,
+  );
+  if (src.includes(plansNavLink)) {
+    src = src.replace(`\n${oldPlansNavLink}`, "");
+    src = src.replace(`\n${legacyPlansNavLink}`, "");
+  }
+  writeFileSync(file, src, "utf8");
+}
+
 function patchClientSource() {
+  // CLOSEDLOOP plan-extraction (FEA-1189): drop the dedicated Plans page into
+  // the pinned client source before Vite build (the App.tsx route + Sidebar
+  // nav entry below reference it). Overwrite is intentional — the client
+  // source is regenerated from the pinned package each build.
+  cpSync(
+    path.join(planModulesDir, "client", "Plans.tsx"),
+    path.join(sourceClientDir, "src", "pages", "Plans.tsx"),
+  );
+  cpSync(
+    path.join(planModulesDir, "client", "closedloop-host-flags.ts"),
+    path.join(sourceClientDir, "src", "lib", "closedloop-host-flags.ts"),
+  );
+  const legacyPlansNavLink = [
+    "        })}",
+    '        <NavLink',
+    '          to="/plans"',
+    '          title={collapsed ? "Plans" : undefined}',
+    "          className={({ isActive }) =>",
+    "            `flex items-center gap-3 rounded-lg text-sm font-medium transition-colors duration-150 ${",
+    '              collapsed ? "justify-center px-2 py-2.5" : "px-3 py-2.5"',
+    "            } ${",
+    "              isActive",
+    '                ? "bg-accent/10 text-accent border border-accent/20"',
+    '                : "text-gray-400 hover:text-gray-200 hover:bg-surface-3 border border-transparent"',
+    "            }`",
+    "          }",
+    "        >",
+    '          <FileText className="w-4 h-4 flex-shrink-0" />',
+    "          {!collapsed && <span>Plans</span>}",
+    "        </NavLink>",
+    "      </nav>",
+  ].join("\n");
+  const plansNavLink = [
+    "        })}",
+    "        {isPlanExtractionEnabled() && (",
+    '          <NavLink',
+    '            to="/plans"',
+    '            title={collapsed ? "Plans" : undefined}',
+    "            className={({ isActive }) =>",
+    "              `flex items-center gap-3 rounded-lg text-sm font-medium transition-colors duration-150 ${",
+    '                collapsed ? "justify-center px-2 py-2.5" : "px-3 py-2.5"',
+    "              } ${",
+    "                isActive",
+    '                  ? "bg-accent/10 text-accent border border-accent/20"',
+    '                  : "text-gray-400 hover:text-gray-200 hover:bg-surface-3 border border-transparent"',
+    "              }`",
+    "            }",
+    "          >",
+    '            <FileText className="w-4 h-4 flex-shrink-0" />',
+    "            {!collapsed && <span>Plans</span>}",
+    "          </NavLink>",
+    "        )}",
+    "      </nav>",
+  ].join("\n");
+  normalizePlanUiAppSource(path.join(sourceClientDir, "src", "App.tsx"));
+  normalizePlanUiSidebarSource(
+    path.join(sourceClientDir, "src", "components", "Sidebar.tsx"),
+    legacyPlansNavLink,
+    plansNavLink,
+  );
   const edits = [
     {
       rel: "src/lib/types.ts",
@@ -629,6 +954,56 @@ function patchClientSource() {
       findFile: "sessions.rowbadge.find.txt",
       replaceFile: "sessions.rowbadge.replace.txt",
     },
+    // CLOSEDLOOP plan-extraction (FEA-1189): dedicated Plans tab — route +
+    // sidebar nav entry. Plans.tsx itself is copied in above.
+    {
+      rel: "src/App.tsx",
+      guard: 'import { Plans }',
+      find: 'import { NotFound } from "./pages/NotFound";',
+      replace:
+        'import { NotFound } from "./pages/NotFound";\nimport { Plans } from "./pages/Plans";',
+    },
+    {
+      rel: "src/App.tsx",
+      guard: 'import { isPlanExtractionEnabled } from "./lib/closedloop-host-flags";',
+      find: 'import { Plans } from "./pages/Plans";',
+      replace:
+        'import { Plans } from "./pages/Plans";\nimport { isPlanExtractionEnabled } from "./lib/closedloop-host-flags";',
+    },
+    {
+      rel: "src/App.tsx",
+      guard: 'path="plans" element={isPlanExtractionEnabled() ? <Plans /> : <NotFound />}',
+      find: '          <Route path="run" element={<Run />} />',
+      findAlternates: [
+        '          <Route path="run" element={<Run />} />\n          <Route path="plans" element={<Plans />} />',
+        '          <Route path="run" element={<Run />} />\n          <Route path="plans" element={isPlansUiEnabled() ? <Plans /> : <NotFound />} />',
+      ],
+      replace:
+        '          <Route path="run" element={<Run />} />\n          <Route path="plans" element={isPlanExtractionEnabled() ? <Plans /> : <NotFound />} />',
+    },
+    {
+      rel: "src/components/Sidebar.tsx",
+      guard: "FileText,",
+      find: '  Gauge,\n} from "lucide-react";',
+      replace: '  Gauge,\n  FileText,\n} from "lucide-react";',
+    },
+    {
+      rel: "src/components/Sidebar.tsx",
+      guard: 'import { isPlanExtractionEnabled } from "../lib/closedloop-host-flags";',
+      find: 'import { api } from "../lib/api";',
+      replace:
+        'import { api } from "../lib/api";\nimport { isPlanExtractionEnabled } from "../lib/closedloop-host-flags";',
+    },
+    {
+      rel: "src/components/Sidebar.tsx",
+      guard: "{isPlanExtractionEnabled() && (",
+      find: "        })}\n      </nav>",
+      findAlternates: [
+        legacyPlansNavLink,
+        plansNavLink.replaceAll("isPlanExtractionEnabled", "isPlansUiEnabled"),
+      ],
+      replace: plansNavLink,
+    },
   ];
 
   for (const e of edits) {
@@ -639,10 +1014,16 @@ function patchClientSource() {
     if (e.append) {
       src = src + snippet(e.append);
     } else {
-      const finds = e.findFiles
-        ? e.findFiles.map((name) => snippet(name))
-        : [e.findFile ? snippet(e.findFile) : e.find];
-      const find = finds.find((candidate) => src.includes(candidate));
+      const findCandidates = [];
+      if (Array.isArray(e.findFiles)) {
+        findCandidates.push(...e.findFiles.map((name) => snippet(name)));
+      }
+      if (e.findFile) findCandidates.push(snippet(e.findFile));
+      if (e.find) findCandidates.push(e.find);
+      if (Array.isArray(e.findAlternates)) {
+        findCandidates.push(...e.findAlternates);
+      }
+      const find = findCandidates.find((candidate) => src.includes(candidate));
       const replace = e.replaceFile ? snippet(e.replaceFile) : e.replace;
       if (!find || !replace) {
         throw new Error(
@@ -665,6 +1046,7 @@ function assertGeneratedTree() {
     generatedSessionsRoute,
     generatedDbFile,
     generatedPushLib,
+    generatedHooksRoute,
     path.join(generatedRootDir, "server", "compat-sqlite.js"),
     generatedClientIndex,
     path.join(generatedRootDir, "scripts", "install-hooks.js"),
@@ -733,6 +1115,59 @@ function assertGeneratedTree() {
   if (!pushSource.includes("CCAM_VAPID_KEYS_PATH")) {
     throw new Error(
       "Generated server/lib/push.js is missing the writable VAPID keys path override.",
+    );
+  }
+
+  const hooksRouteSource = readFileSync(generatedHooksRoute, "utf8");
+
+  // CLOSEDLOOP plan-extraction hard-gates (FEA-1189): a future upstream bump
+  // that breaks an anchor must fail the build, not silently drop plan capture.
+  for (const m of PLAN_MODULES) {
+    if (!existsSync(path.join(generatedRootDir, "server", "lib", `${m}.js`))) {
+      throw new Error(
+        `Generated server/lib/${m}.js missing (plan extraction, FEA-1189).`,
+      );
+    }
+  }
+  if (
+    !existsSync(path.join(generatedRootDir, "server", "routes", "plans.js"))
+  ) {
+    throw new Error(
+      "Generated server/routes/plans.js missing (plan extraction, FEA-1189).",
+    );
+  }
+  if (!dbSource.includes("ensurePlanSchema")) {
+    throw new Error(
+      "Generated server/db.js is missing the plan-schema init (FEA-1189).",
+    );
+  }
+  if (
+    !serverIndex.includes('require("./routes/plans")') ||
+    !serverIndex.includes(
+      '  app.use("/api/plans", plansRouter);\n  app.get("/api/openapi.json", (_req, res) => {',
+    )
+  ) {
+    throw new Error(
+      "Generated server/index.js is missing the ungated /api/plans route wiring (FEA-1189).",
+    );
+  }
+  const importHistorySource = readFileSync(generatedImportHistory, "utf8");
+  if (!importHistorySource.includes("FEA-1189 plan extraction")) {
+    throw new Error(
+      "Generated scripts/import-history.js is missing the plan-capture sink (FEA-1189).",
+    );
+  }
+  if (!serverIndex.includes("runClaudePlanBackfill")) {
+    throw new Error(
+      "Generated server/index.js is missing the ~/.claude/plans backfill (FEA-1189).",
+    );
+  }
+  if (
+    !hooksRouteSource.includes("extractPlanFromHookEvent") ||
+    !hooksRouteSource.includes('broadcast("plan_captured"')
+  ) {
+    throw new Error(
+      "Generated server/routes/hooks.js is missing the live hook plan capture wiring (FEA-1189).",
     );
   }
 }
