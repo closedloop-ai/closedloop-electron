@@ -10,29 +10,7 @@ const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
 const { sessionIdFromTranscriptPath } = require("./cursor-home");
-
-function toIso(ts) {
-  if (ts == null) return null;
-  if (typeof ts === "number") {
-    const ms = ts < 1e12 ? ts * 1000 : ts;
-    const d = new Date(ms);
-    return isNaN(d.getTime()) ? null : d.toISOString();
-  }
-  if (typeof ts === "string") {
-    const d = new Date(ts);
-    return isNaN(d.getTime()) ? ts : d.toISOString();
-  }
-  return null;
-}
-
-function safeJson(v) {
-  if (v == null) return null;
-  if (typeof v === "object") return v;
-  if (typeof v === "string") {
-    try { return JSON.parse(v); } catch { return v; }
-  }
-  return v;
-}
+const { toIso, safeJson } = require("./parser-utils");
 
 /**
  * Parse a single Cursor agent transcript JSONL file.

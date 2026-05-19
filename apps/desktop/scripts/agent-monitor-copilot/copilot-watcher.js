@@ -129,7 +129,16 @@ function startCopilotWatcher({ broadcast }) {
     wsRoot,
     broadcast,
     (filename) => String(filename).endsWith(".json") && String(filename).includes("chatSession"),
-    (full) => ({ type: "chat", workspacePath: null }),
+    (full) => {
+      let workspacePath = null;
+      try {
+        const hashDir = path.dirname(path.dirname(full));
+        const wsJson = JSON.parse(fs.readFileSync(path.join(hashDir, "workspace.json"), "utf8"));
+        const folder = wsJson.folder || wsJson.workspace || "";
+        if (folder) workspacePath = folder.replace(/^file:\/\//, "");
+      } catch { /* workspace.json may not exist */ }
+      return { type: "chat", workspacePath };
+    },
   );
 
   // Watch Copilot CLI session-state for JSONL event files

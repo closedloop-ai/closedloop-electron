@@ -20,7 +20,7 @@ function getOpenCodeHome() {
   }
   const home = os.homedir();
   if (process.platform === "win32") {
-    return path.join(process.env.USERPROFILE || home, ".local", "share", "opencode");
+    return path.join(process.env.APPDATA || path.join(home, "AppData", "Roaming"), "opencode");
   }
   return path.join(home, ".local", "share", "opencode");
 }

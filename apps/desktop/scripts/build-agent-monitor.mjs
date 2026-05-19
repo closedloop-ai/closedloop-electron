@@ -83,11 +83,13 @@ const codexModulesDir = path.join(appDir, "scripts", "agent-monitor-codex");
 const cursorModulesDir = path.join(appDir, "scripts", "agent-monitor-cursor");
 const copilotModulesDir = path.join(appDir, "scripts", "agent-monitor-copilot");
 const opencodeModulesDir = path.join(appDir, "scripts", "agent-monitor-opencode");
+const sharedModulesDir = path.join(appDir, "scripts", "agent-monitor-shared");
 const clientSnippetDir = path.join(codexModulesDir, "client");
 const CODEX_MODULES = ["codex-home", "codex-parser", "codex-import", "codex-watcher"];
 const CURSOR_MODULES = ["cursor-home", "cursor-parser", "cursor-import", "cursor-watcher"];
 const COPILOT_MODULES = ["copilot-home", "copilot-parser", "copilot-import", "copilot-watcher"];
 const OPENCODE_MODULES = ["opencode-home", "opencode-parser", "opencode-import", "opencode-watcher"];
+const SHARED_MODULES = ["parser-utils"];
 const CLIENT_SNIPPET_FILES = readdirSync(clientSnippetDir).sort();
 
 const force =
@@ -190,6 +192,7 @@ function currentStamp() {
     ...CURSOR_MODULES.map((m) => path.join(cursorModulesDir, `${m}.js`)),
     ...COPILOT_MODULES.map((m) => path.join(copilotModulesDir, `${m}.js`)),
     ...OPENCODE_MODULES.map((m) => path.join(opencodeModulesDir, `${m}.js`)),
+    ...SHARED_MODULES.map((m) => path.join(sharedModulesDir, `${m}.js`)),
     ...CLIENT_SNIPPET_FILES.map((file) => path.join(clientSnippetDir, file)),
   ]) {
     h.update(readFileSync(file));
@@ -242,6 +245,12 @@ function materializeRuntimeTree() {
   for (const m of OPENCODE_MODULES) {
     cpSync(
       path.join(opencodeModulesDir, `${m}.js`),
+      path.join(generatedLibDir, `${m}.js`),
+    );
+  }
+  for (const m of SHARED_MODULES) {
+    cpSync(
+      path.join(sharedModulesDir, `${m}.js`),
       path.join(generatedLibDir, `${m}.js`),
     );
   }
@@ -447,7 +456,11 @@ function patchServerIndex(file) {
       [
         "  }",
         "",
-        "  const _dbMod = require(\"./db\");",
+        "  let _dbMod;",
+        "  try { _dbMod = require(\"./db\"); } catch (err) {",
+        '    console.warn("agent-monitor db load failed:", err.message);',
+        "    return;",
+        "  }",
         "",
         "  try {",
         '    const { importAllCodexSessions } = require("./lib/codex-import");',
@@ -808,7 +821,7 @@ function assertGeneratedTree() {
       );
     }
   }
-  for (const m of [...CODEX_MODULES, ...CURSOR_MODULES, ...COPILOT_MODULES, ...OPENCODE_MODULES]) {
+  for (const m of [...CODEX_MODULES, ...CURSOR_MODULES, ...COPILOT_MODULES, ...OPENCODE_MODULES, ...SHARED_MODULES]) {
     if (!existsSync(path.join(generatedRootDir, "server", "lib", `${m}.js`))) {
       throw new Error(
         `Generated server/lib/${m}.js missing (multi-harness).`,

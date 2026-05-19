@@ -309,6 +309,7 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
     'CURSOR_MODULES = ["cursor-home", "cursor-parser", "cursor-import", "cursor-watcher"]',
     'COPILOT_MODULES = ["copilot-home", "copilot-parser", "copilot-import", "copilot-watcher"]',
     'OPENCODE_MODULES = ["opencode-home", "opencode-parser", "opencode-import", "opencode-watcher"]',
+    'SHARED_MODULES = ["parser-utils"]',
     "startCursorWatcher",
     "startCopilotWatcher",
     "startOpenCodeWatcher",
@@ -321,6 +322,12 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
       `build-agent-monitor.mjs missing multi-harness wiring: ${needle}`,
     );
   }
+
+  // Shared parser utilities exist.
+  assert.ok(
+    existsSync(new URL("../scripts/agent-monitor-shared/parser-utils.js", import.meta.url)),
+    "scripts/agent-monitor-shared/parser-utils.js missing",
+  );
 
   // In-repo modules exist for each harness.
   for (const [dir, modules] of [
