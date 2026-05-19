@@ -152,6 +152,13 @@ export class SettingsStore {
     return this.store.get("onboardingCompleted", DEFAULT_DESKTOP_SETTINGS.onboardingCompleted);
   }
 
+  getOnboardingPopupDismissedPermanent(): boolean {
+    return this.store.get(
+      "onboardingPopupDismissedPermanent",
+      DEFAULT_DESKTOP_SETTINGS.onboardingPopupDismissedPermanent,
+    );
+  }
+
   getCloudCommandsPaused(): boolean {
     return this.store.get("cloudCommandsPaused", DEFAULT_DESKTOP_SETTINGS.cloudCommandsPaused);
   }
@@ -184,6 +191,10 @@ export class SettingsStore {
 
   setOnboardingCompleted(onboardingCompleted: boolean): void {
     this.store.set("onboardingCompleted", onboardingCompleted);
+  }
+
+  setOnboardingPopupDismissedPermanent(onboardingPopupDismissedPermanent: boolean): void {
+    this.store.set("onboardingPopupDismissedPermanent", onboardingPopupDismissedPermanent);
   }
 
   setCloudCommandsPaused(cloudCommandsPaused: boolean): void {
@@ -531,6 +542,12 @@ export class SettingsStore {
     }
     if (typeof partial.onboardingCompleted === "boolean") {
       this.store.set("onboardingCompleted", partial.onboardingCompleted);
+    }
+    if (typeof partial.onboardingPopupDismissedPermanent === "boolean") {
+      this.store.set(
+        "onboardingPopupDismissedPermanent",
+        partial.onboardingPopupDismissedPermanent,
+      );
     }
     if (typeof partial.cloudCommandsPaused === "boolean") {
       this.store.set("cloudCommandsPaused", partial.cloudCommandsPaused);
