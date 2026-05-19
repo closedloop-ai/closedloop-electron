@@ -7,7 +7,6 @@ import {
   type RepoExecutionResult,
 } from "@closedloop-ai/loops-api/execution-result";
 import { execFileSync } from "node:child_process";
-import crypto from "node:crypto";
 import { existsSync, promises as fs, readFileSync } from "node:fs";
 import path from "node:path";
 import { readEffectiveStatusFromState } from "../server/operations/symphony-job-snapshot.js";
@@ -20,6 +19,10 @@ import {
   readEvaluateOutputs,
   runExecuteFinalization,
 } from "../server/operations/symphony-loop.js";
+import {
+  postLoopEvent,
+  uploadArtifacts,
+} from "../server/operations/loop-http.js";
 import {
   assertPathAllowed,
   DirectoryNotAllowedError,
@@ -40,7 +43,7 @@ import {
   type JobStore,
   type LocalJob,
 } from "./job-store.js";
-import type { LoopTokenStore } from "./loop-token-store.js";
+import type { LoopTokenMeta, LoopTokenStore } from "./loop-token-store.js";
 import { Observability } from "./observability.js";
 import type {
   SupportUploadReason,
@@ -56,7 +59,7 @@ import { parseUserVisibleLoopFailurePayload } from "./user-visible-loop-failure.
 export interface LoopFinalizerDeps {
   jobStore: JobStore;
   telemetry: TelemetryEmitter;
-  apiAuthToken: string;
+  getToken: () => LoopTokenMeta | null;
   apiBaseUrl: string;
   isProcessRunning: (pid: number) => boolean;
   getAllowedDirectories?: () => string[];
@@ -118,7 +121,7 @@ export type SupportUploadDeps = {
   job: LocalJob;
   claudeWorkDir: string;
   apiBaseUrl: string;
-  token: string;
+  getToken: () => LoopTokenMeta | null;
   jobStore?: JobStore;
 };
 
@@ -134,8 +137,11 @@ export function parseJobWarnings(job: Pick<LocalJob, "warning">): string[] {
 
 type ArtifactUploadDeps = Pick<
   LoopFinalizerDeps,
-  "jobStore" | "apiAuthToken" | "apiBaseUrl" | "getAllowedDirectories"
->;
+  "jobStore" | "getToken" | "apiBaseUrl" | "getAllowedDirectories"
+> & {
+  /** Optional callback to persist a refreshed token (enables 401-driven singleflight refresh). */
+  setToken?: (meta: LoopTokenMeta) => void;
+};
 
 function hasTerminalExecuteFinalization(
   status: LocalJob["executeFinalizationStatus"] | undefined,
@@ -411,7 +417,7 @@ export async function tryUploadArtifacts(
   const uploadResult = await uploadArtifacts(
     deps.apiBaseUrl,
     job.loopId,
-    deps.apiAuthToken,
+    deps.getToken,
     {
       artifacts,
       metadata: buildArtifactUploadMetadata(
@@ -422,6 +428,7 @@ export async function tryUploadArtifacts(
         deps.getAllowedDirectories,
       ),
     },
+    deps.setToken,
   );
   if (!uploadResult.success) {
     warnings.push("ARTIFACT_UPLOAD_FAILED");
@@ -486,8 +493,10 @@ export async function tryPostCompletedEvent(
   const eventResult = await postLoopEvent(
     deps.apiBaseUrl,
     job.loopId,
-    deps.apiAuthToken,
+    deps.getToken,
     completedEvent,
+    undefined,
+    deps.setToken,
   );
   if (!eventResult.success) {
     warnings.push("EVENT_POST_FAILED");
@@ -573,8 +582,10 @@ export async function tryPostErrorEvent(
   const eventResult = await postLoopEvent(
     deps.apiBaseUrl,
     job.loopId,
-    deps.apiAuthToken,
+    deps.getToken,
     errorEvent,
+    undefined,
+    deps.setToken,
   );
   if (!eventResult.success) {
     warnings.push("EVENT_POST_FAILED");
@@ -652,11 +663,7 @@ export function emitFinalizationTelemetry(
     const logPath = path.join(claudeWorkDir, "symphony-loop.log");
     const logTail = readLogTail(logPath) ?? undefined;
     const parsed = parseTokenUsage(claudeWorkDir);
-    const hasTokenActivity =
-      parsed.inputTokens > 0 ||
-      parsed.outputTokens > 0 ||
-      parsed.cacheCreationInputTokens > 0 ||
-      parsed.cacheReadInputTokens > 0;
+    const hasTokenActivity = hasTokenUsageActivity(parsed);
     if (logTail || hasTokenActivity) {
       diagnostics = {
         logTail,
@@ -785,75 +792,6 @@ function readArtifacts(
   return {};
 }
 
-async function postLoopEvent(
-  apiBaseUrl: string,
-  loopId: string,
-  token: string,
-  eventBody: Record<string, unknown>,
-): Promise<{ success: boolean; error?: string }> {
-  const url = `${apiBaseUrl}/loops/${loopId}/events`;
-  const payload: Record<string, unknown> = {
-    ...eventBody,
-    timestamp: eventBody.timestamp ?? new Date().toISOString(),
-  };
-  try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        "x-loop-event-nonce": crypto.randomUUID(),
-      },
-      body: JSON.stringify(payload),
-    });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      return {
-        success: false,
-        error: `HTTP ${resp.status} ${resp.statusText} ${text}`,
-      };
-    }
-    return { success: true };
-  } catch (err) {
-    return {
-      success: false,
-      error: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
-async function uploadArtifacts(
-  apiBaseUrl: string,
-  loopId: string,
-  token: string,
-  body: Record<string, unknown>,
-): Promise<{ success: boolean; error?: string }> {
-  const url = `${apiBaseUrl}/loops/${loopId}/upload-artifacts`;
-  try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      return {
-        success: false,
-        error: `HTTP ${resp.status} ${resp.statusText} ${text}`,
-      };
-    }
-    return { success: true };
-  } catch (err) {
-    return {
-      success: false,
-      error: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
 function supportUploadSuffix(s3StateKey: string | undefined): string | undefined {
   if (!s3StateKey) {
     return undefined;
@@ -949,18 +887,26 @@ async function collectSupportUploadCandidates(
 async function requestSupportUploadUrls(
   apiBaseUrl: string,
   loopId: string,
-  token: string,
+  getToken: () => LoopTokenMeta | null,
   keys: string[],
 ): Promise<
   | { success: true; urlsByKey: Map<string, string> }
   | { success: false; reason: SupportUploadReason; error: string }
 > {
   const url = `${apiBaseUrl}/loops/${loopId}/upload-urls`;
+  const meta = getToken();
+  if (meta === null) {
+    return {
+      success: false,
+      reason: "upload_url_request_failed",
+      error: "no token available",
+    };
+  }
   try {
     const response = await fetch(url, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${token}`,
+        Authorization: `Bearer ${meta.token}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ keys }),
@@ -1081,7 +1027,7 @@ export async function tryUploadSupportBundle({
   job,
   claudeWorkDir,
   apiBaseUrl,
-  token,
+  getToken,
   jobStore,
 }: SupportUploadDeps): Promise<SupportUploadResult> {
   const startedAt = Date.now();
@@ -1119,7 +1065,7 @@ export async function tryUploadSupportBundle({
   const uploadUrls = await requestSupportUploadUrls(
     apiBaseUrl,
     job.loopId,
-    token,
+    getToken,
     candidates.map((candidate) => candidate.key),
   );
   if (!uploadUrls.success) {
@@ -1166,7 +1112,7 @@ export async function tryUploadSupportBundle({
     uploaded.push(candidate);
   }
 
-  const eventResult = await postLoopEvent(apiBaseUrl, job.loopId, token, {
+  const eventResult = await postLoopEvent(apiBaseUrl, job.loopId, getToken, {
     type: SUPPORT_BUNDLE_UPLOADED_EVENT_TYPE,
     keys: uploaded.map((candidate) => candidate.key),
     files: uploaded.map((candidate) => ({
@@ -1260,7 +1206,7 @@ export async function finalizeLoopFromRuntime(
   const {
     jobStore,
     telemetry,
-    apiAuthToken,
+    getToken,
     apiBaseUrl,
     isProcessRunning,
     loopTokenStore,
@@ -1350,11 +1296,19 @@ export async function finalizeLoopFromRuntime(
     resolvedJob.status === "STOPPED" ||
     resolvedJob.status === "UNKNOWN";
 
-  const artifactDeps = {
+  const artifactDeps: ArtifactUploadDeps = {
     jobStore,
-    apiAuthToken,
+    getToken,
     apiBaseUrl,
     getAllowedDirectories,
+    // Wire setToken so that 401-driven singleflight refresh can persist the
+    // refreshed token for the remainder of this finalization sequence.
+    ...(loopTokenStore
+      ? {
+          setToken: (meta: LoopTokenMeta) =>
+            loopTokenStore.setLoopTokenWithMeta(resolvedJob.loopId, meta),
+        }
+      : {}),
   };
   const now = new Date().toISOString();
   const persistBeforeCloud = reason !== "live-exit";
@@ -1416,7 +1370,7 @@ export async function finalizeLoopFromRuntime(
         claudeWorkDir,
         loopId: resolvedJob.loopId,
         apiBaseUrl,
-        token: apiAuthToken,
+        getToken,
         webAppOrigin: resolvedJob.webAppOrigin ?? "",
         getAllowedDirectories,
         artifactSlug: resolvedJob.artifactSlug,
@@ -1500,7 +1454,7 @@ export async function finalizeLoopFromRuntime(
       job: resolvedJob,
       claudeWorkDir,
       apiBaseUrl,
-      token: apiAuthToken,
+      getToken,
       jobStore,
     });
     if (supportResult.failed) {

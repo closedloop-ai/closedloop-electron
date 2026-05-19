@@ -1,5 +1,11 @@
 import { startOutputTailer } from "../server/operations/output-tailer.js";
 import {
+  cancelHeartbeat,
+  cancelProactiveRefresh,
+  scheduleHeartbeat,
+  scheduleProactiveRefresh,
+} from "../server/operations/loop-http.js";
+import {
   cleanupAdditionalWorktreesWithDefaultProvider,
   registerRecoveredLoop,
   unregisterLoop,
@@ -165,7 +171,7 @@ export class BootRecoveryService {
         const outcome = await finalizeLoopFromRuntime(job, "boot-recovery", {
           jobStore,
           telemetry,
-          apiAuthToken: authToken,
+          getToken: () => loopTokenStore.getLoopTokenWithMeta(job.loopId),
           apiBaseUrl,
           isProcessRunning,
           getAllowedDirectories,
@@ -281,7 +287,7 @@ export class BootRecoveryService {
         job.jsonlPath,
         effectiveApiBaseUrl,
         loopId,
-        loopAuthToken,
+        () => this.deps.loopTokenStore.getLoopTokenWithMeta(loopId),
         job.lastObservedJsonlOffset ?? 0,
         (offset) => {
           const current = jobStore.getByLoopId(loopId);
@@ -298,6 +304,16 @@ export class BootRecoveryService {
       );
     }
 
+    scheduleProactiveRefresh(
+      loopId,
+      effectiveApiBaseUrl,
+      () => this.deps.loopTokenStore.getLoopTokenWithMeta(loopId),
+      (meta) => this.deps.loopTokenStore.setLoopTokenWithMeta(loopId, meta),
+    );
+    scheduleHeartbeat(loopId, effectiveApiBaseUrl, () =>
+      this.deps.loopTokenStore.getLoopTokenWithMeta(loopId),
+    );
+
     const watcherPollMs =
       Number(process.env.CLOSEDLOOP_WATCHER_POLL_MS) || DEFAULT_WATCHER_POLL_MS;
     const watcherId = setInterval(() => {
@@ -309,6 +325,8 @@ export class BootRecoveryService {
         clearInterval(watcherId);
         this.liveHandles = this.liveHandles.filter((value) => value.loopId !== loopId);
         unregisterLoop(loopId);
+        cancelProactiveRefresh(loopId);
+        cancelHeartbeat(loopId);
         this.finalizeRecoveredJob(loopId, loopAuthToken, effectiveApiBaseUrl, tailer);
       }
     }, watcherPollMs);
@@ -356,7 +374,7 @@ export class BootRecoveryService {
       const finalizerDeps: LoopFinalizerDeps = {
         jobStore,
         telemetry,
-        apiAuthToken: loopAuthToken,
+        getToken: () => loopTokenStore.getLoopTokenWithMeta(loopId),
         apiBaseUrl,
         isProcessRunning,
         getAllowedDirectories,
@@ -386,6 +404,8 @@ export class BootRecoveryService {
     for (const handle of this.liveHandles) {
       clearInterval(handle.watcherId);
       handle.tailer?.stop();
+      cancelProactiveRefresh(handle.loopId);
+      cancelHeartbeat(handle.loopId);
     }
     this.liveHandles = [];
   }

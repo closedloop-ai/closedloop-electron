@@ -11,6 +11,7 @@ import {
 } from "../src/main/cloud-socket.js";
 import { GATEWAY_PROTOCOL_VERSION } from "../src/shared/contracts.js";
 import { buildCommandSigningCapabilities } from "../src/shared/command-signing-policy.js";
+import { getLoopHttpCapabilities } from "../src/server/operations/loop-http.js";
 import { gatewayLog } from "../src/main/gateway-logger.js";
 import {
   DesktopPopUnavailableError,
@@ -400,5 +401,91 @@ describe("T-3.1: hello payload version fields", () => {
       (ack as unknown as Record<string, unknown>).organizationId,
       undefined,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-6.3: desktop.hello payload includes loop-http capability flags (AC-013)
+// ---------------------------------------------------------------------------
+
+/**
+ * Simulates the getLocalCapabilities() merge from app.ts:
+ *   { ...buildCommandSigningCapabilities(...), ...getLoopHttpCapabilities() }
+ *
+ * Verifies that when CloudSocketService receives the merged capability object
+ * it forwards both loopRunnerRefreshSupported and loopRunnerHeartbeatSupported
+ * in the desktop.hello event payload.
+ */
+describe("T-6.3: desktop.hello payload includes loop-http capability flags", () => {
+  test("hello capabilities include loopRunnerRefreshSupported and loopRunnerHeartbeatSupported when getLocalCapabilities merges getLoopHttpCapabilities", () => {
+    // Reproduce getLocalCapabilities() from app.ts:
+    //   { ...buildCommandSigningCapabilities({ commandSigningEnforcementEnabled: false }),
+    //     ...getLoopHttpCapabilities() }
+    const localCapabilities = {
+      ...buildCommandSigningCapabilities({ commandSigningEnforcementEnabled: false }),
+      ...getLoopHttpCapabilities(),
+    };
+
+    const service = new CloudSocketService(
+      createStubOptions({
+        getCapabilities: () => localCapabilities as unknown as Record<string, unknown>,
+      }),
+    );
+
+    const fakeSocket = new FakeSocket();
+    (service as unknown as Record<string, unknown>)["socket"] = fakeSocket;
+
+    const proto = Object.getPrototypeOf(service) as Record<string, (...args: unknown[]) => void>;
+    proto["emitHello"].call(service);
+
+    const helloEvents = fakeSocket.emittedEvents.filter((e) => e.name === "desktop.hello");
+    assert.equal(helloEvents.length, 1, "Expected exactly one desktop.hello emission");
+
+    const hello = helloEvents[0].payload as Record<string, unknown>;
+    const caps = hello["capabilities"] as Record<string, unknown>;
+
+    assert.equal(
+      caps["loopRunnerRefreshSupported"],
+      true,
+      "desktop.hello capabilities must include loopRunnerRefreshSupported: true",
+    );
+    assert.equal(
+      caps["loopRunnerHeartbeatSupported"],
+      true,
+      "desktop.hello capabilities must include loopRunnerHeartbeatSupported: true",
+    );
+
+    service.stop();
+  });
+
+  test("hello capabilities contain both loop-http flags alongside commandSigning", () => {
+    const localCapabilities = {
+      ...buildCommandSigningCapabilities({ commandSigningEnforcementEnabled: false }),
+      ...getLoopHttpCapabilities(),
+    };
+
+    const service = new CloudSocketService(
+      createStubOptions({
+        getCapabilities: () => localCapabilities as unknown as Record<string, unknown>,
+      }),
+    );
+
+    const fakeSocket = new FakeSocket();
+    (service as unknown as Record<string, unknown>)["socket"] = fakeSocket;
+
+    const proto = Object.getPrototypeOf(service) as Record<string, (...args: unknown[]) => void>;
+    proto["emitHello"].call(service);
+
+    const hello = fakeSocket.emittedEvents.find((e) => e.name === "desktop.hello")
+      ?.payload as Record<string, unknown>;
+    const caps = hello["capabilities"] as Record<string, unknown>;
+
+    // Both loop-http flags must be present
+    assert.equal(caps["loopRunnerRefreshSupported"], true);
+    assert.equal(caps["loopRunnerHeartbeatSupported"], true);
+    // commandSigning flag must also be present (not clobbered by the merge)
+    assert.equal(caps["commandSigning"], true, "commandSigning must survive the merge");
+
+    service.stop();
   });
 });

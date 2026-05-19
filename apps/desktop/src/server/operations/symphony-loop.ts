@@ -58,7 +58,10 @@ import {
   tryUploadSupportBundle,
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
-import type { LoopTokenStore } from "../../main/loop-token-store.js";
+import type {
+  LoopTokenMeta,
+  LoopTokenStore,
+} from "../../main/loop-token-store.js";
 import { Observability } from "../../main/observability.js";
 import {
   parseTokenUsage,
@@ -250,6 +253,15 @@ import {
   writePeerReposManifest,
 } from "./peer-context.js";
 import { json } from "./response-utils.js";
+import {
+  cancelHeartbeat,
+  cancelProactiveRefresh,
+  postLoopEvent,
+  postLoopEventBounded,
+  scheduleHeartbeat,
+  scheduleProactiveRefresh,
+  uploadArtifacts,
+} from "./loop-http.js";
 import {
   parseSymphonyLoopRequestBody,
   SymphonyLoopRequestValidationError,
@@ -1408,139 +1420,6 @@ function slugifyLoopId(loopId: string): string {
  */
 function pickStableId(body: LoopRequestBody): string {
   return slugifyLoopId(body.loopId);
-}
-
-// ---------------------------------------------------------------------------
-// API communication (events + artifact upload)
-// ---------------------------------------------------------------------------
-
-async function postLoopEvent(
-  apiBaseUrl: string,
-  loopId: string,
-  token: string,
-  eventBody: Record<string, unknown>,
-  signal?: AbortSignal,
-): Promise<{ success: boolean; error?: string }> {
-  const url = `${apiBaseUrl}/loops/${loopId}/events`;
-  // Auto-inject timestamp on every event (matches ECS harness reportEvent())
-  const payload: Record<string, unknown> = {
-    ...eventBody,
-    timestamp: eventBody.timestamp ?? new Date().toISOString(),
-  };
-  loopLog(loopId, `POST event: ${payload.type}`, url);
-  try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        "x-loop-event-nonce": crypto.randomUUID(),
-      },
-      body: JSON.stringify(payload),
-      signal,
-    });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      loopError(
-        loopId,
-        `Event POST failed: ${resp.status} ${resp.statusText}`,
-        text,
-      );
-      gatewayLog.error(
-        "loop-event",
-        `POST loopEvent type=${payload.type} loopId=${loopId} url=${url} failed: ${resp.status} ${resp.statusText} ${text}`,
-      );
-      return {
-        success: false,
-        error: "HTTP " + resp.status + " " + resp.statusText,
-      };
-    }
-    loopLog(loopId, `Event POST success: ${resp.status}`);
-    gatewayLog.info(
-      "loop-event",
-      `POST loopEvent type=${payload.type} loopId=${loopId} status=${resp.status}`,
-    );
-    return { success: true };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    loopError(loopId, "Failed to post event:", err);
-    gatewayLog.error(
-      "loop-event",
-      `POST loopEvent type=${payload.type} loopId=${loopId} network error: ${msg}`,
-    );
-    return { success: false, error: msg };
-  }
-}
-
-async function postLoopEventBounded(
-  apiBaseUrl: string,
-  loopId: string,
-  token: string,
-  eventBody: Record<string, unknown>,
-  timeoutMs = 1000,
-): Promise<{ success: boolean; error?: string }> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await postLoopEvent(
-      apiBaseUrl,
-      loopId,
-      token,
-      eventBody,
-      controller.signal,
-    );
-  } catch {
-    return { success: false, error: "timeout" };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function uploadArtifacts(
-  apiBaseUrl: string,
-  loopId: string,
-  token: string,
-  body: Record<string, unknown>,
-): Promise<{ success: boolean; error?: string }> {
-  const url = `${apiBaseUrl}/loops/${loopId}/upload-artifacts`;
-  loopLog(loopId, "Uploading artifacts...", url);
-  try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      loopError(
-        loopId,
-        `Upload failed: ${resp.status} ${resp.statusText}`,
-        text,
-      );
-      gatewayLog.error(
-        "loop-upload",
-        `Artifact upload to ${url} failed: ${resp.status} ${resp.statusText} ${text}`,
-      );
-      return {
-        success: false,
-        error: `HTTP ${resp.status} ${resp.statusText}`,
-      };
-    }
-    loopLog(loopId, `Upload success: ${resp.status}`);
-    gatewayLog.info(
-      "loop-upload",
-      `Artifact upload for loopId=${loopId}: ${resp.status}`,
-    );
-    return { success: true };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    loopError(loopId, "Failed to upload artifacts:", err);
-    gatewayLog.error("loop-upload", `Artifact upload network error: ${msg}`);
-    return { success: false, error: msg };
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3767,7 +3646,7 @@ export async function finalizeMultiRepoExecute(
   deps: {
     loopId: string;
     apiBaseUrl: string;
-    token: string;
+    getToken: () => LoopTokenMeta | null;
     webAppOrigin: string;
     getAllowedDirectories: () => string[];
     artifactSlug?: string;
@@ -3809,7 +3688,7 @@ export async function finalizeMultiRepoExecute(
         entry.fullName,
         String(err),
       );
-      await postLoopEventBounded(deps.apiBaseUrl, deps.loopId, deps.token, {
+      await postLoopEventBounded(deps.apiBaseUrl, deps.loopId, deps.getToken, {
         type: LoopEventType.Error,
         code: LoopErrorCode.RunnerError,
         message: redactCredentials(
@@ -3871,7 +3750,7 @@ export async function finalizeAdditionalReposAndPersist(args: {
   claudeWorkDir: string;
   loopId: string;
   apiBaseUrl: string;
-  token: string;
+  getToken: () => LoopTokenMeta | null;
   webAppOrigin: string;
   getAllowedDirectories: () => string[];
   artifactSlug?: string;
@@ -3928,7 +3807,7 @@ export async function finalizeAdditionalReposAndPersist(args: {
   const additionalResults = await finalizeMultiRepoExecute(finalizable, {
     loopId: args.loopId,
     apiBaseUrl: args.apiBaseUrl,
-    token: args.token,
+    getToken: args.getToken,
     webAppOrigin: args.webAppOrigin,
     getAllowedDirectories: args.getAllowedDirectories,
     artifactSlug: args.artifactSlug,
@@ -4313,11 +4192,25 @@ export async function handleProcessCompletion(
   loopPerfWatcherHandle?: LoopPerfTelemetryWatcherHandle,
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
+  // Token provider and setter closures, shared by all postLoopEvent /
+  // uploadArtifacts calls in this function scope.  The store is preferred when
+  // available (it may contain a refreshed token); the original request token is
+  // the fallback.
+  const getToken = (): LoopTokenMeta | null =>
+    loopTokenStore?.getLoopTokenWithMeta(loopId) ?? { token: closedLoopAuthToken };
+  const setToken: ((meta: LoopTokenMeta) => void) | undefined = loopTokenStore
+    ? (meta) => loopTokenStore.setLoopTokenWithMeta(loopId, meta)
+    : undefined;
   // Temp-dir commands (DECOMPOSE, EVALUATE_*) need the entire temp tree removed on cleanup.
   const tempCleanupDir = usedTempDir ? (worktreeDir ?? claudeWorkDir) : null;
   const elapsedMs = spawnStartedAt ? Date.now() - spawnStartedAt : undefined;
 
   loopLog(loopId, `Process exited with code ${exitCode}, command=${command}`);
+
+  // Cancel the proactive refresh and heartbeat timers for this loop — the loop
+  // is terminating and we no longer need either timer firing.
+  cancelProactiveRefresh(loopId);
+  cancelHeartbeat(loopId);
 
   // Stop the loop perf watcher and reconcile any remaining records.
   // Gated on `loopPerfWatcherHandle` because the watcher and the captured
@@ -4376,8 +4269,10 @@ export async function handleProcessCompletion(
       const result = await postLoopEvent(
         apiBaseUrl,
         loopId,
-        closedLoopAuthToken,
+        getToken,
         eventBody,
+        undefined,
+        setToken,
       );
       failureCloudFinalized = result.success;
       if (!result.success) {
@@ -4414,7 +4309,7 @@ export async function handleProcessCompletion(
           failureWarnings,
           {
             jobStore,
-            apiAuthToken: closedLoopAuthToken,
+            getToken,
             apiBaseUrl,
           },
         );
@@ -4428,7 +4323,7 @@ export async function handleProcessCompletion(
         const uploadResult = await uploadArtifacts(
           apiBaseUrl,
           loopId,
-          closedLoopAuthToken,
+          getToken,
           {
             artifacts: readExecuteOutputs(claudeWorkDir),
             metadata: {
@@ -4472,7 +4367,7 @@ export async function handleProcessCompletion(
         job: supportJob,
         claudeWorkDir,
         apiBaseUrl,
-        token: closedLoopAuthToken,
+        getToken,
         jobStore,
       });
       if (supportResult.failed) {
@@ -4821,17 +4716,24 @@ export async function handleProcessCompletion(
           const finalizationBranchName = worktreeDir
             ? (wt.getCurrentBranch(worktreeDir) ?? undefined)
             : undefined;
-          await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
-            type: LoopEventType.Error,
-            code: LoopErrorCode.AuthChallenge,
-            message: finalizationReason,
+          await postLoopEvent(
+            apiBaseUrl,
             loopId,
-            sessionId: finalizationSessionId,
-            ...(finalizationBranchName
-              ? { branchName: finalizationBranchName }
-              : {}),
-            elapsedMs,
-          });
+            getToken,
+            {
+              type: LoopEventType.Error,
+              code: LoopErrorCode.AuthChallenge,
+              message: finalizationReason,
+              loopId,
+              sessionId: finalizationSessionId,
+              ...(finalizationBranchName
+                ? { branchName: finalizationBranchName }
+                : {}),
+              elapsedMs,
+            },
+            undefined,
+            setToken,
+          );
           if (jobStore) {
             const latestJob = jobStore.getByLoopId(loopId);
             if (latestJob) {
@@ -4888,7 +4790,7 @@ export async function handleProcessCompletion(
           claudeWorkDir,
           loopId,
           apiBaseUrl,
-          token: body.closedLoopAuthToken,
+          getToken,
           webAppOrigin: webAppOrigin ?? "",
           getAllowedDirectories,
           artifactSlug: body.artifactSlug,
@@ -4968,11 +4870,12 @@ export async function handleProcessCompletion(
       const uploadResult = await uploadArtifacts(
         apiBaseUrl,
         loopId,
-        closedLoopAuthToken,
+        getToken,
         {
           artifacts,
           metadata,
         },
+        setToken,
       );
       if (!uploadResult.success) {
         gatewayLog.warn(
@@ -5015,14 +4918,21 @@ export async function handleProcessCompletion(
       loopError(loopId, noWorkMsg);
       gatewayLog.error("loop-harness", `${noWorkMsg}, loopId=${loopId}`);
       runningLoops.delete(loopId);
-      await postLoopEvent(apiBaseUrl, loopId, closedLoopAuthToken, {
-        type: LoopEventType.Error,
-        code: LoopErrorCode.NoWorkProduced,
-        message: noWorkMsg,
+      await postLoopEvent(
+        apiBaseUrl,
         loopId,
-        abortReason: "ghost-loop",
-        elapsedMs,
-      });
+        getToken,
+        {
+          type: LoopEventType.Error,
+          code: LoopErrorCode.NoWorkProduced,
+          message: noWorkMsg,
+          loopId,
+          abortReason: "ghost-loop",
+          elapsedMs,
+        },
+        undefined,
+        setToken,
+      );
       if (tempCleanupDir) {
         fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(() => {});
       }
@@ -5089,7 +4999,7 @@ export async function handleProcessCompletion(
       const finalizerDeps: LoopFinalizerDeps = {
         jobStore,
         telemetry: { emit: () => {} },
-        apiAuthToken: closedLoopAuthToken,
+        getToken,
         apiBaseUrl,
         isProcessRunning,
         getAllowedDirectories,
@@ -5187,8 +5097,10 @@ export async function handleProcessCompletion(
       const eventResult = await postLoopEvent(
         apiBaseUrl,
         loopId,
-        closedLoopAuthToken,
+        getToken,
         completedEvent,
+        undefined,
+        setToken,
       );
       if (!eventResult.success) {
         warnings.push("EVENT_POST_FAILED");
@@ -5252,6 +5164,7 @@ async function provisionAdditionalRepoWorktrees(args: {
   // cleanupAdditionalWorktrees to avoid data loss) is reused instead of
   // force-removed by --force/fs.rm.
   reuseStaleWorktree: boolean;
+  getToken: () => LoopTokenMeta | null;
 }): Promise<boolean> {
   const {
     resolvedAdditionalRepos,
@@ -5267,6 +5180,7 @@ async function provisionAdditionalRepoWorktrees(args: {
     freshLabel,
     ownsPrimaryWorktree,
     reuseStaleWorktree,
+    getToken,
   } = args;
 
   for (let addIdx = 0; addIdx < resolvedAdditionalRepos.length; addIdx++) {
@@ -5316,7 +5230,7 @@ async function provisionAdditionalRepoWorktrees(args: {
         await postLoopEventBounded(
           apiBaseUrl,
           body.loopId,
-          body.closedLoopAuthToken,
+          getToken,
           {
             type: LoopEventType.Error,
             code: LoopErrorCode.RepoNotAllowed,
@@ -5380,7 +5294,7 @@ async function provisionAdditionalRepoWorktrees(args: {
       await postLoopEventBounded(
         apiBaseUrl,
         body.loopId,
-        body.closedLoopAuthToken,
+        getToken,
         {
           type: LoopEventType.Error,
           code: LoopErrorCode.BranchCreateFailed,
@@ -5453,6 +5367,7 @@ async function setupPrdWorktree(args: {
   apiBaseUrl: string;
   context: OperationRequestContext;
   wt: WorktreeProvider;
+  getToken: () => LoopTokenMeta | null;
 }): Promise<{ worktreeDir: string; claudeWorkDir: string } | null> {
   const {
     command,
@@ -5464,6 +5379,7 @@ async function setupPrdWorktree(args: {
     apiBaseUrl,
     context,
     wt,
+    getToken,
   } = args;
   const { prefix, label } = PRD_BRANCH_CONFIG[command];
 
@@ -5527,6 +5443,7 @@ async function setupPrdWorktree(args: {
     ownsPrimaryWorktree: true,
     reuseStaleWorktree:
       getMultiRepoPolicy(body.command).worktreeFreshness === "reuse-stale",
+    getToken,
   });
   if (!additionalsOk) return null;
 
@@ -5743,6 +5660,13 @@ async function handleLoopRequest(
   let spawnedSuccessfully = false;
   let expandedRepoPath: string | null = null;
   const additionalWorktreeDirs: AdditionalWorktreeEntry[] = [];
+  // Token provider and setter closures, shared by all postLoopEvent /
+  // uploadArtifacts / postLoopEventBounded calls in this function scope.
+  const getToken = (): LoopTokenMeta | null =>
+    loopTokenStore?.getLoopTokenWithMeta(body.loopId) ?? { token: body.closedLoopAuthToken };
+  const setToken: ((meta: LoopTokenMeta) => void) | undefined = loopTokenStore
+    ? (meta) => loopTokenStore.setLoopTokenWithMeta(body.loopId, meta)
+    : undefined;
   try {
     const allowedDirs = getAllowedDirectories();
 
@@ -5758,7 +5682,7 @@ async function handleLoopRequest(
             await postLoopEventBounded(
               apiBaseUrl,
               body.loopId,
-              body.closedLoopAuthToken,
+              getToken,
               {
                 type: LoopEventType.Error,
                 code: LoopErrorCode.RepoNotAllowed,
@@ -5798,7 +5722,7 @@ async function handleLoopRequest(
               await postLoopEventBounded(
                 apiBaseUrl,
                 body.loopId,
-                body.closedLoopAuthToken,
+                getToken,
                 {
                   type: LoopEventType.Error,
                   code: LoopErrorCode.RepoNotAllowed,
@@ -5863,7 +5787,7 @@ async function handleLoopRequest(
             await postLoopEventBounded(
               apiBaseUrl,
               body.loopId,
-              body.closedLoopAuthToken,
+              getToken,
               {
                 type: LoopEventType.Error,
                 code: LoopErrorCode.RepoNotFound,
@@ -5904,7 +5828,7 @@ async function handleLoopRequest(
           await postLoopEventBounded(
             apiBaseUrl,
             body.loopId,
-            body.closedLoopAuthToken,
+            getToken,
             {
               type: LoopEventType.Error,
               code: err.code,
@@ -5944,7 +5868,7 @@ async function handleLoopRequest(
             await postLoopEventBounded(
               apiBaseUrl,
               body.loopId,
-              body.closedLoopAuthToken,
+              getToken,
               {
                 type: LoopEventType.Error,
                 code: LoopErrorCode.PreRunValidationFailed,
@@ -5967,7 +5891,7 @@ async function handleLoopRequest(
           await postLoopEventBounded(
             apiBaseUrl,
             body.loopId,
-            body.closedLoopAuthToken,
+            getToken,
             {
               type: LoopEventType.Error,
               code: LoopErrorCode.PreRunValidationFailed,
@@ -6012,14 +5936,21 @@ async function handleLoopRequest(
         );
       } catch (artifactErr) {
         await fs.rm(tmpDir, { recursive: true, force: true });
-        await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-          type: LoopEventType.Error,
-          code: LoopErrorCode.ArtifactWriteFailed,
-          message:
-            artifactErr instanceof Error
-              ? artifactErr.message
-              : String(artifactErr),
-        });
+        await postLoopEvent(
+          apiBaseUrl,
+          body.loopId,
+          getToken,
+          {
+            type: LoopEventType.Error,
+            code: LoopErrorCode.ArtifactWriteFailed,
+            message:
+              artifactErr instanceof Error
+                ? artifactErr.message
+                : String(artifactErr),
+          },
+          undefined,
+          setToken,
+        );
         json(context, 500, { error: "Failed to write artifacts to workdir" });
         return;
       }
@@ -6075,14 +6006,21 @@ async function handleLoopRequest(
         );
       } catch (artifactErr) {
         await fs.rm(claudeWorkDir, { recursive: true, force: true });
-        await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-          type: LoopEventType.Error,
-          code: LoopErrorCode.ArtifactWriteFailed,
-          message:
-            artifactErr instanceof Error
-              ? artifactErr.message
-              : String(artifactErr),
-        });
+        await postLoopEvent(
+          apiBaseUrl,
+          body.loopId,
+          getToken,
+          {
+            type: LoopEventType.Error,
+            code: LoopErrorCode.ArtifactWriteFailed,
+            message:
+              artifactErr instanceof Error
+                ? artifactErr.message
+                : String(artifactErr),
+          },
+          undefined,
+          setToken,
+        );
         json(context, 500, { error: "Failed to write artifacts to workdir" });
         return;
       }
@@ -6158,6 +6096,7 @@ async function handleLoopRequest(
           reuseStaleWorktree:
             getMultiRepoPolicy(body.command).worktreeFreshness ===
             "reuse-stale",
+          getToken,
         });
         if (!planAdditionalsOk) return;
 
@@ -6242,6 +6181,7 @@ async function handleLoopRequest(
           reuseStaleWorktree:
             getMultiRepoPolicy(body.command).worktreeFreshness ===
             "reuse-stale",
+          getToken,
         });
         if (!executeAdditionalsOk) return;
 
@@ -6289,7 +6229,7 @@ async function handleLoopRequest(
             await postLoopEventBounded(
               apiBaseUrl,
               body.loopId,
-              body.closedLoopAuthToken,
+              getToken,
               {
                 type: LoopEventType.Error,
                 code: LoopErrorCode.BranchCreateFailed,
@@ -6383,6 +6323,7 @@ async function handleLoopRequest(
         apiBaseUrl,
         context,
         wt,
+        getToken,
       });
       if (!dirs) return; // helper already sent the response + cleaned up
       worktreeDir = dirs.worktreeDir;
@@ -6434,11 +6375,18 @@ async function handleLoopRequest(
       getOverrideBinaryPaths()?.claude,
     );
     if (resolved.source === "fallback") {
-      await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-        type: LoopEventType.Error,
-        code: LoopErrorCode.BinaryNotFound,
-        message: "claude CLI not found in PATH",
-      });
+      await postLoopEvent(
+        apiBaseUrl,
+        body.loopId,
+        getToken,
+        {
+          type: LoopEventType.Error,
+          code: LoopErrorCode.BinaryNotFound,
+          message: "claude CLI not found in PATH",
+        },
+        undefined,
+        setToken,
+      );
       Observability.preflightBinaryNotFound(
         commandId,
         operationId,
@@ -6456,11 +6404,18 @@ async function handleLoopRequest(
     if (usesRunLoop) {
       scriptPath = findPluginScript("code", "run-loop.sh");
       if (!scriptPath) {
-        await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-          type: LoopEventType.Error,
-          code: LoopErrorCode.ScriptNotFound,
-          message: "run-loop.sh not found in plugin cache",
-        });
+        await postLoopEvent(
+          apiBaseUrl,
+          body.loopId,
+          getToken,
+          {
+            type: LoopEventType.Error,
+            code: LoopErrorCode.ScriptNotFound,
+            message: "run-loop.sh not found in plugin cache",
+          },
+          undefined,
+          setToken,
+        );
         Observability.preflightScriptNotFound(
           commandId,
           operationId,
@@ -6491,8 +6446,10 @@ async function handleLoopRequest(
       const startedResult = await postLoopEvent(
         apiBaseUrl,
         body.loopId,
-        body.closedLoopAuthToken,
+        getToken,
         { type: LoopEventType.Started },
+        undefined,
+        setToken,
       );
       if (!startedResult.success) {
         const callbackError = startedResult.error ?? "unknown callback error";
@@ -6513,9 +6470,14 @@ async function handleLoopRequest(
         return;
       }
     } else {
-      await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-        type: LoopEventType.Started,
-      });
+      await postLoopEvent(
+        apiBaseUrl,
+        body.loopId,
+        getToken,
+        { type: LoopEventType.Started },
+        undefined,
+        setToken,
+      );
     }
 
     // Spawn process
@@ -6525,11 +6487,18 @@ async function handleLoopRequest(
       logFd = openSync(logFile, "a");
     } catch (logErr) {
       const msg = logErr instanceof Error ? logErr.message : String(logErr);
-      await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-        type: LoopEventType.Error,
-        code: LoopErrorCode.SpawnFailed,
-        message: `Cannot open log file: ${msg}`,
-      });
+      await postLoopEvent(
+        apiBaseUrl,
+        body.loopId,
+        getToken,
+        {
+          type: LoopEventType.Error,
+          code: LoopErrorCode.SpawnFailed,
+          message: `Cannot open log file: ${msg}`,
+        },
+        undefined,
+        setToken,
+      );
       Observability.preflightSpawnFailed(
         commandId,
         operationId,
@@ -7012,11 +6981,18 @@ async function handleLoopRequest(
       }
       const msg =
         spawnErr instanceof Error ? spawnErr.message : String(spawnErr);
-      await postLoopEvent(apiBaseUrl, body.loopId, body.closedLoopAuthToken, {
-        type: LoopEventType.Error,
-        code: LoopErrorCode.SpawnFailed,
-        message: msg,
-      });
+      await postLoopEvent(
+        apiBaseUrl,
+        body.loopId,
+        getToken,
+        {
+          type: LoopEventType.Error,
+          code: LoopErrorCode.SpawnFailed,
+          message: msg,
+        },
+        undefined,
+        setToken,
+      );
       Observability.preflightSpawnFailed(
         commandId,
         operationId,
@@ -7152,7 +7128,7 @@ async function handleLoopRequest(
       tailerJsonlPath,
       apiBaseUrl,
       body.loopId,
-      body.closedLoopAuthToken,
+      getToken,
       jsonlPreSpawnOffset,
       jobStore
         ? (offset) => {
@@ -7165,6 +7141,13 @@ async function handleLoopRequest(
         : undefined,
       claudeWorkDir,
     );
+    scheduleProactiveRefresh(
+      body.loopId,
+      apiBaseUrl,
+      getToken,
+      setToken ?? (() => {}),
+    );
+    scheduleHeartbeat(body.loopId, apiBaseUrl, getToken);
     spawnedSuccessfully = true;
     loopLog(body.loopId, `Spawned pid=${pid}, worktree=${worktreeDir}`);
     gatewayLog.debug(

@@ -25,6 +25,7 @@ import {
 } from "./router.js";
 import type { WorktreeProvider } from "./operations/symphony-loop.js";
 import type { RetrySpawnDeps } from "../main/spawn-retry.js";
+import type { PowerMonitorLike } from "./operations/loop-http.js";
 
 export interface DesktopGatewayServerOptions {
   host: string;
@@ -64,6 +65,8 @@ export interface DesktopGatewayServerOptions {
   ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult;
   getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
   applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
+  /** Electron's powerMonitor instance for wake-from-sleep token refresh (T-6.1). */
+  powerMonitor?: PowerMonitorLike;
 }
 
 export class DesktopGatewayServer {
@@ -112,6 +115,7 @@ export class DesktopGatewayServer {
       handleSecurityUpgrade: this.options.handleSecurityUpgrade,
       getBinaryPaths: this.options.getBinaryPaths,
       applyBinaryPathPatch: this.options.applyBinaryPathPatch,
+      powerMonitor: this.options.powerMonitor,
     });
   }
 
@@ -147,6 +151,7 @@ export class DesktopGatewayServer {
       payload: DesktopSecurityUpgradePayload
     ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult,
     getOnboardingCompleted?: () => boolean,
+    powerMonitor?: PowerMonitorLike,
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -180,6 +185,7 @@ export class DesktopGatewayServer {
       getOnboardingCompleted,
       getBinaryPaths,
       applyBinaryPathPatch,
+      powerMonitor,
     });
   }
 

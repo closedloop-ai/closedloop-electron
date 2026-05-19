@@ -106,7 +106,7 @@ test("finalizeLoopFromRuntime uploads, posts completion, and persists terminal s
   await finalizeLoopFromRuntime(job, "live-exit", {
     jobStore,
     telemetry: { emit: (event) => telemetryEvents.push(event) },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -164,7 +164,7 @@ test("finalizeLoopFromRuntime keeps loop token when cloud finalization fails ret
   await finalizeLoopFromRuntime(job, "live-exit", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
     loopTokenStore,
@@ -205,7 +205,7 @@ test("finalizeLoopFromRuntime clears loop token for non-retryable cloud failure"
   await finalizeLoopFromRuntime(job, "live-exit", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
     loopTokenStore,
@@ -226,7 +226,7 @@ test("finalizeLoopFromRuntime is idempotent after timestamps are set", async () 
   await finalizeLoopFromRuntime(job, "live-exit", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -237,7 +237,7 @@ test("finalizeLoopFromRuntime is idempotent after timestamps are set", async () 
   await finalizeLoopFromRuntime(finalized, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -259,7 +259,7 @@ test("finalizeLoopFromRuntime skips CANCEL_PENDING while PID remains alive", asy
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => true,
   });
@@ -285,7 +285,7 @@ test("finalizeLoopFromRuntime maps dead CANCEL_PENDING to CANCELLED without post
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: (event) => telemetryEvents.push(event) },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -316,7 +316,7 @@ test("finalizeLoopFromRuntime maps PID-less CANCEL_PENDING to CANCELLED without 
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: (event) => telemetryEvents.push(event) },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -342,7 +342,7 @@ test("finalizeLoopFromRuntime preserves FAILED jobs and posts an error event", a
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: (event) => telemetryEvents.push(event) },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -380,7 +380,7 @@ test("finalizeLoopFromRuntime replays persisted user-visible runner failure", as
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: (event) => telemetryEvents.push(event) },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -413,7 +413,7 @@ test("finalizeLoopFromRuntime preserves CANCELLED jobs without posting loop even
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: (event) => telemetryEvents.push(event) },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -443,7 +443,7 @@ test("finalizeLoopFromRuntime preserves STOPPED jobs and posts a stopped error e
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: (event) => telemetryEvents.push(event) },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -474,7 +474,7 @@ test("finalizeLoopFromRuntime boot-recovery RUNNING without snapshot resolves to
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -508,7 +508,7 @@ test("finalizeLoopFromRuntime boot-recovery RUNNING with COMPLETED snapshot pres
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -550,7 +550,7 @@ test("finalizeLoopFromRuntime boot-recovery error event includes diagnostics pay
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -586,7 +586,7 @@ test("finalizeLoopFromRuntime boot-recovery RUNNING is idempotent on second call
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -599,7 +599,7 @@ test("finalizeLoopFromRuntime boot-recovery RUNNING is idempotent on second call
   await finalizeLoopFromRuntime(persistedJob, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -623,7 +623,7 @@ test("finalizeLoopFromRuntime boot-recovery RUNNING with CANCELLED snapshot reso
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -653,7 +653,7 @@ const artifactDeps = (
   getAllowedDirectories?: () => string[],
 ) => ({
   jobStore,
-  apiAuthToken: "token",
+  getToken: () => ({ token: "token" }),
   apiBaseUrl: "http://127.0.0.1:12345",
   getAllowedDirectories,
 });
@@ -814,7 +814,7 @@ test("tryUploadSupportBundle uploads renamed claude output and perf, posts event
     job,
     claudeWorkDir,
     apiBaseUrl: "http://127.0.0.1:12345",
-    token: "token",
+    getToken: () => ({ token: "token" }),
     jobStore,
   });
 
@@ -884,7 +884,7 @@ test("tryUploadSupportBundle uploads legacy pre-rename claude output with stable
     job,
     claudeWorkDir,
     apiBaseUrl: "http://127.0.0.1:12345",
-    token: "token",
+    getToken: () => ({ token: "token" }),
   });
 
   assert.equal(result.failed, false);
@@ -926,7 +926,7 @@ test("tryUploadSupportBundle skips when files are missing or too large", async (
     job,
     claudeWorkDir,
     apiBaseUrl: "http://127.0.0.1:12345",
-    token: "token",
+    getToken: () => ({ token: "token" }),
   });
 
   assert.equal(result.failed, false);
@@ -953,7 +953,7 @@ test("tryUploadSupportBundle skips idempotently after support bundle upload is r
     job,
     claudeWorkDir,
     apiBaseUrl: "http://127.0.0.1:12345",
-    token: "token",
+    getToken: () => ({ token: "token" }),
   });
 
   assert.equal(result.failed, false);
@@ -1013,7 +1013,7 @@ for (const scenario of [
       job,
       claudeWorkDir,
       apiBaseUrl: "http://127.0.0.1:12345",
-      token: "token",
+      getToken: () => ({ token: "token" }),
     });
 
     assert.equal(result.failed, true);
@@ -1090,7 +1090,7 @@ for (const scenario of [
       job,
       claudeWorkDir,
       apiBaseUrl: "http://127.0.0.1:12345",
-      token: "token",
+      getToken: () => ({ token: "token" }),
     });
 
     assert.equal(result.failed, true);
@@ -1141,7 +1141,7 @@ test("tryUploadSupportBundle leaves idempotence unset when support event POST fa
     job,
     claudeWorkDir,
     apiBaseUrl: "http://127.0.0.1:12345",
-    token: "token",
+    getToken: () => ({ token: "token" }),
     jobStore,
   });
 
@@ -1190,7 +1190,7 @@ test("finalizeLoopFromRuntime attempts support upload for failed jobs before err
   const outcome = await finalizeLoopFromRuntime(job, "live-exit", {
     jobStore,
     telemetry: { emit: (event) => telemetryEvents.push(event) },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -2051,7 +2051,7 @@ test("finalizeLoopFromRuntime cleans up persisted additionalWorktreeDirs on boot
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
     cleanupAdditionalWorktrees: async (entries, loopId) => {
@@ -2095,7 +2095,7 @@ test("finalizeLoopFromRuntime skips additional worktree cleanup on live-exit (in
   await finalizeLoopFromRuntime(job, "live-exit", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
     cleanupAdditionalWorktrees: async () => {
@@ -2130,7 +2130,7 @@ test("finalizeLoopFromRuntime tolerates a throwing cleanup callback and still cl
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
     cleanupAdditionalWorktrees: async () => {
@@ -2255,7 +2255,7 @@ test("finalizeLoopFromRuntime retries EXECUTE finalization after a prior error o
   await finalizeLoopFromRuntime(job, "live-exit", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
     getAllowedDirectories: () => [tempRoot],
@@ -2273,7 +2273,7 @@ test("finalizeLoopFromRuntime retries EXECUTE finalization after a prior error o
   await finalizeLoopFromRuntime(afterLiveError, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => ({ token: "token" }),
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
     getAllowedDirectories: () => [tempRoot],

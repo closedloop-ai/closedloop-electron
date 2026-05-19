@@ -1,8 +1,9 @@
 import { openSync, readSync, closeSync, existsSync, statSync } from "node:fs";
-import { randomUUID } from "node:crypto";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
 import { gatewayLog } from "../../main/gateway-logger.js";
+import type { LoopTokenMeta } from "../../main/loop-token-store.js";
 import { resolveClaudeOutputPath } from "../../main/token-usage.js";
+import { postLoopEvent } from "./loop-http.js";
 
 export function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -132,57 +133,6 @@ export function summarizeJsonlRecord(record: Record<string, unknown>): string | 
 }
 
 // ---------------------------------------------------------------------------
-// API communication
-// ---------------------------------------------------------------------------
-
-async function postLoopEvent(
-  apiBaseUrl: string,
-  loopId: string,
-  token: string,
-  event: {
-    type: string;
-    data: {
-      chunk: string;
-      tokenUsage?: {
-        inputTokens: number;
-        outputTokens: number;
-        cacheCreationInputTokens?: number;
-        cacheReadInputTokens?: number;
-      };
-    };
-  }
-): Promise<number | null> {
-  const url = `${apiBaseUrl}/loops/${loopId}/events`;
-  try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${token}`,
-        "Content-Type": "application/json",
-        "x-loop-event-nonce": randomUUID(),
-      },
-      body: JSON.stringify({
-        type: event.type,
-        data: event.data,
-        timestamp: new Date().toISOString(),
-      }),
-    });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      gatewayLog.error(
-        "output-tailer",
-        `POST ${event.type} to ${url} failed: ${resp.status} ${resp.statusText} ${text}`,
-      );
-    }
-    return resp.status;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    gatewayLog.error("output-tailer", `POST ${event.type} network error: ${msg}`);
-    return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Output tailer
 // ---------------------------------------------------------------------------
 
@@ -209,11 +159,18 @@ export function startOutputTailer(
   jsonlPath: string,
   apiBaseUrl: string,
   loopId: string,
-  token: string,
+  getToken: (() => LoopTokenMeta | null) | string,
   initialByteOffset: number,
   onOffset?: (offset: number) => void,
   claudeWorkDir?: string,
 ): { stop: () => void; flush: () => Promise<void> } {
+  // Accept a plain string token for backward compatibility with callers that
+  // have not yet migrated to the getToken closure (AC-002). This shim will be
+  // removed once all callers pass a closure.
+  const resolvedGetToken: () => LoopTokenMeta | null =
+    typeof getToken === "string"
+      ? () => ({ token: getToken })
+      : getToken;
   const pollIntervalMs = Number(process.env.CLOSEDLOOP_TAILER_POLL_MS) || DEFAULT_POLL_MS;
   const throttleMs = Number(process.env.CLOSEDLOOP_TAILER_THROTTLE_MS) || DEFAULT_THROTTLE_MS;
   const authRetryBaseMs =
@@ -306,13 +263,27 @@ export function startOutputTailer(
     nextAuthRetryAt = 0;
   }
 
-  function shouldRetryAuthStatus(status: number | null): boolean {
-    if (status === null) return true;
+  /**
+   * Extract an HTTP status code from the `error` string returned by
+   * `postLoopEvent` in `loop-http.ts` (format: "HTTP <code> <text>").
+   * Returns null for network-level errors or "no token".
+   */
+  function extractHttpStatus(error: string | undefined): number | null {
+    if (!error) return null;
+    const match = /^HTTP (\d{3})/.exec(error);
+    if (match) return parseInt(match[1], 10);
+    return null;
+  }
+
+  function shouldRetryOnError(error: string | undefined): boolean {
+    const status = extractHttpStatus(error);
+    if (status === null) return true; // network error or no token
     if (status === 401 || status === 403) return true;
     return status >= 500;
   }
 
-  function scheduleAuthRetry(status: number | null): void {
+  function scheduleAuthRetry(error: string | undefined): void {
+    const status = extractHttpStatus(error);
     authRetryAttempt += 1;
     if (authRetryAttempt > authRetryMaxCount) {
       authRetriesExhausted = true;
@@ -427,14 +398,14 @@ export function startOutputTailer(
         candidateTotals.cacheCreationInputTokens > 0 ||
         candidateTotals.cacheReadInputTokens > 0;
 
-      const status = await postLoopEvent(apiBaseUrl, loopId, token, {
+      const result = await postLoopEvent(apiBaseUrl, loopId, resolvedGetToken, {
         type: LoopEventType.Output,
         data: {
           chunk: lastDisplay,
           tokenUsage: hasAnyTokens ? candidateTotals : undefined,
         },
       });
-      if (status !== null && status >= 200 && status < 300) {
+      if (result.success) {
         resetAuthRetryState();
         authRetriesExhausted = false;
         pendingRemainder = suffix;
@@ -443,8 +414,8 @@ export function startOutputTailer(
         reportCommit(framedEndExclusive);
         continue;
       }
-      if (shouldRetryAuthStatus(status)) {
-        scheduleAuthRetry(status);
+      if (shouldRetryOnError(result.error)) {
+        scheduleAuthRetry(result.error);
       }
       break;
     }

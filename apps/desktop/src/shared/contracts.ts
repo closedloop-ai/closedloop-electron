@@ -45,6 +45,10 @@ export interface ComputeTargetCapabilities {
   commandSigning?: boolean;
   /** Desktop requires browser-origin Ed25519 command signatures for cloud commands. */
   commandSigningRequired?: boolean;
+  /** Desktop loop runner supports token refresh via /refresh-token. */
+  loopRunnerRefreshSupported?: boolean;
+  /** Desktop loop runner supports periodic heartbeat via /heartbeat. */
+  loopRunnerHeartbeatSupported?: boolean;
 }
 
 export const EMPTY_CAPABILITIES: ComputeTargetCapabilities = {

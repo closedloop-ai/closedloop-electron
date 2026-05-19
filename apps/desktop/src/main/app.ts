@@ -6,7 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { randomBytes, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { app, dialog, ipcMain, nativeImage, Notification, safeStorage, shell } from "electron";
+import { app, dialog, ipcMain, nativeImage, Notification, powerMonitor, safeStorage, shell } from "electron";
 import {
   type AlwaysAllowRule,
   DEFAULT_DESKTOP_SETTINGS,
@@ -147,6 +147,7 @@ import {
 import { isSecurityUpgradeProvisioned } from "./security-upgrade-result.js";
 import { isDesktopSetupCompleteFromState } from "./setup-readiness.js";
 import { PendingCommandKeyNotifier } from "./pending-command-key-notifier.js";
+import { getLoopHttpCapabilities } from "../server/operations/loop-http.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -324,6 +325,7 @@ export class DesktopApplication {
         this.cloudStatus.state === "online" ? this.cloudStatus.targetId : null,
       (payload) => this.handleSecurityUpgradeCommand(payload),
       () => this.isDesktopSetupComplete(),
+      powerMonitor,
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -1161,11 +1163,14 @@ export class DesktopApplication {
     });
   }
 
-  private getLocalCapabilities(): ReturnType<typeof buildCommandSigningCapabilities> {
-    return buildCommandSigningCapabilities({
-      commandSigningEnforcementEnabled:
-        this.settingsStore.getCommandSigningEnforcementEnabled(),
-    });
+  private getLocalCapabilities(): ReturnType<typeof buildCommandSigningCapabilities> & ReturnType<typeof getLoopHttpCapabilities> {
+    return {
+      ...buildCommandSigningCapabilities({
+        commandSigningEnforcementEnabled:
+          this.settingsStore.getCommandSigningEnforcementEnabled(),
+      }),
+      ...getLoopHttpCapabilities(),
+    };
   }
 
   private isCommandSigningEnforced(): boolean {

@@ -29,6 +29,10 @@ import { registerMetadataRoutes } from "./operations/metadata-routes.js";
 import { configureMcpDetectionCwdResolver } from "./operations/mcp-detection.js";
 import { registerSecurityUpgradeRoutes } from "./operations/security-upgrade.js";
 import { configureBinaryPathsResolver } from "./operations/symphony-loop.js";
+import {
+  configurePowerMonitor,
+  type PowerMonitorLike,
+} from "./operations/loop-http.js";
 import { registerReposConfigRoutes } from "./operations/repos-config.js";
 import { registerRunViewerChatRoutes } from "./operations/run-viewer-chat.js";
 import { registerRunViewerExtractRoutes } from "./operations/run-viewer-extract.js";
@@ -86,6 +90,8 @@ export interface GatewayRouterOptions {
   ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult;
   getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
   applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
+  /** Electron's powerMonitor instance for wake-from-sleep token refresh (T-6.1). */
+  powerMonitor?: PowerMonitorLike;
 }
 
 export interface GatewayActivityEvent {
@@ -180,6 +186,7 @@ export class GatewayRouter {
       return sandboxRoot?.trim() || undefined;
     });
     configureBinaryPathsResolver(this.options.getBinaryPaths ?? null);
+    configurePowerMonitor(this.options.powerMonitor ?? null);
     const getSymphonyDir = this.options.getSymphonyDir ?? (() => { throw new SymphonyDirNotConfiguredError(); });
     registerFilesystemDirectoriesRoutes(
       this.operationDispatcher,
