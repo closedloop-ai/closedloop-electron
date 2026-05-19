@@ -74,14 +74,20 @@ const generatedUninstallHooks = path.join(
 const stampFile = path.join(generatedRootDir, ".build-stamp");
 const viteBin = resolvePackageBin("vite", "vite");
 
-// CLOSEDLOOP Codex support (Addition #6): proven Codex ingestion modules live
-// in-repo and are copied into the generated server/lib at materialize time
-// (parallel to how uninstall-hooks.js is written). Their logic is
-// architecture-independent — relative requires resolve identically in the
-// generated tree as they did in the old vendored tree.
+// CLOSEDLOOP multi-harness support: proven ingestion modules live in-repo and
+// are copied into the generated server/lib at materialize time (parallel to
+// how uninstall-hooks.js is written). Their logic is architecture-independent
+// — relative requires resolve identically in the generated tree as they did
+// in the old vendored tree.
 const codexModulesDir = path.join(appDir, "scripts", "agent-monitor-codex");
+const cursorModulesDir = path.join(appDir, "scripts", "agent-monitor-cursor");
+const copilotModulesDir = path.join(appDir, "scripts", "agent-monitor-copilot");
+const opencodeModulesDir = path.join(appDir, "scripts", "agent-monitor-opencode");
 const clientSnippetDir = path.join(codexModulesDir, "client");
 const CODEX_MODULES = ["codex-home", "codex-parser", "codex-import", "codex-watcher"];
+const CURSOR_MODULES = ["cursor-home", "cursor-parser", "cursor-import", "cursor-watcher"];
+const COPILOT_MODULES = ["copilot-home", "copilot-parser", "copilot-import", "copilot-watcher"];
+const OPENCODE_MODULES = ["opencode-home", "opencode-parser", "opencode-import", "opencode-watcher"];
 const CLIENT_SNIPPET_FILES = readdirSync(clientSnippetDir).sort();
 
 const force =
@@ -181,6 +187,9 @@ function currentStamp() {
     sourceClientIndex,
     fileURLToPath(import.meta.url),
     ...CODEX_MODULES.map((m) => path.join(codexModulesDir, `${m}.js`)),
+    ...CURSOR_MODULES.map((m) => path.join(cursorModulesDir, `${m}.js`)),
+    ...COPILOT_MODULES.map((m) => path.join(copilotModulesDir, `${m}.js`)),
+    ...OPENCODE_MODULES.map((m) => path.join(opencodeModulesDir, `${m}.js`)),
     ...CLIENT_SNIPPET_FILES.map((file) => path.join(clientSnippetDir, file)),
   ]) {
     h.update(readFileSync(file));
@@ -206,15 +215,33 @@ function materializeRuntimeTree() {
   cpSync(path.join(sourceRootDir, "server"), path.join(generatedRootDir, "server"), {
     recursive: true,
   });
-  // Codex ingestion modules (Addition #6) into the generated server/lib —
+  // Multi-harness ingestion modules into the generated server/lib —
   // alongside upstream's lib files, same as the old vendored layout so the
   // modules' relative requires (../db, ../../scripts/import-history,
-  // ./codex-home) resolve unchanged.
+  // ./<tool>-home) resolve unchanged.
   const generatedLibDir = path.join(generatedRootDir, "server", "lib");
   mkdirSync(generatedLibDir, { recursive: true });
   for (const m of CODEX_MODULES) {
     cpSync(
       path.join(codexModulesDir, `${m}.js`),
+      path.join(generatedLibDir, `${m}.js`),
+    );
+  }
+  for (const m of CURSOR_MODULES) {
+    cpSync(
+      path.join(cursorModulesDir, `${m}.js`),
+      path.join(generatedLibDir, `${m}.js`),
+    );
+  }
+  for (const m of COPILOT_MODULES) {
+    cpSync(
+      path.join(copilotModulesDir, `${m}.js`),
+      path.join(generatedLibDir, `${m}.js`),
+    );
+  }
+  for (const m of OPENCODE_MODULES) {
+    cpSync(
+      path.join(opencodeModulesDir, `${m}.js`),
       path.join(generatedLibDir, `${m}.js`),
     );
   }
@@ -351,8 +378,8 @@ function patchServerIndex(file) {
     );
   }
 
-  // CLOSEDLOOP Codex support (Addition #6) — start the Codex rollout watcher
-  // next to cc-watcher (Codex has no hooks; the watcher is its only live path).
+  // CLOSEDLOOP multi-harness support — start watchers for all non-Claude harnesses
+  // next to cc-watcher (these tools have no hooks; the watcher is their only live path).
   if (!source.includes("startCodexWatcher")) {
     const ccWatcherBlock = [
       '      const { startCcWatcher } = require("./lib/cc-watcher");',
@@ -363,7 +390,7 @@ function patchServerIndex(file) {
     ].join("\n");
     if (!source.includes(ccWatcherBlock)) {
       throw new Error(
-        `Unable to patch ${file}: expected the cc-watcher start block (Codex).`,
+        `Unable to patch ${file}: expected the cc-watcher start block (multi-harness).`,
       );
     }
     source = source.replace(
@@ -376,14 +403,33 @@ function patchServerIndex(file) {
         "    } catch (err) {",
         '      console.warn("codex-watcher failed to start:", err.message);',
         "    }",
+        "    try {",
+        '      const { startCursorWatcher } = require("./lib/cursor-watcher");',
+        "      startCursorWatcher({ broadcast });",
+        "    } catch (err) {",
+        '      console.warn("cursor-watcher failed to start:", err.message);',
+        "    }",
+        "    try {",
+        '      const { startCopilotWatcher } = require("./lib/copilot-watcher");',
+        "      startCopilotWatcher({ broadcast });",
+        "    } catch (err) {",
+        '      console.warn("copilot-watcher failed to start:", err.message);',
+        "    }",
+        "    try {",
+        '      const { startOpenCodeWatcher } = require("./lib/opencode-watcher");',
+        "      startOpenCodeWatcher({ broadcast });",
+        "    } catch (err) {",
+        '      console.warn("opencode-watcher failed to start:", err.message);',
+        "    }",
       ].join("\n"),
     );
   }
 
-  // CLOSEDLOOP Codex support (Addition #6) — import Codex sessions on every
-  // startup (not gated on a zero-row count, unlike the Claude import: Codex
-  // has no hooks so sessions created while the app was closed must still
-  // appear; the import is idempotent). Fire-and-forget; never blocks boot.
+  // CLOSEDLOOP multi-harness support — import sessions from all non-Claude
+  // harnesses on every startup (not gated on a zero-row count, unlike the
+  // Claude import: these tools have no hooks so sessions created while the
+  // app was closed must still appear; all imports are idempotent).
+  // Fire-and-forget; never blocks boot.
   if (!source.includes("importAllCodexSessions")) {
     const tailNeedle = [
       "  }",
@@ -393,7 +439,7 @@ function patchServerIndex(file) {
     ].join("\n");
     if (!source.includes(tailNeedle)) {
       throw new Error(
-        `Unable to patch ${file}: expected the require.main tail (Codex import).`,
+        `Unable to patch ${file}: expected the require.main tail (multi-harness import).`,
       );
     }
     source = source.replace(
@@ -401,9 +447,11 @@ function patchServerIndex(file) {
       [
         "  }",
         "",
+        "  const _dbMod = require(\"./db\");",
+        "",
         "  try {",
         '    const { importAllCodexSessions } = require("./lib/codex-import");',
-        '    importAllCodexSessions(require("./db"))',
+        "    importAllCodexSessions(_dbMod)",
         "      .then(({ imported, errors }) => {",
         "        if (imported > 0)",
         '          console.log("Imported " + imported + " Codex sessions from ~/.codex/");',
@@ -413,6 +461,48 @@ function patchServerIndex(file) {
         "      .catch(() => {});",
         "  } catch (err) {",
         '    console.warn("codex import failed to start:", err.message);',
+        "  }",
+        "",
+        "  try {",
+        '    const { importAllCursorSessions } = require("./lib/cursor-import");',
+        "    importAllCursorSessions(_dbMod)",
+        "      .then(({ imported, errors }) => {",
+        "        if (imported > 0)",
+        '          console.log("Imported " + imported + " Cursor sessions from ~/.cursor/");',
+        "        if (errors > 0)",
+        '          console.log(errors + " Cursor transcript files had errors during import");',
+        "      })",
+        "      .catch(() => {});",
+        "  } catch (err) {",
+        '    console.warn("cursor import failed to start:", err.message);',
+        "  }",
+        "",
+        "  try {",
+        '    const { importAllCopilotSessions } = require("./lib/copilot-import");',
+        "    importAllCopilotSessions(_dbMod)",
+        "      .then(({ imported, errors }) => {",
+        "        if (imported > 0)",
+        '          console.log("Imported " + imported + " Copilot sessions");',
+        "        if (errors > 0)",
+        '          console.log(errors + " Copilot session files had errors during import");',
+        "      })",
+        "      .catch(() => {});",
+        "  } catch (err) {",
+        '    console.warn("copilot import failed to start:", err.message);',
+        "  }",
+        "",
+        "  try {",
+        '    const { importAllOpenCodeSessions } = require("./lib/opencode-import");',
+        "    importAllOpenCodeSessions(_dbMod)",
+        "      .then(({ imported, errors }) => {",
+        "        if (imported > 0)",
+        '          console.log("Imported " + imported + " OpenCode sessions from ~/.local/share/opencode/");',
+        "        if (errors > 0)",
+        '          console.log(errors + " OpenCode session files had errors during import");',
+        "      })",
+        "      .catch(() => {});",
+        "  } catch (err) {",
+        '    console.warn("opencode import failed to start:", err.message);',
         "  }",
         "}",
         "",
@@ -706,18 +796,22 @@ function assertGeneratedTree() {
       "Generated server/db.js is missing the `harness` column migration (Codex Patch #4).",
     );
   }
-  if (
-    !serverIndex.includes("startCodexWatcher") ||
-    !serverIndex.includes("importAllCodexSessions")
-  ) {
-    throw new Error(
-      "Generated server/index.js is missing the Codex watcher/import wiring (Patch #5).",
-    );
+  for (const [name, fn] of [
+    ["Codex", "startCodexWatcher"], ["Codex", "importAllCodexSessions"],
+    ["Cursor", "startCursorWatcher"], ["Cursor", "importAllCursorSessions"],
+    ["Copilot", "startCopilotWatcher"], ["Copilot", "importAllCopilotSessions"],
+    ["OpenCode", "startOpenCodeWatcher"], ["OpenCode", "importAllOpenCodeSessions"],
+  ]) {
+    if (!serverIndex.includes(fn)) {
+      throw new Error(
+        `Generated server/index.js is missing the ${name} watcher/import wiring (${fn}).`,
+      );
+    }
   }
-  for (const m of CODEX_MODULES) {
+  for (const m of [...CODEX_MODULES, ...CURSOR_MODULES, ...COPILOT_MODULES, ...OPENCODE_MODULES]) {
     if (!existsSync(path.join(generatedRootDir, "server", "lib", `${m}.js`))) {
       throw new Error(
-        `Generated server/lib/${m}.js missing (Codex Addition #6).`,
+        `Generated server/lib/${m}.js missing (multi-harness).`,
       );
     }
   }

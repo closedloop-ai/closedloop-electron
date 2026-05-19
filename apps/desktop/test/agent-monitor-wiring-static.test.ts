@@ -57,8 +57,8 @@ test("pnpm-managed agent-monitor source packages are declared and wired into bui
   ]) {
     assert.ok(desktopPkg.devDependencies[dep], `${dep} should be installed for build:agent-monitor`);
   }
-  // Any apps/desktop change requires a version bump (CI-enforced). main was 0.15.19.
-  assert.notEqual(desktopPkg.version, "0.15.19");
+  // Any apps/desktop change requires a version bump (CI-enforced). main was 0.15.22.
+  assert.notEqual(desktopPkg.version, "0.15.22");
 });
 
 test("build script materializes a generated runtime tree with the host patches", () => {
@@ -249,8 +249,6 @@ test("Codex support (Addition #4/#5/#6) is wired into the generated build", () =
     // Hard-gate messages: a future upstream bump that breaks an anchor must
     // fail the build, not silently drop Codex.
     "column migration (Codex Patch #4)",
-    "Codex watcher/import wiring (Patch #5)",
-    "(Codex Addition #6)",
   ]) {
     assert.ok(
       buildScriptSource.includes(needle),
@@ -303,6 +301,64 @@ test("Codex support (Addition #4/#5/#6) is wired into the generated build", () =
   // Docs describe Codex under the generated/pnpm model.
   assert.match(thirdPartyNoticesSource, /Codex/);
   assert.match(claudeDocSource, /Codex/);
+});
+
+test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build", () => {
+  // Build script declares module arrays for all three new harnesses.
+  for (const needle of [
+    'CURSOR_MODULES = ["cursor-home", "cursor-parser", "cursor-import", "cursor-watcher"]',
+    'COPILOT_MODULES = ["copilot-home", "copilot-parser", "copilot-import", "copilot-watcher"]',
+    'OPENCODE_MODULES = ["opencode-home", "opencode-parser", "opencode-import", "opencode-watcher"]',
+    "startCursorWatcher",
+    "startCopilotWatcher",
+    "startOpenCodeWatcher",
+    "importAllCursorSessions",
+    "importAllCopilotSessions",
+    "importAllOpenCodeSessions",
+  ]) {
+    assert.ok(
+      buildScriptSource.includes(needle),
+      `build-agent-monitor.mjs missing multi-harness wiring: ${needle}`,
+    );
+  }
+
+  // In-repo modules exist for each harness.
+  for (const [dir, modules] of [
+    ["agent-monitor-cursor", ["cursor-home", "cursor-parser", "cursor-import", "cursor-watcher"]],
+    ["agent-monitor-copilot", ["copilot-home", "copilot-parser", "copilot-import", "copilot-watcher"]],
+    ["agent-monitor-opencode", ["opencode-home", "opencode-parser", "opencode-import", "opencode-watcher"]],
+  ] as const) {
+    for (const m of modules) {
+      assert.ok(
+        existsSync(new URL(`../scripts/${dir}/${m}.js`, import.meta.url)),
+        `scripts/${dir}/${m}.js missing`,
+      );
+    }
+  }
+
+  // Watchers self-heal when data dirs don't exist at boot.
+  for (const [dir, file] of [
+    ["agent-monitor-cursor", "cursor-watcher.js"],
+    ["agent-monitor-copilot", "copilot-watcher.js"],
+    ["agent-monitor-opencode", "opencode-watcher.js"],
+  ] as const) {
+    assert.match(
+      read(`../scripts/${dir}/${file}`),
+      /runCatchupImport/,
+    );
+  }
+
+  // Client harness badge supports all five harnesses.
+  const badgeSnippet = read("../scripts/agent-monitor-codex/client/statusbadge.append.tsx");
+  assert.match(badgeSnippet, /cursor/);
+  assert.match(badgeSnippet, /copilot/);
+  assert.match(badgeSnippet, /opencode/);
+
+  // Client filter dropdown includes all five harnesses.
+  const stateSnippet = read("../scripts/agent-monitor-codex/client/sessions.state.replace.txt");
+  assert.match(stateSnippet, /Cursor/);
+  assert.match(stateSnippet, /Copilot/);
+  assert.match(stateSnippet, /OpenCode/);
 });
 
 test("Codex harness filter now uses server-backed pagination and rebuilds on snippet edits", () => {

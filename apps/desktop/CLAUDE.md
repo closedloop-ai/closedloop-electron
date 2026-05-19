@@ -210,25 +210,26 @@ setting and defaults OFF. When disabled, the whole dashboard tab is hidden.
   `compat-sqlite.js` working under Electron-as-Node. Shipped via
   `electron-builder.yml` `extraResources` (unpacked, outside the asar)
   preserving the `server/` ↔ `client/dist/` relative layout.
-- **Codex support (multi-harness; Addition #4/#5/#6):** the same dashboard
-  ingests **OpenAI Codex** sessions, not just Claude Code. Codex has **no hook
-  system**, so its data comes from importing/watching the rollout JSONL under
-  `~/.codex/sessions/` (honors `$CODEX_HOME`). The proven, architecture-
-  independent modules live in-repo at
-  `apps/desktop/scripts/agent-monitor-codex/codex-{home,parser,import,watcher}.js`
-  and are copied into the generated `server/lib/` at materialize time;
-  `build-agent-monitor.mjs` also injects a `harness` column + the Codex
-  watcher/import wiring as generated-tree patches (same idempotent
-  string-anchor approach as the loopback/CCAM patches) and patches the client
-  source pre-Vite-build to add a Claude/Codex badge + filter. `codex-parser`
-  emits the same normalized shape as the upstream Claude importer so the
-  shared `importSession()` renders Codex through the unchanged UI; the watcher
-  self-heals if `~/.codex/sessions` does not exist at boot (no app restart
-  needed for a first-ever Codex session). All Codex paths are best-effort and
-  never block boot or the Claude path. The build hard-gates Patches #4/#5 and
-  Addition #6 so a future upstream bump can't silently drop Codex. The
-  user-facing nav/tray label is **"Agent Dashboard"** (internal ids/IPC
-  channels unchanged).
+- **Multi-harness support (5 agent tools):** the same dashboard ingests
+  sessions from **Claude Code** (via hooks), **OpenAI Codex** (rollout JSONL
+  under `~/.codex/sessions/`), **Cursor** (agent transcripts under
+  `~/.cursor/projects/`), **GitHub Copilot** (chat JSON under VS Code
+  `workspaceStorage/` + CLI JSONL under `~/.copilot/session-state/`), and
+  **OpenCode** (per-message JSON under `~/.local/share/opencode/storage/`).
+  All non-Claude tools have **no hook system** — their data comes from
+  file-based importing/watching. Proven, architecture-independent modules
+  live in-repo at `apps/desktop/scripts/agent-monitor-{codex,cursor,copilot,
+  opencode}/{tool}-{home,parser,import,watcher}.js` and are copied into the
+  generated `server/lib/` at materialize time. Each parser emits the same
+  normalized shape as the upstream Claude importer so the shared
+  `importSession()` renders all harnesses through the unchanged UI; all
+  watchers self-heal if data directories don't exist at boot (no app restart
+  needed for a first-ever session with any tool). All non-Claude paths are
+  best-effort and never block boot or the Claude path. The build hard-gates
+  all watcher/import wiring so a future upstream bump can't silently drop
+  any harness. The user-facing nav/tray label is **"Agent Dashboard"**
+  (internal ids/IPC channels unchanged). Environment variable overrides:
+  `$CODEX_HOME`, `$CURSOR_HOME`, `$COPILOT_HOME`, `$OPENCODE_DATA_DIR`.
 - **Update procedure:** bump the git dependency commit(s) in
   `apps/desktop/package.json`, regenerate the lockfile, and rerun
   `pnpm -C apps/desktop build:agent-monitor`. Any change here requires the
