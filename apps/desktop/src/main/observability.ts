@@ -554,6 +554,53 @@ export class Observability {
     Observability.emitTelemetry("info", "queue.stats_changed", "Queue stats changed", {}, { extra: { activeCommands, queueDepth } });
   }
 
+  // --- Onboarding popup (telemetry only) ---
+
+  static onboardingPopupShown(): void {
+    Observability.emitTelemetry(
+      "info",
+      "onboarding.popup_shown",
+      "Onboarding reminder popup shown",
+      {},
+    );
+  }
+
+  static onboardingPopupCtaClicked(): void {
+    Observability.emitTelemetry(
+      "info",
+      "onboarding.popup_cta_clicked",
+      "Onboarding reminder popup CTA clicked",
+      {},
+    );
+  }
+
+  static onboardingPopupDismissedSession(): void {
+    Observability.emitTelemetry(
+      "info",
+      "onboarding.popup_dismissed_session",
+      "Onboarding reminder popup dismissed for session",
+      {},
+    );
+  }
+
+  static onboardingPopupDismissedPermanent(): void {
+    Observability.emitTelemetry(
+      "info",
+      "onboarding.popup_dismissed_permanent",
+      "Onboarding reminder popup dismissed permanently",
+      {},
+    );
+  }
+
+  static onboardingPopupSuppressedAuto(): void {
+    Observability.emitTelemetry(
+      "info",
+      "onboarding.popup_suppressed_auto",
+      "Onboarding reminder popup auto-suppressed; web wizard already complete",
+      {},
+    );
+  }
+
   // --- Internal helpers ---
 
   private static withLifecycleCommand(

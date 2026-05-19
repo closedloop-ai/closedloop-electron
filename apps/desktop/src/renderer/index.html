@@ -2536,9 +2536,114 @@
       [data-tooltip][data-tooltip-pos="bottom"]:focus-visible::after {
         transform: translate(-50%, 0);
       }
+
+      #onboardingPopupBackdrop {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.5);
+        align-items: center;
+        justify-content: center;
+        z-index: 9999;
+      }
+
+      #onboardingPopupBackdrop.visible {
+        display: flex;
+      }
+
+      #onboardingPopup {
+        max-width: 440px;
+        width: calc(100% - 48px);
+        background: var(--card);
+        color: var(--foreground);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 24px;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+      }
+
+      #onboardingPopup h2 {
+        margin: 0 0 8px;
+        font-size: 16px;
+        font-weight: 600;
+      }
+
+      #onboardingPopup p {
+        margin: 0 0 20px;
+        font-size: 13px;
+        line-height: 1.5;
+        color: var(--muted-foreground);
+      }
+
+      #onboardingPopupActions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: flex-end;
+      }
+
+      #onboardingPopupActions button {
+        padding: 8px 14px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--foreground);
+      }
+
+      #onboardingPopupActions button.primary {
+        background: var(--primary);
+        color: var(--primary-foreground);
+        border-color: transparent;
+      }
+
+      #onboardingPopupActions button:hover {
+        filter: brightness(1.1);
+      }
     </style>
   </head>
   <body>
+    <div
+      id="onboardingPopupBackdrop"
+      hidden
+    >
+      <div
+        id="onboardingPopup"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="onboardingPopupTitle"
+        aria-describedby="onboardingPopupBody"
+      >
+        <h2 id="onboardingPopupTitle">Finish setting up ClosedLoop</h2>
+        <p id="onboardingPopupBody">
+          Your desktop app is connected. Head back to the ClosedLoop web app to
+          finish your account setup.
+        </p>
+        <div id="onboardingPopupActions">
+          <button
+            type="button"
+            id="onboardingPopupDismissPermanent"
+          >
+            Don't show again
+          </button>
+          <button
+            type="button"
+            id="onboardingPopupDismissSession"
+          >
+            Remind me later
+          </button>
+          <button
+            type="button"
+            class="primary"
+            id="onboardingPopupCta"
+          >
+            Open web app
+          </button>
+        </div>
+      </div>
+    </div>
     <header>
       <div class="header-main">
         <div>
@@ -5608,6 +5713,46 @@
       });
 
       updateBannerBtn.addEventListener("click", triggerUpdate);
+
+      const onboardingPopupBackdrop = document.getElementById("onboardingPopupBackdrop");
+      const onboardingPopupCtaBtn = document.getElementById("onboardingPopupCta");
+      const onboardingPopupDismissSessionBtn = document.getElementById("onboardingPopupDismissSession");
+      const onboardingPopupDismissPermanentBtn = document.getElementById("onboardingPopupDismissPermanent");
+
+      function showOnboardingPopup() {
+        if (!onboardingPopupBackdrop) {
+          return;
+        }
+        onboardingPopupBackdrop.hidden = false;
+        onboardingPopupBackdrop.classList.add("visible");
+      }
+
+      function hideOnboardingPopup() {
+        if (!onboardingPopupBackdrop) {
+          return;
+        }
+        onboardingPopupBackdrop.classList.remove("visible");
+        onboardingPopupBackdrop.hidden = true;
+      }
+
+      window.addEventListener("desktop:show-onboarding-popup", () => {
+        showOnboardingPopup();
+      });
+
+      onboardingPopupCtaBtn?.addEventListener("click", () => {
+        hideOnboardingPopup();
+        void window.desktopApi.onboardingPopupCta();
+      });
+
+      onboardingPopupDismissSessionBtn?.addEventListener("click", () => {
+        hideOnboardingPopup();
+        void window.desktopApi.dismissOnboardingPopup({ permanent: false });
+      });
+
+      onboardingPopupDismissPermanentBtn?.addEventListener("click", () => {
+        hideOnboardingPopup();
+        void window.desktopApi.dismissOnboardingPopup({ permanent: true });
+      });
     </script>
   </body>
 </html>

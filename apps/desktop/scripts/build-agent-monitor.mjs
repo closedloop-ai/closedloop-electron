@@ -45,11 +45,20 @@ const sourceClientDir = resolvePackageRoot(SOURCE_CLIENT_PACKAGE);
 const sourceRootPkg = path.join(sourceRootDir, "package.json");
 const sourceClientPkg = path.join(sourceClientDir, "package.json");
 const sourceServerEntry = path.join(sourceRootDir, "server", "index.js");
+const sourceSessionsRoute = path.join(sourceRootDir, "server", "routes", "sessions.js");
+const sourceHooksRoute = path.join(sourceRootDir, "server", "routes", "hooks.js");
 const sourceDbFile = path.join(sourceRootDir, "server", "db.js");
 const sourceCompatSqlite = path.join(sourceRootDir, "server", "compat-sqlite.js");
+const sourcePushLib = path.join(sourceRootDir, "server", "lib", "push.js");
 const sourceClientIndex = path.join(sourceClientDir, "index.html");
 const sourceClientDistDir = path.join(sourceClientDir, "dist");
 const generatedServerEntry = path.join(generatedRootDir, "server", "index.js");
+const generatedSessionsRoute = path.join(
+  generatedRootDir,
+  "server",
+  "routes",
+  "sessions.js",
+);
 const generatedDbFile = path.join(generatedRootDir, "server", "db.js");
 const generatedHooksRoute = path.join(
   generatedRootDir,
@@ -57,6 +66,7 @@ const generatedHooksRoute = path.join(
   "routes",
   "hooks.js",
 );
+const generatedPushLib = path.join(generatedRootDir, "server", "lib", "push.js");
 const generatedClientIndex = path.join(
   generatedRootDir,
   "client",
@@ -77,7 +87,9 @@ const viteBin = resolvePackageBin("vite", "vite");
 // architecture-independent — relative requires resolve identically in the
 // generated tree as they did in the old vendored tree.
 const codexModulesDir = path.join(appDir, "scripts", "agent-monitor-codex");
+const clientSnippetDir = path.join(codexModulesDir, "client");
 const CODEX_MODULES = ["codex-home", "codex-parser", "codex-import", "codex-watcher"];
+const CLIENT_SNIPPET_FILES = readdirSync(clientSnippetDir).sort();
 
 // CLOSEDLOOP plan-extraction (FEA-1189 / PLN-613): in-repo modules copied into
 // the generated server/lib (parallel to CODEX_MODULES); plans-route.js copied
@@ -158,8 +170,11 @@ function assertSourcePackages() {
 
   for (const required of [
     sourceServerEntry,
+    sourceSessionsRoute,
+    sourceHooksRoute,
     sourceDbFile,
     sourceCompatSqlite,
+    sourcePushLib,
     path.join(sourceRootDir, "scripts", "install-hooks.js"),
     path.join(sourceRootDir, "scripts", "hook-handler.js"),
     path.join(sourceRootDir, "LICENSE"),
@@ -181,10 +196,14 @@ function currentStamp() {
     sourceRootPkg,
     sourceClientPkg,
     sourceServerEntry,
+    sourceSessionsRoute,
+    sourceHooksRoute,
     sourceDbFile,
+    sourcePushLib,
     sourceClientIndex,
     fileURLToPath(import.meta.url),
     ...CODEX_MODULES.map((m) => path.join(codexModulesDir, `${m}.js`)),
+    ...CLIENT_SNIPPET_FILES.map((file) => path.join(clientSnippetDir, file)),
     ...PLAN_MODULES.map((m) => path.join(planModulesDir, `${m}.js`)),
     path.join(planModulesDir, "plans-route.js"),
     path.join(planModulesDir, "client", "Plans.tsx"),
@@ -254,13 +273,65 @@ function materializeRuntimeTree() {
   cpSync(path.join(sourceRootDir, "LICENSE"), path.join(generatedRootDir, "LICENSE"));
 
   patchServerIndex(generatedServerEntry);
+  patchSessionsRoute(generatedSessionsRoute);
   patchDbFile(generatedDbFile);
   patchHooksRoute(generatedHooksRoute);
+  patchPushFile(generatedPushLib);
   writeFileSync(generatedUninstallHooks, UNINSTALL_HOOKS_SOURCE, "utf8");
 }
 
 function patchServerIndex(file) {
   let source = readFileSync(file, "utf8");
+
+  if (!source.includes("function isAllowedDashboardOrigin(origin)")) {
+    const corsHelperNeedle = 'const runRouter = require("./routes/run");\n\nfunction createApp() {';
+    if (!source.includes(corsHelperNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the run-router require block for CORS tightening.`,
+      );
+    }
+    source = source.replace(
+      corsHelperNeedle,
+      [
+        'const runRouter = require("./routes/run");',
+        "",
+        "function isAllowedDashboardOrigin(origin) {",
+        "  if (!origin) return true;",
+        "  try {",
+        "    const url = new URL(origin);",
+        '    const expectedPort = String(process.env.DASHBOARD_PORT || "4820");',
+        '    const isLoopback = url.protocol === "http:" && (url.hostname === "127.0.0.1" || url.hostname === "localhost");',
+        "    return isLoopback && url.port === expectedPort;",
+        "  } catch {",
+        "    return false;",
+        "  }",
+        "}",
+        "",
+        "function createApp() {",
+      ].join("\n"),
+    );
+  }
+
+  if (!source.includes("callback(null, isAllowedDashboardOrigin(origin));")) {
+    const corsNeedle = "  app.use(cors());";
+    if (!source.includes(corsNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected \`${corsNeedle}\` for tightened CORS.`,
+      );
+    }
+    source = source.replace(
+      corsNeedle,
+      [
+        "  app.use(",
+        "    cors({",
+        "      origin(origin, callback) {",
+        "        callback(null, isAllowedDashboardOrigin(origin));",
+        "      },",
+        "    })",
+        "  );",
+      ].join("\n"),
+    );
+  }
 
   if (!source.includes('server.listen(port, "127.0.0.1", () => {')) {
     const listenNeedle = "server.listen(port, () => {";
@@ -272,6 +343,23 @@ function patchServerIndex(file) {
     source = source.replace(
       listenNeedle,
       'server.listen(port, "127.0.0.1", () => {',
+    );
+  }
+
+  if (!source.includes('process.env.CCAM_ENABLE_RUN === "1"')) {
+    const runNeedle = '  app.use("/api/run", runRouter);';
+    if (!source.includes(runNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected \`${runNeedle}\` for run-route gating.`,
+      );
+    }
+    source = source.replace(
+      runNeedle,
+      [
+        '  if (process.env.CCAM_ENABLE_RUN === "1") {',
+        '    app.use("/api/run", runRouter);',
+        "  }",
+      ].join("\n"),
     );
   }
 
@@ -407,10 +495,10 @@ function patchServerIndex(file) {
   // (read + confirm/reject triage over plans / plan_versions).
   if (!source.includes('require("./routes/plans")')) {
     const requireNeedle = 'const runRouter = require("./routes/run");';
-    const useNeedle = 'app.use("/api/run", runRouter);';
-    if (!source.includes(requireNeedle) || !source.includes(useNeedle)) {
+    const openApiNeedle = '  app.get("/api/openapi.json", (_req, res) => {';
+    if (!source.includes(requireNeedle) || !source.includes(openApiNeedle)) {
       throw new Error(
-        `Unable to patch ${file}: expected the run-route require/use anchors (plans route, FEA-1189).`,
+        `Unable to patch ${file}: expected the run-route require/openapi anchors (plans route, FEA-1189).`,
       );
     }
     source = source.replace(
@@ -418,8 +506,52 @@ function patchServerIndex(file) {
       `${requireNeedle}\nconst plansRouter = require("./routes/plans");`,
     );
     source = source.replace(
-      useNeedle,
-      `${useNeedle}\n  app.use("/api/plans", plansRouter);`,
+      openApiNeedle,
+      `  app.use("/api/plans", plansRouter);\n${openApiNeedle}`,
+    );
+  }
+
+  writeFileSync(file, source, "utf8");
+}
+
+function patchSessionsRoute(file) {
+  let source = readFileSync(file, "utf8");
+
+  if (!source.includes('req.query.harness')) {
+    const queryNeedle = "  const cwd = req.query.cwd;";
+    if (!source.includes(queryNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the query parsing block for harness filtering.`,
+      );
+    }
+    source = source.replace(
+      queryNeedle,
+      [
+        "  const cwd = req.query.cwd;",
+        '  const harness = typeof req.query.harness === "string" ? req.query.harness.trim().toLowerCase() : "";',
+      ].join("\n"),
+    );
+
+    const whereNeedle = [
+      "  if (cwd) {",
+      '    where.push("s.cwd = ?");',
+      "    params.push(cwd);",
+      "  }",
+    ].join("\n");
+    if (!source.includes(whereNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the cwd filter block for harness filtering.`,
+      );
+    }
+    source = source.replace(
+      whereNeedle,
+      [
+        whereNeedle,
+        "  if (harness) {",
+        `    where.push("COALESCE(NULLIF(LOWER(s.harness), ''), 'claude') = ?");`,
+        "    params.push(harness);",
+        "  }",
+      ].join("\n"),
     );
   }
 
@@ -604,55 +736,8 @@ function patchImportHistory(file) {
 // idempotent anchor approach as patchServerIndex/patchDbFile. Replacement
 // bodies live as reviewable snippet files (no escaping) under
 // scripts/agent-monitor-codex/client/.
-const clientSnippetDir = path.join(codexModulesDir, "client");
-const FULL_WAITING_HARNESS_BRANCH = [
-  "      // Two UI-only overlays need client-side filtering on a broad fetch so",
-  "      // paging/totals stay consistent with the visible rows:",
-  '      //  - "waiting"  derived from awaiting_input_since (status is "active").',
-  "      //  - harness    derived from the harness column (Addition #6); the",
-  "      //    vendored /api/sessions route is unpatched so we filter here.",
-  '      // Legacy/empty harness counts as "claude" (matches the DB default).',
-  '      if (filter === "waiting" || harness) {',
-  "        const res = await api.sessions.list({",
-  '          status: filter === "waiting" ? "active" : filter || undefined,',
-  "          q: search || undefined,",
-  "          cwd: cwd || undefined,",
-  "          sort_by: sortBy,",
-  "          sort_desc: sortDesc,",
-  "          limit: 10000,",
-  "          offset: 0,",
-  "        });",
-  "        let rows = res.sessions;",
-  '        if (filter === "waiting") rows = rows.filter(isSessionAwaitingInput);',
-  "        if (harness)",
-  '          rows = rows.filter((s) => (s.harness || "claude").toLowerCase() === harness);',
-  "        setTotal(rows.length);",
-  "        setSessions(rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE));",
-  "        return;",
-  "      }",
-].join("\n");
-
 function snippet(name) {
   return readFileSync(path.join(clientSnippetDir, name), "utf8");
-}
-
-function normalizeSessionsLoadBranch(file) {
-  let src = readFileSync(file, "utf8");
-  if (src.includes(FULL_WAITING_HARNESS_BRANCH)) {
-    writeFileSync(file, src, "utf8");
-    return;
-  }
-
-  const branchPattern =
-    /      \/\/ (?:The "waiting" filter|Two UI-only overlays)[\s\S]*?        return;\n      }\n/;
-  if (!branchPattern.test(src)) {
-    throw new Error(
-      `Unable to normalize ${file}: expected the waiting-filter branch anchor (Codex Addition #6).`,
-    );
-  }
-
-  src = src.replace(branchPattern, `${FULL_WAITING_HARNESS_BRANCH}\n`);
-  writeFileSync(file, src, "utf8");
 }
 
 function patchClientSource() {
@@ -664,7 +749,6 @@ function patchClientSource() {
     path.join(planModulesDir, "client", "Plans.tsx"),
     path.join(sourceClientDir, "src", "pages", "Plans.tsx"),
   );
-  normalizeSessionsLoadBranch(path.join(sourceClientDir, "src", "pages", "Sessions.tsx"));
   const plansNavLink = [
     "        })}",
     '        <NavLink',
@@ -691,6 +775,19 @@ function patchClientSource() {
       guard: "harness?: string | null",
       find: "  cost?: number;",
       replace: "  cost?: number;\n  harness?: string | null;",
+    },
+    {
+      rel: "src/lib/api.ts",
+      guard: "      harness?: string;",
+      find: "      cwd?: string;\n      sort_by?: string;",
+      replace: "      cwd?: string;\n      harness?: string;\n      sort_by?: string;",
+    },
+    {
+      rel: "src/lib/api.ts",
+      guard: 'if (params?.harness) qs.set("harness", params.harness);',
+      find: '      if (params?.cwd) qs.set("cwd", params.cwd);',
+      replace:
+        '      if (params?.cwd) qs.set("cwd", params.cwd);\n      if (params?.harness) qs.set("harness", params.harness);',
     },
     {
       rel: "src/components/StatusBadge.tsx",
@@ -721,6 +818,37 @@ function patchClientSource() {
       guard: "const [harness, setHarness] = useState",
       find: "  const [dashboardRunIds, setDashboardRunIds] = useState<Set<string>>(new Set());",
       replaceFile: "sessions.state.replace.txt",
+    },
+    {
+      rel: "src/pages/Sessions.tsx",
+      guard: "server-side status + harness filters",
+      findFiles: [
+        "sessions.loadtop.find.txt",
+        "sessions.loadtop.legacy.find.txt",
+      ],
+      replaceFile: "sessions.loadtop.replace.txt",
+    },
+    {
+      rel: "src/pages/Sessions.tsx",
+      guard: "rows = rows.filter(isSessionAwaitingInput);",
+      findFiles: [
+        "sessions.loadrows.find.txt",
+        "sessions.loadrows.legacy.find.txt",
+      ],
+      replaceFile: "sessions.loadrows.replace.txt",
+    },
+    {
+      rel: "src/pages/Sessions.tsx",
+      guard: "        harness?: string;",
+      find: "        cwd?: string;\n        sort_by?: string;",
+      replace:
+        "        cwd?: string;\n        harness?: string;\n        sort_by?: string;",
+    },
+    {
+      rel: "src/pages/Sessions.tsx",
+      guard: "      if (harness) params.harness = harness;",
+      find: "      if (cwd) params.cwd = cwd;",
+      replace: "      if (cwd) params.cwd = cwd;\n      if (harness) params.harness = harness;",
     },
     {
       rel: "src/pages/Sessions.tsx",
@@ -785,6 +913,9 @@ function patchClientSource() {
       src = src + snippet(e.append);
     } else {
       const findCandidates = [];
+      if (Array.isArray(e.findFiles)) {
+        findCandidates.push(...e.findFiles.map((name) => snippet(name)));
+      }
       if (e.findFile) findCandidates.push(snippet(e.findFile));
       if (e.find) findCandidates.push(e.find);
       if (Array.isArray(e.findAlternates)) {
@@ -792,7 +923,7 @@ function patchClientSource() {
       }
       const find = findCandidates.find((candidate) => src.includes(candidate));
       const replace = e.replaceFile ? snippet(e.replaceFile) : e.replace;
-      if (!find) {
+      if (!find || !replace) {
         throw new Error(
           `Unable to patch client ${e.rel} (Codex Addition #6): anchor not ` +
             `found — upstream client layout may have changed. Re-derive per ` +
@@ -810,7 +941,9 @@ function assertGeneratedTree() {
     path.join(generatedRootDir, "package.json"),
     path.join(generatedRootDir, "LICENSE"),
     generatedServerEntry,
+    generatedSessionsRoute,
     generatedDbFile,
+    generatedPushLib,
     generatedHooksRoute,
     path.join(generatedRootDir, "server", "compat-sqlite.js"),
     generatedClientIndex,
@@ -832,9 +965,14 @@ function assertGeneratedTree() {
       "Generated server/index.js is missing the CCAM_AUTO_INSTALL_HOOKS guard.",
     );
   }
+  if (!serverIndex.includes('process.env.CCAM_ENABLE_RUN === "1"')) {
+    throw new Error("Generated server/index.js is missing the run-route gate.");
+  }
+  if (!serverIndex.includes("isAllowedDashboardOrigin")) {
+    throw new Error("Generated server/index.js is missing the tightened CORS guard.");
+  }
 
   const dbSource = readFileSync(generatedDbFile, "utf8");
-  const hooksRouteSource = readFileSync(generatedHooksRoute, "utf8");
   if (dbSource.includes('require("better-sqlite3")')) {
     throw new Error(
       "Generated server/db.js must not load better-sqlite3 directly.",
@@ -864,6 +1002,22 @@ function assertGeneratedTree() {
     }
   }
 
+  const sessionsSource = readFileSync(generatedSessionsRoute, "utf8");
+  if (!sessionsSource.includes("req.query.harness")) {
+    throw new Error(
+      "Generated server/routes/sessions.js is missing the server-side harness filter.",
+    );
+  }
+
+  const pushSource = readFileSync(generatedPushLib, "utf8");
+  if (!pushSource.includes("CCAM_VAPID_KEYS_PATH")) {
+    throw new Error(
+      "Generated server/lib/push.js is missing the writable VAPID keys path override.",
+    );
+  }
+
+  const hooksRouteSource = readFileSync(generatedHooksRoute, "utf8");
+
   // CLOSEDLOOP plan-extraction hard-gates (FEA-1189): a future upstream bump
   // that breaks an anchor must fail the build, not silently drop plan capture.
   for (const m of PLAN_MODULES) {
@@ -887,10 +1041,12 @@ function assertGeneratedTree() {
   }
   if (
     !serverIndex.includes('require("./routes/plans")') ||
-    !serverIndex.includes('app.use("/api/plans", plansRouter)')
+    !serverIndex.includes(
+      '  app.use("/api/plans", plansRouter);\n  app.get("/api/openapi.json", (_req, res) => {',
+    )
   ) {
     throw new Error(
-      "Generated server/index.js is missing the /api/plans route wiring (FEA-1189).",
+      "Generated server/index.js is missing the ungated /api/plans route wiring (FEA-1189).",
     );
   }
   const importHistorySource = readFileSync(generatedImportHistory, "utf8");
@@ -912,6 +1068,26 @@ function assertGeneratedTree() {
       "Generated server/routes/hooks.js is missing the live hook plan capture wiring (FEA-1189).",
     );
   }
+}
+
+function patchPushFile(file) {
+  let source = readFileSync(file, "utf8");
+
+  if (!source.includes("process.env.CCAM_VAPID_KEYS_PATH")) {
+    const keysNeedle =
+      'const KEYS_PATH = path.join(__dirname, "../../data/vapid-keys.json");';
+    if (!source.includes(keysNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the VAPID key path constant.`,
+      );
+    }
+    source = source.replace(
+      keysNeedle,
+      'const KEYS_PATH = process.env.CCAM_VAPID_KEYS_PATH || path.join(__dirname, "../../data/vapid-keys.json");',
+    );
+  }
+
+  writeFileSync(file, source, "utf8");
 }
 
 function runSqliteGate() {

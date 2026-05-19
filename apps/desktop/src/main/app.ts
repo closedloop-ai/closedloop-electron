@@ -150,6 +150,11 @@ import {
   type OnboardingHandoffFailureReason,
   type PendingOnboardingHandoff,
 } from "./onboarding-handoff.js";
+import {
+  fetchOnboardingStatus,
+  ONBOARDING_WIZARD_PATH,
+  resolveOnboardingPopupDecision,
+} from "./onboarding-popup.js";
 import { isSecurityUpgradeProvisioned } from "./security-upgrade-result.js";
 import { isDesktopSetupCompleteFromState } from "./setup-readiness.js";
 import { PendingCommandKeyNotifier } from "./pending-command-key-notifier.js";
@@ -536,6 +541,7 @@ export class DesktopApplication {
     this.bootReadyForOnboarding = true;
     void this.drainQueuedOnboardingHandoffs();
     void this.processCanonicalOnboardingHandoff("cold-start");
+    void this.maybeShowOnboardingPopup();
 
     gatewayLog.setVerbose(this.settingsStore.getAll().verboseLogging);
     const previousLogEntries = await readPreviousSessionLogTail(200);
@@ -1527,6 +1533,45 @@ export class DesktopApplication {
     this.desktopWindow
       .getWindow()
       ?.webContents.send("desktop:onboarding-state-changed");
+  }
+
+  private async maybeShowOnboardingPopup(): Promise<void> {
+    try {
+      if (this.settingsStore.getOnboardingPopupDismissedPermanent()) {
+        return;
+      }
+      if (!this.isDesktopSetupComplete()) {
+        return;
+      }
+      const apiKey = this.apiKeyStore.getApiKey();
+      if (!apiKey) {
+        return;
+      }
+      const apiOrigin = this.settingsStore.getApiOrigin();
+      const statusResult = await fetchOnboardingStatus({ apiOrigin, apiKey });
+      const decision = resolveOnboardingPopupDecision({
+        setupComplete: true,
+        dismissedPermanent: false,
+        statusResult,
+      });
+      if (decision === "skip") {
+        return;
+      }
+      if (decision === "suppress") {
+        this.settingsStore.setOnboardingPopupDismissedPermanent(true);
+        Observability.onboardingPopupSuppressedAuto();
+        return;
+      }
+      this.desktopWindow
+        .getWindow()
+        ?.webContents.send("desktop:show-onboarding-popup");
+      Observability.onboardingPopupShown();
+    } catch (error) {
+      gatewayLog.warn(
+        "onboarding-popup",
+        `maybeShowOnboardingPopup failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   private setPackagedUpdateState(patch: Partial<PackagedUpdateState>): void {
@@ -2772,6 +2817,26 @@ export class DesktopApplication {
       async (_event, payload: { webAppOrigin?: string } | undefined) =>
         this.startDesktopFirstDeviceOnboarding(payload?.webAppOrigin),
     );
+    ipcMain.handle(
+      "desktop:dismiss-onboarding-popup",
+      (_event, payload: { permanent?: boolean } | undefined) => {
+        const permanent = payload?.permanent === true;
+        if (permanent) {
+          this.settingsStore.setOnboardingPopupDismissedPermanent(true);
+          Observability.onboardingPopupDismissedPermanent();
+        } else {
+          Observability.onboardingPopupDismissedSession();
+        }
+        return { permanent };
+      },
+    );
+    ipcMain.handle("desktop:onboarding-popup-cta", async () => {
+      Observability.onboardingPopupCtaClicked();
+      const webAppOrigin = this.settingsStore.getWebAppOrigin();
+      const targetUrl = new URL(ONBOARDING_WIZARD_PATH, webAppOrigin).toString();
+      await shell.openExternal(targetUrl);
+      return { opened: targetUrl };
+    });
     ipcMain.handle("desktop:get-binary-paths", () =>
       this.settingsStore.getBinaryPaths(),
     );

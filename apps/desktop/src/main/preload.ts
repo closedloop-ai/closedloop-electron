@@ -57,6 +57,10 @@ const desktopApi = {
     ipcRenderer.invoke("desktop:complete-onboarding", payload) as Promise<unknown>,
   startDeviceOnboarding: (payload: unknown) =>
     ipcRenderer.invoke("desktop:start-device-onboarding", payload) as Promise<unknown>,
+  dismissOnboardingPopup: (payload: { permanent: boolean }) =>
+    ipcRenderer.invoke("desktop:dismiss-onboarding-popup", payload) as Promise<unknown>,
+  onboardingPopupCta: () =>
+    ipcRenderer.invoke("desktop:onboarding-popup-cta") as Promise<unknown>,
   pickSandboxDirectory: () =>
     ipcRenderer.invoke("desktop:pick-sandbox-directory") as Promise<{
       path: string;
@@ -151,4 +155,8 @@ ipcRenderer.on("desktop:update-status", (_event, result) => {
 
 ipcRenderer.on("desktop:onboarding-state-changed", () => {
   window.dispatchEvent(new CustomEvent("desktop:onboarding-state-changed"));
+});
+
+ipcRenderer.on("desktop:show-onboarding-popup", () => {
+  window.dispatchEvent(new CustomEvent("desktop:show-onboarding-popup"));
 });
