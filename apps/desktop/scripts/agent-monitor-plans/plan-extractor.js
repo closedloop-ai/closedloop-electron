@@ -189,9 +189,23 @@ function extractPlansFromSession(session, captureMethod = "log") {
 
   // --- Codex: plan items surfaced by codex-parser into session.plans[] ---
   const codexPlans = Array.isArray(session.plans) ? session.plans : [];
+  const structuredCodexPlanHashes = new Set(
+    codexPlans
+      .filter(
+        (cp) =>
+          cp &&
+          typeof cp === "object" &&
+          cp.source === "codex-plan-item" &&
+          nonEmpty(cp.content),
+      )
+      .map((cp) => sha256(cp.content)),
+  );
   for (const cp of codexPlans) {
     if (!cp || typeof cp !== "object" || !nonEmpty(cp.content)) continue;
     const isProposed = cp.source === "codex-proposed-plan";
+    if (isProposed && structuredCodexPlanHashes.has(sha256(cp.content))) {
+      continue;
+    }
     out.push(
       makeCapture({
         harness: "codex",

@@ -27,6 +27,7 @@ const {
   ensurePlanSchema,
   upsertPlanCapture,
   listPlans,
+  countPlans,
   listVersions,
   getPlan,
   confirmPlan,
@@ -122,6 +123,26 @@ test("extractPlansFromSession detects Codex plan item (high) and proposed-plan (
   assert.equal(prop.needs_confirmation, 1);
 });
 
+test("extractPlansFromSession suppresses fallback proposed-plan text when a matching Codex plan item exists", () => {
+  const caps = extractPlansFromSession({
+    sessionId: "cx",
+    plans: [
+      {
+        source: "codex-proposed-plan",
+        content: "# Shared Plan\nstep 1",
+        timestamp: "t1",
+      },
+      {
+        source: "codex-plan-item",
+        content: "# Shared Plan\nstep 1",
+        timestamp: "t2",
+      },
+    ],
+  });
+  assert.equal(caps.length, 1);
+  assert.equal(caps[0].source, "codex-plan-item");
+});
+
 test("extractPlansFromSession ignores empty/malformed input", () => {
   assert.deepEqual(extractPlansFromSession(null), []);
   assert.deepEqual(extractPlansFromSession({ toolUses: [{ name: "ExitPlanMode", input: { plan: "  " } }] }), []);
@@ -180,7 +201,7 @@ test("extractPlansFromPlansDir scans ~/.claude/plans-style .md files", () => {
   assert.ok(/^[0-9a-f]{64}$/.test(a.content_sha256));
 });
 
-test("plan-store persists file_path and backfills source_log_path on dedup", () => {
+test("plan-store persists file_path and backfills session/log links on dedup", () => {
   const db = freshDb();
   // First pass: plans-dir backfill — file_path set, no agent log.
   const c1 = {
@@ -202,17 +223,21 @@ test("plan-store persists file_path and backfills source_log_path on dedup", () 
   let p = getPlan(db, r1.planId);
   assert.equal(p.file_path, "/u/.claude/plans/linkable.md");
   assert.equal(p.source_log_path, null);
+  assert.equal(p.created_from_session_id, null);
 
   // Same file/content later via the import sink, now WITH an agent log →
   // deduped (same plan_key + sha256) but the log link is backfilled.
   const r2 = upsertPlanCapture(db, {
     ...c1,
+    created_from_session_id: "S1",
     source_log_path: "/u/.claude/projects/p/S1.jsonl",
   });
   assert.equal(r2.deduped, true);
+  assert.equal(r2.planId, r1.planId);
   p = getPlan(db, r1.planId);
   assert.equal(p.file_path, "/u/.claude/plans/linkable.md");
   assert.equal(p.source_log_path, "/u/.claude/projects/p/S1.jsonl");
+  assert.equal(p.created_from_session_id, "S1");
 });
 
 test("extractPlansFromPlansDir tolerates a missing directory", () => {
@@ -238,6 +263,31 @@ test("plans-dir captures upsert + dedupe across runs (gate-independent)", () => 
   const r2 = upsertPlanCapture(db, c2);
   assert.equal(r2.planId, r1.planId);
   assert.equal(r2.version, 2);
+});
+
+test("Codex proposed-plan and plan-item variants share one plan when they describe the same plan", () => {
+  const db = freshDb();
+  const caps = extractPlansFromSession({
+    sessionId: "cx",
+    plans: [
+      {
+        source: "codex-proposed-plan",
+        content: "# Shared Plan\ninitial outline",
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        source: "codex-plan-item",
+        content: "# Shared Plan\ninitial outline\nfinal step",
+        timestamp: "2026-01-01T00:01:00.000Z",
+      },
+    ],
+  });
+
+  assert.equal(caps.length, 2);
+  const first = upsertPlanCapture(db, caps[0]);
+  const second = upsertPlanCapture(db, caps[1]);
+  assert.equal(second.planId, first.planId);
+  assert.equal(listVersions(db, first.planId).length, 2);
 });
 
 // ── plan-store: schema, versioning, dedup ──────────────────────────────────
@@ -294,6 +344,42 @@ test("distinct plan_keys / sessions produce distinct plans", () => {
   assert.notEqual(ra.planId, rb.planId);
   assert.equal(listPlans(db).length, 2);
   assert.equal(listPlans(db, { sessionId: "A" }).length, 1);
+});
+
+test("listPlans/countPlans apply needs_confirmation filtering before pagination", () => {
+  const db = freshDb();
+  for (const cap of extractPlansFromSession({
+    sessionId: "cx",
+    plans: [
+      {
+        source: "codex-proposed-plan",
+        content: "# Needs Review\nfirst",
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        source: "codex-proposed-plan",
+        content: "# Needs Review Too\nsecond",
+        timestamp: "2026-01-01T00:01:00.000Z",
+      },
+      {
+        source: "codex-plan-item",
+        content: "# Already Confirmed\nthird",
+        timestamp: "2026-01-01T00:02:00.000Z",
+      },
+    ],
+  })) {
+    upsertPlanCapture(db, cap);
+  }
+
+  const filtered = listPlans(db, {
+    sessionId: "cx",
+    needsConfirmation: true,
+    limit: 1,
+    offset: 0,
+  });
+  assert.equal(filtered.length, 1);
+  assert.equal(filtered[0].title, "Needs Review Too");
+  assert.equal(countPlans(db, { sessionId: "cx", needsConfirmation: true }), 2);
 });
 
 test("confirm / reject clears needs_confirmation and sets status", () => {

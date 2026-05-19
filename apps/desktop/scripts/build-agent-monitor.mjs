@@ -51,6 +51,12 @@ const sourceClientIndex = path.join(sourceClientDir, "index.html");
 const sourceClientDistDir = path.join(sourceClientDir, "dist");
 const generatedServerEntry = path.join(generatedRootDir, "server", "index.js");
 const generatedDbFile = path.join(generatedRootDir, "server", "db.js");
+const generatedHooksRoute = path.join(
+  generatedRootDir,
+  "server",
+  "routes",
+  "hooks.js",
+);
 const generatedClientIndex = path.join(
   generatedRootDir,
   "client",
@@ -249,6 +255,7 @@ function materializeRuntimeTree() {
 
   patchServerIndex(generatedServerEntry);
   patchDbFile(generatedDbFile);
+  patchHooksRoute(generatedHooksRoute);
   writeFileSync(generatedUninstallHooks, UNINSTALL_HOOKS_SOURCE, "utf8");
 }
 
@@ -489,6 +496,61 @@ function patchDbFile(file) {
   writeFileSync(file, source, "utf8");
 }
 
+function patchHooksRoute(file) {
+  let source = readFileSync(file, "utf8");
+
+  if (!source.includes("extractPlanFromHookEvent")) {
+    const requireNeedle =
+      'const { scanAndImportSubagents } = require("../../scripts/import-history");';
+    if (!source.includes(requireNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the hook-route import-history require anchor (plan hooks, FEA-1189).`,
+      );
+    }
+    source = source.replace(
+      requireNeedle,
+      [
+        requireNeedle,
+        'const { extractPlanFromHookEvent } = require("../lib/plan-extractor");',
+        'const { upsertPlanCapture } = require("../lib/plan-store");',
+      ].join("\n"),
+    );
+  }
+
+  if (!source.includes("[plans] hook capture failed")) {
+    const responseNeedle = '\n\n  res.json({ ok: true, event: result });';
+    if (!source.includes(responseNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the hook-route response anchor (plan hooks, FEA-1189).`,
+      );
+    }
+    source = source.replace(
+      responseNeedle,
+      [
+        "",
+        "  try {",
+        "    const capture = extractPlanFromHookEvent(hook_type, data);",
+        "    if (capture) {",
+        "      const planResult = upsertPlanCapture(db, capture);",
+        "      if (planResult && !planResult.deduped) {",
+        '        broadcast("plan_captured", {',
+        "          plan_id: planResult.planId,",
+        "          version: planResult.version,",
+        "          session_id: capture.created_from_session_id,",
+        "        });",
+        "      }",
+        "    }",
+        "  } catch (e) {",
+        '    console.warn("[plans] hook capture failed:", e && e.message);',
+        "  }",
+        responseNeedle,
+      ].join("\n"),
+    );
+  }
+
+  writeFileSync(file, source, "utf8");
+}
+
 // CLOSEDLOOP plan-extraction (FEA-1189): wire plan capture into the single
 // shared import sink so Claude (session.toolUses) AND Codex (session.plans)
 // plans are persisted on the import/watch path — the primary path, since hooks
@@ -543,9 +605,54 @@ function patchImportHistory(file) {
 // bodies live as reviewable snippet files (no escaping) under
 // scripts/agent-monitor-codex/client/.
 const clientSnippetDir = path.join(codexModulesDir, "client");
+const FULL_WAITING_HARNESS_BRANCH = [
+  "      // Two UI-only overlays need client-side filtering on a broad fetch so",
+  "      // paging/totals stay consistent with the visible rows:",
+  '      //  - "waiting"  derived from awaiting_input_since (status is "active").',
+  "      //  - harness    derived from the harness column (Addition #6); the",
+  "      //    vendored /api/sessions route is unpatched so we filter here.",
+  '      // Legacy/empty harness counts as "claude" (matches the DB default).',
+  '      if (filter === "waiting" || harness) {',
+  "        const res = await api.sessions.list({",
+  '          status: filter === "waiting" ? "active" : filter || undefined,',
+  "          q: search || undefined,",
+  "          cwd: cwd || undefined,",
+  "          sort_by: sortBy,",
+  "          sort_desc: sortDesc,",
+  "          limit: 10000,",
+  "          offset: 0,",
+  "        });",
+  "        let rows = res.sessions;",
+  '        if (filter === "waiting") rows = rows.filter(isSessionAwaitingInput);',
+  "        if (harness)",
+  '          rows = rows.filter((s) => (s.harness || "claude").toLowerCase() === harness);',
+  "        setTotal(rows.length);",
+  "        setSessions(rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE));",
+  "        return;",
+  "      }",
+].join("\n");
 
 function snippet(name) {
   return readFileSync(path.join(clientSnippetDir, name), "utf8");
+}
+
+function normalizeSessionsLoadBranch(file) {
+  let src = readFileSync(file, "utf8");
+  if (src.includes(FULL_WAITING_HARNESS_BRANCH)) {
+    writeFileSync(file, src, "utf8");
+    return;
+  }
+
+  const branchPattern =
+    /      \/\/ (?:The "waiting" filter|Two UI-only overlays)[\s\S]*?        return;\n      }\n/;
+  if (!branchPattern.test(src)) {
+    throw new Error(
+      `Unable to normalize ${file}: expected the waiting-filter branch anchor (Codex Addition #6).`,
+    );
+  }
+
+  src = src.replace(branchPattern, `${FULL_WAITING_HARNESS_BRANCH}\n`);
+  writeFileSync(file, src, "utf8");
 }
 
 function patchClientSource() {
@@ -557,6 +664,7 @@ function patchClientSource() {
     path.join(planModulesDir, "client", "Plans.tsx"),
     path.join(sourceClientDir, "src", "pages", "Plans.tsx"),
   );
+  normalizeSessionsLoadBranch(path.join(sourceClientDir, "src", "pages", "Sessions.tsx"));
   const plansNavLink = [
     "        })}",
     '        <NavLink',
@@ -613,18 +721,6 @@ function patchClientSource() {
       guard: "const [harness, setHarness] = useState",
       find: "  const [dashboardRunIds, setDashboardRunIds] = useState<Set<string>>(new Set());",
       replaceFile: "sessions.state.replace.txt",
-    },
-    {
-      rel: "src/pages/Sessions.tsx",
-      guard: 'filter === "waiting" || harness',
-      findFile: "sessions.loadtop.find.txt",
-      replaceFile: "sessions.loadtop.replace.txt",
-    },
-    {
-      rel: "src/pages/Sessions.tsx",
-      guard: "let rows = res.sessions;",
-      findFile: "sessions.loadrows.find.txt",
-      replaceFile: "sessions.loadrows.replace.txt",
     },
     {
       rel: "src/pages/Sessions.tsx",
@@ -688,9 +784,15 @@ function patchClientSource() {
     if (e.append) {
       src = src + snippet(e.append);
     } else {
-      const find = e.findFile ? snippet(e.findFile) : e.find;
+      const findCandidates = [];
+      if (e.findFile) findCandidates.push(snippet(e.findFile));
+      if (e.find) findCandidates.push(e.find);
+      if (Array.isArray(e.findAlternates)) {
+        findCandidates.push(...e.findAlternates);
+      }
+      const find = findCandidates.find((candidate) => src.includes(candidate));
       const replace = e.replaceFile ? snippet(e.replaceFile) : e.replace;
-      if (!src.includes(find)) {
+      if (!find) {
         throw new Error(
           `Unable to patch client ${e.rel} (Codex Addition #6): anchor not ` +
             `found — upstream client layout may have changed. Re-derive per ` +
@@ -709,6 +811,7 @@ function assertGeneratedTree() {
     path.join(generatedRootDir, "LICENSE"),
     generatedServerEntry,
     generatedDbFile,
+    generatedHooksRoute,
     path.join(generatedRootDir, "server", "compat-sqlite.js"),
     generatedClientIndex,
     path.join(generatedRootDir, "scripts", "install-hooks.js"),
@@ -731,6 +834,7 @@ function assertGeneratedTree() {
   }
 
   const dbSource = readFileSync(generatedDbFile, "utf8");
+  const hooksRouteSource = readFileSync(generatedHooksRoute, "utf8");
   if (dbSource.includes('require("better-sqlite3")')) {
     throw new Error(
       "Generated server/db.js must not load better-sqlite3 directly.",
@@ -798,6 +902,14 @@ function assertGeneratedTree() {
   if (!serverIndex.includes("runClaudePlanBackfill")) {
     throw new Error(
       "Generated server/index.js is missing the ~/.claude/plans backfill (FEA-1189).",
+    );
+  }
+  if (
+    !hooksRouteSource.includes("extractPlanFromHookEvent") ||
+    !hooksRouteSource.includes('broadcast("plan_captured"')
+  ) {
+    throw new Error(
+      "Generated server/routes/hooks.js is missing the live hook plan capture wiring (FEA-1189).",
     );
   }
 }

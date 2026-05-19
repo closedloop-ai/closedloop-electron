@@ -96,7 +96,27 @@ function ensurePlanSchema(db) {
   }
 }
 
-/** Stable per-(session,plan) grouping key. */
+function firstPlanLine(markdown) {
+  if (typeof markdown !== "string") return null;
+  for (const rawLine of markdown.split(/\r?\n/)) {
+    const line = rawLine.replace(/^\s{0,3}#+\s*/, "").trim();
+    if (line) return line.slice(0, 120);
+  }
+  return null;
+}
+
+function normalizePlanKeyPart(value) {
+  if (typeof value !== "string") return null;
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+  return normalized.length > 0 ? normalized : null;
+}
+
+/** Stable logical grouping key for one captured plan. */
 function planKeyFor(capture) {
   if (capture.file_path) {
     const base = String(capture.file_path)
@@ -106,13 +126,68 @@ function planKeyFor(capture) {
       .pop();
     if (base) return base;
   }
-  return `${capture.created_from_session_id || "nosession"}:${capture.source}`;
+  const keyPart =
+    normalizePlanKeyPart(firstPlanLine(capture.content_markdown)) ||
+    normalizePlanKeyPart(capture.title) ||
+    normalizePlanKeyPart(capture.source) ||
+    "plan";
+  const sessionKey = capture.created_from_session_id || "nosession";
+  if (capture.harness === "codex") {
+    return `${sessionKey}:codex:${keyPart}`;
+  }
+  return `${sessionKey}:${keyPart}`;
+}
+
+function findExistingPlan(db, capture, planKey) {
+  const harness = capture.harness || null;
+  const sessionId = capture.created_from_session_id || null;
+
+  if (capture.file_path) {
+    return db
+      .prepare(
+        `SELECT * FROM plans
+         WHERE harness IS ? AND plan_key = ? AND (file_path = ? OR file_path IS NULL)
+         ORDER BY CASE WHEN file_path = ? THEN 0 ELSE 1 END,
+                  CASE WHEN created_from_session_id IS NULL THEN 1 ELSE 0 END,
+                  updated_at DESC
+         LIMIT 1`,
+      )
+      .get(harness, planKey, capture.file_path, capture.file_path);
+  }
+
+  return db
+    .prepare(
+      `SELECT * FROM plans
+       WHERE harness IS ? AND created_from_session_id IS ? AND plan_key = ?
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+    )
+    .get(harness, sessionId, planKey);
+}
+
+function buildPlanListFilters({ sessionId = null, needsConfirmation = null } = {}) {
+  const clauses = [];
+  const params = [];
+  if (sessionId) {
+    clauses.push("created_from_session_id = ?");
+    params.push(sessionId);
+  }
+  if (typeof needsConfirmation === "boolean") {
+    clauses.push("needs_confirmation = ?");
+    params.push(needsConfirmation ? 1 : 0);
+  }
+  return {
+    clause: clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "",
+    params,
+  };
 }
 
 /**
- * Upsert a PlanCapture. Resolves/creates the parent `plans` row by
- * (created_from_session_id, plan_key); appends a new `plan_versions` row only
- * when the content sha256 differs from the latest version.
+ * Upsert a PlanCapture. Resolves/creates the parent `plans` row by the
+ * capture's logical key (file-backed plans ignore session boundaries so
+ * startup backfill and later imports merge cleanly); appends a new
+ * `plan_versions` row only when the content sha256 differs from the latest
+ * version.
  *
  * @returns {{planId:string, versionId:string|null, version:number, deduped:boolean, created:boolean}}
  */
@@ -121,13 +196,7 @@ function upsertPlanCapture(db, capture) {
   const sessionId = capture.created_from_session_id || null;
   const ts = capture.captured_at || nowIso();
 
-  const existingPlan = db
-    .prepare(
-      `SELECT * FROM plans
-       WHERE created_from_session_id IS ? AND plan_key = ?
-       LIMIT 1`,
-    )
-    .get(sessionId, planKey);
+  const existingPlan = findExistingPlan(db, capture, planKey);
 
   let planId;
   let created = false;
@@ -149,14 +218,22 @@ function upsertPlanCapture(db, capture) {
       if (capture.file_path || capture.source_log_path) {
         db.prepare(
           `UPDATE plans
-             SET file_path = COALESCE(file_path, ?),
+             SET created_from_session_id = COALESCE(created_from_session_id, ?),
+                 file_path = COALESCE(file_path, ?),
                  source_log_path = COALESCE(source_log_path, ?)
            WHERE id = ?`,
         ).run(
+          sessionId,
           capture.file_path || null,
           capture.source_log_path || null,
           planId,
         );
+      } else if (sessionId) {
+        db.prepare(
+          `UPDATE plans
+             SET created_from_session_id = COALESCE(created_from_session_id, ?)
+           WHERE id = ?`,
+        ).run(sessionId, planId);
       }
       return {
         planId,
@@ -228,6 +305,7 @@ function upsertPlanCapture(db, capture) {
            title = COALESCE(?, title),
            capture_method = COALESCE(?, capture_method),
            harness = COALESCE(?, harness),
+           created_from_session_id = COALESCE(created_from_session_id, ?),
            file_path = COALESCE(?, file_path),
            source_log_path = COALESCE(?, source_log_path),
            needs_confirmation = ?,
@@ -239,6 +317,7 @@ function upsertPlanCapture(db, capture) {
     capture.title || null,
     capture.capture_method || null,
     capture.harness || null,
+    sessionId,
     capture.file_path || null,
     capture.source_log_path || null,
     capture.needs_confirmation ? 1 : 0,
@@ -256,21 +335,24 @@ function upsertPlanCapture(db, capture) {
   };
 }
 
-function listPlans(db, { sessionId = null, limit = 100, offset = 0 } = {}) {
-  if (sessionId) {
-    return db
-      .prepare(
-        `SELECT * FROM plans
-         WHERE created_from_session_id = ?
-         ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
-      )
-      .all(sessionId, limit, offset);
-  }
+function listPlans(
+  db,
+  { sessionId = null, needsConfirmation = null, limit = 100, offset = 0 } = {},
+) {
+  const filters = buildPlanListFilters({ sessionId, needsConfirmation });
   return db
     .prepare(
-      `SELECT * FROM plans ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
+      `SELECT * FROM plans${filters.clause}
+       ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
     )
-    .all(limit, offset);
+    .all(...filters.params, limit, offset);
+}
+
+function countPlans(db, { sessionId = null, needsConfirmation = null } = {}) {
+  const filters = buildPlanListFilters({ sessionId, needsConfirmation });
+  return db
+    .prepare(`SELECT COUNT(*) AS c FROM plans${filters.clause}`)
+    .get(...filters.params).c;
 }
 
 function listVersions(db, planId) {
@@ -317,6 +399,7 @@ module.exports = {
   ensurePlanSchema,
   upsertPlanCapture,
   listPlans,
+  countPlans,
   listVersions,
   getPlan,
   confirmPlan,

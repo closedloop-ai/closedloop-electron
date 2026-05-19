@@ -22,7 +22,6 @@ interface Plan {
   id: string;
   title: string | null;
   status: string;
-  source: string;
   harness: string | null;
   capture_method: string | null;
   created_from_session_id: string | null;
@@ -189,7 +188,7 @@ export function Plans() {
                       {p.harness || "?"}
                     </span>
                     <span className="rounded bg-surface-3 px-1.5 py-0.5">
-                      {p.source}
+                      {p.status}
                     </span>
                     <span className="rounded bg-surface-3 px-1.5 py-0.5">
                       {p.capture_method || "?"}

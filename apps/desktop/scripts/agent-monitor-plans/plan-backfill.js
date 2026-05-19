@@ -48,6 +48,8 @@ function runClaudePlanBackfill(db) {
   const plansDir = path.join(resolveClaudeHome(), "plans");
   let captured = 0;
   let deduped = 0;
+  let errors = 0;
+  let lastError = null;
   for (const cap of extractPlansFromPlansDir(plansDir)) {
     try {
       const r = upsertPlanCapture(db, cap);
@@ -64,7 +66,8 @@ function runClaudePlanBackfill(db) {
         }
       }
     } catch (e) {
-      void e; // idempotent / non-fatal
+      errors += 1;
+      lastError = e;
     }
   }
   if (captured > 0) {
@@ -72,7 +75,12 @@ function runClaudePlanBackfill(db) {
       `[plans] backfilled ${captured} plan file(s) from ${plansDir}`,
     );
   }
-  return { captured, deduped };
+  if (errors > 0) {
+    console.warn(
+      `[plans] ${errors} Claude plan file(s) failed to backfill from ${plansDir}${lastError && lastError.message ? `: ${lastError.message}` : ""}`,
+    );
+  }
+  return { captured, deduped, errors };
 }
 
 module.exports = { runClaudePlanBackfill, resolveClaudeHome };

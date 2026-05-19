@@ -17,14 +17,12 @@ const planStore = require("../lib/plan-store");
 // Path is never client-supplied — it's the plan's own stored file_path /
 // source_log_path, validated to exist — so there's no arbitrary-open vector.
 function osOpen(filePath) {
-  const cmd =
+  const [cmd, args] =
     process.platform === "darwin"
-      ? "open"
+      ? ["open", [filePath]]
       : process.platform === "win32"
-        ? "cmd"
-        : "xdg-open";
-  const args =
-    process.platform === "win32" ? ["/c", "start", "", filePath] : [filePath];
+        ? ["rundll32.exe", ["url.dll,FileProtocolHandler", filePath]]
+        : ["xdg-open", [filePath]];
   const child = spawn(cmd, args, { detached: true, stdio: "ignore" });
   child.unref();
 }
@@ -59,19 +57,20 @@ router.get("/", (req, res) => {
     typeof req.query.session_id === "string" && req.query.session_id.trim()
       ? req.query.session_id.trim()
       : null;
+  const needsConfirmation =
+    req.query.needs_confirmation === "1"
+      ? true
+      : req.query.needs_confirmation === "0"
+        ? false
+        : null;
 
-  let plans = planStore.listPlans(db, { sessionId, limit, offset });
-  if (req.query.needs_confirmation === "1") {
-    plans = plans.filter((p) => p.needs_confirmation === 1);
-  }
-
-  const total = sessionId
-    ? db
-        .prepare(
-          "SELECT COUNT(*) AS c FROM plans WHERE created_from_session_id = ?",
-        )
-        .get(sessionId).c
-    : db.prepare("SELECT COUNT(*) AS c FROM plans").get().c;
+  const plans = planStore.listPlans(db, {
+    sessionId,
+    needsConfirmation,
+    limit,
+    offset,
+  });
+  const total = planStore.countPlans(db, { sessionId, needsConfirmation });
 
   res.json({ plans, limit, offset, total });
 });

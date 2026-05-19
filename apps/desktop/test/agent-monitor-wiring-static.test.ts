@@ -8,6 +8,7 @@ const read = (relative: string): string =>
 const appSource = read("../src/main/app.ts");
 const agentMonitorPathSource = read("../src/main/agent-monitor-path.ts");
 const buildScriptSource = read("../scripts/build-agent-monitor.mjs");
+const plansRouteSource = read("../scripts/agent-monitor-plans/plans-route.js");
 const claudeDocSource = read("../CLAUDE.md");
 const shutdownSource = read("../src/main/shutdown.ts");
 const stagePackagingSource = read("../scripts/stage-packaging-app.mjs");
@@ -63,6 +64,9 @@ test("build script materializes a generated runtime tree with the host patches",
   assert.match(buildScriptSource, /server\.listen\(port, "127\.0\.0\.1", \(\) => \{/);
   assert.match(buildScriptSource, /CCAM_AUTO_INSTALL_HOOKS === "1"/);
   assert.match(buildScriptSource, /Database = require\("\.\/compat-sqlite"\);/);
+  assert.match(buildScriptSource, /function patchHooksRoute/);
+  assert.match(buildScriptSource, /extractPlanFromHookEvent/);
+  assert.match(buildScriptSource, /upsertPlanCapture\(db, capture\)/);
   assert.match(buildScriptSource, /module\.exports = \{ uninstallHooks \};/);
 });
 
@@ -211,6 +215,12 @@ test("renderer hides the monitor tab by default and exposes the settings toggle"
   // Iframe-in-hidden-panel height fix must be present.
   assert.match(indexHtml, /function sizeClaudeFrame/);
   assert.match(indexHtml, /window\.addEventListener\("resize", sizeClaudeFrame\)/);
+});
+
+test("plans route filters in SQL and avoids shell-parsed Windows open commands", () => {
+  assert.match(plansRouteSource, /countPlans\(db, \{ sessionId, needsConfirmation \}\)/);
+  assert.match(plansRouteSource, /rundll32\.exe/);
+  assert.doesNotMatch(plansRouteSource, /spawn\(cmd, \["\/c", "start"/);
 });
 
 test("Codex support (Addition #4/#5/#6) is wired into the generated build", () => {
