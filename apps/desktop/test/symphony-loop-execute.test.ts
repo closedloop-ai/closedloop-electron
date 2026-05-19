@@ -2876,6 +2876,7 @@ test("EXECUTE: LLM commit spawns claude via resolved absolute path and writes PI
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);

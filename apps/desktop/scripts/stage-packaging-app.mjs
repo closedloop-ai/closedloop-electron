@@ -137,6 +137,11 @@ if (installResult.status !== 0) {
   process.exit(installResult.status ?? 1);
 }
 
+await rm(path.join(stageAppDir, "node_modules", "better-sqlite3"), {
+  recursive: true,
+  force: true,
+});
+
 await stat(buildOutputDir).catch(() => {
   throw new Error("apps/desktop/dist is missing. Run `pnpm build` before staging the packaging app.");
 });

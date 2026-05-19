@@ -4,6 +4,7 @@ export interface ShutdownDeps {
   observability: { shutdown: () => Promise<void> };
   cloudSocket: { stop: () => void };
   commandExecutor: { dispose: () => void };
+  agentMonitor: { stop: () => Promise<void> | void };
   server: { stop: () => Promise<void> };
   desktopWindow: { dispose: () => void };
   tray: { dispose: () => void };
@@ -54,6 +55,9 @@ export async function runShutdownSequence(
     });
     await runPhase("cloudSocket.stop", () => deps.cloudSocket.stop());
     await runPhase("commandExecutor.dispose", () => deps.commandExecutor.dispose());
+    await runPhase("agentMonitor.stop", async () => {
+      await deps.agentMonitor.stop();
+    });
     await runPhase("server.stop", () => deps.server.stop());
     await runPhase("desktopWindow.dispose", () => deps.desktopWindow.dispose());
     await runPhase("tray.dispose", () => deps.tray.dispose());
