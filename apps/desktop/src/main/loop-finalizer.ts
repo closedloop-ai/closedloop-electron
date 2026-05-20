@@ -7,9 +7,12 @@ import {
   type RepoExecutionResult,
 } from "@closedloop-ai/loops-api/execution-result";
 import { execFileSync } from "node:child_process";
-import crypto from "node:crypto";
 import { existsSync, promises as fs, readFileSync } from "node:fs";
 import path from "node:path";
+import {
+  postLoopEvent,
+  uploadArtifacts,
+} from "../server/operations/loop-http.js";
 import { readEffectiveStatusFromState } from "../server/operations/symphony-job-snapshot.js";
 import {
   EVALUATE_COMMAND_ARTIFACT,
@@ -56,7 +59,7 @@ import { parseUserVisibleLoopFailurePayload } from "./user-visible-loop-failure.
 export interface LoopFinalizerDeps {
   jobStore: JobStore;
   telemetry: TelemetryEmitter;
-  apiAuthToken: string;
+  getToken: () => string | null;
   apiBaseUrl: string;
   isProcessRunning: (pid: number) => boolean;
   getAllowedDirectories?: () => string[];
@@ -118,7 +121,7 @@ export type SupportUploadDeps = {
   job: LocalJob;
   claudeWorkDir: string;
   apiBaseUrl: string;
-  token: string;
+  getToken: () => string | null;
   jobStore?: JobStore;
 };
 
@@ -134,7 +137,7 @@ export function parseJobWarnings(job: Pick<LocalJob, "warning">): string[] {
 
 type ArtifactUploadDeps = Pick<
   LoopFinalizerDeps,
-  "jobStore" | "apiAuthToken" | "apiBaseUrl" | "getAllowedDirectories"
+  "jobStore" | "getToken" | "apiBaseUrl" | "getAllowedDirectories"
 >;
 
 function hasTerminalExecuteFinalization(
@@ -411,7 +414,7 @@ export async function tryUploadArtifacts(
   const uploadResult = await uploadArtifacts(
     deps.apiBaseUrl,
     job.loopId,
-    deps.apiAuthToken,
+    deps.getToken,
     {
       artifacts,
       metadata: buildArtifactUploadMetadata(
@@ -486,7 +489,7 @@ export async function tryPostCompletedEvent(
   const eventResult = await postLoopEvent(
     deps.apiBaseUrl,
     job.loopId,
-    deps.apiAuthToken,
+    deps.getToken,
     completedEvent,
   );
   if (!eventResult.success) {
@@ -573,7 +576,7 @@ export async function tryPostErrorEvent(
   const eventResult = await postLoopEvent(
     deps.apiBaseUrl,
     job.loopId,
-    deps.apiAuthToken,
+    deps.getToken,
     errorEvent,
   );
   if (!eventResult.success) {
@@ -785,75 +788,6 @@ function readArtifacts(
   return {};
 }
 
-async function postLoopEvent(
-  apiBaseUrl: string,
-  loopId: string,
-  token: string,
-  eventBody: Record<string, unknown>,
-): Promise<{ success: boolean; error?: string }> {
-  const url = `${apiBaseUrl}/loops/${loopId}/events`;
-  const payload: Record<string, unknown> = {
-    ...eventBody,
-    timestamp: eventBody.timestamp ?? new Date().toISOString(),
-  };
-  try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        "x-loop-event-nonce": crypto.randomUUID(),
-      },
-      body: JSON.stringify(payload),
-    });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      return {
-        success: false,
-        error: `HTTP ${resp.status} ${resp.statusText} ${text}`,
-      };
-    }
-    return { success: true };
-  } catch (err) {
-    return {
-      success: false,
-      error: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
-async function uploadArtifacts(
-  apiBaseUrl: string,
-  loopId: string,
-  token: string,
-  body: Record<string, unknown>,
-): Promise<{ success: boolean; error?: string }> {
-  const url = `${apiBaseUrl}/loops/${loopId}/upload-artifacts`;
-  try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      return {
-        success: false,
-        error: `HTTP ${resp.status} ${resp.statusText} ${text}`,
-      };
-    }
-    return { success: true };
-  } catch (err) {
-    return {
-      success: false,
-      error: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
 function supportUploadSuffix(s3StateKey: string | undefined): string | undefined {
   if (!s3StateKey) {
     return undefined;
@@ -949,12 +883,20 @@ async function collectSupportUploadCandidates(
 async function requestSupportUploadUrls(
   apiBaseUrl: string,
   loopId: string,
-  token: string,
+  getToken: () => string | null,
   keys: string[],
 ): Promise<
   | { success: true; urlsByKey: Map<string, string> }
   | { success: false; reason: SupportUploadReason; error: string }
 > {
+  const token = getToken();
+  if (token === null) {
+    return {
+      success: false,
+      reason: "missing_token",
+      error: "No loop token available for support upload",
+    };
+  }
   const url = `${apiBaseUrl}/loops/${loopId}/upload-urls`;
   try {
     const response = await fetch(url, {
@@ -1081,7 +1023,7 @@ export async function tryUploadSupportBundle({
   job,
   claudeWorkDir,
   apiBaseUrl,
-  token,
+  getToken,
   jobStore,
 }: SupportUploadDeps): Promise<SupportUploadResult> {
   const startedAt = Date.now();
@@ -1119,7 +1061,7 @@ export async function tryUploadSupportBundle({
   const uploadUrls = await requestSupportUploadUrls(
     apiBaseUrl,
     job.loopId,
-    token,
+    getToken,
     candidates.map((candidate) => candidate.key),
   );
   if (!uploadUrls.success) {
@@ -1166,7 +1108,7 @@ export async function tryUploadSupportBundle({
     uploaded.push(candidate);
   }
 
-  const eventResult = await postLoopEvent(apiBaseUrl, job.loopId, token, {
+  const eventResult = await postLoopEvent(apiBaseUrl, job.loopId, getToken, {
     type: SUPPORT_BUNDLE_UPLOADED_EVENT_TYPE,
     keys: uploaded.map((candidate) => candidate.key),
     files: uploaded.map((candidate) => ({
@@ -1260,7 +1202,7 @@ export async function finalizeLoopFromRuntime(
   const {
     jobStore,
     telemetry,
-    apiAuthToken,
+    getToken,
     apiBaseUrl,
     isProcessRunning,
     loopTokenStore,
@@ -1352,7 +1294,7 @@ export async function finalizeLoopFromRuntime(
 
   const artifactDeps = {
     jobStore,
-    apiAuthToken,
+    getToken,
     apiBaseUrl,
     getAllowedDirectories,
   };
@@ -1416,7 +1358,7 @@ export async function finalizeLoopFromRuntime(
         claudeWorkDir,
         loopId: resolvedJob.loopId,
         apiBaseUrl,
-        token: apiAuthToken,
+        getToken,
         webAppOrigin: resolvedJob.webAppOrigin ?? "",
         getAllowedDirectories,
         artifactSlug: resolvedJob.artifactSlug,
@@ -1500,7 +1442,7 @@ export async function finalizeLoopFromRuntime(
       job: resolvedJob,
       claudeWorkDir,
       apiBaseUrl,
-      token: apiAuthToken,
+      getToken,
       jobStore,
     });
     if (supportResult.failed) {
