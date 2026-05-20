@@ -117,6 +117,7 @@ const desktopApi = {
       url: string | null;
       ready: boolean;
       enabled: boolean;
+      planExtractionEnabled: boolean;
     }>,
   openAgentMonitor: () =>
     ipcRenderer.invoke("desktop:open-agent-monitor") as Promise<unknown>,

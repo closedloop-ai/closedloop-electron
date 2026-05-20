@@ -258,6 +258,7 @@ import { json } from "./response-utils.js";
 import {
   parseSymphonyLoopRequestBody,
   SymphonyLoopRequestValidationError,
+  type SymphonyBranchMaterializationEntry,
   type CodeContextFile,
   type SymphonyLoopRequestBody,
   type SymphonyLoopSupportingArtifact,
@@ -1373,6 +1374,195 @@ function resolveLoopPrimaryFullName(
   );
 }
 
+function normalizeLoopRepoFullName(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function requireVerifiedLoopRepositoryFullName(args: {
+  declaredFullName?: string | null;
+  repoPath: string;
+  role: "primary" | "additional";
+}): string {
+  const declaredFullName = args.declaredFullName?.trim();
+  if (!declaredFullName) {
+    throw new Error(`${args.role} repository fullName is required`);
+  }
+  const resolvedFullName = resolveRepoFullName(args.repoPath);
+  if (!resolvedFullName) {
+    throw new Error(
+      `Unable to resolve ${args.role} repository origin fullName for ${args.repoPath}`,
+    );
+  }
+  if (
+    normalizeLoopRepoFullName(resolvedFullName) !==
+    normalizeLoopRepoFullName(declaredFullName)
+  ) {
+    throw new Error(
+      `${args.role} repository fullName ${declaredFullName} does not match local origin ${resolvedFullName}`,
+    );
+  }
+  return declaredFullName;
+}
+
+function requireExpectedLoopBranch(args: {
+  body: SymphonyLoopRequestBody;
+  role: SymphonyBranchMaterializationEntry["role"];
+  repositoryFullName: string;
+  baseBranch: string;
+}): SymphonyBranchMaterializationEntry {
+  const materialization = args.body.branchMaterialization;
+  if (!materialization) {
+    throw new Error("branchMaterialization is required for new loop worktree");
+  }
+  if (!args.repositoryFullName) {
+    throw new Error(
+      "repositoryFullName is required to match branchMaterialization",
+    );
+  }
+
+  const matches = materialization.branches.filter(
+    (entry) =>
+      entry.role === args.role &&
+      normalizeLoopRepoFullName(entry.repositoryFullName) ===
+        normalizeLoopRepoFullName(args.repositoryFullName) &&
+      entry.baseBranch === args.baseBranch,
+  );
+
+  if (matches.length === 0) {
+    throw new Error(
+      `Missing branchMaterialization entry for ${args.role} repo ${args.repositoryFullName} base ${args.baseBranch}`,
+    );
+  }
+  if (matches.length > 1) {
+    throw new Error(
+      `Ambiguous branchMaterialization entries for ${args.role} repo ${args.repositoryFullName} base ${args.baseBranch}`,
+    );
+  }
+  return matches[0];
+}
+
+function shouldUseBranchMaterialization(
+  body: SymphonyLoopRequestBody,
+): boolean {
+  return body.branchMaterialization !== undefined;
+}
+
+async function failBranchCreate(args: {
+  body: SymphonyLoopRequestBody;
+  apiBaseUrl: string;
+  context: OperationRequestContext;
+  message: string;
+  status?: number;
+}): Promise<void> {
+  const message = sanitizeLoopErrorMessage(args.message);
+  await postLoopEventBounded(
+    args.apiBaseUrl,
+    args.body.loopId,
+    () => args.body.closedLoopAuthToken,
+    {
+      type: LoopEventType.Error,
+      code: LoopErrorCode.BranchCreateFailed,
+      message,
+    },
+  );
+  json(args.context, args.status ?? 500, { error: message });
+}
+
+async function preflightAdditionalRepoBranchMaterialization(args: {
+  resolvedAdditionalRepos: readonly ResolvedAdditionalRepo[];
+  worktreeKey: string;
+  allowedDirs: string[];
+  body: SymphonyLoopRequestBody;
+  apiBaseUrl: string;
+  context: OperationRequestContext;
+  wt: WorktreeProvider;
+  reuseStaleWorktree: boolean;
+}): Promise<boolean> {
+  if (!shouldUseBranchMaterialization(args.body)) {
+    return true;
+  }
+
+  for (let addIdx = 0; addIdx < args.resolvedAdditionalRepos.length; addIdx++) {
+    const addRepo = args.resolvedAdditionalRepos[addIdx];
+    const requestEntry = args.body.additionalRepos?.[addIdx];
+    const peerOffenderLabel = (): string =>
+      requestEntry?.fullName ??
+      resolveRepoFullName(addRepo.repoPath) ??
+      addRepo.repoPath;
+    const baseBranch = addRepo.branch;
+    const addRepoSlug = slugifyLoopId(baseBranch);
+    const addRepoKey = `${args.worktreeKey}-${addRepoSlug}-${additionalRepoDisambiguator(addRepo.repoPath)}`;
+    const canonicalAddWorktreeDir = resolveLoopWorktreeDir(
+      addRepo.repoPath,
+      addRepoKey,
+    );
+
+    let expectedBranch: SymphonyBranchMaterializationEntry;
+    try {
+      const repositoryFullName = requireVerifiedLoopRepositoryFullName({
+        declaredFullName: requestEntry?.fullName,
+        repoPath: addRepo.repoPath,
+        role: "additional",
+      });
+      expectedBranch = requireExpectedLoopBranch({
+        body: args.body,
+        role: "additional",
+        repositoryFullName,
+        baseBranch,
+      });
+    } catch (err) {
+      const msg = sanitizeUnknownError(err);
+      const offender = peerOffenderLabel();
+      await postLoopEventBounded(
+        args.apiBaseUrl,
+        args.body.loopId,
+        () => args.body.closedLoopAuthToken,
+        {
+          type: LoopEventType.Error,
+          code: LoopErrorCode.BranchCreateFailed,
+          message: `Additional repo branch materialization is not available for ${offender}: ${msg}`,
+        },
+      );
+      json(args.context, 500, {
+        error: `Additional repo branch materialization is not available for ${offender}: ${msg}`,
+      });
+      return false;
+    }
+
+    const staleAddWorktree = args.wt.findWorktreeForBranch(
+      addRepo.repoPath,
+      expectedBranch.branchName,
+    );
+    const addWorktreeDir =
+      args.reuseStaleWorktree && staleAddWorktree
+        ? staleAddWorktree
+        : canonicalAddWorktreeDir;
+    try {
+      assertPathAllowed(addWorktreeDir, args.allowedDirs);
+    } catch (err) {
+      if (err instanceof DirectoryNotAllowedError) {
+        const offender = peerOffenderLabel();
+        await postLoopEventBounded(
+          args.apiBaseUrl,
+          args.body.loopId,
+          () => args.body.closedLoopAuthToken,
+          {
+            type: LoopEventType.Error,
+            code: LoopErrorCode.RepoNotAllowed,
+            message: `Additional repo worktree path not allowed for ${offender}: ${addWorktreeDir}`,
+          },
+        );
+        json(args.context, 403, {
+          error: `Additional repo worktree path not allowed for ${offender}: ${addWorktreeDir}`,
+        });
+        return false;
+      }
+      throw err;
+    }
+  }
+  return true;
+}
+
 /**
  * Resolve worktree directory for a loop.
  * Uses full untruncated stable ID for directory naming.
@@ -1426,8 +1616,30 @@ async function ensureWorktreeImpl(
   baseBranch: string,
   loopId: string,
 ): Promise<void> {
-  if (existsSync(worktreeDir)) {
+  const created = await createWorktreeCheckoutImpl(
+    expandedRepoPath,
+    worktreeDir,
+    branchName,
+    baseBranch,
+    loopId,
+  );
+  if (!created) {
     return;
+  }
+
+  await runBootstrapIfNeeded(worktreeDir, loopId);
+  await runLoopsSetupScript(worktreeDir, loopId);
+}
+
+async function createWorktreeCheckoutImpl(
+  expandedRepoPath: string,
+  worktreeDir: string,
+  branchName: string,
+  baseBranch: string,
+  _loopId: string,
+): Promise<boolean> {
+  if (existsSync(worktreeDir)) {
+    return false;
   }
 
   await fs.mkdir(path.dirname(worktreeDir), { recursive: true });
@@ -1467,8 +1679,202 @@ async function ensureWorktreeImpl(
     },
   );
 
-  await runBootstrapIfNeeded(worktreeDir, loopId);
-  await runLoopsSetupScript(worktreeDir, loopId);
+  return true;
+}
+
+async function ensureLoopWorktreeMaterialized(args: {
+  expandedRepoPath: string;
+  worktreeDir: string;
+  branchName: string;
+  baseBranch: string;
+  loopId: string;
+  repositoryFullName: string;
+  apiBaseUrl: string;
+  token: string;
+  wt?: WorktreeProvider;
+}): Promise<void> {
+  if (args.wt && args.wt !== defaultWorktreeProvider) {
+    throw new Error(
+      "branch materialization requires the default worktree provider",
+    );
+  }
+
+  if (existsSync(args.worktreeDir)) {
+    loopLog(
+      args.loopId,
+      `Removing stale loop worktree path before branch materialization: ${args.worktreeDir}`,
+    );
+    await defaultWorktreeProvider.removeWorktree(
+      args.worktreeDir,
+      args.expandedRepoPath,
+      args.loopId,
+    );
+  }
+
+  const created = await createWorktreeCheckoutImpl(
+    args.expandedRepoPath,
+    args.worktreeDir,
+    args.branchName,
+    args.baseBranch,
+    args.loopId,
+  );
+  if (!created) {
+    throw new Error(
+      `Failed to create fresh loop worktree at ${args.worktreeDir}`,
+    );
+  }
+
+  await pushAndRecordLoopBranch(args);
+  await runBootstrapIfNeeded(args.worktreeDir, args.loopId);
+  await runLoopsSetupScript(args.worktreeDir, args.loopId);
+}
+
+async function ensureLoopWorktreeForRequest(args: {
+  body: SymphonyLoopRequestBody;
+  expandedRepoPath: string;
+  worktreeDir: string;
+  branchName: string;
+  baseBranch: string;
+  loopId: string;
+  repositoryFullName: string;
+  apiBaseUrl: string;
+  token: string;
+  wt: WorktreeProvider;
+}): Promise<void> {
+  if (shouldUseBranchMaterialization(args.body)) {
+    await ensureLoopWorktreeMaterialized(args);
+    return;
+  }
+
+  await args.wt.ensureWorktree(
+    args.expandedRepoPath,
+    args.worktreeDir,
+    args.branchName,
+    args.baseBranch,
+    args.loopId,
+  );
+}
+
+async function pushAndRecordLoopBranch(args: {
+  expandedRepoPath: string;
+  worktreeDir: string;
+  branchName: string;
+  baseBranch: string;
+  loopId: string;
+  repositoryFullName: string;
+  apiBaseUrl: string;
+  token: string;
+}): Promise<void> {
+  const gitBin = getResolvedGitPath();
+  const headSha = await runGitForMaterialization(
+    gitBin,
+    ["rev-parse", "HEAD"],
+    args.worktreeDir,
+    "resolve branch HEAD",
+    10_000,
+  );
+  const defaultBranch = await resolveOriginDefaultBranch(
+    gitBin,
+    args.expandedRepoPath,
+    args.baseBranch,
+  );
+
+  await runGitForMaterialization(
+    gitBin,
+    ["push", "-u", "origin", args.branchName],
+    args.worktreeDir,
+    "push loop branch",
+    60_000,
+  );
+
+  const url = `${args.apiBaseUrl}/loops/${args.loopId}/branch-artifact`;
+  let resp: Response;
+  try {
+    resp = await fetchWithTimeout(
+      url,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${args.token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          repositoryFullName: args.repositoryFullName,
+          branchName: args.branchName,
+          baseBranch: args.baseBranch,
+          defaultBranch,
+          headSha,
+        }),
+      },
+      60_000,
+    );
+  } catch (err) {
+    throw new Error(
+      `Failed to record loop branch artifact: ${sanitizeUnknownError(err)}`,
+    );
+  }
+
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => "");
+    throw new Error(
+      `Failed to record loop branch artifact: HTTP ${resp.status} ${resp.statusText} ${sanitizeLoopErrorMessage(body)}`.trim(),
+    );
+  }
+}
+
+async function runGitForMaterialization(
+  gitBin: string,
+  args: string[],
+  cwd: string,
+  action: string,
+  timeoutMs: number,
+): Promise<string> {
+  try {
+    const result = await execFileAsync(gitBin, args, {
+      cwd,
+      encoding: "utf8",
+      timeout: timeoutMs,
+    });
+    return result.stdout.trim();
+  } catch (err) {
+    throw new Error(`Failed to ${action}: ${sanitizeUnknownError(err)}`);
+  }
+}
+
+async function resolveOriginDefaultBranch(
+  gitBin: string,
+  repoPath: string,
+  baseBranch: string,
+): Promise<string> {
+  try {
+    const result = await execFileAsync(
+      gitBin,
+      ["symbolic-ref", "refs/remotes/origin/HEAD", "--short"],
+      {
+        cwd: repoPath,
+        encoding: "utf8",
+        timeout: 10_000,
+      },
+    );
+    const branch = result.stdout.trim().replace(/^origin\//, "");
+    return branch || baseBranch;
+  } catch {
+    return baseBranch;
+  }
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Check whether a branch exists locally or on the remote. */
@@ -2344,17 +2750,22 @@ export function readBootstrapOutputs(claudeWorkDir: string): LoopOutputArtifacts
  * Each entry is a [pattern, replacement] tuple with a string replacement.
  */
 const CREDENTIAL_PATTERNS: Array<[RegExp, string]> = [
+  // Credential-bearing HTTPS remotes: https://user:token@github.com/owner/repo.git
+  [
+    /\bhttps:\/\/[^:\s/@]+:[^@\s/]+@([^/\s]+\/[^\s"'<>]+)/gi,
+    "https://[REDACTED]@$1",
+  ],
   // AWS keys: AKIA... style (20 uppercase alphanum after AKIA/ASIA/AROA prefix)
   [/\b(AKIA|ASIA|AROA)[A-Z0-9]{16}\b/g, "[REDACTED_AWS_KEY]"],
   // Generic bearer / API tokens: "Bearer <token>"
-  [/\bBearer\s+[A-Za-z0-9\-._~+/]+=*/g, "Bearer [REDACTED]"],
+  [/\bBearer\s+[A-Za-z0-9\-._~+/]+=*/gi, "Bearer [REDACTED]"],
   // sk- prefixed API keys (OpenAI, Anthropic, etc.)
   [/\bsk-[A-Za-z0-9\-_]{10,}/g, "[REDACTED_SK_KEY]"],
-  // GitHub personal access tokens: ghp_, gho_, ghs_, ghr_
-  [/\b(ghp|gho|ghs|ghr)_[A-Za-z0-9]{36,}/g, "[REDACTED_GH_TOKEN]"],
+  // GitHub personal access tokens and installation tokens.
+  [/\b(ghp|gho|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}/g, "[REDACTED_GH_TOKEN]"],
   // Generic "password=..." or "secret=..." in query strings / env
   [
-    /\b(password|secret|passwd|api_key|apikey|auth_token)=[^\s&"']+/gi,
+    /\b(password|secret|passwd|api_key|apikey|auth_token|access_token|token|client_secret)=[^\s&"']+/gi,
     "$1=[REDACTED]",
   ],
 ];
@@ -2368,6 +2779,40 @@ function redactCredentials(text: string): string {
     result = result.replace(pattern, replacement);
   }
   return result;
+}
+
+function sanitizeLoopErrorMessage(message: string): string {
+  return redactCredentials(sanitizeErrorMessage(message));
+}
+
+function messageFromUnknownError(err: unknown): string {
+  if (err instanceof Error) {
+    const details: string[] = [err.message];
+    const maybeOutput = err as {
+      stdout?: unknown;
+      stderr?: unknown;
+      code?: unknown;
+      signal?: unknown;
+    };
+    if (typeof maybeOutput.stderr === "string" && maybeOutput.stderr.trim()) {
+      details.push(maybeOutput.stderr.trim());
+    }
+    if (typeof maybeOutput.stdout === "string" && maybeOutput.stdout.trim()) {
+      details.push(maybeOutput.stdout.trim());
+    }
+    if (maybeOutput.code !== undefined) {
+      details.push(`exit code ${String(maybeOutput.code)}`);
+    }
+    if (maybeOutput.signal !== undefined) {
+      details.push(`signal ${String(maybeOutput.signal)}`);
+    }
+    return details.join("; ");
+  }
+  return String(err);
+}
+
+function sanitizeUnknownError(err: unknown): string {
+  return sanitizeLoopErrorMessage(messageFromUnknownError(err));
 }
 
 /**
@@ -5109,7 +5554,7 @@ async function provisionAdditionalRepoWorktrees(args: {
   primaryRepoPath: string;
   additionalWorktreeDirs: AdditionalWorktreeEntry[];
   allowedDirs: string[];
-  body: LoopRequestBody;
+  body: SymphonyLoopRequestBody;
   apiBaseUrl: string;
   context: OperationRequestContext;
   wt: WorktreeProvider;
@@ -5152,18 +5597,62 @@ async function provisionAdditionalRepoWorktrees(args: {
       requestEntry?.fullName ??
       resolveRepoFullName(addRepo.repoPath) ??
       addRepo.repoPath;
-    const addRepoSlug = slugifyLoopId(addRepo.branch);
+    const baseBranch = addRepo.branch;
+    let repositoryFullName =
+      requestEntry?.fullName ?? resolveRepoFullName(addRepo.repoPath) ?? "";
+    const addRepoSlug = slugifyLoopId(baseBranch);
     const addRepoKey = `${worktreeKey}-${addRepoSlug}-${additionalRepoDisambiguator(addRepo.repoPath)}`;
     const canonicalAddWorktreeDir = resolveLoopWorktreeDir(
       addRepo.repoPath,
       addRepoKey,
     );
-    const addBranchName = `symphony/${addRepoKey}`;
+    const legacyAddBranchName = `symphony/${addRepoKey}`;
+    const useBranchMaterialization = shouldUseBranchMaterialization(body);
+    let expectedBranch: SymphonyBranchMaterializationEntry | null = null;
+    if (useBranchMaterialization) {
+      try {
+        repositoryFullName = requireVerifiedLoopRepositoryFullName({
+          declaredFullName: requestEntry?.fullName,
+          repoPath: addRepo.repoPath,
+          role: "additional",
+        });
+        expectedBranch = requireExpectedLoopBranch({
+          body,
+          role: "additional",
+          repositoryFullName,
+          baseBranch,
+        });
+      } catch (err) {
+        const msg = sanitizeUnknownError(err);
+        await cleanupAdditionalWorktrees(additionalWorktreeDirs, body.loopId, wt);
+        if (ownsPrimaryWorktree) {
+          await wt
+            .removeWorktree(worktreeDir, primaryRepoPath, body.loopId)
+            .catch(() => {});
+        }
+        const offender = peerOffenderLabel();
+        await postLoopEventBounded(
+          apiBaseUrl,
+          body.loopId,
+          () => body.closedLoopAuthToken,
+          {
+            type: LoopEventType.Error,
+            code: LoopErrorCode.BranchCreateFailed,
+            message: `Additional repo branch materialization is not available for ${offender}: ${msg}`,
+          },
+        );
+        json(context, 500, {
+          error: `Additional repo branch materialization is not available for ${offender}: ${msg}`,
+        });
+        return false;
+      }
+    }
+    const addBranchName = expectedBranch?.branchName ?? legacyAddBranchName;
 
-    const staleAddWorktree = wt.findWorktreeForBranch(
-      addRepo.repoPath,
-      addBranchName,
-    );
+    const staleAddWorktree =
+      expectedBranch !== null
+        ? wt.findWorktreeForBranch(addRepo.repoPath, expectedBranch.branchName)
+        : wt.findWorktreeForBranch(addRepo.repoPath, legacyAddBranchName);
     const reuseExisting = reuseStaleWorktree && staleAddWorktree !== null;
     const addWorktreeDir =
       reuseExisting && staleAddWorktree
@@ -5221,23 +5710,24 @@ async function provisionAdditionalRepoWorktrees(args: {
             body.loopId,
           );
         }
-        await wt.ensureWorktree(
-          addRepo.repoPath,
-          addWorktreeDir,
-          addBranchName,
-          addRepo.branch,
-          body.loopId,
-        );
+        await ensureLoopWorktreeForRequest({
+          body,
+          expandedRepoPath: addRepo.repoPath,
+          worktreeDir: addWorktreeDir,
+          branchName: addBranchName,
+          baseBranch,
+          loopId: body.loopId,
+          repositoryFullName,
+          apiBaseUrl,
+          token: body.closedLoopAuthToken,
+          wt,
+        });
       }
     } catch (checkoutErr) {
-      const msg =
-        checkoutErr instanceof Error
-          ? checkoutErr.message
-          : String(checkoutErr);
+      const msg = sanitizeUnknownError(checkoutErr);
       loopError(
         body.loopId,
-        `ensureWorktree failed for additional repo ${addRepo.repoPath}:`,
-        checkoutErr,
+        `ensureLoopWorktreeMaterialized failed for additional repo ${addRepo.repoPath}: ${msg}`,
       );
       await wt
         .removeWorktree(addWorktreeDir, addRepo.repoPath, body.loopId)
@@ -5269,10 +5759,8 @@ async function provisionAdditionalRepoWorktrees(args: {
       dir: addWorktreeDir,
       repoPath: addRepo.repoPath,
       fullName:
-        requestEntry?.fullName ??
-        resolveRepoFullName(addRepo.repoPath) ??
-        undefined,
-      baseBranch: requestEntry?.branch ?? addRepo.branch,
+        requestEntry?.fullName ?? resolveRepoFullName(addRepo.repoPath) ?? undefined,
+      baseBranch: requestEntry?.branch ?? baseBranch,
     });
     loopLog(
       body.loopId,
@@ -5317,7 +5805,7 @@ async function setupPrdWorktree(args: {
   command:
     | typeof LoopCommand.GeneratePrd
     | typeof LoopCommand.RequestPrdChanges;
-  body: LoopRequestBody;
+  body: SymphonyLoopRequestBody;
   expandedRepoPath: string;
   resolvedAdditionalRepos: readonly ResolvedAdditionalRepo[];
   additionalWorktreeDirs: AdditionalWorktreeEntry[];
@@ -5343,11 +5831,74 @@ async function setupPrdWorktree(args: {
     ? slugifyLoopId(body.artifactSlug)
     : null;
   const worktreeKey = sanitizedSlug ?? pickStableId(body);
-  const branchName = `symphony/${prefix}-${worktreeKey}`;
   const worktreeDir = resolveLoopWorktreeDir(
     expandedRepoPath,
     `${prefix}-${worktreeKey}`,
   );
+  const baseBranch = body.repo?.branch ?? "main";
+  const useBranchMaterialization = shouldUseBranchMaterialization(body);
+  let repositoryFullName = resolveLoopPrimaryFullName(body, expandedRepoPath);
+  if (useBranchMaterialization) {
+    try {
+      repositoryFullName = requireVerifiedLoopRepositoryFullName({
+        declaredFullName: body.repo?.fullName,
+        repoPath: expandedRepoPath,
+        role: "primary",
+      });
+      assertPathAllowed(worktreeDir, allowedDirs);
+    } catch (err) {
+      if (err instanceof DirectoryNotAllowedError) {
+        json(context, 403, {
+          error: `Worktree path not allowed: ${worktreeDir}`,
+        });
+        return null;
+      }
+      await failBranchCreate({
+        body,
+        apiBaseUrl,
+        context,
+        message: `${command} branch materialization is not available: ${sanitizeUnknownError(err)}`,
+      });
+      return null;
+    }
+  }
+  let branchName = `symphony/${prefix}-${worktreeKey}`;
+  if (useBranchMaterialization) {
+    let expectedBranch: SymphonyBranchMaterializationEntry;
+    try {
+      expectedBranch = requireExpectedLoopBranch({
+        body,
+        role: "primary",
+        repositoryFullName,
+        baseBranch,
+      });
+    } catch (err) {
+      await failBranchCreate({
+        body,
+        apiBaseUrl,
+        context,
+        message: `${command} branch materialization is not available: ${sanitizeUnknownError(err)}`,
+      });
+      return null;
+    }
+    branchName = expectedBranch.branchName;
+  }
+
+  const branchMaterializationPreflightOk =
+    await preflightAdditionalRepoBranchMaterialization({
+      resolvedAdditionalRepos,
+      worktreeKey,
+      allowedDirs,
+      body,
+      apiBaseUrl,
+      context,
+      wt,
+      reuseStaleWorktree:
+        getMultiRepoPolicy(command).worktreeFreshness === "reuse-stale",
+    });
+  if (!branchMaterializationPreflightOk) {
+    return null;
+  }
 
   // Always-fresh per policy — destroy any prior worktree at this branch.
   const staleWorktree = wt.findWorktreeForBranch(expandedRepoPath, branchName);
@@ -5359,29 +5910,52 @@ async function setupPrdWorktree(args: {
     await wt.removeWorktree(staleWorktree, expandedRepoPath, body.loopId);
   }
 
-  await wt.ensureWorktree(
-    expandedRepoPath,
-    worktreeDir,
-    branchName,
-    body.repo?.branch ?? "main",
-    body.loopId,
-  );
+  try {
+    await ensureLoopWorktreeForRequest({
+      body,
+      expandedRepoPath,
+      worktreeDir,
+      branchName,
+      baseBranch,
+      loopId: body.loopId,
+      repositoryFullName,
+      apiBaseUrl,
+      token: body.closedLoopAuthToken,
+      wt,
+    });
+  } catch (err) {
+    const msg = sanitizeUnknownError(err);
+    loopError(
+      body.loopId,
+      `ensureLoopWorktreeMaterialized failed for ${command}: ${msg}`,
+    );
+    await wt.removeWorktree(worktreeDir, expandedRepoPath, body.loopId).catch(() => {});
+    await failBranchCreate({
+      body,
+      apiBaseUrl,
+      context,
+      message: `Failed to materialize ${command} branch: ${msg}`,
+    });
+    return null;
+  }
   loopLog(
     body.loopId,
     `Created worktree for ${command}: ${worktreeDir} (branch: ${branchName})`,
   );
 
-  try {
-    assertPathAllowed(worktreeDir, allowedDirs);
-  } catch (e) {
-    if (e instanceof DirectoryNotAllowedError) {
-      await wt.removeWorktree(worktreeDir, expandedRepoPath, body.loopId);
-      json(context, 403, {
-        error: `Worktree path not allowed: ${worktreeDir}`,
-      });
-      return null;
+  if (!useBranchMaterialization) {
+    try {
+      assertPathAllowed(worktreeDir, allowedDirs);
+    } catch (e) {
+      if (e instanceof DirectoryNotAllowedError) {
+        await wt.removeWorktree(worktreeDir, expandedRepoPath, body.loopId);
+        json(context, 403, {
+          error: `Worktree path not allowed: ${worktreeDir}`,
+        });
+        return null;
+      }
+      throw e;
     }
-    throw e;
   }
 
   const additionalsOk = await provisionAdditionalRepoWorktrees({
@@ -5980,13 +6554,78 @@ async function handleLoopRequest(
         ? slugifyLoopId(body.artifactSlug)
         : null;
       const worktreeKey = sanitizedSlug ?? pickStableId(body);
-      const branchName = sanitizedSlug
+      const legacyBranchName = sanitizedSlug
         ? `symphony/${sanitizedSlug}`
         : `symphony/loop-${pickStableId(body)}`;
+      const baseBranch = body.repo?.branch ?? "main";
+      const useBranchMaterialization = shouldUseBranchMaterialization(body);
 
       worktreeDir = resolveLoopWorktreeDir(repoPath, worktreeKey);
+      let repositoryFullName = resolveLoopPrimaryFullName(body, repoPath);
+      if (useBranchMaterialization) {
+        try {
+          repositoryFullName = requireVerifiedLoopRepositoryFullName({
+            declaredFullName: body.repo?.fullName,
+            repoPath,
+            role: "primary",
+          });
+          assertPathAllowed(worktreeDir, allowedDirs);
+        } catch (err) {
+          if (err instanceof DirectoryNotAllowedError) {
+            json(context, 403, {
+              error: `Worktree path not allowed: ${worktreeDir}`,
+            });
+            return;
+          }
+          await failBranchCreate({
+            body,
+            apiBaseUrl,
+            context,
+            message: `${body.command} branch materialization is not available: ${sanitizeUnknownError(err)}`,
+          });
+          return;
+        }
+      }
+
+      const branchMaterializationPreflightOk =
+        await preflightAdditionalRepoBranchMaterialization({
+          resolvedAdditionalRepos,
+          worktreeKey,
+          allowedDirs,
+          body,
+          apiBaseUrl,
+          context,
+          wt,
+          reuseStaleWorktree:
+            getMultiRepoPolicy(body.command).worktreeFreshness ===
+            "reuse-stale",
+        });
+      if (!branchMaterializationPreflightOk) {
+        return;
+      }
 
       if (body.command === LoopCommand.Plan) {
+        let branchName = legacyBranchName;
+        if (useBranchMaterialization) {
+          let expectedBranch: SymphonyBranchMaterializationEntry;
+          try {
+            expectedBranch = requireExpectedLoopBranch({
+              body,
+              role: "primary",
+              repositoryFullName,
+              baseBranch,
+            });
+          } catch (err) {
+            await failBranchCreate({
+              body,
+              apiBaseUrl,
+              context,
+              message: `PLAN branch materialization is not available: ${sanitizeUnknownError(err)}`,
+            });
+            return;
+          }
+          branchName = expectedBranch.branchName;
+        }
         // PLAN always starts fresh — remove stale worktree if it exists.
         // PLAN has requiresParent: false, so it must not inherit prior state.
         const staleWorktree = wt.findWorktreeForBranch(repoPath, branchName);
@@ -5997,13 +6636,34 @@ async function handleLoopRequest(
           );
           await wt.removeWorktree(staleWorktree, repoPath, body.loopId);
         }
-        await wt.ensureWorktree(
-          repoPath,
-          worktreeDir,
-          branchName,
-          body.repo?.branch ?? "main",
-          body.loopId,
-        );
+        try {
+          await ensureLoopWorktreeForRequest({
+            body,
+            expandedRepoPath: repoPath,
+            worktreeDir,
+            branchName,
+            baseBranch,
+            loopId: body.loopId,
+            repositoryFullName,
+            apiBaseUrl,
+            token: body.closedLoopAuthToken,
+            wt,
+          });
+        } catch (err) {
+          const msg = sanitizeUnknownError(err);
+          loopError(
+            body.loopId,
+            `ensureLoopWorktreeMaterialized failed for PLAN: ${msg}`,
+          );
+          await wt.removeWorktree(worktreeDir, repoPath, body.loopId).catch(() => {});
+          await failBranchCreate({
+            body,
+            apiBaseUrl,
+            context,
+            message: `Failed to materialize PLAN branch: ${msg}`,
+          });
+          return;
+        }
         loopLog(
           body.loopId,
           `Created fresh worktree for PLAN: ${worktreeDir} (branch: ${branchName})`,
@@ -6048,7 +6708,30 @@ async function handleLoopRequest(
         // EXECUTE/REQUEST_CHANGES: reuse existing worktree.
         // Try artifact slug first, then parentLoopId fallback, then create new.
         let reusedPrimaryWorktree = false;
-        const existingWorktree = wt.findWorktreeForBranch(repoPath, branchName);
+        let expectedBranch: SymphonyBranchMaterializationEntry | null = null;
+        if (useBranchMaterialization) {
+          try {
+            expectedBranch = requireExpectedLoopBranch({
+              body,
+              role: "primary",
+              repositoryFullName,
+              baseBranch,
+            });
+          } catch (err) {
+            await failBranchCreate({
+              body,
+              apiBaseUrl,
+              context,
+              message: `${body.command} branch materialization is not available: ${sanitizeUnknownError(err)}`,
+            });
+            return;
+          }
+        }
+        let branchName = expectedBranch?.branchName ?? legacyBranchName;
+        const existingWorktree =
+          expectedBranch !== null
+            ? wt.findWorktreeForBranch(repoPath, expectedBranch.branchName)
+            : wt.findWorktreeForBranch(repoPath, legacyBranchName);
         if (existingWorktree) {
           worktreeDir = existingWorktree;
           reusedPrimaryWorktree = true;
@@ -6056,7 +6739,7 @@ async function handleLoopRequest(
             body.loopId,
             `Reusing worktree via artifact slug: ${worktreeDir} (branch: ${branchName})`,
           );
-        } else if (body.parentLoopId) {
+        } else if (!useBranchMaterialization && body.parentLoopId) {
           // Fallback: try parent's loopId-based branch (pre-slug deployments or missing slug)
           const parentBranch = `symphony/loop-${slugifyLoopId(body.parentLoopId)}`;
           const parentWorktree = wt.findWorktreeForBranch(
@@ -6074,14 +6757,38 @@ async function handleLoopRequest(
         }
         if (!worktreeDir || !existsSync(worktreeDir)) {
           // No existing worktree found — create new
+          if (expectedBranch) {
+            branchName = expectedBranch.branchName;
+          }
           worktreeDir = resolveLoopWorktreeDir(repoPath, worktreeKey);
-          await wt.ensureWorktree(
-            repoPath,
-            worktreeDir,
-            branchName,
-            body.repo?.branch ?? "main",
-            body.loopId,
-          );
+          try {
+            await ensureLoopWorktreeForRequest({
+              body,
+              expandedRepoPath: repoPath,
+              worktreeDir,
+              branchName,
+              baseBranch,
+              loopId: body.loopId,
+              repositoryFullName,
+              apiBaseUrl,
+              token: body.closedLoopAuthToken,
+              wt,
+            });
+          } catch (err) {
+            const msg = sanitizeUnknownError(err);
+            loopError(
+              body.loopId,
+              `ensureLoopWorktreeMaterialized failed for ${body.command}: ${msg}`,
+            );
+            await wt.removeWorktree(worktreeDir, repoPath, body.loopId).catch(() => {});
+            await failBranchCreate({
+              body,
+              apiBaseUrl,
+              context,
+              message: `Failed to materialize ${body.command} branch: ${msg}`,
+            });
+            return;
+          }
           reusedPrimaryWorktree = false;
           loopLog(
             body.loopId,
