@@ -1301,114 +1301,83 @@ test("reattachLiveJob transitions to TIMED_OUT when cloud reports TIMED_OUT", as
   service.dispose();
 });
 
-test("reattachLiveJob starts tailer when cloud reports RUNNING", async () => {
-  const repoDir = path.join(tempRoot, "repo");
-  const claudeWorkDir = path.join(repoDir, "workdir");
-  await fs.mkdir(claudeWorkDir, { recursive: true });
-  const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
-  await fs.writeFile(jsonlPath, "");
+for (const scenario of [
+  {
+    name: "cloud reports RUNNING",
+    storeSuffix: "running",
+    statusHandler: () => Response.json({ status: "RUNNING" }),
+    jsonlSnippet: "recovered",
+    assertAfterReattach(jobStore: JobStore): void {
+      const persisted = jobStore.getByLoopId("loop-1");
+      assert.ok(persisted);
+      assert.notEqual(persisted.status, "TIMED_OUT", "expected status not to be TIMED_OUT");
+    },
+  },
+  {
+    name: "GET status check throws a network error",
+    storeSuffix: "net-err",
+    statusHandler: () => {
+      throw new Error("network failure");
+    },
+    jsonlSnippet: "net-err-test",
+    assertAfterReattach(jobStore: JobStore): void {
+      const beforeWrite = jobStore.getByLoopId("loop-1");
+      assert.ok(beforeWrite);
+      assert.notEqual(
+        beforeWrite.status,
+        "TIMED_OUT",
+        "network error must not transition job to TIMED_OUT",
+      );
+    },
+  },
+] as const) {
+  test(`reattachLiveJob continues when ${scenario.name}`, async () => {
+    const repoDir = path.join(tempRoot, "repo");
+    const claudeWorkDir = path.join(repoDir, "workdir");
+    await fs.mkdir(claudeWorkDir, { recursive: true });
+    const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+    await fs.writeFile(jsonlPath, "");
 
-  const loopTokenStore = createLoopTokenStore("boot-recovery-reattach-running-tokens");
-  loopTokenStore.setLoopToken("loop-1", "loop-token");
+    const loopTokenStore = createLoopTokenStore(
+      `boot-recovery-reattach-${scenario.storeSuffix}-tokens`,
+    );
+    loopTokenStore.setLoopToken("loop-1", "loop-token");
 
-  const jobStore = createStore("boot-recovery-reattach-running");
-  const liveJob = createJob({
-    pid: process.pid,
-    status: "RUNNING",
-    claudeWorkDir,
-    jsonlPath,
-    lastObservedJsonlOffset: 0,
+    const jobStore = createStore(`boot-recovery-reattach-${scenario.storeSuffix}`);
+    jobStore.upsert(
+      createJob({
+        pid: process.pid,
+        status: "RUNNING",
+        claudeWorkDir,
+        jsonlPath,
+        lastObservedJsonlOffset: 0,
+      }),
+    );
+
+    installCloudStatusFetchMock(scenario.statusHandler);
+
+    const service = new BootRecoveryService({
+      jobStore,
+      telemetry: { emit: () => {} },
+      getApiKey: () => "test-key",
+      getApiOrigin: () => "http://127.0.0.1:4021",
+      loopTokenStore,
+    });
+    await service.reattachLiveJobs();
+    scenario.assertAfterReattach(jobStore);
+
+    await fs.appendFile(
+      jsonlPath,
+      `{"type":"assistant","message":{"content":[{"type":"text","text":"${scenario.jsonlSnippet}"}],"usage":{"input_tokens":1,"output_tokens":1}}}\n`,
+    );
+
+    await waitForCondition(
+      () => fetchCalls.some((c) => c.url.includes("/loops/loop-1/events")),
+      5000,
+    );
+    service.dispose();
   });
-  jobStore.upsert(liveJob);
-
-  installCloudStatusFetchMock(() => Response.json({ status: "RUNNING" }));
-
-  const service = new BootRecoveryService({
-    jobStore,
-    telemetry: { emit: (event) => telemetryEvents.push(event) },
-    getApiKey: () => "test-key",
-    getApiOrigin: () => "http://127.0.0.1:4021",
-    loopTokenStore,
-  });
-  await service.reattachLiveJobs();
-
-  // Write a complete JSONL record to trigger a tailer event POST
-  await fs.appendFile(
-    jsonlPath,
-    '{"type":"assistant","message":{"content":[{"type":"text","text":"recovered"}],"usage":{"input_tokens":1,"output_tokens":1}}}\n',
-  );
-
-  await waitForCondition(
-    () => fetchCalls.some((c) => c.url.includes("/loops/loop-1/events")),
-    5000,
-  );
-
-  const persisted = jobStore.getByLoopId("loop-1");
-  assert.ok(persisted);
-  assert.notEqual(persisted.status, "TIMED_OUT", "expected status not to be TIMED_OUT");
-  assert.ok(
-    fetchCalls.some((c) => c.url.includes("/loops/loop-1/events")),
-    "expected at least one POST to /events from tailer",
-  );
-  service.dispose();
-});
-
-test("reattachLiveJob continues when GET status check throws a network error", async () => {
-  const repoDir = path.join(tempRoot, "repo");
-  const claudeWorkDir = path.join(repoDir, "workdir");
-  await fs.mkdir(claudeWorkDir, { recursive: true });
-  const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
-  await fs.writeFile(jsonlPath, "");
-
-  const loopTokenStore = createLoopTokenStore("boot-recovery-reattach-net-err-tokens");
-  loopTokenStore.setLoopToken("loop-1", "loop-token");
-
-  const jobStore = createStore("boot-recovery-reattach-net-err");
-  const liveJob = createJob({
-    pid: process.pid,
-    status: "RUNNING",
-    claudeWorkDir,
-    jsonlPath,
-    lastObservedJsonlOffset: 0,
-  });
-  jobStore.upsert(liveJob);
-
-  installCloudStatusFetchMock(() => { throw new Error("network failure"); });
-
-  const service = new BootRecoveryService({
-    jobStore,
-    telemetry: { emit: (event) => telemetryEvents.push(event) },
-    getApiKey: () => "test-key",
-    getApiOrigin: () => "http://127.0.0.1:4022",
-    loopTokenStore,
-  });
-  await service.reattachLiveJobs();
-
-  const beforeWrite = jobStore.getByLoopId("loop-1");
-  assert.ok(beforeWrite);
-  assert.notEqual(
-    beforeWrite.status,
-    "TIMED_OUT",
-    "network error must not transition job to TIMED_OUT",
-  );
-
-  // Verify tailer is running: write a JSONL record and wait for it to be picked up
-  await fs.appendFile(
-    jsonlPath,
-    '{"type":"assistant","message":{"content":[{"type":"text","text":"net-err-test"}],"usage":{"input_tokens":1,"output_tokens":1}}}\n',
-  );
-
-  await waitForCondition(
-    () => fetchCalls.some((c) => c.url.includes("/loops/loop-1/events")),
-    5000,
-  );
-
-  assert.ok(
-    fetchCalls.some((c) => c.url.includes("/loops/loop-1/events")),
-    "expected tailer to start and POST /events after network error on status check",
-  );
-  service.dispose();
-});
+}
 
 test("finalizeDeadJobs skips finalization and sets cloudFinalizedAt when cloud reports TIMED_OUT", async () => {
   const repoDir = path.join(tempRoot, "repo");

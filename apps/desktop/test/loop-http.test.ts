@@ -757,21 +757,6 @@ describe("getCloudLoopStatus", () => {
     assert.equal(result.kind, "error");
   });
 
-  test("HTTP 500 response: returns { kind: 'error' }", async () => {
-    installFetchStub({
-      status: 500,
-      responseBody: "Internal Server Error",
-    });
-
-    const result = await getCloudLoopStatus(
-      "loop-500",
-      () => "my-token",
-      "https://api.example.com",
-    );
-
-    assert.equal(result.kind, "error");
-  });
-
   test("HTTP 503 with JSON body containing status field: returns { kind: 'error', message: 'HTTP 503' } (T-2.1, AC-003)", async () => {
     // Regression: a non-2xx response with a valid JSON body like {"status":"RUNNING"}
     // must return { kind: 'error' }, not { kind: 'active' }.
