@@ -239,7 +239,7 @@ export class BootRecoveryService {
     apiBaseUrl: string,
   ): ReturnType<typeof getCloudLoopStatus> {
     const token = this.deps.loopTokenStore.getLoopToken(job.loopId);
-    const result = await getCloudLoopStatus(job.loopId, () => token, apiBaseUrl);
+    const result = await getCloudLoopStatus(apiBaseUrl, job.loopId, () => token);
     if (result.kind === "timed_out") {
       const current = this.deps.jobStore.getByLoopId(job.loopId) ?? job;
       this.deps.jobStore.upsert({

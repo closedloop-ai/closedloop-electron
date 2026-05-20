@@ -713,9 +713,9 @@ describe("getCloudLoopStatus", () => {
     });
 
     const result = await getCloudLoopStatus(
+      "https://api.example.com",
       "loop-abc",
       () => "my-token",
-      "https://api.example.com",
     );
 
     assert.deepEqual(result, { kind: "timed_out" });
@@ -734,9 +734,9 @@ describe("getCloudLoopStatus", () => {
     });
 
     const result = await getCloudLoopStatus(
+      "https://api.example.com",
       "loop-running",
       () => "my-token",
-      "https://api.example.com",
     );
 
     assert.deepEqual(result, { kind: "active" });
@@ -749,9 +749,9 @@ describe("getCloudLoopStatus", () => {
     });
 
     const result = await getCloudLoopStatus(
+      "https://api.example.com",
       "loop-404",
       () => "my-token",
-      "https://api.example.com",
     );
 
     assert.equal(result.kind, "error");
@@ -766,9 +766,9 @@ describe("getCloudLoopStatus", () => {
     });
 
     const result = await getCloudLoopStatus(
+      "https://api.example.com",
       "loop-503-json",
       () => "my-token",
-      "https://api.example.com",
     );
 
     assert.deepEqual(result, { kind: "error", message: "HTTP 503" });
@@ -780,9 +780,9 @@ describe("getCloudLoopStatus", () => {
     }) as typeof fetch;
 
     const result = await getCloudLoopStatus(
+      "https://api.example.com",
       "loop-net-err",
       () => "my-token",
-      "https://api.example.com",
     );
 
     assert.equal(result.kind, "error");
@@ -799,9 +799,9 @@ describe("getCloudLoopStatus", () => {
     });
 
     await getCloudLoopStatus(
+      "https://api.example.com",
       "loop-null-tok",
       () => null,
-      "https://api.example.com",
     );
 
     const req = capturedRequests[0];
@@ -821,9 +821,9 @@ describe("getCloudLoopStatus", () => {
     });
 
     const result = await getCloudLoopStatus(
+      "https://api.example.com",
       "loop-no-status",
       () => "my-token",
-      "https://api.example.com",
     );
 
     assert.deepEqual(result, { kind: "active" });
@@ -841,9 +841,9 @@ describe("getCloudLoopStatus", () => {
     installFetchStub({ hang: true });
 
     const result = await getCloudLoopStatus(
+      "https://api.example.com",
       "loop-timeout",
       () => "my-token",
-      "https://api.example.com",
       1,
     );
 

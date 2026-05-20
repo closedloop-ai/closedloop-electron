@@ -209,9 +209,9 @@ export async function uploadArtifacts(
  * postLoopEventBounded pattern.
  */
 export async function getCloudLoopStatus(
+  apiBaseUrl: string,
   loopId: string,
   getToken: () => string | null,
-  apiBaseUrl: string,
   timeoutMs = 5000,
 ): Promise<{ kind: "timed_out" } | { kind: "active" } | { kind: "error"; message: string }> {
   const url = `${apiBaseUrl}/loops/${encodeURIComponent(loopId)}`;
