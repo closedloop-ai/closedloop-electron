@@ -241,6 +241,95 @@ test("scanner detects BMad v6+ project install via .agents/skills/bmad-*", () =>
   assert.equal(pack.associations[0].project_path, projectRoot);
 });
 
+test("gstack Codex install collapses N per-skill symlinks into ONE install row", () => {
+  const home = mkdtemp();
+  // Simulate the Codex install: ~/.codex/skills/gstack-<name> symlinks
+  // pointing into the Claude install's .agents/skills tree. Use a real
+  // physical "source" repo and real symlinks so safeRealpath / findSkillFiles
+  // behave as they do in production.
+  const claudeRoot = nodePath.join(home, ".claude", "skills", "gstack");
+  const codexRoot = nodePath.join(home, ".codex", "skills");
+  fs.mkdirSync(claudeRoot, { recursive: true });
+  fs.mkdirSync(codexRoot, { recursive: true });
+  // Claude install needs a SKILL.md somewhere so its scan path triggers
+  writeFile(
+    nodePath.join(claudeRoot, "office-hours", "SKILL.md"),
+    `---\nname: office-hours\n---\n`,
+  );
+  // Source tree the codex symlinks point INTO
+  const sourceSkillsRoot = nodePath.join(claudeRoot, ".agents", "skills");
+  for (const name of ["office-hours", "ship", "review", "investigate"]) {
+    writeFile(
+      nodePath.join(sourceSkillsRoot, `gstack-${name}`, "SKILL.md"),
+      `---\nname: ${name}\n---\n`,
+    );
+    // Symlink each into ~/.codex/skills/gstack-<name>
+    fs.symlinkSync(
+      nodePath.join(sourceSkillsRoot, `gstack-${name}`),
+      nodePath.join(codexRoot, `gstack-${name}`),
+    );
+  }
+
+  const db = makeDb();
+  withFakeHome(home, () => runPackScanner(db));
+
+  const packs = db
+    .prepare(
+      "SELECT harness, install_path FROM agent_packs WHERE pack_id='gstack' ORDER BY harness",
+    )
+    .all();
+  // Expect exactly 2 install rows: 1 claude + 1 codex (NOT 1 + 4 symlinks).
+  assert.equal(packs.length, 2, "expect one claude + one codex install row");
+  const codexInstall = packs.find((p) => p.harness === "codex");
+  assert.ok(codexInstall);
+  assert.equal(
+    codexInstall.install_path,
+    codexRoot,
+    "codex install path collapses to the skills root, not per-skill symlinks",
+  );
+
+  // All 4 codex-symlinked skills should still appear individually in the
+  // skills table — collapse is for install rows only.
+  const codexSkills = db
+    .prepare(
+      "SELECT COUNT(*) AS n FROM skills WHERE pack_id='gstack' AND harness='codex'",
+    )
+    .get().n;
+  assert.equal(codexSkills, 4, "all symlinked skills still ingested");
+});
+
+test("runPackScanner prunes stale rows from prior scans", () => {
+  const home = mkdtemp();
+  makeGStackTree(home, { skills: ["office-hours"] });
+  const db = makeDb();
+
+  // Seed a stale row from a hypothetical earlier scanner version that
+  // registered N per-skill installs. Backdated last_seen_at so the prune
+  // step catches it.
+  db.prepare(
+    `INSERT INTO agent_packs
+       (pack_id, harness, install_path, install_kind, source_url, version, detected_at, last_seen_at)
+     VALUES ('gstack', 'codex', '/old/per/skill/path', 'symlink', NULL, NULL, ?, ?)`,
+  ).run("2020-01-01T00:00:00Z", "2020-01-01T00:00:00Z");
+  db.prepare(
+    `INSERT INTO skills (skill_id, pack_id, harness, install_path, name, detected_at, last_seen_at)
+     VALUES ('stale-1', 'gstack', 'codex', '/old/path', 'stale-skill', ?, ?)`,
+  ).run("2020-01-01T00:00:00Z", "2020-01-01T00:00:00Z");
+
+  withFakeHome(home, () => runPackScanner(db));
+
+  const stalePack = db
+    .prepare(
+      "SELECT * FROM agent_packs WHERE install_path = '/old/per/skill/path'",
+    )
+    .get();
+  assert.equal(stalePack, undefined, "stale agent_packs row should be pruned");
+  const staleSkill = db
+    .prepare("SELECT * FROM skills WHERE skill_id = 'stale-1'")
+    .get();
+  assert.equal(staleSkill, undefined, "stale skills row should be pruned");
+});
+
 test("BMad v6+ manifest parser tolerates missing version", () => {
   const { _internals } = require("../pack-scanner");
   const home = mkdtemp();

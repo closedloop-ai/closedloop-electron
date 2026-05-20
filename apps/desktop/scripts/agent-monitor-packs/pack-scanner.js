@@ -193,6 +193,17 @@ function ingestPackDir(db, { packId, harness, installPath, sourceUrl, version })
 /**
  * Detect GStack: look for `gstack` or `gstack-*` entries under each known
  * skills root.
+ *
+ * Claude install is a single directory at ~/.claude/skills/gstack — one
+ * agent_packs row.
+ *
+ * Codex install is special: the gstack ./setup --host codex creates ONE
+ * symlink per skill under ~/.codex/skills/ (gstack-autoplan, gstack-ship,
+ * etc., ~46 entries), each pointing into the same upstream gstack repo's
+ * .agents/skills tree. They all share one logical install — so we collapse
+ * them into a single agent_packs row keyed on the codex skills root (rather
+ * than registering 46 install rows), and still ingest every linked SKILL.md
+ * into the skills table.
  */
 function scanGStack(db) {
   const results = { installs: 0, skills: 0 };
@@ -213,18 +224,53 @@ function scanGStack(db) {
   }
 
   const codexSkillsRoot = path.join(resolveCodexHome(), "skills");
-  for (const entry of safeReadDir(codexSkillsRoot)) {
-    if (entry.name !== "gstack" && !entry.name.startsWith("gstack-")) continue;
-    const installPath = path.join(codexSkillsRoot, entry.name);
-    const real = safeRealpath(installPath);
-    if (!findSkillFiles(real).length) continue;
-    const added = ingestPackDir(db, {
-      packId: "gstack",
+  const codexEntries = safeReadDir(codexSkillsRoot).filter(
+    (e) =>
+      (e.isDirectory() || e.isSymbolicLink()) &&
+      (e.name === "gstack" || e.name.startsWith("gstack-")),
+  );
+  if (codexEntries.length > 0) {
+    // Derive source_url from any one entry's real path (they all resolve to
+    // the same source repo).
+    let sourceUrl = null;
+    for (const e of codexEntries) {
+      const real = safeRealpath(path.join(codexSkillsRoot, e.name));
+      sourceUrl =
+        deriveGitRemoteUrl(real) || deriveGitRemoteUrl(path.dirname(real));
+      if (sourceUrl) break;
+    }
+    upsertPack(db, {
+      pack_id: "gstack",
       harness: "codex",
-      installPath,
+      install_path: codexSkillsRoot,
+      install_kind: "symlink",
+      source_url: sourceUrl,
+      version: null,
     });
     results.installs += 1;
-    results.skills += added;
+    for (const e of codexEntries) {
+      const entryPath = path.join(codexSkillsRoot, e.name);
+      const real = safeRealpath(entryPath);
+      for (const skillFile of findSkillFiles(real)) {
+        const content = safeReadFile(skillFile);
+        if (content == null) continue;
+        const meta = parseSkillFrontmatter(content) || {};
+        const dirName = path.basename(path.dirname(skillFile));
+        const name = meta.name || dirName;
+        if (!name) continue;
+        upsertSkill(db, {
+          skill_id: deterministicSkillId("codex", codexSkillsRoot, name),
+          pack_id: "gstack",
+          harness: "codex",
+          install_path: skillFile,
+          name,
+          version: meta.version || null,
+          description: meta.description || null,
+          source_url: sourceUrl,
+        });
+        results.skills += 1;
+      }
+    }
   }
 
   return results;
@@ -491,20 +537,61 @@ function scanProjectGStackAssociations(db) {
 }
 
 /**
+ * Drop pack-inventory rows that weren't touched during this scan. The scanner
+ * is the filesystem-of-truth — any row in agent_packs / skills /
+ * project_pack_associations that didn't have its last_seen_at refreshed by
+ * the current pass is stale and should age out. Without this, schema changes
+ * to the scanner (e.g. the 47-codex-rows -> 1-row collapse for gstack)
+ * permanently leave the old rows in place.
+ *
+ * Best-effort: if any DELETE fails (locked DB, etc.) the scanner still
+ * succeeds — pruning is a cleanup, not a correctness requirement.
+ */
+function pruneStaleRows(db, scanStartedAt) {
+  try {
+    db.prepare(
+      "DELETE FROM agent_packs WHERE last_seen_at < ?",
+    ).run(scanStartedAt);
+  } catch (e) {
+    console.warn("[pack-scanner] prune agent_packs failed:", e && e.message);
+  }
+  try {
+    db.prepare("DELETE FROM skills WHERE last_seen_at < ?").run(scanStartedAt);
+  } catch (e) {
+    console.warn("[pack-scanner] prune skills failed:", e && e.message);
+  }
+  try {
+    db.prepare(
+      "DELETE FROM project_pack_associations WHERE last_seen_at < ?",
+    ).run(scanStartedAt);
+  } catch (e) {
+    console.warn(
+      "[pack-scanner] prune project_pack_associations failed:",
+      e && e.message,
+    );
+  }
+}
+
+/**
  * Top-level entry: run every scan path. Best-effort — exceptions in one branch
- * never block another. Safe to call repeatedly.
+ * never block another. Safe to call repeatedly. At the end, prune any
+ * inventory rows whose last_seen_at wasn't refreshed (i.e. weren't observed
+ * in the current pass).
  *
  * @returns {{
  *   gstack: {installs:number, skills:number},
  *   bmad:   {installs:number, skills:number, projects:number},
- *   gstackProjects: number
+ *   gstackProjects: number,
+ *   prunedBefore: string
  * }}
  */
 function runPackScanner(db) {
+  const scanStartedAt = new Date().toISOString();
   const summary = {
     gstack: { installs: 0, skills: 0 },
     bmad: { installs: 0, skills: 0, projects: 0 },
     gstackProjects: 0,
+    prunedBefore: scanStartedAt,
   };
   try {
     summary.gstack = scanGStack(db);
@@ -524,6 +611,7 @@ function runPackScanner(db) {
       e && e.message,
     );
   }
+  pruneStaleRows(db, scanStartedAt);
   return summary;
 }
 
