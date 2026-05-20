@@ -169,6 +169,16 @@ const generatedImportHistory = path.join(
   "import-history.js",
 );
 
+// CLOSEDLOOP pack-observability (FEA-1224 / PLN-651): same materialization
+// pattern as plan-extraction. pack-store + pack-scanner copied into the
+// generated server/lib; packs-route.js + skills-route.js into server/routes;
+// four React pages into the client src tree before the Vite build. server/db.js
+// and server/index.js are wired via the same idempotent string-anchor +
+// hard-gate approach as the plan patches.
+const packModulesDir = path.join(appDir, "scripts", "agent-monitor-packs");
+const PACK_MODULES = ["pack-store", "pack-scanner"];
+const PACK_CLIENT_PAGES = ["Skills", "Tools", "SubAgents", "Packs"];
+
 // Host-owned pricing defaults for model IDs we ingest from non-Claude harnesses.
 // These keep cost stats working without requiring users to hand-enter common
 // rules after startup. Rates are per 1M tokens.
@@ -312,6 +322,12 @@ function currentStamp() {
     path.join(planModulesDir, "plans-route.js"),
     path.join(planModulesDir, "client", "Plans.tsx"),
     path.join(planModulesDir, "client", "closedloop-host-flags.ts"),
+    ...PACK_MODULES.map((m) => path.join(packModulesDir, `${m}.js`)),
+    path.join(packModulesDir, "packs-route.js"),
+    path.join(packModulesDir, "skills-route.js"),
+    ...PACK_CLIENT_PAGES.map((p) =>
+      path.join(packModulesDir, "client", `${p}.tsx`),
+    ),
   ]) {
     h.update(readFileSync(file));
   }
@@ -381,6 +397,15 @@ function materializeRuntimeTree() {
       path.join(generatedLibDir, `${m}.js`),
     );
   }
+  // CLOSEDLOOP pack-observability (FEA-1224): pack-store + pack-scanner into
+  // server/lib alongside plan modules. Routes are copied below alongside
+  // plans-route.js.
+  for (const m of PACK_MODULES) {
+    cpSync(
+      path.join(packModulesDir, `${m}.js`),
+      path.join(generatedLibDir, `${m}.js`),
+    );
+  }
   cpSync(
     path.join(sourceRootDir, "scripts"),
     path.join(generatedRootDir, "scripts"),
@@ -393,6 +418,17 @@ function materializeRuntimeTree() {
   cpSync(
     path.join(planModulesDir, "plans-route.js"),
     path.join(generatedRootDir, "server", "routes", "plans.js"),
+  );
+  // CLOSEDLOOP pack-observability (FEA-1224): packs + skills routes alongside
+  // the plans route. Both read from the existing events/agents/sessions tables
+  // plus the new inventory tables created by ensurePackSchema.
+  cpSync(
+    path.join(packModulesDir, "packs-route.js"),
+    path.join(generatedRootDir, "server", "routes", "packs.js"),
+  );
+  cpSync(
+    path.join(packModulesDir, "skills-route.js"),
+    path.join(generatedRootDir, "server", "routes", "skills.js"),
   );
   patchImportHistory(generatedImportHistory);
   mkdirSync(path.join(generatedRootDir, "client"), { recursive: true });
@@ -661,6 +697,62 @@ function patchServerIndex(file) {
     );
   }
 
+  // CLOSEDLOOP pack-observability (FEA-1224): register /api/packs + /api/skills
+  // routes. Ungated, top-level — the four new dashboard pages always visible.
+  if (!source.includes('require("./routes/packs")')) {
+    const requireNeedle = 'const plansRouter = require("./routes/plans");';
+    const openApiNeedle = '  app.get("/api/openapi.json", (_req, res) => {';
+    if (!source.includes(requireNeedle) || !source.includes(openApiNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the plans-router require / openapi anchors (packs route, FEA-1224).`,
+      );
+    }
+    source = source.replace(
+      requireNeedle,
+      [
+        requireNeedle,
+        'const packsRouter = require("./routes/packs");',
+        'const skillsRouter = require("./routes/skills");',
+      ].join("\n"),
+    );
+    source = source.replace(
+      openApiNeedle,
+      [
+        '  app.use("/api/packs", packsRouter);',
+        '  app.use("/api/skills", skillsRouter);',
+        openApiNeedle,
+      ].join("\n"),
+    );
+  }
+
+  // CLOSEDLOOP pack-observability (FEA-1224): run the filesystem pack scanner
+  // at startup, immediately after the existing plan backfill. Best-effort —
+  // a scanner failure must never block boot.
+  if (!source.includes("runPackScanner")) {
+    const backfillNeedle = [
+      '    require("./lib/plan-backfill").runClaudePlanBackfill(dbModule.db);',
+      "  } catch (e) {",
+      '    console.warn("[plans] backfill failed:", e && e.message);',
+      "  }",
+    ].join("\n");
+    if (!source.includes(backfillNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the plan-backfill block anchor (pack scanner, FEA-1224).`,
+      );
+    }
+    source = source.replace(
+      backfillNeedle,
+      [
+        backfillNeedle,
+        "  try {",
+        '    require("./lib/pack-scanner").runPackScanner(dbModule.db);',
+        "  } catch (e) {",
+        '    console.warn("[packs] scanner failed:", e && e.message);',
+        "  }",
+      ].join("\n"),
+    );
+  }
+
   writeFileSync(file, source, "utf8");
 }
 
@@ -779,6 +871,31 @@ function patchDbFile(file) {
         '  require("./lib/plan-store").ensurePlanSchema(db);',
         "} catch (e) {",
         '  console.warn("[plans] schema init failed:", e && e.message);',
+        "}",
+        "",
+        exportNeedle,
+      ].join("\n"),
+    );
+  }
+
+  // CLOSEDLOOP pack-observability (FEA-1224): ensure the three pack-inventory
+  // tables (agent_packs, skills, project_pack_associations) exist at startup.
+  // Idempotent CREATE TABLE IF NOT EXISTS — never an ALTER migration.
+  if (!source.includes("ensurePackSchema")) {
+    const exportNeedle =
+      "module.exports = { db, stmts, DB_PATH, DEFAULT_PRICING };";
+    if (!source.includes(exportNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the db module.exports tail (pack schema, FEA-1224).`,
+      );
+    }
+    source = source.replace(
+      exportNeedle,
+      [
+        "try {",
+        '  require("./lib/pack-store").ensurePackSchema(db);',
+        "} catch (e) {",
+        '  console.warn("[packs] schema init failed:", e && e.message);',
         "}",
         "",
         exportNeedle,
@@ -992,6 +1109,15 @@ function patchClientSource() {
     path.join(planModulesDir, "client", "closedloop-host-flags.ts"),
     path.join(sourceClientDir, "src", "lib", "closedloop-host-flags.ts"),
   );
+  // CLOSEDLOOP pack-observability (FEA-1224): drop the four pack/skill/tool/
+  // sub-agent pages into the pinned client before Vite build. Routes + NavLink
+  // entries are added below via the declarative edits array.
+  for (const p of PACK_CLIENT_PAGES) {
+    cpSync(
+      path.join(packModulesDir, "client", `${p}.tsx`),
+      path.join(sourceClientDir, "src", "pages", `${p}.tsx`),
+    );
+  }
   const legacyPlansNavLink = [
     "        })}",
     '        <NavLink',
@@ -1195,6 +1321,61 @@ function patchClientSource() {
       ],
       replace: plansNavLink,
     },
+    // CLOSEDLOOP pack-observability (FEA-1224): four ungated top-level nav
+    // entries (Skills, Tools, Sub-agents, Packs). Labels use the i18next key
+    // fallback (t(key) returns key verbatim if no translation exists), so the
+    // bare strings render correctly without touching the upstream locale
+    // bundles.
+    {
+      rel: "src/App.tsx",
+      guard: 'import { Skills } from "./pages/Skills";',
+      find: 'import { Plans } from "./pages/Plans";',
+      replace: [
+        'import { Plans } from "./pages/Plans";',
+        'import { Skills } from "./pages/Skills";',
+        'import { Tools } from "./pages/Tools";',
+        'import { SubAgents } from "./pages/SubAgents";',
+        'import { Packs } from "./pages/Packs";',
+      ].join("\n"),
+    },
+    {
+      rel: "src/App.tsx",
+      guard: '<Route path="skills" element={<Skills />} />',
+      find: '          <Route path="plans" element={isPlanExtractionEnabled() ? <Plans /> : <NotFound />} />',
+      replace: [
+        '          <Route path="plans" element={isPlanExtractionEnabled() ? <Plans /> : <NotFound />} />',
+        '          <Route path="skills" element={<Skills />} />',
+        '          <Route path="tools" element={<Tools />} />',
+        '          <Route path="agents" element={<SubAgents />} />',
+        '          <Route path="packs" element={<Packs />} />',
+      ].join("\n"),
+    },
+    {
+      rel: "src/components/Sidebar.tsx",
+      guard: "Sparkles,",
+      find: '  FileText,\n} from "lucide-react";',
+      replace: [
+        "  FileText,",
+        "  Sparkles,",
+        "  Wrench,",
+        "  Users,",
+        "  Package,",
+        '} from "lucide-react";',
+      ].join("\n"),
+    },
+    {
+      rel: "src/components/Sidebar.tsx",
+      guard: 'to: "/skills", icon: Sparkles',
+      find: '  { to: "/settings", icon: Settings, key: "nav:settings" },\n] as const;',
+      replace: [
+        '  { to: "/skills", icon: Sparkles, key: "Skills" },',
+        '  { to: "/tools", icon: Wrench, key: "Tools" },',
+        '  { to: "/agents", icon: Users, key: "Sub-agents" },',
+        '  { to: "/packs", icon: Package, key: "Packs" },',
+        '  { to: "/settings", icon: Settings, key: "nav:settings" },',
+        "] as const;",
+      ].join("\n"),
+    },
   ];
 
   for (const e of edits) {
@@ -1342,9 +1523,8 @@ function assertGeneratedTree() {
   }
   if (
     !serverIndex.includes('require("./routes/plans")') ||
-    !serverIndex.includes(
-      '  app.use("/api/plans", plansRouter);\n  app.get("/api/openapi.json", (_req, res) => {',
-    )
+    !serverIndex.includes('app.use("/api/plans", plansRouter)') ||
+    !serverIndex.includes('app.get("/api/openapi.json"')
   ) {
     throw new Error(
       "Generated server/index.js is missing the ungated /api/plans route wiring (FEA-1189).",
@@ -1367,6 +1547,82 @@ function assertGeneratedTree() {
   ) {
     throw new Error(
       "Generated server/routes/hooks.js is missing the live hook plan capture wiring (FEA-1189).",
+    );
+  }
+
+  // CLOSEDLOOP pack-observability hard-gates (FEA-1224): a future upstream
+  // bump that breaks any anchor must fail the build, not silently drop a page.
+  for (const m of PACK_MODULES) {
+    if (!existsSync(path.join(generatedRootDir, "server", "lib", `${m}.js`))) {
+      throw new Error(
+        `Generated server/lib/${m}.js missing (pack observability, FEA-1224).`,
+      );
+    }
+  }
+  for (const routeFile of ["packs.js", "skills.js"]) {
+    if (
+      !existsSync(path.join(generatedRootDir, "server", "routes", routeFile))
+    ) {
+      throw new Error(
+        `Generated server/routes/${routeFile} missing (pack observability, FEA-1224).`,
+      );
+    }
+  }
+  if (!dbSource.includes("ensurePackSchema")) {
+    throw new Error(
+      "Generated server/db.js is missing the pack-schema init (FEA-1224).",
+    );
+  }
+  if (
+    !serverIndex.includes('require("./routes/packs")') ||
+    !serverIndex.includes('require("./routes/skills")') ||
+    !serverIndex.includes('app.use("/api/packs", packsRouter)') ||
+    !serverIndex.includes('app.use("/api/skills", skillsRouter)')
+  ) {
+    throw new Error(
+      "Generated server/index.js is missing the /api/packs or /api/skills route wiring (FEA-1224).",
+    );
+  }
+  if (!serverIndex.includes("runPackScanner")) {
+    throw new Error(
+      "Generated server/index.js is missing the pack scanner startup call (FEA-1224).",
+    );
+  }
+  // Client-side: the four new pages must be present in the patched upstream
+  // client source so Vite's bundle resolves their imports. The pre-Vite copy
+  // puts them at src/pages/<Name>.tsx; if any is missing the Vite step would
+  // have already failed. We hard-gate the source files plus the App.tsx route
+  // wiring as belt-and-suspenders.
+  for (const pageName of PACK_CLIENT_PAGES) {
+    if (
+      !existsSync(path.join(sourceClientDir, "src", "pages", `${pageName}.tsx`))
+    ) {
+      throw new Error(
+        `Patched client source is missing src/pages/${pageName}.tsx (FEA-1224).`,
+      );
+    }
+  }
+  const appSource = readFileSync(
+    path.join(sourceClientDir, "src", "App.tsx"),
+    "utf8",
+  );
+  for (const route of ["skills", "tools", "agents", "packs"]) {
+    if (!appSource.includes(`<Route path="${route}"`)) {
+      throw new Error(
+        `Patched client src/App.tsx is missing the /${route} route (FEA-1224).`,
+      );
+    }
+  }
+  const sidebarSource = readFileSync(
+    path.join(sourceClientDir, "src", "components", "Sidebar.tsx"),
+    "utf8",
+  );
+  if (
+    !sidebarSource.includes('to: "/skills", icon: Sparkles') ||
+    !sidebarSource.includes('to: "/packs", icon: Package')
+  ) {
+    throw new Error(
+      "Patched client src/components/Sidebar.tsx is missing the new NAV_KEYS entries (FEA-1224).",
     );
   }
 }
