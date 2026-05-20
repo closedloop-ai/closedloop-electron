@@ -231,8 +231,9 @@ function scanGStack(db) {
 }
 
 /**
- * Parse `marketplace.json` and confirm it's a BMad plugin. Returns
- * `{ version }` on match, null otherwise.
+ * Parse `marketplace.json` and confirm it's a BMad plugin (pre-v6 layout).
+ * Returns `{ version }` on match, null otherwise. Kept for back-compat with
+ * older BMad installs distributed as Claude Code plugins.
  */
 function readBmadMarketplace(dir) {
   const file = path.join(dir, ".claude-plugin", "marketplace.json");
@@ -250,13 +251,120 @@ function readBmadMarketplace(dir) {
 }
 
 /**
- * Detect BMad: globally under `~/.claude/skills` via marketplace.json, plus
- * per-project under recent `sessions.cwd` via `_bmad/` directory.
+ * Parse the project-local BMad install manifest (`_bmad/_config/manifest.yaml`)
+ * to extract the installed version. Written by `npx bmad-method install`
+ * (BMad v6+). Tiny line-based parser — sufficient for the well-known top-level
+ * `installation.version: X.Y.Z` field; avoids pulling in a YAML dependency.
+ */
+function readBmadProjectManifest(projectRoot) {
+  const manifestPath = path.join(
+    projectRoot,
+    "_bmad",
+    "_config",
+    "manifest.yaml",
+  );
+  const content = safeReadFile(manifestPath);
+  if (!content) return null;
+  // Find the `installation:` block and pull the first `version: ...` line
+  // beneath it. Stops at the next top-level key (a line with no leading
+  // whitespace and ending in `:`).
+  const lines = content.split(/\r?\n/);
+  let inInstallation = false;
+  for (const raw of lines) {
+    if (/^installation:\s*$/.test(raw)) {
+      inInstallation = true;
+      continue;
+    }
+    if (inInstallation && /^[A-Za-z_][^:]*:/.test(raw) && !raw.startsWith(" ")) {
+      break;
+    }
+    if (inInstallation) {
+      const m = raw.match(/^\s+version:\s*['"]?([0-9][0-9A-Za-z.\-+]*)['"]?\s*$/);
+      if (m) return { version: m[1] };
+    }
+  }
+  return null;
+}
+
+/**
+ * Detect a BMad v6+ project install: project root has `.agents/skills/bmad-*`
+ * directories with SKILL.md files. The `bmad-` skill-name prefix is the
+ * pack identity signal (no marketplace.json in this layout).
+ *
+ * Returns the install_path + version (read from `_bmad/_config/manifest.yaml`
+ * if present) — or null if no bmad-* skills are found under the root.
+ */
+function detectBmadProjectInstall(projectRoot) {
+  const skillsRoot = path.join(projectRoot, ".agents", "skills");
+  if (!safeStat(skillsRoot)) return null;
+  const hasBmadSkill = safeReadDir(skillsRoot).some(
+    (e) =>
+      (e.isDirectory() || e.isSymbolicLink()) &&
+      e.name.startsWith("bmad-") &&
+      safeStat(path.join(skillsRoot, e.name, "SKILL.md")),
+  );
+  if (!hasBmadSkill) return null;
+  const manifest = readBmadProjectManifest(projectRoot);
+  return {
+    installPath: skillsRoot,
+    version: manifest ? manifest.version : null,
+  };
+}
+
+/**
+ * Ingest BMad v6+ skills from a project install path. Same shape as
+ * ingestPackDir but only pulls in directories whose name is prefixed
+ * "bmad-" — the .agents/skills root in BMad v6 can in principle host
+ * non-BMad skills (other plugins use the same convention), so we
+ * partition by name prefix.
+ */
+function ingestBmadProjectSkills(db, { installPath, harness, version }) {
+  upsertPack(db, {
+    pack_id: "bmad-method",
+    harness,
+    install_path: installPath,
+    install_kind: "directory",
+    source_url: "https://github.com/bmad-code-org/BMAD-METHOD",
+    version: version || null,
+  });
+  let skillCount = 0;
+  for (const entry of safeReadDir(installPath)) {
+    if (!(entry.isDirectory() || entry.isSymbolicLink())) continue;
+    if (!entry.name.startsWith("bmad-")) continue;
+    const skillFile = path.join(installPath, entry.name, "SKILL.md");
+    const content = safeReadFile(skillFile);
+    if (content == null) continue;
+    const meta = parseSkillFrontmatter(content) || {};
+    const name = meta.name || entry.name;
+    upsertSkill(db, {
+      skill_id: deterministicSkillId(harness, installPath, name),
+      pack_id: "bmad-method",
+      harness,
+      install_path: skillFile,
+      name,
+      version: meta.version || version || null,
+      description: meta.description || null,
+      source_url: "https://github.com/bmad-code-org/BMAD-METHOD",
+    });
+    skillCount++;
+  }
+  return skillCount;
+}
+
+/**
+ * Detect BMad across all known layouts:
+ *   1. v6+ per-project install via .agents/skills/bmad-* (current)
+ *   2. Legacy global install via ~/.claude/skills/<plugin>/.claude-plugin/
+ *      marketplace.json
+ *   3. Legacy per-project install via _bmad/ directory (very old)
+ *
+ * Every install path also produces a project_pack_associations row for the
+ * project root that hosts it.
  */
 function scanBmad(db) {
   const results = { installs: 0, skills: 0, projects: 0 };
 
-  // 1. Global installs under ~/.claude/skills/<dir>/.claude-plugin/marketplace.json
+  // 1. Legacy global installs under ~/.claude/skills/<dir>/.claude-plugin/
   const claudeSkillsRoot = path.join(resolveClaudeHome(), "skills");
   for (const entry of safeReadDir(claudeSkillsRoot)) {
     if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
@@ -273,7 +381,7 @@ function scanBmad(db) {
     results.skills += added;
   }
 
-  // 2. Per-project: walk distinct sessions.cwd from the last 90 days.
+  // 2 & 3. Per-project: walk distinct sessions.cwd from the last 90 days.
   let projectRoots = [];
   try {
     const since = new Date(
@@ -293,31 +401,54 @@ function scanBmad(db) {
   }
 
   for (const projectRoot of projectRoots) {
-    const bmadDir = path.join(projectRoot, "_bmad");
-    if (!safeStat(bmadDir)) continue;
+    let added = 0;
+    let installedHere = false;
 
-    // Walk up to 3 parent dirs looking for marketplace.json (for version)
-    let marketplace = null;
-    let probe = projectRoot;
-    for (let i = 0; i < 4 && !marketplace; i++) {
-      marketplace = readBmadMarketplace(probe);
-      probe = path.dirname(probe);
-      if (probe === path.dirname(probe)) break; // hit fs root
+    // 2. BMad v6+: project-local `.agents/skills/bmad-*` install. Stamp the
+    // pack against both `claude` and `codex` harnesses because the manifest
+    // explicitly lists both as supported IDEs (and either can invoke the
+    // skills from this same install).
+    const v6 = detectBmadProjectInstall(projectRoot);
+    if (v6) {
+      for (const harness of ["claude", "codex"]) {
+        added += ingestBmadProjectSkills(db, {
+          installPath: v6.installPath,
+          harness,
+          version: v6.version,
+        });
+        results.installs += 1;
+      }
+      installedHere = true;
     }
 
-    const added = ingestPackDir(db, {
-      packId: "bmad-method",
-      harness: "claude",
-      installPath: bmadDir,
-      version: marketplace ? marketplace.version : null,
-    });
-    upsertProjectAssociation(db, {
-      project_path: projectRoot,
-      pack_id: "bmad-method",
-    });
-    results.installs += 1;
-    results.skills += added;
-    results.projects += 1;
+    // 3. Legacy per-project `_bmad/` install with marketplace.json upstream.
+    const legacyBmadDir = path.join(projectRoot, "_bmad");
+    if (safeStat(legacyBmadDir) && !v6) {
+      let marketplace = null;
+      let probe = projectRoot;
+      for (let i = 0; i < 4 && !marketplace; i++) {
+        marketplace = readBmadMarketplace(probe);
+        probe = path.dirname(probe);
+        if (probe === path.dirname(probe)) break; // hit fs root
+      }
+      added += ingestPackDir(db, {
+        packId: "bmad-method",
+        harness: "claude",
+        installPath: legacyBmadDir,
+        version: marketplace ? marketplace.version : null,
+      });
+      results.installs += 1;
+      installedHere = true;
+    }
+
+    if (installedHere) {
+      upsertProjectAssociation(db, {
+        project_path: projectRoot,
+        pack_id: "bmad-method",
+      });
+      results.skills += added;
+      results.projects += 1;
+    }
   }
 
   return results;
@@ -404,6 +535,8 @@ module.exports = {
   _internals: {
     findSkillFiles,
     readBmadMarketplace,
+    readBmadProjectManifest,
+    detectBmadProjectInstall,
     resolveClaudeHome,
     resolveCodexHome,
   },

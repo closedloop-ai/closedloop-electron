@@ -79,7 +79,10 @@ function makeGStackTree(home, { skills = ["office-hours", "ship", "review"] } = 
   return root;
 }
 
-function makeBmadTree(home) {
+// Legacy BMad layout (pre-v6): a global Claude Code plugin under
+// ~/.claude/skills/bmad-method with marketplace.json + src/{core,bmm}-skills.
+// Still supported by the scanner for back-compat.
+function makeLegacyBmadTree(home) {
   const root = nodePath.join(home, ".claude", "skills", "bmad-method");
   fs.mkdirSync(nodePath.join(root, ".claude-plugin"), { recursive: true });
   fs.writeFileSync(
@@ -95,6 +98,42 @@ function makeBmadTree(home) {
     `---\nname: bmad-party-mode\nversion: 6.6.0\n---\n`,
   );
   return root;
+}
+
+// Current BMad layout (v6+, from `npx bmad-method install`): per-project
+// install with .agents/skills/bmad-*/SKILL.md and _bmad/_config/manifest.yaml
+// for version. No marketplace.json.
+function makeBmadV6Tree(projectRoot) {
+  fs.mkdirSync(nodePath.join(projectRoot, ".agents", "skills"), {
+    recursive: true,
+  });
+  const skills = ["bmad-help", "bmad-prd", "bmad-party-mode"];
+  for (const s of skills) {
+    writeFile(
+      nodePath.join(projectRoot, ".agents", "skills", s, "SKILL.md"),
+      `---\nname: ${s}\ndescription: Test ${s}\n---\n# ${s}\n`,
+    );
+  }
+  // Throw in a non-bmad sibling skill that must NOT be attributed to bmad.
+  writeFile(
+    nodePath.join(projectRoot, ".agents", "skills", "other-pack-skill", "SKILL.md"),
+    `---\nname: other-pack-skill\n---\n`,
+  );
+  fs.mkdirSync(nodePath.join(projectRoot, "_bmad", "_config"), {
+    recursive: true,
+  });
+  fs.writeFileSync(
+    nodePath.join(projectRoot, "_bmad", "_config", "manifest.yaml"),
+    [
+      "installation:",
+      "  version: 6.7.1",
+      "  installDate: 2026-05-20T23:13:17.769Z",
+      "modules:",
+      "  - name: core",
+      "    version: 6.7.1",
+    ].join("\n"),
+  );
+  return projectRoot;
 }
 
 function withFakeHome(home, fn) {
@@ -148,9 +187,9 @@ test("scanner detects GStack and writes inventory rows", () => {
   assert.ok(skills.every((s) => s.harness === "claude"));
 });
 
-test("scanner detects BMad via marketplace.json and parses version", () => {
+test("scanner detects legacy BMad install via marketplace.json", () => {
   const home = mkdtemp();
-  makeBmadTree(home);
+  makeLegacyBmadTree(home);
   const db = makeDb();
 
   withFakeHome(home, () => runPackScanner(db));
@@ -159,6 +198,60 @@ test("scanner detects BMad via marketplace.json and parses version", () => {
   assert.ok(pack, "bmad-method pack should be present");
   assert.equal(pack.version, "6.6.0");
   assert.ok(pack.skills.length >= 2);
+});
+
+test("scanner detects BMad v6+ project install via .agents/skills/bmad-*", () => {
+  const home = mkdtemp();
+  const projectRoot = nodePath.join(home, "projects", "myapp");
+  fs.mkdirSync(projectRoot, { recursive: true });
+  makeBmadV6Tree(projectRoot);
+
+  const db = makeDb();
+  addHarnessColumn(db);
+  // Scanner walks sessions.cwd to find candidate project roots
+  seedSession(db, "s1", "claude");
+  db.prepare("UPDATE sessions SET cwd = ? WHERE id = 's1'").run(projectRoot);
+
+  withFakeHome(home, () => runPackScanner(db));
+
+  const pack = getPack(db, "bmad-method");
+  assert.ok(pack, "bmad-method pack should be present");
+  assert.equal(pack.version, "6.7.1", "version should be read from manifest.yaml");
+
+  // Pack is registered for both harnesses (BMad supports claude + codex)
+  const harnesses = pack.installs.map((i) => i.harness).sort();
+  assert.deepEqual(harnesses, ["claude", "codex"]);
+
+  // Only bmad-* skills are attributed; the sibling `other-pack-skill` is not.
+  const bmadSkillNames = pack.skills.map((s) => s.name).sort();
+  assert.ok(
+    bmadSkillNames.every((n) => n.startsWith("bmad-")),
+    "no non-bmad sibling skills should be ingested under bmad-method",
+  );
+  assert.ok(bmadSkillNames.includes("bmad-help"));
+  assert.ok(bmadSkillNames.includes("bmad-prd"));
+  assert.ok(bmadSkillNames.includes("bmad-party-mode"));
+
+  // Project association recorded
+  assert.equal(
+    pack.associations.length,
+    1,
+    "one project association expected",
+  );
+  assert.equal(pack.associations[0].project_path, projectRoot);
+});
+
+test("BMad v6+ manifest parser tolerates missing version", () => {
+  const { _internals } = require("../pack-scanner");
+  const home = mkdtemp();
+  const root = nodePath.join(home, "proj");
+  fs.mkdirSync(nodePath.join(root, "_bmad", "_config"), { recursive: true });
+  fs.writeFileSync(
+    nodePath.join(root, "_bmad", "_config", "manifest.yaml"),
+    "installation:\n  installDate: 2026-05-20\n",
+  );
+  const result = _internals.readBmadProjectManifest(root);
+  assert.equal(result, null, "no version line → null");
 });
 
 test("scanner is idempotent — re-running does not duplicate rows", () => {
