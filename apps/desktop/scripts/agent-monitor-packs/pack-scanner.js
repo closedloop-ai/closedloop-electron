@@ -191,6 +191,20 @@ function ingestPackDir(db, { packId, harness, installPath, sourceUrl, version })
 }
 
 /**
+ * Read the gstack pack version from the install's top-level VERSION file
+ * (plain-text, e.g. "1.40.0.0"). Returns null if absent or unreadable.
+ * gstack publishes its pack-level version through this file (the script
+ * gstack/bin/gstack-update-check uses the same source to detect upgrades).
+ */
+function readGStackVersion(installPath) {
+  const versionFile = path.join(installPath, "VERSION");
+  const content = safeReadFile(versionFile);
+  if (!content) return null;
+  const v = content.trim().split(/\s+/)[0];
+  return v && /^[0-9][0-9A-Za-z.\-+]*$/.test(v) ? v : null;
+}
+
+/**
  * Detect GStack: look for `gstack` or `gstack-*` entries under each known
  * skills root.
  *
@@ -214,10 +228,12 @@ function scanGStack(db) {
     const installPath = path.join(claudeSkillsRoot, entry.name);
     const real = safeRealpath(installPath);
     if (!findSkillFiles(real).length) continue;
+    const version = readGStackVersion(real);
     const added = ingestPackDir(db, {
       packId: "gstack",
       harness: "claude",
       installPath,
+      version,
     });
     results.installs += 1;
     results.skills += added;
@@ -230,14 +246,26 @@ function scanGStack(db) {
       (e.name === "gstack" || e.name.startsWith("gstack-")),
   );
   if (codexEntries.length > 0) {
-    // Derive source_url from any one entry's real path (they all resolve to
-    // the same source repo).
+    // Derive source_url + version from any one entry's resolved real path.
+    // All gstack-* codex symlinks resolve into the same upstream gstack repo,
+    // so its top-level VERSION file is the right source for the pack version
+    // — same value as the Claude install row.
     let sourceUrl = null;
+    let version = null;
     for (const e of codexEntries) {
       const real = safeRealpath(path.join(codexSkillsRoot, e.name));
-      sourceUrl =
-        deriveGitRemoteUrl(real) || deriveGitRemoteUrl(path.dirname(real));
-      if (sourceUrl) break;
+      // Walk up to find the gstack repo root (the dir containing VERSION).
+      // Codex symlinks point into <gstack-repo>/.agents/skills/<skill>/, so
+      // the repo root is the great-grandparent.
+      let probe = real;
+      for (let i = 0; i < 5 && !version; i++) {
+        version = readGStackVersion(probe);
+        if (!sourceUrl) sourceUrl = deriveGitRemoteUrl(probe);
+        const next = path.dirname(probe);
+        if (next === probe) break;
+        probe = next;
+      }
+      if (version || sourceUrl) break;
     }
     upsertPack(db, {
       pack_id: "gstack",
@@ -245,7 +273,7 @@ function scanGStack(db) {
       install_path: codexSkillsRoot,
       install_kind: "symlink",
       source_url: sourceUrl,
-      version: null,
+      version,
     });
     results.installs += 1;
     for (const e of codexEntries) {
@@ -625,6 +653,7 @@ module.exports = {
     readBmadMarketplace,
     readBmadProjectManifest,
     detectBmadProjectInstall,
+    readGStackVersion,
     resolveClaudeHome,
     resolveCodexHome,
   },

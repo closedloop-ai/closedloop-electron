@@ -67,7 +67,10 @@ function makeDb() {
   return db;
 }
 
-function makeGStackTree(home, { skills = ["office-hours", "ship", "review"] } = {}) {
+function makeGStackTree(
+  home,
+  { skills = ["office-hours", "ship", "review"], version = null } = {},
+) {
   const root = nodePath.join(home, ".claude", "skills", "gstack");
   fs.mkdirSync(root, { recursive: true });
   for (const name of skills) {
@@ -75,6 +78,9 @@ function makeGStackTree(home, { skills = ["office-hours", "ship", "review"] } = 
       nodePath.join(root, name, "SKILL.md"),
       `---\nname: ${name}\nversion: 1.0.0\ndescription: Test skill ${name}\n---\n# ${name}\n`,
     );
+  }
+  if (version) {
+    fs.writeFileSync(nodePath.join(root, "VERSION"), `${version}\n`);
   }
   return root;
 }
@@ -328,6 +334,29 @@ test("runPackScanner prunes stale rows from prior scans", () => {
     .prepare("SELECT * FROM skills WHERE skill_id = 'stale-1'")
     .get();
   assert.equal(staleSkill, undefined, "stale skills row should be pruned");
+});
+
+test("scanner reads gstack pack version from top-level VERSION file", () => {
+  const home = mkdtemp();
+  makeGStackTree(home, { skills: ["office-hours"], version: "1.40.0.0" });
+  const db = makeDb();
+
+  withFakeHome(home, () => runPackScanner(db));
+
+  const pack = getPack(db, "gstack");
+  assert.ok(pack);
+  const claudeInstall = pack.installs.find((i) => i.harness === "claude");
+  assert.ok(claudeInstall);
+  assert.equal(claudeInstall.version, "1.40.0.0");
+});
+
+test("readGStackVersion rejects malformed VERSION content", () => {
+  const { _internals } = require("../pack-scanner");
+  const home = mkdtemp();
+  const root = nodePath.join(home, "g");
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(nodePath.join(root, "VERSION"), "definitely not a version\n");
+  assert.equal(_internals.readGStackVersion(root), null);
 });
 
 test("BMad v6+ manifest parser tolerates missing version", () => {
