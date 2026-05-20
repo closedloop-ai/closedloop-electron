@@ -19,6 +19,7 @@ import {
   tryUploadArtifacts,
   tryUploadSupportBundle,
 } from "../src/main/loop-finalizer.js";
+import { gatewayLog } from "../src/main/gateway-logger.js";
 import { LoopTokenStore } from "../src/main/loop-token-store.js";
 import { Observability } from "../src/main/observability.js";
 import { resetResolvedClaudePath } from "../src/server/operations/symphony-loop.js";
@@ -31,7 +32,7 @@ import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
 import { makeV2ExecutionResult } from "./helpers/execution-result-fixtures.js";
 
 let tempRoot = "";
-let fetchCalls: Array<{ url: string; body: string }> = [];
+let fetchCalls: Array<{ url: string; body: string; authHeader?: string | null }> = [];
 let telemetryEvents: TelemetryEventPayload[] = [];
 const originalFetch = globalThis.fetch;
 const originalPath = process.env.PATH;
@@ -40,10 +41,13 @@ beforeEach(async () => {
   tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "loop-finalizer-test-"));
   fetchCalls = [];
   telemetryEvents = [];
+  gatewayLog.clear();
   globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    const headers = new Headers(init?.headers);
     fetchCalls.push({
       url: String(input),
       body: typeof init?.body === "string" ? init.body : "",
+      authHeader: headers.get("Authorization"),
     });
     return new Response(JSON.stringify({ success: true }), {
       status: 200,
@@ -54,6 +58,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   globalThis.fetch = originalFetch;
+  gatewayLog.clear();
   await Observability.shutdown();
   Observability.reset();
   process.env.PATH = originalPath;
@@ -106,7 +111,7 @@ test("finalizeLoopFromRuntime uploads, posts completion, and persists terminal s
   await finalizeLoopFromRuntime(job, "live-exit", {
     jobStore,
     telemetry: { emit: (event) => telemetryEvents.push(event) },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -119,6 +124,9 @@ test("finalizeLoopFromRuntime uploads, posts completion, and persists terminal s
   assert.ok(persisted.finalStatusPersistedAt);
   assert.ok(persisted.cloudFinalizedAt);
   assert.equal(fetchCalls.length, 2);
+  // Both fetch calls must carry the Bearer token injected by getToken().
+  assert.equal(fetchCalls[0]?.authHeader, "Bearer token");
+  assert.equal(fetchCalls[1]?.authHeader, "Bearer token");
   const uploadBody = JSON.parse(fetchCalls[0]?.body ?? "{}") as {
     artifacts?: { plan?: Record<string, unknown> };
   };
@@ -164,7 +172,7 @@ test("finalizeLoopFromRuntime keeps loop token when cloud finalization fails ret
   await finalizeLoopFromRuntime(job, "live-exit", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
     loopTokenStore,
@@ -205,7 +213,7 @@ test("finalizeLoopFromRuntime clears loop token for non-retryable cloud failure"
   await finalizeLoopFromRuntime(job, "live-exit", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
     loopTokenStore,
@@ -226,7 +234,7 @@ test("finalizeLoopFromRuntime is idempotent after timestamps are set", async () 
   await finalizeLoopFromRuntime(job, "live-exit", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -237,7 +245,7 @@ test("finalizeLoopFromRuntime is idempotent after timestamps are set", async () 
   await finalizeLoopFromRuntime(finalized, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -259,7 +267,7 @@ test("finalizeLoopFromRuntime skips CANCEL_PENDING while PID remains alive", asy
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => true,
   });
@@ -285,7 +293,7 @@ test("finalizeLoopFromRuntime maps dead CANCEL_PENDING to CANCELLED without post
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: (event) => telemetryEvents.push(event) },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -316,7 +324,7 @@ test("finalizeLoopFromRuntime maps PID-less CANCEL_PENDING to CANCELLED without 
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: (event) => telemetryEvents.push(event) },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -342,7 +350,7 @@ test("finalizeLoopFromRuntime preserves FAILED jobs and posts an error event", a
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: (event) => telemetryEvents.push(event) },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -380,7 +388,7 @@ test("finalizeLoopFromRuntime replays persisted user-visible runner failure", as
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: (event) => telemetryEvents.push(event) },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -413,7 +421,7 @@ test("finalizeLoopFromRuntime preserves CANCELLED jobs without posting loop even
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: (event) => telemetryEvents.push(event) },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -443,7 +451,7 @@ test("finalizeLoopFromRuntime preserves STOPPED jobs and posts a stopped error e
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: (event) => telemetryEvents.push(event) },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -474,7 +482,7 @@ test("finalizeLoopFromRuntime boot-recovery RUNNING without snapshot resolves to
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -508,7 +516,7 @@ test("finalizeLoopFromRuntime boot-recovery RUNNING with COMPLETED snapshot pres
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -550,7 +558,7 @@ test("finalizeLoopFromRuntime boot-recovery error event includes diagnostics pay
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -586,7 +594,7 @@ test("finalizeLoopFromRuntime boot-recovery RUNNING is idempotent on second call
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -599,7 +607,7 @@ test("finalizeLoopFromRuntime boot-recovery RUNNING is idempotent on second call
   await finalizeLoopFromRuntime(persistedJob, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -623,7 +631,7 @@ test("finalizeLoopFromRuntime boot-recovery RUNNING with CANCELLED snapshot reso
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -653,7 +661,7 @@ const artifactDeps = (
   getAllowedDirectories?: () => string[],
 ) => ({
   jobStore,
-  apiAuthToken: "token",
+  getToken: () => "token",
   apiBaseUrl: "http://127.0.0.1:12345",
   getAllowedDirectories,
 });
@@ -695,6 +703,8 @@ test("tryUploadArtifacts POSTs artifacts and sets artifactsUploadedAt on success
   assert.equal(failed, false);
   assert.equal(warnings.length, 0);
   assert.equal(fetchCalls.filter((c) => c.url.includes("/upload-artifacts")).length, 1);
+  // Artifact upload fetch must carry the Bearer token.
+  assert.equal(fetchCalls[0]?.authHeader, "Bearer token");
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted?.artifactsUploadedAt);
   const uploadBody = JSON.parse(fetchCalls[0]?.body ?? "{}") as {
@@ -704,6 +714,36 @@ test("tryUploadArtifacts POSTs artifacts and sets artifactsUploadedAt on success
     content: "Plan content",
     raw: { content: "Plan content", tasks: [] },
   });
+});
+
+test("tryUploadArtifacts emits loop-upload info log entry on success", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(
+    path.join(claudeWorkDir, "plan.json"),
+    JSON.stringify({ content: "Logged plan", tasks: [] }),
+  );
+
+  const jobStore = createStore("step-upload-log");
+  const job = createBaseJob({ claudeWorkDir });
+  jobStore.upsert(job);
+
+  const warnings: string[] = [];
+  const { failed } = await tryUploadArtifacts(
+    job,
+    LoopCommand.Plan,
+    claudeWorkDir,
+    undefined,
+    warnings,
+    artifactDeps(jobStore),
+  );
+
+  assert.equal(failed, false);
+  const logEntry = gatewayLog
+    .getEntries()
+    .find((e) => e.tag === "loop-upload" && e.level === "info");
+  assert.ok(logEntry, "expected a loop-upload info log entry after artifact upload");
+  assert.match(logEntry.message, /loop-1/);
 });
 
 test("tryUploadArtifacts includes current plan state on EXECUTE uploads", async () => {
@@ -814,7 +854,7 @@ test("tryUploadSupportBundle uploads renamed claude output and perf, posts event
     job,
     claudeWorkDir,
     apiBaseUrl: "http://127.0.0.1:12345",
-    token: "token",
+    getToken: () => "token",
     jobStore,
   });
 
@@ -847,6 +887,44 @@ test("tryUploadSupportBundle uploads renamed claude output and perf, posts event
     ["claude-output.jsonl", "perf.jsonl"],
   );
   assert.ok(jobStore.getByLoopId("loop-1")?.supportBundleUploadedAt);
+});
+
+test("tryUploadSupportBundle URL-encodes loopId in upload-urls request", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir-encode");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "claude-output.jsonl"), "{}\n");
+
+  const jobStore = createStore("support-upload-encode");
+  const job = createBaseJob({
+    loopId: "abc/def",
+    claudeWorkDir,
+    status: "FAILED",
+    s3StateKey: "org-1/loops/abc%2Fdef/run-1",
+  });
+  jobStore.upsert(job);
+  globalThis.fetch = (async (input: URL | RequestInfo) => {
+    fetchCalls.push({ url: String(input), body: "" });
+    if (String(input).includes("/upload-urls")) {
+      return Response.json({ success: true, data: { urls: [] } });
+    }
+    return Response.json({ success: true });
+  }) as typeof fetch;
+
+  await tryUploadSupportBundle({
+    job,
+    claudeWorkDir,
+    apiBaseUrl: "http://127.0.0.1:12345",
+    getToken: () => "token",
+    jobStore,
+  });
+
+  const uploadUrlCall = fetchCalls.find((call) => call.url.includes("/upload-urls"));
+  assert.ok(uploadUrlCall, "Expected at least one /upload-urls request");
+  assert.equal(
+    uploadUrlCall.url,
+    "http://127.0.0.1:12345/loops/abc%2Fdef/upload-urls",
+    "loopId with URL-significant characters must be percent-encoded to match the centralized loop-http helpers",
+  );
 });
 
 test("tryUploadSupportBundle uploads legacy pre-rename claude output with stable support key", async () => {
@@ -884,7 +962,7 @@ test("tryUploadSupportBundle uploads legacy pre-rename claude output with stable
     job,
     claudeWorkDir,
     apiBaseUrl: "http://127.0.0.1:12345",
-    token: "token",
+    getToken: () => "token",
   });
 
   assert.equal(result.failed, false);
@@ -926,7 +1004,7 @@ test("tryUploadSupportBundle skips when files are missing or too large", async (
     job,
     claudeWorkDir,
     apiBaseUrl: "http://127.0.0.1:12345",
-    token: "token",
+    getToken: () => "token",
   });
 
   assert.equal(result.failed, false);
@@ -953,7 +1031,7 @@ test("tryUploadSupportBundle skips idempotently after support bundle upload is r
     job,
     claudeWorkDir,
     apiBaseUrl: "http://127.0.0.1:12345",
-    token: "token",
+    getToken: () => "token",
   });
 
   assert.equal(result.failed, false);
@@ -1013,7 +1091,7 @@ for (const scenario of [
       job,
       claudeWorkDir,
       apiBaseUrl: "http://127.0.0.1:12345",
-      token: "token",
+      getToken: () => "token",
     });
 
     assert.equal(result.failed, true);
@@ -1090,7 +1168,7 @@ for (const scenario of [
       job,
       claudeWorkDir,
       apiBaseUrl: "http://127.0.0.1:12345",
-      token: "token",
+      getToken: () => "token",
     });
 
     assert.equal(result.failed, true);
@@ -1141,7 +1219,7 @@ test("tryUploadSupportBundle leaves idempotence unset when support event POST fa
     job,
     claudeWorkDir,
     apiBaseUrl: "http://127.0.0.1:12345",
-    token: "token",
+    getToken: () => "token",
     jobStore,
   });
 
@@ -1190,7 +1268,7 @@ test("finalizeLoopFromRuntime attempts support upload for failed jobs before err
   const outcome = await finalizeLoopFromRuntime(job, "live-exit", {
     jobStore,
     telemetry: { emit: (event) => telemetryEvents.push(event) },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
   });
@@ -2051,7 +2129,7 @@ test("finalizeLoopFromRuntime cleans up persisted additionalWorktreeDirs on boot
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
     cleanupAdditionalWorktrees: async (entries, loopId) => {
@@ -2095,7 +2173,7 @@ test("finalizeLoopFromRuntime skips additional worktree cleanup on live-exit (in
   await finalizeLoopFromRuntime(job, "live-exit", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
     cleanupAdditionalWorktrees: async () => {
@@ -2130,7 +2208,7 @@ test("finalizeLoopFromRuntime tolerates a throwing cleanup callback and still cl
   await finalizeLoopFromRuntime(job, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
     cleanupAdditionalWorktrees: async () => {
@@ -2255,7 +2333,7 @@ test("finalizeLoopFromRuntime retries EXECUTE finalization after a prior error o
   await finalizeLoopFromRuntime(job, "live-exit", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
     getAllowedDirectories: () => [tempRoot],
@@ -2273,7 +2351,7 @@ test("finalizeLoopFromRuntime retries EXECUTE finalization after a prior error o
   await finalizeLoopFromRuntime(afterLiveError, "boot-recovery", {
     jobStore,
     telemetry: { emit: () => {} },
-    apiAuthToken: "token",
+    getToken: () => "token",
     apiBaseUrl: "http://127.0.0.1:12345",
     isProcessRunning: () => false,
     getAllowedDirectories: () => [tempRoot],
@@ -2428,4 +2506,41 @@ test("unsupported execution-result schema results in no-changes fields", async (
   assert.equal(parsed.result?.has_changes, false, "unsupported schema must produce has_changes=false");
   assert.equal(parsed.result?.prUrl, null, "unsupported schema must produce prUrl=null");
   assert.equal(parsed.result?.prNumber, null, "unsupported schema must produce prNumber=null");
+});
+
+test("token provider is called once per HTTP request during finalization", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(
+    path.join(claudeWorkDir, "plan.json"),
+    JSON.stringify({ content: "Plan content", tasks: [] }),
+  );
+  await fs.writeFile(path.join(claudeWorkDir, "open-questions.md"), "none");
+
+  const jobStore = createStore("token-provider-per-request");
+  const job = createBaseJob({ claudeWorkDir });
+  jobStore.upsert(job);
+
+  let tokenProviderCallCount = 0;
+  const getToken = () => {
+    tokenProviderCallCount++;
+    return "tracked-token";
+  };
+
+  await finalizeLoopFromRuntime(job, "live-exit", {
+    jobStore,
+    telemetry: { emit: () => {} },
+    getToken,
+    apiBaseUrl: "http://127.0.0.1:12345",
+    isProcessRunning: () => false,
+  });
+
+  // Finalization makes two HTTP requests: upload-artifacts and completed event.
+  // The token provider must be invoked exactly once per request.
+  assert.equal(fetchCalls.length, 2, "expected exactly 2 HTTP requests");
+  assert.equal(
+    tokenProviderCallCount,
+    fetchCalls.length,
+    "token provider must be called once per HTTP request",
+  );
 });

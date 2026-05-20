@@ -1197,3 +1197,76 @@ test("cleanupAdditionalWorktrees retains worktree when git status fails unexpect
     await fs.rm(nonRepoDir, { recursive: true, force: true });
   }
 });
+
+test("AC-004: per-request provider resolution uses token at call time, not at construction time", async () => {
+  // Verifies that getToken() is resolved on every fetch call so that a token
+  // rotation between the artifact-upload and the completed-event POST results
+  // in different Authorization headers for each request.
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
+  await fs.writeFile(path.join(claudeWorkDir, "open-questions.md"), "none");
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-per-request-token");
+  loopTokenStore.setLoopToken("loop-1", "token-before-upload");
+
+  const jobStore = createStore("boot-recovery-per-request");
+  const deadJob = createJob({
+    status: "RUNNING",
+    claudeWorkDir,
+    // No statePath so RUNNING-no-snapshot resolves to FAILED (no upload-artifacts call).
+    // To exercise both upload-artifacts and completed-event, we need a COMPLETED snapshot.
+    statePath: path.join(claudeWorkDir, "state.json"),
+  });
+  await fs.writeFile(
+    path.join(claudeWorkDir, "state.json"),
+    JSON.stringify({ status: "COMPLETED" }),
+  );
+  jobStore.upsert(deadJob);
+
+  // Intercept fetch: after the first call (upload-artifacts), rotate the token
+  // in loopTokenStore so the second call (completed event) picks up the new value.
+  let callCount = 0;
+  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    const url = String(input);
+    const headers = new Headers(init?.headers);
+    callCount++;
+    fetchCalls.push({
+      url,
+      body: typeof init?.body === "string" ? init.body : "",
+      authHeader: headers.get("Authorization"),
+    });
+    if (callCount === 1 && url.includes("/upload-artifacts")) {
+      // Rotate the token after the upload-artifacts call is captured.
+      loopTokenStore.setLoopToken("loop-1", "token-after-upload");
+    }
+    return new Response(JSON.stringify({ success: true }), { status: 200 });
+  }) as typeof fetch;
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4015",
+    loopTokenStore,
+  });
+  await service.run([deadJob]);
+  service.dispose();
+
+  const uploadCall = fetchCalls.find((c) => c.url.includes("/upload-artifacts"));
+  assert.ok(uploadCall, "expected upload-artifacts fetch call");
+  assert.equal(
+    uploadCall.authHeader,
+    "Bearer token-before-upload",
+    "artifact upload must use token resolved at upload time",
+  );
+
+  const completedEventCall = fetchCalls.find((c) => c.body.includes('"type":"completed"'));
+  assert.ok(completedEventCall, "expected completed-event fetch call");
+  assert.equal(
+    completedEventCall.authHeader,
+    "Bearer token-after-upload",
+    "completed-event POST must use token resolved at post time (per-request resolution)",
+  );
+});

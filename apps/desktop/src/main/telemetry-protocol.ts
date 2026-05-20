@@ -366,6 +366,7 @@ export type SupportUploadOutcome = "started" | "skipped" | "succeeded" | "failed
 export type SupportUploadReason =
   | "already_uploaded"
   | "missing_s3_state_key"
+  | "missing_token"
   | "no_uploadable_files"
   | "upload_url_http_error"
   | "upload_url_malformed_response"
