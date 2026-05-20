@@ -15,12 +15,12 @@
 
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, test } from "node:test";
+import { gatewayLog } from "../src/main/gateway-logger.js";
 import {
   postLoopEvent,
   postLoopEventBounded,
   uploadArtifacts,
 } from "../src/server/operations/loop-http.js";
-import { gatewayLog } from "../src/main/gateway-logger.js";
 
 // ---------------------------------------------------------------------------
 // Shared mock infrastructure
@@ -488,7 +488,7 @@ describe("postLoopEventBounded timeout", () => {
       `Expected result.error to be 'timeout', got: ${JSON.stringify(result.error)}`,
     );
     assert.ok(
-      elapsed < timeoutMs * 10,
+      elapsed < timeoutMs * 2,
       `Expected postLoopEventBounded to resolve within ${timeoutMs * 10}ms, took ${elapsed}ms`,
     );
   });
