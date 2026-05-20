@@ -477,14 +477,20 @@ test("starts dead job finalization in the background", async () => {
   const fetchGate = new Promise<void>((resolve) => {
     releaseFetch = resolve;
   });
+  // Let the cloud status check (GET /loops/:id) pass immediately; only gate
+  // event POSTs so that persistFinalJobStatus() runs before we assert.
   globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
     const url = String(input);
+    const method = init?.method ?? "GET";
     const headers = new Headers(init?.headers);
     fetchCalls.push({
       url,
       body: typeof init?.body === "string" ? init.body : "",
       authHeader: headers.get("Authorization"),
     });
+    if (isLoopStatusRequest(url, method)) {
+      return new Response(JSON.stringify({ success: true }), { status: 200 });
+    }
     await fetchGate;
     return new Response(JSON.stringify({ success: true }), { status: 200 });
   }) as typeof fetch;
@@ -541,15 +547,22 @@ test("dispose stops queued dead-job finalization after in-flight request", async
   jobStore.upsert(deadJobTwo);
 
   let releaseFetch: (() => void) | null = null;
-  const firstFetchStarted = new Promise<void>((resolve) => {
+  // Resolves when the first event POST (not the status-check GET) starts, so
+  // dispose() is called while exactly one loop's cloud call is in-flight.
+  const firstEventPostStarted = new Promise<void>((resolve) => {
     globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
       const url = String(input);
+      const method = init?.method ?? "GET";
       const headers = new Headers(init?.headers);
       fetchCalls.push({
         url,
         body: typeof init?.body === "string" ? init.body : "",
         authHeader: headers.get("Authorization"),
       });
+      // Status checks resolve immediately so finalization can reach the event POST.
+      if (isLoopStatusRequest(url, method)) {
+        return new Response(JSON.stringify({ success: true }), { status: 200 });
+      }
       resolve();
       await new Promise<void>((innerResolve) => {
         releaseFetch = innerResolve;
@@ -567,7 +580,7 @@ test("dispose stops queued dead-job finalization after in-flight request", async
   });
 
   const completion = service.startDeadJobFinalization([deadJobOne, deadJobTwo]);
-  await firstFetchStarted;
+  await firstEventPostStarted;
   service.dispose();
   const unblockFetch = releaseFetch;
   assert.ok(unblockFetch);
@@ -1486,7 +1499,7 @@ test("AC-004: per-request provider resolution uses token at call time, not at co
       body: typeof init?.body === "string" ? init.body : "",
       authHeader: headers.get("Authorization"),
     });
-    if (callCount === 1 && url.includes("/upload-artifacts")) {
+    if (url.includes("/upload-artifacts")) {
       // Rotate the token after the upload-artifacts call is captured.
       loopTokenStore.setLoopToken("loop-1", "token-after-upload");
     }
