@@ -197,3 +197,54 @@ export async function uploadArtifacts(
     return { success: false, kind: "network", error: msg };
   }
 }
+
+/**
+ * GET the current status of a cloud loop.
+ *
+ * Returns `{ kind: 'active' }` for any running/non-terminal status,
+ * `{ kind: 'timed_out' }` when the API reports status === 'TIMED_OUT',
+ * or `{ kind: 'error', message }` on network / fetch errors.
+ *
+ * Uses an AbortController timeout (default 5 000 ms) matching the
+ * postLoopEventBounded pattern.
+ */
+export async function getCloudLoopStatus(
+  loopId: string,
+  getToken: () => string | null,
+  apiBaseUrl: string,
+  timeoutMs = 5000,
+): Promise<{ kind: "timed_out" } | { kind: "active" } | { kind: "error"; message: string }> {
+  const url = `${apiBaseUrl}/loops/${encodeURIComponent(loopId)}`;
+  const token = getToken();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token ?? ""}`,
+      },
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      return { kind: "error", message: `HTTP ${resp.status}` };
+    }
+    const raw = (await resp.json()) as Record<string, unknown>;
+    const status = typeof raw?.status === "string" ? raw.status : null;
+    if (status === null) {
+      gatewayLog.warn(
+        "loop-status",
+        `Unexpected response shape for loopId=${loopId}: ${JSON.stringify(raw)}`,
+      );
+      return { kind: "active" };
+    }
+    if (status === "TIMED_OUT") {
+      return { kind: "timed_out" };
+    }
+    return { kind: "active" };
+  } catch (err) {
+    return { kind: "error", message: err instanceof Error ? err.message : String(err) };
+  } finally {
+    clearTimeout(timer);
+  }
+}

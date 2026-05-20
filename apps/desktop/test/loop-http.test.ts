@@ -18,6 +18,7 @@ import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import { gatewayLog } from "../src/main/gateway-logger.js";
 import {
+  getCloudLoopStatus,
   postLoopEvent,
   postLoopEventBounded,
   uploadArtifacts,
@@ -697,5 +698,170 @@ describe("logging output", () => {
       errorEntries.length > 0,
       "Expected at least one error log with tag 'loop-upload' on network error",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getCloudLoopStatus
+// ---------------------------------------------------------------------------
+
+describe("getCloudLoopStatus", () => {
+  test("TIMED_OUT response: returns { kind: 'timed_out' }, GET method, correct URL, correct Authorization", async () => {
+    installFetchStub({
+      status: 200,
+      responseBody: JSON.stringify({ status: "TIMED_OUT" }),
+    });
+
+    const result = await getCloudLoopStatus(
+      "loop-abc",
+      () => "my-token",
+      "https://api.example.com",
+    );
+
+    assert.deepEqual(result, { kind: "timed_out" });
+    assert.equal(capturedRequests.length, 1);
+    const req = capturedRequests[0];
+    assert.ok(req, "Expected a captured request");
+    assert.equal(req.method, "GET");
+    assert.equal(req.url, "https://api.example.com/loops/loop-abc");
+    assert.equal(req.headers["authorization"], "Bearer my-token");
+  });
+
+  test("RUNNING response: returns { kind: 'active' }", async () => {
+    installFetchStub({
+      status: 200,
+      responseBody: JSON.stringify({ status: "RUNNING" }),
+    });
+
+    const result = await getCloudLoopStatus(
+      "loop-running",
+      () => "my-token",
+      "https://api.example.com",
+    );
+
+    assert.deepEqual(result, { kind: "active" });
+  });
+
+  test("HTTP 404 response: returns { kind: 'error' }", async () => {
+    installFetchStub({
+      status: 404,
+      responseBody: "Not Found",
+    });
+
+    const result = await getCloudLoopStatus(
+      "loop-404",
+      () => "my-token",
+      "https://api.example.com",
+    );
+
+    assert.equal(result.kind, "error");
+  });
+
+  test("HTTP 500 response: returns { kind: 'error' }", async () => {
+    installFetchStub({
+      status: 500,
+      responseBody: "Internal Server Error",
+    });
+
+    const result = await getCloudLoopStatus(
+      "loop-500",
+      () => "my-token",
+      "https://api.example.com",
+    );
+
+    assert.equal(result.kind, "error");
+  });
+
+  test("HTTP 503 with JSON body containing status field: returns { kind: 'error', message: 'HTTP 503' } (T-2.1, AC-003)", async () => {
+    // Regression: a non-2xx response with a valid JSON body like {"status":"RUNNING"}
+    // must return { kind: 'error' }, not { kind: 'active' }.
+    installFetchStub({
+      status: 503,
+      responseBody: JSON.stringify({ status: "RUNNING" }),
+    });
+
+    const result = await getCloudLoopStatus(
+      "loop-503-json",
+      () => "my-token",
+      "https://api.example.com",
+    );
+
+    assert.deepEqual(result, { kind: "error", message: "HTTP 503" });
+  });
+
+  test("fetch throws ECONNREFUSED: returns { kind: 'error' }, message includes ECONNREFUSED", async () => {
+    globalThis.fetch = (async () => {
+      throw new Error("ECONNREFUSED");
+    }) as typeof fetch;
+
+    const result = await getCloudLoopStatus(
+      "loop-net-err",
+      () => "my-token",
+      "https://api.example.com",
+    );
+
+    assert.equal(result.kind, "error");
+    assert.ok(
+      result.kind === "error" && result.message.includes("ECONNREFUSED"),
+      `Expected message to include ECONNREFUSED, got: ${JSON.stringify(result)}`,
+    );
+  });
+
+  test("null token: Authorization header is 'Bearer '", async () => {
+    installFetchStub({
+      status: 200,
+      responseBody: JSON.stringify({ status: "RUNNING" }),
+    });
+
+    await getCloudLoopStatus(
+      "loop-null-tok",
+      () => null,
+      "https://api.example.com",
+    );
+
+    const req = capturedRequests[0];
+    assert.ok(req, "Expected a captured request");
+    // Headers normalization trims trailing whitespace, so 'Bearer ' becomes 'Bearer'
+    assert.ok(
+      req.headers["authorization"] === "Bearer" ||
+        req.headers["authorization"] === "Bearer ",
+      `Authorization header should be 'Bearer' or 'Bearer ' when token is null, got: ${JSON.stringify(req.headers["authorization"])}`,
+    );
+  });
+
+  test("missing status field: returns { kind: 'active' }, emits warn log with tag 'loop-status'", async () => {
+    installFetchStub({
+      status: 200,
+      responseBody: JSON.stringify({ other: "field" }),
+    });
+
+    const result = await getCloudLoopStatus(
+      "loop-no-status",
+      () => "my-token",
+      "https://api.example.com",
+    );
+
+    assert.deepEqual(result, { kind: "active" });
+
+    const warnEntries = gatewayLogEntries.filter(
+      (e) => e.level === "warn" && e.tag === "loop-status",
+    );
+    assert.ok(
+      warnEntries.length > 0,
+      `Expected at least one warn log entry with tag 'loop-status', got: ${JSON.stringify(gatewayLogEntries)}`,
+    );
+  });
+
+  test("AbortController timeout: returns { kind: 'error' } when fetch hangs and timeoutMs is 1", async () => {
+    installFetchStub({ hang: true });
+
+    const result = await getCloudLoopStatus(
+      "loop-timeout",
+      () => "my-token",
+      "https://api.example.com",
+      1,
+    );
+
+    assert.equal(result.kind, "error");
   });
 });

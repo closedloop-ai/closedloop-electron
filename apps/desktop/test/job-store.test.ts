@@ -100,10 +100,30 @@ test("isTerminalJobStatus returns correct values", () => {
   assert.ok(isTerminalJobStatus("CANCELLED"));
   assert.ok(isTerminalJobStatus("STOPPED"));
   assert.ok(isTerminalJobStatus("UNKNOWN"));
+  assert.ok(isTerminalJobStatus("TIMED_OUT"));
   assert.ok(!isTerminalJobStatus("QUEUED"));
   assert.ok(!isTerminalJobStatus("STARTING"));
   assert.ok(!isTerminalJobStatus("RUNNING"));
   assert.ok(!isTerminalJobStatus("CANCEL_PENDING"));
+});
+
+test("upsert TIMED_OUT moves job to terminal", () => {
+  store.upsert(makeJob({ id: "j1", status: "RUNNING" }));
+  assert.equal(store.listRunning().length, 1);
+
+  store.upsert(makeJob({ id: "j1", status: "TIMED_OUT", liveActivity: "Loop timed out — restart from the loop list." }));
+  assert.equal(store.listRunning().length, 0);
+  assert.equal(store.listCompleted().length, 1);
+  assert.equal(store.listCompleted()[0].status, "TIMED_OUT");
+  assert.equal(store.listCompleted()[0].liveActivity, "Loop timed out — restart from the loop list.");
+});
+
+test("TIMED_OUT job persists across JobStore instantiation", () => {
+  store.upsert(makeJob({ id: "j1", loopId: "loop-1", status: "TIMED_OUT", liveActivity: "Loop timed out — restart from the loop list." }));
+
+  const store2 = new JobStore({ cwd: tmpDir, name: "test-jobs" });
+  assert.equal(store2.getByLoopId("loop-1")?.status, "TIMED_OUT");
+  assert.equal(store2.getByLoopId("loop-1")?.liveActivity, "Loop timed out — restart from the loop list.");
 });
 
 test("persists and restores across instances", () => {

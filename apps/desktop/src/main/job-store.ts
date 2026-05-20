@@ -11,7 +11,8 @@ export type LocalJobStatus =
   | "COMPLETED"
   | "FAILED"
   | "CANCELLED"
-  | "UNKNOWN";
+  | "UNKNOWN"
+  | "TIMED_OUT";
 
 export type LocalJobKind = "SYMPHONY_LOOP";
 
@@ -145,8 +146,17 @@ const TERMINAL_STATUSES: ReadonlySet<LocalJobStatus> = new Set([
   "CANCELLED",
   "STOPPED",
   "UNKNOWN",
+  "TIMED_OUT",
 ]);
 
+// T-1.1 design decision: a compile-time exhaustiveness guard
+//   const _assertTimedOutIsTerminal: 'TIMED_OUT' extends (typeof TERMINAL_STATUSES extends ReadonlySet<infer S> ? S : never) ? true : never = true;
+// was evaluated and found tautological. Because TERMINAL_STATUSES is declared as
+// ReadonlySet<LocalJobStatus>, TypeScript widens the inferred element type to the
+// full LocalJobStatus union — so the extends-check is always true regardless of the
+// set's runtime contents. A membership assertion against a widened type provides no
+// build-time safety. Runtime coverage for T-1.1 (AC-007) is provided by the
+// isTerminalJobStatus('TIMED_OUT') assertion in job-store.test.ts.
 export function isTerminalJobStatus(status: LocalJobStatus): boolean {
   return TERMINAL_STATUSES.has(status);
 }

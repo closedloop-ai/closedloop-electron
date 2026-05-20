@@ -33,6 +33,43 @@ import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js
 let tempRoot = "";
 let fetchCalls: Array<{ url: string; body: string; authHeader?: string | null }> = [];
 let telemetryEvents: TelemetryEventPayload[] = [];
+
+/**
+ * Returns true when `url`/`method` target the loop status endpoint
+ * (GET /loops/:id, excluding /events and /upload-artifacts sub-paths).
+ */
+function isLoopStatusRequest(url: string, method: string): boolean {
+  return (
+    url.includes("/loops/") &&
+    !url.includes("/events") &&
+    !url.includes("/upload-artifacts") &&
+    method === "GET"
+  );
+}
+
+/**
+ * Install a fetch mock that records every request into `fetchCalls` and
+ * delegates GET /loops/:id (the cloud-status endpoint) to `statusHandler`.
+ * All other requests return `Response.json({ success: true })`.
+ */
+function installCloudStatusFetchMock(
+  statusHandler: (url: string) => Response | never,
+): void {
+  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    const headers = new Headers(init?.headers);
+    fetchCalls.push({
+      url,
+      body: typeof init?.body === "string" ? init.body : "",
+      authHeader: headers.get("Authorization"),
+    });
+    if (isLoopStatusRequest(url, method)) {
+      return statusHandler(url);
+    }
+    return Response.json({ success: true });
+  }) as typeof fetch;
+}
 const originalFetch = globalThis.fetch;
 const originalPollMs = process.env.CLOSEDLOOP_TAILER_POLL_MS;
 const originalThrottleMs = process.env.CLOSEDLOOP_TAILER_THROTTLE_MS;
@@ -1196,6 +1233,218 @@ test("cleanupAdditionalWorktrees retains worktree when git status fails unexpect
   } finally {
     await fs.rm(nonRepoDir, { recursive: true, force: true });
   }
+});
+
+test("reattachLiveJob transitions to TIMED_OUT when cloud reports TIMED_OUT", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  const worktreeDir = path.join(tempRoot, "worktree");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.mkdir(worktreeDir, { recursive: true });
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-reattach-timed-out-tokens");
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
+
+  const jobStore = createStore("boot-recovery-reattach-timed-out");
+  const liveJob = createJob({
+    pid: process.pid,
+    status: "RUNNING",
+    claudeWorkDir,
+    worktreeDir,
+  });
+  jobStore.upsert(liveJob);
+
+  installCloudStatusFetchMock(() => Response.json({ status: "TIMED_OUT" }));
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4020",
+    loopTokenStore,
+  });
+  await service.reattachLiveJobs();
+  await sleep(100);
+
+  assert.equal(fetchCalls.length, 1, "expected exactly one fetch call (GET status check)");
+  assert.ok(
+    fetchCalls[0].url.includes("/loops/loop-1") &&
+      !fetchCalls[0].url.includes("/events") &&
+      !fetchCalls[0].url.includes("/upload-artifacts"),
+    "expected GET to /loops/loop-1 status endpoint",
+  );
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.equal(persisted.status, "TIMED_OUT");
+  assert.equal(
+    persisted.liveActivity,
+    "Loop timed out — restart from the loop list.",
+    "expected TIMED_OUT liveActivity message",
+  );
+  assert.ok(persisted.cloudFinalizedAt, "expected cloudFinalizedAt to be set");
+  assert.equal(loopTokenStore.getLoopToken("loop-1"), null, "expected loop token cleared");
+  assert.ok(existsSync(worktreeDir), "expected worktreeDir to remain on disk after TIMED_OUT");
+  service.dispose();
+});
+
+test("reattachLiveJob starts tailer when cloud reports RUNNING", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+  await fs.writeFile(jsonlPath, "");
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-reattach-running-tokens");
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
+
+  const jobStore = createStore("boot-recovery-reattach-running");
+  const liveJob = createJob({
+    pid: process.pid,
+    status: "RUNNING",
+    claudeWorkDir,
+    jsonlPath,
+    lastObservedJsonlOffset: 0,
+  });
+  jobStore.upsert(liveJob);
+
+  installCloudStatusFetchMock(() => Response.json({ status: "RUNNING" }));
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4021",
+    loopTokenStore,
+  });
+  await service.reattachLiveJobs();
+
+  // Write a complete JSONL record to trigger a tailer event POST
+  await fs.appendFile(
+    jsonlPath,
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"recovered"}],"usage":{"input_tokens":1,"output_tokens":1}}}\n',
+  );
+
+  await waitForCondition(
+    () => fetchCalls.some((c) => c.url.includes("/loops/loop-1/events")),
+    5000,
+  );
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.notEqual(persisted.status, "TIMED_OUT", "expected status not to be TIMED_OUT");
+  assert.ok(
+    fetchCalls.some((c) => c.url.includes("/loops/loop-1/events")),
+    "expected at least one POST to /events from tailer",
+  );
+  service.dispose();
+});
+
+test("reattachLiveJob continues when GET status check throws a network error", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+  await fs.writeFile(jsonlPath, "");
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-reattach-net-err-tokens");
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
+
+  const jobStore = createStore("boot-recovery-reattach-net-err");
+  const liveJob = createJob({
+    pid: process.pid,
+    status: "RUNNING",
+    claudeWorkDir,
+    jsonlPath,
+    lastObservedJsonlOffset: 0,
+  });
+  jobStore.upsert(liveJob);
+
+  installCloudStatusFetchMock(() => { throw new Error("network failure"); });
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4022",
+    loopTokenStore,
+  });
+  await service.reattachLiveJobs();
+
+  const beforeWrite = jobStore.getByLoopId("loop-1");
+  assert.ok(beforeWrite);
+  assert.notEqual(
+    beforeWrite.status,
+    "TIMED_OUT",
+    "network error must not transition job to TIMED_OUT",
+  );
+
+  // Verify tailer is running: write a JSONL record and wait for it to be picked up
+  await fs.appendFile(
+    jsonlPath,
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"net-err-test"}],"usage":{"input_tokens":1,"output_tokens":1}}}\n',
+  );
+
+  await waitForCondition(
+    () => fetchCalls.some((c) => c.url.includes("/loops/loop-1/events")),
+    5000,
+  );
+
+  assert.ok(
+    fetchCalls.some((c) => c.url.includes("/loops/loop-1/events")),
+    "expected tailer to start and POST /events after network error on status check",
+  );
+  service.dispose();
+});
+
+test("finalizeDeadJobs skips finalization and sets cloudFinalizedAt when cloud reports TIMED_OUT", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-dead-timed-out-tokens");
+  loopTokenStore.setLoopToken("loop-1", "loop-token");
+
+  const jobStore = createStore("boot-recovery-dead-timed-out");
+  const deadJob = createJob({
+    status: "RUNNING",
+    pid: 9_999_999,
+    claudeWorkDir,
+  });
+  jobStore.upsert(deadJob);
+
+  installCloudStatusFetchMock(() => Response.json({ status: "TIMED_OUT" }));
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4023",
+    loopTokenStore,
+  });
+  await service.run([deadJob]);
+  service.dispose();
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.ok(persisted.cloudFinalizedAt, "expected cloudFinalizedAt to be set on TIMED_OUT");
+  assert.equal(loopTokenStore.getLoopToken("loop-1"), null, "expected loop token cleared");
+  assert.equal(
+    fetchCalls.filter((c) => c.url.includes("/events")).length,
+    0,
+    "expected zero POST /events calls for TIMED_OUT job",
+  );
+  assert.equal(
+    fetchCalls.filter((c) => c.url.includes("/upload-artifacts")).length,
+    0,
+    "expected zero POST /upload-artifacts calls for TIMED_OUT job",
+  );
+  assert.equal(
+    persisted.finalStatusPersistedAt,
+    undefined,
+    "finalStatusPersistedAt must NOT be set for cloud-TIMED_OUT jobs",
+  );
 });
 
 test("AC-004: per-request provider resolution uses token at call time, not at construction time", async () => {
