@@ -587,10 +587,9 @@ export class DesktopApplication {
           );
         });
 
-      if (this.cloudConnectionEnabled) {
-        await this.promptForApiKeyIfNeeded();
+      if (this.cloudConnectionEnabled && this.apiKeyStore.getStatus().hasApiKey) {
         void this.cloudSocket.start();
-      } else {
+      } else if (!this.cloudConnectionEnabled) {
         this.cloudStatus = {
           state: "degraded",
           error: "Cloud connection disabled by user",
@@ -961,48 +960,6 @@ export class DesktopApplication {
       mode: "enhanced",
       detail: "Managed key with request signing is configured.",
     };
-  }
-
-  /**
-   * On first run with no API key and no pending onboarding handoff, prompt the
-   * user to enter an API key manually so the app starts in "standard" mode
-   * instead of staying stuck in "unconfigured". Blocks until a key is
-   * available or the user dismisses the prompt.
-   */
-  private async promptForApiKeyIfNeeded(): Promise<void> {
-    if (this.apiKeyStore.getStatus().hasApiKey) {
-      return;
-    }
-    if (this.managedOnboardingState.status !== "idle") {
-      return;
-    }
-
-    const result = await dialog.showMessageBox({
-      type: "info",
-      buttons: ["Enter API Key", "Skip"],
-      defaultId: 0,
-      cancelId: 1,
-      noLink: true,
-      title: "ClosedLoop Desktop Setup",
-      message: "No API key is configured.",
-      detail: "Enter your API key to connect. You can find it in the ClosedLoop web app under Settings > API Keys.",
-    });
-
-    if (result.response !== 0) {
-      return;
-    }
-
-    this.showWindow();
-
-    // Wait for the user to enter the key via the settings UI (set-api-key IPC).
-    // Poll briefly so the cloud socket doesn't start in unconfigured state.
-    const deadline = Date.now() + 5 * 60_000;
-    while (!this.apiKeyStore.getStatus().hasApiKey && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      if (this.shuttingDown) {
-        return;
-      }
-    }
   }
 
   private getOrCreateActiveSigningKey(): GatewaySigningKeyResult {
