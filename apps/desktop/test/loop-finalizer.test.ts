@@ -889,6 +889,44 @@ test("tryUploadSupportBundle uploads renamed claude output and perf, posts event
   assert.ok(jobStore.getByLoopId("loop-1")?.supportBundleUploadedAt);
 });
 
+test("tryUploadSupportBundle URL-encodes loopId in upload-urls request", async () => {
+  const claudeWorkDir = path.join(tempRoot, "repo", "workdir-encode");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "claude-output.jsonl"), "{}\n");
+
+  const jobStore = createStore("support-upload-encode");
+  const job = createBaseJob({
+    loopId: "abc/def",
+    claudeWorkDir,
+    status: "FAILED",
+    s3StateKey: "org-1/loops/abc%2Fdef/run-1",
+  });
+  jobStore.upsert(job);
+  globalThis.fetch = (async (input: URL | RequestInfo) => {
+    fetchCalls.push({ url: String(input), body: "" });
+    if (String(input).includes("/upload-urls")) {
+      return Response.json({ success: true, data: { urls: [] } });
+    }
+    return Response.json({ success: true });
+  }) as typeof fetch;
+
+  await tryUploadSupportBundle({
+    job,
+    claudeWorkDir,
+    apiBaseUrl: "http://127.0.0.1:12345",
+    getToken: () => "token",
+    jobStore,
+  });
+
+  const uploadUrlCall = fetchCalls.find((call) => call.url.includes("/upload-urls"));
+  assert.ok(uploadUrlCall, "Expected at least one /upload-urls request");
+  assert.equal(
+    uploadUrlCall.url,
+    "http://127.0.0.1:12345/loops/abc%2Fdef/upload-urls",
+    "loopId with URL-significant characters must be percent-encoded to match the centralized loop-http helpers",
+  );
+});
+
 test("tryUploadSupportBundle uploads legacy pre-rename claude output with stable support key", async () => {
   const claudeWorkDir = path.join(tempRoot, "repo", "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });

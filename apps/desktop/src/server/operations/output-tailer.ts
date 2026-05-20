@@ -2,7 +2,7 @@ import { openSync, readSync, closeSync, existsSync, statSync } from "node:fs";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
 import { gatewayLog } from "../../main/gateway-logger.js";
 import { resolveClaudeOutputPath } from "../../main/token-usage.js";
-import { postLoopEvent } from "./loop-http.js";
+import { postLoopEvent, type LoopHttpResult } from "./loop-http.js";
 
 export function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -269,23 +269,43 @@ export function startOutputTailer(
     nextAuthRetryAt = 0;
   }
 
-  function shouldRetryOnError(error: string | undefined): boolean {
-    if (error === undefined) return true;
-    // Retry on auth failures (401/403) and server errors (5xx)
-    if (error.includes("401") || error.includes("403")) return true;
-    if (/HTTP 5\d\d/.test(error)) return true;
-    // Retry on network errors (no HTTP status code)
-    if (!error.startsWith("HTTP ")) return true;
-    return false;
+  // Retry policy keyed on the structured `kind` discriminator from
+  // postLoopEvent so the decision doesn't depend on substring matching of
+  // human-readable error strings (the old `error.includes("401")` approach
+  // silently broke whenever the error-string format drifted).
+  function shouldRetryOnResult(result: LoopHttpResult): boolean {
+    if (result.success) return false;
+    switch (result.kind) {
+      case "http":
+        // Auth failures (401/403) and server errors (5xx) are retried; other
+        // 4xx are terminal (request shape is wrong, retrying won't help).
+        return result.status === 401 || result.status === 403 || result.status >= 500;
+      case "network":
+      case "timeout":
+        return true;
+      case "auth":
+        // Missing token usually means the gateway hasn't been re-authed yet;
+        // retry with the same backoff as 401 so the tailer waits for the
+        // token to appear rather than spinning or giving up immediately.
+        return true;
+    }
   }
 
-  function scheduleAuthRetry(error: string | undefined): void {
+  function formatResultForLog(result: LoopHttpResult): string {
+    if (result.success) return `success status=${result.status}`;
+    if (result.kind === "http") {
+      return `kind=${result.kind} status=${result.status} error=${result.error}`;
+    }
+    return `kind=${result.kind} error=${result.error}`;
+  }
+
+  function scheduleAuthRetry(result: LoopHttpResult): void {
     authRetryAttempt += 1;
     if (authRetryAttempt > authRetryMaxCount) {
       authRetriesExhausted = true;
       gatewayLog.warn(
         "output-tailer",
-        `Stopping tailer for loopId=${loopId}: exhausted auth retries after ${authRetryMaxCount} attempts (last error=${error ?? "network"})`,
+        `Stopping tailer for loopId=${loopId}: exhausted auth retries after ${authRetryMaxCount} attempts (last ${formatResultForLog(result)})`,
       );
       return;
     }
@@ -293,7 +313,7 @@ export function startOutputTailer(
     nextAuthRetryAt = Date.now() + delayMs;
     gatewayLog.warn(
       "output-tailer",
-      `Retrying output tailer for loopId=${loopId}: attempt=${authRetryAttempt}/${authRetryMaxCount} error=${error ?? "network"} backoffMs=${delayMs}`,
+      `Retrying output tailer for loopId=${loopId}: attempt=${authRetryAttempt}/${authRetryMaxCount} ${formatResultForLog(result)} backoffMs=${delayMs}`,
     );
   }
 
@@ -410,8 +430,8 @@ export function startOutputTailer(
         reportCommit(framedEndExclusive);
         continue;
       }
-      if (shouldRetryOnError(result.error)) {
-        scheduleAuthRetry(result.error);
+      if (shouldRetryOnResult(result)) {
+        scheduleAuthRetry(result);
       }
       break;
     }

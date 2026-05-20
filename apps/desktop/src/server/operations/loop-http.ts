@@ -9,7 +9,18 @@ import { loopError, loopLog } from "./symphony-utils.js";
 // long-lived closures (output tailer, boot-recovery) resolve the current
 // token on every request rather than capturing a stale string at
 // construction time.
+//
+// Return shape is a discriminated union on `kind` so callers (notably the
+// output tailer's retry classifier) can branch on a typed field rather than
+// parsing substrings out of the human-readable `error` string.
 // ---------------------------------------------------------------------------
+
+export type LoopHttpResult =
+  | { success: true; status: number }
+  | { success: false; kind: "http"; status: number; error: string }
+  | { success: false; kind: "network"; error: string }
+  | { success: false; kind: "timeout"; error: "timeout" }
+  | { success: false; kind: "auth"; error: "missing_token" };
 
 /**
  * POST a single loop event to the cloud API.
@@ -18,8 +29,8 @@ import { loopError, loopLog } from "./symphony-utils.js";
  * (matches ECS harness `reportEvent()` behaviour).
  * Generates a fresh `x-loop-event-nonce` UUID on every call.
  *
- * Returns `{ success: true }` on 2xx, otherwise `{ success: false, error }`.
- * Network errors are caught and returned as `{ success: false, error }` too.
+ * Short-circuits with `kind: "auth"` when `getToken()` returns null so the
+ * caller can skip the round trip and the inevitable 401.
  */
 export async function postLoopEvent(
   apiBaseUrl: string,
@@ -27,7 +38,7 @@ export async function postLoopEvent(
   getToken: () => string | null,
   eventBody: Record<string, unknown>,
   signal?: AbortSignal,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<LoopHttpResult> {
   const url = `${apiBaseUrl}/loops/${encodeURIComponent(loopId)}/events`;
   // Auto-inject timestamp on every event (matches ECS harness reportEvent())
   const payload: Record<string, unknown> = {
@@ -36,11 +47,19 @@ export async function postLoopEvent(
   };
   loopLog(loopId, `POST event: ${payload.type}`, url);
   const token = getToken();
+  if (token === null) {
+    loopError(loopId, "No loop token available for event POST", url);
+    gatewayLog.warn(
+      "loop-event",
+      `POST loopEvent type=${payload.type} loopId=${loopId} skipped: missing token`,
+    );
+    return { success: false, kind: "auth", error: "missing_token" };
+  }
   try {
     const resp = await fetch(url, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${token ?? ""}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         "x-loop-event-nonce": crypto.randomUUID(),
       },
@@ -60,6 +79,8 @@ export async function postLoopEvent(
       );
       return {
         success: false,
+        kind: "http",
+        status: resp.status,
         error: "HTTP " + resp.status + " " + resp.statusText,
       };
     }
@@ -68,10 +89,10 @@ export async function postLoopEvent(
       "loop-event",
       `POST loopEvent type=${payload.type} loopId=${loopId} status=${resp.status}`,
     );
-    return { success: true };
+    return { success: true, status: resp.status };
   } catch (err) {
     if (signal?.aborted) {
-      return { success: false, error: "timeout" };
+      return { success: false, kind: "timeout", error: "timeout" };
     }
     const msg = err instanceof Error ? err.message : String(err);
     loopError(loopId, "Failed to post event:", err);
@@ -79,7 +100,7 @@ export async function postLoopEvent(
       "loop-event",
       `POST loopEvent type=${payload.type} loopId=${loopId} network error: ${msg}`,
     );
-    return { success: false, error: msg };
+    return { success: false, kind: "network", error: msg };
   }
 }
 
@@ -95,7 +116,7 @@ export async function postLoopEventBounded(
   getToken: () => string | null,
   eventBody: Record<string, unknown>,
   timeoutMs = 1000,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<LoopHttpResult> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -117,22 +138,30 @@ export async function postLoopEventBounded(
  * Unlike `postLoopEvent`, this call does NOT include `x-loop-event-nonce`
  * (artifact uploads are not idempotency-keyed events).
  *
- * Returns `{ success: true }` on 2xx, otherwise `{ success: false, error }`.
+ * Short-circuits with `kind: "auth"` when `getToken()` returns null.
  */
 export async function uploadArtifacts(
   apiBaseUrl: string,
   loopId: string,
   getToken: () => string | null,
   body: Record<string, unknown>,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<LoopHttpResult> {
   const url = `${apiBaseUrl}/loops/${encodeURIComponent(loopId)}/upload-artifacts`;
   loopLog(loopId, "Uploading artifacts...", url);
   const token = getToken();
+  if (token === null) {
+    loopError(loopId, "No loop token available for artifact upload", url);
+    gatewayLog.warn(
+      "loop-upload",
+      `Artifact upload for loopId=${loopId} skipped: missing token`,
+    );
+    return { success: false, kind: "auth", error: "missing_token" };
+  }
   try {
     const resp = await fetch(url, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${token ?? ""}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
@@ -150,6 +179,8 @@ export async function uploadArtifacts(
       );
       return {
         success: false,
+        kind: "http",
+        status: resp.status,
         error: `HTTP ${resp.status} ${resp.statusText}`,
       };
     }
@@ -158,11 +189,11 @@ export async function uploadArtifacts(
       "loop-upload",
       `Artifact upload for loopId=${loopId}: ${resp.status}`,
     );
-    return { success: true };
+    return { success: true, status: resp.status };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     loopError(loopId, "Failed to upload artifacts:", err);
     gatewayLog.error("loop-upload", `Artifact upload network error: ${msg}`);
-    return { success: false, error: msg };
+    return { success: false, kind: "network", error: msg };
   }
 }

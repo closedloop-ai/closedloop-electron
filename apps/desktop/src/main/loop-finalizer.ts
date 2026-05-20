@@ -897,7 +897,7 @@ async function requestSupportUploadUrls(
       error: "No loop token available for support upload",
     };
   }
-  const url = `${apiBaseUrl}/loops/${loopId}/upload-urls`;
+  const url = `${apiBaseUrl}/loops/${encodeURIComponent(loopId)}/upload-urls`;
   try {
     const response = await fetch(url, {
       method: "POST",

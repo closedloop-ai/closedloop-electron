@@ -4,10 +4,11 @@
  * Covers:
  *   - postLoopEvent: correct headers (Authorization, Content-Type, x-loop-event-nonce)
  *   - postLoopEvent: timestamp auto-injection when absent
- *   - postLoopEvent: token provider returning null (empty Bearer token)
- *   - postLoopEvent: HTTP error response handling
+ *   - postLoopEvent: null token short-circuits without sending a request
+ *   - postLoopEvent: structured kind/status discriminator on HTTP and network errors
  *   - postLoopEvent: network error handling
  *   - uploadArtifacts: correct headers (no x-loop-event-nonce)
+ *   - uploadArtifacts: null token short-circuits without sending a request
  *   - uploadArtifacts: HTTP error response handling
  *   - postLoopEventBounded: AbortController-based timeout abort
  *   - gatewayLog entries for success, failure, and network error paths
@@ -268,7 +269,7 @@ describe("postLoopEvent timestamp", () => {
 // ---------------------------------------------------------------------------
 
 describe("postLoopEvent null token", () => {
-  test("uses empty Bearer token when getToken returns null", async () => {
+  test("short-circuits with kind:'auth' and skips fetch when getToken returns null", async () => {
     installFetchStub({ status: 200 });
     const result = await postLoopEvent(
       "https://api.example.com",
@@ -277,15 +278,17 @@ describe("postLoopEvent null token", () => {
       { type: "started" },
     );
 
-    assert.equal(result.success, true);
-    const req = capturedRequests[0];
-    assert.ok(req, "Expected a captured request");
-    // Headers normalization trims trailing whitespace, so 'Bearer ' becomes 'Bearer'
-    assert.ok(
-      req.headers["authorization"] === "Bearer" ||
-        req.headers["authorization"] === "Bearer ",
-      `Authorization header should be 'Bearer' or 'Bearer ' when token is null, got: ${JSON.stringify(req.headers["authorization"])}`,
+    assert.equal(result.success, false);
+    assert.equal(
+      capturedRequests.length,
+      0,
+      "fetch must not be called when token is null",
     );
+    if (result.success) {
+      assert.fail("unreachable: result.success was asserted false above");
+    }
+    assert.equal(result.kind, "auth");
+    assert.equal(result.error, "missing_token");
   });
 });
 
@@ -297,7 +300,7 @@ describe("postLoopEvent error responses", () => {
   // postLoopEvent has a single `if (!resp.ok)` branch with no per-status logic;
   // one representative non-2xx case is sufficient. The network-error test below
   // covers the throw branch.
-  test("returns success:false for non-2xx response and includes status in error", async () => {
+  test("returns kind:'http' with numeric status on non-2xx response", async () => {
     globalThis.fetch = (async () =>
       new Response("error body", {
         status: 500,
@@ -311,13 +314,21 @@ describe("postLoopEvent error responses", () => {
       { type: "started" },
     );
     assert.equal(result.success, false);
+    if (result.success) {
+      assert.fail("unreachable: result.success was asserted false above");
+    }
+    assert.equal(result.kind, "http");
+    if (result.kind !== "http") {
+      assert.fail(`expected kind 'http', got '${result.kind}'`);
+    }
+    assert.equal(result.status, 500);
     assert.ok(
-      typeof result.error === "string" && result.error.includes("500"),
+      result.error.includes("500"),
       `Expected error to include status 500, got: ${JSON.stringify(result.error)}`,
     );
   });
 
-  test("returns success:false on network error", async () => {
+  test("returns kind:'network' on network error", async () => {
     globalThis.fetch = (async () => {
       throw new Error("ECONNREFUSED");
     }) as typeof fetch;
@@ -329,9 +340,12 @@ describe("postLoopEvent error responses", () => {
       { type: "started" },
     );
     assert.equal(result.success, false);
+    if (result.success) {
+      assert.fail("unreachable: result.success was asserted false above");
+    }
+    assert.equal(result.kind, "network");
     assert.ok(
-      typeof result.error === "string" &&
-        result.error.includes("ECONNREFUSED"),
+      result.error.includes("ECONNREFUSED"),
       `Expected error to include ECONNREFUSED, got: ${JSON.stringify(result.error)}`,
     );
   });
@@ -380,22 +394,25 @@ describe("uploadArtifacts headers", () => {
     assert.equal(req.method, "POST");
   });
 
-  test("uses empty Bearer token when getToken returns null", async () => {
+  test("short-circuits with kind:'auth' and skips fetch when getToken returns null", async () => {
     installFetchStub({ status: 200 });
-    await uploadArtifacts(
+    const result = await uploadArtifacts(
       "https://api.example.com",
       "loop-art-null",
       () => null,
       {},
     );
-    const req = capturedRequests[0];
-    assert.ok(req, "Expected a captured request");
-    // Headers normalization trims trailing whitespace, so 'Bearer ' becomes 'Bearer'
-    assert.ok(
-      req.headers["authorization"] === "Bearer" ||
-        req.headers["authorization"] === "Bearer ",
-      `Authorization header should be 'Bearer' or 'Bearer ' when token is null, got: ${JSON.stringify(req.headers["authorization"])}`,
+    assert.equal(result.success, false);
+    assert.equal(
+      capturedRequests.length,
+      0,
+      "fetch must not be called when token is null",
     );
+    if (result.success) {
+      assert.fail("unreachable: result.success was asserted false above");
+    }
+    assert.equal(result.kind, "auth");
+    assert.equal(result.error, "missing_token");
   });
 
   test("sends exactly the input body as the request body", async () => {
@@ -489,7 +506,7 @@ describe("postLoopEventBounded timeout", () => {
     );
     assert.ok(
       elapsed < timeoutMs * 2,
-      `Expected postLoopEventBounded to resolve within ${timeoutMs * 10}ms, took ${elapsed}ms`,
+      `Expected postLoopEventBounded to resolve within ${timeoutMs * 2}ms, took ${elapsed}ms`,
     );
   });
 
