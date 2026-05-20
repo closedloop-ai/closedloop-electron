@@ -40,11 +40,15 @@ function writeFile(p, content) {
 function makeDb() {
   const db = new DatabaseSync(":memory:");
   // Stub the upstream sessions / events tables so the scanner can join.
+  // Columns mirror the production schema (sessions.model + sessions.harness
+  // come from the upstream + FEA-1132 Codex patch respectively). Tests that
+  // exercise the harness-aware path call addHarnessColumn() to mimic that.
   db.exec(`
     CREATE TABLE sessions (
       id TEXT PRIMARY KEY,
       name TEXT,
       cwd TEXT,
+      model TEXT,
       status TEXT,
       started_at TEXT,
       updated_at TEXT
@@ -206,30 +210,55 @@ test("per-project association detected via .gstack/conductor.json", () => {
   assert.equal(assoc[0].project_path, projectRoot);
 });
 
+// makeDb stubs sessions WITHOUT a harness column to mirror a legacy DB; the
+// harness-aware tests below add the column where they need it. The default
+// store SQL uses COALESCE(NULLIF(sess.harness, ''), 'claude') so legacy rows
+// without harness stamp as Claude — the documented backward-compat behavior.
+
+function addHarnessColumn(db) {
+  try {
+    db.prepare("SELECT harness FROM sessions LIMIT 1").get();
+  } catch {
+    db.prepare(
+      "ALTER TABLE sessions ADD COLUMN harness TEXT NOT NULL DEFAULT 'claude'",
+    ).run();
+  }
+}
+
+function seedSession(db, id, harness, model = null) {
+  const ts = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO sessions (id, name, cwd, started_at, updated_at, model)
+     VALUES (?, ?, '/Users/me/proj', ?, ?, ?)`,
+  ).run(id, id, ts, ts, model);
+  if (harness) {
+    db.prepare("UPDATE sessions SET harness = ? WHERE id = ?").run(harness, id);
+  }
+}
+
+function seedPrompt(db, sessionId, prompt) {
+  db.prepare(
+    `INSERT INTO events (session_id, event_type, data, created_at)
+     VALUES (?, 'UserPromptSubmit', ?, ?)`,
+  ).run(sessionId, JSON.stringify({ prompt }), new Date().toISOString());
+}
+
 test("listSkills returns invocation counts from UserPromptSubmit events", () => {
   const home = mkdtemp();
   makeGStackTree(home, { skills: ["office-hours", "ship"] });
   const db = makeDb();
+  addHarnessColumn(db);
+  seedSession(db, "s1", "claude", "claude-opus-4-7");
 
-  // Seed 3 slash-command invocations spanning bare and arg-bearing forms.
-  // Claude Code records every slash command as a UserPromptSubmit event whose
-  // data.prompt starts with "/<skill-name>" — there is no PreToolUse/Skill.
-  const seed = (prompt) => {
-    db.prepare(
-      `INSERT INTO events (session_id, event_type, data, created_at)
-       VALUES ('s1', 'UserPromptSubmit', ?, ?)`,
-    ).run(JSON.stringify({ prompt }), new Date().toISOString());
-  };
-  seed("/office-hours");
-  seed("/office-hours can you brainstorm an idea?");
-  seed("/ship");
-  // Negative case: a plain prose prompt that happens to begin with the user's
-  // typing — must NOT count toward office-hours.
-  seed("office-hours please");
+  seedPrompt(db, "s1", "/office-hours");
+  seedPrompt(db, "s1", "/office-hours can you brainstorm an idea?");
+  seedPrompt(db, "s1", "/ship");
+  // Negative case: a plain prose prompt — must NOT count toward office-hours.
+  seedPrompt(db, "s1", "office-hours please");
 
   withFakeHome(home, () => runPackScanner(db));
 
-  const skills = listSkills(db);
+  const skills = listSkills(db).filter((s) => s.harness === "claude");
   const office = skills.find((s) => s.name === "office-hours");
   const ship = skills.find((s) => s.name === "ship");
   assert.ok(office);
@@ -238,32 +267,70 @@ test("listSkills returns invocation counts from UserPromptSubmit events", () => 
   assert.equal(ship.invocation_count, 1);
 });
 
-test("listSkillInvocations pulls only UserPromptSubmit rows matching the skill name", () => {
+test("listSkills partitions invocations by harness — codex calls do not bleed into claude row", () => {
+  const home = mkdtemp();
+  makeGStackTree(home, { skills: ["office-hours"] });
+  // Also create the Codex install of gstack so we get two install rows.
+  const codexRoot = nodePath.join(home, ".codex", "skills", "gstack");
+  fs.mkdirSync(nodePath.join(codexRoot, "office-hours"), { recursive: true });
+  fs.writeFileSync(
+    nodePath.join(codexRoot, "office-hours", "SKILL.md"),
+    `---\nname: office-hours\nversion: 1.0.0\n---\n`,
+  );
+
+  const db = makeDb();
+  addHarnessColumn(db);
+  seedSession(db, "c1", "claude", "claude-opus-4-7");
+  seedSession(db, "x1", "codex", "gpt-5.5");
+  seedPrompt(db, "c1", "/office-hours via claude");
+  seedPrompt(db, "c1", "/office-hours another via claude");
+  seedPrompt(db, "x1", "/office-hours via codex");
+
+  withFakeHome(home, () => runPackScanner(db));
+
+  const skills = listSkills(db).filter((s) => s.name === "office-hours");
+  const claudeRow = skills.find((s) => s.harness === "claude");
+  const codexRow = skills.find((s) => s.harness === "codex");
+  assert.ok(claudeRow, "claude install row should be present");
+  assert.ok(codexRow, "codex install row should be present");
+  assert.equal(claudeRow.invocation_count, 2);
+  assert.equal(codexRow.invocation_count, 1);
+});
+
+test("listSkillInvocations filters by harness and returns session metadata", () => {
   const home = mkdtemp();
   makeGStackTree(home, { skills: ["office-hours"] });
   const db = makeDb();
+  addHarnessColumn(db);
+  seedSession(db, "c1", "claude", "claude-sonnet-4-6");
+  seedSession(db, "x1", "codex", "gpt-5.5");
 
-  db.prepare(
-    `INSERT INTO sessions (id, name, cwd, started_at, updated_at)
-     VALUES ('s1', 'demo', '/Users/me/proj', ?, ?)`,
-  ).run(new Date().toISOString(), new Date().toISOString());
-
-  const seed = (prompt) => {
-    db.prepare(
-      `INSERT INTO events (session_id, event_type, data, created_at)
-       VALUES ('s1', 'UserPromptSubmit', ?, ?)`,
-    ).run(JSON.stringify({ prompt }), new Date().toISOString());
-  };
-  seed("/office-hours one");
-  seed("/ship release");
-  seed("/office-hours two");
+  seedPrompt(db, "c1", "/office-hours one");
+  seedPrompt(db, "x1", "/office-hours via codex");
+  seedPrompt(db, "c1", "/office-hours two");
 
   withFakeHome(home, () => runPackScanner(db));
 
   const { listSkillInvocations } = require("../pack-store");
-  const calls = listSkillInvocations(db, "office-hours", { limit: 10 });
-  assert.equal(calls.length, 2);
-  assert.ok(calls.every((c) => c.session_cwd === "/Users/me/proj"));
+  const claudeCalls = listSkillInvocations(db, "office-hours", {
+    limit: 10,
+    harness: "claude",
+  });
+  assert.equal(claudeCalls.length, 2);
+  assert.ok(claudeCalls.every((c) => c.session_harness === "claude"));
+  assert.ok(claudeCalls.every((c) => c.session_model === "claude-sonnet-4-6"));
+
+  const codexCalls = listSkillInvocations(db, "office-hours", {
+    limit: 10,
+    harness: "codex",
+  });
+  assert.equal(codexCalls.length, 1);
+  assert.equal(codexCalls[0].session_harness, "codex");
+  assert.equal(codexCalls[0].session_model, "gpt-5.5");
+
+  // No harness filter → all matching invocations.
+  const allCalls = listSkillInvocations(db, "office-hours", { limit: 10 });
+  assert.equal(allCalls.length, 3);
 });
 
 test("no skill_invocations table is ever created", () => {

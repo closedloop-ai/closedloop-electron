@@ -34,15 +34,20 @@ router.get("/", (_req, res) => {
   }
 });
 
-// GET /api/skills/:name/invocations?limit=&offset=
+// GET /api/skills/:name/invocations?limit=&offset=&harness=
 router.get("/:name/invocations", (req, res) => {
   try {
     const limit = clampInt(req.query.limit, DEFAULT_LIMIT, 1, MAX_LIMIT);
     const offset = clampInt(req.query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
+    const harness =
+      typeof req.query.harness === "string" && req.query.harness.trim()
+        ? req.query.harness.trim()
+        : null;
     res.json({
       items: packStore.listSkillInvocations(db, req.params.name, {
         limit,
         offset,
+        harness,
       }),
     });
   } catch (err) {

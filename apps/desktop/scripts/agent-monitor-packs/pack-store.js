@@ -238,6 +238,16 @@ const SKILL_INVOCATION_WHERE_SQL = `
  * hook pipeline as `events` rows with `event_type='UserPromptSubmit'` and
  * `data.prompt` of the form `/<skill-name> [args...]` — NOT as
  * `PreToolUse`/`Skill` (those only fire for the tools the skill USES).
+ *
+ * Aggregation is partitioned by harness (joined from `sessions.harness`) so a
+ * pack installed for multiple harnesses (e.g. gstack for Claude AND Codex)
+ * reports each install row with its own count rather than attributing every
+ * call to every install. `sessions.harness` is the SoT for which harness
+ * fired a given hook event — it has been on the schema since the FEA-1132
+ * Codex patch (default 'claude' for legacy rows).
+ *
+ * Also surfaces the most recent `sessions.model` per (skill, harness) so the
+ * UI can display the dominant model alongside each row.
  */
 function listSkills(db) {
   const rows = db
@@ -258,14 +268,17 @@ function listSkills(db) {
        FROM skills s
        LEFT JOIN (
          SELECT
-           ${SKILL_NAME_FROM_PROMPT_SQL} AS skill_name,
-           COUNT(*)                       AS invocation_count,
-           MAX(created_at)                AS last_invoked_at
-         FROM events
-         WHERE ${SKILL_INVOCATION_WHERE_SQL}
-         GROUP BY skill_name
-       ) inv ON inv.skill_name = s.name
-       ORDER BY s.pack_id IS NULL ASC, s.pack_id ASC, s.name ASC`,
+           ${SKILL_NAME_FROM_PROMPT_SQL.replace(/\bdata\b/g, "e.data")} AS skill_name,
+           COALESCE(NULLIF(sess.harness, ''), 'claude')                  AS harness,
+           COUNT(*)                                                       AS invocation_count,
+           MAX(e.created_at)                                              AS last_invoked_at
+         FROM events e
+         JOIN sessions sess ON sess.id = e.session_id
+         WHERE e.event_type = 'UserPromptSubmit'
+           AND json_extract(e.data,'$.prompt') LIKE '/_%'
+         GROUP BY skill_name, harness
+       ) inv ON inv.skill_name = s.name AND inv.harness = s.harness
+       ORDER BY s.pack_id IS NULL ASC, s.pack_id ASC, s.name ASC, s.harness ASC`,
     )
     .all();
   return rows;
@@ -273,22 +286,38 @@ function listSkills(db) {
 
 /**
  * Recent invocations for one skill name, joined to `sessions` for session
- * labels/cwd. Pulls from the `events` table only — no parallel invocation
- * storage exists. Same UserPromptSubmit pattern as listSkills.
+ * labels, cwd, harness, and model. Pulls from the `events` table only — no
+ * parallel invocation storage exists. Same UserPromptSubmit pattern as
+ * listSkills. The optional `harness` filter restricts results to a single
+ * install row's calls — needed so the Skills page detail panel shows only
+ * the calls that match the install row the user clicked on.
  */
-function listSkillInvocations(db, name, { limit = 50, offset = 0 } = {}) {
+function listSkillInvocations(
+  db,
+  name,
+  { limit = 50, offset = 0, harness = null } = {},
+) {
+  const harnessClause = harness
+    ? "AND COALESCE(NULLIF(sess.harness, ''), 'claude') = ?"
+    : "";
+  const params = [name];
+  if (harness) params.push(harness);
+  params.push(limit, offset);
+
   return db
     .prepare(
       `SELECT
-         e.id           AS event_id,
+         e.id                AS event_id,
          e.session_id,
          e.created_at,
          e.summary,
          e.data,
-         s.name         AS session_name,
-         s.cwd          AS session_cwd
+         sess.name           AS session_name,
+         sess.cwd            AS session_cwd,
+         COALESCE(NULLIF(sess.harness, ''), 'claude') AS session_harness,
+         sess.model          AS session_model
        FROM events e
-       LEFT JOIN sessions s ON s.id = e.session_id
+       JOIN sessions sess ON sess.id = e.session_id
        WHERE e.event_type = 'UserPromptSubmit'
          AND json_extract(e.data,'$.prompt') LIKE '/_%'
          AND (
@@ -302,10 +331,11 @@ function listSkillInvocations(db, name, { limit = 50, offset = 0 } = {}) {
              ELSE substr(json_extract(e.data,'$.prompt'), 2)
            END
          ) = ?
+         ${harnessClause}
        ORDER BY e.created_at DESC
        LIMIT ? OFFSET ?`,
     )
-    .all(name, limit, offset);
+    .all(...params);
 }
 
 module.exports = {

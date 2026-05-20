@@ -25,6 +25,8 @@ interface Invocation {
   session_id: string;
   session_name: string | null;
   session_cwd: string | null;
+  session_harness: string | null;
+  session_model: string | null;
   created_at: string;
   summary: string | null;
   data: string | null;
@@ -63,25 +65,32 @@ export function Skills() {
     }
   }, []);
 
-  const loadInvocations = useCallback(async (name: string) => {
-    try {
-      const res = await fetch(
-        `/api/skills/${encodeURIComponent(name)}/invocations?limit=50`,
-      );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      setInvocations(Array.isArray(data.items) ? data.items : []);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
+  const loadInvocations = useCallback(
+    async (name: string, harness: string) => {
+      try {
+        const qs = new URLSearchParams({
+          limit: "50",
+          harness,
+        });
+        const res = await fetch(
+          `/api/skills/${encodeURIComponent(name)}/invocations?${qs.toString()}`,
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        setInvocations(Array.isArray(data.items) ? data.items : []);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     loadList();
   }, [loadList]);
 
   useEffect(() => {
-    if (selected) loadInvocations(selected.name);
+    if (selected) loadInvocations(selected.name, selected.harness);
     else setInvocations([]);
   }, [selected, loadInvocations]);
 
@@ -201,7 +210,8 @@ export function Skills() {
 
               {invocations.length === 0 ? (
                 <p className="text-xs text-gray-500 italic">
-                  No invocations recorded yet.
+                  No invocations recorded yet for the {selected.harness}{" "}
+                  install.
                 </p>
               ) : (
                 <div className="space-y-1.5">
@@ -218,11 +228,23 @@ export function Skills() {
                           {fmt(inv.created_at)}
                         </span>
                       </div>
-                      {inv.session_cwd && (
-                        <div className="text-[10px] text-gray-500 truncate font-mono mt-0.5">
-                          {inv.session_cwd}
-                        </div>
-                      )}
+                      <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-gray-500">
+                        {inv.session_harness && (
+                          <span className="rounded bg-surface-3 px-1.5 py-0.5 text-gray-300">
+                            {inv.session_harness}
+                          </span>
+                        )}
+                        {inv.session_model && (
+                          <span className="rounded bg-surface-3 px-1.5 py-0.5 font-mono">
+                            {inv.session_model}
+                          </span>
+                        )}
+                        {inv.session_cwd && (
+                          <span className="truncate font-mono">
+                            {inv.session_cwd}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
