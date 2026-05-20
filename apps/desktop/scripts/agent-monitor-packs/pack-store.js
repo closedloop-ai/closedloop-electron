@@ -208,15 +208,36 @@ function listSkillsForPack(db, packId) {
     .all(packId);
 }
 
+// Shared SQL fragment: extract the skill-name token from a UserPromptSubmit
+// event's `data.prompt` field. Claude Code records slash-command invocations
+// as UserPromptSubmit events where data.prompt = "/<skill-name> [args...]"
+// (no PreToolUse / tool_name='Skill' event is fired). We pull the first
+// whitespace-delimited token after the leading slash. Path-like prompts
+// (e.g. "/Users/foo/...") are filtered out by requiring the extracted token
+// to contain no slash characters.
+const SKILL_NAME_FROM_PROMPT_SQL = `
+  CASE
+    WHEN instr(substr(json_extract(data,'$.prompt'), 2), ' ') > 0
+      THEN substr(
+        json_extract(data,'$.prompt'),
+        2,
+        instr(substr(json_extract(data,'$.prompt'), 2), ' ') - 1
+      )
+    ELSE substr(json_extract(data,'$.prompt'), 2)
+  END
+`;
+
+const SKILL_INVOCATION_WHERE_SQL = `
+  event_type = 'UserPromptSubmit'
+  AND json_extract(data,'$.prompt') LIKE '/_%'
+`;
+
 /**
  * Cross-pack skills aggregate joined against the existing `events` table for
- * invocation counts. Skill invocations are recorded by the upstream hook
- * pipeline as `events` rows with `event_type='PreToolUse'` and
- * `tool_name='Skill'`; the slash-command name lives in the JSON `data` blob.
- *
- * Tries two `json_extract` paths to remain robust against minor payload
- * variation: `$.tool_input.skill` (Claude Code PreToolUse format) and
- * `$.skill` (flatter alternative). Whichever returns a value wins.
+ * invocation counts. Slash-command invocations are recorded by Claude Code's
+ * hook pipeline as `events` rows with `event_type='UserPromptSubmit'` and
+ * `data.prompt` of the form `/<skill-name> [args...]` — NOT as
+ * `PreToolUse`/`Skill` (those only fire for the tools the skill USES).
  */
 function listSkills(db) {
   const rows = db
@@ -237,14 +258,11 @@ function listSkills(db) {
        FROM skills s
        LEFT JOIN (
          SELECT
-           COALESCE(
-             json_extract(data, '$.tool_input.skill'),
-             json_extract(data, '$.skill')
-           )                  AS skill_name,
-           COUNT(*)           AS invocation_count,
-           MAX(created_at)    AS last_invoked_at
+           ${SKILL_NAME_FROM_PROMPT_SQL} AS skill_name,
+           COUNT(*)                       AS invocation_count,
+           MAX(created_at)                AS last_invoked_at
          FROM events
-         WHERE event_type = 'PreToolUse' AND tool_name = 'Skill'
+         WHERE ${SKILL_INVOCATION_WHERE_SQL}
          GROUP BY skill_name
        ) inv ON inv.skill_name = s.name
        ORDER BY s.pack_id IS NULL ASC, s.pack_id ASC, s.name ASC`,
@@ -256,7 +274,7 @@ function listSkills(db) {
 /**
  * Recent invocations for one skill name, joined to `sessions` for session
  * labels/cwd. Pulls from the `events` table only — no parallel invocation
- * storage exists.
+ * storage exists. Same UserPromptSubmit pattern as listSkills.
  */
 function listSkillInvocations(db, name, { limit = 50, offset = 0 } = {}) {
   return db
@@ -271,12 +289,19 @@ function listSkillInvocations(db, name, { limit = 50, offset = 0 } = {}) {
          s.cwd          AS session_cwd
        FROM events e
        LEFT JOIN sessions s ON s.id = e.session_id
-       WHERE e.event_type = 'PreToolUse'
-         AND e.tool_name = 'Skill'
-         AND COALESCE(
-               json_extract(e.data, '$.tool_input.skill'),
-               json_extract(e.data, '$.skill')
-             ) = ?
+       WHERE e.event_type = 'UserPromptSubmit'
+         AND json_extract(e.data,'$.prompt') LIKE '/_%'
+         AND (
+           CASE
+             WHEN instr(substr(json_extract(e.data,'$.prompt'), 2), ' ') > 0
+               THEN substr(
+                 json_extract(e.data,'$.prompt'),
+                 2,
+                 instr(substr(json_extract(e.data,'$.prompt'), 2), ' ') - 1
+               )
+             ELSE substr(json_extract(e.data,'$.prompt'), 2)
+           END
+         ) = ?
        ORDER BY e.created_at DESC
        LIMIT ? OFFSET ?`,
     )

@@ -206,28 +206,64 @@ test("per-project association detected via .gstack/conductor.json", () => {
   assert.equal(assoc[0].project_path, projectRoot);
 });
 
-test("listSkills returns invocation counts from events table", () => {
+test("listSkills returns invocation counts from UserPromptSubmit events", () => {
   const home = mkdtemp();
-  makeGStackTree(home, { skills: ["office-hours"] });
+  makeGStackTree(home, { skills: ["office-hours", "ship"] });
   const db = makeDb();
 
-  // Seed two PreToolUse / Skill events for office-hours.
-  for (let i = 0; i < 2; i++) {
+  // Seed 3 slash-command invocations spanning bare and arg-bearing forms.
+  // Claude Code records every slash command as a UserPromptSubmit event whose
+  // data.prompt starts with "/<skill-name>" — there is no PreToolUse/Skill.
+  const seed = (prompt) => {
     db.prepare(
-      `INSERT INTO events (session_id, event_type, tool_name, data, created_at)
-       VALUES ('s1', 'PreToolUse', 'Skill', ?, ?)`,
-    ).run(
-      JSON.stringify({ tool_input: { skill: "office-hours" } }),
-      new Date().toISOString(),
-    );
-  }
+      `INSERT INTO events (session_id, event_type, data, created_at)
+       VALUES ('s1', 'UserPromptSubmit', ?, ?)`,
+    ).run(JSON.stringify({ prompt }), new Date().toISOString());
+  };
+  seed("/office-hours");
+  seed("/office-hours can you brainstorm an idea?");
+  seed("/ship");
+  // Negative case: a plain prose prompt that happens to begin with the user's
+  // typing — must NOT count toward office-hours.
+  seed("office-hours please");
 
   withFakeHome(home, () => runPackScanner(db));
 
   const skills = listSkills(db);
   const office = skills.find((s) => s.name === "office-hours");
+  const ship = skills.find((s) => s.name === "ship");
   assert.ok(office);
   assert.equal(office.invocation_count, 2);
+  assert.ok(ship);
+  assert.equal(ship.invocation_count, 1);
+});
+
+test("listSkillInvocations pulls only UserPromptSubmit rows matching the skill name", () => {
+  const home = mkdtemp();
+  makeGStackTree(home, { skills: ["office-hours"] });
+  const db = makeDb();
+
+  db.prepare(
+    `INSERT INTO sessions (id, name, cwd, started_at, updated_at)
+     VALUES ('s1', 'demo', '/Users/me/proj', ?, ?)`,
+  ).run(new Date().toISOString(), new Date().toISOString());
+
+  const seed = (prompt) => {
+    db.prepare(
+      `INSERT INTO events (session_id, event_type, data, created_at)
+       VALUES ('s1', 'UserPromptSubmit', ?, ?)`,
+    ).run(JSON.stringify({ prompt }), new Date().toISOString());
+  };
+  seed("/office-hours one");
+  seed("/ship release");
+  seed("/office-hours two");
+
+  withFakeHome(home, () => runPackScanner(db));
+
+  const { listSkillInvocations } = require("../pack-store");
+  const calls = listSkillInvocations(db, "office-hours", { limit: 10 });
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every((c) => c.session_cwd === "/Users/me/proj"));
 });
 
 test("no skill_invocations table is ever created", () => {
