@@ -294,36 +294,28 @@ describe("postLoopEvent null token", () => {
 // ---------------------------------------------------------------------------
 
 describe("postLoopEvent error responses", () => {
-  const errorCases = [
-    { status: 400, statusText: "Bad Request" },
-    { status: 401, statusText: "Unauthorized" },
-    { status: 500, statusText: "Internal Server Error" },
-    { status: 503, statusText: "Service Unavailable" },
-  ];
+  // postLoopEvent has a single `if (!resp.ok)` branch with no per-status logic;
+  // one representative non-2xx case is sufficient. The network-error test below
+  // covers the throw branch.
+  test("returns success:false for non-2xx response and includes status in error", async () => {
+    globalThis.fetch = (async () =>
+      new Response("error body", {
+        status: 500,
+        statusText: "Internal Server Error",
+      })) as typeof fetch;
 
-  for (const { status, statusText } of errorCases) {
-    test(`returns success:false for HTTP ${status}`, async () => {
-      // Use a Response with the correct statusText
-      globalThis.fetch = (async () =>
-        new Response("error body", {
-          status,
-          statusText,
-        })) as typeof fetch;
-
-      const result = await postLoopEvent(
-        "https://api.example.com",
-        "loop-err",
-        () => "tok",
-        { type: "started" },
-      );
-      assert.equal(result.success, false);
-      assert.ok(
-        typeof result.error === "string" &&
-          result.error.includes(String(status)),
-        `Expected error to include status ${status}, got: ${JSON.stringify(result.error)}`,
-      );
-    });
-  }
+    const result = await postLoopEvent(
+      "https://api.example.com",
+      "loop-err",
+      () => "tok",
+      { type: "started" },
+    );
+    assert.equal(result.success, false);
+    assert.ok(
+      typeof result.error === "string" && result.error.includes("500"),
+      `Expected error to include status 500, got: ${JSON.stringify(result.error)}`,
+    );
+  });
 
   test("returns success:false on network error", async () => {
     globalThis.fetch = (async () => {
@@ -475,7 +467,7 @@ describe("uploadArtifacts error responses", () => {
 // ---------------------------------------------------------------------------
 
 describe("postLoopEventBounded timeout", () => {
-  test("returns success:false and completes within 2x timeoutMs when server hangs", async () => {
+  test("hang triggers timeout: returns {success:false, error:'timeout'} within budget", async () => {
     installFetchStub({ hang: true });
 
     const timeoutMs = 100;
@@ -490,29 +482,14 @@ describe("postLoopEventBounded timeout", () => {
     const elapsed = Date.now() - start;
 
     assert.equal(result.success, false);
-    // The bounded call should resolve after the timeout fires — allow generous buffer
-    assert.ok(
-      elapsed < timeoutMs * 10,
-      `Expected postLoopEventBounded to resolve within ${timeoutMs * 10}ms, took ${elapsed}ms`,
-    );
-  });
-
-  test("returns error:'timeout' when the server hangs and the timeout fires", async () => {
-    installFetchStub({ hang: true });
-
-    const result = await postLoopEventBounded(
-      "https://api.example.com",
-      "loop-bounded-timeout-err",
-      () => "tok",
-      { type: "started" },
-      100,
-    );
-
-    assert.equal(result.success, false);
     assert.equal(
       result.error,
       "timeout",
       `Expected result.error to be 'timeout', got: ${JSON.stringify(result.error)}`,
+    );
+    assert.ok(
+      elapsed < timeoutMs * 10,
+      `Expected postLoopEventBounded to resolve within ${timeoutMs * 10}ms, took ${elapsed}ms`,
     );
   });
 
