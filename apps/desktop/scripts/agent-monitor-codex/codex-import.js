@@ -14,6 +14,7 @@
 const { parseRolloutFile } = require("./codex-parser");
 const { listAllRolloutFiles } = require("./codex-home");
 const { importSession } = require("../../scripts/import-history");
+const { reactivateImportedSession } = require("../agent-monitor-shared/import-session-utils");
 
 /**
  * Import (or idempotently backfill) a single Codex rollout file.
@@ -29,7 +30,8 @@ function importCodexSession(dbModule, session) {
   } catch {
     /* non-fatal — column/stmt guaranteed by db.js Patch #4 */
   }
-  return { sessionId: session.sessionId, result };
+  const reactivated = reactivateImportedSession(dbModule, session);
+  return { sessionId: session.sessionId, result, reactivated };
 }
 
 /**
@@ -47,8 +49,8 @@ async function importAllCodexSessions(dbModule) {
 
   const importBatch = dbModule.db.transaction((sessions) => {
     for (const session of sessions) {
-      const { result } = importCodexSession(dbModule, session);
-      if (result && result.skipped) skipped++;
+      const { result, reactivated } = importCodexSession(dbModule, session);
+      if (result && result.skipped && !reactivated) skipped++;
       else imported++;
     }
   });

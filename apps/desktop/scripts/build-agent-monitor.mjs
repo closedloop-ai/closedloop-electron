@@ -66,6 +66,12 @@ const generatedHooksRoute = path.join(
   "routes",
   "hooks.js",
 );
+const generatedPricingRoute = path.join(
+  generatedRootDir,
+  "server",
+  "routes",
+  "pricing.js",
+);
 const generatedPushLib = path.join(generatedRootDir, "server", "lib", "push.js");
 const generatedClientIndex = path.join(
   generatedRootDir,
@@ -81,14 +87,72 @@ const generatedUninstallHooks = path.join(
 const stampFile = path.join(generatedRootDir, ".build-stamp");
 const viteBin = resolvePackageBin("vite", "vite");
 
-// CLOSEDLOOP Codex support (Addition #6): proven Codex ingestion modules live
-// in-repo and are copied into the generated server/lib at materialize time
-// (parallel to how uninstall-hooks.js is written). Their logic is
-// architecture-independent — relative requires resolve identically in the
-// generated tree as they did in the old vendored tree.
+// CLOSEDLOOP multi-harness support: proven ingestion modules live in-repo and
+// are copied into the generated server/lib at materialize time (parallel to
+// how uninstall-hooks.js is written). Their logic is architecture-independent
+// — relative requires resolve identically in the generated tree as they did
+// in the old vendored tree.
 const codexModulesDir = path.join(appDir, "scripts", "agent-monitor-codex");
+const cursorModulesDir = path.join(appDir, "scripts", "agent-monitor-cursor");
+const copilotModulesDir = path.join(appDir, "scripts", "agent-monitor-copilot");
+const opencodeModulesDir = path.join(appDir, "scripts", "agent-monitor-opencode");
+const sharedModulesDir = path.join(appDir, "scripts", "agent-monitor-shared");
 const clientSnippetDir = path.join(codexModulesDir, "client");
 const CODEX_MODULES = ["codex-home", "codex-parser", "codex-import", "codex-watcher"];
+const CURSOR_MODULES = ["cursor-home", "cursor-parser", "cursor-import", "cursor-watcher"];
+const COPILOT_MODULES = ["copilot-home", "copilot-parser", "copilot-import", "copilot-watcher"];
+const OPENCODE_MODULES = ["opencode-home", "opencode-parser", "opencode-import", "opencode-watcher"];
+const SHARED_MODULES = ["harness-watcher-utils", "import-session-utils", "parser-utils"];
+const MULTI_HARNESS_SPECS = [
+  {
+    key: "codex",
+    label: "Codex",
+    modulesDir: codexModulesDir,
+    modules: CODEX_MODULES,
+    watcherModule: "codex-watcher",
+    watcherFn: "startCodexWatcher",
+    importModule: "codex-import",
+    importFn: "importAllCodexSessions",
+    importedLog: "Codex sessions from ~/.codex/",
+    errorLog: "Codex rollout files had errors during import",
+  },
+  {
+    key: "cursor",
+    label: "Cursor",
+    modulesDir: cursorModulesDir,
+    modules: CURSOR_MODULES,
+    watcherModule: "cursor-watcher",
+    watcherFn: "startCursorWatcher",
+    importModule: "cursor-import",
+    importFn: "importAllCursorSessions",
+    importedLog: "Cursor sessions from ~/.cursor/",
+    errorLog: "Cursor transcript files had errors during import",
+  },
+  {
+    key: "copilot",
+    label: "Copilot",
+    modulesDir: copilotModulesDir,
+    modules: COPILOT_MODULES,
+    watcherModule: "copilot-watcher",
+    watcherFn: "startCopilotWatcher",
+    importModule: "copilot-import",
+    importFn: "importAllCopilotSessions",
+    importedLog: "Copilot sessions",
+    errorLog: "Copilot session files had errors during import",
+  },
+  {
+    key: "opencode",
+    label: "OpenCode",
+    modulesDir: opencodeModulesDir,
+    modules: OPENCODE_MODULES,
+    watcherModule: "opencode-watcher",
+    watcherFn: "startOpenCodeWatcher",
+    importModule: "opencode-import",
+    importFn: "importAllOpenCodeSessions",
+    importedLog: "OpenCode sessions from ~/.local/share/opencode/",
+    errorLog: "OpenCode session files had errors during import",
+  },
+];
 const CLIENT_SNIPPET_FILES = readdirSync(clientSnippetDir).sort();
 
 // CLOSEDLOOP plan-extraction (FEA-1189 / PLN-613): in-repo modules copied into
@@ -104,6 +168,42 @@ const generatedImportHistory = path.join(
   "scripts",
   "import-history.js",
 );
+
+// Host-owned pricing defaults for model IDs we ingest from non-Claude harnesses.
+// These keep cost stats working without requiring users to hand-enter common
+// rules after startup. Rates are per 1M tokens.
+const HOST_DEFAULT_PRICING = [
+  // Opus family
+  ["claude-opus-4-7%", "Claude Opus 4.7", 5, 25, 0.5, 6.25],
+  ["claude-opus-4-6%", "Claude Opus 4.6", 5, 25, 0.5, 6.25],
+  ["claude-opus-4-5%", "Claude Opus 4.5", 5, 25, 0.5, 6.25],
+  ["claude-opus-4-1%", "Claude Opus 4.1", 15, 75, 1.5, 18.75],
+  ["claude-opus-4-2%", "Claude Opus 4", 15, 75, 1.5, 18.75],
+  // Sonnet family
+  ["claude-sonnet-4-6%", "Claude Sonnet 4.6", 3, 15, 0.3, 3.75],
+  ["claude-sonnet-4-5%", "Claude Sonnet 4.5", 3, 15, 0.3, 3.75],
+  ["claude-sonnet-4-2%", "Claude Sonnet 4", 3, 15, 0.3, 3.75],
+  ["claude-3-7-sonnet%", "Claude Sonnet 3.7", 3, 15, 0.3, 3.75],
+  ["claude-3-5-sonnet%", "Claude Sonnet 3.5", 3, 15, 0.3, 3.75],
+  // Haiku family
+  ["claude-haiku-4-5%", "Claude Haiku 4.5", 1, 5, 0.1, 1.25],
+  ["claude-3-5-haiku%", "Claude Haiku 3.5", 0.8, 4, 0.08, 1],
+  ["claude-3-haiku%", "Claude Haiku 3", 0.25, 1.25, 0.03, 0.3],
+  // GPT-5 family
+  ["gpt-5.5%", "GPT-5.5", 5, 30, 0.5, 0],
+  ["gpt-5.4-mini%", "GPT-5.4 mini", 0.75, 4.5, 0.075, 0],
+  ["gpt-5.4-nano%", "GPT-5.4 nano", 0.2, 1.25, 0.02, 0],
+  ["gpt-5.4%", "GPT-5.4", 2.5, 15, 0.25, 0],
+  ["gpt-5-codex%", "GPT-5 Codex", 1.25, 10, 0.125, 0],
+  ["gpt-5-mini%", "GPT-5 mini", 0.25, 2, 0.025, 0],
+  ["gpt-5-nano%", "GPT-5 nano", 0.05, 0.4, 0.005, 0],
+  ["gpt-5%", "GPT-5", 1.25, 10, 0.125, 0],
+  // OpenCode-hosted free models
+  ["big-pickle%", "Big Pickle", 0, 0, 0, 0],
+  ["opencode/big-pickle%", "OpenCode Big Pickle", 0, 0, 0, 0],
+  // Legacy
+  ["claude-3-opus%", "Claude Opus 3", 15, 75, 1.5, 18.75],
+];
 
 const force =
   process.argv.includes("--force") ||
@@ -203,7 +303,10 @@ function currentStamp() {
     sourcePushLib,
     sourceClientIndex,
     fileURLToPath(import.meta.url),
-    ...CODEX_MODULES.map((m) => path.join(codexModulesDir, `${m}.js`)),
+    ...MULTI_HARNESS_SPECS.flatMap(({ modulesDir, modules }) =>
+      modules.map((m) => path.join(modulesDir, `${m}.js`)),
+    ),
+    ...SHARED_MODULES.map((m) => path.join(sharedModulesDir, `${m}.js`)),
     ...CLIENT_SNIPPET_FILES.map((file) => path.join(clientSnippetDir, file)),
     ...PLAN_MODULES.map((m) => path.join(planModulesDir, `${m}.js`)),
     path.join(planModulesDir, "plans-route.js"),
@@ -213,6 +316,17 @@ function currentStamp() {
     h.update(readFileSync(file));
   }
   return h.digest("hex");
+}
+
+function renderDefaultPricingSource(rows = HOST_DEFAULT_PRICING) {
+  return [
+    "const DEFAULT_PRICING = [",
+    ...rows.map(
+      ([pattern, name, input, output, cacheRead, cacheWrite]) =>
+        `  [${JSON.stringify(pattern)}, ${JSON.stringify(name)}, ${input}, ${output}, ${cacheRead}, ${cacheWrite}],`,
+    ),
+    "];",
+  ].join("\n");
 }
 
 function buildClient() {
@@ -233,16 +347,30 @@ function materializeRuntimeTree() {
   cpSync(path.join(sourceRootDir, "server"), path.join(generatedRootDir, "server"), {
     recursive: true,
   });
-  // Codex ingestion modules (Addition #6) into the generated server/lib —
+  // Multi-harness ingestion modules into the generated server/lib —
   // alongside upstream's lib files, same as the old vendored layout so the
   // modules' relative requires (../db, ../../scripts/import-history,
-  // ./codex-home) resolve unchanged.
+  // ./<tool>-home) resolve unchanged.
   const generatedLibDir = path.join(generatedRootDir, "server", "lib");
   mkdirSync(generatedLibDir, { recursive: true });
-  for (const m of CODEX_MODULES) {
+  for (const { modulesDir, modules } of MULTI_HARNESS_SPECS) {
+    for (const m of modules) {
+      cpSync(
+        path.join(modulesDir, `${m}.js`),
+        path.join(generatedLibDir, `${m}.js`),
+      );
+    }
+  }
+  // Shared parser utilities: place at server/agent-monitor-shared/ to match
+  // the source-tree require path (../agent-monitor-shared/parser-utils) used
+  // by all parsers. Both source tests and the generated runtime resolve the
+  // same relative path.
+  const generatedSharedDir = path.join(generatedRootDir, "server", "agent-monitor-shared");
+  mkdirSync(generatedSharedDir, { recursive: true });
+  for (const m of SHARED_MODULES) {
     cpSync(
-      path.join(codexModulesDir, `${m}.js`),
-      path.join(generatedLibDir, `${m}.js`),
+      path.join(sharedModulesDir, `${m}.js`),
+      path.join(generatedSharedDir, `${m}.js`),
     );
   }
   // CLOSEDLOOP plan-extraction (FEA-1189): plan modules alongside Codex's in
@@ -277,6 +405,7 @@ function materializeRuntimeTree() {
   patchServerIndex(generatedServerEntry);
   patchSessionsRoute(generatedSessionsRoute);
   patchDbFile(generatedDbFile);
+  patchPricingRoute(generatedPricingRoute);
   patchHooksRoute(generatedHooksRoute);
   patchPushFile(generatedPushLib);
   writeFileSync(generatedUninstallHooks, UNINSTALL_HOOKS_SOURCE, "utf8");
@@ -396,8 +525,37 @@ function patchServerIndex(file) {
     );
   }
 
-  // CLOSEDLOOP Codex support (Addition #6) — start the Codex rollout watcher
-  // next to cc-watcher (Codex has no hooks; the watcher is its only live path).
+  const watcherPatchLines = MULTI_HARNESS_SPECS.flatMap(
+    ({ key, watcherFn, watcherModule }) => [
+      "    try {",
+      `      const { ${watcherFn} } = require("./lib/${watcherModule}");`,
+      `      ${watcherFn}({ broadcast });`,
+      "    } catch (err) {",
+      `      console.warn("${key}-watcher failed to start:", err.message);`,
+      "    }",
+    ],
+  );
+  const importPatchLines = MULTI_HARNESS_SPECS.flatMap(
+    ({ key, importFn, importModule, importedLog, errorLog }) => [
+      "  try {",
+      `    const { ${importFn} } = require("./lib/${importModule}");`,
+      `    ${importFn}(_dbMod)`,
+      "      .then(({ imported, errors }) => {",
+      "        if (imported > 0)",
+      `          console.log("Imported " + imported + " ${importedLog}");`,
+      "        if (errors > 0)",
+      `          console.log(errors + " ${errorLog}");`,
+      "      })",
+      "      .catch(() => {});",
+      "  } catch (err) {",
+      `    console.warn("${key} import failed to start:", err.message);`,
+      "  }",
+      "",
+    ],
+  );
+
+  // CLOSEDLOOP multi-harness support — start watchers for all non-Claude harnesses
+  // next to cc-watcher (these tools have no hooks; the watcher is their only live path).
   if (!source.includes("startCodexWatcher")) {
     const ccWatcherBlock = [
       '      const { startCcWatcher } = require("./lib/cc-watcher");',
@@ -408,27 +566,23 @@ function patchServerIndex(file) {
     ].join("\n");
     if (!source.includes(ccWatcherBlock)) {
       throw new Error(
-        `Unable to patch ${file}: expected the cc-watcher start block (Codex).`,
+        `Unable to patch ${file}: expected the cc-watcher start block (multi-harness).`,
       );
     }
     source = source.replace(
       ccWatcherBlock,
       [
         ccWatcherBlock,
-        "    try {",
-        '      const { startCodexWatcher } = require("./lib/codex-watcher");',
-        "      startCodexWatcher({ broadcast });",
-        "    } catch (err) {",
-        '      console.warn("codex-watcher failed to start:", err.message);',
-        "    }",
+        ...watcherPatchLines,
       ].join("\n"),
     );
   }
 
-  // CLOSEDLOOP Codex support (Addition #6) — import Codex sessions on every
-  // startup (not gated on a zero-row count, unlike the Claude import: Codex
-  // has no hooks so sessions created while the app was closed must still
-  // appear; the import is idempotent). Fire-and-forget; never blocks boot.
+  // CLOSEDLOOP multi-harness support — import sessions from all non-Claude
+  // harnesses on every startup (not gated on a zero-row count, unlike the
+  // Claude import: these tools have no hooks so sessions created while the
+  // app was closed must still appear; all imports are idempotent).
+  // Fire-and-forget; never blocks boot.
   if (!source.includes("importAllCodexSessions")) {
     const tailNeedle = [
       "  }",
@@ -438,7 +592,7 @@ function patchServerIndex(file) {
     ].join("\n");
     if (!source.includes(tailNeedle)) {
       throw new Error(
-        `Unable to patch ${file}: expected the require.main tail (Codex import).`,
+        `Unable to patch ${file}: expected the require.main tail (multi-harness import).`,
       );
     }
     source = source.replace(
@@ -446,19 +600,13 @@ function patchServerIndex(file) {
       [
         "  }",
         "",
-        "  try {",
-        '    const { importAllCodexSessions } = require("./lib/codex-import");',
-        '    importAllCodexSessions(require("./db"))',
-        "      .then(({ imported, errors }) => {",
-        "        if (imported > 0)",
-        '          console.log("Imported " + imported + " Codex sessions from ~/.codex/");',
-        "        if (errors > 0)",
-        '          console.log(errors + " Codex rollout files had errors during import");',
-        "      })",
-        "      .catch(() => {});",
-        "  } catch (err) {",
-        '    console.warn("codex import failed to start:", err.message);',
+        "  let _dbMod;",
+        "  try { _dbMod = require(\"./db\"); } catch (err) {",
+        '    console.warn("agent-monitor db load failed:", err.message);',
+        "    return;",
         "  }",
+        "",
+        ...importPatchLines,
         "}",
         "",
         "module.exports = { createApp, startServer };",
@@ -575,6 +723,17 @@ function patchDbFile(file) {
     );
   }
 
+  const pricingBlock = /const DEFAULT_PRICING = \[[\s\S]*?\n\];\n\n\/\/ Top-up:/;
+  if (!pricingBlock.test(source)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the DEFAULT_PRICING block.`,
+    );
+  }
+  source = source.replace(
+    pricingBlock,
+    `${renderDefaultPricingSource()}\n\n// Top-up:`,
+  );
+
   // CLOSEDLOOP Codex support (Addition #4): add a `harness` dimension so one
   // dashboard shows multiple harnesses. Additive + DEFAULT 'claude' so the
   // unchanged Claude/manual insert path stays correct; the Codex importer
@@ -623,6 +782,38 @@ function patchDbFile(file) {
         "}",
         "",
         exportNeedle,
+      ].join("\n"),
+    );
+  }
+
+  writeFileSync(file, source, "utf8");
+}
+
+function patchPricingRoute(file) {
+  let source = readFileSync(file, "utf8");
+
+  if (!source.includes('String(row.model || "").toLowerCase()')) {
+    const matchNeedle = [
+      "  for (const row of tokenRows) {",
+      "    const rule = sortedRules.find((p) => {",
+      '      const pattern = p.model_pattern.replace(/%/g, ".*");',
+      '      return new RegExp("^" + pattern + "$").test(row.model);',
+      "    });",
+    ].join("\n");
+    if (!source.includes(matchNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the pricing rule match block.`,
+      );
+    }
+    source = source.replace(
+      matchNeedle,
+      [
+        "  for (const row of tokenRows) {",
+        '    const modelId = String(row.model || "").toLowerCase();',
+        "    const rule = sortedRules.find((p) => {",
+        '      const pattern = String(p.model_pattern || "").toLowerCase().replace(/%/g, ".*");',
+        '      return new RegExp("^" + pattern + "$").test(modelId);',
+        "    });",
       ].join("\n"),
     );
   }
@@ -1088,18 +1279,26 @@ function assertGeneratedTree() {
       "Generated server/db.js is missing the `harness` column migration (Codex Patch #4).",
     );
   }
-  if (
-    !serverIndex.includes("startCodexWatcher") ||
-    !serverIndex.includes("importAllCodexSessions")
-  ) {
-    throw new Error(
-      "Generated server/index.js is missing the Codex watcher/import wiring (Patch #5).",
-    );
-  }
-  for (const m of CODEX_MODULES) {
-    if (!existsSync(path.join(generatedRootDir, "server", "lib", `${m}.js`))) {
+  for (const { label, watcherFn, importFn } of MULTI_HARNESS_SPECS) {
+    for (const fn of [watcherFn, importFn]) {
+      if (serverIndex.includes(fn)) continue;
       throw new Error(
-        `Generated server/lib/${m}.js missing (Codex Addition #6).`,
+        `Generated server/index.js is missing the ${label} watcher/import wiring (${fn}).`,
+      );
+    }
+  }
+  for (const { modules } of MULTI_HARNESS_SPECS) {
+    for (const m of modules) {
+      if (existsSync(path.join(generatedRootDir, "server", "lib", `${m}.js`))) continue;
+      throw new Error(
+        `Generated server/lib/${m}.js missing (multi-harness).`,
+      );
+    }
+  }
+  for (const m of SHARED_MODULES) {
+    if (!existsSync(path.join(generatedRootDir, "server", "agent-monitor-shared", `${m}.js`))) {
+      throw new Error(
+        `Generated server/agent-monitor-shared/${m}.js missing (multi-harness).`,
       );
     }
   }
