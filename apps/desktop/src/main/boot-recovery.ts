@@ -1,3 +1,4 @@
+import { getCloudLoopStatus } from "../server/operations/loop-http.js";
 import { startOutputTailer } from "../server/operations/output-tailer.js";
 import {
   cleanupAdditionalWorktreesWithDefaultProvider,
@@ -154,6 +155,10 @@ export class BootRecoveryService {
           "boot-recovery",
           `Token source for loopId=${job.loopId}: LOOP_TOKEN_STORE`,
         );
+        const reconcileResult = await this.reconcileCloudLoopStatus(job, apiBaseUrl);
+        if (reconcileResult.kind === "timed_out") {
+          continue;
+        }
         jobStore.upsert({
           ...job,
           recoveryAttempts: attempts + 1,
@@ -229,6 +234,27 @@ export class BootRecoveryService {
     });
   }
 
+  private async reconcileCloudLoopStatus(
+    job: LocalJob,
+    apiBaseUrl: string,
+  ): ReturnType<typeof getCloudLoopStatus> {
+    const token = this.deps.loopTokenStore.getLoopToken(job.loopId);
+    const result = await getCloudLoopStatus(apiBaseUrl, job.loopId, () => token);
+    if (result.kind === "timed_out") {
+      const current = this.deps.jobStore.getByLoopId(job.loopId) ?? job;
+      this.deps.jobStore.upsert({
+        ...current,
+        status: "TIMED_OUT",
+        liveActivity: "Loop timed out — restart from the loop list.",
+        completedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        cloudFinalizedAt: new Date().toISOString(),
+      });
+      this.deps.loopTokenStore.deleteLoopToken(job.loopId);
+    }
+    return result;
+  }
+
   private async reattachLiveJob(job: LocalJob, apiBaseUrl: string): Promise<void> {
     const { jobStore } = this.deps;
     const { loopId, pid } = job;
@@ -251,6 +277,11 @@ export class BootRecoveryService {
     // TOCTOU guard: process was alive when liveJobs was built, but may have exited since.
     if (!isProcessRunning(pid)) {
       this.finalizeRecoveredJob(loopId, () => this.deps.loopTokenStore.getLoopToken(loopId), effectiveApiBaseUrl, undefined);
+      return;
+    }
+
+    const reconcileResult = await this.reconcileCloudLoopStatus(job, effectiveApiBaseUrl);
+    if (reconcileResult.kind === "timed_out") {
       return;
     }
 
