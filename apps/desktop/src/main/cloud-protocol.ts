@@ -1,3 +1,5 @@
+import type { AgentSessionSyncBatch } from "./agent-session-sync-contract.js";
+
 export type CloudSocketStatus =
   | { state: "idle" }
   | { state: "online"; targetId: string }
@@ -40,6 +42,7 @@ export interface DesktopHelloAckEvent extends ProtocolEnvelope {
   resumeFromSequence?: Record<string, number>;
   serverCapabilities?: {
     computeTargetSigning?: boolean;
+    agentSessionSync?: boolean;
   };
 }
 
@@ -97,6 +100,8 @@ export interface DesktopPresenceEvent extends ProtocolEnvelope {
 }
 
 export const DESKTOP_ANALYTICS_SOCKET_EVENT = "desktop.analytics" as const;
+export const DESKTOP_AGENT_SESSIONS_SOCKET_EVENT =
+  "desktop.agent-sessions" as const;
 
 export const DesktopAnalyticsAckReason = {
   FeatureDisabled: "feature_disabled",
@@ -110,6 +115,23 @@ export type DesktopAnalyticsAckReason =
 export type DesktopAnalyticsAck =
   | { accepted: true }
   | { accepted: false; reason: DesktopAnalyticsAckReason };
+
+export const DesktopAgentSessionsAckReason = {
+  FeatureDisabled: "feature_disabled",
+  RateLimited: "rate_limited",
+  ValidationFailed: "validation_failed",
+} as const;
+
+export type DesktopAgentSessionsAckReason =
+  (typeof DesktopAgentSessionsAckReason)[keyof typeof DesktopAgentSessionsAckReason];
+
+export type DesktopAgentSessionsAck =
+  | { accepted: true }
+  | { accepted: false; reason: DesktopAgentSessionsAckReason };
+
+export interface DesktopAgentSessionsEvent
+  extends ProtocolEnvelope,
+    AgentSessionSyncBatch {}
 
 export const DesktopAnalyticsEventName = {
   CommandInitiated: "command_initiated",

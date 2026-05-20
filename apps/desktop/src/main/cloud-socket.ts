@@ -5,6 +5,10 @@ import {
   PROTOCOL_VERSION,
   type CloudSocketStatus,
   type CommandEventRecord,
+  type DesktopAgentSessionsAck,
+  DesktopAgentSessionsAckReason,
+  type DesktopAgentSessionsEvent,
+  DESKTOP_AGENT_SESSIONS_SOCKET_EVENT,
   type DesktopAnalyticsAck,
   DesktopAnalyticsAckReason,
   type DesktopAnalyticsEvent,
@@ -68,6 +72,7 @@ export class CloudSocketService {
   private degradedSince: number | null = null;
   private recoveryTimer: NodeJS.Timeout | null = null;
   private analyticsDisabledForSession = false;
+  private agentSessionsDisabledForSession = false;
   private analyticsQueue: QueuedAnalyticsEvent[] = [];
   private readonly analyticsInFlight = new Set<Promise<void>>();
 
@@ -118,6 +123,7 @@ export class CloudSocketService {
     this.hadSuccessfulConnection = false;
     this.degradedSince = null;
     this.analyticsDisabledForSession = false;
+    this.agentSessionsDisabledForSession = false;
     this.clearHelloAckTimer();
     this.clearReconnectTimer();
     this.clearRecoveryTimer();
@@ -137,11 +143,79 @@ export class CloudSocketService {
     if (this.analyticsDisabledForSession) {
       return;
     }
-    if (!this.isAnalyticsReady()) {
+    if (!this.isRelayReady()) {
       this.queueAnalyticsEvent(event);
       return;
     }
     this.trackAnalyticsSend(this.sendAnalyticsNow(event));
+  }
+
+  async sendAgentSessions(
+    event: Omit<DesktopAgentSessionsEvent, keyof EnvelopeOnlyFields>,
+  ): Promise<DesktopAgentSessionsAck> {
+    if (this.agentSessionsDisabledForSession) {
+      return {
+        accepted: false,
+        reason: DesktopAgentSessionsAckReason.FeatureDisabled,
+      };
+    }
+    if (!this.isRelayReady()) {
+      return {
+        accepted: false,
+        reason: DesktopAgentSessionsAckReason.RateLimited,
+      };
+    }
+
+    const socket = this.socket;
+    if (!socket?.connected) {
+      return {
+        accepted: false,
+        reason: DesktopAgentSessionsAckReason.RateLimited,
+      };
+    }
+
+    const payload = {
+      ...createEnvelope(),
+      ...event,
+    };
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        gatewayLog.debug(
+          "cloud-socket",
+          "desktop.agent-sessions ack timed out; will retry later",
+        );
+        resolve({
+          accepted: false,
+          reason: DesktopAgentSessionsAckReason.RateLimited,
+        });
+      }, AGENT_SESSIONS_ACK_TIMEOUT_MS);
+
+      socket.emit(
+        DESKTOP_AGENT_SESSIONS_SOCKET_EVENT,
+        payload,
+        (ack: unknown) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          const parsedAck = parseDesktopAgentSessionsAck(ack);
+          if (
+            parsedAck.accepted === false &&
+            parsedAck.reason === DesktopAgentSessionsAckReason.FeatureDisabled
+          ) {
+            this.agentSessionsDisabledForSession = true;
+          }
+          resolve(parsedAck);
+        },
+      );
+    });
   }
 
   async flushAnalytics(options: { timeoutMs: number }): Promise<void> {
@@ -272,9 +346,10 @@ export class CloudSocketService {
       );
       const rawComputeTargetSigning =
         rawServerCapabilities.computeTargetSigning;
+      const rawAgentSessionSync = rawServerCapabilities.agentSessionSync;
       gatewayLog.info(
         "cloud-socket",
-        `Hello ack received, targetId=${ackEvent.computeTargetId}, serverCapabilityKeys=${formatObjectKeysForLog(rawServerCapabilities)}, computeTargetSigning=${formatPrimitiveForLog(rawComputeTargetSigning)}, parsedComputeTargetSigning=${parsedServerCapabilities?.computeTargetSigning === true}`,
+        `Hello ack received, targetId=${ackEvent.computeTargetId}, serverCapabilityKeys=${formatObjectKeysForLog(rawServerCapabilities)}, computeTargetSigning=${formatPrimitiveForLog(rawComputeTargetSigning)}, parsedComputeTargetSigning=${parsedServerCapabilities?.computeTargetSigning === true}, agentSessionSync=${formatPrimitiveForLog(rawAgentSessionSync)}, parsedAgentSessionSync=${parsedServerCapabilities?.agentSessionSync === true}`,
       );
       this.options.onHelloAck?.(ackEvent);
       this.notifyStatus({ state: "online", targetId: ackEvent.computeTargetId });
@@ -357,7 +432,7 @@ export class CloudSocketService {
     });
   }
 
-  private isAnalyticsReady(): boolean {
+  private isRelayReady(): boolean {
     return Boolean(
       this.socket?.connected &&
         this.targetId &&
@@ -383,14 +458,14 @@ export class CloudSocketService {
   }
 
   private drainAnalyticsQueue(): void {
-    if (!this.isAnalyticsReady() || this.analyticsDisabledForSession) {
+    if (!this.isRelayReady() || this.analyticsDisabledForSession) {
       return;
     }
     const now = Date.now();
     const ready = this.analyticsQueue.filter((entry) => entry.expiresAt > now);
     this.analyticsQueue = [];
     for (const entry of ready) {
-      if (this.analyticsDisabledForSession || !this.isAnalyticsReady()) {
+      if (this.analyticsDisabledForSession || !this.isRelayReady()) {
         this.queueAnalyticsEvent(entry.event);
         continue;
       }
@@ -609,6 +684,7 @@ const RECOVERY_CHECK_INTERVAL_MS = 30_000;
 const ANALYTICS_QUEUE_MAX = 200;
 const ANALYTICS_QUEUE_TTL_MS = 15 * 60_000;
 const ANALYTICS_ACK_TIMEOUT_MS = 1_500;
+const AGENT_SESSIONS_ACK_TIMEOUT_MS = 10_000;
 
 type QueuedAnalyticsEvent = {
   event: Omit<DesktopAnalyticsEvent, keyof EnvelopeOnlyFields>;
@@ -673,12 +749,20 @@ function parseDesktopCommand(payload: unknown): DesktopCommandEvent | null {
  * preserve legacy unsigned command compatibility.
  */
 export function parseServerCapabilities(value: unknown):
-  | { computeTargetSigning?: boolean }
+  | { computeTargetSigning?: boolean; agentSessionSync?: boolean }
   | undefined {
   const record = asObject(value);
-  return record.computeTargetSigning === true
-    ? { computeTargetSigning: true }
-    : undefined;
+  const parsed: {
+    computeTargetSigning?: boolean;
+    agentSessionSync?: boolean;
+  } = {};
+  if (record.computeTargetSigning === true) {
+    parsed.computeTargetSigning = true;
+  }
+  if (record.agentSessionSync === true) {
+    parsed.agentSessionSync = true;
+  }
+  return Object.keys(parsed).length > 0 ? parsed : undefined;
 }
 
 export function parseDesktopHelloAck(
@@ -725,6 +809,26 @@ export function parseDesktopAnalyticsAck(
   return {
     accepted: false,
     reason: DesktopAnalyticsAckReason.ValidationFailed,
+  };
+}
+
+export function parseDesktopAgentSessionsAck(
+  payload: unknown,
+): DesktopAgentSessionsAck {
+  const event = asObject(payload);
+  if (event.accepted === true) {
+    return { accepted: true };
+  }
+  if (
+    event.reason === DesktopAgentSessionsAckReason.FeatureDisabled ||
+    event.reason === DesktopAgentSessionsAckReason.RateLimited ||
+    event.reason === DesktopAgentSessionsAckReason.ValidationFailed
+  ) {
+    return { accepted: false, reason: event.reason };
+  }
+  return {
+    accepted: false,
+    reason: DesktopAgentSessionsAckReason.RateLimited,
   };
 }
 
