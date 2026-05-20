@@ -317,4 +317,4 @@ async function parseRolloutFile(filePath) {
   };
 }
 
-module.exports = { parseRolloutFile, classify, toIso };
+module.exports = { parseRolloutFile, classify };

@@ -310,6 +310,9 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
     'COPILOT_MODULES = ["copilot-home", "copilot-parser", "copilot-import", "copilot-watcher"]',
     'OPENCODE_MODULES = ["opencode-home", "opencode-parser", "opencode-import", "opencode-watcher"]',
     'SHARED_MODULES = ["parser-utils"]',
+    "MULTI_HARNESS_SPECS = [",
+    "watcherPatchLines",
+    "importPatchLines",
     "startCursorWatcher",
     "startCopilotWatcher",
     "startOpenCodeWatcher",
@@ -327,6 +330,14 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
   assert.ok(
     existsSync(new URL("../scripts/agent-monitor-shared/parser-utils.js", import.meta.url)),
     "scripts/agent-monitor-shared/parser-utils.js missing",
+  );
+  assert.match(
+    read("../scripts/agent-monitor-copilot/copilot-home.js"),
+    /readWorkspacePathFromHashDir/,
+  );
+  assert.match(
+    read("../scripts/agent-monitor-opencode/opencode-parser.js"),
+    /DatabaseSync/,
   );
 
   // In-repo modules exist for each harness.

@@ -197,4 +197,4 @@ async function parseTranscriptFile(filePath) {
   };
 }
 
-module.exports = { parseTranscriptFile, toIso };
+module.exports = { parseTranscriptFile };

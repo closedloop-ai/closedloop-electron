@@ -15,6 +15,7 @@
 const path = require("path");
 const os = require("os");
 const fs = require("fs");
+const { fileURLToPath } = require("url");
 
 function getCopilotCliHome() {
   const raw = process.env.COPILOT_HOME;
@@ -44,6 +45,29 @@ function getVscodeWorkspaceStorageDir() {
   }
 }
 
+function workspacePathFromUri(folder) {
+  if (typeof folder !== "string" || folder.length === 0) return null;
+  if (!folder.startsWith("file:")) return folder;
+  try {
+    return fileURLToPath(folder);
+  } catch {
+    try {
+      return decodeURIComponent(folder.replace(/^file:\/\//, ""));
+    } catch {
+      return folder.replace(/^file:\/\//, "");
+    }
+  }
+}
+
+function readWorkspacePathFromHashDir(hashPath) {
+  try {
+    const wsJson = JSON.parse(fs.readFileSync(path.join(hashPath, "workspace.json"), "utf8"));
+    return workspacePathFromUri(wsJson.folder || wsJson.workspace || "");
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Discover all chatSession JSON files across all VS Code workspaces.
  * Returns array of { filePath, workspacePath } where workspacePath is resolved
@@ -63,15 +87,7 @@ function listChatSessionFiles() {
     const chatDir = path.join(hashPath, "chatSessions");
     if (!fs.existsSync(chatDir)) continue;
 
-    // Resolve workspace path from workspace.json
-    let workspacePath = null;
-    try {
-      const wsJson = JSON.parse(fs.readFileSync(path.join(hashPath, "workspace.json"), "utf8"));
-      const folder = wsJson.folder || wsJson.workspace || "";
-      if (folder) {
-        workspacePath = folder.replace(/^file:\/\//, "");
-      }
-    } catch { /* workspace.json may not exist or be readable */ }
+    const workspacePath = readWorkspacePathFromHashDir(hashPath);
 
     let files;
     try { files = fs.readdirSync(chatDir, { withFileTypes: true }); } catch { continue; }
@@ -112,6 +128,8 @@ module.exports = {
   getCopilotCliHome,
   getCopilotCliSessionStateDir,
   getVscodeWorkspaceStorageDir,
+  workspacePathFromUri,
+  readWorkspacePathFromHashDir,
   listChatSessionFiles,
   listCliEventFiles,
 };

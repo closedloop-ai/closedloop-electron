@@ -1,11 +1,10 @@
 /**
  * @file opencode-import.js
- * @description Bootstrap importer for OpenCode sessions. Parses each session's
- * message JSON files into the shared normalized session shape and reuses
- * importSession().
+ * @description Bootstrap importer for OpenCode sessions. Parses the canonical
+ * `opencode.db` session/message store into the shared normalized session shape
+ * and reuses importSession().
  */
-const { parseSessionDir } = require("./opencode-parser");
-const { listSessionDirs } = require("./opencode-home");
+const { loadSessionsFromDb } = require("./opencode-parser");
 const { importSession } = require("../../scripts/import-history");
 
 function importOpenCodeSession(dbModule, session) {
@@ -17,7 +16,6 @@ function importOpenCodeSession(dbModule, session) {
 }
 
 async function importAllOpenCodeSessions(dbModule) {
-  const dirs = listSessionDirs();
   let imported = 0;
   let skipped = 0;
   let errors = 0;
@@ -30,15 +28,14 @@ async function importAllOpenCodeSessions(dbModule) {
     }
   });
 
-  const batch = [];
-  for (const { sessionDir, sessionId } of dirs) {
-    try {
-      const session = parseSessionDir(sessionDir, sessionId);
-      if (!session) { skipped++; continue; }
-      batch.push(session);
-    } catch { errors++; }
+  try {
+    const sessions = loadSessionsFromDb();
+    if (sessions.length > 0) {
+      importBatch(sessions);
+    }
+  } catch {
+    errors++;
   }
-  if (batch.length > 0) importBatch(batch);
 
   return { imported, skipped, errors };
 }

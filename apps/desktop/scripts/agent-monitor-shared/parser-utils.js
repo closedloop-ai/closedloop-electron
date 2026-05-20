@@ -36,4 +36,29 @@ function safeJson(v) {
   return v;
 }
 
-module.exports = { toIso, safeJson };
+/**
+ * Best-effort extraction of a human-readable error message from a nested value.
+ */
+function extractErrorMessage(value, depth = 0) {
+  if (value == null || depth > 4) return null;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const message = extractErrorMessage(entry, depth + 1);
+      if (message) return message;
+    }
+    return null;
+  }
+  if (typeof value === "object") {
+    for (const key of ["message", "error", "details", "text", "content"]) {
+      const message = extractErrorMessage(value[key], depth + 1);
+      if (message) return message;
+    }
+  }
+  return null;
+}
+
+module.exports = { toIso, safeJson, extractErrorMessage };

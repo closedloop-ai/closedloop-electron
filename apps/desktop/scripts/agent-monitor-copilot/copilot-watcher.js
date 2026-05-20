@@ -11,6 +11,7 @@ const path = require("path");
 const {
   getCopilotCliSessionStateDir,
   getVscodeWorkspaceStorageDir,
+  readWorkspacePathFromHashDir,
 } = require("./copilot-home");
 const { parseChatSessionFile, parseCliEventFile } = require("./copilot-parser");
 
@@ -130,14 +131,8 @@ function startCopilotWatcher({ broadcast }) {
     broadcast,
     (filename) => String(filename).endsWith(".json") && String(filename).includes("chatSession"),
     (full) => {
-      let workspacePath = null;
-      try {
-        const hashDir = path.dirname(path.dirname(full));
-        const wsJson = JSON.parse(fs.readFileSync(path.join(hashDir, "workspace.json"), "utf8"));
-        const folder = wsJson.folder || wsJson.workspace || "";
-        if (folder) workspacePath = folder.replace(/^file:\/\//, "");
-      } catch { /* workspace.json may not exist */ }
-      return { type: "chat", workspacePath };
+      const hashDir = path.dirname(path.dirname(full));
+      return { type: "chat", workspacePath: readWorkspacePathFromHashDir(hashDir) };
     },
   );
 
