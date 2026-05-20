@@ -359,6 +359,106 @@ test("readGStackVersion rejects malformed VERSION content", () => {
   assert.equal(_internals.readGStackVersion(root), null);
 });
 
+// Build a minimal Claude Code marketplace install on disk:
+// ~/.claude/plugins/installed_plugins.json + per-plugin cache dirs with
+// SKILL.md files inside each plugin's skills/ subdir. Mirrors the layout
+// produced by `claude plugin install <p>@<marketplace> --scope user`.
+function makeClaudeMarketplaceTree(home, marketplace, plugins) {
+  const cacheRoot = nodePath.join(home, ".claude", "plugins", "cache", marketplace);
+  const registry = { version: 2, plugins: {} };
+  for (const p of plugins) {
+    const installPath = nodePath.join(cacheRoot, p.name, p.version);
+    fs.mkdirSync(installPath, { recursive: true });
+    // Plugin manifest
+    fs.mkdirSync(nodePath.join(installPath, ".claude-plugin"), {
+      recursive: true,
+    });
+    fs.writeFileSync(
+      nodePath.join(installPath, ".claude-plugin", "plugin.json"),
+      JSON.stringify({ name: p.name, version: p.version }),
+    );
+    // Skills
+    for (const skillName of p.skills || []) {
+      writeFile(
+        nodePath.join(installPath, "skills", skillName, "SKILL.md"),
+        `---\nname: ${skillName}\ndescription: skill ${skillName}\n---\n`,
+      );
+    }
+    registry.plugins[`${p.name}@${marketplace}`] = [
+      {
+        scope: "user",
+        installPath,
+        version: p.version,
+        installedAt: "2026-05-20T00:00:00Z",
+        lastUpdated: "2026-05-20T00:00:00Z",
+      },
+    ];
+  }
+  const registryPath = nodePath.join(home, ".claude", "plugins", "installed_plugins.json");
+  fs.mkdirSync(nodePath.dirname(registryPath), { recursive: true });
+  fs.writeFileSync(registryPath, JSON.stringify(registry, null, 2));
+  return registry;
+}
+
+test("scanner detects closedloop-ai marketplace plugins as one pack with N installs", () => {
+  const home = mkdtemp();
+  makeClaudeMarketplaceTree(home, "closedloop-ai", [
+    { name: "code", version: "1.11.20", skills: ["plan-validate", "decision-table", "find-plugin-file"] },
+    { name: "code-review", version: "1.5.5", skills: ["start"] },
+    { name: "judges", version: "1.7.1", skills: ["run-judges", "eval-cache"] },
+    { name: "platform", version: "1.1.3", skills: [] },
+    { name: "self-learning", version: "1.2.5", skills: ["push-learnings"] },
+  ]);
+
+  const db = makeDb();
+  withFakeHome(home, () => runPackScanner(db));
+
+  const pack = getPack(db, "closedloop-ai");
+  assert.ok(pack, "closedloop-ai pack should be present");
+  assert.equal(pack.installs.length, 5, "one install row per plugin");
+
+  // Per-plugin versions preserved on install rows
+  const versions = Object.fromEntries(
+    pack.installs.map((i) => [nodePath.basename(nodePath.dirname(i.install_path)), i.version]),
+  );
+  assert.equal(versions["code"], "1.11.20");
+  assert.equal(versions["judges"], "1.7.1");
+
+  // source_url is populated for the known marketplace
+  assert.ok(
+    pack.installs.every(
+      (i) => i.source_url === "https://github.com/closedloop-ai/claude-plugins",
+    ),
+  );
+
+  // Skills aggregate across all plugins (3+1+2+0+1 = 7)
+  assert.equal(pack.skills.length, 7);
+  const names = pack.skills.map((s) => s.name).sort();
+  assert.ok(names.includes("plan-validate"));
+  assert.ok(names.includes("run-judges"));
+  assert.ok(names.includes("push-learnings"));
+});
+
+test("marketplace scanner ignores reserved pack_ids (gstack, bmad-method)", () => {
+  // Hypothetical: someone publishes "gstack" via a Claude marketplace too.
+  // It should be skipped to avoid colliding with the dedicated gstack scanner.
+  const home = mkdtemp();
+  makeClaudeMarketplaceTree(home, "gstack", [
+    { name: "office-hours", version: "9.9.9", skills: ["office-hours"] },
+  ]);
+  const db = makeDb();
+  withFakeHome(home, () => runPackScanner(db));
+  const pack = getPack(db, "gstack");
+  // Either null (no real gstack install) or the real one — but NEVER the
+  // hypothetical marketplace install.
+  if (pack) {
+    assert.ok(
+      pack.installs.every((i) => i.version !== "9.9.9"),
+      "marketplace shouldn't have created a fake gstack install",
+    );
+  }
+});
+
 test("BMad v6+ manifest parser tolerates missing version", () => {
   const { _internals } = require("../pack-scanner");
   const home = mkdtemp();

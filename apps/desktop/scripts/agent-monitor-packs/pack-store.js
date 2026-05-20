@@ -142,11 +142,17 @@ function upsertProjectAssociation(db, row) {
  * Includes harness fan-out and skill count.
  */
 function listPacks(db) {
+  // version is NULL when the pack has multiple distinct install versions
+  // (e.g. a marketplace pack with several plugins at different versions) —
+  // avoids picking one arbitrary value and presenting it as authoritative.
   return db
     .prepare(
       `SELECT
          p.pack_id,
-         MAX(p.version)                                     AS version,
+         CASE
+           WHEN COUNT(DISTINCT COALESCE(p.version, '')) > 1 THEN NULL
+           ELSE MAX(p.version)
+         END                                                AS version,
          GROUP_CONCAT(DISTINCT p.harness)                   AS harnesses,
          COUNT(DISTINCT p.harness || '|' || p.install_path) AS install_count,
          MIN(p.detected_at)                                 AS first_detected_at,

@@ -528,6 +528,123 @@ function scanBmad(db) {
   return results;
 }
 
+// Known Claude Code plugin marketplaces → upstream repo URL. Marketplaces
+// outside this table are still detected and registered as packs; they just
+// get no source_url chip in the UI.
+const KNOWN_MARKETPLACE_SOURCES = {
+  "closedloop-ai": "https://github.com/closedloop-ai/claude-plugins",
+};
+
+/**
+ * Detect plugins installed via Claude Code's marketplace system. The
+ * canonical install registry lives at ~/.claude/plugins/installed_plugins.json
+ * — JSON with one entry per (plugin@marketplace, scope) tuple, each with an
+ * installPath and version. Marketplaces themselves are registered under
+ * ~/.claude/plugins/marketplaces/<name>/.claude-plugin/marketplace.json.
+ *
+ * Each marketplace becomes ONE pack (pack_id = marketplace name). Each
+ * plugin from that marketplace becomes one install row under the pack with
+ * its own per-plugin version. Skills aggregate across all plugins.
+ *
+ * Plugins inside the install dir live under `skills/<name>/SKILL.md` —
+ * same SKILL.md frontmatter format as GStack/BMad.
+ */
+function scanClaudeMarketplaces(db) {
+  const registryPath = path.join(
+    resolveClaudeHome(),
+    "plugins",
+    "installed_plugins.json",
+  );
+  const raw = safeReadFile(registryPath);
+  if (!raw) return { installs: 0, skills: 0, marketplaces: 0 };
+  let registry;
+  try {
+    registry = JSON.parse(raw);
+  } catch {
+    return { installs: 0, skills: 0, marketplaces: 0 };
+  }
+  if (!registry || typeof registry.plugins !== "object") {
+    return { installs: 0, skills: 0, marketplaces: 0 };
+  }
+
+  // Group installed plugins by marketplace name. Plugin ID format is
+  // "<plugin>@<marketplace>"; entries without that shape are skipped (e.g.
+  // legacy unversioned entries from older Claude Code versions).
+  const byMarketplace = new Map();
+  for (const [pluginRef, scopes] of Object.entries(registry.plugins)) {
+    const at = pluginRef.lastIndexOf("@");
+    if (at < 1) continue;
+    const pluginName = pluginRef.slice(0, at);
+    const marketplace = pluginRef.slice(at + 1);
+    if (!Array.isArray(scopes)) continue;
+    for (const entry of scopes) {
+      if (!entry || !entry.installPath) continue;
+      if (!byMarketplace.has(marketplace)) {
+        byMarketplace.set(marketplace, []);
+      }
+      byMarketplace.get(marketplace).push({
+        pluginName,
+        installPath: entry.installPath,
+        version: entry.version || null,
+      });
+    }
+  }
+
+  // Pack IDs that already have dedicated scanners — skip them here so
+  // marketplace installs of gstack or bmad-method don't get double-counted.
+  const reservedPackIds = new Set(["gstack", "bmad-method"]);
+
+  const results = { installs: 0, skills: 0, marketplaces: 0 };
+  for (const [marketplace, plugins] of byMarketplace.entries()) {
+    if (reservedPackIds.has(marketplace)) continue;
+    const sourceUrl = KNOWN_MARKETPLACE_SOURCES[marketplace] || null;
+
+    for (const plugin of plugins) {
+      if (!safeStat(plugin.installPath)) continue; // installPath gone — skip
+      upsertPack(db, {
+        pack_id: marketplace,
+        harness: "claude",
+        install_path: plugin.installPath,
+        install_kind: "directory",
+        source_url: sourceUrl,
+        version: plugin.version,
+      });
+      results.installs += 1;
+
+      // Skills live under <installPath>/skills/<name>/SKILL.md. Each skill
+      // gets a deterministic skill_id keyed on the marketplace, install path,
+      // and skill name — so re-scans dedupe cleanly and a version bump
+      // (which changes installPath) is treated as a fresh skill row.
+      const skillsDir = path.join(plugin.installPath, "skills");
+      for (const skillFile of findSkillFiles(skillsDir)) {
+        const content = safeReadFile(skillFile);
+        if (content == null) continue;
+        const meta = parseSkillFrontmatter(content) || {};
+        const dirName = path.basename(path.dirname(skillFile));
+        const name = meta.name || dirName;
+        if (!name) continue;
+        upsertSkill(db, {
+          skill_id: deterministicSkillId(
+            "claude",
+            plugin.installPath,
+            name,
+          ),
+          pack_id: marketplace,
+          harness: "claude",
+          install_path: skillFile,
+          name,
+          version: meta.version || plugin.version || null,
+          description: meta.description || null,
+          source_url: sourceUrl,
+        });
+        results.skills += 1;
+      }
+    }
+    results.marketplaces += 1;
+  }
+  return results;
+}
+
 /**
  * Scan recent project roots for `.gstack/conductor.json` markers and record
  * per-project associations.
@@ -618,6 +735,7 @@ function runPackScanner(db) {
   const summary = {
     gstack: { installs: 0, skills: 0 },
     bmad: { installs: 0, skills: 0, projects: 0 },
+    marketplaces: { installs: 0, skills: 0, marketplaces: 0 },
     gstackProjects: 0,
     prunedBefore: scanStartedAt,
   };
@@ -630,6 +748,14 @@ function runPackScanner(db) {
     summary.bmad = scanBmad(db);
   } catch (e) {
     console.warn("[pack-scanner] bmad scan failed:", e && e.message);
+  }
+  try {
+    summary.marketplaces = scanClaudeMarketplaces(db);
+  } catch (e) {
+    console.warn(
+      "[pack-scanner] claude marketplace scan failed:",
+      e && e.message,
+    );
   }
   try {
     summary.gstackProjects = scanProjectGStackAssociations(db);
@@ -654,6 +780,8 @@ module.exports = {
     readBmadProjectManifest,
     detectBmadProjectInstall,
     readGStackVersion,
+    scanClaudeMarketplaces,
+    KNOWN_MARKETPLACE_SOURCES,
     resolveClaudeHome,
     resolveCodexHome,
   },
