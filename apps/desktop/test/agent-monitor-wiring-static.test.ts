@@ -61,8 +61,8 @@ test("pnpm-managed agent-monitor source packages are declared and wired into bui
   ]) {
     assert.ok(desktopPkg.devDependencies[dep], `${dep} should be installed for build:agent-monitor`);
   }
-  // Any apps/desktop change requires a version bump (CI-enforced). main was 0.15.19.
-  assert.notEqual(desktopPkg.version, "0.15.19");
+  // Any apps/desktop change requires a version bump (CI-enforced). origin/main is 0.15.25.
+  assert.notEqual(desktopPkg.version, "0.15.25");
 });
 
 test("build script materializes a generated runtime tree with the host patches", () => {
@@ -95,6 +95,10 @@ test("electron-builder ships the generated agent-monitor runtime tree unpacked",
   assert.match(electronBuilder, /client\/dist\/\*\*\/\*/);
   assert.doesNotMatch(electronBuilder, /node_modules\/\*\*\/\*/);
   assert.match(stagePackagingSource, /node_modules", "better-sqlite3"/);
+  assert.match(
+    stagePackagingSource,
+    /dependency\.resolved[\s\S]*packageJson\.dependencies\?\.\[dependencyName\][\s\S]*dependency\.version/,
+  );
 });
 
 test("runtime resolves the generated tree and sidecar wiring still uses the fixed port", () => {
