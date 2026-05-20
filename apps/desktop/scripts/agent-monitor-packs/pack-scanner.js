@@ -599,22 +599,38 @@ function scanClaudeMarketplaces(db) {
     if (reservedPackIds.has(marketplace)) continue;
     const sourceUrl = KNOWN_MARKETPLACE_SOURCES[marketplace] || null;
 
+    // Invariant: at most one install row per (pack, harness). A marketplace's
+    // plugins (e.g. closedloop-ai's code / code-review / judges / platform /
+    // self-learning) are sub-units of the SAME logical install — the user
+    // ran one `claude plugin install ... --scope user` (or the curl
+    // installer) to get all of them. The cache root holds them all.
+    const cacheRoot = path.join(
+      resolveClaudeHome(),
+      "plugins",
+      "cache",
+      marketplace,
+    );
+    // version on the install row is NULL because the cache root spans
+    // multiple per-plugin versions; per-plugin versions live on each skill
+    // row (set below from plugin.json) and are also surfaced on the Packs
+    // detail panel's Skills grid.
+    upsertPack(db, {
+      pack_id: marketplace,
+      harness: "claude",
+      install_path: cacheRoot,
+      install_kind: "directory",
+      source_url: sourceUrl,
+      version: null,
+    });
+    results.installs += 1;
+
     for (const plugin of plugins) {
       if (!safeStat(plugin.installPath)) continue; // installPath gone — skip
-      upsertPack(db, {
-        pack_id: marketplace,
-        harness: "claude",
-        install_path: plugin.installPath,
-        install_kind: "directory",
-        source_url: sourceUrl,
-        version: plugin.version,
-      });
-      results.installs += 1;
-
-      // Skills live under <installPath>/skills/<name>/SKILL.md. Each skill
-      // gets a deterministic skill_id keyed on the marketplace, install path,
-      // and skill name — so re-scans dedupe cleanly and a version bump
-      // (which changes installPath) is treated as a fresh skill row.
+      // Skills live under <plugin-install>/skills/<name>/SKILL.md. The
+      // skill_id is keyed on the marketplace's cache root (NOT the
+      // per-plugin versioned install path) so a plugin version bump that
+      // changes the path doesn't churn skill_ids — the prune step still
+      // catches genuinely removed skills via last_seen_at.
       const skillsDir = path.join(plugin.installPath, "skills");
       for (const skillFile of findSkillFiles(skillsDir)) {
         const content = safeReadFile(skillFile);
@@ -624,11 +640,7 @@ function scanClaudeMarketplaces(db) {
         const name = meta.name || dirName;
         if (!name) continue;
         upsertSkill(db, {
-          skill_id: deterministicSkillId(
-            "claude",
-            plugin.installPath,
-            name,
-          ),
+          skill_id: deterministicSkillId("claude", cacheRoot, name),
           pack_id: marketplace,
           harness: "claude",
           install_path: skillFile,

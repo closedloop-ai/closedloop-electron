@@ -400,7 +400,7 @@ function makeClaudeMarketplaceTree(home, marketplace, plugins) {
   return registry;
 }
 
-test("scanner detects closedloop-ai marketplace plugins as one pack with N installs", () => {
+test("marketplace pack collapses to ONE install per harness regardless of plugin count", () => {
   const home = mkdtemp();
   makeClaudeMarketplaceTree(home, "closedloop-ai", [
     { name: "code", version: "1.11.20", skills: ["plan-validate", "decision-table", "find-plugin-file"] },
@@ -415,28 +415,37 @@ test("scanner detects closedloop-ai marketplace plugins as one pack with N insta
 
   const pack = getPack(db, "closedloop-ai");
   assert.ok(pack, "closedloop-ai pack should be present");
-  assert.equal(pack.installs.length, 5, "one install row per plugin");
-
-  // Per-plugin versions preserved on install rows
-  const versions = Object.fromEntries(
-    pack.installs.map((i) => [nodePath.basename(nodePath.dirname(i.install_path)), i.version]),
+  // Invariant: one install per (pack, harness). All 5 plugins belong to the
+  // same marketplace install — that's still ONE install row, not 5.
+  assert.equal(
+    pack.installs.length,
+    1,
+    "marketplace collapses to one install row per harness",
   );
-  assert.equal(versions["code"], "1.11.20");
-  assert.equal(versions["judges"], "1.7.1");
-
-  // source_url is populated for the known marketplace
+  assert.equal(pack.installs[0].harness, "claude");
+  // install_path is the marketplace cache root, NOT a per-plugin versioned
+  // path, so it remains stable across plugin version bumps.
   assert.ok(
-    pack.installs.every(
-      (i) => i.source_url === "https://github.com/closedloop-ai/claude-plugins",
+    pack.installs[0].install_path.endsWith(
+      nodePath.join(".claude", "plugins", "cache", "closedloop-ai"),
     ),
+    `unexpected install_path: ${pack.installs[0].install_path}`,
+  );
+  // No single pack-level version (5 plugins at 5 versions).
+  assert.equal(pack.installs[0].version, null);
+  assert.equal(
+    pack.installs[0].source_url,
+    "https://github.com/closedloop-ai/claude-plugins",
   );
 
-  // Skills aggregate across all plugins (3+1+2+0+1 = 7)
+  // Skills still aggregate across all plugins (3+1+2+0+1 = 7).
   assert.equal(pack.skills.length, 7);
-  const names = pack.skills.map((s) => s.name).sort();
-  assert.ok(names.includes("plan-validate"));
-  assert.ok(names.includes("run-judges"));
-  assert.ok(names.includes("push-learnings"));
+  const skillsByName = Object.fromEntries(pack.skills.map((s) => [s.name, s]));
+  // Per-plugin versions ride along on each skill row (sourced from the
+  // plugin.json the installer wrote), so the UI can still surface them.
+  assert.equal(skillsByName["plan-validate"].version, "1.11.20");
+  assert.equal(skillsByName["run-judges"].version, "1.7.1");
+  assert.equal(skillsByName["push-learnings"].version, "1.2.5");
 });
 
 test("marketplace scanner ignores reserved pack_ids (gstack, bmad-method)", () => {
