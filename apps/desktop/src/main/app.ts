@@ -89,6 +89,8 @@ import { shouldAutoApprove, OPERATION_RISK_TIERS } from "./approval-policy.js";
 import { gatewayLog, isNetworkError } from "./gateway-logger.js";
 import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
+import { GitActivityStore } from "./git-activity-store.js";
+import { SessionLogTailer } from "./session-log-tailer.js";
 import { JobStore, isTerminalJobStatus, type LocalJob } from "./job-store.js";
 import { Observability } from "./observability.js";
 import type {
@@ -199,6 +201,8 @@ export class DesktopApplication {
   private readonly agentSessionSync: AgentSessionSyncService;
   private readonly activityLog: ActivityLogStore;
   private readonly approvalStore: ApprovalStore;
+  private readonly gitActivityStore: GitActivityStore;
+  private sessionLogTailer: SessionLogTailer | null = null;
   private readonly jobStore: JobStore;
   private readonly recovery: GatewayRecoveryManager;
   private readonly bootRecovery: BootRecoveryService;
@@ -285,6 +289,15 @@ export class DesktopApplication {
     this.desktopWindow = new DesktopWindow();
     this.agentMonitor = new AgentMonitorSidecar();
     this.activityLog = new ActivityLogStore();
+    this.gitActivityStore = new GitActivityStore();
+    // Sync the store's enabled flag with persisted settings so add() gates correctly
+    // even before applyCaptureEngineerActivitySetting() runs on boot.
+    this.gitActivityStore.setEnabled(
+      this.settingsStore.getCaptureEngineerActivity(),
+    );
+    this.gitActivityStore.onChange(() => {
+      this.tray.setRecentActivity(this.gitActivityStore.list({ limit: 10 }));
+    });
     this.jobStore = new JobStore();
     this.approvalStore = new ApprovalStore({
       onChange: (pendingCount) => this.tray.setPendingApprovals(pendingCount),
@@ -347,6 +360,10 @@ export class DesktopApplication {
       (payload) => this.handleSecurityUpgradeCommand(payload),
       () => this.isDesktopSetupComplete(),
       this.schedulers,
+      {
+        list: (opts) => this.gitActivityStore.list(opts),
+        clear: () => this.gitActivityStore.clear(),
+      },
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -560,8 +577,15 @@ export class DesktopApplication {
       onManageCommandKeys: () => this.openBrowserCommandKeysSettings(),
       onOpenClaudeDashboard: () => this.openClaudeDashboard(),
       onTogglePaused: (paused) => this.setCloudCommandsPaused(paused),
+      onOpenActivityUrl: (url) => {
+        void shell.openExternal(url);
+      },
     });
     this.tray.setAgentMonitorEnabled(this.settingsStore.getAgentMonitorEnabled());
+    this.tray.setCaptureEngineerActivityEnabled(
+      this.settingsStore.getCaptureEngineerActivity(),
+    );
+    this.tray.setRecentActivity(this.gitActivityStore.list({ limit: 10 }));
     this.tray.setPaused(this.cloudCommandsPaused);
     this.syncPendingApprovalsToTray();
     this.desktopWindow.init();
@@ -600,6 +624,14 @@ export class DesktopApplication {
       void this.agentMonitor.start();
       syncAgentMonitorHooksOnBoot();
       this.agentSessionSync.start();
+    }
+
+    // FEA-1226: start the engineer-activity tailer if the user has opted in.
+    // Fire-and-forget like the agent monitor — a tailer failure must never
+    // block boot. The store's enabled flag also gates writes as belt-and-
+    // suspenders (AC6 privacy).
+    if (this.settingsStore.getCaptureEngineerActivity()) {
+      void this.startSessionLogTailer();
     }
 
     try {
@@ -1225,6 +1257,50 @@ export class DesktopApplication {
     this.desktopWindow
       .getWindow()
       ?.webContents.send("desktop:navigate-settings-tab", "relay-gateway");
+  }
+
+  private async startSessionLogTailer(): Promise<void> {
+    if (this.sessionLogTailer) {
+      return;
+    }
+    const tailer = new SessionLogTailer({ store: this.gitActivityStore });
+    this.sessionLogTailer = tailer;
+    try {
+      await tailer.start();
+    } catch (err) {
+      gatewayLog.warn(
+        "git-activity-tailer",
+        `start failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  private async stopSessionLogTailer(): Promise<void> {
+    const tailer = this.sessionLogTailer;
+    if (!tailer) {
+      return;
+    }
+    this.sessionLogTailer = null;
+    try {
+      await tailer.stop();
+    } catch (err) {
+      gatewayLog.warn(
+        "git-activity-tailer",
+        `stop failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  private async applyCaptureEngineerActivitySetting(
+    enabled: boolean,
+  ): Promise<void> {
+    this.gitActivityStore.setEnabled(enabled);
+    this.tray.setCaptureEngineerActivityEnabled(enabled);
+    if (enabled) {
+      await this.startSessionLogTailer();
+    } else {
+      await this.stopSessionLogTailer();
+    }
   }
 
   openClaudeDashboard(): void {
@@ -2419,6 +2495,7 @@ export class DesktopApplication {
           verboseLogging?: boolean;
           agentMonitorEnabled?: boolean;
           planExtractionEnabled?: boolean;
+          captureEngineerActivity?: boolean;
           commandSigningEnforcementEnabled?: boolean;
         },
       ) => {
@@ -2460,6 +2537,9 @@ export class DesktopApplication {
         }
         if (typeof partial.planExtractionEnabled === "boolean") {
           nextPartial.planExtractionEnabled = partial.planExtractionEnabled;
+        }
+        if (typeof partial.captureEngineerActivity === "boolean") {
+          nextPartial.captureEngineerActivity = partial.captureEngineerActivity;
         }
         const selectedSandbox =
           typeof partial.sandboxBaseDirectory === "string"
@@ -2507,6 +2587,15 @@ export class DesktopApplication {
           nextPartial.agentMonitorEnabled !== currentSettings.agentMonitorEnabled
         ) {
           await this.applyAgentMonitorSetting(nextPartial.agentMonitorEnabled);
+        }
+        if (
+          typeof nextPartial.captureEngineerActivity === "boolean" &&
+          nextPartial.captureEngineerActivity !==
+            currentSettings.captureEngineerActivity
+        ) {
+          await this.applyCaptureEngineerActivitySetting(
+            nextPartial.captureEngineerActivity,
+          );
         }
 
         if (

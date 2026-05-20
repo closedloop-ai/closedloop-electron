@@ -181,6 +181,13 @@ export class SettingsStore {
     );
   }
 
+  getCaptureEngineerActivity(): boolean {
+    return this.store.get(
+      "captureEngineerActivity",
+      DEFAULT_DESKTOP_SETTINGS.captureEngineerActivity,
+    );
+  }
+
   getCommandSigningEnforcementEnabled(): boolean {
     return this.store.get(
       "commandSigningEnforcementEnabled",
@@ -218,6 +225,10 @@ export class SettingsStore {
 
   setPlanExtractionEnabled(planExtractionEnabled: boolean): void {
     this.store.set("planExtractionEnabled", planExtractionEnabled);
+  }
+
+  setCaptureEngineerActivity(captureEngineerActivity: boolean): void {
+    this.store.set("captureEngineerActivity", captureEngineerActivity);
   }
 
   setCommandSigningEnforcementEnabled(commandSigningEnforcementEnabled: boolean): void {
@@ -571,6 +582,12 @@ export class SettingsStore {
     }
     if (typeof partial.planExtractionEnabled === "boolean") {
       this.store.set("planExtractionEnabled", partial.planExtractionEnabled);
+    }
+    if (typeof partial.captureEngineerActivity === "boolean") {
+      this.store.set(
+        "captureEngineerActivity",
+        partial.captureEngineerActivity,
+      );
     }
     if (typeof partial.commandSigningEnforcementEnabled === "boolean") {
       this.store.set(

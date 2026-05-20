@@ -3177,6 +3177,16 @@
                   <p class="field-help" style="margin-top:8px">Runs the local Agent Dashboard sidecar that powers the Dashboard and agent views in the sidebar. On by default; turning it off hides those views.</p>
                 </div>
               </div>
+              <div class="row">
+                <label for="captureEngineerActivity">GitHub Activity Capture</label>
+                <div>
+                  <label class="toggle-switch" title="Watches Claude Code and Codex session logs for PR URLs and surfaces them locally in the tray. No outbound network calls. Off by default.">
+                    <input id="captureEngineerActivity" type="checkbox" />
+                    <span class="toggle-track"></span>
+                  </label>
+                  <p class="field-help" style="margin-top:8px">Watches Claude Code and Codex session logs for PR URLs and surfaces them locally in the tray. No outbound network calls. Off by default.</p>
+                </div>
+              </div>
             </div>
           </div>
           <!-- Saved Configs section -->
@@ -3893,6 +3903,7 @@
       const apiOrigin = document.getElementById("apiOrigin");
       const webAppOrigin = document.getElementById("webAppOrigin");
       const agentMonitorEnabled = document.getElementById("agentMonitorEnabled");
+      const captureEngineerActivity = document.getElementById("captureEngineerActivity");
       const apiKey = document.getElementById("apiKey");
       const apiKeyStatus = document.getElementById("apiKeyStatus");
       const sandboxBaseDirectory = document.getElementById("sandboxBaseDirectory");
@@ -4636,6 +4647,9 @@
           agentMonitorEnabled.checked = cachedAgentMonitorEnabled;
         }
         syncAgentMonitorTabVisibility(cachedAgentMonitorEnabled);
+        if (captureEngineerActivity) {
+          captureEngineerActivity.checked = settings.captureEngineerActivity === true;
+        }
         sandboxBaseDirectory.value = settings.sandboxBaseDirectory || "";
         cachedCommandSigningEnforcementEnabled = settings.commandSigningEnforcementEnabled === true;
         if (commandSigningEnforcementEnabled) {
@@ -5321,7 +5335,8 @@
           relayOrigin: relayOrigin.value.trim(),
           apiOrigin: apiOrigin.value.trim(),
           webAppOrigin: webAppOrigin.value.trim(),
-          agentMonitorEnabled: agentMonitorEnabled?.checked === true
+          agentMonitorEnabled: agentMonitorEnabled?.checked === true,
+          captureEngineerActivity: captureEngineerActivity?.checked === true
         });
         syncAgentMonitorTabVisibility(agentMonitorEnabled?.checked === true);
         relayGatewayMessage.textContent = "Saved.";
