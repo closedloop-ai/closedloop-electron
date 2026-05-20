@@ -588,6 +588,7 @@ export class DesktopApplication {
         });
 
       if (this.cloudConnectionEnabled) {
+        await this.promptForApiKeyIfNeeded();
         void this.cloudSocket.start();
       } else {
         this.cloudStatus = {
@@ -960,6 +961,37 @@ export class DesktopApplication {
       mode: "enhanced",
       detail: "Managed key with request signing is configured.",
     };
+  }
+
+  /**
+   * On first run with no API key and no pending onboarding handoff, prompt the
+   * user to enter an API key manually so the app starts in "standard" mode
+   * instead of staying stuck in "unconfigured".
+   */
+  private async promptForApiKeyIfNeeded(): Promise<void> {
+    if (this.apiKeyStore.getStatus().hasApiKey) {
+      return;
+    }
+    if (this.managedOnboardingState.status !== "idle") {
+      return;
+    }
+
+    const result = await dialog.showMessageBox({
+      type: "info",
+      buttons: ["Enter API Key", "Wait for automated setup"],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+      title: "ClosedLoop Desktop Setup",
+      message: "No API key is configured. Enter one manually to get started, or wait for automated setup from the web app.",
+      detail: "You can find your API key in the ClosedLoop web app under Settings > API Keys.",
+    });
+
+    if (result.response !== 0) {
+      return;
+    }
+
+    this.showWindow();
   }
 
   private getOrCreateActiveSigningKey(): GatewaySigningKeyResult {
