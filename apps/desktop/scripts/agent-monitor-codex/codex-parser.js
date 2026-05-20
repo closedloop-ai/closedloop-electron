@@ -37,6 +37,11 @@ const RESPONSE_ITEM_TYPES = new Set([
   "custom_tool_call_output",
 ]);
 
+// CLOSEDLOOP plan-extraction (FEA-1189): Codex emits implementation plans as a
+// structured `item_completed` event whose item.type === "Plan", and (fallback)
+// as a <proposed_plan> block inside an assistant message. We surface both into
+// session.plans[]; plan-extractor/plan-store handle normalization + versioning.
+const PROPOSED_PLAN_RE = /<proposed_plan>([\s\S]*?)<\/proposed_plan>/i;
 /**
  * Classify a parsed JSONL record into a coarse kind plus its inner payload.
  */
@@ -107,6 +112,7 @@ async function parseRolloutFile(filePath) {
   let assistantMessageCount = 0;
   const messageTimestamps = [];
   const toolUses = [];
+  const plans = []; // CLOSEDLOOP plan-extraction (FEA-1189)
   const apiErrors = [];
   let thinkingBlockCount = 0;
   const toolResultErrors = [];
@@ -134,6 +140,16 @@ async function parseRolloutFile(filePath) {
       } else {
         assistantMessageCount++;
         if (iso) messageTimestamps.push(iso);
+        // Fallback plan signal: <proposed_plan> block in an assistant message
+        // (medium confidence — flagged for user confirmation downstream).
+        const pm = PROPOSED_PLAN_RE.exec(text);
+        if (pm && pm[1] && pm[1].trim()) {
+          plans.push({
+            source: "codex-proposed-plan",
+            content: pm[1].trim(),
+            timestamp: iso || firstTimestamp,
+          });
+        }
       }
       void text;
     } else if (itype === "reasoning") {
@@ -174,6 +190,22 @@ async function parseRolloutFile(filePath) {
   const handleEvent = (p, iso) => {
     const et = p.type;
     if (!et) return;
+    // CLOSEDLOOP plan-extraction (FEA-1189): the strongest Codex plan signal —
+    // a structured item_completed event carrying item.type === "Plan".
+    if (
+      et === "item_completed" &&
+      p.item &&
+      p.item.type === "Plan" &&
+      typeof p.item.text === "string" &&
+      p.item.text.trim()
+    ) {
+      plans.push({
+        source: "codex-plan-item",
+        content: p.item.text,
+        timestamp: iso || firstTimestamp,
+      });
+      return;
+    }
     if (et === "user_message") {
       userMessageCount++;
     } else if (et === "agent_message" || et === "agent_message_delta") {
@@ -305,6 +337,7 @@ async function parseRolloutFile(filePath) {
     tokensByModel,
     messageTimestamps,
     toolUses,
+    plans,
     compactions: [],
     apiErrors,
     fileModifiedAt,

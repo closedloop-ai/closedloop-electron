@@ -8,6 +8,7 @@ const read = (relative: string): string =>
 const appSource = read("../src/main/app.ts");
 const agentMonitorPathSource = read("../src/main/agent-monitor-path.ts");
 const buildScriptSource = read("../scripts/build-agent-monitor.mjs");
+const plansRouteSource = read("../scripts/agent-monitor-plans/plans-route.js");
 const claudeDocSource = read("../CLAUDE.md");
 const shutdownSource = read("../src/main/shutdown.ts");
 const stagePackagingSource = read("../scripts/stage-packaging-app.mjs");
@@ -26,6 +27,9 @@ const loadTopSnippet = read(
 );
 const loadRowsSnippet = read(
   "../scripts/agent-monitor-codex/client/sessions.loadrows.replace.txt",
+);
+const hostFlagsSource = read(
+  "../scripts/agent-monitor-plans/client/closedloop-host-flags.ts",
 );
 const desktopPkg = JSON.parse(read("../package.json")) as {
   version: string;
@@ -72,8 +76,13 @@ test("build script materializes a generated runtime tree with the host patches",
   assert.match(buildScriptSource, /CCAM_ENABLE_RUN === "1"/);
   assert.match(buildScriptSource, /CCAM_AUTO_INSTALL_HOOKS === "1"/);
   assert.match(buildScriptSource, /Database = require\("\.\/compat-sqlite"\);/);
+  assert.match(buildScriptSource, /function patchHooksRoute/);
+  assert.match(buildScriptSource, /extractPlanFromHookEvent/);
+  assert.match(buildScriptSource, /upsertPlanCapture\(db, capture\)/);
   assert.match(buildScriptSource, /req\.query\.harness/);
   assert.match(buildScriptSource, /CCAM_VAPID_KEYS_PATH/);
+  assert.match(buildScriptSource, /closedloop-host-flags\.ts/);
+  assert.match(buildScriptSource, /isPlanExtractionEnabled/);
   assert.match(buildScriptSource, /module\.exports = \{ uninstallHooks \};/);
 });
 
@@ -131,14 +140,22 @@ test("docs and ignores describe generated pnpm-managed inputs, not vendor source
   assert.doesNotMatch(claudeDocSource, /vendor\/agent-monitor/);
 });
 
-test("agent monitor is feature-gated and defaults off in desktop settings", () => {
+test("agent monitor and plan extraction are feature-gated and default off in desktop settings", () => {
   assert.match(contractsSource, /agentMonitorEnabled: boolean/);
   assert.match(contractsSource, /agentMonitorEnabled: false/);
+  assert.match(contractsSource, /planExtractionEnabled: boolean/);
+  assert.match(contractsSource, /planExtractionEnabled: false/);
   assert.match(settingsStoreSource, /getAgentMonitorEnabled\(\)/);
   assert.match(settingsStoreSource, /setAgentMonitorEnabled\(agentMonitorEnabled: boolean\)/);
+  assert.match(settingsStoreSource, /getPlanExtractionEnabled\(\)/);
+  assert.match(settingsStoreSource, /setPlanExtractionEnabled\(planExtractionEnabled: boolean\)/);
   assert.match(
     settingsStoreSource,
     /if \(typeof partial\.agentMonitorEnabled === "boolean"\) \{[\s\S]*this\.store\.set\("agentMonitorEnabled"/,
+  );
+  assert.match(
+    settingsStoreSource,
+    /if \(typeof partial\.planExtractionEnabled === "boolean"\) \{[\s\S]*this\.store\.set\("planExtractionEnabled"/,
   );
 });
 
@@ -161,7 +178,7 @@ test("sidecar is feature-gated and, when enabled, starts before the gateway", ()
 test("sidecar URL + hooks toggle exposed via IPC + preload", () => {
   assert.match(
     appSource,
-    /ipcMain\.handle\("desktop:get-agent-monitor-url",[\s\S]*this\.agentMonitor\.getUrl\(\)[\s\S]*this\.agentMonitor\.isReady\(\)[\s\S]*enabled: this\.isAgentMonitorEnabled\(\)/,
+    /ipcMain\.handle\("desktop:get-agent-monitor-url",[\s\S]*this\.agentMonitor\.getUrl\(\)[\s\S]*this\.agentMonitor\.isReady\(\)[\s\S]*enabled: this\.isAgentMonitorEnabled\(\)[\s\S]*planExtractionEnabled: this\.isPlanExtractionEnabled\(\)/,
   );
   assert.match(
     appSource,
@@ -169,7 +186,7 @@ test("sidecar URL + hooks toggle exposed via IPC + preload", () => {
   );
   assert.match(
     preloadSource,
-    /getAgentMonitorUrl: \(\) =>\s*ipcRenderer\.invoke\("desktop:get-agent-monitor-url"\)/,
+    /getAgentMonitorUrl: \(\) =>[\s\S]*planExtractionEnabled: boolean;/,
   );
   assert.match(
     preloadSource,
@@ -227,11 +244,25 @@ test("renderer hides the monitor tab by default and exposes the settings toggle"
   assert.match(indexHtml, /id="claudeDashFrame"/);
   assert.match(indexHtml, /tabName === "claude-dashboard"/);
   assert.match(indexHtml, /api\.getAgentMonitorUrl\(\)/);
+  assert.match(indexHtml, /searchParams\.set\(\s*"closedloop_plan_extraction",[\s\S]*r\.planExtractionEnabled \? "1" : "0"/);
   assert.match(indexHtml, /id="claudeDashHooksToggle"/);
   assert.match(indexHtml, /api\.setAgentMonitorHooksEnabled/);
   // Iframe-in-hidden-panel height fix must be present.
   assert.match(indexHtml, /function sizeClaudeFrame/);
   assert.match(indexHtml, /window\.addEventListener\("resize", sizeClaudeFrame\)/);
+});
+
+test("plans UI is gated by the host-loaded plan extraction flag", () => {
+  assert.match(hostFlagsSource, /const PLAN_EXTRACTION_QUERY_PARAM = "closedloop_plan_extraction"/);
+  assert.match(hostFlagsSource, /window\.sessionStorage/);
+  assert.match(buildScriptSource, /path="plans" element=\{isPlanExtractionEnabled\(\) \? <Plans \/> : <NotFound \/>\}/);
+  assert.match(buildScriptSource, /\{isPlanExtractionEnabled\(\) && \(/);
+});
+
+test("plans route filters in SQL and avoids shell-parsed Windows open commands", () => {
+  assert.match(plansRouteSource, /countPlans\(db, \{ sessionId, needsConfirmation \}\)/);
+  assert.match(plansRouteSource, /rundll32\.exe/);
+  assert.doesNotMatch(plansRouteSource, /spawn\(cmd, \["\/c", "start"/);
 });
 
 test("Codex support (Addition #4/#5/#6) is wired into the generated build", () => {
@@ -309,7 +340,7 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
     'CURSOR_MODULES = ["cursor-home", "cursor-parser", "cursor-import", "cursor-watcher"]',
     'COPILOT_MODULES = ["copilot-home", "copilot-parser", "copilot-import", "copilot-watcher"]',
     'OPENCODE_MODULES = ["opencode-home", "opencode-parser", "opencode-import", "opencode-watcher"]',
-    'SHARED_MODULES = ["parser-utils"]',
+    'SHARED_MODULES = ["harness-watcher-utils", "import-session-utils", "parser-utils"]',
     "MULTI_HARNESS_SPECS = [",
     "watcherPatchLines",
     "importPatchLines",
@@ -331,9 +362,23 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
     existsSync(new URL("../scripts/agent-monitor-shared/parser-utils.js", import.meta.url)),
     "scripts/agent-monitor-shared/parser-utils.js missing",
   );
+  assert.ok(
+    existsSync(new URL("../scripts/agent-monitor-shared/harness-watcher-utils.js", import.meta.url)),
+    "scripts/agent-monitor-shared/harness-watcher-utils.js missing",
+  );
+  assert.ok(
+    existsSync(new URL("../scripts/agent-monitor-shared/import-session-utils.js", import.meta.url)),
+    "scripts/agent-monitor-shared/import-session-utils.js missing",
+  );
   assert.match(
     read("../scripts/agent-monitor-copilot/copilot-home.js"),
     /readWorkspacePathFromHashDir/,
+  );
+  assert.ok(
+    read("../scripts/agent-monitor-copilot/copilot-watcher.js").includes(
+      String.raw`const CHAT_SESSION_FILE_RE = /(^|[/\\])chatSessions[/\\][^/\\]+\.json$/i;`,
+    ),
+    "copilot-watcher.js should match real chatSessions/*.json files",
   );
   assert.match(
     read("../scripts/agent-monitor-opencode/opencode-parser.js"),
@@ -360,11 +405,19 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
     ["agent-monitor-copilot", "copilot-watcher.js"],
     ["agent-monitor-opencode", "opencode-watcher.js"],
   ] as const) {
-    assert.match(
-      read(`../scripts/${dir}/${file}`),
-      /runCatchupImport/,
+    const source = read(`../scripts/${dir}/${file}`);
+    assert.match(source, /CATCHUP_POLL_MS = 5000/);
+    assert.match(source, /broadcastHarnessRows/);
+    assert.match(source, /runCatchupImport/);
+    assert.ok(
+      source.includes("catchupTimer.unref?.();\n  runCatchupImport(broadcast);"),
+      `${file} should run an immediate catch-up import on start`,
     );
   }
+  assert.match(
+    read("../scripts/agent-monitor-codex/codex-watcher.js"),
+    /catchupTimer\.unref\?\.\(\);\s*runCatchupImport\(broadcast\);/,
+  );
 
   // Client harness badge supports all five harnesses.
   const badgeSnippet = read("../scripts/agent-monitor-codex/client/statusbadge.append.tsx");

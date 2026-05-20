@@ -6,13 +6,15 @@
  */
 const { loadSessionsFromDb } = require("./opencode-parser");
 const { importSession } = require("../../scripts/import-history");
+const { reactivateImportedSession } = require("../agent-monitor-shared/import-session-utils");
 
 function importOpenCodeSession(dbModule, session) {
   const result = importSession(dbModule, session);
   try {
     dbModule.stmts.setSessionHarness.run("opencode", session.sessionId, "opencode");
   } catch { /* non-fatal */ }
-  return { sessionId: session.sessionId, result };
+  const reactivated = reactivateImportedSession(dbModule, session);
+  return { sessionId: session.sessionId, result, reactivated };
 }
 
 async function importAllOpenCodeSessions(dbModule) {
@@ -22,8 +24,8 @@ async function importAllOpenCodeSessions(dbModule) {
 
   const importBatch = dbModule.db.transaction((sessions) => {
     for (const session of sessions) {
-      const { result } = importOpenCodeSession(dbModule, session);
-      if (result && result.skipped) skipped++;
+      const { result, reactivated } = importOpenCodeSession(dbModule, session);
+      if (result && result.skipped && !reactivated) skipped++;
       else imported++;
     }
   });

@@ -11,14 +11,20 @@
  */
 
 import { LoopCommand } from "@closedloop-ai/loops-api/commands";
+import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import { promisify } from "node:util";
 import { JobStore } from "../src/main/job-store.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
-import { handleProcessCompletion } from "../src/server/operations/symphony-loop.js";
+import {
+  defaultWorktreeProvider,
+  handleProcessCompletion,
+} from "../src/server/operations/symphony-loop.js";
 import { setShellPathForTest } from "../src/server/shell-path.js";
 import {
   createFakeRunLoopScript,
@@ -31,6 +37,8 @@ import {
   waitForCompletedEvent,
   waitForTerminalEvent,
 } from "./symphony-test-utils.js";
+
+const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Shared state and cleanup
@@ -53,6 +61,70 @@ function createTestGateway(
     worktreeProvider,
     serversToClose,
   });
+}
+
+async function createRepoWithOrigin(
+  root: string,
+  name: string,
+): Promise<{ repoPath: string; originPath: string; fullName: string }> {
+  const originPath = path.join(root, `${name}.git`);
+  const repoPath = path.join(root, name);
+  await execFileAsync("git", ["init", "--bare", "-b", "main", originPath]);
+  await execFileAsync("git", ["clone", originPath, repoPath]);
+  await execFileAsync("git", ["config", "user.email", "test@example.com"], {
+    cwd: repoPath,
+  });
+  await execFileAsync("git", ["config", "user.name", "Test User"], {
+    cwd: repoPath,
+  });
+  await fs.writeFile(path.join(repoPath, "README.md"), `# ${name}\n`);
+  await execFileAsync("git", ["add", "README.md"], { cwd: repoPath });
+  await execFileAsync("git", ["commit", "-m", "initial"], { cwd: repoPath });
+  await execFileAsync("git", ["push", "-u", "origin", "main"], {
+    cwd: repoPath,
+  });
+  const fullName = `org/${name}`;
+  await execFileAsync(
+    "git",
+    ["remote", "set-url", "origin", `git@github.com:${fullName}.git`],
+    { cwd: repoPath },
+  );
+  await execFileAsync("git", ["remote", "set-url", "--push", "origin", originPath], {
+    cwd: repoPath,
+  });
+  return { repoPath, originPath, fullName };
+}
+
+async function remoteBranchSha(
+  originPath: string,
+  branchName: string,
+): Promise<string> {
+  const result = await execFileAsync(
+    "git",
+    ["--git-dir", originPath, "rev-parse", branchName],
+    { encoding: "utf8" },
+  );
+  return String(result.stdout).trim();
+}
+
+async function waitForBranchArtifacts(
+  requests: Array<{ url: string; body: string }>,
+  loopId: string,
+  count: number,
+): Promise<Array<Record<string, unknown>>> {
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    const payloads = requests
+      .filter((request) =>
+        request.url.includes(`/loops/${loopId}/branch-artifact`),
+      )
+      .map((request) => JSON.parse(request.body) as Record<string, unknown>);
+    if (payloads.length >= count) {
+      return payloads;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for ${count} branch artifact callbacks`);
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +229,208 @@ test("ensureWorktree called for each additional repo with correct branch before 
       "Scratch branch name must differ from baseBranch to avoid mutating the user's branch",
     );
   }
+});
+
+test("PLAN materializes expected additional repo branch and records callback payload", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "wt-add-branch-"));
+  tempPathsToClean.push(tmpDir);
+
+  const primary = await createRepoWithOrigin(tmpDir, "primary-materialized");
+  const additional = await createRepoWithOrigin(tmpDir, "additional-materialized");
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(
+    path.join(fakeBin, "claude"),
+    [
+      "#!/bin/sh",
+      'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
+      "exit 0",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+  const server = await createTestGateway(
+    tmpDir,
+    mock.port,
+    defaultWorktreeProvider,
+  );
+
+  const loopId = "00000000-0000-0000-0000-000000117001";
+  const primaryBranch = "symphony/primary-materialized-branch";
+  const additionalBranch = "symphony/additional-materialized-branch";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: LoopCommand.Plan,
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        prompt: "Plan with a peer repo",
+        artifactSlug: "PLN-604-multi",
+        repo: {
+          fullName: primary.fullName,
+          branch: "main",
+        },
+        additionalRepos: [
+          {
+            localRepoPath: additional.repoPath,
+            fullName: additional.fullName,
+            branch: "main",
+          },
+        ],
+        branchMaterialization: {
+          schemaVersion: 1,
+          branches: [
+            {
+              role: "primary",
+              repositoryFullName: primary.fullName,
+              baseBranch: "main",
+              branchName: primaryBranch,
+            },
+            {
+              role: "additional",
+              repositoryFullName: additional.fullName,
+              baseBranch: "main",
+              branchName: additionalBranch,
+            },
+          ],
+        },
+      }),
+    },
+  );
+
+  assert.equal(response.status, 200, await response.text());
+  const payloads = await waitForBranchArtifacts(mock.requests, loopId, 2);
+  const additionalPayload = payloads.find(
+    (payload) => payload.repositoryFullName === additional.fullName,
+  );
+  assert.ok(additionalPayload, "expected additional repo branch callback");
+  assert.equal(additionalPayload.branchName, additionalBranch);
+  assert.equal(additionalPayload.baseBranch, "main");
+  assert.equal(additionalPayload.defaultBranch, "main");
+  assert.equal(
+    await remoteBranchSha(additional.originPath, additionalBranch),
+    additionalPayload.headSha,
+  );
+});
+
+test("PLAN materialization rejects additional repo identity mismatch before sidecar push", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "wt-add-mismatch-"));
+  tempPathsToClean.push(tmpDir);
+
+  const primary = await createRepoWithOrigin(tmpDir, "primary-add-mismatch");
+  const additional = await createRepoWithOrigin(tmpDir, "actual-additional");
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  await createFakeRunLoopScript(tmpDir, "#!/bin/sh\nexit 0\n");
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(
+    path.join(fakeBin, "claude"),
+    [
+      "#!/bin/sh",
+      'echo \'{"type":"result","subtype":"success","result":"","is_error":false}\'',
+      "exit 0",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+  const server = await createTestGateway(
+    tmpDir,
+    mock.port,
+    defaultWorktreeProvider,
+  );
+
+  const loopId = "00000000-0000-0000-0000-000000117006";
+  const primaryBranch = "symphony/primary-add-mismatch";
+  const additionalBranch = "symphony/additional-add-mismatch";
+  const declaredAdditionalFullName = "org/declared-additional";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: LoopCommand.Plan,
+        closedLoopAuthToken: "tok",
+        artifacts: [],
+        prompt: "Plan with a mismatched peer repo",
+        artifactSlug: "PLN-604-add-mismatch",
+        repo: {
+          fullName: primary.fullName,
+          branch: "main",
+        },
+        additionalRepos: [
+          {
+            localRepoPath: additional.repoPath,
+            fullName: declaredAdditionalFullName,
+            branch: "main",
+          },
+        ],
+        branchMaterialization: {
+          schemaVersion: 1,
+          branches: [
+            {
+              role: "primary",
+              repositoryFullName: primary.fullName,
+              baseBranch: "main",
+              branchName: primaryBranch,
+            },
+            {
+              role: "additional",
+              repositoryFullName: declaredAdditionalFullName,
+              baseBranch: "main",
+              branchName: additionalBranch,
+            },
+          ],
+        },
+      }),
+    },
+  );
+
+  assert.equal(response.status, 500);
+  const payloads = mock.requests
+    .filter((request) => request.url.includes(`/loops/${loopId}/branch-artifact`))
+    .map((request) => JSON.parse(request.body) as Record<string, unknown>);
+  assert.equal(
+    payloads.length,
+    0,
+    "additional repo preflight failure must not record any branch artifacts",
+  );
+  const events = mock.requests
+    .filter((request) => request.url.includes(`/loops/${loopId}/events`))
+    .map((request) => JSON.parse(request.body) as Record<string, unknown>);
+  assert.ok(
+    events.some((event) => event.code === LoopErrorCode.BranchCreateFailed),
+    "expected BranchCreateFailed event for additional repo identity mismatch",
+  );
+  await assert.rejects(remoteBranchSha(primary.originPath, primaryBranch));
+  await assert.rejects(remoteBranchSha(additional.originPath, additionalBranch));
 });
 
 // ---------------------------------------------------------------------------
