@@ -75,6 +75,12 @@ test("build script materializes a generated runtime tree with the host patches",
   assert.match(buildScriptSource, /req\.query\.harness/);
   assert.match(buildScriptSource, /CCAM_VAPID_KEYS_PATH/);
   assert.match(buildScriptSource, /module\.exports = \{ uninstallHooks \};/);
+  // Watcher shutdown cleanup must be patched into the sidecar shutdown handler
+  assert.match(buildScriptSource, /stopCodexWatcher/);
+  assert.match(buildScriptSource, /stopCursorWatcher/);
+  assert.match(buildScriptSource, /stopCopilotWatcher/);
+  assert.match(buildScriptSource, /stopOpenCodeWatcher/);
+  assert.match(buildScriptSource, /stopCcWatcher/);
 });
 
 test("electron-builder ships the generated agent-monitor runtime tree unpacked", () => {
@@ -349,11 +355,16 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
     ["agent-monitor-copilot", "copilot-watcher.js"],
     ["agent-monitor-opencode", "opencode-watcher.js"],
   ] as const) {
-    assert.match(
-      read(`../scripts/${dir}/${file}`),
-      /runCatchupImport/,
-    );
+    const src = read(`../scripts/${dir}/${file}`);
+    assert.match(src, /runCatchupImport/);
+    // Retry intervals must be bounded to prevent resource leaks.
+    assert.match(src, /MAX_RETRY_ATTEMPTS/);
   }
+  // Codex watcher must also have bounded retries.
+  assert.match(
+    read("../scripts/agent-monitor-codex/codex-watcher.js"),
+    /MAX_RETRY_ATTEMPTS/,
+  );
 
   // Client harness badge supports all five harnesses.
   const badgeSnippet = read("../scripts/agent-monitor-codex/client/statusbadge.append.tsx");

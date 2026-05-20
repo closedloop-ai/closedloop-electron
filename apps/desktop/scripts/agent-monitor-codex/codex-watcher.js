@@ -24,6 +24,7 @@ const { parseRolloutFile } = require("./codex-parser");
 
 const DEBOUNCE_MS = 600;
 const RETRY_MS = 4000;
+const MAX_RETRY_ATTEMPTS = 75; // ~5 minutes at 4s intervals, then give up
 
 let started = false;
 let timer = null;
@@ -144,7 +145,14 @@ function startCodexWatcher({ broadcast }) {
   started = true;
   const root = getCodexSessionsDir();
   if (safeWatchSessions({ root, broadcast })) return; // dir existed → attached
+  if (retryTimer) { clearInterval(retryTimer); retryTimer = null; }
+  let retryCount = 0;
   retryTimer = setInterval(() => {
+    if (++retryCount > MAX_RETRY_ATTEMPTS) {
+      clearInterval(retryTimer);
+      retryTimer = null;
+      return;
+    }
     if (!fs.existsSync(root)) return;
     if (safeWatchSessions({ root, broadcast })) {
       clearInterval(retryTimer);
