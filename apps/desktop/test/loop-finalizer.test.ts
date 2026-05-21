@@ -167,7 +167,7 @@ test("finalizeLoopFromRuntime keeps loop token when cloud finalization fails ret
     name: "finalizer-upload-fail-lt",
     safeStorage: createTestLoopTokenSafeStorage(),
   });
-  loopTokenStore.setLoopToken("loop-1", "runner-token");
+  loopTokenStore.setLoopToken("loop-1", { token: "runner-token" });
 
   await finalizeLoopFromRuntime(job, "live-exit", {
     jobStore,
@@ -182,7 +182,7 @@ test("finalizeLoopFromRuntime keeps loop token when cloud finalization fails ret
   assert.equal(persisted?.status, "COMPLETED");
   assert.equal(persisted?.cloudFinalizedAt, undefined);
   assert.ok(persisted?.lastRecoveryError);
-  assert.equal(loopTokenStore.getLoopToken("loop-1"), "runner-token");
+  assert.deepEqual(loopTokenStore.getLoopToken("loop-1"), { token: "runner-token" });
 });
 
 test("finalizeLoopFromRuntime clears loop token for non-retryable cloud failure", async () => {
@@ -208,7 +208,7 @@ test("finalizeLoopFromRuntime clears loop token for non-retryable cloud failure"
     name: "finalizer-non-retryable-lt",
     safeStorage: createTestLoopTokenSafeStorage(),
   });
-  loopTokenStore.setLoopToken("loop-1", "runner-token");
+  loopTokenStore.setLoopToken("loop-1", { token: "runner-token" });
 
   await finalizeLoopFromRuntime(job, "live-exit", {
     jobStore,
