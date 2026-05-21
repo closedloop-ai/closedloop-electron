@@ -198,6 +198,62 @@ export function parseTokenUsage(claudeWorkDir: string): {
   return totals;
 }
 
+/**
+ * Outcome of a JSONL success-record scan.
+ *
+ * - `"success"` — a `{"type":"result","subtype":"success"}` record was found.
+ * - `"missing"` — the JSONL output file could not be resolved (not yet written,
+ *   or worktree was cleaned up).
+ * - `"unreadable"` — the file exists but could not be read or parsed at the
+ *   file level; `error` carries the underlying message.
+ * - `"no-success"` — the file was read successfully but contained no success
+ *   record.
+ */
+export type DetectSuccessOutcome =
+  | { outcome: "success" }
+  | { outcome: "missing" }
+  | { outcome: "unreadable"; error: string }
+  | { outcome: "no-success" };
+
+/**
+ * Scan the Claude JSONL output for a run and return a structured outcome
+ * indicating whether a `{"type":"result","subtype":"success"}` record was
+ * found, or why the check could not be completed.
+ *
+ * The JSONL file is read once synchronously; no retry or polling is performed
+ * because the file is guaranteed to be flushed before the Claude Code process
+ * exits.
+ */
+export function detectSuccessFromOutput(claudeWorkDir: string): DetectSuccessOutcome {
+  const outputFile = resolveClaudeOutputPath(claudeWorkDir);
+  if (outputFile === null) {
+    return { outcome: "missing" };
+  }
+  let content: string;
+  try {
+    content = readFileSync(outputFile, "utf-8");
+  } catch (err) {
+    return {
+      outcome: "unreadable",
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+  for (const line of content.split("\n")) {
+    if (!line.trim()) {
+      continue;
+    }
+    try {
+      const entry = JSON.parse(line) as Record<string, unknown>;
+      if (entry.type === "result" && entry.subtype === "success") {
+        return { outcome: "success" };
+      }
+    } catch {
+      // Skip malformed lines
+    }
+  }
+  return { outcome: "no-success" };
+}
+
 /** Extract apiKeySource from the init record in Claude JSONL stream output. */
 export function parseApiKeySource(claudeWorkDir: string): string | null {
   const outputFile = resolveClaudeOutputPath(claudeWorkDir);
