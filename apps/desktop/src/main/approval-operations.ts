@@ -31,12 +31,13 @@ export const SUPPORTED_OPERATION_IDS = [
   "deploy",
   "learnings",
   "filesystem",
-  "binary_paths_settings"
+  "binary_paths_settings",
+  "update_and_restart"
 ] as const;
 
 export type OperationId = (typeof SUPPORTED_OPERATION_IDS)[number];
 
-export function resolveOperationId(pathname: string): string | null {
+export function resolveOperationId(pathname: string): OperationId | null {
   if (!pathname.startsWith("/api/gateway/")) {
     return null;
   }
@@ -136,6 +137,9 @@ export function resolveOperationId(pathname: string): string | null {
   }
   if (pathname.startsWith("/api/gateway/deploy")) {
     return "deploy";
+  }
+  if (pathname === "/api/gateway/update-and-restart") {
+    return "update_and_restart";
   }
   if (pathname === "/api/gateway/learnings") {
     return "learnings";

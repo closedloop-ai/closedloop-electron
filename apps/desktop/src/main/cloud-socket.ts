@@ -27,7 +27,7 @@ export interface CloudSocketOptions {
   pluginVersion: string;
   desktopClientVersion: string;
   gatewayProtocolVersion: string;
-  supportedOperations: string[];
+  getEnabledOperations: () => string[];
   onStatusChange?: (status: CloudSocketStatus) => void;
   onHelloAck?: (event: DesktopHelloAckEvent) => void;
   onCommand?: (event: DesktopCommandEvent) => void;
@@ -270,7 +270,7 @@ export class CloudSocketService {
       pluginVersion: this.options.pluginVersion,
       desktopClientVersion: this.options.desktopClientVersion,
       gatewayProtocolVersion: this.options.gatewayProtocolVersion,
-      supportedOperations: this.options.supportedOperations,
+      supportedOperations: this.options.getEnabledOperations(),
       maxInFlightCommands: Math.max(1, this.options.getMaxInFlightCommands()),
       allowedDirectoriesHash: hashAllowedDirectories(this.options.getAllowedDirectories())
     };

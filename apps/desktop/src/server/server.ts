@@ -51,6 +51,9 @@ export interface DesktopGatewayServerOptions {
   getGatewayId: () => string;
   getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
   applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
+  checkForUpdate?: () => Promise<{ updateAvailable: boolean; version?: string }>;
+  applyUpdate?: () => Promise<void>;
+  isUpdateAndRestartEnabled?: () => boolean;
 }
 
 export class DesktopGatewayServer {
@@ -92,6 +95,9 @@ export class DesktopGatewayServer {
       getGatewayId: this.options.getGatewayId,
       getBinaryPaths: this.options.getBinaryPaths,
       applyBinaryPathPatch: this.options.applyBinaryPathPatch,
+      checkForUpdate: this.options.checkForUpdate,
+      applyUpdate: this.options.applyUpdate,
+      isUpdateAndRestartEnabled: this.options.isUpdateAndRestartEnabled,
     });
   }
 
@@ -119,6 +125,9 @@ export class DesktopGatewayServer {
     getGatewayId: () => string = () => "",
     getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string },
     applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string },
+    checkForUpdate?: () => Promise<{ updateAvailable: boolean; version?: string }>,
+    applyUpdate?: () => Promise<void>,
+    isUpdateAndRestartEnabled?: () => boolean,
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -146,6 +155,9 @@ export class DesktopGatewayServer {
       getGatewayId,
       getBinaryPaths,
       applyBinaryPathPatch,
+      checkForUpdate,
+      applyUpdate,
+      isUpdateAndRestartEnabled,
     });
   }
 

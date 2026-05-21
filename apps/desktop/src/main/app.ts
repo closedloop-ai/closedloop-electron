@@ -41,7 +41,7 @@ import {
   SUPPORTED_OPERATION_IDS,
   resolveOperationId,
 } from "./approval-operations.js";
-import { shouldAutoApprove, OPERATION_RISK_TIERS } from "./approval-policy.js";
+import { shouldAutoApprove, OPERATION_RISK_TIERS, FORCE_INTERACTIVE_OPERATIONS } from "./approval-policy.js";
 import { gatewayLog, isNetworkError } from "./gateway-logger.js";
 import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
@@ -166,6 +166,25 @@ export class DesktopApplication {
       () => this.gatewayId,
       () => this.settingsStore.getBinaryPaths(),
       (patch) => this.applyBinaryPathPatchAndInvalidateCaches(patch),
+      async () => {
+        if (app.isPackaged) {
+          const result = await autoUpdater.checkForUpdates();
+          const remoteVersion = result?.updateInfo?.version;
+          return {
+            updateAvailable: remoteVersion !== undefined && remoteVersion !== app.getVersion(),
+            version: remoteVersion,
+          };
+        }
+        return this.checkForUpdate();
+      },
+      async () => {
+        if (app.isPackaged) {
+          autoUpdater.quitAndInstall();
+          return;
+        }
+        await this.applyUpdate();
+      },
+      () => this.settingsStore.getUpdateAndRestartEnabled(),
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -199,7 +218,12 @@ export class DesktopApplication {
       pluginVersion: getCodePluginVersion(),
       desktopClientVersion: app.getVersion(),
       gatewayProtocolVersion: GATEWAY_PROTOCOL_VERSION,
-      supportedOperations: [...SUPPORTED_OPERATION_IDS],
+      getEnabledOperations: () => {
+        const enabled = this.settingsStore.getUpdateAndRestartEnabled();
+        return SUPPORTED_OPERATION_IDS.filter(
+          (id) => id !== "update_and_restart" || enabled
+        );
+      },
       onStatusChange: (status) => this.onCloudSocketStatus(status),
       onDisconnect: (reason) => { Observability.connectionLost(reason); },
       onHelloAck: (event) => {
@@ -690,7 +714,10 @@ export class DesktopApplication {
 
     const configuredTier =
       settings.autoApprovalRules[operationId] ?? settings.defaultApprovalTier;
+    // Force-interactive operations skip auto-approve and always go through
+    // the interactive approval queue.
     if (
+      !FORCE_INTERACTIVE_OPERATIONS.has(operationId) &&
       shouldAutoApprove(
         operationId,
         configuredTier,
@@ -956,6 +983,7 @@ export class DesktopApplication {
             "auto" | "none" | "low" | "medium" | "high"
           >;
           verboseLogging?: boolean;
+          updateAndRestartEnabled?: boolean;
         },
       ) => {
         if ("binaryPaths" in partial) {

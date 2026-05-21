@@ -3834,14 +3834,22 @@ test("claude-cli ENOENT with no foundAt: error is Not found, remediation mention
   const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
   assert.equal(response.status, 200);
   const body = (await response.json()) as {
-    checks: Array<{ id: string; passed: boolean; error?: string; remediation?: string }>;
+    checks: Array<{ id: string; passed: boolean; error?: string; remediation?: string; debug?: { foundAt?: string[] } }>;
   };
 
   const check = body.checks.find((c) => c.id === "claude-cli");
   assert.ok(check, "claude-cli check should be present");
   assert.equal(check.passed, false);
-  assert.equal(check.error, "Not found");
-  assert.ok(check.remediation?.includes("npm install"), `remediation should mention npm install, got: ${check.remediation}`);
+  // System may have claude installed at a known location (e.g., /opt/homebrew/bin/claude),
+  // in which case the error will be "Found at ... but not on PATH" instead of "Not found".
+  const foundAt = check.debug?.foundAt ?? [];
+  if (foundAt.length === 0) {
+    assert.equal(check.error, "Not found", "error should be 'Not found' if claude is not at any known location");
+    assert.ok(check.remediation?.includes("npm install"), `remediation should mention npm install, got: ${check.remediation}`);
+  } else {
+    assert.ok(check.error?.includes("Found at"), `error should mention a found location, got: ${check.error}`);
+    assert.ok(check.remediation?.includes("PATH"), `remediation should mention PATH when binary is found at known location, got: ${check.remediation}`);
+  }
 });
 
 test("claude-cli ENOENT with foundAt: error mentions path, remediation mentions Add to PATH", async () => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { shouldAutoApprove, OPERATION_RISK_TIERS, riskTierOrder } from "../src/main/approval-policy.js";
+import { shouldAutoApprove, OPERATION_RISK_TIERS, riskTierOrder, FORCE_INTERACTIVE_OPERATIONS } from "../src/main/approval-policy.js";
 import { SUPPORTED_OPERATION_IDS, resolveOperationId } from "../src/main/approval-operations.js";
 
 // --- riskTierOrder ---
@@ -81,4 +81,22 @@ test("resolveOperationId returns null for truly unknown gateway paths", () => {
 
 test("resolveOperationId returns null for paths outside /api/gateway/", () => {
   assert.equal(resolveOperationId("/health"), null);
+});
+
+// --- update_and_restart operation ---
+
+test("resolveOperationId maps /api/gateway/update-and-restart to update_and_restart", () => {
+  assert.equal(resolveOperationId("/api/gateway/update-and-restart"), "update_and_restart");
+});
+
+test("update_and_restart has high risk tier", () => {
+  assert.equal(OPERATION_RISK_TIERS["update_and_restart"], "high");
+});
+
+test("update_and_restart is in FORCE_INTERACTIVE_OPERATIONS", () => {
+  assert.ok(FORCE_INTERACTIVE_OPERATIONS.has("update_and_restart"));
+});
+
+test("update_and_restart is included in SUPPORTED_OPERATION_IDS", () => {
+  assert.ok(SUPPORTED_OPERATION_IDS.includes("update_and_restart"));
 });

@@ -33,8 +33,17 @@ export const OPERATION_RISK_TIERS: Record<OperationId, Exclude<RiskTier, "none">
   codex_argue:             "medium",
   deploy:                  "high",
   learnings:               "medium",
-  binary_paths_settings:   "medium"
+  binary_paths_settings:   "medium",
+  update_and_restart:      "high"
 };
+
+/**
+ * Operations that always require interactive user approval, regardless of the
+ * configured defaultApprovalTier or per-operation auto-approval settings.
+ */
+export const FORCE_INTERACTIVE_OPERATIONS: ReadonlySet<OperationId> = new Set<OperationId>([
+  "update_and_restart",
+]);
 
 /** Converts a RiskTier to a numeric value for threshold comparison. */
 export function riskTierOrder(tier: RiskTier): number {

@@ -133,6 +133,10 @@ export class SettingsStore {
     return this.store.get("cloudCommandsPaused", DEFAULT_DESKTOP_SETTINGS.cloudCommandsPaused);
   }
 
+  getUpdateAndRestartEnabled(): boolean {
+    return this.store.get("updateAndRestartEnabled", DEFAULT_DESKTOP_SETTINGS.updateAndRestartEnabled);
+  }
+
   getCloudConnectionEnabled(): boolean {
     return this.store.get("cloudConnectionEnabled", DEFAULT_DESKTOP_SETTINGS.cloudConnectionEnabled);
   }
@@ -151,6 +155,10 @@ export class SettingsStore {
 
   setCloudCommandsPaused(cloudCommandsPaused: boolean): void {
     this.store.set("cloudCommandsPaused", cloudCommandsPaused);
+  }
+
+  setUpdateAndRestartEnabled(updateAndRestartEnabled: boolean): void {
+    this.store.set("updateAndRestartEnabled", updateAndRestartEnabled);
   }
 
   setCloudConnectionEnabled(cloudConnectionEnabled: boolean): void {
@@ -326,6 +334,9 @@ export class SettingsStore {
     }
     if (typeof partial.cloudCommandsPaused === "boolean") {
       this.store.set("cloudCommandsPaused", partial.cloudCommandsPaused);
+    }
+    if (typeof partial.updateAndRestartEnabled === "boolean") {
+      this.store.set("updateAndRestartEnabled", partial.updateAndRestartEnabled);
     }
     if (typeof partial.cloudConnectionEnabled === "boolean") {
       this.store.set("cloudConnectionEnabled", partial.cloudConnectionEnabled);
