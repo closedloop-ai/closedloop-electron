@@ -228,9 +228,7 @@ async function runCatalogFetch(db) {
   let rows;
   try {
     rows = db
-      .prepare(
-        "SELECT pack_id, github_url, upstream_github_url, contents FROM pack_catalog",
-      )
+      .prepare("SELECT pack_id, github_url, contents FROM pack_catalog")
       .all();
   } catch (e) {
     console.warn("[catalog-fetcher] cannot read pack_catalog:", e && e.message);
@@ -247,20 +245,23 @@ async function runCatalogFetch(db) {
       contents && contents.type === "github-claude-plugin";
 
     if (isMarketplaceSubPlugin) {
-      // FEA-1314 v6: marketplace sub-plugin path. Read the plugin's OWN
-      // manifest for description + version. For stars/forks: if the catalog
-      // entry declared an `upstream_github_url` (e.g. context7 → upstash/
-      // context7), fetch stars from THAT repo. Otherwise leave stars null —
-      // showing the parent marketplace's count on every sub-plugin row would
-      // make them all look identical (the v5 bug).
-      const mkRepoOverride = contents.marketplace_repo
+      // FEA-1314 v7: marketplace sub-plugin path. Always fetch the manifest
+      // from contents.marketplace_repo (where the install lives). For
+      // stars/forks: if `github_url` parses to the SAME repo as
+      // contents.marketplace_repo, then github_url is a subdirectory of the
+      // marketplace and has no independent star count — leave stars null
+      // (avoids the v5 "all 4 cards show 21.3k" bug). If github_url is a
+      // DIFFERENT repo (e.g. context7's github_url=upstash/context7,
+      // marketplace_repo=anthropics/claude-plugins-official), that's a true
+      // upstream and we fetch its real star count.
+      const mkRepo = contents.marketplace_repo
         ? parseGithubUrl(`https://github.com/${contents.marketplace_repo}`)
         : null;
-      const pluginOwner = mkRepoOverride ? mkRepoOverride.owner : parsed.owner;
-      const pluginRepo = mkRepoOverride ? mkRepoOverride.repo : parsed.repo;
+      const manifestOwner = mkRepo ? mkRepo.owner : parsed.owner;
+      const manifestRepo = mkRepo ? mkRepo.repo : parsed.repo;
       const manifest = await fetchPluginManifest(
-        pluginOwner,
-        pluginRepo,
+        manifestOwner,
+        manifestRepo,
         contents.plugin_path,
         summary.used_gh_cli,
       );
@@ -269,34 +270,33 @@ async function runCatalogFetch(db) {
         continue;
       }
 
-      // Optional upstream fetch for sub-plugins backed by a distinct repo.
-      let upstreamStars = null;
-      let upstreamForks = null;
-      let upstreamRelease = null;
-      if (row.upstream_github_url) {
-        const up = parseGithubUrl(row.upstream_github_url);
-        if (up) {
-          let upRepo = summary.used_gh_cli ? ghFetch(up.owner, up.repo) : null;
-          if (!upRepo) upRepo = await restFetch(up.owner, up.repo);
-          if (upRepo) {
-            upstreamStars =
-              upRepo.stargazers_count == null ? null : upRepo.stargazers_count;
-            upstreamForks =
-              upRepo.forks_count == null ? null : upRepo.forks_count;
-            upstreamRelease = summary.used_gh_cli
-              ? ghFetchLatestRelease(up.owner, up.repo)
-              : await restFetchLatestRelease(up.owner, up.repo);
-          }
+      // Decide if github_url points to a distinct upstream.
+      const sameAsMarketplace =
+        mkRepo &&
+        parsed.owner === mkRepo.owner &&
+        parsed.repo === mkRepo.repo;
+      let stars = null;
+      let forks = null;
+      let release = null;
+      if (!sameAsMarketplace) {
+        let repo = summary.used_gh_cli ? ghFetch(parsed.owner, parsed.repo) : null;
+        if (!repo) repo = await restFetch(parsed.owner, parsed.repo);
+        if (repo) {
+          stars = repo.stargazers_count == null ? null : repo.stargazers_count;
+          forks = repo.forks_count == null ? null : repo.forks_count;
+          release = summary.used_gh_cli
+            ? ghFetchLatestRelease(parsed.owner, parsed.repo)
+            : await restFetchLatestRelease(parsed.owner, parsed.repo);
         }
       }
 
       try {
         applyFetchResult(db, {
           pack_id: row.pack_id,
-          stars: upstreamStars,
-          forks: upstreamForks,
+          stars,
+          forks,
           description: manifest.description || null,
-          last_release: manifest.version || upstreamRelease || null,
+          last_release: manifest.version || release || null,
         });
         summary.succeeded += 1;
       } catch (e) {

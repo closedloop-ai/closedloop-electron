@@ -229,23 +229,23 @@ export function PackDetail() {
                 )}
               </div>
             </div>
-            {/* GitHub is always the primary link. When the pack has a distinct
-                upstream repo (e.g. context7 → upstash/context7), that's the
-                real source-of-truth and the marketplace listing is secondary. */}
-            {(entry.upstream_github_url || entry.github_url) && (
+            {/* GitHub is always the primary link — it points at the actual
+                source location (subdirectory for marketplace plugins, repo
+                root otherwise). marketplace_url renders as a secondary if set. */}
+            {entry.github_url && (
               <a
-                href={entry.upstream_github_url || entry.github_url}
+                href={entry.github_url}
                 target="_blank"
                 rel="noreferrer"
                 className="text-[11px] rounded border border-accent/40 bg-accent/10 text-accent px-2.5 py-1 hover:bg-accent/20 flex-shrink-0"
-                title="GitHub source repository"
+                title="GitHub source"
               >
                 GitHub →
               </a>
             )}
-            {entry.upstream_github_url && entry.github_url && (
+            {entry.marketplace_url && (
               <a
-                href={entry.github_url}
+                href={entry.marketplace_url}
                 target="_blank"
                 rel="noreferrer"
                 className="text-[11px] rounded border border-border bg-surface-2 text-gray-400 px-2.5 py-1 hover:bg-surface-3 flex-shrink-0"

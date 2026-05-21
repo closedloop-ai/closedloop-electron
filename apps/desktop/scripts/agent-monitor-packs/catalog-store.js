@@ -94,13 +94,22 @@ function ensureCatalogSchema(db) {
     ["contents", "TEXT"],
     ["contents_cache", "TEXT"],
     ["contents_fetched_at", "TEXT"],
-    // v6: upstream_github_url for marketplace plugins whose "real source"
-    // lives in a separate repo from the marketplace. e.g. context7's true
-    // upstream is upstash/context7 (55.8k stars), distinct from the
-    // anthropics/claude-plugins-official marketplace that wraps it. When
-    // set, the fetcher uses THIS for stars/forks; the marketplace github_url
-    // stays for "find me in the marketplace" linking.
+    // v6: upstream_github_url (DEPRECATED — replaced by marketplace_url in v7,
+    // see below). Kept as a column so old rows don't error out; never read.
     ["upstream_github_url", "TEXT"],
+    // v7: marketplace_url is the OPTIONAL secondary catalog/marketplace listing
+    // for packs distributed via a marketplace. `github_url` is now ALWAYS the
+    // primary source-of-truth code location (a subdirectory link for
+    // marketplace plugins, or a repo root or true upstream otherwise);
+    // `marketplace_url` points to the parent marketplace registry when one
+    // exists, so the UI can render it as a secondary "Marketplace →" link.
+    // Examples:
+    //   - context7:    github_url = upstash/context7,
+    //                  marketplace_url = anthropics/claude-plugins-official
+    //   - code-review: github_url = .../claude-plugins-official/tree/main/plugins/code-review,
+    //                  marketplace_url = .../claude-plugins-official
+    //   - gstack:      github_url = repo root,  marketplace_url = NULL
+    ["marketplace_url", "TEXT"],
   ]) {
     try {
       db.prepare(`SELECT ${col} FROM pack_catalog LIMIT 1`).get();
@@ -150,32 +159,32 @@ function upsertCatalogSeed(db, seedDoc) {
     }
     db.prepare(
       `INSERT INTO pack_catalog
-         (pack_id, display_name, category, github_url, upstream_github_url,
+         (pack_id, display_name, category, github_url, marketplace_url,
           description, harnesses, install_commands, uninstall_commands,
           install_notes, placeholder_reason, verified, pin_order, contents,
           seed_version)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(pack_id) DO UPDATE SET
-         display_name        = excluded.display_name,
-         category            = excluded.category,
-         github_url          = excluded.github_url,
-         upstream_github_url = excluded.upstream_github_url,
-         description         = excluded.description,
-         harnesses           = excluded.harnesses,
-         install_commands    = excluded.install_commands,
-         uninstall_commands  = excluded.uninstall_commands,
-         install_notes       = excluded.install_notes,
-         placeholder_reason  = excluded.placeholder_reason,
-         verified            = excluded.verified,
-         pin_order           = excluded.pin_order,
-         contents            = excluded.contents,
-         seed_version        = excluded.seed_version`,
+         display_name       = excluded.display_name,
+         category           = excluded.category,
+         github_url         = excluded.github_url,
+         marketplace_url    = excluded.marketplace_url,
+         description        = excluded.description,
+         harnesses          = excluded.harnesses,
+         install_commands   = excluded.install_commands,
+         uninstall_commands = excluded.uninstall_commands,
+         install_notes      = excluded.install_notes,
+         placeholder_reason = excluded.placeholder_reason,
+         verified           = excluded.verified,
+         pin_order          = excluded.pin_order,
+         contents           = excluded.contents,
+         seed_version       = excluded.seed_version`,
     ).run(
       pack.pack_id,
       pack.display_name,
       pack.category || null,
       pack.github_url,
-      pack.upstream_github_url || null,
+      pack.marketplace_url || null,
       pack.description || null,
       pack.harnesses ? JSON.stringify(pack.harnesses) : null,
       pack.install_commands ? JSON.stringify(pack.install_commands) : null,

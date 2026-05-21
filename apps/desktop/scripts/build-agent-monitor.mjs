@@ -73,6 +73,12 @@ const generatedPricingRoute = path.join(
   "pricing.js",
 );
 const generatedPushLib = path.join(generatedRootDir, "server", "lib", "push.js");
+const generatedCcDiscovery = path.join(
+  generatedRootDir,
+  "server",
+  "lib",
+  "cc-discovery.js",
+);
 const generatedClientIndex = path.join(
   generatedRootDir,
   "client",
@@ -493,6 +499,7 @@ function materializeRuntimeTree() {
   patchPricingRoute(generatedPricingRoute);
   patchHooksRoute(generatedHooksRoute);
   patchPushFile(generatedPushLib);
+  patchCcDiscovery(generatedCcDiscovery);
   writeFileSync(generatedUninstallHooks, UNINSTALL_HOOKS_SOURCE, "utf8");
 }
 
@@ -1652,6 +1659,21 @@ function assertGeneratedTree() {
     );
   }
 
+  // CC-Config MCP discovery: hard-gate the claude.ai-connector patch so a
+  // future upstream bump can't silently drop the closedloop MCP from the
+  // dashboard's MCP panel.
+  if (!existsSync(generatedCcDiscovery)) {
+    throw new Error(
+      "Generated server/lib/cc-discovery.js is missing — upstream layout changed?",
+    );
+  }
+  const ccDiscoverySource = readFileSync(generatedCcDiscovery, "utf8");
+  if (!ccDiscoverySource.includes("claudeAiMcpEverConnected")) {
+    throw new Error(
+      "Generated server/lib/cc-discovery.js is missing the claudeAiMcpEverConnected patch.",
+    );
+  }
+
   const pushSource = readFileSync(generatedPushLib, "utf8");
   if (!pushSource.includes("CCAM_VAPID_KEYS_PATH")) {
     throw new Error(
@@ -1852,6 +1874,59 @@ function assertGeneratedTree() {
       );
     }
   }
+}
+
+/**
+ * Patch cc-discovery.js to ALSO surface MCP servers that live in
+ * `~/.claude.json` under the `claudeAiMcpEverConnected` array. These are the
+ * "claude.ai connectors" (Mintlify, Airtable, ClosedLoop, Asana, etc.) that
+ * Claude Code resolves via the claude.ai web auth handshake — their full
+ * configs (URLs, credentials) live server-side, so locally we only know names.
+ * Upstream's `readMcpServers()` only scans `mcpServers` dicts and never sees
+ * them. We append them to `out.user` with kind="remote" so the CC-Config tab's
+ * MCP panel lists them alongside locally-configured stdio/http servers.
+ *
+ * Idempotent: presence-checked on the "claudeAiMcpEverConnected" string.
+ */
+function patchCcDiscovery(file) {
+  let source = readFileSync(file, "utf8");
+
+  if (source.includes("claudeAiMcpEverConnected")) {
+    return; // already patched
+  }
+
+  const needle = "  return out;\n}\n\nfunction summarizeMcpDef(def) {";
+  if (!source.includes(needle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the readMcpServers return + summarizeMcpDef boundary.`,
+    );
+  }
+  const replacement = [
+    "  // ClosedLoop patch: surface claude.ai-managed remote connectors (the",
+    "  // 7+ entries Claude Code resolves via the claude.ai web auth handshake;",
+    "  // their full configs live server-side, locally we only see the names).",
+    "  if (claudeJson.ok && claudeJson.data) {",
+    "    const remoteNames = claudeJson.data.claudeAiMcpEverConnected;",
+    "    if (Array.isArray(remoteNames)) {",
+    '      const already = new Set(out.user.map((s) => s.name));',
+    "      for (const name of remoteNames) {",
+    '        if (typeof name !== "string" || already.has(name)) continue;',
+    "        out.user.push({",
+    "          name,",
+    '          source: "~/.claude.json (claudeAiMcpEverConnected — claude.ai connector)",',
+    '          kind: "remote",',
+    "        });",
+    "      }",
+    "    }",
+    "  }",
+    "  return out;",
+    "}",
+    "",
+    "function summarizeMcpDef(def) {",
+  ].join("\n");
+  source = source.replace(needle, replacement);
+
+  writeFileSync(file, source, "utf8");
 }
 
 function patchPushFile(file) {

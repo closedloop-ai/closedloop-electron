@@ -1,6 +1,6 @@
 {
-  "seed_version": 6,
-  "_note": "Seed v6 (2026-05-21): added optional `upstream_github_url` field for marketplace plugins whose true source lives in a separate repo. Set for context7 → upstash/context7 (55.8k stars; the Anthropic marketplace ships a thin wrapper around it). The other 4 Anthropic picks (code-review, code-modernization, claude-code-setup, claude-md-management) are genuinely owned by Anthropic and live only inside the marketplace repo — no upstream. v5 changes preserved (RTK + 5 marketplace picks).",
+  "seed_version": 7,
+  "_note": "Seed v7 (2026-05-21): every pack has a GitHub presence — `github_url` now ALWAYS points at the actual source-of-truth code location (a subdirectory link for marketplace plugins, or a repo root, or a true upstream). The optional `marketplace_url` field points at the parent marketplace registry when one exists, surfaced in the UI as a secondary 'Marketplace →' link. v6's `upstream_github_url` field is dropped (replaced by this cleaner model). For context7 specifically, github_url is upstash/context7 (the real source, 55.8k stars) and marketplace_url is the anthropics registry. For the 4 Anthropic-owned picks, github_url is the precise tree/main/plugins/<name> subdirectory and marketplace_url is the registry root.",
   "packs": [
     {
       "pack_id": "closedloop-ai",
@@ -50,7 +50,8 @@
       "pack_id": "code-review",
       "display_name": "Code Review (Anthropic)",
       "category": "methodology",
-      "github_url": "https://github.com/anthropics/claude-plugins-official",
+      "github_url": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/code-review",
+      "marketplace_url": "https://github.com/anthropics/claude-plugins-official",
       "description": "Anthropic's official multi-agent code-review plugin: runs specialized review agents with confidence-based scoring to filter false positives. Direct alternative/complement to closedloop's code-review for teams that want a vendor-shipped baseline.",
       "harnesses": ["claude"],
       "install_commands": {
@@ -71,7 +72,8 @@
       "pack_id": "code-modernization",
       "display_name": "Code Modernization (Anthropic)",
       "category": "methodology",
-      "github_url": "https://github.com/anthropics/claude-plugins-official",
+      "github_url": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/code-modernization",
+      "marketplace_url": "https://github.com/anthropics/claude-plugins-official",
       "description": "Structured workflow for modernizing legacy codebases (COBOL, legacy Java/C++, monolith web apps). Phases: assess → map → extract-rules → reimagine → transform. Ships with agents that own each phase.",
       "harnesses": ["claude"],
       "install_commands": {
@@ -92,7 +94,8 @@
       "pack_id": "claude-code-setup",
       "display_name": "Claude Code Setup (Anthropic)",
       "category": "methodology",
-      "github_url": "https://github.com/anthropics/claude-plugins-official",
+      "github_url": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/claude-code-setup",
+      "marketplace_url": "https://github.com/anthropics/claude-plugins-official",
       "description": "Analyzes your codebase and recommends tailored Claude Code automations — hooks, skills, MCP servers, subagents. Excellent first-time-experience companion for new projects.",
       "harnesses": ["claude"],
       "install_commands": {
@@ -113,7 +116,8 @@
       "pack_id": "claude-md-management",
       "display_name": "CLAUDE.md Management (Anthropic)",
       "category": "methodology",
-      "github_url": "https://github.com/anthropics/claude-plugins-official",
+      "github_url": "https://github.com/anthropics/claude-plugins-official/tree/main/plugins/claude-md-management",
+      "marketplace_url": "https://github.com/anthropics/claude-plugins-official",
       "description": "Tools to maintain and improve CLAUDE.md files — audit quality, capture session learnings, keep project memory current. Pairs well with closedloop / gstack which rely on CLAUDE.md for context.",
       "harnesses": ["claude"],
       "install_commands": {
@@ -134,8 +138,8 @@
       "pack_id": "context7",
       "display_name": "Context7 (Upstash)",
       "category": "tooling",
-      "github_url": "https://github.com/anthropics/claude-plugins-official",
-      "upstream_github_url": "https://github.com/upstash/context7",
+      "github_url": "https://github.com/upstash/context7",
+      "marketplace_url": "https://github.com/anthropics/claude-plugins-official",
       "description": "Upstash Context7 MCP server for up-to-date documentation lookup. Pulls version-specific docs + code examples directly from source repositories into your LLM context. Community-managed plugin in Anthropic's official marketplace.",
       "harnesses": ["claude"],
       "install_commands": {

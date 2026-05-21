@@ -14,7 +14,9 @@ export interface CatalogEntry {
   display_name: string;
   category: string | null;
   github_url: string;
-  upstream_github_url: string | null;
+  /** Optional secondary catalog/marketplace listing (e.g. anthropics/claude-plugins-official).
+   *  When set, the UI renders a faint "Marketplace →" link next to the primary "GitHub →". */
+  marketplace_url: string | null;
   description: string | null;
   description_live: string | null;
   harnesses: string[];
@@ -164,21 +166,22 @@ export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
           );
         })}
         <div className="ml-auto flex items-center gap-1.5">
-          {/* GitHub is always the primary link. When the pack has a distinct
-              upstream repo (e.g. context7 → upstash/context7), that's the real
-              source-of-truth and the marketplace listing is secondary. */}
+          {/* GitHub is always the primary link — it points at the actual source
+              location (a subdirectory for marketplace plugins, a repo root
+              otherwise). The optional Marketplace link points at the parent
+              registry, rendered as a faint secondary. */}
           <a
-            href={pack.upstream_github_url || pack.github_url}
+            href={pack.github_url}
             target="_blank"
             rel="noreferrer"
             className="text-[10px] text-gray-300 hover:text-gray-100"
-            title="GitHub source repo"
+            title="GitHub source"
           >
             GitHub →
           </a>
-          {pack.upstream_github_url && (
+          {pack.marketplace_url && (
             <a
-              href={pack.github_url}
+              href={pack.marketplace_url}
               target="_blank"
               rel="noreferrer"
               className="text-[10px] text-gray-500 hover:text-gray-300"
