@@ -88,45 +88,6 @@
         color: var(--foreground);
       }
 
-      header {
-        padding: 16px 20px 0;
-        background: var(--card);
-      }
-
-      .header-main {
-        display: flex;
-        align-items: flex-start;
-        justify-content: space-between;
-        gap: 16px;
-        flex-wrap: wrap;
-      }
-
-      .header-controls {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        flex-wrap: wrap;
-      }
-
-      .header-controls > * {
-        align-self: center;
-      }
-
-      .header-controls button {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        height: 36px;
-        padding: 0 12px;
-        line-height: 1;
-        font-size: 12px;
-        border: 1px solid var(--border);
-        background: var(--card);
-        color: var(--foreground);
-        border-radius: 8px;
-        cursor: pointer;
-      }
-
       .control-group {
         display: inline-flex;
         align-items: center;
@@ -169,17 +130,6 @@
         font-weight: 600;
       }
 
-      header h1 {
-        margin: 0;
-        font-size: 20px;
-      }
-
-      .sub {
-        margin-top: 4px;
-        color: var(--muted-foreground);
-        font-size: 13px;
-      }
-
       .runtime-health {
         display: inline-flex;
         align-items: center;
@@ -204,40 +154,6 @@
 
       .runtime-health.unhealthy .dot {
         background: var(--destructive);
-      }
-
-      nav {
-        display: flex;
-        gap: 4px;
-        padding: 0 20px;
-        background: var(--card);
-        border-bottom: 1px solid var(--border);
-      }
-
-      nav button {
-        border: none;
-        border-bottom: 2px solid transparent;
-        background: none;
-        color: var(--muted-foreground);
-        padding: 10px 12px;
-        font-size: 13px;
-        font-weight: 500;
-        cursor: pointer;
-        transition: color 0.15s, border-color 0.15s;
-      }
-
-      nav button:hover {
-        color: var(--foreground);
-      }
-
-      nav button.active {
-        color: var(--foreground);
-        border-bottom-color: var(--primary);
-        font-weight: 600;
-      }
-
-      main {
-        padding: 16px 20px 20px;
       }
 
       .panel {
@@ -2603,6 +2519,325 @@
       #onboardingPopupActions button:hover {
         filter: brightness(1.1);
       }
+
+      /* ════════════════════════════════════════════════════════════
+         ClosedLoop Gateway shell — left sidebar + topbar.
+         Ported from the Claude Design "Dashboard.html" handoff bundle;
+         color tokens mirror packages/design-system/styles/globals.css.
+         ════════════════════════════════════════════════════════════ */
+      :root {
+        /* Chart palette — 8 tokens (globals.css ships 5; 6-8 added here). */
+        --chart-1: oklch(0.62 0.22 266);
+        --chart-2: oklch(0.7 0.15 221);
+        --chart-3: oklch(0.7 0.19 158);
+        --chart-4: oklch(0.75 0.18 119);
+        --chart-5: oklch(0.66 0.2 52);
+        --chart-6: oklch(0.66 0.22 25);
+        --chart-7: oklch(0.7 0.18 340);
+        --chart-8: oklch(0.62 0.2 295);
+        --sidebar-primary: oklch(0.322 0 0);
+        --sidebar-primary-foreground: oklch(0.985 0 0);
+        --sidebar-accent: oklch(0.92 0.008 267);
+        --sidebar-accent-foreground: oklch(0.322 0 0);
+        --sidebar-border: oklch(0.933 0 0);
+        --sidebar-ring: oklch(0.762 0 0);
+        --radius-sm: calc(var(--radius) - 4px);
+        --radius-md: calc(var(--radius) - 2px);
+        --radius-lg: var(--radius);
+        --radius-xl: calc(var(--radius) + 4px);
+        --font-sans: "Geist", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+        --font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --sidebar-primary: oklch(0.476 0.199 270);
+          --sidebar-primary-foreground: oklch(1 0 0);
+          --sidebar-accent: oklch(0.262 0.008 270);
+          --sidebar-accent-foreground: oklch(0.961 0.002 270);
+          --sidebar-border: oklch(0.266 0.005 270);
+          --sidebar-ring: oklch(0.852 0.004 270);
+        }
+      }
+
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+      }
+
+      body {
+        font-family: var(--font-sans);
+        background: var(--sidebar);
+        color: var(--foreground);
+      }
+
+      /* ── App shell ─────────────────────────────────────────────── */
+      .app {
+        display: grid;
+        grid-template-columns: 232px 1fr;
+        height: 100%;
+        background: var(--sidebar);
+        --status: var(--success);
+        --status-foreground: var(--success-foreground);
+      }
+      .app.sidebar-collapsed {
+        grid-template-columns: 60px 1fr;
+      }
+      .app.state-degraded {
+        --status: var(--warning);
+        --status-foreground: var(--warning-foreground);
+      }
+      .app.state-disconnected {
+        --status: var(--destructive);
+        --status-foreground: var(--destructive-foreground);
+      }
+      .app .main {
+        background: var(--background);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        margin: 8px 8px 8px 0;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.04);
+      }
+
+      /* ── Sidebar ───────────────────────────────────────────────── */
+      .sidebar {
+        display: flex;
+        flex-direction: column;
+        padding: 10px 8px 8px;
+        gap: 2px;
+        color: var(--sidebar-foreground);
+        overflow: hidden;
+        min-width: 0;
+      }
+      .sb-brand {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 8px 18px;
+      }
+      .sb-brand .mark {
+        width: 22px;
+        height: 22px;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--foreground);
+      }
+      .sb-brand .name {
+        font-weight: 600;
+        font-size: 13px;
+        letter-spacing: -0.005em;
+        line-height: 1;
+        color: var(--foreground);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .sb-nav {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        flex: 1;
+        overflow-y: auto;
+        min-height: 0;
+      }
+      .sb-section {
+        font-size: 11px;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted-foreground);
+        padding: 18px 10px 4px;
+      }
+      .sb-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 10px;
+        border-radius: 6px;
+        color: var(--sidebar-foreground);
+        cursor: pointer;
+        font-size: 13px;
+        user-select: none;
+        white-space: nowrap;
+        overflow: hidden;
+        border: 0;
+        background: none;
+        width: 100%;
+        text-align: left;
+        font-family: inherit;
+        transition: background 0.12s, color 0.12s;
+      }
+      .sb-item:hover {
+        background: var(--sidebar-accent);
+      }
+      .sb-item.active {
+        background: var(--sidebar-accent);
+        color: var(--sidebar-accent-foreground);
+        font-weight: 500;
+      }
+      .sb-item > .ico {
+        width: 16px;
+        height: 16px;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .sb-item > .ico svg {
+        width: 16px;
+        height: 16px;
+      }
+      .sb-item > .sb-label {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .sb-item .count {
+        margin-left: auto;
+        background: var(--muted);
+        color: var(--muted-foreground);
+        font-size: 11px;
+        padding: 1px 6px;
+        border-radius: 9999px;
+        font-family: var(--font-mono);
+        font-weight: 500;
+      }
+      .sb-item .count:empty,
+      .sb-item .count[data-count="0"] {
+        display: none;
+      }
+      .sb-spacer {
+        flex: 0 0 6px;
+      }
+      .sb-foot {
+        margin: 8px 2px 2px;
+        padding: 9px 10px;
+        border-radius: 8px;
+        background: var(--card);
+        border: 1px solid var(--border);
+      }
+      .sb-foot .runtime-health {
+        border: 0;
+        background: none;
+        padding: 0;
+        font-size: 12px;
+      }
+      .sb-version {
+        padding: 6px 12px 4px;
+        font-size: 11px;
+        font-family: var(--font-mono);
+        color: var(--muted-foreground);
+        letter-spacing: 0.02em;
+      }
+      /* Collapsed sidebar */
+      .app.sidebar-collapsed .sb-brand {
+        justify-content: center;
+        padding: 6px 0 12px;
+      }
+      .app.sidebar-collapsed .sb-brand .name,
+      .app.sidebar-collapsed .sb-item > .sb-label,
+      .app.sidebar-collapsed .sb-item .count,
+      .app.sidebar-collapsed .sb-section,
+      .app.sidebar-collapsed .sb-foot,
+      .app.sidebar-collapsed .sb-version {
+        display: none;
+      }
+      .app.sidebar-collapsed .sb-item {
+        justify-content: center;
+        padding: 6px;
+      }
+      /* Agent nav hidden when the Agent Dashboard sidecar is disabled */
+      .app.agent-disabled .sb-item[data-kind="agent"] {
+        display: none;
+      }
+
+      /* ── Topbar ────────────────────────────────────────────────── */
+      .topbar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 9px 16px;
+        border-bottom: 1px solid var(--border);
+        background: var(--background);
+        flex-shrink: 0;
+      }
+      .sidebar-toggle {
+        appearance: none;
+        border: 1px solid transparent;
+        background: transparent;
+        color: var(--muted-foreground);
+        width: 28px;
+        height: 28px;
+        border-radius: 6px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        flex-shrink: 0;
+        transition: background 0.12s, color 0.12s;
+      }
+      .sidebar-toggle:hover {
+        background: var(--muted);
+        color: var(--foreground);
+      }
+      .sidebar-toggle svg {
+        width: 16px;
+        height: 16px;
+      }
+      .crumbs {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+        color: var(--muted-foreground);
+        min-width: 0;
+      }
+      .crumbs .sep {
+        opacity: 0.5;
+      }
+      .crumbs .here {
+        color: var(--foreground);
+        font-weight: 500;
+      }
+      .topbar .topbar-actions {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: nowrap;
+      }
+
+      /* ── Page (scroll region inside .main) ─────────────────────── */
+      .page {
+        padding: 16px 20px 24px;
+        overflow-y: auto;
+        flex: 1;
+        min-height: 0;
+      }
+      .page > .panel {
+        margin: 0;
+      }
+      /* Agent Dashboard iframe panel renders full-bleed — the iframe sits
+         flush against the topbar and the bottom of the content area. */
+      #claude-dashboard.panel {
+        padding: 0;
+        border: 0;
+        background: transparent;
+        border-radius: 0;
+      }
+      .app.agent-view .page {
+        padding: 0;
+        overflow: hidden;
+      }
     </style>
   </head>
   <body>
@@ -2645,30 +2880,6 @@
         </div>
       </div>
     </div>
-    <header>
-      <div class="header-main">
-        <div>
-          <h1>ClosedLoop Gateway <span id="appVersion" style="font-size: 12px; font-weight: 400; color: var(--muted-foreground)"></span></h1>
-          <div class="sub">
-            <span id="runtimeStatus" class="runtime-health unhealthy">
-              <span class="dot"></span>
-              <span class="label">Unhealthy</span>
-            </span>
-          </div>
-        </div>
-        <div class="header-controls">
-          <label class="control-group danger-toggle" id="dangerAutoApproveLabel" for="dangerAutoApproveToggle">
-            <input type="checkbox" id="dangerAutoApproveToggle" />
-            Auto-Approve All
-          </label>
-          <label class="control-group" for="headerPauseToggle">
-            <input type="checkbox" id="headerPauseToggle" />
-            Pause Incoming Commands
-          </label>
-          <button class="secondary" id="headerConnectionToggle">Disconnect</button>
-        </div>
-      </div>
-    </header>
     <div id="onboardingOverlay" class="onboarding-overlay hidden">
       <div class="onboarding-card">
         <h2 style="margin-top: 0">Setup Required</h2>
@@ -2745,57 +2956,54 @@
         <p class="muted" id="onboardingMessage"></p>
       </div>
     </div>
-    <nav>
-      <button data-tab="dashboard" class="active">Dashboard</button>
-      <button data-tab="approvals">Approvals</button>
-      <button data-tab="activity">Requests</button>
-      <button data-tab="logs">Diagnostics</button>
-      <button data-tab="claude-dashboard" id="claudeDashboardTabButton" hidden>Agent Dashboard</button>
-      <button data-tab="settings">Settings</button>
-    </nav>
-    <main>
+    <div class="app state-disconnected agent-view" id="appShell">
+      <aside class="sidebar">
+        <div class="sb-brand">
+          <span class="mark" aria-hidden="true">
+            <svg viewBox="0 0 100 100" fill="none" width="22" height="22">
+              <path d="M0.424623 49.6765C0.339767 56.2176 1.55939 62.7103 4.01272 68.7779C6.46604 74.8455 10.1042 80.3673 14.7161 85.0227C19.3281 89.6781 24.8219 93.3744 30.8788 95.8973C36.9358 98.4202 43.4352 99.7193 50 99.7193C56.5648 99.7193 63.0643 98.4202 69.1212 95.8973C75.1782 93.3744 80.672 89.6781 85.2839 85.0227C89.8958 80.3673 93.534 74.8455 95.9873 68.7779C98.4406 62.7103 99.6603 56.2176 99.5754 49.6765C99.5754 49.5115 99.5754 49.3546 99.5754 49.1895H71.7496C71.7496 49.3546 71.7496 49.5115 71.7496 49.6765C71.7496 53.9658 70.473 58.1587 68.0814 61.7249C65.6898 65.2912 62.2906 68.0706 58.3136 69.7117C54.3367 71.3527 49.9606 71.7817 45.739 70.9443C41.5174 70.1069 37.6398 68.0408 34.5966 65.0072C31.5535 61.9737 29.4815 58.109 28.6428 53.902C27.804 49.695 28.2361 45.3346 29.8845 41.3723C31.5329 37.4101 34.3235 34.0239 37.9033 31.6421C41.4831 29.2603 45.6914 27.9899 49.9959 27.9915H50.0704L50.0373 0.280626C43.524 0.275203 37.0735 1.54886 31.0545 4.02881C25.0354 6.50876 19.5659 10.1464 14.9583 14.7338C10.3508 19.3211 6.69575 24.7683 4.20197 30.764C1.70819 36.7597 0.424621 43.1863 0.424623 49.6765Z" fill="currentColor"></path>
+              <path d="M57.1534 0.801147V29.2137C60.1811 30.2616 62.939 31.9629 65.2303 34.1961C67.5215 36.4293 69.2895 39.1392 70.4077 42.1323H99.004C97.3792 31.6897 92.4381 22.0411 84.906 14.6024C77.3738 7.16375 67.6471 2.32669 57.1534 0.801147Z" fill="#41A3FF"></path>
+            </svg>
+          </span>
+          <span class="name">ClosedLoop Gateway</span>
+        </div>
+        <nav class="sb-nav" id="sidebarNav" aria-label="Primary"></nav>
+        <div class="sb-spacer"></div>
+        <div class="sb-foot">
+          <span id="runtimeStatus" class="runtime-health unhealthy">
+            <span class="dot"></span>
+            <span class="label">Unhealthy</span>
+          </span>
+        </div>
+        <div class="sb-version"><span id="appVersion"></span></div>
+      </aside>
+      <main class="main">
+        <header class="topbar">
+          <button class="sidebar-toggle" id="sidebarToggle" type="button" title="Collapse sidebar" aria-label="Collapse sidebar">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg>
+          </button>
+          <div class="crumbs">
+            <span class="group" id="crumbGroup" hidden></span>
+            <span class="sep" id="crumbSep" hidden>/</span>
+            <span class="here" id="crumbHere">Dashboard</span>
+          </div>
+          <div class="topbar-actions">
+            <label class="control-group danger-toggle" id="dangerAutoApproveLabel" for="dangerAutoApproveToggle">
+              <input type="checkbox" id="dangerAutoApproveToggle" />
+              Auto-Approve All
+            </label>
+            <label class="control-group" for="headerPauseToggle">
+              <input type="checkbox" id="headerPauseToggle" />
+              Pause Incoming Commands
+            </label>
+            <button class="secondary" id="headerConnectionToggle">Disconnect</button>
+          </div>
+        </header>
+        <div class="page">
       <div id="updateBanner">
         <span id="updateBannerText">A new version is available</span>
         <button id="updateBannerBtn">Update &amp; restart</button>
       </div>
-      <section id="dashboard" class="panel active">
-        <div class="dashboard-summary">
-          <div class="status-card">
-            <div class="status-label">Gateway Port</div>
-            <div class="status-value" id="dashboardPort">Loading...</div>
-          </div>
-          <div class="status-card">
-            <div class="status-label">Cloud Connection</div>
-            <div class="status-value" id="dashboardCloud">Loading...</div>
-            <div class="status-detail" id="wsStatusDetail">Loading...</div>
-          </div>
-          <div class="status-card">
-            <div class="status-label">Remote Commands</div>
-            <div class="status-value" id="dashboardCommandsState">Loading...</div>
-          </div>
-          <div class="status-card">
-            <div class="status-label">Connection Security</div>
-            <div class="status-value" id="dashboardSecurity">Loading...</div>
-            <div class="status-detail" id="dashboardSecurityDetail">Loading...</div>
-          </div>
-        </div>
-        <div class="config-section-label">Endpoints</div>
-        <div class="dashboard-config">
-          <div class="config-row">
-            <div class="config-row-label">Target ID</div>
-            <div class="config-row-value mono" id="dashboardTarget" title="">Loading...</div>
-          </div>
-          <div class="config-row">
-            <div class="config-row-label">Relay Origin</div>
-            <div class="config-row-value mono" id="dashboardRelayOrigin" title="">Loading...</div>
-          </div>
-          <div class="config-row">
-            <div class="config-row-label">API Origin</div>
-            <div class="config-row-value mono" id="dashboardApiOrigin" title="">Loading...</div>
-          </div>
-        </div>
-        <div id="dashboardApproval"></div>
-      </section>
       <section id="approvals" class="panel">
         <p class="muted">Pending requests that need approval (Approve, Decline, or Always Allow).</p>
         <div class="actions" style="margin-bottom: 12px">
@@ -2857,8 +3065,8 @@
         <div id="logsPausedBanner" class="logs-paused-banner">Paused - 0 new entries queued</div>
         <div id="logsList" class="logs-container"></div>
       </section>
-      <section id="claude-dashboard" class="panel">
-        <div id="claudeDashConsent" style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border,#2a2a2a);font-size:13px">
+      <section id="claude-dashboard" class="panel active">
+        <div id="claudeDashConsent" style="display:none;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border,#2a2a2a);font-size:13px">
           <label class="toggle-switch" title="Installs Claude Code hooks in ~/.claude/settings.json so this dashboard receives live session events. Off by default; fully removable.">
             <input type="checkbox" id="claudeDashHooksToggle" />
             <span class="toggle-track"></span>
@@ -2881,6 +3089,46 @@
 
         <!-- Relay / Gateway sub-tab -->
         <div id="settings-relay-gateway" class="settings-sub-panel active">
+          <div class="settings-group">
+            <h3 class="settings-group-title">Connection Status</h3>
+            <p class="settings-group-desc">Live gateway port, cloud connection, and endpoint configuration.</p>
+            <div class="dashboard-summary">
+              <div class="status-card">
+                <div class="status-label">Gateway Port</div>
+                <div class="status-value" id="dashboardPort">Loading...</div>
+              </div>
+              <div class="status-card">
+                <div class="status-label">Cloud Connection</div>
+                <div class="status-value" id="dashboardCloud">Loading...</div>
+                <div class="status-detail" id="wsStatusDetail">Loading...</div>
+              </div>
+              <div class="status-card">
+                <div class="status-label">Remote Commands</div>
+                <div class="status-value" id="dashboardCommandsState">Loading...</div>
+              </div>
+              <div class="status-card">
+                <div class="status-label">Connection Security</div>
+                <div class="status-value" id="dashboardSecurity">Loading...</div>
+                <div class="status-detail" id="dashboardSecurityDetail">Loading...</div>
+              </div>
+            </div>
+            <div class="config-section-label">Endpoints</div>
+            <div class="dashboard-config">
+              <div class="config-row">
+                <div class="config-row-label">Target ID</div>
+                <div class="config-row-value mono" id="dashboardTarget" title="">Loading...</div>
+              </div>
+              <div class="config-row">
+                <div class="config-row-label">Relay Origin</div>
+                <div class="config-row-value mono" id="dashboardRelayOrigin" title="">Loading...</div>
+              </div>
+              <div class="config-row">
+                <div class="config-row-label">API Origin</div>
+                <div class="config-row-value mono" id="dashboardApiOrigin" title="">Loading...</div>
+              </div>
+            </div>
+            <div id="dashboardApproval"></div>
+          </div>
           <div class="settings-columns">
             <div class="settings-group">
               <h3 class="settings-group-title">Cloud Relay</h3>
@@ -2922,11 +3170,11 @@
               <div class="row">
                 <label for="agentMonitorEnabled">Agent Dashboard</label>
                 <div>
-                  <label class="toggle-switch" title="Runs the local Agent Dashboard sidecar and shows the Agent Dashboard tab. Off by default.">
+                  <label class="toggle-switch" title="Runs the local Agent Dashboard sidecar that powers the Dashboard and agent views in the sidebar. On by default.">
                     <input id="agentMonitorEnabled" type="checkbox" />
                     <span class="toggle-track"></span>
                   </label>
-                  <p class="field-help" style="margin-top:8px">Runs the local Agent Dashboard sidecar and shows the Agent Dashboard tab. Off by default.</p>
+                  <p class="field-help" style="margin-top:8px">Runs the local Agent Dashboard sidecar that powers the Dashboard and agent views in the sidebar. On by default; turning it off hides those views.</p>
                 </div>
               </div>
             </div>
@@ -3197,46 +3445,222 @@
           </div>
         </div>
       </section>
-    </main>
+        </div>
+      </main>
+    </div>
     <script>
       const api = window.desktopApi;
-      const tabs = document.querySelectorAll("nav button");
-      const panels = document.querySelectorAll(".panel");
+      const PANELS = document.querySelectorAll(".panel");
+      const appShell = document.getElementById("appShell");
 
-      function activateTab(tabName) {
-        if (tabName === "claude-dashboard" && !cachedAgentMonitorEnabled) {
-          activateTab("settings");
+      // ── Left sidebar navigation ──────────────────────────────────────
+      // Agent items drive the embedded Agent Dashboard iframe (one panel,
+      // routed via postMessage); Gateway items map to their own panels.
+      const SVG_ICONS = {
+        dashboard: '<rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/>',
+        kanban: '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="M15 3v18"/>',
+        sessions: '<path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>',
+        activity: '<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>',
+        analytics: '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
+        workflows: '<rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/>',
+        boxes: '<path d="M2.97 12.92A2 2 0 0 0 2 14.63v3.24a2 2 0 0 0 .97 1.71l3 1.8a2 2 0 0 0 2.06 0L12 19v-5.5l-5-3-4.03 2.42Z"/><path d="m7 16.5-4.74-2.85"/><path d="m7 16.5 5-3"/><path d="M7 16.5v5.17"/><path d="M12 13.5V19l3.97 2.38a2 2 0 0 0 2.06 0l3-1.8a2 2 0 0 0 .97-1.71v-3.24a2 2 0 0 0-.97-1.71L17 10.5l-5 3Z"/><path d="m17 16.5-5-3"/><path d="m17 16.5 4.74-2.85"/><path d="M17 16.5v5.17"/><path d="M7.97 4.42A2 2 0 0 0 7 6.13v4.37l5 3 5-3V6.13a2 2 0 0 0-.97-1.71l-3-1.8a2 2 0 0 0-2.06 0l-3 1.8Z"/><path d="M12 8 7.26 5.15"/><path d="m12 8 4.74-2.85"/><path d="M12 13.5V8"/>',
+        play: '<polygon points="6 3 20 12 6 21 6 3"/>',
+        sparkles: '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/>',
+        wrench: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+        users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+        package: '<path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><polyline points="3.29 7 12 12 20.71 7"/><path d="m7.5 4.27 9 5.15"/>',
+        "file-text": '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/>',
+        settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+        shield: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
+        inbox: '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+        stethoscope: '<path d="M11 2v2"/><path d="M5 2v2"/><path d="M5 3H4a2 2 0 0 0-2 2v4a6 6 0 0 0 12 0V5a2 2 0 0 0-2-2h-1"/><path d="M8 15a6 6 0 0 0 12 0v-3"/><circle cx="20" cy="10" r="2"/>',
+      };
+      function navIcon(name) {
+        return '<span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+          (SVG_ICONS[name] || "") + "</svg></span>";
+      }
+
+      const NAV_ITEMS = [
+        { id: "dashboard",      label: "Dashboard",      icon: "dashboard",   kind: "agent",   route: "/" },
+        { id: "kanban",         label: "Kanban Board",   icon: "kanban",      kind: "agent",   route: "/kanban" },
+        { id: "sessions",       label: "Sessions",       icon: "sessions",    kind: "agent",   route: "/sessions" },
+        { id: "activity-feed",  label: "Activity Feed",  icon: "activity",    kind: "agent",   route: "/activity" },
+        { id: "analytics",      label: "Analytics",      icon: "analytics",   kind: "agent",   route: "/analytics" },
+        { id: "workflows",      label: "Workflows",      icon: "workflows",   kind: "agent",   route: "/workflows" },
+        { id: "cc-config",      label: "CC Config",      icon: "boxes",       kind: "agent",   route: "/cc-config" },
+        { id: "run",            label: "Run",            icon: "play",        kind: "agent",   route: "/run" },
+        { id: "plans",          label: "Plans",          icon: "file-text",   kind: "agent",   route: "/plans",    planExtractionOnly: true },
+        { id: "agent-settings", label: "Agent Settings", icon: "settings",    kind: "agent",   route: "/settings" },
+        { type: "group", label: "Gateway" },
+        { id: "approvals",      label: "Approvals",      icon: "shield",      kind: "gateway", panel: "approvals", count: true },
+        { id: "requests",       label: "Requests",       icon: "inbox",       kind: "gateway", panel: "activity" },
+        { id: "diagnostics",    label: "Diagnostics",    icon: "stethoscope", kind: "gateway", panel: "logs" },
+        { id: "settings",       label: "Settings",       icon: "settings",    kind: "gateway", panel: "settings" },
+      ];
+
+      // Map legacy tab names (tray menu, IPC events) to new nav ids.
+      const LEGACY_TAB_ALIAS = {
+        dashboard: "dashboard",
+        "claude-dashboard": "dashboard",
+        approvals: "approvals",
+        activity: "requests",
+        logs: "diagnostics",
+        settings: "settings",
+      };
+
+      let currentNavId = "dashboard";
+      let pendingAgentRoute = "/";
+      let bootNavDone = false;
+      let cachedPlanExtractionEnabled = false;
+      let agentMonitorFrameOrigin = null;
+
+      function shouldShowNavItem(item) {
+        return !item.planExtractionOnly || cachedPlanExtractionEnabled;
+      }
+
+      function buildSidebar() {
+        const nav = document.getElementById("sidebarNav");
+        nav.innerHTML = "";
+        for (const item of NAV_ITEMS) {
+          if (item.type === "group") {
+            const group = document.createElement("div");
+            group.className = "sb-section";
+            group.textContent = item.label;
+            nav.appendChild(group);
+            continue;
+          }
+          if (!shouldShowNavItem(item)) {
+            continue;
+          }
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "sb-item";
+          btn.dataset.nav = item.id;
+          btn.dataset.kind = item.kind;
+          btn.title = item.label;
+          let html = navIcon(item.icon) + '<span class="sb-label">' + item.label + "</span>";
+          if (item.count) {
+            html += '<span class="count" id="approvalsCount" data-count="0"></span>';
+          }
+          btn.innerHTML = html;
+          btn.addEventListener("click", () => activateNav(item.id));
+          nav.appendChild(btn);
+        }
+        const activeId = nav.querySelector(`.sb-item[data-nav="${currentNavId}"]`)
+          ? currentNavId
+          : "dashboard";
+        nav.querySelector(`.sb-item[data-nav="${activeId}"]`)?.classList.add("active");
+      }
+
+      function setBreadcrumb(item) {
+        const group = document.getElementById("crumbGroup");
+        const sep = document.getElementById("crumbSep");
+        group.textContent = item.kind === "agent" ? "Agents" : "Gateway";
+        group.hidden = false;
+        sep.hidden = false;
+        document.getElementById("crumbHere").textContent = item.label;
+      }
+
+      function updateApprovalsBadge(count) {
+        const el = document.getElementById("approvalsCount");
+        if (!el) return;
+        const n = Number(count) || 0;
+        el.dataset.count = String(n);
+        el.textContent = n > 0 ? String(n) : "";
+      }
+
+      // Drive the embedded Agent Dashboard route. Once the iframe is loaded
+      // navigation is a postMessage (no reload); before then the route is
+      // baked into the initial iframe src by startClaudeDashboard().
+      function navigateAgentRoute(route) {
+        pendingAgentRoute = route || "/";
+        const frame = document.getElementById("claudeDashFrame");
+        if (claudeDashLoaded && frame && frame.contentWindow && agentMonitorFrameOrigin) {
+          try {
+            frame.contentWindow.postMessage(
+              { type: "closedloop:navigate", path: pendingAgentRoute },
+              agentMonitorFrameOrigin,
+            );
+          } catch (_) {
+            /* cross-origin timing race — safe to ignore */
+          }
+        }
+      }
+
+      function activateNav(id) {
+        const item = NAV_ITEMS.find((n) => n.id === id && n.type !== "group");
+        if (!item) return;
+        if (item.kind === "agent" && !cachedAgentMonitorEnabled) {
+          // Agent views need the sidecar enabled — fall back to Settings.
+          activateNav("settings");
           activateSettingsTab("relay-gateway");
           return;
         }
-        tabs.forEach((button) => button.classList.remove("active"));
-        panels.forEach((panel) => panel.classList.remove("active"));
-        const tabButton = document.querySelector(`nav button[data-tab="${tabName}"]`);
-        if (tabButton) {
-          tabButton.classList.add("active");
-          document.getElementById(tabName)?.classList.add("active");
-        }
-        if (tabName === "logs") {
+        currentNavId = id;
+        document.querySelectorAll("#sidebarNav .sb-item").forEach((el) => {
+          el.classList.toggle("active", el.dataset.nav === id);
+        });
+        const panelId = item.kind === "agent" ? "claude-dashboard" : item.panel;
+        PANELS.forEach((panel) => panel.classList.toggle("active", panel.id === panelId));
+        // Agent views render the iframe full-bleed (no .page padding).
+        appShell.classList.toggle("agent-view", item.kind === "agent");
+        setBreadcrumb(item);
+        if (panelId === "logs") {
           void pollLogs();
           startLogsAutoRefresh();
-          api.getSettings().then(s => { verboseToggle.checked = !!s.verboseLogging; });
+          api.getSettings().then((s) => { verboseToggle.checked = !!s.verboseLogging; });
         } else {
           stopLogsAutoRefresh();
         }
-        if (tabName === "claude-dashboard") {
+        if (item.kind === "agent") {
+          // The session-tracking consent toggle belongs on Agent Settings
+          // only — not stacked above every agent view.
+          const consent = document.getElementById("claudeDashConsent");
+          if (consent) {
+            consent.style.display = id === "agent-settings" ? "flex" : "none";
+          }
           startClaudeDashboard();
+          navigateAgentRoute(item.route);
         } else {
           stopClaudeDashboardPoll();
         }
       }
 
-      tabs.forEach((tab) => {
-        tab.addEventListener("click", () => activateTab(tab.dataset.tab));
-      });
+      // Backward-compatible shim for the tray menu and IPC navigation events.
+      function activateTab(name) {
+        activateNav(LEGACY_TAB_ALIAS[name] || name);
+      }
 
       window.addEventListener("desktop:navigate-tab", (event) => {
         activateTab(event.detail);
       });
+
+      const sidebarToggle = document.getElementById("sidebarToggle");
+      sidebarToggle.addEventListener("click", () => {
+        const collapsed = appShell.classList.toggle("sidebar-collapsed");
+        try {
+          localStorage.setItem("cl:sidebar-collapsed", collapsed ? "1" : "0");
+        } catch (_) {
+          /* localStorage unavailable */
+        }
+        sizeClaudeFrame();
+      });
+      try {
+        if (localStorage.getItem("cl:sidebar-collapsed") === "1") {
+          appShell.classList.add("sidebar-collapsed");
+        }
+      } catch (_) {
+        /* localStorage unavailable */
+      }
+
+      buildSidebar();
+      // Fallback: render the initial view even if settings never load.
+      setTimeout(() => {
+        if (!bootNavDone) {
+          bootNavDone = true;
+          activateNav(currentNavId);
+        }
+      }, 1500);
 
       // --- Claude Dashboard (generated Agent Monitor sidecar) --------------
       // Embed the already-running localhost sidecar in an iframe once it is
@@ -3247,9 +3671,8 @@
 
       function syncAgentMonitorTabVisibility(enabled) {
         cachedAgentMonitorEnabled = enabled === true;
-        if (claudeDashboardTabButton) {
-          claudeDashboardTabButton.hidden = !cachedAgentMonitorEnabled;
-        }
+        // Agent nav items are hidden in the sidebar when the sidecar is off.
+        appShell.classList.toggle("agent-disabled", !cachedAgentMonitorEnabled);
 
         const frame = document.getElementById("claudeDashFrame");
         const status = document.getElementById("claudeDashStatus");
@@ -3266,6 +3689,7 @@
         if (!cachedAgentMonitorEnabled) {
           stopClaudeDashboardPoll();
           claudeDashLoaded = false;
+          agentMonitorFrameOrigin = null;
           if (frame) {
             frame.src = "about:blank";
             frame.style.display = "none";
@@ -3278,26 +3702,34 @@
             hint.textContent =
               "— enable Agent Dashboard in Settings to manage session tracking";
           }
-          if (document.getElementById("claude-dashboard")?.classList.contains("active")) {
+          const current = NAV_ITEMS.find((n) => n.id === currentNavId);
+          if (current && current.kind === "agent") {
             activateTab("settings");
             activateSettingsTab("relay-gateway");
           }
-          return;
+        } else if (hint) {
+          hint.textContent = "— off (no changes to your global Claude config)";
         }
 
-        if (hint) {
-          hint.textContent = "— off (no changes to your global Claude config)";
+        // Render the initial view once the enabled-state is known on boot.
+        if (!bootNavDone) {
+          bootNavDone = true;
+          activateNav(currentNavId);
         }
       }
 
       function sizeClaudeFrame() {
         const frame = document.getElementById("claudeDashFrame");
         if (!frame || frame.style.display === "none") return;
-        // body/html/main have no height and the page scrolls; height:100%
-        // collapses to 0 and any measure while the panel is display:none is 0.
-        // Set an explicit px height AFTER the panel is .active.
+        // Fill exactly from the iframe's top to the bottom of the .page
+        // container — no gap above (page padding is removed in agent view)
+        // or below. Measured live, so the consent bar / resize are handled.
+        const page = frame.closest(".page");
         const top = frame.getBoundingClientRect().top;
-        frame.style.height = Math.max(320, window.innerHeight - top - 24) + "px";
+        const bottom = page
+          ? page.getBoundingClientRect().bottom
+          : window.innerHeight;
+        frame.style.height = Math.max(320, bottom - top) + "px";
       }
       window.addEventListener("resize", sizeClaudeFrame);
 
@@ -3369,7 +3801,20 @@
           try {
             const r = await api.getAgentMonitorUrl();
             if (r && r.ready && r.url) {
+              if (cachedPlanExtractionEnabled !== (r.planExtractionEnabled === true)) {
+                cachedPlanExtractionEnabled = r.planExtractionEnabled === true;
+                buildSidebar();
+              }
               const frameUrl = new URL(r.url);
+              agentMonitorFrameOrigin = frameUrl.origin;
+              // Embed mode hides the sidecar's own sidebar/chrome; the
+              // initial route is baked in so the first paint lands right.
+              frameUrl.pathname = pendingAgentRoute || "/";
+              frameUrl.searchParams.set("embed", "1");
+              frameUrl.searchParams.set(
+                "closedloop_host_origin",
+                window.location.origin || "null",
+              );
               frameUrl.searchParams.set(
                 "closedloop_plan_extraction",
                 r.planExtractionEnabled ? "1" : "0",
@@ -3483,7 +3928,6 @@
       const dashboardSecurity = document.getElementById("dashboardSecurity");
       const dashboardSecurityDetail = document.getElementById("dashboardSecurityDetail");
       const dashboardApproval = document.getElementById("dashboardApproval");
-      const claudeDashboardTabButton = document.getElementById("claudeDashboardTabButton");
       const approvalsList = document.getElementById("approvalsList");
       const activityList = document.getElementById("activityList");
       const runningJobsList = document.getElementById("runningJobsList");
@@ -3527,6 +3971,10 @@
         cachedPort = status.port ?? 19432;
         const runtimeHealth = describeRuntimeHealth(cloudStatus, cachedConnectionEnabled);
         runtimeStatus.className = `runtime-health ${runtimeHealth.tone}`;
+        appShell.classList.remove("state-degraded", "state-disconnected");
+        if (runtimeHealth.tone !== "healthy") {
+          appShell.classList.add("state-disconnected");
+        }
         runtimeStatus.title = runtimeHealth.detail;
         runtimeStatus.style.cursor = isAuthError(cloudStatus.error) ? "pointer" : "";
         runtimeStatus.onclick = isAuthError(cloudStatus.error) ? () => activateTab("settings") : null;
@@ -4171,6 +4619,7 @@
         ]);
         cachedPendingApprovals = Array.isArray(approvals) ? approvals : [];
         cachedResolvedApprovals = Array.isArray(resolved) ? resolved : [];
+        updateApprovalsBadge(cachedPendingApprovals.length);
         renderApprovals();
       }
 
@@ -4179,7 +4628,9 @@
         relayOrigin.value = settings.relayOrigin || "";
         apiOrigin.value = settings.apiOrigin || "";
         webAppOrigin.value = settings.webAppOrigin || "";
+        cachedPlanExtractionEnabled = settings.planExtractionEnabled === true;
         cachedAgentMonitorEnabled = settings.agentMonitorEnabled === true;
+        buildSidebar();
         if (agentMonitorEnabled) {
           agentMonitorEnabled.checked = cachedAgentMonitorEnabled;
         }

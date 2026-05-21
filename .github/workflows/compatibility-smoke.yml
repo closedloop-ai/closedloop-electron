@@ -50,6 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
+      app_credentials_available: ${{ steps.compat-auth.outputs.available }}
       symphony_candidate_sha: ${{ steps.candidate.outputs.symphony_candidate_sha }}
       symphony_candidate_pr: ${{ steps.candidate.outputs.symphony_candidate_pr }}
 
@@ -74,8 +75,23 @@ jobs:
               core.warning('Symphony-alpha SHA is a placeholder — skipping symphony checkout.');
             }
 
-      - name: Generate GitHub App Token
+      - name: Check GitHub App credentials
         if: steps.lkg.outputs.is_placeholder != 'true'
+        id: compat-auth
+        env:
+          CLOSEDLOOP_APP_ID_STAGE: ${{ secrets.CLOSEDLOOP_APP_ID_STAGE }}
+          CLOSEDLOOP_APP_SECRET_STAGE: ${{ secrets.CLOSEDLOOP_APP_SECRET_STAGE }}
+        run: |
+          if [ -n "$CLOSEDLOOP_APP_ID_STAGE" ] && [ -n "$CLOSEDLOOP_APP_SECRET_STAGE" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "available=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::Skipping compatibility smoke tests because CLOSEDLOOP_APP_ID_STAGE or CLOSEDLOOP_APP_SECRET_STAGE is not configured."
+
+      - name: Generate GitHub App Token
+        if: steps.lkg.outputs.is_placeholder != 'true' && steps.compat-auth.outputs.available == 'true'
         id: app-token
         uses: actions/create-github-app-token@v2
         with:
@@ -90,7 +106,7 @@ jobs:
       # label can redirect to an arbitrary PR branch — restrict label permissions
       # in GitHub settings to trusted contributors.
       - name: Checkout symphony-alpha at last-known-good SHA
-        if: steps.lkg.outputs.is_placeholder != 'true'
+        if: steps.lkg.outputs.is_placeholder != 'true' && steps.compat-auth.outputs.available == 'true'
         uses: actions/checkout@v4
         with:
           repository: ${{ steps.lkg.outputs.repo }}
@@ -106,7 +122,7 @@ jobs:
       # must have the `compatibility-pair` label applied BEFORE either CI run starts.
       - name: Detect coordinated symphony-alpha candidate PR
         id: candidate
-        if: steps.lkg.outputs.is_placeholder != 'true'
+        if: steps.lkg.outputs.is_placeholder != 'true' && steps.compat-auth.outputs.available == 'true'
         continue-on-error: true
         uses: actions/github-script@v9
         with:
@@ -152,12 +168,12 @@ jobs:
             core.setOutput("symphony_candidate_pr", prUrl);
 
       - name: Setup pnpm
-        if: steps.lkg.outputs.is_placeholder != 'true'
+        if: steps.lkg.outputs.is_placeholder != 'true' && steps.compat-auth.outputs.available == 'true'
         uses: pnpm/action-setup@v4
 
       # Node 20 (not 22) because symphony-alpha requires ^20.19 for Prisma 7.x
       - name: Setup Node.js
-        if: steps.lkg.outputs.is_placeholder != 'true'
+        if: steps.lkg.outputs.is_placeholder != 'true' && steps.compat-auth.outputs.available == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -165,19 +181,19 @@ jobs:
           cache-dependency-path: symphony-checkout/pnpm-lock.yaml
 
       - name: Install symphony-alpha dependencies
-        if: steps.lkg.outputs.is_placeholder != 'true'
+        if: steps.lkg.outputs.is_placeholder != 'true' && steps.compat-auth.outputs.available == 'true'
         working-directory: symphony-checkout
         run: pnpm install --frozen-lockfile
         env:
           DATABASE_URL: postgresql://localhost:5432/placeholder
 
       - name: Build shared loop API package
-        if: steps.lkg.outputs.is_placeholder != 'true'
+        if: steps.lkg.outputs.is_placeholder != 'true' && steps.compat-auth.outputs.available == 'true'
         working-directory: symphony-checkout
         run: pnpm turbo build --filter=@closedloop-ai/loops-api
 
       - name: Run API compatibility smoke tests
-        if: steps.lkg.outputs.is_placeholder != 'true'
+        if: steps.lkg.outputs.is_placeholder != 'true' && steps.compat-auth.outputs.available == 'true'
         working-directory: symphony-checkout
         run: pnpm --filter=api test:compatibility
         env:
@@ -186,7 +202,7 @@ jobs:
           ELECTRON_CHECKOUT_PATH: ${{ github.workspace }}
 
       - name: Run app compatibility smoke tests
-        if: steps.lkg.outputs.is_placeholder != 'true'
+        if: steps.lkg.outputs.is_placeholder != 'true' && steps.compat-auth.outputs.available == 'true'
         working-directory: symphony-checkout
         run: pnpm --filter=app test:compatibility
         env:
@@ -194,7 +210,7 @@ jobs:
           ELECTRON_CHECKOUT_PATH: ${{ github.workspace }}
 
       - name: Enrich compatibility results with metadata
-        if: steps.lkg.outputs.is_placeholder != 'true'
+        if: steps.lkg.outputs.is_placeholder != 'true' && steps.compat-auth.outputs.available == 'true'
         shell: bash
         run: |
           node -e "
@@ -211,7 +227,7 @@ jobs:
           "
 
       - name: Upload compatibility results
-        if: steps.lkg.outputs.is_placeholder != 'true'
+        if: steps.lkg.outputs.is_placeholder != 'true' && steps.compat-auth.outputs.available == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: compatibility-results-${{ github.event.pull_request.number }}
@@ -228,22 +244,27 @@ jobs:
             const lkgSha = '${{ steps.lkg.outputs.symphony_sha }}';
             const candidateSha = '${{ steps.candidate.outputs.symphony_candidate_sha }}';
             const candidatePr = '${{ steps.candidate.outputs.symphony_candidate_pr }}';
+            const appCredentialsAvailable = '${{ steps.compat-auth.outputs.available }}' === 'true';
             const symphonySha = candidateSha || lkgSha;
             const symphonyLabel = candidateSha ? 'candidate' : 'last-known-good';
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const marker = '<!-- electron-compatibility-smoke-results -->';
 
-            const statusEmoji = runStatus === 'success' ? ':white_check_mark:' : ':x:';
+            const effectiveStatus = appCredentialsAvailable ? runStatus : 'skipped';
+            const statusEmoji = effectiveStatus === 'success' ? ':white_check_mark:' : effectiveStatus === 'skipped' ? ':warning:' : ':x:';
             const lines = [
               marker,
               `## Compatibility Smoke Test Results ${statusEmoji}`,
               '',
-              `**Status:** ${runStatus}`,
+              `**Status:** ${effectiveStatus}`,
               `**Electron SHA:** \`${electronSha}\``,
               `**Symphony Alpha SHA (${symphonyLabel}):** \`${symphonySha}\``,
             ];
             if (candidatePr) {
               lines.push(`**Paired Symphony Alpha PR:** ${candidatePr}`);
+            }
+            if (!appCredentialsAvailable) {
+              lines.push('**Note:** Skipped because the stage GitHub App credentials are not configured for this workflow run.');
             }
             lines.push('', `[View Actions run](${runUrl})`);
             const body = lines.join('\n');
@@ -287,6 +308,7 @@ jobs:
           DETECT_RESULT="${{ needs.detect-changes.result }}"
           SMOKE_RESULT="${{ needs.smoke-tests.result }}"
           BOUNDARY_CHANGED="${{ needs.detect-changes.outputs.boundary }}"
+          APP_CREDENTIALS_AVAILABLE="${{ needs.smoke-tests.outputs.app_credentials_available }}"
 
           if [ "$DETECT_RESULT" != "success" ]; then
             echo "Change detection failed — cannot determine if boundary files were affected."
@@ -296,6 +318,11 @@ jobs:
           if [ "$SMOKE_RESULT" = "failure" ] || [ "$SMOKE_RESULT" = "cancelled" ]; then
             echo "Compatibility smoke tests failed or were cancelled."
             exit 1
+          fi
+
+          if [ "$BOUNDARY_CHANGED" = "true" ] && [ "$APP_CREDENTIALS_AVAILABLE" = "false" ]; then
+            echo "Compatibility smoke tests skipped because the stage GitHub App credentials are not configured."
+            exit 0
           fi
 
           if [ "$BOUNDARY_CHANGED" = "true" ] && [ "$SMOKE_RESULT" = "success" ]; then

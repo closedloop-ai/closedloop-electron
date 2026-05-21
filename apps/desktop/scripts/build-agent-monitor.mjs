@@ -169,6 +169,30 @@ const generatedImportHistory = path.join(
   "import-history.js",
 );
 
+// CLOSEDLOOP embed integration: the agent monitor ships as an <iframe> inside
+// the desktop app. These ClosedLoop-authored files are copied over the
+// upstream client source before the Vite build — Layout.tsx adds embed mode
+// (drops the monitor's own sidebar) plus the host postMessage nav bridge;
+// tailwind.config.js remaps the accent token to the ClosedLoop brand primary.
+const embedModulesDir = path.join(appDir, "scripts", "agent-monitor-embed");
+const embedAppSource = path.join(embedModulesDir, "App.tsx");
+const embedLayoutSource = path.join(embedModulesDir, "Layout.tsx");
+const embedTailwindSource = path.join(embedModulesDir, "tailwind.config.js");
+const CLIENT_FULL_FILE_OVERRIDES = [
+  {
+    from: embedAppSource,
+    to: path.join("src", "App.tsx"),
+  },
+  {
+    from: embedLayoutSource,
+    to: path.join("src", "components", "Layout.tsx"),
+  },
+  {
+    from: embedTailwindSource,
+    to: "tailwind.config.js",
+  },
+];
+
 // Host-owned pricing defaults for model IDs we ingest from non-Claude harnesses.
 // These keep cost stats working without requiring users to hand-enter common
 // rules after startup. Rates are per 1M tokens.
@@ -312,6 +336,8 @@ function currentStamp() {
     path.join(planModulesDir, "plans-route.js"),
     path.join(planModulesDir, "client", "Plans.tsx"),
     path.join(planModulesDir, "client", "closedloop-host-flags.ts"),
+    embedLayoutSource,
+    embedTailwindSource,
   ]) {
     h.update(readFileSync(file));
   }
@@ -1022,6 +1048,12 @@ function patchClientSource() {
     path.join(planModulesDir, "client", "closedloop-host-flags.ts"),
     path.join(sourceClientDir, "src", "lib", "closedloop-host-flags.ts"),
   );
+  // CLOSEDLOOP embed integration: replace selected upstream client files with
+  // repo-owned overlays. Extend CLIENT_FULL_FILE_OVERRIDES for future host
+  // patches that should fully override an upstream file at build time.
+  for (const override of CLIENT_FULL_FILE_OVERRIDES) {
+    cpSync(override.from, path.join(sourceClientDir, override.to));
+  }
   const legacyPlansNavLink = [
     "        })}",
     '        <NavLink',
