@@ -48,4 +48,32 @@ router.get("/:pack_id/skills", (req, res) => {
   }
 });
 
+// GET /api/packs/:pack_id/sessions — per-session usage rollup, derived
+// retroactively from events.data path-matching. Powers the "Used in N
+// sessions" table on the Pack detail page.
+//
+// Query params: limit (default 25), offset (default 0).
+// Response: { items: [{session_id, session_name, session_cwd, session_harness,
+//                      session_model, session_started_at, tool_calls,
+//                      first_used_at, last_used_at}, ...],
+//             total: number }
+router.get("/:pack_id/sessions", (req, res) => {
+  try {
+    const limit = Math.min(
+      Math.max(parseInt(req.query.limit, 10) || 25, 1),
+      200,
+    );
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
+    res.json({
+      items: packStore.listPackSessions(db, req.params.pack_id, {
+        limit,
+        offset,
+      }),
+      total: packStore.countPackSessions(db, req.params.pack_id),
+    });
+  } catch (err) {
+    res.status(500).json({ error: { message: err && err.message } });
+  }
+});
+
 module.exports = router;

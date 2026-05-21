@@ -367,47 +367,75 @@ function listSkillInvocations(
 }
 
 /**
+ * Collect per-pack detection-path patterns from three sources:
+ *   1. `agent_packs.install_path` — current AND tombstoned installs.
+ *   2. `project_pack_associations.project_path` — per-project installs like
+ *      BMad's `_bmad/` directory.
+ *   3. `pack_catalog.detection_patterns` (optional) — seeded fuzzy patterns
+ *      for packs invoked via plugins-cache or other path shapes that don't
+ *      have a formal install row. Catches packs that were used but never
+ *      formally installed in `agent_packs`.
+ *
+ * Returns Map<pack_id, string[]>.
+ */
+function collectPackPaths(db) {
+  const out = new Map();
+  function add(pack_id, p) {
+    if (!pack_id || typeof p !== "string" || !p) return;
+    if (!out.has(pack_id)) out.set(pack_id, new Set());
+    out.get(pack_id).add(p);
+  }
+  for (const row of db
+    .prepare(
+      "SELECT pack_id, install_path FROM agent_packs WHERE install_path IS NOT NULL",
+    )
+    .all()) {
+    add(row.pack_id, row.install_path);
+  }
+  for (const row of db
+    .prepare(
+      "SELECT pack_id, project_path FROM project_pack_associations WHERE project_path IS NOT NULL",
+    )
+    .all()) {
+    add(row.pack_id, row.project_path);
+  }
+  // detection_patterns is on the catalog table — may not exist in legacy/test
+  // environments. try/catch keeps this best-effort.
+  try {
+    for (const row of db
+      .prepare(
+        "SELECT pack_id, detection_patterns FROM pack_catalog WHERE detection_patterns IS NOT NULL",
+      )
+      .all()) {
+      let patterns;
+      try {
+        patterns = JSON.parse(row.detection_patterns);
+      } catch {
+        continue;
+      }
+      if (!Array.isArray(patterns)) continue;
+      for (const p of patterns) add(row.pack_id, p);
+    }
+  } catch {
+    /* pack_catalog table missing — non-fatal */
+  }
+  // Convert Set values to arrays so callers can map over them.
+  const result = new Map();
+  for (const [k, v] of out) result.set(k, Array.from(v));
+  return result;
+}
+
+/**
  * Retroactive pack-usage attribution from the existing `events` table.
- *
- * Every `agent_packs` row carries an `install_path` (e.g.
- * `/Users/x/.claude/skills/gstack`). Most pack work shows up as PreToolUse /
- * PostToolUse events whose `data` blob contains that install_path
- * (file_paths the agent Read/Edit'd, Bash commands invoking the pack's bins,
- * etc.). Joining `events.data LIKE '%' || p.install_path || '%'` recovers
- * that history WITHOUT any new ingestion — works retroactively on any DB
- * whose legacy importer already ran.
- *
- * Also picks up `project_pack_associations` paths so a project that uses BMad
- * (via `_bmad/` in its cwd) gets credit for tool calls inside that project.
+ * See `collectPackPaths()` for which path sources are joined.
  *
  * Returns one row per pack_id with: tool-call count, distinct sessions,
  * first/last used timestamps. Includes tombstoned (uninstalled) packs so they
  * still surface as "previously installed, used N times" on the catalog grid.
- *
- * The LIKE-join is a sequential scan over events but is bounded by the small
- * cardinality of agent_packs rows (typically <50) and is run once per page
- * load. If it ever needs to be hot, add a derived `events_pack_paths` index
- * table populated by the importer.
  */
 function listPackUsage(db) {
-  // Collect candidate install paths for each pack: both `agent_packs.install_path`
-  // (real installs, including tombstoned ones) and `project_pack_associations.project_path`
-  // (project roots where the pack is active — bmad-method's main signal).
-  const paths = db
-    .prepare(
-      `SELECT pack_id, install_path AS p FROM agent_packs WHERE install_path IS NOT NULL
-       UNION
-       SELECT pack_id, project_path AS p FROM project_pack_associations WHERE project_path IS NOT NULL`,
-    )
-    .all();
-  if (paths.length === 0) return [];
-
-  // Group paths by pack_id so we can OR them together per pack.
-  const byPack = new Map();
-  for (const { pack_id, p } of paths) {
-    if (!byPack.has(pack_id)) byPack.set(pack_id, []);
-    byPack.get(pack_id).push(p);
-  }
+  const byPack = collectPackPaths(db);
+  if (byPack.size === 0) return [];
 
   const out = [];
   for (const [packId, packPaths] of byPack) {
@@ -431,6 +459,72 @@ function listPackUsage(db) {
   return out;
 }
 
+/**
+ * Per-session usage rollup for one pack. Powers the "Used in N sessions"
+ * table on the Pack detail page. Each row is one session whose events touched
+ * one or more of the pack's detection paths (see `collectPackPaths()`).
+ *
+ * Sorted by last activity in that session, descending.
+ *
+ * @returns {Array<{
+ *   session_id: string,
+ *   session_name: string | null,
+ *   session_cwd: string | null,
+ *   session_harness: string,
+ *   session_model: string | null,
+ *   session_started_at: string | null,
+ *   tool_calls: number,
+ *   first_used_at: string,
+ *   last_used_at: string
+ * }>}
+ */
+function listPackSessions(db, packId, { limit = 25, offset = 0 } = {}) {
+  const byPack = collectPackPaths(db);
+  const packPaths = byPack.get(packId);
+  if (!packPaths || packPaths.length === 0) return [];
+
+  const likeClauses = packPaths.map(() => "e.data LIKE ?").join(" OR ");
+  const likeParams = packPaths.map((p) => `%${p}%`);
+
+  return db
+    .prepare(
+      `SELECT
+         e.session_id,
+         sess.name                                    AS session_name,
+         sess.cwd                                     AS session_cwd,
+         COALESCE(NULLIF(sess.harness, ''), 'claude') AS session_harness,
+         sess.model                                   AS session_model,
+         sess.started_at                              AS session_started_at,
+         COUNT(*)                                     AS tool_calls,
+         MIN(e.created_at)                            AS first_used_at,
+         MAX(e.created_at)                            AS last_used_at
+       FROM events e
+       JOIN sessions sess ON sess.id = e.session_id
+       WHERE ${likeClauses}
+       GROUP BY e.session_id
+       ORDER BY last_used_at DESC
+       LIMIT ? OFFSET ?`,
+    )
+    .all(...likeParams, limit, offset);
+}
+
+/** Total count of sessions matching listPackSessions (for pagination UIs). */
+function countPackSessions(db, packId) {
+  const byPack = collectPackPaths(db);
+  const packPaths = byPack.get(packId);
+  if (!packPaths || packPaths.length === 0) return 0;
+  const likeClauses = packPaths.map(() => "e.data LIKE ?").join(" OR ");
+  const likeParams = packPaths.map((p) => `%${p}%`);
+  const row = db
+    .prepare(
+      `SELECT COUNT(DISTINCT e.session_id) AS n
+       FROM events e
+       WHERE ${likeClauses}`,
+    )
+    .get(...likeParams);
+  return row ? row.n : 0;
+}
+
 module.exports = {
   ensurePackSchema,
   upsertPack,
@@ -442,4 +536,7 @@ module.exports = {
   listSkills,
   listSkillInvocations,
   listPackUsage,
+  listPackSessions,
+  countPackSessions,
+  collectPackPaths,
 };

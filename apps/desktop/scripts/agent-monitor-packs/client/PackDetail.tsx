@@ -53,12 +53,43 @@ interface InstalledSkill {
   description: string | null;
 }
 
+interface SessionUsageRow {
+  session_id: string;
+  session_name: string | null;
+  session_cwd: string | null;
+  session_harness: string;
+  session_model: string | null;
+  session_started_at: string | null;
+  tool_calls: number;
+  first_used_at: string;
+  last_used_at: string;
+}
+
+interface SessionUsageResponse {
+  items: SessionUsageRow[];
+  total: number;
+}
+
 interface InstalledDetail {
   pack_id: string;
   version: string | null;
   harnesses: string[];
   installs: InstalledInstall[];
   skills: InstalledSkill[];
+}
+
+function formatRelativeShort(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (Number.isNaN(ms) || ms < 0) return "—";
+  const days = Math.floor(ms / 86400000);
+  if (days >= 30) return `${Math.floor(days / 30)}mo`;
+  if (days >= 1) return `${days}d`;
+  const hours = Math.floor(ms / 3600000);
+  if (hours >= 1) return `${hours}h`;
+  const mins = Math.floor(ms / 60000);
+  if (mins >= 1) return `${mins}m`;
+  return "now";
 }
 
 function formatStars(n: number | null | undefined): string {
@@ -98,6 +129,10 @@ export function PackDetail() {
   const [contentsLoading, setContentsLoading] = useState(false);
   const [contentsError, setContentsError] = useState<string | null>(null);
   const [installed, setInstalled] = useState<InstalledDetail | null>(null);
+  const [sessions, setSessions] = useState<SessionUsageRow[] | null>(null);
+  const [sessionsTotal, setSessionsTotal] = useState(0);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionsLimit, setSessionsLimit] = useState(25);
   const [error, setError] = useState<string | null>(null);
   const [installModal, setInstallModal] = useState<{
     harness: string;
@@ -168,12 +203,32 @@ export function PackDetail() {
     }
   }, [packId]);
 
+  const loadSessions = useCallback(async () => {
+    if (!packId) return;
+    setSessionsLoading(true);
+    try {
+      const res = await fetch(
+        `/api/packs/${encodeURIComponent(packId)}/sessions?limit=${sessionsLimit}`,
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as SessionUsageResponse;
+      setSessions(Array.isArray(data.items) ? data.items : []);
+      setSessionsTotal(typeof data.total === "number" ? data.total : 0);
+    } catch {
+      setSessions([]);
+      setSessionsTotal(0);
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, [packId, sessionsLimit]);
+
   useEffect(() => {
     loadEntry();
     loadInstalled();
     loadReadme();
     loadContents();
-  }, [loadEntry, loadInstalled, loadReadme, loadContents]);
+    loadSessions();
+  }, [loadEntry, loadInstalled, loadReadme, loadContents, loadSessions]);
 
   if (!packId) return null;
 
@@ -426,6 +481,97 @@ export function PackDetail() {
                 )}
               </section>
             )}
+
+            {/* Per-session usage history (FEA-1314 v8). Sourced retroactively
+                from the events table — works for currently-installed AND
+                tombstoned packs, as long as a session ever touched a path
+                in the pack's detection_patterns set. */}
+            <section>
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 mb-1.5">
+                Used in sessions
+                {sessions && sessions.length > 0 && (
+                  <span className="ml-1 text-gray-400 normal-case font-normal">
+                    ({sessionsTotal === sessions.length
+                      ? sessionsTotal
+                      : `showing ${sessions.length} of ${sessionsTotal}`}
+                    )
+                  </span>
+                )}
+              </div>
+              {sessionsLoading && !sessions ? (
+                <div className="text-[11px] text-gray-500 italic">Loading…</div>
+              ) : !sessions || sessions.length === 0 ? (
+                <div className="text-[11px] text-gray-500 italic">
+                  No session usage detected for this pack yet. Sessions appear
+                  here once any tool call touches the pack's files (install
+                  dir, plugin cache, or known per-project paths like{" "}
+                  <code className="font-mono">_bmad/</code> /{" "}
+                  <code className="font-mono">.gstack/</code>).
+                </div>
+              ) : (
+                <div className="rounded-lg border border-border overflow-hidden">
+                  <table className="w-full text-[11px]">
+                    <thead className="bg-surface-3 text-[10px] uppercase tracking-wide text-gray-400">
+                      <tr>
+                        <th className="text-left px-2.5 py-1.5 font-medium">Session</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium">When</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium">Project</th>
+                        <th className="text-left px-2.5 py-1.5 font-medium">Harness · Model</th>
+                        <th className="text-right px-2.5 py-1.5 font-medium">Tool calls</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border">
+                      {sessions.map((s) => {
+                        const project = s.session_cwd
+                          ? s.session_cwd.split("/").filter(Boolean).slice(-1)[0]
+                          : "—";
+                        const when = formatRelativeShort(s.last_used_at);
+                        return (
+                          <tr
+                            key={s.session_id}
+                            className="hover:bg-surface-3/50 cursor-pointer"
+                            onClick={() => navigate(`/sessions/${s.session_id}`)}
+                            title={`Click to open session\nLast used: ${new Date(s.last_used_at).toLocaleString()}\nStarted: ${s.session_started_at ? new Date(s.session_started_at).toLocaleString() : "unknown"}`}
+                          >
+                            <td className="px-2.5 py-1.5 font-mono text-gray-200 truncate max-w-[18rem]">
+                              {s.session_name || s.session_id.slice(0, 8)}
+                            </td>
+                            <td className="px-2.5 py-1.5 text-gray-400 whitespace-nowrap">
+                              {when}
+                            </td>
+                            <td
+                              className="px-2.5 py-1.5 font-mono text-gray-400 truncate max-w-[12rem]"
+                              title={s.session_cwd || ""}
+                            >
+                              {project}
+                            </td>
+                            <td className="px-2.5 py-1.5 text-gray-400 truncate max-w-[12rem]">
+                              <span className="font-mono">{s.session_harness}</span>
+                              {s.session_model && (
+                                <span className="text-gray-500"> · {s.session_model}</span>
+                              )}
+                            </td>
+                            <td className="px-2.5 py-1.5 text-right font-mono text-gray-200">
+                              {s.tool_calls}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {sessionsTotal > sessions.length && (
+                    <div className="bg-surface-3/30 px-2.5 py-1.5 text-center">
+                      <button
+                        onClick={() => setSessionsLimit(sessionsLimit + 25)}
+                        className="text-[11px] text-gray-400 hover:text-gray-200"
+                      >
+                        Show {Math.min(25, sessionsTotal - sessions.length)} more →
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </section>
 
             {/* Contents — pre-install or catalog listing */}
             <section>

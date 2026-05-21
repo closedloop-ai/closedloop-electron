@@ -1,6 +1,6 @@
 {
-  "seed_version": 7,
-  "_note": "Seed v7 (2026-05-21): every pack has a GitHub presence — `github_url` now ALWAYS points at the actual source-of-truth code location (a subdirectory link for marketplace plugins, or a repo root, or a true upstream). The optional `marketplace_url` field points at the parent marketplace registry when one exists, surfaced in the UI as a secondary 'Marketplace →' link. v6's `upstream_github_url` field is dropped (replaced by this cleaner model). For context7 specifically, github_url is upstash/context7 (the real source, 55.8k stars) and marketplace_url is the anthropics registry. For the 4 Anthropic-owned picks, github_url is the precise tree/main/plugins/<name> subdirectory and marketplace_url is the registry root.",
+  "seed_version": 8,
+  "_note": "Seed v8 (2026-05-21): added optional `detection_patterns` field — a list of path substrings the pack-store uses to retroactively attribute events to a pack. Used by the new GET /api/packs/:packId/sessions endpoint that powers the 'Used in N sessions' table on Pack detail pages. Catches packs invoked via plugins/cache/ (no formal install row), project-local installs, and other fuzzy paths beyond agent_packs.install_path. v7 dual-URL model preserved.",
   "packs": [
     {
       "pack_id": "closedloop-ai",
@@ -18,6 +18,11 @@
       "install_notes": "Installs the five runtime plugins (code, code-review, judges, platform, self-learning) into Claude Code at user scope. The bootstrap plugin is available in the marketplace but excluded from the default install.",
       "verified": true,
       "pin_order": 0,
+      "detection_patterns": [
+        "/.claude/plugins/cache/closedloop-ai/",
+        "/.claude/plugins/marketplaces/closedloop-ai/",
+        "closedloop-ai/claude-plugins"
+      ],
       "contents": {
         "type": "claude-marketplace",
         "marketplace_repo": "closedloop-ai/claude-plugins",
@@ -62,6 +67,9 @@
       },
       "install_notes": "Hand-picked from Anthropic's claude-plugins-official marketplace. Installable headlessly via the Claude CLI.",
       "verified": true,
+      "detection_patterns": [
+        "/.claude/plugins/cache/claude-plugins-official/code-review/"
+      ],
       "contents": {
         "type": "github-claude-plugin",
         "marketplace_repo": "anthropics/claude-plugins-official",
@@ -84,6 +92,9 @@
       },
       "install_notes": "Hand-picked from Anthropic's claude-plugins-official marketplace.",
       "verified": true,
+      "detection_patterns": [
+        "/.claude/plugins/cache/claude-plugins-official/code-modernization/"
+      ],
       "contents": {
         "type": "github-claude-plugin",
         "marketplace_repo": "anthropics/claude-plugins-official",
@@ -106,6 +117,9 @@
       },
       "install_notes": "Hand-picked from Anthropic's claude-plugins-official marketplace. After install, invoke its setup skill from a fresh project to get a recommended automation stack.",
       "verified": true,
+      "detection_patterns": [
+        "/.claude/plugins/cache/claude-plugins-official/claude-code-setup/"
+      ],
       "contents": {
         "type": "github-claude-plugin",
         "marketplace_repo": "anthropics/claude-plugins-official",
@@ -128,6 +142,9 @@
       },
       "install_notes": "Hand-picked from Anthropic's claude-plugins-official marketplace.",
       "verified": true,
+      "detection_patterns": [
+        "/.claude/plugins/cache/claude-plugins-official/claude-md-management/"
+      ],
       "contents": {
         "type": "github-claude-plugin",
         "marketplace_repo": "anthropics/claude-plugins-official",
@@ -150,6 +167,11 @@
       },
       "install_notes": "MCP server — adds documentation-lookup tools rather than slash commands or agents. Hand-picked from Anthropic's claude-plugins-official marketplace; sourced from external_plugins/context7.",
       "verified": true,
+      "detection_patterns": [
+        "/.claude/plugins/cache/claude-plugins-official/context7/",
+        "mcp__context7__",
+        "upstash/context7"
+      ],
       "contents": {
         "type": "github-claude-plugin",
         "marketplace_repo": "anthropics/claude-plugins-official",
@@ -171,6 +193,10 @@
       },
       "install_notes": "Installs from Anthropic's official Claude Code plugin marketplace (claude-plugins-official). Codex install is interactive via the Codex /plugins UI — not scripted from CLI.",
       "verified": true,
+      "detection_patterns": [
+        "/.claude/plugins/cache/claude-plugins-official/superpowers/",
+        "/obra/superpowers"
+      ],
       "contents": {
         "type": "github-skill-tree",
         "skills_path": "skills",
@@ -191,7 +217,11 @@
         "claude": "claude plugin uninstall compound-engineering@claude-plugins-official --scope user"
       },
       "install_notes": "Installable from Anthropic's official Claude Code plugin marketplace. Codex/Cursor installs follow each harness's plugin format — see README.",
-      "verified": true
+      "verified": true,
+      "detection_patterns": [
+        "/compound-engineering-plugin/",
+        "/.claude/plugins/cache/claude-plugins-official/compound-engineering/"
+      ]
     },
     {
       "pack_id": "gstack",
@@ -210,6 +240,13 @@
       },
       "verified": true,
       "install_notes": "After the clone lands, gstack's `./setup` is INTERACTIVE — it prompts for several confirmations. The catalog runs the clone + setup, but you may need to answer prompts in the install modal's output pane. Codex install runs `./setup --host codex` after the Claude side. NOTE: gstack's setup creates per-skill symlinks at `~/.claude/skills/<skill-name>/SKILL.md` pointing into the gstack repo (NOT under `~/.claude/skills/gstack/`); the uninstall command removes both the gstack repo AND every dangling symlink it leaves behind.",
+      "detection_patterns": [
+        "/.claude/skills/gstack",
+        "/.codex/skills/gstack",
+        "/.gstack/",
+        "gstack-builder-profile",
+        "gstack-brain-sync"
+      ],
       "contents": {
         "type": "github-skill-tree",
         "skills_path": ".agents/skills",
@@ -233,6 +270,14 @@
       },
       "install_notes": "Runs in the CURRENT directory and installs per-project. `--yes` alone does NOT skip the directory prompt — `--directory .` is required to bypass interactivity. The installer accepts module/IDE flags too (see README).",
       "verified": true,
+      "detection_patterns": [
+        "/.claude/skills/bmad-",
+        "/_bmad/",
+        "/.bmad/",
+        "bmad-distillator",
+        "bmad-prd",
+        "bmad-method/"
+      ],
       "contents": {
         "type": "github-multi-skill-tree",
         "skill_paths": ["src/core-skills", "src/bmm-skills"],

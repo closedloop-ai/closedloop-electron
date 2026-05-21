@@ -27,6 +27,9 @@ const {
   listSkills,
   listSkillsForPack,
   listPackUsage,
+  listPackSessions,
+  countPackSessions,
+  collectPackPaths,
 } = require("../pack-store");
 
 function mkdtemp() {
@@ -778,6 +781,81 @@ test("listPackUsage attributes events to packs via install_path LIKE-join", () =
     2,
     "1 from skills install_path + 1 from project_pack_associations",
   );
+});
+
+test("listPackSessions groups events by session for a single pack", () => {
+  const db = makeDb();
+  // Seed a single gstack install whose install_path is the LIKE-anchor.
+  db.prepare(
+    `INSERT INTO agent_packs
+       (pack_id, harness, install_path, install_kind, source_url, version, detected_at, last_seen_at, uninstalled_at)
+     VALUES ('gstack', 'claude', '/u/.claude/skills/gstack', 'directory', NULL, NULL, ?, ?, NULL)`,
+  ).run("2026-05-18T00:00:00Z", "2026-05-21T00:00:00Z");
+
+  // Two sessions, each with multiple events touching gstack.
+  db.prepare("INSERT INTO sessions (id, name, cwd, model, started_at) VALUES (?, ?, ?, ?, ?)")
+    .run("sA", "feat/FEA-1314", "/u/work/proj", "sonnet-4", "2026-05-18T09:00:00Z");
+  db.prepare("INSERT INTO sessions (id, name, cwd, model, started_at) VALUES (?, ?, ?, ?, ?)")
+    .run("sB", "plan review",   "/u/work/proj", "sonnet-4", "2026-05-19T09:00:00Z");
+  // Stub sessions need a harness column to satisfy the LEFT JOIN's COALESCE.
+  try { db.exec("ALTER TABLE sessions ADD COLUMN harness TEXT"); } catch {}
+  db.prepare("UPDATE sessions SET harness='claude' WHERE id IN ('sA','sB')").run();
+
+  for (const e of [
+    ["sA", "2026-05-18T10:00:00Z", '{"tool_input":{"file_path":"/u/.claude/skills/gstack/ETHOS.md"}}'],
+    ["sA", "2026-05-18T10:05:00Z", '{"tool_input":{"file_path":"/u/.claude/skills/gstack/VERSION"}}'],
+    ["sA", "2026-05-18T10:10:00Z", '{"tool_input":{"command":"bash /u/.claude/skills/gstack/bin/gstack-brain-sync"}}'],
+    ["sB", "2026-05-19T10:00:00Z", '{"tool_input":{"file_path":"/u/.claude/skills/gstack/SKILL.md"}}'],
+    // unrelated session — must not appear
+    ["sA", "2026-05-18T11:00:00Z", '{"tool_input":{"file_path":"/u/unrelated.md"}}'],
+  ]) {
+    const [sid, ts, data] = e;
+    db.prepare(
+      "INSERT INTO events (session_id, event_type, data, created_at) VALUES (?, 'PostToolUse', ?, ?)",
+    ).run(sid, data, ts);
+  }
+
+  const rows = listPackSessions(db, "gstack");
+  assert.equal(rows.length, 2, "should return 2 sessions");
+  // Sorted by last_used_at DESC — sB (5/19) before sA (5/18).
+  assert.equal(rows[0].session_id, "sB");
+  assert.equal(rows[0].tool_calls, 1);
+  assert.equal(rows[1].session_id, "sA");
+  assert.equal(rows[1].tool_calls, 3, "3 of sA's 4 events match gstack");
+  assert.equal(rows[1].session_name, "feat/FEA-1314");
+  assert.equal(rows[1].session_harness, "claude");
+  assert.equal(rows[1].session_model, "sonnet-4");
+  assert.equal(rows[1].session_cwd, "/u/work/proj");
+
+  assert.equal(countPackSessions(db, "gstack"), 2);
+  assert.equal(countPackSessions(db, "no-such-pack"), 0);
+});
+
+test("collectPackPaths merges install_path, project_path, and detection_patterns", () => {
+  const db = makeDb();
+  // Seed the catalog table — same additive schema the build creates at startup.
+  const catalogStore = require("../catalog-store");
+  catalogStore.ensureCatalogSchema(db);
+  db.prepare(
+    `INSERT INTO pack_catalog (pack_id, display_name, github_url, detection_patterns, seed_version)
+     VALUES ('gstack', 'gstack', 'https://github.com/x/x', ?, 1)`,
+  ).run(JSON.stringify(["/.gstack/", "gstack-brain-sync"]));
+  db.prepare(
+    `INSERT INTO agent_packs
+       (pack_id, harness, install_path, install_kind, detected_at, last_seen_at, uninstalled_at)
+     VALUES ('gstack', 'claude', '/u/.claude/skills/gstack', 'directory', ?, ?, NULL)`,
+  ).run("2026-05-18T00:00:00Z", "2026-05-21T00:00:00Z");
+  db.prepare(
+    `INSERT INTO project_pack_associations (project_path, pack_id, detected_at, last_seen_at)
+     VALUES ('/u/work/proj', 'gstack', ?, ?)`,
+  ).run("2026-05-18T00:00:00Z", "2026-05-21T00:00:00Z");
+
+  const paths = collectPackPaths(db).get("gstack");
+  assert.ok(paths);
+  assert.ok(paths.includes("/u/.claude/skills/gstack"));
+  assert.ok(paths.includes("/u/work/proj"));
+  assert.ok(paths.includes("/.gstack/"));
+  assert.ok(paths.includes("gstack-brain-sync"));
 });
 
 test("no skill_invocations table is ever created", () => {

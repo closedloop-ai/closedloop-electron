@@ -1771,6 +1771,30 @@ function assertGeneratedTree() {
       "Generated server/index.js is missing the pack scanner startup call (FEA-1224).",
     );
   }
+  // FEA-1314 v8: per-session usage rollup on Pack detail. Hard-gate the
+  // server-side endpoint + the pack-store helper so a future patch can't
+  // silently drop them.
+  const packsRouteSource = readFileSync(
+    path.join(generatedRootDir, "server", "routes", "packs.js"),
+    "utf8",
+  );
+  if (!packsRouteSource.includes("/:pack_id/sessions")) {
+    throw new Error(
+      "Generated server/routes/packs.js is missing the /sessions endpoint (FEA-1314 v8).",
+    );
+  }
+  const packStoreSource = readFileSync(
+    path.join(generatedRootDir, "server", "lib", "pack-store.js"),
+    "utf8",
+  );
+  if (
+    !packStoreSource.includes("listPackSessions") ||
+    !packStoreSource.includes("collectPackPaths")
+  ) {
+    throw new Error(
+      "Generated server/lib/pack-store.js is missing listPackSessions / collectPackPaths (FEA-1314 v8).",
+    );
+  }
   // Client-side: the four new pages must be present in the patched upstream
   // client source so Vite's bundle resolves their imports. The pre-Vite copy
   // puts them at src/pages/<Name>.tsx; if any is missing the Vite step would

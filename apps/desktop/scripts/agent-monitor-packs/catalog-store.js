@@ -110,6 +110,13 @@ function ensureCatalogSchema(db) {
     //                  marketplace_url = .../claude-plugins-official
     //   - gstack:      github_url = repo root,  marketplace_url = NULL
     ["marketplace_url", "TEXT"],
+    // v8: detection_patterns is a JSON array of substring patterns used by
+    // pack-store.collectPackPaths() to retroactively attribute events to a
+    // pack — broader than the literal `agent_packs.install_path`. Catches
+    // packs invoked via plugins/cache/ (no formal install row), project-local
+    // installs (`.bmad/`, `.gstack/`), and other fuzzy paths. Nullable; no-op
+    // when absent.
+    ["detection_patterns", "TEXT"],
   ]) {
     try {
       db.prepare(`SELECT ${col} FROM pack_catalog LIMIT 1`).get();
@@ -162,23 +169,24 @@ function upsertCatalogSeed(db, seedDoc) {
          (pack_id, display_name, category, github_url, marketplace_url,
           description, harnesses, install_commands, uninstall_commands,
           install_notes, placeholder_reason, verified, pin_order, contents,
-          seed_version)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          detection_patterns, seed_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(pack_id) DO UPDATE SET
-         display_name       = excluded.display_name,
-         category           = excluded.category,
-         github_url         = excluded.github_url,
-         marketplace_url    = excluded.marketplace_url,
-         description        = excluded.description,
-         harnesses          = excluded.harnesses,
-         install_commands   = excluded.install_commands,
-         uninstall_commands = excluded.uninstall_commands,
-         install_notes      = excluded.install_notes,
-         placeholder_reason = excluded.placeholder_reason,
-         verified           = excluded.verified,
-         pin_order          = excluded.pin_order,
-         contents           = excluded.contents,
-         seed_version       = excluded.seed_version`,
+         display_name        = excluded.display_name,
+         category            = excluded.category,
+         github_url          = excluded.github_url,
+         marketplace_url     = excluded.marketplace_url,
+         description         = excluded.description,
+         harnesses           = excluded.harnesses,
+         install_commands    = excluded.install_commands,
+         uninstall_commands  = excluded.uninstall_commands,
+         install_notes       = excluded.install_notes,
+         placeholder_reason  = excluded.placeholder_reason,
+         verified            = excluded.verified,
+         pin_order           = excluded.pin_order,
+         contents            = excluded.contents,
+         detection_patterns  = excluded.detection_patterns,
+         seed_version        = excluded.seed_version`,
     ).run(
       pack.pack_id,
       pack.display_name,
@@ -196,6 +204,9 @@ function upsertCatalogSeed(db, seedDoc) {
       pack.verified ? 1 : 0,
       typeof pack.pin_order === "number" ? pack.pin_order : null,
       pack.contents ? JSON.stringify(pack.contents) : null,
+      Array.isArray(pack.detection_patterns)
+        ? JSON.stringify(pack.detection_patterns)
+        : null,
       seedVersion,
     );
     if (existing) stats.updated += 1;
