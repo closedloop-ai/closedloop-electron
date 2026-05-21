@@ -22,6 +22,15 @@ const { execFileSync } = require("child_process");
 const https = require("https");
 const { applyFetchResult } = require("./catalog-store");
 
+// FEA-1314 v6: marketplace sub-plugins (e.g. code-review, context7) live as
+// folders inside a parent marketplace repo. The default per-repo fetch
+// (stars + description) writes the MARKETPLACE'S stars/description to every
+// sub-plugin row, making all of them look identical (e.g. 5 plugins all
+// showing "21.3k stars · Official, Anthropic-managed directory of...").
+// For these, we instead fetch each plugin's own .claude-plugin/plugin.json
+// for its plugin-specific name/description/version, and leave stars NULL —
+// the marketplace's star count doesn't represent the individual plugin.
+
 const REQUEST_TIMEOUT_MS = 5000;
 const DEFAULT_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
 const USER_AGENT = "closedloop-electron-agent-monitor";
@@ -126,6 +135,85 @@ async function restFetchLatestRelease(owner, repo) {
 }
 
 /**
+ * Fetch a marketplace sub-plugin's .claude-plugin/plugin.json from the
+ * parent marketplace repo. Returns the parsed JSON or null. Used to source
+ * plugin-specific description + version for catalog entries whose
+ * `contents.type === 'github-claude-plugin'`.
+ */
+function ghFetchPluginManifest(owner, repo, pluginPath) {
+  try {
+    const out = execFileSync(
+      "gh",
+      [
+        "api",
+        `repos/${owner}/${repo}/contents/${encodeURI(pluginPath)}/.claude-plugin/plugin.json`,
+        "--header",
+        "Accept: application/vnd.github.raw",
+      ],
+      { timeout: REQUEST_TIMEOUT_MS, stdio: ["ignore", "pipe", "ignore"] },
+    );
+    return JSON.parse(out.toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function restFetchPluginManifest(owner, repo, pluginPath) {
+  return new Promise((resolve) => {
+    const req = https.get(
+      {
+        host: "api.github.com",
+        path: `/repos/${owner}/${repo}/contents/${encodeURI(pluginPath)}/.claude-plugin/plugin.json`,
+        headers: {
+          "User-Agent": USER_AGENT,
+          Accept: "application/vnd.github.raw",
+        },
+        timeout: REQUEST_TIMEOUT_MS,
+      },
+      (res) => {
+        if (res.statusCode !== 200) {
+          resolve(null);
+          res.resume();
+          return;
+        }
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (c) => (body += c));
+        res.on("end", () => {
+          try {
+            resolve(JSON.parse(body));
+          } catch {
+            resolve(null);
+          }
+        });
+      },
+    );
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(null);
+    });
+  });
+}
+
+async function fetchPluginManifest(owner, repo, pluginPath, useGh) {
+  if (useGh) {
+    const m = ghFetchPluginManifest(owner, repo, pluginPath);
+    if (m) return m;
+  }
+  return restFetchPluginManifest(owner, repo, pluginPath);
+}
+
+function parseJsonField(value) {
+  if (!value) return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Fetch stats for every pack in pack_catalog and apply them via the store.
  * Best-effort per pack; returns a summary.
  */
@@ -140,7 +228,7 @@ async function runCatalogFetch(db) {
   let rows;
   try {
     rows = db
-      .prepare("SELECT pack_id, github_url FROM pack_catalog")
+      .prepare("SELECT pack_id, github_url, contents FROM pack_catalog")
       .all();
   } catch (e) {
     console.warn("[catalog-fetcher] cannot read pack_catalog:", e && e.message);
@@ -152,6 +240,52 @@ async function runCatalogFetch(db) {
       summary.skipped += 1;
       continue;
     }
+    const contents = parseJsonField(row.contents);
+    const isMarketplaceSubPlugin =
+      contents && contents.type === "github-claude-plugin";
+
+    if (isMarketplaceSubPlugin) {
+      // FEA-1314 v6: read the plugin's OWN manifest for description +
+      // version. Skip the marketplace-repo-level stars fetch entirely — those
+      // numbers are misleading for sub-plugins (every sub-plugin would
+      // inherit the marketplace's identical star count). The card will
+      // render with stars=null → "★ —" instead of a wrong "21.3k".
+      const mkRepoOverride = contents.marketplace_repo
+        ? parseGithubUrl(`https://github.com/${contents.marketplace_repo}`)
+        : null;
+      const pluginOwner = mkRepoOverride ? mkRepoOverride.owner : parsed.owner;
+      const pluginRepo = mkRepoOverride ? mkRepoOverride.repo : parsed.repo;
+      const manifest = await fetchPluginManifest(
+        pluginOwner,
+        pluginRepo,
+        contents.plugin_path,
+        summary.used_gh_cli,
+      );
+      if (!manifest) {
+        summary.failed += 1;
+        continue;
+      }
+      try {
+        applyFetchResult(db, {
+          pack_id: row.pack_id,
+          // Sub-plugins don't have their own GitHub star count — leave NULL.
+          stars: null,
+          forks: null,
+          description: manifest.description || null,
+          last_release: manifest.version || null,
+        });
+        summary.succeeded += 1;
+      } catch (e) {
+        console.warn(
+          `[catalog-fetcher] applyFetchResult failed for ${row.pack_id}:`,
+          e && e.message,
+        );
+        summary.failed += 1;
+      }
+      continue;
+    }
+
+    // Default path: standalone repo — fetch its stars + description.
     let repo = null;
     let release = null;
     if (summary.used_gh_cli) {
