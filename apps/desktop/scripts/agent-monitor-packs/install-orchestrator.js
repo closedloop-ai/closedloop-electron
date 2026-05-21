@@ -120,23 +120,46 @@ function isHarnessInstalled(harness) {
 }
 
 /**
- * For `single_install` packs (gstack), pick the install command that covers
- * the most installed CLIs.
+ * For `single_install` packs (gstack), pick the command to run for install
+ * or uninstall. Install and uninstall use different join strategies because
+ * the underlying commands have different semantic relationships:
  *
- * Heuristic: if both claude and codex are installed AND the seed lists both
- * harnesses, prefer the `codex` install command — by convention these
- * commands are written as supersets of the `claude` command for packs in
- * this category (gstack's `./setup && ./setup --host codex` is the
- * canonical example). Fall back to whichever single command exists for
- * the harness that IS installed.
+ *   INSTALL — pick the SUPERSET command. By convention for single_install
+ *   packs, the codex install command is a superset of the claude install
+ *   command (gstack's `./setup && ./setup --host codex` runs the claude
+ *   setup AND the codex one). Running the superset alone installs for all
+ *   detected CLIs.
  *
- * Returns { command, registerHarnesses } — the command to run + which
- * harness rows the post-install scanner should expect to materialize.
+ *   UNINSTALL — JOIN all uninstall commands across listed harnesses with
+ *   `;`. The claude and codex uninstall commands are DISJOINT cleanups
+ *   (claude: rm ~/.claude/skills/gstack; codex: rm ~/.codex/skills/gstack*),
+ *   neither is a superset of the other. Running only one leaves the other
+ *   harness's artifacts on disk. `;` (not `&&`) so each step is independent
+ *   — a missing artifact in one harness doesn't skip cleanup in the next.
+ *   Uninstall runs for ALL listed harnesses (not just CLIs currently on
+ *   PATH) because on-disk artifacts may outlive the CLI install.
+ *
+ * Returns { command, registerHarnesses }.
  */
 function pickSingleInstallCommand(entry, action) {
   const cmdMap =
     action === "uninstall" ? entry.uninstall_commands : entry.install_commands;
   const harnesses = Array.isArray(entry.harnesses) ? entry.harnesses : [];
+
+  if (action === "uninstall") {
+    // Join ALL listed harnesses' uninstall commands. Run regardless of
+    // which CLIs are currently on PATH — we're cleaning up artifacts, not
+    // managing live CLIs.
+    const cmds = harnesses
+      .map((h) => cmdMap && cmdMap[h])
+      .filter(Boolean);
+    if (cmds.length === 0) {
+      return { command: null, registerHarnesses: [] };
+    }
+    return { command: cmds.join(" ; "), registerHarnesses: harnesses };
+  }
+
+  // Install path — only consider harnesses whose CLI is actually present.
   const installed = harnesses.filter(isHarnessInstalled);
   if (installed.length === 0) {
     return { command: null, registerHarnesses: [] };

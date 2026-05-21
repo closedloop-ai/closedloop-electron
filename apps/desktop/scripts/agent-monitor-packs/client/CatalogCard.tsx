@@ -355,14 +355,32 @@ export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
           // command. The server picks the actual command to run based on
           // detected CLIs, so the preview may differ slightly from what
           // executes — that's noted in the modal copy.
+          //
+          // INSTALL vs UNINSTALL differ for single_install packs:
+          //  - install:   server picks one SUPERSET command (codex variant
+          //               is a superset of claude). Preview = codex command.
+          //  - uninstall: server JOINS all uninstall commands with `;` (they
+          //               are disjoint cleanups; one is not a superset of
+          //               the other). Preview = same joined string so the
+          //               user sees what's about to actually run.
           const cmdMap =
             modal.action === "install"
               ? pack.install_commands
               : pack.uninstall_commands;
           let previewCommand: string;
           if (modal.harness === "auto") {
-            previewCommand =
-              cmdMap["codex"] || cmdMap["claude"] || Object.values(cmdMap)[0] || "";
+            if (modal.action === "uninstall") {
+              previewCommand = pack.harnesses
+                .map((h) => cmdMap[h])
+                .filter((c): c is string => Boolean(c))
+                .join(" ; ");
+            } else {
+              previewCommand =
+                cmdMap["codex"] ||
+                cmdMap["claude"] ||
+                Object.values(cmdMap)[0] ||
+                "";
+            }
           } else {
             previewCommand = cmdMap[modal.harness] || "";
           }
