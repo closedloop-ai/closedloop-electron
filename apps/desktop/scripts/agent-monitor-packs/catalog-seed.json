@@ -73,11 +73,11 @@
         "codex": "git clone https://github.com/garrytan/gstack ~/.claude/skills/gstack && cd ~/.claude/skills/gstack && ./setup && ./setup --host codex"
       },
       "uninstall_commands": {
-        "claude": "rm -rf ~/.claude/skills/gstack",
+        "claude": "rm -rf ~/.claude/skills/gstack && find ~/.claude/skills -maxdepth 2 -name SKILL.md -lname '*gstack*' -print0 2>/dev/null | xargs -0 -I {} dirname {} | xargs -I {} rm -rf {}",
         "codex": "find ~/.codex/skills -maxdepth 1 -name 'gstack*' -exec rm -rf {} +"
       },
       "verified": true,
-      "install_notes": "After the clone lands, gstack's `./setup` is INTERACTIVE — it prompts for several confirmations. The catalog runs the clone + setup, but you may need to answer prompts in the install modal's output pane. Codex install runs `./setup --host codex` after the Claude side.",
+      "install_notes": "After the clone lands, gstack's `./setup` is INTERACTIVE — it prompts for several confirmations. The catalog runs the clone + setup, but you may need to answer prompts in the install modal's output pane. Codex install runs `./setup --host codex` after the Claude side. NOTE: gstack's setup creates per-skill symlinks at `~/.claude/skills/<skill-name>/SKILL.md` pointing into the gstack repo (NOT under `~/.claude/skills/gstack/`); the uninstall command removes both the gstack repo AND every dangling symlink it leaves behind.",
       "contents": {
         "type": "github-skill-tree",
         "skills_path": ".agents/skills",
