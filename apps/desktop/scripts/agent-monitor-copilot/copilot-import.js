@@ -8,6 +8,11 @@ const { parseChatSessionFile, parseCliEventFile } = require("./copilot-parser");
 const { listChatSessionFiles, listCliEventFiles } = require("./copilot-home");
 const { importSession } = require("../../scripts/import-history");
 const { reactivateImportedSession } = require("../agent-monitor-shared/import-session-utils");
+const { createCatchupCache } = require("../agent-monitor-shared/catchup-cache");
+
+// See FEA-1316: skip chat/CLI files unchanged since last tick.
+const chatCache = createCatchupCache();
+const cliCache = createCatchupCache();
 
 function importCopilotSession(dbModule, session) {
   const result = importSession(dbModule, session);
@@ -32,26 +37,46 @@ async function importAllCopilotSessions(dbModule) {
   });
 
   const batch = [];
+  const chatParsed = [];
+  const cliParsed = [];
 
   // Copilot Chat (VS Code extension) — JSON files
-  for (const { filePath, workspacePath } of listChatSessionFiles()) {
+  const chatFiles = listChatSessionFiles();
+  for (const { filePath, workspacePath } of chatFiles) {
+    const { unchanged, stat } = chatCache.isUnchanged(filePath);
+    if (unchanged) {
+      skipped++;
+      continue;
+    }
     try {
       const session = parseChatSessionFile(filePath, workspacePath);
-      if (!session) { skipped++; continue; }
+      if (!session) { chatCache.markSeenWith(filePath, stat); skipped++; continue; }
       batch.push(session);
+      chatParsed.push({ path: filePath, stat });
     } catch { errors++; }
   }
 
   // Copilot CLI — JSONL event files
-  for (const { filePath, sessionId } of listCliEventFiles()) {
+  const cliFiles = listCliEventFiles();
+  for (const { filePath, sessionId } of cliFiles) {
+    const { unchanged, stat } = cliCache.isUnchanged(filePath);
+    if (unchanged) {
+      skipped++;
+      continue;
+    }
     try {
       const session = await parseCliEventFile(filePath, sessionId);
-      if (!session) { skipped++; continue; }
+      if (!session) { cliCache.markSeenWith(filePath, stat); skipped++; continue; }
       batch.push(session);
+      cliParsed.push({ path: filePath, stat });
     } catch { errors++; }
   }
 
   if (batch.length > 0) importBatch(batch);
+  for (const { path, stat } of chatParsed) chatCache.markSeenWith(path, stat);
+  for (const { path, stat } of cliParsed) cliCache.markSeenWith(path, stat);
+  chatCache.pruneTo(chatFiles.map((f) => f.filePath));
+  cliCache.pruneTo(cliFiles.map((f) => f.filePath));
 
   return { imported, skipped, errors };
 }

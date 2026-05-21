@@ -357,7 +357,7 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
     'CURSOR_MODULES = ["cursor-home", "cursor-parser", "cursor-import", "cursor-watcher"]',
     'COPILOT_MODULES = ["copilot-home", "copilot-parser", "copilot-import", "copilot-watcher"]',
     'OPENCODE_MODULES = ["opencode-home", "opencode-parser", "opencode-import", "opencode-watcher"]',
-    'SHARED_MODULES = ["harness-watcher-utils", "import-session-utils", "parser-utils"]',
+    'SHARED_MODULES = ["harness-watcher-utils", "import-session-utils", "parser-utils", "catchup-cache"]',
     "MULTI_HARNESS_SPECS = [",
     "watcherPatchLines",
     "importPatchLines",
