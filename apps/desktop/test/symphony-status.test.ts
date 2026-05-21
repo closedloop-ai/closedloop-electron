@@ -12,8 +12,14 @@
  *   outcome "no-success" → status STOPPED,   fallbackDetected false
  *
  * detectSuccessFromOutput() has no Electron dependency and can be imported and
- * tested directly. The four test cases below exercise each discriminant
- * outcome, proving the fallback behaves correctly for each.
+ * tested directly. Every DetectSuccessOutcome variant is exercised: the
+ * data-driven cases below cover "success", "missing", and "no-success" (the
+ * latter twice — once from a non-success record, once from malformed JSONL
+ * that all parse-fails and is skipped). The dedicated permission-denied test
+ * below the loop covers "unreadable" by chmodding the JSONL file itself to
+ * 0o000 so readFileSync throws EACCES while the parent directory remains
+ * traversable (chmodding the parent to 0o000 would instead make existsSync
+ * return false and route through the "missing" branch).
  */
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
@@ -119,4 +125,38 @@ describe("resolveEffectiveState JSONL fallback — dead PID + IN_PROGRESS state"
       assert.equal(effective.fallbackDetected, fixture.expected.fallbackDetected);
     });
   }
+
+  test("dead PID + unreadable JSONL file returns STOPPED", async () => {
+    // Force a filesystem read error by stripping all permissions on the JSONL
+    // file. Chmodding the parent directory instead would block path traversal,
+    // making existsSync() return false and routing through the "missing"
+    // branch — the only way to exercise the "unreadable" branch in
+    // detectSuccessFromOutput is for the file to be resolvable but unreadable.
+    const claudeWorkDir = path.join(tempRoot, ".closedloop-ai", "work");
+    await fs.mkdir(claudeWorkDir, { recursive: true });
+    const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+    await fs.writeFile(
+      jsonlPath,
+      JSON.stringify({ type: "result", subtype: "success" }) + "\n",
+    );
+    await fs.chmod(jsonlPath, 0o000);
+
+    try {
+      const outcome = detectSuccessFromOutput(claudeWorkDir);
+      const effective = mapOutcomeToEffectiveState(outcome);
+
+      // Writing a valid success record before the chmod makes the assertion
+      // unambiguous: the only reason outcome is not "success" is the read
+      // failure, proving we exercised the "unreadable" branch. outcome.error
+      // is intentionally not asserted because the underlying err.message
+      // varies by platform/libuv version and is not part of the contract.
+      assert.equal(outcome.outcome, "unreadable");
+      assert.equal(effective.status, "STOPPED");
+      assert.equal(effective.fallbackDetected, false);
+    } finally {
+      // Restore read+write so the afterEach rm can remove the temp tree on
+      // platforms where unlink of a 0o000-mode file requires extra steps.
+      await fs.chmod(jsonlPath, 0o600);
+    }
+  });
 });
