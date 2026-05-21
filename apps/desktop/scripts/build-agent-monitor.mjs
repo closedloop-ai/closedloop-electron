@@ -1318,6 +1318,10 @@ function patchClientSource() {
       path.join(sourceClientDir, "src", "pages", `${p}.tsx`),
     );
   }
+  cpSync(
+    path.join(packModulesDir, "client", "PackInstallModalUtils.ts"),
+    path.join(sourceClientDir, "src", "pages", "PackInstallModalUtils.ts"),
+  );
   // CLOSEDLOOP embed integration: replace selected upstream client files with
   // repo-owned overlays. Extend CLIENT_FULL_FILE_OVERRIDES for future host
   // patches that should fully override an upstream file at build time.

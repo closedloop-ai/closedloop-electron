@@ -8,6 +8,11 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Sparkline } from "./Sparkline";
 import { InstallModal } from "./InstallModal";
+import {
+  resolvePackModalHarness,
+  resolvePackPreviewCommand,
+  usesAutoDetectedInstallCommand,
+} from "./PackInstallModalUtils";
 
 export interface CatalogEntry {
   pack_id: string;
@@ -346,52 +351,20 @@ export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
 
       {modal &&
         (() => {
-          // Resolve the command to PREVIEW in the modal. For most packs this
-          // is just install_commands[harness]. For single_install packs, the
-          // client uses the "auto" sentinel that the server resolves at run-
-          // time — but the modal still needs SOMETHING to show. Pick the
-          // codex variant when both exist (by convention codex is a superset
-          // of claude for these packs); fall back to the first available
-          // command. The server picks the actual command to run based on
-          // detected CLIs, so the preview may differ slightly from what
-          // executes — that's noted in the modal copy.
-          //
-          // INSTALL vs UNINSTALL differ for single_install packs:
-          //  - install:   server picks one SUPERSET command (codex variant
-          //               is a superset of claude). Preview = codex command.
-          //  - uninstall: server JOINS all uninstall commands with `;` (they
-          //               are disjoint cleanups; one is not a superset of
-          //               the other). Preview = same joined string so the
-          //               user sees what's about to actually run.
-          const cmdMap =
-            modal.action === "install"
-              ? pack.install_commands
-              : pack.uninstall_commands;
-          let previewCommand: string;
-          if (modal.harness === "auto") {
-            if (modal.action === "uninstall") {
-              previewCommand = pack.harnesses
-                .map((h) => cmdMap[h])
-                .filter((c): c is string => Boolean(c))
-                .join(" ; ");
-            } else {
-              previewCommand =
-                cmdMap["codex"] ||
-                cmdMap["claude"] ||
-                Object.values(cmdMap)[0] ||
-                "";
-            }
-          } else {
-            previewCommand = cmdMap[modal.harness] || "";
-          }
+          const resolvedHarness = resolvePackModalHarness(pack, modal.harness, modal.action);
+          const previewCommand = resolvePackPreviewCommand(
+            pack,
+            resolvedHarness,
+            modal.action,
+          );
           return (
             <InstallModal
               packId={pack.pack_id}
               packDisplayName={pack.display_name}
-              harness={modal.harness}
+              harness={resolvedHarness}
               action={modal.action}
               command={previewCommand}
-              commandIsAutoDetect={modal.harness === "auto"}
+              commandIsAutoDetect={usesAutoDetectedInstallCommand(resolvedHarness, modal.action)}
               projectScoped={pack.project_scoped === 1}
               postInstall={pack.post_install || null}
               onClose={() => setModal(null)}

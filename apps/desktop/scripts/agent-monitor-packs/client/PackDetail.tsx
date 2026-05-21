@@ -15,6 +15,11 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import type { CatalogEntry } from "./CatalogCard";
 import { InstallModal } from "./InstallModal";
+import {
+  resolvePackModalHarness,
+  resolvePackPreviewCommand,
+  usesAutoDetectedInstallCommand,
+} from "./PackInstallModalUtils";
 
 interface ReadmeResponse {
   pack_id: string;
@@ -133,6 +138,20 @@ export function PackDetail() {
   const [sessionsTotal, setSessionsTotal] = useState(0);
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [sessionsLimit, setSessionsLimit] = useState(25);
+
+  const resolvedInstallModal = entry && installModal
+    ? (() => {
+        const harness = resolvePackModalHarness(entry, installModal.harness, installModal.action);
+        const command = resolvePackPreviewCommand(entry, harness, installModal.action);
+        if (!command) return null;
+        return {
+          harness,
+          action: installModal.action,
+          command,
+          commandIsAutoDetect: usesAutoDetectedInstallCommand(harness, installModal.action),
+        };
+      })()
+    : null;
   const [error, setError] = useState<string | null>(null);
   const [installModal, setInstallModal] = useState<{
     harness: string;
@@ -376,7 +395,7 @@ export function PackDetail() {
                                   <button
                                     onClick={() =>
                                       setInstallModal({
-                                        harness: h,
+                                        harness: resolvePackModalHarness(entry, h, "uninstall"),
                                         action: "uninstall",
                                       })
                                     }
@@ -675,17 +694,14 @@ export function PackDetail() {
         </>
       )}
 
-      {installModal && entry && entry.install_commands[installModal.harness] && (
+      {resolvedInstallModal && entry && (
         <InstallModal
           packId={entry.pack_id}
           packDisplayName={entry.display_name}
-          harness={installModal.harness}
-          action={installModal.action}
-          command={
-            installModal.action === "install"
-              ? entry.install_commands[installModal.harness]
-              : entry.uninstall_commands[installModal.harness]
-          }
+          harness={resolvedInstallModal.harness}
+          action={resolvedInstallModal.action}
+          command={resolvedInstallModal.command}
+          commandIsAutoDetect={resolvedInstallModal.commandIsAutoDetect}
           projectScoped={entry.project_scoped === 1}
           onClose={() => setInstallModal(null)}
           onCompleted={() => {
