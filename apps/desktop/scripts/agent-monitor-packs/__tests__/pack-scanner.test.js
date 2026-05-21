@@ -80,8 +80,8 @@ test("ensurePackSchema adds event lookup indexes for pack analytics queries", ()
     .all()
     .map((row) => row.name);
   assert.deepEqual(indexes, [
-    "idx_events_type_tool",
     "idx_events_skill_prompt_lookup",
+    "idx_events_type_tool",
   ]);
 });
 
