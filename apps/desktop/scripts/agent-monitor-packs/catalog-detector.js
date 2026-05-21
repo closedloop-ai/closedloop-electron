@@ -256,6 +256,65 @@ function detectRtk(db) {
   });
 }
 
+/**
+ * Detect ECC's Codex install (FEA-1348). ECC's `scripts/sync-ecc-to-codex.sh`
+ * doesn't land skills — it lands ~83 prompt-style command markdown files at
+ * `~/.codex/prompts/ecc-*.md`, plus AGENTS.md / rules / config.toml changes.
+ * The prompt files are the cleanest detection signal: their presence is
+ * directly caused by `sync-ecc-to-codex.sh`, and they're individually
+ * addressable on uninstall (the catalog's Codex `uninstall_command` does
+ * `rm -f ~/.codex/prompts/ecc-*.md`).
+ *
+ * We surface each `ecc-<cmd>.md` as a "skill" row keyed on the command name
+ * (the `ecc-` prefix stripped, so the UI shows `code-review`, `tdd`, etc.
+ * rather than 83 entries all starting with `ecc-`). install_kind="directory"
+ * keeps the CHECK constraint happy; install_path is the prompts root.
+ *
+ * The Claude side of ECC lands via `claude plugin install ecc@ecc` and is
+ * picked up by the existing scanClaudeMarketplaces in pack-scanner.js — no
+ * adapter is needed there.
+ */
+function resolveCodexHome() {
+  return process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+}
+
+function detectEccCodex(db) {
+  const promptsRoot = path.join(resolveCodexHome(), "prompts");
+  if (!safeStat(promptsRoot)) return false;
+  const eccPrompts = safeReadDir(promptsRoot).filter(
+    (e) => e.isFile() && e.name.startsWith("ecc-") && e.name.endsWith(".md"),
+  );
+  if (eccPrompts.length === 0) return false;
+  upsertPack(db, {
+    pack_id: "ecc",
+    harness: "codex",
+    install_path: promptsRoot,
+    install_kind: "directory",
+    source_url: "https://github.com/affaan-m/everything-claude-code",
+    version: null,
+  });
+  for (const entry of eccPrompts) {
+    // Strip the "ecc-" prefix + ".md" suffix so skills show under their
+    // command name (e.g. `code-review`, `tdd`) rather than 83 rows all
+    // prefixed with `ecc-`. The full file path stays in install_path for
+    // attribution.
+    const fullPath = path.join(promptsRoot, entry.name);
+    const name = entry.name.replace(/^ecc-/, "").replace(/\.md$/, "");
+    if (!name) continue;
+    upsertSkill(db, {
+      skill_id: deterministicSkillId("codex", promptsRoot, name),
+      pack_id: "ecc",
+      harness: "codex",
+      install_path: fullPath,
+      name,
+      version: null,
+      description: null,
+      source_url: "https://github.com/affaan-m/everything-claude-code",
+    });
+  }
+  return true;
+}
+
 function detectClaudeCodeRouter(db) {
   // Global npm install — probe via `npm ls -g` (fast, no network).
   let installed = false;
@@ -302,6 +361,7 @@ function runCatalogDetectors(db) {
     ["claude-code-router", detectClaudeCodeRouter],
     ["claude-plugins-official", detectClaudePluginsOfficial],
     ["rtk", detectRtk],
+    ["ecc-codex", detectEccCodex],
   ];
   for (const [name, fn] of ADAPTERS) {
     try {
@@ -327,6 +387,7 @@ module.exports = {
     detectClaudeCodeRouter,
     detectClaudePluginsOfficial,
     detectRtk,
+    detectEccCodex,
     detectBinaryTool,
   },
 };

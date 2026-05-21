@@ -1127,3 +1127,177 @@ test("no skill_invocations table is ever created", () => {
     .get();
   assert.equal(assoc, undefined);
 });
+
+// ---------- FEA-1348: ECC + OpenAI Skills catalog tests ----------
+
+/**
+ * Call detectEccCodex with a fixture-isolated CODEX_HOME. The fakeHome path
+ * is treated as `$HOME`; the adapter resolves `~/.codex` via the CODEX_HOME
+ * env var override. (Note: withFakeHome() sets SKIP_CATALOG_DETECTORS, so we
+ * call the adapter directly here rather than via runPackScanner.)
+ */
+function withFakeCodexHome(home, fn) {
+  const prev = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = nodePath.join(home, ".codex");
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = prev;
+  }
+}
+
+test("FEA-1348: detectEccCodex registers a pack when ~/.codex/prompts/ecc-*.md exist", () => {
+  const { _internals: detectorInternals } = require("../catalog-detector");
+  const home = mkdtemp();
+  const promptsRoot = nodePath.join(home, ".codex", "prompts");
+  // The real ECC sync script lands ~83 ecc-*.md prompt files here. Two are
+  // sufficient to verify the detector + prefix-stripping logic.
+  writeFile(
+    nodePath.join(promptsRoot, "ecc-code-review.md"),
+    "# ECC Command Prompt: /code-review\nbody",
+  );
+  writeFile(
+    nodePath.join(promptsRoot, "ecc-tdd.md"),
+    "# ECC Command Prompt: /tdd\nbody",
+  );
+  // A non-ECC prompt that must NOT be ingested as an ECC skill.
+  writeFile(
+    nodePath.join(promptsRoot, "openai-skills.md"),
+    "# something else",
+  );
+  const db = makeDb();
+
+  const detected = withFakeCodexHome(home, () => detectorInternals.detectEccCodex(db));
+  assert.equal(detected, true, "detectEccCodex should return true when ecc-*.md prompts exist");
+
+  const pack = getPack(db, "ecc");
+  assert.ok(pack, "ecc pack row should be present");
+  const codexInstall = pack.installs.find((i) => i.harness === "codex");
+  assert.ok(codexInstall, "codex install row should be present");
+  assert.ok(
+    codexInstall.install_path.endsWith(
+      nodePath.join(".codex", "prompts"),
+    ),
+    `unexpected install_path: ${codexInstall.install_path}`,
+  );
+  assert.equal(
+    codexInstall.source_url,
+    "https://github.com/affaan-m/everything-claude-code",
+  );
+  // Exactly two ecc-* prompts should be ingested — openai-skills.md ignored.
+  assert.equal(pack.skills.length, 2);
+  const byName = Object.fromEntries(pack.skills.map((s) => [s.name, s]));
+  assert.ok(byName["code-review"], "ecc- prefix should be stripped from skill name");
+  assert.ok(byName.tdd, "ecc-tdd → tdd");
+});
+
+test("FEA-1348: detectEccCodex returns false when no ecc-*.md prompts exist", () => {
+  const { _internals: detectorInternals } = require("../catalog-detector");
+  const home = mkdtemp(); // empty — no .codex tree at all
+  const db = makeDb();
+  const detected = withFakeCodexHome(home, () => detectorInternals.detectEccCodex(db));
+  assert.equal(detected, false, "absent dir → false, no rows written");
+  assert.equal(getPack(db, "ecc"), null, "no ecc pack row should be created");
+
+  // Also: prompts dir exists but contains no ecc-* files → also false
+  const home2 = mkdtemp();
+  writeFile(
+    nodePath.join(home2, ".codex", "prompts", "some-other.md"),
+    "# not ECC",
+  );
+  const db2 = makeDb();
+  const detected2 = withFakeCodexHome(home2, () => detectorInternals.detectEccCodex(db2));
+  assert.equal(detected2, false, "prompts dir without ecc-* → false");
+  assert.equal(getPack(db2, "ecc"), null);
+});
+
+test("FEA-1348: ECC Claude marketplace install is detected by scanClaudeMarketplaces", () => {
+  // ECC distributes through its own Claude marketplace named `ecc`. The
+  // existing marketplace scanner reads installed_plugins.json and creates one
+  // pack per plugin name. pack_id `ecc` (in catalog-seed.json) must match the
+  // plugin name from the registry — confirmed here with a synthesized install
+  // tree shaped exactly like a real `claude plugin install ecc@ecc` produces.
+  const home = mkdtemp();
+  makeClaudeMarketplaceTree(home, "ecc", [
+    {
+      name: "ecc",
+      version: "1.0.0",
+      skills: ["tdd", "plan", "security-review"],
+    },
+  ]);
+  const db = makeDb();
+  withFakeHome(home, () => runPackScanner(db));
+
+  const pack = getPack(db, "ecc");
+  assert.ok(pack, "ecc pack should be detected via marketplace scanner");
+  assert.equal(pack.installs.length, 1);
+  assert.equal(pack.installs[0].harness, "claude");
+  assert.equal(pack.installs[0].version, "1.0.0");
+  assert.equal(pack.skills.length, 3);
+});
+
+test("FEA-1348: OpenAI Skills placeholder entry has no install commands", () => {
+  // The seed entry for openai-skills uses `placeholder_reason` instead of
+  // install_commands, because skills install interactively from a Codex
+  // session via $skill-installer — there's no shell-runnable one-liner.
+  // The catalog UI renders this as a notice instead of an install button.
+  const seedDoc = require("../catalog-seed.json");
+  const entry = seedDoc.packs.find((p) => p.pack_id === "openai-skills");
+  assert.ok(entry, "openai-skills entry should be present in seed");
+  assert.equal(
+    entry.install_commands,
+    undefined,
+    "placeholder packs MUST NOT have install_commands",
+  );
+  assert.equal(
+    entry.uninstall_commands,
+    undefined,
+    "placeholder packs MUST NOT have uninstall_commands",
+  );
+  assert.ok(
+    entry.placeholder_reason && entry.placeholder_reason.length > 0,
+    "placeholder packs MUST have a non-empty placeholder_reason",
+  );
+  assert.deepEqual(entry.harnesses, ["codex"]);
+});
+
+test("FEA-1348: ECC seed entry has install + uninstall for both harnesses", () => {
+  const seedDoc = require("../catalog-seed.json");
+  const entry = seedDoc.packs.find((p) => p.pack_id === "ecc");
+  assert.ok(entry, "ecc entry should be present in seed");
+  assert.deepEqual(entry.harnesses.sort(), ["claude", "codex"]);
+  for (const harness of ["claude", "codex"]) {
+    assert.ok(
+      entry.install_commands[harness],
+      `install_commands.${harness} should be present`,
+    );
+    assert.ok(
+      entry.uninstall_commands[harness],
+      `uninstall_commands.${harness} should be present`,
+    );
+  }
+  // Sanity: Claude install adds the marketplace AND installs the plugin in
+  // one shell line (no marketplace pre-registration assumed).
+  assert.ok(
+    entry.install_commands.claude.includes("plugin marketplace add"),
+    "Claude install must register the marketplace first",
+  );
+  assert.ok(
+    entry.install_commands.claude.includes("plugin install ecc@ecc"),
+    "Claude install must install the ecc plugin from the ecc marketplace",
+  );
+  // Sanity: Codex install runs the bundled sync script after a clone+npm.
+  assert.ok(
+    entry.install_commands.codex.includes("sync-ecc-to-codex.sh"),
+    "Codex install must invoke the bundled sync script",
+  );
+  // Sanity: post_install copy_command exists so users can install the
+  // rules library that Claude's plugin system can't distribute.
+  assert.ok(entry.post_install, "ecc must have a post_install block");
+  assert.ok(
+    entry.post_install.copy_command.includes("rules/common") &&
+      entry.post_install.copy_command.includes("rules/typescript"),
+    "post_install copy_command must seed both rules subdirs",
+  );
+});

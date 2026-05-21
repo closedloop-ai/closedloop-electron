@@ -1,6 +1,6 @@
 {
-  "seed_version": 11,
-  "_note": "Seed v11 (2026-05-21): gstack install commands made idempotent — `git clone` is now gated by `test -d` so re-running the install on a partially-installed pack tops it off (e.g. adds codex symlinks when only claude was previously set up) instead of erroring out on a re-clone of an existing directory. v10's flags preserved.",
+  "seed_version": 12,
+  "_note": "Seed v12 (2026-05-21, FEA-1348): added ECC (Everything Claude Code) as a full Claude+Codex install with marketplace-driven Claude install + sync-script Codex install, plus OpenAI Skills as a catalog placeholder (skills install interactively via `$skill-installer` inside a Codex session — no shell-runnable one-liner exists). v11's idempotent-clone behavior preserved.",
   "packs": [
     {
       "pack_id": "closedloop-ai",
@@ -410,6 +410,50 @@
         "type": "github-nested-skill-tree",
         "match_pattern": "*/skills/*/SKILL.md"
       }
+    },
+    {
+      "pack_id": "ecc",
+      "display_name": "ECC — Everything Claude Code",
+      "category": "framework",
+      "github_url": "https://github.com/affaan-m/everything-claude-code",
+      "description": "Agent harness performance optimization system: 232 skills, 60 agents, 75 commands, plus AgentShield (102 security rules that run inside every session). Multi-harness (Claude Code + Codex). One of the largest agent harness frameworks by GitHub stars.",
+      "harnesses": ["claude", "codex"],
+      "install_commands": {
+        "claude": "claude plugin marketplace add affaan-m/everything-claude-code && claude plugin install ecc@ecc --scope user",
+        "codex": "(test -d ~/.ecc-source || git clone https://github.com/affaan-m/everything-claude-code ~/.ecc-source) && cd ~/.ecc-source && npm install --silent && bash scripts/sync-ecc-to-codex.sh"
+      },
+      "uninstall_commands": {
+        "claude": "claude plugin uninstall ecc@ecc --scope user 2>/dev/null || true && claude plugin marketplace remove ecc 2>/dev/null || true && rm -rf ~/.claude/rules/ecc",
+        "codex": "rm -f ~/.codex/prompts/ecc-*.md && rm -rf ~/.ecc-source"
+      },
+      "install_notes": "Three known caveats. (1) Claude's plugin system does NOT distribute `rules` — ECC's rules library has to be copied manually after install. The 'optional next step' shown after install does this for you. (2) The Codex install path clones the upstream repo to ~/.ecc-source (~360MB) and runs `sync-ecc-to-codex.sh`, which lands ~83 command prompt files at ~/.codex/prompts/ecc-*.md, merges MCP servers into ~/.codex/config.toml (add-only — never removes existing servers), and overwrites ~/.codex/AGENTS.md (a backup is saved to ~/.codex/backups/ecc-<timestamp>/). Our uninstall removes the ecc-*.md prompt files and the ~/.ecc-source clone, but does NOT touch config.toml or AGENTS.md — clean those manually if you want a fully pristine state (restore AGENTS.md from the most recent ~/.codex/backups/ecc-* dir). (3) Restart Codex after installing or uninstalling so it reloads prompts and MCP servers.",
+      "verified": true,
+      "post_install": {
+        "title": "Optional: install ECC's rules library",
+        "body": "Claude's plugin system can't distribute rules. To get ECC's full rule library, copy the rules/ tree from a shallow clone of the upstream repo.",
+        "copy_command": "git clone --depth 1 https://github.com/affaan-m/everything-claude-code /tmp/ecc-rules && mkdir -p ~/.claude/rules/ecc && cp -r /tmp/ecc-rules/rules/common /tmp/ecc-rules/rules/typescript ~/.claude/rules/ecc/ && rm -rf /tmp/ecc-rules",
+        "url": "https://github.com/affaan-m/everything-claude-code#rules",
+        "required": false
+      },
+      "detection_patterns": [
+        "/.claude/plugins/cache/ecc/",
+        "/.codex/prompts/ecc-",
+        "affaan-m/everything-claude-code"
+      ],
+      "contents": {
+        "type": "claude-marketplace",
+        "marketplace_repo": "affaan-m/everything-claude-code"
+      }
+    },
+    {
+      "pack_id": "openai-skills",
+      "display_name": "OpenAI Skills (Codex)",
+      "category": "catalog",
+      "github_url": "https://github.com/openai/skills",
+      "description": "OpenAI's official skills catalog for Codex — curated, .experimental, and .system skills. The cleanest Codex-native baseline. Symmetric to Anthropic's claude-plugins-official marketplace on the Claude side.",
+      "harnesses": ["codex"],
+      "placeholder_reason": "Skills install interactively from inside a Codex session via `$skill-installer <name>` — there is no shell-runnable one-liner. Browse the catalog on GitHub, then run `$skill-installer <skill-name>` from a Codex session to install individual skills. .system skills are pre-installed in the latest Codex.",
+      "verified": true
     }
   ]
 }
