@@ -577,13 +577,15 @@ export class DesktopApplication {
     // Independent of the gateway, but fully feature-gated. When enabled, start
     // the sidecar fire-and-forget BEFORE the gateway try-block so a
     // gateway-start failure never prevents it from running, and a sidecar
-    // failure never blocks or fails app boot. Hook repair remains opt-in and
-    // self-healing.
+    // failure never blocks or fails app boot. The relay sync service follows
+    // the same flag, so disabling Agent Monitor leaves only dormant wiring in
+    // the desktop shell and no background sync loop. Hook repair remains
+    // opt-in and self-healing.
     if (this.settingsStore.getAgentMonitorEnabled()) {
       void this.agentMonitor.start();
       syncAgentMonitorHooksOnBoot();
+      this.agentSessionSync.start();
     }
-    this.agentSessionSync.start();
 
     try {
       await this.server.start();
@@ -1186,7 +1188,7 @@ export class DesktopApplication {
     if (enabled) {
       void this.agentMonitor.start();
       syncAgentMonitorHooksOnBoot();
-      this.agentSessionSync.refresh();
+      this.agentSessionSync.start();
       return;
     }
 
@@ -1201,7 +1203,7 @@ export class DesktopApplication {
     }
 
     await this.agentMonitor.stop();
-    this.agentSessionSync.refresh();
+    this.agentSessionSync.stop();
     this.desktopWindow
       .getWindow()
       ?.webContents.send("desktop:navigate-tab", "settings");
