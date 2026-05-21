@@ -173,7 +173,7 @@ test("sidecar is feature-gated and, when enabled, starts before the gateway", ()
   assert.match(appSource, /this\.agentMonitor = new AgentMonitorSidecar\(\)/);
   assert.match(
     appSource,
-    /if \(this\.settingsStore\.getAgentMonitorEnabled\(\)\) \{[\s\S]*void this\.agentMonitor\.start\(\);[\s\S]*syncAgentMonitorHooksOnBoot\(\);/,
+    /if \(this\.settingsStore\.getAgentMonitorEnabled\(\)\) \{[\s\S]*void this\.agentMonitor\.start\(\);[\s\S]*syncAgentMonitorHooksOnBoot\(\);[\s\S]*this\.agentSessionSync\.start\(\);/,
   );
   const startIdx = appSource.indexOf("void this.agentMonitor.start()");
   const gatewayTryIdx = appSource.indexOf("await this.server.start()");
@@ -182,6 +182,13 @@ test("sidecar is feature-gated and, when enabled, starts before the gateway", ()
   assert.ok(
     startIdx < gatewayTryIdx,
     "sidecar must start before the gateway try-block",
+  );
+});
+
+test("agent session sync starts and stops with the agent monitor flag", () => {
+  assert.match(
+    appSource,
+    /private async applyAgentMonitorSetting\(enabled: boolean\): Promise<void> \{[\s\S]*if \(enabled\) \{[\s\S]*this\.agentSessionSync\.start\(\);[\s\S]*return;[\s\S]*await this\.agentMonitor\.stop\(\);[\s\S]*this\.agentSessionSync\.stop\(\);/,
   );
 });
 
