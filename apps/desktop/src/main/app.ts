@@ -65,6 +65,7 @@ import { SettingsStore, type SavedConfigManagedPatch } from "./settings-store.js
 import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
 import { AgentMonitorSidecar } from "./agent-monitor-sidecar.js";
+import { AgentSessionSyncService } from "./agent-session-sync-service.js";
 import {
   isAgentMonitorHooksEnabled,
   setAgentMonitorHooksEnabled,
@@ -193,6 +194,7 @@ export class DesktopApplication {
   private readonly cloudSocket: CloudSocketService;
   private readonly commandExecutor: CloudCommandExecutor;
   private readonly agentMonitor: AgentMonitorSidecar;
+  private readonly agentSessionSync: AgentSessionSyncService;
   private readonly activityLog: ActivityLogStore;
   private readonly approvalStore: ApprovalStore;
   private readonly jobStore: JobStore;
@@ -207,6 +209,7 @@ export class DesktopApplication {
   private cloudCommandsPaused: boolean;
   private cloudConnectionEnabled: boolean;
   private serverCommandSigningSupported = false;
+  private serverAgentSessionSyncSupported = false;
   private updateCheckTimer: NodeJS.Timeout | null = null;
   private packagedUpdateState: PackagedUpdateState =
     createInitialPackagedUpdateState();
@@ -384,13 +387,17 @@ export class DesktopApplication {
       onStatusChange: (status) => this.onCloudSocketStatus(status),
       onDisconnect: (reason) => {
         this.serverCommandSigningSupported = false;
+        this.serverAgentSessionSyncSupported = false;
         this.commandKeyReconciler.stop();
+        this.agentSessionSync.refresh();
         this.notifyCommandKeysChanged();
         Observability.connectionLost(reason);
       },
       onHelloAck: (event) => {
         this.serverCommandSigningSupported =
           event.serverCapabilities?.computeTargetSigning === true;
+        this.serverAgentSessionSyncSupported =
+          event.serverCapabilities?.agentSessionSync === true;
         gatewayLog.info(
           "command-signing",
           `Server support from hello ack: computeTargetId=${event.computeTargetId}, computeTargetSigning=${event.serverCapabilities?.computeTargetSigning === true}`,
@@ -414,6 +421,7 @@ export class DesktopApplication {
           event.computeTargetId,
           process.env.NODE_ENV ?? "production",
         );
+        this.agentSessionSync.refresh();
       },
       onCommand: (command) => {
         const keyApprovalRequestMatch =
@@ -485,6 +493,14 @@ export class DesktopApplication {
       onCommandEventAck: (event) => {
         this.commandExecutor.acknowledge(event);
       },
+    });
+    this.agentSessionSync = new AgentSessionSyncService({
+      isAgentMonitorEnabled: () => this.settingsStore.getAgentMonitorEnabled(),
+      isRelayReady: () =>
+        this.serverAgentSessionSyncSupported &&
+        this.cloudStatus.state === "online",
+      sendBatch: (batch) => this.cloudSocket.sendAgentSessions(batch),
+      getUserDataPath: () => app.getPath("userData"),
     });
     this.recovery = new GatewayRecoveryManager({
       probe: () => this.probeGatewayAlive(),
@@ -561,11 +577,14 @@ export class DesktopApplication {
     // Independent of the gateway, but fully feature-gated. When enabled, start
     // the sidecar fire-and-forget BEFORE the gateway try-block so a
     // gateway-start failure never prevents it from running, and a sidecar
-    // failure never blocks or fails app boot. Hook repair remains opt-in and
-    // self-healing.
+    // failure never blocks or fails app boot. The relay sync service follows
+    // the same flag, so disabling Agent Monitor leaves only dormant wiring in
+    // the desktop shell and no background sync loop. Hook repair remains
+    // opt-in and self-healing.
     if (this.settingsStore.getAgentMonitorEnabled()) {
       void this.agentMonitor.start();
       syncAgentMonitorHooksOnBoot();
+      this.agentSessionSync.start();
     }
 
     try {
@@ -1169,6 +1188,7 @@ export class DesktopApplication {
     if (enabled) {
       void this.agentMonitor.start();
       syncAgentMonitorHooksOnBoot();
+      this.agentSessionSync.start();
       return;
     }
 
@@ -1183,6 +1203,7 @@ export class DesktopApplication {
     }
 
     await this.agentMonitor.stop();
+    this.agentSessionSync.stop();
     this.desktopWindow
       .getWindow()
       ?.webContents.send("desktop:navigate-tab", "settings");
@@ -1621,6 +1642,7 @@ export class DesktopApplication {
     await this.bootRecovery.quiesce(1_000);
     this.queueStatsTelemetryDebounce.cancel();
     this.commandKeyReconciler.stop();
+    this.agentSessionSync.stop();
     return runShutdownSequence({
       observability: Observability,
       updateCheckTimer: this.updateCheckTimer,
@@ -1827,11 +1849,13 @@ export class DesktopApplication {
         state: "degraded",
         error: "Cloud connection disabled by user",
       };
+      this.agentSessionSync.refresh();
       this.refreshTrayState();
       return;
     }
 
     this.cloudStatus = status;
+    this.agentSessionSync.refresh();
     const stats = this.commandExecutor.getStats();
 
     if (status.state === "online") {
@@ -1903,16 +1927,19 @@ export class DesktopApplication {
     if (!enabled) {
       this.cloudSocket.stop();
       this.serverCommandSigningSupported = false;
+      this.serverAgentSessionSyncSupported = false;
       this.commandKeyReconciler.stop();
       this.cloudStatus = {
         state: "degraded",
         error: "Cloud connection disabled by user",
       };
+      this.agentSessionSync.refresh();
       this.refreshTrayState();
       return;
     }
 
     this.cloudStatus = { state: "idle" };
+    this.agentSessionSync.refresh();
     this.refreshTrayState();
     this.cloudSocket.restart();
   }
@@ -1925,7 +1952,9 @@ export class DesktopApplication {
       return;
     }
     this.serverCommandSigningSupported = false;
+    this.serverAgentSessionSyncSupported = false;
     this.commandKeyReconciler.stop();
+    this.agentSessionSync.refresh();
     this.cloudSocket.restart();
   }
 
@@ -3083,7 +3112,10 @@ export class DesktopApplication {
         this.settingsStore.setApiOrigin(DEFAULT_DESKTOP_SETTINGS.apiOrigin);
         this.settingsStore.setWebAppOrigin(DEFAULT_DESKTOP_SETTINGS.webAppOrigin);
         this.cloudSocket.stop();
+        this.serverCommandSigningSupported = false;
+        this.serverAgentSessionSyncSupported = false;
         this.cloudStatus = { state: "idle" };
+        this.agentSessionSync.refresh();
         this.apiKeyStore.clearApiKey();
         this.refreshTrayState();
       }
