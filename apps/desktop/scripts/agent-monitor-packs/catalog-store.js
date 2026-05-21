@@ -241,15 +241,25 @@ function hydrateRow(row) {
  * the star order — closedloop pinned, then highest-star next.
  */
 function listCatalog(db) {
+  // "Currently installed" = at least one agent_packs row whose uninstalled_at
+  // is NULL. "Previously installed" = at least one row whose uninstalled_at
+  // IS NOT NULL AND no current install. The catalog UI uses these to render
+  // green (Installed), amber (Previously installed), or gray (Never).
   const rows = db
     .prepare(
       `SELECT
          c.*,
          (SELECT GROUP_CONCAT(DISTINCT ap.harness)
           FROM agent_packs ap
-          WHERE ap.pack_id = c.pack_id)              AS installed_harnesses,
+          WHERE ap.pack_id = c.pack_id
+            AND ap.uninstalled_at IS NULL)            AS installed_harnesses,
          (SELECT COUNT(*) FROM skills s
-          WHERE s.pack_id = c.pack_id)               AS installed_skill_count
+          WHERE s.pack_id = c.pack_id
+            AND s.uninstalled_at IS NULL)             AS installed_skill_count,
+         (SELECT MAX(ap.uninstalled_at)
+          FROM agent_packs ap
+          WHERE ap.pack_id = c.pack_id
+            AND ap.uninstalled_at IS NOT NULL)        AS uninstalled_at
        FROM pack_catalog c
        ORDER BY
          CASE WHEN c.pin_order IS NULL THEN 1 ELSE 0 END ASC,
@@ -258,11 +268,14 @@ function listCatalog(db) {
          c.display_name ASC`,
     )
     .all();
+  // Pack usage attribution (retroactive, sourced from events table).
+  const usage = loadUsageMap(db);
   return rows.map((r) => ({
     ...hydrateRow(r),
     installed_harnesses: r.installed_harnesses
       ? r.installed_harnesses.split(",")
       : [],
+    usage: usage.get(r.pack_id) || null,
   }));
 }
 
@@ -274,21 +287,56 @@ function getCatalog(db, packId, { historyDays = 30 } = {}) {
          c.*,
          (SELECT GROUP_CONCAT(DISTINCT ap.harness)
           FROM agent_packs ap
-          WHERE ap.pack_id = c.pack_id)              AS installed_harnesses,
+          WHERE ap.pack_id = c.pack_id
+            AND ap.uninstalled_at IS NULL)            AS installed_harnesses,
          (SELECT COUNT(*) FROM skills s
-          WHERE s.pack_id = c.pack_id)               AS installed_skill_count
+          WHERE s.pack_id = c.pack_id
+            AND s.uninstalled_at IS NULL)             AS installed_skill_count,
+         (SELECT MAX(ap.uninstalled_at)
+          FROM agent_packs ap
+          WHERE ap.pack_id = c.pack_id
+            AND ap.uninstalled_at IS NOT NULL)        AS uninstalled_at
        FROM pack_catalog c
        WHERE c.pack_id = ?`,
     )
     .get(packId);
   if (!row) return null;
+  const usage = loadUsageMap(db);
   return {
     ...hydrateRow(row),
     installed_harnesses: row.installed_harnesses
       ? row.installed_harnesses.split(",")
       : [],
+    usage: usage.get(packId) || null,
     history: listHistory(db, packId, historyDays),
   };
+}
+
+/**
+ * Compute pack usage attribution from the existing `events` table — works
+ * retroactively on already-imported sessions. Lazy-loads pack-store to avoid
+ * a circular require at startup.
+ *
+ * Returns Map<pack_id, { tool_calls, sessions, first_used_at, last_used_at }>.
+ */
+function loadUsageMap(db) {
+  try {
+    const { listPackUsage } = require("./pack-store");
+    const rows = listPackUsage(db) || [];
+    const m = new Map();
+    for (const r of rows) {
+      m.set(r.pack_id, {
+        tool_calls: r.tool_calls,
+        sessions: r.sessions,
+        first_used_at: r.first_used_at,
+        last_used_at: r.last_used_at,
+      });
+    }
+    return m;
+  } catch (e) {
+    // pack-store might not be present in legacy test environments — best-effort.
+    return new Map();
+  }
 }
 
 /**

@@ -26,6 +26,7 @@ const {
   getPack,
   listSkills,
   listSkillsForPack,
+  listPackUsage,
 } = require("../pack-store");
 
 function mkdtemp() {
@@ -311,36 +312,77 @@ test("gstack Codex install collapses N per-skill symlinks into ONE install row",
   assert.equal(codexSkills, 4, "all symlinked skills still ingested");
 });
 
-test("runPackScanner prunes stale rows from prior scans", () => {
+test("runPackScanner tombstones stale rows from prior scans (instead of deleting)", () => {
   const home = mkdtemp();
   makeGStackTree(home, { skills: ["office-hours"] });
   const db = makeDb();
 
-  // Seed a stale row from a hypothetical earlier scanner version that
-  // registered N per-skill installs. Backdated last_seen_at so the prune
-  // step catches it.
+  // Seed a stale row from a hypothetical earlier scanner version. Backdated
+  // last_seen_at so the tombstone step catches it.
   db.prepare(
     `INSERT INTO agent_packs
-       (pack_id, harness, install_path, install_kind, source_url, version, detected_at, last_seen_at)
-     VALUES ('gstack', 'codex', '/old/per/skill/path', 'symlink', NULL, NULL, ?, ?)`,
+       (pack_id, harness, install_path, install_kind, source_url, version, detected_at, last_seen_at, uninstalled_at)
+     VALUES ('gstack', 'codex', '/old/per/skill/path', 'symlink', NULL, NULL, ?, ?, NULL)`,
   ).run("2020-01-01T00:00:00Z", "2020-01-01T00:00:00Z");
   db.prepare(
-    `INSERT INTO skills (skill_id, pack_id, harness, install_path, name, detected_at, last_seen_at)
-     VALUES ('stale-1', 'gstack', 'codex', '/old/path', 'stale-skill', ?, ?)`,
+    `INSERT INTO skills (skill_id, pack_id, harness, install_path, name, detected_at, last_seen_at, uninstalled_at)
+     VALUES ('stale-1', 'gstack', 'codex', '/old/path', 'stale-skill', ?, ?, NULL)`,
   ).run("2020-01-01T00:00:00Z", "2020-01-01T00:00:00Z");
 
   withFakeHome(home, () => runPackScanner(db));
 
+  // After scan: row is preserved but tombstoned with uninstalled_at set.
   const stalePack = db
     .prepare(
       "SELECT * FROM agent_packs WHERE install_path = '/old/per/skill/path'",
     )
     .get();
-  assert.equal(stalePack, undefined, "stale agent_packs row should be pruned");
+  assert.ok(stalePack, "stale agent_packs row should be PRESERVED (tombstoned, not deleted)");
+  assert.ok(
+    stalePack.uninstalled_at,
+    "stale agent_packs row should have uninstalled_at set",
+  );
   const staleSkill = db
     .prepare("SELECT * FROM skills WHERE skill_id = 'stale-1'")
     .get();
-  assert.equal(staleSkill, undefined, "stale skills row should be pruned");
+  assert.ok(staleSkill, "stale skills row should be PRESERVED (tombstoned, not deleted)");
+  assert.ok(
+    staleSkill.uninstalled_at,
+    "stale skills row should have uninstalled_at set",
+  );
+});
+
+test("tombstone is cleared when a previously uninstalled pack reappears", () => {
+  const home = mkdtemp();
+  makeGStackTree(home, { skills: ["office-hours"] });
+  const db = makeDb();
+
+  // Seed gstack as previously tombstoned (uninstalled days ago).
+  const gstackPath = nodePath.join(home, ".claude", "skills", "gstack");
+  db.prepare(
+    `INSERT INTO agent_packs
+       (pack_id, harness, install_path, install_kind, source_url, version, detected_at, last_seen_at, uninstalled_at)
+     VALUES ('gstack', 'claude', ?, 'directory', NULL, NULL, ?, ?, ?)`,
+  ).run(
+    gstackPath,
+    "2025-12-01T00:00:00Z",
+    "2025-12-01T00:00:00Z",
+    "2026-01-01T00:00:00Z",
+  );
+
+  withFakeHome(home, () => runPackScanner(db));
+
+  const reinstalled = db
+    .prepare(
+      "SELECT uninstalled_at FROM agent_packs WHERE pack_id = 'gstack' AND harness = 'claude' AND install_path = ?",
+    )
+    .get(gstackPath);
+  assert.ok(reinstalled, "row should be present");
+  assert.equal(
+    reinstalled.uninstalled_at,
+    null,
+    "uninstalled_at should be cleared on re-detection",
+  );
 });
 
 test("scanner reads gstack pack version from top-level VERSION file", () => {
@@ -658,6 +700,84 @@ test("listSkillInvocations filters by harness and returns session metadata", () 
   // No harness filter → all matching invocations.
   const allCalls = listSkillInvocations(db, "office-hours", { limit: 10 });
   assert.equal(allCalls.length, 3);
+});
+
+test("listPackUsage attributes events to packs via install_path LIKE-join", () => {
+  const db = makeDb();
+  // Seed two installs and one project association.
+  db.prepare(
+    `INSERT INTO agent_packs
+       (pack_id, harness, install_path, install_kind, source_url, version, detected_at, last_seen_at, uninstalled_at)
+     VALUES
+       ('gstack', 'claude', '/Users/x/.claude/skills/gstack', 'directory', NULL, NULL, ?, ?, NULL),
+       ('bmad-method', 'claude', '/Users/x/.claude/skills/bmad', 'directory', NULL, NULL, ?, ?, ?)`,
+  ).run(
+    "2026-05-18T00:00:00Z",
+    "2026-05-21T00:00:00Z",
+    "2026-05-18T00:00:00Z",
+    "2026-05-20T00:00:00Z",
+    "2026-05-21T00:00:00Z", // bmad is tombstoned (previously installed)
+  );
+  db.prepare(
+    `INSERT INTO project_pack_associations (project_path, pack_id, detected_at, last_seen_at)
+     VALUES ('/Users/x/work/proj', 'bmad-method', ?, ?)`,
+  ).run("2026-05-18T00:00:00Z", "2026-05-21T00:00:00Z");
+
+  // Seed events with various file_path / Bash-cmd shapes referencing the
+  // install paths. Each event must include the path inside its data blob.
+  db.prepare("INSERT INTO sessions (id, name, started_at) VALUES (?, ?, ?)").run(
+    "sess1",
+    "test",
+    "2026-05-18T00:00:00Z",
+  );
+  for (const e of [
+    {
+      type: "PostToolUse",
+      data: '{"tool_input":{"file_path":"/Users/x/.claude/skills/gstack/ETHOS.md"}}',
+      at: "2026-05-18T10:00:00Z",
+    },
+    {
+      type: "PreToolUse",
+      data: '{"tool_input":{"command":"bash /Users/x/.claude/skills/gstack/bin/gstack-brain-sync"}}',
+      at: "2026-05-19T10:00:00Z",
+    },
+    {
+      type: "PostToolUse",
+      data: '{"tool_input":{"file_path":"/Users/x/.claude/skills/bmad/distillator/resources/format.md"}}',
+      at: "2026-05-20T10:00:00Z",
+    },
+    {
+      type: "PostToolUse",
+      data: '{"tool_input":{"file_path":"/Users/x/work/proj/_bmad/sprint.md"}}',
+      at: "2026-05-20T11:00:00Z",
+    },
+    {
+      // unrelated tool call — must NOT be attributed
+      type: "PostToolUse",
+      data: '{"tool_input":{"file_path":"/Users/x/unrelated.md"}}',
+      at: "2026-05-21T10:00:00Z",
+    },
+  ]) {
+    db.prepare(
+      "INSERT INTO events (session_id, event_type, data, created_at) VALUES (?, ?, ?, ?)",
+    ).run("sess1", e.type, e.data, e.at);
+  }
+
+  const usage = listPackUsage(db);
+  const byPack = Object.fromEntries(usage.map((u) => [u.pack_id, u]));
+
+  assert.ok(byPack.gstack, "gstack should appear in usage");
+  assert.equal(byPack.gstack.tool_calls, 2);
+  assert.equal(byPack.gstack.sessions, 1);
+  assert.equal(byPack.gstack.first_used_at, "2026-05-18T10:00:00Z");
+  assert.equal(byPack.gstack.last_used_at, "2026-05-19T10:00:00Z");
+
+  assert.ok(byPack["bmad-method"], "tombstoned bmad-method should still appear");
+  assert.equal(
+    byPack["bmad-method"].tool_calls,
+    2,
+    "1 from skills install_path + 1 from project_pack_associations",
+  );
 });
 
 test("no skill_invocations table is ever created", () => {

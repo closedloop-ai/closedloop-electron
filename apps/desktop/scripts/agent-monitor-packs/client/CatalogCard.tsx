@@ -31,6 +31,19 @@ export interface CatalogEntry {
   last_fetched_at: string | null;
   installed_harnesses: string[];
   installed_skill_count: number;
+  /** ISO timestamp of the most recent tombstone — set when at least one
+   *  install row exists with uninstalled_at IS NOT NULL and no current install
+   *  is active. Drives the amber "Previously installed" badge. */
+  uninstalled_at?: string | null;
+  /** Retroactive usage stats derived by joining `agent_packs.install_path`
+   *  against `events.data`. Surfaces gstack/bmad/etc. activity that already
+   *  lives in the events table even when the pack is uninstalled. */
+  usage?: {
+    tool_calls: number;
+    sessions: number;
+    first_used_at: string | null;
+    last_used_at: string | null;
+  } | null;
   history?: Array<{ fetched_at: string; stars: number | null; forks: number | null }>;
 }
 
@@ -45,6 +58,22 @@ function formatStars(n: number | null): string {
   if (n == null) return "—";
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
   return String(n);
+}
+
+/** Relative-time formatter for "last used" / "uninstalled" badges. */
+function formatRelative(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const ms = Date.now() - new Date(iso).getTime();
+  if (Number.isNaN(ms) || ms < 0) return "";
+  const days = Math.floor(ms / 86400000);
+  if (days >= 30) {
+    const months = Math.floor(days / 30);
+    return `${months}mo ago`;
+  }
+  if (days >= 1) return `${days}d ago`;
+  const hours = Math.floor(ms / 3600000);
+  if (hours >= 1) return `${hours}h ago`;
+  return "just now";
 }
 
 export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
@@ -105,10 +134,17 @@ export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
         </div>
       )}
 
-      <div className="flex items-center gap-1.5 text-[10px]">
+      <div className="flex items-center gap-1.5 text-[10px] flex-wrap">
         {isInstalled ? (
           <span className="rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 px-1.5 py-0.5">
             Installed ({pack.installed_harnesses.join(", ")})
+          </span>
+        ) : pack.uninstalled_at ? (
+          <span
+            className="rounded bg-amber-500/15 border border-amber-500/30 text-amber-300 px-1.5 py-0.5"
+            title={`Last installed copy was uninstalled ${new Date(pack.uninstalled_at).toLocaleString()}`}
+          >
+            Previously installed · uninstalled {formatRelative(pack.uninstalled_at)}
           </span>
         ) : (
           <span className="rounded bg-surface-3 text-gray-400 px-1.5 py-0.5">
@@ -119,6 +155,14 @@ export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
           <span className="text-gray-500">
             · {pack.installed_skill_count} skill
             {pack.installed_skill_count === 1 ? "" : "s"}
+          </span>
+        )}
+        {pack.usage && pack.usage.tool_calls > 0 && (
+          <span
+            className="text-gray-500"
+            title={`${pack.usage.tool_calls} tool calls across ${pack.usage.sessions} session${pack.usage.sessions === 1 ? "" : "s"}; first ${pack.usage.first_used_at?.slice(0, 10)}, last ${pack.usage.last_used_at?.slice(0, 10)}`}
+          >
+            · used {pack.usage.tool_calls}× · last {formatRelative(pack.usage.last_used_at)}
           </span>
         )}
       </div>

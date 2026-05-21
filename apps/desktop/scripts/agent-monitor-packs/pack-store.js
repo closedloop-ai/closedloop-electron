@@ -58,6 +58,26 @@ function ensurePackSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
     CREATE INDEX IF NOT EXISTS idx_agent_packs_pack ON agent_packs(pack_id);
   `);
+
+  // v2 additive migration: `uninstalled_at` tombstone column. When set, the row
+  // represents a pack/skill that USED to be installed but isn't anymore — kept
+  // around so we can surface "previously installed, last used $DATE, $N tool
+  // calls" on catalog cards. The scanner sets this instead of DELETE-ing rows;
+  // a future re-install clears it back to NULL.
+  for (const [table, col, type] of [
+    ["agent_packs", "uninstalled_at", "TEXT"],
+    ["skills", "uninstalled_at", "TEXT"],
+  ]) {
+    try {
+      db.prepare(`SELECT ${col} FROM ${table} LIMIT 1`).get();
+    } catch {
+      try {
+        db.prepare(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`).run();
+      } catch {
+        /* column may already exist via concurrent run — non-fatal */
+      }
+    }
+  }
 }
 
 function nowIso() {
@@ -73,13 +93,14 @@ function upsertPack(db, row) {
   const ts = nowIso();
   db.prepare(
     `INSERT INTO agent_packs
-       (pack_id, harness, install_path, install_kind, source_url, version, detected_at, last_seen_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       (pack_id, harness, install_path, install_kind, source_url, version, detected_at, last_seen_at, uninstalled_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)
      ON CONFLICT(pack_id, harness, install_path) DO UPDATE SET
-       install_kind = excluded.install_kind,
-       source_url   = COALESCE(excluded.source_url, source_url),
-       version      = COALESCE(excluded.version, version),
-       last_seen_at = excluded.last_seen_at`,
+       install_kind   = excluded.install_kind,
+       source_url     = COALESCE(excluded.source_url, source_url),
+       version        = COALESCE(excluded.version, version),
+       last_seen_at   = excluded.last_seen_at,
+       uninstalled_at = NULL`,
   ).run(
     row.pack_id,
     row.harness,
@@ -101,14 +122,15 @@ function upsertSkill(db, row) {
   const ts = nowIso();
   db.prepare(
     `INSERT INTO skills
-       (skill_id, pack_id, harness, install_path, name, version, description, source_url, detected_at, last_seen_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       (skill_id, pack_id, harness, install_path, name, version, description, source_url, detected_at, last_seen_at, uninstalled_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
      ON CONFLICT(skill_id) DO UPDATE SET
-       pack_id      = excluded.pack_id,
-       version      = COALESCE(excluded.version, version),
-       description  = COALESCE(excluded.description, description),
-       source_url   = COALESCE(excluded.source_url, source_url),
-       last_seen_at = excluded.last_seen_at`,
+       pack_id        = excluded.pack_id,
+       version        = COALESCE(excluded.version, version),
+       description    = COALESCE(excluded.description, description),
+       source_url     = COALESCE(excluded.source_url, source_url),
+       last_seen_at   = excluded.last_seen_at,
+       uninstalled_at = NULL`,
   ).run(
     row.skill_id,
     row.pack_id || null,
@@ -344,6 +366,71 @@ function listSkillInvocations(
     .all(...params);
 }
 
+/**
+ * Retroactive pack-usage attribution from the existing `events` table.
+ *
+ * Every `agent_packs` row carries an `install_path` (e.g.
+ * `/Users/x/.claude/skills/gstack`). Most pack work shows up as PreToolUse /
+ * PostToolUse events whose `data` blob contains that install_path
+ * (file_paths the agent Read/Edit'd, Bash commands invoking the pack's bins,
+ * etc.). Joining `events.data LIKE '%' || p.install_path || '%'` recovers
+ * that history WITHOUT any new ingestion — works retroactively on any DB
+ * whose legacy importer already ran.
+ *
+ * Also picks up `project_pack_associations` paths so a project that uses BMad
+ * (via `_bmad/` in its cwd) gets credit for tool calls inside that project.
+ *
+ * Returns one row per pack_id with: tool-call count, distinct sessions,
+ * first/last used timestamps. Includes tombstoned (uninstalled) packs so they
+ * still surface as "previously installed, used N times" on the catalog grid.
+ *
+ * The LIKE-join is a sequential scan over events but is bounded by the small
+ * cardinality of agent_packs rows (typically <50) and is run once per page
+ * load. If it ever needs to be hot, add a derived `events_pack_paths` index
+ * table populated by the importer.
+ */
+function listPackUsage(db) {
+  // Collect candidate install paths for each pack: both `agent_packs.install_path`
+  // (real installs, including tombstoned ones) and `project_pack_associations.project_path`
+  // (project roots where the pack is active — bmad-method's main signal).
+  const paths = db
+    .prepare(
+      `SELECT pack_id, install_path AS p FROM agent_packs WHERE install_path IS NOT NULL
+       UNION
+       SELECT pack_id, project_path AS p FROM project_pack_associations WHERE project_path IS NOT NULL`,
+    )
+    .all();
+  if (paths.length === 0) return [];
+
+  // Group paths by pack_id so we can OR them together per pack.
+  const byPack = new Map();
+  for (const { pack_id, p } of paths) {
+    if (!byPack.has(pack_id)) byPack.set(pack_id, []);
+    byPack.get(pack_id).push(p);
+  }
+
+  const out = [];
+  for (const [packId, packPaths] of byPack) {
+    const likeClauses = packPaths.map(() => "e.data LIKE ?").join(" OR ");
+    const likeParams = packPaths.map((p) => `%${p}%`);
+    const row = db
+      .prepare(
+        `SELECT
+           COUNT(*)                     AS tool_calls,
+           COUNT(DISTINCT e.session_id) AS sessions,
+           MIN(e.created_at)            AS first_used_at,
+           MAX(e.created_at)            AS last_used_at
+         FROM events e
+         WHERE ${likeClauses}`,
+      )
+      .get(...likeParams);
+    if (row && row.tool_calls > 0) {
+      out.push({ pack_id: packId, ...row });
+    }
+  }
+  return out;
+}
+
 module.exports = {
   ensurePackSchema,
   upsertPack,
@@ -354,4 +441,5 @@ module.exports = {
   listSkillsForPack,
   listSkills,
   listSkillInvocations,
+  listPackUsage,
 };

@@ -755,18 +755,37 @@ function scanProjectGStackAssociations(db) {
  * Best-effort: if any DELETE fails (locked DB, etc.) the scanner still
  * succeeds — pruning is a cleanup, not a correctness requirement.
  */
+/**
+ * Tombstone rows the current scan didn't observe. Replaces the old DELETE
+ * behavior — packs/skills that USED to be installed are kept around with
+ * `uninstalled_at` set so the catalog can surface "previously installed, used
+ * N times" badges via listPackUsage(). A subsequent re-install clears the
+ * tombstone in the upsert path. project_pack_associations is still pruned
+ * (associations are observational, not user state worth preserving).
+ */
 function pruneStaleRows(db, scanStartedAt) {
   try {
     db.prepare(
-      "DELETE FROM agent_packs WHERE last_seen_at < ?",
-    ).run(scanStartedAt);
+      `UPDATE agent_packs
+         SET uninstalled_at = ?
+       WHERE last_seen_at < ?
+         AND uninstalled_at IS NULL`,
+    ).run(scanStartedAt, scanStartedAt);
   } catch (e) {
-    console.warn("[pack-scanner] prune agent_packs failed:", e && e.message);
+    console.warn(
+      "[pack-scanner] tombstone agent_packs failed:",
+      e && e.message,
+    );
   }
   try {
-    db.prepare("DELETE FROM skills WHERE last_seen_at < ?").run(scanStartedAt);
+    db.prepare(
+      `UPDATE skills
+         SET uninstalled_at = ?
+       WHERE last_seen_at < ?
+         AND uninstalled_at IS NULL`,
+    ).run(scanStartedAt, scanStartedAt);
   } catch (e) {
-    console.warn("[pack-scanner] prune skills failed:", e && e.message);
+    console.warn("[pack-scanner] tombstone skills failed:", e && e.message);
   }
   try {
     db.prepare(
