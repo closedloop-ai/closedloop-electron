@@ -119,6 +119,15 @@ function isHarnessInstalled(harness) {
   }
 }
 
+function joinIndependentCleanupCommands(commands) {
+  const failureVar = "__closedloop_uninstall_failed";
+  return [
+    `${failureVar}=0`,
+    ...commands.map((command) => `if ! ( ${command} ); then ${failureVar}=1; fi`),
+    `exit $${failureVar}`,
+  ].join("; ");
+}
+
 /**
  * For `single_install` packs (gstack), pick the command to run for install
  * or uninstall. Install and uninstall use different join strategies because
@@ -130,12 +139,14 @@ function isHarnessInstalled(harness) {
  *   setup AND the codex one). Running the superset alone installs for all
  *   detected CLIs.
  *
- *   UNINSTALL — JOIN all uninstall commands across listed harnesses with
- *   `;`. The claude and codex uninstall commands are DISJOINT cleanups
+ *   UNINSTALL — run all uninstall commands across listed harnesses
+ *   independently, but aggregate failures. The claude and codex uninstall
+ *   commands are DISJOINT cleanups
  *   (claude: rm ~/.claude/skills/gstack; codex: rm ~/.codex/skills/gstack*),
  *   neither is a superset of the other. Running only one leaves the other
- *   harness's artifacts on disk. `;` (not `&&`) so each step is independent
- *   — a missing artifact in one harness doesn't skip cleanup in the next.
+ *   harness's artifacts on disk. We still avoid `&&` so each step is
+ *   independent — a missing artifact in one harness doesn't skip cleanup in
+ *   the next — but any non-zero step still makes the overall uninstall fail.
  *   Uninstall runs for ALL listed harnesses (not just CLIs currently on
  *   PATH) because on-disk artifacts may outlive the CLI install.
  *
@@ -147,16 +158,20 @@ function pickSingleInstallCommand(entry, action) {
   const harnesses = Array.isArray(entry.harnesses) ? entry.harnesses : [];
 
   if (action === "uninstall") {
-    // Join ALL listed harnesses' uninstall commands. Run regardless of
-    // which CLIs are currently on PATH — we're cleaning up artifacts, not
-    // managing live CLIs.
+    // Run ALL listed harnesses' uninstall commands. Keep each cleanup
+    // independent, but surface any failure in the aggregate exit status.
+    // Run regardless of which CLIs are currently on PATH — we're cleaning
+    // up artifacts, not managing live CLIs.
     const cmds = harnesses
       .map((h) => cmdMap && cmdMap[h])
       .filter(Boolean);
     if (cmds.length === 0) {
       return { command: null, registerHarnesses: [] };
     }
-    return { command: cmds.join(" ; "), registerHarnesses: harnesses };
+    return {
+      command: joinIndependentCleanupCommands(cmds),
+      registerHarnesses: harnesses,
+    };
   }
 
   // Install path — only consider harnesses whose CLI is actually present.
@@ -281,12 +296,18 @@ function streamRun(db, opts) {
     command = picked.command;
     resolvedHarnesses = picked.registerHarnesses;
     if (!command) {
+      const noCommandMessage =
+        action === "uninstall"
+          ? `pack '${pack_id}' is single_install but no uninstall commands are configured for any listed harness.`
+          : `pack '${pack_id}' is single_install but no supported CLI is on PATH. ` +
+            `Install Claude Code or Codex first, then try again.`;
       sse(res, "error", {
-        message:
-          `pack '${pack_id}' is single_install but no supported CLI is on PATH. ` +
-          `Install Claude Code or Codex first, then try again.`,
+        message: noCommandMessage,
       });
-      sse(res, "complete", { exit_code: -1, reason: "no_cli_detected" });
+      sse(res, "complete", {
+        exit_code: -1,
+        reason: action === "uninstall" ? "no_command" : "no_cli_detected",
+      });
       res.end();
       return;
     }
@@ -458,6 +479,7 @@ module.exports = {
     stripAnsi,
     tailBytes,
     isHarnessInstalled,
+    joinIndependentCleanupCommands,
     pickSingleInstallCommand,
   },
 };

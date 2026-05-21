@@ -32,6 +32,8 @@ function seedCatalog(db, packId, installCmd, uninstallCmd = null, options = {}) 
   const installCommands =
     options.installCommands || { claude: installCmd };
   const harnesses = options.harnesses || Object.keys(installCommands);
+  const uninstallCommands =
+    options.uninstallCommands || (uninstallCmd ? { claude: uninstallCmd } : null);
   upsertCatalogSeed(db, {
     seed_version: 1,
     packs: [
@@ -41,7 +43,8 @@ function seedCatalog(db, packId, installCmd, uninstallCmd = null, options = {}) 
         github_url: `https://github.com/test/${packId}`,
         harnesses,
         install_commands: installCommands,
-        ...(uninstallCmd ? { uninstall_commands: { claude: uninstallCmd } } : {}),
+        ...(uninstallCommands ? { uninstall_commands: uninstallCommands } : {}),
+        ...(options.singleInstall ? { single_install: true } : {}),
         ...(options.projectScoped ? { project_scoped: true } : {}),
       },
     ],
@@ -186,6 +189,59 @@ test("streamRun errors when no install_command exists for the harness", async ()
     stream.includes("event: error") && stream.includes("no install command"),
     `expected no-install-command error; got stream: ${stream.slice(0, 400)}`,
   );
+});
+
+test("streamRun single_install uninstall runs every cleanup but fails overall when one step fails", async () => {
+  const db = makeDb();
+  seedCatalog(db, "single-uninstall-fail-pack", "echo install", null, {
+    singleInstall: true,
+    harnesses: ["claude", "codex"],
+    installCommands: {
+      claude: "echo install-claude",
+      codex: "echo install-codex",
+    },
+    uninstallCommands: {
+      claude: "echo claude-cleanup && exit 7",
+      codex: "echo codex-cleanup",
+    },
+  });
+  const res = makeRes();
+  streamRun(db, {
+    pack_id: "single-uninstall-fail-pack",
+    harness: "auto",
+    action: "uninstall",
+    res,
+  });
+  await awaitComplete(res);
+  const stream = joined(res);
+  assert.ok(stream.includes("claude-cleanup"), "first cleanup should still run");
+  assert.ok(stream.includes("codex-cleanup"), "later cleanup should still run");
+  const runs = listInstallRuns(db, { pack_id: "single-uninstall-fail-pack" });
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].exit_code, 1);
+});
+
+test("streamRun single_install uninstall reports missing uninstall commands clearly", async () => {
+  const db = makeDb();
+  seedCatalog(db, "single-uninstall-missing-pack", "echo install", null, {
+    singleInstall: true,
+    harnesses: ["claude", "codex"],
+    installCommands: {
+      claude: "echo install-claude",
+      codex: "echo install-codex",
+    },
+  });
+  const res = makeRes();
+  streamRun(db, {
+    pack_id: "single-uninstall-missing-pack",
+    harness: "auto",
+    action: "uninstall",
+    res,
+  });
+  await awaitComplete(res);
+  const stream = joined(res);
+  assert.ok(stream.includes("no uninstall commands are configured"));
+  assert.ok(!stream.includes("Install Claude Code or Codex first"));
 });
 
 test("streamRun requires an explicit cwd for project-scoped commands", async () => {

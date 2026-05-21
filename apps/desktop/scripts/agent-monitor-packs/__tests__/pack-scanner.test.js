@@ -1105,8 +1105,10 @@ test("pickSingleInstallCommand joins ALL uninstall commands; picks superset for 
     },
   };
 
-  // UNINSTALL: must join BOTH commands with `;` regardless of which CLIs are
-  // present, because cleanup must happen for all listed harnesses' artifacts.
+  // UNINSTALL: must run BOTH commands independently regardless of which CLIs
+  // are present, because cleanup must happen for all listed harnesses'
+  // artifacts. Any failed step still needs to make the aggregate uninstall
+  // fail.
   const uninstall = io._internals.pickSingleInstallCommand(entry, "uninstall");
   assert.ok(uninstall.command, "uninstall command must be present");
   assert.ok(
@@ -1118,8 +1120,8 @@ test("pickSingleInstallCommand joins ALL uninstall commands; picks superset for 
     "uninstall must include the codex cleanup",
   );
   assert.ok(
-    uninstall.command.includes(" ; "),
-    "uninstall must join commands with ' ; ' so each step runs independently",
+    uninstall.command.includes("exit $__closedloop_uninstall_failed"),
+    "uninstall must preserve a non-zero aggregate exit status",
   );
   assert.deepEqual(uninstall.registerHarnesses, ["claude", "codex"]);
 
