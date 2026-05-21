@@ -1,5 +1,6 @@
 import { getCloudLoopStatus } from "../server/operations/loop-http.js";
 import { startOutputTailer } from "../server/operations/output-tailer.js";
+import { withTokenRefreshRetry } from "./loop-refresh.js";
 import {
   cleanupAdditionalWorktreesWithDefaultProvider,
   registerRecoveredLoop,
@@ -14,6 +15,10 @@ import {
   type LoopFinalizerDeps,
 } from "./loop-finalizer.js";
 import type { TelemetryEmitter } from "./telemetry-protocol.js";
+import { teardownLoopSchedulers } from "./loop-lifecycle.js";
+import * as loopRefreshScheduler from "./loop-refresh-scheduler.js";
+import * as loopHeartbeat from "./loop-heartbeat.js";
+import * as loopSleepRecovery from "./loop-sleep-recovery.js";
 
 export interface BootRecoveryDeps {
   jobStore: JobStore;
@@ -169,7 +174,7 @@ export class BootRecoveryService {
         const outcome = await finalizeLoopFromRuntime(job, "boot-recovery", {
           jobStore,
           telemetry,
-          getToken: () => loopTokenStore.getLoopToken(job.loopId),
+          getToken: () => loopTokenStore.getLoopTokenString(job.loopId),
           apiBaseUrl,
           isProcessRunning,
           getAllowedDirectories,
@@ -238,8 +243,32 @@ export class BootRecoveryService {
     job: LocalJob,
     apiBaseUrl: string,
   ): ReturnType<typeof getCloudLoopStatus> {
-    const token = this.deps.loopTokenStore.getLoopToken(job.loopId);
-    const result = await getCloudLoopStatus(job.loopId, () => token, apiBaseUrl);
+    const { loopTokenStore } = this.deps;
+    const getToken = () => loopTokenStore.getLoopTokenString(job.loopId);
+
+    // Bridge getCloudLoopStatus into a LoopHttpResult so withTokenRefreshRetry
+    // can intercept 401 responses (signalled by error message "HTTP 401") and
+    // retry exactly once with a refreshed token.
+    let cloudStatus: Awaited<ReturnType<typeof getCloudLoopStatus>> | null = null;
+    await withTokenRefreshRetry(
+      job.loopId,
+      apiBaseUrl,
+      getToken,
+      loopTokenStore,
+      async (gt) => {
+        const status = await getCloudLoopStatus(job.loopId, gt, apiBaseUrl);
+        cloudStatus = status;
+        // Translate to LoopHttpResult so the wrapper can detect 401 and retry.
+        if (status.kind === "error" && status.message === "HTTP 401") {
+          return { success: false as const, kind: "http" as const, status: 401, error: status.message };
+        }
+        return { success: true as const, status: 200 };
+      },
+    );
+
+    // cloudStatus is always set after the await above (either first call or retry).
+    const result = (cloudStatus as unknown as Awaited<ReturnType<typeof getCloudLoopStatus>>);
+
     if (result.kind === "timed_out") {
       const current = this.deps.jobStore.getByLoopId(job.loopId) ?? job;
       this.deps.jobStore.upsert({
@@ -276,7 +305,7 @@ export class BootRecoveryService {
 
     // TOCTOU guard: process was alive when liveJobs was built, but may have exited since.
     if (!isProcessRunning(pid)) {
-      this.finalizeRecoveredJob(loopId, () => this.deps.loopTokenStore.getLoopToken(loopId), effectiveApiBaseUrl, undefined);
+      this.finalizeRecoveredJob(loopId, () => this.deps.loopTokenStore.getLoopTokenString(loopId), effectiveApiBaseUrl, undefined);
       return;
     }
 
@@ -311,7 +340,7 @@ export class BootRecoveryService {
         job.jsonlPath,
         effectiveApiBaseUrl,
         loopId,
-        () => this.deps.loopTokenStore.getLoopToken(loopId),
+        () => this.deps.loopTokenStore.getLoopTokenString(loopId),
         job.lastObservedJsonlOffset ?? 0,
         (offset) => {
           const current = jobStore.getByLoopId(loopId);
@@ -320,6 +349,7 @@ export class BootRecoveryService {
           }
         },
         job.claudeWorkDir,
+        this.deps.loopTokenStore,
       );
     } else {
       gatewayLog.warn(
@@ -327,6 +357,23 @@ export class BootRecoveryService {
         `Cannot start output tailer for loopId=${loopId}: no jsonlPath (claudeWorkDir=${job.claudeWorkDir ?? "none"})`,
       );
     }
+
+    const getToken = () => this.deps.loopTokenStore.getLoopTokenString(loopId);
+
+    const loopTokenMeta = this.deps.loopTokenStore.getLoopToken(loopId);
+    loopRefreshScheduler.start(loopId, loopTokenMeta?.expiresAt, {
+      apiBaseUrl: effectiveApiBaseUrl,
+      getToken,
+      loopTokenStore: this.deps.loopTokenStore,
+    });
+
+    loopHeartbeat.start(loopId, effectiveApiBaseUrl, getToken);
+
+    loopSleepRecovery.registerLoop(loopId, {
+      apiBaseUrl: effectiveApiBaseUrl,
+      getToken,
+      loopTokenStore: this.deps.loopTokenStore,
+    });
 
     const watcherPollMs =
       Number(process.env.CLOSEDLOOP_WATCHER_POLL_MS) || DEFAULT_WATCHER_POLL_MS;
@@ -339,7 +386,8 @@ export class BootRecoveryService {
         clearInterval(watcherId);
         this.liveHandles = this.liveHandles.filter((value) => value.loopId !== loopId);
         unregisterLoop(loopId);
-        this.finalizeRecoveredJob(loopId, () => this.deps.loopTokenStore.getLoopToken(loopId), effectiveApiBaseUrl, tailer);
+        teardownLoopSchedulers(loopId);
+        this.finalizeRecoveredJob(loopId, () => this.deps.loopTokenStore.getLoopTokenString(loopId), effectiveApiBaseUrl, tailer);
       }
     }, watcherPollMs);
 

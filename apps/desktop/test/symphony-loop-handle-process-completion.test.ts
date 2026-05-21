@@ -471,7 +471,7 @@ test("handleProcessCompletion persists runner failure marker before failed error
   const loopTokenStore = createLoopTokenStore(
     "symphony-runner-marker-event-failure-tokens",
   );
-  loopTokenStore.setLoopToken(loopId, "loop-token");
+  loopTokenStore.setLoopToken(loopId, { token: "loop-token" });
   jobStore.upsert(createBaseJob(loopId, claudeWorkDir));
 
   await completeFailedLoopWithMarkerSecret({
@@ -491,7 +491,7 @@ test("handleProcessCompletion persists runner failure marker before failed error
     "ARTIFACT_UPLOAD_FAILED",
     "EVENT_POST_FAILED",
   ]);
-  assert.equal(loopTokenStore.getLoopToken(loopId), "loop-token");
+  assert.deepEqual(loopTokenStore.getLoopToken(loopId), { token: "loop-token" });
   assert.deepEqual(persisted.userVisibleLoopFailure, {
     code: "RUNNER_ERROR",
     message: "Claude rate limit reached.",

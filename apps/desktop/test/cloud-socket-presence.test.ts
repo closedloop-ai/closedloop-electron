@@ -402,3 +402,39 @@ describe("T-3.1: hello payload version fields", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// T-6.2: Capability flags loopRunnerRefreshSupported and loopRunnerHeartbeatSupported
+// ---------------------------------------------------------------------------
+
+describe("T-6.2: capability flags loopRunnerRefreshSupported and loopRunnerHeartbeatSupported", () => {
+  test("desktop.hello capabilities include loopRunnerRefreshSupported=true and loopRunnerHeartbeatSupported=true", () => {
+    const service = new CloudSocketService(
+      createStubOptions({
+        getCapabilities: () => ({
+          tools: { claude: false, codex: false, git: false, gh: false, python3: false },
+          versions: {},
+          commandSigning: true,
+          loopRunnerRefreshSupported: true,
+          loopRunnerHeartbeatSupported: true,
+        }),
+      }),
+    );
+
+    const fakeSocket = new FakeSocket();
+    (service as unknown as Record<string, unknown>)["socket"] = fakeSocket;
+
+    const proto = Object.getPrototypeOf(service) as Record<string, (...args: unknown[]) => void>;
+    proto["emitHello"].call(service);
+
+    const hello = fakeSocket.emittedEvents.find((e) => e.name === "desktop.hello")
+      ?.payload as Record<string, unknown>;
+    assert.ok(hello, "Expected desktop.hello to be emitted");
+
+    const caps = hello["capabilities"] as Record<string, unknown>;
+    assert.equal(caps["loopRunnerRefreshSupported"], true, "loopRunnerRefreshSupported must be true");
+    assert.equal(caps["loopRunnerHeartbeatSupported"], true, "loopRunnerHeartbeatSupported must be true");
+
+    service.stop();
+  });
+});

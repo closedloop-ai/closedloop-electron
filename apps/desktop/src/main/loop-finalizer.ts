@@ -13,6 +13,7 @@ import {
   postLoopEvent,
   uploadArtifacts,
 } from "../server/operations/loop-http.js";
+import { withTokenRefreshRetry } from "./loop-refresh.js";
 import { readEffectiveStatusFromState } from "../server/operations/symphony-job-snapshot.js";
 import {
   EVALUATE_COMMAND_ARTIFACT,
@@ -44,6 +45,7 @@ import {
   type LocalJob,
 } from "./job-store.js";
 import type { LoopTokenStore } from "./loop-token-store.js";
+import { teardownLoopSchedulers } from "./loop-lifecycle.js";
 import { Observability } from "./observability.js";
 import type {
   SupportUploadReason,
@@ -123,6 +125,7 @@ export type SupportUploadDeps = {
   apiBaseUrl: string;
   getToken: () => string | null;
   jobStore?: JobStore;
+  loopTokenStore?: LoopTokenStore;
 };
 
 export function parseJobWarnings(job: Pick<LocalJob, "warning">): string[] {
@@ -137,7 +140,7 @@ export function parseJobWarnings(job: Pick<LocalJob, "warning">): string[] {
 
 type ArtifactUploadDeps = Pick<
   LoopFinalizerDeps,
-  "jobStore" | "getToken" | "apiBaseUrl" | "getAllowedDirectories"
+  "jobStore" | "getToken" | "apiBaseUrl" | "getAllowedDirectories" | "loopTokenStore"
 >;
 
 function hasTerminalExecuteFinalization(
@@ -411,21 +414,25 @@ export async function tryUploadArtifacts(
     return { artifacts, failed: false };
   }
 
-  const uploadResult = await uploadArtifacts(
-    deps.apiBaseUrl,
-    job.loopId,
-    deps.getToken,
-    {
+  const uploadBody = {
+    artifacts,
+    metadata: buildArtifactUploadMetadata(
+      job,
+      command,
+      claudeWorkDir,
       artifacts,
-      metadata: buildArtifactUploadMetadata(
-        job,
-        command,
-        claudeWorkDir,
-        artifacts,
-        deps.getAllowedDirectories,
-      ),
-    },
-  );
+      deps.getAllowedDirectories,
+    ),
+  };
+  const uploadResult = deps.loopTokenStore
+    ? await withTokenRefreshRetry(
+        job.loopId,
+        deps.apiBaseUrl,
+        deps.getToken,
+        deps.loopTokenStore,
+        (getToken) => uploadArtifacts(deps.apiBaseUrl, job.loopId, getToken, uploadBody),
+      )
+    : await uploadArtifacts(deps.apiBaseUrl, job.loopId, deps.getToken, uploadBody);
   if (!uploadResult.success) {
     warnings.push("ARTIFACT_UPLOAD_FAILED");
     return { artifacts, failed: true, error: uploadResult.error };
@@ -486,12 +493,15 @@ export async function tryPostCompletedEvent(
     ...(warnings.length > 0 ? { warnings } : {}),
   };
 
-  const eventResult = await postLoopEvent(
-    deps.apiBaseUrl,
-    job.loopId,
-    deps.getToken,
-    completedEvent,
-  );
+  const eventResult = deps.loopTokenStore
+    ? await withTokenRefreshRetry(
+        job.loopId,
+        deps.apiBaseUrl,
+        deps.getToken,
+        deps.loopTokenStore,
+        (getToken) => postLoopEvent(deps.apiBaseUrl, job.loopId, getToken, completedEvent),
+      )
+    : await postLoopEvent(deps.apiBaseUrl, job.loopId, deps.getToken, completedEvent);
   if (!eventResult.success) {
     warnings.push("EVENT_POST_FAILED");
     return { failed: true, error: eventResult.error };
@@ -573,12 +583,15 @@ export async function tryPostErrorEvent(
     ...(warnings.length > 0 ? { warnings } : {}),
   };
 
-  const eventResult = await postLoopEvent(
-    deps.apiBaseUrl,
-    job.loopId,
-    deps.getToken,
-    errorEvent,
-  );
+  const eventResult = deps.loopTokenStore
+    ? await withTokenRefreshRetry(
+        job.loopId,
+        deps.apiBaseUrl,
+        deps.getToken,
+        deps.loopTokenStore,
+        (getToken) => postLoopEvent(deps.apiBaseUrl, job.loopId, getToken, errorEvent),
+      )
+    : await postLoopEvent(deps.apiBaseUrl, job.loopId, deps.getToken, errorEvent);
   if (!eventResult.success) {
     warnings.push("EVENT_POST_FAILED");
     return { failed: true, error: eventResult.error };
@@ -655,11 +668,7 @@ export function emitFinalizationTelemetry(
     const logPath = path.join(claudeWorkDir, "symphony-loop.log");
     const logTail = readLogTail(logPath) ?? undefined;
     const parsed = parseTokenUsage(claudeWorkDir);
-    const hasTokenActivity =
-      parsed.inputTokens > 0 ||
-      parsed.outputTokens > 0 ||
-      parsed.cacheCreationInputTokens > 0 ||
-      parsed.cacheReadInputTokens > 0;
+    const hasTokenActivity = hasTokenUsageActivity(parsed);
     if (logTail || hasTokenActivity) {
       diagnostics = {
         logTail,
@@ -1025,6 +1034,7 @@ export async function tryUploadSupportBundle({
   apiBaseUrl,
   getToken,
   jobStore,
+  loopTokenStore,
 }: SupportUploadDeps): Promise<SupportUploadResult> {
   const startedAt = Date.now();
   if (job.supportBundleUploadedAt) {
@@ -1108,7 +1118,7 @@ export async function tryUploadSupportBundle({
     uploaded.push(candidate);
   }
 
-  const eventResult = await postLoopEvent(apiBaseUrl, job.loopId, getToken, {
+  const supportEventBody = {
     type: SUPPORT_BUNDLE_UPLOADED_EVENT_TYPE,
     keys: uploaded.map((candidate) => candidate.key),
     files: uploaded.map((candidate) => ({
@@ -1116,7 +1126,16 @@ export async function tryUploadSupportBundle({
       key: candidate.key,
       sizeBytes: candidate.sizeBytes,
     })),
-  });
+  };
+  const eventResult = loopTokenStore
+    ? await withTokenRefreshRetry(
+        job.loopId,
+        apiBaseUrl,
+        getToken,
+        loopTokenStore,
+        (gt) => postLoopEvent(apiBaseUrl, job.loopId, gt, supportEventBody),
+      )
+    : await postLoopEvent(apiBaseUrl, job.loopId, getToken, supportEventBody);
   if (!eventResult.success) {
     const error = eventResult.error ?? "support event post failed";
     emitSupportUploadLifecycle(job, "failed", {
@@ -1297,6 +1316,7 @@ export async function finalizeLoopFromRuntime(
     getToken,
     apiBaseUrl,
     getAllowedDirectories,
+    loopTokenStore,
   };
   const now = new Date().toISOString();
   const persistBeforeCloud = reason !== "live-exit";
@@ -1444,6 +1464,7 @@ export async function finalizeLoopFromRuntime(
       apiBaseUrl,
       getToken,
       jobStore,
+      loopTokenStore,
     });
     if (supportResult.failed) {
       warnings.push("SUPPORT_UPLOAD_FAILED");
@@ -1504,6 +1525,7 @@ export async function finalizeLoopFromRuntime(
   );
 
   if (cloudFinalized || !retryableFailure) {
+    teardownLoopSchedulers(resolvedJob.loopId);
     loopTokenStore?.deleteLoopToken(resolvedJob.loopId);
   }
 

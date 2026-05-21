@@ -158,6 +158,7 @@ import {
 import { isSecurityUpgradeProvisioned } from "./security-upgrade-result.js";
 import { isDesktopSetupCompleteFromState } from "./setup-readiness.js";
 import { PendingCommandKeyNotifier } from "./pending-command-key-notifier.js";
+import * as loopSleepRecovery from "./loop-sleep-recovery.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -557,6 +558,10 @@ export class DesktopApplication {
     if (bootSandbox?.trim()) {
       await seedReposConfig(bootSandbox);
     }
+
+    // Register the sleep/wake recovery listener so active loops refresh their
+    // tokens and send heartbeats after the system wakes from sleep.
+    loopSleepRecovery.init();
 
     // Independent of the gateway, but fully feature-gated. When enabled, start
     // the sidecar fire-and-forget BEFORE the gateway try-block so a
@@ -1240,10 +1245,14 @@ export class DesktopApplication {
   }
 
   private getLocalCapabilities(): ReturnType<typeof buildCommandSigningCapabilities> {
-    return buildCommandSigningCapabilities({
-      commandSigningEnforcementEnabled:
-        this.settingsStore.getCommandSigningEnforcementEnabled(),
-    });
+    return {
+      ...buildCommandSigningCapabilities({
+        commandSigningEnforcementEnabled:
+          this.settingsStore.getCommandSigningEnforcementEnabled(),
+      }),
+      loopRunnerRefreshSupported: true,
+      loopRunnerHeartbeatSupported: true,
+    };
   }
 
   private isCommandSigningEnforced(): boolean {

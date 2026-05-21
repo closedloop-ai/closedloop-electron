@@ -58,7 +58,12 @@ import {
   tryUploadSupportBundle,
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
-import type { LoopTokenStore } from "../../main/loop-token-store.js";
+import type { LoopTokenStore, LoopTokenMeta } from "../../main/loop-token-store.js";
+import { teardownLoopSchedulers } from "../../main/loop-lifecycle.js";
+import * as loopRefreshScheduler from "../../main/loop-refresh-scheduler.js";
+import * as loopHeartbeat from "../../main/loop-heartbeat.js";
+import * as loopSleepRecovery from "../../main/loop-sleep-recovery.js";
+import { parseJwtExpiry } from "../../main/jwt-utils.js";
 import { Observability } from "../../main/observability.js";
 import {
   parseTokenUsage,
@@ -5024,6 +5029,7 @@ export async function handleProcessCompletion(
     }
     await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt);
     if (wasCancelled || failureCloudFinalized || !failureRetryableFailure) {
+      teardownLoopSchedulers(loopId);
       loopTokenStore?.deleteLoopToken(loopId);
     }
     return;
@@ -5066,6 +5072,7 @@ export async function handleProcessCompletion(
             () => {},
           );
         }
+        teardownLoopSchedulers(loopId);
         loopTokenStore?.deleteLoopToken(loopId);
         return;
       }
@@ -5103,6 +5110,7 @@ export async function handleProcessCompletion(
             () => {},
           );
         }
+        teardownLoopSchedulers(loopId);
         loopTokenStore?.deleteLoopToken(loopId);
         return;
       }
@@ -5174,6 +5182,7 @@ export async function handleProcessCompletion(
             loopId,
             wt,
           );
+          teardownLoopSchedulers(loopId);
           loopTokenStore?.deleteLoopToken(loopId);
           return;
         }
@@ -5343,6 +5352,7 @@ export async function handleProcessCompletion(
       if (tempCleanupDir) {
         fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(() => {});
       }
+      teardownLoopSchedulers(loopId);
       loopTokenStore?.deleteLoopToken(loopId);
       return;
     }
@@ -5370,6 +5380,7 @@ export async function handleProcessCompletion(
         await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
       }
       await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt);
+      teardownLoopSchedulers(loopId);
       loopTokenStore?.deleteLoopToken(loopId);
       return;
     }
@@ -5519,6 +5530,7 @@ export async function handleProcessCompletion(
         legacySessionId,
         body.command,
       );
+      teardownLoopSchedulers(loopId);
       loopTokenStore?.deleteLoopToken(loopId);
     }
 
@@ -7052,7 +7064,7 @@ async function handleLoopRequest(
 
     try {
       if (loopTokenStore) {
-        loopTokenStore.setLoopToken(body.loopId, body.closedLoopAuthToken);
+        loopTokenStore.setLoopToken(body.loopId, { token: body.closedLoopAuthToken } satisfies LoopTokenMeta);
       }
     } catch (err) {
       loopLog(
@@ -7808,6 +7820,27 @@ async function handleLoopRequest(
 
     // Write PID file (safe to await now — close handler is already registered)
     await fs.writeFile(path.join(claudeWorkDir, "process.pid"), String(pid));
+
+    // Start refresh scheduler and heartbeat now that the loop is running
+    if (loopTokenStore) {
+      const expiresAtSec = parseJwtExpiry(body.closedLoopAuthToken);
+      const expiresAtMs = expiresAtSec !== null ? expiresAtSec * 1000 : undefined;
+      loopRefreshScheduler.start(body.loopId, expiresAtMs, {
+        apiBaseUrl,
+        getToken: () => loopTokenStore.getLoopToken(body.loopId)?.token ?? body.closedLoopAuthToken,
+        loopTokenStore,
+      });
+      loopSleepRecovery.registerLoop(body.loopId, {
+        apiBaseUrl,
+        getToken: () => loopTokenStore.getLoopToken(body.loopId)?.token ?? null,
+        loopTokenStore,
+      });
+    }
+    loopHeartbeat.start(
+      body.loopId,
+      apiBaseUrl,
+      () => loopTokenStore?.getLoopToken(body.loopId)?.token ?? body.closedLoopAuthToken,
+    );
 
     json(context, 200, {
       success: true,
