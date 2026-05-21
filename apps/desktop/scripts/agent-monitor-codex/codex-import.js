@@ -66,9 +66,10 @@ async function importAllCodexSessions(dbModule) {
   // parse — that is the common case for the 5 s catchup poll. Without this
   // gate every tick re-parses every historical rollout file (FEA-1316).
   const batch = [];
-  const parsedPaths = [];
+  const parsedEntries = [];
   for (const filePath of files) {
-    if (catchupCache.isUnchanged(filePath)) {
+    const { unchanged, stat } = catchupCache.isUnchanged(filePath);
+    if (unchanged) {
       skipped++;
       continue;
     }
@@ -76,18 +77,18 @@ async function importAllCodexSessions(dbModule) {
       const session = await parseRolloutFile(filePath);
       if (!session) {
         // Cache even null-parsed files so we don't re-read them every tick.
-        catchupCache.markSeen(filePath);
+        catchupCache.markSeenWith(filePath, stat);
         skipped++;
         continue;
       }
       batch.push(session);
-      parsedPaths.push(filePath);
+      parsedEntries.push({ path: filePath, stat });
     } catch {
       errors++;
     }
   }
   if (batch.length > 0) importBatch(batch);
-  for (const p of parsedPaths) catchupCache.markSeen(p);
+  for (const { path, stat } of parsedEntries) catchupCache.markSeenWith(path, stat);
   catchupCache.pruneTo(files);
 
   return { imported, skipped, errors };

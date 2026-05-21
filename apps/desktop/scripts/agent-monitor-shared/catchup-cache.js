@@ -19,25 +19,38 @@ function createCatchupCache() {
   const seen = new Map();
 
   /**
-   * Returns true if the file has not changed since the last time it was
-   * marked seen. A missing or unreadable file is treated as "not seen" so
-   * the caller can decide to skip it on its own (parse usually returns null).
+   * Returns { unchanged, stat }. When unchanged is false the caller should
+   * process the file and then pass stat to markSeenWith() — this avoids a
+   * re-stat race where the file is appended to between isUnchanged and
+   * markSeen, causing the new content to be silently skipped.
    */
   function isUnchanged(filePath) {
-    const cached = seen.get(filePath);
-    if (!cached) return false;
     let stat;
     try {
       stat = fs.statSync(filePath);
     } catch {
-      return false;
+      return { unchanged: false, stat: null };
     }
-    return cached.mtimeMs === stat.mtimeMs && cached.size === stat.size;
+    const cached = seen.get(filePath);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      return { unchanged: true, stat };
+    }
+    return { unchanged: false, stat };
   }
 
   /**
-   * Record the current (mtime, size) for a file so a subsequent
-   * isUnchanged() call can short-circuit.
+   * Record a previously-captured stat so a subsequent isUnchanged() call
+   * can short-circuit. Prefer this over markSeen() to avoid TOCTOU races.
+   */
+  function markSeenWith(filePath, stat) {
+    if (stat) {
+      seen.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size });
+    }
+  }
+
+  /**
+   * Record the current (mtime, size) for a file. Only use when no prior
+   * stat is available (e.g. startup seeding). Prefer markSeenWith().
    */
   function markSeen(filePath) {
     let stat;
@@ -68,7 +81,7 @@ function createCatchupCache() {
     seen.clear();
   }
 
-  return { isUnchanged, markSeen, pruneTo, size, clear };
+  return { isUnchanged, markSeen, markSeenWith, pruneTo, size, clear };
 }
 
 module.exports = { createCatchupCache };

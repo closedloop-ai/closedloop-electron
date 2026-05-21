@@ -43,36 +43,38 @@ async function importAllCopilotSessions(dbModule) {
   // Copilot Chat (VS Code extension) — JSON files
   const chatFiles = listChatSessionFiles();
   for (const { filePath, workspacePath } of chatFiles) {
-    if (chatCache.isUnchanged(filePath)) {
+    const { unchanged, stat } = chatCache.isUnchanged(filePath);
+    if (unchanged) {
       skipped++;
       continue;
     }
     try {
       const session = parseChatSessionFile(filePath, workspacePath);
-      if (!session) { chatCache.markSeen(filePath); skipped++; continue; }
+      if (!session) { chatCache.markSeenWith(filePath, stat); skipped++; continue; }
       batch.push(session);
-      chatParsed.push(filePath);
+      chatParsed.push({ path: filePath, stat });
     } catch { errors++; }
   }
 
   // Copilot CLI — JSONL event files
   const cliFiles = listCliEventFiles();
   for (const { filePath, sessionId } of cliFiles) {
-    if (cliCache.isUnchanged(filePath)) {
+    const { unchanged, stat } = cliCache.isUnchanged(filePath);
+    if (unchanged) {
       skipped++;
       continue;
     }
     try {
       const session = await parseCliEventFile(filePath, sessionId);
-      if (!session) { cliCache.markSeen(filePath); skipped++; continue; }
+      if (!session) { cliCache.markSeenWith(filePath, stat); skipped++; continue; }
       batch.push(session);
-      cliParsed.push(filePath);
+      cliParsed.push({ path: filePath, stat });
     } catch { errors++; }
   }
 
   if (batch.length > 0) importBatch(batch);
-  for (const p of chatParsed) chatCache.markSeen(p);
-  for (const p of cliParsed) cliCache.markSeen(p);
+  for (const { path, stat } of chatParsed) chatCache.markSeenWith(path, stat);
+  for (const { path, stat } of cliParsed) cliCache.markSeenWith(path, stat);
   chatCache.pruneTo(chatFiles.map((f) => f.filePath));
   cliCache.pruneTo(cliFiles.map((f) => f.filePath));
 
