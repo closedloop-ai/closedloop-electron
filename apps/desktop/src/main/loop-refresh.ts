@@ -33,7 +33,7 @@ export type RefreshLoopTokenResult =
   | RefreshLoopTokenFailure;
 
 // ---------------------------------------------------------------------------
-// Module-scoped singleflight map (populated in T-2.2)
+// Module-scoped singleflight map: deduplicates concurrent refresh requests per loop ID
 // ---------------------------------------------------------------------------
 
 const inflight = new Map<string, Promise<RefreshLoopTokenResult>>();
@@ -201,7 +201,7 @@ function extractCodeFromBody(text: string): string | null {
  *   immediately (AC-002).
  *
  * Callers that need singleflight deduplication should use
- * `refreshLoopTokenSingleflight` (T-2.2).
+ * `refreshLoopTokenSingleflight`.
  */
 export async function refreshLoopToken(
   loopId: string,
@@ -341,7 +341,7 @@ export async function withTokenRefreshRetry(
 }
 
 // ---------------------------------------------------------------------------
-// Public: singleflight wrapper (T-2.2 — exported for completeness)
+// Public: singleflight wrapper — deduplicates concurrent callers per loop ID
 // ---------------------------------------------------------------------------
 
 /**

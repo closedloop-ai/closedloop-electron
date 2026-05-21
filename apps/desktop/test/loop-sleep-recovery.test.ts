@@ -50,76 +50,45 @@ let tempRoot = "";
 // ---------------------------------------------------------------------------
 
 /**
- * Installs a fetch stub that returns a successful token refresh response
- * followed by a 200 heartbeat response.
- *
- * - POST to a refresh-token URL returns { token, jti }.
- * - POST to a heartbeat URL returns 200 with empty body.
+ * Captures fetch calls and routes refresh-token URLs through `handleRefresh`.
+ * All other URLs return 200 with an empty body (heartbeat endpoint).
  */
+function installFetchStub(handleRefresh: () => Promise<Response>): void {
+  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    const url = String(input);
+    const headers = new Headers(init?.headers);
+    capturedFetchCalls.push({
+      url,
+      method: init?.method ?? "GET",
+      authorization: headers.get("authorization") ?? undefined,
+    });
+    if (url.includes("refresh-token")) return handleRefresh();
+    return new Response("", { status: 200 });
+  }) as typeof fetch;
+}
+
 function installSuccessFetchStub(loopToken = "refreshed-token"): void {
-  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
-    const url = String(input);
-    const headers = new Headers(init?.headers);
-    capturedFetchCalls.push({
-      url,
-      method: init?.method ?? "GET",
-      authorization: headers.get("authorization") ?? undefined,
-    });
-
-    if (url.includes("refresh-token")) {
-      return new Response(
-        JSON.stringify({ token: loopToken, jti: "test-jti" }),
-        { status: 200 },
-      );
-    }
-    // Heartbeat endpoint
-    return new Response("", { status: 200 });
-  }) as typeof fetch;
+  installFetchStub(() =>
+    Promise.resolve(
+      new Response(JSON.stringify({ token: loopToken, jti: "test-jti" }), {
+        status: 200,
+      }),
+    ),
+  );
 }
 
-/**
- * Installs a fetch stub that throws a network error for refresh-token calls
- * and returns 200 for heartbeat calls. Used to verify that heartbeat fires
- * even when refresh throws.
- */
 function installRefreshThrowingFetchStub(): void {
-  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
-    const url = String(input);
-    const headers = new Headers(init?.headers);
-    capturedFetchCalls.push({
-      url,
-      method: init?.method ?? "GET",
-      authorization: headers.get("authorization") ?? undefined,
-    });
-
-    if (url.includes("refresh-token")) {
-      throw new Error("simulated network error during refresh");
-    }
-    return new Response("", { status: 200 });
-  }) as typeof fetch;
+  installFetchStub(() => {
+    throw new Error("simulated network error during refresh");
+  });
 }
 
-/**
- * Installs a fetch stub that returns a non-OK response for refresh-token calls
- * (simulates auth failure) and returns 200 for heartbeat calls.
- */
 function installRefreshFailureFetchStub(): void {
-  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
-    const url = String(input);
-    const headers = new Headers(init?.headers);
-    capturedFetchCalls.push({
-      url,
-      method: init?.method ?? "GET",
-      authorization: headers.get("authorization") ?? undefined,
-    });
-
-    if (url.includes("refresh-token")) {
-      return new Response(JSON.stringify({ error: "unauthorized" }), {
-        status: 401,
-      });
-    }
-    return new Response("", { status: 200 });
-  }) as typeof fetch;
+  installFetchStub(() =>
+    Promise.resolve(
+      new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 }),
+    ),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -397,13 +366,11 @@ describe("loop-sleep-recovery: registry management", () => {
 // ---------------------------------------------------------------------------
 
 describe("loop-sleep-recovery: init() idempotency", () => {
-  test("calling init() twice does not double-register onResume", async () => {
-    // In the Node.js test runner, powerMonitor is undefined because the
-    // electron CJS shim exports only the binary path. init() uses optional
-    // chaining (powerMonitor?.on) so it is safe to call here — the listener
-    // registration is a no-op in this environment.
-    // What we verify is the behavioral consequence: onResume fires exactly
-    // once per explicit call regardless of how many times init() was called.
+  test("calling init() twice does not throw", async () => {
+    // powerMonitor is undefined in the Node.js test runner (Electron CJS shim
+    // exports only the binary path), so powerMonitor?.on("resume", ...) is a
+    // no-op. The double-registration guard in init() cannot be exercised here;
+    // this test verifies only that calling init() multiple times does not throw.
     installSuccessFetchStub();
 
     const store = makeStore("store-init");
@@ -425,11 +392,7 @@ describe("loop-sleep-recovery: init() idempotency", () => {
     const refreshCalls = capturedFetchCalls.filter((c) =>
       c.url.includes("refresh-token"),
     );
-    assert.equal(
-      refreshCalls.length,
-      1,
-      "onResume must fire exactly once — double init() must not double-register the listener",
-    );
+    assert.equal(refreshCalls.length, 1, "onResume fires exactly once per explicit call");
   });
 
   test("registerLoop replaces the deps when called again for the same loopId", async () => {

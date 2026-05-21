@@ -253,7 +253,6 @@ describe("loop-refresh-scheduler: rescheduling", () => {
     mock.timers.enable({ apis: ["Date", "setTimeout"] });
 
     let fetchCallCount = 0;
-    installFailRefreshStub();
     globalThis.fetch = (async () => {
       fetchCallCount++;
       return new Response("Unauthorized", { status: 401 });

@@ -23,14 +23,10 @@ import { flushAsync } from "./loop-token-test-utils.js";
 // Per-test scheduler context. Cleared in afterEach via Symbol.dispose so
 // timers never leak across tests.
 let ctx: LoopSchedulerContext;
-// Token store stub satisfies the LoopSchedulerDeps contract used by sleep
-// recovery; heartbeat tests never invoke its methods.
-const dummyLoopTokenStore = {} as never;
 const start = (loopId: string, deps: { apiBaseUrl: string; getToken: () => string | null }) =>
   ctx.startHeartbeat(loopId, deps);
 const stop = (loopId: string) => ctx.stopHeartbeat(loopId);
 const stopAll = () => ctx[Symbol.dispose]();
-void dummyLoopTokenStore;
 
 // ---------------------------------------------------------------------------
 // Shared state

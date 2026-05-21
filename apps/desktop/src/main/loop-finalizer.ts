@@ -12,6 +12,7 @@ import path from "node:path";
 import {
   postLoopEvent,
   uploadArtifacts,
+  type LoopHttpResult,
 } from "../server/operations/loop-http.js";
 import { withTokenRefreshRetry } from "./loop-refresh.js";
 import { readEffectiveStatusFromState } from "../server/operations/symphony-job-snapshot.js";
@@ -58,6 +59,18 @@ import {
 } from "./token-usage.js";
 import { parseUserVisibleLoopFailurePayload } from "./user-visible-loop-failure.js";
 
+async function callWithRefreshRetry(
+  loopId: string,
+  apiBaseUrl: string,
+  getToken: () => string | null,
+  loopTokenStore: LoopTokenStore | undefined,
+  fn: (getToken: () => string | null) => Promise<LoopHttpResult>,
+): Promise<LoopHttpResult> {
+  return loopTokenStore
+    ? withTokenRefreshRetry(loopId, apiBaseUrl, getToken, loopTokenStore, fn)
+    : fn(getToken);
+}
+
 export interface LoopFinalizerDeps {
   jobStore: JobStore;
   telemetry: TelemetryEmitter;
@@ -79,9 +92,9 @@ export interface LoopFinalizerDeps {
   ) => Promise<void>;
   /**
    * Scheduler context whose `teardownLoop(loopId)` will be invoked after the
-   * loop reaches a terminal status. Defaults to the process-wide active
-   * context — tests that construct their own context pass it explicitly so
-   * teardown is routed to the same instance that owns the timers.
+   * loop reaches a terminal status. When omitted, scheduler teardown is
+   * skipped — callers must pass the same LoopSchedulerContext instance that
+   * owns the timers for teardown to take effect.
    */
   schedulers?: LoopSchedulerContext;
 }
@@ -431,15 +444,13 @@ export async function tryUploadArtifacts(
       deps.getAllowedDirectories,
     ),
   };
-  const uploadResult = deps.loopTokenStore
-    ? await withTokenRefreshRetry(
-        job.loopId,
-        deps.apiBaseUrl,
-        deps.getToken,
-        deps.loopTokenStore,
-        (getToken) => uploadArtifacts(deps.apiBaseUrl, job.loopId, getToken, uploadBody),
-      )
-    : await uploadArtifacts(deps.apiBaseUrl, job.loopId, deps.getToken, uploadBody);
+  const uploadResult = await callWithRefreshRetry(
+    job.loopId,
+    deps.apiBaseUrl,
+    deps.getToken,
+    deps.loopTokenStore,
+    (getToken) => uploadArtifacts(deps.apiBaseUrl, job.loopId, getToken, uploadBody),
+  );
   if (!uploadResult.success) {
     warnings.push("ARTIFACT_UPLOAD_FAILED");
     return { artifacts, failed: true, error: uploadResult.error };
@@ -500,15 +511,13 @@ export async function tryPostCompletedEvent(
     ...(warnings.length > 0 ? { warnings } : {}),
   };
 
-  const eventResult = deps.loopTokenStore
-    ? await withTokenRefreshRetry(
-        job.loopId,
-        deps.apiBaseUrl,
-        deps.getToken,
-        deps.loopTokenStore,
-        (getToken) => postLoopEvent(deps.apiBaseUrl, job.loopId, getToken, completedEvent),
-      )
-    : await postLoopEvent(deps.apiBaseUrl, job.loopId, deps.getToken, completedEvent);
+  const eventResult = await callWithRefreshRetry(
+    job.loopId,
+    deps.apiBaseUrl,
+    deps.getToken,
+    deps.loopTokenStore,
+    (getToken) => postLoopEvent(deps.apiBaseUrl, job.loopId, getToken, completedEvent),
+  );
   if (!eventResult.success) {
     warnings.push("EVENT_POST_FAILED");
     return { failed: true, error: eventResult.error };
@@ -590,15 +599,13 @@ export async function tryPostErrorEvent(
     ...(warnings.length > 0 ? { warnings } : {}),
   };
 
-  const eventResult = deps.loopTokenStore
-    ? await withTokenRefreshRetry(
-        job.loopId,
-        deps.apiBaseUrl,
-        deps.getToken,
-        deps.loopTokenStore,
-        (getToken) => postLoopEvent(deps.apiBaseUrl, job.loopId, getToken, errorEvent),
-      )
-    : await postLoopEvent(deps.apiBaseUrl, job.loopId, deps.getToken, errorEvent);
+  const eventResult = await callWithRefreshRetry(
+    job.loopId,
+    deps.apiBaseUrl,
+    deps.getToken,
+    deps.loopTokenStore,
+    (getToken) => postLoopEvent(deps.apiBaseUrl, job.loopId, getToken, errorEvent),
+  );
   if (!eventResult.success) {
     warnings.push("EVENT_POST_FAILED");
     return { failed: true, error: eventResult.error };
@@ -1134,15 +1141,13 @@ export async function tryUploadSupportBundle({
       sizeBytes: candidate.sizeBytes,
     })),
   };
-  const eventResult = loopTokenStore
-    ? await withTokenRefreshRetry(
-        job.loopId,
-        apiBaseUrl,
-        getToken,
-        loopTokenStore,
-        (gt) => postLoopEvent(apiBaseUrl, job.loopId, gt, supportEventBody),
-      )
-    : await postLoopEvent(apiBaseUrl, job.loopId, getToken, supportEventBody);
+  const eventResult = await callWithRefreshRetry(
+    job.loopId,
+    apiBaseUrl,
+    getToken,
+    loopTokenStore,
+    (gt) => postLoopEvent(apiBaseUrl, job.loopId, gt, supportEventBody),
+  );
   if (!eventResult.success) {
     const error = eventResult.error ?? "support event post failed";
     emitSupportUploadLifecycle(job, "failed", {

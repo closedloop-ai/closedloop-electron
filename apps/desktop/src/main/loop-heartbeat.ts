@@ -1,6 +1,6 @@
 import { postLoopHeartbeat } from "../server/operations/loop-http.js";
 import { gatewayLog } from "./gateway-logger.js";
-import type { LoopSchedulerDeps } from "./loop-lifecycle.js";
+import { parseEnvMs, type LoopSchedulerDeps } from "./loop-lifecycle.js";
 import {
   isEndpointDisabled,
   markEndpointDisabled,
@@ -12,16 +12,8 @@ import {
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000;
 
-export function getHeartbeatIntervalMs(): number {
-  const override = process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS;
-  if (override !== undefined) {
-    const parsed = parseInt(override, 10);
-    if (!isNaN(parsed) && parsed >= 0) {
-      return parsed;
-    }
-  }
-  return DEFAULT_HEARTBEAT_INTERVAL_MS;
-}
+export const getHeartbeatIntervalMs = (): number =>
+  parseEnvMs("CLOSEDLOOP_HEARTBEAT_INTERVAL_MS", DEFAULT_HEARTBEAT_INTERVAL_MS);
 
 // ---------------------------------------------------------------------------
 // Subset of LoopSchedulerDeps the heartbeat needs.

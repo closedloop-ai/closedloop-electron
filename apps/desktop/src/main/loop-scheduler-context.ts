@@ -92,10 +92,13 @@ export class LoopSchedulerContext {
       `Scheduling proactive refresh for loopId=${loopId} in ${delay}ms`,
     );
     const handle = setTimeout(() => {
-      this.refreshes.delete(loopId);
-      void runRefreshTick(loopId, deps, (newExpiresAt) =>
-        this.scheduleRefreshTick(loopId, newExpiresAt, deps),
-      );
+      void runRefreshTick(loopId, deps, (newExpiresAt) => {
+        if (this.refreshes.has(loopId)) {
+          this.scheduleRefreshTick(loopId, newExpiresAt, deps);
+        }
+      }).finally(() => {
+        this.refreshes.delete(loopId);
+      });
     }, delay);
     // See note in startHeartbeat: unref so a pending refresh timer never pins
     // the event loop past explicit disposal.

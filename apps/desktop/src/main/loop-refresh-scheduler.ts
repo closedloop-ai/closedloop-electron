@@ -1,5 +1,5 @@
 import { gatewayLog } from "./gateway-logger.js";
-import type { LoopSchedulerDeps } from "./loop-lifecycle.js";
+import { parseEnvMs, type LoopSchedulerDeps } from "./loop-lifecycle.js";
 import { refreshLoopToken } from "./loop-refresh.js";
 
 // ---------------------------------------------------------------------------
@@ -8,16 +8,8 @@ import { refreshLoopToken } from "./loop-refresh.js";
 
 const DEFAULT_REFRESH_SKEW_MS = 30 * 60 * 1000;
 
-export function getRefreshSkewMs(): number {
-  const override = process.env.CLOSEDLOOP_TOKEN_REFRESH_SKEW_MS;
-  if (override !== undefined) {
-    const parsed = parseInt(override, 10);
-    if (!isNaN(parsed) && parsed >= 0) {
-      return parsed;
-    }
-  }
-  return DEFAULT_REFRESH_SKEW_MS;
-}
+export const getRefreshSkewMs = (): number =>
+  parseEnvMs("CLOSEDLOOP_TOKEN_REFRESH_SKEW_MS", DEFAULT_REFRESH_SKEW_MS);
 
 // ---------------------------------------------------------------------------
 // Shared tick logic (exported so LoopSchedulerContext can reuse it)

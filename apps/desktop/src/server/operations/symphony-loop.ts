@@ -7068,7 +7068,12 @@ async function handleLoopRequest(
 
     try {
       if (loopTokenStore) {
-        loopTokenStore.setLoopToken(body.loopId, { token: body.closedLoopAuthToken } satisfies LoopTokenMeta);
+        const initialExpSec = parseJwtExpiry(body.closedLoopAuthToken);
+        const initialExpiresAt = initialExpSec !== null ? initialExpSec * 1000 : undefined;
+        loopTokenStore.setLoopToken(body.loopId, {
+          token: body.closedLoopAuthToken,
+          expiresAt: initialExpiresAt,
+        } satisfies LoopTokenMeta);
       }
     } catch (err) {
       loopLog(

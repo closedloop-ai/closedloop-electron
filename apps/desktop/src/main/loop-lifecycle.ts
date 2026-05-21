@@ -19,3 +19,16 @@ export interface LoopSchedulerDeps {
   getToken: () => string | null;
   loopTokenStore: LoopTokenStore;
 }
+
+/**
+ * Reads an env var as a non-negative integer millisecond value.
+ * Returns `defaultMs` when the var is absent or not a valid non-negative integer.
+ */
+export function parseEnvMs(envVar: string, defaultMs: number): number {
+  const override = process.env[envVar];
+  if (override !== undefined) {
+    const parsed = parseInt(override, 10);
+    if (!isNaN(parsed) && parsed >= 0) return parsed;
+  }
+  return defaultMs;
+}
