@@ -174,6 +174,13 @@ export class SettingsStore {
     );
   }
 
+  getPlanExtractionEnabled(): boolean {
+    return this.store.get(
+      "planExtractionEnabled",
+      DEFAULT_DESKTOP_SETTINGS.planExtractionEnabled,
+    );
+  }
+
   getCommandSigningEnforcementEnabled(): boolean {
     return this.store.get(
       "commandSigningEnforcementEnabled",
@@ -207,6 +214,10 @@ export class SettingsStore {
 
   setAgentMonitorEnabled(agentMonitorEnabled: boolean): void {
     this.store.set("agentMonitorEnabled", agentMonitorEnabled);
+  }
+
+  setPlanExtractionEnabled(planExtractionEnabled: boolean): void {
+    this.store.set("planExtractionEnabled", planExtractionEnabled);
   }
 
   setCommandSigningEnforcementEnabled(commandSigningEnforcementEnabled: boolean): void {
@@ -557,6 +568,9 @@ export class SettingsStore {
     }
     if (typeof partial.agentMonitorEnabled === "boolean") {
       this.store.set("agentMonitorEnabled", partial.agentMonitorEnabled);
+    }
+    if (typeof partial.planExtractionEnabled === "boolean") {
+      this.store.set("planExtractionEnabled", partial.planExtractionEnabled);
     }
     if (typeof partial.commandSigningEnforcementEnabled === "boolean") {
       this.store.set(

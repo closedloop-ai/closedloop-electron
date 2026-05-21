@@ -1,3 +1,4 @@
+import { getCloudLoopStatus } from "../server/operations/loop-http.js";
 import { startOutputTailer } from "../server/operations/output-tailer.js";
 import {
   cleanupAdditionalWorktreesWithDefaultProvider,
@@ -143,8 +144,7 @@ export class BootRecoveryService {
         continue;
       }
       try {
-        const authToken = loopTokenStore.getLoopToken(job.loopId);
-        if (!authToken) {
+        if (!loopTokenStore.getLoopToken(job.loopId)) {
           gatewayLog.warn(
             "boot-recovery",
             `Skipping dead loop finalization: missing loop token for loopId=${job.loopId} (phase=dead-finalization)`,
@@ -155,6 +155,10 @@ export class BootRecoveryService {
           "boot-recovery",
           `Token source for loopId=${job.loopId}: LOOP_TOKEN_STORE`,
         );
+        const reconcileResult = await this.reconcileCloudLoopStatus(job, apiBaseUrl);
+        if (reconcileResult.kind === "timed_out") {
+          continue;
+        }
         jobStore.upsert({
           ...job,
           recoveryAttempts: attempts + 1,
@@ -165,7 +169,7 @@ export class BootRecoveryService {
         const outcome = await finalizeLoopFromRuntime(job, "boot-recovery", {
           jobStore,
           telemetry,
-          apiAuthToken: authToken,
+          getToken: () => loopTokenStore.getLoopToken(job.loopId),
           apiBaseUrl,
           isProcessRunning,
           getAllowedDirectories,
@@ -230,6 +234,27 @@ export class BootRecoveryService {
     });
   }
 
+  private async reconcileCloudLoopStatus(
+    job: LocalJob,
+    apiBaseUrl: string,
+  ): ReturnType<typeof getCloudLoopStatus> {
+    const token = this.deps.loopTokenStore.getLoopToken(job.loopId);
+    const result = await getCloudLoopStatus(apiBaseUrl, job.loopId, () => token);
+    if (result.kind === "timed_out") {
+      const current = this.deps.jobStore.getByLoopId(job.loopId) ?? job;
+      this.deps.jobStore.upsert({
+        ...current,
+        status: "TIMED_OUT",
+        liveActivity: "Loop timed out — restart from the loop list.",
+        completedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        cloudFinalizedAt: new Date().toISOString(),
+      });
+      this.deps.loopTokenStore.deleteLoopToken(job.loopId);
+    }
+    return result;
+  }
+
   private async reattachLiveJob(job: LocalJob, apiBaseUrl: string): Promise<void> {
     const { jobStore } = this.deps;
     const { loopId, pid } = job;
@@ -251,7 +276,12 @@ export class BootRecoveryService {
 
     // TOCTOU guard: process was alive when liveJobs was built, but may have exited since.
     if (!isProcessRunning(pid)) {
-      this.finalizeRecoveredJob(loopId, loopAuthToken, effectiveApiBaseUrl, undefined);
+      this.finalizeRecoveredJob(loopId, () => this.deps.loopTokenStore.getLoopToken(loopId), effectiveApiBaseUrl, undefined);
+      return;
+    }
+
+    const reconcileResult = await this.reconcileCloudLoopStatus(job, effectiveApiBaseUrl);
+    if (reconcileResult.kind === "timed_out") {
       return;
     }
 
@@ -281,7 +311,7 @@ export class BootRecoveryService {
         job.jsonlPath,
         effectiveApiBaseUrl,
         loopId,
-        loopAuthToken,
+        () => this.deps.loopTokenStore.getLoopToken(loopId),
         job.lastObservedJsonlOffset ?? 0,
         (offset) => {
           const current = jobStore.getByLoopId(loopId);
@@ -309,7 +339,7 @@ export class BootRecoveryService {
         clearInterval(watcherId);
         this.liveHandles = this.liveHandles.filter((value) => value.loopId !== loopId);
         unregisterLoop(loopId);
-        this.finalizeRecoveredJob(loopId, loopAuthToken, effectiveApiBaseUrl, tailer);
+        this.finalizeRecoveredJob(loopId, () => this.deps.loopTokenStore.getLoopToken(loopId), effectiveApiBaseUrl, tailer);
       }
     }, watcherPollMs);
 
@@ -318,7 +348,7 @@ export class BootRecoveryService {
 
   private finalizeRecoveredJob(
     loopId: string,
-    loopAuthToken: string,
+    getToken: () => string | null,
     apiBaseUrl: string,
     tailer: LiveJobHandle["tailer"] | undefined,
   ): void {
@@ -356,7 +386,7 @@ export class BootRecoveryService {
       const finalizerDeps: LoopFinalizerDeps = {
         jobStore,
         telemetry,
-        apiAuthToken: loopAuthToken,
+        getToken,
         apiBaseUrl,
         isProcessRunning,
         getAllowedDirectories,

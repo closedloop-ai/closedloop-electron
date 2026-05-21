@@ -8,14 +8,17 @@ const fs = require("fs");
 const path = require("path");
 const { getCursorProjectsDir } = require("./cursor-home");
 const { parseTranscriptFile } = require("./cursor-parser");
+const { broadcastHarnessRows } = require("../agent-monitor-shared/harness-watcher-utils");
 
 const DEBOUNCE_MS = 600;
 const RETRY_MS = 4000;
 const MAX_RETRY_ATTEMPTS = 75; // ~5 minutes at 4s intervals, then give up
+const CATCHUP_POLL_MS = 5000;
 
 let started = false;
 let timer = null;
 let retryTimer = null;
+let catchupTimer = null;
 let pending = new Set();
 const watchers = [];
 
@@ -84,13 +87,10 @@ function runCatchupImport(broadcast) {
   } catch { return; }
   Promise.resolve()
     .then(() => importAllCursorSessions(dbModule))
-    .then(() => {
-      try {
-        const rows = dbModule.db
-          .prepare("SELECT * FROM sessions WHERE harness = 'cursor'")
-          .all();
-        for (const row of rows) broadcast("session_updated", row);
-      } catch { /* non-fatal */ }
+    .then(({ imported }) => {
+      if (imported > 0) {
+        broadcastHarnessRows(dbModule, broadcast, "cursor");
+      }
     })
     .catch(() => {});
 }
@@ -98,6 +98,9 @@ function runCatchupImport(broadcast) {
 function startCursorWatcher({ broadcast }) {
   if (started) return;
   started = true;
+  catchupTimer = setInterval(() => runCatchupImport(broadcast), CATCHUP_POLL_MS);
+  catchupTimer.unref?.();
+  runCatchupImport(broadcast);
   const root = getCursorProjectsDir();
   if (safeWatch({ root, broadcast })) return;
   if (retryTimer) { clearInterval(retryTimer); retryTimer = null; }
@@ -121,6 +124,7 @@ function startCursorWatcher({ broadcast }) {
 function stopCursorWatcher() {
   if (timer) { clearTimeout(timer); timer = null; }
   if (retryTimer) { clearInterval(retryTimer); retryTimer = null; }
+  if (catchupTimer) { clearInterval(catchupTimer); catchupTimer = null; }
   for (const w of watchers) { try { w.close(); } catch { /* ignore */ } }
   watchers.length = 0;
   pending = new Set();

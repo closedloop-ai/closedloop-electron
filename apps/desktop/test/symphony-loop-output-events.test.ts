@@ -424,7 +424,7 @@ describe("T-5.2: Output events arrive before completed event", () => {
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
 
-    const tailer = startOutputTailer(nonExistentJsonl, apiBaseUrl, "test-loop-id", "token", 0);
+    const tailer = startOutputTailer(nonExistentJsonl, apiBaseUrl, "test-loop-id", () => "token", 0);
     await assert.doesNotReject(() => tailer.flush());
 
     // No output events should be posted since file doesn't exist
@@ -507,7 +507,7 @@ describe("T-5.3: Partial JSONL writes", () => {
       jsonlPath,
       apiBaseUrl,
       "partial-offset-loop",
-      "token",
+      () => "token",
       0,
       (o) => {
         committedOffsets.push(o);
@@ -533,7 +533,7 @@ describe("T-5.3: Partial JSONL writes", () => {
       jsonlPath,
       apiBaseUrl,
       "partial-offset-loop",
-      "token",
+      () => "token",
       resumeFrom,
       (o) => {
         committedOffsets.push(o);
@@ -565,7 +565,7 @@ describe("T-5.3: Partial JSONL writes", () => {
       jsonlPath,
       apiBaseUrl,
       "auth-reject-loop",
-      "token",
+      () => "token",
       0,
       (o) => {
         committedOffsets.push(o);
@@ -607,7 +607,7 @@ describe("T-5.3: Partial JSONL writes", () => {
       jsonlPath,
       apiBaseUrl,
       "auth-retry-loop",
-      "token",
+      () => "token",
       0,
       (o) => {
         committedOffsets.push(o);
@@ -653,7 +653,7 @@ describe("T-5.3: Partial JSONL writes", () => {
       jsonlPath,
       apiBaseUrl,
       "flush-auth-retry-loop",
-      "token",
+      () => "token",
       0,
       (o) => {
         committedOffsets.push(o);
@@ -686,7 +686,7 @@ describe("T-5.3: Partial JSONL writes", () => {
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
 
-    const tailer = startOutputTailer(jsonlPath, apiBaseUrl, "partial-test-loop", "token", 0);
+    const tailer = startOutputTailer(jsonlPath, apiBaseUrl, "partial-test-loop", () => "token", 0);
 
     // Write an incomplete line (no trailing newline)
     const incompleteLine = '{"type":"assistant","message":{"content":[{"type":"text","text":"hel';
@@ -695,7 +695,7 @@ describe("T-5.3: Partial JSONL writes", () => {
     // Flush: no complete lines yet — 0 events
     await tailer.flush();
     // Re-create tailer since flush() stops it
-    const tailer2 = startOutputTailer(jsonlPath, apiBaseUrl, "partial-test-loop", "token", 0);
+    const tailer2 = startOutputTailer(jsonlPath, apiBaseUrl, "partial-test-loop", () => "token", 0);
 
     const collectedBeforeComplete = eventSrv.getCollected().filter((e) => e.type === "output");
     assert.equal(
@@ -899,7 +899,7 @@ describe("T-5.6: Throttle", () => {
     ];
     writeFileSync(jsonlPath, lines.join("\n") + "\n");
 
-    const tailer = startOutputTailer(jsonlPath, apiBaseUrl, "throttle-test-loop", "token", 0);
+    const tailer = startOutputTailer(jsonlPath, apiBaseUrl, "throttle-test-loop", () => "token", 0);
     await tailer.flush();
 
     const outputEvents = eventSrv.getCollected().filter((e) => e.type === "output");

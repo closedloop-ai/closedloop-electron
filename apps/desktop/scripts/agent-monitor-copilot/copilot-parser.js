@@ -12,11 +12,136 @@
 const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
-const { toIso, safeJson } = require("../agent-monitor-shared/parser-utils");
+const {
+  extractErrorMessage,
+  toIso,
+  safeJson,
+} = require("../agent-monitor-shared/parser-utils");
+
+function hasRenderableContent(value, depth = 0) {
+  if (value == null || depth > 4) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (typeof value === "number" || typeof value === "boolean") return true;
+  if (Array.isArray(value)) return value.some((entry) => hasRenderableContent(entry, depth + 1));
+  if (typeof value === "object") {
+    return Object.values(value).some((entry) => hasRenderableContent(entry, depth + 1));
+  }
+  return false;
+}
+
+function collectToolCalls(value, depth = 0, out = []) {
+  if (value == null || depth > 4) return out;
+  if (Array.isArray(value)) {
+    for (const entry of value) collectToolCalls(entry, depth + 1, out);
+    return out;
+  }
+  if (typeof value !== "object") return out;
+
+  for (const key of ["toolCalls", "tool_calls", "functionCalls"]) {
+    const calls = value[key];
+    if (Array.isArray(calls)) {
+      for (const call of calls) out.push(call);
+    }
+  }
+
+  for (const key of ["message", "request", "prompt", "input", "response", "result", "reply", "output"]) {
+    collectToolCalls(value[key], depth + 1, out);
+  }
+  return out;
+}
+
+function normalizeChatRequest(request, sessionData) {
+  if (!request || typeof request !== "object") return [];
+
+  const requestTimestamp =
+    request.timestamp ||
+    request.created_at ||
+    request.createdAt ||
+    request.requestDate ||
+    request.message?.timestamp ||
+    request.message?.createdAt ||
+    sessionData.creationDate ||
+    null;
+  const responseTimestamp =
+    request.responseTimestamp ||
+    request.responseDate ||
+    request.updatedAt ||
+    request.response?.timestamp ||
+    request.result?.timestamp ||
+    sessionData.lastMessageDate ||
+    requestTimestamp;
+  const userPayload =
+    request.message ??
+    request.request ??
+    request.prompt ??
+    request.input;
+  const assistantPayload =
+    request.response ??
+    request.result ??
+    request.reply ??
+    request.output;
+  const toolCalls = collectToolCalls(request);
+  const assistantError = extractErrorMessage(
+    request.responseError ??
+      request.error ??
+      request.result?.error ??
+      request.response?.error,
+  );
+
+  const entries = [];
+  if (
+    hasRenderableContent(userPayload) ||
+    request.id != null ||
+    request.requestId != null
+  ) {
+    entries.push({
+      role: "user",
+      timestamp: requestTimestamp,
+    });
+  }
+
+  if (
+    hasRenderableContent(assistantPayload) ||
+    assistantError != null ||
+    toolCalls.length > 0 ||
+    request.response != null ||
+    request.result != null ||
+    request.reply != null ||
+    request.output != null
+  ) {
+    entries.push({
+      role: "assistant",
+      timestamp: responseTimestamp,
+      toolCalls,
+      thinking: Boolean(
+        request.thinking ||
+          request.reasoning ||
+          request.response?.thinking ||
+          request.response?.reasoning ||
+          request.result?.thinking ||
+          request.result?.reasoning,
+      ),
+      error: assistantError,
+    });
+  }
+
+  return entries;
+}
+
+function normalizeChatMessages(data) {
+  for (const key of ["messages", "turns", "history"]) {
+    const value = data[key];
+    if (Array.isArray(value) && value.length > 0) return value;
+  }
+
+  const requests = Array.isArray(data.requests) ? data.requests : [];
+  return requests.flatMap((request) => normalizeChatRequest(request, data));
+}
 
 /**
  * Parse a Copilot Chat JSON session file (VS Code extension).
- * These files contain conversation history with user/assistant message arrays.
+ * Recent VS Code builds persist these as top-level metadata plus `requests[]`,
+ * while older shapes may store direct `messages[]` / `turns[]` arrays.
  */
 function parseChatSessionFile(filePath, workspacePath) {
   let data;
@@ -27,7 +152,7 @@ function parseChatSessionFile(filePath, workspacePath) {
   if (!data || typeof data !== "object") return null;
 
   const sessionId = data.sessionId || data.id || path.basename(filePath, ".json");
-  const messages = data.messages || data.turns || data.history || [];
+  const messages = normalizeChatMessages(data);
   if (!Array.isArray(messages) || messages.length === 0) return null;
 
   let firstTimestamp = null;
@@ -50,7 +175,7 @@ function parseChatSessionFile(filePath, workspacePath) {
 
   for (const msg of messages) {
     if (!msg || typeof msg !== "object") continue;
-    const ts = msg.timestamp || msg.created_at || msg.date || null;
+    const ts = msg.timestamp || msg.created_at || msg.createdAt || msg.date || null;
     const iso = noteTs(ts);
     const role = msg.role || msg.author || msg.type || "";
 
@@ -62,7 +187,11 @@ function parseChatSessionFile(filePath, workspacePath) {
     }
 
     // Tool uses embedded in messages
-    const calls = msg.toolCalls || msg.tool_calls || msg.functionCalls || [];
+    const calls =
+      msg.toolCalls ||
+      msg.tool_calls ||
+      msg.functionCalls ||
+      collectToolCalls(msg);
     if (Array.isArray(calls)) {
       for (const call of calls) {
         if (!call) continue;
@@ -76,6 +205,15 @@ function parseChatSessionFile(filePath, workspacePath) {
 
     // Thinking blocks
     if (msg.thinking || msg.reasoning) thinkingBlockCount++;
+
+    const errorMessage = extractErrorMessage(msg.error);
+    if (errorMessage) {
+      apiErrors.push({
+        type: "error",
+        message: errorMessage,
+        timestamp: iso,
+      });
+    }
   }
 
   if (!firstTimestamp) {
@@ -262,4 +400,4 @@ async function parseCliEventFile(filePath, sessionId) {
   };
 }
 
-module.exports = { parseChatSessionFile, parseCliEventFile, toIso };
+module.exports = { parseChatSessionFile, parseCliEventFile };

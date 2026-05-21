@@ -7,13 +7,15 @@
 const { parseChatSessionFile, parseCliEventFile } = require("./copilot-parser");
 const { listChatSessionFiles, listCliEventFiles } = require("./copilot-home");
 const { importSession } = require("../../scripts/import-history");
+const { reactivateImportedSession } = require("../agent-monitor-shared/import-session-utils");
 
 function importCopilotSession(dbModule, session) {
   const result = importSession(dbModule, session);
   try {
     dbModule.stmts.setSessionHarness.run("copilot", session.sessionId, "copilot");
   } catch { /* non-fatal */ }
-  return { sessionId: session.sessionId, result };
+  const reactivated = reactivateImportedSession(dbModule, session);
+  return { sessionId: session.sessionId, result, reactivated };
 }
 
 async function importAllCopilotSessions(dbModule) {
@@ -23,8 +25,8 @@ async function importAllCopilotSessions(dbModule) {
 
   const importBatch = dbModule.db.transaction((sessions) => {
     for (const session of sessions) {
-      const { result } = importCopilotSession(dbModule, session);
-      if (result && result.skipped) skipped++;
+      const { result, reactivated } = importCopilotSession(dbModule, session);
+      if (result && result.skipped && !reactivated) skipped++;
       else imported++;
     }
   });

@@ -2606,6 +2606,7 @@ test("EXECUTE: artifact links use /implementation-plans/ in PR body and LLM prom
 
   const loopId = "00000000-0000-0000-0000-000000001000";
   const artifactSlug = "PLAN-42";
+  const repoFullName = `artifactlink/${path.basename(repoPath)}`;
   const response = await fetch(
     `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
@@ -2618,7 +2619,7 @@ test("EXECUTE: artifact links use /implementation-plans/ in PR body and LLM prom
         prompt: "test",
         artifacts: [],
         artifactSlug,
-        repo: { fullName: `artifactlink/${path.basename(repoPath)}`, branch: "main" },
+        repo: { fullName: repoFullName, branch: "main" },
       }),
     }
   );
@@ -2762,6 +2763,7 @@ test("EXECUTE: SAFETY commit PR title uses '<slug>: Automated changes from loop 
   const loopId = "00000000-0000-0000-0000-000000001100";
   const artifactSlug = "PLAN-55";
   const shortId = loopId.slice(0, 8); // "00000000"
+  const repoFullName = `prtitle/${path.basename(repoPath)}`;
 
   const response = await fetch(
     `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
@@ -2775,7 +2777,7 @@ test("EXECUTE: SAFETY commit PR title uses '<slug>: Automated changes from loop 
         prompt: "test",
         artifacts: [],
         artifactSlug,
-        repo: { fullName: `prtitle/${path.basename(repoPath)}`, branch: "main" },
+        repo: { fullName: repoFullName, branch: "main" },
       }),
     }
   );
@@ -2900,6 +2902,7 @@ test("EXECUTE: LLM commit spawns claude via resolved absolute path and writes PI
   await server.start();
 
   const loopId = "00000000-0000-0000-0000-000000001200";
+  const repoFullName = `llmspawn/${path.basename(repoPath)}`;
   const response = await fetch(
     `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
@@ -2911,7 +2914,7 @@ test("EXECUTE: LLM commit spawns claude via resolved absolute path and writes PI
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
-        repo: { fullName: `llmspawn/${path.basename(repoPath)}`, branch: "main" },
+        repo: { fullName: repoFullName, branch: "main" },
       }),
     }
   );

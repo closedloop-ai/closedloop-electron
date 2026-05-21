@@ -11,16 +11,21 @@ const path = require("path");
 const {
   getCopilotCliSessionStateDir,
   getVscodeWorkspaceStorageDir,
+  readWorkspacePathFromHashDir,
 } = require("./copilot-home");
 const { parseChatSessionFile, parseCliEventFile } = require("./copilot-parser");
+const { broadcastHarnessRows } = require("../agent-monitor-shared/harness-watcher-utils");
 
 const DEBOUNCE_MS = 600;
 const RETRY_MS = 4000;
 const MAX_RETRY_ATTEMPTS = 75; // ~5 minutes at 4s intervals, then give up
+const CATCHUP_POLL_MS = 5000;
+const CHAT_SESSION_FILE_RE = /(^|[/\\])chatSessions[/\\][^/\\]+\.json$/i;
 
 let started = false;
 let timer = null;
 let retryTimers = [];
+let catchupTimer = null;
 let pending = new Map(); // filePath → { type: "chat"|"cli", meta }
 const watchers = [];
 
@@ -115,13 +120,10 @@ function runCatchupImport(broadcast) {
   } catch { return; }
   Promise.resolve()
     .then(() => importAllCopilotSessions(dbModule))
-    .then(() => {
-      try {
-        const rows = dbModule.db
-          .prepare("SELECT * FROM sessions WHERE harness = 'copilot'")
-          .all();
-        for (const row of rows) broadcast("session_updated", row);
-      } catch { /* non-fatal */ }
+    .then(({ imported }) => {
+      if (imported > 0) {
+        broadcastHarnessRows(dbModule, broadcast, "copilot");
+      }
     })
     .catch(() => {});
 }
@@ -132,22 +134,19 @@ function startCopilotWatcher({ broadcast }) {
   // Clear any stale retry timers from a previous lifecycle
   for (const t of retryTimers) { clearInterval(t); }
   retryTimers = [];
+  catchupTimer = setInterval(() => runCatchupImport(broadcast), CATCHUP_POLL_MS);
+  catchupTimer.unref?.();
+  runCatchupImport(broadcast);
 
   // Watch VS Code workspace storage for chat session JSON files
   const wsRoot = getVscodeWorkspaceStorageDir();
   retryWatch(
     wsRoot,
     broadcast,
-    (filename) => String(filename).endsWith(".json") && String(filename).includes("chatSession"),
+    (filename) => CHAT_SESSION_FILE_RE.test(String(filename)),
     (full) => {
-      let workspacePath = null;
-      try {
-        const hashDir = path.dirname(path.dirname(full));
-        const wsJson = JSON.parse(fs.readFileSync(path.join(hashDir, "workspace.json"), "utf8"));
-        const folder = wsJson.folder || wsJson.workspace || "";
-        if (folder) workspacePath = folder.replace(/^file:\/\//, "");
-      } catch { /* workspace.json may not exist */ }
-      return { type: "chat", workspacePath };
+      const hashDir = path.dirname(path.dirname(full));
+      return { type: "chat", workspacePath: readWorkspacePathFromHashDir(hashDir) };
     },
   );
 
@@ -168,6 +167,7 @@ function stopCopilotWatcher() {
   if (timer) { clearTimeout(timer); timer = null; }
   for (const t of retryTimers) { clearInterval(t); }
   retryTimers = [];
+  if (catchupTimer) { clearInterval(catchupTimer); catchupTimer = null; }
   for (const w of watchers) { try { w.close(); } catch { /* ignore */ } }
   watchers.length = 0;
   pending = new Map();

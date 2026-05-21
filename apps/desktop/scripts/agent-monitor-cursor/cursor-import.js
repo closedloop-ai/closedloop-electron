@@ -9,6 +9,7 @@
 const { parseTranscriptFile } = require("./cursor-parser");
 const { listAllTranscriptFiles } = require("./cursor-home");
 const { importSession } = require("../../scripts/import-history");
+const { reactivateImportedSession } = require("../agent-monitor-shared/import-session-utils");
 
 /**
  * Import a single Cursor agent transcript file.
@@ -18,7 +19,8 @@ function importCursorSession(dbModule, session) {
   try {
     dbModule.stmts.setSessionHarness.run("cursor", session.sessionId, "cursor");
   } catch { /* non-fatal */ }
-  return { sessionId: session.sessionId, result };
+  const reactivated = reactivateImportedSession(dbModule, session);
+  return { sessionId: session.sessionId, result, reactivated };
 }
 
 /**
@@ -32,8 +34,8 @@ async function importAllCursorSessions(dbModule) {
 
   const importBatch = dbModule.db.transaction((sessions) => {
     for (const session of sessions) {
-      const { result } = importCursorSession(dbModule, session);
-      if (result && result.skipped) skipped++;
+      const { result, reactivated } = importCursorSession(dbModule, session);
+      if (result && result.skipped && !reactivated) skipped++;
       else imported++;
     }
   });

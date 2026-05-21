@@ -127,6 +127,8 @@ export interface DesktopSettings {
   cloudConnectionEnabled: boolean;
   /** Enables the Claude Dashboard sidecar/tab. Off by default. */
   agentMonitorEnabled: boolean;
+  /** Host-owned opt-in for Plans / plan extraction UI in the embedded Agent Dashboard. */
+  planExtractionEnabled: boolean;
   /** Desktop-local opt-in that requires trusted browser command signatures. */
   commandSigningEnforcementEnabled: boolean;
   defaultApprovalTier: RiskTier;
@@ -154,6 +156,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   cloudCommandsPaused: false,
   cloudConnectionEnabled: true,
   agentMonitorEnabled: false,
+  planExtractionEnabled: false,
   commandSigningEnforcementEnabled: false,
   defaultApprovalTier: "high",
   relayOrigin: DEFAULT_RELAY_ORIGIN,

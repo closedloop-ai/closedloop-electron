@@ -1,56 +1,30 @@
 /**
  * @file opencode-watcher.js
- * @description Live file watcher for OpenCode sessions. Watches
- * ~/.local/share/opencode/storage/ for new/changed message JSON files and
- * re-imports the containing session on change. Best-effort and non-fatal.
+ * @description Live file watcher for OpenCode sessions. Watches the
+ * `opencode.db` / WAL files for changes and re-imports the DB-backed session
+ * model on change. Best-effort and non-fatal.
  */
 const fs = require("fs");
 const path = require("path");
-const { getOpenCodeStorageDir } = require("./opencode-home");
-const { parseSessionDir } = require("./opencode-parser");
+const { getOpenCodeDbWatchDir, getOpenCodeDbWatchFiles } = require("./opencode-home");
+const { broadcastHarnessRows } = require("../agent-monitor-shared/harness-watcher-utils");
 
 const DEBOUNCE_MS = 600;
 const RETRY_MS = 4000;
 const MAX_RETRY_ATTEMPTS = 75; // ~5 minutes at 4s intervals, then give up
+const CATCHUP_POLL_MS = 5000;
 
 let started = false;
 let timer = null;
 let retryTimer = null;
-let pending = new Map(); // sessionDir → sessionId
+let catchupTimer = null;
 const watchers = [];
 
 function processPending(broadcast) {
-  const entries = Array.from(pending.entries());
-  pending = new Map();
-  if (entries.length === 0) return;
-
-  let dbModule;
-  let importOpenCodeSession;
-  try {
-    dbModule = require("../db");
-    ({ importOpenCodeSession } = require("./opencode-import"));
-  } catch { return; }
-
-  for (const [sessionDir, sessionId] of entries) {
-    let session;
-    try { session = parseSessionDir(sessionDir, sessionId); } catch { continue; }
-    if (!session) continue;
-    try {
-      const before = dbModule.stmts.getSession.get(session.sessionId);
-      const apply = dbModule.db.transaction(() => {
-        importOpenCodeSession(dbModule, session);
-      });
-      apply();
-      const row = dbModule.stmts.getSession.get(session.sessionId);
-      if (row) broadcast(before ? "session_updated" : "session_created", row);
-      const agent = dbModule.stmts.getAgent.get(`${session.sessionId}-main`);
-      if (agent) broadcast("agent_updated", agent);
-    } catch { /* non-fatal */ }
-  }
+  runCatchupImport(broadcast);
 }
 
-function scheduleProcess(broadcast, sessionDir, sessionId) {
-  if (sessionDir) pending.set(sessionDir, sessionId);
+function scheduleProcess(broadcast) {
   if (timer) return;
   timer = setTimeout(() => {
     timer = null;
@@ -61,15 +35,13 @@ function scheduleProcess(broadcast, sessionDir, sessionId) {
 function safeWatch({ root, broadcast }) {
   try {
     if (!fs.existsSync(root)) return false;
-    const w = fs.watch(root, { recursive: true }, (_event, filename) => {
+    const watchedNames = new Set(getOpenCodeDbWatchFiles());
+    const w = fs.watch(root, (_event, filename) => {
       if (!filename) return;
-      if (!String(filename).endsWith(".json")) return;
-      // filename is relative to root, e.g. "session-id/message_3.json"
-      const parts = String(filename).split(path.sep);
-      if (parts.length < 2) return;
-      const sessionId = parts[0];
-      const sessionDir = path.join(root, sessionId);
-      scheduleProcess(broadcast, sessionDir, sessionId);
+      const relative = String(filename);
+      const base = path.basename(relative);
+      if (!watchedNames.has(base)) return;
+      scheduleProcess(broadcast);
     });
     w.on("error", () => {});
     watchers.push(w);
@@ -86,13 +58,10 @@ function runCatchupImport(broadcast) {
   } catch { return; }
   Promise.resolve()
     .then(() => importAllOpenCodeSessions(dbModule))
-    .then(() => {
-      try {
-        const rows = dbModule.db
-          .prepare("SELECT * FROM sessions WHERE harness = 'opencode'")
-          .all();
-        for (const row of rows) broadcast("session_updated", row);
-      } catch { /* non-fatal */ }
+    .then(({ imported }) => {
+      if (imported > 0) {
+        broadcastHarnessRows(dbModule, broadcast, "opencode");
+      }
     })
     .catch(() => {});
 }
@@ -100,7 +69,10 @@ function runCatchupImport(broadcast) {
 function startOpenCodeWatcher({ broadcast }) {
   if (started) return;
   started = true;
-  const root = getOpenCodeStorageDir();
+  catchupTimer = setInterval(() => runCatchupImport(broadcast), CATCHUP_POLL_MS);
+  catchupTimer.unref?.();
+  runCatchupImport(broadcast);
+  const root = getOpenCodeDbWatchDir();
   if (safeWatch({ root, broadcast })) return;
   if (retryTimer) { clearInterval(retryTimer); retryTimer = null; }
   let retryCount = 0;
@@ -123,9 +95,9 @@ function startOpenCodeWatcher({ broadcast }) {
 function stopOpenCodeWatcher() {
   if (timer) { clearTimeout(timer); timer = null; }
   if (retryTimer) { clearInterval(retryTimer); retryTimer = null; }
+  if (catchupTimer) { clearInterval(catchupTimer); catchupTimer = null; }
   for (const w of watchers) { try { w.close(); } catch { /* ignore */ } }
   watchers.length = 0;
-  pending = new Map();
   started = false;
 }
 

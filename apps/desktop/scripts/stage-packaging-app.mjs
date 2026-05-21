@@ -19,6 +19,18 @@ const rendererEntryFile = path.join(appDir, "src/renderer/index.html");
 const stageRendererDir = path.join(stageAppDir, "src/renderer");
 const stageNpmrcFile = path.join(stageAppDir, ".npmrc");
 
+function resolveStageDependencySpec(packageJson, dependencyName, dependency) {
+  if (typeof dependency.resolved === "string" && dependency.resolved.length > 0) {
+    return dependency.resolved;
+  }
+
+  return (
+    packageJson.dependencies?.[dependencyName]
+    ?? packageJson.optionalDependencies?.[dependencyName]
+    ?? dependency.version
+  );
+}
+
 function parseJsonFromCommandOutput(output) {
   const trimmedOutput = output.trim();
 
@@ -90,7 +102,7 @@ const stagePackageJson = {
   dependencies: Object.fromEntries(
     Object.entries(installedDependencies).map(([dependencyName, dependency]) => [
       dependencyName,
-      dependency.version,
+      resolveStageDependencySpec(packageJson, dependencyName, dependency),
     ]),
   ),
 };

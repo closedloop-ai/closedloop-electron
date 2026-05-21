@@ -587,9 +587,9 @@ export class DesktopApplication {
           );
         });
 
-      if (this.cloudConnectionEnabled) {
+      if (this.cloudConnectionEnabled && this.apiKeyStore.getStatus().hasApiKey) {
         void this.cloudSocket.start();
-      } else {
+      } else if (!this.cloudConnectionEnabled) {
         this.cloudStatus = {
           state: "degraded",
           error: "Cloud connection disabled by user",
@@ -1157,6 +1157,10 @@ export class DesktopApplication {
 
   private isAgentMonitorEnabled(): boolean {
     return this.settingsStore.getAgentMonitorEnabled();
+  }
+
+  private isPlanExtractionEnabled(): boolean {
+    return this.settingsStore.getPlanExtractionEnabled();
   }
 
   private async applyAgentMonitorSetting(enabled: boolean): Promise<void> {
@@ -2308,6 +2312,7 @@ export class DesktopApplication {
       url: this.agentMonitor.getUrl(),
       ready: this.agentMonitor.isReady(),
       enabled: this.isAgentMonitorEnabled(),
+      planExtractionEnabled: this.isPlanExtractionEnabled(),
     }));
     ipcMain.handle("desktop:open-agent-monitor", () =>
       this.openClaudeDashboard(),
@@ -2365,6 +2370,7 @@ export class DesktopApplication {
           >;
           verboseLogging?: boolean;
           agentMonitorEnabled?: boolean;
+          planExtractionEnabled?: boolean;
           commandSigningEnforcementEnabled?: boolean;
         },
       ) => {
@@ -2403,6 +2409,9 @@ export class DesktopApplication {
         }
         if (typeof partial.agentMonitorEnabled === "boolean") {
           nextPartial.agentMonitorEnabled = partial.agentMonitorEnabled;
+        }
+        if (typeof partial.planExtractionEnabled === "boolean") {
+          nextPartial.planExtractionEnabled = partial.planExtractionEnabled;
         }
         const selectedSandbox =
           typeof partial.sandboxBaseDirectory === "string"

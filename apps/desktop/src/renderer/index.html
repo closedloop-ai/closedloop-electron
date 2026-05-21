@@ -1519,7 +1519,8 @@
         color: var(--ai);
       }
 
-      .job-status-badge.stopped {
+      .job-status-badge.stopped,
+      .job-status-badge.timed-out {
         border-color: var(--warning);
         color: var(--warning);
       }
@@ -3368,7 +3369,12 @@
           try {
             const r = await api.getAgentMonitorUrl();
             if (r && r.ready && r.url) {
-              frame.src = r.url;
+              const frameUrl = new URL(r.url);
+              frameUrl.searchParams.set(
+                "closedloop_plan_extraction",
+                r.planExtractionEnabled ? "1" : "0",
+              );
+              frame.src = frameUrl.toString();
               frame.style.display = "block";
               status.style.display = "none";
               claudeDashLoaded = true;
