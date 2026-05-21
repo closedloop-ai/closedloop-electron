@@ -604,9 +604,9 @@ export class DesktopApplication {
           );
         });
 
-      if (this.cloudConnectionEnabled) {
+      if (this.cloudConnectionEnabled && this.apiKeyStore.getStatus().hasApiKey) {
         void this.cloudSocket.start();
-      } else {
+      } else if (!this.cloudConnectionEnabled) {
         this.cloudStatus = {
           state: "degraded",
           error: "Cloud connection disabled by user",

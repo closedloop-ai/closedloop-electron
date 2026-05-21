@@ -24,6 +24,7 @@ import {
 
 const TAG = "agent-session-sync";
 const SYNC_INTERVAL_MS = 5_000;
+const MIN_INCREMENTAL_SYNC_INTERVAL_MS = 30_000;
 const SESSION_BATCH_SIZE = 10;
 const { app } = electron;
 
@@ -110,6 +111,9 @@ export class AgentSessionSyncService {
   private started = false;
   private syncing = false;
   private observedTopUpdatedAt: string | null = null;
+  private observedIdsAtTopUpdatedAt = new Set<string>();
+  private lastIncrementalBatchAttemptedAtMs = 0;
+  private featureDisabledForRelaySession = false;
   private incrementalQueue: string[] = [];
   private readonly incrementalQueuedIds = new Set<string>();
   private backfillQueue: string[] = [];
@@ -142,6 +146,10 @@ export class AgentSessionSyncService {
     if (!this.started) {
       return;
     }
+    if (!this.options.isRelayReady()) {
+      this.featureDisabledForRelaySession = false;
+      this.lastIncrementalBatchAttemptedAtMs = 0;
+    }
     if (!this.shouldRun()) {
       this.clearTimer();
       return;
@@ -153,7 +161,7 @@ export class AgentSessionSyncService {
   private shouldRun(): boolean {
     return (
       this.options.isAgentMonitorEnabled() && this.options.isRelayReady()
-    );
+    ) && !this.featureDisabledForRelaySession;
   }
 
   private ensureTimer(): void {
@@ -197,9 +205,15 @@ export class AgentSessionSyncService {
         this.initializeBackfillQueueIfNeeded(db);
         this.enqueueIncrementalUpdates(db);
 
-        if (this.incrementalQueue.length > 0) {
+        const nowMs = Date.now();
+        if (
+          this.incrementalQueue.length > 0 &&
+          nowMs - this.lastIncrementalBatchAttemptedAtMs >=
+            MIN_INCREMENTAL_SYNC_INTERVAL_MS
+        ) {
           syncMode = "incremental";
           syncIds = this.incrementalQueue.slice(0, SESSION_BATCH_SIZE);
+          this.lastIncrementalBatchAttemptedAtMs = nowMs;
         } else if (this.backfillQueue.length > 0) {
           syncMode = "backfill";
           syncIds = this.backfillQueue.slice(0, SESSION_BATCH_SIZE);
@@ -253,6 +267,10 @@ export class AgentSessionSyncService {
     }
 
     this.observedTopUpdatedAt = rows[0].updated_at;
+    this.observedIdsAtTopUpdatedAt = collectIdsAtTimestamp(
+      rows,
+      this.observedTopUpdatedAt,
+    );
     for (const row of rows) {
       if (this.backfillQueuedIds.has(row.id)) {
         continue;
@@ -272,19 +290,38 @@ export class AgentSessionSyncService {
       return;
     }
 
-    const rows = listUpdatedSessionCursorRows(db, this.observedTopUpdatedAt);
+    const previousTopUpdatedAt = this.observedTopUpdatedAt;
+    const previousTopIds = new Set(this.observedIdsAtTopUpdatedAt);
+    const rows = listUpdatedSessionCursorRows(db, previousTopUpdatedAt);
     if (rows.length === 0) {
       return;
     }
 
-    this.observedTopUpdatedAt = rows[0].updated_at;
+    let nextTopUpdatedAt = previousTopUpdatedAt;
+    let nextTopIds = new Set(previousTopIds);
     for (const row of rows) {
+      if (row.updated_at > nextTopUpdatedAt) {
+        nextTopUpdatedAt = row.updated_at;
+        nextTopIds = new Set<string>();
+      }
+      if (row.updated_at === nextTopUpdatedAt) {
+        nextTopIds.add(row.id);
+      }
+      if (
+        row.updated_at === previousTopUpdatedAt &&
+        previousTopIds.has(row.id)
+      ) {
+        continue;
+      }
       if (this.incrementalQueuedIds.has(row.id)) {
         continue;
       }
       this.incrementalQueuedIds.add(row.id);
       this.incrementalQueue.push(row.id);
     }
+
+    this.observedTopUpdatedAt = nextTopUpdatedAt;
+    this.observedIdsAtTopUpdatedAt = nextTopIds;
   }
 
   private handleBatchAck(
@@ -308,6 +345,16 @@ export class AgentSessionSyncService {
         `dropping ${ids.length} ${syncMode} agent-session payload(s) after validation_failed to avoid a permanent sync stall`,
       );
       this.dequeue(syncMode, ids);
+      return;
+    }
+
+    if (ack.reason === DesktopAgentSessionsAckReason.FeatureDisabled) {
+      this.featureDisabledForRelaySession = true;
+      this.clearTimer();
+      gatewayLog.info(
+        TAG,
+        "pausing agent-session sync until the relay reconnects because the current relay session rejected agent-session batches with feature_disabled",
+      );
       return;
     }
 
@@ -363,11 +410,25 @@ export function listUpdatedSessionCursorRows(
       `
         SELECT id, updated_at
         FROM sessions
-        WHERE updated_at > ?
+        WHERE updated_at >= ?
         ORDER BY updated_at DESC, id DESC
       `,
     )
     .all(sinceUpdatedAt) as SessionCursorRow[];
+}
+
+function collectIdsAtTimestamp(
+  rows: SessionCursorRow[],
+  updatedAt: string,
+): Set<string> {
+  const ids = new Set<string>();
+  for (const row of rows) {
+    if (row.updated_at !== updatedAt) {
+      break;
+    }
+    ids.add(row.id);
+  }
+  return ids;
 }
 
 export function loadSyncedSessions(

@@ -84,6 +84,12 @@ test("build script materializes a generated runtime tree with the host patches",
   assert.match(buildScriptSource, /closedloop-host-flags\.ts/);
   assert.match(buildScriptSource, /isPlanExtractionEnabled/);
   assert.match(buildScriptSource, /module\.exports = \{ uninstallHooks \};/);
+  // Watcher shutdown cleanup must be patched into the sidecar shutdown handler
+  assert.match(buildScriptSource, /stopCodexWatcher/);
+  assert.match(buildScriptSource, /stopCursorWatcher/);
+  assert.match(buildScriptSource, /stopCopilotWatcher/);
+  assert.match(buildScriptSource, /stopOpenCodeWatcher/);
+  assert.match(buildScriptSource, /stopCcWatcher/);
 });
 
 test("electron-builder ships the generated agent-monitor runtime tree unpacked", () => {
@@ -413,13 +419,18 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
     assert.match(source, /CATCHUP_POLL_MS = 5000/);
     assert.match(source, /broadcastHarnessRows/);
     assert.match(source, /runCatchupImport/);
+    // Retry intervals must be bounded to prevent resource leaks.
+    assert.match(source, /MAX_RETRY_ATTEMPTS/);
     assert.ok(
       source.includes("catchupTimer.unref?.();\n  runCatchupImport(broadcast);"),
       `${file} should run an immediate catch-up import on start`,
     );
   }
+  // Codex watcher must also have bounded retries and catch-up polling.
+  const codexSource = read("../scripts/agent-monitor-codex/codex-watcher.js");
+  assert.match(codexSource, /MAX_RETRY_ATTEMPTS/);
   assert.match(
-    read("../scripts/agent-monitor-codex/codex-watcher.js"),
+    codexSource,
     /catchupTimer\.unref\?\.\(\);\s*runCatchupImport\(broadcast\);/,
   );
 
