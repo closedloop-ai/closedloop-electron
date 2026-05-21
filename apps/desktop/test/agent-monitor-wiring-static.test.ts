@@ -84,6 +84,12 @@ test("build script materializes a generated runtime tree with the host patches",
   assert.match(buildScriptSource, /closedloop-host-flags\.ts/);
   assert.match(buildScriptSource, /isPlanExtractionEnabled/);
   assert.match(buildScriptSource, /module\.exports = \{ uninstallHooks \};/);
+  // Watcher shutdown cleanup must be patched into the sidecar shutdown handler
+  assert.match(buildScriptSource, /stopCodexWatcher/);
+  assert.match(buildScriptSource, /stopCursorWatcher/);
+  assert.match(buildScriptSource, /stopCopilotWatcher/);
+  assert.match(buildScriptSource, /stopOpenCodeWatcher/);
+  assert.match(buildScriptSource, /stopCcWatcher/);
 });
 
 test("electron-builder ships the generated agent-monitor runtime tree unpacked", () => {
@@ -167,7 +173,7 @@ test("sidecar is feature-gated and, when enabled, starts before the gateway", ()
   assert.match(appSource, /this\.agentMonitor = new AgentMonitorSidecar\(\)/);
   assert.match(
     appSource,
-    /if \(this\.settingsStore\.getAgentMonitorEnabled\(\)\) \{[\s\S]*void this\.agentMonitor\.start\(\);[\s\S]*syncAgentMonitorHooksOnBoot\(\);/,
+    /if \(this\.settingsStore\.getAgentMonitorEnabled\(\)\) \{[\s\S]*void this\.agentMonitor\.start\(\);[\s\S]*syncAgentMonitorHooksOnBoot\(\);[\s\S]*this\.agentSessionSync\.start\(\);/,
   );
   const startIdx = appSource.indexOf("void this.agentMonitor.start()");
   const gatewayTryIdx = appSource.indexOf("await this.server.start()");
@@ -176,6 +182,13 @@ test("sidecar is feature-gated and, when enabled, starts before the gateway", ()
   assert.ok(
     startIdx < gatewayTryIdx,
     "sidecar must start before the gateway try-block",
+  );
+});
+
+test("agent session sync starts and stops with the agent monitor flag", () => {
+  assert.match(
+    appSource,
+    /private async applyAgentMonitorSetting\(enabled: boolean\): Promise<void> \{[\s\S]*if \(enabled\) \{[\s\S]*this\.agentSessionSync\.start\(\);[\s\S]*return;[\s\S]*await this\.agentMonitor\.stop\(\);[\s\S]*this\.agentSessionSync\.stop\(\);/,
   );
 });
 
@@ -344,7 +357,7 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
     'CURSOR_MODULES = ["cursor-home", "cursor-parser", "cursor-import", "cursor-watcher"]',
     'COPILOT_MODULES = ["copilot-home", "copilot-parser", "copilot-import", "copilot-watcher"]',
     'OPENCODE_MODULES = ["opencode-home", "opencode-parser", "opencode-import", "opencode-watcher"]',
-    'SHARED_MODULES = ["harness-watcher-utils", "import-session-utils", "parser-utils"]',
+    'SHARED_MODULES = ["harness-watcher-utils", "import-session-utils", "parser-utils", "catchup-cache"]',
     "MULTI_HARNESS_SPECS = [",
     "watcherPatchLines",
     "importPatchLines",
@@ -413,13 +426,18 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
     assert.match(source, /CATCHUP_POLL_MS = 5000/);
     assert.match(source, /broadcastHarnessRows/);
     assert.match(source, /runCatchupImport/);
+    // Retry intervals must be bounded to prevent resource leaks.
+    assert.match(source, /MAX_RETRY_ATTEMPTS/);
     assert.ok(
       source.includes("catchupTimer.unref?.();\n  runCatchupImport(broadcast);"),
       `${file} should run an immediate catch-up import on start`,
     );
   }
+  // Codex watcher must also have bounded retries and catch-up polling.
+  const codexSource = read("../scripts/agent-monitor-codex/codex-watcher.js");
+  assert.match(codexSource, /MAX_RETRY_ATTEMPTS/);
   assert.match(
-    read("../scripts/agent-monitor-codex/codex-watcher.js"),
+    codexSource,
     /catchupTimer\.unref\?\.\(\);\s*runCatchupImport\(broadcast\);/,
   );
 

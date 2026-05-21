@@ -217,9 +217,9 @@ export type CloudLoopStatus =
   | { kind: "error"; message: string };
 
 export async function getCloudLoopStatus(
+  apiBaseUrl: string,
   loopId: string,
   getToken: () => string | null,
-  apiBaseUrl: string,
   timeoutMs = 5000,
 ): Promise<CloudLoopStatus> {
   const url = `${apiBaseUrl}/loops/${encodeURIComponent(loopId)}`;

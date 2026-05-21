@@ -251,7 +251,7 @@ export class BootRecoveryService implements Disposable {
     const { loopTokenStore } = this.deps;
     const getToken = () => loopTokenStore.getLoopTokenString(job.loopId);
 
-    let result = await getCloudLoopStatus(job.loopId, getToken, apiBaseUrl);
+    let result = await getCloudLoopStatus(apiBaseUrl, job.loopId, getToken);
 
     // On 401, refresh the loop token exactly once (singleflight-coalesced) and
     // retry. getToken closes over the store, so the retry picks up the new
@@ -264,9 +264,10 @@ export class BootRecoveryService implements Disposable {
         loopTokenStore,
       );
       if (refresh.success) {
-        result = await getCloudLoopStatus(job.loopId, getToken, apiBaseUrl);
+        result = await getCloudLoopStatus(apiBaseUrl, job.loopId, getToken);
       }
     }
+
 
     if (result.kind === "timed_out") {
       const current = this.deps.jobStore.getByLoopId(job.loopId) ?? job;

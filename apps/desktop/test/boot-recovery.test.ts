@@ -1571,6 +1571,7 @@ test("reattachLiveJob starts heartbeat scheduler for recovered loop", async () =
   }
 });
 
+
 test("AC-004: per-request provider resolution uses token at call time, not at construction time", async () => {
   // Verifies that getToken() is resolved on every fetch call so that a token
   // rotation between the artifact-upload and the completed-event POST results
@@ -1598,13 +1599,11 @@ test("AC-004: per-request provider resolution uses token at call time, not at co
   );
   jobStore.upsert(deadJob);
 
-  // Intercept fetch: after the first call (upload-artifacts), rotate the token
-  // in loopTokenStore so the second call (completed event) picks up the new value.
-  let callCount = 0;
+  // Intercept fetch: when the upload-artifacts call is captured, rotate the token
+  // in loopTokenStore so the subsequent completed-event call picks up the new value.
   globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
     const url = String(input);
     const headers = new Headers(init?.headers);
-    callCount++;
     fetchCalls.push({
       url,
       body: typeof init?.body === "string" ? init.body : "",

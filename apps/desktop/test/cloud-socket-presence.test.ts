@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { afterEach, describe, test } from "node:test";
 import {
   CloudSocketService,
+  parseDesktopAgentSessionsAck,
   buildRelayValidationPopHeaders,
   parseDesktopHelloAck,
   parseServerCapabilities,
@@ -338,14 +339,24 @@ describe("T-3.1: hello payload version fields", () => {
     service.stop();
   });
 
-  test("parseServerCapabilities requires explicit computeTargetSigning true", () => {
-    assert.deepEqual(parseServerCapabilities({ computeTargetSigning: true }), {
-      computeTargetSigning: true,
-    });
+  test("parseServerCapabilities requires explicit true flags", () => {
+    assert.deepEqual(
+      parseServerCapabilities({
+        computeTargetSigning: true,
+        agentSessionSync: true,
+      }),
+      {
+        computeTargetSigning: true,
+        agentSessionSync: true,
+      },
+    );
     assert.equal(
       parseServerCapabilities({ computeTargetSigning: false }),
       undefined,
     );
+    assert.deepEqual(parseServerCapabilities({ agentSessionSync: true }), {
+      agentSessionSync: true,
+    });
     assert.equal(
       parseServerCapabilities({ computeTargetSigning: "true" }),
       undefined,
@@ -361,7 +372,10 @@ describe("T-3.1: hello payload version fields", () => {
       clerkUserId: " clerk_user_1 ",
       organizationId: " org-1 ",
       userId: "user_db_1",
-      serverCapabilities: { computeTargetSigning: true },
+      serverCapabilities: {
+        computeTargetSigning: true,
+        agentSessionSync: true,
+      },
       resumeFromSequence: { "cmd-1": 2 },
     });
 
@@ -379,7 +393,10 @@ describe("T-3.1: hello payload version fields", () => {
       (ack as unknown as Record<string, unknown>).userId,
       undefined,
     );
-    assert.deepEqual(ack.serverCapabilities, { computeTargetSigning: true });
+    assert.deepEqual(ack.serverCapabilities, {
+      computeTargetSigning: true,
+      agentSessionSync: true,
+    });
     assert.deepEqual(ack.resumeFromSequence, { "cmd-1": 2 });
   });
 
@@ -400,6 +417,40 @@ describe("T-3.1: hello payload version fields", () => {
       (ack as unknown as Record<string, unknown>).organizationId,
       undefined,
     );
+  });
+
+  test("parseDesktopAgentSessionsAck keeps malformed payloads retryable", () => {
+    assert.deepEqual(parseDesktopAgentSessionsAck({ accepted: true }), {
+      accepted: true,
+    });
+    assert.deepEqual(
+      parseDesktopAgentSessionsAck({ reason: "feature_disabled" }),
+      {
+        accepted: false,
+        reason: "feature_disabled",
+      },
+    );
+    assert.deepEqual(parseDesktopAgentSessionsAck({ reason: "bogus" }), {
+      accepted: false,
+      reason: "rate_limited",
+    });
+  });
+
+  test("sendAgentSessions keeps batches retryable until the relay is ready", async () => {
+    const service = new CloudSocketService(createStubOptions());
+
+    const ack = await service.sendAgentSessions({
+      schemaVersion: 1,
+      batchId: "batch-1",
+      syncMode: "incremental",
+      sessionCount: 0,
+      sessions: [],
+    });
+
+    assert.deepEqual(ack, {
+      accepted: false,
+      reason: "rate_limited",
+    });
   });
 });
 
