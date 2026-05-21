@@ -128,6 +128,26 @@ function ensureCatalogSchema(db) {
     //     into the sidecar's launch dir.
     ["harness_agnostic", "INTEGER"],
     ["project_scoped", "INTEGER"],
+    // v10: `single_install` extends harness_agnostic to packs whose ONE install
+    // command sets up multiple harnesses (not just packs with one universal
+    // binary). gstack's Codex install command is a superset that also covers
+    // Claude — running it once installs both. UI collapses per-harness buttons
+    // for any pack with single_install OR harness_agnostic.
+    ["single_install", "INTEGER"],
+    // v10: `post_install` is an optional JSON block describing required-or-
+    // recommended next steps the user must complete AFTER the install command
+    // finishes. The install modal pops a post-install screen showing this
+    // content. Used for packs that install OK but are non-functional until
+    // the user adds API keys / OAuths / edits a config file (Claude Code
+    // Router, future ClosedLoop MCP card, context7's optional Upstash key).
+    //
+    // Shape: { title, body, copy_command?, url?, required? }
+    //   - title: section header in the post-install screen
+    //   - body: human-readable explanation (1-3 sentences)
+    //   - copy_command: optional shell snippet shown with a Copy button
+    //   - url: optional reference link (e.g. config docs)
+    //   - required: true if the pack is non-functional without these steps
+    ["post_install", "TEXT"],
   ]) {
     try {
       db.prepare(`SELECT ${col} FROM pack_catalog LIMIT 1`).get();
@@ -180,8 +200,9 @@ function upsertCatalogSeed(db, seedDoc) {
          (pack_id, display_name, category, github_url, marketplace_url,
           description, harnesses, install_commands, uninstall_commands,
           install_notes, placeholder_reason, verified, pin_order, contents,
-          detection_patterns, harness_agnostic, project_scoped, seed_version)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          detection_patterns, harness_agnostic, project_scoped,
+          single_install, post_install, seed_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(pack_id) DO UPDATE SET
          display_name        = excluded.display_name,
          category            = excluded.category,
@@ -199,6 +220,8 @@ function upsertCatalogSeed(db, seedDoc) {
          detection_patterns  = excluded.detection_patterns,
          harness_agnostic    = excluded.harness_agnostic,
          project_scoped      = excluded.project_scoped,
+         single_install      = excluded.single_install,
+         post_install        = excluded.post_install,
          seed_version        = excluded.seed_version`,
     ).run(
       pack.pack_id,
@@ -222,6 +245,8 @@ function upsertCatalogSeed(db, seedDoc) {
         : null,
       pack.harness_agnostic ? 1 : 0,
       pack.project_scoped ? 1 : 0,
+      pack.single_install ? 1 : 0,
+      pack.post_install ? JSON.stringify(pack.post_install) : null,
       seedVersion,
     );
     if (existing) stats.updated += 1;
@@ -248,6 +273,7 @@ function hydrateRow(row) {
     uninstall_commands: parseJsonField(row.uninstall_commands) || {},
     contents: parseJsonField(row.contents) || null,
     contents_cache: parseJsonField(row.contents_cache) || null,
+    post_install: parseJsonField(row.post_install) || null,
   };
 }
 
