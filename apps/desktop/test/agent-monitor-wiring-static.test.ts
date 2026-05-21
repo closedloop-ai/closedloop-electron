@@ -19,6 +19,7 @@ const traySource = read("../src/main/tray.ts");
 const preloadSource = read("../src/main/preload.ts");
 const sidecarSource = read("../src/main/agent-monitor-sidecar.ts");
 const hooksSource = read("../src/main/agent-monitor-hooks.ts");
+const embedLayoutSource = read("../scripts/agent-monitor-embed/Layout.tsx");
 const contractsSource = read("../src/shared/contracts.ts");
 const settingsStoreSource = read("../src/main/settings-store.ts");
 const indexHtml = read("../src/renderer/index.html");
@@ -291,7 +292,9 @@ test("renderer wires the Agent Dashboard sidecar into the sidebar and gates it o
   assert.match(indexHtml, /searchParams\.set\(\s*"closedloop_plan_extraction",[\s\S]*r\.planExtractionEnabled \? "1" : "0"/);
   // Embed mode + host postMessage navigation.
   assert.match(indexHtml, /searchParams\.set\("embed", "1"\)/);
+  assert.match(indexHtml, /searchParams\.set\(\s*"closedloop_host_origin"/);
   assert.match(indexHtml, /type: "closedloop:navigate"/);
+  assert.doesNotMatch(indexHtml, /postMessage\([\s\S]*,\s*"\*"/);
   assert.match(indexHtml, /cachedPlanExtractionEnabled/);
   assert.match(indexHtml, /planExtractionOnly: true/);
   assert.match(indexHtml, /id="claudeDashHooksToggle"/);
@@ -299,6 +302,12 @@ test("renderer wires the Agent Dashboard sidecar into the sidebar and gates it o
   // Iframe-in-hidden-panel height fix must be present.
   assert.match(indexHtml, /function sizeClaudeFrame/);
   assert.match(indexHtml, /window\.addEventListener\("resize", sizeClaudeFrame\)/);
+});
+
+test("embedded layout accepts navigation only from the configured host origin", () => {
+  assert.match(embedLayoutSource, /EMBED_HOST_ORIGIN_QUERY_PARAM = "closedloop_host_origin"/);
+  assert.match(embedLayoutSource, /sessionStorage\.setItem\(EMBED_HOST_ORIGIN_STORAGE_KEY, fromQuery\)/);
+  assert.match(embedLayoutSource, /event\.origin === allowedHostOrigin/);
 });
 
 test("renderer agent nav stays aligned with the embedded monitor router", () => {

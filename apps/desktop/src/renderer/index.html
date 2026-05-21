@@ -2756,8 +2756,7 @@
         padding: 6px;
       }
       /* Agent nav hidden when the Agent Dashboard sidecar is disabled */
-      .app.agent-disabled .sb-item[data-kind="agent"],
-      .app.agent-disabled .sb-section[data-section="agent"] {
+      .app.agent-disabled .sb-item[data-kind="agent"] {
         display: none;
       }
 
@@ -3517,6 +3516,7 @@
       let pendingAgentRoute = "/";
       let bootNavDone = false;
       let cachedPlanExtractionEnabled = false;
+      let agentMonitorFrameOrigin = null;
 
       function shouldShowNavItem(item) {
         return !item.planExtractionOnly || cachedPlanExtractionEnabled;
@@ -3579,11 +3579,11 @@
       function navigateAgentRoute(route) {
         pendingAgentRoute = route || "/";
         const frame = document.getElementById("claudeDashFrame");
-        if (claudeDashLoaded && frame && frame.contentWindow) {
+        if (claudeDashLoaded && frame && frame.contentWindow && agentMonitorFrameOrigin) {
           try {
             frame.contentWindow.postMessage(
               { type: "closedloop:navigate", path: pendingAgentRoute },
-              "*",
+              agentMonitorFrameOrigin,
             );
           } catch (_) {
             /* cross-origin timing race — safe to ignore */
@@ -3693,6 +3693,7 @@
         if (!cachedAgentMonitorEnabled) {
           stopClaudeDashboardPoll();
           claudeDashLoaded = false;
+          agentMonitorFrameOrigin = null;
           if (frame) {
             frame.src = "about:blank";
             frame.style.display = "none";
@@ -3809,10 +3810,15 @@
                 buildSidebar();
               }
               const frameUrl = new URL(r.url);
+              agentMonitorFrameOrigin = frameUrl.origin;
               // Embed mode hides the sidecar's own sidebar/chrome; the
               // initial route is baked in so the first paint lands right.
               frameUrl.pathname = pendingAgentRoute || "/";
               frameUrl.searchParams.set("embed", "1");
+              frameUrl.searchParams.set(
+                "closedloop_host_origin",
+                window.location.origin || "null",
+              );
               frameUrl.searchParams.set(
                 "closedloop_plan_extraction",
                 r.planExtractionEnabled ? "1" : "0",

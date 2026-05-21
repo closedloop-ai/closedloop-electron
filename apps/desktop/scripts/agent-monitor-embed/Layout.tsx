@@ -23,6 +23,9 @@ interface LayoutProps {
   wsConnected: boolean;
 }
 
+const EMBED_HOST_ORIGIN_QUERY_PARAM = "closedloop_host_origin";
+const EMBED_HOST_ORIGIN_STORAGE_KEY = "closedloop.embed-host-origin";
+
 // The monitor is only ever framed by the ClosedLoop desktop app, so being in
 // an iframe IS embed mode. This beats reading `?embed=1` from the URL: React
 // Router navigations drop the query string, and the host can drive routes
@@ -36,10 +39,25 @@ function isEmbedded(): boolean {
   }
 }
 
+function resolveAllowedHostOrigin(): string | null {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const fromQuery = params.get(EMBED_HOST_ORIGIN_QUERY_PARAM);
+    if (fromQuery) {
+      window.sessionStorage.setItem(EMBED_HOST_ORIGIN_STORAGE_KEY, fromQuery);
+      return fromQuery;
+    }
+    return window.sessionStorage.getItem(EMBED_HOST_ORIGIN_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
 export function Layout({ wsConnected }: LayoutProps) {
   const [collapsed, setCollapsed] = useState(loadCollapsed);
   const navigate = useNavigate();
   const embedded = isEmbedded();
+  const allowedHostOrigin = resolveAllowedHostOrigin();
 
   const toggle = useCallback(() => {
     setCollapsed((prev) => {
@@ -63,6 +81,7 @@ export function Layout({ wsConnected }: LayoutProps) {
       // MessageEvent.data is `any`; guard the shape before routing.
       const data = event.data;
       if (
+        event.origin === allowedHostOrigin &&
         data &&
         typeof data === "object" &&
         data.type === "closedloop:navigate" &&
@@ -73,7 +92,7 @@ export function Layout({ wsConnected }: LayoutProps) {
     };
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [embedded, navigate]);
+  }, [allowedHostOrigin, embedded, navigate]);
 
   if (embedded) {
     return (
