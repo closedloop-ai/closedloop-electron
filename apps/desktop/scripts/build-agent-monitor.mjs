@@ -102,7 +102,7 @@ const CODEX_MODULES = ["codex-home", "codex-parser", "codex-import", "codex-watc
 const CURSOR_MODULES = ["cursor-home", "cursor-parser", "cursor-import", "cursor-watcher"];
 const COPILOT_MODULES = ["copilot-home", "copilot-parser", "copilot-import", "copilot-watcher"];
 const OPENCODE_MODULES = ["opencode-home", "opencode-parser", "opencode-import", "opencode-watcher"];
-const SHARED_MODULES = ["harness-watcher-utils", "import-session-utils", "parser-utils"];
+const SHARED_MODULES = ["harness-watcher-utils", "import-session-utils", "parser-utils", "catchup-cache"];
 const MULTI_HARNESS_SPECS = [
   {
     key: "codex",

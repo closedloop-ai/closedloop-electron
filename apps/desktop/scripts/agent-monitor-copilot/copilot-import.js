@@ -8,6 +8,11 @@ const { parseChatSessionFile, parseCliEventFile } = require("./copilot-parser");
 const { listChatSessionFiles, listCliEventFiles } = require("./copilot-home");
 const { importSession } = require("../../scripts/import-history");
 const { reactivateImportedSession } = require("../agent-monitor-shared/import-session-utils");
+const { createCatchupCache } = require("../agent-monitor-shared/catchup-cache");
+
+// See FEA-1316: skip chat/CLI files unchanged since last tick.
+const chatCache = createCatchupCache();
+const cliCache = createCatchupCache();
 
 function importCopilotSession(dbModule, session) {
   const result = importSession(dbModule, session);
@@ -32,26 +37,44 @@ async function importAllCopilotSessions(dbModule) {
   });
 
   const batch = [];
+  const chatParsed = [];
+  const cliParsed = [];
 
   // Copilot Chat (VS Code extension) — JSON files
-  for (const { filePath, workspacePath } of listChatSessionFiles()) {
+  const chatFiles = listChatSessionFiles();
+  for (const { filePath, workspacePath } of chatFiles) {
+    if (chatCache.isUnchanged(filePath)) {
+      skipped++;
+      continue;
+    }
     try {
       const session = parseChatSessionFile(filePath, workspacePath);
-      if (!session) { skipped++; continue; }
+      if (!session) { chatCache.markSeen(filePath); skipped++; continue; }
       batch.push(session);
+      chatParsed.push(filePath);
     } catch { errors++; }
   }
 
   // Copilot CLI — JSONL event files
-  for (const { filePath, sessionId } of listCliEventFiles()) {
+  const cliFiles = listCliEventFiles();
+  for (const { filePath, sessionId } of cliFiles) {
+    if (cliCache.isUnchanged(filePath)) {
+      skipped++;
+      continue;
+    }
     try {
       const session = await parseCliEventFile(filePath, sessionId);
-      if (!session) { skipped++; continue; }
+      if (!session) { cliCache.markSeen(filePath); skipped++; continue; }
       batch.push(session);
+      cliParsed.push(filePath);
     } catch { errors++; }
   }
 
   if (batch.length > 0) importBatch(batch);
+  for (const p of chatParsed) chatCache.markSeen(p);
+  for (const p of cliParsed) cliCache.markSeen(p);
+  chatCache.pruneTo(chatFiles.map((f) => f.filePath));
+  cliCache.pruneTo(cliFiles.map((f) => f.filePath));
 
   return { imported, skipped, errors };
 }
