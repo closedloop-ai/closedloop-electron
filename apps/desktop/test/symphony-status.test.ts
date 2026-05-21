@@ -23,9 +23,9 @@
  */
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, test } from "node:test";
+import { describe, test } from "node:test";
+import { createTempDirManager } from "./helpers/temp-dir.js";
 import {
   detectSuccessFromOutput,
   type DetectSuccessOutcome,
@@ -35,17 +35,7 @@ import {
 // Test infrastructure
 // ---------------------------------------------------------------------------
 
-let tempRoot = "";
-
-beforeEach(async () => {
-  tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "symphony-status-test-"));
-});
-
-afterEach(async () => {
-  if (tempRoot) {
-    await fs.rm(tempRoot, { recursive: true, force: true });
-  }
-});
+const { makeTempDir } = createTempDirManager("symphony-status-test-");
 
 /**
  * Map a detectSuccessFromOutput outcome to the effective status/fallbackDetected
@@ -108,7 +98,7 @@ const fallbackCases: readonly FallbackCase[] = [
 describe("resolveEffectiveState JSONL fallback — dead PID + IN_PROGRESS state", () => {
   for (const fixture of fallbackCases) {
     test(`dead PID + ${fixture.name}`, async () => {
-      const claudeWorkDir = path.join(tempRoot, ".closedloop-ai", "work");
+      const claudeWorkDir = path.join(makeTempDir(), ".closedloop-ai", "work");
       await fs.mkdir(claudeWorkDir, { recursive: true });
       if (fixture.jsonlContent !== null) {
         await fs.writeFile(
@@ -132,7 +122,7 @@ describe("resolveEffectiveState JSONL fallback — dead PID + IN_PROGRESS state"
     // making existsSync() return false and routing through the "missing"
     // branch — the only way to exercise the "unreadable" branch in
     // detectSuccessFromOutput is for the file to be resolvable but unreadable.
-    const claudeWorkDir = path.join(tempRoot, ".closedloop-ai", "work");
+    const claudeWorkDir = path.join(makeTempDir(), ".closedloop-ai", "work");
     await fs.mkdir(claudeWorkDir, { recursive: true });
     const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
     await fs.writeFile(
