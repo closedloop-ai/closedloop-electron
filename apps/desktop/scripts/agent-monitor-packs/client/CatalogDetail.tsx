@@ -9,6 +9,11 @@
 import { useEffect, useState } from "react";
 import type { CatalogEntry } from "./CatalogCard";
 import { InstallModal } from "./InstallModal";
+import {
+  resolvePackModalHarness,
+  resolvePackPreviewCommand,
+  usesAutoDetectedInstallCommand,
+} from "./PackInstallModalUtils";
 
 interface CatalogDetailProps {
   packId: string;
@@ -79,6 +84,20 @@ export function CatalogDetail({ packId, onClose, onAfterRun }: CatalogDetailProp
     harness: string;
     action: "install" | "uninstall";
   } | null>(null);
+
+  const resolvedInstall = entry && install
+    ? (() => {
+        const harness = resolvePackModalHarness(entry, install.harness, install.action);
+        const command = resolvePackPreviewCommand(entry, harness, install.action);
+        if (!command) return null;
+        return {
+          harness,
+          action: install.action,
+          command,
+          commandIsAutoDetect: usesAutoDetectedInstallCommand(harness, install.action),
+        };
+      })()
+    : null;
 
   useEffect(() => {
     let alive = true;
@@ -272,7 +291,10 @@ export function CatalogDetail({ packId, onClose, onAfterRun }: CatalogDetailProp
                                   {uninstallCmd && (
                                     <button
                                       onClick={() =>
-                                        setInstall({ harness: h, action: "uninstall" })
+                                        setInstall({
+                                          harness: resolvePackModalHarness(entry, h, "uninstall"),
+                                          action: "uninstall",
+                                        })
                                       }
                                       className="text-[10px] rounded border border-border bg-surface-3 text-gray-300 px-2 py-1 hover:bg-surface-2"
                                     >
@@ -430,17 +452,14 @@ export function CatalogDetail({ packId, onClose, onAfterRun }: CatalogDetailProp
         </div>
       </div>
 
-      {install && entry && entry.install_commands[install.harness] && (
+      {resolvedInstall && entry && (
         <InstallModal
           packId={entry.pack_id}
           packDisplayName={entry.display_name}
-          harness={install.harness}
-          action={install.action}
-          command={
-            install.action === "install"
-              ? entry.install_commands[install.harness]
-              : entry.uninstall_commands[install.harness]
-          }
+          harness={resolvedInstall.harness}
+          action={resolvedInstall.action}
+          command={resolvedInstall.command}
+          commandIsAutoDetect={resolvedInstall.commandIsAutoDetect}
           projectScoped={entry.project_scoped === 1}
           onClose={() => setInstall(null)}
           onCompleted={() => {

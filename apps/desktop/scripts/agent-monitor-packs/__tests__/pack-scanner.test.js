@@ -1090,6 +1090,55 @@ test("runPackScanner does not prune when any detector scope fails", () => {
   );
 });
 
+test("pickSingleInstallCommand joins ALL uninstall commands; picks superset for install", () => {
+  const io = require("../install-orchestrator");
+  const entry = {
+    pack_id: "gstack",
+    harnesses: ["claude", "codex"],
+    install_commands: {
+      claude: "git clone X /a && cd /a && ./setup",
+      codex: "git clone X /a && cd /a && ./setup && ./setup --host codex",
+    },
+    uninstall_commands: {
+      claude: "rm -rf /a && find /a -lname '*g*' -exec rm -rf {} +",
+      codex: "find /b -name 'g*' -exec rm -rf {} +",
+    },
+  };
+
+  // UNINSTALL: must run BOTH commands independently regardless of which CLIs
+  // are present, because cleanup must happen for all listed harnesses'
+  // artifacts. Any failed step still needs to make the aggregate uninstall
+  // fail.
+  const uninstall = io._internals.pickSingleInstallCommand(entry, "uninstall");
+  assert.ok(uninstall.command, "uninstall command must be present");
+  assert.ok(
+    uninstall.command.includes(entry.uninstall_commands.claude),
+    "uninstall must include the claude cleanup",
+  );
+  assert.ok(
+    uninstall.command.includes(entry.uninstall_commands.codex),
+    "uninstall must include the codex cleanup",
+  );
+  assert.ok(
+    uninstall.command.includes("exit $__closedloop_uninstall_failed"),
+    "uninstall must preserve a non-zero aggregate exit status",
+  );
+  assert.deepEqual(uninstall.registerHarnesses, ["claude", "codex"]);
+
+  // INSTALL: picks the SUPERSET command (codex variant when codex CLI is on
+  // PATH). We can't assert on the machine's actual CLI state, so just verify
+  // the function returns something coherent.
+  const install = io._internals.pickSingleInstallCommand(entry, "install");
+  // If neither CLI is installed, command is null + registerHarnesses=[].
+  // If any CLI is installed, command is a single string (NOT joined).
+  if (install.command) {
+    assert.ok(
+      !install.command.includes(" ; "),
+      "install picks ONE superset command, never joined",
+    );
+  }
+});
+
 test("isHarnessInstalled returns true for binaries on PATH and false otherwise", () => {
   const io = require("../install-orchestrator");
   // /bin/ls is universally present on macOS + Linux. We re-use it as a proxy
