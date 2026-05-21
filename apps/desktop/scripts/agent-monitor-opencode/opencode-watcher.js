@@ -11,6 +11,7 @@ const { broadcastHarnessRows } = require("../agent-monitor-shared/harness-watche
 
 const DEBOUNCE_MS = 600;
 const RETRY_MS = 4000;
+const MAX_RETRY_ATTEMPTS = 75; // ~5 minutes at 4s intervals, then give up
 const CATCHUP_POLL_MS = 5000;
 
 let started = false;
@@ -73,7 +74,14 @@ function startOpenCodeWatcher({ broadcast }) {
   runCatchupImport(broadcast);
   const root = getOpenCodeDbWatchDir();
   if (safeWatch({ root, broadcast })) return;
+  if (retryTimer) { clearInterval(retryTimer); retryTimer = null; }
+  let retryCount = 0;
   retryTimer = setInterval(() => {
+    if (++retryCount > MAX_RETRY_ATTEMPTS) {
+      clearInterval(retryTimer);
+      retryTimer = null;
+      return;
+    }
     if (!fs.existsSync(root)) return;
     if (safeWatch({ root, broadcast })) {
       clearInterval(retryTimer);

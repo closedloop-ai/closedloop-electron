@@ -65,6 +65,7 @@ import { SettingsStore, type SavedConfigManagedPatch } from "./settings-store.js
 import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
 import { AgentMonitorSidecar } from "./agent-monitor-sidecar.js";
+import { AgentSessionSyncService } from "./agent-session-sync-service.js";
 import {
   isAgentMonitorHooksEnabled,
   setAgentMonitorHooksEnabled,
@@ -158,6 +159,8 @@ import {
 import { isSecurityUpgradeProvisioned } from "./security-upgrade-result.js";
 import { isDesktopSetupCompleteFromState } from "./setup-readiness.js";
 import { PendingCommandKeyNotifier } from "./pending-command-key-notifier.js";
+import * as loopSleepRecovery from "./loop-sleep-recovery.js";
+import { LoopSchedulerContext } from "./loop-scheduler-context.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -193,11 +196,13 @@ export class DesktopApplication {
   private readonly cloudSocket: CloudSocketService;
   private readonly commandExecutor: CloudCommandExecutor;
   private readonly agentMonitor: AgentMonitorSidecar;
+  private readonly agentSessionSync: AgentSessionSyncService;
   private readonly activityLog: ActivityLogStore;
   private readonly approvalStore: ApprovalStore;
   private readonly jobStore: JobStore;
   private readonly recovery: GatewayRecoveryManager;
   private readonly bootRecovery: BootRecoveryService;
+  private readonly schedulers: LoopSchedulerContext;
   private readonly gatewayAuthToken: string;
   private readonly legacyGatewayId: string;
   private readonly sessionStore: LocalSessionStore;
@@ -207,6 +212,7 @@ export class DesktopApplication {
   private cloudCommandsPaused: boolean;
   private cloudConnectionEnabled: boolean;
   private serverCommandSigningSupported = false;
+  private serverAgentSessionSyncSupported = false;
   private updateCheckTimer: NodeJS.Timeout | null = null;
   private packagedUpdateState: PackagedUpdateState =
     createInitialPackagedUpdateState();
@@ -306,6 +312,9 @@ export class DesktopApplication {
       app.getPath("userData"),
     );
     this.legacyGatewayId = gatewayIdentityStore.loadSync();
+    // Initialized before the gateway server so the server constructor can take
+    // ownership of the same instance the BootRecoveryService is later given.
+    this.schedulers = new LoopSchedulerContext();
     this.server = DesktopGatewayServer.createDefault(
       this.settingsStore.getWebAppOrigin(),
       () => (this.isNoAuthMode() ? undefined : this.gatewayAuthToken),
@@ -337,6 +346,7 @@ export class DesktopApplication {
         this.cloudStatus.state === "online" ? this.cloudStatus.targetId : null,
       (payload) => this.handleSecurityUpgradeCommand(payload),
       () => this.isDesktopSetupComplete(),
+      this.schedulers,
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -384,13 +394,17 @@ export class DesktopApplication {
       onStatusChange: (status) => this.onCloudSocketStatus(status),
       onDisconnect: (reason) => {
         this.serverCommandSigningSupported = false;
+        this.serverAgentSessionSyncSupported = false;
         this.commandKeyReconciler.stop();
+        this.agentSessionSync.refresh();
         this.notifyCommandKeysChanged();
         Observability.connectionLost(reason);
       },
       onHelloAck: (event) => {
         this.serverCommandSigningSupported =
           event.serverCapabilities?.computeTargetSigning === true;
+        this.serverAgentSessionSyncSupported =
+          event.serverCapabilities?.agentSessionSync === true;
         gatewayLog.info(
           "command-signing",
           `Server support from hello ack: computeTargetId=${event.computeTargetId}, computeTargetSigning=${event.serverCapabilities?.computeTargetSigning === true}`,
@@ -414,6 +428,7 @@ export class DesktopApplication {
           event.computeTargetId,
           process.env.NODE_ENV ?? "production",
         );
+        this.agentSessionSync.refresh();
       },
       onCommand: (command) => {
         const keyApprovalRequestMatch =
@@ -486,6 +501,14 @@ export class DesktopApplication {
         this.commandExecutor.acknowledge(event);
       },
     });
+    this.agentSessionSync = new AgentSessionSyncService({
+      isAgentMonitorEnabled: () => this.settingsStore.getAgentMonitorEnabled(),
+      isRelayReady: () =>
+        this.serverAgentSessionSyncSupported &&
+        this.cloudStatus.state === "online",
+      sendBatch: (batch) => this.cloudSocket.sendAgentSessions(batch),
+      getUserDataPath: () => app.getPath("userData"),
+    });
     this.recovery = new GatewayRecoveryManager({
       probe: () => this.probeGatewayAlive(),
       restart: () => this.server.restart(),
@@ -512,6 +535,7 @@ export class DesktopApplication {
       getApiOrigin: () => this.settingsStore.getApiOrigin(),
       getAllowedDirectories: () => this.getAllowedDirectoriesFromSandbox(),
       loopTokenStore: this.loopTokenStore,
+      schedulers: this.schedulers,
     });
     this.registerIpcHandlers();
     this.registerOnboardingFileOpenHandler();
@@ -558,14 +582,21 @@ export class DesktopApplication {
       await seedReposConfig(bootSandbox);
     }
 
+    // Register the sleep/wake recovery listener so active loops refresh their
+    // tokens and send heartbeats after the system wakes from sleep.
+    loopSleepRecovery.init();
+
     // Independent of the gateway, but fully feature-gated. When enabled, start
     // the sidecar fire-and-forget BEFORE the gateway try-block so a
     // gateway-start failure never prevents it from running, and a sidecar
-    // failure never blocks or fails app boot. Hook repair remains opt-in and
-    // self-healing.
+    // failure never blocks or fails app boot. The relay sync service follows
+    // the same flag, so disabling Agent Monitor leaves only dormant wiring in
+    // the desktop shell and no background sync loop. Hook repair remains
+    // opt-in and self-healing.
     if (this.settingsStore.getAgentMonitorEnabled()) {
       void this.agentMonitor.start();
       syncAgentMonitorHooksOnBoot();
+      this.agentSessionSync.start();
     }
 
     try {
@@ -587,9 +618,9 @@ export class DesktopApplication {
           );
         });
 
-      if (this.cloudConnectionEnabled) {
+      if (this.cloudConnectionEnabled && this.apiKeyStore.getStatus().hasApiKey) {
         void this.cloudSocket.start();
-      } else {
+      } else if (!this.cloudConnectionEnabled) {
         this.cloudStatus = {
           state: "degraded",
           error: "Cloud connection disabled by user",
@@ -1169,6 +1200,7 @@ export class DesktopApplication {
     if (enabled) {
       void this.agentMonitor.start();
       syncAgentMonitorHooksOnBoot();
+      this.agentSessionSync.start();
       return;
     }
 
@@ -1183,6 +1215,7 @@ export class DesktopApplication {
     }
 
     await this.agentMonitor.stop();
+    this.agentSessionSync.stop();
     this.desktopWindow
       .getWindow()
       ?.webContents.send("desktop:navigate-tab", "settings");
@@ -1240,10 +1273,14 @@ export class DesktopApplication {
   }
 
   private getLocalCapabilities(): ReturnType<typeof buildCommandSigningCapabilities> {
-    return buildCommandSigningCapabilities({
-      commandSigningEnforcementEnabled:
-        this.settingsStore.getCommandSigningEnforcementEnabled(),
-    });
+    return {
+      ...buildCommandSigningCapabilities({
+        commandSigningEnforcementEnabled:
+          this.settingsStore.getCommandSigningEnforcementEnabled(),
+      }),
+      loopRunnerRefreshSupported: true,
+      loopRunnerHeartbeatSupported: true,
+    };
   }
 
   private isCommandSigningEnforced(): boolean {
@@ -1617,10 +1654,11 @@ export class DesktopApplication {
     }
 
     this.shuttingDown = true;
-    this.bootRecovery.dispose();
+    this.bootRecovery[Symbol.dispose]();
     await this.bootRecovery.quiesce(1_000);
     this.queueStatsTelemetryDebounce.cancel();
     this.commandKeyReconciler.stop();
+    this.agentSessionSync.stop();
     return runShutdownSequence({
       observability: Observability,
       updateCheckTimer: this.updateCheckTimer,
@@ -1827,11 +1865,13 @@ export class DesktopApplication {
         state: "degraded",
         error: "Cloud connection disabled by user",
       };
+      this.agentSessionSync.refresh();
       this.refreshTrayState();
       return;
     }
 
     this.cloudStatus = status;
+    this.agentSessionSync.refresh();
     const stats = this.commandExecutor.getStats();
 
     if (status.state === "online") {
@@ -1903,16 +1943,19 @@ export class DesktopApplication {
     if (!enabled) {
       this.cloudSocket.stop();
       this.serverCommandSigningSupported = false;
+      this.serverAgentSessionSyncSupported = false;
       this.commandKeyReconciler.stop();
       this.cloudStatus = {
         state: "degraded",
         error: "Cloud connection disabled by user",
       };
+      this.agentSessionSync.refresh();
       this.refreshTrayState();
       return;
     }
 
     this.cloudStatus = { state: "idle" };
+    this.agentSessionSync.refresh();
     this.refreshTrayState();
     this.cloudSocket.restart();
   }
@@ -1925,7 +1968,9 @@ export class DesktopApplication {
       return;
     }
     this.serverCommandSigningSupported = false;
+    this.serverAgentSessionSyncSupported = false;
     this.commandKeyReconciler.stop();
+    this.agentSessionSync.refresh();
     this.cloudSocket.restart();
   }
 
@@ -3083,7 +3128,10 @@ export class DesktopApplication {
         this.settingsStore.setApiOrigin(DEFAULT_DESKTOP_SETTINGS.apiOrigin);
         this.settingsStore.setWebAppOrigin(DEFAULT_DESKTOP_SETTINGS.webAppOrigin);
         this.cloudSocket.stop();
+        this.serverCommandSigningSupported = false;
+        this.serverAgentSessionSyncSupported = false;
         this.cloudStatus = { state: "idle" };
+        this.agentSessionSync.refresh();
         this.apiKeyStore.clearApiKey();
         this.refreshTrayState();
       }
