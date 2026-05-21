@@ -14,6 +14,7 @@ export interface CatalogEntry {
   display_name: string;
   category: string | null;
   github_url: string;
+  upstream_github_url: string | null;
   description: string | null;
   description_live: string | null;
   harnesses: string[];
@@ -21,6 +22,7 @@ export interface CatalogEntry {
   uninstall_commands: Record<string, string>;
   install_notes: string | null;
   placeholder_reason: string | null;
+  verified?: number;
   stars: number | null;
   forks: number | null;
   last_release: string | null;
@@ -161,14 +163,32 @@ export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
             </button>
           );
         })}
-        <a
-          href={pack.github_url}
-          target="_blank"
-          rel="noreferrer"
-          className="ml-auto text-[10px] text-gray-500 hover:text-gray-300"
-        >
-          GitHub →
-        </a>
+        <div className="ml-auto flex items-center gap-1.5">
+          {pack.upstream_github_url && (
+            <a
+              href={pack.upstream_github_url}
+              target="_blank"
+              rel="noreferrer"
+              className="text-[10px] text-gray-500 hover:text-gray-300"
+              title="Upstream source repo"
+            >
+              Source →
+            </a>
+          )}
+          <a
+            href={pack.github_url}
+            target="_blank"
+            rel="noreferrer"
+            className="text-[10px] text-gray-500 hover:text-gray-300"
+            title={
+              pack.upstream_github_url
+                ? "Marketplace entry"
+                : "GitHub repo"
+            }
+          >
+            {pack.upstream_github_url ? "Marketplace →" : "GitHub →"}
+          </a>
+        </div>
       </div>
 
       {modal && (

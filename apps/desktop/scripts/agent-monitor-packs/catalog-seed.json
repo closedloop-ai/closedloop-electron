@@ -1,6 +1,6 @@
 {
-  "seed_version": 5,
-  "_note": "Seed v5 (2026-05-21): added 6 new packs. RTK (Rust Token Killer, 51.9k stars) — CLI proxy that filters tool output to save 60-90% LLM tokens; brew tap-based install. Plus 5 hand-picked methodology plugins from Anthropic's claude-plugins-official marketplace: code-review (multi-agent PR review, anthropic's official), code-modernization (legacy code transform), claude-code-setup (analyzes a codebase + recommends automations), claude-md-management (CLAUDE.md auditor), context7 (Upstash docs MCP server). Each is installable via 'claude plugin install <name>@claude-plugins-official'. All 5 use the new 'github-claude-plugin' contents type which walks commands/ + agents/ + skills/ inside the plugin dir (these plugins have mixed layouts — some have only commands, some have skills, etc.). v4 changes preserved.",
+  "seed_version": 6,
+  "_note": "Seed v6 (2026-05-21): added optional `upstream_github_url` field for marketplace plugins whose true source lives in a separate repo. Set for context7 → upstash/context7 (55.8k stars; the Anthropic marketplace ships a thin wrapper around it). The other 4 Anthropic picks (code-review, code-modernization, claude-code-setup, claude-md-management) are genuinely owned by Anthropic and live only inside the marketplace repo — no upstream. v5 changes preserved (RTK + 5 marketplace picks).",
   "packs": [
     {
       "pack_id": "closedloop-ai",
@@ -135,6 +135,7 @@
       "display_name": "Context7 (Upstash)",
       "category": "tooling",
       "github_url": "https://github.com/anthropics/claude-plugins-official",
+      "upstream_github_url": "https://github.com/upstash/context7",
       "description": "Upstash Context7 MCP server for up-to-date documentation lookup. Pulls version-specific docs + code examples directly from source repositories into your LLM context. Community-managed plugin in Anthropic's official marketplace.",
       "harnesses": ["claude"],
       "install_commands": {

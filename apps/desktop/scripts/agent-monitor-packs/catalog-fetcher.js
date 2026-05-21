@@ -228,7 +228,9 @@ async function runCatalogFetch(db) {
   let rows;
   try {
     rows = db
-      .prepare("SELECT pack_id, github_url, contents FROM pack_catalog")
+      .prepare(
+        "SELECT pack_id, github_url, upstream_github_url, contents FROM pack_catalog",
+      )
       .all();
   } catch (e) {
     console.warn("[catalog-fetcher] cannot read pack_catalog:", e && e.message);
@@ -245,11 +247,12 @@ async function runCatalogFetch(db) {
       contents && contents.type === "github-claude-plugin";
 
     if (isMarketplaceSubPlugin) {
-      // FEA-1314 v6: read the plugin's OWN manifest for description +
-      // version. Skip the marketplace-repo-level stars fetch entirely — those
-      // numbers are misleading for sub-plugins (every sub-plugin would
-      // inherit the marketplace's identical star count). The card will
-      // render with stars=null → "★ —" instead of a wrong "21.3k".
+      // FEA-1314 v6: marketplace sub-plugin path. Read the plugin's OWN
+      // manifest for description + version. For stars/forks: if the catalog
+      // entry declared an `upstream_github_url` (e.g. context7 → upstash/
+      // context7), fetch stars from THAT repo. Otherwise leave stars null —
+      // showing the parent marketplace's count on every sub-plugin row would
+      // make them all look identical (the v5 bug).
       const mkRepoOverride = contents.marketplace_repo
         ? parseGithubUrl(`https://github.com/${contents.marketplace_repo}`)
         : null;
@@ -265,14 +268,35 @@ async function runCatalogFetch(db) {
         summary.failed += 1;
         continue;
       }
+
+      // Optional upstream fetch for sub-plugins backed by a distinct repo.
+      let upstreamStars = null;
+      let upstreamForks = null;
+      let upstreamRelease = null;
+      if (row.upstream_github_url) {
+        const up = parseGithubUrl(row.upstream_github_url);
+        if (up) {
+          let upRepo = summary.used_gh_cli ? ghFetch(up.owner, up.repo) : null;
+          if (!upRepo) upRepo = await restFetch(up.owner, up.repo);
+          if (upRepo) {
+            upstreamStars =
+              upRepo.stargazers_count == null ? null : upRepo.stargazers_count;
+            upstreamForks =
+              upRepo.forks_count == null ? null : upRepo.forks_count;
+            upstreamRelease = summary.used_gh_cli
+              ? ghFetchLatestRelease(up.owner, up.repo)
+              : await restFetchLatestRelease(up.owner, up.repo);
+          }
+        }
+      }
+
       try {
         applyFetchResult(db, {
           pack_id: row.pack_id,
-          // Sub-plugins don't have their own GitHub star count — leave NULL.
-          stars: null,
-          forks: null,
+          stars: upstreamStars,
+          forks: upstreamForks,
           description: manifest.description || null,
-          last_release: manifest.version || null,
+          last_release: manifest.version || upstreamRelease || null,
         });
         summary.succeeded += 1;
       } catch (e) {

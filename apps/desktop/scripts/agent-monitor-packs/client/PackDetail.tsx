@@ -229,14 +229,30 @@ export function PackDetail() {
                 )}
               </div>
             </div>
+            {entry.upstream_github_url && (
+              <a
+                href={entry.upstream_github_url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-[11px] rounded border border-border bg-surface-2 text-gray-300 px-2.5 py-1 hover:bg-surface-3 flex-shrink-0"
+                title="Upstream source repository"
+              >
+                Source →
+              </a>
+            )}
             {entry.github_url && (
               <a
                 href={entry.github_url}
                 target="_blank"
                 rel="noreferrer"
                 className="text-[11px] rounded border border-border bg-surface-2 text-gray-300 px-2.5 py-1 hover:bg-surface-3 flex-shrink-0"
+                title={
+                  entry.upstream_github_url
+                    ? "Marketplace entry"
+                    : "GitHub repo"
+                }
               >
-                GitHub →
+                {entry.upstream_github_url ? "Marketplace →" : "GitHub →"}
               </a>
             )}
           </div>
