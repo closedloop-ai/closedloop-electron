@@ -192,7 +192,7 @@ export class CloudSocketService {
         );
         resolve({
           accepted: false,
-          reason: DesktopAgentSessionsAckReason.RateLimited,
+          reason: DesktopAgentSessionsAckReason.AckTimeout,
         });
       }, AGENT_SESSIONS_ACK_TIMEOUT_MS);
 

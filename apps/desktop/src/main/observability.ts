@@ -3,6 +3,7 @@ import type {
   DesktopAnalyticsEvent,
   DesktopAnalyticsEventName,
 } from "./cloud-protocol.js";
+import type { AgentSessionSyncTelemetryEvent } from "./agent-session-sync-service.js";
 import type { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import type {
   DesktopShutdownDiagnostics,
@@ -352,6 +353,17 @@ export class Observability {
   static sandboxBlocked(operationClass: string): void {
     Observability.captureAnalytics("sandbox_blocked_operation", {
       operation_class: operationClass,
+    });
+  }
+
+  // --- Agent session sync (product analytics only) ---
+
+  static agentSessionSyncBatchFailed(event: AgentSessionSyncTelemetryEvent & { outcome: "failure" }): void {
+    Observability.captureAnalytics("agent_session_sync_batch_failed", {
+      reason: event.reason,
+      sync_mode: event.syncMode,
+      session_count: event.sessionCount,
+      payload_bytes: event.payloadBytes,
     });
   }
 
