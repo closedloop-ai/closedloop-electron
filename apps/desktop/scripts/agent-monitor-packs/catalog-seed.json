@@ -1,7 +1,29 @@
 {
-  "seed_version": 2,
-  "_note": "Seed v2 (2026-05-21): replaced ECC (188k stars claim was wrong — the repo doesn't exist at that path/star count) with EveryInc/compound-engineering-plugin (17k stars, official Compound Engineering plugin). Removed OpenAI Skills (no canonical repo). Switched Superpowers from a git-clone-and-run-installer command to the canonical 'claude plugin install superpowers@claude-plugins-official' marketplace install verified against the upstream README. Added a 'verified' flag on each install_command set so the UI can label which commands have been confirmed against the upstream README vs which are best-guess placeholders.",
+  "seed_version": 3,
+  "_note": "Seed v3 (2026-05-21): added closedloop-ai (our own pack) to the catalog and gave it a pin_order so the unified Packs page surfaces it top-left regardless of star count. Added a 'contents' object on each entry describing how to fetch the pack's skill/agent/command listing from GitHub (so the detail modal can render a pre-install inventory). v2 changes preserved: dropped nonexistent ECC + OpenAI Skills, swapped Superpowers to the marketplace install command, added compound-engineering and claude-plugins-official.",
   "packs": [
+    {
+      "pack_id": "closedloop-ai",
+      "display_name": "ClosedLoop Agent Plugins",
+      "category": "framework",
+      "github_url": "https://github.com/closedloop-ai/claude-plugins",
+      "description": "ClosedLoop's own pack: plan, code, code-review, judges, platform, self-learning. The same agents that ship inside the ClosedLoop platform — multi-agent orchestration with planning, review, and self-learning loops.",
+      "harnesses": ["claude"],
+      "install_commands": {
+        "claude": "curl -fsSL https://raw.githubusercontent.com/closedloop-ai/claude-plugins/main/install.sh | bash"
+      },
+      "uninstall_commands": {
+        "claude": "for p in code code-review judges platform self-learning; do claude plugin uninstall \"$p@closedloop-ai\" --scope user 2>/dev/null || true; done"
+      },
+      "install_notes": "Installs the five runtime plugins (code, code-review, judges, platform, self-learning) into Claude Code at user scope. The bootstrap plugin is available in the marketplace but excluded from the default install.",
+      "verified": true,
+      "pin_order": 0,
+      "contents": {
+        "type": "claude-marketplace",
+        "marketplace_repo": "closedloop-ai/claude-plugins",
+        "plugins_root": "plugins"
+      }
+    },
     {
       "pack_id": "superpowers",
       "display_name": "Superpowers",
@@ -16,7 +38,12 @@
         "claude": "claude plugin uninstall superpowers@claude-plugins-official --scope user"
       },
       "install_notes": "Installs from Anthropic's official Claude Code plugin marketplace (claude-plugins-official). Codex install is interactive via the Codex /plugins UI — not scripted from CLI.",
-      "verified": true
+      "verified": true,
+      "contents": {
+        "type": "github-skill-tree",
+        "skills_path": "skills",
+        "skill_marker": "SKILL.md"
+      }
     },
     {
       "pack_id": "compound-engineering",
@@ -49,7 +76,12 @@
         "claude": "rm -rf ~/.claude/skills/gstack",
         "codex": "find ~/.codex/skills -name 'gstack-*' -delete && rm -f ~/.codex/skills/gstack"
       },
-      "verified": true
+      "verified": true,
+      "contents": {
+        "type": "github-skill-tree",
+        "skills_path": ".agents/skills",
+        "skill_marker": "SKILL.md"
+      }
     },
     {
       "pack_id": "bmad-method",
@@ -67,7 +99,12 @@
         "codex": "rm -rf ./_bmad ./_bmad-output ./.agents"
       },
       "install_notes": "Runs in the CURRENT directory and installs per-project. Use --yes to avoid the interactive picker; the installer accepts module/IDE flags too (see README).",
-      "verified": true
+      "verified": true,
+      "contents": {
+        "type": "github-multi-skill-tree",
+        "skill_paths": ["src/core-skills", "src/bmm-skills"],
+        "skill_marker": "SKILL.md"
+      }
     },
     {
       "pack_id": "awesome-claude-code",
@@ -93,7 +130,11 @@
         "claude": "npm uninstall -g @musistudio/claude-code-router"
       },
       "install_notes": "Requires Claude Code (`npm install -g @anthropic-ai/claude-code`). After install, configure ~/.claude-code-router/config.json — see README for the schema.",
-      "verified": true
+      "verified": true,
+      "contents": {
+        "type": "none",
+        "reason": "Router CLI tool, not a skill collection. Installs the `ccr` binary."
+      }
     },
     {
       "pack_id": "superclaude",
@@ -106,10 +147,15 @@
         "claude": "pipx install superclaude && SuperClaude install"
       },
       "uninstall_commands": {
-        "claude": "SuperClaude uninstall && pipx uninstall superclaude"
+        "claude": "superclaude uninstall && pipx uninstall superclaude"
       },
-      "install_notes": "Requires pipx (`brew install pipx` or `python -m pip install --user pipx`). The pip package name is lowercase 'superclaude'; the CLI binary is 'SuperClaude'.",
-      "verified": true
+      "install_notes": "Requires pipx (`brew install pipx` or `python -m pip install --user pipx`). v4.x CLI binary is lowercase `superclaude` (the README still says PascalCase — outdated). PATH may need ~/.local/bin.",
+      "verified": true,
+      "contents": {
+        "type": "github-flat-md",
+        "md_path": "SuperClaude/Commands",
+        "kind": "command"
+      }
     },
     {
       "pack_id": "voltagent-subagents",
@@ -125,7 +171,12 @@
         "claude": "rm -rf ~/.claude/skills/voltagent-subagents"
       },
       "install_notes": "Installs the whole collection under ~/.claude/skills/voltagent-subagents/. The upstream README also offers a curl-based installer and per-agent install commands — see the repo to install only specific agents.",
-      "verified": true
+      "verified": true,
+      "contents": {
+        "type": "github-nested-md",
+        "root_path": "categories",
+        "kind": "agent"
+      }
     },
     {
       "pack_id": "claude-plugins-official",
@@ -138,7 +189,11 @@
         "claude": "claude plugin marketplace add anthropics/claude-plugins-official"
       },
       "install_notes": "Pre-registered in fresh Claude Code installs. Use this entry as a pointer to the marketplace's contents (Superpowers, Compound Engineering, etc. — already in this catalog).",
-      "verified": true
+      "verified": true,
+      "contents": {
+        "type": "claude-marketplace",
+        "marketplace_repo": "anthropics/claude-plugins-official"
+      }
     },
     {
       "pack_id": "alirezarezvani-claude-skills",
@@ -156,7 +211,11 @@
         "codex": "rm -rf ~/.codex/skills/alirezarezvani-claude-skills"
       },
       "install_notes": "Multi-harness catalog. The clone-and-drop-in pattern works but is heavy — the upstream README also documents an `npx agent-skills-cli add` flow + per-skill cherry-pick. Cherry-pick is recommended over the full clone.",
-      "verified": true
+      "verified": true,
+      "contents": {
+        "type": "github-nested-skill-tree",
+        "match_pattern": "*/skills/*/SKILL.md"
+      }
     }
   ]
 }

@@ -139,8 +139,45 @@ test("listCatalog joins against agent_packs and surfaces installed_harnesses", (
   assert.deepEqual(sp.installed_harnesses, []);
   assert.equal(sp.installed_skill_count, 0);
 
-  // Installed entries are sorted first
-  assert.equal(items[0].pack_id, "gstack");
+  // v3 sort: no pin_order on any of these → by stars (all null/0 in
+  // this fixture) → alphabetic tiebreak. installed status is decorated
+  // but no longer drives the sort.
+  assert.equal(items[0].pack_id, "bmad-method");
+});
+
+test("listCatalog respects pin_order ahead of star count", () => {
+  const db = makeDb();
+  upsertCatalogSeed(db, {
+    seed_version: 1,
+    packs: [
+      {
+        pack_id: "high-star-not-pinned",
+        display_name: "High Stars",
+        github_url: "https://github.com/test/hs",
+        harnesses: ["claude"],
+      },
+      {
+        pack_id: "pinned-low-star",
+        display_name: "Pinned",
+        github_url: "https://github.com/test/p",
+        harnesses: ["claude"],
+        pin_order: 0,
+      },
+    ],
+  });
+  // Give "high-star-not-pinned" 200k stars; pinned has none.
+  applyFetchResult(db, {
+    pack_id: "high-star-not-pinned",
+    stars: 200000,
+    forks: 0,
+  });
+  const items = listCatalog(db);
+  assert.equal(
+    items[0].pack_id,
+    "pinned-low-star",
+    "pinned entry must lead even when another pack has way more stars",
+  );
+  assert.equal(items[1].pack_id, "high-star-not-pinned");
 });
 
 test("applyFetchResult updates live fields and appends a history row", () => {

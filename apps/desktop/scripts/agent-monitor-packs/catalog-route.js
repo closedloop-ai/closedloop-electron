@@ -12,6 +12,7 @@ const { Router } = require("express");
 const { db } = require("../db");
 const catalogStore = require("../lib/catalog-store");
 const catalogFetcher = require("../lib/catalog-fetcher");
+const catalogContents = require("../lib/catalog-contents");
 const installOrchestrator = require("../lib/install-orchestrator");
 const packScanner = require("../lib/pack-scanner");
 
@@ -175,6 +176,33 @@ router.get("/:pack_id/readme", async (req, res) => {
     res.json({
       pack_id: entry.pack_id,
       readme_excerpt: readme,
+      cached: false,
+    });
+  } catch (err) {
+    res.status(500).json({ error: { message: err && err.message } });
+  }
+});
+
+router.get("/:pack_id/contents", async (req, res) => {
+  try {
+    const entry = catalogStore.getCatalog(db, req.params.pack_id);
+    if (!entry) return res.status(404).json({ error: { message: "pack not found" } });
+
+    const force = req.query.refresh === "1";
+    const fresh = catalogContents.isContentsFresh(entry);
+    if (!force && fresh && entry.contents_cache) {
+      return res.json({
+        pack_id: entry.pack_id,
+        items: entry.contents_cache,
+        contents_fetched_at: entry.contents_fetched_at,
+        cached: true,
+      });
+    }
+
+    const items = await catalogContents.refreshCatalogContents(db, entry);
+    res.json({
+      pack_id: entry.pack_id,
+      items,
       cached: false,
     });
   } catch (err) {

@@ -23,6 +23,23 @@ interface ReadmeResponse {
   cached?: boolean;
 }
 
+interface ContentsItem {
+  name: string;
+  kind: "skill" | "command" | "agent" | "plugin";
+  description?: string | null;
+  category?: string | null;
+  path?: string | null;
+  skill_count?: number;
+  skills?: string[];
+}
+
+interface ContentsResponse {
+  pack_id: string;
+  items: ContentsItem[];
+  contents_fetched_at?: string;
+  cached?: boolean;
+}
+
 function formatStars(n: number | null | undefined): string {
   if (n == null) return "—";
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
@@ -54,6 +71,9 @@ export function CatalogDetail({ packId, onClose, onAfterRun }: CatalogDetailProp
   const [readme, setReadme] = useState<string | null>(null);
   const [readmeLoading, setReadmeLoading] = useState(false);
   const [readmeError, setReadmeError] = useState<string | null>(null);
+  const [contents, setContents] = useState<ContentsItem[] | null>(null);
+  const [contentsLoading, setContentsLoading] = useState(false);
+  const [contentsError, setContentsError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [install, setInstall] = useState<{
     harness: string;
@@ -91,6 +111,26 @@ export function CatalogDetail({ packId, onClose, onAfterRun }: CatalogDetailProp
       })
       .finally(() => {
         if (alive) setReadmeLoading(false);
+      });
+
+    setContentsLoading(true);
+    fetch(`/api/catalog/${encodeURIComponent(packId)}/contents`)
+      .then(async (res) => {
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body?.error?.message || `HTTP ${res.status}`);
+        }
+        return res.json();
+      })
+      .then((data: ContentsResponse) => {
+        if (alive) setContents(Array.isArray(data.items) ? data.items : []);
+      })
+      .catch((e) => {
+        if (alive)
+          setContentsError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (alive) setContentsLoading(false);
       });
 
     return () => {
@@ -277,6 +317,79 @@ export function CatalogDetail({ packId, onClose, onAfterRun }: CatalogDetailProp
                   <p className="mt-2 text-[11px] text-gray-500 italic">
                     {entry.install_notes}
                   </p>
+                )}
+              </div>
+
+              {/* Contents — pre-install skill/command/agent listing */}
+              <div>
+                <div className="flex items-baseline justify-between mb-1">
+                  <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                    Contents{" "}
+                    {contents && contents.length > 0 && (
+                      <span className="text-gray-400 normal-case font-normal">
+                        ({contents.length})
+                      </span>
+                    )}
+                  </div>
+                </div>
+                {contentsLoading ? (
+                  <p className="text-[11px] text-gray-500 italic">
+                    Loading skill list from GitHub…
+                  </p>
+                ) : contentsError ? (
+                  <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                    Could not load contents: {contentsError}.
+                  </div>
+                ) : contents == null || contents.length === 0 ? (
+                  <p className="text-[11px] text-gray-500 italic">
+                    No skills, commands, or agents listed for this pack.
+                  </p>
+                ) : (
+                  <div className="space-y-1">
+                    {/* Group by category if present, otherwise by kind */}
+                    {(() => {
+                      const groups = new Map<string, ContentsItem[]>();
+                      for (const c of contents) {
+                        const key = c.category || c.kind || "items";
+                        if (!groups.has(key)) groups.set(key, []);
+                        groups.get(key)!.push(c);
+                      }
+                      return [...groups.entries()].map(([group, items]) => (
+                        <div key={group} className="mb-2">
+                          <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 mb-1">
+                            {group}{" "}
+                            <span className="text-gray-600">
+                              ({items.length})
+                            </span>
+                          </div>
+                          <div className="grid grid-cols-2 md:grid-cols-3 gap-1.5">
+                            {items.map((c) => (
+                              <div
+                                key={`${group}-${c.name}`}
+                                className="rounded border border-border bg-surface-2 px-2 py-1 text-[11px] font-mono text-gray-200 truncate"
+                                title={
+                                  c.description ||
+                                  (c.kind === "plugin" && c.skill_count
+                                    ? `plugin · ${c.skill_count} skills`
+                                    : c.name)
+                                }
+                              >
+                                {c.kind === "command" ? "/" : ""}
+                                {c.name}
+                                {c.kind === "plugin" &&
+                                  typeof c.skill_count === "number" && (
+                                    <span className="text-gray-500">
+                                      {" "}
+                                      · {c.skill_count} skills
+                                    </span>
+                                  )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ));
+                    })()}
+                  </div>
                 )}
               </div>
 

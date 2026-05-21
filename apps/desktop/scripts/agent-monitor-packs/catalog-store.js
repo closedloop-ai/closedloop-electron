@@ -84,6 +84,16 @@ function ensureCatalogSchema(db) {
     ["verified", "INTEGER NOT NULL DEFAULT 0"],
     ["readme_excerpt", "TEXT"],
     ["readme_fetched_at", "TEXT"],
+    // v3: pin_order surfaces "always show first" packs (closedloop) at the
+    // top of the unified catalog grid, even if their star count is lower
+    // than others. NULL = no pin (sort by stars).
+    ["pin_order", "INTEGER"],
+    // v3: contents describes how to fetch this pack's skill/agent/command
+    // list from GitHub (JSON; see catalog-contents.js). Cached output lands
+    // in contents_cache + contents_fetched_at.
+    ["contents", "TEXT"],
+    ["contents_cache", "TEXT"],
+    ["contents_fetched_at", "TEXT"],
   ]) {
     try {
       db.prepare(`SELECT ${col} FROM pack_catalog LIMIT 1`).get();
@@ -135,8 +145,8 @@ function upsertCatalogSeed(db, seedDoc) {
       `INSERT INTO pack_catalog
          (pack_id, display_name, category, github_url, description,
           harnesses, install_commands, uninstall_commands, install_notes,
-          placeholder_reason, verified, seed_version)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          placeholder_reason, verified, pin_order, contents, seed_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(pack_id) DO UPDATE SET
          display_name       = excluded.display_name,
          category           = excluded.category,
@@ -148,6 +158,8 @@ function upsertCatalogSeed(db, seedDoc) {
          install_notes      = excluded.install_notes,
          placeholder_reason = excluded.placeholder_reason,
          verified           = excluded.verified,
+         pin_order          = excluded.pin_order,
+         contents           = excluded.contents,
          seed_version       = excluded.seed_version`,
     ).run(
       pack.pack_id,
@@ -163,6 +175,8 @@ function upsertCatalogSeed(db, seedDoc) {
       pack.install_notes || null,
       pack.placeholder_reason || null,
       pack.verified ? 1 : 0,
+      typeof pack.pin_order === "number" ? pack.pin_order : null,
+      pack.contents ? JSON.stringify(pack.contents) : null,
       seedVersion,
     );
     if (existing) stats.updated += 1;
@@ -187,6 +201,8 @@ function hydrateRow(row) {
     harnesses: parseJsonField(row.harnesses) || [],
     install_commands: parseJsonField(row.install_commands) || {},
     uninstall_commands: parseJsonField(row.uninstall_commands) || {},
+    contents: parseJsonField(row.contents) || null,
+    contents_cache: parseJsonField(row.contents_cache) || null,
   };
 }
 
@@ -194,6 +210,16 @@ function hydrateRow(row) {
  * List all catalog entries with `installed_harnesses` (array, derived from
  * the FEA-1224 `agent_packs` table). Sorted: installed-first descending by
  * skill count, then not-installed by star count.
+ */
+/**
+ * List all catalog entries. Sort order (v3):
+ *   1. Pinned entries (pin_order ASC) — ClosedLoop always lands first.
+ *   2. Everything else by star count DESC.
+ *   3. Tiebreak: display name ASC.
+ *
+ * Note: installed status is decorated but no longer used in the sort. The
+ * v3 UI is a single unified grid, so installed/not-installed mixes with
+ * the star order — closedloop pinned, then highest-star next.
  */
 function listCatalog(db) {
   const rows = db
@@ -207,7 +233,8 @@ function listCatalog(db) {
           WHERE s.pack_id = c.pack_id)               AS installed_skill_count
        FROM pack_catalog c
        ORDER BY
-         CASE WHEN (SELECT 1 FROM agent_packs ap WHERE ap.pack_id = c.pack_id LIMIT 1) IS NOT NULL THEN 0 ELSE 1 END ASC,
+         CASE WHEN c.pin_order IS NULL THEN 1 ELSE 0 END ASC,
+         c.pin_order ASC,
          COALESCE(c.stars, 0) DESC,
          c.display_name ASC`,
     )
@@ -257,6 +284,19 @@ function applyReadmeFetch(db, { pack_id, readme_excerpt }) {
            readme_fetched_at = ?
      WHERE pack_id = ?`,
   ).run(readme_excerpt || null, nowIso(), pack_id);
+}
+
+/**
+ * Cache the per-pack contents listing fetched by catalog-contents.js.
+ * `items` is an array of `{ name, kind, description?, path? }`.
+ */
+function applyContentsFetch(db, { pack_id, items }) {
+  db.prepare(
+    `UPDATE pack_catalog
+       SET contents_cache     = ?,
+           contents_fetched_at = ?
+     WHERE pack_id = ?`,
+  ).run(items == null ? null : JSON.stringify(items), nowIso(), pack_id);
 }
 
 function listHistory(db, packId, days = 30) {
@@ -375,6 +415,7 @@ module.exports = {
   listHistory,
   applyFetchResult,
   applyReadmeFetch,
+  applyContentsFetch,
   recordInstallRunStart,
   recordInstallRunEnd,
   inFlightInstallRun,
