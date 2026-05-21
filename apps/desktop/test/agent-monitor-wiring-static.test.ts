@@ -150,9 +150,11 @@ test("docs and ignores describe generated pnpm-managed inputs, not vendor source
   assert.doesNotMatch(claudeDocSource, /vendor\/agent-monitor/);
 });
 
-test("agent monitor and plan extraction are feature-gated and default off in desktop settings", () => {
+test("agent monitor defaults on; plan extraction is feature-gated and defaults off in desktop settings", () => {
   assert.match(contractsSource, /agentMonitorEnabled: boolean/);
-  assert.match(contractsSource, /agentMonitorEnabled: false/);
+  // The Agent Dashboard now powers the primary Dashboard + agent nav, so the
+  // sidecar defaults ON (it can still be turned off in Settings).
+  assert.match(contractsSource, /agentMonitorEnabled: true/);
   assert.match(contractsSource, /planExtractionEnabled: boolean/);
   assert.match(contractsSource, /planExtractionEnabled: false/);
   assert.match(settingsStoreSource, /getAgentMonitorEnabled\(\)/);
@@ -252,16 +254,20 @@ test("shutdown sequence stops the sidecar before the server", () => {
   assert.ok(amIdx > 0 && srvIdx > 0 && amIdx < srvIdx, "agentMonitor.stop must precede server.stop");
 });
 
-test("renderer hides the monitor tab by default and exposes the settings toggle", () => {
-  assert.match(indexHtml, /data-tab="claude-dashboard" id="claudeDashboardTabButton" hidden>Agent Dashboard</);
-  assert.match(indexHtml, /<section id="claude-dashboard" class="panel">/);
+test("renderer wires the Agent Dashboard sidecar into the sidebar and gates it on the setting", () => {
+  // Agent nav items live in the left sidebar; hidden when the sidecar is off.
+  assert.match(indexHtml, /<nav class="sb-nav" id="sidebarNav"/);
+  assert.match(indexHtml, /agent-disabled/);
+  assert.match(indexHtml, /<section id="claude-dashboard" class="panel active">/);
   assert.match(indexHtml, /id="agentMonitorEnabled"/);
   assert.match(indexHtml, /function syncAgentMonitorTabVisibility/);
-  assert.match(indexHtml, /tabName === "claude-dashboard" && !cachedAgentMonitorEnabled/);
+  assert.match(indexHtml, /kind === "agent" && !cachedAgentMonitorEnabled/);
   assert.match(indexHtml, /id="claudeDashFrame"/);
-  assert.match(indexHtml, /tabName === "claude-dashboard"/);
   assert.match(indexHtml, /api\.getAgentMonitorUrl\(\)/);
   assert.match(indexHtml, /searchParams\.set\(\s*"closedloop_plan_extraction",[\s\S]*r\.planExtractionEnabled \? "1" : "0"/);
+  // Embed mode + host postMessage navigation.
+  assert.match(indexHtml, /searchParams\.set\("embed", "1"\)/);
+  assert.match(indexHtml, /type: "closedloop:navigate"/);
   assert.match(indexHtml, /id="claudeDashHooksToggle"/);
   assert.match(indexHtml, /api\.setAgentMonitorHooksEnabled/);
   // Iframe-in-hidden-panel height fix must be present.

@@ -155,7 +155,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   onboardingPopupDismissedPermanent: false,
   cloudCommandsPaused: false,
   cloudConnectionEnabled: true,
-  agentMonitorEnabled: false,
+  agentMonitorEnabled: true,
   planExtractionEnabled: false,
   commandSigningEnforcementEnabled: false,
   defaultApprovalTier: "high",

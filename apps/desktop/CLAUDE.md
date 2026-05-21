@@ -142,9 +142,11 @@ The desktop app bundles the MIT-licensed `Claude-Code-Agent-Monitor`
 (`agent-dashboard` + `agent-dashboard-client`, pinned in
 `apps/desktop/package.json`) and runs a generated runtime tree as a managed
 localhost **sidecar** for local Claude Code session/agent observability. It is
-the single embedded observability tool (the embedded **"Claude Dashboard"** nav
-tab), but the feature is behind the persisted `agentMonitorEnabled` desktop
-setting and defaults OFF. When disabled, the whole dashboard tab is hidden.
+the single embedded observability tool. It powers the **Dashboard** and the
+agent nav items (Sessions, Kanban, Activity Feed, etc.) in the desktop left
+sidebar. The feature is gated by the persisted `agentMonitorEnabled` desktop
+setting, which **defaults ON**; when disabled, the agent nav items are hidden
+and only the Gateway section remains.
 
 - **Process model:** `src/main/agent-monitor-sidecar.ts` spawns the generated
   `server/index.js` from `apps/desktop/.generated/agent-monitor/` (packaged:
@@ -165,23 +167,26 @@ setting and defaults OFF. When disabled, the whole dashboard tab is hidden.
   read-only). Uses Node's built-in `node:sqlite`; the generated `server/db.js`
   is patched to prefer `./compat-sqlite`, and staged packaging removes the
   hoisted `better-sqlite3` module as a belt-and-suspenders guard.
-- **UI:** embedded as the **"Claude Dashboard"** tab in the main window
-  (`src/renderer/index.html`) — a plain `<iframe>` pointed at the sidecar URL
-  fetched via `desktop:get-agent-monitor-url` (renderer polls until `ready`,
-  then sets `src` once). No separate window. The tab is hidden unless the user
-  enables Claude Dashboard in Settings → Relay / Gateway; the tray item only
-  appears when enabled, and `desktop:open-agent-monitor` redirects to Settings
-  when disabled. The embed depends on the renderer having **no CSP** — if a
-  CSP is ever added it must include
-  `frame-src http://127.0.0.1:*`. Iframes in a `display:none` panel collapse to
-  0px, so an explicit px height is set via JS *after* the panel is `.active`,
-  re-applied on `resize`.
+- **UI:** embedded in the main window (`src/renderer/index.html`) as a plain
+  `<iframe>` pointed at the sidecar URL fetched via
+  `desktop:get-agent-monitor-url` (renderer polls until `ready`, then sets
+  `src` once). No separate window. The host left sidebar drives it: the
+  **Dashboard** + agent nav items each map to a sidecar route. The first load
+  bakes the route + `embed=1` into the iframe `src`; later agent-nav clicks
+  are a `postMessage` (`{ type: "closedloop:navigate", path }`) so there is no
+  reload. In embed mode the sidecar's own `Layout` drops its internal sidebar
+  (see `scripts/agent-monitor-embed/Layout.tsx`) so the host shell is the only
+  chrome. The agent nav items are hidden when the feature is disabled. The
+  embed depends on the renderer having **no CSP** — if a CSP is ever added it
+  must include `frame-src http://127.0.0.1:*`. Iframes in a `display:none`
+  panel collapse to 0px, so an explicit px height is set via JS *after* the
+  panel is `.active`, re-applied on `resize`.
 - **Hooks are explicit opt-in (consent-bearing).** Upstream silently writes 8
   hooks into `~/.claude/settings.json` on every startup — the generated
   `server/index.js` gates that behind `CCAM_AUTO_INSTALL_HOOKS` (which the
   sidecar sets to `"0"`).
-  The user enables/disables tracking via the toggle on the Claude Dashboard tab
-  → `src/main/agent-monitor-hooks.ts` writes/removes the 8 hook entries. The
+  The user enables/disables tracking via the toggle on the Agent Dashboard
+  view → `src/main/agent-monitor-hooks.ts` writes/removes the 8 hook entries. The
   hook command runs the Electron binary as Node against a **userData copy** of
   `hook-handler.js` (location-independent across app moves/updates), at the
   fixed port 4820. Default is OFF; disabling fully removes the entries;
