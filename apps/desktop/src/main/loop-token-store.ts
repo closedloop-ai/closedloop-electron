@@ -41,6 +41,7 @@ export interface LoopTokenStoreOptions {
  * On-disk format: encrypted JSON serialization of {@link LoopTokenMeta}.
  * Legacy entries (encrypted plain strings written before this schema change) are
  * transparently migrated on read via JSON-parse discrimination.
+ * Legacy migration tracked for removal by FEA-1319.
  */
 export class LoopTokenStore {
   private readonly store: Store<LoopTokenStoreSchema>;
@@ -83,6 +84,7 @@ export class LoopTokenStore {
    *
    * Legacy entries encrypted as plain strings (written before the LoopTokenMeta
    * schema change) are transparently promoted to `{ token: <value> }`.
+   * Legacy migration removal tracked by FEA-1319.
    */
   getLoopToken(loopId: string): LoopTokenMeta | null {
     const encrypted = this.getEncryptedMap()[loopId];
@@ -98,7 +100,7 @@ export class LoopTokenStore {
       if (trimmed.length === 0) {
         return null;
       }
-      // Discriminate JSON-encoded LoopTokenMeta from legacy plain-string entries.
+      // Legacy migration (FEA-1319): discriminate JSON-encoded LoopTokenMeta from legacy plain-string entries written by pre-PLN-650 builds.
       try {
         const parsed: unknown = JSON.parse(trimmed);
         if (
@@ -112,7 +114,7 @@ export class LoopTokenStore {
       } catch {
         // Not valid JSON — treat as legacy plain-string token.
       }
-      // Legacy path: encrypted value was a raw token string.
+      // Legacy migration (FEA-1319): encrypted value was a raw token string written by pre-PLN-650 builds.
       return { token: trimmed };
     } catch {
       return null;

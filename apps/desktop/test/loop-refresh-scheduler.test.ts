@@ -16,12 +16,16 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, mock, test } from "node:test";
-import {
-  start,
-  stop,
-  stopAll,
-} from "../src/main/loop-refresh-scheduler.js";
+import { LoopSchedulerContext } from "../src/main/loop-scheduler-context.js";
+import type { LoopSchedulerDeps } from "../src/main/loop-lifecycle.js";
 import { LoopTokenStore } from "../src/main/loop-token-store.js";
+
+// Per-test scheduler context; disposed in afterEach so timers cannot leak.
+let ctx: LoopSchedulerContext;
+const start = (loopId: string, expiresAt: number | undefined, deps: LoopSchedulerDeps) =>
+  ctx.startRefresh(loopId, expiresAt, deps);
+const stop = (loopId: string) => ctx.stopRefresh(loopId);
+const stopAll = () => ctx[Symbol.dispose]();
 import {
   createTestLoopTokenStore,
   flushAsync,
@@ -78,6 +82,7 @@ function installFailRefreshStub(): void {
 
 beforeEach(async () => {
   tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "loop-refresh-scheduler-test-"));
+  ctx = new LoopSchedulerContext();
 });
 
 afterEach(async () => {

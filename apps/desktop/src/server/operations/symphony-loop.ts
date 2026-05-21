@@ -59,10 +59,7 @@ import {
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
 import type { LoopTokenStore, LoopTokenMeta } from "../../main/loop-token-store.js";
-import { teardownLoopSchedulers } from "../../main/loop-lifecycle.js";
-import * as loopRefreshScheduler from "../../main/loop-refresh-scheduler.js";
-import * as loopHeartbeat from "../../main/loop-heartbeat.js";
-import * as loopSleepRecovery from "../../main/loop-sleep-recovery.js";
+import type { LoopSchedulerContext } from "../../main/loop-scheduler-context.js";
 import { parseJwtExpiry } from "../../main/jwt-utils.js";
 import { Observability } from "../../main/observability.js";
 import {
@@ -4633,6 +4630,7 @@ export async function handleProcessCompletion(
   userVisibleLoopFailureSecret?: string,
   loopPerfTelemetryStartOffset = 0,
   loopPerfWatcherHandle?: LoopPerfTelemetryWatcherHandle,
+  schedulers?: LoopSchedulerContext,
 ): Promise<void> {
   const { loopId, command, closedLoopAuthToken, committer } = body;
   // Temp-dir commands (DECOMPOSE, EVALUATE_*) need the entire temp tree removed on cleanup.
@@ -5028,8 +5026,12 @@ export async function handleProcessCompletion(
       await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
     }
     await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt);
+    // Schedulers (heartbeat, refresh, sleep) are always torn down when the
+    // process exits — the loop is dead regardless of whether cloud finalization
+    // succeeded. Token deletion is conditional: keep the token when the event
+    // POST failed with a retryable network error so boot-recovery can retry.
+    schedulers?.teardownLoop(loopId);
     if (wasCancelled || failureCloudFinalized || !failureRetryableFailure) {
-      teardownLoopSchedulers(loopId);
       loopTokenStore?.deleteLoopToken(loopId);
     }
     return;
@@ -5072,7 +5074,7 @@ export async function handleProcessCompletion(
             () => {},
           );
         }
-        teardownLoopSchedulers(loopId);
+        schedulers?.teardownLoop(loopId);
         loopTokenStore?.deleteLoopToken(loopId);
         return;
       }
@@ -5110,7 +5112,7 @@ export async function handleProcessCompletion(
             () => {},
           );
         }
-        teardownLoopSchedulers(loopId);
+        schedulers?.teardownLoop(loopId);
         loopTokenStore?.deleteLoopToken(loopId);
         return;
       }
@@ -5182,7 +5184,7 @@ export async function handleProcessCompletion(
             loopId,
             wt,
           );
-          teardownLoopSchedulers(loopId);
+          schedulers?.teardownLoop(loopId);
           loopTokenStore?.deleteLoopToken(loopId);
           return;
         }
@@ -5352,7 +5354,7 @@ export async function handleProcessCompletion(
       if (tempCleanupDir) {
         fs.rm(tempCleanupDir, { recursive: true, force: true }).catch(() => {});
       }
-      teardownLoopSchedulers(loopId);
+      schedulers?.teardownLoop(loopId);
       loopTokenStore?.deleteLoopToken(loopId);
       return;
     }
@@ -5380,7 +5382,7 @@ export async function handleProcessCompletion(
         await wt.removeWorktree(worktreeDir, expandedRepoPath, loopId);
       }
       await cleanupAdditionalWorktrees(additionalWorktreeDirs, loopId, wt);
-      teardownLoopSchedulers(loopId);
+      schedulers?.teardownLoop(loopId);
       loopTokenStore?.deleteLoopToken(loopId);
       return;
     }
@@ -5422,6 +5424,7 @@ export async function handleProcessCompletion(
         isProcessRunning,
         getAllowedDirectories,
         loopTokenStore,
+        schedulers,
       };
       const outcome = await finalizeLoopFromRuntime(
         existingJob,
@@ -5530,7 +5533,7 @@ export async function handleProcessCompletion(
         legacySessionId,
         body.command,
       );
-      teardownLoopSchedulers(loopId);
+      schedulers?.teardownLoop(loopId);
       loopTokenStore?.deleteLoopToken(loopId);
     }
 
@@ -6011,6 +6014,7 @@ async function setupPrdWorktree(args: {
 async function handleLoopRequest(
   context: OperationRequestContext,
   getAllowedDirectories: () => string[],
+  schedulers: LoopSchedulerContext,
   getApiOrigin?: () => string,
   jobStore?: JobStore,
   getWebAppOrigin?: () => string,
@@ -7682,6 +7686,7 @@ async function handleLoopRequest(
           userVisibleLoopFailureSecret,
           loopPerfTelemetryStartOffset,
           loopPerfWatcherHandle,
+          schedulers,
         ).catch((err) => {
           loopError(body.loopId, "Completion handler error:", err);
           gatewayLog.error(
@@ -7743,7 +7748,9 @@ async function handleLoopRequest(
       tailerJsonlPath,
       apiBaseUrl,
       body.loopId,
-      () => body.closedLoopAuthToken,
+      () =>
+        loopTokenStore?.getLoopToken(body.loopId)?.token ??
+        body.closedLoopAuthToken,
       jsonlPreSpawnOffset,
       jobStore
         ? (offset) => {
@@ -7755,6 +7762,7 @@ async function handleLoopRequest(
         }
         : undefined,
       claudeWorkDir,
+      loopTokenStore,
     );
     spawnedSuccessfully = true;
     loopLog(body.loopId, `Spawned pid=${pid}, worktree=${worktreeDir}`);
@@ -7825,22 +7833,22 @@ async function handleLoopRequest(
     if (loopTokenStore) {
       const expiresAtSec = parseJwtExpiry(body.closedLoopAuthToken);
       const expiresAtMs = expiresAtSec !== null ? expiresAtSec * 1000 : undefined;
-      loopRefreshScheduler.start(body.loopId, expiresAtMs, {
+      schedulers.startRefresh(body.loopId, expiresAtMs, {
         apiBaseUrl,
         getToken: () => loopTokenStore.getLoopToken(body.loopId)?.token ?? body.closedLoopAuthToken,
         loopTokenStore,
       });
-      loopSleepRecovery.registerLoop(body.loopId, {
+      schedulers.registerSleep(body.loopId, {
         apiBaseUrl,
         getToken: () => loopTokenStore.getLoopToken(body.loopId)?.token ?? null,
         loopTokenStore,
       });
     }
-    loopHeartbeat.start(
-      body.loopId,
+    schedulers.startHeartbeat(body.loopId, {
       apiBaseUrl,
-      () => loopTokenStore?.getLoopToken(body.loopId)?.token ?? body.closedLoopAuthToken,
-    );
+      getToken: () =>
+        loopTokenStore?.getLoopToken(body.loopId)?.token ?? body.closedLoopAuthToken,
+    });
 
     json(context, 200, {
       success: true,
@@ -7962,6 +7970,7 @@ async function handleLoopKill(
 export function registerSymphonyLoopRoutes(
   dispatcher: OperationDispatcher,
   getAllowedDirectories: () => string[],
+  schedulers: LoopSchedulerContext,
   getApiOrigin?: () => string,
   jobStore?: JobStore,
   getWebAppOrigin?: () => string,
@@ -7975,6 +7984,7 @@ export function registerSymphonyLoopRoutes(
       handleLoopRequest(
         context,
         getAllowedDirectories,
+        schedulers,
         getApiOrigin,
         jobStore,
         getWebAppOrigin,

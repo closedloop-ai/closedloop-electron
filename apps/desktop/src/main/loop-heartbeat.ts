@@ -1,4 +1,6 @@
+import { postLoopHeartbeat } from "../server/operations/loop-http.js";
 import { gatewayLog } from "./gateway-logger.js";
+import type { LoopSchedulerDeps } from "./loop-lifecycle.js";
 import {
   isEndpointDisabled,
   markEndpointDisabled,
@@ -10,7 +12,7 @@ import {
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 30 * 60 * 1000;
 
-function getHeartbeatIntervalMs(): number {
+export function getHeartbeatIntervalMs(): number {
   const override = process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS;
   if (override !== undefined) {
     const parsed = parseInt(override, 10);
@@ -22,20 +24,26 @@ function getHeartbeatIntervalMs(): number {
 }
 
 // ---------------------------------------------------------------------------
-// Per-loop interval handles
+// Subset of LoopSchedulerDeps the heartbeat needs.
 // ---------------------------------------------------------------------------
 
-const timers = new Map<string, NodeJS.Timeout>();
+export type HeartbeatDeps = Pick<LoopSchedulerDeps, "apiBaseUrl" | "getToken">;
 
 // ---------------------------------------------------------------------------
-// Internal: tick handler (fire-and-forget)
+// Shared tick logic (exported so LoopSchedulerContext can reuse it)
 // ---------------------------------------------------------------------------
 
-async function onTick(
+/**
+ * Runs one heartbeat tick. `stopFn` is called when the endpoint returns 404
+ * so the caller can cancel whichever timer handle owns this loop — either the
+ * module-level scheduler or an instance-scoped LoopSchedulerContext.
+ */
+export async function runHeartbeatTick(
   loopId: string,
-  apiBaseUrl: string,
-  getToken: () => string | null,
+  deps: HeartbeatDeps,
+  stopFn: () => void,
 ): Promise<void> {
+  const { apiBaseUrl } = deps;
   const heartbeatPath = `/loops/${loopId}/heartbeat`;
 
   if (isEndpointDisabled(apiBaseUrl, heartbeatPath)) {
@@ -46,8 +54,22 @@ async function onTick(
     return;
   }
 
-  const token = getToken();
-  if (token === null) {
+  gatewayLog.info(
+    "loop-heartbeat",
+    `Issuing heartbeat for loopId=${loopId}`,
+  );
+
+  const result = await postLoopHeartbeat(apiBaseUrl, loopId, deps.getToken);
+
+  if (result.success) {
+    gatewayLog.info(
+      "loop-heartbeat",
+      `Heartbeat succeeded for loopId=${loopId}`,
+    );
+    return;
+  }
+
+  if (result.kind === "auth") {
     gatewayLog.warn(
       "loop-heartbeat",
       `Skipping heartbeat for loopId=${loopId}: no token available`,
@@ -55,137 +77,43 @@ async function onTick(
     return;
   }
 
-  const url = `${apiBaseUrl}${heartbeatPath}`;
-
-  try {
-    gatewayLog.info(
+  if (result.kind === "http" && result.status === 404) {
+    gatewayLog.warn(
       "loop-heartbeat",
-      `Issuing heartbeat for loopId=${loopId}`,
+      `Heartbeat endpoint returned 404 for loopId=${loopId}; disabling endpoint and stopping scheduler`,
     );
-
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-    });
-
-    if (response.status === 404) {
-      gatewayLog.warn(
-        "loop-heartbeat",
-        `Heartbeat endpoint returned 404 for loopId=${loopId}; disabling endpoint and stopping scheduler`,
-      );
-      markEndpointDisabled(apiBaseUrl, heartbeatPath);
-      stop(loopId);
-      return;
-    }
-
-    if (!response.ok) {
-      gatewayLog.warn(
-        "loop-heartbeat",
-        `Heartbeat for loopId=${loopId} returned HTTP ${response.status}`,
-      );
-      return;
-    }
-
-    gatewayLog.info(
-      "loop-heartbeat",
-      `Heartbeat succeeded for loopId=${loopId}`,
-    );
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    gatewayLog.error(
-      "loop-heartbeat",
-      `Heartbeat for loopId=${loopId} failed: ${message}`,
-    );
+    markEndpointDisabled(apiBaseUrl, heartbeatPath);
+    stopFn();
+    return;
   }
+
+  if (result.kind === "http") {
+    gatewayLog.warn(
+      "loop-heartbeat",
+      `Heartbeat for loopId=${loopId} returned HTTP ${result.status}`,
+    );
+    return;
+  }
+
+  // network / timeout
+  gatewayLog.error(
+    "loop-heartbeat",
+    `Heartbeat for loopId=${loopId} failed: ${result.error}`,
+  );
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
 /**
- * Sends an immediate heartbeat for the given loop, bypassing the scheduler
+ * Sends an immediate heartbeat for the given loop, bypassing any scheduled
  * interval. Uses the same 404-gate and error-handling logic as the scheduled
  * tick. Errors are logged and never thrown (fire-and-forget safe).
  *
  * Intended for callers that need to issue a heartbeat outside the normal
  * schedule — for example, immediately after a system sleep/wake resume.
- */
-export function sendHeartbeatNow(
-  loopId: string,
-  apiBaseUrl: string,
-  getToken: () => string | null,
-): void {
-  void onTick(loopId, apiBaseUrl, getToken);
-}
-
-/**
- * Starts the per-loop heartbeat scheduler for the given loop.
  *
- * Issues a POST to `/loops/:id/heartbeat` on the configured interval (default
- * 30 minutes, overridable via CLOSEDLOOP_HEARTBEAT_INTERVAL_MS). Errors are
- * logged and never thrown. A 404 response disables the endpoint for the
- * lifetime of the process and stops the scheduler for that loop.
- *
- * Calling `start` for a loop that already has an active timer replaces the
- * existing schedule.
+ * No scheduler ownership: this one-shot fetch holds no timer handle and has
+ * nothing to dispose. The `stopFn` passed to `runHeartbeatTick` is a no-op
+ * because there is no scheduled interval to cancel on a 404.
  */
-export function start(
-  loopId: string,
-  apiBaseUrl: string,
-  getToken: () => string | null,
-): void {
-  const interval = getHeartbeatIntervalMs();
-
-  gatewayLog.info(
-    "loop-heartbeat",
-    `Starting heartbeat scheduler for loopId=${loopId} (interval=${interval}ms)`,
-  );
-
-  // Cancel any existing timer for this loop before replacing it.
-  const existing = timers.get(loopId);
-  if (existing !== undefined) {
-    clearInterval(existing);
-  }
-
-  const handle = setInterval(() => {
-    void onTick(loopId, apiBaseUrl, getToken);
-  }, interval);
-
-  timers.set(loopId, handle);
-}
-
-/**
- * Cancels the heartbeat scheduler for the given loop.
- * A no-op if the loop has no active timer.
- */
-export function stop(loopId: string): void {
-  const handle = timers.get(loopId);
-  if (handle === undefined) {
-    return;
-  }
-  clearInterval(handle);
-  timers.delete(loopId);
-  gatewayLog.info(
-    "loop-heartbeat",
-    `Stopped heartbeat scheduler for loopId=${loopId}`,
-  );
-}
-
-/**
- * Cancels all active heartbeat schedulers.
- * Called during app shutdown to prevent timers from firing after teardown.
- */
-export function stopAll(): void {
-  for (const [loopId, handle] of timers) {
-    clearInterval(handle);
-    gatewayLog.info(
-      "loop-heartbeat",
-      `Stopped heartbeat scheduler for loopId=${loopId} (stopAll)`,
-    );
-  }
-  timers.clear();
+export function sendHeartbeatNow(loopId: string, deps: HeartbeatDeps): void {
+  void runHeartbeatTick(loopId, deps, () => {});
 }

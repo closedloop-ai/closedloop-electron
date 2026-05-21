@@ -23,10 +23,6 @@ afterEach(() => {
   resetAllGates();
 });
 
-// ---------------------------------------------------------------------------
-// Marking and checking disabled state
-// ---------------------------------------------------------------------------
-
 test("isEndpointDisabled returns false before any mark", () => {
   assert.equal(
     isEndpointDisabled("https://api.example.com", "/refresh-token"),
@@ -34,15 +30,7 @@ test("isEndpointDisabled returns false before any mark", () => {
   );
 });
 
-test("isEndpointDisabled returns true after markEndpointDisabled for the same arguments", () => {
-  markEndpointDisabled("https://api.example.com", "/refresh-token");
-  assert.equal(
-    isEndpointDisabled("https://api.example.com", "/refresh-token"),
-    true,
-  );
-});
-
-test("markEndpointDisabled is idempotent — marking twice does not throw and state remains true", () => {
+test("markEndpointDisabled flips state to true and is idempotent on repeat marks", () => {
   markEndpointDisabled("https://api.example.com", "/heartbeat");
   markEndpointDisabled("https://api.example.com", "/heartbeat");
   assert.equal(
@@ -51,22 +39,7 @@ test("markEndpointDisabled is idempotent — marking twice does not throw and st
   );
 });
 
-// ---------------------------------------------------------------------------
-// Independence between server URLs
-// ---------------------------------------------------------------------------
-
-test("disabling an endpoint on one server URL does not affect another server URL", () => {
-  markEndpointDisabled("https://api.server-a.com", "/refresh-token");
-
-  // Same path on a different server must remain enabled.
-  assert.equal(
-    isEndpointDisabled("https://api.server-b.com", "/refresh-token"),
-    false,
-    "server-b should not be affected by a mark on server-a",
-  );
-});
-
-test("each server URL has independent disabled state", () => {
+test("each (server, path) pair has independent disabled state", () => {
   markEndpointDisabled("https://api.server-a.com", "/heartbeat");
   markEndpointDisabled("https://api.server-b.com", "/refresh-token");
 
@@ -90,81 +63,27 @@ test("each server URL has independent disabled state", () => {
   );
 });
 
-// ---------------------------------------------------------------------------
-// Independence between endpoint paths on the same server
-// ---------------------------------------------------------------------------
-
-test("disabling one endpoint path on a server does not disable another path on the same server", () => {
-  markEndpointDisabled("https://api.example.com", "/refresh-token");
-
-  assert.equal(
-    isEndpointDisabled("https://api.example.com", "/heartbeat"),
-    false,
-    "/heartbeat should remain enabled when only /refresh-token was marked",
-  );
-});
-
-test("multiple endpoint paths on the same server can be independently disabled", () => {
-  markEndpointDisabled("https://api.example.com", "/refresh-token");
-  markEndpointDisabled("https://api.example.com", "/heartbeat");
-
-  assert.equal(
-    isEndpointDisabled("https://api.example.com", "/refresh-token"),
-    true,
-  );
-  assert.equal(
-    isEndpointDisabled("https://api.example.com", "/heartbeat"),
-    true,
-  );
-});
-
-// ---------------------------------------------------------------------------
-// Process-memory-only semantics
-// ---------------------------------------------------------------------------
-
-test("resetAllGates clears all disabled state — simulating process restart", () => {
-  // Populate state across multiple server/path combinations.
+test("resetAllGates clears state and the gate can be re-populated afterwards", () => {
   markEndpointDisabled("https://api.server-a.com", "/refresh-token");
   markEndpointDisabled("https://api.server-b.com", "/heartbeat");
 
-  // Confirm state is present before reset.
-  assert.equal(
-    isEndpointDisabled("https://api.server-a.com", "/refresh-token"),
-    true,
-  );
-  assert.equal(
-    isEndpointDisabled("https://api.server-b.com", "/heartbeat"),
-    true,
-  );
-
-  // Simulate process restart — all in-memory state is gone.
   resetAllGates();
 
-  // After reset, both entries must be gone.
   assert.equal(
     isEndpointDisabled("https://api.server-a.com", "/refresh-token"),
     false,
-    "State should be cleared after resetAllGates",
+    "state should be cleared after resetAllGates",
   );
   assert.equal(
     isEndpointDisabled("https://api.server-b.com", "/heartbeat"),
     false,
-    "State should be cleared after resetAllGates",
+    "state should be cleared after resetAllGates",
   );
-});
 
-test("gate can be re-populated after resetAllGates — confirming in-memory lifetime", () => {
-  markEndpointDisabled("https://api.example.com", "/refresh-token");
-  resetAllGates();
-
-  // After reset, re-mark and confirm it works again.
+  // Re-mark to confirm the in-memory store still works after reset.
+  markEndpointDisabled("https://api.server-a.com", "/refresh-token");
   assert.equal(
-    isEndpointDisabled("https://api.example.com", "/refresh-token"),
-    false,
-  );
-  markEndpointDisabled("https://api.example.com", "/refresh-token");
-  assert.equal(
-    isEndpointDisabled("https://api.example.com", "/refresh-token"),
+    isEndpointDisabled("https://api.server-a.com", "/refresh-token"),
     true,
   );
 });

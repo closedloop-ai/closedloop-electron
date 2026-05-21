@@ -45,7 +45,7 @@ import {
   type LocalJob,
 } from "./job-store.js";
 import type { LoopTokenStore } from "./loop-token-store.js";
-import { teardownLoopSchedulers } from "./loop-lifecycle.js";
+import type { LoopSchedulerContext } from "./loop-scheduler-context.js";
 import { Observability } from "./observability.js";
 import type {
   SupportUploadReason,
@@ -77,6 +77,13 @@ export interface LoopFinalizerDeps {
     entries: readonly { dir: string; repoPath: string }[],
     loopId: string,
   ) => Promise<void>;
+  /**
+   * Scheduler context whose `teardownLoop(loopId)` will be invoked after the
+   * loop reaches a terminal status. Defaults to the process-wide active
+   * context — tests that construct their own context pass it explicitly so
+   * teardown is routed to the same instance that owns the timers.
+   */
+  schedulers?: LoopSchedulerContext;
 }
 
 export type LoopFinalizationReason =
@@ -1525,7 +1532,7 @@ export async function finalizeLoopFromRuntime(
   );
 
   if (cloudFinalized || !retryableFailure) {
-    teardownLoopSchedulers(resolvedJob.loopId);
+    deps.schedulers?.teardownLoop(resolvedJob.loopId);
     loopTokenStore?.deleteLoopToken(resolvedJob.loopId);
   }
 

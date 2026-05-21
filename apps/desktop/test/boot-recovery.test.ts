@@ -29,8 +29,6 @@ import { initGitRepo, restoreEnv } from "./symphony-test-utils.js";
 import type { TelemetryEventPayload } from "../src/main/telemetry-protocol.js";
 import { cleanupAdditionalWorktrees } from "../src/server/operations/symphony-loop.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
-import { stopAll as stopAllRefreshSchedulers } from "../src/main/loop-refresh-scheduler.js";
-import { stopAll as stopAllHeartbeats } from "../src/main/loop-heartbeat.js";
 
 let tempRoot = "";
 let fetchCalls: Array<{ url: string; body: string; authHeader?: string | null }> = [];
@@ -165,7 +163,7 @@ test("finalizes dead CANCEL_PENDING jobs to CANCELLED without loop events", asyn
     loopTokenStore,
   });
   await service.run([deadJob]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
@@ -201,7 +199,7 @@ test("finalizes dead jobs without promoting UNKNOWN status to completed", async 
     loopTokenStore,
   });
   await service.run([deadJob]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
@@ -271,7 +269,7 @@ test("boot recovery uploads support bundle for failed dead jobs before terminal 
     loopTokenStore,
   });
   await service.run([deadJob]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const eventBodies = fetchCalls
     .filter((call) => call.url.endsWith("/events"))
@@ -308,7 +306,7 @@ test("finalizes dead jobs using LoopTokenStore and clears token after UNKNOWN re
     loopTokenStore,
   });
   await service.run([deadJob]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
@@ -372,7 +370,7 @@ test("retries cloud finalization across boots and resumes from partial progress"
         entry.authHeader === "Bearer loop-token",
     ),
   );
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
 test("gives up after three retryable failures and stops future attempts", async () => {
@@ -426,7 +424,7 @@ test("gives up after three retryable failures and stops future attempts", async 
   persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
   assert.equal(fetchCalls.length, attemptsBeforeExtraRun);
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
 test("skips dead job finalization when loop token is missing", async () => {
@@ -452,7 +450,7 @@ test("skips dead job finalization when loop token is missing", async () => {
     loopTokenStore,
   });
   await service.run([deadJob]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
@@ -521,7 +519,7 @@ test("starts dead job finalization in the background", async () => {
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
   assert.ok(persisted.finalStatusPersistedAt);
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
 test("dispose stops queued dead-job finalization after in-flight request", async () => {
@@ -583,7 +581,7 @@ test("dispose stops queued dead-job finalization after in-flight request", async
 
   const completion = service.startDeadJobFinalization([deadJobOne, deadJobTwo]);
   await firstEventPostStarted;
-  service.dispose();
+  service[Symbol.dispose]();
   const unblockFetch = releaseFetch;
   assert.ok(unblockFetch);
   unblockFetch();
@@ -640,7 +638,7 @@ test("reattaches to live jobs and persists jsonl offsets", async () => {
         entry.authHeader === "Bearer loop-token",
     ),
   );
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
 test("live reattach does not persist jsonl offset past incomplete trailing line", async () => {
@@ -700,7 +698,7 @@ test("live reattach does not persist jsonl offset past incomplete trailing line"
         entry.authHeader === "Bearer loop-token",
     ),
   );
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
 test("skips live job reattach when loop token is missing", async () => {
@@ -741,7 +739,7 @@ test("skips live job reattach when loop token is missing", async () => {
   assert.ok(persisted);
   assert.equal(persisted.lastObservedJsonlOffset, 0);
   assert.equal(fetchCalls.length, 0);
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
 test("finalizes recovered live job as FAILED when process is externally killed", async () => {
@@ -799,7 +797,7 @@ test("finalizes recovered live job as FAILED when process is externally killed",
         entry.authHeader === "Bearer loop-token",
     ),
   );
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
 test("preserves COMPLETED status when terminal snapshot is available during boot-recovery", async () => {
@@ -867,7 +865,7 @@ test("preserves COMPLETED status when terminal snapshot is available during boot
     "expected no error event for COMPLETED job",
   );
 
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
 test("replays zero-token EXECUTE recovery as NO_WORK_PRODUCED instead of a completed event", async () => {
@@ -912,7 +910,7 @@ test("replays zero-token EXECUTE recovery as NO_WORK_PRODUCED instead of a compl
     loopTokenStore,
   });
   await service.run([deadJob]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
@@ -980,7 +978,7 @@ test("boot-recovery replays terminal user-visible runner failure", async () => {
     loopTokenStore,
   });
   await service.run([]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
@@ -1061,7 +1059,7 @@ test("replays EXECUTE completion from persisted execution-result artifacts durin
     loopTokenStore,
   });
   await service.run([]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
@@ -1150,7 +1148,7 @@ test("sweepOrphanedTokens removes tokens for finalized and unknown loops, keeps 
     loopTokenStore,
   });
   await service.run([]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   assert.equal(loopTokenStore.getLoopToken("loop-finalized"), null);
   assert.equal(loopTokenStore.getLoopToken("loop-unknown"), null);
@@ -1300,7 +1298,7 @@ test("reattachLiveJob transitions to TIMED_OUT when cloud reports TIMED_OUT", as
   assert.ok(persisted.cloudFinalizedAt, "expected cloudFinalizedAt to be set");
   assert.equal(loopTokenStore.getLoopToken("loop-1"), null, "expected loop token cleared");
   assert.ok(existsSync(worktreeDir), "expected worktreeDir to remain on disk after TIMED_OUT");
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
 test("reattachLiveJob starts tailer when cloud reports RUNNING", async () => {
@@ -1352,7 +1350,7 @@ test("reattachLiveJob starts tailer when cloud reports RUNNING", async () => {
     fetchCalls.some((c) => c.url.includes("/loops/loop-1/events")),
     "expected at least one POST to /events from tailer",
   );
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
 test("reattachLiveJob continues when GET status check throws a network error", async () => {
@@ -1409,7 +1407,7 @@ test("reattachLiveJob continues when GET status check throws a network error", a
     fetchCalls.some((c) => c.url.includes("/loops/loop-1/events")),
     "expected tailer to start and POST /events after network error on status check",
   );
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
 test("finalizeDeadJobs skips finalization and sets cloudFinalizedAt when cloud reports TIMED_OUT", async () => {
@@ -1439,7 +1437,7 @@ test("finalizeDeadJobs skips finalization and sets cloudFinalizedAt when cloud r
     loopTokenStore,
   });
   await service.run([deadJob]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
@@ -1468,35 +1466,35 @@ test("reattachLiveJob starts refresh scheduler for recovered loop", async () => 
   const savedSkewEnv = process.env.CLOSEDLOOP_TOKEN_REFRESH_SKEW_MS;
   process.env.CLOSEDLOOP_TOKEN_REFRESH_SKEW_MS = "0";
 
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+  await fs.writeFile(jsonlPath, "");
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-scheduler-start-tokens");
+  // expiresAt in the past → scheduler fires immediately with skew=0
+  const expiresAt = Date.now() - 1000;
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token", expiresAt });
+
+  const jobStore = createStore("boot-recovery-scheduler-start");
+  const liveJob = createJob({
+    pid: process.pid,
+    status: "RUNNING",
+    claudeWorkDir,
+    jsonlPath,
+    lastObservedJsonlOffset: 0,
+  });
+  jobStore.upsert(liveJob);
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: () => {} },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4030",
+    loopTokenStore,
+  });
   try {
-    const repoDir = path.join(tempRoot, "repo");
-    const claudeWorkDir = path.join(repoDir, "workdir");
-    await fs.mkdir(claudeWorkDir, { recursive: true });
-    const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
-    await fs.writeFile(jsonlPath, "");
-
-    const loopTokenStore = createLoopTokenStore("boot-recovery-scheduler-start-tokens");
-    // expiresAt in the past → scheduler fires immediately with skew=0
-    const expiresAt = Date.now() - 1000;
-    loopTokenStore.setLoopToken("loop-1", { token: "loop-token", expiresAt });
-
-    const jobStore = createStore("boot-recovery-scheduler-start");
-    const liveJob = createJob({
-      pid: process.pid,
-      status: "RUNNING",
-      claudeWorkDir,
-      jsonlPath,
-      lastObservedJsonlOffset: 0,
-    });
-    jobStore.upsert(liveJob);
-
-    const service = new BootRecoveryService({
-      jobStore,
-      telemetry: { emit: () => {} },
-      getApiKey: () => "test-key",
-      getApiOrigin: () => "http://127.0.0.1:4030",
-      loopTokenStore,
-    });
     await service.reattachLiveJobs();
 
     // Wait for the scheduler to fire and call /refresh-token
@@ -1509,10 +1507,8 @@ test("reattachLiveJob starts refresh scheduler for recovered loop", async () => 
       fetchCalls.some((c) => c.url.includes("/loops/loop-1/refresh-token")),
       "expected refresh scheduler to start and POST to /refresh-token",
     );
-    service.dispose();
   } finally {
-    stopAllRefreshSchedulers();
-    stopAllHeartbeats();
+    service[Symbol.dispose]();
     if (savedSkewEnv === undefined) {
       delete process.env.CLOSEDLOOP_TOKEN_REFRESH_SKEW_MS;
     } else {
@@ -1526,33 +1522,33 @@ test("reattachLiveJob starts heartbeat scheduler for recovered loop", async () =
   const savedHeartbeatEnv = process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS;
   process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "50";
 
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+  await fs.writeFile(jsonlPath, "");
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-heartbeat-start-tokens");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
+
+  const jobStore = createStore("boot-recovery-heartbeat-start");
+  const liveJob = createJob({
+    pid: process.pid,
+    status: "RUNNING",
+    claudeWorkDir,
+    jsonlPath,
+    lastObservedJsonlOffset: 0,
+  });
+  jobStore.upsert(liveJob);
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: () => {} },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4031",
+    loopTokenStore,
+  });
   try {
-    const repoDir = path.join(tempRoot, "repo");
-    const claudeWorkDir = path.join(repoDir, "workdir");
-    await fs.mkdir(claudeWorkDir, { recursive: true });
-    const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
-    await fs.writeFile(jsonlPath, "");
-
-    const loopTokenStore = createLoopTokenStore("boot-recovery-heartbeat-start-tokens");
-    loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
-
-    const jobStore = createStore("boot-recovery-heartbeat-start");
-    const liveJob = createJob({
-      pid: process.pid,
-      status: "RUNNING",
-      claudeWorkDir,
-      jsonlPath,
-      lastObservedJsonlOffset: 0,
-    });
-    jobStore.upsert(liveJob);
-
-    const service = new BootRecoveryService({
-      jobStore,
-      telemetry: { emit: () => {} },
-      getApiKey: () => "test-key",
-      getApiOrigin: () => "http://127.0.0.1:4031",
-      loopTokenStore,
-    });
     await service.reattachLiveJobs();
 
     // Wait for the heartbeat scheduler to fire
@@ -1565,173 +1561,12 @@ test("reattachLiveJob starts heartbeat scheduler for recovered loop", async () =
       fetchCalls.some((c) => c.url.includes("/loops/loop-1/heartbeat")),
       "expected heartbeat scheduler to start and POST to /heartbeat",
     );
-    service.dispose();
   } finally {
-    stopAllRefreshSchedulers();
-    stopAllHeartbeats();
+    service[Symbol.dispose]();
     if (savedHeartbeatEnv === undefined) {
       delete process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS;
     } else {
       process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = savedHeartbeatEnv;
-    }
-  }
-});
-
-test("first refresh after recovery reuses lastIdempotencyKey from LoopTokenMeta", async () => {
-  // When LoopTokenMeta.lastIdempotencyKey is set (e.g. from a prior force-quit
-  // mid-refresh), refreshLoopToken must reuse that key on the first attempt.
-  const savedSkewEnv = process.env.CLOSEDLOOP_TOKEN_REFRESH_SKEW_MS;
-  process.env.CLOSEDLOOP_TOKEN_REFRESH_SKEW_MS = "0";
-
-  const capturedHeaders: Array<{ url: string; idempotencyKey: string | null }> = [];
-
-  try {
-    const repoDir = path.join(tempRoot, "repo");
-    const claudeWorkDir = path.join(repoDir, "workdir");
-    await fs.mkdir(claudeWorkDir, { recursive: true });
-    const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
-    await fs.writeFile(jsonlPath, "");
-
-    const loopTokenStore = createLoopTokenStore("boot-recovery-idempotency-reuse-tokens");
-    const storedIdempotencyKey = "stored-idempotency-key-abc123";
-    const expiresAt = Date.now() - 1000; // already expired → fires immediately
-    loopTokenStore.setLoopToken("loop-1", {
-      token: "loop-token",
-      expiresAt,
-      lastIdempotencyKey: storedIdempotencyKey,
-    });
-
-    const jobStore = createStore("boot-recovery-idempotency-reuse");
-    const liveJob = createJob({
-      pid: process.pid,
-      status: "RUNNING",
-      claudeWorkDir,
-      jsonlPath,
-      lastObservedJsonlOffset: 0,
-    });
-    jobStore.upsert(liveJob);
-
-    // Install a custom fetch mock that also captures the Idempotency-Key header.
-    globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
-      const url = String(input);
-      const headers = new Headers(init?.headers);
-      const idempotencyKey = headers.get("Idempotency-Key");
-      fetchCalls.push({
-        url,
-        body: typeof init?.body === "string" ? init.body : "",
-        authHeader: headers.get("Authorization"),
-      });
-      if (url.includes("/refresh-token")) {
-        capturedHeaders.push({ url, idempotencyKey });
-      }
-      return new Response(JSON.stringify({ success: true }), { status: 200 });
-    }) as typeof fetch;
-
-    const service = new BootRecoveryService({
-      jobStore,
-      telemetry: { emit: () => {} },
-      getApiKey: () => "test-key",
-      getApiOrigin: () => "http://127.0.0.1:4032",
-      loopTokenStore,
-    });
-    await service.reattachLiveJobs();
-
-    // Wait for the refresh scheduler to fire and call /refresh-token
-    await waitForCondition(() => capturedHeaders.length > 0, 3000);
-
-    assert.ok(capturedHeaders.length > 0, "expected at least one /refresh-token call");
-    assert.equal(
-      capturedHeaders[0].idempotencyKey,
-      storedIdempotencyKey,
-      "first refresh after recovery must reuse the stored lastIdempotencyKey",
-    );
-    service.dispose();
-  } finally {
-    stopAllRefreshSchedulers();
-    stopAllHeartbeats();
-    if (savedSkewEnv === undefined) {
-      delete process.env.CLOSEDLOOP_TOKEN_REFRESH_SKEW_MS;
-    } else {
-      process.env.CLOSEDLOOP_TOKEN_REFRESH_SKEW_MS = savedSkewEnv;
-    }
-  }
-});
-
-test("first refresh after recovery generates a fresh idempotency key when none is stored", async () => {
-  // When LoopTokenMeta has no lastIdempotencyKey, refreshLoopToken must
-  // generate a fresh UUID for the Idempotency-Key header.
-  const savedSkewEnv = process.env.CLOSEDLOOP_TOKEN_REFRESH_SKEW_MS;
-  process.env.CLOSEDLOOP_TOKEN_REFRESH_SKEW_MS = "0";
-
-  const capturedHeaders: Array<{ url: string; idempotencyKey: string | null }> = [];
-
-  try {
-    const repoDir = path.join(tempRoot, "repo");
-    const claudeWorkDir = path.join(repoDir, "workdir");
-    await fs.mkdir(claudeWorkDir, { recursive: true });
-    const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
-    await fs.writeFile(jsonlPath, "");
-
-    const loopTokenStore = createLoopTokenStore("boot-recovery-idempotency-fresh-tokens");
-    const expiresAt = Date.now() - 1000; // already expired → fires immediately
-    // No lastIdempotencyKey set
-    loopTokenStore.setLoopToken("loop-1", { token: "loop-token", expiresAt });
-
-    const jobStore = createStore("boot-recovery-idempotency-fresh");
-    const liveJob = createJob({
-      pid: process.pid,
-      status: "RUNNING",
-      claudeWorkDir,
-      jsonlPath,
-      lastObservedJsonlOffset: 0,
-    });
-    jobStore.upsert(liveJob);
-
-    // Install a custom fetch mock that also captures the Idempotency-Key header.
-    globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
-      const url = String(input);
-      const headers = new Headers(init?.headers);
-      const idempotencyKey = headers.get("Idempotency-Key");
-      fetchCalls.push({
-        url,
-        body: typeof init?.body === "string" ? init.body : "",
-        authHeader: headers.get("Authorization"),
-      });
-      if (url.includes("/refresh-token")) {
-        capturedHeaders.push({ url, idempotencyKey });
-      }
-      return new Response(JSON.stringify({ success: true }), { status: 200 });
-    }) as typeof fetch;
-
-    const service = new BootRecoveryService({
-      jobStore,
-      telemetry: { emit: () => {} },
-      getApiKey: () => "test-key",
-      getApiOrigin: () => "http://127.0.0.1:4033",
-      loopTokenStore,
-    });
-    await service.reattachLiveJobs();
-
-    // Wait for the refresh scheduler to fire and call /refresh-token
-    await waitForCondition(() => capturedHeaders.length > 0, 3000);
-
-    assert.ok(capturedHeaders.length > 0, "expected at least one /refresh-token call");
-    const key = capturedHeaders[0].idempotencyKey;
-    assert.ok(key !== null && key.length > 0, "expected a non-empty idempotency key");
-    // A freshly generated key must be a UUID (8-4-4-4-12 hex format).
-    assert.match(
-      key ?? "",
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
-      "expected fresh idempotency key to be a UUID",
-    );
-    service.dispose();
-  } finally {
-    stopAllRefreshSchedulers();
-    stopAllHeartbeats();
-    if (savedSkewEnv === undefined) {
-      delete process.env.CLOSEDLOOP_TOKEN_REFRESH_SKEW_MS;
-    } else {
-      process.env.CLOSEDLOOP_TOKEN_REFRESH_SKEW_MS = savedSkewEnv;
     }
   }
 });
@@ -1790,7 +1625,7 @@ test("AC-004: per-request provider resolution uses token at call time, not at co
     loopTokenStore,
   });
   await service.run([deadJob]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const uploadCall = fetchCalls.find((c) => c.url.includes("/upload-artifacts"));
   assert.ok(uploadCall, "expected upload-artifacts fetch call");

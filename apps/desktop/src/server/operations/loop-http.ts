@@ -203,17 +203,25 @@ export async function uploadArtifacts(
  *
  * Returns `{ kind: 'active' }` for any running/non-terminal status,
  * `{ kind: 'timed_out' }` when the API reports status === 'TIMED_OUT',
- * or `{ kind: 'error', message }` on network / fetch errors.
+ * `{ kind: 'unauthorized' }` on HTTP 401 (so callers can refresh and retry
+ * via a typed branch rather than a string-equality check),
+ * or `{ kind: 'error', message }` on other HTTP errors / network failures.
  *
  * Uses an AbortController timeout (default 5 000 ms) matching the
  * postLoopEventBounded pattern.
  */
+export type CloudLoopStatus =
+  | { kind: "timed_out" }
+  | { kind: "active" }
+  | { kind: "unauthorized" }
+  | { kind: "error"; message: string };
+
 export async function getCloudLoopStatus(
   loopId: string,
   getToken: () => string | null,
   apiBaseUrl: string,
   timeoutMs = 5000,
-): Promise<{ kind: "timed_out" } | { kind: "active" } | { kind: "error"; message: string }> {
+): Promise<CloudLoopStatus> {
   const url = `${apiBaseUrl}/loops/${encodeURIComponent(loopId)}`;
   const token = getToken();
   const controller = new AbortController();
@@ -226,6 +234,9 @@ export async function getCloudLoopStatus(
       },
       signal: controller.signal,
     });
+    if (resp.status === 401) {
+      return { kind: "unauthorized" };
+    }
     if (!resp.ok) {
       return { kind: "error", message: `HTTP ${resp.status}` };
     }
@@ -246,5 +257,45 @@ export async function getCloudLoopStatus(
     return { kind: "error", message: err instanceof Error ? err.message : String(err) };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * POST a heartbeat to `/loops/:id/heartbeat`.
+ *
+ * Returns the same `LoopHttpResult` discriminated union as `postLoopEvent`
+ * so callers can branch on `kind === "http" && status === 404` without
+ * parsing strings.
+ */
+export async function postLoopHeartbeat(
+  apiBaseUrl: string,
+  loopId: string,
+  getToken: () => string | null,
+): Promise<LoopHttpResult> {
+  const url = `${apiBaseUrl}/loops/${encodeURIComponent(loopId)}/heartbeat`;
+  const token = getToken();
+  if (token === null) {
+    return { success: false, kind: "auth", error: "missing_token" };
+  }
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+    });
+    if (!resp.ok) {
+      return {
+        success: false,
+        kind: "http",
+        status: resp.status,
+        error: `HTTP ${resp.status} ${resp.statusText}`,
+      };
+    }
+    return { success: true, status: resp.status };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, kind: "network", error: msg };
   }
 }

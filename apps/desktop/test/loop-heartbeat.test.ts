@@ -13,16 +13,24 @@
 
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, mock, test } from "node:test";
-import {
-  start,
-  stop,
-  stopAll,
-} from "../src/main/loop-heartbeat.js";
+import { LoopSchedulerContext } from "../src/main/loop-scheduler-context.js";
 import {
   isEndpointDisabled,
   resetAllGates,
 } from "../src/main/loop-404-gate.js";
 import { flushAsync } from "./loop-token-test-utils.js";
+
+// Per-test scheduler context. Cleared in afterEach via Symbol.dispose so
+// timers never leak across tests.
+let ctx: LoopSchedulerContext;
+// Token store stub satisfies the LoopSchedulerDeps contract used by sleep
+// recovery; heartbeat tests never invoke its methods.
+const dummyLoopTokenStore = {} as never;
+const start = (loopId: string, deps: { apiBaseUrl: string; getToken: () => string | null }) =>
+  ctx.startHeartbeat(loopId, deps);
+const stop = (loopId: string) => ctx.stopHeartbeat(loopId);
+const stopAll = () => ctx[Symbol.dispose]();
+void dummyLoopTokenStore;
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -72,6 +80,7 @@ function installThrowingFetchStub(): void {
 beforeEach(() => {
   capturedHeartbeats = [];
   resetAllGates();
+  ctx = new LoopSchedulerContext();
 });
 
 afterEach(() => {
@@ -107,7 +116,7 @@ describe("loop-heartbeat: periodic firing", () => {
 
     installHeartbeatFetchStub(200);
 
-    start("loop-hb", "https://api.example.com", () => "bearer-token");
+    start("loop-hb", { apiBaseUrl: "https://api.example.com", getToken: () => "bearer-token" });
 
     // First interval.
     mock.timers.tick(1000);
@@ -132,7 +141,7 @@ describe("loop-heartbeat: periodic firing", () => {
 
     installHeartbeatFetchStub(200);
 
-    start("loop-123", "https://api.example.com", () => "my-bearer-token");
+    start("loop-123", { apiBaseUrl: "https://api.example.com", getToken: () => "my-bearer-token" });
 
     mock.timers.tick(500);
     await flushAsync();
@@ -152,7 +161,7 @@ describe("loop-heartbeat: periodic firing", () => {
 
     installHeartbeatFetchStub(200);
 
-    start("loop-early", "https://api.example.com", () => "tok");
+    start("loop-early", { apiBaseUrl: "https://api.example.com", getToken: () => "tok" });
 
     mock.timers.tick(1999);
     await flushAsync();
@@ -166,7 +175,7 @@ describe("loop-heartbeat: periodic firing", () => {
 
     installHeartbeatFetchStub(200);
 
-    start("loop-no-token", "https://api.example.com", () => null);
+    start("loop-no-token", { apiBaseUrl: "https://api.example.com", getToken: () => null });
 
     mock.timers.tick(1000);
     await flushAsync();
@@ -189,7 +198,7 @@ describe("loop-heartbeat: fire-and-forget error handling", () => {
 
     // Should not throw during start.
     assert.doesNotThrow(() => {
-      start("loop-throw", "https://api.example.com", () => "tok");
+      start("loop-throw", { apiBaseUrl: "https://api.example.com", getToken: () => "tok" });
     });
 
     // Firing the interval must not cause an unhandled rejection or throw.
@@ -214,7 +223,7 @@ describe("loop-heartbeat: fire-and-forget error handling", () => {
 
     installHeartbeatFetchStub(500, "Internal Server Error");
 
-    start("loop-500", "https://api.example.com", () => "tok");
+    start("loop-500", { apiBaseUrl: "https://api.example.com", getToken: () => "tok" });
 
     mock.timers.tick(1000);
     await flushAsync();
@@ -239,7 +248,7 @@ describe("loop-heartbeat: 404 gate integration", () => {
 
     installHeartbeatFetchStub(404);
 
-    start("loop-404", "https://api.example.com", () => "tok");
+    start("loop-404", { apiBaseUrl: "https://api.example.com", getToken: () => "tok" });
 
     // First interval fires and receives 404.
     mock.timers.tick(1000);
@@ -274,7 +283,7 @@ describe("loop-heartbeat: 404 gate integration", () => {
 
     installHeartbeatFetchStub(200);
 
-    start("loop-pre-disabled", "https://api.example.com", () => "tok");
+    start("loop-pre-disabled", { apiBaseUrl: "https://api.example.com", getToken: () => "tok" });
 
     mock.timers.tick(1000);
     await flushAsync();
@@ -299,7 +308,7 @@ describe("loop-heartbeat: CLOSEDLOOP_HEARTBEAT_INTERVAL_MS override", () => {
 
     installHeartbeatFetchStub(200);
 
-    start("loop-env-interval", "https://api.example.com", () => "tok");
+    start("loop-env-interval", { apiBaseUrl: "https://api.example.com", getToken: () => "tok" });
 
     // Just before the env-var interval — must not fire.
     mock.timers.tick(2999);
@@ -319,7 +328,7 @@ describe("loop-heartbeat: CLOSEDLOOP_HEARTBEAT_INTERVAL_MS override", () => {
 
     installHeartbeatFetchStub(200);
 
-    start("loop-env-invalid", "https://api.example.com", () => "tok");
+    start("loop-env-invalid", { apiBaseUrl: "https://api.example.com", getToken: () => "tok" });
 
     // Default interval is 30 minutes = 1_800_000 ms.
     // Tick just before default — must not fire.
@@ -346,7 +355,7 @@ describe("loop-heartbeat: clean stop", () => {
 
     installHeartbeatFetchStub(200);
 
-    start("loop-cleanstop", "https://api.example.com", () => "tok");
+    start("loop-cleanstop", { apiBaseUrl: "https://api.example.com", getToken: () => "tok" });
 
     // Let one heartbeat fire.
     mock.timers.tick(1000);
@@ -372,8 +381,8 @@ describe("loop-heartbeat: clean stop", () => {
 
     installHeartbeatFetchStub(200);
 
-    start("loop-all-a", "https://api.example.com", () => "tok");
-    start("loop-all-b", "https://api.example.com", () => "tok");
+    start("loop-all-a", { apiBaseUrl: "https://api.example.com", getToken: () => "tok" });
+    start("loop-all-b", { apiBaseUrl: "https://api.example.com", getToken: () => "tok" });
 
     stopAll();
 
@@ -390,8 +399,8 @@ describe("loop-heartbeat: clean stop", () => {
     installHeartbeatFetchStub(200);
 
     // Start and immediately replace.
-    start("loop-replace-hb", "https://api.example.com", () => "tok");
-    start("loop-replace-hb", "https://api.example.com", () => "tok");
+    start("loop-replace-hb", { apiBaseUrl: "https://api.example.com", getToken: () => "tok" });
+    start("loop-replace-hb", { apiBaseUrl: "https://api.example.com", getToken: () => "tok" });
 
     // The second start replaces the first. There should be only one active interval.
     // If both were active, ticking once would fire twice.

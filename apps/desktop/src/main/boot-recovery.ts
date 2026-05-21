@@ -1,6 +1,9 @@
-import { getCloudLoopStatus } from "../server/operations/loop-http.js";
+import {
+  getCloudLoopStatus,
+  type CloudLoopStatus,
+} from "../server/operations/loop-http.js";
 import { startOutputTailer } from "../server/operations/output-tailer.js";
-import { withTokenRefreshRetry } from "./loop-refresh.js";
+import { refreshLoopTokenSingleflight } from "./loop-refresh.js";
 import {
   cleanupAdditionalWorktreesWithDefaultProvider,
   registerRecoveredLoop,
@@ -15,10 +18,7 @@ import {
   type LoopFinalizerDeps,
 } from "./loop-finalizer.js";
 import type { TelemetryEmitter } from "./telemetry-protocol.js";
-import { teardownLoopSchedulers } from "./loop-lifecycle.js";
-import * as loopRefreshScheduler from "./loop-refresh-scheduler.js";
-import * as loopHeartbeat from "./loop-heartbeat.js";
-import * as loopSleepRecovery from "./loop-sleep-recovery.js";
+import { LoopSchedulerContext } from "./loop-scheduler-context.js";
 
 export interface BootRecoveryDeps {
   jobStore: JobStore;
@@ -27,6 +27,8 @@ export interface BootRecoveryDeps {
   getApiOrigin: () => string;
   getAllowedDirectories?: () => string[];
   loopTokenStore: LoopTokenStore;
+  /** Instance-scoped scheduler context. Defaults to a new LoopSchedulerContext when omitted. */
+  schedulers?: LoopSchedulerContext;
 }
 
 interface LiveJobHandle {
@@ -38,8 +40,9 @@ interface LiveJobHandle {
 const DEFAULT_WATCHER_POLL_MS = 3000;
 const MAX_RECOVERY_ATTEMPTS = 3;
 
-export class BootRecoveryService {
+export class BootRecoveryService implements Disposable {
   private readonly deps: BootRecoveryDeps;
+  private readonly schedulers: LoopSchedulerContext;
   private liveHandles: LiveJobHandle[] = [];
   private readonly backgroundTasks = new Set<Promise<void>>();
   private deadJobFinalizationTask: Promise<void> | null = null;
@@ -48,6 +51,7 @@ export class BootRecoveryService {
 
   constructor(deps: BootRecoveryDeps) {
     this.deps = deps;
+    this.schedulers = deps.schedulers ?? new LoopSchedulerContext();
   }
 
   async run(deadJobs: LocalJob[]): Promise<void> {
@@ -180,6 +184,7 @@ export class BootRecoveryService {
           getAllowedDirectories,
           loopTokenStore,
           cleanupAdditionalWorktrees: cleanupAdditionalWorktreesWithDefaultProvider,
+          schedulers: this.schedulers,
         });
         if (!outcome.cloudFinalized && outcome.retryableFailure) {
           const latest = jobStore.getByLoopId(job.loopId);
@@ -242,32 +247,26 @@ export class BootRecoveryService {
   private async reconcileCloudLoopStatus(
     job: LocalJob,
     apiBaseUrl: string,
-  ): ReturnType<typeof getCloudLoopStatus> {
+  ): Promise<CloudLoopStatus> {
     const { loopTokenStore } = this.deps;
     const getToken = () => loopTokenStore.getLoopTokenString(job.loopId);
 
-    // Bridge getCloudLoopStatus into a LoopHttpResult so withTokenRefreshRetry
-    // can intercept 401 responses (signalled by error message "HTTP 401") and
-    // retry exactly once with a refreshed token.
-    let cloudStatus: Awaited<ReturnType<typeof getCloudLoopStatus>> | null = null;
-    await withTokenRefreshRetry(
-      job.loopId,
-      apiBaseUrl,
-      getToken,
-      loopTokenStore,
-      async (gt) => {
-        const status = await getCloudLoopStatus(job.loopId, gt, apiBaseUrl);
-        cloudStatus = status;
-        // Translate to LoopHttpResult so the wrapper can detect 401 and retry.
-        if (status.kind === "error" && status.message === "HTTP 401") {
-          return { success: false as const, kind: "http" as const, status: 401, error: status.message };
-        }
-        return { success: true as const, status: 200 };
-      },
-    );
+    let result = await getCloudLoopStatus(job.loopId, getToken, apiBaseUrl);
 
-    // cloudStatus is always set after the await above (either first call or retry).
-    const result = (cloudStatus as unknown as Awaited<ReturnType<typeof getCloudLoopStatus>>);
+    // On 401, refresh the loop token exactly once (singleflight-coalesced) and
+    // retry. getToken closes over the store, so the retry picks up the new
+    // token automatically once the refresh has written it.
+    if (result.kind === "unauthorized") {
+      const refresh = await refreshLoopTokenSingleflight(
+        job.loopId,
+        apiBaseUrl,
+        getToken,
+        loopTokenStore,
+      );
+      if (refresh.success) {
+        result = await getCloudLoopStatus(job.loopId, getToken, apiBaseUrl);
+      }
+    }
 
     if (result.kind === "timed_out") {
       const current = this.deps.jobStore.getByLoopId(job.loopId) ?? job;
@@ -361,15 +360,15 @@ export class BootRecoveryService {
     const getToken = () => this.deps.loopTokenStore.getLoopTokenString(loopId);
 
     const loopTokenMeta = this.deps.loopTokenStore.getLoopToken(loopId);
-    loopRefreshScheduler.start(loopId, loopTokenMeta?.expiresAt, {
+    this.schedulers.startRefresh(loopId, loopTokenMeta?.expiresAt, {
       apiBaseUrl: effectiveApiBaseUrl,
       getToken,
       loopTokenStore: this.deps.loopTokenStore,
     });
 
-    loopHeartbeat.start(loopId, effectiveApiBaseUrl, getToken);
+    this.schedulers.startHeartbeat(loopId, { apiBaseUrl: effectiveApiBaseUrl, getToken });
 
-    loopSleepRecovery.registerLoop(loopId, {
+    this.schedulers.registerSleep(loopId, {
       apiBaseUrl: effectiveApiBaseUrl,
       getToken,
       loopTokenStore: this.deps.loopTokenStore,
@@ -386,7 +385,7 @@ export class BootRecoveryService {
         clearInterval(watcherId);
         this.liveHandles = this.liveHandles.filter((value) => value.loopId !== loopId);
         unregisterLoop(loopId);
-        teardownLoopSchedulers(loopId);
+        this.schedulers.teardownLoop(loopId);
         this.finalizeRecoveredJob(loopId, () => this.deps.loopTokenStore.getLoopTokenString(loopId), effectiveApiBaseUrl, tailer);
       }
     }, watcherPollMs);
@@ -440,6 +439,7 @@ export class BootRecoveryService {
         getAllowedDirectories,
         loopTokenStore,
         cleanupAdditionalWorktrees: cleanupAdditionalWorktreesWithDefaultProvider,
+        schedulers: this.schedulers,
       };
 
       try {
@@ -459,13 +459,15 @@ export class BootRecoveryService {
     void this.trackBackgroundTask(run()).catch(() => {});
   }
 
-  dispose(): void {
+  [Symbol.dispose](): void {
     this.disposed = true;
     for (const handle of this.liveHandles) {
       clearInterval(handle.watcherId);
       handle.tailer?.stop();
+      this.schedulers.teardownLoop(handle.loopId);
     }
     this.liveHandles = [];
+    this.schedulers[Symbol.dispose]();
   }
 
   private sweepOrphanedTokens(): void {

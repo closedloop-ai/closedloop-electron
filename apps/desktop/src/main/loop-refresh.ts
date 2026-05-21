@@ -7,11 +7,30 @@ import type { LoopHttpResult } from "../server/operations/loop-http.js";
 
 // ---------------------------------------------------------------------------
 // Refresh result types
+//
+// All failure variants share `retryable: false` (no caller currently has a
+// retry path; surfacing it for future-proofing). The discriminator is `kind`
+// — branch on it instead of parsing `error` strings.
 // ---------------------------------------------------------------------------
+
+export type RefreshLoopTokenFailure =
+  | { success: false; retryable: false; kind: "missing_token"; error: "missing_token" }
+  | { success: false; retryable: false; kind: "endpoint_disabled"; error: "endpoint_disabled" }
+  | { success: false; retryable: false; kind: "network"; error: string }
+  | {
+      success: false;
+      retryable: false;
+      kind: "http";
+      status: number;
+      /** Parsed `code` field from the response body, if present. */
+      code: string | null;
+      error: string;
+    }
+  | { success: false; retryable: false; kind: "malformed"; error: string };
 
 export type RefreshLoopTokenResult =
   | { success: true; meta: LoopTokenMeta }
-  | { success: false; retryable: false; error: string };
+  | RefreshLoopTokenFailure;
 
 // ---------------------------------------------------------------------------
 // Module-scoped singleflight map (populated in T-2.2)
@@ -32,7 +51,7 @@ async function attemptRefresh(
 ): Promise<RefreshLoopTokenResult> {
   const token = getToken();
   if (token === null) {
-    return { success: false, retryable: false, error: "missing_token" };
+    return { success: false, retryable: false, kind: "missing_token", error: "missing_token" };
   }
 
   const endpointPath = `/loops/${encodeURIComponent(loopId)}/refresh-token`;
@@ -43,7 +62,12 @@ async function attemptRefresh(
       "loop-refresh",
       `Skipping refresh for loopId=${loopId}: endpoint disabled (prior 404)`,
     );
-    return { success: false, retryable: false, error: "endpoint_disabled" };
+    return {
+      success: false,
+      retryable: false,
+      kind: "endpoint_disabled",
+      error: "endpoint_disabled",
+    };
   }
 
   let resp: Response;
@@ -59,41 +83,40 @@ async function attemptRefresh(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     gatewayLog.error("loop-refresh", `Network error refreshing loopId=${loopId}: ${msg}`);
-    return { success: false, retryable: false, error: msg };
-  }
-
-  if (resp.status === 401) {
-    const text = await resp.text().catch(() => "");
-    gatewayLog.warn(
-      "loop-refresh",
-      `Non-retryable auth failure refreshing loopId=${loopId}: ${resp.status} ${text}`,
-    );
-    return { success: false, retryable: false, error: `HTTP 401 ${text}` };
-  }
-
-  if (resp.status === 404) {
-    const text = await resp.text().catch(() => "");
-    gatewayLog.warn(
-      "loop-refresh",
-      `404 received for loopId=${loopId}; disabling endpoint ${endpointPath} on ${apiBaseUrl}`,
-    );
-    markEndpointDisabled(apiBaseUrl, endpointPath);
-    return { success: false, retryable: false, error: `HTTP 404 ${text}` };
-  }
-
-  if (resp.status === 409) {
-    // 409 indicates RACE_LOST — will be handled by the caller with a retry.
-    const text = await resp.text().catch(() => "");
-    return { success: false, retryable: false, error: `HTTP 409 ${text}` };
+    return { success: false, retryable: false, kind: "network", error: msg };
   }
 
   if (!resp.ok) {
     const text = await resp.text().catch(() => "");
-    gatewayLog.error(
-      "loop-refresh",
-      `Refresh failed for loopId=${loopId}: ${resp.status} ${text}`,
-    );
-    return { success: false, retryable: false, error: `HTTP ${resp.status} ${text}` };
+    const code = extractCodeFromBody(text);
+
+    if (resp.status === 401) {
+      gatewayLog.warn(
+        "loop-refresh",
+        `Non-retryable auth failure refreshing loopId=${loopId}: ${resp.status} ${text}`,
+      );
+    } else if (resp.status === 404) {
+      gatewayLog.warn(
+        "loop-refresh",
+        `404 received for loopId=${loopId}; disabling endpoint ${endpointPath} on ${apiBaseUrl}`,
+      );
+      markEndpointDisabled(apiBaseUrl, endpointPath);
+    } else if (resp.status !== 409) {
+      // 409 RACE_LOST is handled by the caller with a retry; don't log as error here.
+      gatewayLog.error(
+        "loop-refresh",
+        `Refresh failed for loopId=${loopId}: ${resp.status} ${text}`,
+      );
+    }
+
+    return {
+      success: false,
+      retryable: false,
+      kind: "http",
+      status: resp.status,
+      code,
+      error: `HTTP ${resp.status} ${text}`,
+    };
   }
 
   // Parse success response: { token, expiresAt, jti }
@@ -101,7 +124,12 @@ async function attemptRefresh(
   try {
     body = await resp.json();
   } catch {
-    return { success: false, retryable: false, error: "malformed refresh response" };
+    return {
+      success: false,
+      retryable: false,
+      kind: "malformed",
+      error: "malformed refresh response",
+    };
   }
 
   const record = (body !== null && typeof body === "object" && !Array.isArray(body))
@@ -111,7 +139,12 @@ async function attemptRefresh(
   const jti = typeof record.jti === "string" ? record.jti : undefined;
 
   if (!newToken) {
-    return { success: false, retryable: false, error: "refresh response missing token" };
+    return {
+      success: false,
+      retryable: false,
+      kind: "malformed",
+      error: "refresh response missing token",
+    };
   }
 
   // Extract exp from the new JWT; convert seconds -> milliseconds for LoopTokenMeta.
@@ -200,17 +233,11 @@ export async function refreshLoopToken(
   }
 
   // Check for 409 RACE_LOST to trigger one retry with a fresh key.
-  const is409 = firstResult.error.startsWith("HTTP 409");
-  if (!is409) {
-    return firstResult;
-  }
-
-  // Extract the code from the body text embedded in the error string.
-  const bodyText = firstResult.error.slice("HTTP 409 ".length);
-  const code = extractCodeFromBody(bodyText);
-
-  if (code !== "RACE_LOST") {
-    // 409 with a different code is non-retryable.
+  if (
+    firstResult.kind !== "http" ||
+    firstResult.status !== 409 ||
+    firstResult.code !== "RACE_LOST"
+  ) {
     return firstResult;
   }
 
@@ -235,16 +262,14 @@ export async function refreshLoopToken(
     retryKey,
   );
 
-  if (retryResult.success) {
-    return retryResult;
+  if (!retryResult.success) {
+    // Second consecutive 409 (or any failure on retry) is non-retryable.
+    gatewayLog.warn(
+      "loop-refresh",
+      `Retry also failed for loopId=${loopId}: ${retryResult.error}`,
+    );
   }
-
-  // Second consecutive 409 (or any failure on retry) is non-retryable.
-  gatewayLog.warn(
-    "loop-refresh",
-    `Retry also failed for loopId=${loopId}: ${retryResult.error}`,
-  );
-  return { success: false, retryable: false, error: retryResult.error };
+  return retryResult;
 }
 
 // ---------------------------------------------------------------------------

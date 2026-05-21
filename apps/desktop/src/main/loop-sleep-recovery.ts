@@ -14,6 +14,7 @@ const { powerMonitor } = electron;
 // ---------------------------------------------------------------------------
 
 const registry = new Map<string, LoopSchedulerDeps>();
+let initialized = false;
 
 // ---------------------------------------------------------------------------
 // Internal: handle a single loop on resume (fire-and-forget)
@@ -56,7 +57,7 @@ async function handleResumeForLoop(
   // Trigger an immediate heartbeat via the heartbeat module's public API.
   // sendHeartbeatNow is fire-and-forget and handles errors internally; errors
   // are logged by the heartbeat module, so no additional try/catch is needed.
-  sendHeartbeatNow(loopId, apiBaseUrl, getToken);
+  sendHeartbeatNow(loopId, { apiBaseUrl, getToken });
 }
 
 // ---------------------------------------------------------------------------
@@ -108,15 +109,27 @@ export function onResume(): void {
  * registered active loops immediately refresh their tokens and send a
  * heartbeat when the system wakes from sleep.
  *
- * Safe to call multiple times — subsequent calls are no-ops because Electron
- * deduplicates identical listener instances on the same event.
+ * Idempotent: subsequent calls are no-ops. (Note: `powerMonitor` is an
+ * `EventEmitter` and does not deduplicate identical listener instances —
+ * without this guard a second `init()` call would double-register `onResume`
+ * and cause duplicate token-refresh attempts on every resume.)
  */
 export function init(): void {
-  powerMonitor.on("resume", onResume);
+  if (initialized) {
+    return;
+  }
+  initialized = true;
+  powerMonitor?.on("resume", onResume);
   gatewayLog.info(
     "loop-sleep-recovery",
     "Sleep/wake recovery listener registered",
   );
+}
+
+/** Resets module-level state. For unit tests only. */
+export function resetForTesting(): void {
+  initialized = false;
+  registry.clear();
 }
 
 /**
