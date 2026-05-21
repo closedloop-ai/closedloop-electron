@@ -73,6 +73,12 @@ const generatedPricingRoute = path.join(
   "pricing.js",
 );
 const generatedPushLib = path.join(generatedRootDir, "server", "lib", "push.js");
+const generatedCcDiscovery = path.join(
+  generatedRootDir,
+  "server",
+  "lib",
+  "cc-discovery.js",
+);
 const generatedClientIndex = path.join(
   generatedRootDir,
   "client",
@@ -168,6 +174,73 @@ const generatedImportHistory = path.join(
   "scripts",
   "import-history.js",
 );
+
+// CLOSEDLOOP pack-observability (FEA-1224 / PLN-651): same materialization
+// pattern as plan-extraction. pack-store + pack-scanner copied into the
+// generated server/lib; packs-route.js + skills-route.js into server/routes;
+// four React pages into the client src tree before the Vite build. server/db.js
+// and server/index.js are wired via the same idempotent string-anchor +
+// hard-gate approach as the plan patches.
+const packModulesDir = path.join(appDir, "scripts", "agent-monitor-packs");
+const PACK_MODULES = [
+  "pack-store",
+  "pack-scanner",
+  // CLOSEDLOOP catalog (FEA-1314 / PLN-657): discovery catalog of popular
+  // agent packs with live GitHub stats + 1-click install. catalog-route is
+  // copied separately into server/routes/ (alongside packs-route/skills-route).
+  "catalog-store",
+  "catalog-fetcher",
+  // Per-pack contents-fetcher (FEA-1314 v3): scrapes skill/agent/command
+  // listings from each pack's GitHub repo for the detail view.
+  "catalog-contents",
+  "catalog-action-handler",
+  "install-orchestrator",
+  // Per-pack detection adapters (voltagent, alirezarezvani, superclaude,
+  // claude-code-router). Lazy-required by pack-scanner at run time.
+  "catalog-detector",
+];
+const PACK_CLIENT_PAGES = ["Skills", "Tools", "SubAgents", "Packs"];
+// CLOSEDLOOP catalog (FEA-1314): extra client modules that need to ship with
+// the Packs page (tab shell + catalog cards + install modal + sparkline).
+// Packs.tsx itself is the wrapper that renders <PacksLayout/>.
+const PACK_CATALOG_CLIENT_PAGES = [
+  "PacksLayout",
+  "PacksInstalled",
+  "PacksCatalog",
+  "CatalogCard",
+  // v4: full-page detail view at /packs/:packId — replaces CatalogDetail
+  // modal but uses the same components (InstallModal, etc.). CatalogDetail
+  // is preserved as a no-op import for back-compat with users who still
+  // reference it via stale build caches.
+  "PackDetail",
+  "CatalogDetail",
+  "InstallModal",
+  "Sparkline",
+];
+
+// CLOSEDLOOP embed integration: the agent monitor ships as an <iframe> inside
+// the desktop app. These ClosedLoop-authored files are copied over the
+// upstream client source before the Vite build — Layout.tsx adds embed mode
+// (drops the monitor's own sidebar) plus the host postMessage nav bridge;
+// tailwind.config.js remaps the accent token to the ClosedLoop brand primary.
+const embedModulesDir = path.join(appDir, "scripts", "agent-monitor-embed");
+const embedAppSource = path.join(embedModulesDir, "App.tsx");
+const embedLayoutSource = path.join(embedModulesDir, "Layout.tsx");
+const embedTailwindSource = path.join(embedModulesDir, "tailwind.config.js");
+const CLIENT_FULL_FILE_OVERRIDES = [
+  {
+    from: embedAppSource,
+    to: path.join("src", "App.tsx"),
+  },
+  {
+    from: embedLayoutSource,
+    to: path.join("src", "components", "Layout.tsx"),
+  },
+  {
+    from: embedTailwindSource,
+    to: "tailwind.config.js",
+  },
+];
 
 // Host-owned pricing defaults for model IDs we ingest from non-Claude harnesses.
 // These keep cost stats working without requiring users to hand-enter common
@@ -312,6 +385,20 @@ function currentStamp() {
     path.join(planModulesDir, "plans-route.js"),
     path.join(planModulesDir, "client", "Plans.tsx"),
     path.join(planModulesDir, "client", "closedloop-host-flags.ts"),
+    ...PACK_MODULES.map((m) => path.join(packModulesDir, `${m}.js`)),
+    path.join(packModulesDir, "packs-route.js"),
+    path.join(packModulesDir, "skills-route.js"),
+    path.join(packModulesDir, "catalog-route.js"),
+    path.join(packModulesDir, "catalog-seed.json"),
+    ...PACK_CLIENT_PAGES.map((p) =>
+      path.join(packModulesDir, "client", `${p}.tsx`),
+    ),
+    ...PACK_CATALOG_CLIENT_PAGES.map((p) =>
+      path.join(packModulesDir, "client", `${p}.tsx`),
+    ),
+    embedAppSource,
+    embedLayoutSource,
+    embedTailwindSource,
   ]) {
     h.update(readFileSync(file));
   }
@@ -381,6 +468,15 @@ function materializeRuntimeTree() {
       path.join(generatedLibDir, `${m}.js`),
     );
   }
+  // CLOSEDLOOP pack-observability (FEA-1224): pack-store + pack-scanner into
+  // server/lib alongside plan modules. Routes are copied below alongside
+  // plans-route.js.
+  for (const m of PACK_MODULES) {
+    cpSync(
+      path.join(packModulesDir, `${m}.js`),
+      path.join(generatedLibDir, `${m}.js`),
+    );
+  }
   cpSync(
     path.join(sourceRootDir, "scripts"),
     path.join(generatedRootDir, "scripts"),
@@ -393,6 +489,29 @@ function materializeRuntimeTree() {
   cpSync(
     path.join(planModulesDir, "plans-route.js"),
     path.join(generatedRootDir, "server", "routes", "plans.js"),
+  );
+  // CLOSEDLOOP pack-observability (FEA-1224): packs + skills routes alongside
+  // the plans route. Both read from the existing events/agents/sessions tables
+  // plus the new inventory tables created by ensurePackSchema.
+  cpSync(
+    path.join(packModulesDir, "packs-route.js"),
+    path.join(generatedRootDir, "server", "routes", "packs.js"),
+  );
+  cpSync(
+    path.join(packModulesDir, "skills-route.js"),
+    path.join(generatedRootDir, "server", "routes", "skills.js"),
+  );
+  // CLOSEDLOOP pack catalog (FEA-1314): catalog route + the seed JSON the
+  // store reads at startup. The seed lives alongside the store under
+  // server/lib so a `require("./catalog-seed.json")` from catalog-store
+  // resolves cleanly in the generated tree.
+  cpSync(
+    path.join(packModulesDir, "catalog-route.js"),
+    path.join(generatedRootDir, "server", "routes", "catalog.js"),
+  );
+  cpSync(
+    path.join(packModulesDir, "catalog-seed.json"),
+    path.join(generatedLibDir, "catalog-seed.json"),
   );
   patchImportHistory(generatedImportHistory);
   mkdirSync(path.join(generatedRootDir, "client"), { recursive: true });
@@ -408,6 +527,7 @@ function materializeRuntimeTree() {
   patchPricingRoute(generatedPricingRoute);
   patchHooksRoute(generatedHooksRoute);
   patchPushFile(generatedPushLib);
+  patchCcDiscovery(generatedCcDiscovery);
   writeFileSync(generatedUninstallHooks, UNINSTALL_HOOKS_SOURCE, "utf8");
 }
 
@@ -691,6 +811,115 @@ function patchServerIndex(file) {
     );
   }
 
+  // CLOSEDLOOP pack-observability (FEA-1224): register /api/packs + /api/skills
+  // routes. Ungated, top-level — the four new dashboard pages always visible.
+  if (!source.includes('require("./routes/packs")')) {
+    const requireNeedle = 'const plansRouter = require("./routes/plans");';
+    const openApiNeedle = '  app.get("/api/openapi.json", (_req, res) => {';
+    if (!source.includes(requireNeedle) || !source.includes(openApiNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the plans-router require / openapi anchors (packs route, FEA-1224).`,
+      );
+    }
+    source = source.replace(
+      requireNeedle,
+      [
+        requireNeedle,
+        'const packsRouter = require("./routes/packs");',
+        'const skillsRouter = require("./routes/skills");',
+      ].join("\n"),
+    );
+    source = source.replace(
+      openApiNeedle,
+      [
+        '  app.use("/api/packs", packsRouter);',
+        '  app.use("/api/skills", skillsRouter);',
+        openApiNeedle,
+      ].join("\n"),
+    );
+  }
+
+  // CLOSEDLOOP pack catalog (FEA-1314): register /api/catalog route + seed
+  // the catalog table + kick off the first GitHub fetch at startup. The
+  // fetch is async and best-effort — boot doesn't wait on it.
+  if (!source.includes('require("./routes/catalog")')) {
+    const requireNeedle = 'const packsRouter = require("./routes/packs");';
+    const mountNeedle = '  app.use("/api/packs", packsRouter);';
+    if (!source.includes(requireNeedle) || !source.includes(mountNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the packs-router require / mount anchors (catalog route, FEA-1314).`,
+      );
+    }
+    source = source.replace(
+      requireNeedle,
+      [requireNeedle, 'const catalogRouter = require("./routes/catalog");'].join("\n"),
+    );
+    source = source.replace(
+      mountNeedle,
+      [mountNeedle, '  app.use("/api/catalog", catalogRouter);'].join("\n"),
+    );
+  }
+
+  // CLOSEDLOOP pack-observability (FEA-1224): run the filesystem pack scanner
+  // at startup, immediately after the existing plan backfill. Best-effort —
+  // a scanner failure must never block boot.
+  if (!source.includes("runPackScanner")) {
+    const backfillNeedle = [
+      '    require("./lib/plan-backfill").runClaudePlanBackfill(dbModule.db);',
+      "  } catch (e) {",
+      '    console.warn("[plans] backfill failed:", e && e.message);',
+      "  }",
+    ].join("\n");
+    if (!source.includes(backfillNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the plan-backfill block anchor (pack scanner, FEA-1224).`,
+      );
+    }
+    source = source.replace(
+      backfillNeedle,
+      [
+        backfillNeedle,
+        "  try {",
+        '    require("./lib/pack-scanner").runPackScanner(dbModule.db);',
+        "  } catch (e) {",
+        '    console.warn("[packs] scanner failed:", e && e.message);',
+        "  }",
+      ].join("\n"),
+    );
+  }
+
+  // CLOSEDLOOP pack catalog (FEA-1314): seed + first fetch at startup,
+  // immediately after the pack scanner. Best-effort — failures don't block
+  // boot. Order matters: this patch anchors on the pack-scanner block above,
+  // so it must run AFTER that patch has been applied to `source`.
+  if (!source.includes("upsertCatalogSeed")) {
+    const scannerNeedle = [
+      '    require("./lib/pack-scanner").runPackScanner(dbModule.db);',
+      "  } catch (e) {",
+      '    console.warn("[packs] scanner failed:", e && e.message);',
+      "  }",
+    ].join("\n");
+    if (!source.includes(scannerNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the pack-scanner block anchor (catalog startup, FEA-1314).`,
+      );
+    }
+    source = source.replace(
+      scannerNeedle,
+      [
+        scannerNeedle,
+        "  try {",
+        '    const catalogSeed = require("./lib/catalog-seed.json");',
+        '    require("./lib/catalog-store").upsertCatalogSeed(dbModule.db, catalogSeed);',
+        '    require("./lib/catalog-fetcher").runCatalogFetch(dbModule.db).catch(() => {});',
+        '    require("./lib/catalog-fetcher").scheduleCatalogFetch(dbModule.db);',
+        "  } catch (e) {",
+        '    console.warn("[catalog] startup failed:", e && e.message);',
+        "  }",
+      ].join("\n"),
+    );
+  }
+
   writeFileSync(file, source, "utf8");
 }
 
@@ -809,6 +1038,55 @@ function patchDbFile(file) {
         '  require("./lib/plan-store").ensurePlanSchema(db);',
         "} catch (e) {",
         '  console.warn("[plans] schema init failed:", e && e.message);',
+        "}",
+        "",
+        exportNeedle,
+      ].join("\n"),
+    );
+  }
+
+  // CLOSEDLOOP pack-observability (FEA-1224): ensure the three pack-inventory
+  // tables (agent_packs, skills, project_pack_associations) exist at startup.
+  // Idempotent CREATE TABLE IF NOT EXISTS — never an ALTER migration.
+  if (!source.includes("ensurePackSchema")) {
+    const exportNeedle =
+      "module.exports = { db, stmts, DB_PATH, DEFAULT_PRICING };";
+    if (!source.includes(exportNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the db module.exports tail (pack schema, FEA-1224).`,
+      );
+    }
+    source = source.replace(
+      exportNeedle,
+      [
+        "try {",
+        '  require("./lib/pack-store").ensurePackSchema(db);',
+        "} catch (e) {",
+        '  console.warn("[packs] schema init failed:", e && e.message);',
+        "}",
+        "",
+        exportNeedle,
+      ].join("\n"),
+    );
+  }
+
+  // CLOSEDLOOP pack catalog (FEA-1314): ensure the catalog tables exist at
+  // startup alongside the pack inventory tables.
+  if (!source.includes("ensureCatalogSchema")) {
+    const exportNeedle =
+      "module.exports = { db, stmts, DB_PATH, DEFAULT_PRICING };";
+    if (!source.includes(exportNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the db module.exports tail (catalog schema, FEA-1314).`,
+      );
+    }
+    source = source.replace(
+      exportNeedle,
+      [
+        "try {",
+        '  require("./lib/catalog-store").ensureCatalogSchema(db);',
+        "} catch (e) {",
+        '  console.warn("[catalog] schema init failed:", e && e.message);',
         "}",
         "",
         exportNeedle,
@@ -1022,6 +1300,34 @@ function patchClientSource() {
     path.join(planModulesDir, "client", "closedloop-host-flags.ts"),
     path.join(sourceClientDir, "src", "lib", "closedloop-host-flags.ts"),
   );
+  // CLOSEDLOOP pack-observability (FEA-1224): drop the four pack/skill/tool/
+  // sub-agent pages into the pinned client before Vite build. Routes + NavLink
+  // entries are added below via the declarative edits array.
+  for (const p of PACK_CLIENT_PAGES) {
+    cpSync(
+      path.join(packModulesDir, "client", `${p}.tsx`),
+      path.join(sourceClientDir, "src", "pages", `${p}.tsx`),
+    );
+  }
+  // CLOSEDLOOP pack catalog (FEA-1314): tab shell + catalog cards + install
+  // modal + sparkline alongside the FEA-1224 pages. Packs.tsx (copied above)
+  // is the wrapper that renders <PacksLayout/>.
+  for (const p of PACK_CATALOG_CLIENT_PAGES) {
+    cpSync(
+      path.join(packModulesDir, "client", `${p}.tsx`),
+      path.join(sourceClientDir, "src", "pages", `${p}.tsx`),
+    );
+  }
+  cpSync(
+    path.join(packModulesDir, "client", "PackInstallModalUtils.ts"),
+    path.join(sourceClientDir, "src", "pages", "PackInstallModalUtils.ts"),
+  );
+  // CLOSEDLOOP embed integration: replace selected upstream client files with
+  // repo-owned overlays. Extend CLIENT_FULL_FILE_OVERRIDES for future host
+  // patches that should fully override an upstream file at build time.
+  for (const override of CLIENT_FULL_FILE_OVERRIDES) {
+    cpSync(override.from, path.join(sourceClientDir, override.to));
+  }
   const legacyPlansNavLink = [
     "        })}",
     '        <NavLink',
@@ -1225,6 +1531,87 @@ function patchClientSource() {
       ],
       replace: plansNavLink,
     },
+    // CLOSEDLOOP pack-observability (FEA-1224): four ungated top-level nav
+    // entries (Skills, Tools, Sub-agents, Packs). Labels use the i18next key
+    // fallback (t(key) returns key verbatim if no translation exists), so the
+    // bare strings render correctly without touching the upstream locale
+    // bundles.
+    {
+      rel: "src/App.tsx",
+      guard: 'import { Skills } from "./pages/Skills";',
+      find: 'import { Plans } from "./pages/Plans";',
+      replace: [
+        'import { Plans } from "./pages/Plans";',
+        'import { Skills } from "./pages/Skills";',
+        'import { Tools } from "./pages/Tools";',
+        'import { SubAgents } from "./pages/SubAgents";',
+        'import { Packs } from "./pages/Packs";',
+      ].join("\n"),
+    },
+    {
+      rel: "src/App.tsx",
+      guard: '<Route path="skills" element={<Skills />} />',
+      find: '          <Route path="plans" element={isPlanExtractionEnabled() ? <Plans /> : <NotFound />} />',
+      replace: [
+        '          <Route path="plans" element={isPlanExtractionEnabled() ? <Plans /> : <NotFound />} />',
+        '          <Route path="skills" element={<Skills />} />',
+        '          <Route path="tools" element={<Tools />} />',
+        '          <Route path="agents" element={<SubAgents />} />',
+        '          <Route path="packs" element={<Packs />} />',
+        '          <Route path="packs/:packId" element={<PackDetail />} />',
+      ].join("\n"),
+    },
+    // FEA-1314 v4 (separately patched): the packs/:packId route was added
+    // to the FEA-1224 patch above, but on existing patched sources where
+    // the FEA-1224 patch had already fired (guard already matches), the
+    // whole edit short-circuits and the new packs/:packId line never lands.
+    // This dedicated entry — guarded on the packs/:packId line itself — is
+    // surgical and idempotent: it adds JUST the missing route line after
+    // the packs route, regardless of whether the FEA-1224 patch fired
+    // before or after v4 was introduced.
+    {
+      rel: "src/App.tsx",
+      guard: 'path="packs/:packId"',
+      find: '          <Route path="packs" element={<Packs />} />',
+      replace:
+        '          <Route path="packs" element={<Packs />} />\n          <Route path="packs/:packId" element={<PackDetail />} />',
+    },
+    // FEA-1314 v4: import the PackDetail component referenced in the
+    // /packs/:packId route. Anchors AFTER the Packs import added above so
+    // re-runs are idempotent.
+    {
+      rel: "src/App.tsx",
+      guard: 'import { PackDetail } from "./pages/PackDetail"',
+      find: 'import { Packs } from "./pages/Packs";',
+      replace:
+        'import { Packs } from "./pages/Packs";\nimport { PackDetail } from "./pages/PackDetail";',
+    },
+    {
+      rel: "src/components/Sidebar.tsx",
+      guard: "Sparkles,",
+      find: '  FileText,\n} from "lucide-react";',
+      replace: [
+        "  FileText,",
+        "  Sparkles,",
+        "  Wrench,",
+        "  Users,",
+        "  Package,",
+        '} from "lucide-react";',
+      ].join("\n"),
+    },
+    {
+      rel: "src/components/Sidebar.tsx",
+      guard: 'to: "/skills", icon: Sparkles',
+      find: '  { to: "/settings", icon: Settings, key: "nav:settings" },\n] as const;',
+      replace: [
+        '  { to: "/skills", icon: Sparkles, key: "Skills" },',
+        '  { to: "/tools", icon: Wrench, key: "Tools" },',
+        '  { to: "/agents", icon: Users, key: "Sub-agents" },',
+        '  { to: "/packs", icon: Package, key: "Packs" },',
+        '  { to: "/settings", icon: Settings, key: "nav:settings" },',
+        "] as const;",
+      ].join("\n"),
+    },
   ];
 
   for (const e of edits) {
@@ -1345,6 +1732,21 @@ function assertGeneratedTree() {
     );
   }
 
+  // CC-Config MCP discovery: hard-gate the claude.ai-connector patch so a
+  // future upstream bump can't silently drop the closedloop MCP from the
+  // dashboard's MCP panel.
+  if (!existsSync(generatedCcDiscovery)) {
+    throw new Error(
+      "Generated server/lib/cc-discovery.js is missing — upstream layout changed?",
+    );
+  }
+  const ccDiscoverySource = readFileSync(generatedCcDiscovery, "utf8");
+  if (!ccDiscoverySource.includes("claudeAiMcpEverConnected")) {
+    throw new Error(
+      "Generated server/lib/cc-discovery.js is missing the claudeAiMcpEverConnected patch.",
+    );
+  }
+
   const pushSource = readFileSync(generatedPushLib, "utf8");
   if (!pushSource.includes("CCAM_VAPID_KEYS_PATH")) {
     throw new Error(
@@ -1377,9 +1779,8 @@ function assertGeneratedTree() {
   }
   if (
     !serverIndex.includes('require("./routes/plans")') ||
-    !serverIndex.includes(
-      '  app.use("/api/plans", plansRouter);\n  app.get("/api/openapi.json", (_req, res) => {',
-    )
+    !serverIndex.includes('app.use("/api/plans", plansRouter)') ||
+    !serverIndex.includes('app.get("/api/openapi.json"')
   ) {
     throw new Error(
       "Generated server/index.js is missing the ungated /api/plans route wiring (FEA-1189).",
@@ -1404,6 +1805,225 @@ function assertGeneratedTree() {
       "Generated server/routes/hooks.js is missing the live hook plan capture wiring (FEA-1189).",
     );
   }
+
+  // CLOSEDLOOP pack-observability hard-gates (FEA-1224): a future upstream
+  // bump that breaks any anchor must fail the build, not silently drop a page.
+  for (const m of PACK_MODULES) {
+    if (!existsSync(path.join(generatedRootDir, "server", "lib", `${m}.js`))) {
+      throw new Error(
+        `Generated server/lib/${m}.js missing (pack observability, FEA-1224).`,
+      );
+    }
+  }
+  for (const routeFile of ["packs.js", "skills.js"]) {
+    if (
+      !existsSync(path.join(generatedRootDir, "server", "routes", routeFile))
+    ) {
+      throw new Error(
+        `Generated server/routes/${routeFile} missing (pack observability, FEA-1224).`,
+      );
+    }
+  }
+  if (!dbSource.includes("ensurePackSchema")) {
+    throw new Error(
+      "Generated server/db.js is missing the pack-schema init (FEA-1224).",
+    );
+  }
+  if (
+    !serverIndex.includes('require("./routes/packs")') ||
+    !serverIndex.includes('require("./routes/skills")') ||
+    !serverIndex.includes('app.use("/api/packs", packsRouter)') ||
+    !serverIndex.includes('app.use("/api/skills", skillsRouter)')
+  ) {
+    throw new Error(
+      "Generated server/index.js is missing the /api/packs or /api/skills route wiring (FEA-1224).",
+    );
+  }
+  if (!serverIndex.includes("runPackScanner")) {
+    throw new Error(
+      "Generated server/index.js is missing the pack scanner startup call (FEA-1224).",
+    );
+  }
+  // FEA-1314 v8: per-session usage rollup on Pack detail. Hard-gate the
+  // server-side endpoint + the pack-store helper so a future patch can't
+  // silently drop them.
+  const packsRouteSource = readFileSync(
+    path.join(generatedRootDir, "server", "routes", "packs.js"),
+    "utf8",
+  );
+  if (!packsRouteSource.includes("/:pack_id/sessions")) {
+    throw new Error(
+      "Generated server/routes/packs.js is missing the /sessions endpoint (FEA-1314 v8).",
+    );
+  }
+  const packStoreSource = readFileSync(
+    path.join(generatedRootDir, "server", "lib", "pack-store.js"),
+    "utf8",
+  );
+  if (
+    !packStoreSource.includes("listPackSessions") ||
+    !packStoreSource.includes("collectPackPaths")
+  ) {
+    throw new Error(
+      "Generated server/lib/pack-store.js is missing listPackSessions / collectPackPaths (FEA-1314 v8).",
+    );
+  }
+  // Client-side: the four new pages must be present in the patched upstream
+  // client source so Vite's bundle resolves their imports. The pre-Vite copy
+  // puts them at src/pages/<Name>.tsx; if any is missing the Vite step would
+  // have already failed. We hard-gate the source files plus the App.tsx route
+  // wiring as belt-and-suspenders.
+  for (const pageName of PACK_CLIENT_PAGES) {
+    if (
+      !existsSync(path.join(sourceClientDir, "src", "pages", `${pageName}.tsx`))
+    ) {
+      throw new Error(
+        `Patched client source is missing src/pages/${pageName}.tsx (FEA-1224).`,
+      );
+    }
+  }
+  const appSource = readFileSync(
+    path.join(sourceClientDir, "src", "App.tsx"),
+    "utf8",
+  );
+  for (const route of ["skills", "tools", "agents", "packs"]) {
+    if (!appSource.includes(`<Route path="${route}"`)) {
+      throw new Error(
+        `Patched client src/App.tsx is missing the /${route} route (FEA-1224).`,
+      );
+    }
+  }
+  // FEA-1314 v4: the packs/:packId detail route + PackDetail import must be
+  // present in App.tsx. v3 → v4 had a silent-fail bug where the FEA-1224
+  // patch's guard short-circuited the new :packId line; this hard-gate
+  // catches that class of regression next time.
+  if (!appSource.includes('<Route path="packs/:packId"')) {
+    throw new Error(
+      "Patched client src/App.tsx is missing the /packs/:packId detail route (FEA-1314 v4).",
+    );
+  }
+  if (!appSource.includes('import { PackDetail }')) {
+    throw new Error(
+      "Patched client src/App.tsx is missing the PackDetail import (FEA-1314 v4).",
+    );
+  }
+  const sidebarSource = readFileSync(
+    path.join(sourceClientDir, "src", "components", "Sidebar.tsx"),
+    "utf8",
+  );
+  if (
+    !sidebarSource.includes('to: "/skills", icon: Sparkles') ||
+    !sidebarSource.includes('to: "/packs", icon: Package')
+  ) {
+    throw new Error(
+      "Patched client src/components/Sidebar.tsx is missing the new NAV_KEYS entries (FEA-1224).",
+    );
+  }
+
+  // CLOSEDLOOP pack catalog hard-gates (FEA-1314): every catalog module,
+  // route, seed, and client file must be present in the generated tree.
+  for (const m of ["catalog-store", "catalog-fetcher", "install-orchestrator"]) {
+    if (!existsSync(path.join(generatedRootDir, "server", "lib", `${m}.js`))) {
+      throw new Error(
+        `Generated server/lib/${m}.js missing (catalog, FEA-1314).`,
+      );
+    }
+  }
+  if (
+    !existsSync(path.join(generatedRootDir, "server", "routes", "catalog.js"))
+  ) {
+    throw new Error("Generated server/routes/catalog.js missing (FEA-1314).");
+  }
+  if (
+    !existsSync(path.join(generatedRootDir, "server", "lib", "catalog-seed.json"))
+  ) {
+    throw new Error(
+      "Generated server/lib/catalog-seed.json missing (FEA-1314).",
+    );
+  }
+  if (!dbSource.includes("ensureCatalogSchema")) {
+    throw new Error(
+      "Generated server/db.js is missing the catalog-schema init (FEA-1314).",
+    );
+  }
+  if (
+    !serverIndex.includes('require("./routes/catalog")') ||
+    !serverIndex.includes('app.use("/api/catalog", catalogRouter)')
+  ) {
+    throw new Error(
+      "Generated server/index.js is missing the /api/catalog route wiring (FEA-1314).",
+    );
+  }
+  if (
+    !serverIndex.includes("upsertCatalogSeed") ||
+    !serverIndex.includes("runCatalogFetch")
+  ) {
+    throw new Error(
+      "Generated server/index.js is missing the catalog seed/fetch startup wiring (FEA-1314).",
+    );
+  }
+  for (const pageName of PACK_CATALOG_CLIENT_PAGES) {
+    if (
+      !existsSync(path.join(sourceClientDir, "src", "pages", `${pageName}.tsx`))
+    ) {
+      throw new Error(
+        `Patched client source is missing src/pages/${pageName}.tsx (FEA-1314).`,
+      );
+    }
+  }
+}
+
+/**
+ * Patch cc-discovery.js to ALSO surface MCP servers that live in
+ * `~/.claude.json` under the `claudeAiMcpEverConnected` array. These are the
+ * "claude.ai connectors" (Mintlify, Airtable, ClosedLoop, Asana, etc.) that
+ * Claude Code resolves via the claude.ai web auth handshake — their full
+ * configs (URLs, credentials) live server-side, so locally we only know names.
+ * Upstream's `readMcpServers()` only scans `mcpServers` dicts and never sees
+ * them. We append them to `out.user` with kind="remote" so the CC-Config tab's
+ * MCP panel lists them alongside locally-configured stdio/http servers.
+ *
+ * Idempotent: presence-checked on the "claudeAiMcpEverConnected" string.
+ */
+function patchCcDiscovery(file) {
+  let source = readFileSync(file, "utf8");
+
+  if (source.includes("claudeAiMcpEverConnected")) {
+    return; // already patched
+  }
+
+  const needle = "  return out;\n}\n\nfunction summarizeMcpDef(def) {";
+  if (!source.includes(needle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the readMcpServers return + summarizeMcpDef boundary.`,
+    );
+  }
+  const replacement = [
+    "  // ClosedLoop patch: surface claude.ai-managed remote connectors (the",
+    "  // 7+ entries Claude Code resolves via the claude.ai web auth handshake;",
+    "  // their full configs live server-side, locally we only see the names).",
+    "  if (claudeJson.ok && claudeJson.data) {",
+    "    const remoteNames = claudeJson.data.claudeAiMcpEverConnected;",
+    "    if (Array.isArray(remoteNames)) {",
+    '      const already = new Set(out.user.map((s) => s.name));',
+    "      for (const name of remoteNames) {",
+    '        if (typeof name !== "string" || already.has(name)) continue;',
+    "        out.user.push({",
+    "          name,",
+    '          source: "~/.claude.json (claudeAiMcpEverConnected — claude.ai connector)",',
+    '          kind: "remote",',
+    "        });",
+    "      }",
+    "    }",
+    "  }",
+    "  return out;",
+    "}",
+    "",
+    "function summarizeMcpDef(def) {",
+  ].join("\n");
+  source = source.replace(needle, replacement);
+
+  writeFileSync(file, source, "utf8");
 }
 
 function patchPushFile(file) {

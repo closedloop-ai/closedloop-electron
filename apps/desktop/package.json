@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "version": "0.15.37",
+  "version": "0.15.59",
   "description": "ClosedLoop Desktop",
   "author": "ClosedLoop AI <support@closedloop.ai>",
   "private": true,
@@ -14,10 +14,12 @@
     "prebuild": "node -e \"const{execSync:e}=require('child_process'),{writeFileSync:w}=require('fs');const h=e('git rev-parse HEAD').toString().trim();w('src/shared/build-info.ts','// AUTO-GENERATED — do not edit\\nexport const BUILD_COMMIT_HASH = \\\"'+h+'\\\";\\n');\"",
     "build": "pnpm clean:dist && pnpm prebuild && tsc -p tsconfig.json && pnpm build:agent-monitor",
     "build:agent-monitor": "node scripts/build-agent-monitor.mjs",
+    "dashboard:reset": "node scripts/reset-dashboard-db.mjs",
+    "dashboard:reset-packs": "node scripts/reset-dashboard-db.mjs --packs-only",
     "stage:package": "node scripts/stage-packaging-app.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src/",
-    "test": "tsx --test test/*.test.ts",
+    "test": "tsx --test test/*.test.ts && node --test \"scripts/agent-monitor-packs/__tests__/*.test.js\"",
     "package": "pnpm clean:package && pnpm build && pnpm stage:package && node scripts/run-electron-builder.mjs",
     "release": "pnpm clean:package && pnpm build && pnpm stage:package && node scripts/run-electron-builder.mjs --publish always"
   },
