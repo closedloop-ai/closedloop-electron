@@ -37,6 +37,7 @@ import { registerSymphonyChatHistoryRoutes } from "./operations/symphony-chat-hi
 import { registerSymphonyJudgesRoutes } from "./operations/symphony-judges.js";
 import { registerSymphonyKillRoutes } from "./operations/symphony-kill.js";
 import { registerSymphonyLoopRoutes, type WorktreeProvider } from "./operations/symphony-loop.js";
+import type { LoopSchedulerContext } from "../main/loop-scheduler-context.js";
 import { registerSymphonyLogsRoutes } from "./operations/symphony-logs.js";
 import { registerSymphonyPlanRoutes } from "./operations/symphony-plan.js";
 import { registerSymphonySessionRoutes } from "./operations/symphony-sessions.js";
@@ -78,6 +79,8 @@ export interface GatewayRouterOptions {
   jobStore?: JobStore;
   worktreeProvider?: WorktreeProvider;
   loopTokenStore?: LoopTokenStore;
+  /** Per-loop heartbeat/refresh/sleep timer container owned by the gateway. */
+  schedulers: LoopSchedulerContext;
   retrySpawnDeps?: RetrySpawnDeps;
   getGatewayId: () => string;
   getComputeTargetId?: () => string | null;
@@ -250,6 +253,7 @@ export class GatewayRouter {
     registerSymphonyLoopRoutes(
       this.operationDispatcher,
       this.options.getAllowedDirectories,
+      this.options.schedulers,
       this.options.getApiOrigin,
       this.options.jobStore,
       this.options.getWebAppOrigin ?? (() => this.options.webAppOrigin),

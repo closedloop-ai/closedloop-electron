@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 import { LoopCommand } from "@closedloop-ai/loops-api/commands";
+import { LoopSchedulerContext } from "../src/main/loop-scheduler-context.js";
 
 // ---------------------------------------------------------------------------
 // Minimal gateway server that records requests
@@ -160,6 +161,7 @@ beforeEach(async () => {
   registerSymphonyLoopRoutes(
     fakeDispatcher as never,
     () => [ssrfAllowDir],
+    new LoopSchedulerContext(),
     () => `http://127.0.0.1:${gatewayPort}`,
     undefined // no jobStore
   );
@@ -187,6 +189,7 @@ test("returns 503 when getApiOrigin is absent", async () => {
     registerSymphonyLoopRoutes(
       { register: (m: string, p: string, h: OperationHandler) => freshRoutes.push({ method: m, path: p, handler: h }) } as never,
       () => [allowDir],
+      new LoopSchedulerContext(),
       undefined, // no getApiOrigin
       undefined
     );

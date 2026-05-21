@@ -55,6 +55,10 @@ export interface ComputeTargetCapabilities {
   commandSigning?: boolean;
   /** Desktop requires browser-origin Ed25519 command signatures for cloud commands. */
   commandSigningRequired?: boolean;
+  /** Desktop supports the loop runner token-refresh protocol. */
+  loopRunnerRefreshSupported?: boolean;
+  /** Desktop supports the loop runner heartbeat protocol. */
+  loopRunnerHeartbeatSupported?: boolean;
 }
 
 export const EMPTY_CAPABILITIES: ComputeTargetCapabilities = {
@@ -155,7 +159,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   onboardingPopupDismissedPermanent: false,
   cloudCommandsPaused: false,
   cloudConnectionEnabled: true,
-  agentMonitorEnabled: false,
+  agentMonitorEnabled: true,
   planExtractionEnabled: false,
   commandSigningEnforcementEnabled: false,
   defaultApprovalTier: "high",

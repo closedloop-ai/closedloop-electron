@@ -159,6 +159,8 @@ import {
 import { isSecurityUpgradeProvisioned } from "./security-upgrade-result.js";
 import { isDesktopSetupCompleteFromState } from "./setup-readiness.js";
 import { PendingCommandKeyNotifier } from "./pending-command-key-notifier.js";
+import * as loopSleepRecovery from "./loop-sleep-recovery.js";
+import { LoopSchedulerContext } from "./loop-scheduler-context.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -200,6 +202,7 @@ export class DesktopApplication {
   private readonly jobStore: JobStore;
   private readonly recovery: GatewayRecoveryManager;
   private readonly bootRecovery: BootRecoveryService;
+  private readonly schedulers: LoopSchedulerContext;
   private readonly gatewayAuthToken: string;
   private readonly legacyGatewayId: string;
   private readonly sessionStore: LocalSessionStore;
@@ -309,6 +312,9 @@ export class DesktopApplication {
       app.getPath("userData"),
     );
     this.legacyGatewayId = gatewayIdentityStore.loadSync();
+    // Initialized before the gateway server so the server constructor can take
+    // ownership of the same instance the BootRecoveryService is later given.
+    this.schedulers = new LoopSchedulerContext();
     this.server = DesktopGatewayServer.createDefault(
       this.settingsStore.getWebAppOrigin(),
       () => (this.isNoAuthMode() ? undefined : this.gatewayAuthToken),
@@ -340,6 +346,7 @@ export class DesktopApplication {
         this.cloudStatus.state === "online" ? this.cloudStatus.targetId : null,
       (payload) => this.handleSecurityUpgradeCommand(payload),
       () => this.isDesktopSetupComplete(),
+      this.schedulers,
     );
     this.commandExecutor = new CloudCommandExecutor({
       getGatewayPort: () => this.server.getActivePort(),
@@ -528,6 +535,7 @@ export class DesktopApplication {
       getApiOrigin: () => this.settingsStore.getApiOrigin(),
       getAllowedDirectories: () => this.getAllowedDirectoriesFromSandbox(),
       loopTokenStore: this.loopTokenStore,
+      schedulers: this.schedulers,
     });
     this.registerIpcHandlers();
     this.registerOnboardingFileOpenHandler();
@@ -573,6 +581,10 @@ export class DesktopApplication {
     if (bootSandbox?.trim()) {
       await seedReposConfig(bootSandbox);
     }
+
+    // Register the sleep/wake recovery listener so active loops refresh their
+    // tokens and send heartbeats after the system wakes from sleep.
+    loopSleepRecovery.init();
 
     // Independent of the gateway, but fully feature-gated. When enabled, start
     // the sidecar fire-and-forget BEFORE the gateway try-block so a
@@ -1261,10 +1273,14 @@ export class DesktopApplication {
   }
 
   private getLocalCapabilities(): ReturnType<typeof buildCommandSigningCapabilities> {
-    return buildCommandSigningCapabilities({
-      commandSigningEnforcementEnabled:
-        this.settingsStore.getCommandSigningEnforcementEnabled(),
-    });
+    return {
+      ...buildCommandSigningCapabilities({
+        commandSigningEnforcementEnabled:
+          this.settingsStore.getCommandSigningEnforcementEnabled(),
+      }),
+      loopRunnerRefreshSupported: true,
+      loopRunnerHeartbeatSupported: true,
+    };
   }
 
   private isCommandSigningEnforced(): boolean {
@@ -1638,7 +1654,7 @@ export class DesktopApplication {
     }
 
     this.shuttingDown = true;
-    this.bootRecovery.dispose();
+    this.bootRecovery[Symbol.dispose]();
     await this.bootRecovery.quiesce(1_000);
     this.queueStatsTelemetryDebounce.cancel();
     this.commandKeyReconciler.stop();
