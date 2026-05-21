@@ -1,0 +1,129 @@
+{
+  "seed_version": 1,
+  "packs": [
+    {
+      "pack_id": "superpowers",
+      "display_name": "Superpowers",
+      "category": "methodology",
+      "github_url": "https://github.com/obra/superpowers",
+      "description": "Methodology + skills framework: brainstorming, TDD, systematic debugging, subagent dev, code review. Works across Claude Code, Codex, Cursor, OpenCode, Gemini.",
+      "harnesses": ["claude", "codex"],
+      "install_commands": {
+        "claude": "git clone https://github.com/obra/superpowers ~/.claude/skills/superpowers && cd ~/.claude/skills/superpowers && (./install 2>/dev/null || ./setup 2>/dev/null || echo 'No installer script found — see README')"
+      },
+      "placeholder_reason": "Install path unconfirmed against upstream; verify ./install vs ./setup script name before relying on auto-install."
+    },
+    {
+      "pack_id": "ecc",
+      "display_name": "Everything Claude Code",
+      "category": "operator-system",
+      "github_url": "https://github.com/everything-claude-code/ecc",
+      "description": "Cross-harness operator system: skills, instincts, memory, security, MCP configs, Claude/Codex/Cursor/OpenCode adapters.",
+      "harnesses": ["claude", "codex", "cursor"],
+      "placeholder_reason": "ECC is large and opinionated — recommended to read the README before installing. Install path varies per harness."
+    },
+    {
+      "pack_id": "gstack",
+      "display_name": "gstack",
+      "category": "workflow-pack",
+      "github_url": "https://github.com/garrytan/gstack",
+      "description": "Garry Tan's opinionated Claude Code setup: CEO/designer/eng-manager/release/QA/security workflows. Includes /autoplan, /ship, /qa, /cso, /review, /codex.",
+      "harnesses": ["claude", "codex"],
+      "install_commands": {
+        "claude": "git clone https://github.com/garrytan/gstack ~/.claude/skills/gstack && cd ~/.claude/skills/gstack && ./setup",
+        "codex": "git clone https://github.com/garrytan/gstack ~/.claude/skills/gstack && cd ~/.claude/skills/gstack && ./setup && ./setup --host codex"
+      },
+      "uninstall_commands": {
+        "claude": "rm -rf ~/.claude/skills/gstack",
+        "codex": "find ~/.codex/skills -name 'gstack-*' -delete && rm -f ~/.codex/skills/gstack"
+      }
+    },
+    {
+      "pack_id": "bmad-method",
+      "display_name": "BMAD Method",
+      "category": "framework",
+      "github_url": "https://github.com/bmad-code-org/BMAD-METHOD",
+      "description": "Full agile AI-dev framework: PM/architect/dev/QA agents, PRDs, architecture, stories, acceptance criteria, lifecycle workflow.",
+      "harnesses": ["claude", "codex"],
+      "install_commands": {
+        "claude": "npx bmad-method install",
+        "codex": "npx bmad-method install"
+      },
+      "uninstall_commands": {
+        "claude": "rm -rf ./_bmad ./_bmad-output ./.agents",
+        "codex": "rm -rf ./_bmad ./_bmad-output ./.agents"
+      },
+      "install_notes": "Runs inside the current project directory — installs are per-project."
+    },
+    {
+      "pack_id": "awesome-claude-code",
+      "display_name": "Awesome Claude Code",
+      "category": "catalog",
+      "github_url": "https://github.com/hesreallyhim/awesome-claude-code",
+      "description": "Curated directory of Claude Code skills, hooks, commands, orchestrators, plugins, tools. Best discovery hub — not a pack to install wholesale.",
+      "harnesses": ["claude"],
+      "placeholder_reason": "Catalog repo, not an installable pack. Open in browser to browse."
+    },
+    {
+      "pack_id": "claude-code-router",
+      "display_name": "Claude Code Router",
+      "category": "router",
+      "github_url": "https://github.com/musistudio/claude-code-router",
+      "description": "Route Claude Code through OpenRouter / DeepSeek / Ollama / Gemini and other model providers.",
+      "harnesses": ["claude"],
+      "install_commands": {
+        "claude": "npm install -g @musistudio/claude-code-router"
+      },
+      "uninstall_commands": {
+        "claude": "npm uninstall -g @musistudio/claude-code-router"
+      }
+    },
+    {
+      "pack_id": "superclaude",
+      "display_name": "SuperClaude",
+      "category": "framework",
+      "github_url": "https://github.com/SuperClaude-Org/SuperClaude_Framework",
+      "description": "Configuration framework for Claude Code: commands, personas, workflows. Older but widely referenced.",
+      "harnesses": ["claude"],
+      "install_commands": {
+        "claude": "pipx install SuperClaude && SuperClaude install"
+      },
+      "uninstall_commands": {
+        "claude": "SuperClaude uninstall && pipx uninstall SuperClaude"
+      }
+    },
+    {
+      "pack_id": "voltagent-subagents",
+      "display_name": "VoltAgent: Awesome Claude Code Subagents",
+      "category": "subagent-collection",
+      "github_url": "https://github.com/VoltAgent/awesome-claude-code-subagents",
+      "description": "100+ ready-made Claude Code subagents covering frontend, backend, devops, data, security, and more.",
+      "harnesses": ["claude"],
+      "install_commands": {
+        "claude": "git clone https://github.com/VoltAgent/awesome-claude-code-subagents ~/.claude/skills/voltagent-subagents"
+      },
+      "uninstall_commands": {
+        "claude": "rm -rf ~/.claude/skills/voltagent-subagents"
+      },
+      "install_notes": "Cherry-pick — installing all 100+ subagents at once gets noisy and expensive."
+    },
+    {
+      "pack_id": "openai-skills",
+      "display_name": "OpenAI Skills",
+      "category": "catalog",
+      "github_url": "https://github.com/openai/openai-skills",
+      "description": "Official Codex skills catalog and reference implementation. Canonical SKILL.md format with progressive loading.",
+      "harnesses": ["codex"],
+      "placeholder_reason": "Canonical Codex skill source; install path varies depending on which skills you want. See README."
+    },
+    {
+      "pack_id": "alirezarezvani-claude-skills",
+      "display_name": "claude-skills (alirezarezvani)",
+      "category": "catalog",
+      "github_url": "https://github.com/alirezarezvani/claude-skills",
+      "description": "313+ skills and plugins across Claude Code, Codex, Gemini, Cursor, and OpenCode.",
+      "harnesses": ["claude", "codex", "cursor"],
+      "placeholder_reason": "Multi-harness skill catalog; install is per-skill rather than all-at-once."
+    }
+  ]
+}

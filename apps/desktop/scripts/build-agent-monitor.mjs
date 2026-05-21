@@ -176,8 +176,28 @@ const generatedImportHistory = path.join(
 // and server/index.js are wired via the same idempotent string-anchor +
 // hard-gate approach as the plan patches.
 const packModulesDir = path.join(appDir, "scripts", "agent-monitor-packs");
-const PACK_MODULES = ["pack-store", "pack-scanner"];
+const PACK_MODULES = [
+  "pack-store",
+  "pack-scanner",
+  // CLOSEDLOOP catalog (FEA-1314 / PLN-657): discovery catalog of popular
+  // agent packs with live GitHub stats + 1-click install. catalog-route is
+  // copied separately into server/routes/ (alongside packs-route/skills-route).
+  "catalog-store",
+  "catalog-fetcher",
+  "install-orchestrator",
+];
 const PACK_CLIENT_PAGES = ["Skills", "Tools", "SubAgents", "Packs"];
+// CLOSEDLOOP catalog (FEA-1314): extra client modules that need to ship with
+// the Packs page (tab shell + catalog cards + install modal + sparkline).
+// Packs.tsx itself is the wrapper that renders <PacksLayout/>.
+const PACK_CATALOG_CLIENT_PAGES = [
+  "PacksLayout",
+  "PacksInstalled",
+  "PacksCatalog",
+  "CatalogCard",
+  "InstallModal",
+  "Sparkline",
+];
 
 // Host-owned pricing defaults for model IDs we ingest from non-Claude harnesses.
 // These keep cost stats working without requiring users to hand-enter common
@@ -325,7 +345,12 @@ function currentStamp() {
     ...PACK_MODULES.map((m) => path.join(packModulesDir, `${m}.js`)),
     path.join(packModulesDir, "packs-route.js"),
     path.join(packModulesDir, "skills-route.js"),
+    path.join(packModulesDir, "catalog-route.js"),
+    path.join(packModulesDir, "catalog-seed.json"),
     ...PACK_CLIENT_PAGES.map((p) =>
+      path.join(packModulesDir, "client", `${p}.tsx`),
+    ),
+    ...PACK_CATALOG_CLIENT_PAGES.map((p) =>
       path.join(packModulesDir, "client", `${p}.tsx`),
     ),
   ]) {
@@ -429,6 +454,18 @@ function materializeRuntimeTree() {
   cpSync(
     path.join(packModulesDir, "skills-route.js"),
     path.join(generatedRootDir, "server", "routes", "skills.js"),
+  );
+  // CLOSEDLOOP pack catalog (FEA-1314): catalog route + the seed JSON the
+  // store reads at startup. The seed lives alongside the store under
+  // server/lib so a `require("./catalog-seed.json")` from catalog-store
+  // resolves cleanly in the generated tree.
+  cpSync(
+    path.join(packModulesDir, "catalog-route.js"),
+    path.join(generatedRootDir, "server", "routes", "catalog.js"),
+  );
+  cpSync(
+    path.join(packModulesDir, "catalog-seed.json"),
+    path.join(generatedLibDir, "catalog-seed.json"),
   );
   patchImportHistory(generatedImportHistory);
   mkdirSync(path.join(generatedRootDir, "client"), { recursive: true });
@@ -725,6 +762,27 @@ function patchServerIndex(file) {
     );
   }
 
+  // CLOSEDLOOP pack catalog (FEA-1314): register /api/catalog route + seed
+  // the catalog table + kick off the first GitHub fetch at startup. The
+  // fetch is async and best-effort — boot doesn't wait on it.
+  if (!source.includes('require("./routes/catalog")')) {
+    const requireNeedle = 'const packsRouter = require("./routes/packs");';
+    const mountNeedle = '  app.use("/api/packs", packsRouter);';
+    if (!source.includes(requireNeedle) || !source.includes(mountNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the packs-router require / mount anchors (catalog route, FEA-1314).`,
+      );
+    }
+    source = source.replace(
+      requireNeedle,
+      [requireNeedle, 'const catalogRouter = require("./routes/catalog");'].join("\n"),
+    );
+    source = source.replace(
+      mountNeedle,
+      [mountNeedle, '  app.use("/api/catalog", catalogRouter);'].join("\n"),
+    );
+  }
+
   // CLOSEDLOOP pack-observability (FEA-1224): run the filesystem pack scanner
   // at startup, immediately after the existing plan backfill. Best-effort —
   // a scanner failure must never block boot.
@@ -748,6 +806,38 @@ function patchServerIndex(file) {
         '    require("./lib/pack-scanner").runPackScanner(dbModule.db);',
         "  } catch (e) {",
         '    console.warn("[packs] scanner failed:", e && e.message);',
+        "  }",
+      ].join("\n"),
+    );
+  }
+
+  // CLOSEDLOOP pack catalog (FEA-1314): seed + first fetch at startup,
+  // immediately after the pack scanner. Best-effort — failures don't block
+  // boot. Order matters: this patch anchors on the pack-scanner block above,
+  // so it must run AFTER that patch has been applied to `source`.
+  if (!source.includes("upsertCatalogSeed")) {
+    const scannerNeedle = [
+      '    require("./lib/pack-scanner").runPackScanner(dbModule.db);',
+      "  } catch (e) {",
+      '    console.warn("[packs] scanner failed:", e && e.message);',
+      "  }",
+    ].join("\n");
+    if (!source.includes(scannerNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the pack-scanner block anchor (catalog startup, FEA-1314).`,
+      );
+    }
+    source = source.replace(
+      scannerNeedle,
+      [
+        scannerNeedle,
+        "  try {",
+        '    const catalogSeed = require("./lib/catalog-seed.json");',
+        '    require("./lib/catalog-store").upsertCatalogSeed(dbModule.db, catalogSeed);',
+        '    require("./lib/catalog-fetcher").runCatalogFetch(dbModule.db).catch(() => {});',
+        '    require("./lib/catalog-fetcher").scheduleCatalogFetch(dbModule.db);',
+        "  } catch (e) {",
+        '    console.warn("[catalog] startup failed:", e && e.message);',
         "  }",
       ].join("\n"),
     );
@@ -896,6 +986,30 @@ function patchDbFile(file) {
         '  require("./lib/pack-store").ensurePackSchema(db);',
         "} catch (e) {",
         '  console.warn("[packs] schema init failed:", e && e.message);',
+        "}",
+        "",
+        exportNeedle,
+      ].join("\n"),
+    );
+  }
+
+  // CLOSEDLOOP pack catalog (FEA-1314): ensure the catalog tables exist at
+  // startup alongside the pack inventory tables.
+  if (!source.includes("ensureCatalogSchema")) {
+    const exportNeedle =
+      "module.exports = { db, stmts, DB_PATH, DEFAULT_PRICING };";
+    if (!source.includes(exportNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the db module.exports tail (catalog schema, FEA-1314).`,
+      );
+    }
+    source = source.replace(
+      exportNeedle,
+      [
+        "try {",
+        '  require("./lib/catalog-store").ensureCatalogSchema(db);',
+        "} catch (e) {",
+        '  console.warn("[catalog] schema init failed:", e && e.message);',
         "}",
         "",
         exportNeedle,
@@ -1113,6 +1227,15 @@ function patchClientSource() {
   // sub-agent pages into the pinned client before Vite build. Routes + NavLink
   // entries are added below via the declarative edits array.
   for (const p of PACK_CLIENT_PAGES) {
+    cpSync(
+      path.join(packModulesDir, "client", `${p}.tsx`),
+      path.join(sourceClientDir, "src", "pages", `${p}.tsx`),
+    );
+  }
+  // CLOSEDLOOP pack catalog (FEA-1314): tab shell + catalog cards + install
+  // modal + sparkline alongside the FEA-1224 pages. Packs.tsx (copied above)
+  // is the wrapper that renders <PacksLayout/>.
+  for (const p of PACK_CATALOG_CLIENT_PAGES) {
     cpSync(
       path.join(packModulesDir, "client", `${p}.tsx`),
       path.join(sourceClientDir, "src", "pages", `${p}.tsx`),
@@ -1624,6 +1747,58 @@ function assertGeneratedTree() {
     throw new Error(
       "Patched client src/components/Sidebar.tsx is missing the new NAV_KEYS entries (FEA-1224).",
     );
+  }
+
+  // CLOSEDLOOP pack catalog hard-gates (FEA-1314): every catalog module,
+  // route, seed, and client file must be present in the generated tree.
+  for (const m of ["catalog-store", "catalog-fetcher", "install-orchestrator"]) {
+    if (!existsSync(path.join(generatedRootDir, "server", "lib", `${m}.js`))) {
+      throw new Error(
+        `Generated server/lib/${m}.js missing (catalog, FEA-1314).`,
+      );
+    }
+  }
+  if (
+    !existsSync(path.join(generatedRootDir, "server", "routes", "catalog.js"))
+  ) {
+    throw new Error("Generated server/routes/catalog.js missing (FEA-1314).");
+  }
+  if (
+    !existsSync(path.join(generatedRootDir, "server", "lib", "catalog-seed.json"))
+  ) {
+    throw new Error(
+      "Generated server/lib/catalog-seed.json missing (FEA-1314).",
+    );
+  }
+  if (!dbSource.includes("ensureCatalogSchema")) {
+    throw new Error(
+      "Generated server/db.js is missing the catalog-schema init (FEA-1314).",
+    );
+  }
+  if (
+    !serverIndex.includes('require("./routes/catalog")') ||
+    !serverIndex.includes('app.use("/api/catalog", catalogRouter)')
+  ) {
+    throw new Error(
+      "Generated server/index.js is missing the /api/catalog route wiring (FEA-1314).",
+    );
+  }
+  if (
+    !serverIndex.includes("upsertCatalogSeed") ||
+    !serverIndex.includes("runCatalogFetch")
+  ) {
+    throw new Error(
+      "Generated server/index.js is missing the catalog seed/fetch startup wiring (FEA-1314).",
+    );
+  }
+  for (const pageName of PACK_CATALOG_CLIENT_PAGES) {
+    if (
+      !existsSync(path.join(sourceClientDir, "src", "pages", `${pageName}.tsx`))
+    ) {
+      throw new Error(
+        `Patched client source is missing src/pages/${pageName}.tsx (FEA-1314).`,
+      );
+    }
   }
 }
 
