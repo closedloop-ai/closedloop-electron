@@ -533,7 +533,22 @@ function scanBmad(db) {
 // get no source_url chip in the UI.
 const KNOWN_MARKETPLACE_SOURCES = {
   "closedloop-ai": "https://github.com/closedloop-ai/claude-plugins",
+  "claude-plugins-official":
+    "https://github.com/anthropics/claude-plugins-official",
 };
+
+// Marketplaces whose plugins are conceptually ONE bundle (one logical pack
+// shipped together) rather than independently-installable units. closedloop-ai
+// is the canonical example: code/code-review/judges/platform/self-learning
+// are 5 plugins but install as a unit and the user thinks of them as "the
+// closedloop pack." For these, the agent_packs row is keyed on the
+// marketplace name and skills aggregate across plugins.
+//
+// For all OTHER marketplaces (anthropics/claude-plugins-official, etc.) each
+// plugin becomes its OWN pack — pack_id = plugin name. That matches the
+// catalog's pack_id values (e.g. superpowers, compound-engineering) so the
+// "installed" join in listCatalog works correctly.
+const MARKETPLACE_BUNDLE_AS_PACK = new Set(["closedloop-ai"]);
 
 /**
  * Detect plugins installed via Claude Code's marketplace system. The
@@ -594,43 +609,75 @@ function scanClaudeMarketplaces(db) {
   // marketplace installs of gstack or bmad-method don't get double-counted.
   const reservedPackIds = new Set(["gstack", "bmad-method"]);
 
-  const results = { installs: 0, skills: 0, marketplaces: 0 };
+  const results = { installs: 0, skills: 0, marketplaces: 0, plugins: 0 };
   for (const [marketplace, plugins] of byMarketplace.entries()) {
     if (reservedPackIds.has(marketplace)) continue;
     const sourceUrl = KNOWN_MARKETPLACE_SOURCES[marketplace] || null;
 
-    // Invariant: at most one install row per (pack, harness). A marketplace's
-    // plugins (e.g. closedloop-ai's code / code-review / judges / platform /
-    // self-learning) are sub-units of the SAME logical install — the user
-    // ran one `claude plugin install ... --scope user` (or the curl
-    // installer) to get all of them. The cache root holds them all.
-    const cacheRoot = path.join(
-      resolveClaudeHome(),
-      "plugins",
-      "cache",
-      marketplace,
-    );
-    // version on the install row is NULL because the cache root spans
-    // multiple per-plugin versions; per-plugin versions live on each skill
-    // row (set below from plugin.json) and are also surfaced on the Packs
-    // detail panel's Skills grid.
-    upsertPack(db, {
-      pack_id: marketplace,
-      harness: "claude",
-      install_path: cacheRoot,
-      install_kind: "directory",
-      source_url: sourceUrl,
-      version: null,
-    });
-    results.installs += 1;
+    if (MARKETPLACE_BUNDLE_AS_PACK.has(marketplace)) {
+      // BUNDLED PATH: closedloop-ai and friends — the marketplace IS the
+      // pack, sub-plugins are skills. Invariant: at most one install row per
+      // (pack, harness). The cache root holds them all.
+      const cacheRoot = path.join(
+        resolveClaudeHome(),
+        "plugins",
+        "cache",
+        marketplace,
+      );
+      upsertPack(db, {
+        pack_id: marketplace,
+        harness: "claude",
+        install_path: cacheRoot,
+        install_kind: "directory",
+        source_url: sourceUrl,
+        version: null,
+      });
+      results.installs += 1;
+      for (const plugin of plugins) {
+        if (!safeStat(plugin.installPath)) continue;
+        const skillsDir = path.join(plugin.installPath, "skills");
+        for (const skillFile of findSkillFiles(skillsDir)) {
+          const content = safeReadFile(skillFile);
+          if (content == null) continue;
+          const meta = parseSkillFrontmatter(content) || {};
+          const dirName = path.basename(path.dirname(skillFile));
+          const name = meta.name || dirName;
+          if (!name) continue;
+          upsertSkill(db, {
+            skill_id: deterministicSkillId("claude", cacheRoot, name),
+            pack_id: marketplace,
+            harness: "claude",
+            install_path: skillFile,
+            name,
+            version: meta.version || plugin.version || null,
+            description: meta.description || null,
+            source_url: sourceUrl,
+          });
+          results.skills += 1;
+        }
+      }
+      results.marketplaces += 1;
+      continue;
+    }
 
+    // PER-PLUGIN PATH: claude-plugins-official, superpowers-marketplace, etc.
+    // Each installed plugin becomes its OWN pack so the catalog's per-pack
+    // entries (pack_id=superpowers, compound-engineering, …) join cleanly.
+    // install_path is the plugin's versioned install dir (one install row
+    // per plugin per harness — Claude Code only tracks `claude` scope).
     for (const plugin of plugins) {
-      if (!safeStat(plugin.installPath)) continue; // installPath gone — skip
-      // Skills live under <plugin-install>/skills/<name>/SKILL.md. The
-      // skill_id is keyed on the marketplace's cache root (NOT the
-      // per-plugin versioned install path) so a plugin version bump that
-      // changes the path doesn't churn skill_ids — the prune step still
-      // catches genuinely removed skills via last_seen_at.
+      if (!safeStat(plugin.installPath)) continue;
+      if (reservedPackIds.has(plugin.pluginName)) continue;
+      upsertPack(db, {
+        pack_id: plugin.pluginName,
+        harness: "claude",
+        install_path: plugin.installPath,
+        install_kind: "directory",
+        source_url: sourceUrl,
+        version: plugin.version,
+      });
+      results.installs += 1;
+      results.plugins += 1;
       const skillsDir = path.join(plugin.installPath, "skills");
       for (const skillFile of findSkillFiles(skillsDir)) {
         const content = safeReadFile(skillFile);
@@ -640,8 +687,12 @@ function scanClaudeMarketplaces(db) {
         const name = meta.name || dirName;
         if (!name) continue;
         upsertSkill(db, {
-          skill_id: deterministicSkillId("claude", cacheRoot, name),
-          pack_id: marketplace,
+          skill_id: deterministicSkillId(
+            "claude",
+            plugin.installPath,
+            name,
+          ),
+          pack_id: plugin.pluginName,
           harness: "claude",
           install_path: skillFile,
           name,
@@ -730,6 +781,28 @@ function pruneStaleRows(db, scanStartedAt) {
 }
 
 /**
+ * Run the catalog-detector adapters (per-pack on-disk probes). Lazy-required
+ * so this module can also stand alone for the gstack/bmad/marketplace path
+ * without dragging in the full catalog wiring.
+ *
+ * Honors SKIP_CATALOG_DETECTORS=1 so unit tests can disable adapters that
+ * probe outside the fixture sandbox (notably npm-global lookups).
+ */
+function runCatalogDetectorAdapters(db) {
+  if (process.env.SKIP_CATALOG_DETECTORS === "1") return {};
+  try {
+    const { runCatalogDetectors } = require("./catalog-detector");
+    return runCatalogDetectors(db);
+  } catch (e) {
+    console.warn(
+      "[pack-scanner] catalog-detector unavailable:",
+      e && e.message,
+    );
+    return {};
+  }
+}
+
+/**
  * Top-level entry: run every scan path. Best-effort — exceptions in one branch
  * never block another. Safe to call repeatedly. At the end, prune any
  * inventory rows whose last_seen_at wasn't refreshed (i.e. weren't observed
@@ -774,6 +847,14 @@ function runPackScanner(db) {
   } catch (e) {
     console.warn(
       "[pack-scanner] gstack project association scan failed:",
+      e && e.message,
+    );
+  }
+  try {
+    summary.catalogDetectors = runCatalogDetectorAdapters(db);
+  } catch (e) {
+    console.warn(
+      "[pack-scanner] catalog detectors failed:",
       e && e.message,
     );
   }

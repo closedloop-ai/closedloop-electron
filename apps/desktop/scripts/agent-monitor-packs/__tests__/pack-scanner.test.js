@@ -145,8 +145,13 @@ function makeBmadV6Tree(projectRoot) {
 function withFakeHome(home, fn) {
   const prevClaude = process.env.CLAUDE_HOME;
   const prevCodex = process.env.CODEX_HOME;
+  const prevSkip = process.env.SKIP_CATALOG_DETECTORS;
   process.env.CLAUDE_HOME = nodePath.join(home, ".claude");
   process.env.CODEX_HOME = nodePath.join(home, ".codex");
+  // Catalog detectors probe ~/.claude / npm -g globally — unaffected by
+  // CLAUDE_HOME for some adapters. Tests need pristine fixture isolation,
+  // so disable them.
+  process.env.SKIP_CATALOG_DETECTORS = "1";
   try {
     return fn();
   } finally {
@@ -154,6 +159,8 @@ function withFakeHome(home, fn) {
     else process.env.CLAUDE_HOME = prevClaude;
     if (prevCodex === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = prevCodex;
+    if (prevSkip === undefined) delete process.env.SKIP_CATALOG_DETECTORS;
+    else process.env.SKIP_CATALOG_DETECTORS = prevSkip;
   }
 }
 

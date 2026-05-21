@@ -7,6 +7,7 @@
 import { useState } from "react";
 import { Sparkline } from "./Sparkline";
 import { InstallModal } from "./InstallModal";
+import { CatalogDetail } from "./CatalogDetail";
 
 export interface CatalogEntry {
   pack_id: string;
@@ -47,6 +48,7 @@ export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
     harness: string;
     action: "install" | "uninstall";
   } | null>(null);
+  const [showDetail, setShowDetail] = useState(false);
 
   const isInstalled = pack.installed_harnesses.length > 0;
   const desc = pack.description_live || pack.description || "";
@@ -56,10 +58,14 @@ export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
       : (pack.history || []).map((h) => h.stars)) || [];
 
   return (
-    <div className="rounded-lg border border-border bg-surface-2 p-4 flex flex-col gap-3 min-h-[14rem]">
-      <div className="flex items-start justify-between gap-2">
+    <div className="rounded-lg border border-border bg-surface-2 p-4 flex flex-col gap-3 min-h-[14rem] hover:border-accent/30 transition-colors">
+      <button
+        onClick={() => setShowDetail(true)}
+        className="text-left flex items-start justify-between gap-2 group"
+        aria-label={`Open ${pack.display_name} details`}
+      >
         <div className="min-w-0">
-          <h3 className="text-sm font-semibold text-gray-100 truncate">
+          <h3 className="text-sm font-semibold text-gray-100 truncate group-hover:text-accent">
             {pack.display_name}
           </h3>
           <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-gray-500">
@@ -82,7 +88,7 @@ export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
             <Sparkline values={stars} width={64} height={14} />
           </div>
         </div>
-      </div>
+      </button>
 
       {desc && (
         <p className="text-[11px] text-gray-400 line-clamp-3">{desc}</p>
@@ -179,6 +185,13 @@ export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
           onCompleted={() => {
             if (onAfterRun) onAfterRun();
           }}
+        />
+      )}
+      {showDetail && (
+        <CatalogDetail
+          packId={pack.pack_id}
+          onClose={() => setShowDetail(false)}
+          onAfterRun={onAfterRun}
         />
       )}
     </div>

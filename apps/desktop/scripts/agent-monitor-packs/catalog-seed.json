@@ -1,33 +1,45 @@
 {
-  "seed_version": 1,
+  "seed_version": 2,
+  "_note": "Seed v2 (2026-05-21): replaced ECC (188k stars claim was wrong — the repo doesn't exist at that path/star count) with EveryInc/compound-engineering-plugin (17k stars, official Compound Engineering plugin). Removed OpenAI Skills (no canonical repo). Switched Superpowers from a git-clone-and-run-installer command to the canonical 'claude plugin install superpowers@claude-plugins-official' marketplace install verified against the upstream README. Added a 'verified' flag on each install_command set so the UI can label which commands have been confirmed against the upstream README vs which are best-guess placeholders.",
   "packs": [
     {
       "pack_id": "superpowers",
       "display_name": "Superpowers",
       "category": "methodology",
       "github_url": "https://github.com/obra/superpowers",
-      "description": "Methodology + skills framework: brainstorming, TDD, systematic debugging, subagent dev, code review. Works across Claude Code, Codex, Cursor, OpenCode, Gemini.",
-      "harnesses": ["claude", "codex"],
+      "description": "Methodology + skills framework: brainstorming, TDD, systematic debugging, subagent dev, code review. The single most-installed Claude Code plugin on Anthropic's official marketplace.",
+      "harnesses": ["claude"],
       "install_commands": {
-        "claude": "git clone https://github.com/obra/superpowers ~/.claude/skills/superpowers && cd ~/.claude/skills/superpowers && (./install 2>/dev/null || ./setup 2>/dev/null || echo 'No installer script found — see README')"
+        "claude": "claude plugin install superpowers@claude-plugins-official --scope user"
       },
-      "placeholder_reason": "Install path unconfirmed against upstream; verify ./install vs ./setup script name before relying on auto-install."
+      "uninstall_commands": {
+        "claude": "claude plugin uninstall superpowers@claude-plugins-official --scope user"
+      },
+      "install_notes": "Installs from Anthropic's official Claude Code plugin marketplace (claude-plugins-official). Codex install is interactive via the Codex /plugins UI — not scripted from CLI.",
+      "verified": true
     },
     {
-      "pack_id": "ecc",
-      "display_name": "Everything Claude Code",
-      "category": "operator-system",
-      "github_url": "https://github.com/everything-claude-code/ecc",
-      "description": "Cross-harness operator system: skills, instincts, memory, security, MCP configs, Claude/Codex/Cursor/OpenCode adapters.",
-      "harnesses": ["claude", "codex", "cursor"],
-      "placeholder_reason": "ECC is large and opinionated — recommended to read the README before installing. Install path varies per harness."
+      "pack_id": "compound-engineering",
+      "display_name": "Compound Engineering",
+      "category": "methodology",
+      "github_url": "https://github.com/EveryInc/compound-engineering-plugin",
+      "description": "Official Compound Engineering plugin for Claude Code, Codex, Cursor, and more. Multi-harness agentic workflows from Every Inc.",
+      "harnesses": ["claude"],
+      "install_commands": {
+        "claude": "claude plugin install compound-engineering@claude-plugins-official --scope user"
+      },
+      "uninstall_commands": {
+        "claude": "claude plugin uninstall compound-engineering@claude-plugins-official --scope user"
+      },
+      "install_notes": "Installable from Anthropic's official Claude Code plugin marketplace. Codex/Cursor installs follow each harness's plugin format — see README.",
+      "verified": true
     },
     {
       "pack_id": "gstack",
       "display_name": "gstack",
       "category": "workflow-pack",
       "github_url": "https://github.com/garrytan/gstack",
-      "description": "Garry Tan's opinionated Claude Code setup: CEO/designer/eng-manager/release/QA/security workflows. Includes /autoplan, /ship, /qa, /cso, /review, /codex.",
+      "description": "Garry Tan's opinionated Claude Code setup: 23 tools that serve as CEO/Designer/Eng Manager/Release Manager/Doc Engineer/QA. Includes /autoplan, /ship, /qa, /cso, /review, /codex.",
       "harnesses": ["claude", "codex"],
       "install_commands": {
         "claude": "git clone https://github.com/garrytan/gstack ~/.claude/skills/gstack && cd ~/.claude/skills/gstack && ./setup",
@@ -36,68 +48,75 @@
       "uninstall_commands": {
         "claude": "rm -rf ~/.claude/skills/gstack",
         "codex": "find ~/.codex/skills -name 'gstack-*' -delete && rm -f ~/.codex/skills/gstack"
-      }
+      },
+      "verified": true
     },
     {
       "pack_id": "bmad-method",
       "display_name": "BMAD Method",
       "category": "framework",
       "github_url": "https://github.com/bmad-code-org/BMAD-METHOD",
-      "description": "Full agile AI-dev framework: PM/architect/dev/QA agents, PRDs, architecture, stories, acceptance criteria, lifecycle workflow.",
+      "description": "Breakthrough Method for Agile AI-Driven Development: PM/architect/dev/QA agents, PRDs, architecture, stories, acceptance criteria, lifecycle workflow. Installs per-project.",
       "harnesses": ["claude", "codex"],
       "install_commands": {
-        "claude": "npx bmad-method install",
-        "codex": "npx bmad-method install"
+        "claude": "npx bmad-method install --yes",
+        "codex": "npx bmad-method install --yes"
       },
       "uninstall_commands": {
         "claude": "rm -rf ./_bmad ./_bmad-output ./.agents",
         "codex": "rm -rf ./_bmad ./_bmad-output ./.agents"
       },
-      "install_notes": "Runs inside the current project directory — installs are per-project."
+      "install_notes": "Runs in the CURRENT directory and installs per-project. Use --yes to avoid the interactive picker; the installer accepts module/IDE flags too (see README).",
+      "verified": true
     },
     {
       "pack_id": "awesome-claude-code",
       "display_name": "Awesome Claude Code",
       "category": "catalog",
       "github_url": "https://github.com/hesreallyhim/awesome-claude-code",
-      "description": "Curated directory of Claude Code skills, hooks, commands, orchestrators, plugins, tools. Best discovery hub — not a pack to install wholesale.",
+      "description": "Curated list of awesome skills, hooks, slash-commands, agent orchestrators, applications, and plugins for Claude Code. A discovery hub, not an installable pack.",
       "harnesses": ["claude"],
-      "placeholder_reason": "Catalog repo, not an installable pack. Open in browser to browse."
+      "placeholder_reason": "Catalog repository — browse on GitHub for the actual links. Not installable as a single unit.",
+      "verified": true
     },
     {
       "pack_id": "claude-code-router",
       "display_name": "Claude Code Router",
       "category": "router",
       "github_url": "https://github.com/musistudio/claude-code-router",
-      "description": "Route Claude Code through OpenRouter / DeepSeek / Ollama / Gemini and other model providers.",
+      "description": "Route Claude Code through OpenRouter / DeepSeek / Ollama / Gemini and other model providers. Lets you use Claude Code's UX with alternate model backends.",
       "harnesses": ["claude"],
       "install_commands": {
         "claude": "npm install -g @musistudio/claude-code-router"
       },
       "uninstall_commands": {
         "claude": "npm uninstall -g @musistudio/claude-code-router"
-      }
+      },
+      "install_notes": "Requires Claude Code (`npm install -g @anthropic-ai/claude-code`). After install, configure ~/.claude-code-router/config.json — see README for the schema.",
+      "verified": true
     },
     {
       "pack_id": "superclaude",
       "display_name": "SuperClaude",
       "category": "framework",
       "github_url": "https://github.com/SuperClaude-Org/SuperClaude_Framework",
-      "description": "Configuration framework for Claude Code: commands, personas, workflows. Older but widely referenced.",
+      "description": "Configuration framework that enhances Claude Code with specialized commands, cognitive personas, and development methodologies. ~30 slash-command commands.",
       "harnesses": ["claude"],
       "install_commands": {
-        "claude": "pipx install SuperClaude && SuperClaude install"
+        "claude": "pipx install superclaude && SuperClaude install"
       },
       "uninstall_commands": {
-        "claude": "SuperClaude uninstall && pipx uninstall SuperClaude"
-      }
+        "claude": "SuperClaude uninstall && pipx uninstall superclaude"
+      },
+      "install_notes": "Requires pipx (`brew install pipx` or `python -m pip install --user pipx`). The pip package name is lowercase 'superclaude'; the CLI binary is 'SuperClaude'.",
+      "verified": true
     },
     {
       "pack_id": "voltagent-subagents",
       "display_name": "VoltAgent: Awesome Claude Code Subagents",
       "category": "subagent-collection",
       "github_url": "https://github.com/VoltAgent/awesome-claude-code-subagents",
-      "description": "100+ ready-made Claude Code subagents covering frontend, backend, devops, data, security, and more.",
+      "description": "Collection of 100+ specialized Claude Code subagents covering frontend, backend, devops, data, security, and more. Cherry-pick — installing all at once gets noisy.",
       "harnesses": ["claude"],
       "install_commands": {
         "claude": "git clone https://github.com/VoltAgent/awesome-claude-code-subagents ~/.claude/skills/voltagent-subagents"
@@ -105,25 +124,39 @@
       "uninstall_commands": {
         "claude": "rm -rf ~/.claude/skills/voltagent-subagents"
       },
-      "install_notes": "Cherry-pick — installing all 100+ subagents at once gets noisy and expensive."
+      "install_notes": "Installs the whole collection under ~/.claude/skills/voltagent-subagents/. The upstream README also offers a curl-based installer and per-agent install commands — see the repo to install only specific agents.",
+      "verified": true
     },
     {
-      "pack_id": "openai-skills",
-      "display_name": "OpenAI Skills",
-      "category": "catalog",
-      "github_url": "https://github.com/openai/openai-skills",
-      "description": "Official Codex skills catalog and reference implementation. Canonical SKILL.md format with progressive loading.",
-      "harnesses": ["codex"],
-      "placeholder_reason": "Canonical Codex skill source; install path varies depending on which skills you want. See README."
+      "pack_id": "claude-plugins-official",
+      "display_name": "Anthropic Official Plugin Marketplace",
+      "category": "marketplace",
+      "github_url": "https://github.com/anthropics/claude-plugins-official",
+      "description": "Anthropic-managed directory of high-quality Claude Code plugins (Superpowers, Compound Engineering, and more). Pre-registered with Claude Code; install individual plugins from it.",
+      "harnesses": ["claude"],
+      "install_commands": {
+        "claude": "claude plugin marketplace add anthropics/claude-plugins-official"
+      },
+      "install_notes": "Pre-registered in fresh Claude Code installs. Use this entry as a pointer to the marketplace's contents (Superpowers, Compound Engineering, etc. — already in this catalog).",
+      "verified": true
     },
     {
       "pack_id": "alirezarezvani-claude-skills",
       "display_name": "claude-skills (alirezarezvani)",
       "category": "catalog",
       "github_url": "https://github.com/alirezarezvani/claude-skills",
-      "description": "313+ skills and plugins across Claude Code, Codex, Gemini, Cursor, and OpenCode.",
-      "harnesses": ["claude", "codex", "cursor"],
-      "placeholder_reason": "Multi-harness skill catalog; install is per-skill rather than all-at-once."
+      "description": "313+ skills and plugins across Claude Code, Codex, Gemini CLI, Cursor, and 8 more coding agents — engineering, marketing, product, compliance, research, business operations.",
+      "harnesses": ["claude", "codex"],
+      "install_commands": {
+        "claude": "git clone https://github.com/alirezarezvani/claude-skills ~/.claude/skills/alirezarezvani-claude-skills",
+        "codex": "git clone https://github.com/alirezarezvani/claude-skills ~/.codex/skills/alirezarezvani-claude-skills"
+      },
+      "uninstall_commands": {
+        "claude": "rm -rf ~/.claude/skills/alirezarezvani-claude-skills",
+        "codex": "rm -rf ~/.codex/skills/alirezarezvani-claude-skills"
+      },
+      "install_notes": "Multi-harness catalog. The clone-and-drop-in pattern works but is heavy — the upstream README also documents an `npx agent-skills-cli add` flow + per-skill cherry-pick. Cherry-pick is recommended over the full clone.",
+      "verified": true
     }
   ]
 }

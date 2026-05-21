@@ -6,6 +6,8 @@
  */
 "use strict";
 
+const { execFileSync } = require("child_process");
+const https = require("https");
 const { Router } = require("express");
 const { db } = require("../db");
 const catalogStore = require("../lib/catalog-store");
@@ -14,6 +16,75 @@ const installOrchestrator = require("../lib/install-orchestrator");
 const packScanner = require("../lib/pack-scanner");
 
 catalogStore.ensureCatalogSchema(db);
+
+const README_MAX_BYTES = 30000; // ~30KB excerpt is plenty for a detail panel
+const README_TTL_MS = 24 * 60 * 60 * 1000;
+
+function parseGithubUrl(url) {
+  const m = String(url || "").match(/github\.com[/:]([^/]+)\/([^/?#.]+)/);
+  return m ? { owner: m[1], repo: m[2].replace(/\.git$/, "") } : null;
+}
+
+function ghReadme(owner, repo) {
+  try {
+    const out = execFileSync(
+      "gh",
+      [
+        "api",
+        `repos/${owner}/${repo}/readme`,
+        "--header",
+        "Accept: application/vnd.github.raw",
+      ],
+      { timeout: 7000, stdio: ["ignore", "pipe", "ignore"] },
+    );
+    return out.toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+function restReadme(owner, repo) {
+  return new Promise((resolve) => {
+    const req = https.get(
+      {
+        host: "api.github.com",
+        path: `/repos/${owner}/${repo}/readme`,
+        headers: {
+          "User-Agent": "closedloop-electron-agent-monitor",
+          Accept: "application/vnd.github.raw",
+        },
+        timeout: 7000,
+      },
+      (res) => {
+        if (res.statusCode !== 200) {
+          resolve(null);
+          res.resume();
+          return;
+        }
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          body += chunk;
+          if (body.length > README_MAX_BYTES * 2) req.destroy();
+        });
+        res.on("end", () => resolve(body));
+      },
+    );
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(null);
+    });
+  });
+}
+
+async function fetchReadmeFor(githubUrl) {
+  const parsed = parseGithubUrl(githubUrl);
+  if (!parsed) return null;
+  const out = ghReadme(parsed.owner, parsed.repo) || (await restReadme(parsed.owner, parsed.repo));
+  if (!out) return null;
+  return out.length > README_MAX_BYTES ? out.slice(0, README_MAX_BYTES) + "\n\n…(truncated)" : out;
+}
 
 const router = Router();
 
@@ -68,6 +139,44 @@ router.get("/:pack_id", (req, res) => {
     });
     if (!entry) return res.status(404).json({ error: { message: "pack not found" } });
     res.json(entry);
+  } catch (err) {
+    res.status(500).json({ error: { message: err && err.message } });
+  }
+});
+
+router.get("/:pack_id/readme", async (req, res) => {
+  try {
+    const entry = catalogStore.getCatalog(db, req.params.pack_id);
+    if (!entry) return res.status(404).json({ error: { message: "pack not found" } });
+
+    const force = req.query.refresh === "1";
+    const fresh =
+      entry.readme_fetched_at &&
+      Date.now() - new Date(entry.readme_fetched_at).getTime() < README_TTL_MS;
+    if (!force && fresh && entry.readme_excerpt) {
+      return res.json({
+        pack_id: entry.pack_id,
+        readme_excerpt: entry.readme_excerpt,
+        readme_fetched_at: entry.readme_fetched_at,
+        cached: true,
+      });
+    }
+
+    const readme = await fetchReadmeFor(entry.github_url);
+    if (readme == null) {
+      return res
+        .status(502)
+        .json({ error: { message: "Could not fetch README from GitHub (rate limit or 404)" } });
+    }
+    catalogStore.applyReadmeFetch(db, {
+      pack_id: entry.pack_id,
+      readme_excerpt: readme,
+    });
+    res.json({
+      pack_id: entry.pack_id,
+      readme_excerpt: readme,
+      cached: false,
+    });
   } catch (err) {
     res.status(500).json({ error: { message: err && err.message } });
   }

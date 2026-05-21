@@ -38,6 +38,9 @@ function ensureCatalogSchema(db) {
       uninstall_commands TEXT,
       install_notes      TEXT,
       placeholder_reason TEXT,
+      verified           INTEGER NOT NULL DEFAULT 0,
+      readme_excerpt     TEXT,
+      readme_fetched_at  TEXT,
       stars              INTEGER,
       forks              INTEGER,
       last_release       TEXT,
@@ -72,6 +75,26 @@ function ensureCatalogSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_pack_install_runs_inflight
       ON pack_install_runs(pack_id, ended_at);
   `);
+
+  // Idempotent additive migrations for columns added after seed v1. CREATE
+  // TABLE IF NOT EXISTS above only fires on a fresh DB; on an upgraded DB
+  // we need ALTER TABLE for the new columns. Mirrors the same
+  // detect-then-ALTER pattern used in plan-store.js.
+  for (const [col, type] of [
+    ["verified", "INTEGER NOT NULL DEFAULT 0"],
+    ["readme_excerpt", "TEXT"],
+    ["readme_fetched_at", "TEXT"],
+  ]) {
+    try {
+      db.prepare(`SELECT ${col} FROM pack_catalog LIMIT 1`).get();
+    } catch {
+      try {
+        db.prepare(`ALTER TABLE pack_catalog ADD COLUMN ${col} ${type}`).run();
+      } catch {
+        /* column may have been added by a concurrent run — non-fatal */
+      }
+    }
+  }
 }
 
 /**
@@ -112,8 +135,8 @@ function upsertCatalogSeed(db, seedDoc) {
       `INSERT INTO pack_catalog
          (pack_id, display_name, category, github_url, description,
           harnesses, install_commands, uninstall_commands, install_notes,
-          placeholder_reason, seed_version)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          placeholder_reason, verified, seed_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(pack_id) DO UPDATE SET
          display_name       = excluded.display_name,
          category           = excluded.category,
@@ -124,6 +147,7 @@ function upsertCatalogSeed(db, seedDoc) {
          uninstall_commands = excluded.uninstall_commands,
          install_notes      = excluded.install_notes,
          placeholder_reason = excluded.placeholder_reason,
+         verified           = excluded.verified,
          seed_version       = excluded.seed_version`,
     ).run(
       pack.pack_id,
@@ -138,6 +162,7 @@ function upsertCatalogSeed(db, seedDoc) {
         : null,
       pack.install_notes || null,
       pack.placeholder_reason || null,
+      pack.verified ? 1 : 0,
       seedVersion,
     );
     if (existing) stats.updated += 1;
@@ -218,6 +243,20 @@ function getCatalog(db, packId, { historyDays = 30 } = {}) {
       : [],
     history: listHistory(db, packId, historyDays),
   };
+}
+
+/**
+ * Update the README excerpt for a pack. Called by the catalog-route's
+ * on-demand README fetcher (lazy — README is only pulled when a user
+ * opens the detail modal).
+ */
+function applyReadmeFetch(db, { pack_id, readme_excerpt }) {
+  db.prepare(
+    `UPDATE pack_catalog
+       SET readme_excerpt    = ?,
+           readme_fetched_at = ?
+     WHERE pack_id = ?`,
+  ).run(readme_excerpt || null, nowIso(), pack_id);
 }
 
 function listHistory(db, packId, days = 30) {
@@ -335,6 +374,7 @@ module.exports = {
   getCatalog,
   listHistory,
   applyFetchResult,
+  applyReadmeFetch,
   recordInstallRunStart,
   recordInstallRunEnd,
   inFlightInstallRun,

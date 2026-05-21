@@ -185,6 +185,9 @@ const PACK_MODULES = [
   "catalog-store",
   "catalog-fetcher",
   "install-orchestrator",
+  // Per-pack detection adapters (voltagent, alirezarezvani, superclaude,
+  // claude-code-router). Lazy-required by pack-scanner at run time.
+  "catalog-detector",
 ];
 const PACK_CLIENT_PAGES = ["Skills", "Tools", "SubAgents", "Packs"];
 // CLOSEDLOOP catalog (FEA-1314): extra client modules that need to ship with
@@ -195,6 +198,7 @@ const PACK_CATALOG_CLIENT_PAGES = [
   "PacksInstalled",
   "PacksCatalog",
   "CatalogCard",
+  "CatalogDetail",
   "InstallModal",
   "Sparkline",
 ];
