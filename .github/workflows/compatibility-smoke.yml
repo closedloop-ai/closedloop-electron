@@ -1,0 +1,301 @@
+name: Compatibility Smoke
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: compat-smoke-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  detect-changes:
+    name: Detect Symphony-boundary changes
+    runs-on: ubuntu-latest
+    outputs:
+      boundary: ${{ steps.filter.outputs.boundary }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Filter paths
+        id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            boundary:
+              - 'apps/desktop/src/server/server.ts'
+              - 'apps/desktop/src/server/router.ts'
+              - 'apps/desktop/src/server/operation-dispatcher.ts'
+              - 'apps/desktop/src/server/security.ts'
+              - 'apps/desktop/src/server/operations/**'
+              - 'apps/desktop/src/shared/**'
+              - 'apps/desktop/src/main/approval-operations.ts'
+              - 'apps/desktop/src/main/approval-policy.ts'
+              - 'apps/desktop/src/main/cloud-protocol.ts'
+              - 'apps/desktop/src/main/cloud-socket.ts'
+              - 'apps/desktop/src/main/loop-finalizer.ts'
+              - 'apps/desktop/src/main/telemetry-protocol.ts'
+              - 'apps/desktop/src/main/observability.ts'
+
+  smoke-tests:
+    name: Run compatibility smoke tests
+    needs: detect-changes
+    if: needs.detect-changes.outputs.boundary == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      symphony_candidate_sha: ${{ steps.candidate.outputs.symphony_candidate_sha }}
+      symphony_candidate_pr: ${{ steps.candidate.outputs.symphony_candidate_pr }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Read last-known-good symphony-alpha SHA
+        id: lkg
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('fs');
+            const lkg = JSON.parse(fs.readFileSync('.github/compatibility/last-known-good.json', 'utf8'));
+            const sha = lkg.symphonyAlpha.sha;
+            const isPlaceholder = sha === '<placeholder-sha>';
+            core.setOutput('sha', sha);
+            core.setOutput('repo', lkg.symphonyAlpha.repo);
+            core.setOutput('symphony_sha', sha);
+            core.setOutput('is_placeholder', isPlaceholder ? 'true' : 'false');
+            if (isPlaceholder) {
+              core.warning('Symphony-alpha SHA is a placeholder — skipping symphony checkout.');
+            }
+
+      - name: Generate GitHub App Token
+        if: steps.lkg.outputs.is_placeholder != 'true'
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CLOSEDLOOP_APP_ID_STAGE }}
+          private-key: ${{ secrets.CLOSEDLOOP_APP_SECRET_STAGE }}
+          owner: ${{ github.repository_owner }}
+          repositories: symphony-alpha
+          permission-contents: read
+
+      # SECURITY: symphony-alpha test code IS EXECUTED (pnpm install + vitest run),
+      # not merely read. The LKG SHA is locked via PR review. The compatibility-pair
+      # label can redirect to an arbitrary PR branch — restrict label permissions
+      # in GitHub settings to trusted contributors.
+      - name: Checkout symphony-alpha at last-known-good SHA
+        if: steps.lkg.outputs.is_placeholder != 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.lkg.outputs.repo }}
+          ref: ${{ steps.lkg.outputs.sha }}
+          token: ${{ steps.app-token.outputs.token }}
+          path: symphony-checkout
+
+      # Coordinated change detection: if a symphony-alpha PR carries the
+      # `compatibility-pair` label, switch the symphony-checkout working tree to
+      # that PR's head SHA so both sides of the boundary change are tested together.
+      #
+      # RACE CONDITION: both PRs (this electron PR and the paired symphony-alpha PR)
+      # must have the `compatibility-pair` label applied BEFORE either CI run starts.
+      - name: Detect coordinated symphony-alpha candidate PR
+        id: candidate
+        if: steps.lkg.outputs.is_placeholder != 'true'
+        continue-on-error: true
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            const searchResult = await github.rest.search.issuesAndPullRequests({
+              q: "repo:closedloop-ai/symphony-alpha is:pr is:open label:compatibility-pair",
+              sort: "updated",
+              order: "desc",
+            });
+
+            if (searchResult.data.total_count === 0) {
+              core.info("No compatibility-pair symphony-alpha PR found — using last-known-good SHA.");
+              core.setOutput("symphony_candidate_sha", "");
+              core.setOutput("symphony_candidate_pr", "");
+              return;
+            }
+
+            const candidatePr = searchResult.data.items[0];
+            const prNumber = candidatePr.number;
+            const prUrl = candidatePr.html_url;
+
+            const prDetails = await github.rest.pulls.get({
+              owner: "closedloop-ai",
+              repo: "symphony-alpha",
+              pull_number: prNumber,
+            });
+            const candidateSha = prDetails.data.head.sha;
+
+            core.info(`Found compatibility-pair PR #${prNumber}: ${prUrl}`);
+            core.info(`Switching symphony-checkout from last-known-good to candidate SHA ${candidateSha}`);
+
+            if (!/^[0-9a-f]{40}$/.test(candidateSha)) {
+              core.setFailed(`Invalid SHA from GitHub API: ${candidateSha}`);
+              return;
+            }
+
+            const { execSync } = require("child_process");
+            execSync(`git -C symphony-checkout fetch origin ${candidateSha}`, { stdio: "inherit" });
+            execSync(`git -C symphony-checkout checkout ${candidateSha}`, { stdio: "inherit" });
+
+            core.setOutput("symphony_candidate_sha", candidateSha);
+            core.setOutput("symphony_candidate_pr", prUrl);
+
+      - name: Setup pnpm
+        if: steps.lkg.outputs.is_placeholder != 'true'
+        uses: pnpm/action-setup@v4
+
+      # Node 20 (not 22) because symphony-alpha requires ^20.19 for Prisma 7.x
+      - name: Setup Node.js
+        if: steps.lkg.outputs.is_placeholder != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'pnpm'
+          cache-dependency-path: symphony-checkout/pnpm-lock.yaml
+
+      - name: Install symphony-alpha dependencies
+        if: steps.lkg.outputs.is_placeholder != 'true'
+        working-directory: symphony-checkout
+        run: pnpm install --frozen-lockfile
+        env:
+          DATABASE_URL: postgresql://localhost:5432/placeholder
+
+      - name: Build shared loop API package
+        if: steps.lkg.outputs.is_placeholder != 'true'
+        working-directory: symphony-checkout
+        run: pnpm turbo build --filter=@closedloop-ai/loops-api
+
+      - name: Run API compatibility smoke tests
+        if: steps.lkg.outputs.is_placeholder != 'true'
+        working-directory: symphony-checkout
+        run: pnpm --filter=api test:compatibility
+        env:
+          NODE_ENV: test
+          INTERNAL_API_SECRET: test-internal-secret
+          ELECTRON_CHECKOUT_PATH: ${{ github.workspace }}
+
+      - name: Run app compatibility smoke tests
+        if: steps.lkg.outputs.is_placeholder != 'true'
+        working-directory: symphony-checkout
+        run: pnpm --filter=app test:compatibility
+        env:
+          NODE_ENV: test
+          ELECTRON_CHECKOUT_PATH: ${{ github.workspace }}
+
+      - name: Enrich compatibility results with metadata
+        if: steps.lkg.outputs.is_placeholder != 'true'
+        shell: bash
+        run: |
+          node -e "
+            const fs = require('fs');
+            const resultsPath = 'symphony-checkout/apps/api/compatibility-results.json';
+            if (!fs.existsSync(resultsPath)) {
+              fs.writeFileSync('compatibility-results.json', JSON.stringify({ note: 'no results file produced' }, null, 2));
+              process.exit(0);
+            }
+            const results = JSON.parse(fs.readFileSync(resultsPath, 'utf8'));
+            results.closedloopElectronSha = '${{ github.event.pull_request.head.sha }}';
+            results.symphonyAlphaVersion = '${{ steps.candidate.outputs.symphony_candidate_sha }}' || '${{ steps.lkg.outputs.symphony_sha }}';
+            fs.writeFileSync('compatibility-results.json', JSON.stringify(results, null, 2));
+          "
+
+      - name: Upload compatibility results
+        if: steps.lkg.outputs.is_placeholder != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-results-${{ github.event.pull_request.number }}
+          path: compatibility-results.json
+          retention-days: 30
+
+      - name: Post PR comment with smoke test results
+        if: always() && steps.lkg.outputs.is_placeholder != 'true'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const runStatus = '${{ job.status }}';
+            const electronSha = '${{ github.event.pull_request.head.sha }}';
+            const lkgSha = '${{ steps.lkg.outputs.symphony_sha }}';
+            const candidateSha = '${{ steps.candidate.outputs.symphony_candidate_sha }}';
+            const candidatePr = '${{ steps.candidate.outputs.symphony_candidate_pr }}';
+            const symphonySha = candidateSha || lkgSha;
+            const symphonyLabel = candidateSha ? 'candidate' : 'last-known-good';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const marker = '<!-- electron-compatibility-smoke-results -->';
+
+            const statusEmoji = runStatus === 'success' ? ':white_check_mark:' : ':x:';
+            const lines = [
+              marker,
+              `## Compatibility Smoke Test Results ${statusEmoji}`,
+              '',
+              `**Status:** ${runStatus}`,
+              `**Electron SHA:** \`${electronSha}\``,
+              `**Symphony Alpha SHA (${symphonyLabel}):** \`${symphonySha}\``,
+            ];
+            if (candidatePr) {
+              lines.push(`**Paired Symphony Alpha PR:** ${candidatePr}`);
+            }
+            lines.push('', `[View Actions run](${runUrl})`);
+            const body = lines.join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+  # REQUIRED STATUS CHECK: add 'Compatibility Smoke / Compatibility smoke status'
+  # to branch protection rules. Do NOT use 'smoke-tests' — it skips on non-boundary
+  # PRs which would leave the check pending forever.
+  status-report:
+    name: Compatibility smoke status
+    needs: [detect-changes, smoke-tests]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Report status
+        run: |
+          SMOKE_RESULT="${{ needs.smoke-tests.result }}"
+          BOUNDARY_CHANGED="${{ needs.detect-changes.outputs.boundary }}"
+
+          if [ "$SMOKE_RESULT" = "failure" ] || [ "$SMOKE_RESULT" = "cancelled" ]; then
+            echo "Compatibility smoke tests failed or were cancelled."
+            exit 1
+          fi
+
+          if [ "$BOUNDARY_CHANGED" = "true" ] && [ "$SMOKE_RESULT" = "success" ]; then
+            echo "Compatibility smoke tests passed."
+            exit 0
+          fi
+
+          echo "No Symphony-boundary changes detected — smoke tests skipped."
+          exit 0
