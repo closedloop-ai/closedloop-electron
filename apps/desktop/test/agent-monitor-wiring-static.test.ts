@@ -1,11 +1,9 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
-import { createRequire } from "node:module";
 import { test } from "node:test";
 
 const read = (relative: string): string =>
   readFileSync(new URL(relative, import.meta.url), "utf8");
-const requireFromDesktop = createRequire(new URL("../package.json", import.meta.url));
 
 const appSource = read("../src/main/app.ts");
 const agentMonitorPathSource = read("../src/main/agent-monitor-path.ts");
@@ -19,6 +17,7 @@ const traySource = read("../src/main/tray.ts");
 const preloadSource = read("../src/main/preload.ts");
 const sidecarSource = read("../src/main/agent-monitor-sidecar.ts");
 const hooksSource = read("../src/main/agent-monitor-hooks.ts");
+const embedAppSource = read("../scripts/agent-monitor-embed/App.tsx");
 const embedLayoutSource = read("../scripts/agent-monitor-embed/Layout.tsx");
 const contractsSource = read("../src/shared/contracts.ts");
 const settingsStoreSource = read("../src/main/settings-store.ts");
@@ -33,10 +32,6 @@ const loadRowsSnippet = read(
 );
 const hostFlagsSource = read(
   "../scripts/agent-monitor-plans/client/closedloop-host-flags.ts",
-);
-const upstreamClientAppSource = readFileSync(
-  requireFromDesktop.resolve("agent-dashboard-client/src/App.tsx"),
-  "utf8",
 );
 const desktopPkg = JSON.parse(read("../package.json")) as {
   version: string;
@@ -95,6 +90,7 @@ test("build script materializes a generated runtime tree with the host patches",
   assert.match(buildScriptSource, /SOURCE_CLIENT_PACKAGE = "agent-dashboard-client"/);
   assert.match(buildScriptSource, /\.generated", "agent-monitor"/);
   assert.match(buildScriptSource, /vite build/);
+  assert.match(buildScriptSource, /CLIENT_FULL_FILE_OVERRIDES/);
   assert.match(buildScriptSource, /CLIENT_SNIPPET_FILES/);
   assert.match(buildScriptSource, /server\.listen\(port, "127\.0\.0\.1", \(\) => \{/);
   assert.match(buildScriptSource, /isAllowedDashboardOrigin/);
@@ -311,10 +307,12 @@ test("embedded layout accepts navigation only from the configured host origin", 
 });
 
 test("renderer agent nav stays aligned with the embedded monitor router", () => {
-  assert.deepEqual(
-    parseHostAgentNavRoutes(indexHtml),
-    parseEmbeddedMonitorNavRoutes(upstreamClientAppSource),
-  );
+  assert.deepEqual(parseHostAgentNavRoutes(indexHtml), parseEmbeddedMonitorNavRoutes(embedAppSource));
+  // We intentionally layer host-owned route patches on top of the pinned
+  // upstream client via a repo-owned App.tsx overlay, not by mutating the
+  // dependency contents directly.
+  assert.match(buildScriptSource, /from: embedAppSource,[\s\S]*to: path\.join\("src", "App\.tsx"\)/);
+  assert.match(buildScriptSource, /for \(const override of CLIENT_FULL_FILE_OVERRIDES\)/);
 });
 
 test("plans UI is gated by the host-loaded plan extraction flag", () => {
