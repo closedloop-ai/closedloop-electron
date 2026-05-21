@@ -26,6 +26,21 @@ router.get("/", (_req, res) => {
   }
 });
 
+// GET /api/packs/recent-projects — distinct project cwds from the last 90 days
+// of sessions. Powers the project-picker dropdown in the copy-command modal
+// for project-scoped pack installs (BMad et al). Cheap query — read-only.
+router.get("/recent-projects", (_req, res) => {
+  try {
+    const { getRecentProjectRoots } = require("../lib/pack-scanner")._internals;
+    const items = (getRecentProjectRoots(db) || [])
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b));
+    res.json({ items });
+  } catch (err) {
+    res.status(500).json({ error: { message: err && err.message } });
+  }
+});
+
 // GET /api/packs/:pack_id — pack detail: installs, skills, project associations.
 router.get("/:pack_id", (req, res) => {
   try {

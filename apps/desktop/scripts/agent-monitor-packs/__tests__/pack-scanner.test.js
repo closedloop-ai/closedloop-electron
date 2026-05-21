@@ -958,6 +958,18 @@ test("looksProjectRelative flags BMad-style commands but allows brew/etc", () =>
     f("claude plugin install code-review@claude-plugins-official --scope user"),
     false,
   );
+  // v0.15.54 regression: `cd <abspath> && ./setup` is NOT project-relative
+  // (the cd to an absolute path means the ./setup runs at that absolute
+  // location, not from the launcher's cwd). The original heuristic's ` ./`
+  // pattern produced a false positive on this exact gstack install command,
+  // blocking gstack installs via the modal until we tightened it.
+  assert.equal(
+    f(
+      "git clone https://github.com/garrytan/gstack ~/.claude/skills/gstack && cd ~/.claude/skills/gstack && ./setup",
+    ),
+    false,
+    "gstack ./setup after cd to abspath must NOT be flagged",
+  );
 });
 
 test("runPackScanner does not prune when any detector scope fails", () => {

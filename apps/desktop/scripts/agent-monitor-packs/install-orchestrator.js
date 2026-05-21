@@ -66,17 +66,27 @@ function buildAllowedChildEnv() {
   return out;
 }
 
-/** Heuristics for catalog commands that operate on the current directory and
- *  must NOT be run without an explicit, validated project cwd. shafty PR
- *  review P1: BMad's `npx bmad-method install --directory .` would write
- *  files into whatever directory launched the sidecar (typically the user's
- *  home or the build dir), not the project they intended. We refuse to spawn
- *  these unless the caller passes an explicit cwd. */
+/**
+ * Heuristic for catalog commands that operate on the current directory and
+ * must NOT be run without an explicit, validated project cwd. Tightened in
+ * v0.15.54 — the original ` ./` pattern produced a false positive on commands
+ * like `cd ~/.claude/skills/gstack && ./setup` where the `./` is preceded by
+ * a `cd` to an ABSOLUTE path (the script then executes at that absolute
+ * location; not project-relative in the sense that matters here).
+ *
+ * Now we only match the unambiguous "writes to cwd" signals:
+ *   --directory .   (npx-style)
+ *   --directory=.   (gnu-arg-style)
+ *    -C .           (make / git -C style)
+ *
+ * The explicit `project_scoped: true` flag on the catalog seed is the
+ * canonical signal. This heuristic only acts as defense-in-depth for entries
+ * that forgot to set the flag.
+ */
 const PROJECT_RELATIVE_HINTS = [
   "--directory .",
   "--directory=.",
   " -C .",
-  " ./",
 ];
 function looksProjectRelative(command) {
   if (typeof command !== "string") return false;
@@ -196,6 +206,20 @@ function streamRun(db, opts) {
     (entry.project_scoped === true || looksProjectRelative(command)) &&
     !resolvedCwd
   ) {
+    // Emit a structured `copy_command` event the client can render as the
+    // copy-paste-into-terminal UX (BMad et al). The client picks a project
+    // dir from the dropdown and either retries the install with ?cwd= OR
+    // simply copies the displayed command and runs it manually. Either path
+    // is honest about the fact that these installers can't run from an SSE
+    // pipe without stdin. (v0.15.54)
+    sse(res, "copy_command", {
+      pack_id,
+      command,
+      reason:
+        entry.project_scoped === true
+          ? "project_scoped"
+          : "looks_project_relative",
+    });
     sse(res, "error", {
       message:
         `pack '${pack_id}' is project-scoped (command operates on cwd). ` +

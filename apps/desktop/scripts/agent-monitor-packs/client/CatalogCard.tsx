@@ -320,6 +320,7 @@ export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
               ? pack.install_commands[modal.harness]
               : pack.uninstall_commands[modal.harness]
           }
+          projectScoped={pack.project_scoped === 1}
           onClose={() => setModal(null)}
           onCompleted={() => {
             if (onAfterRun) onAfterRun();
