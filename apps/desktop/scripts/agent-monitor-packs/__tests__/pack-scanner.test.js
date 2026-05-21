@@ -71,6 +71,20 @@ function makeDb() {
   return db;
 }
 
+test("ensurePackSchema adds event lookup indexes for pack analytics queries", () => {
+  const db = makeDb();
+  const indexes = db
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('idx_events_type_tool', 'idx_events_skill_prompt_lookup') ORDER BY name",
+    )
+    .all()
+    .map((row) => row.name);
+  assert.deepEqual(indexes, [
+    "idx_events_type_tool",
+    "idx_events_skill_prompt_lookup",
+  ]);
+});
+
 function makeGStackTree(
   home,
   { skills = ["office-hours", "ship", "review"], version = null } = {},
@@ -386,6 +400,78 @@ test("tombstone is cleared when a previously uninstalled pack reappears", () => 
     null,
     "uninstalled_at should be cleared on re-detection",
   );
+});
+
+test("installed read paths ignore tombstoned packs and skills", () => {
+  const db = makeDb();
+  addHarnessColumn(db);
+
+  db.prepare(
+    `INSERT INTO agent_packs
+       (pack_id, harness, install_path, install_kind, source_url, version, detected_at, last_seen_at, uninstalled_at)
+     VALUES ('gstack', 'claude', '/tmp/gstack', 'directory', NULL, '1.0.0', ?, ?, ?)`,
+  ).run(
+    "2026-05-18T00:00:00Z",
+    "2026-05-19T00:00:00Z",
+    "2026-05-20T00:00:00Z",
+  );
+  db.prepare(
+    `INSERT INTO skills
+       (skill_id, pack_id, harness, install_path, name, version, description, source_url, detected_at, last_seen_at, uninstalled_at)
+     VALUES ('skill-1', 'gstack', 'claude', '/tmp/gstack/office-hours/SKILL.md', 'office-hours', NULL, NULL, NULL, ?, ?, ?)`,
+  ).run(
+    "2026-05-18T00:00:00Z",
+    "2026-05-19T00:00:00Z",
+    "2026-05-20T00:00:00Z",
+  );
+
+  assert.equal(listPacks(db).length, 0);
+  assert.equal(getPack(db, "gstack"), null);
+  assert.deepEqual(listSkillsForPack(db, "gstack"), []);
+  assert.equal(listSkills(db).length, 0);
+});
+
+test("runPackScanner skips pruning when any detector fails", () => {
+  const db = makeDb();
+
+  db.prepare(
+    `INSERT INTO agent_packs
+       (pack_id, harness, install_path, install_kind, source_url, version, detected_at, last_seen_at, uninstalled_at)
+     VALUES ('gstack', 'claude', '/tmp/gstack', 'directory', NULL, NULL, ?, ?, NULL)`,
+  ).run("2026-05-18T00:00:00Z", "2026-05-18T00:00:00Z");
+  db.prepare(
+    `INSERT INTO skills
+       (skill_id, pack_id, harness, install_path, name, detected_at, last_seen_at, uninstalled_at)
+     VALUES ('skill-keep', 'gstack', 'claude', '/tmp/gstack/office-hours/SKILL.md', 'office-hours', ?, ?, NULL)`,
+  ).run("2026-05-18T00:00:00Z", "2026-05-18T00:00:00Z");
+
+  const summary = runPackScanner(db, {
+    scanGStack() {
+      throw new Error("boom");
+    },
+    scanBmad() {
+      return { installs: 0, skills: 0, projects: 0 };
+    },
+    scanClaudeMarketplaces() {
+      return { installs: 0, skills: 0, marketplaces: 0 };
+    },
+    scanProjectGStackAssociations() {
+      return 0;
+    },
+    runCatalogDetectorAdapters() {
+      return {};
+    },
+  });
+
+  const packRow = db
+    .prepare("SELECT uninstalled_at FROM agent_packs WHERE install_path = '/tmp/gstack'")
+    .get();
+  const skillRow = db
+    .prepare("SELECT uninstalled_at FROM skills WHERE skill_id = 'skill-keep'")
+    .get();
+  assert.equal(summary.pruneSkipped, true);
+  assert.equal(packRow.uninstalled_at, null);
+  assert.equal(skillRow.uninstalled_at, null);
 });
 
 test("scanner reads gstack pack version from top-level VERSION file", () => {

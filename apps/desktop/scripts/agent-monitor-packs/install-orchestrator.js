@@ -16,8 +16,8 @@
 "use strict";
 
 const { spawn } = require("child_process");
-const path = require("path");
 const fs = require("fs");
+const path = require("path");
 const {
   getCatalog,
   recordInstallRunStart,
@@ -39,8 +39,8 @@ const TAIL_BYTES = 4096;
  * (PATH for binary lookup, HOME / USER for ~/ expansion, LANG / TERM for
  * proper rendering, SHELL for `sh -c`) is passed through.
  */
-function buildAllowedChildEnv() {
-  const ALLOWED = [
+function buildAllowedChildEnv(parentEnv = process.env, cwd = null) {
+  const allowed = [
     "PATH",
     "HOME",
     "USER",
@@ -57,12 +57,16 @@ function buildAllowedChildEnv() {
     "PYTHONUNBUFFERED",
   ];
   const out = {};
-  for (const k of ALLOWED) {
-    if (process.env[k] != null) out[k] = process.env[k];
+  for (const key of allowed) {
+    if (typeof parentEnv[key] === "string" && parentEnv[key].length > 0) {
+      out[key] = parentEnv[key];
+    }
   }
-  // Force a sensible HOME if process.env.HOME isn't set (defense-in-depth;
-  // npm and brew both refuse to run without one).
   if (!out.HOME) out.HOME = require("os").homedir();
+  if (cwd) {
+    out.INIT_CWD = cwd;
+    out.PWD = cwd;
+  }
   return out;
 }
 
@@ -83,19 +87,15 @@ function buildAllowedChildEnv() {
  * canonical signal. This heuristic only acts as defense-in-depth for entries
  * that forgot to set the flag.
  */
-const PROJECT_RELATIVE_HINTS = [
-  "--directory .",
-  "--directory=.",
-  " -C .",
-];
+const PROJECT_RELATIVE_HINTS = ["--directory .", "--directory=.", " -C ."];
 function looksProjectRelative(command) {
   if (typeof command !== "string") return false;
-  return PROJECT_RELATIVE_HINTS.some((h) => command.includes(h));
+  return PROJECT_RELATIVE_HINTS.some((hint) => command.includes(hint));
 }
 
 // Strip ANSI escape sequences for stored tails. The live SSE stream keeps the
 // raw bytes so terminal-styled output still renders for the user.
-const ANSI_RE = /\[[0-9;?]*[ -/]*[@-~]/g;
+const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 function stripAnsi(s) {
   return typeof s === "string" ? s.replace(ANSI_RE, "") : s;
 }
@@ -111,6 +111,40 @@ function sse(res, event, data) {
   if (res.writableEnded) return;
   res.write(`event: ${event}\n`);
   res.write(`data: ${typeof data === "string" ? data : JSON.stringify(data)}\n\n`);
+}
+
+function resolveSpawnCwd(requestedCwd) {
+  if (typeof requestedCwd !== "string" || requestedCwd.trim().length === 0) {
+    return null;
+  }
+
+  const trimmed = requestedCwd.trim();
+  if (!path.isAbsolute(trimmed)) {
+    const err = new Error("cwd must be an absolute path");
+    err.code = "EBADCWD";
+    throw err;
+  }
+
+  const abs = path.resolve(trimmed);
+  let stat;
+  try {
+    stat = fs.statSync(abs);
+  } catch {
+    const err = new Error(`cwd does not exist: ${abs}`);
+    err.code = "EBADCWD";
+    throw err;
+  }
+  if (!stat.isDirectory()) {
+    const err = new Error(`not a directory: ${abs}`);
+    err.code = "EBADCWD";
+    throw err;
+  }
+  if (abs === "/" || abs === path.parse(abs).root) {
+    const err = new Error("refusing to spawn at filesystem root");
+    err.code = "EBADCWD";
+    throw err;
+  }
+  return abs;
 }
 
 /**
@@ -130,13 +164,8 @@ function sse(res, event, data) {
 function streamRun(db, opts) {
   const { pack_id, harness, action, res, onComplete } = opts;
   const timeoutMs = opts.timeoutMs || DEFAULT_TIMEOUT_MS;
-  // Optional `cwd` from the request — only honored if it resolves to an
-  // existing directory and is not blacklisted (no /etc, /, etc.). The
-  // catalog-route layer is responsible for validating that this is a path
-  // the user explicitly approved.
   const requestedCwd = typeof opts.cwd === "string" ? opts.cwd.trim() : "";
 
-  // Set SSE headers (only if not already set)
   if (!res.headersSent) {
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -146,7 +175,6 @@ function streamRun(db, opts) {
     });
   }
 
-  // Lookup catalog entry
   const entry = getCatalog(db, pack_id);
   if (!entry) {
     sse(res, "error", { message: `pack_id not in catalog: ${pack_id}` });
@@ -154,6 +182,7 @@ function streamRun(db, opts) {
     res.end();
     return;
   }
+
   const commandMap =
     action === "uninstall" ? entry.uninstall_commands : entry.install_commands;
   const command = commandMap && commandMap[harness];
@@ -166,7 +195,19 @@ function streamRun(db, opts) {
     return;
   }
 
-  // Concurrent-install guard
+  let resolvedCwd = null;
+  try {
+    resolvedCwd = resolveSpawnCwd(requestedCwd);
+  } catch (error) {
+    sse(res, "error", {
+      code: error && error.code ? error.code : "EBADCWD",
+      message: error && error.message ? error.message : "invalid cwd",
+    });
+    sse(res, "complete", { exit_code: -1, reason: "invalid_cwd" });
+    res.end();
+    return;
+  }
+
   const inFlight = inFlightInstallRun(db, pack_id);
   if (inFlight) {
     sse(res, "error", {
@@ -178,45 +219,16 @@ function streamRun(db, opts) {
     return;
   }
 
-  // Validate cwd if provided. Refuses project-relative commands (BMad's
-  // `--directory .`) without a validated cwd. (shafty PR review P1.)
-  let resolvedCwd = null;
-  if (requestedCwd) {
-    try {
-      const abs = path.resolve(requestedCwd);
-      const stat = fs.statSync(abs);
-      if (!stat.isDirectory()) {
-        throw new Error(`not a directory: ${abs}`);
-      }
-      // Reject obviously-dangerous roots.
-      if (abs === "/" || abs === path.parse(abs).root) {
-        throw new Error("refusing to spawn at filesystem root");
-      }
-      resolvedCwd = abs;
-    } catch (e) {
-      sse(res, "error", {
-        message: `invalid cwd '${requestedCwd}': ${e.message}`,
-      });
-      sse(res, "complete", { exit_code: -1, reason: "invalid_cwd" });
-      res.end();
-      return;
-    }
-  }
-  if (
-    (entry.project_scoped === true || looksProjectRelative(command)) &&
-    !resolvedCwd
-  ) {
-    // Emit a structured `copy_command` event the client can render as the
-    // copy-paste-into-terminal UX (BMad et al). The client picks a project
-    // dir from the dropdown and either retries the install with ?cwd= OR
-    // simply copies the displayed command and runs it manually. Either path
-    // is honest about the fact that these installers can't run from an SSE
-    // pipe without stdin. (v0.15.54)
+  const requiresProjectCwd =
+    entry.project_scoped === true ||
+    entry.project_scoped === 1 ||
+    looksProjectRelative(command);
+  if (requiresProjectCwd && !resolvedCwd) {
     sse(res, "copy_command", {
       pack_id,
       command,
       reason:
-        entry.project_scoped === true
+        entry.project_scoped === true || entry.project_scoped === 1
           ? "project_scoped"
           : "looks_project_relative",
     });
@@ -231,7 +243,6 @@ function streamRun(db, opts) {
     return;
   }
 
-  // Record start
   const runId = recordInstallRunStart(db, { pack_id, harness, command });
   sse(res, "start", { run_id: runId, command, cwd: resolvedCwd });
 
@@ -241,14 +252,18 @@ function streamRun(db, opts) {
 
   const spawnOpts = {
     stdio: ["ignore", "pipe", "pipe"],
-    env: buildAllowedChildEnv(),
+    env: buildAllowedChildEnv(process.env, resolvedCwd),
   };
   if (resolvedCwd) spawnOpts.cwd = resolvedCwd;
   const child = spawn("sh", ["-c", command], spawnOpts);
 
   const timer = setTimeout(() => {
     killed = true;
-    sse(res, "stderr", `[install-orchestrator] timeout after ${timeoutMs}ms — killing\n`);
+    sse(
+      res,
+      "stderr",
+      `[install-orchestrator] timeout after ${timeoutMs}ms — killing\n`,
+    );
     try {
       child.kill("SIGTERM");
       setTimeout(() => {
@@ -303,11 +318,8 @@ function streamRun(db, opts) {
     }
   });
 
-  // Client disconnect: leave subprocess running but stop streaming. The run
-  // record will still be finalized on child close.
   res.on("close", () => {
     if (!res.writableEnded) {
-      // client gone — silence further writes
       res.end = () => {};
       res.write = () => {};
     }
@@ -316,11 +328,11 @@ function streamRun(db, opts) {
 
 module.exports = {
   streamRun,
-  // Exported for tests
   _internals: {
-    stripAnsi,
-    tailBytes,
     buildAllowedChildEnv,
     looksProjectRelative,
+    resolveSpawnCwd,
+    stripAnsi,
+    tailBytes,
   },
 };

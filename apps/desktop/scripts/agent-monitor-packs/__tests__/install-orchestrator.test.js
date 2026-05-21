@@ -8,6 +8,9 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const { DatabaseSync } = require("node:sqlite");
 
 const {
@@ -25,7 +28,10 @@ function makeDb() {
   return db;
 }
 
-function seedCatalog(db, packId, installCmd, uninstallCmd = null) {
+function seedCatalog(db, packId, installCmd, uninstallCmd = null, options = {}) {
+  const installCommands =
+    options.installCommands || { claude: installCmd };
+  const harnesses = options.harnesses || Object.keys(installCommands);
   upsertCatalogSeed(db, {
     seed_version: 1,
     packs: [
@@ -33,9 +39,10 @@ function seedCatalog(db, packId, installCmd, uninstallCmd = null) {
         pack_id: packId,
         display_name: packId,
         github_url: `https://github.com/test/${packId}`,
-        harnesses: ["claude"],
-        install_commands: { claude: installCmd },
+        harnesses,
+        install_commands: installCommands,
         ...(uninstallCmd ? { uninstall_commands: { claude: uninstallCmd } } : {}),
+        ...(options.projectScoped ? { project_scoped: true } : {}),
       },
     ],
   });
@@ -179,4 +186,85 @@ test("streamRun errors when no install_command exists for the harness", async ()
     stream.includes("event: error") && stream.includes("no install command"),
     `expected no-install-command error; got stream: ${stream.slice(0, 400)}`,
   );
+});
+
+test("streamRun requires an explicit cwd for project-scoped commands", async () => {
+  const db = makeDb();
+  seedCatalog(db, "project-pack", "pwd", null, {
+    projectScoped: true,
+  });
+  const res = makeRes();
+  streamRun(db, {
+    pack_id: "project-pack",
+    harness: "claude",
+    action: "install",
+    res,
+  });
+  await awaitComplete(res);
+  const stream = joined(res);
+  assert.ok(
+    stream.includes("event: copy_command") && stream.includes("cwd_required"),
+    `expected cwd-required error; got stream: ${stream.slice(0, 400)}`,
+  );
+  assert.equal(listInstallRuns(db, { pack_id: "project-pack" }).length, 0);
+});
+
+test("streamRun runs project-scoped commands in the provided cwd", async () => {
+  const db = makeDb();
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pack-cwd-"));
+  try {
+    seedCatalog(db, "cwd-pack", "pwd", null, {
+      projectScoped: true,
+    });
+    const res = makeRes();
+    streamRun(db, {
+      pack_id: "cwd-pack",
+      harness: "claude",
+      action: "install",
+      cwd: tmpDir,
+      res,
+    });
+    await awaitComplete(res);
+    const stream = joined(res);
+    assert.ok(
+      stream.includes(tmpDir),
+      `expected command to run in ${tmpDir}; got stream: ${stream.slice(0, 400)}`,
+    );
+    const runs = listInstallRuns(db, { pack_id: "cwd-pack" });
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].exit_code, 0);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("streamRun uses an allowlisted child env and does not leak arbitrary secrets", async () => {
+  const db = makeDb();
+  const secretKey = "CLOSEDLOOP_SECRET_SENTINEL";
+  const previous = process.env[secretKey];
+  process.env[secretKey] = "super-secret-value";
+  try {
+    seedCatalog(
+      db,
+      "env-pack",
+      `printf '%s' "$${secretKey}"`,
+    );
+    const res = makeRes();
+    streamRun(db, {
+      pack_id: "env-pack",
+      harness: "claude",
+      action: "install",
+      res,
+    });
+    await awaitComplete(res);
+    const stream = joined(res);
+    assert.ok(!stream.includes("super-secret-value"));
+    const runs = listInstallRuns(db, { pack_id: "env-pack" });
+    assert.equal(runs.length, 1);
+    assert.equal(runs[0].exit_code, 0);
+    assert.equal(runs[0].stdout_tail, null);
+  } finally {
+    if (previous === undefined) delete process.env[secretKey];
+    else process.env[secretKey] = previous;
+  }
 });

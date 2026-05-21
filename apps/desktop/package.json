@@ -19,7 +19,7 @@
     "stage:package": "node scripts/stage-packaging-app.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src/",
-    "test": "tsx --test test/*.test.ts",
+    "test": "tsx --test test/*.test.ts && node --test \"scripts/agent-monitor-packs/__tests__/*.test.js\"",
     "package": "pnpm clean:package && pnpm build && pnpm stage:package && node scripts/run-electron-builder.mjs",
     "release": "pnpm clean:package && pnpm build && pnpm stage:package && node scripts/run-electron-builder.mjs --publish always"
   },

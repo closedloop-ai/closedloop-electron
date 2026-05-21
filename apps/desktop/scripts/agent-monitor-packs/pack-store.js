@@ -58,19 +58,6 @@ function ensurePackSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
     CREATE INDEX IF NOT EXISTS idx_agent_packs_pack ON agent_packs(pack_id);
   `);
-  // Index on `events(event_type, tool_name)` speeds up the UserPromptSubmit
-  // aggregate subquery powering /api/skills and listPackUsage. The events
-  // table is owned by the upstream agent-dashboard schema and may not exist
-  // yet when ensurePackSchema runs in legacy/test fixtures, so wrap in try.
-  // (Thadeus PR review.)
-  try {
-    db.exec(
-      "CREATE INDEX IF NOT EXISTS idx_events_type_tool ON events(event_type, tool_name);",
-    );
-  } catch {
-    /* events table not present — non-fatal */
-  }
-
   // v2 additive migration: `uninstalled_at` tombstone column. When set, the row
   // represents a pack/skill that USED to be installed but isn't anymore — kept
   // around so we can surface "previously installed, last used $DATE, $N tool
@@ -88,6 +75,20 @@ function ensurePackSchema(db) {
       } catch {
         /* column may already exist via concurrent run — non-fatal */
       }
+    }
+  }
+
+  // Skill-invocation reads join against the shared `events` table. Keep these
+  // indexes best-effort so fresh/test DBs without the upstream tables still
+  // boot cleanly.
+  for (const sql of [
+    "CREATE INDEX IF NOT EXISTS idx_events_type_tool ON events(event_type, tool_name)",
+    "CREATE INDEX IF NOT EXISTS idx_events_skill_prompt_lookup ON events(event_type, json_extract(data,'$.prompt'))",
+  ]) {
+    try {
+      db.exec(sql);
+    } catch {
+      /* upstream table or JSON extension may be unavailable in some tests */
     }
   }
 }
@@ -195,7 +196,8 @@ function listPacks(db) {
          COUNT(DISTINCT p.harness || '|' || p.install_path) AS install_count,
          MIN(p.detected_at)                                 AS first_detected_at,
          MAX(p.last_seen_at)                                AS last_seen_at,
-         (SELECT COUNT(*) FROM skills s
+         (SELECT COUNT(*)
+          FROM skills s
           WHERE s.pack_id = p.pack_id
             AND s.uninstalled_at IS NULL)                   AS skill_count
        FROM agent_packs p

@@ -79,19 +79,16 @@ async function main() {
     // Node — the previous fallback silently wiped the WHOLE DB (sessions,
     // events, agents, plans), which was actively dangerous because the
     // command name `--packs-only` promised the opposite. (shafty PR review
-    // P2.) If the user truly wants a full wipe, they can re-run without
-    // `--packs-only`.
+    // P2.)
     let DatabaseSync;
     try {
       ({ DatabaseSync } = await import("node:sqlite"));
     } catch (e) {
       console.error(
         "[reset-dashboard-db] --packs-only requires Node >=22.5 (node:sqlite\n" +
-          "  built-in module). Refusing to run because the previous fallback\n" +
-          "  silently wiped the whole DB. Either:\n" +
-          "    1. Upgrade Node, or\n" +
-          "    2. Drop the --packs-only flag if you want a full wipe.\n" +
-          "  Reason node:sqlite unavailable:",
+          "  built-in module). Refusing to widen this into a full DB wipe.\n" +
+          "  Upgrade Node or run `pnpm -C apps/desktop dashboard:reset`\n" +
+          "  if you explicitly want the full FTUE reset. Reason:",
         e && e.message,
       );
       process.exit(2);

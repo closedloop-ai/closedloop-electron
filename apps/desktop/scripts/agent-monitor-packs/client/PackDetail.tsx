@@ -686,6 +686,7 @@ export function PackDetail() {
               ? entry.install_commands[installModal.harness]
               : entry.uninstall_commands[installModal.harness]
           }
+          projectScoped={entry.project_scoped === 1}
           onClose={() => setInstallModal(null)}
           onCompleted={() => {
             loadEntry();

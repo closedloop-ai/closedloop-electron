@@ -355,6 +355,25 @@ function readBmadMarketplace(dir) {
   return null;
 }
 
+function getRecentProjectRoots(db) {
+  try {
+    const since = new Date(
+      Date.now() - PROJECT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
+    ).toISOString();
+    return db
+      .prepare(
+        `SELECT DISTINCT cwd FROM sessions
+         WHERE cwd IS NOT NULL AND cwd != ''
+           AND (updated_at >= ? OR started_at >= ?)`,
+      )
+      .all(since, since)
+      .map((row) => row.cwd)
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Parse the project-local BMad install manifest (`_bmad/_config/manifest.yaml`)
  * to extract the installed version. Written by `npx bmad-method install`
@@ -487,9 +506,7 @@ function scanBmad(db) {
   }
 
   // 2 & 3. Per-project: walk distinct sessions.cwd from the last 90 days.
-  const projectRoots = getRecentProjectRoots(db);
-
-  for (const projectRoot of projectRoots) {
+  for (const projectRoot of getRecentProjectRoots(db)) {
     let added = 0;
     let installedHere = false;
 
@@ -728,9 +745,8 @@ function scanClaudeMarketplaces(db) {
  * per-project associations.
  */
 function scanProjectGStackAssociations(db) {
-  const projectRoots = getRecentProjectRoots(db);
   let count = 0;
-  for (const projectRoot of projectRoots) {
+  for (const projectRoot of getRecentProjectRoots(db)) {
     const marker = path.join(projectRoot, ".gstack", "conductor.json");
     if (!safeStat(marker)) continue;
     upsertProjectAssociation(db, {
@@ -807,59 +823,74 @@ function pruneStaleRows(db, scanStartedAt) {
  */
 function runCatalogDetectorAdapters(db) {
   if (process.env.SKIP_CATALOG_DETECTORS === "1") return {};
-  try {
-    const { runCatalogDetectors } = require("./catalog-detector");
-    return runCatalogDetectors(db);
-  } catch (e) {
-    console.warn(
-      "[pack-scanner] catalog-detector unavailable:",
-      e && e.message,
-    );
-    return {};
-  }
+  const { runCatalogDetectors } = require("./catalog-detector");
+  return runCatalogDetectors(db);
 }
 
 /**
  * Top-level entry: run every scan path. Best-effort — exceptions in one branch
  * never block another. Safe to call repeatedly. At the end, prune any
  * inventory rows whose last_seen_at wasn't refreshed (i.e. weren't observed
- * in the current pass).
+ * in the current pass). Pruning is skipped when any detector fails so a
+ * transient read/permission/parsing error cannot tombstone real installs.
  *
  * @returns {{
  *   gstack: {installs:number, skills:number},
  *   bmad:   {installs:number, skills:number, projects:number},
  *   gstackProjects: number,
- *   prunedBefore: string
+ *   prunedBefore: string,
+ *   scopes: Record<string, boolean>,
+ *   pruned: boolean,
+ *   pruneSkipped: boolean
  * }}
  */
-function runPackScanner(db) {
+function runPackScanner(db, overrides = {}) {
   const scanStartedAt = new Date().toISOString();
+  const scanners = {
+    scanGStack: overrides.scanGStack || scanGStack,
+    scanBmad: overrides.scanBmad || scanBmad,
+    scanClaudeMarketplaces:
+      overrides.scanClaudeMarketplaces || scanClaudeMarketplaces,
+    scanProjectGStackAssociations:
+      overrides.scanProjectGStackAssociations || scanProjectGStackAssociations,
+    runCatalogDetectorAdapters:
+      overrides.runCatalogDetectorAdapters || runCatalogDetectorAdapters,
+  };
   const summary = {
     gstack: { installs: 0, skills: 0 },
     bmad: { installs: 0, skills: 0, projects: 0 },
     marketplaces: { installs: 0, skills: 0, marketplaces: 0 },
+    catalogDetectors: {},
     gstackProjects: 0,
     prunedBefore: scanStartedAt,
-    scopes: { gstack: false, bmad: false, marketplaces: false, gstackProjects: false, catalogDetectors: false },
+    scopes: {
+      gstack: false,
+      bmad: false,
+      marketplaces: false,
+      gstackProjects: false,
+      catalogDetectors: false,
+    },
+    pruned: false,
+    pruneSkipped: false,
   };
 
   // Track per-scope success so a transient failure in (say) the bmad scanner
   // doesn't tombstone real gstack installs simply because they weren't observed
   // in the failing scope. (shafty PR review P2.)
   try {
-    summary.gstack = scanGStack(db);
+    summary.gstack = scanners.scanGStack(db);
     summary.scopes.gstack = true;
   } catch (e) {
     console.warn("[pack-scanner] gstack scan failed:", e && e.message);
   }
   try {
-    summary.bmad = scanBmad(db);
+    summary.bmad = scanners.scanBmad(db);
     summary.scopes.bmad = true;
   } catch (e) {
     console.warn("[pack-scanner] bmad scan failed:", e && e.message);
   }
   try {
-    summary.marketplaces = scanClaudeMarketplaces(db);
+    summary.marketplaces = scanners.scanClaudeMarketplaces(db);
     summary.scopes.marketplaces = true;
   } catch (e) {
     console.warn(
@@ -868,7 +899,7 @@ function runPackScanner(db) {
     );
   }
   try {
-    summary.gstackProjects = scanProjectGStackAssociations(db);
+    summary.gstackProjects = scanners.scanProjectGStackAssociations(db);
     summary.scopes.gstackProjects = true;
   } catch (e) {
     console.warn(
@@ -877,7 +908,7 @@ function runPackScanner(db) {
     );
   }
   try {
-    summary.catalogDetectors = runCatalogDetectorAdapters(db);
+    summary.catalogDetectors = scanners.runCatalogDetectorAdapters(db);
     summary.scopes.catalogDetectors = true;
   } catch (e) {
     console.warn(
@@ -885,16 +916,9 @@ function runPackScanner(db) {
       e && e.message,
     );
   }
-  // Only prune when ALL scopes completed without exception. A partial scan
-  // produces an incomplete observed-set; tombstoning based on that would
-  // mark genuinely-installed packs as uninstalled. Better to leave stale
-  // rows for one cycle than risk false uninstall.
   const allSucceeded = Object.values(summary.scopes).every(Boolean);
-  if (allSucceeded) {
-    pruneStaleRows(db, scanStartedAt);
-    summary.pruned = true;
-  } else {
-    summary.pruned = false;
+  if (!allSucceeded) {
+    summary.pruneSkipped = true;
     console.warn(
       "[pack-scanner] skipping prune — some detector scopes failed:",
       Object.entries(summary.scopes)
@@ -902,6 +926,9 @@ function runPackScanner(db) {
         .map(([k]) => k)
         .join(", "),
     );
+  } else {
+    pruneStaleRows(db, scanStartedAt);
+    summary.pruned = true;
   }
   return summary;
 }
@@ -919,8 +946,8 @@ module.exports = {
     readGStackVersion,
     scanClaudeMarketplaces,
     KNOWN_MARKETPLACE_SOURCES,
+    getRecentProjectRoots,
     resolveClaudeHome,
     resolveCodexHome,
-    getRecentProjectRoots,
   },
 };

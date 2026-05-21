@@ -193,6 +193,7 @@ const PACK_MODULES = [
   // Per-pack contents-fetcher (FEA-1314 v3): scrapes skill/agent/command
   // listings from each pack's GitHub repo for the detail view.
   "catalog-contents",
+  "catalog-action-handler",
   "install-orchestrator",
   // Per-pack detection adapters (voltagent, alirezarezvani, superclaude,
   // claude-code-router). Lazy-required by pack-scanner at run time.

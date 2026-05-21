@@ -51,6 +51,7 @@ const SEED_FIXTURE = {
       description: "test bmad",
       harnesses: ["claude", "codex"],
       install_commands: { claude: "npx bmad-method install", codex: "npx bmad-method install" },
+      project_scoped: true,
     },
     {
       pack_id: "superpowers",
@@ -198,6 +199,13 @@ test("applyFetchResult updates live fields and appends a history row", () => {
   const history = listHistory(db, "gstack", 1);
   assert.equal(history.length, 1);
   assert.equal(history[0].stars, 100000);
+});
+
+test("getCatalog preserves project_scoped metadata for project installs", () => {
+  const db = makeDb();
+  upsertCatalogSeed(db, SEED_FIXTURE);
+  const bmad = getCatalog(db, "bmad-method");
+  assert.equal(bmad.project_scoped, 1);
 });
 
 test("install run lifecycle: start, query in-flight, end, list", () => {

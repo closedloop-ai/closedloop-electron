@@ -6,15 +6,14 @@
  *
  * Same card design across both sections (CatalogCard). Cards link to
  * /packs/:packId via React Router — the detail view is a real page, not
- * a modal.
+ * a modal. The Installed section always renders so `/packs` shows either
+ * scanner-backed inventory or an explicit zero-installed empty state.
  *
  * Sort within each section:
  *   - pin_order ASC NULLS LAST (closedloop top-left of its section)
  *   - stars DESC
  *   - display_name ASC
  *
- * The Installed section is hidden entirely when no packs are installed,
- * so first-time users see the Catalog directly.
  */
 import { useCallback, useEffect, useState } from "react";
 import { CatalogCard, type CatalogEntry } from "./CatalogCard";
@@ -92,23 +91,28 @@ export function PacksCatalog() {
         </p>
       ) : (
         <div className="space-y-8">
-          {installed.length > 0 && (
-            <section>
-              <div className="mb-3 flex items-baseline gap-2">
-                <h2 className="text-sm font-semibold text-gray-100">
-                  Installed
-                </h2>
-                <span className="text-[11px] text-gray-500">
-                  {installed.length} pack{installed.length === 1 ? "" : "s"}
-                </span>
+          <section>
+            <div className="mb-3 flex items-baseline gap-2">
+              <h2 className="text-sm font-semibold text-gray-100">
+                Installed
+              </h2>
+              <span className="text-[11px] text-gray-500">
+                {installed.length} pack{installed.length === 1 ? "" : "s"}
+              </span>
+            </div>
+            {installed.length === 0 ? (
+              <div className="rounded-lg border border-border bg-surface-2 px-3 py-3 text-xs text-gray-400">
+                No packs detected on disk yet. This section is populated by the
+                pack scanner at startup and after successful installs.
               </div>
+            ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
                 {installed.map((pack) => (
                   <CatalogCard key={pack.pack_id} pack={pack} onAfterRun={load} />
                 ))}
               </div>
-            </section>
-          )}
+            )}
+          </section>
 
           {available.length > 0 && (
             <section>

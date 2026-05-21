@@ -13,6 +13,9 @@ const { db } = require("../db");
 const catalogStore = require("../lib/catalog-store");
 const catalogFetcher = require("../lib/catalog-fetcher");
 const catalogContents = require("../lib/catalog-contents");
+const {
+  createCatalogActionHandler,
+} = require("../lib/catalog-action-handler");
 const installOrchestrator = require("../lib/install-orchestrator");
 const packScanner = require("../lib/pack-scanner");
 
@@ -97,6 +100,12 @@ function clampInt(raw, fallback, min, max) {
   if (Number.isNaN(n)) return fallback;
   return Math.min(Math.max(n, min), max);
 }
+
+const streamAction = createCatalogActionHandler({
+  db,
+  installOrchestrator,
+  packScanner,
+});
 
 // ----- Read -----
 
@@ -232,81 +241,7 @@ router.post("/refresh", async (_req, res) => {
   }
 });
 
-/**
- * Require an Origin header in the configured allowlist for mutating catalog
- * actions. Local CLI tools (curl, fetch from a script) typically don't send
- * an Origin header — this blocks them from spawning shell commands via the
- * sidecar. (shafty PR review P1.)
- *
- * The allowed origins are passed via env (CCAM_ALLOWED_ORIGINS, comma-
- * separated). Empty allowlist means "any non-empty origin is acceptable,"
- * matching the upstream's permissive default for read endpoints but
- * STILL rejecting Origin-less local-process requests.
- */
-function requireKnownOrigin(req, res) {
-  const origin = req.headers.origin;
-  if (!origin) {
-    res
-      .status(403)
-      .json({
-        error: {
-          message:
-            "Origin header required for mutating catalog actions. Local CLI calls without an Origin header are not allowed.",
-        },
-      });
-    return false;
-  }
-  const allowedRaw = process.env.CCAM_ALLOWED_ORIGINS || "";
-  const allowed = allowedRaw
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (allowed.length > 0 && !allowed.includes(origin)) {
-    res
-      .status(403)
-      .json({ error: { message: `Origin not in allowlist: ${origin}` } });
-    return false;
-  }
-  return true;
-}
-
-function streamAction(action, req, res) {
-  if (!requireKnownOrigin(req, res)) return;
-  const harness =
-    typeof req.query.harness === "string" && req.query.harness.trim()
-      ? req.query.harness.trim()
-      : null;
-  if (!harness) {
-    res.status(400).json({ error: { message: "harness query param required" } });
-    return;
-  }
-  // Optional cwd for project-scoped installs (BMad). Forwarded as-is to the
-  // orchestrator, which validates it's an existing directory before spawning.
-  const cwd = typeof req.query.cwd === "string" ? req.query.cwd.trim() : "";
-  installOrchestrator.streamRun(db, {
-    pack_id: req.params.pack_id,
-    harness,
-    action,
-    cwd,
-    res,
-    onComplete: ({ exit_code, killed }) => {
-      // Re-run the pack scanner after a successful install/uninstall so the
-      // Installed badge flips without manual refresh.
-      if (!killed && exit_code === 0) {
-        try {
-          packScanner.runPackScanner(db);
-        } catch (e) {
-          console.warn(
-            "[catalog-route] post-install rescan failed:",
-            e && e.message,
-          );
-        }
-      }
-    },
-  });
-}
-
-router.post("/:pack_id/install", (req, res) => streamAction("install", req, res));
-router.post("/:pack_id/uninstall", (req, res) => streamAction("uninstall", req, res));
+router.post("/:pack_id/install", streamAction("install"));
+router.post("/:pack_id/uninstall", streamAction("uninstall"));
 
 module.exports = router;

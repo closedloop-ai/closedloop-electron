@@ -34,8 +34,8 @@ export interface CatalogEntry {
    *  per-harness install buttons into one "Install" button. */
   harness_agnostic?: number;
   /** When 1, install command operates on the current working directory
-   *  (e.g. BMad's `--directory .`). UI must ask for a project cwd before
-   *  spawning; the orchestrator refuses spawn without one. */
+   *  (e.g. BMad's `--directory .`). UI switches to a copy-command flow so
+   *  the user can run the interactive installer in their own terminal. */
   project_scoped?: number;
   installed_harnesses: string[];
   installed_skill_count: number;

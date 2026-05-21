@@ -441,6 +441,7 @@ export function CatalogDetail({ packId, onClose, onAfterRun }: CatalogDetailProp
               ? entry.install_commands[install.harness]
               : entry.uninstall_commands[install.harness]
           }
+          projectScoped={entry.project_scoped === 1}
           onClose={() => setInstall(null)}
           onCompleted={() => {
             if (onAfterRun) onAfterRun();

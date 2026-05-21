@@ -6,6 +6,9 @@
  */
 import { useEffect, useRef, useState } from "react";
 
+const TRUSTED_ACTION_HEADER = "x-agent-dashboard-trusted-action";
+const TRUSTED_ACTION_VALUE = "catalog-mutate";
+
 /** POSIX single-quote escape — wraps a path so it can be safely interpolated
  *  into a shell command. Handles embedded single quotes via the classic
  *  `'\''` trick. Used for the project cwd prefix in the copy-command UX. */
@@ -48,15 +51,11 @@ export function InstallModal({
   const [state, setState] = useState<RunState>({ kind: "preview" });
   const [lines, setLines] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
-  // Project-scoped install UX state
   const [projects, setProjects] = useState<string[]>([]);
   const [selectedProject, setSelectedProject] = useState<string>("");
   const [copied, setCopied] = useState(false);
   const preRef = useRef<HTMLPreElement | null>(null);
-  const sseRef = useRef<EventSource | null>(null);
 
-  // Load recent projects when this is a project-scoped install — populates the
-  // dropdown that prefixes the copy-command with `cd <project> && ...`.
   useEffect(() => {
     if (!projectScoped) return;
     fetch("/api/packs/recent-projects")
@@ -79,7 +78,7 @@ export function InstallModal({
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch {
-      // best-effort
+      /* best-effort */
     }
   };
 
@@ -89,23 +88,29 @@ export function InstallModal({
     }
   }, [lines]);
 
-  useEffect(() => {
-    return () => {
-      if (sseRef.current) sseRef.current.close();
-    };
-  }, []);
-
   const runIt = () => {
     setState({ kind: "running" });
     setLines([]);
     setError(null);
     const url = `/api/catalog/${encodeURIComponent(packId)}/${action}?harness=${encodeURIComponent(harness)}`;
-    // EventSource only supports GET; fall back to fetch+ReadableStream for SSE-over-POST.
-    fetch(url, { method: "POST", headers: { Accept: "text/event-stream" } })
+    fetch(url, {
+      method: "POST",
+      headers: {
+        Accept: "text/event-stream",
+        [TRUSTED_ACTION_HEADER]: TRUSTED_ACTION_VALUE,
+      },
+    })
       .then(async (res) => {
         if (!res.ok || !res.body) {
-          const body = await res.text().catch(() => "");
-          throw new Error(`HTTP ${res.status}${body ? ": " + body : ""}`);
+          const raw = await res.text().catch(() => "");
+          let detail = raw;
+          try {
+            const parsed = JSON.parse(raw);
+            detail = parsed?.error?.message || raw;
+          } catch {
+            /* leave raw body as-is */
+          }
+          throw new Error(`HTTP ${res.status}${detail ? `: ${detail}` : ""}`);
         }
         const reader = res.body.getReader();
         const decoder = new TextDecoder();
@@ -114,7 +119,6 @@ export function InstallModal({
           const { value, done } = await reader.read();
           if (done) break;
           buf += decoder.decode(value, { stream: true });
-          // SSE frames are separated by blank lines
           let idx;
           while ((idx = buf.indexOf("\n\n")) !== -1) {
             const frame = buf.slice(0, idx);
@@ -138,11 +142,15 @@ export function InstallModal({
     const event = eventLine ? eventLine.slice(6).trim() : "message";
     const data = dataLines.join("\n");
     if (event === "stdout" || event === "stderr") {
-      setLines((prev) => [...prev, event === "stderr" ? `[stderr] ${data}` : data]);
+      setLines((prev) => [
+        ...prev,
+        event === "stderr" ? `[stderr] ${data}` : data,
+      ]);
     } else if (event === "complete") {
       try {
         const parsed = JSON.parse(data);
-        const exitCode = typeof parsed.exit_code === "number" ? parsed.exit_code : -1;
+        const exitCode =
+          typeof parsed.exit_code === "number" ? parsed.exit_code : -1;
         setState({ kind: "complete", exitCode, reason: parsed.reason });
         if (onCompleted) onCompleted(exitCode);
       } catch {
@@ -155,13 +163,13 @@ export function InstallModal({
       } catch {
         setError(data);
       }
-    } else if (event === "start") {
-      // no-op; the command was already shown in the preview
     }
   };
 
   const title =
-    action === "install" ? `Install ${packDisplayName}` : `Uninstall ${packDisplayName}`;
+    action === "install"
+      ? `Install ${packDisplayName}`
+      : `Uninstall ${packDisplayName}`;
 
   return (
     <div
@@ -186,7 +194,9 @@ export function InstallModal({
                   className={`ml-2 ${state.exitCode === 0 ? "text-emerald-300" : "text-rose-300"}`}
                 >
                   exit {state.exitCode}
-                  {state.reason && state.reason !== "exit" ? ` (${state.reason})` : ""}
+                  {state.reason && state.reason !== "exit"
+                    ? ` (${state.reason})`
+                    : ""}
                 </span>
               )}
             </p>
@@ -200,11 +210,6 @@ export function InstallModal({
           </button>
         </div>
 
-        {/* Project-scoped pack: copy-command UX (BMad et al). The installer
-            for these packs is interactive in ways our SSE pipe can't handle
-            (module selection, IDE choice, etc), so we show the right command
-            with a `cd <project>` prefix and let the user run it in their
-            own terminal where they can answer the prompts. */}
         {projectScoped ? (
           <div className="p-4 space-y-3">
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-200/90">
