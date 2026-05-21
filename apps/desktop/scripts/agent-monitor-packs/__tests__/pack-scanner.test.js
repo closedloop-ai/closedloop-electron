@@ -858,6 +858,49 @@ test("collectPackPaths merges install_path, project_path, and detection_patterns
   assert.ok(paths.includes("gstack-brain-sync"));
 });
 
+test("detectBinaryTool registers one agent_packs row per harness for an on-PATH binary", () => {
+  const db = makeDb();
+  const cd = require("../catalog-detector");
+  // Use `/bin/ls` as a stand-in binary that is guaranteed to be on PATH on
+  // macOS + Linux. The detector should register two rows (claude + codex)
+  // pointing at the same install_path.
+  const result = cd._internals.detectBinaryTool(db, {
+    pack_id: "test-binary-tool",
+    binNames: ["ls"],
+    source_url: "https://example.invalid/x",
+    harnesses: ["claude", "codex"],
+    versionArgs: [], // ls doesn't have a useful --version; skip probing
+  });
+  assert.equal(result, true);
+  const rows = db
+    .prepare(
+      "SELECT pack_id, harness, install_path FROM agent_packs WHERE pack_id = 'test-binary-tool' ORDER BY harness",
+    )
+    .all();
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].harness, "claude");
+  assert.equal(rows[1].harness, "codex");
+  assert.ok(rows[0].install_path.endsWith("/ls"));
+  assert.equal(rows[0].install_path, rows[1].install_path);
+});
+
+test("detectBinaryTool returns false when binary is not on PATH", () => {
+  const db = makeDb();
+  const cd = require("../catalog-detector");
+  const result = cd._internals.detectBinaryTool(db, {
+    pack_id: "test-missing",
+    binNames: ["this-binary-definitely-does-not-exist-xyz123"],
+    source_url: null,
+    harnesses: ["claude"],
+    versionArgs: [],
+  });
+  assert.equal(result, false);
+  const count = db
+    .prepare("SELECT COUNT(*) AS n FROM agent_packs WHERE pack_id = 'test-missing'")
+    .get();
+  assert.equal(count.n, 0);
+});
+
 test("no skill_invocations table is ever created", () => {
   const home = mkdtemp();
   makeGStackTree(home);

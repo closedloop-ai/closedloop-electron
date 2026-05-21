@@ -188,6 +188,74 @@ function detectClaudePluginsOfficial(db) {
   return true;
 }
 
+/**
+ * Detect a binary-installed, harness-agnostic CLI tool (e.g. RTK installed via
+ * brew). Since the binary works regardless of which agent harness invokes it,
+ * one detection registers an agent_packs row for EACH harness in
+ * `harnesses`, so the catalog card's per-harness chips all flip to
+ * "Installed" together.
+ *
+ * Returns `true` if the binary is on PATH (any of `binNames` resolvable), and
+ * registers rows; `false` if not found.
+ */
+function detectBinaryTool(
+  db,
+  { pack_id, binNames, source_url, harnesses, versionArgs },
+) {
+  let binaryPath = null;
+  for (const bin of binNames) {
+    try {
+      const out = execFileSync("/usr/bin/which", [bin], {
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 1000,
+      });
+      const trimmed = out.toString().trim();
+      if (trimmed) {
+        binaryPath = trimmed;
+        break;
+      }
+    } catch {
+      /* not on PATH — try next bin name */
+    }
+  }
+  if (!binaryPath) return false;
+
+  let version = null;
+  if (Array.isArray(versionArgs) && versionArgs.length > 0) {
+    try {
+      const out = execFileSync(binaryPath, versionArgs, {
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 2000,
+      });
+      const m = out.toString().match(/(\d+(?:\.\d+)+)/);
+      if (m) version = m[1];
+    } catch {
+      /* version probe is best-effort */
+    }
+  }
+  for (const harness of harnesses) {
+    upsertPack(db, {
+      pack_id,
+      harness,
+      install_path: binaryPath,
+      install_kind: "directory", // CHECK constraint allows symlink|directory
+      source_url: source_url || null,
+      version,
+    });
+  }
+  return true;
+}
+
+function detectRtk(db) {
+  return detectBinaryTool(db, {
+    pack_id: "rtk",
+    binNames: ["rtk"],
+    source_url: "https://github.com/rtk-ai/rtk",
+    harnesses: ["claude", "codex"],
+    versionArgs: ["--version"],
+  });
+}
+
 function detectClaudeCodeRouter(db) {
   // Global npm install — probe via `npm ls -g` (fast, no network).
   let installed = false;
@@ -233,6 +301,7 @@ function runCatalogDetectors(db) {
     ["superclaude", detectSuperClaude],
     ["claude-code-router", detectClaudeCodeRouter],
     ["claude-plugins-official", detectClaudePluginsOfficial],
+    ["rtk", detectRtk],
   ];
   for (const [name, fn] of ADAPTERS) {
     try {
@@ -257,5 +326,7 @@ module.exports = {
     detectSuperClaude,
     detectClaudeCodeRouter,
     detectClaudePluginsOfficial,
+    detectRtk,
+    detectBinaryTool,
   },
 };
