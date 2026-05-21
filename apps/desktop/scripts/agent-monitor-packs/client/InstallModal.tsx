@@ -17,17 +17,33 @@ function shellQuote(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
+interface PostInstallInfo {
+  title: string;
+  body: string;
+  copy_command?: string;
+  url?: string;
+  required?: boolean;
+}
+
 interface InstallModalProps {
   packId: string;
   packDisplayName: string;
   harness: string;
   action: "install" | "uninstall";
   command: string;
+  /** When true, the `command` field is a best-guess preview — the server
+   *  picks the actual command to run based on installed CLIs at spawn
+   *  time. UI shows a note explaining this. */
+  commandIsAutoDetect?: boolean;
   /** Set when the pack's install command operates on `cwd` (BMad et al).
    *  When true, the modal shows a copy-command UX with a project picker
    *  instead of streaming the install — the user runs it in their own
    *  terminal where they can answer interactive prompts. */
   projectScoped?: boolean;
+  /** Optional next-steps block popped automatically after a successful
+   *  install (Claude Code Router, context7 optional Upstash key, future
+   *  ClosedLoop MCP). Falls through unchanged for packs without one. */
+  postInstall?: PostInstallInfo | null;
   onClose: () => void;
   /** Called after a successful run so the parent can re-fetch the catalog. */
   onCompleted?: (exitCode: number) => void;
@@ -44,16 +60,30 @@ export function InstallModal({
   harness,
   action,
   command,
+  commandIsAutoDetect,
   projectScoped,
+  postInstall,
   onClose,
   onCompleted,
 }: InstallModalProps) {
+  // Friendlier label for the "auto" sentinel — most users don't know what
+  // "auto" means as a harness value. Shows the actual harnesses the server
+  // will pick from instead.
+  const harnessLabel =
+    harness === "auto" ? "auto-detect (claude + codex)" : harness;
   const [state, setState] = useState<RunState>({ kind: "preview" });
   const [lines, setLines] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [projects, setProjects] = useState<string[]>([]);
   const [selectedProject, setSelectedProject] = useState<string>("");
   const [copied, setCopied] = useState(false);
+  // Post-install screen. Populated either from the seeded `postInstall` prop
+  // OR from a `post_install` SSE event the server emits before `complete`.
+  // We prefer the server-emitted one since it can carry runtime-resolved
+  // values, but fall back to the prop for client-side rendering.
+  const [postInstallInfo, setPostInstallInfo] =
+    useState<PostInstallInfo | null>(null);
+  const [postInstallCopied, setPostInstallCopied] = useState(false);
   const preRef = useRef<HTMLPreElement | null>(null);
 
   useEffect(() => {
@@ -146,11 +176,39 @@ export function InstallModal({
         ...prev,
         event === "stderr" ? `[stderr] ${data}` : data,
       ]);
+    } else if (event === "post_install") {
+      // Server is signalling that this install has required-or-recommended
+      // follow-ups. Store the block — the post-install screen renders after
+      // `complete` lands.
+      try {
+        const parsed = JSON.parse(data);
+        if (parsed && typeof parsed === "object" && parsed.title && parsed.body) {
+          setPostInstallInfo({
+            title: String(parsed.title),
+            body: String(parsed.body),
+            copy_command: parsed.copy_command,
+            url: parsed.url,
+            required: Boolean(parsed.required),
+          });
+        }
+      } catch {
+        /* malformed — ignore */
+      }
     } else if (event === "complete") {
       try {
         const parsed = JSON.parse(data);
         const exitCode =
           typeof parsed.exit_code === "number" ? parsed.exit_code : -1;
+        // Promote prop-supplied post_install if the server didn't send one
+        // (e.g. older sidecar). Only on a successful install.
+        if (
+          exitCode === 0 &&
+          action === "install" &&
+          !postInstallInfo &&
+          postInstall
+        ) {
+          setPostInstallInfo(postInstall);
+        }
         setState({ kind: "complete", exitCode, reason: parsed.reason });
         if (onCompleted) onCompleted(exitCode);
       } catch {
@@ -185,7 +243,7 @@ export function InstallModal({
               {title}
             </h2>
             <p className="text-[11px] text-gray-500 mt-0.5">
-              harness: <span className="font-mono text-gray-300">{harness}</span>
+              harness: <span className="font-mono text-gray-300">{harnessLabel}</span>
               {state.kind === "running" && (
                 <span className="ml-2 text-amber-300">running…</span>
               )}
@@ -269,9 +327,15 @@ export function InstallModal({
             <div>
               <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 mb-1">
                 Command
+                {commandIsAutoDetect && (
+                  <span className="ml-2 text-[10px] normal-case font-normal text-gray-400">
+                    (preview — server picks the final command based on
+                    installed CLIs)
+                  </span>
+                )}
               </div>
               <pre className="whitespace-pre-wrap break-all text-xs font-mono text-gray-200 bg-surface-2 border border-border rounded-lg p-3 max-h-32 overflow-auto">
-                {command}
+                {command || "(server will resolve at install time)"}
               </pre>
             </div>
 
@@ -294,6 +358,73 @@ export function InstallModal({
                 </pre>
               </div>
             )}
+
+            {/* Post-install required-or-recommended next steps. Pops only on a
+                successful install when the pack has a `post_install` block —
+                most packs render nothing here. (Claude Code Router needs
+                provider keys; context7 optionally needs an Upstash key; future
+                ClosedLoop MCP needs OAuth + API key.) */}
+            {state.kind === "complete" &&
+              state.exitCode === 0 &&
+              action === "install" &&
+              postInstallInfo && (
+                <div
+                  className={`rounded-lg border px-3 py-3 ${
+                    postInstallInfo.required
+                      ? "border-amber-500/40 bg-amber-500/5"
+                      : "border-sky-500/30 bg-sky-500/5"
+                  }`}
+                >
+                  <div
+                    className={`text-[11px] font-semibold uppercase tracking-wide mb-1 ${
+                      postInstallInfo.required
+                        ? "text-amber-300"
+                        : "text-sky-300"
+                    }`}
+                  >
+                    {postInstallInfo.required ? "Required next step" : "Next step (optional)"}
+                  </div>
+                  <div className="text-sm font-medium text-gray-100 mb-1">
+                    {postInstallInfo.title}
+                  </div>
+                  <p className="text-[12px] text-gray-300 mb-3 leading-relaxed">
+                    {postInstallInfo.body}
+                  </p>
+                  {postInstallInfo.copy_command && (
+                    <div className="mb-3">
+                      <pre className="whitespace-pre-wrap break-all text-[11px] font-mono text-gray-200 bg-black/30 border border-border rounded-lg p-2.5 max-h-32 overflow-auto">
+                        {postInstallInfo.copy_command}
+                      </pre>
+                      <button
+                        onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(
+                              postInstallInfo.copy_command || "",
+                            );
+                            setPostInstallCopied(true);
+                            setTimeout(() => setPostInstallCopied(false), 1500);
+                          } catch {
+                            /* best-effort */
+                          }
+                        }}
+                        className="mt-1.5 text-[11px] rounded border border-border bg-surface-3 text-gray-300 px-2 py-1 hover:bg-surface-2"
+                      >
+                        {postInstallCopied ? "Copied ✓" : "Copy"}
+                      </button>
+                    </div>
+                  )}
+                  {postInstallInfo.url && (
+                    <a
+                      href={postInstallInfo.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[11px] text-accent hover:underline"
+                    >
+                      Open setup guide →
+                    </a>
+                  )}
+                </div>
+              )}
 
             <div className="flex justify-end gap-2 pt-2">
               {state.kind === "preview" && (

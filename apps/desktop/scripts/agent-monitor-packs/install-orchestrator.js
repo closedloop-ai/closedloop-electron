@@ -93,6 +93,72 @@ function looksProjectRelative(command) {
   return PROJECT_RELATIVE_HINTS.some((hint) => command.includes(hint));
 }
 
+/**
+ * Probe whether a harness CLI is installed on PATH. Used by `single_install`
+ * packs (gstack today) so we install only for the harnesses the user actually
+ * has. Best-effort and short-timeout — never blocks the request long.
+ *
+ * @param {string} harness — 'claude' | 'codex' (extend as we add more)
+ * @returns {boolean}
+ */
+const HARNESS_CLI_BINARIES = {
+  claude: "claude",
+  codex: "codex",
+};
+function isHarnessInstalled(harness) {
+  const bin = HARNESS_CLI_BINARIES[harness];
+  if (!bin) return false;
+  try {
+    const out = require("child_process").execFileSync("/usr/bin/which", [bin], {
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 1000,
+    });
+    return Boolean(out.toString().trim());
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * For `single_install` packs (gstack), pick the install command that covers
+ * the most installed CLIs.
+ *
+ * Heuristic: if both claude and codex are installed AND the seed lists both
+ * harnesses, prefer the `codex` install command — by convention these
+ * commands are written as supersets of the `claude` command for packs in
+ * this category (gstack's `./setup && ./setup --host codex` is the
+ * canonical example). Fall back to whichever single command exists for
+ * the harness that IS installed.
+ *
+ * Returns { command, registerHarnesses } — the command to run + which
+ * harness rows the post-install scanner should expect to materialize.
+ */
+function pickSingleInstallCommand(entry, action) {
+  const cmdMap =
+    action === "uninstall" ? entry.uninstall_commands : entry.install_commands;
+  const harnesses = Array.isArray(entry.harnesses) ? entry.harnesses : [];
+  const installed = harnesses.filter(isHarnessInstalled);
+  if (installed.length === 0) {
+    return { command: null, registerHarnesses: [] };
+  }
+  // Prefer codex command when codex is present and there's a command for it,
+  // since the convention is codex command = claude command + extras. If no
+  // codex command exists, fall back to claude.
+  const codexFirst = ["codex", "claude"];
+  for (const h of codexFirst) {
+    if (installed.includes(h) && cmdMap && cmdMap[h]) {
+      return { command: cmdMap[h], registerHarnesses: installed };
+    }
+  }
+  // Last resort: any command, any installed harness.
+  for (const h of installed) {
+    if (cmdMap && cmdMap[h]) {
+      return { command: cmdMap[h], registerHarnesses: installed };
+    }
+  }
+  return { command: null, registerHarnesses: [] };
+}
+
 // Strip ANSI escape sequences for stored tails. The live SSE stream keeps the
 // raw bytes so terminal-styled output still renders for the user.
 const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
@@ -182,17 +248,39 @@ function streamRun(db, opts) {
     res.end();
     return;
   }
-
-  const commandMap =
-    action === "uninstall" ? entry.uninstall_commands : entry.install_commands;
-  const command = commandMap && commandMap[harness];
-  if (!command) {
-    sse(res, "error", {
-      message: `no ${action} command for harness '${harness}' on pack '${pack_id}'`,
-    });
-    sse(res, "complete", { exit_code: -1, reason: "no_command" });
-    res.end();
-    return;
+  // For `single_install` packs (gstack), the catalog UI sends harness="auto"
+  // and we pick the command that covers all installed CLIs in one run.
+  // Otherwise the per-harness command from the seed is used as-is.
+  let command;
+  let resolvedHarnesses = [harness];
+  if (entry.single_install === 1 && harness === "auto") {
+    const picked = pickSingleInstallCommand(entry, action);
+    command = picked.command;
+    resolvedHarnesses = picked.registerHarnesses;
+    if (!command) {
+      sse(res, "error", {
+        message:
+          `pack '${pack_id}' is single_install but no supported CLI is on PATH. ` +
+          `Install Claude Code or Codex first, then try again.`,
+      });
+      sse(res, "complete", { exit_code: -1, reason: "no_cli_detected" });
+      res.end();
+      return;
+    }
+  } else {
+    const commandMap =
+      action === "uninstall"
+        ? entry.uninstall_commands
+        : entry.install_commands;
+    command = commandMap && commandMap[harness];
+    if (!command) {
+      sse(res, "error", {
+        message: `no ${action} command for harness '${harness}' on pack '${pack_id}'`,
+      });
+      sse(res, "complete", { exit_code: -1, reason: "no_command" });
+      res.end();
+      return;
+    }
   }
 
   let resolvedCwd = null;
@@ -300,6 +388,18 @@ function streamRun(db, opts) {
       stdout_tail: tailBytes(stdoutBuf),
       stderr_tail: tailBytes(stderrBuf),
     });
+    // On successful install only: surface the pack's post_install block (if
+    // present) BEFORE the complete event, so the client knows to render the
+    // "next steps" screen instead of plain Done. (User-facing: this is what
+    // pops the CCR provider-keys reminder, etc.)
+    if (
+      !killed &&
+      exitCode === 0 &&
+      action === "install" &&
+      entry.post_install
+    ) {
+      sse(res, "post_install", entry.post_install);
+    }
     sse(res, "complete", {
       exit_code: killed ? -1 : exitCode,
       reason: killed ? "timeout" : signal ? `signal:${signal}` : "exit",
@@ -334,5 +434,7 @@ module.exports = {
     resolveSpawnCwd,
     stripAnsi,
     tailBytes,
+    isHarnessInstalled,
+    pickSingleInstallCommand,
   },
 };

@@ -1,6 +1,6 @@
 {
-  "seed_version": 9,
-  "_note": "Seed v9 (2026-05-21): added two pack-level flags from PR review. `harness_agnostic: true` for binary-installed tools whose one install satisfies all harnesses at once (RTK) — UI collapses the per-harness install buttons into one. `project_scoped: true` for packs whose install command operates on the current directory (BMad's --directory .) and MUST receive an explicit cwd at install time. The install orchestrator refuses to spawn project-scoped commands without a validated cwd.",
+  "seed_version": 11,
+  "_note": "Seed v11 (2026-05-21): gstack install commands made idempotent — `git clone` is now gated by `test -d` so re-running the install on a partially-installed pack tops it off (e.g. adds codex symlinks when only claude was previously set up) instead of erroring out on a re-clone of an existing directory. v10's flags preserved.",
   "packs": [
     {
       "pack_id": "closedloop-ai",
@@ -168,6 +168,12 @@
       },
       "install_notes": "MCP server — adds documentation-lookup tools rather than slash commands or agents. Hand-picked from Anthropic's claude-plugins-official marketplace; sourced from external_plugins/context7.",
       "verified": true,
+      "post_install": {
+        "title": "Optional: add an Upstash API key for higher rate limits",
+        "body": "Context7 works out of the box on the free tier. If you want higher request limits or private docs, sign up at Upstash and add the API key to your Claude Code config.",
+        "url": "https://context7.com/dashboard",
+        "required": false
+      },
       "detection_patterns": [
         "/.claude/plugins/cache/claude-plugins-official/context7/",
         "mcp__context7__",
@@ -231,9 +237,10 @@
       "github_url": "https://github.com/garrytan/gstack",
       "description": "Garry Tan's opinionated Claude Code setup: 23 tools that serve as CEO/Designer/Eng Manager/Release Manager/Doc Engineer/QA. Includes /autoplan, /ship, /qa, /cso, /review, /codex.",
       "harnesses": ["claude", "codex"],
+      "single_install": true,
       "install_commands": {
-        "claude": "git clone https://github.com/garrytan/gstack ~/.claude/skills/gstack && cd ~/.claude/skills/gstack && ./setup",
-        "codex": "git clone https://github.com/garrytan/gstack ~/.claude/skills/gstack && cd ~/.claude/skills/gstack && ./setup && ./setup --host codex"
+        "claude": "(test -d ~/.claude/skills/gstack || git clone https://github.com/garrytan/gstack ~/.claude/skills/gstack) && cd ~/.claude/skills/gstack && ./setup",
+        "codex": "(test -d ~/.claude/skills/gstack || git clone https://github.com/garrytan/gstack ~/.claude/skills/gstack) && cd ~/.claude/skills/gstack && ./setup && ./setup --host codex"
       },
       "uninstall_commands": {
         "claude": "rm -rf ~/.claude/skills/gstack && find ~/.claude/skills -maxdepth 2 -name SKILL.md -lname '*gstack*' -print0 2>/dev/null | xargs -0 -I {} dirname {} | xargs -I {} rm -rf {}",
@@ -311,6 +318,13 @@
       },
       "install_notes": "Requires Claude Code (`npm install -g @anthropic-ai/claude-code`). After install, configure ~/.claude-code-router/config.json — see README for the schema.",
       "verified": true,
+      "post_install": {
+        "title": "One more step — add your LLM provider keys",
+        "body": "Claude Code Router is installed but won't route until you tell it which LLM providers to use. Open the config file and add API keys for OpenRouter, DeepSeek, Ollama, Gemini, or whichever providers you want to route through.",
+        "copy_command": "open ~/.claude-code-router/config.json 2>/dev/null || mkdir -p ~/.claude-code-router && touch ~/.claude-code-router/config.json && open ~/.claude-code-router/config.json",
+        "url": "https://github.com/musistudio/claude-code-router#configuration",
+        "required": true
+      },
       "contents": {
         "type": "none",
         "reason": "Router CLI tool, not a skill collection. Installs the `ccr` binary."
