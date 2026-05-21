@@ -16,6 +16,8 @@
 "use strict";
 
 const { spawn } = require("child_process");
+const path = require("path");
+const fs = require("fs");
 const {
   getCatalog,
   recordInstallRunStart,
@@ -25,6 +27,61 @@ const {
 
 const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
 const TAIL_BYTES = 4096;
+
+/**
+ * Minimal env passed to child install processes.
+ *
+ * SHIPPED FIX (shafty PR review P1): the previous `env: process.env` passed
+ * the FULL Desktop process environment to arbitrary catalog shell commands,
+ * which can include ClosedLoop tokens, PostHog keys, API keys, and shell
+ * credentials. A malicious or compromised catalog entry could exfiltrate
+ * any of them. Only an allowlist of variables needed for sane CLI execution
+ * (PATH for binary lookup, HOME / USER for ~/ expansion, LANG / TERM for
+ * proper rendering, SHELL for `sh -c`) is passed through.
+ */
+function buildAllowedChildEnv() {
+  const ALLOWED = [
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "TMPDIR",
+    "HOMEBREW_PREFIX",
+    "HOMEBREW_CELLAR",
+    "HOMEBREW_REPOSITORY",
+    "PYTHONUNBUFFERED",
+  ];
+  const out = {};
+  for (const k of ALLOWED) {
+    if (process.env[k] != null) out[k] = process.env[k];
+  }
+  // Force a sensible HOME if process.env.HOME isn't set (defense-in-depth;
+  // npm and brew both refuse to run without one).
+  if (!out.HOME) out.HOME = require("os").homedir();
+  return out;
+}
+
+/** Heuristics for catalog commands that operate on the current directory and
+ *  must NOT be run without an explicit, validated project cwd. shafty PR
+ *  review P1: BMad's `npx bmad-method install --directory .` would write
+ *  files into whatever directory launched the sidecar (typically the user's
+ *  home or the build dir), not the project they intended. We refuse to spawn
+ *  these unless the caller passes an explicit cwd. */
+const PROJECT_RELATIVE_HINTS = [
+  "--directory .",
+  "--directory=.",
+  " -C .",
+  " ./",
+];
+function looksProjectRelative(command) {
+  if (typeof command !== "string") return false;
+  return PROJECT_RELATIVE_HINTS.some((h) => command.includes(h));
+}
 
 // Strip ANSI escape sequences for stored tails. The live SSE stream keeps the
 // raw bytes so terminal-styled output still renders for the user.
@@ -63,6 +120,11 @@ function sse(res, event, data) {
 function streamRun(db, opts) {
   const { pack_id, harness, action, res, onComplete } = opts;
   const timeoutMs = opts.timeoutMs || DEFAULT_TIMEOUT_MS;
+  // Optional `cwd` from the request — only honored if it resolves to an
+  // existing directory and is not blacklisted (no /etc, /, etc.). The
+  // catalog-route layer is responsible for validating that this is a path
+  // the user explicitly approved.
+  const requestedCwd = typeof opts.cwd === "string" ? opts.cwd.trim() : "";
 
   // Set SSE headers (only if not already set)
   if (!res.headersSent) {
@@ -106,18 +168,59 @@ function streamRun(db, opts) {
     return;
   }
 
+  // Validate cwd if provided. Refuses project-relative commands (BMad's
+  // `--directory .`) without a validated cwd. (shafty PR review P1.)
+  let resolvedCwd = null;
+  if (requestedCwd) {
+    try {
+      const abs = path.resolve(requestedCwd);
+      const stat = fs.statSync(abs);
+      if (!stat.isDirectory()) {
+        throw new Error(`not a directory: ${abs}`);
+      }
+      // Reject obviously-dangerous roots.
+      if (abs === "/" || abs === path.parse(abs).root) {
+        throw new Error("refusing to spawn at filesystem root");
+      }
+      resolvedCwd = abs;
+    } catch (e) {
+      sse(res, "error", {
+        message: `invalid cwd '${requestedCwd}': ${e.message}`,
+      });
+      sse(res, "complete", { exit_code: -1, reason: "invalid_cwd" });
+      res.end();
+      return;
+    }
+  }
+  if (
+    (entry.project_scoped === true || looksProjectRelative(command)) &&
+    !resolvedCwd
+  ) {
+    sse(res, "error", {
+      message:
+        `pack '${pack_id}' is project-scoped (command operates on cwd). ` +
+        `Provide an explicit \`cwd\` for the install — otherwise it would ` +
+        `run in the sidecar's launch directory, not your project.`,
+    });
+    sse(res, "complete", { exit_code: -1, reason: "cwd_required" });
+    res.end();
+    return;
+  }
+
   // Record start
   const runId = recordInstallRunStart(db, { pack_id, harness, command });
-  sse(res, "start", { run_id: runId, command });
+  sse(res, "start", { run_id: runId, command, cwd: resolvedCwd });
 
   let stdoutBuf = "";
   let stderrBuf = "";
   let killed = false;
 
-  const child = spawn("sh", ["-c", command], {
+  const spawnOpts = {
     stdio: ["ignore", "pipe", "pipe"],
-    env: process.env,
-  });
+    env: buildAllowedChildEnv(),
+  };
+  if (resolvedCwd) spawnOpts.cwd = resolvedCwd;
+  const child = spawn("sh", ["-c", command], spawnOpts);
 
   const timer = setTimeout(() => {
     killed = true;
@@ -190,5 +293,10 @@ function streamRun(db, opts) {
 module.exports = {
   streamRun,
   // Exported for tests
-  _internals: { stripAnsi, tailBytes },
+  _internals: {
+    stripAnsi,
+    tailBytes,
+    buildAllowedChildEnv,
+    looksProjectRelative,
+  },
 };

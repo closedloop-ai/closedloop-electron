@@ -29,6 +29,14 @@ export interface CatalogEntry {
   forks: number | null;
   last_release: string | null;
   last_fetched_at: string | null;
+  /** When 1, one install satisfies ALL harnesses in `harnesses` (e.g. RTK:
+   *  brew binary on PATH used by both claude and codex). UI collapses the
+   *  per-harness install buttons into one "Install" button. */
+  harness_agnostic?: number;
+  /** When 1, install command operates on the current working directory
+   *  (e.g. BMad's `--directory .`). UI must ask for a project cwd before
+   *  spawning; the orchestrator refuses spawn without one. */
+  project_scoped?: number;
   installed_harnesses: string[];
   installed_skill_count: number;
   /** ISO timestamp of the most recent tombstone — set when at least one
@@ -168,47 +176,111 @@ export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
       </div>
 
       <div className="mt-auto flex flex-wrap items-center gap-1.5 pt-2 border-t border-border">
-        {pack.harnesses.map((h) => {
-          const cmd = pack.install_commands[h];
-          const installed = pack.installed_harnesses.includes(h);
-          if (!cmd) {
-            return (
-              <a
-                key={h}
-                href={pack.github_url}
-                target="_blank"
-                rel="noreferrer"
-                className="text-[10px] rounded border border-border bg-surface-3 text-gray-400 px-2 py-1 hover:bg-surface-2"
-                title="No install command in catalog seed — open the repo for instructions"
-              >
-                {h}: see repo
-              </a>
-            );
-          }
-          if (installed) {
-            const uninstall = pack.uninstall_commands[h];
-            return (
-              <button
-                key={h}
-                onClick={() => uninstall && setModal({ harness: h, action: "uninstall" })}
-                disabled={!uninstall}
-                className="text-[10px] rounded border border-border bg-surface-3 text-gray-300 px-2 py-1 hover:bg-surface-2 disabled:opacity-50"
-                title={uninstall ? `Uninstall ${pack.display_name} for ${h}` : "No uninstall command in catalog seed"}
-              >
-                Uninstall ({h})
-              </button>
-            );
-          }
-          return (
-            <button
-              key={h}
-              onClick={() => setModal({ harness: h, action: "install" })}
-              className="text-[10px] font-medium rounded border border-accent/40 bg-accent/10 text-accent px-2 py-1 hover:bg-accent/20"
-            >
-              Install ({h})
-            </button>
-          );
-        })}
+        {/* For harness-agnostic packs (RTK et al), collapse the per-harness
+            button set into ONE button — both chips are satisfied by the same
+            install command. We use the first available harness/command pair
+            because they're equivalent for these tools. */}
+        {pack.harness_agnostic === 1 && pack.harnesses.length > 0
+          ? (() => {
+              const firstHarness =
+                pack.harnesses.find((h) => pack.install_commands[h]) ||
+                pack.harnesses[0];
+              const cmd = pack.install_commands[firstHarness];
+              const fullyInstalled = pack.harnesses.every((h) =>
+                pack.installed_harnesses.includes(h),
+              );
+              if (!cmd) {
+                return (
+                  <a
+                    href={pack.github_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[10px] rounded border border-border bg-surface-3 text-gray-400 px-2 py-1 hover:bg-surface-2"
+                    title="No install command in catalog seed — open the repo for instructions"
+                  >
+                    see repo
+                  </a>
+                );
+              }
+              if (fullyInstalled) {
+                const uninstall = pack.uninstall_commands[firstHarness];
+                return (
+                  <button
+                    onClick={() =>
+                      uninstall &&
+                      setModal({ harness: firstHarness, action: "uninstall" })
+                    }
+                    disabled={!uninstall}
+                    className="text-[10px] rounded border border-border bg-surface-3 text-gray-300 px-2 py-1 hover:bg-surface-2 disabled:opacity-50"
+                    title={
+                      uninstall
+                        ? `Uninstall ${pack.display_name} (removes for all harnesses)`
+                        : "No uninstall command in catalog seed"
+                    }
+                  >
+                    Uninstall
+                  </button>
+                );
+              }
+              return (
+                <button
+                  onClick={() =>
+                    setModal({ harness: firstHarness, action: "install" })
+                  }
+                  className="text-[10px] font-medium rounded border border-accent/40 bg-accent/10 text-accent px-2 py-1 hover:bg-accent/20"
+                  title={`One install registers for ${pack.harnesses.join(", ")} — this is a harness-agnostic CLI tool.`}
+                >
+                  Install
+                </button>
+              );
+            })()
+          : pack.harnesses.map((h) => {
+              const cmd = pack.install_commands[h];
+              const installed = pack.installed_harnesses.includes(h);
+              if (!cmd) {
+                return (
+                  <a
+                    key={h}
+                    href={pack.github_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[10px] rounded border border-border bg-surface-3 text-gray-400 px-2 py-1 hover:bg-surface-2"
+                    title="No install command in catalog seed — open the repo for instructions"
+                  >
+                    {h}: see repo
+                  </a>
+                );
+              }
+              if (installed) {
+                const uninstall = pack.uninstall_commands[h];
+                return (
+                  <button
+                    key={h}
+                    onClick={() =>
+                      uninstall && setModal({ harness: h, action: "uninstall" })
+                    }
+                    disabled={!uninstall}
+                    className="text-[10px] rounded border border-border bg-surface-3 text-gray-300 px-2 py-1 hover:bg-surface-2 disabled:opacity-50"
+                    title={
+                      uninstall
+                        ? `Uninstall ${pack.display_name} for ${h}`
+                        : "No uninstall command in catalog seed"
+                    }
+                  >
+                    Uninstall ({h})
+                  </button>
+                );
+              }
+              return (
+                <button
+                  key={h}
+                  onClick={() => setModal({ harness: h, action: "install" })}
+                  className="text-[10px] font-medium rounded border border-accent/40 bg-accent/10 text-accent px-2 py-1 hover:bg-accent/20"
+                >
+                  Install ({h})
+                </button>
+              );
+            })}
         <div className="ml-auto flex items-center gap-1.5">
           {/* GitHub is always the primary link — it points at the actual source
               location (a subdirectory for marketplace plugins, a repo root

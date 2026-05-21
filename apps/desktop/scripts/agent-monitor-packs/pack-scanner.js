@@ -153,6 +153,37 @@ function deriveGitRemoteUrl(dir) {
  * Ingest one resolved pack directory: write the agent_packs row and every
  * SKILL.md it contains. Used by both gstack and bmad detection paths.
  */
+/**
+ * Distinct recent-session cwds, used by every per-project scanner that needs
+ * to look at which projects the user worked in recently (BMad scanner +
+ * gstack-project scanner). Extracted to remove duplication called out in
+ * Thadeus's PR review — previously the same SELECT + map + filter pattern
+ * lived in `scanBmad` and `scanProjectGStackAssociations`. Lookback window
+ * is the module's PROJECT_LOOKBACK_DAYS constant.
+ *
+ * Returns string[] of absolute paths (already de-duped by SELECT DISTINCT).
+ * Returns [] (not throws) on any failure — the sessions table may not exist
+ * in unit-test fixtures or on a fresh DB.
+ */
+function getRecentProjectRoots(db) {
+  try {
+    const since = new Date(
+      Date.now() - PROJECT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
+    ).toISOString();
+    return db
+      .prepare(
+        `SELECT DISTINCT cwd FROM sessions
+         WHERE cwd IS NOT NULL AND cwd != ''
+           AND (updated_at >= ? OR started_at >= ?)`,
+      )
+      .all(since, since)
+      .map((r) => r.cwd)
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 function ingestPackDir(db, { packId, harness, installPath, sourceUrl, version }) {
   const real = safeRealpath(installPath);
   const installKind = isSymlink(installPath) ? "symlink" : "directory";
@@ -456,23 +487,7 @@ function scanBmad(db) {
   }
 
   // 2 & 3. Per-project: walk distinct sessions.cwd from the last 90 days.
-  let projectRoots = [];
-  try {
-    const since = new Date(
-      Date.now() - PROJECT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
-    ).toISOString();
-    projectRoots = db
-      .prepare(
-        `SELECT DISTINCT cwd FROM sessions
-         WHERE cwd IS NOT NULL AND cwd != ''
-           AND (updated_at >= ? OR started_at >= ?)`,
-      )
-      .all(since, since)
-      .map((r) => r.cwd)
-      .filter(Boolean);
-  } catch {
-    /* sessions table missing in tests / fresh DB — non-fatal */
-  }
+  const projectRoots = getRecentProjectRoots(db);
 
   for (const projectRoot of projectRoots) {
     let added = 0;
@@ -713,24 +728,7 @@ function scanClaudeMarketplaces(db) {
  * per-project associations.
  */
 function scanProjectGStackAssociations(db) {
-  let projectRoots = [];
-  try {
-    const since = new Date(
-      Date.now() - PROJECT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000,
-    ).toISOString();
-    projectRoots = db
-      .prepare(
-        `SELECT DISTINCT cwd FROM sessions
-         WHERE cwd IS NOT NULL AND cwd != ''
-           AND (updated_at >= ? OR started_at >= ?)`,
-      )
-      .all(since, since)
-      .map((r) => r.cwd)
-      .filter(Boolean);
-  } catch {
-    return 0;
-  }
-
+  const projectRoots = getRecentProjectRoots(db);
   let count = 0;
   for (const projectRoot of projectRoots) {
     const marker = path.join(projectRoot, ".gstack", "conductor.json");
@@ -842,19 +840,27 @@ function runPackScanner(db) {
     marketplaces: { installs: 0, skills: 0, marketplaces: 0 },
     gstackProjects: 0,
     prunedBefore: scanStartedAt,
+    scopes: { gstack: false, bmad: false, marketplaces: false, gstackProjects: false, catalogDetectors: false },
   };
+
+  // Track per-scope success so a transient failure in (say) the bmad scanner
+  // doesn't tombstone real gstack installs simply because they weren't observed
+  // in the failing scope. (shafty PR review P2.)
   try {
     summary.gstack = scanGStack(db);
+    summary.scopes.gstack = true;
   } catch (e) {
     console.warn("[pack-scanner] gstack scan failed:", e && e.message);
   }
   try {
     summary.bmad = scanBmad(db);
+    summary.scopes.bmad = true;
   } catch (e) {
     console.warn("[pack-scanner] bmad scan failed:", e && e.message);
   }
   try {
     summary.marketplaces = scanClaudeMarketplaces(db);
+    summary.scopes.marketplaces = true;
   } catch (e) {
     console.warn(
       "[pack-scanner] claude marketplace scan failed:",
@@ -863,6 +869,7 @@ function runPackScanner(db) {
   }
   try {
     summary.gstackProjects = scanProjectGStackAssociations(db);
+    summary.scopes.gstackProjects = true;
   } catch (e) {
     console.warn(
       "[pack-scanner] gstack project association scan failed:",
@@ -871,13 +878,31 @@ function runPackScanner(db) {
   }
   try {
     summary.catalogDetectors = runCatalogDetectorAdapters(db);
+    summary.scopes.catalogDetectors = true;
   } catch (e) {
     console.warn(
       "[pack-scanner] catalog detectors failed:",
       e && e.message,
     );
   }
-  pruneStaleRows(db, scanStartedAt);
+  // Only prune when ALL scopes completed without exception. A partial scan
+  // produces an incomplete observed-set; tombstoning based on that would
+  // mark genuinely-installed packs as uninstalled. Better to leave stale
+  // rows for one cycle than risk false uninstall.
+  const allSucceeded = Object.values(summary.scopes).every(Boolean);
+  if (allSucceeded) {
+    pruneStaleRows(db, scanStartedAt);
+    summary.pruned = true;
+  } else {
+    summary.pruned = false;
+    console.warn(
+      "[pack-scanner] skipping prune — some detector scopes failed:",
+      Object.entries(summary.scopes)
+        .filter(([, ok]) => !ok)
+        .map(([k]) => k)
+        .join(", "),
+    );
+  }
   return summary;
 }
 
@@ -896,5 +921,6 @@ module.exports = {
     KNOWN_MARKETPLACE_SOURCES,
     resolveClaudeHome,
     resolveCodexHome,
+    getRecentProjectRoots,
   },
 };

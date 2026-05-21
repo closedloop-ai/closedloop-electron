@@ -1,6 +1,6 @@
 {
-  "seed_version": 8,
-  "_note": "Seed v8 (2026-05-21): added optional `detection_patterns` field — a list of path substrings the pack-store uses to retroactively attribute events to a pack. Used by the new GET /api/packs/:packId/sessions endpoint that powers the 'Used in N sessions' table on Pack detail pages. Catches packs invoked via plugins/cache/ (no formal install row), project-local installs, and other fuzzy paths beyond agent_packs.install_path. v7 dual-URL model preserved.",
+  "seed_version": 9,
+  "_note": "Seed v9 (2026-05-21): added two pack-level flags from PR review. `harness_agnostic: true` for binary-installed tools whose one install satisfies all harnesses at once (RTK) — UI collapses the per-harness install buttons into one. `project_scoped: true` for packs whose install command operates on the current directory (BMad's --directory .) and MUST receive an explicit cwd at install time. The install orchestrator refuses to spawn project-scoped commands without a validated cwd.",
   "packs": [
     {
       "pack_id": "closedloop-ai",
@@ -36,6 +36,7 @@
       "github_url": "https://github.com/rtk-ai/rtk",
       "description": "High-performance CLI proxy that filters and summarizes tool output before it reaches your LLM context. Wraps git/cargo/npm/cargo/docker/kubectl/etc. — saves 60-90% on tokens for common dev commands. Works with any AI coding harness.",
       "harnesses": ["claude", "codex"],
+      "harness_agnostic": true,
       "install_commands": {
         "claude": "brew tap rtk-ai/tap && brew install rtk",
         "codex": "brew tap rtk-ai/tap && brew install rtk"
@@ -260,6 +261,7 @@
       "github_url": "https://github.com/bmad-code-org/BMAD-METHOD",
       "description": "Breakthrough Method for Agile AI-Driven Development: PM/architect/dev/QA agents, PRDs, architecture, stories, acceptance criteria, lifecycle workflow. Installs per-project.",
       "harnesses": ["claude", "codex"],
+      "project_scoped": true,
       "install_commands": {
         "claude": "npx bmad-method install --directory . --yes",
         "codex": "npx bmad-method install --directory . --yes"

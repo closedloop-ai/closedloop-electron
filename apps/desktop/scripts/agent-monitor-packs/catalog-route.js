@@ -232,7 +232,46 @@ router.post("/refresh", async (_req, res) => {
   }
 });
 
+/**
+ * Require an Origin header in the configured allowlist for mutating catalog
+ * actions. Local CLI tools (curl, fetch from a script) typically don't send
+ * an Origin header — this blocks them from spawning shell commands via the
+ * sidecar. (shafty PR review P1.)
+ *
+ * The allowed origins are passed via env (CCAM_ALLOWED_ORIGINS, comma-
+ * separated). Empty allowlist means "any non-empty origin is acceptable,"
+ * matching the upstream's permissive default for read endpoints but
+ * STILL rejecting Origin-less local-process requests.
+ */
+function requireKnownOrigin(req, res) {
+  const origin = req.headers.origin;
+  if (!origin) {
+    res
+      .status(403)
+      .json({
+        error: {
+          message:
+            "Origin header required for mutating catalog actions. Local CLI calls without an Origin header are not allowed.",
+        },
+      });
+    return false;
+  }
+  const allowedRaw = process.env.CCAM_ALLOWED_ORIGINS || "";
+  const allowed = allowedRaw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (allowed.length > 0 && !allowed.includes(origin)) {
+    res
+      .status(403)
+      .json({ error: { message: `Origin not in allowlist: ${origin}` } });
+    return false;
+  }
+  return true;
+}
+
 function streamAction(action, req, res) {
+  if (!requireKnownOrigin(req, res)) return;
   const harness =
     typeof req.query.harness === "string" && req.query.harness.trim()
       ? req.query.harness.trim()
@@ -241,10 +280,14 @@ function streamAction(action, req, res) {
     res.status(400).json({ error: { message: "harness query param required" } });
     return;
   }
+  // Optional cwd for project-scoped installs (BMad). Forwarded as-is to the
+  // orchestrator, which validates it's an existing directory before spawning.
+  const cwd = typeof req.query.cwd === "string" ? req.query.cwd.trim() : "";
   installOrchestrator.streamRun(db, {
     pack_id: req.params.pack_id,
     harness,
     action,
+    cwd,
     res,
     onComplete: ({ exit_code, killed }) => {
       // Re-run the pack scanner after a successful install/uninstall so the

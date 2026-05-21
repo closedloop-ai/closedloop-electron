@@ -117,6 +117,17 @@ function ensureCatalogSchema(db) {
     // installs (`.bmad/`, `.gstack/`), and other fuzzy paths. Nullable; no-op
     // when absent.
     ["detection_patterns", "TEXT"],
+    // v9: install-time behavior flags surfaced by the catalog UI + enforced
+    // by the install-orchestrator.
+    //   harness_agnostic = 1  → ONE install satisfies all harnesses in
+    //     `harnesses` (RTK: brew binary on PATH works for both claude and
+    //     codex). UI collapses per-harness install buttons into one.
+    //   project_scoped = 1   → install command operates on cwd (BMad's
+    //     `--directory .`). Orchestrator REFUSES to spawn without an
+    //     explicit cwd passed by the caller — would otherwise install
+    //     into the sidecar's launch dir.
+    ["harness_agnostic", "INTEGER"],
+    ["project_scoped", "INTEGER"],
   ]) {
     try {
       db.prepare(`SELECT ${col} FROM pack_catalog LIMIT 1`).get();
@@ -169,8 +180,8 @@ function upsertCatalogSeed(db, seedDoc) {
          (pack_id, display_name, category, github_url, marketplace_url,
           description, harnesses, install_commands, uninstall_commands,
           install_notes, placeholder_reason, verified, pin_order, contents,
-          detection_patterns, seed_version)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          detection_patterns, harness_agnostic, project_scoped, seed_version)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(pack_id) DO UPDATE SET
          display_name        = excluded.display_name,
          category            = excluded.category,
@@ -186,6 +197,8 @@ function upsertCatalogSeed(db, seedDoc) {
          pin_order           = excluded.pin_order,
          contents            = excluded.contents,
          detection_patterns  = excluded.detection_patterns,
+         harness_agnostic    = excluded.harness_agnostic,
+         project_scoped      = excluded.project_scoped,
          seed_version        = excluded.seed_version`,
     ).run(
       pack.pack_id,
@@ -207,6 +220,8 @@ function upsertCatalogSeed(db, seedDoc) {
       Array.isArray(pack.detection_patterns)
         ? JSON.stringify(pack.detection_patterns)
         : null,
+      pack.harness_agnostic ? 1 : 0,
+      pack.project_scoped ? 1 : 0,
       seedVersion,
     );
     if (existing) stats.updated += 1;

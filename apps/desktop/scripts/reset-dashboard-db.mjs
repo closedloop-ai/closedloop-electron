@@ -75,19 +75,26 @@ async function main() {
 
   if (PACKS_ONLY) {
     // Open via node:sqlite (built-in, same path the sidecar uses) and run
-    // DELETE on just the three inventory tables. If node:sqlite is unavailable
-    // (Node <22.5), fall back to the full wipe with a warning.
+    // DELETE on just the three inventory tables. Refuse to run on older
+    // Node — the previous fallback silently wiped the WHOLE DB (sessions,
+    // events, agents, plans), which was actively dangerous because the
+    // command name `--packs-only` promised the opposite. (shafty PR review
+    // P2.) If the user truly wants a full wipe, they can re-run without
+    // `--packs-only`.
     let DatabaseSync;
     try {
       ({ DatabaseSync } = await import("node:sqlite"));
     } catch (e) {
-      console.warn(
-        "[reset-dashboard-db] node:sqlite unavailable (need Node >=22.5);\n" +
-          "  falling back to full-wipe. Reason:",
+      console.error(
+        "[reset-dashboard-db] --packs-only requires Node >=22.5 (node:sqlite\n" +
+          "  built-in module). Refusing to run because the previous fallback\n" +
+          "  silently wiped the whole DB. Either:\n" +
+          "    1. Upgrade Node, or\n" +
+          "    2. Drop the --packs-only flag if you want a full wipe.\n" +
+          "  Reason node:sqlite unavailable:",
         e && e.message,
       );
-      removeAll(dbPath);
-      return;
+      process.exit(2);
     }
     const db = new DatabaseSync(dbPath);
     try {

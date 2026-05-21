@@ -58,6 +58,18 @@ function ensurePackSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_skills_name ON skills(name);
     CREATE INDEX IF NOT EXISTS idx_agent_packs_pack ON agent_packs(pack_id);
   `);
+  // Index on `events(event_type, tool_name)` speeds up the UserPromptSubmit
+  // aggregate subquery powering /api/skills and listPackUsage. The events
+  // table is owned by the upstream agent-dashboard schema and may not exist
+  // yet when ensurePackSchema runs in legacy/test fixtures, so wrap in try.
+  // (Thadeus PR review.)
+  try {
+    db.exec(
+      "CREATE INDEX IF NOT EXISTS idx_events_type_tool ON events(event_type, tool_name);",
+    );
+  } catch {
+    /* events table not present — non-fatal */
+  }
 
   // v2 additive migration: `uninstalled_at` tombstone column. When set, the row
   // represents a pack/skill that USED to be installed but isn't anymore — kept
@@ -164,6 +176,10 @@ function upsertProjectAssociation(db, row) {
  * Includes harness fan-out and skill count.
  */
 function listPacks(db) {
+  // Installed-inventory reads filter uninstalled_at IS NULL so tombstoned
+  // rows (kept for retroactive usage attribution) do NOT surface as
+  // currently-installed. Re-installing a tombstoned pack clears
+  // uninstalled_at in the upsert path. (shafty PR review P1.)
   // version is NULL when the pack has multiple distinct install versions
   // (e.g. a marketplace pack with several plugins at different versions) —
   // avoids picking one arbitrary value and presenting it as authoritative.
@@ -179,8 +195,11 @@ function listPacks(db) {
          COUNT(DISTINCT p.harness || '|' || p.install_path) AS install_count,
          MIN(p.detected_at)                                 AS first_detected_at,
          MAX(p.last_seen_at)                                AS last_seen_at,
-         (SELECT COUNT(*) FROM skills s WHERE s.pack_id = p.pack_id) AS skill_count
+         (SELECT COUNT(*) FROM skills s
+          WHERE s.pack_id = p.pack_id
+            AND s.uninstalled_at IS NULL)                   AS skill_count
        FROM agent_packs p
+       WHERE p.uninstalled_at IS NULL
        GROUP BY p.pack_id
        ORDER BY p.pack_id ASC`,
     )
@@ -189,7 +208,7 @@ function listPacks(db) {
 
 /**
  * Get one pack by `pack_id`, returning installs (one row per harness/install
- * path), skills, and project associations.
+ * path), skills, and project associations. Tombstoned installs are excluded.
  */
 function getPack(db, packId) {
   const installs = db
@@ -198,6 +217,7 @@ function getPack(db, packId) {
               detected_at, last_seen_at
        FROM agent_packs
        WHERE pack_id = ?
+         AND uninstalled_at IS NULL
        ORDER BY harness ASC, install_path ASC`,
     )
     .all(packId);
@@ -231,6 +251,7 @@ function listSkillsForPack(db, packId) {
               source_url, detected_at, last_seen_at
        FROM skills
        WHERE pack_id IS ?
+         AND uninstalled_at IS NULL
        ORDER BY name ASC, harness ASC`,
     )
     .all(packId);
@@ -306,6 +327,7 @@ function listSkills(db) {
            AND json_extract(e.data,'$.prompt') LIKE '/_%'
          GROUP BY skill_name, harness
        ) inv ON inv.skill_name = s.name AND inv.harness = s.harness
+       WHERE s.uninstalled_at IS NULL
        ORDER BY s.pack_id IS NULL ASC, s.pack_id ASC, s.name ASC, s.harness ASC`,
     )
     .all();
