@@ -201,6 +201,11 @@ const PACK_CATALOG_CLIENT_PAGES = [
   "PacksInstalled",
   "PacksCatalog",
   "CatalogCard",
+  // v4: full-page detail view at /packs/:packId — replaces CatalogDetail
+  // modal but uses the same components (InstallModal, etc.). CatalogDetail
+  // is preserved as a no-op import for back-compat with users who still
+  // reference it via stale build caches.
+  "PackDetail",
   "CatalogDetail",
   "InstallModal",
   "Sparkline",
@@ -1478,7 +1483,18 @@ function patchClientSource() {
         '          <Route path="tools" element={<Tools />} />',
         '          <Route path="agents" element={<SubAgents />} />',
         '          <Route path="packs" element={<Packs />} />',
+        '          <Route path="packs/:packId" element={<PackDetail />} />',
       ].join("\n"),
+    },
+    // FEA-1314 v4: import the PackDetail component referenced in the
+    // /packs/:packId route. Anchors AFTER the Packs import added above so
+    // re-runs are idempotent.
+    {
+      rel: "src/App.tsx",
+      guard: 'import { PackDetail } from "./pages/PackDetail"',
+      find: 'import { Packs } from "./pages/Packs";',
+      replace:
+        'import { Packs } from "./pages/Packs";\nimport { PackDetail } from "./pages/PackDetail";',
     },
     {
       rel: "src/components/Sidebar.tsx",

@@ -1,6 +1,6 @@
 {
-  "seed_version": 3,
-  "_note": "Seed v3 (2026-05-21): added closedloop-ai (our own pack) to the catalog and gave it a pin_order so the unified Packs page surfaces it top-left regardless of star count. Added a 'contents' object on each entry describing how to fetch the pack's skill/agent/command listing from GitHub (so the detail modal can render a pre-install inventory). v2 changes preserved: dropped nonexistent ECC + OpenAI Skills, swapped Superpowers to the marketplace install command, added compound-engineering and claude-plugins-official.",
+  "seed_version": 4,
+  "_note": "Seed v4 (2026-05-21): fixed three install/uninstall bugs found during end-to-end verification. (1) BMad's '--yes' alone does NOT skip the interactive directory picker — must add '--directory .' to provide it; the install otherwise hangs forever waiting for input. (2) SuperClaude has NO 'uninstall' subcommand (the v4.x CLI only exposes 'install' / 'install-skill') — the seed v3 used 'SuperClaude uninstall' which errors; correct cleanup is 'pipx uninstall superclaude && rm -rf ~/.claude/commands/sc'. (3) gstack './setup' is interactive — flagged in install_notes so users know to run it manually after the clone lands. v3 changes preserved: closedloop-ai pinned, per-pack 'contents' for the pre-install skill listing.",
   "packs": [
     {
       "pack_id": "closedloop-ai",
@@ -74,9 +74,10 @@
       },
       "uninstall_commands": {
         "claude": "rm -rf ~/.claude/skills/gstack",
-        "codex": "find ~/.codex/skills -name 'gstack-*' -delete && rm -f ~/.codex/skills/gstack"
+        "codex": "find ~/.codex/skills -maxdepth 1 -name 'gstack*' -exec rm -rf {} +"
       },
       "verified": true,
+      "install_notes": "After the clone lands, gstack's `./setup` is INTERACTIVE — it prompts for several confirmations. The catalog runs the clone + setup, but you may need to answer prompts in the install modal's output pane. Codex install runs `./setup --host codex` after the Claude side.",
       "contents": {
         "type": "github-skill-tree",
         "skills_path": ".agents/skills",
@@ -91,14 +92,14 @@
       "description": "Breakthrough Method for Agile AI-Driven Development: PM/architect/dev/QA agents, PRDs, architecture, stories, acceptance criteria, lifecycle workflow. Installs per-project.",
       "harnesses": ["claude", "codex"],
       "install_commands": {
-        "claude": "npx bmad-method install --yes",
-        "codex": "npx bmad-method install --yes"
+        "claude": "npx bmad-method install --directory . --yes",
+        "codex": "npx bmad-method install --directory . --yes"
       },
       "uninstall_commands": {
         "claude": "rm -rf ./_bmad ./_bmad-output ./.agents",
         "codex": "rm -rf ./_bmad ./_bmad-output ./.agents"
       },
-      "install_notes": "Runs in the CURRENT directory and installs per-project. Use --yes to avoid the interactive picker; the installer accepts module/IDE flags too (see README).",
+      "install_notes": "Runs in the CURRENT directory and installs per-project. `--yes` alone does NOT skip the directory prompt — `--directory .` is required to bypass interactivity. The installer accepts module/IDE flags too (see README).",
       "verified": true,
       "contents": {
         "type": "github-multi-skill-tree",
@@ -144,12 +145,12 @@
       "description": "Configuration framework that enhances Claude Code with specialized commands, cognitive personas, and development methodologies. ~30 slash-command commands.",
       "harnesses": ["claude"],
       "install_commands": {
-        "claude": "pipx install superclaude && SuperClaude install"
+        "claude": "pipx install superclaude && superclaude install"
       },
       "uninstall_commands": {
-        "claude": "superclaude uninstall && pipx uninstall superclaude"
+        "claude": "pipx uninstall superclaude && rm -rf ~/.claude/commands/sc"
       },
-      "install_notes": "Requires pipx (`brew install pipx` or `python -m pip install --user pipx`). v4.x CLI binary is lowercase `superclaude` (the README still says PascalCase — outdated). PATH may need ~/.local/bin.",
+      "install_notes": "Requires pipx (`brew install pipx`). v4.x CLI binary is lowercase `superclaude` (the README still says PascalCase — outdated). The CLI has NO `uninstall` subcommand; cleanup must combine `pipx uninstall` with `rm -rf ~/.claude/commands/sc`. PATH may need ~/.local/bin.",
       "verified": true,
       "contents": {
         "type": "github-flat-md",

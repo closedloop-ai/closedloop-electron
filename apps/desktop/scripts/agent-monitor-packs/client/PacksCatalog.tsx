@@ -1,7 +1,20 @@
 /**
- * @file PacksCatalog.tsx — discovery catalog of popular agent packs
- * (FEA-1314 / PLN-657). Card grid sorted installed-first, then by star
- * count. Manual refresh button hits /api/catalog/refresh.
+ * @file PacksCatalog.tsx — single Packs page with two sections (v4):
+ *
+ *   1. Installed (top) — cards for packs detected on disk
+ *   2. Catalog   (bottom) — cards for packs available but not installed
+ *
+ * Same card design across both sections (CatalogCard). Cards link to
+ * /packs/:packId via React Router — the detail view is a real page, not
+ * a modal.
+ *
+ * Sort within each section:
+ *   - pin_order ASC NULLS LAST (closedloop top-left of its section)
+ *   - stars DESC
+ *   - display_name ASC
+ *
+ * The Installed section is hidden entirely when no packs are installed,
+ * so first-time users see the Catalog directly.
  */
 import { useCallback, useEffect, useState } from "react";
 import { CatalogCard, type CatalogEntry } from "./CatalogCard";
@@ -42,16 +55,17 @@ export function PacksCatalog() {
     load();
   }, [load]);
 
-  const installedCount = items.filter((i) => i.installed_harnesses.length > 0).length;
+  const installed = items.filter((i) => i.installed_harnesses.length > 0);
+  const available = items.filter((i) => i.installed_harnesses.length === 0);
   const totalStars = items.reduce((s, i) => s + (i.stars || 0), 0);
 
   return (
     <div>
-      <div className="mb-3 flex items-end justify-between gap-3">
+      <div className="mb-4 flex items-end justify-between gap-3">
         <p className="text-xs text-gray-500">
           {items.length === 0
             ? "Loading catalog…"
-            : `${items.length} popular agent packs · ${installedCount} installed · ${totalStars.toLocaleString()} combined stars on GitHub`}
+            : `${items.length} packs · ${installed.length} installed · ${totalStars.toLocaleString()} combined stars on GitHub`}
         </p>
         <button
           onClick={refresh}
@@ -77,10 +91,40 @@ export function PacksCatalog() {
           <code className="mx-1">/api/catalog/refresh</code>.
         </p>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-          {items.map((pack) => (
-            <CatalogCard key={pack.pack_id} pack={pack} onAfterRun={load} />
-          ))}
+        <div className="space-y-8">
+          {installed.length > 0 && (
+            <section>
+              <div className="mb-3 flex items-baseline gap-2">
+                <h2 className="text-sm font-semibold text-gray-100">
+                  Installed
+                </h2>
+                <span className="text-[11px] text-gray-500">
+                  {installed.length} pack{installed.length === 1 ? "" : "s"}
+                </span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                {installed.map((pack) => (
+                  <CatalogCard key={pack.pack_id} pack={pack} onAfterRun={load} />
+                ))}
+              </div>
+            </section>
+          )}
+
+          {available.length > 0 && (
+            <section>
+              <div className="mb-3 flex items-baseline gap-2">
+                <h2 className="text-sm font-semibold text-gray-100">Catalog</h2>
+                <span className="text-[11px] text-gray-500">
+                  {available.length} available
+                </span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+                {available.map((pack) => (
+                  <CatalogCard key={pack.pack_id} pack={pack} onAfterRun={load} />
+                ))}
+              </div>
+            </section>
+          )}
         </div>
       )}
     </div>

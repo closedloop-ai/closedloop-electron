@@ -5,9 +5,9 @@
  * GitHub link.
  */
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Sparkline } from "./Sparkline";
 import { InstallModal } from "./InstallModal";
-import { CatalogDetail } from "./CatalogDetail";
 
 export interface CatalogEntry {
   pack_id: string;
@@ -44,13 +44,14 @@ function formatStars(n: number | null): string {
 }
 
 export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
+  const navigate = useNavigate();
   const [modal, setModal] = useState<{
     harness: string;
     action: "install" | "uninstall";
   } | null>(null);
-  const [showDetail, setShowDetail] = useState(false);
 
   const isInstalled = pack.installed_harnesses.length > 0;
+  const goToDetail = () => navigate(`/packs/${encodeURIComponent(pack.pack_id)}`);
   const desc = pack.description_live || pack.description || "";
   const stars =
     (history && history.length > 0
@@ -60,7 +61,7 @@ export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
   return (
     <div className="rounded-lg border border-border bg-surface-2 p-4 flex flex-col gap-3 min-h-[14rem] hover:border-accent/30 transition-colors">
       <button
-        onClick={() => setShowDetail(true)}
+        onClick={goToDetail}
         className="text-left flex items-start justify-between gap-2 group"
         aria-label={`Open ${pack.display_name} details`}
       >
@@ -185,13 +186,6 @@ export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
           onCompleted={() => {
             if (onAfterRun) onAfterRun();
           }}
-        />
-      )}
-      {showDetail && (
-        <CatalogDetail
-          packId={pack.pack_id}
-          onClose={() => setShowDetail(false)}
-          onAfterRun={onAfterRun}
         />
       )}
     </div>
