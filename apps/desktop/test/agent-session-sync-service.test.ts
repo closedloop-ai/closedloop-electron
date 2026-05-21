@@ -668,10 +668,12 @@ test("agent-session sync handleBatchAck logs ack_timeout and invokes telemetry c
   });
 
   const telemetryEvents: import("../src/main/agent-session-sync-service.js").AgentSessionSyncTelemetryEvent[] = [];
+  const sentBatches: import("../src/main/agent-session-sync-contract.js").AgentSessionSyncBatch[] = [];
   const service = new AgentSessionSyncService({
     isAgentMonitorEnabled: () => true,
     isRelayReady: () => true,
-    sendBatch: async () => {
+    sendBatch: async (batch) => {
+      sentBatches.push(batch);
       return {
         accepted: false,
         reason: DesktopAgentSessionsAckReason.AckTimeout,
@@ -687,18 +689,31 @@ test("agent-session sync handleBatchAck logs ack_timeout and invokes telemetry c
   await flushAgentSessionSync();
 
   // The ack_timeout path must fire the telemetry callback exactly once with the
-  // correct reason; the session must remain queued (not dequeued) for retry.
+  // correct reason.
   assert.equal(telemetryEvents.length, 1, "expected exactly one telemetry event");
   const event = telemetryEvents[0];
   assert.equal(event.outcome, "failure");
-  assert.ok(event.outcome === "failure");
-  if (event.outcome === "failure") {
-    assert.equal(
-      event.reason,
-      DesktopAgentSessionsAckReason.AckTimeout,
-      "telemetry reason must be ack_timeout",
-    );
-  }
+  assert.equal(
+    event.reason,
+    DesktopAgentSessionsAckReason.AckTimeout,
+    "telemetry reason must be ack_timeout",
+  );
+
+  // The session must remain queued (not dequeued) for retry: driving a second
+  // sync cycle must re-send the same session, proving handleBatchAck did not
+  // drop it on ack_timeout.
+  service.refresh();
+  await flushAgentSessionSync();
+  assert.equal(
+    sentBatches.length,
+    2,
+    "ack_timeout must leave the session queued for retry (second sync cycle must re-send)",
+  );
+  assert.equal(
+    sentBatches[1].sessions[0].externalSessionId,
+    "sess-timeout",
+    "retried batch must re-send the same session",
+  );
 
   service.stop();
   db.close();

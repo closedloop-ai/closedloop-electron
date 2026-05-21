@@ -358,7 +358,7 @@ export class Observability {
 
   // --- Agent session sync (product analytics only) ---
 
-  static agentSessionSyncBatchFailed(event: AgentSessionSyncTelemetryEvent & { outcome: "failure" }): void {
+  static agentSessionSyncBatchFailed(event: AgentSessionSyncTelemetryEvent): void {
     Observability.captureAnalytics("agent_session_sync_batch_failed", {
       reason: event.reason,
       sync_mode: event.syncMode,

@@ -106,20 +106,13 @@ export type SessionAttributionResolverCache = {
   repoFullNameByPath: Map<string, string | null>;
 };
 
-export type AgentSessionSyncTelemetryEvent =
-  | {
-      outcome: "success";
-      syncMode: AgentSessionSyncMode;
-      sessionCount: number;
-      payloadBytes: number;
-    }
-  | {
-      outcome: "failure";
-      reason: DesktopAgentSessionsAckReason;
-      syncMode: AgentSessionSyncMode;
-      sessionCount: number;
-      payloadBytes: number;
-    };
+export type AgentSessionSyncTelemetryEvent = {
+  outcome: "failure";
+  reason: DesktopAgentSessionsAckReason;
+  syncMode: AgentSessionSyncMode;
+  sessionCount: number;
+  payloadBytes: number;
+};
 
 export interface AgentSessionSyncServiceOptions {
   isAgentMonitorEnabled: () => boolean;
