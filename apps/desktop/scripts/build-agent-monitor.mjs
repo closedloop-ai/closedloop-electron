@@ -108,7 +108,7 @@ const CODEX_MODULES = ["codex-home", "codex-parser", "codex-import", "codex-watc
 const CURSOR_MODULES = ["cursor-home", "cursor-parser", "cursor-import", "cursor-watcher"];
 const COPILOT_MODULES = ["copilot-home", "copilot-parser", "copilot-import", "copilot-watcher"];
 const OPENCODE_MODULES = ["opencode-home", "opencode-parser", "opencode-import", "opencode-watcher"];
-const SHARED_MODULES = ["harness-watcher-utils", "import-session-utils", "parser-utils"];
+const SHARED_MODULES = ["harness-watcher-utils", "import-session-utils", "parser-utils", "catchup-cache"];
 const MULTI_HARNESS_SPECS = [
   {
     key: "codex",
@@ -216,6 +216,30 @@ const PACK_CATALOG_CLIENT_PAGES = [
   "CatalogDetail",
   "InstallModal",
   "Sparkline",
+];
+
+// CLOSEDLOOP embed integration: the agent monitor ships as an <iframe> inside
+// the desktop app. These ClosedLoop-authored files are copied over the
+// upstream client source before the Vite build — Layout.tsx adds embed mode
+// (drops the monitor's own sidebar) plus the host postMessage nav bridge;
+// tailwind.config.js remaps the accent token to the ClosedLoop brand primary.
+const embedModulesDir = path.join(appDir, "scripts", "agent-monitor-embed");
+const embedAppSource = path.join(embedModulesDir, "App.tsx");
+const embedLayoutSource = path.join(embedModulesDir, "Layout.tsx");
+const embedTailwindSource = path.join(embedModulesDir, "tailwind.config.js");
+const CLIENT_FULL_FILE_OVERRIDES = [
+  {
+    from: embedAppSource,
+    to: path.join("src", "App.tsx"),
+  },
+  {
+    from: embedLayoutSource,
+    to: path.join("src", "components", "Layout.tsx"),
+  },
+  {
+    from: embedTailwindSource,
+    to: "tailwind.config.js",
+  },
 ];
 
 // Host-owned pricing defaults for model IDs we ingest from non-Claude harnesses.
@@ -372,6 +396,9 @@ function currentStamp() {
     ...PACK_CATALOG_CLIENT_PAGES.map((p) =>
       path.join(packModulesDir, "client", `${p}.tsx`),
     ),
+    embedAppSource,
+    embedLayoutSource,
+    embedTailwindSource,
   ]) {
     h.update(readFileSync(file));
   }
@@ -667,6 +694,36 @@ function patchServerIndex(file) {
       [
         ccWatcherBlock,
         ...watcherPatchLines,
+      ].join("\n"),
+    );
+  }
+
+  // CLOSEDLOOP multi-harness support — stop all watchers during graceful
+  // shutdown so their retry setIntervals and fs.watch handles are cleaned up.
+  // Without this, leaked intervals accumulate and cause resource exhaustion.
+  if (!source.includes("stopCodexWatcher")) {
+    const shutdownNeedle = [
+      "    shutdownInProgress = true;",
+      '    console.log(`\\n${signal} received — shutting down gracefully… (hit Ctrl+C again to force)`);',
+      "    if (httpServer) {",
+    ].join("\n");
+    if (!source.includes(shutdownNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the shutdown handler (watcher cleanup).`,
+      );
+    }
+    source = source.replace(
+      shutdownNeedle,
+      [
+        "    shutdownInProgress = true;",
+        '    console.log(`\\n${signal} received — shutting down gracefully… (hit Ctrl+C again to force)`);',
+        "    // Stop all file watchers and clear their retry intervals",
+        '    try { require("./lib/cc-watcher").stopCcWatcher(); } catch { /* ignore */ }',
+        '    try { require("./lib/codex-watcher").stopCodexWatcher(); } catch { /* ignore */ }',
+        '    try { require("./lib/cursor-watcher").stopCursorWatcher(); } catch { /* ignore */ }',
+        '    try { require("./lib/copilot-watcher").stopCopilotWatcher(); } catch { /* ignore */ }',
+        '    try { require("./lib/opencode-watcher").stopOpenCodeWatcher(); } catch { /* ignore */ }',
+        "    if (httpServer) {",
       ].join("\n"),
     );
   }
@@ -1261,6 +1318,12 @@ function patchClientSource() {
       path.join(sourceClientDir, "src", "pages", `${p}.tsx`),
     );
   }
+  // CLOSEDLOOP embed integration: replace selected upstream client files with
+  // repo-owned overlays. Extend CLIENT_FULL_FILE_OVERRIDES for future host
+  // patches that should fully override an upstream file at build time.
+  for (const override of CLIENT_FULL_FILE_OVERRIDES) {
+    cpSync(override.from, path.join(sourceClientDir, override.to));
+  }
   const legacyPlansNavLink = [
     "        })}",
     '        <NavLink',
@@ -1613,6 +1676,11 @@ function assertGeneratedTree() {
   }
   if (!serverIndex.includes("isAllowedDashboardOrigin")) {
     throw new Error("Generated server/index.js is missing the tightened CORS guard.");
+  }
+  if (!serverIndex.includes("stopCodexWatcher")) {
+    throw new Error(
+      "Generated server/index.js is missing the watcher shutdown cleanup.",
+    );
   }
 
   const dbSource = readFileSync(generatedDbFile, "utf8");

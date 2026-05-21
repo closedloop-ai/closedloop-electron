@@ -25,6 +25,7 @@ import {
 } from "./router.js";
 import type { WorktreeProvider } from "./operations/symphony-loop.js";
 import type { RetrySpawnDeps } from "../main/spawn-retry.js";
+import { LoopSchedulerContext } from "../main/loop-scheduler-context.js";
 
 export interface DesktopGatewayServerOptions {
   host: string;
@@ -57,6 +58,12 @@ export interface DesktopGatewayServerOptions {
   retrySpawnDeps?: RetrySpawnDeps;
   onUnexpectedClose?: () => void;
   loopTokenStore?: LoopTokenStore;
+  /**
+   * Per-process container for loop heartbeat/refresh/sleep timers. If not
+   * provided, the server constructs and owns one, disposing it in `stop()`.
+   * Production passes the app-level singleton so its lifetime matches app boot.
+   */
+  schedulers?: LoopSchedulerContext;
   getGatewayId?: () => string;
   getComputeTargetId?: () => string | null;
   handleSecurityUpgrade?: (
@@ -69,6 +76,9 @@ export interface DesktopGatewayServerOptions {
 export class DesktopGatewayServer {
   private readonly options: DesktopGatewayServerOptions;
   private readonly router: GatewayRouter;
+  private readonly schedulers: LoopSchedulerContext;
+  /** True when this server constructed its own LoopSchedulerContext and must dispose it on stop(). */
+  private readonly ownsSchedulers: boolean;
   private server: Server | null = null;
   private alive = false;
   private activePort: number;
@@ -81,6 +91,11 @@ export class DesktopGatewayServer {
         options.discoveryFilePath ??
         path.join(os.homedir(), ".closedloop-ai", "electron-port"),
     };
+    // When no scheduler context is injected (tests, ad-hoc usage), the server
+    // owns a fresh one and tears it down in stop() — so a test that only
+    // constructs DesktopGatewayServer cannot leak heartbeat/refresh timers.
+    this.schedulers = options.schedulers ?? new LoopSchedulerContext();
+    this.ownsSchedulers = options.schedulers === undefined;
     this.activePort = this.options.preferredPort;
     this.router = new GatewayRouter({
       webAppOrigin: this.options.webAppOrigin,
@@ -106,6 +121,7 @@ export class DesktopGatewayServer {
       jobStore: this.options.jobStore,
       worktreeProvider: this.options.worktreeProvider,
       loopTokenStore: this.options.loopTokenStore,
+      schedulers: this.schedulers,
       retrySpawnDeps: this.options.retrySpawnDeps,
       getGatewayId: this.options.getGatewayId ?? (() => ""),
       getComputeTargetId: this.options.getComputeTargetId,
@@ -147,6 +163,7 @@ export class DesktopGatewayServer {
       payload: DesktopSecurityUpgradePayload
     ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult,
     getOnboardingCompleted?: () => boolean,
+    schedulers?: LoopSchedulerContext,
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -180,6 +197,7 @@ export class DesktopGatewayServer {
       getOnboardingCompleted,
       getBinaryPaths,
       applyBinaryPathPatch,
+      schedulers,
     });
   }
 
@@ -259,6 +277,9 @@ export class DesktopGatewayServer {
   async stop(): Promise<void> {
     this.alive = false;
     if (!this.server) {
+      if (this.ownsSchedulers) {
+        this.schedulers[Symbol.dispose]();
+      }
       return;
     }
 
@@ -278,6 +299,9 @@ export class DesktopGatewayServer {
       // Force-drop active NDJSON/SSE streams so close() can actually complete.
       runningServer.closeAllConnections();
     });
+    if (this.ownsSchedulers) {
+      this.schedulers[Symbol.dispose]();
+    }
   }
 
   isAlive(): boolean {

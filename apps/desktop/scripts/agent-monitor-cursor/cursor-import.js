@@ -10,6 +10,11 @@ const { parseTranscriptFile } = require("./cursor-parser");
 const { listAllTranscriptFiles } = require("./cursor-home");
 const { importSession } = require("../../scripts/import-history");
 const { reactivateImportedSession } = require("../agent-monitor-shared/import-session-utils");
+const { createCatchupCache } = require("../agent-monitor-shared/catchup-cache");
+
+// See FEA-1316: skip transcript files unchanged since last tick to keep
+// the 5 s catchup poll cheap.
+const catchupCache = createCatchupCache();
 
 /**
  * Import a single Cursor agent transcript file.
@@ -41,14 +46,27 @@ async function importAllCursorSessions(dbModule) {
   });
 
   const batch = [];
+  const parsedEntries = [];
   for (const filePath of files) {
+    const { unchanged, stat } = catchupCache.isUnchanged(filePath);
+    if (unchanged) {
+      skipped++;
+      continue;
+    }
     try {
       const session = await parseTranscriptFile(filePath);
-      if (!session) { skipped++; continue; }
+      if (!session) {
+        catchupCache.markSeenWith(filePath, stat);
+        skipped++;
+        continue;
+      }
       batch.push(session);
+      parsedEntries.push({ path: filePath, stat });
     } catch { errors++; }
   }
   if (batch.length > 0) importBatch(batch);
+  for (const { path, stat } of parsedEntries) catchupCache.markSeenWith(path, stat);
+  catchupCache.pruneTo(files);
 
   return { imported, skipped, errors };
 }

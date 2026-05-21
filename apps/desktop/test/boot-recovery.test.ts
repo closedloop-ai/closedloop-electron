@@ -144,7 +144,7 @@ test("finalizes dead CANCEL_PENDING jobs to CANCELLED without loop events", asyn
   await fs.mkdir(claudeWorkDir, { recursive: true });
   await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
   const loopTokenStore = createLoopTokenStore("boot-recovery-cancel-pending-tokens");
-  loopTokenStore.setLoopToken("loop-1", "loop-token");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
 
   const jobStore = createStore("boot-recovery-cancel-pending");
   const deadJob = createJob({
@@ -163,7 +163,7 @@ test("finalizes dead CANCEL_PENDING jobs to CANCELLED without loop events", asyn
     loopTokenStore,
   });
   await service.run([deadJob]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
@@ -182,7 +182,7 @@ test("finalizes dead jobs without promoting UNKNOWN status to completed", async 
   await fs.mkdir(claudeWorkDir, { recursive: true });
   await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
   const loopTokenStore = createLoopTokenStore("boot-recovery-dead-loop-tokens");
-  loopTokenStore.setLoopToken("loop-1", "loop-token");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
 
   const jobStore = createStore("boot-recovery-dead");
   const deadJob = createJob({
@@ -199,7 +199,7 @@ test("finalizes dead jobs without promoting UNKNOWN status to completed", async 
     loopTokenStore,
   });
   await service.run([deadJob]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
@@ -226,7 +226,7 @@ test("boot recovery uploads support bundle for failed dead jobs before terminal 
   await fs.mkdir(claudeWorkDir, { recursive: true });
   await fs.writeFile(path.join(claudeWorkDir, "claude-output.jsonl"), "{}\n");
   const loopTokenStore = createLoopTokenStore("boot-recovery-support-tokens");
-  loopTokenStore.setLoopToken("loop-1", "loop-token");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
 
   const jobStore = createStore("boot-recovery-support-upload");
   const deadJob = createJob({
@@ -269,7 +269,7 @@ test("boot recovery uploads support bundle for failed dead jobs before terminal 
     loopTokenStore,
   });
   await service.run([deadJob]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const eventBodies = fetchCalls
     .filter((call) => call.url.endsWith("/events"))
@@ -289,7 +289,7 @@ test("finalizes dead jobs using LoopTokenStore and clears token after UNKNOWN re
   await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
 
   const loopTokenStore = createLoopTokenStore("boot-recovery-loop-tokens");
-  loopTokenStore.setLoopToken("loop-1", "loop-token");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
 
   const jobStore = createStore("boot-recovery-dead-store");
   const deadJob = createJob({
@@ -306,7 +306,7 @@ test("finalizes dead jobs using LoopTokenStore and clears token after UNKNOWN re
     loopTokenStore,
   });
   await service.run([deadJob]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
@@ -329,7 +329,7 @@ test("retries cloud finalization across boots and resumes from partial progress"
   await fs.writeFile(path.join(claudeWorkDir, "open-questions.md"), "none");
 
   const loopTokenStore = createLoopTokenStore("boot-recovery-retry-across-boots-tokens");
-  loopTokenStore.setLoopToken("loop-1", "loop-token");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
 
   const jobStore = createStore("boot-recovery-retry-across-boots");
   const deadJob = createJob({
@@ -370,7 +370,7 @@ test("retries cloud finalization across boots and resumes from partial progress"
         entry.authHeader === "Bearer loop-token",
     ),
   );
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
 test("gives up after three retryable failures and stops future attempts", async () => {
@@ -380,7 +380,7 @@ test("gives up after three retryable failures and stops future attempts", async 
   await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
 
   const loopTokenStore = createLoopTokenStore("boot-recovery-retry-cap-tokens");
-  loopTokenStore.setLoopToken("loop-1", "loop-token");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
 
   globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
     const url = String(input);
@@ -424,7 +424,7 @@ test("gives up after three retryable failures and stops future attempts", async 
   persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
   assert.equal(fetchCalls.length, attemptsBeforeExtraRun);
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
 test("skips dead job finalization when loop token is missing", async () => {
@@ -450,7 +450,7 @@ test("skips dead job finalization when loop token is missing", async () => {
     loopTokenStore,
   });
   await service.run([deadJob]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
@@ -464,7 +464,7 @@ test("starts dead job finalization in the background", async () => {
   await fs.mkdir(claudeWorkDir, { recursive: true });
   await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
   const loopTokenStore = createLoopTokenStore("boot-recovery-background-dead-finalize-tokens");
-  loopTokenStore.setLoopToken("loop-1", "loop-token");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
 
   const jobStore = createStore("boot-recovery-background-dead-finalize");
   const deadJob = createJob({
@@ -519,7 +519,7 @@ test("starts dead job finalization in the background", async () => {
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
   assert.ok(persisted.finalStatusPersistedAt);
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
 test("dispose stops queued dead-job finalization after in-flight request", async () => {
@@ -532,8 +532,8 @@ test("dispose stops queued dead-job finalization after in-flight request", async
   await fs.writeFile(path.join(secondWorkDir, "plan.json"), JSON.stringify({ ok: true }));
 
   const loopTokenStore = createLoopTokenStore("boot-recovery-dispose-dead-finalize-tokens");
-  loopTokenStore.setLoopToken("loop-1", "loop-token-1");
-  loopTokenStore.setLoopToken("loop-2", "loop-token-2");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token-1" });
+  loopTokenStore.setLoopToken("loop-2", { token: "loop-token-2" });
 
   const jobStore = createStore("boot-recovery-dispose-dead-finalize");
   const deadJobOne = createJob({ status: "UNKNOWN", claudeWorkDir: firstWorkDir });
@@ -581,7 +581,7 @@ test("dispose stops queued dead-job finalization after in-flight request", async
 
   const completion = service.startDeadJobFinalization([deadJobOne, deadJobTwo]);
   await firstEventPostStarted;
-  service.dispose();
+  service[Symbol.dispose]();
   const unblockFetch = releaseFetch;
   assert.ok(unblockFetch);
   unblockFetch();
@@ -601,7 +601,7 @@ test("reattaches to live jobs and persists jsonl offsets", async () => {
   const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
   await fs.writeFile(jsonlPath, "");
   const loopTokenStore = createLoopTokenStore("boot-recovery-live-offset-loop-tokens");
-  loopTokenStore.setLoopToken("loop-1", "loop-token");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
 
   const jobStore = createStore("boot-recovery-live-offset");
   const liveJob = createJob({
@@ -638,7 +638,7 @@ test("reattaches to live jobs and persists jsonl offsets", async () => {
         entry.authHeader === "Bearer loop-token",
     ),
   );
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
 test("live reattach does not persist jsonl offset past incomplete trailing line", async () => {
@@ -648,7 +648,7 @@ test("live reattach does not persist jsonl offset past incomplete trailing line"
   const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
   await fs.writeFile(jsonlPath, "");
   const loopTokenStore = createLoopTokenStore("boot-recovery-partial-jsonl-loop-tokens");
-  loopTokenStore.setLoopToken("loop-1", "loop-token");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
 
   const jobStore = createStore("boot-recovery-partial-jsonl");
   const liveJob = createJob({
@@ -698,7 +698,7 @@ test("live reattach does not persist jsonl offset past incomplete trailing line"
         entry.authHeader === "Bearer loop-token",
     ),
   );
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
 test("skips live job reattach when loop token is missing", async () => {
@@ -739,7 +739,7 @@ test("skips live job reattach when loop token is missing", async () => {
   assert.ok(persisted);
   assert.equal(persisted.lastObservedJsonlOffset, 0);
   assert.equal(fetchCalls.length, 0);
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
 test("finalizes recovered live job as FAILED when process is externally killed", async () => {
@@ -750,7 +750,7 @@ test("finalizes recovered live job as FAILED when process is externally killed",
   const claudeWorkDir = path.join(repoDir, "workdir");
   await fs.mkdir(claudeWorkDir, { recursive: true });
   const loopTokenStore = createLoopTokenStore("boot-recovery-live-kill-loop-tokens");
-  loopTokenStore.setLoopToken("loop-1", "loop-token");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
 
   const child = spawn("bash", ["-lc", "sleep 5"], { detached: false });
   assert.ok(child.pid);
@@ -797,7 +797,7 @@ test("finalizes recovered live job as FAILED when process is externally killed",
         entry.authHeader === "Bearer loop-token",
     ),
   );
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
 test("preserves COMPLETED status when terminal snapshot is available during boot-recovery", async () => {
@@ -811,7 +811,7 @@ test("preserves COMPLETED status when terminal snapshot is available during boot
   await fs.writeFile(statePath, JSON.stringify({ status: "COMPLETED" }));
 
   const loopTokenStore = createLoopTokenStore("boot-recovery-live-completed-snapshot-tokens");
-  loopTokenStore.setLoopToken("loop-1", "loop-token");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
 
   const child = spawn("bash", ["-lc", "sleep 0.1"], { detached: false });
   assert.ok(child.pid);
@@ -865,7 +865,7 @@ test("preserves COMPLETED status when terminal snapshot is available during boot
     "expected no error event for COMPLETED job",
   );
 
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
 test("replays zero-token EXECUTE recovery as NO_WORK_PRODUCED instead of a completed event", async () => {
@@ -891,7 +891,7 @@ test("replays zero-token EXECUTE recovery as NO_WORK_PRODUCED instead of a compl
   );
 
   const loopTokenStore = createLoopTokenStore("boot-recovery-execute-no-work-tokens");
-  loopTokenStore.setLoopToken("loop-1", "loop-token");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
 
   const jobStore = createStore("boot-recovery-execute-no-work");
   const deadJob = createJob({
@@ -910,7 +910,7 @@ test("replays zero-token EXECUTE recovery as NO_WORK_PRODUCED instead of a compl
     loopTokenStore,
   });
   await service.run([deadJob]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
@@ -950,7 +950,7 @@ test("boot-recovery replays terminal user-visible runner failure", async () => {
   const loopTokenStore = createLoopTokenStore(
     "boot-recovery-terminal-runner-failure-tokens",
   );
-  loopTokenStore.setLoopToken("loop-1", "loop-token");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
 
   const persistedAt = new Date().toISOString();
   const jobStore = createStore("boot-recovery-terminal-runner-failure");
@@ -978,7 +978,7 @@ test("boot-recovery replays terminal user-visible runner failure", async () => {
     loopTokenStore,
   });
   await service.run([]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
@@ -1038,7 +1038,7 @@ test("replays EXECUTE completion from persisted execution-result artifacts durin
   );
 
   const loopTokenStore = createLoopTokenStore("boot-recovery-execute-artifact-existing-tokens");
-  loopTokenStore.setLoopToken("loop-1", "loop-token");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
 
   const persistedAt = new Date().toISOString();
   const jobStore = createStore("boot-recovery-execute-artifact-existing");
@@ -1059,7 +1059,7 @@ test("replays EXECUTE completion from persisted execution-result artifacts durin
     loopTokenStore,
   });
   await service.run([]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
@@ -1124,10 +1124,10 @@ test("sweepOrphanedTokens removes tokens for finalized and unknown loops, keeps 
     completedAt: new Date().toISOString(),
   });
   jobStore.upsert(finalizedJob);
-  loopTokenStore.setLoopToken("loop-finalized", "token-finalized");
+  loopTokenStore.setLoopToken("loop-finalized", { token: "token-finalized" });
 
   // (b) Loop ID not in job store at all — token should be swept
-  loopTokenStore.setLoopToken("loop-unknown", "token-unknown");
+  loopTokenStore.setLoopToken("loop-unknown", { token: "token-unknown" });
 
   // (c) Still-running job — token must be preserved
   const runningJob = createJob({
@@ -1138,7 +1138,7 @@ test("sweepOrphanedTokens removes tokens for finalized and unknown loops, keeps 
     claudeWorkDir,
   });
   jobStore.upsert(runningJob);
-  loopTokenStore.setLoopToken("loop-active", "token-active");
+  loopTokenStore.setLoopToken("loop-active", { token: "token-active" });
 
   const service = new BootRecoveryService({
     jobStore,
@@ -1148,11 +1148,11 @@ test("sweepOrphanedTokens removes tokens for finalized and unknown loops, keeps 
     loopTokenStore,
   });
   await service.run([]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   assert.equal(loopTokenStore.getLoopToken("loop-finalized"), null);
   assert.equal(loopTokenStore.getLoopToken("loop-unknown"), null);
-  assert.equal(loopTokenStore.getLoopToken("loop-active"), "token-active");
+  assert.deepEqual(loopTokenStore.getLoopToken("loop-active"), { token: "token-active" });
 });
 
 function makeSimpleRemoveProvider(): WorktreeProvider {
@@ -1256,7 +1256,7 @@ test("reattachLiveJob transitions to TIMED_OUT when cloud reports TIMED_OUT", as
   await fs.mkdir(worktreeDir, { recursive: true });
 
   const loopTokenStore = createLoopTokenStore("boot-recovery-reattach-timed-out-tokens");
-  loopTokenStore.setLoopToken("loop-1", "loop-token");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
 
   const jobStore = createStore("boot-recovery-reattach-timed-out");
   const liveJob = createJob({
@@ -1298,86 +1298,117 @@ test("reattachLiveJob transitions to TIMED_OUT when cloud reports TIMED_OUT", as
   assert.ok(persisted.cloudFinalizedAt, "expected cloudFinalizedAt to be set");
   assert.equal(loopTokenStore.getLoopToken("loop-1"), null, "expected loop token cleared");
   assert.ok(existsSync(worktreeDir), "expected worktreeDir to remain on disk after TIMED_OUT");
-  service.dispose();
+  service[Symbol.dispose]();
 });
 
-for (const scenario of [
-  {
-    name: "cloud reports RUNNING",
-    storeSuffix: "running",
-    statusHandler: () => Response.json({ status: "RUNNING" }),
-    jsonlSnippet: "recovered",
-    assertAfterReattach(jobStore: JobStore): void {
-      const persisted = jobStore.getByLoopId("loop-1");
-      assert.ok(persisted);
-      assert.notEqual(persisted.status, "TIMED_OUT", "expected status not to be TIMED_OUT");
-    },
-  },
-  {
-    name: "GET status check throws a network error",
-    storeSuffix: "net-err",
-    statusHandler: () => {
-      throw new Error("network failure");
-    },
-    jsonlSnippet: "net-err-test",
-    assertAfterReattach(jobStore: JobStore): void {
-      const beforeWrite = jobStore.getByLoopId("loop-1");
-      assert.ok(beforeWrite);
-      assert.notEqual(
-        beforeWrite.status,
-        "TIMED_OUT",
-        "network error must not transition job to TIMED_OUT",
-      );
-    },
-  },
-] as const) {
-  test(`reattachLiveJob continues when ${scenario.name}`, async () => {
-    const repoDir = path.join(tempRoot, "repo");
-    const claudeWorkDir = path.join(repoDir, "workdir");
-    await fs.mkdir(claudeWorkDir, { recursive: true });
-    const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
-    await fs.writeFile(jsonlPath, "");
+test("reattachLiveJob starts tailer when cloud reports RUNNING", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+  await fs.writeFile(jsonlPath, "");
 
-    const loopTokenStore = createLoopTokenStore(
-      `boot-recovery-reattach-${scenario.storeSuffix}-tokens`,
-    );
-    loopTokenStore.setLoopToken("loop-1", "loop-token");
+  const loopTokenStore = createLoopTokenStore("boot-recovery-reattach-running-tokens");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
 
-    const jobStore = createStore(`boot-recovery-reattach-${scenario.storeSuffix}`);
-    jobStore.upsert(
-      createJob({
-        pid: process.pid,
-        status: "RUNNING",
-        claudeWorkDir,
-        jsonlPath,
-        lastObservedJsonlOffset: 0,
-      }),
-    );
-
-    installCloudStatusFetchMock(scenario.statusHandler);
-
-    const service = new BootRecoveryService({
-      jobStore,
-      telemetry: { emit: () => {} },
-      getApiKey: () => "test-key",
-      getApiOrigin: () => "http://127.0.0.1:4021",
-      loopTokenStore,
-    });
-    await service.reattachLiveJobs();
-    scenario.assertAfterReattach(jobStore);
-
-    await fs.appendFile(
-      jsonlPath,
-      `{"type":"assistant","message":{"content":[{"type":"text","text":"${scenario.jsonlSnippet}"}],"usage":{"input_tokens":1,"output_tokens":1}}}\n`,
-    );
-
-    await waitForCondition(
-      () => fetchCalls.some((c) => c.url.includes("/loops/loop-1/events")),
-      5000,
-    );
-    service.dispose();
+  const jobStore = createStore("boot-recovery-reattach-running");
+  const liveJob = createJob({
+    pid: process.pid,
+    status: "RUNNING",
+    claudeWorkDir,
+    jsonlPath,
+    lastObservedJsonlOffset: 0,
   });
-}
+  jobStore.upsert(liveJob);
+
+  installCloudStatusFetchMock(() => Response.json({ status: "RUNNING" }));
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4021",
+    loopTokenStore,
+  });
+  await service.reattachLiveJobs();
+
+  // Write a complete JSONL record to trigger a tailer event POST
+  await fs.appendFile(
+    jsonlPath,
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"recovered"}],"usage":{"input_tokens":1,"output_tokens":1}}}\n',
+  );
+
+  await waitForCondition(
+    () => fetchCalls.some((c) => c.url.includes("/loops/loop-1/events")),
+    5000,
+  );
+
+  const persisted = jobStore.getByLoopId("loop-1");
+  assert.ok(persisted);
+  assert.notEqual(persisted.status, "TIMED_OUT", "expected status not to be TIMED_OUT");
+  assert.ok(
+    fetchCalls.some((c) => c.url.includes("/loops/loop-1/events")),
+    "expected at least one POST to /events from tailer",
+  );
+  service[Symbol.dispose]();
+});
+
+test("reattachLiveJob continues when GET status check throws a network error", async () => {
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+  await fs.writeFile(jsonlPath, "");
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-reattach-net-err-tokens");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
+
+  const jobStore = createStore("boot-recovery-reattach-net-err");
+  const liveJob = createJob({
+    pid: process.pid,
+    status: "RUNNING",
+    claudeWorkDir,
+    jsonlPath,
+    lastObservedJsonlOffset: 0,
+  });
+  jobStore.upsert(liveJob);
+
+  installCloudStatusFetchMock(() => { throw new Error("network failure"); });
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4022",
+    loopTokenStore,
+  });
+  await service.reattachLiveJobs();
+
+  const beforeWrite = jobStore.getByLoopId("loop-1");
+  assert.ok(beforeWrite);
+  assert.notEqual(
+    beforeWrite.status,
+    "TIMED_OUT",
+    "network error must not transition job to TIMED_OUT",
+  );
+
+  // Verify tailer is running: write a JSONL record and wait for it to be picked up
+  await fs.appendFile(
+    jsonlPath,
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"net-err-test"}],"usage":{"input_tokens":1,"output_tokens":1}}}\n',
+  );
+
+  await waitForCondition(
+    () => fetchCalls.some((c) => c.url.includes("/loops/loop-1/events")),
+    5000,
+  );
+
+  assert.ok(
+    fetchCalls.some((c) => c.url.includes("/loops/loop-1/events")),
+    "expected tailer to start and POST /events after network error on status check",
+  );
+  service[Symbol.dispose]();
+});
 
 test("finalizeDeadJobs skips finalization and sets cloudFinalizedAt when cloud reports TIMED_OUT", async () => {
   const repoDir = path.join(tempRoot, "repo");
@@ -1386,7 +1417,7 @@ test("finalizeDeadJobs skips finalization and sets cloudFinalizedAt when cloud r
   await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
 
   const loopTokenStore = createLoopTokenStore("boot-recovery-dead-timed-out-tokens");
-  loopTokenStore.setLoopToken("loop-1", "loop-token");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
 
   const jobStore = createStore("boot-recovery-dead-timed-out");
   const deadJob = createJob({
@@ -1406,7 +1437,7 @@ test("finalizeDeadJobs skips finalization and sets cloudFinalizedAt when cloud r
     loopTokenStore,
   });
   await service.run([deadJob]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const persisted = jobStore.getByLoopId("loop-1");
   assert.ok(persisted);
@@ -1429,6 +1460,118 @@ test("finalizeDeadJobs skips finalization and sets cloudFinalizedAt when cloud r
   );
 });
 
+test("reattachLiveJob starts refresh scheduler for recovered loop", async () => {
+  // Set skew to 0 and expiresAt in the near past so the scheduler fires
+  // immediately (delay = max(expiresAt - skew - now, 0) = 0).
+  const savedSkewEnv = process.env.CLOSEDLOOP_TOKEN_REFRESH_SKEW_MS;
+  process.env.CLOSEDLOOP_TOKEN_REFRESH_SKEW_MS = "0";
+
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+  await fs.writeFile(jsonlPath, "");
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-scheduler-start-tokens");
+  // expiresAt in the past → scheduler fires immediately with skew=0
+  const expiresAt = Date.now() - 1000;
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token", expiresAt });
+
+  const jobStore = createStore("boot-recovery-scheduler-start");
+  const liveJob = createJob({
+    pid: process.pid,
+    status: "RUNNING",
+    claudeWorkDir,
+    jsonlPath,
+    lastObservedJsonlOffset: 0,
+  });
+  jobStore.upsert(liveJob);
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: () => {} },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4030",
+    loopTokenStore,
+  });
+  try {
+    await service.reattachLiveJobs();
+
+    // Wait for the scheduler to fire and call /refresh-token
+    await waitForCondition(
+      () => fetchCalls.some((c) => c.url.includes("/refresh-token")),
+      3000,
+    );
+
+    assert.ok(
+      fetchCalls.some((c) => c.url.includes("/loops/loop-1/refresh-token")),
+      "expected refresh scheduler to start and POST to /refresh-token",
+    );
+  } finally {
+    service[Symbol.dispose]();
+    if (savedSkewEnv === undefined) {
+      delete process.env.CLOSEDLOOP_TOKEN_REFRESH_SKEW_MS;
+    } else {
+      process.env.CLOSEDLOOP_TOKEN_REFRESH_SKEW_MS = savedSkewEnv;
+    }
+  }
+});
+
+test("reattachLiveJob starts heartbeat scheduler for recovered loop", async () => {
+  // Use a very short heartbeat interval so the scheduler fires quickly.
+  const savedHeartbeatEnv = process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS;
+  process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "50";
+
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+  await fs.writeFile(jsonlPath, "");
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-heartbeat-start-tokens");
+  loopTokenStore.setLoopToken("loop-1", { token: "loop-token" });
+
+  const jobStore = createStore("boot-recovery-heartbeat-start");
+  const liveJob = createJob({
+    pid: process.pid,
+    status: "RUNNING",
+    claudeWorkDir,
+    jsonlPath,
+    lastObservedJsonlOffset: 0,
+  });
+  jobStore.upsert(liveJob);
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: () => {} },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4031",
+    loopTokenStore,
+  });
+  try {
+    await service.reattachLiveJobs();
+
+    // Wait for the heartbeat scheduler to fire
+    await waitForCondition(
+      () => fetchCalls.some((c) => c.url.includes("/heartbeat")),
+      3000,
+    );
+
+    assert.ok(
+      fetchCalls.some((c) => c.url.includes("/loops/loop-1/heartbeat")),
+      "expected heartbeat scheduler to start and POST to /heartbeat",
+    );
+  } finally {
+    service[Symbol.dispose]();
+    if (savedHeartbeatEnv === undefined) {
+      delete process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS;
+    } else {
+      process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = savedHeartbeatEnv;
+    }
+  }
+});
+
+
 test("AC-004: per-request provider resolution uses token at call time, not at construction time", async () => {
   // Verifies that getToken() is resolved on every fetch call so that a token
   // rotation between the artifact-upload and the completed-event POST results
@@ -1440,7 +1583,7 @@ test("AC-004: per-request provider resolution uses token at call time, not at co
   await fs.writeFile(path.join(claudeWorkDir, "open-questions.md"), "none");
 
   const loopTokenStore = createLoopTokenStore("boot-recovery-per-request-token");
-  loopTokenStore.setLoopToken("loop-1", "token-before-upload");
+  loopTokenStore.setLoopToken("loop-1", { token: "token-before-upload" });
 
   const jobStore = createStore("boot-recovery-per-request");
   const deadJob = createJob({
@@ -1468,7 +1611,7 @@ test("AC-004: per-request provider resolution uses token at call time, not at co
     });
     if (url.includes("/upload-artifacts")) {
       // Rotate the token after the upload-artifacts call is captured.
-      loopTokenStore.setLoopToken("loop-1", "token-after-upload");
+      loopTokenStore.setLoopToken("loop-1", { token: "token-after-upload" });
     }
     return new Response(JSON.stringify({ success: true }), { status: 200 });
   }) as typeof fetch;
@@ -1481,7 +1624,7 @@ test("AC-004: per-request provider resolution uses token at call time, not at co
     loopTokenStore,
   });
   await service.run([deadJob]);
-  service.dispose();
+  service[Symbol.dispose]();
 
   const uploadCall = fetchCalls.find((c) => c.url.includes("/upload-artifacts"));
   assert.ok(uploadCall, "expected upload-artifacts fetch call");

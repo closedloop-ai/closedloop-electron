@@ -1,0 +1,13 @@
+{
+  "symphonyAlpha": {
+    "sha": "24741ed9be45cc761195d7a7b6613bd30cdfce84",
+    "branch": "main",
+    "repo": "closedloop-ai/symphony-alpha"
+  },
+  "closedloopElectron": {
+    "sha": "<placeholder-sha>",
+    "branch": "main"
+  },
+  "lastUpdated": "2026-05-20T00:00:00Z",
+  "updatedBy": "manual"
+}

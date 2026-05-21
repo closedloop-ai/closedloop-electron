@@ -18,6 +18,7 @@ const { broadcastHarnessRows } = require("../agent-monitor-shared/harness-watche
 
 const DEBOUNCE_MS = 600;
 const RETRY_MS = 4000;
+const MAX_RETRY_ATTEMPTS = 75; // ~5 minutes at 4s intervals, then give up
 const CATCHUP_POLL_MS = 5000;
 const CHAT_SESSION_FILE_RE = /(^|[/\\])chatSessions[/\\][^/\\]+\.json$/i;
 
@@ -92,7 +93,13 @@ function watchDir(root, broadcast, matchFn, infoFn) {
 
 function retryWatch(root, broadcast, matchFn, infoFn) {
   if (watchDir(root, broadcast, matchFn, infoFn)) return;
+  let retryCount = 0;
   const t = setInterval(() => {
+    if (++retryCount > MAX_RETRY_ATTEMPTS) {
+      clearInterval(t);
+      retryTimers = retryTimers.filter((r) => r !== t);
+      return;
+    }
     if (!fs.existsSync(root)) return;
     if (watchDir(root, broadcast, matchFn, infoFn)) {
       clearInterval(t);
@@ -124,6 +131,9 @@ function runCatchupImport(broadcast) {
 function startCopilotWatcher({ broadcast }) {
   if (started) return;
   started = true;
+  // Clear any stale retry timers from a previous lifecycle
+  for (const t of retryTimers) { clearInterval(t); }
+  retryTimers = [];
   catchupTimer = setInterval(() => runCatchupImport(broadcast), CATCHUP_POLL_MS);
   catchupTimer.unref?.();
   runCatchupImport(broadcast);

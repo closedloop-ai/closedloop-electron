@@ -1,6 +1,8 @@
 import { openSync, readSync, closeSync, existsSync, statSync } from "node:fs";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
 import { gatewayLog } from "../../main/gateway-logger.js";
+import { withTokenRefreshRetry } from "../../main/loop-refresh.js";
+import type { LoopTokenStore } from "../../main/loop-token-store.js";
 import { resolveClaudeOutputPath } from "../../main/token-usage.js";
 import { postLoopEvent, type LoopHttpResult } from "./loop-http.js";
 
@@ -162,6 +164,7 @@ export function startOutputTailer(
   initialByteOffset: number,
   onOffset?: (offset: number) => void,
   claudeWorkDir?: string,
+  loopTokenStore?: LoopTokenStore,
 ): { stop: () => void; flush: () => Promise<void> } {
   const parseEnvNumber = (name: string, fallback: number): number => {
     const raw = process.env[name];
@@ -414,13 +417,22 @@ export function startOutputTailer(
         candidateTotals.cacheCreationInputTokens > 0 ||
         candidateTotals.cacheReadInputTokens > 0;
 
-      const result = await postLoopEvent(apiBaseUrl, loopId, getToken, {
+      const outputEventBody = {
         type: LoopEventType.Output,
         data: {
           chunk: lastDisplay,
           tokenUsage: hasAnyTokens ? candidateTotals : undefined,
         },
-      });
+      };
+      const result = loopTokenStore
+        ? await withTokenRefreshRetry(
+            loopId,
+            apiBaseUrl,
+            getToken,
+            loopTokenStore,
+            (gt) => postLoopEvent(apiBaseUrl, loopId, gt, outputEventBody),
+          )
+        : await postLoopEvent(apiBaseUrl, loopId, getToken, outputEventBody);
       if (result.success) {
         resetAuthRetryState();
         authRetriesExhausted = false;

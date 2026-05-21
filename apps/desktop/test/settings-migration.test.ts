@@ -107,8 +107,8 @@ test("migration: fresh install applies defaults", () => {
   assert.equal(all.apiOrigin, DEFAULT_DESKTOP_SETTINGS.apiOrigin, "apiOrigin should be the default REST API origin");
   assert.equal(
     all.agentMonitorEnabled,
-    false,
-    "Claude Dashboard should default off",
+    true,
+    "Agent Dashboard should default on",
   );
   assert.equal(
     all.planExtractionEnabled,

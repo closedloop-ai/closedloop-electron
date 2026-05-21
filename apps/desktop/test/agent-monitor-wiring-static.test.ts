@@ -17,6 +17,8 @@ const traySource = read("../src/main/tray.ts");
 const preloadSource = read("../src/main/preload.ts");
 const sidecarSource = read("../src/main/agent-monitor-sidecar.ts");
 const hooksSource = read("../src/main/agent-monitor-hooks.ts");
+const embedAppSource = read("../scripts/agent-monitor-embed/App.tsx");
+const embedLayoutSource = read("../scripts/agent-monitor-embed/Layout.tsx");
 const contractsSource = read("../src/shared/contracts.ts");
 const settingsStoreSource = read("../src/main/settings-store.ts");
 const indexHtml = read("../src/renderer/index.html");
@@ -37,6 +39,24 @@ const desktopPkg = JSON.parse(read("../package.json")) as {
   dependencies: Record<string, string>;
   devDependencies: Record<string, string>;
 };
+
+function parseHostAgentNavRoutes(source: string): string[] {
+  return [...source.matchAll(/kind:\s*"agent",\s*route:\s*"([^"]+)"/g)].map(
+    (match) => match[1],
+  );
+}
+
+function parseEmbeddedMonitorNavRoutes(source: string): string[] {
+  const routes = ["/"];
+  for (const match of source.matchAll(/<Route path="([^"]+)"/g)) {
+    const route = match[1];
+    if (route === "*" || route.includes(":")) {
+      continue;
+    }
+    routes.push(`/${route}`);
+  }
+  return routes;
+}
 
 test("pnpm-managed agent-monitor source packages are declared and wired into build", () => {
   assert.equal(
@@ -70,6 +90,7 @@ test("build script materializes a generated runtime tree with the host patches",
   assert.match(buildScriptSource, /SOURCE_CLIENT_PACKAGE = "agent-dashboard-client"/);
   assert.match(buildScriptSource, /\.generated", "agent-monitor"/);
   assert.match(buildScriptSource, /vite build/);
+  assert.match(buildScriptSource, /CLIENT_FULL_FILE_OVERRIDES/);
   assert.match(buildScriptSource, /CLIENT_SNIPPET_FILES/);
   assert.match(buildScriptSource, /server\.listen\(port, "127\.0\.0\.1", \(\) => \{/);
   assert.match(buildScriptSource, /isAllowedDashboardOrigin/);
@@ -84,6 +105,12 @@ test("build script materializes a generated runtime tree with the host patches",
   assert.match(buildScriptSource, /closedloop-host-flags\.ts/);
   assert.match(buildScriptSource, /isPlanExtractionEnabled/);
   assert.match(buildScriptSource, /module\.exports = \{ uninstallHooks \};/);
+  // Watcher shutdown cleanup must be patched into the sidecar shutdown handler
+  assert.match(buildScriptSource, /stopCodexWatcher/);
+  assert.match(buildScriptSource, /stopCursorWatcher/);
+  assert.match(buildScriptSource, /stopCopilotWatcher/);
+  assert.match(buildScriptSource, /stopOpenCodeWatcher/);
+  assert.match(buildScriptSource, /stopCcWatcher/);
 });
 
 test("electron-builder ships the generated agent-monitor runtime tree unpacked", () => {
@@ -144,9 +171,11 @@ test("docs and ignores describe generated pnpm-managed inputs, not vendor source
   assert.doesNotMatch(claudeDocSource, /vendor\/agent-monitor/);
 });
 
-test("agent monitor and plan extraction are feature-gated and default off in desktop settings", () => {
+test("agent monitor defaults on; plan extraction is feature-gated and defaults off in desktop settings", () => {
   assert.match(contractsSource, /agentMonitorEnabled: boolean/);
-  assert.match(contractsSource, /agentMonitorEnabled: false/);
+  // The Agent Dashboard now powers the primary Dashboard + agent nav, so the
+  // sidecar defaults ON (it can still be turned off in Settings).
+  assert.match(contractsSource, /agentMonitorEnabled: true/);
   assert.match(contractsSource, /planExtractionEnabled: boolean/);
   assert.match(contractsSource, /planExtractionEnabled: false/);
   assert.match(settingsStoreSource, /getAgentMonitorEnabled\(\)/);
@@ -167,7 +196,7 @@ test("sidecar is feature-gated and, when enabled, starts before the gateway", ()
   assert.match(appSource, /this\.agentMonitor = new AgentMonitorSidecar\(\)/);
   assert.match(
     appSource,
-    /if \(this\.settingsStore\.getAgentMonitorEnabled\(\)\) \{[\s\S]*void this\.agentMonitor\.start\(\);[\s\S]*syncAgentMonitorHooksOnBoot\(\);/,
+    /if \(this\.settingsStore\.getAgentMonitorEnabled\(\)\) \{[\s\S]*void this\.agentMonitor\.start\(\);[\s\S]*syncAgentMonitorHooksOnBoot\(\);[\s\S]*this\.agentSessionSync\.start\(\);/,
   );
   const startIdx = appSource.indexOf("void this.agentMonitor.start()");
   const gatewayTryIdx = appSource.indexOf("await this.server.start()");
@@ -176,6 +205,13 @@ test("sidecar is feature-gated and, when enabled, starts before the gateway", ()
   assert.ok(
     startIdx < gatewayTryIdx,
     "sidecar must start before the gateway try-block",
+  );
+});
+
+test("agent session sync starts and stops with the agent monitor flag", () => {
+  assert.match(
+    appSource,
+    /private async applyAgentMonitorSetting\(enabled: boolean\): Promise<void> \{[\s\S]*if \(enabled\) \{[\s\S]*this\.agentSessionSync\.start\(\);[\s\S]*return;[\s\S]*await this\.agentMonitor\.stop\(\);[\s\S]*this\.agentSessionSync\.stop\(\);/,
   );
 });
 
@@ -239,21 +275,44 @@ test("shutdown sequence stops the sidecar before the server", () => {
   assert.ok(amIdx > 0 && srvIdx > 0 && amIdx < srvIdx, "agentMonitor.stop must precede server.stop");
 });
 
-test("renderer hides the monitor tab by default and exposes the settings toggle", () => {
-  assert.match(indexHtml, /data-tab="claude-dashboard" id="claudeDashboardTabButton" hidden>Agent Dashboard</);
-  assert.match(indexHtml, /<section id="claude-dashboard" class="panel">/);
+test("renderer wires the Agent Dashboard sidecar into the sidebar and gates it on the setting", () => {
+  // Agent nav items live in the left sidebar; hidden when the sidecar is off.
+  assert.match(indexHtml, /<nav class="sb-nav" id="sidebarNav"/);
+  assert.match(indexHtml, /agent-disabled/);
+  assert.match(indexHtml, /<section id="claude-dashboard" class="panel active">/);
   assert.match(indexHtml, /id="agentMonitorEnabled"/);
   assert.match(indexHtml, /function syncAgentMonitorTabVisibility/);
-  assert.match(indexHtml, /tabName === "claude-dashboard" && !cachedAgentMonitorEnabled/);
+  assert.match(indexHtml, /kind === "agent" && !cachedAgentMonitorEnabled/);
   assert.match(indexHtml, /id="claudeDashFrame"/);
-  assert.match(indexHtml, /tabName === "claude-dashboard"/);
   assert.match(indexHtml, /api\.getAgentMonitorUrl\(\)/);
   assert.match(indexHtml, /searchParams\.set\(\s*"closedloop_plan_extraction",[\s\S]*r\.planExtractionEnabled \? "1" : "0"/);
+  // Embed mode + host postMessage navigation.
+  assert.match(indexHtml, /searchParams\.set\("embed", "1"\)/);
+  assert.match(indexHtml, /searchParams\.set\(\s*"closedloop_host_origin"/);
+  assert.match(indexHtml, /type: "closedloop:navigate"/);
+  assert.doesNotMatch(indexHtml, /postMessage\([\s\S]*,\s*"\*"/);
+  assert.match(indexHtml, /cachedPlanExtractionEnabled/);
+  assert.match(indexHtml, /planExtractionOnly: true/);
   assert.match(indexHtml, /id="claudeDashHooksToggle"/);
   assert.match(indexHtml, /api\.setAgentMonitorHooksEnabled/);
   // Iframe-in-hidden-panel height fix must be present.
   assert.match(indexHtml, /function sizeClaudeFrame/);
   assert.match(indexHtml, /window\.addEventListener\("resize", sizeClaudeFrame\)/);
+});
+
+test("embedded layout accepts navigation only from the configured host origin", () => {
+  assert.match(embedLayoutSource, /EMBED_HOST_ORIGIN_QUERY_PARAM = "closedloop_host_origin"/);
+  assert.match(embedLayoutSource, /sessionStorage\.setItem\(EMBED_HOST_ORIGIN_STORAGE_KEY, fromQuery\)/);
+  assert.match(embedLayoutSource, /event\.origin === allowedHostOrigin/);
+});
+
+test("renderer agent nav stays aligned with the embedded monitor router", () => {
+  assert.deepEqual(parseHostAgentNavRoutes(indexHtml), parseEmbeddedMonitorNavRoutes(embedAppSource));
+  // We intentionally layer host-owned route patches on top of the pinned
+  // upstream client via a repo-owned App.tsx overlay, not by mutating the
+  // dependency contents directly.
+  assert.match(buildScriptSource, /from: embedAppSource,[\s\S]*to: path\.join\("src", "App\.tsx"\)/);
+  assert.match(buildScriptSource, /for \(const override of CLIENT_FULL_FILE_OVERRIDES\)/);
 });
 
 test("plans UI is gated by the host-loaded plan extraction flag", () => {
@@ -344,7 +403,7 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
     'CURSOR_MODULES = ["cursor-home", "cursor-parser", "cursor-import", "cursor-watcher"]',
     'COPILOT_MODULES = ["copilot-home", "copilot-parser", "copilot-import", "copilot-watcher"]',
     'OPENCODE_MODULES = ["opencode-home", "opencode-parser", "opencode-import", "opencode-watcher"]',
-    'SHARED_MODULES = ["harness-watcher-utils", "import-session-utils", "parser-utils"]',
+    'SHARED_MODULES = ["harness-watcher-utils", "import-session-utils", "parser-utils", "catchup-cache"]',
     "MULTI_HARNESS_SPECS = [",
     "watcherPatchLines",
     "importPatchLines",
@@ -413,13 +472,18 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
     assert.match(source, /CATCHUP_POLL_MS = 5000/);
     assert.match(source, /broadcastHarnessRows/);
     assert.match(source, /runCatchupImport/);
+    // Retry intervals must be bounded to prevent resource leaks.
+    assert.match(source, /MAX_RETRY_ATTEMPTS/);
     assert.ok(
       source.includes("catchupTimer.unref?.();\n  runCatchupImport(broadcast);"),
       `${file} should run an immediate catch-up import on start`,
     );
   }
+  // Codex watcher must also have bounded retries and catch-up polling.
+  const codexSource = read("../scripts/agent-monitor-codex/codex-watcher.js");
+  assert.match(codexSource, /MAX_RETRY_ATTEMPTS/);
   assert.match(
-    read("../scripts/agent-monitor-codex/codex-watcher.js"),
+    codexSource,
     /catchupTimer\.unref\?\.\(\);\s*runCatchupImport\(broadcast\);/,
   );
 
