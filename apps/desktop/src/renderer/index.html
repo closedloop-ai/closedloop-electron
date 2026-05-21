@@ -3470,6 +3470,7 @@
         wrench: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
         users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
         package: '<path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><polyline points="3.29 7 12 12 20.71 7"/><path d="m7.5 4.27 9 5.15"/>',
+        "file-text": '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/>',
         settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
         shield: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
         inbox: '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
@@ -3489,6 +3490,7 @@
         { id: "workflows",      label: "Workflows",      icon: "workflows",   kind: "agent",   route: "/workflows" },
         { id: "cc-config",      label: "CC Config",      icon: "boxes",       kind: "agent",   route: "/cc-config" },
         { id: "run",            label: "Run",            icon: "play",        kind: "agent",   route: "/run" },
+        { id: "plans",          label: "Plans",          icon: "file-text",   kind: "agent",   route: "/plans",    planExtractionOnly: true },
         { id: "skills",         label: "Skills",         icon: "sparkles",    kind: "agent",   route: "/skills" },
         { id: "tools",          label: "Tools",          icon: "wrench",      kind: "agent",   route: "/tools" },
         { id: "subagents",      label: "Sub-agents",     icon: "users",       kind: "agent",   route: "/agents" },
@@ -3514,6 +3516,11 @@
       let currentNavId = "dashboard";
       let pendingAgentRoute = "/";
       let bootNavDone = false;
+      let cachedPlanExtractionEnabled = false;
+
+      function shouldShowNavItem(item) {
+        return !item.planExtractionOnly || cachedPlanExtractionEnabled;
+      }
 
       function buildSidebar() {
         const nav = document.getElementById("sidebarNav");
@@ -3524,6 +3531,9 @@
             group.className = "sb-section";
             group.textContent = item.label;
             nav.appendChild(group);
+            continue;
+          }
+          if (!shouldShowNavItem(item)) {
             continue;
           }
           const btn = document.createElement("button");
@@ -3540,7 +3550,10 @@
           btn.addEventListener("click", () => activateNav(item.id));
           nav.appendChild(btn);
         }
-        nav.querySelector('.sb-item[data-nav="dashboard"]')?.classList.add("active");
+        const activeId = nav.querySelector(`.sb-item[data-nav="${currentNavId}"]`)
+          ? currentNavId
+          : "dashboard";
+        nav.querySelector(`.sb-item[data-nav="${activeId}"]`)?.classList.add("active");
       }
 
       function setBreadcrumb(item) {
@@ -3791,6 +3804,10 @@
           try {
             const r = await api.getAgentMonitorUrl();
             if (r && r.ready && r.url) {
+              if (cachedPlanExtractionEnabled !== (r.planExtractionEnabled === true)) {
+                cachedPlanExtractionEnabled = r.planExtractionEnabled === true;
+                buildSidebar();
+              }
               const frameUrl = new URL(r.url);
               // Embed mode hides the sidecar's own sidebar/chrome; the
               // initial route is baked in so the first paint lands right.
@@ -4609,7 +4626,9 @@
         relayOrigin.value = settings.relayOrigin || "";
         apiOrigin.value = settings.apiOrigin || "";
         webAppOrigin.value = settings.webAppOrigin || "";
+        cachedPlanExtractionEnabled = settings.planExtractionEnabled === true;
         cachedAgentMonitorEnabled = settings.agentMonitorEnabled === true;
+        buildSidebar();
         if (agentMonitorEnabled) {
           agentMonitorEnabled.checked = cachedAgentMonitorEnabled;
         }

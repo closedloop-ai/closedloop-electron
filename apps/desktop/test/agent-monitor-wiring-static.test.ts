@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { test } from "node:test";
 
 const read = (relative: string): string =>
   readFileSync(new URL(relative, import.meta.url), "utf8");
+const requireFromDesktop = createRequire(new URL("../package.json", import.meta.url));
 
 const appSource = read("../src/main/app.ts");
 const agentMonitorPathSource = read("../src/main/agent-monitor-path.ts");
@@ -31,12 +33,34 @@ const loadRowsSnippet = read(
 const hostFlagsSource = read(
   "../scripts/agent-monitor-plans/client/closedloop-host-flags.ts",
 );
+const upstreamClientAppSource = readFileSync(
+  requireFromDesktop.resolve("agent-dashboard-client/src/App.tsx"),
+  "utf8",
+);
 const desktopPkg = JSON.parse(read("../package.json")) as {
   version: string;
   scripts: Record<string, string>;
   dependencies: Record<string, string>;
   devDependencies: Record<string, string>;
 };
+
+function parseHostAgentNavRoutes(source: string): string[] {
+  return [...source.matchAll(/kind:\s*"agent",\s*route:\s*"([^"]+)"/g)].map(
+    (match) => match[1],
+  );
+}
+
+function parseEmbeddedMonitorNavRoutes(source: string): string[] {
+  const routes = ["/"];
+  for (const match of source.matchAll(/<Route path="([^"]+)"/g)) {
+    const route = match[1];
+    if (route === "*" || route.includes(":")) {
+      continue;
+    }
+    routes.push(`/${route}`);
+  }
+  return routes;
+}
 
 test("pnpm-managed agent-monitor source packages are declared and wired into build", () => {
   assert.equal(
@@ -268,11 +292,20 @@ test("renderer wires the Agent Dashboard sidecar into the sidebar and gates it o
   // Embed mode + host postMessage navigation.
   assert.match(indexHtml, /searchParams\.set\("embed", "1"\)/);
   assert.match(indexHtml, /type: "closedloop:navigate"/);
+  assert.match(indexHtml, /cachedPlanExtractionEnabled/);
+  assert.match(indexHtml, /planExtractionOnly: true/);
   assert.match(indexHtml, /id="claudeDashHooksToggle"/);
   assert.match(indexHtml, /api\.setAgentMonitorHooksEnabled/);
   // Iframe-in-hidden-panel height fix must be present.
   assert.match(indexHtml, /function sizeClaudeFrame/);
   assert.match(indexHtml, /window\.addEventListener\("resize", sizeClaudeFrame\)/);
+});
+
+test("renderer agent nav stays aligned with the embedded monitor router", () => {
+  assert.deepEqual(
+    parseHostAgentNavRoutes(indexHtml),
+    parseEmbeddedMonitorNavRoutes(upstreamClientAppSource),
+  );
 });
 
 test("plans UI is gated by the host-loaded plan extraction flag", () => {
