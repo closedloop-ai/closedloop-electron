@@ -12,7 +12,10 @@
  *   - github-nested-md          — categories/<cat>/<file>.md (VoltAgent)
  *   - github-nested-skill-tree  — <team>/skills/<skill>/SKILL.md (alirezarezvani)
  *   - claude-marketplace        — read .claude-plugin/marketplace.json (closedloop)
- *   - none                      — pack has no skill/command listing (claude-code-router)
+ *   - github-claude-plugin      — single marketplace plugin: walks commands/ +
+ *                                  agents/ + skills/ if present under plugin_path
+ *                                  (claude-plugins-official entries)
+ *   - none                      — pack has no skill/command listing (RTK, claude-code-router)
  *
  * Returns [{ name, kind, description?, path? }]. kind is one of
  * 'skill', 'command', 'agent', 'plugin'.
@@ -255,6 +258,39 @@ async function fetchClaudeMarketplace(owner, repo, pluginsRoot) {
   return [];
 }
 
+/**
+ * Walk a single claude-plugins-official-style plugin dir for its commands,
+ * agents, and skills. Plugins in that marketplace have a mixed layout —
+ * some have only commands/, some commands + agents, some skills, etc. —
+ * so a single dispatch needs to handle whichever subset is present.
+ */
+async function fetchClaudePlugin(owner, repo, pluginPath) {
+  const items = [];
+  const top = await gh(
+    `repos/${owner}/${repo}/contents/${encodeURI(pluginPath)}`,
+  );
+  if (!Array.isArray(top)) return items;
+  const hasDir = (name) => top.some((e) => e.type === "dir" && e.name === name);
+
+  // commands/<name>.md
+  if (hasDir("commands")) {
+    items.push(
+      ...(await fetchFlatMd(owner, repo, `${pluginPath}/commands`, "command")),
+    );
+  }
+  // agents/<name>.md
+  if (hasDir("agents")) {
+    items.push(
+      ...(await fetchFlatMd(owner, repo, `${pluginPath}/agents`, "agent")),
+    );
+  }
+  // skills/<name>/SKILL.md
+  if (hasDir("skills")) {
+    items.push(...(await fetchSkillTree(owner, repo, `${pluginPath}/skills`)));
+  }
+  return items;
+}
+
 async function fetchNestedSkillTree(owner, repo, matchPattern) {
   // Simple two-level walk: <team>/skills/<skill>/SKILL.md
   const top = await gh(`repos/${owner}/${repo}/contents`);
@@ -320,6 +356,14 @@ async function fetchContents(catalogEntry) {
       const mkO = repoFromContents ? repoFromContents.owner : owner;
       const mkR = repoFromContents ? repoFromContents.repo : repo;
       return fetchClaudeMarketplace(mkO, mkR, contents.plugins_root);
+    }
+    case "github-claude-plugin": {
+      const repoFromContents = contents.marketplace_repo
+        ? parseGithubUrl(`https://github.com/${contents.marketplace_repo}`)
+        : null;
+      const pluginO = repoFromContents ? repoFromContents.owner : owner;
+      const pluginR = repoFromContents ? repoFromContents.repo : repo;
+      return fetchClaudePlugin(pluginO, pluginR, contents.plugin_path);
     }
     case "none":
       return [];

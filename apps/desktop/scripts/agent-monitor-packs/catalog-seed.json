@@ -1,6 +1,6 @@
 {
-  "seed_version": 4,
-  "_note": "Seed v4 (2026-05-21): fixed three install/uninstall bugs found during end-to-end verification. (1) BMad's '--yes' alone does NOT skip the interactive directory picker — must add '--directory .' to provide it; the install otherwise hangs forever waiting for input. (2) SuperClaude has NO 'uninstall' subcommand (the v4.x CLI only exposes 'install' / 'install-skill') — the seed v3 used 'SuperClaude uninstall' which errors; correct cleanup is 'pipx uninstall superclaude && rm -rf ~/.claude/commands/sc'. (3) gstack './setup' is interactive — flagged in install_notes so users know to run it manually after the clone lands. v3 changes preserved: closedloop-ai pinned, per-pack 'contents' for the pre-install skill listing.",
+  "seed_version": 5,
+  "_note": "Seed v5 (2026-05-21): added 6 new packs. RTK (Rust Token Killer, 51.9k stars) — CLI proxy that filters tool output to save 60-90% LLM tokens; brew tap-based install. Plus 5 hand-picked methodology plugins from Anthropic's claude-plugins-official marketplace: code-review (multi-agent PR review, anthropic's official), code-modernization (legacy code transform), claude-code-setup (analyzes a codebase + recommends automations), claude-md-management (CLAUDE.md auditor), context7 (Upstash docs MCP server). Each is installable via 'claude plugin install <name>@claude-plugins-official'. All 5 use the new 'github-claude-plugin' contents type which walks commands/ + agents/ + skills/ inside the plugin dir (these plugins have mixed layouts — some have only commands, some have skills, etc.). v4 changes preserved.",
   "packs": [
     {
       "pack_id": "closedloop-ai",
@@ -22,6 +22,133 @@
         "type": "claude-marketplace",
         "marketplace_repo": "closedloop-ai/claude-plugins",
         "plugins_root": "plugins"
+      }
+    },
+    {
+      "pack_id": "rtk",
+      "display_name": "RTK (Rust Token Killer)",
+      "category": "tooling",
+      "github_url": "https://github.com/rtk-ai/rtk",
+      "description": "High-performance CLI proxy that filters and summarizes tool output before it reaches your LLM context. Wraps git/cargo/npm/cargo/docker/kubectl/etc. — saves 60-90% on tokens for common dev commands. Works with any AI coding harness.",
+      "harnesses": ["claude", "codex"],
+      "install_commands": {
+        "claude": "brew tap rtk-ai/tap && brew install rtk",
+        "codex": "brew tap rtk-ai/tap && brew install rtk"
+      },
+      "uninstall_commands": {
+        "claude": "brew uninstall rtk && brew untap rtk-ai/tap 2>/dev/null || true",
+        "codex": "brew uninstall rtk && brew untap rtk-ai/tap 2>/dev/null || true"
+      },
+      "install_notes": "Requires Homebrew. After install, prefix dev commands with `rtk` (e.g. `rtk git status`, `rtk cargo test`). For agents to use it automatically, configure the harness's AGENTS.md or CLAUDE.md to prefer `rtk`-prefixed commands. The `untap` step is best-effort — fails silently if other taps share the formula.",
+      "verified": true,
+      "contents": {
+        "type": "none",
+        "reason": "RTK is a CLI proxy binary, not a skill collection. Installs the `rtk` binary which wraps existing dev tools."
+      }
+    },
+    {
+      "pack_id": "code-review",
+      "display_name": "Code Review (Anthropic)",
+      "category": "methodology",
+      "github_url": "https://github.com/anthropics/claude-plugins-official",
+      "description": "Anthropic's official multi-agent code-review plugin: runs specialized review agents with confidence-based scoring to filter false positives. Direct alternative/complement to closedloop's code-review for teams that want a vendor-shipped baseline.",
+      "harnesses": ["claude"],
+      "install_commands": {
+        "claude": "claude plugin install code-review@claude-plugins-official --scope user"
+      },
+      "uninstall_commands": {
+        "claude": "claude plugin uninstall code-review@claude-plugins-official --scope user"
+      },
+      "install_notes": "Hand-picked from Anthropic's claude-plugins-official marketplace. Installable headlessly via the Claude CLI.",
+      "verified": true,
+      "contents": {
+        "type": "github-claude-plugin",
+        "marketplace_repo": "anthropics/claude-plugins-official",
+        "plugin_path": "plugins/code-review"
+      }
+    },
+    {
+      "pack_id": "code-modernization",
+      "display_name": "Code Modernization (Anthropic)",
+      "category": "methodology",
+      "github_url": "https://github.com/anthropics/claude-plugins-official",
+      "description": "Structured workflow for modernizing legacy codebases (COBOL, legacy Java/C++, monolith web apps). Phases: assess → map → extract-rules → reimagine → transform. Ships with agents that own each phase.",
+      "harnesses": ["claude"],
+      "install_commands": {
+        "claude": "claude plugin install code-modernization@claude-plugins-official --scope user"
+      },
+      "uninstall_commands": {
+        "claude": "claude plugin uninstall code-modernization@claude-plugins-official --scope user"
+      },
+      "install_notes": "Hand-picked from Anthropic's claude-plugins-official marketplace.",
+      "verified": true,
+      "contents": {
+        "type": "github-claude-plugin",
+        "marketplace_repo": "anthropics/claude-plugins-official",
+        "plugin_path": "plugins/code-modernization"
+      }
+    },
+    {
+      "pack_id": "claude-code-setup",
+      "display_name": "Claude Code Setup (Anthropic)",
+      "category": "methodology",
+      "github_url": "https://github.com/anthropics/claude-plugins-official",
+      "description": "Analyzes your codebase and recommends tailored Claude Code automations — hooks, skills, MCP servers, subagents. Excellent first-time-experience companion for new projects.",
+      "harnesses": ["claude"],
+      "install_commands": {
+        "claude": "claude plugin install claude-code-setup@claude-plugins-official --scope user"
+      },
+      "uninstall_commands": {
+        "claude": "claude plugin uninstall claude-code-setup@claude-plugins-official --scope user"
+      },
+      "install_notes": "Hand-picked from Anthropic's claude-plugins-official marketplace. After install, invoke its setup skill from a fresh project to get a recommended automation stack.",
+      "verified": true,
+      "contents": {
+        "type": "github-claude-plugin",
+        "marketplace_repo": "anthropics/claude-plugins-official",
+        "plugin_path": "plugins/claude-code-setup"
+      }
+    },
+    {
+      "pack_id": "claude-md-management",
+      "display_name": "CLAUDE.md Management (Anthropic)",
+      "category": "methodology",
+      "github_url": "https://github.com/anthropics/claude-plugins-official",
+      "description": "Tools to maintain and improve CLAUDE.md files — audit quality, capture session learnings, keep project memory current. Pairs well with closedloop / gstack which rely on CLAUDE.md for context.",
+      "harnesses": ["claude"],
+      "install_commands": {
+        "claude": "claude plugin install claude-md-management@claude-plugins-official --scope user"
+      },
+      "uninstall_commands": {
+        "claude": "claude plugin uninstall claude-md-management@claude-plugins-official --scope user"
+      },
+      "install_notes": "Hand-picked from Anthropic's claude-plugins-official marketplace.",
+      "verified": true,
+      "contents": {
+        "type": "github-claude-plugin",
+        "marketplace_repo": "anthropics/claude-plugins-official",
+        "plugin_path": "plugins/claude-md-management"
+      }
+    },
+    {
+      "pack_id": "context7",
+      "display_name": "Context7 (Upstash)",
+      "category": "tooling",
+      "github_url": "https://github.com/anthropics/claude-plugins-official",
+      "description": "Upstash Context7 MCP server for up-to-date documentation lookup. Pulls version-specific docs + code examples directly from source repositories into your LLM context. Community-managed plugin in Anthropic's official marketplace.",
+      "harnesses": ["claude"],
+      "install_commands": {
+        "claude": "claude plugin install context7@claude-plugins-official --scope user"
+      },
+      "uninstall_commands": {
+        "claude": "claude plugin uninstall context7@claude-plugins-official --scope user"
+      },
+      "install_notes": "MCP server — adds documentation-lookup tools rather than slash commands or agents. Hand-picked from Anthropic's claude-plugins-official marketplace; sourced from external_plugins/context7.",
+      "verified": true,
+      "contents": {
+        "type": "github-claude-plugin",
+        "marketplace_repo": "anthropics/claude-plugins-official",
+        "plugin_path": "external_plugins/context7"
       }
     },
     {
