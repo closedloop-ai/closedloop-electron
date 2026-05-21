@@ -362,7 +362,12 @@ export class CloudSocketService {
     socket.on("desktop.command", (payload: unknown) => {
       const parsed = parseDesktopCommand(payload);
       if (!parsed) {
-        gatewayLog.warn("cloud-socket", "Received unparseable desktop.command, ignoring");
+        const rawPath = asNonEmptyString(asObject(payload).path);
+        if (rawPath?.startsWith("/api/engineer/")) {
+          gatewayLog.warn("cloud-socket", `Received legacy /api/engineer/ command (${rawPath}), ignoring — desktop only accepts /api/gateway/ commands`);
+        } else {
+          gatewayLog.warn("cloud-socket", "Received unparseable desktop.command, ignoring");
+        }
         return;
       }
       gatewayLog.debug("cloud-socket", `Command received: ${parsed.operationId} ${parsed.method} ${parsed.path} (commandId=${parsed.commandId})`);
