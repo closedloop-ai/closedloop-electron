@@ -164,30 +164,29 @@ export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
           );
         })}
         <div className="ml-auto flex items-center gap-1.5">
+          {/* GitHub is always the primary link. When the pack has a distinct
+              upstream repo (e.g. context7 → upstash/context7), that's the real
+              source-of-truth and the marketplace listing is secondary. */}
+          <a
+            href={pack.upstream_github_url || pack.github_url}
+            target="_blank"
+            rel="noreferrer"
+            className="text-[10px] text-gray-300 hover:text-gray-100"
+            title="GitHub source repo"
+          >
+            GitHub →
+          </a>
           {pack.upstream_github_url && (
             <a
-              href={pack.upstream_github_url}
+              href={pack.github_url}
               target="_blank"
               rel="noreferrer"
               className="text-[10px] text-gray-500 hover:text-gray-300"
-              title="Upstream source repo"
+              title="Marketplace listing"
             >
-              Source →
+              Marketplace →
             </a>
           )}
-          <a
-            href={pack.github_url}
-            target="_blank"
-            rel="noreferrer"
-            className="text-[10px] text-gray-500 hover:text-gray-300"
-            title={
-              pack.upstream_github_url
-                ? "Marketplace entry"
-                : "GitHub repo"
-            }
-          >
-            {pack.upstream_github_url ? "Marketplace →" : "GitHub →"}
-          </a>
         </div>
       </div>
 

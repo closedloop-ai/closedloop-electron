@@ -229,30 +229,29 @@ export function PackDetail() {
                 )}
               </div>
             </div>
-            {entry.upstream_github_url && (
+            {/* GitHub is always the primary link. When the pack has a distinct
+                upstream repo (e.g. context7 → upstash/context7), that's the
+                real source-of-truth and the marketplace listing is secondary. */}
+            {(entry.upstream_github_url || entry.github_url) && (
               <a
-                href={entry.upstream_github_url}
+                href={entry.upstream_github_url || entry.github_url}
                 target="_blank"
                 rel="noreferrer"
-                className="text-[11px] rounded border border-border bg-surface-2 text-gray-300 px-2.5 py-1 hover:bg-surface-3 flex-shrink-0"
-                title="Upstream source repository"
+                className="text-[11px] rounded border border-accent/40 bg-accent/10 text-accent px-2.5 py-1 hover:bg-accent/20 flex-shrink-0"
+                title="GitHub source repository"
               >
-                Source →
+                GitHub →
               </a>
             )}
-            {entry.github_url && (
+            {entry.upstream_github_url && entry.github_url && (
               <a
                 href={entry.github_url}
                 target="_blank"
                 rel="noreferrer"
-                className="text-[11px] rounded border border-border bg-surface-2 text-gray-300 px-2.5 py-1 hover:bg-surface-3 flex-shrink-0"
-                title={
-                  entry.upstream_github_url
-                    ? "Marketplace entry"
-                    : "GitHub repo"
-                }
+                className="text-[11px] rounded border border-border bg-surface-2 text-gray-400 px-2.5 py-1 hover:bg-surface-3 flex-shrink-0"
+                title="Marketplace listing"
               >
-                {entry.upstream_github_url ? "Marketplace →" : "GitHub →"}
+                Marketplace →
               </a>
             )}
           </div>
