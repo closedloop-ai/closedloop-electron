@@ -1486,6 +1486,21 @@ function patchClientSource() {
         '          <Route path="packs/:packId" element={<PackDetail />} />',
       ].join("\n"),
     },
+    // FEA-1314 v4 (separately patched): the packs/:packId route was added
+    // to the FEA-1224 patch above, but on existing patched sources where
+    // the FEA-1224 patch had already fired (guard already matches), the
+    // whole edit short-circuits and the new packs/:packId line never lands.
+    // This dedicated entry — guarded on the packs/:packId line itself — is
+    // surgical and idempotent: it adds JUST the missing route line after
+    // the packs route, regardless of whether the FEA-1224 patch fired
+    // before or after v4 was introduced.
+    {
+      rel: "src/App.tsx",
+      guard: 'path="packs/:packId"',
+      find: '          <Route path="packs" element={<Packs />} />',
+      replace:
+        '          <Route path="packs" element={<Packs />} />\n          <Route path="packs/:packId" element={<PackDetail />} />',
+    },
     // FEA-1314 v4: import the PackDetail component referenced in the
     // /packs/:packId route. Anchors AFTER the Packs import added above so
     // re-runs are idempotent.
@@ -1758,6 +1773,20 @@ function assertGeneratedTree() {
         `Patched client src/App.tsx is missing the /${route} route (FEA-1224).`,
       );
     }
+  }
+  // FEA-1314 v4: the packs/:packId detail route + PackDetail import must be
+  // present in App.tsx. v3 → v4 had a silent-fail bug where the FEA-1224
+  // patch's guard short-circuited the new :packId line; this hard-gate
+  // catches that class of regression next time.
+  if (!appSource.includes('<Route path="packs/:packId"')) {
+    throw new Error(
+      "Patched client src/App.tsx is missing the /packs/:packId detail route (FEA-1314 v4).",
+    );
+  }
+  if (!appSource.includes('import { PackDetail }')) {
+    throw new Error(
+      "Patched client src/App.tsx is missing the PackDetail import (FEA-1314 v4).",
+    );
   }
   const sidebarSource = readFileSync(
     path.join(sourceClientDir, "src", "components", "Sidebar.tsx"),
