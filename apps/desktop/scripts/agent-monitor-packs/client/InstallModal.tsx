@@ -31,6 +31,10 @@ interface InstallModalProps {
   harness: string;
   action: "install" | "uninstall";
   command: string;
+  /** When true, the `command` field is a best-guess preview — the server
+   *  picks the actual command to run based on installed CLIs at spawn
+   *  time. UI shows a note explaining this. */
+  commandIsAutoDetect?: boolean;
   /** Set when the pack's install command operates on `cwd` (BMad et al).
    *  When true, the modal shows a copy-command UX with a project picker
    *  instead of streaming the install — the user runs it in their own
@@ -56,11 +60,17 @@ export function InstallModal({
   harness,
   action,
   command,
+  commandIsAutoDetect,
   projectScoped,
   postInstall,
   onClose,
   onCompleted,
 }: InstallModalProps) {
+  // Friendlier label for the "auto" sentinel — most users don't know what
+  // "auto" means as a harness value. Shows the actual harnesses the server
+  // will pick from instead.
+  const harnessLabel =
+    harness === "auto" ? "auto-detect (claude + codex)" : harness;
   const [state, setState] = useState<RunState>({ kind: "preview" });
   const [lines, setLines] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -233,7 +243,7 @@ export function InstallModal({
               {title}
             </h2>
             <p className="text-[11px] text-gray-500 mt-0.5">
-              harness: <span className="font-mono text-gray-300">{harness}</span>
+              harness: <span className="font-mono text-gray-300">{harnessLabel}</span>
               {state.kind === "running" && (
                 <span className="ml-2 text-amber-300">running…</span>
               )}
@@ -317,9 +327,15 @@ export function InstallModal({
             <div>
               <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 mb-1">
                 Command
+                {commandIsAutoDetect && (
+                  <span className="ml-2 text-[10px] normal-case font-normal text-gray-400">
+                    (preview — server picks the final command based on
+                    installed CLIs)
+                  </span>
+                )}
               </div>
               <pre className="whitespace-pre-wrap break-all text-xs font-mono text-gray-200 bg-surface-2 border border-border rounded-lg p-3 max-h-32 overflow-auto">
-                {command}
+                {command || "(server will resolve at install time)"}
               </pre>
             </div>
 

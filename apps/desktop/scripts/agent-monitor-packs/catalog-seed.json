@@ -1,6 +1,6 @@
 {
-  "seed_version": 10,
-  "_note": "Seed v10 (2026-05-21): two new fields. `single_install: true` for packs whose ONE install command sets up all detected harnesses in one run (gstack — its codex install command is a superset of the claude one). UI shows ONE Install button, server detects which CLIs are installed and picks the right command. `post_install` is a structured block ({title, body, copy_command?, url?, required?}) describing required-or-recommended next steps after the install command completes — popped as a modal screen for packs like Claude Code Router that install OK but are non-functional without provider keys.",
+  "seed_version": 11,
+  "_note": "Seed v11 (2026-05-21): gstack install commands made idempotent — `git clone` is now gated by `test -d` so re-running the install on a partially-installed pack tops it off (e.g. adds codex symlinks when only claude was previously set up) instead of erroring out on a re-clone of an existing directory. v10's flags preserved.",
   "packs": [
     {
       "pack_id": "closedloop-ai",
@@ -239,8 +239,8 @@
       "harnesses": ["claude", "codex"],
       "single_install": true,
       "install_commands": {
-        "claude": "git clone https://github.com/garrytan/gstack ~/.claude/skills/gstack && cd ~/.claude/skills/gstack && ./setup",
-        "codex": "git clone https://github.com/garrytan/gstack ~/.claude/skills/gstack && cd ~/.claude/skills/gstack && ./setup && ./setup --host codex"
+        "claude": "(test -d ~/.claude/skills/gstack || git clone https://github.com/garrytan/gstack ~/.claude/skills/gstack) && cd ~/.claude/skills/gstack && ./setup",
+        "codex": "(test -d ~/.claude/skills/gstack || git clone https://github.com/garrytan/gstack ~/.claude/skills/gstack) && cd ~/.claude/skills/gstack && ./setup && ./setup --host codex"
       },
       "uninstall_commands": {
         "claude": "rm -rf ~/.claude/skills/gstack && find ~/.claude/skills -maxdepth 2 -name SKILL.md -lname '*gstack*' -print0 2>/dev/null | xargs -0 -I {} dirname {} | xargs -I {} rm -rf {}",

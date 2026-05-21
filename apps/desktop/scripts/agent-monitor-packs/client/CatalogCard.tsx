@@ -209,7 +209,13 @@ export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
                 pack.harnesses.find((h) => pack.install_commands[h]) ||
                 pack.harnesses[0];
               const cmd = pack.install_commands[firstHarness];
-              const fullyInstalled = pack.harnesses.every((h) =>
+              // For single_install/harness_agnostic packs, the user model is
+              // "one install satisfies all harnesses". If ANY harness shows
+              // installed (even from a legacy per-harness install), treat the
+              // pack as installed — show Uninstall. Otherwise the card lights
+              // up the green "Installed" badge but also presents an Install
+              // button, which contradicts itself. (v0.15.56 fix.)
+              const anyInstalled = pack.harnesses.some((h) =>
                 pack.installed_harnesses.includes(h),
               );
               const tooltipPrefix = isSingleInstall
@@ -228,7 +234,7 @@ export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
                   </a>
                 );
               }
-              if (fullyInstalled) {
+              if (anyInstalled) {
                 const uninstall = pack.uninstall_commands[firstHarness];
                 return (
                   <button
@@ -338,25 +344,45 @@ export function CatalogCard({ pack, history, onAfterRun }: CatalogCardProps) {
         </div>
       </div>
 
-      {modal && (
-        <InstallModal
-          packId={pack.pack_id}
-          packDisplayName={pack.display_name}
-          harness={modal.harness}
-          action={modal.action}
-          command={
+      {modal &&
+        (() => {
+          // Resolve the command to PREVIEW in the modal. For most packs this
+          // is just install_commands[harness]. For single_install packs, the
+          // client uses the "auto" sentinel that the server resolves at run-
+          // time — but the modal still needs SOMETHING to show. Pick the
+          // codex variant when both exist (by convention codex is a superset
+          // of claude for these packs); fall back to the first available
+          // command. The server picks the actual command to run based on
+          // detected CLIs, so the preview may differ slightly from what
+          // executes — that's noted in the modal copy.
+          const cmdMap =
             modal.action === "install"
-              ? pack.install_commands[modal.harness]
-              : pack.uninstall_commands[modal.harness]
+              ? pack.install_commands
+              : pack.uninstall_commands;
+          let previewCommand: string;
+          if (modal.harness === "auto") {
+            previewCommand =
+              cmdMap["codex"] || cmdMap["claude"] || Object.values(cmdMap)[0] || "";
+          } else {
+            previewCommand = cmdMap[modal.harness] || "";
           }
-          projectScoped={pack.project_scoped === 1}
-          postInstall={pack.post_install || null}
-          onClose={() => setModal(null)}
-          onCompleted={() => {
-            if (onAfterRun) onAfterRun();
-          }}
-        />
-      )}
+          return (
+            <InstallModal
+              packId={pack.pack_id}
+              packDisplayName={pack.display_name}
+              harness={modal.harness}
+              action={modal.action}
+              command={previewCommand}
+              commandIsAutoDetect={modal.harness === "auto"}
+              projectScoped={pack.project_scoped === 1}
+              postInstall={pack.post_install || null}
+              onClose={() => setModal(null)}
+              onCompleted={() => {
+                if (onAfterRun) onAfterRun();
+              }}
+            />
+          );
+        })()}
     </div>
   );
 }
