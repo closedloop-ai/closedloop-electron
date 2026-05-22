@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { afterEach, test } from "node:test";
 import { OperationDispatcher } from "../src/server/operation-dispatcher.js";
+import { gatewayLog } from "../src/main/gateway-logger.js";
 import {
   _resetMutexForTesting,
   registerUpdateAndRestartRoutes,
@@ -10,6 +11,7 @@ import {
 
 afterEach(() => {
   _resetMutexForTesting();
+  gatewayLog.clear();
 });
 
 // ---------------------------------------------------------------------------
@@ -220,6 +222,17 @@ test("applyUpdate error is caught and does not throw unhandled rejection", async
   // to settle.  If an unhandled rejection were thrown the test runner would
   // catch it and fail this test automatically.
   await new Promise<void>((resolve) => setTimeout(resolve, 600));
+
+  const entries = gatewayLog.getEntries();
+  assert.ok(
+    entries.some(
+      (entry) =>
+        entry.level === "error" &&
+        entry.tag === "update-and-restart" &&
+        entry.message.includes("apply-update failed: apply failed")
+    ),
+    "expected applyUpdate failure to be logged"
+  );
 
   // Reaching here means no unhandled rejection escaped.
   assert.ok(true, "no unhandled rejection was thrown");

@@ -1,4 +1,5 @@
 import type { OperationDispatcher } from "../operation-dispatcher.js";
+import { gatewayLog } from "../../main/gateway-logger.js";
 import { json } from "./response-utils.js";
 
 let updateInProgress = false;
@@ -73,9 +74,13 @@ export function registerUpdateAndRestartRoutes(
       // Apply the update after a short delay so the TCP stack has time to
       // deliver the response before the process exits/restarts.
       setTimeout(() => {
-        options.applyUpdate().catch(() => {
-          // Swallow rejection to prevent unhandled promise rejection;
-          // mutex is reset in .finally() regardless.
+        options.applyUpdate().catch((error) => {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          gatewayLog.error(
+            "update-and-restart",
+            `apply-update failed: ${message}`
+          );
         }).finally(() => {
           updateInProgress = false;
         });

@@ -67,6 +67,13 @@ import { BUILD_COMMIT_HASH } from "../shared/build-info.js";
 import { BootRecoveryService } from "./boot-recovery.js";
 import { LoopTokenStore } from "./loop-token-store.js";
 import { GatewayIdentityStore } from "./gateway-identity.js";
+import {
+  type PackagedUpdateState,
+  buildUpdateAndRestartDisabledResult,
+  canApplyPackagedUpdate,
+  resolvePackagedUpdateCheckResult,
+  shouldHonorAlwaysAllowRule,
+} from "./update-and-restart-helpers.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const execFileAsync = promisify(execFile);
@@ -95,6 +102,10 @@ export class DesktopApplication {
   private cloudCommandsPaused: boolean;
   private cloudConnectionEnabled: boolean;
   private updateCheckTimer: NodeJS.Timeout | null = null;
+  private packagedUpdateState: PackagedUpdateState = {
+    availableVersion: null,
+    downloadedVersion: null,
+  };
 
   constructor() {
     this.gatewayAuthToken = randomBytes(24).toString("hex");
@@ -170,15 +181,19 @@ export class DesktopApplication {
         if (app.isPackaged) {
           const result = await autoUpdater.checkForUpdates();
           const remoteVersion = result?.updateInfo?.version;
-          return {
-            updateAvailable: remoteVersion !== undefined && remoteVersion !== app.getVersion(),
-            version: remoteVersion,
-          };
+          return resolvePackagedUpdateCheckResult(
+            app.getVersion(),
+            this.packagedUpdateState,
+            remoteVersion
+          );
         }
         return this.checkForUpdate();
       },
       async () => {
         if (app.isPackaged) {
+          if (!canApplyPackagedUpdate(app.getVersion(), this.packagedUpdateState)) {
+            throw new Error("Update has not finished downloading yet");
+          }
           autoUpdater.quitAndInstall();
           return;
         }
@@ -375,12 +390,28 @@ export class DesktopApplication {
           gatewayLog[level]("auto-update", `Auto-update error: ${err.message}`);
         });
         autoUpdater.on("update-available", (info) => {
+          this.packagedUpdateState = {
+            availableVersion: info.version,
+            downloadedVersion: null,
+          };
           this.desktopWindow
             .getWindow()
             ?.webContents.send("desktop:update-available", {
               updateAvailable: true,
               version: info.version,
             });
+        });
+        autoUpdater.on("update-not-available", () => {
+          this.packagedUpdateState = {
+            availableVersion: null,
+            downloadedVersion: null,
+          };
+        });
+        autoUpdater.on("update-downloaded", (info) => {
+          this.packagedUpdateState = {
+            availableVersion: info.version,
+            downloadedVersion: info.version,
+          };
         });
         void autoUpdater.checkForUpdates().catch((err: unknown) => {
           const msg = err instanceof Error ? err.message : String(err);
@@ -693,6 +724,13 @@ export class DesktopApplication {
       };
     }
 
+    if (
+      operationId === "update_and_restart" &&
+      !this.settingsStore.getUpdateAndRestartEnabled()
+    ) {
+      return buildUpdateAndRestartDisabledResult();
+    }
+
     const settings = this.settingsStore.getAll();
     const requestScopePath = resolveApprovalScopePath(request.body);
     const activeAlwaysAllowRules = pruneExpiredAlwaysAllowRules(
@@ -701,7 +739,13 @@ export class DesktopApplication {
     if (activeAlwaysAllowRules.length !== settings.alwaysAllowRules.length) {
       this.settingsStore.setAlwaysAllowRules(activeAlwaysAllowRules);
     }
+    const isForceInteractiveOperation =
+      !shouldHonorAlwaysAllowRule(
+        operationId,
+        FORCE_INTERACTIVE_OPERATIONS as ReadonlySet<string>
+      );
     if (
+      !isForceInteractiveOperation &&
       matchesAlwaysAllowRule(activeAlwaysAllowRules, {
         operationId,
         method: request.method,
@@ -717,7 +761,7 @@ export class DesktopApplication {
     // Force-interactive operations skip auto-approve and always go through
     // the interactive approval queue.
     if (
-      !FORCE_INTERACTIVE_OPERATIONS.has(operationId) &&
+      !isForceInteractiveOperation &&
       shouldAutoApprove(
         operationId,
         configuredTier,
@@ -749,7 +793,7 @@ export class DesktopApplication {
       APPROVAL_TIMEOUT_MS,
     );
 
-    if (decision === "always_allow") {
+    if (decision === "always_allow" && !isForceInteractiveOperation) {
       this.saveAlwaysAllowRuleForPending(pending);
     }
 
