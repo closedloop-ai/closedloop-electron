@@ -158,10 +158,6 @@
 
       .panel {
         display: none;
-        background: var(--card);
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        padding: 16px;
       }
 
       .panel.active {
@@ -291,11 +287,8 @@
         gap: 12px;
         padding: 10px 14px;
         margin-bottom: 12px;
-        background: var(--card);
-        border: 1px solid var(--border);
-        border-left: 3px solid var(--primary);
-        border-radius: 8px;
-        color: var(--foreground);
+        background: var(--accent);
+        color: var(--accent-foreground);
         font-size: 13px;
         font-weight: 500;
       }
@@ -869,16 +862,13 @@
         align-items: center;
         justify-content: space-between;
         margin-bottom: 10px;
-        padding: 8px 12px;
-        background: var(--card);
-        border: 1px solid var(--border);
-        border-radius: 8px;
       }
 
       .logs-verbose-label {
         display: flex;
         align-items: center;
         gap: 10px;
+        margin: 0;
         font-size: 12px;
         font-weight: 500;
         color: var(--muted-foreground);
@@ -930,7 +920,8 @@
         font-family: "SF Mono", "Menlo", "Consolas", monospace;
         font-size: 11px;
         line-height: 1;
-        max-height: calc(100vh - 200px);
+        flex: 1;
+        min-height: 0;
         overflow-y: auto;
         background: var(--card);
         border: 1px solid var(--border);
@@ -1660,8 +1651,12 @@
         display: flex;
         gap: 0;
         border-bottom: 1px solid var(--border);
-        margin: -16px -16px 20px;
-        padding: 0 16px;
+        margin: -8px 0 20px;
+        padding-top: 8px;
+        position: sticky;
+        top: -8px;
+        z-index: 2;
+        background: var(--background);
       }
 
       .settings-sub-nav button {
@@ -2969,7 +2964,7 @@
 
       /* ── Page (scroll region inside .main) ─────────────────────── */
       .page {
-        padding: 16px 20px 24px;
+        padding: 8px 20px 20px;
         overflow-y: auto;
         flex: 1;
         min-height: 0;
@@ -2977,18 +2972,15 @@
       .page > .panel {
         margin: 0;
       }
-      /* Agent Dashboard iframe panel renders full-bleed — the iframe sits
-         flush against the topbar and the bottom of the content area. */
-      #claude-dashboard.panel {
-        padding: 0;
-        border: 0;
-        background: transparent;
-        border-radius: 0;
-      }
       #claude-dashboard.panel.active {
         display: flex;
         flex-direction: column;
         min-height: 100%;
+      }
+      #logs.panel.active {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
       }
       #claudeDashStatus {
         flex: 1;
@@ -3330,11 +3322,11 @@
             <button class="secondary" id="headerConnectionToggle">Disconnect</button>
           </div>
         </header>
+        <div id="updateBanner">
+          <span id="updateBannerText">A new version is available</span>
+          <button id="updateBannerBtn">Update &amp; restart</button>
+        </div>
         <div class="page">
-      <div id="updateBanner">
-        <span id="updateBannerText">A new version is available</span>
-        <button id="updateBannerBtn">Update &amp; restart</button>
-      </div>
       <section id="approvals" class="panel">
         <p class="muted">Pending requests that need approval (Approve, Decline, or Always Allow).</p>
         <div class="actions" style="margin-bottom: 12px">
