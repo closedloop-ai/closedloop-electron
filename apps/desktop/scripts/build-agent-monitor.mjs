@@ -259,6 +259,7 @@ const embedTailwindSource = path.join(embedModulesDir, "tailwind.config.js");
 const clientOverlayDir = path.join(appDir, "scripts", "agent-monitor-client");
 const clientOverlayStatusBadgeSource = path.join(clientOverlayDir, "StatusBadge.tsx");
 const clientOverlaySessionsSource = path.join(clientOverlayDir, "Sessions.tsx");
+const clientOverlayDashboardSource = path.join(clientOverlayDir, "Dashboard.tsx");
 const CLIENT_FULL_FILE_OVERRIDES = [
   {
     from: embedAppSource,
@@ -279,6 +280,10 @@ const CLIENT_FULL_FILE_OVERRIDES = [
   {
     from: clientOverlaySessionsSource,
     to: path.join("src", "pages", "Sessions.tsx"),
+  },
+  {
+    from: clientOverlayDashboardSource,
+    to: path.join("src", "pages", "Dashboard.tsx"),
   },
 ];
 
