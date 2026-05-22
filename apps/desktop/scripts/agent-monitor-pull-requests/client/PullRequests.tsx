@@ -7,6 +7,7 @@
  * client as src/pages/PullRequests.tsx by build-agent-monitor.mjs.
  */
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 
 interface PullRequest {
   id: string;
@@ -44,17 +45,29 @@ function fmt(ts: string | null): string {
   return Number.isNaN(d.getTime()) ? ts : d.toLocaleString();
 }
 
+/**
+ * Open a captured PR on GitHub. The dashboard runs in a sandboxed iframe, so
+ * an <a target="_blank"> cannot reliably reach the browser — the sidecar opens
+ * it via the OS handler (POST /api/pull-requests/:id/open).
+ */
+function openPr(id: string): void {
+  fetch(`/api/pull-requests/${encodeURIComponent(id)}/open`, {
+    method: "POST",
+  }).catch(() => {
+    /* best-effort — nothing actionable if the sidecar is unreachable */
+  });
+}
+
 function PrChip({ pr }: { pr: PullRequest }) {
   return (
-    <a
-      href={pr.pr_url}
-      target="_blank"
-      rel="noreferrer"
+    <button
+      type="button"
+      onClick={() => openPr(pr.id)}
       title={pr.title ? `${pr.repo_full_name}#${pr.pr_number} — ${pr.title}` : pr.pr_url}
       className="inline-flex items-center gap-1 rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[11px] font-medium text-accent hover:bg-accent/20"
     >
       {pr.repo_full_name}#{pr.pr_number}
-    </a>
+    </button>
   );
 }
 
@@ -180,9 +193,18 @@ export function PullRequests() {
                     className="border-t border-border bg-surface-1 align-top"
                   >
                     <td className="px-3 py-2">
-                      <div className="font-medium text-gray-100">
-                        {s.session_name || s.session_id || "(unimported session)"}
-                      </div>
+                      {s.session_name && s.session_id ? (
+                        <Link
+                          to={`/sessions/${s.session_id}`}
+                          className="font-medium text-accent hover:underline"
+                        >
+                          {s.session_name}
+                        </Link>
+                      ) : (
+                        <div className="font-medium text-gray-100">
+                          {s.session_id || "(unimported session)"}
+                        </div>
+                      )}
                       {s.session_cwd && (
                         <div className="font-mono text-[10px] text-gray-500 truncate">
                           {s.session_cwd}
