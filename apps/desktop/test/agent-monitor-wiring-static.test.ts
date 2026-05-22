@@ -12,6 +12,13 @@ const generatedDbUrl = new URL("../.generated/agent-monitor/server/db.js", impor
 const generatedDbSource = existsSync(generatedDbUrl)
   ? readFileSync(generatedDbUrl, "utf8")
   : null;
+const generatedImportHistoryUrl = new URL(
+  "../.generated/agent-monitor/scripts/import-history.js",
+  import.meta.url,
+);
+const generatedImportHistorySource = existsSync(generatedImportHistoryUrl)
+  ? readFileSync(generatedImportHistoryUrl, "utf8")
+  : null;
 const plansRouteSource = read("../scripts/agent-monitor-plans/plans-route.js");
 const claudeDocSource = read("../CLAUDE.md");
 const shutdownSource = read("../src/main/shutdown.ts");
@@ -119,6 +126,9 @@ test("build script materializes a generated runtime tree with the host patches",
   assert.match(buildScriptSource, /stopCopilotWatcher/);
   assert.match(buildScriptSource, /stopOpenCodeWatcher/);
   assert.match(buildScriptSource, /stopCcWatcher/);
+  assert.match(buildScriptSource, /agent-monitor-client/);
+  assert.match(buildScriptSource, /StatusBadge\.tsx/);
+  assert.match(buildScriptSource, /Sessions\.tsx/);
 });
 
 test("session overview token totals include compaction baselines", () => {
@@ -135,6 +145,18 @@ test("session overview token totals include compaction baselines", () => {
       generatedDbSource,
       /COALESCE\(SUM\(cache_write_tokens \+ baseline_cache_write\), 0\) as cache_write_tokens/,
     );
+  }
+});
+
+test("re-import metadata refresh is not gated only on message-count changes", () => {
+  assert.match(buildScriptSource, /function patchImportHistoryMetadataRefresh/);
+  assert.match(buildScriptSource, /CLOSEDLOOP metadata refresh parity/);
+  assert.match(buildScriptSource, /const nextPermissionMode = meta\.permission_mode \|\| session\.permissionMode \|\| null;/);
+  assert.match(buildScriptSource, /JSON\.stringify\(meta\.usage_extras \|\| null\) !== JSON\.stringify\(nextUsageExtras\)/);
+  if (generatedImportHistorySource !== null) {
+    assert.match(generatedImportHistorySource, /CLOSEDLOOP metadata refresh parity/);
+    assert.match(generatedImportHistorySource, /meta\.entrypoint !== nextEntryPoint/);
+    assert.match(generatedImportHistorySource, /\(meta\.turn_count \|\| 0\) !== nextTurnCount/);
   }
 });
 

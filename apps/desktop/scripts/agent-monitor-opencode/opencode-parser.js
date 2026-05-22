@@ -165,7 +165,7 @@ function parseSessionRow(sessionRow, getMessages, getParts) {
 
   return {
     sessionId: `opencode-${sessionRow.id}`,
-    name: `${projectName} (opencode)`,
+    name: projectName,
     cwd,
     model,
     version: sessionRow.version || null,

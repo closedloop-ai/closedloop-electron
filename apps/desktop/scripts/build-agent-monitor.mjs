@@ -251,6 +251,9 @@ const embedModulesDir = path.join(appDir, "scripts", "agent-monitor-embed");
 const embedAppSource = path.join(embedModulesDir, "App.tsx");
 const embedLayoutSource = path.join(embedModulesDir, "Layout.tsx");
 const embedTailwindSource = path.join(embedModulesDir, "tailwind.config.js");
+const clientOverlayDir = path.join(appDir, "scripts", "agent-monitor-client");
+const clientOverlayStatusBadgeSource = path.join(clientOverlayDir, "StatusBadge.tsx");
+const clientOverlaySessionsSource = path.join(clientOverlayDir, "Sessions.tsx");
 const CLIENT_FULL_FILE_OVERRIDES = [
   {
     from: embedAppSource,
@@ -263,6 +266,14 @@ const CLIENT_FULL_FILE_OVERRIDES = [
   {
     from: embedTailwindSource,
     to: "tailwind.config.js",
+  },
+  {
+    from: clientOverlayStatusBadgeSource,
+    to: path.join("src", "components", "StatusBadge.tsx"),
+  },
+  {
+    from: clientOverlaySessionsSource,
+    to: path.join("src", "pages", "Sessions.tsx"),
   },
 ];
 
@@ -437,6 +448,8 @@ function currentStamp() {
     embedAppSource,
     embedLayoutSource,
     embedTailwindSource,
+    clientOverlayStatusBadgeSource,
+    clientOverlaySessionsSource,
   ]) {
     h.update(readFileSync(file));
   }
@@ -574,6 +587,7 @@ function materializeRuntimeTree() {
   // since both modify the same file.
   patchImportHistoryTokenReconcile(generatedImportHistory);
   patchImportHistoryMetaImported(generatedImportHistory);
+  patchImportHistoryMetadataRefresh(generatedImportHistory);
   mkdirSync(path.join(generatedRootDir, "client"), { recursive: true });
   cpSync(sourceClientDistDir, path.join(generatedRootDir, "client", "dist"), {
     recursive: true,
@@ -1638,6 +1652,62 @@ function patchImportHistoryMetaImported(file) {
   writeFileSync(file, source, "utf8");
 }
 
+/**
+ * CLOSEDLOOP metadata refresh parity: widen the existing-session refresh gate
+ * in importSession() so re-imports update derived metadata even when message
+ * counts stay stable. Without this, non-Claude sessions can keep stale
+ * permission mode, thinking-block counts, usage extras, or turn metrics
+ * forever unless user/assistant counts also happen to change.
+ */
+function patchImportHistoryMetadataRefresh(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("CLOSEDLOOP metadata refresh parity")) {
+    writeFileSync(file, source, "utf8");
+    return;
+  }
+  const needle = [
+    "    // Refresh sessions.ended_at and the message-count metadata so the dashboard",
+    "    // shows the latest window when a long-running session is re-imported. We",
+    "    // only move ended_at forward — never backward — and only when the JSONL's",
+    "    // latest activity is genuinely past whatever the DB currently records.",
+    "    const metaChanged =",
+    "      meta.user_messages !== session.userMessages ||",
+    "      meta.assistant_messages !== session.assistantMessages ||",
+    "      (!meta.entrypoint && (session.entrypoint || session.turnDurations?.length > 0));",
+  ].join("\n");
+  if (!source.includes(needle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the narrow metadata refresh gate (CLOSEDLOOP metadata refresh parity).`,
+    );
+  }
+  const replacement = [
+    "    // CLOSEDLOOP metadata refresh parity: re-imports must refresh the",
+    "    // derived metadata we already know how to compute, even when message",
+    "    // counts do not change. Otherwise non-Claude sessions can keep stale",
+    "    // permission mode, thinking-block counts, usage extras, and turn",
+    "    // latency metrics forever after the first import.",
+    "    const nextEntryPoint = meta.entrypoint || session.entrypoint || null;",
+    "    const nextPermissionMode = meta.permission_mode || session.permissionMode || null;",
+    "    const nextThinkingBlocks = Math.max(meta.thinking_blocks || 0, session.thinkingBlockCount || 0);",
+    "    const nextUsageExtras = session.usageExtras || meta.usage_extras || null;",
+    "    const nextTurnCount = session.turnDurations ? session.turnDurations.length : meta.turn_count || 0;",
+    "    const nextTotalTurnDurationMs = session.turnDurations",
+    "      ? session.turnDurations.reduce((s, t) => s + t.durationMs, 0)",
+    "      : meta.total_turn_duration_ms || 0;",
+    "    const metaChanged =",
+    "      meta.user_messages !== session.userMessages ||",
+    "      meta.assistant_messages !== session.assistantMessages ||",
+    "      meta.entrypoint !== nextEntryPoint ||",
+    "      (meta.permission_mode || null) !== nextPermissionMode ||",
+    "      (meta.thinking_blocks || 0) !== nextThinkingBlocks ||",
+    "      JSON.stringify(meta.usage_extras || null) !== JSON.stringify(nextUsageExtras) ||",
+    "      (meta.turn_count || 0) !== nextTurnCount ||",
+    "      (meta.total_turn_duration_ms || 0) !== nextTotalTurnDurationMs;",
+  ].join("\n");
+  source = source.replace(needle, replacement);
+  writeFileSync(file, source, "utf8");
+}
+
 // CLOSEDLOOP engineer GitHub activity capture (FEA-1226): two idempotent
 // patches to import-history.js — (1) expose the source JSONL path on the
 // normalized session object so the PR extractor can re-read it for
@@ -1796,6 +1866,10 @@ function patchClientSource() {
   for (const override of CLIENT_FULL_FILE_OVERRIDES) {
     cpSync(override.from, path.join(sourceClientDir, override.to));
   }
+  const snippetBypassFiles = new Set([
+    path.join("src", "components", "StatusBadge.tsx"),
+    path.join("src", "pages", "Sessions.tsx"),
+  ]);
   const legacyPlansNavLink = [
     "        })}",
     '        <NavLink',
@@ -2102,6 +2176,7 @@ function patchClientSource() {
   ];
 
   for (const e of edits) {
+    if (snippetBypassFiles.has(e.rel)) continue;
     const file = path.join(sourceClientDir, e.rel);
     let src = readFileSync(file, "utf8");
     if (src.includes(e.guard)) continue; // already patched (idempotent)

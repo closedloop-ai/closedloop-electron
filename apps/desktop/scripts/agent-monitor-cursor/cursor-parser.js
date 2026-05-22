@@ -179,7 +179,7 @@ async function parseTranscriptFile(filePath) {
 
   return {
     sessionId,
-    name: `${projectName} (cursor)`,
+    name: projectName,
     cwd,
     model,
     version,

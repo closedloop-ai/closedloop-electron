@@ -93,7 +93,7 @@ test("Copilot Chat parser supports request-based session files", () => {
   const parsed = copilotParser.parseChatSessionFile(filePath, "/Users/dev/my project");
   assert.ok(parsed, "expected a parsed Copilot chat session");
   assert.equal(parsed.sessionId, "copilot-chat-copilot-session-1");
-  assert.equal(parsed.name, "my project (copilot)");
+  assert.equal(parsed.name, "my project");
   assert.equal(parsed.userMessages, 1);
   assert.equal(parsed.assistantMessages, 1);
   assert.equal(parsed.toolUses.length, 1);
@@ -240,7 +240,7 @@ test("OpenCode parser loads sessions from opencode.db", () => {
   const parsed = sessions[0];
   assert.equal(parsed.sessionId, "opencode-ses_1");
   assert.equal(parsed.cwd, "/Users/dev/my project");
-  assert.equal(parsed.name, "my project (opencode)");
+  assert.equal(parsed.name, "my project");
   assert.equal(parsed.model, "big-pickle");
   assert.equal(parsed.version, "1.15.5");
   assert.equal(parsed.userMessages, 1);

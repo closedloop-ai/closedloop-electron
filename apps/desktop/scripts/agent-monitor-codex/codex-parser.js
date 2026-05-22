@@ -338,7 +338,7 @@ async function parseRolloutFile(filePath) {
 
   return {
     sessionId,
-    name: `${projectName} (codex)`,
+    name: projectName,
     cwd,
     model,
     version,
