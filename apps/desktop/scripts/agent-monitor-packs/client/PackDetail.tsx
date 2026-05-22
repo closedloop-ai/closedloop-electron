@@ -139,6 +139,18 @@ export function PackDetail() {
   const [sessionsLoading, setSessionsLoading] = useState(false);
   const [sessionsLimit, setSessionsLimit] = useState(25);
 
+  const [error, setError] = useState<string | null>(null);
+  const [installModal, setInstallModal] = useState<{
+    harness: string;
+    action: "install" | "uninstall";
+  } | null>(null);
+
+  // Derived install-modal state. MUST be declared AFTER the `installModal`
+  // useState above: referencing `installModal` before its declaration hits the
+  // temporal dead zone and throws a render-time ReferenceError. Because Vite/
+  // esbuild only strips types (no type-check) and this client is outside the
+  // desktop tsconfig, tsc never flags it — so the crash only shows at runtime,
+  // blanking the whole embedded app once the catalog fetch makes `entry` truthy.
   const resolvedInstallModal = entry && installModal
     ? (() => {
         const harness = resolvePackModalHarness(entry, installModal.harness, installModal.action);
@@ -152,11 +164,6 @@ export function PackDetail() {
         };
       })()
     : null;
-  const [error, setError] = useState<string | null>(null);
-  const [installModal, setInstallModal] = useState<{
-    harness: string;
-    action: "install" | "uninstall";
-  } | null>(null);
 
   const loadEntry = useCallback(async () => {
     if (!packId) return;
