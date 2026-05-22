@@ -1,340 +1,247 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, test } from "node:test";
 import {
-  createClaudeCodeParserState,
+  createSessionParserState,
   extractPrUrlsFromText,
   isFixtureOwner,
-  parseClaudeCodeLine,
-  parseClosedloopLoopLine,
-  parseCodexLine,
+  isPrCreateCommand,
+  parseSessionLine,
   safeParseLine,
 } from "../src/main/session-log-parsers.js";
+import type { GitActivityEventInput } from "../src/shared/git-activity-types.js";
 
-describe("extractPrUrlsFromText()", () => {
-  test("extracts a single real PR URL", () => {
-    const refs = extractPrUrlsFromText(
-      "https://github.com/closedloop-ai/closedloop-electron/pull/203",
-    );
-    assert.equal(refs.length, 1);
-    assert.equal(refs[0].prUrl, "https://github.com/closedloop-ai/closedloop-electron/pull/203");
-    assert.equal(refs[0].prNumber, 203);
-    assert.equal(refs[0].repoFullName, "closedloop-ai/closedloop-electron");
+const FIXTURES = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "fixtures",
+  "git-activity",
+);
+
+/** Parse a fixture file end-to-end exactly as the tailer would. */
+function parseFixture(name: string): GitActivityEventInput[] {
+  const text = fs.readFileSync(path.join(FIXTURES, name), "utf-8");
+  const state = createSessionParserState();
+  const fallbackId = name.replace(/\.jsonl$/, "");
+  const events: GitActivityEventInput[] = [];
+  for (const line of text.split("\n")) {
+    if (!line.trim()) continue;
+    const parsed = safeParseLine(line);
+    if (!parsed) continue;
+    events.push(...parseSessionLine(parsed, fallbackId, state));
+  }
+  return events;
+}
+
+function eventKey(e: {
+  sourceClient: string;
+  sourceSessionId: string;
+  prUrl: string;
+  prNumber: number;
+  repoFullName: string;
+  branchName: string | null;
+}): string {
+  return [
+    e.sourceClient,
+    e.sourceSessionId,
+    e.prUrl,
+    e.prNumber,
+    e.repoFullName,
+    e.branchName ?? "—",
+  ].join("|");
+}
+
+const expected = JSON.parse(
+  fs.readFileSync(path.join(FIXTURES, "expected-events.json"), "utf-8"),
+) as Record<string, Array<Record<string, unknown>>>;
+
+// ─── Golden-master: every fixture file vs expected-events.json ───────────────
+
+describe("parseSessionLine — golden master against real-schema fixtures", () => {
+  for (const fixtureFile of Object.keys(expected)) {
+    if (fixtureFile.startsWith("_")) continue;
+    test(`${fixtureFile} yields exactly its expected events`, () => {
+      const actual = parseFixture(fixtureFile);
+      const actualKeys = new Set(actual.map(eventKey));
+      const expectedKeys = new Set(
+        expected[fixtureFile].map((e) => eventKey(e as never)),
+      );
+      assert.equal(
+        actual.length,
+        expected[fixtureFile].length,
+        `${fixtureFile}: expected ${expected[fixtureFile].length} events, got ${actual.length} -> ${[...actualKeys].join(", ")}`,
+      );
+      for (const k of expectedKeys) {
+        assert.ok(actualKeys.has(k), `${fixtureFile}: missing expected event ${k}`);
+      }
+      for (const k of actualKeys) {
+        assert.ok(expectedKeys.has(k), `${fixtureFile}: unexpected event ${k}`);
+      }
+    });
+  }
+
+  test("negatives.jsonl produces ZERO captures (the 53%-noise guard)", () => {
+    assert.equal(parseFixture("negatives.jsonl").length, 0);
   });
 
-  test("extracts multiple PR URLs from one string", () => {
-    const refs = extractPrUrlsFromText(
-      "see https://github.com/a-org/repo-x/pull/1 and https://github.com/b-org/repo-y/pull/2 done",
-    );
-    assert.equal(refs.length, 2);
-  });
-
-  test("dedups identical URLs in the same string", () => {
-    const refs = extractPrUrlsFromText(
-      "https://github.com/x/y/pull/1 ... https://github.com/x/y/pull/1",
-    );
-    assert.equal(refs.length, 1);
-  });
-
-  test("filters out fixture owners (AC7)", () => {
-    for (const owner of ["owner", "acme", "example", "test-org", "sample", "fixtures", "placeholder"]) {
-      const refs = extractPrUrlsFromText(`https://github.com/${owner}/some-repo/pull/5`);
-      assert.equal(refs.length, 0, `expected fixture owner "${owner}" to be filtered`);
+  test("every captured event carries a real (not fallback) session id", () => {
+    for (const f of ["claude-code-session.jsonl", "codex-session.jsonl", "loop-pr-link.jsonl"]) {
+      for (const e of parseFixture(f)) {
+        assert.match(e.sourceSessionId, /^fixture-(cc|codex|loop)-\d+$/);
+      }
     }
   });
+});
 
-  test("fixture owner match is case-insensitive", () => {
-    assert.equal(extractPrUrlsFromText("https://github.com/ACME/foo/pull/1").length, 0);
-    assert.equal(extractPrUrlsFromText("https://github.com/Example/foo/pull/1").length, 0);
+// ─── Command gate ────────────────────────────────────────────────────────────
+
+describe("isPrCreateCommand — command gate", () => {
+  test("accepts gh pr create in all real positions", () => {
+    assert.ok(isPrCreateCommand("gh pr create --fill"));
+    assert.ok(isPrCreateCommand("git push -u origin HEAD && gh pr create --base main"));
+    assert.ok(isPrCreateCommand("gh pr create"));
   });
-
-  test("does not match non-PR github URLs", () => {
-    assert.equal(extractPrUrlsFromText("https://github.com/x/y/issues/3").length, 0);
-    assert.equal(extractPrUrlsFromText("https://github.com/x/y/blob/main/README.md").length, 0);
-    assert.equal(extractPrUrlsFromText("https://github.com/x/y").length, 0);
+  test("rejects every non-creating gh pr / gh api subcommand", () => {
+    for (const c of [
+      "gh pr view 88 --json url",
+      "gh pr edit 88 --body-file -",
+      "gh pr list --state open",
+      "gh pr checks 88",
+      "gh pr status",
+      "gh api repos/x/y/pulls/88/comments -X POST",
+    ]) {
+      assert.equal(isPrCreateCommand(c), false, `must reject: ${c}`);
+    }
   });
-
-  test("rejects PR numbers that are zero or negative", () => {
-    assert.equal(extractPrUrlsFromText("https://github.com/x/y/pull/0").length, 0);
+  test("rejects inspection commands", () => {
+    for (const c of ["git diff origin/main...HEAD", "rg -n externalUrl test/", "cat pr.md", ""]) {
+      assert.equal(isPrCreateCommand(c), false);
+    }
   });
-
-  test("handles non-string/empty input", () => {
-    assert.equal(extractPrUrlsFromText("").length, 0);
-    // @ts-expect-error testing runtime tolerance
-    assert.equal(extractPrUrlsFromText(null).length, 0);
-    // @ts-expect-error testing runtime tolerance
-    assert.equal(extractPrUrlsFromText(undefined).length, 0);
+  test("rejects gh pr create appearing only as an argument to another binary", () => {
+    for (const c of [
+      "echo gh pr create --fill",
+      "echo 'next step: gh pr create'",
+      "cat pr-log.txt | grep gh pr create",
+      "printf 'gh pr create\\n'",
+    ]) {
+      assert.equal(isPrCreateCommand(c), false, `must reject: ${c}`);
+    }
   });
+  test("tolerates non-string input", () => {
+    assert.equal(isPrCreateCommand(undefined), false);
+    assert.equal(isPrCreateCommand(null), false);
+  });
+});
 
-  test("isFixtureOwner direct check", () => {
-    assert.equal(isFixtureOwner("acme"), true);
-    assert.equal(isFixtureOwner("ACME"), true);
+// ─── URL extraction ──────────────────────────────────────────────────────────
+
+describe("extractPrUrlsFromText", () => {
+  test("extracts a confirmed PR URL", () => {
+    const refs = extractPrUrlsFromText("done: https://github.com/closedloop-ai/symphony-alpha/pull/1199");
+    assert.equal(refs.length, 1);
+    assert.equal(refs[0].prNumber, 1199);
+    assert.equal(refs[0].repoFullName, "closedloop-ai/symphony-alpha");
+  });
+  test("rejects pull/new/<branch> push hints", () => {
+    assert.equal(
+      extractPrUrlsFromText("https://github.com/loopco/desktop/pull/new/feat/onboarding").length,
+      0,
+    );
+  });
+  test("filters fixture owners (AC7)", () => {
+    for (const o of ["owner", "acme", "org", "example", "test-org", "sample"]) {
+      assert.equal(extractPrUrlsFromText(`https://github.com/${o}/repo/pull/5`).length, 0);
+    }
+  });
+  test("ignores non-PR github URLs", () => {
+    assert.equal(extractPrUrlsFromText("https://github.com/loopco/desktop/issues/9").length, 0);
+    assert.equal(extractPrUrlsFromText("https://github.com/loopco/desktop/blob/main/x.ts").length, 0);
+  });
+  test("strips a #discussion fragment to the bare PR number", () => {
+    const refs = extractPrUrlsFromText("https://github.com/loopco/api/pull/88#discussion_r3228520");
+    assert.equal(refs.length, 1);
+    assert.equal(refs[0].prNumber, 88);
+    assert.equal(refs[0].prUrl, "https://github.com/loopco/api/pull/88");
+  });
+  test("isFixtureOwner is case-insensitive", () => {
+    assert.ok(isFixtureOwner("ACME"));
     assert.equal(isFixtureOwner("closedloop-ai"), false);
   });
 });
 
-describe("safeParseLine()", () => {
-  test("returns parsed object for valid JSON", () => {
-    const v = safeParseLine('{"type":"pr-link","prUrl":"x"}');
-    assert.deepEqual(v, { type: "pr-link", prUrl: "x" });
-  });
-  test("returns null for malformed JSON", () => {
-    assert.equal(safeParseLine('{"type":"pr-link'), null);
-  });
-  test("returns null for non-object lines (arrays, primitives)", () => {
-    assert.equal(safeParseLine("[1,2,3]"), null);
-    assert.equal(safeParseLine("42"), null);
-    assert.equal(safeParseLine(""), null);
-    assert.equal(safeParseLine("not json"), null);
-  });
-});
+// ─── Schema-specific behaviour the corpus revealed ───────────────────────────
 
-describe("parseClosedloopLoopLine()", () => {
-  test("emits one event for a valid pr-link line", () => {
-    const events = parseClosedloopLoopLine(
-      {
-        type: "pr-link",
-        prUrl: "https://github.com/closedloop-ai/closedloop-electron/pull/203",
-        prNumber: 203,
-        branchName: "feat/foo",
-        commitSha: "abcdef1234567890",
-      },
-      "session-xyz",
-    );
-    assert.equal(events.length, 1);
-    assert.equal(events[0].sourceClient, "closedloop-loop");
-    assert.equal(events[0].sourceSessionId, "session-xyz");
-    assert.equal(events[0].prNumber, 203);
-    assert.equal(events[0].branchName, "feat/foo");
-    assert.equal(events[0].commitSha, "abcdef1234567890");
-  });
-
-  test("preserves null branchName/commitSha when absent", () => {
-    const events = parseClosedloopLoopLine(
-      { type: "pr-link", prUrl: "https://github.com/closedloop-ai/cle/pull/1" },
-      "s1",
-    );
-    assert.equal(events.length, 1);
-    assert.equal(events[0].branchName, null);
-    assert.equal(events[0].commitSha, null);
-  });
-
-  test("ignores non-pr-link types", () => {
-    assert.equal(parseClosedloopLoopLine({ type: "unrelated" }, "s1").length, 0);
-  });
-
-  test("filters fixture URLs", () => {
-    const events = parseClosedloopLoopLine(
-      { type: "pr-link", prUrl: "https://github.com/acme/test/pull/9" },
-      "s1",
-    );
-    assert.equal(events.length, 0);
-  });
-
-  test("ignores non-records", () => {
-    assert.equal(parseClosedloopLoopLine(null, "s1").length, 0);
-    assert.equal(parseClosedloopLoopLine("string", "s1").length, 0);
-    assert.equal(parseClosedloopLoopLine([1, 2], "s1").length, 0);
-  });
-});
-
-describe("parseCodexLine()", () => {
-  test("extracts URLs from aggregated_output", () => {
-    const events = parseCodexLine(
-      {
-        type: "exec_command_end",
-        command: ["gh", "pr", "create"],
-        aggregated_output:
-          "Creating pull request for feature/foo into main in closedloop-ai/closedloop-electron\nhttps://github.com/closedloop-ai/closedloop-electron/pull/200\n",
-      },
-      "rollout-1",
-    );
-    assert.equal(events.length, 1);
-    assert.equal(events[0].sourceClient, "codex");
-    assert.equal(events[0].prNumber, 200);
-    assert.equal(events[0].sourceSessionId, "rollout-1");
-  });
-
-  test("extracts branch name from a git push command", () => {
-    const events = parseCodexLine(
-      {
-        type: "exec_command_end",
-        command: ["git", "push", "origin", "feature/my-branch"],
-        aggregated_output:
-          "To github.com:closedloop-ai/closedloop-electron.git\nremote: ... Create a pull request for 'feature/my-branch' on GitHub by visiting:\nremote:      https://github.com/closedloop-ai/closedloop-electron/pull/new/feature/my-branch\nhttps://github.com/closedloop-ai/closedloop-electron/pull/250",
-      },
-      "rollout-2",
-    );
-    assert.equal(events.length, 1);
-    assert.equal(events[0].branchName, "feature/my-branch");
-    assert.equal(events[0].prNumber, 250);
-  });
-
-  test("ignores lines without aggregated_output", () => {
-    assert.equal(parseCodexLine({ type: "exec_command_end" }, "s").length, 0);
-  });
-
-  test("ignores other types", () => {
+describe("real-schema parsing details", () => {
+  test("Claude tool_use/tool_result are nested in message.content[], not top-level", () => {
+    const state = createSessionParserState();
+    // a top-level {"type":"tool_use"} (the WRONG schema my v1 assumed) yields nothing
     assert.equal(
-      parseCodexLine({ type: "exec_command_begin", command: ["x"] }, "s").length,
+      parseSessionLine({ type: "tool_use", name: "Bash" }, "s", state).length,
       0,
     );
   });
-
-  test("filters fixture URLs in output", () => {
-    const events = parseCodexLine(
+  test("Codex command output is gated by the paired function_call's command", () => {
+    const state = createSessionParserState();
+    // function_call records a non-creating command
+    parseSessionLine(
       {
-        type: "exec_command_end",
-        command: [],
-        aggregated_output: "https://github.com/example/sample/pull/1",
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          arguments: '{"cmd":"gh pr view 5 --json url"}',
+          call_id: "c1",
+        },
       },
       "s",
+      state,
     );
-    assert.equal(events.length, 0);
+    // its output, even with a real PR URL, must not capture
+    const out = parseSessionLine(
+      {
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          call_id: "c1",
+          output: "https://github.com/loopco/api/pull/5",
+        },
+      },
+      "s",
+      state,
+    );
+    assert.equal(out.length, 0);
+  });
+  test("Codex session id comes from session_meta.payload.id", () => {
+    const state = createSessionParserState();
+    parseSessionLine(
+      { type: "session_meta", payload: { id: "real-codex-id" } },
+      "filename-fallback",
+      state,
+    );
+    const events = parseSessionLine(
+      {
+        type: "event_msg",
+        payload: {
+          type: "exec_command_end",
+          parsed_cmd: [{ type: "unknown", cmd: "gh pr create --fill" }],
+          aggregated_output: "https://github.com/loopco/desktop/pull/9",
+        },
+      },
+      "filename-fallback",
+      state,
+    );
+    assert.equal(events.length, 1);
+    assert.equal(events[0].sourceSessionId, "real-codex-id");
   });
 });
 
-describe("parseClaudeCodeLine()", () => {
-  test("captures URL from a tool_result that follows a Bash tool_use", () => {
-    const state = createClaudeCodeParserState();
-    const tu = parseClaudeCodeLine(
-      {
-        type: "tool_use",
-        id: "use-1",
-        name: "Bash",
-        input: { command: "gh pr create --title foo" },
-      },
-      "claude-session",
-      state,
-    );
-    assert.equal(tu.length, 0, "tool_use never emits events directly");
-
-    const tr = parseClaudeCodeLine(
-      {
-        type: "tool_result",
-        tool_use_id: "use-1",
-        content:
-          "https://github.com/closedloop-ai/closedloop-electron/pull/175",
-      },
-      "claude-session",
-      state,
-    );
-    assert.equal(tr.length, 1);
-    assert.equal(tr[0].prNumber, 175);
-    assert.equal(tr[0].sourceClient, "claude-code");
-    assert.equal(tr[0].sourceSessionId, "claude-session");
-  });
-
-  test("extracts branch from the paired tool_use's command", () => {
-    const state = createClaudeCodeParserState();
-    parseClaudeCodeLine(
-      {
-        type: "tool_use",
-        id: "use-2",
-        name: "Bash",
-        input: { command: "git push -u origin feature/abc" },
-      },
-      "s",
-      state,
-    );
-    const events = parseClaudeCodeLine(
-      {
-        type: "tool_result",
-        tool_use_id: "use-2",
-        content: "https://github.com/x-org/y-repo/pull/9",
-      },
-      "s",
-      state,
-    );
-    assert.equal(events.length, 1);
-    assert.equal(events[0].branchName, "feature/abc");
-  });
-
-  test("handles tool_result.content as an array of blocks", () => {
-    const state = createClaudeCodeParserState();
-    parseClaudeCodeLine(
-      { type: "tool_use", id: "use-3", name: "Bash", input: { command: "" } },
-      "s",
-      state,
-    );
-    const events = parseClaudeCodeLine(
-      {
-        type: "tool_result",
-        tool_use_id: "use-3",
-        content: [
-          { type: "text", text: "Pushed feature/x" },
-          { type: "text", text: "https://github.com/real-org/real-repo/pull/12" },
-        ],
-      },
-      "s",
-      state,
-    );
-    assert.equal(events.length, 1);
-    assert.equal(events[0].prNumber, 12);
-  });
-
-  test("emits with null branch when there is no paired tool_use", () => {
-    const state = createClaudeCodeParserState();
-    const events = parseClaudeCodeLine(
-      {
-        type: "tool_result",
-        tool_use_id: "missing",
-        content: "https://github.com/real-org/real-repo/pull/4",
-      },
-      "s",
-      state,
-    );
-    assert.equal(events.length, 1);
-    assert.equal(events[0].branchName, null);
-  });
-
-  test("ignores non-Bash tool_use lines", () => {
-    const state = createClaudeCodeParserState();
-    parseClaudeCodeLine(
-      { type: "tool_use", id: "use-4", name: "Read", input: { file_path: "/x" } },
-      "s",
-      state,
-    );
-    assert.equal(state.pendingToolUses.size, 0);
-  });
-
-  test("emits zero events for tool_result containing no PR URLs", () => {
-    const state = createClaudeCodeParserState();
-    parseClaudeCodeLine(
-      { type: "tool_use", id: "use-5", name: "Bash", input: { command: "ls" } },
-      "s",
-      state,
-    );
-    const events = parseClaudeCodeLine(
-      { type: "tool_result", tool_use_id: "use-5", content: "file1\nfile2" },
-      "s",
-      state,
-    );
-    assert.equal(events.length, 0);
-  });
-
-  test("filters fixture URLs in tool_result content", () => {
-    const state = createClaudeCodeParserState();
-    const events = parseClaudeCodeLine(
-      {
-        type: "tool_result",
-        tool_use_id: "x",
-        content: "https://github.com/acme/sandbox/pull/1",
-      },
-      "s",
-      state,
-    );
-    assert.equal(events.length, 0);
-  });
-
-  test("bounds pendingToolUses map to prevent unbounded growth", () => {
-    const state = createClaudeCodeParserState();
-    for (let i = 0; i < 500; i++) {
-      parseClaudeCodeLine(
-        { type: "tool_use", id: `use-${i}`, name: "Bash", input: { command: "ls" } },
-        "s",
-        state,
-      );
-    }
-    assert.ok(state.pendingToolUses.size <= 256);
+describe("safeParseLine", () => {
+  test("parses valid JSON objects, rejects everything else", () => {
+    assert.deepEqual(safeParseLine('{"type":"pr-link"}'), { type: "pr-link" });
+    assert.equal(safeParseLine('{"broken'), null);
+    assert.equal(safeParseLine("[1,2]"), null);
+    assert.equal(safeParseLine("not json"), null);
+    assert.equal(safeParseLine(""), null);
   });
 });

@@ -25,12 +25,10 @@ import path from "node:path";
 import type { GitActivityStore } from "./git-activity-store.js";
 import { gatewayLog } from "./gateway-logger.js";
 import {
-  createClaudeCodeParserState,
-  parseClaudeCodeLine,
-  parseClosedloopLoopLine,
-  parseCodexLine,
+  createSessionParserState,
+  parseSessionLine,
   safeParseLine,
-  type ClaudeCodeParserState,
+  type SessionParserState,
 } from "./session-log-parsers.js";
 
 const TAG = "git-activity-tailer";
@@ -58,7 +56,7 @@ export class SessionLogTailer {
   private readonly initialScanCutoffMs: number;
 
   private readonly offsets = new Map<string, number>();
-  private readonly claudeStates = new Map<string, ClaudeCodeParserState>();
+  private readonly parserStates = new Map<string, SessionParserState>();
   private readonly debounceTimers = new Map<string, NodeJS.Timeout>();
   private readonly watcherAborts: AbortController[] = [];
   private started = false;
@@ -216,7 +214,7 @@ export class SessionLogTailer {
     } catch {
       // file vanished
       this.offsets.delete(filePath);
-      this.claudeStates.delete(filePath);
+      this.parserStates.delete(filePath);
       return;
     }
     const offset = this.offsets.get(filePath) ?? 0;
@@ -244,10 +242,10 @@ export class SessionLogTailer {
       const slice = buf.subarray(0, bytesRead);
       const text = slice.toString("utf-8");
       const sessionId = path.basename(filePath, ".jsonl");
-      let state = this.claudeStates.get(filePath);
+      let state = this.parserStates.get(filePath);
       if (!state) {
-        state = createClaudeCodeParserState();
-        this.claudeStates.set(filePath, state);
+        state = createSessionParserState();
+        this.parserStates.set(filePath, state);
       }
       const { processedBytes } = this.processChunk(text, sessionId, state);
       this.offsets.set(filePath, offset + processedBytes);
@@ -264,7 +262,7 @@ export class SessionLogTailer {
   private processChunk(
     text: string,
     sessionId: string,
-    state: ClaudeCodeParserState,
+    state: SessionParserState,
   ): { processedBytes: number } {
     if (text.length === 0) {
       return { processedBytes: 0 };
@@ -289,17 +287,13 @@ export class SessionLogTailer {
   private dispatchLine(
     line: string,
     sessionId: string,
-    state: ClaudeCodeParserState,
+    state: SessionParserState,
   ): void {
     const parsed = safeParseLine(line);
     if (!parsed) {
       return;
     }
-    const inputs = [
-      ...parseClosedloopLoopLine(parsed, sessionId),
-      ...parseCodexLine(parsed, sessionId),
-      ...parseClaudeCodeLine(parsed, sessionId, state),
-    ];
+    const inputs = parseSessionLine(parsed, sessionId, state);
     for (const input of inputs) {
       this.store.add(input);
     }

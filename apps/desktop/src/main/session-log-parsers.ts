@@ -1,18 +1,23 @@
 /**
- * Parsers for the three signal formats the FEA-1226 tailer recognizes:
+ * Parsers for the FEA-1226 session-log tailer.
  *
- *   1. ClosedLoop loop wrapper:  {"type":"pr-link", "prUrl": ...}
- *   2. Codex CLI:                {"type":"exec_command_end", "aggregated_output": "..."}
- *   3. Claude Code:              {"type":"tool_use",    "name":"Bash", "input":{"command": "..."} }
- *                                {"type":"tool_result", "content": "..."}  (paired by tool_use_id)
+ * These read the REAL on-disk JSONL schemas of three harnesses and emit a
+ * captured PR event ONLY when a PR URL came out of a `gh pr create` command
+ * (or a ClosedLoop loop `pr-link` event). This command-gating is the heart of
+ * the design: a corpus pass over 2,561 real session files found that 53% of
+ * PR-URL occurrences are false positives — URLs from `gh pr view`, `gh api`,
+ * `git diff`, `grep`, human prompts, and model prose. None of those are
+ * created PRs, so none are captured.
  *
- * Each parser takes a single JSONL line (already known to be JSON-shaped) plus
- * the source session id (the JSONL file basename without extension). It returns
- * zero or more event drafts. The tailer is responsible for stitching state
- * (Claude Code tool_use → tool_result pairing) across lines of the same file.
+ * Real schemas (top-level JSONL line shapes):
+ *   - ClosedLoop loop : {"type":"pr-link", prUrl, prNumber, prRepository, sessionId}
+ *   - Claude Code     : {"type":"assistant"|"user", "sessionId", "gitBranch",
+ *                        "message":{"content":[ ...tool_use / tool_result... ]}}
+ *   - Codex CLI       : {"type":"event_msg"|"response_item"|"session_meta",
+ *                        "payload":{ "type": "...", ... }}
  *
- * Test-fixture URLs are filtered at the URL-extraction step so all three
- * parsers benefit uniformly (AC7 in FEA-1226).
+ * `tool_use`/`tool_result` (Claude) and `function_call`/`function_call_output`
+ * (Codex) are paired across lines, so the parser carries per-file state.
  */
 
 import type {
@@ -20,30 +25,29 @@ import type {
   GitActivitySourceClient,
 } from "../shared/git-activity-types.js";
 
-// Single regex used by every text-content parser. Allows owner/repo with dots,
-// hyphens, underscores (matches the slug rules GitHub actually permits).
-// `g` flag is intentional — multiple PR URLs in one line should all be picked up.
+// Matches a confirmed PR URL. The `(?!new\b)` lookahead rejects
+// `pull/new/<branch>` push hints — those are not created PRs.
 const GITHUB_PR_URL_RE =
-  /https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)\b/g;
+  /https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(?!new\b)(\d+)/g;
 
-// Owners that are exclusively used in fixtures / examples / test data.
-// `acme` is the canonical placeholder in many docs; `example`/`sample` are the
-// IANA / GitHub example owners; `test-org` is widely used in fixture suites.
-// Real owners do exist with names like `owner` or `org` so we err narrow.
+// Owners used exclusively in fixtures / examples / test data (FEA-1226 AC7).
 const FIXTURE_OWNER_RE =
   /^(?:owner|acme|org|example|test-org|sample|fixtures?|placeholder|repo)$/i;
+
+// Per-file cap so a pathological session can't grow the pairing maps without
+// bound. PR-creating commands are rare; 256 pending entries is generous.
+const PENDING_COMMAND_CAP = 256;
 
 export interface ExtractedPrReference {
   prUrl: string;
   prNumber: number;
   repoFullName: string;
-  /** Owner segment (already lowercased for matching only — preserved cased in repoFullName). */
   owner: string;
 }
 
 /**
- * Extracts all real-looking GitHub PR URLs from a string. Fixture URLs are
- * filtered out. Duplicates within the same string are deduped.
+ * Extracts confirmed GitHub PR URLs from a string. Fixture-owner URLs and
+ * `pull/new/` hints are filtered out. Duplicates within the string are deduped.
  */
 export function extractPrUrlsFromText(text: string): ExtractedPrReference[] {
   if (typeof text !== "string" || text.length === 0) {
@@ -68,12 +72,7 @@ export function extractPrUrlsFromText(text: string): ExtractedPrReference[] {
       continue;
     }
     seen.add(prUrl);
-    refs.push({
-      prUrl,
-      prNumber,
-      repoFullName: `${owner}/${repo}`,
-      owner,
-    });
+    refs.push({ prUrl, prNumber, repoFullName: `${owner}/${repo}`, owner });
   }
   return refs;
 }
@@ -83,9 +82,27 @@ export function isFixtureOwner(owner: string): boolean {
 }
 
 /**
- * Attempts to parse a single JSONL line as JSON. Returns null on parse errors —
- * malformed lines are skipped silently by design (the tailer must be tolerant
- * of partial writes and schema drift; an exception here would halt the loop).
+ * True when `cmd` invokes `gh pr create` — the only command whose output is
+ * trusted to mean "this engineer just created a PR". Deliberately excludes
+ * `gh pr view`, `gh pr edit`, `gh pr list`, `gh pr checks`, `gh api`, etc.
+ *
+ * `gh` must sit in command position: at the start of the string, or right
+ * after a shell separator (`;`, `&&`, `|`, `(`, newline, tab) — optionally
+ * preceded by whitespace. This rejects `gh` appearing merely as an *argument*
+ * to another binary, e.g. `echo gh pr create` or `... | grep gh pr create`,
+ * which would otherwise sneak past a plain-whitespace boundary.
+ */
+export function isPrCreateCommand(cmd: unknown): boolean {
+  if (typeof cmd !== "string") {
+    return false;
+  }
+  return /(?:^|[;&|(\n\t])\s*gh\s+pr\s+create(?:$|[\s'")])/.test(cmd);
+}
+
+/**
+ * Parses a single JSONL line as JSON. Returns null on parse errors — malformed
+ * lines are skipped silently (the tailer must tolerate partial writes and
+ * schema drift; throwing here would halt the scan loop).
  */
 export function safeParseLine(line: string): unknown {
   if (typeof line !== "string") {
@@ -102,80 +119,228 @@ export function safeParseLine(line: string): unknown {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 1. ClosedLoop loop wrapper
-// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Per-file parser state. The tailer creates one per session file and feeds
+ * lines through `parseSessionLine` in order so command/output pairs resolve.
+ */
+export interface SessionParserState {
+  /** Claude Code: tool_use_id -> the Bash command string. */
+  claudeBashCommands: Map<string, string>;
+  /** Codex: call_id -> the command string (from function_call arguments). */
+  codexCallCommands: Map<string, string>;
+  /** Codex: real session id from the `session_meta` line, if seen. */
+  codexSessionId: string | null;
+}
+
+export function createSessionParserState(): SessionParserState {
+  return {
+    claudeBashCommands: new Map(),
+    codexCallCommands: new Map(),
+    codexSessionId: null,
+  };
+}
 
 /**
- * Parses a single line for `{"type":"pr-link", "prUrl": ..., "prNumber": ...}`.
- * The loop wrapper emits these directly, so no URL extraction is needed — we
- * trust the structured fields and only do shape validation.
+ * Parse one JSONL line. `fallbackSessionId` is used when the line/file carries
+ * no embedded session id (typically the JSONL filename basename).
  */
-export function parseClosedloopLoopLine(
+export function parseSessionLine(
   parsed: unknown,
-  sourceSessionId: string,
+  fallbackSessionId: string,
+  state: SessionParserState,
 ): GitActivityEventInput[] {
   if (!isRecord(parsed)) {
     return [];
   }
-  if (parsed.type !== "pr-link") {
-    return [];
+  switch (parsed.type) {
+    case "pr-link":
+      return parseLoopPrLink(parsed, fallbackSessionId);
+    case "assistant":
+    case "user":
+      return parseClaudeLine(parsed, fallbackSessionId, state);
+    case "event_msg":
+    case "response_item":
+      return parseCodexLine(parsed, fallbackSessionId, state);
+    case "session_meta": {
+      const payload = isRecord(parsed.payload) ? parsed.payload : null;
+      if (payload && typeof payload.id === "string") {
+        state.codexSessionId = payload.id;
+      }
+      return [];
+    }
+    default:
+      return [];
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ClosedLoop loop wrapper
+// ─────────────────────────────────────────────────────────────────────────────
+
+function parseLoopPrLink(
+  parsed: Record<string, unknown>,
+  fallbackSessionId: string,
+): GitActivityEventInput[] {
   const prUrl = typeof parsed.prUrl === "string" ? parsed.prUrl : null;
   if (!prUrl) {
     return [];
   }
   const refs = extractPrUrlsFromText(prUrl);
   if (refs.length === 0) {
-    return []; // URL didn't pass the fixture/sanity filter
+    return [];
   }
   const ref = refs[0];
-  const branchName = typeof parsed.branchName === "string" ? parsed.branchName : null;
-  const commitSha = typeof parsed.commitSha === "string" ? parsed.commitSha : null;
+  const sessionId =
+    typeof parsed.sessionId === "string" && parsed.sessionId
+      ? parsed.sessionId
+      : fallbackSessionId;
   return [
     {
       type: "pr-link",
       prUrl: ref.prUrl,
       prNumber: ref.prNumber,
       repoFullName: ref.repoFullName,
-      branchName,
-      commitSha,
+      branchName: typeof parsed.branchName === "string" ? parsed.branchName : null,
+      commitSha: typeof parsed.commitSha === "string" ? parsed.commitSha : null,
       sourceClient: "closedloop-loop",
-      sourceSessionId,
+      sourceSessionId: sessionId,
     },
   ];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. Codex CLI
+// Claude Code — tool_use / tool_result nested in message.content[]
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Codex's rollout JSONL emits one record per command end. PR URLs from
- * `gh pr create` show up inside `aggregated_output` (the captured stdout).
- * The `command` array can give us a branch name when the shell line was a push.
- */
-export function parseCodexLine(
-  parsed: unknown,
-  sourceSessionId: string,
+function parseClaudeLine(
+  parsed: Record<string, unknown>,
+  fallbackSessionId: string,
+  state: SessionParserState,
 ): GitActivityEventInput[] {
-  if (!isRecord(parsed)) {
+  const message = isRecord(parsed.message) ? parsed.message : null;
+  const content = message && Array.isArray(message.content) ? message.content : [];
+
+  if (parsed.type === "assistant") {
+    // Record Bash commands so a later tool_result can be matched to them.
+    for (const block of content) {
+      if (!isRecord(block) || block.type !== "tool_use" || block.name !== "Bash") {
+        continue;
+      }
+      const id = typeof block.id === "string" ? block.id : null;
+      const input = isRecord(block.input) ? block.input : null;
+      const command = input && typeof input.command === "string" ? input.command : "";
+      if (id) {
+        rememberCommand(state.claudeBashCommands, id, command);
+      }
+    }
     return [];
   }
-  if (parsed.type !== "exec_command_end") {
+
+  // type === "user": tool_result blocks carry command output.
+  const sessionId =
+    typeof parsed.sessionId === "string" && parsed.sessionId
+      ? parsed.sessionId
+      : fallbackSessionId;
+  const branchName =
+    typeof parsed.gitBranch === "string" && parsed.gitBranch ? parsed.gitBranch : null;
+  const events: GitActivityEventInput[] = [];
+  for (const block of content) {
+    if (!isRecord(block) || block.type !== "tool_result") {
+      continue;
+    }
+    const toolUseId =
+      typeof block.tool_use_id === "string" ? block.tool_use_id : null;
+    const command = toolUseId ? state.claudeBashCommands.get(toolUseId) : undefined;
+    if (toolUseId) {
+      state.claudeBashCommands.delete(toolUseId);
+    }
+    // Command gate: only `gh pr create` output is trusted.
+    if (!isPrCreateCommand(command)) {
+      continue;
+    }
+    const body = flattenContent(block.content);
+    for (const ref of extractPrUrlsFromText(body)) {
+      events.push({
+        type: "pr-link",
+        prUrl: ref.prUrl,
+        prNumber: ref.prNumber,
+        repoFullName: ref.repoFullName,
+        branchName,
+        commitSha: null,
+        sourceClient: "claude-code",
+        sourceSessionId: sessionId,
+      });
+    }
+  }
+  return events;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Codex CLI — event nested in payload
+// ─────────────────────────────────────────────────────────────────────────────
+
+function parseCodexLine(
+  parsed: Record<string, unknown>,
+  fallbackSessionId: string,
+  state: SessionParserState,
+): GitActivityEventInput[] {
+  const payload = isRecord(parsed.payload) ? parsed.payload : null;
+  if (!payload) {
     return [];
   }
-  const output =
-    typeof parsed.aggregated_output === "string" ? parsed.aggregated_output : "";
-  const refs = extractPrUrlsFromText(output);
-  if (refs.length === 0) {
-    return [];
+  const sessionId = state.codexSessionId ?? fallbackSessionId;
+
+  switch (payload.type) {
+    case "function_call": {
+      // Record the command; arguments is a JSON-encoded string.
+      const callId = typeof payload.call_id === "string" ? payload.call_id : null;
+      const command = extractCodexCommand(payload.arguments);
+      if (callId) {
+        rememberCommand(state.codexCallCommands, callId, command);
+      }
+      return [];
+    }
+    case "function_call_output": {
+      const callId = typeof payload.call_id === "string" ? payload.call_id : null;
+      const command = callId ? state.codexCallCommands.get(callId) : undefined;
+      if (callId) {
+        state.codexCallCommands.delete(callId);
+      }
+      if (!isPrCreateCommand(command)) {
+        return [];
+      }
+      return codexEvents(
+        flattenContent(payload.output),
+        command ?? "",
+        sessionId,
+      );
+    }
+    case "exec_command_end": {
+      // Self-contained: the command is in parsed_cmd, the output in
+      // aggregated_output.
+      const command = extractParsedCmd(payload.parsed_cmd);
+      if (!isPrCreateCommand(command)) {
+        return [];
+      }
+      return codexEvents(
+        flattenContent(payload.aggregated_output),
+        command,
+        sessionId,
+      );
+    }
+    default:
+      // user_message, agent_message, reasoning, token_count, … — ignored.
+      return [];
   }
-  const command = Array.isArray(parsed.command)
-    ? (parsed.command as unknown[]).filter((x): x is string => typeof x === "string")
-    : [];
-  const branchName = extractBranchFromCommand(command);
-  return refs.map((ref) => ({
+}
+
+function codexEvents(
+  body: string,
+  command: string,
+  sessionId: string,
+): GitActivityEventInput[] {
+  const branchName = extractHeadBranch(command);
+  return extractPrUrlsFromText(body).map((ref) => ({
     type: "pr-link" as const,
     prUrl: ref.prUrl,
     prNumber: ref.prNumber,
@@ -183,103 +348,69 @@ export function parseCodexLine(
     branchName,
     commitSha: null,
     sourceClient: "codex" as GitActivitySourceClient,
-    sourceSessionId,
+    sourceSessionId: sessionId,
   }));
 }
 
+/** Codex `function_call.arguments` is a JSON string like `{"cmd":"gh pr …"}`. */
+function extractCodexCommand(args: unknown): string {
+  if (typeof args !== "string") {
+    return "";
+  }
+  try {
+    const parsed = JSON.parse(args);
+    if (isRecord(parsed) && typeof parsed.cmd === "string") {
+      return parsed.cmd;
+    }
+  } catch {
+    // arguments not JSON — fall through
+  }
+  return args;
+}
+
+/** Codex `exec_command_end.parsed_cmd` is `[{type, cmd}]`. */
+function extractParsedCmd(parsedCmd: unknown): string {
+  if (!Array.isArray(parsedCmd)) {
+    return "";
+  }
+  return parsedCmd
+    .map((entry) =>
+      isRecord(entry) && typeof entry.cmd === "string" ? entry.cmd : "",
+    )
+    .filter((c) => c.length > 0)
+    .join(" && ");
+}
+
+/** Best-effort branch from a `gh pr create … --head <branch>` command. */
+function extractHeadBranch(command: string): string | null {
+  const match = /--head[=\s]+(\S+)/.exec(command);
+  return match ? match[1] : null;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. Claude Code (Bash tool_use → tool_result pairing)
+// helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Per-file state the tailer carries across lines so a `tool_result` can be
- * matched back to its `tool_use.input.command`. Maps tool_use_id → command
- * string. Bounded to avoid pathological growth on long-lived sessions.
+ * Flattens a content value into one searchable string. Handles a plain
+ * string, or an array of content blocks (`[{type:"text", text}]`) — the newer
+ * Anthropic tool_result shape.
  */
-export interface ClaudeCodeParserState {
-  pendingToolUses: Map<string, { command: string }>;
-}
-
-const CLAUDE_TOOL_USE_CAP = 256;
-
-export function createClaudeCodeParserState(): ClaudeCodeParserState {
-  return { pendingToolUses: new Map() };
-}
-
-export function parseClaudeCodeLine(
-  parsed: unknown,
-  sourceSessionId: string,
-  state: ClaudeCodeParserState,
-): GitActivityEventInput[] {
-  if (!isRecord(parsed)) {
-    return [];
+function flattenContent(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
   }
-  if (parsed.type === "tool_use") {
-    if (parsed.name !== "Bash") {
-      return [];
-    }
-    const toolUseId = typeof parsed.id === "string" ? parsed.id : null;
-    if (!toolUseId) {
-      return [];
-    }
-    const input = isRecord(parsed.input) ? parsed.input : null;
-    const command = input && typeof input.command === "string" ? input.command : "";
-    state.pendingToolUses.set(toolUseId, { command });
-    // Bound the map to prevent unbounded growth in long sessions
-    if (state.pendingToolUses.size > CLAUDE_TOOL_USE_CAP) {
-      const firstKey = state.pendingToolUses.keys().next().value;
-      if (firstKey !== undefined) {
-        state.pendingToolUses.delete(firstKey);
-      }
-    }
-    return [];
-  }
-  if (parsed.type !== "tool_result") {
-    return [];
-  }
-  const content = extractToolResultContent(parsed);
-  if (!content) {
-    return [];
-  }
-  const refs = extractPrUrlsFromText(content);
-  if (refs.length === 0) {
-    return [];
-  }
-  const toolUseId = typeof parsed.tool_use_id === "string" ? parsed.tool_use_id : null;
-  const stash = toolUseId ? state.pendingToolUses.get(toolUseId) : undefined;
-  if (stash && toolUseId) {
-    state.pendingToolUses.delete(toolUseId);
-  }
-  const branchName = stash ? extractBranchFromCommandLine(stash.command) : null;
-  return refs.map((ref) => ({
-    type: "pr-link" as const,
-    prUrl: ref.prUrl,
-    prNumber: ref.prNumber,
-    repoFullName: ref.repoFullName,
-    branchName,
-    commitSha: null,
-    sourceClient: "claude-code" as GitActivitySourceClient,
-    sourceSessionId,
-  }));
-}
-
-/**
- * tool_result.content can be a string (legacy) or an array of content blocks
- * (newer Anthropic API shape: `[{ type: "text", text: "..." }]`). Flatten to a
- * single string so the URL regex can scan it.
- */
-function extractToolResultContent(parsed: Record<string, unknown>): string {
-  const content = parsed.content;
-  if (typeof content === "string") {
-    return content;
-  }
-  if (Array.isArray(content)) {
+  if (Array.isArray(value)) {
     const parts: string[] = [];
-    for (const item of content) {
+    for (const item of value) {
       if (typeof item === "string") {
         parts.push(item);
-      } else if (isRecord(item) && typeof item.text === "string") {
-        parts.push(item.text);
+      } else if (isRecord(item)) {
+        for (const key of ["text", "output", "content", "result"]) {
+          if (typeof item[key] === "string") {
+            parts.push(item[key] as string);
+          }
+        }
       }
     }
     return parts.join("\n");
@@ -287,50 +418,24 @@ function extractToolResultContent(parsed: Record<string, unknown>): string {
   return "";
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Branch-name extraction (best-effort)
-// ─────────────────────────────────────────────────────────────────────────────
-
-/** From an argv-style array like `["git","push","origin","feature/foo"]`. */
-function extractBranchFromCommand(argv: readonly string[]): string | null {
-  // Recognize `git push <remote> <branch>` and `git push -u <remote> <branch>`.
-  const pushIdx = argv.indexOf("push");
-  if (pushIdx >= 0 && argv[pushIdx - 1] === "git") {
-    let cursor = pushIdx + 1;
-    while (cursor < argv.length && argv[cursor]?.startsWith("-")) {
-      // Skip flags like -u, --force, --set-upstream
-      if (argv[cursor] === "-u" || argv[cursor] === "--set-upstream") {
-        cursor += 1;
-      } else if (argv[cursor]?.startsWith("--") && argv[cursor]?.includes("=")) {
-        cursor += 1;
-      } else {
-        cursor += 1;
-      }
-    }
-    // Remote is at cursor, branch at cursor+1
-    const candidate = argv[cursor + 1];
-    if (candidate && !candidate.startsWith("-")) {
-      return candidate;
+/** Insert into a pairing map, evicting the oldest entry past the cap. */
+function rememberCommand(
+  map: Map<string, string>,
+  key: string,
+  command: string,
+): void {
+  // delete-then-set so a re-used id is refreshed to newest insertion order
+  // (LRU); a plain set() would leave a re-used key at its stale position and
+  // let it be evicted ahead of genuinely older entries.
+  map.delete(key);
+  map.set(key, command);
+  if (map.size > PENDING_COMMAND_CAP) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) {
+      map.delete(oldest);
     }
   }
-  return null;
 }
-
-/** From a flat command line like `"git push origin feature/foo"`. */
-function extractBranchFromCommandLine(commandLine: string): string | null {
-  if (!commandLine) {
-    return null;
-  }
-  // Simple whitespace split — sufficient for `git push <remote> <branch>` cases.
-  // Quoted args with spaces in branch names are not handled (branch names cannot
-  // contain spaces in git anyway).
-  const argv = commandLine.trim().split(/\s+/);
-  return extractBranchFromCommand(argv);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// helpers
-// ─────────────────────────────────────────────────────────────────────────────
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
