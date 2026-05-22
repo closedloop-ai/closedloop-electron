@@ -133,8 +133,6 @@ export interface DesktopSettings {
   agentMonitorEnabled: boolean;
   /** Host-owned opt-in for Plans / plan extraction UI in the embedded Agent Dashboard. */
   planExtractionEnabled: boolean;
-  /** Engineer GitHub activity capture (FEA-1226). Off by default — opt-in only. */
-  captureEngineerActivity: boolean;
   /** Desktop-local opt-in that requires trusted browser command signatures. */
   commandSigningEnforcementEnabled: boolean;
   defaultApprovalTier: RiskTier;
@@ -163,7 +161,6 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   cloudConnectionEnabled: true,
   agentMonitorEnabled: true,
   planExtractionEnabled: false,
-  captureEngineerActivity: false,
   commandSigningEnforcementEnabled: false,
   defaultApprovalTier: "high",
   relayOrigin: DEFAULT_RELAY_ORIGIN,

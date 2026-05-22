@@ -23,11 +23,6 @@ import { registerGitPrRoutes } from "./operations/git-pr.js";
 import { registerGitRepoPathRoutes } from "./operations/git-repo-path.js";
 import { registerGitWorktreeRoutes } from "./operations/git-worktree.js";
 import { registerBinaryPathsRoutes } from "./operations/binary-paths.js";
-import {
-  registerGitActivityObserverRoutes,
-  type GitActivityRouteDeps,
-} from "./operations/git-activity-observer.js";
-export type { GitActivityRouteDeps };
 import { registerHealthCheckRoutes } from "./operations/health-check.js";
 import { registerLearningsRoutes } from "./operations/learnings.js";
 import { registerMetadataRoutes } from "./operations/metadata-routes.js";
@@ -94,7 +89,6 @@ export interface GatewayRouterOptions {
   ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult;
   getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
   applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
-  gitActivity?: GitActivityRouteDeps;
 }
 
 export interface GatewayActivityEvent {
@@ -231,9 +225,6 @@ export class GatewayRouter {
     );
     if (this.options.getBinaryPaths && this.options.applyBinaryPathPatch) {
       registerBinaryPathsRoutes(this.operationDispatcher, this.options.getBinaryPaths, this.options.applyBinaryPathPatch);
-    }
-    if (this.options.gitActivity) {
-      registerGitActivityObserverRoutes(this.operationDispatcher, this.options.gitActivity);
     }
     registerLearningsRoutes(
       this.operationDispatcher,

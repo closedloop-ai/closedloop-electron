@@ -17,7 +17,6 @@ import type { DesktopPopSigner } from "../main/desktop-pop.js";
 import type { DesktopPopUnavailableReporter } from "../main/desktop-pop-sign-utils.js";
 import {
   GatewayRouter,
-  type GitActivityRouteDeps,
   type DesktopSecurityUpgradePayload,
   type DesktopSecurityUpgradeResult,
   type GatewayActivityEvent,
@@ -72,7 +71,6 @@ export interface DesktopGatewayServerOptions {
   ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult;
   getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
   applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
-  gitActivity?: GitActivityRouteDeps;
 }
 
 export class DesktopGatewayServer {
@@ -130,7 +128,6 @@ export class DesktopGatewayServer {
       handleSecurityUpgrade: this.options.handleSecurityUpgrade,
       getBinaryPaths: this.options.getBinaryPaths,
       applyBinaryPathPatch: this.options.applyBinaryPathPatch,
-      gitActivity: this.options.gitActivity,
     });
   }
 
@@ -167,7 +164,6 @@ export class DesktopGatewayServer {
     ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult,
     getOnboardingCompleted?: () => boolean,
     schedulers?: LoopSchedulerContext,
-    gitActivity?: GitActivityRouteDeps,
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -202,7 +198,6 @@ export class DesktopGatewayServer {
       getBinaryPaths,
       applyBinaryPathPatch,
       schedulers,
-      gitActivity,
     });
   }
 

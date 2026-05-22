@@ -1,6 +1,9 @@
-# FEA-1226 git-activity test fixtures
+# FEA-1226 pull-request capture test fixtures
 
-Test data set for the engineer GitHub activity capture parsers.
+Test data set for the command-gated PR parsers (`pr-parsers.js`). PR capture
+runs inside the Agent Dashboard sidecar's session importer and writes to the
+shared `dashboard.db` `pull_requests` table — the same database that holds
+sessions, plans, and packs.
 
 ## Provenance
 
@@ -93,11 +96,13 @@ Additional traps:
 
 ## Session-id sourcing
 
-All three formats carry the real session id inside the file — the parser
-should prefer it over the filename:
-- Claude Code: top-level `sessionId` field on every line
-- Codex: `session_meta.payload.id` (first line)
-- Loop: `sessionId` field on the `pr-link` event
+All three formats carry a session id inside the file (Claude Code: top-level
+`sessionId`; Codex: `session_meta.payload.id`; loop: `sessionId` on the
+`pr-link` event), and the parser reads it. In the sidecar, however,
+`pr-extractor.js` **overrides** it with the importer's canonical session id
+(`session.sessionId`, which is `sessions.id`) so every `pull_requests` row
+FK-joins to its `sessions` row — even for Codex, where the in-file id differs
+from the transcript filename.
 
 ## Regenerating
 

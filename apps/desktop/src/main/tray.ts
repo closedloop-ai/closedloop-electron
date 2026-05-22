@@ -1,7 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { app, Menu, Tray, nativeImage } from "electron";
-import type { GitActivityEvent } from "../shared/git-activity-types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -12,11 +11,7 @@ export interface DesktopTrayHandlers {
   onManageCommandKeys?: () => void;
   onOpenClaudeDashboard?: () => void;
   onTogglePaused?: (paused: boolean) => void;
-  /** Open a captured PR URL in the user's default browser. */
-  onOpenActivityUrl?: (url: string) => void;
 }
-
-const TRAY_ACTIVITY_MENU_LIMIT = 10;
 
 const TRAY_STATE_TOOLTIP: Record<TrayState, string> = {
   starting: "Starting Symphony Desktop Client",
@@ -31,8 +26,6 @@ export class DesktopTray {
   private paused = false;
   private pendingApprovals = 0;
   private agentMonitorEnabled = false;
-  private captureEngineerActivityEnabled = false;
-  private recentActivity: GitActivityEvent[] = [];
   private handlers: DesktopTrayHandlers = {};
 
   init(handlers?: DesktopTrayHandlers): void {
@@ -84,18 +77,6 @@ export class DesktopTray {
     this.refreshContextMenu();
   }
 
-  setCaptureEngineerActivityEnabled(enabled: boolean): void {
-    this.captureEngineerActivityEnabled = enabled;
-    this.refreshContextMenu();
-  }
-
-  setRecentActivity(events: readonly GitActivityEvent[]): void {
-    // Keep at most TRAY_ACTIVITY_MENU_LIMIT entries — the menu cannot show
-    // more anyway, and stashing extras here wastes memory.
-    this.recentActivity = events.slice(0, TRAY_ACTIVITY_MENU_LIMIT);
-    this.refreshContextMenu();
-  }
-
   dispose(): void {
     if (!this.tray) {
       return;
@@ -133,20 +114,6 @@ export class DesktopTray {
               click: () => {
                 this.handlers.onOpenClaudeDashboard?.();
               }
-            }]
-          : []),
-        ...(this.captureEngineerActivityEnabled
-          ? [{
-              label: "GitHub Activity",
-              submenu:
-                this.recentActivity.length === 0
-                  ? [{ label: "No PRs captured yet", enabled: false }]
-                  : this.recentActivity.map((event) => ({
-                      label: `${event.repoFullName}#${event.prNumber}`,
-                      click: () => {
-                        this.handlers.onOpenActivityUrl?.(event.prUrl);
-                      }
-                    }))
             }]
           : []),
         {
