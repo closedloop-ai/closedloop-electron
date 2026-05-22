@@ -159,6 +159,29 @@ function parseChatSessionFile(filePath, workspacePath) {
   if (!data || typeof data !== "object") return null;
 
   const sessionId = data.sessionId || data.id || path.basename(filePath, ".json");
+
+  // P1 Fix: extract token usage from raw requests BEFORE normalization,
+  // since normalizeChatMessages reduces each request to {role, timestamp}
+  // and drops the original usage/response payloads.
+  const rawRequests = Array.isArray(data.requests) ? data.requests : [];
+  const requestTokenFields = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  for (const req of rawRequests) {
+    if (!req || typeof req !== "object") continue;
+    const usageInfo =
+      req.usage || req.tokenUsage || req.token_count ||
+      req.response?.usage || req.result?.usage || null;
+    if (usageInfo && typeof usageInfo === "object") {
+      if (usageInfo.input_tokens != null) requestTokenFields.input += usageInfo.input_tokens;
+      if (usageInfo.output_tokens != null) requestTokenFields.output += usageInfo.output_tokens;
+      if (usageInfo.prompt_tokens != null) requestTokenFields.input += usageInfo.prompt_tokens;
+      if (usageInfo.completion_tokens != null) requestTokenFields.output += usageInfo.completion_tokens;
+      if (usageInfo.cache_read_tokens != null) requestTokenFields.cacheRead += usageInfo.cache_read_tokens;
+      if (usageInfo.cached_input_tokens != null) requestTokenFields.cacheRead += usageInfo.cached_input_tokens;
+      if (usageInfo.cache_write_tokens != null) requestTokenFields.cacheWrite += usageInfo.cache_write_tokens;
+      if (usageInfo.cache_creation_input_tokens != null) requestTokenFields.cacheWrite += usageInfo.cache_creation_input_tokens;
+    }
+  }
+
   const messages = normalizeChatMessages(data);
   if (!Array.isArray(messages) || messages.length === 0) return null;
 
@@ -243,6 +266,13 @@ function parseChatSessionFile(filePath, workspacePath) {
     }
   }
 
+  // Merge request-level tokens (from raw requests before normalization)
+  // with message-level tokens. Use summation since each request is unique.
+  tokenFields.input += requestTokenFields.input;
+  tokenFields.output += requestTokenFields.output;
+  tokenFields.cacheRead += requestTokenFields.cacheRead;
+  tokenFields.cacheWrite += requestTokenFields.cacheWrite;
+
   // Token usage from top-level session data
   const topUsage = data.usage || data.tokenUsage || data.token_count || null;
   if (topUsage && typeof topUsage === "object") {
@@ -253,6 +283,8 @@ function parseChatSessionFile(filePath, workspacePath) {
     if (topUsage.cache_read_tokens != null) tokenFields.cacheRead = Math.max(tokenFields.cacheRead, topUsage.cache_read_tokens);
     if (topUsage.cached_input_tokens != null) tokenFields.cacheRead = Math.max(tokenFields.cacheRead, topUsage.cached_input_tokens);
     if (topUsage.cache_write_tokens != null) tokenFields.cacheWrite = Math.max(tokenFields.cacheWrite, topUsage.cache_write_tokens);
+    // P2 Fix: also map cache_creation_input_tokens to cacheWrite (alias)
+    if (topUsage.cache_creation_input_tokens != null) tokenFields.cacheWrite = Math.max(tokenFields.cacheWrite, topUsage.cache_creation_input_tokens);
   }
 
   if (!firstTimestamp) {
