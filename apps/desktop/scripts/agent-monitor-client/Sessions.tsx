@@ -202,89 +202,93 @@ export function Sessions() {
         </button>
       </div>
 
-      <div className="flex flex-wrap lg:flex-nowrap items-center gap-3 mb-6 bg-surface-2/40 p-2 rounded-xl border border-border w-full">
-        <div className="relative flex-1 min-w-[180px] max-w-[340px]">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
-          <input
-            type="text"
-            placeholder={t("searchPlaceholder")}
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            className="input w-full pl-10"
-          />
-        </div>
-
-        <div className="relative shrink-0 w-[180px]">
-          <select
-            value={cwd}
-            onChange={(e) => setCwd(e.target.value)}
-            className="input w-full text-ellipsis bg-surface-1 pr-9 appearance-none cursor-pointer"
-          >
-            <option value="">All Directories</option>
-            {directories.map((d) => (
-              <option key={d} value={d} title={d}>
-                {truncate(d, 30)}
-              </option>
-            ))}
-          </select>
-          <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500 pointer-events-none" />
-        </div>
-
-        <div className="flex items-center gap-1.5 bg-surface-1 px-1.5 py-1 rounded-lg border border-border h-[38px] flex-1 min-w-[180px]">
-          <div className="relative flex-1">
-            <select
-              value={sortBy}
-              onChange={(e) => setSortBy(e.target.value)}
-              className="bg-transparent w-full text-xs text-gray-200 outline-none pl-3 pr-8 appearance-none cursor-pointer whitespace-nowrap"
-            >
-              <option value="time">Sort by Time ({sortDesc ? "Newest" : "Oldest"})</option>
-              <option value="duration">
-                Sort by Duration ({sortDesc ? "Longest" : "Shortest"})
-              </option>
-              <option value="price">Sort by Price ({sortDesc ? "Highest" : "Lowest"})</option>
-            </select>
-            <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-500 pointer-events-none" />
+      <div className="mb-6 bg-surface-2/40 p-2 rounded-xl border border-border w-full">
+        <div className="flex flex-wrap lg:flex-nowrap items-center gap-3">
+          <div className="relative flex-1 min-w-[180px] max-w-[340px]">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500" />
+            <input
+              type="text"
+              placeholder={t("searchPlaceholder")}
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              className="input w-full pl-10"
+            />
           </div>
-          <div className="w-px h-4 bg-border mx-1" />
-          <button
-            onClick={() => setSortDesc(!sortDesc)}
-            className="p-1.5 rounded hover:bg-surface-3 text-gray-400 hover:text-gray-200 transition-colors shrink-0"
-            title={sortDesc ? "Descending" : "Ascending"}
-          >
-            {sortDesc ? <SortDesc className="w-4 h-4" /> : <SortAsc className="w-4 h-4" />}
-          </button>
+
+          <div className="relative shrink-0 w-[180px]">
+            <select
+              value={cwd}
+              onChange={(e) => setCwd(e.target.value)}
+              className="input w-full text-ellipsis bg-surface-1 pr-9 appearance-none cursor-pointer"
+            >
+              <option value="">All Directories</option>
+              {directories.map((d) => (
+                <option key={d} value={d} title={d}>
+                  {truncate(d, 30)}
+                </option>
+              ))}
+            </select>
+            <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500 pointer-events-none" />
+          </div>
+
+          <div className="flex items-center gap-1.5 bg-surface-1 px-1.5 py-1 rounded-lg border border-border h-[38px] flex-1 min-w-[180px]">
+            <div className="relative flex-1">
+              <select
+                value={sortBy}
+                onChange={(e) => setSortBy(e.target.value)}
+                className="bg-transparent w-full text-xs text-gray-200 outline-none pl-3 pr-8 appearance-none cursor-pointer whitespace-nowrap"
+              >
+                <option value="time">Sort by Time ({sortDesc ? "Newest" : "Oldest"})</option>
+                <option value="duration">
+                  Sort by Duration ({sortDesc ? "Longest" : "Shortest"})
+                </option>
+                <option value="price">Sort by Price ({sortDesc ? "Highest" : "Lowest"})</option>
+              </select>
+              <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-500 pointer-events-none" />
+            </div>
+            <div className="w-px h-4 bg-border mx-1" />
+            <button
+              onClick={() => setSortDesc(!sortDesc)}
+              className="p-1.5 rounded hover:bg-surface-3 text-gray-400 hover:text-gray-200 transition-colors shrink-0"
+              title={sortDesc ? "Descending" : "Ascending"}
+            >
+              {sortDesc ? <SortDesc className="w-4 h-4" /> : <SortAsc className="w-4 h-4" />}
+            </button>
+          </div>
         </div>
 
-        <div className="flex gap-1 bg-surface-1 rounded-lg p-1 border border-border shrink-0">
-          {HARNESS_OPTIONS.map((opt) => (
-            <button
-              key={opt.value}
-              onClick={() => setHarness(opt.value)}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
-                harness === opt.value
-                  ? "bg-surface-4 text-gray-200"
-                  : "text-gray-500 hover:text-gray-300"
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
+        <div className="mt-3 flex items-center gap-3 overflow-x-auto pb-1">
+          <div className="flex gap-1 bg-surface-1 rounded-lg p-1 border border-border shrink-0 min-w-max">
+            {HARNESS_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                onClick={() => setHarness(opt.value)}
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                  harness === opt.value
+                    ? "bg-surface-4 text-gray-200"
+                    : "text-gray-500 hover:text-gray-300"
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
 
-        <div className="flex gap-1 bg-surface-1 rounded-lg p-1 border border-border shrink-0">
-          {FILTER_OPTIONS.map((opt) => (
-            <button
-              key={opt.value}
-              onClick={() => setFilter(opt.value)}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
-                filter === opt.value
-                  ? "bg-surface-4 text-gray-200"
-                  : "text-gray-500 hover:text-gray-300"
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
+          <div className="flex gap-1 bg-surface-1 rounded-lg p-1 border border-border shrink-0 min-w-max">
+            {FILTER_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                onClick={() => setFilter(opt.value)}
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                  filter === opt.value
+                    ? "bg-surface-4 text-gray-200"
+                    : "text-gray-500 hover:text-gray-300"
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 

@@ -112,6 +112,10 @@ import {
   uploadArtifacts,
 } from "./loop-http.js";
 import {
+  clearPendingLoopExit,
+  registerPendingLoopExit,
+} from "./symphony-loop-lifecycle.js";
+import {
   CLONE_GIT_TIMEOUT,
   expandHome,
   fetchOrigin,
@@ -632,6 +636,7 @@ export function registerRecoveredLoop(loopId: string, pid: number): void {
 }
 
 export function unregisterLoop(loopId: string): void {
+  clearPendingLoopExit(loopId);
   runningLoops.delete(loopId);
 }
 
@@ -7661,6 +7666,7 @@ async function handleLoopRequest(
           });
         }
       }
+      clearPendingLoopExit(body.loopId);
       try {
         await stopTailer.flush();
       } catch (err) {
@@ -7748,6 +7754,7 @@ async function handleLoopRequest(
 
     // Replace sentinel with real entry — storing `child` prevents GC of the
     // ChildProcess handle which would silently drop the exit listener.
+    registerPendingLoopExit(body.loopId);
     runningLoops.set(body.loopId, { pid, child, stage: "running" });
     stopTailer = startOutputTailer(
       tailerJsonlPath,
@@ -7864,6 +7871,7 @@ async function handleLoopRequest(
   } finally {
     // Clean up sentinel and persisted token if we never reached a successful spawn
     if (!spawnedSuccessfully) {
+      clearPendingLoopExit(body.loopId);
       runningLoops.delete(body.loopId);
       loopTokenStore?.deleteLoopToken(body.loopId);
       // Best-effort cleanup of any additional repo worktrees created before spawn failed
@@ -7965,6 +7973,7 @@ async function handleLoopKill(
   }
 
   runningLoops.delete(loopId);
+  clearPendingLoopExit(loopId);
   json(context, 200, { success: true, message: "Loop process terminated" });
 }
 

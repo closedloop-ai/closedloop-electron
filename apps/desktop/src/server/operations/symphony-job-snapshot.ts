@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { type LocalJob, type LocalJobStatus, type TaskProgress, isTerminalJobStatus } from "../../main/job-store.js";
+import { hasPendingLoopExit } from "./symphony-loop-lifecycle.js";
 import { isProcessRunning } from "./symphony-utils.js";
 
 // ---------------------------------------------------------------------------
@@ -211,8 +212,15 @@ export async function enrichJobSnapshot(job: LocalJob): Promise<JobSnapshot> {
   }
 
   // If the process is dead but the job isn't terminal yet, finalize it.
+  // A live detached child can disappear from the process table before Node
+  // delivers its exit event; suppress STOPPED while Desktop still owns that
+  // child handle so the exit path can claim the job with exitCode first.
   if (!processRunning && !isTerminalJobStatus(status) && status !== "QUEUED" && status !== "STARTING") {
-    status = status === "CANCEL_PENDING" ? "CANCELLED" : "STOPPED";
+    if (status === "CANCEL_PENDING") {
+      status = "CANCELLED";
+    } else if (!hasPendingLoopExit(job.loopId)) {
+      status = "STOPPED";
+    }
   }
 
   // Finalize QUEUED/STARTING jobs that never got a PID and are older than
@@ -238,4 +246,3 @@ export async function enrichJobSnapshot(job: LocalJob): Promise<JobSnapshot> {
     phase,
   };
 }
-

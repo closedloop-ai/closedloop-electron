@@ -1,5 +1,5 @@
 import { app } from "electron";
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -7,11 +7,6 @@ import path from "node:path";
 import { AGENT_MONITOR_PORT } from "../shared/contracts.js";
 import { gatewayLog } from "./gateway-logger.js";
 import { resolveAgentMonitorPaths } from "./agent-monitor-path.js";
-import {
-  isAgentMonitorCommand,
-  ownsHealthyListener,
-  parseListenerPid,
-} from "./agent-monitor-sidecar-ownership.js";
 
 const TAG = "agent-monitor";
 const HOST = "127.0.0.1";
@@ -138,8 +133,6 @@ export class AgentMonitorSidecar {
       return;
     }
 
-    await reapStaleAgentMonitorListener(this.port, entryFile);
-
     const dbPath = path.join(
       app.getPath("userData"),
       "agent-monitor",
@@ -193,7 +186,7 @@ export class AgentMonitorSidecar {
     );
     child.on("exit", (code, signal) => this.handleExit(code, signal));
 
-    const healthy = await this.waitForHealth(child.pid);
+    const healthy = await this.waitForHealth();
     if (healthy) {
       this.restartAttempts = 0;
       gatewayLog.info(TAG, `agent monitor ready at http://${HOST}:${this.port}`);
@@ -251,19 +244,13 @@ export class AgentMonitorSidecar {
     }, backoff);
   }
 
-  private async waitForHealth(expectedPid: number): Promise<boolean> {
+  private async waitForHealth(): Promise<boolean> {
     const deadline = Date.now() + READY_TIMEOUT_MS;
     while (Date.now() < deadline) {
       if (this.stopping || this.child == null) {
         return false;
       }
-      const listenerPid = listenerPidForPort(this.port);
-      if (ownsHealthyListener(
-        listenerPid,
-        expectedPid,
-        isRunning(expectedPid),
-        await healthOk(this.port),
-      )) {
+      if (await healthOk(this.port)) {
         return true;
       }
       await delay(READY_POLL_INTERVAL_MS);
@@ -304,69 +291,6 @@ function resolveRuntimeSupportNodePaths(packageName: string): string[] {
     ].filter((candidate) => existsSync(candidate));
   } catch {
     return [];
-  }
-}
-
-async function reapStaleAgentMonitorListener(
-  port: number,
-  expectedEntryFile: string,
-): Promise<void> {
-  const pid = listenerPidForPort(port);
-  if (pid == null) {
-    return;
-  }
-  if (!isAgentMonitorProcess(pid, expectedEntryFile)) {
-    gatewayLog.warn(
-      TAG,
-      `port ${port} already in use by pid=${pid}; leaving non-agent-monitor listener untouched`,
-    );
-    return;
-  }
-  gatewayLog.warn(
-    TAG,
-    `reaping stale agent monitor listener pid=${pid} on port ${port}`,
-  );
-  killGroup(pid, "SIGTERM");
-  await waitForPortRelease(port, STOP_GRACE_MS);
-  if (listenerPidForPort(port) === pid && isRunning(pid)) {
-    killGroup(pid, "SIGKILL");
-    await waitForPortRelease(port, STOP_GRACE_MS);
-  }
-}
-
-function listenerPidForPort(port: number): number | null {
-  const result = spawnSync(
-    "lsof",
-    ["-n", "-P", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"],
-    { encoding: "utf8" },
-  );
-  if (result.error) {
-    gatewayLog.warn(TAG, `lsof failed while probing port ${port}: ${describe(result.error)}`);
-    return null;
-  }
-  if (result.status !== 0) {
-    return null;
-  }
-  return parseListenerPid(result.stdout);
-}
-
-function isAgentMonitorProcess(pid: number, expectedEntryFile: string): boolean {
-  const result = spawnSync("ps", ["-o", "command=", "-p", String(pid)], {
-    encoding: "utf8",
-  });
-  if (result.error || result.status !== 0) {
-    return false;
-  }
-  return isAgentMonitorCommand(result.stdout.trim(), expectedEntryFile);
-}
-
-async function waitForPortRelease(port: number, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (listenerPidForPort(port) == null) {
-      return;
-    }
-    await delay(100);
   }
 }
 
