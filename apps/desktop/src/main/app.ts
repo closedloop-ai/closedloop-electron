@@ -508,6 +508,9 @@ export class DesktopApplication {
         this.cloudStatus.state === "online",
       sendBatch: (batch) => this.cloudSocket.sendAgentSessions(batch),
       getUserDataPath: () => app.getPath("userData"),
+      onBatchOutcome: (event) => {
+        Observability.agentSessionSyncBatchFailed(event);
+      },
     });
     this.recovery = new GatewayRecoveryManager({
       probe: () => this.probeGatewayAlive(),
