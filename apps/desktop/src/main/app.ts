@@ -2362,6 +2362,27 @@ export class DesktopApplication {
       enabled: this.isAgentMonitorEnabled(),
       planExtractionEnabled: this.isPlanExtractionEnabled(),
     }));
+    // FEA-1334: proxy the sidecar's cold-start ingest progress so the renderer
+    // can drive the floating progress card without a cross-origin fetch.
+    // Returns null whenever the sidecar is not reachable — the renderer treats
+    // that as "keep polling, nothing to show yet".
+    ipcMain.handle("desktop:get-agent-monitor-ingest-progress", async () => {
+      const baseUrl = this.agentMonitor.getUrl();
+      if (!baseUrl) {
+        return null;
+      }
+      try {
+        const response = await fetch(`${baseUrl}/api/import/progress`, {
+          signal: AbortSignal.timeout(2_000),
+        });
+        if (!response.ok) {
+          return null;
+        }
+        return await response.json();
+      } catch {
+        return null;
+      }
+    });
     ipcMain.handle("desktop:open-agent-monitor", () =>
       this.openClaudeDashboard(),
     );

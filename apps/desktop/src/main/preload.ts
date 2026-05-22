@@ -129,7 +129,25 @@ const desktopApi = {
     ipcRenderer.invoke(
       "desktop:set-agent-monitor-hooks-enabled",
       enabled,
-    ) as Promise<{ ok: boolean; enabled: boolean; error?: string }>
+    ) as Promise<{ ok: boolean; enabled: boolean; error?: string }>,
+  // FEA-1334: cold-start ingest progress for the floating progress card.
+  // Resolves null when the sidecar is unreachable or has no progress yet.
+  getAgentMonitorIngestProgress: () =>
+    ipcRenderer.invoke(
+      "desktop:get-agent-monitor-ingest-progress",
+    ) as Promise<{
+      running: boolean;
+      startedAt: number | null;
+      updatedAt: number | null;
+      finishedAt: number | null;
+      total: number;
+      parsed: number;
+      imported: number;
+      byHarness: Record<
+        string,
+        { total: number; parsed: number; imported: number; complete: boolean }
+      >;
+    } | null>
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);

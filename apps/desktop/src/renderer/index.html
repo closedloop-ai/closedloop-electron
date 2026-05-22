@@ -2838,6 +2838,111 @@
         padding: 0;
         overflow: hidden;
       }
+
+      /* ── Ingest progress card (FEA-1334) ──────────────────────────
+         Floating bottom-right card shown on every launch while the
+         agent-history backlog is imported. Lives outside the dashboard
+         iframe so it stays visible across every view. */
+      .ingest-card {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        z-index: 1200;
+        width: 320px;
+        padding: 14px 16px;
+        background: var(--card);
+        color: var(--card-foreground);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        box-shadow: 0 8px 28px oklch(0 0 0 / 0.22);
+        font-size: 13px;
+        animation: ingest-card-in 160ms ease-out;
+      }
+      .ingest-card[hidden] {
+        display: none;
+      }
+      @keyframes ingest-card-in {
+        from {
+          opacity: 0;
+          transform: translateY(8px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      .ingest-card-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      .ingest-card-title {
+        font-weight: 600;
+      }
+      .ingest-card-dismiss {
+        flex: none;
+        width: 20px;
+        height: 20px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 0;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--muted-foreground);
+        cursor: pointer;
+        font-size: 15px;
+        line-height: 1;
+        padding: 0;
+      }
+      .ingest-card-dismiss:hover {
+        background: var(--muted);
+        color: var(--foreground);
+      }
+      .ingest-bar {
+        height: 6px;
+        border-radius: 999px;
+        background: var(--muted);
+        overflow: hidden;
+      }
+      .ingest-bar-fill {
+        height: 100%;
+        width: 0%;
+        border-radius: 999px;
+        background: var(--primary);
+        transition: width 240ms ease;
+      }
+      .ingest-card.ingest-done .ingest-bar-fill {
+        background: var(--success);
+      }
+      .ingest-count {
+        margin-top: 8px;
+        color: var(--muted-foreground);
+        font-variant-numeric: tabular-nums;
+      }
+      .ingest-rail {
+        margin-top: 10px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .ingest-chip {
+        font-size: 11px;
+        padding: 2px 7px;
+        border-radius: 999px;
+        background: var(--muted);
+        color: var(--muted-foreground);
+        white-space: nowrap;
+      }
+      .ingest-chip.active {
+        color: var(--foreground);
+      }
+      .ingest-chip.done {
+        background: var(--secondary);
+        color: var(--secondary-foreground);
+      }
     </style>
   </head>
   <body>
@@ -2955,6 +3060,33 @@
         </div>
         <p class="muted" id="onboardingMessage"></p>
       </div>
+    </div>
+    <div
+      id="ingestProgressCard"
+      class="ingest-card"
+      hidden
+      role="status"
+      aria-live="polite"
+    >
+      <div class="ingest-card-head">
+        <span class="ingest-card-title" id="ingestTitle"
+          >Catching up on agent history</span
+        >
+        <button
+          type="button"
+          class="ingest-card-dismiss"
+          id="ingestDismiss"
+          title="Dismiss"
+          aria-label="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+      <div class="ingest-bar">
+        <div class="ingest-bar-fill" id="ingestBarFill"></div>
+      </div>
+      <div class="ingest-count" id="ingestCount">Scanning…</div>
+      <div class="ingest-rail" id="ingestHarnessRail"></div>
     </div>
     <div class="app state-disconnected agent-view" id="appShell">
       <aside class="sidebar">
@@ -3848,6 +3980,167 @@
           }, 1000);
         }
       }
+
+      // ── Ingest progress card (FEA-1334) ────────────────────────────
+      // Polls the agent-monitor sidecar's cold-start ingest progress and
+      // drives the floating bottom-right card. Runs on every launch,
+      // independent of which view is active, so the user always sees the
+      // app catching up on agent-history backlog.
+      (function setupIngestProgressCard() {
+        const card = document.getElementById("ingestProgressCard");
+        if (!card) return;
+        const titleEl = document.getElementById("ingestTitle");
+        const barFill = document.getElementById("ingestBarFill");
+        const countEl = document.getElementById("ingestCount");
+        const railEl = document.getElementById("ingestHarnessRail");
+        const dismissBtn = document.getElementById("ingestDismiss");
+
+        const HARNESSES = [
+          ["codex", "Codex"],
+          ["cursor", "Cursor"],
+          ["copilot", "Copilot"],
+          ["opencode", "OpenCode"],
+        ];
+        const POLL_FAST_MS = 600;
+        const POLL_WAIT_MS = 1500;
+        const GIVE_UP_MS = 120000;
+
+        let pollTimer = null;
+        let hideTimer = null;
+        let dismissed = false;
+        let sawRunning = false;
+        const startedAt = Date.now();
+
+        function stopPolling() {
+          if (pollTimer) {
+            clearTimeout(pollTimer);
+            pollTimer = null;
+          }
+        }
+        function schedule(ms) {
+          stopPolling();
+          pollTimer = setTimeout(tick, ms);
+        }
+        function fmt(n) {
+          return (n || 0).toLocaleString();
+        }
+
+        function renderRail(snap) {
+          railEl.innerHTML = "";
+          const by = snap.byHarness || {};
+          for (const [key, label] of HARNESSES) {
+            const h = by[key];
+            const chip = document.createElement("span");
+            chip.className = "ingest-chip";
+            let mark = "·";
+            if (h) {
+              if (h.complete) {
+                mark = "✓";
+                chip.classList.add("done");
+              } else if (h.parsed > 0) {
+                mark = "⟳";
+                chip.classList.add("active");
+              }
+            }
+            chip.textContent = mark + " " + label;
+            railEl.appendChild(chip);
+          }
+        }
+
+        function renderRunning(snap) {
+          card.classList.remove("ingest-done");
+          titleEl.textContent = "Catching up on agent history";
+          const total = snap.total || 0;
+          const parsed = Math.min(snap.parsed || 0, total || snap.parsed || 0);
+          const pct =
+            total > 0 ? Math.min(100, Math.round((parsed / total) * 100)) : 0;
+          barFill.style.width = pct + "%";
+          countEl.textContent =
+            total > 0
+              ? fmt(parsed) + " / " + fmt(total) + " sessions · " + pct + "%"
+              : "Scanning your agent history…";
+          renderRail(snap);
+        }
+
+        function renderDone(snap) {
+          card.classList.add("ingest-done");
+          titleEl.textContent = "✓ Caught up";
+          barFill.style.width = "100%";
+          const imported = snap.imported || 0;
+          countEl.textContent =
+            imported > 0
+              ? "Imported " +
+                fmt(imported) +
+                " new session" +
+                (imported === 1 ? "" : "s")
+              : "Your agent history is up to date";
+          renderRail(snap);
+        }
+
+        async function tick() {
+          let snap = null;
+          try {
+            snap = await api.getAgentMonitorIngestProgress();
+          } catch (_) {
+            snap = null;
+          }
+
+          if (!snap) {
+            // Sidecar not reachable yet (still booting, or the dashboard is
+            // disabled). Keep waiting, but give up eventually so a disabled
+            // dashboard does not poll forever.
+            if (Date.now() - startedAt > GIVE_UP_MS) {
+              stopPolling();
+              return;
+            }
+            schedule(POLL_WAIT_MS);
+            return;
+          }
+
+          if (snap.running) {
+            sawRunning = true;
+            if (!dismissed) {
+              card.hidden = false;
+              renderRunning(snap);
+            }
+            schedule(dismissed ? POLL_WAIT_MS : POLL_FAST_MS);
+            return;
+          }
+
+          // Not running — distinguish "not started yet" from "finished".
+          if (!snap.finishedAt) {
+            if (Date.now() - startedAt > GIVE_UP_MS) {
+              stopPolling();
+              return;
+            }
+            schedule(POLL_WAIT_MS);
+            return;
+          }
+
+          // Finished. Show the caught-up toast only if the user actually saw
+          // a running state — a tiny backlog that finishes between polls
+          // should not flash any UI.
+          if (sawRunning && !dismissed) {
+            card.hidden = false;
+            renderDone(snap);
+            if (hideTimer) clearTimeout(hideTimer);
+            hideTimer = setTimeout(() => {
+              card.hidden = true;
+            }, 3500);
+          }
+          stopPolling();
+        }
+
+        dismissBtn.addEventListener("click", () => {
+          dismissed = true;
+          card.hidden = true;
+          if (hideTimer) clearTimeout(hideTimer);
+          stopPolling();
+        });
+
+        // Kick off polling; the sidecar boots in parallel with the renderer.
+        schedule(POLL_WAIT_MS);
+      })();
 
       // Settings sub-tab switching
       const settingsSubTabs = document.querySelectorAll(".settings-sub-nav button");

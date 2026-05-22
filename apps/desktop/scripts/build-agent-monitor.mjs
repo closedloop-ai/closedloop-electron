@@ -66,6 +66,12 @@ const generatedHooksRoute = path.join(
   "routes",
   "hooks.js",
 );
+const generatedImportRoute = path.join(
+  generatedRootDir,
+  "server",
+  "routes",
+  "import.js",
+);
 const generatedPricingRoute = path.join(
   generatedRootDir,
   "server",
@@ -108,7 +114,17 @@ const CODEX_MODULES = ["codex-home", "codex-parser", "codex-import", "codex-watc
 const CURSOR_MODULES = ["cursor-home", "cursor-parser", "cursor-import", "cursor-watcher"];
 const COPILOT_MODULES = ["copilot-home", "copilot-parser", "copilot-import", "copilot-watcher"];
 const OPENCODE_MODULES = ["opencode-home", "opencode-parser", "opencode-import", "opencode-watcher"];
-const SHARED_MODULES = ["harness-watcher-utils", "import-session-utils", "parser-utils", "catchup-cache"];
+const SHARED_MODULES = [
+  "harness-watcher-utils",
+  "import-session-utils",
+  "parser-utils",
+  "catchup-cache",
+  // CLOSEDLOOP FEA-1334: cold-start ingest orchestration + persisted-cache
+  // path resolution + the progress singleton GET /api/import/progress reads.
+  "ingest-paths",
+  "ingest-progress",
+  "ingest-orchestrator",
+];
 const MULTI_HARNESS_SPECS = [
   {
     key: "codex",
@@ -526,6 +542,7 @@ function materializeRuntimeTree() {
   patchDbFile(generatedDbFile);
   patchPricingRoute(generatedPricingRoute);
   patchHooksRoute(generatedHooksRoute);
+  patchImportRoute(generatedImportRoute);
   patchPushFile(generatedPushLib);
   patchCcDiscovery(generatedCcDiscovery);
   writeFileSync(generatedUninstallHooks, UNINSTALL_HOOKS_SOURCE, "utf8");
@@ -655,24 +672,31 @@ function patchServerIndex(file) {
       "    }",
     ],
   );
-  const importPatchLines = MULTI_HARNESS_SPECS.flatMap(
-    ({ key, importFn, importModule, importedLog, errorLog }) => [
-      "  try {",
-      `    const { ${importFn} } = require("./lib/${importModule}");`,
-      `    ${importFn}(_dbMod)`,
-      "      .then(({ imported, errors }) => {",
-      "        if (imported > 0)",
-      `          console.log("Imported " + imported + " ${importedLog}");`,
-      "        if (errors > 0)",
-      `          console.log(errors + " ${errorLog}");`,
-      "      })",
-      "      .catch(() => {});",
-      "  } catch (err) {",
-      `    console.warn("${key} import failed to start:", err.message);`,
-      "  }",
-      "",
-    ],
+  // CLOSEDLOOP FEA-1334: a single ingest orchestrator replaces the four
+  // independent per-harness import chains. It runs every non-Claude importer
+  // as one coordinated unit (still fire-and-forget, still never blocks boot)
+  // and feeds the ingest-progress singleton that GET /api/import/progress
+  // exposes to the desktop floating progress card. The harness importers are
+  // dependency-injected so ingest-orchestrator.js stays a pure, identical
+  // module in both the generated runtime tree and the source tree.
+  const orchestratorHarnessLines = MULTI_HARNESS_SPECS.map(
+    ({ key, importFn, importModule }) =>
+      `        { key: ${JSON.stringify(key)}, importAll: require("./lib/${importModule}").${importFn} },`,
   );
+  const importPatchLines = [
+    "  try {",
+    '    const { ingestAllHarnesses } = require("./agent-monitor-shared/ingest-orchestrator");',
+    "    ingestAllHarnesses({",
+    "      dbModule: _dbMod,",
+    "      harnesses: [",
+    ...orchestratorHarnessLines,
+    "      ],",
+    "    }).catch(() => {});",
+    "  } catch (err) {",
+    '    console.warn("ingest orchestrator failed to start:", err.message);',
+    "  }",
+    "",
+  ];
 
   // CLOSEDLOOP multi-harness support — start watchers for all non-Claude harnesses
   // next to cc-watcher (these tools have no hooks; the watcher is their only live path).
@@ -728,12 +752,12 @@ function patchServerIndex(file) {
     );
   }
 
-  // CLOSEDLOOP multi-harness support — import sessions from all non-Claude
-  // harnesses on every startup (not gated on a zero-row count, unlike the
-  // Claude import: these tools have no hooks so sessions created while the
-  // app was closed must still appear; all imports are idempotent).
-  // Fire-and-forget; never blocks boot.
-  if (!source.includes("importAllCodexSessions")) {
+  // CLOSEDLOOP FEA-1334 — import sessions from all non-Claude harnesses on
+  // every startup via the unified ingest orchestrator (not gated on a
+  // zero-row count, unlike the Claude import: these tools have no hooks so
+  // sessions created while the app was closed must still appear; all imports
+  // are idempotent). Fire-and-forget; never blocks boot.
+  if (!source.includes("ingestAllHarnesses")) {
     const tailNeedle = [
       "  }",
       "}",
@@ -1181,6 +1205,41 @@ function patchHooksRoute(file) {
     );
   }
 
+  writeFileSync(file, source, "utf8");
+}
+
+// CLOSEDLOOP FEA-1334: expose cold-start ingest progress so the desktop
+// renderer can show a floating "catching up on agent history" card on every
+// launch. The ingest orchestrator writes into the ingest-progress singleton;
+// this read-only endpoint snapshots it. Idempotent string-anchor patch.
+function patchImportRoute(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes('router.get("/progress"')) return;
+
+  const needle = "module.exports = router;";
+  if (!source.includes(needle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the import-route module.exports anchor (FEA-1334 progress endpoint).`,
+    );
+  }
+  source = source.replace(
+    needle,
+    [
+      "// CLOSEDLOOP FEA-1334: read-only snapshot of cold-start ingest progress",
+      "// for the desktop floating progress card. The ingest orchestrator writes",
+      "// into the ingest-progress singleton; this endpoint only reads it.",
+      'router.get("/progress", (_req, res) => {',
+      "  try {",
+      '    const progress = require("../agent-monitor-shared/ingest-progress");',
+      "    res.json(progress.snapshot());",
+      "  } catch (err) {",
+      "    res.status(500).json({ error: String((err && err.message) || err) });",
+      "  }",
+      "});",
+      "",
+      needle,
+    ].join("\n"),
+  );
   writeFileSync(file, source, "utf8");
 }
 
@@ -1708,6 +1767,21 @@ function assertGeneratedTree() {
         `Generated server/index.js is missing the ${label} watcher/import wiring (${fn}).`,
       );
     }
+  }
+
+  // CLOSEDLOOP FEA-1334 hard-gates: a future upstream bump that breaks an
+  // anchor must fail the build, not silently drop the ingest orchestrator or
+  // the progress endpoint that powers the desktop floating progress card.
+  if (!serverIndex.includes("ingestAllHarnesses")) {
+    throw new Error(
+      "Generated server/index.js is missing the FEA-1334 ingest orchestrator wiring (ingestAllHarnesses).",
+    );
+  }
+  const importRouteSource = readFileSync(generatedImportRoute, "utf8");
+  if (!importRouteSource.includes('router.get("/progress"')) {
+    throw new Error(
+      "Generated server/routes/import.js is missing the FEA-1334 /api/import/progress endpoint.",
+    );
   }
   for (const { modules } of MULTI_HARNESS_SPECS) {
     for (const m of modules) {

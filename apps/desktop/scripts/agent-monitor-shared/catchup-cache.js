@@ -8,15 +8,56 @@
  * time (FEA-1316). With this cache, an unchanged file is skipped with one
  * stat() call.
  *
- * Cache is per-process and best-effort: a process restart costs one full
- * re-parse on the next tick, which is fine because the host (server/index.js
- * boot path) already does a startup import.
+ * Persistence (FEA-1334): when constructed with a `persistPath`, the cache
+ * loads its entries from a JSON file on startup and flushes them back on
+ * demand. Without persistence the cache is per-process, so a process restart
+ * costs one full re-parse of every historical file on the next boot import —
+ * which is exactly the cold-start cost that grows as a user accumulates
+ * sessions. A persisted cache survives the restart: the boot importer skips
+ * unchanged files with a single stat() call instead of a full parse.
+ * Persistence is best-effort — a missing or corrupt cache file simply starts
+ * empty, and write failures are swallowed (the cache stays correct in memory).
  */
 const fs = require("fs");
+const path = require("path");
 
-function createCatchupCache() {
+const PERSIST_VERSION = 1;
+
+/**
+ * @param {{ persistPath?: string }} [options]
+ *   persistPath — absolute path to a JSON file used to persist cache entries
+ *   across process restarts. When omitted the cache is in-memory only and
+ *   behaves exactly as the original per-process FEA-1316 cache.
+ */
+function createCatchupCache(options = {}) {
+  const persistPath =
+    typeof options.persistPath === "string" && options.persistPath.length > 0
+      ? options.persistPath
+      : null;
+
   /** @type {Map<string, { mtimeMs: number, size: number }>} */
   const seen = new Map();
+  let dirty = false;
+
+  if (persistPath) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(persistPath, "utf8"));
+      const entries = parsed && parsed.entries;
+      if (entries && typeof entries === "object") {
+        for (const [key, value] of Object.entries(entries)) {
+          if (
+            value &&
+            typeof value.mtimeMs === "number" &&
+            typeof value.size === "number"
+          ) {
+            seen.set(key, { mtimeMs: value.mtimeMs, size: value.size });
+          }
+        }
+      }
+    } catch {
+      /* missing or corrupt cache file — start empty, non-fatal */
+    }
+  }
 
   /**
    * Returns { unchanged, stat }. When unchanged is false the caller should
@@ -45,6 +86,7 @@ function createCatchupCache() {
   function markSeenWith(filePath, stat) {
     if (stat) {
       seen.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size });
+      dirty = true;
     }
   }
 
@@ -60,6 +102,7 @@ function createCatchupCache() {
       return;
     }
     seen.set(filePath, { mtimeMs: stat.mtimeMs, size: stat.size });
+    dirty = true;
   }
 
   /**
@@ -69,7 +112,32 @@ function createCatchupCache() {
   function pruneTo(currentPaths) {
     const keep = new Set(currentPaths);
     for (const key of seen.keys()) {
-      if (!keep.has(key)) seen.delete(key);
+      if (!keep.has(key)) {
+        seen.delete(key);
+        dirty = true;
+      }
+    }
+  }
+
+  /**
+   * Persist the cache to disk if it changed since the last flush and a
+   * persistPath was configured. Best-effort: write failures are swallowed.
+   * No-op (and no disk write) when nothing changed — an unchanged catchup
+   * tick costs zero IO here.
+   */
+  function flush() {
+    if (!persistPath || !dirty) return;
+    dirty = false;
+    try {
+      fs.mkdirSync(path.dirname(persistPath), { recursive: true });
+      const entries = {};
+      for (const [key, value] of seen) entries[key] = value;
+      fs.writeFileSync(
+        persistPath,
+        JSON.stringify({ version: PERSIST_VERSION, entries }),
+      );
+    } catch {
+      /* best-effort persistence — cache stays correct in memory */
     }
   }
 
@@ -78,10 +146,20 @@ function createCatchupCache() {
   }
 
   function clear() {
+    if (seen.size > 0) dirty = true;
     seen.clear();
   }
 
-  return { isUnchanged, markSeen, markSeenWith, pruneTo, size, clear };
+  return {
+    isUnchanged,
+    markSeen,
+    markSeenWith,
+    pruneTo,
+    flush,
+    size,
+    clear,
+    persisted: persistPath != null,
+  };
 }
 
 module.exports = { createCatchupCache };
