@@ -22,6 +22,32 @@ const { parseRolloutFile } = require(
   parseRolloutFile: (p: string) => Promise<Record<string, unknown> | null>;
 };
 
+type ParsedCodexSession = {
+  sessionId: string;
+  cwd: string | null;
+  model: string | null;
+  gitBranch: string | null;
+  version: string | null;
+  name: string;
+  entrypoint: string;
+  userMessages: number;
+  assistantMessages: number;
+  thinkingBlockCount: number;
+  startedAt: string;
+  endedAt: string;
+  toolUses: Array<{ name: string }>;
+  tokensByModel: Record<
+    string,
+    {
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheWrite: number;
+    }
+  >;
+  turnDurations: Array<{ durationMs: number; timestamp: string }>;
+};
+
 const UUID = "11111111-1111-4111-8111-111111111111";
 
 function writeRollout(name: string, lines: unknown[]): string {
@@ -96,7 +122,7 @@ test("parses the modern RolloutLine envelope into the shared session shape", asy
     },
   ]);
 
-  const s = (await parseRolloutFile(file)) as Record<string, any>;
+  const s = (await parseRolloutFile(file)) as ParsedCodexSession;
   assert.ok(s, "expected a parsed session");
   assert.equal(s.sessionId, UUID);
   assert.equal(s.cwd, "/Users/dev/myproj");
@@ -119,6 +145,12 @@ test("parses the modern RolloutLine envelope into the shared session shape", asy
     cacheRead: 400,
     cacheWrite: 0,
   });
+  assert.deepEqual(s.turnDurations, [
+    {
+      durationMs: 3000,
+      timestamp: "2026-05-18T10:00:05.000Z",
+    },
+  ]);
   // Shape parity with the Claude parser (fields importSession reads).
   for (const k of [
     "messageTimestamps",
@@ -139,7 +171,7 @@ test("tolerates bare/legacy records (no envelope, no timestamp on items)", async
     { type: "message", role: "user", content: "hi" },
     { type: "function_call", name: "apply_patch", arguments: "{}" },
   ]);
-  const s = (await parseRolloutFile(file)) as Record<string, any>;
+  const s = (await parseRolloutFile(file)) as ParsedCodexSession;
   assert.ok(s);
   assert.equal(s.cwd, "/x");
   assert.equal(s.userMessages, 1);
