@@ -52,6 +52,7 @@ import { registerChatSessionRoutes } from "./operations/chat-session.js";
 import { ClaudeProvider, CodexProvider, ProviderRegistry } from "./operations/chat-providers.js";
 import { ProcessManager } from "./process-manager.js";
 import { SymphonyDirNotConfiguredError } from "./operations/symphony-utils.js";
+import { registerUpdateAndRestartRoutes } from "./operations/update-and-restart.js";
 
 export interface GatewayRouterOptions {
   webAppOrigin: string;
@@ -89,6 +90,9 @@ export interface GatewayRouterOptions {
   ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult;
   getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
   applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
+  checkForUpdate?: () => Promise<{ updateAvailable: boolean; version?: string }>;
+  applyUpdate?: () => Promise<void>;
+  isUpdateAndRestartEnabled?: () => boolean;
 }
 
 export interface GatewayActivityEvent {
@@ -314,6 +318,13 @@ export class GatewayRouter {
       providerRegistry,
       this.options.getGatewayId
     );
+    if (this.options.checkForUpdate && this.options.applyUpdate && this.options.isUpdateAndRestartEnabled) {
+      registerUpdateAndRestartRoutes(this.operationDispatcher, {
+        isUpdateAndRestartEnabled: this.options.isUpdateAndRestartEnabled,
+        checkForUpdate: this.options.checkForUpdate,
+        applyUpdate: this.options.applyUpdate,
+      });
+    }
     registerSecurityUpgradeRoutes(this.operationDispatcher, {
       getGatewayId: this.options.getGatewayId,
       getComputeTargetId: this.options.getComputeTargetId,

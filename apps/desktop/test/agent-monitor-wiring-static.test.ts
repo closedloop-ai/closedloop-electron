@@ -8,6 +8,10 @@ const read = (relative: string): string =>
 const appSource = read("../src/main/app.ts");
 const agentMonitorPathSource = read("../src/main/agent-monitor-path.ts");
 const buildScriptSource = read("../scripts/build-agent-monitor.mjs");
+const generatedDbUrl = new URL("../.generated/agent-monitor/server/db.js", import.meta.url);
+const generatedDbSource = existsSync(generatedDbUrl)
+  ? readFileSync(generatedDbUrl, "utf8")
+  : null;
 const plansRouteSource = read("../scripts/agent-monitor-plans/plans-route.js");
 const claudeDocSource = read("../CLAUDE.md");
 const shutdownSource = read("../src/main/shutdown.ts");
@@ -113,6 +117,23 @@ test("build script materializes a generated runtime tree with the host patches",
   assert.match(buildScriptSource, /stopCcWatcher/);
 });
 
+test("session overview token totals include compaction baselines", () => {
+  assert.match(
+    buildScriptSource,
+    /COALESCE\(SUM\(input_tokens \+ baseline_input\), 0\) as input_tokens/,
+  );
+  if (generatedDbSource !== null) {
+    assert.match(
+      generatedDbSource,
+      /COALESCE\(SUM\(input_tokens \+ baseline_input\), 0\) as input_tokens/,
+    );
+    assert.match(
+      generatedDbSource,
+      /COALESCE\(SUM\(cache_write_tokens \+ baseline_cache_write\), 0\) as cache_write_tokens/,
+    );
+  }
+});
+
 test("electron-builder ships the generated agent-monitor runtime tree unpacked", () => {
   assert.match(
     electronBuilder,
@@ -182,13 +203,10 @@ test("agent monitor defaults on; plan extraction is feature-gated and defaults o
   assert.match(settingsStoreSource, /setAgentMonitorEnabled\(agentMonitorEnabled: boolean\)/);
   assert.match(settingsStoreSource, /getPlanExtractionEnabled\(\)/);
   assert.match(settingsStoreSource, /setPlanExtractionEnabled\(planExtractionEnabled: boolean\)/);
+  // update() handles all registered flags generically via FLAG_KEYS loop
   assert.match(
     settingsStoreSource,
-    /if \(typeof partial\.agentMonitorEnabled === "boolean"\) \{[\s\S]*this\.store\.set\("agentMonitorEnabled"/,
-  );
-  assert.match(
-    settingsStoreSource,
-    /if \(typeof partial\.planExtractionEnabled === "boolean"\) \{[\s\S]*this\.store\.set\("planExtractionEnabled"/,
+    /for \(const key of FLAG_KEYS\)/,
   );
 });
 
@@ -280,7 +298,9 @@ test("renderer wires the Agent Dashboard sidecar into the sidebar and gates it o
   assert.match(indexHtml, /<nav class="sb-nav" id="sidebarNav"/);
   assert.match(indexHtml, /agent-disabled/);
   assert.match(indexHtml, /<section id="claude-dashboard" class="panel active">/);
-  assert.match(indexHtml, /id="agentMonitorEnabled"/);
+  // agentMonitorEnabled toggle moved to the Feature Flags panel (rendered via JS from the registry).
+  assert.match(indexHtml, /id="featureFlagsList"/);
+  assert.match(indexHtml, /function renderFeatureFlagsPanel/);
   assert.match(indexHtml, /function syncAgentMonitorTabVisibility/);
   assert.match(indexHtml, /kind === "agent" && !cachedAgentMonitorEnabled/);
   assert.match(indexHtml, /id="claudeDashFrame"/);

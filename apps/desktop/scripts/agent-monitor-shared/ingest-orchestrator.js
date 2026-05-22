@@ -15,9 +15,10 @@
  * module pure coordination logic — identical in both trees and trivially
  * unit-testable with fakes.
  *
- * Claude is intentionally NOT orchestrated here: its legacy import is a
- * one-time bootstrap gated on an empty DB (`if (existingCount === 0)`),
- * a separate concern from the every-boot non-Claude catch-up.
+ * Claude is NOT imported here — each harness is dependency-injected by the
+ * caller.  The generated server/index.js injects Claude into the harness
+ * array when the DB is empty (`existingCount === 0`) so the one-time legacy
+ * import shares the progress bar alongside the non-Claude catch-up.
  */
 
 /**

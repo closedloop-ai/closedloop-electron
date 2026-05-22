@@ -151,6 +151,7 @@ export interface DesktopSettings {
   };
   savedConfigs: SavedConfig[];
   activeConfigId: string | null;
+  updateAndRestartEnabled: boolean;
 }
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
@@ -172,5 +173,6 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   verboseLogging: false,
   binaryPaths: {},
   savedConfigs: [],
-  activeConfigId: null
+  activeConfigId: null,
+  updateAndRestartEnabled: false
 };

@@ -803,6 +803,67 @@
         transform: translateX(16px);
       }
 
+      .toggle-switch input:disabled + .toggle-track {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .flag-row {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        padding: 12px 0;
+        border-bottom: 1px solid var(--border);
+        gap: 16px;
+      }
+      .flag-row:last-child { border-bottom: none; }
+      .flag-info { flex: 1; min-width: 0; }
+      .flag-label {
+        font-weight: 500;
+        font-size: 13px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .flag-key {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--muted-foreground);
+        margin-top: 2px;
+      }
+      .flag-desc {
+        font-size: 12px;
+        color: var(--muted-foreground);
+        margin-top: 4px;
+        line-height: 1.45;
+      }
+      .flag-badge {
+        display: inline-block;
+        font-size: 10px;
+        font-weight: 600;
+        padding: 1px 6px;
+        border-radius: 4px;
+        text-transform: uppercase;
+        letter-spacing: 0.02em;
+      }
+      .flag-badge[data-source="default"] { background: var(--border); color: var(--muted-foreground); }
+      .flag-badge[data-source="user"] { background: var(--primary); color: #fff; }
+      .flag-badge[data-source="env"] { background: #b45309; color: #fff; }
+      .flag-category {
+        display: inline-block;
+        font-size: 10px;
+        padding: 1px 5px;
+        border-radius: 3px;
+        background: var(--border);
+        color: var(--muted-foreground);
+      }
+      .flag-toggle { flex-shrink: 0; padding-top: 2px; }
+      .flag-restart-hint {
+        font-size: 10px;
+        color: #b45309;
+        margin-top: 2px;
+      }
+
       .logs-toolbar {
         display: flex;
         align-items: center;
@@ -3351,6 +3412,7 @@
           <button data-settings-tab="security">Security</button>
           <button data-settings-tab="policies">Policies</button>
           <button data-settings-tab="binary-paths">CLI Tools</button>
+          <button data-settings-tab="feature-flags">Labs</button>
         </div>
 
         <!-- Relay / Gateway sub-tab -->
@@ -3432,16 +3494,6 @@
               <div class="row">
                 <label for="webAppOrigin">Web App Origin (CORS)</label>
                 <input id="webAppOrigin" />
-              </div>
-              <div class="row">
-                <label for="agentMonitorEnabled">Agent Dashboard</label>
-                <div>
-                  <label class="toggle-switch" title="Runs the local Agent Dashboard sidecar that powers the Dashboard and agent views in the sidebar. On by default.">
-                    <input id="agentMonitorEnabled" type="checkbox" />
-                    <span class="toggle-track"></span>
-                  </label>
-                  <p class="field-help" style="margin-top:8px">Runs the local Agent Dashboard sidecar that powers the Dashboard and agent views in the sidebar. On by default; turning it off hides those views.</p>
-                </div>
               </div>
               <div class="row">
                 <label for="reprocessLogsBtn">Reprocess all logs</label>
@@ -3716,6 +3768,18 @@
             <button id="savePolicies">Save</button>
             <button class="secondary" id="reloadPolicies">Reload</button>
             <p class="muted" id="policiesMessage"></p>
+          </div>
+        </div>
+
+        <!-- Feature Flags sub-tab -->
+        <div id="settings-feature-flags" class="settings-sub-panel">
+          <div class="settings-group">
+            <h3 class="settings-group-title">Labs</h3>
+            <p class="settings-group-desc">Early access to experimental features and advanced controls. Flip a switch, see what happens.</p>
+            <div id="featureFlagsList"></div>
+          </div>
+          <div class="settings-tab-footer">
+            <p class="muted" id="featureFlagsMessage"></p>
           </div>
         </div>
       </section>
@@ -4381,6 +4445,9 @@
         if (tabName === "relay-gateway" && typeof loadSavedConfigs === "function") {
           void loadSavedConfigs();
         }
+        if (tabName === "feature-flags" && typeof renderFeatureFlagsPanel === "function") {
+          void renderFeatureFlagsPanel();
+        }
       }
 
       settingsSubTabs.forEach((btn) => {
@@ -4403,10 +4470,71 @@
         void refreshCommandSigningKeys();
       });
 
+      // ── Feature Flags panel ──────────────────────────────────────────
+      const featureFlagsList = document.getElementById("featureFlagsList");
+      const featureFlagsMessage = document.getElementById("featureFlagsMessage");
+
+      async function renderFeatureFlagsPanel() {
+        if (!featureFlagsList) return;
+        try {
+          const data = await api.getAllFlags();
+          const { registry, flags } = data;
+          featureFlagsList.innerHTML = "";
+          for (const def of registry) {
+            const state = flags.find((f) => f.key === def.key);
+            const value = state ? state.value : def.default;
+            const source = state ? state.source : "default";
+            const isEnvLocked = source === "env";
+
+            const row = document.createElement("div");
+            row.className = "flag-row";
+            row.innerHTML = `
+              <div class="flag-info">
+                <div class="flag-label">
+                  ${def.label}
+                  <span class="flag-badge" data-source="${source}">${source}</span>
+                  <span class="flag-category">${def.category}</span>
+                </div>
+                <div class="flag-key">${def.key}</div>
+                <div class="flag-desc">${def.description}</div>
+                ${def.requiresRestart ? '<div class="flag-restart-hint">Requires restart to take full effect</div>' : ""}
+              </div>
+              <div class="flag-toggle">
+                <label class="toggle-switch" ${isEnvLocked ? `title="Forced by env var ${def.envOverride || ""}"` : ""}>
+                  <input type="checkbox" data-flag-key="${def.key}" ${value ? "checked" : ""} ${isEnvLocked ? "disabled" : ""} />
+                  <span class="toggle-track"></span>
+                </label>
+              </div>`;
+            row.querySelector("input")?.addEventListener("change", async (e) => {
+              const checkbox = e.target;
+              const key = checkbox.dataset.flagKey;
+              if (featureFlagsMessage) featureFlagsMessage.textContent = "";
+              await api.updateSettings({ [key]: checkbox.checked });
+              if (key === "agentMonitorEnabled") {
+                syncAgentMonitorTabVisibility(checkbox.checked);
+              }
+              if (featureFlagsMessage) featureFlagsMessage.textContent = "Saved.";
+              setTimeout(() => {
+                if (featureFlagsMessage) featureFlagsMessage.textContent = "";
+              }, 2000);
+            });
+            featureFlagsList.appendChild(row);
+          }
+        } catch (err) {
+          featureFlagsList.innerHTML = '<p class="muted">Failed to load feature flags.</p>';
+        }
+      }
+
+      api.onFlagsChanged(() => {
+        const flagsPanel = document.getElementById("settings-feature-flags");
+        if (flagsPanel?.classList.contains("active")) {
+          void renderFeatureFlagsPanel();
+        }
+      });
+
       const relayOrigin = document.getElementById("relayOrigin");
       const apiOrigin = document.getElementById("apiOrigin");
       const webAppOrigin = document.getElementById("webAppOrigin");
-      const agentMonitorEnabled = document.getElementById("agentMonitorEnabled");
       const apiKey = document.getElementById("apiKey");
       const apiKeyStatus = document.getElementById("apiKeyStatus");
       const sandboxBaseDirectory = document.getElementById("sandboxBaseDirectory");
@@ -5146,9 +5274,6 @@
         cachedPlanExtractionEnabled = settings.planExtractionEnabled === true;
         cachedAgentMonitorEnabled = settings.agentMonitorEnabled === true;
         buildSidebar();
-        if (agentMonitorEnabled) {
-          agentMonitorEnabled.checked = cachedAgentMonitorEnabled;
-        }
         syncAgentMonitorTabVisibility(cachedAgentMonitorEnabled);
         sandboxBaseDirectory.value = settings.sandboxBaseDirectory || "";
         cachedCommandSigningEnforcementEnabled = settings.commandSigningEnforcementEnabled === true;
@@ -5835,9 +5960,7 @@
           relayOrigin: relayOrigin.value.trim(),
           apiOrigin: apiOrigin.value.trim(),
           webAppOrigin: webAppOrigin.value.trim(),
-          agentMonitorEnabled: agentMonitorEnabled?.checked === true
         });
-        syncAgentMonitorTabVisibility(agentMonitorEnabled?.checked === true);
         relayGatewayMessage.textContent = "Saved.";
         await Promise.all([refreshRuntime(), refreshApprovals()]);
       }
