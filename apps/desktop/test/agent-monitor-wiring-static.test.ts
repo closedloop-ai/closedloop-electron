@@ -202,13 +202,10 @@ test("runtime resolves the generated tree and sidecar wiring still uses the fixe
   assert.match(sidecarSource, /resolveRuntimeSupportNodePaths\("agent-dashboard"\)/);
   assert.match(sidecarSource, /path\.dirname\(packageRoot\)/);
   assert.match(sidecarSource, /process\.resourcesPath,\s*"app\.asar",\s*"app",\s*"node_modules"/);
-  assert.match(sidecarSource, /reapStaleAgentMonitorListener\(this\.port, entryFile\)/);
-  assert.match(sidecarSource, /probeListenerForPort\(this\.port\)/);
-  assert.match(sidecarSource, /ownsHealthyListener\(/);
-  assert.match(sidecarSource, /resolveListenerProbe/);
-  assert.match(sidecarSource, /spawnSync\(\s*"lsof"/);
-  assert.match(sidecarSource, /spawnSync\(\s*"ps"/);
+  assert.match(sidecarSource, /const healthy = await this\.waitForHealth\(\);/);
   assert.match(sidecarSource, /\/api\/health/);
+  assert.doesNotMatch(sidecarSource, /spawnSync\(\s*"lsof"/);
+  assert.doesNotMatch(sidecarSource, /spawnSync\(\s*"ps"/);
   assert.match(
     sidecarSource,
     /async stop\(\): Promise<void> \{[\s\S]*this\.started = false;[\s\S]*this\.stopping = true;[\s\S]*this\.restartAttempts = 0;[\s\S]*this\.stopping = false;/,

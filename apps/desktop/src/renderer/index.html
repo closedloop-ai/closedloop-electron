@@ -4133,6 +4133,7 @@
         const status = document.getElementById("claudeDashStatus");
         if (!status) return;
         status.className = "dash-loading";
+        status.style.display = "flex";
         status.innerHTML =
           '<div class="dash-loading-spinner"></div>' +
           '<div class="dash-loading-title">Starting your dashboard…</div>' +
@@ -4152,7 +4153,6 @@
         }
         void refreshClaudeHooksToggle();
         if (claudeDashLoaded) { sizeClaudeFrame(); return; }
-        status.style.display = "block";
         renderDashLoading();
 
         const tick = async () => {
