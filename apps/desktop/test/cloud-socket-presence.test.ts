@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { afterEach, describe, test } from "node:test";
+import { afterEach, describe, mock, test } from "node:test";
 import {
   CloudSocketService,
   parseDesktopAgentSessionsAck,
@@ -43,6 +43,7 @@ function createStubOptions(
 }
 
 afterEach(() => {
+  mock.timers.reset();
   gatewayLog.clear();
   gatewayLog.setVerbose(false);
 });
@@ -450,6 +451,45 @@ describe("T-3.1: hello payload version fields", () => {
     assert.deepEqual(ack, {
       accepted: false,
       reason: "rate_limited",
+    });
+  });
+
+  test("sendAgentSessions waits for the longer relay ack window before timing out", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+
+    const service = new CloudSocketService(createStubOptions());
+    const fakeSocket = new FakeSocket();
+    (service as unknown as Record<string, unknown>)["socket"] = fakeSocket;
+    (service as unknown as Record<string, unknown>)["stopped"] = false;
+    (service as unknown as Record<string, unknown>)["targetId"] = "target-1";
+
+    const ackPromise = service.sendAgentSessions({
+      schemaVersion: 1,
+      batchId: "batch-1",
+      syncMode: "incremental",
+      sessionCount: 0,
+      sessions: [],
+    });
+
+    mock.timers.tick(29_999);
+    await Promise.resolve();
+
+    let settled = false;
+    void ackPromise.then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    assert.equal(
+      settled,
+      false,
+      "agent-session acks must remain pending before the full 30s window elapses",
+    );
+
+    mock.timers.tick(1);
+    const ack = await ackPromise;
+    assert.deepEqual(ack, {
+      accepted: false,
+      reason: "ack_timeout",
     });
   });
 });
