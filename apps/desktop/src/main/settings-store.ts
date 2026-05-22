@@ -165,6 +165,13 @@ export class SettingsStore {
     );
   }
 
+  getDashboardWelcomeSeen(): boolean {
+    return this.store.get(
+      "dashboardWelcomeSeen",
+      DEFAULT_DESKTOP_SETTINGS.dashboardWelcomeSeen,
+    );
+  }
+
   // --- Generic flag accessors (registry-driven) ---
 
   /**
@@ -210,7 +217,6 @@ export class SettingsStore {
   }
 
   // --- Legacy flag getters (thin wrappers for zero call-site churn) ---
-
   getCloudCommandsPaused(): boolean {
     return this.getFlag("cloudCommandsPaused");
   }
@@ -249,6 +255,10 @@ export class SettingsStore {
 
   setOnboardingPopupDismissedPermanent(onboardingPopupDismissedPermanent: boolean): void {
     this.store.set("onboardingPopupDismissedPermanent", onboardingPopupDismissedPermanent);
+  }
+
+  setDashboardWelcomeSeen(dashboardWelcomeSeen: boolean): void {
+    this.store.set("dashboardWelcomeSeen", dashboardWelcomeSeen);
   }
 
   setCloudCommandsPaused(cloudCommandsPaused: boolean): void {

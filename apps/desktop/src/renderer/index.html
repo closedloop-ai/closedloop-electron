@@ -1555,6 +1555,95 @@
         padding: 22px;
       }
 
+      /* ── Dashboard load screen + first-run welcome (FEA-1333) ───── */
+      .dash-loading {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        padding: 64px 24px;
+        text-align: center;
+      }
+      .dash-loading-spinner {
+        width: 30px;
+        height: 30px;
+        border-radius: 50%;
+        border: 3px solid var(--muted);
+        border-top-color: var(--primary);
+        animation: dash-spin 0.8s linear infinite;
+      }
+      @keyframes dash-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      .dash-loading-title {
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--foreground);
+      }
+      .dash-loading-sub {
+        font-size: 13px;
+        color: var(--muted-foreground);
+        max-width: 380px;
+        line-height: 1.5;
+      }
+      /* The welcome reuses .onboarding-overlay for the backdrop; it must sit
+         above the ingest banner (z-index 1300) as a first-run takeover. */
+      #dashboardWelcome {
+        z-index: 1400;
+      }
+      .welcome-card {
+        width: min(560px, 100%);
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 32px;
+        text-align: center;
+      }
+      .welcome-card h1 {
+        margin: 0 0 10px;
+        font-size: 22px;
+        color: var(--foreground);
+      }
+      .welcome-subhead {
+        margin: 0 0 22px;
+        color: var(--muted-foreground);
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      .welcome-bullets {
+        list-style: none;
+        margin: 0 0 24px;
+        padding: 0;
+        text-align: left;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .welcome-bullets li {
+        display: flex;
+        gap: 10px;
+        font-size: 13px;
+        line-height: 1.45;
+        color: var(--foreground);
+      }
+      .welcome-bullets .welcome-check {
+        flex: none;
+        color: var(--primary);
+        font-weight: 700;
+      }
+      .welcome-actions {
+        display: flex;
+        justify-content: center;
+      }
+      .welcome-footer {
+        margin: 16px 0 0;
+        font-size: 12px;
+        color: var(--muted-foreground);
+      }
+
       .settings-columns {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -3129,6 +3218,39 @@
         <p class="muted" id="onboardingMessage"></p>
       </div>
     </div>
+    <div id="dashboardWelcome" class="onboarding-overlay hidden">
+      <div class="welcome-card">
+        <h1>See every coding agent you use — in one place</h1>
+        <p class="welcome-subhead">
+          ClosedLoop watches your local Claude Code, Codex, Cursor, Copilot,
+          and OpenCode sessions — so you can see your work across every tool
+          in one dashboard.
+        </p>
+        <ul class="welcome-bullets">
+          <li>
+            <span class="welcome-check">✓</span>
+            <span><strong>One view across five agents</strong> — sessions,
+            tokens, and cost, rolled up together.</span>
+          </li>
+          <li>
+            <span class="welcome-check">✓</span>
+            <span><strong>Streams in live</strong> — new sessions appear in
+            the dashboard as your agents run.</span>
+          </li>
+          <li>
+            <span class="welcome-check">✓</span>
+            <span><strong>Stays on your machine</strong> — it reads each
+            agent's local data; nothing is uploaded.</span>
+          </li>
+        </ul>
+        <div class="welcome-actions">
+          <button id="dashboardWelcomeStart" class="primary">Get started →</button>
+        </div>
+        <p class="welcome-footer">
+          You can turn the dashboard off anytime in Settings.
+        </p>
+      </div>
+    </div>
     <div id="ingestBanner" class="ingest-banner" role="status" aria-live="polite">
       <div class="ingest-banner-body">
         <div class="ingest-banner-line">
@@ -3274,8 +3396,13 @@
           <span>Enable Claude Code session tracking</span>
           <span id="claudeDashHooksHint" style="color:var(--muted-foreground,#888)">— off (no changes to your global Claude config)</span>
         </div>
-        <div id="claudeDashStatus" style="padding:48px 20px;text-align:center;color:var(--muted-foreground,#888)">
-          Starting Agent Dashboard…
+        <div id="claudeDashStatus" class="dash-loading">
+          <div class="dash-loading-spinner"></div>
+          <div class="dash-loading-title">Starting your dashboard…</div>
+          <div class="dash-loading-sub">
+            Reading your agent sessions. This takes a few seconds the first
+            time.
+          </div>
         </div>
         <iframe id="claudeDashFrame" title="Claude Code Agent Monitor" style="display:none;width:100%;border:0;background:#fff"></iframe>
       </section>
@@ -3997,6 +4124,20 @@
         });
       })();
 
+      // FEA-1333: render the branded dashboard load screen. Called instead of
+      // flattening #claudeDashStatus to plain text, so the spinner + copy
+      // survive each (re)start of the dashboard.
+      function renderDashLoading() {
+        const status = document.getElementById("claudeDashStatus");
+        if (!status) return;
+        status.className = "dash-loading";
+        status.innerHTML =
+          '<div class="dash-loading-spinner"></div>' +
+          '<div class="dash-loading-title">Starting your dashboard…</div>' +
+          '<div class="dash-loading-sub">Reading your agent sessions. ' +
+          "This takes a few seconds the first time.</div>";
+      }
+
       function startClaudeDashboard() {
         const frame = document.getElementById("claudeDashFrame");
         const status = document.getElementById("claudeDashStatus");
@@ -4009,7 +4150,7 @@
         void refreshClaudeHooksToggle();
         if (claudeDashLoaded) { sizeClaudeFrame(); return; }
         status.style.display = "block";
-        status.textContent = "Starting Agent Dashboard…";
+        renderDashLoading();
 
         const tick = async () => {
           try {
@@ -6190,6 +6331,36 @@
         }
       }
 
+      // Set once the user dismisses the welcome. Guards against an in-session
+      // refresh of onboarding state (desktop:onboarding-state-changed) re-
+      // showing the welcome even if the persist IPC failed.
+      let dashboardWelcomeDismissedThisSession = false;
+
+      // FEA-1333: show the one-time Agent Dashboard welcome — but only once
+      // the gateway "Setup Required" overlay is satisfied, so the two
+      // first-run overlays never stack on top of each other.
+      function maybeShowDashboardWelcome(state) {
+        if (dashboardWelcomeDismissedThisSession) return;
+        if (!state || !state.completed) return;
+        if (state.settings && state.settings.dashboardWelcomeSeen) return;
+        const welcome = document.getElementById("dashboardWelcome");
+        if (welcome) welcome.classList.remove("hidden");
+      }
+
+      document
+        .getElementById("dashboardWelcomeStart")
+        ?.addEventListener("click", async () => {
+          // Suppress synchronously on click — independent of the persist IPC.
+          dashboardWelcomeDismissedThisSession = true;
+          document.getElementById("dashboardWelcome")?.classList.add("hidden");
+          try {
+            await api.markDashboardWelcomeSeen();
+          } catch (_) {
+            /* best-effort persistence — the session guard above already
+               prevents any re-show until the next launch */
+          }
+        });
+
       async function loadOnboardingState() {
         const state = await api.getOnboardingState();
         const settings = state?.settings || {};
@@ -6210,6 +6381,7 @@
         } else {
           onboardingOverlay.classList.remove("hidden");
         }
+        maybeShowDashboardWelcome(state);
       }
 
       function updateOnboardingSandboxWarning({ isGitRepo, suggestedPath } = {}) {
@@ -6289,8 +6461,9 @@
           if (Object.keys(binaryPaths).length > 0) {
             payload.binaryPaths = binaryPaths;
           }
-          await api.completeOnboarding(payload);
+          const completedState = await api.completeOnboarding(payload);
           onboardingOverlay.classList.add("hidden");
+          maybeShowDashboardWelcome(completedState);
           await Promise.all([loadSettings(), refreshRuntime(), refreshApiKeyStatus(), refreshApprovals()]);
         } catch (error) {
           onboardingMessage.textContent = `Failed to complete setup: ${error.message}`;
