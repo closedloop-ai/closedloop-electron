@@ -159,6 +159,13 @@ export class SettingsStore {
     );
   }
 
+  getDashboardWelcomeSeen(): boolean {
+    return this.store.get(
+      "dashboardWelcomeSeen",
+      DEFAULT_DESKTOP_SETTINGS.dashboardWelcomeSeen,
+    );
+  }
+
   getCloudCommandsPaused(): boolean {
     return this.store.get("cloudCommandsPaused", DEFAULT_DESKTOP_SETTINGS.cloudCommandsPaused);
   }
@@ -202,6 +209,10 @@ export class SettingsStore {
 
   setOnboardingPopupDismissedPermanent(onboardingPopupDismissedPermanent: boolean): void {
     this.store.set("onboardingPopupDismissedPermanent", onboardingPopupDismissedPermanent);
+  }
+
+  setDashboardWelcomeSeen(dashboardWelcomeSeen: boolean): void {
+    this.store.set("dashboardWelcomeSeen", dashboardWelcomeSeen);
   }
 
   setCloudCommandsPaused(cloudCommandsPaused: boolean): void {

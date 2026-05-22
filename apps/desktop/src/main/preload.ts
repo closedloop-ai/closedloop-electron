@@ -55,6 +55,11 @@ const desktopApi = {
   getOnboardingState: () => ipcRenderer.invoke("desktop:get-onboarding-state") as Promise<unknown>,
   completeOnboarding: (payload: unknown) =>
     ipcRenderer.invoke("desktop:complete-onboarding", payload) as Promise<unknown>,
+  // FEA-1333: mark the one-time Agent Dashboard welcome as seen.
+  markDashboardWelcomeSeen: () =>
+    ipcRenderer.invoke("desktop:mark-dashboard-welcome-seen") as Promise<{
+      ok: boolean;
+    }>,
   startDeviceOnboarding: (payload: unknown) =>
     ipcRenderer.invoke("desktop:start-device-onboarding", payload) as Promise<unknown>,
   dismissOnboardingPopup: (payload: { permanent: boolean }) =>

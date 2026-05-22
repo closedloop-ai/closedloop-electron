@@ -2846,6 +2846,13 @@ export class DesktopApplication {
     ipcMain.handle("desktop:get-onboarding-state", () =>
       this.getOnboardingState(),
     );
+    // FEA-1333: mark the one-time Agent Dashboard welcome as seen so it does
+    // not show again. Separate from desktop:complete-onboarding, which owns
+    // the gateway "Setup Required" flow.
+    ipcMain.handle("desktop:mark-dashboard-welcome-seen", () => {
+      this.settingsStore.setDashboardWelcomeSeen(true);
+      return { ok: true };
+    });
     ipcMain.handle(
       "desktop:complete-onboarding",
       async (
