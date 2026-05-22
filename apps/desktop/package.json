@@ -8,7 +8,7 @@
   "main": "dist/main/index.js",
   "scripts": {
     "dev": "pnpm build && ELECTRON_BIN=$(bash scripts/patch-electron-plist.sh | tail -1) && \"$ELECTRON_BIN\" .",
-    "start": "ELECTRON_BIN=$(bash scripts/patch-electron-plist.sh | tail -1) && \"$ELECTRON_BIN\" .",
+    "start": "pnpm build:agent-monitor && ELECTRON_BIN=$(bash scripts/patch-electron-plist.sh | tail -1) && \"$ELECTRON_BIN\" .",
     "clean:dist": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
     "clean:package": "node -e \"require('fs').rmSync('dist-dmg',{recursive:true,force:true})\"",
     "prebuild": "node -e \"const{execSync:e}=require('child_process'),{writeFileSync:w}=require('fs');const h=e('git rev-parse HEAD').toString().trim();w('src/shared/build-info.ts','// AUTO-GENERATED — do not edit\\nexport const BUILD_COMMIT_HASH = \\\"'+h+'\\\";\\n');\"",
