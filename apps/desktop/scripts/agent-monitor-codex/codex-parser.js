@@ -24,7 +24,7 @@ const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
 const { sessionIdFromRolloutPath } = require("./codex-home");
-const { toIso, safeJson } = require("../agent-monitor-shared/parser-utils");
+const { toIso, safeJson, pushTurnDuration } = require("../agent-monitor-shared/parser-utils");
 
 const RESPONSE_ITEM_TYPES = new Set([
   "message",
@@ -87,13 +87,6 @@ function extractText(content) {
     }
   }
   return parts.join("");
-}
-
-function pushTurnDuration(turnDurations, startedAtIso, endedAtIso) {
-  if (!startedAtIso || !endedAtIso) return;
-  const durationMs = new Date(endedAtIso).getTime() - new Date(startedAtIso).getTime();
-  if (!Number.isFinite(durationMs) || durationMs < 0) return;
-  turnDurations.push({ durationMs, timestamp: endedAtIso });
 }
 
 /**

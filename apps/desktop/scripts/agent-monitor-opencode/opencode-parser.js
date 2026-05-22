@@ -13,6 +13,7 @@ const {
   extractErrorMessage,
   safeJson,
   toIso,
+  pushTurnDuration,
 } = require("../agent-monitor-shared/parser-utils");
 
 function parseJsonCell(value) {
@@ -58,13 +59,6 @@ function collectToolUse(toolUses, toolResultErrors, partRow, part, firstTimestam
       timestamp,
     });
   }
-}
-
-function pushTurnDuration(turnDurations, startedAtIso, endedAtIso) {
-  if (!startedAtIso || !endedAtIso) return;
-  const durationMs = new Date(endedAtIso).getTime() - new Date(startedAtIso).getTime();
-  if (!Number.isFinite(durationMs) || durationMs < 0) return;
-  turnDurations.push({ durationMs, timestamp: endedAtIso });
 }
 
 function parseSessionRow(sessionRow, getMessages, getParts) {

@@ -1370,7 +1370,7 @@ function patchImportHistoryMetaImported(file) {
     "    // dedup protects against duplicate events and the baseline-shifting",
     "    // upsert protects against double-counted tokens.",
     "    if (!meta.imported) {",
-    "      meta = { ...meta, imported: true };",
+    "      meta.imported = true;",
     "    }",
   ].join("\n");
   source = source.replace(needle, replacement);
