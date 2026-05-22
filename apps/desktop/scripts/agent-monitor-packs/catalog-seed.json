@@ -1,6 +1,6 @@
 {
   "seed_version": 12,
-  "_note": "Seed v12 (2026-05-21, FEA-1348): added ECC (Everything Claude Code) as a full Claude+Codex install with marketplace-driven Claude install + sync-script Codex install, plus OpenAI Skills as a catalog placeholder (skills install interactively via `$skill-installer` inside a Codex session — no shell-runnable one-liner exists). v11's idempotent-clone behavior preserved.",
+  "_note": "Seed v12 (2026-05-21, FEA-1348): added ECC (Everything Claude Code) as a Claude Code plugin install, plus OpenAI Skills as a catalog placeholder (skills install interactively via `$skill-installer` inside a Codex session — no shell-runnable one-liner exists). ECC's upstream Codex install is intentionally NOT cataloged — its sync script mutates global Codex config (AGENTS.md, config.toml, git hooksPath) with no clean 1-click uninstall, so only the reversible Claude install path is offered. v11's idempotent-clone behavior preserved.",
   "packs": [
     {
       "pack_id": "closedloop-ai",
@@ -416,17 +416,15 @@
       "display_name": "ECC — Everything Claude Code",
       "category": "framework",
       "github_url": "https://github.com/affaan-m/everything-claude-code",
-      "description": "Agent harness performance optimization system: 232 skills, 60 agents, 75 commands, plus AgentShield (102 security rules that run inside every session). Multi-harness (Claude Code + Codex). One of the largest agent harness frameworks by GitHub stars.",
-      "harnesses": ["claude", "codex"],
+      "description": "Agent harness performance optimization system: 232 skills, 60 agents, 75 commands, plus AgentShield (102 security rules that run inside every session). One of the largest agent harness frameworks by GitHub stars. Installs as a Claude Code plugin.",
+      "harnesses": ["claude"],
       "install_commands": {
-        "claude": "claude plugin marketplace add affaan-m/everything-claude-code && claude plugin install ecc@ecc --scope user",
-        "codex": "(test -d ~/.ecc-source || git clone https://github.com/affaan-m/everything-claude-code ~/.ecc-source) && cd ~/.ecc-source && npm install --silent && bash scripts/sync-ecc-to-codex.sh"
+        "claude": "claude plugin marketplace add affaan-m/everything-claude-code && claude plugin install ecc@ecc --scope user"
       },
       "uninstall_commands": {
-        "claude": "claude plugin uninstall ecc@ecc --scope user 2>/dev/null || true && claude plugin marketplace remove ecc 2>/dev/null || true && rm -rf ~/.claude/rules/ecc",
-        "codex": "rm -f ~/.codex/prompts/ecc-*.md && rm -rf ~/.ecc-source"
+        "claude": "claude plugin uninstall ecc@ecc --scope user 2>/dev/null || true && claude plugin marketplace remove ecc 2>/dev/null || true && rm -rf ~/.claude/rules/ecc"
       },
-      "install_notes": "Three known caveats. (1) Claude's plugin system does NOT distribute `rules` — ECC's rules library has to be copied manually after install. The 'optional next step' shown after install does this for you. (2) The Codex install path clones the upstream repo to ~/.ecc-source (~360MB) and runs `sync-ecc-to-codex.sh`, which lands ~83 command prompt files at ~/.codex/prompts/ecc-*.md, merges MCP servers into ~/.codex/config.toml (add-only — never removes existing servers), and overwrites ~/.codex/AGENTS.md (a backup is saved to ~/.codex/backups/ecc-<timestamp>/). Our uninstall removes the ecc-*.md prompt files and the ~/.ecc-source clone, but does NOT touch config.toml or AGENTS.md — clean those manually if you want a fully pristine state (restore AGENTS.md from the most recent ~/.codex/backups/ecc-* dir). (3) Restart Codex after installing or uninstalling so it reloads prompts and MCP servers.",
+      "install_notes": "One caveat: Claude's plugin system does NOT distribute `rules` — ECC's rules library has to be copied manually after install. The 'optional next step' shown after install does this for you, and the uninstall removes the copied ~/.claude/rules/ecc directory. NOTE: ECC also supports Codex upstream via a sync script, but that install mutates global Codex config (~/.codex/AGENTS.md, config.toml, and the global git hooksPath) in ways a 1-click uninstall can't cleanly reverse — so the catalog ships the Claude install only. Install the Codex side manually from the upstream repo if you want it.",
       "verified": true,
       "post_install": {
         "title": "Optional: install ECC's rules library",
@@ -437,7 +435,6 @@
       },
       "detection_patterns": [
         "/.claude/plugins/cache/ecc/",
-        "/.codex/prompts/ecc-",
         "affaan-m/everything-claude-code"
       ],
       "contents": {
