@@ -18,6 +18,10 @@ import {
   resetResolvedClaudePath,
   readBootstrapRepoOutputs,
 } from "../src/server/operations/symphony-loop.js";
+import {
+  waitForPidsGone,
+  writeBootstrapPluginRegistry,
+} from "./symphony-test-utils.js";
 
 const tempPaths: string[] = [];
 const originalEnv = {
@@ -52,23 +56,6 @@ function makeTempDir(): string {
   return dir;
 }
 
-async function writeBootstrapPluginRegistry(homeDir: string): Promise<void> {
-  const installPath = path.join(homeDir, ".claude", "plugins", "bootstrap-install");
-  await fs.mkdir(installPath, { recursive: true });
-  const registryPath = path.join(homeDir, ".claude", "plugins", "installed_plugins.json");
-  await fs.mkdir(path.dirname(registryPath), { recursive: true });
-  await fs.writeFile(
-    registryPath,
-    JSON.stringify({
-      plugins: {
-        "bootstrap@closedloop-ai": [
-          { installPath, scope: "user", enabled: true, version: "1.0.0" },
-        ],
-      },
-    }),
-  );
-}
-
 async function writeFakeClaude(
   homeDir: string,
   script: string,
@@ -78,28 +65,6 @@ async function writeFakeClaude(
   await fs.writeFile(path.join(fakeBin, "claude"), script, { mode: 0o755 });
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
-}
-
-async function waitUntil(
-  predicate: () => boolean,
-  timeoutMs = 1000,
-): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return true;
-    await new Promise<void>((resolve) => setTimeout(resolve, 25));
-  }
-  return predicate();
-}
-
-function pidExists(pidPath: string): boolean {
-  try {
-    const pid = Number(readFileSync(pidPath, "utf-8").trim());
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 // --- hasBootstrapArtifacts ---
@@ -332,8 +297,8 @@ describe("runBootstrapIfNeeded", () => {
 
     assert.equal(result.status, "timed-out");
     assert.ok(elapsed < 2000, `timeout resolution took ${elapsed}ms`);
-    assert.ok(
-      await waitUntil(() => !pidExists(childPidFile) && !pidExists(grandchildPidFile)),
+    await assert.doesNotReject(
+      waitForPidsGone([childPidFile, grandchildPidFile]),
       "expected bootstrap process group cleanup to kill child and grandchild",
     );
   });
@@ -366,8 +331,8 @@ describe("runBootstrapIfNeeded", () => {
       const result = await runBootstrapIfNeeded(dir, "loop-kill-fallback");
 
       assert.equal(result.status, "timed-out");
-      assert.ok(
-        await waitUntil(() => !pidExists(childPidFile)),
+      await assert.doesNotReject(
+        waitForPidsGone([childPidFile]),
         "expected child kill fallback to clean up bootstrap child",
       );
     } finally {

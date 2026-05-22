@@ -14,7 +14,6 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -36,8 +35,11 @@ import {
   setupStubClaude,
   startMockApiServer,
   waitForCompletedEvent,
+  waitForFile,
+  waitForPidsGone,
   waitForTerminalEvent,
   writeFakeGhScript,
+  writeBootstrapPluginRegistry,
 } from "./symphony-test-utils.js";
 
 const fakeWorktreeProvider = makeFakeWorktreeProvider("symphony/cloud-failures-test");
@@ -98,55 +100,6 @@ async function writeFakeFailingGh(dir: string): Promise<string> {
     path.join(dir, "fake-bin"),
     '#!/bin/sh\necho "not found" >&2\nexit 1\n',
   );
-}
-
-async function writeBootstrapPluginRegistry(homeDir: string): Promise<void> {
-  const installPath = path.join(homeDir, ".claude", "plugins", "bootstrap-install");
-  await fs.mkdir(installPath, { recursive: true });
-  const registryPath = path.join(homeDir, ".claude", "plugins", "installed_plugins.json");
-  await fs.mkdir(path.dirname(registryPath), { recursive: true });
-  await fs.writeFile(
-    registryPath,
-    JSON.stringify({
-      plugins: {
-        "bootstrap@closedloop-ai": [
-          { installPath, scope: "user", enabled: true, version: "1.0.0" },
-        ],
-      },
-    }),
-  );
-}
-
-async function waitForFile(filePath: string, timeoutMs = 10_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      await fs.access(filePath);
-      return;
-    } catch {
-      await new Promise<void>((resolve) => setTimeout(resolve, 25));
-    }
-  }
-  throw new Error(`Timed out waiting for file ${filePath}`);
-}
-
-function pidExists(pidPath: string): boolean {
-  try {
-    const pid = Number(readFileSync(pidPath, "utf-8").trim());
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function waitForPidsGone(pidPaths: string[], timeoutMs = 5000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (pidPaths.every((pidPath) => !pidExists(pidPath))) return;
-    await new Promise<void>((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`Timed out waiting for pids to exit: ${pidPaths.join(", ")}`);
 }
 
 function loopEvents(

@@ -30,6 +30,7 @@ import {
   PRD_PEER_COMMANDS,
   startMockApiServer,
   waitForTerminalEvent,
+  writeBootstrapPluginRegistry,
 } from "./symphony-test-utils.js";
 
 // ---------------------------------------------------------------------------
@@ -71,23 +72,6 @@ function createTestGateway(tmpDir: string, mockPort: number) {
     worktreeProvider: fakeWorktreeProvider,
     serversToClose,
   });
-}
-
-async function writeBootstrapPluginRegistry(homeDir: string): Promise<void> {
-  const installPath = path.join(homeDir, ".claude", "plugins", "bootstrap-install");
-  await fs.mkdir(installPath, { recursive: true });
-  const registryPath = path.join(homeDir, ".claude", "plugins", "installed_plugins.json");
-  await fs.mkdir(path.dirname(registryPath), { recursive: true });
-  await fs.writeFile(
-    registryPath,
-    JSON.stringify({
-      plugins: {
-        "bootstrap@closedloop-ai": [
-          { installPath, scope: "user", enabled: true, version: "1.0.0" },
-        ],
-      },
-    }),
-  );
 }
 
 function bootstrapOutputChunks(
