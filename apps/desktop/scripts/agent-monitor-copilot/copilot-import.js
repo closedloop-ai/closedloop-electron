@@ -9,10 +9,13 @@ const { listChatSessionFiles, listCliEventFiles } = require("./copilot-home");
 const { importSession } = require("../../scripts/import-history");
 const { reactivateImportedSession } = require("../agent-monitor-shared/import-session-utils");
 const { createCatchupCache } = require("../agent-monitor-shared/catchup-cache");
+const { ingestCachePath } = require("../agent-monitor-shared/ingest-paths");
 
-// See FEA-1316: skip chat/CLI files unchanged since last tick.
-const chatCache = createCatchupCache();
-const cliCache = createCatchupCache();
+// Skip chat/CLI files unchanged since the last tick (FEA-1316); the persisted
+// backing files additionally let a fresh process skip unchanged files on the
+// cold-start boot import (FEA-1334).
+const chatCache = createCatchupCache({ persistPath: ingestCachePath("copilot-chat") });
+const cliCache = createCatchupCache({ persistPath: ingestCachePath("copilot-cli") });
 
 function importCopilotSession(dbModule, session) {
   const result = importSession(dbModule, session);
@@ -23,7 +26,18 @@ function importCopilotSession(dbModule, session) {
   return { sessionId: session.sessionId, result, reactivated };
 }
 
-async function importAllCopilotSessions(dbModule) {
+/**
+ * Parse + import every discovered Copilot Chat + CLI session. Idempotent.
+ *
+ * @param {any} dbModule
+ * @param {{ signal?: AbortSignal, onBegin?: (total: number) => void,
+ *           onProgress?: () => void }} [opts] - ingest-orchestrator progress
+ *   hooks (FEA-1334). The watcher catchup tick calls this with no opts.
+ */
+async function importAllCopilotSessions(dbModule, opts = {}) {
+  const onBegin = typeof opts.onBegin === "function" ? opts.onBegin : null;
+  const onProgress = typeof opts.onProgress === "function" ? opts.onProgress : null;
+  const signal = opts.signal || null;
   let imported = 0;
   let skipped = 0;
   let errors = 0;
@@ -40,9 +54,16 @@ async function importAllCopilotSessions(dbModule) {
   const chatParsed = [];
   const cliParsed = [];
 
-  // Copilot Chat (VS Code extension) — JSON files
+  // Discover both source sets up front so the orchestrator gets one honest
+  // total covering Chat (JSON) + CLI (JSONL) before parsing begins.
   const chatFiles = listChatSessionFiles();
+  const cliFiles = listCliEventFiles();
+  if (onBegin) onBegin(chatFiles.length + cliFiles.length);
+
+  // Copilot Chat (VS Code extension) — JSON files
   for (const { filePath, workspacePath } of chatFiles) {
+    if (signal && signal.aborted) break;
+    if (onProgress) onProgress();
     const { unchanged, stat } = chatCache.isUnchanged(filePath);
     if (unchanged) {
       skipped++;
@@ -57,8 +78,9 @@ async function importAllCopilotSessions(dbModule) {
   }
 
   // Copilot CLI — JSONL event files
-  const cliFiles = listCliEventFiles();
   for (const { filePath, sessionId } of cliFiles) {
+    if (signal && signal.aborted) break;
+    if (onProgress) onProgress();
     const { unchanged, stat } = cliCache.isUnchanged(filePath);
     if (unchanged) {
       skipped++;
@@ -77,6 +99,8 @@ async function importAllCopilotSessions(dbModule) {
   for (const { path, stat } of cliParsed) cliCache.markSeenWith(path, stat);
   chatCache.pruneTo(chatFiles.map((f) => f.filePath));
   cliCache.pruneTo(cliFiles.map((f) => f.filePath));
+  chatCache.flush();
+  cliCache.flush();
 
   return { imported, skipped, errors };
 }
