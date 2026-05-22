@@ -5,15 +5,69 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { Observability } from "../../main/observability.js";
+import { gatewayLog } from "../../main/gateway-logger.js";
+import type {
+  PluginUpdateDiagnostics,
+  PluginUpdateFailureReason,
+  PluginUpdateOutcome,
+} from "../../main/telemetry-protocol.js";
 import type { OperationDispatcher } from "../operation-dispatcher.js";
-import { getShellEnv, resolveBinary, resolveExecutablesOnPath } from "../shell-path.js";
+import { getShellEnv, resolveBinaryFromLoginShell, resolveExecutablesOnPath } from "../shell-path.js";
 import { detectMcpAvailability, type McpDetectionResult } from "./mcp-detection.js";
-import { getInstalledPluginVersions, isPluginInstalled } from "./plugin-cache.js";
+import {
+  type ClaudePluginInventoryEntry,
+  getInstalledPluginVersions,
+  getPluginInstallStatus,
+  parseClaudePluginListJson,
+  parseClaudePluginListText,
+  toPluginInventoryMap,
+} from "./plugin-cache.js";
 import type { ProcessManager } from "../process-manager.js";
 import { json } from "./response-utils.js";
 
 const execFileAsync = promisify(execFile);
 const VERSION_REGEX = /(\d+\.\d+[\w.-]*)/;
+const VERSION_PREFIX_REGEX = /^[vV]/;
+const CLOSEDLOOP_MARKETPLACE_NAME = "closedloop-ai";
+const PLUGIN_UPDATE_TIMEOUT_MS = 30_000;
+const STDERR_TAIL_MAX_CHARS = 512;
+const PLUGIN_AUTOUPDATE_DOCS_LINK = {
+  label: "Update ClosedLoop plugins manually",
+  url: "https://github.com/closedloop-ai/claude-plugins#quick-start",
+} as const;
+
+const CLOSEDLOOP_USER_PLUGINS = [
+  {
+    folder: "code",
+    key: "code@closedloop-ai",
+    label: "Symphony Plugin",
+    required: true,
+  },
+  {
+    folder: "platform",
+    key: "platform@closedloop-ai",
+    label: "Platform Plugin",
+    required: true,
+  },
+  {
+    folder: "judges",
+    key: "judges@closedloop-ai",
+    label: "Judges Plugin",
+    required: true,
+  },
+  {
+    folder: "code-review",
+    key: "code-review@closedloop-ai",
+    label: "Code Review Plugin",
+    required: true,
+  },
+  {
+    folder: "self-learning",
+    key: "self-learning@closedloop-ai",
+    label: "Self-Learning Plugin",
+    required: true,
+  },
+] as const;
 
 type CheckResult = {
   id: string;
@@ -23,6 +77,13 @@ type CheckResult = {
   version?: string;
   error?: string;
   remediation?: string;
+  enableAttempted?: boolean;
+  enableOutcome?: PluginUpdateOutcome;
+  enablePluginIds?: string[];
+  updateAttempted?: boolean;
+  updateOutcome?: PluginUpdateOutcome;
+  updatePluginIds?: string[];
+  remediationLinks?: Array<{ label: string; url: string }>;
   debug?: {
     errorCode?: string;       // "ENOENT" | "EACCES" | "ETIMEDOUT" | "EPERM" | other
     stderr?: string;          // trimmed, capped at 512 chars
@@ -49,6 +110,67 @@ type CommandError = {
   message: string;
 };
 
+type PluginManifest = {
+  plugin: (typeof CLOSEDLOOP_USER_PLUGINS)[number];
+  latestVersion?: string;
+  error?: "manifest_unavailable";
+};
+
+type ClaudeMarketplaceListEntry = {
+  name?: unknown;
+  source?: unknown;
+  path?: unknown;
+  installLocation?: unknown;
+};
+
+type PluginUpdateCommandResult = {
+  outcome: PluginUpdateOutcome;
+  exitCode?: number;
+  stdout: string;
+  stderrTail?: string;
+  elapsedMs: number;
+  failureReason?: PluginUpdateFailureReason;
+};
+
+type PluginInventoryResult = {
+  source: "json" | "text" | "unavailable";
+  entries: Map<string, ClaudePluginInventoryEntry>;
+  error?: string;
+};
+
+function getPluginUpdateOutputTail(output: string | Buffer | undefined): string {
+  return (output ?? "")
+    .toString()
+    .trim()
+    .slice(-STDERR_TAIL_MAX_CHARS);
+}
+
+function shouldEnablePluginAutoUpdate(
+  requested: boolean,
+  checks: Array<Pick<CheckResult, "id" | "passed">>
+): boolean {
+  return (
+    requested &&
+    checks.some((check) => check.id === "claude-cli" && check.passed)
+  );
+}
+
+function resolvePostUpdateOutcome(
+  current: boolean,
+  updateResult?: PluginUpdateCommandResult
+): PluginUpdateOutcome {
+  if (current) {
+    return "success";
+  }
+  if (
+    updateResult?.outcome === "timeout" ||
+    updateResult?.outcome === "skipped"
+  ) {
+    return updateResult.outcome;
+  }
+  return "failed";
+}
+
 export function registerHealthCheckRoutes(
   dispatcher: OperationDispatcher,
   processManager: ProcessManager,
@@ -57,32 +179,54 @@ export function registerHealthCheckRoutes(
     provider: "claude" | "codex",
     expectedMcpUrl?: string
   ) => Promise<McpDetectionResult>,
-  getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string }
+  getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string },
+  getAppVersion?: () => string | undefined
 ): void {
   const detectMcp = detectMcpOverride ?? detectMcpAvailability;
   const configDir = () => path.join(getSymphonyDir(), "config");
 
   dispatcher.register("GET", "/api/gateway/health-check", async (context) => {
     const expectedMcpUrl = context.query.get("expectedMcpUrl")?.trim() || undefined;
+    const requestedPluginAutoUpdate =
+      context.query.get("pluginAutoUpdate") === "1";
     const paths = getBinaryPaths?.();
-    const [checks, claudeMcp, codexMcp] = await Promise.all([
+    const [
+      pluginListJson,
+      baseChecks,
+      claudeMcp,
+      codexMcp,
+    ] = await Promise.all([
+      readClaudePluginListJson(paths?.claude),
       Promise.all([
         checkGit(processManager, paths?.git),
         checkClaudeCli(processManager, paths?.claude),
         checkGhCli(processManager, paths?.gh),
         checkGhAuth(processManager, paths?.gh),
-        Promise.resolve(checkPlugin("code", "Symphony Plugin", true)),
-        Promise.resolve(checkPlugin("platform", "Platform Plugin", true)),
-        Promise.resolve(checkPlugin("judges", "Judges Plugin", true)),
-        Promise.resolve(checkPlugin("code-review", "Code Review Plugin", true)),
-        Promise.resolve(checkPlugin("self-learning", "Self-Learning Plugin", true)),
-        Promise.resolve(await checkWorktreeDir(configDir)),
+        checkWorktreeDir(configDir),
         checkCodex(processManager, paths?.codex),
         checkPython3(processManager, paths?.python3)
       ]),
       detectMcp("claude", expectedMcpUrl),
       detectMcp("codex", expectedMcpUrl),
     ]);
+    const pluginAutoUpdateEnabled = shouldEnablePluginAutoUpdate(
+      requestedPluginAutoUpdate,
+      baseChecks
+    );
+    let pluginChecks = CLOSEDLOOP_USER_PLUGINS.map((plugin) =>
+      checkPlugin(plugin, pluginListJson, pluginAutoUpdateEnabled)
+    );
+    if (pluginAutoUpdateEnabled) {
+      pluginChecks = await applyPluginEnableChecks(pluginChecks, {
+        claudeOverride: paths?.claude,
+        readInventory: () => readClaudePluginInventory(paths?.claude),
+      });
+    }
+    let checks: CheckResult[] = [
+      ...baseChecks.slice(0, 4),
+      ...pluginChecks,
+      ...baseChecks.slice(4),
+    ];
 
     // Check plugin versions if all plugins are installed
     const allPluginsInstalled = checks
@@ -90,14 +234,25 @@ export function registerHealthCheckRoutes(
       .every((c) => c.passed);
     if (allPluginsInstalled) {
       const installed = getInstalledPluginVersions();
-      const versionResult = await checkPluginVersions(installed);
-      if (versionResult !== undefined) {
-        checks.push(versionResult);
-      }
+      checks = await applyPluginVersionChecks(checks, installed, {
+        pluginAutoUpdateEnabled,
+        claudeOverride: paths?.claude,
+        readInstalledVersions: () => getInstalledPluginVersions(),
+      });
     }
 
     for (const check of checks) {
       Observability.healthCheckResult(check);
+    }
+
+    const rawLatestVersion = context.query.get("latestVersion")?.trim() || undefined;
+    const rawCurrentVersion = getAppVersion?.();
+    if (rawLatestVersion && rawCurrentVersion) {
+      const latestNorm = rawLatestVersion.replace(VERSION_PREFIX_REGEX, "");
+      const currentNorm = rawCurrentVersion.replace(VERSION_PREFIX_REGEX, "");
+      const appVersionResult = checkAppVersion(currentNorm, latestNorm);
+      checks.push(appVersionResult);
+      Observability.healthCheckResult(appVersionResult);
     }
 
     const allRequiredPassed = checks.filter((check) => check.required).every((check) => check.passed);
@@ -133,6 +288,198 @@ const defaultRunCommand: RunCommand = async (cmd, args, options) => {
 
 let runCommand: RunCommand = defaultRunCommand;
 
+async function readClaudePluginListJson(claudeOverride?: string): Promise<string | null> {
+  const resolved = await resolveBinaryFromLoginShell("claude", claudeOverride);
+  if (resolved.source === "override_invalid") {
+    return null;
+  }
+
+  try {
+    const { stdout } = await runCommand(resolved.path, ["plugin", "list", "--json"]);
+    return stdout;
+  } catch {
+    return null;
+  }
+}
+
+type PluginUpdateRunner = (
+  pluginRef: string,
+  options?: { claudeOverride?: string; timeoutMs?: number }
+) => Promise<PluginUpdateCommandResult>;
+
+type PluginMarketplaceUpdateRunner = (
+  options?: { claudeOverride?: string; timeoutMs?: number }
+) => Promise<PluginUpdateCommandResult>;
+
+async function defaultRunPluginMarketplaceUpdateCommand(
+  options: { claudeOverride?: string; timeoutMs?: number } = {}
+): Promise<PluginUpdateCommandResult> {
+  const startedAt = Date.now();
+  const resolved = await resolveBinaryFromLoginShell(
+    "claude",
+    options.claudeOverride
+  );
+  if (resolved.source === "override_invalid") {
+    return {
+      outcome: "failed",
+      stdout: "",
+      elapsedMs: Date.now() - startedAt,
+      failureReason: "cli_unavailable",
+      stderrTail: "Claude binary override path does not exist or is not executable",
+    };
+  }
+
+  const env = await getShellEnv();
+  try {
+    const { stdout } = await execFileAsync(
+      resolved.path,
+      [
+        "plugin",
+        "marketplace",
+        "update",
+        CLOSEDLOOP_MARKETPLACE_NAME,
+      ],
+      {
+        timeout: options.timeoutMs ?? PLUGIN_UPDATE_TIMEOUT_MS,
+        env,
+      }
+    );
+    return {
+      outcome: "success",
+      stdout: stdout.trim(),
+      elapsedMs: Date.now() - startedAt,
+    };
+  } catch (err) {
+    const error = err as NodeJS.ErrnoException & {
+      stderr?: string | Buffer;
+      stdout?: string | Buffer;
+      killed?: boolean;
+      code?: string | number;
+    };
+    const timeout = error.killed || error.code === "ETIMEDOUT";
+    return {
+      outcome: timeout ? "timeout" : "failed",
+      exitCode: typeof error.code === "number" ? error.code : undefined,
+      stdout: (error.stdout ?? "").toString().trim(),
+      stderrTail: getPluginUpdateOutputTail(error.stderr),
+      elapsedMs: Date.now() - startedAt,
+      failureReason: timeout ? "timeout" : "command_failed",
+    };
+  }
+}
+
+async function defaultRunPluginUpdateCommand(
+  pluginRef: string,
+  options: { claudeOverride?: string; timeoutMs?: number } = {}
+): Promise<PluginUpdateCommandResult> {
+  const startedAt = Date.now();
+  const resolved = await resolveBinaryFromLoginShell(
+    "claude",
+    options.claudeOverride
+  );
+  if (resolved.source === "override_invalid") {
+    return {
+      outcome: "failed",
+      stdout: "",
+      elapsedMs: Date.now() - startedAt,
+      failureReason: "cli_unavailable",
+      stderrTail: "Claude binary override path does not exist or is not executable",
+    };
+  }
+
+  const env = await getShellEnv();
+  try {
+    const { stdout } = await execFileAsync(
+      resolved.path,
+      ["plugin", "update", pluginRef, "--scope", "user"],
+      {
+        timeout: options.timeoutMs ?? PLUGIN_UPDATE_TIMEOUT_MS,
+        env,
+      }
+    );
+    return {
+      outcome: "success",
+      stdout: stdout.trim(),
+      elapsedMs: Date.now() - startedAt,
+    };
+  } catch (err) {
+    const error = err as NodeJS.ErrnoException & {
+      stderr?: string | Buffer;
+      stdout?: string | Buffer;
+      killed?: boolean;
+      code?: string | number;
+    };
+    const timeout = error.killed || error.code === "ETIMEDOUT";
+    return {
+      outcome: timeout ? "timeout" : "failed",
+      exitCode: typeof error.code === "number" ? error.code : undefined,
+      stdout: (error.stdout ?? "").toString().trim(),
+      stderrTail: getPluginUpdateOutputTail(error.stderr),
+      elapsedMs: Date.now() - startedAt,
+      failureReason: timeout ? "timeout" : "command_failed",
+    };
+  }
+}
+
+async function defaultRunPluginEnableCommand(
+  pluginRef: string,
+  options: { claudeOverride?: string; timeoutMs?: number } = {}
+): Promise<PluginUpdateCommandResult> {
+  const startedAt = Date.now();
+  const resolved = await resolveBinaryFromLoginShell(
+    "claude",
+    options.claudeOverride
+  );
+  if (resolved.source === "override_invalid") {
+    return {
+      outcome: "failed",
+      stdout: "",
+      elapsedMs: Date.now() - startedAt,
+      failureReason: "cli_unavailable",
+      stderrTail: "Claude binary override path does not exist or is not executable",
+    };
+  }
+
+  const env = await getShellEnv();
+  try {
+    const { stdout } = await execFileAsync(
+      resolved.path,
+      ["plugin", "enable", pluginRef, "--scope", "user"],
+      {
+        timeout: options.timeoutMs ?? PLUGIN_UPDATE_TIMEOUT_MS,
+        env,
+      }
+    );
+    return {
+      outcome: "success",
+      stdout: stdout.trim(),
+      elapsedMs: Date.now() - startedAt,
+    };
+  } catch (err) {
+    const error = err as NodeJS.ErrnoException & {
+      stderr?: string | Buffer;
+      stdout?: string | Buffer;
+      killed?: boolean;
+      code?: string | number;
+    };
+    const timeout = error.killed || error.code === "ETIMEDOUT";
+    return {
+      outcome: timeout ? "timeout" : "failed",
+      exitCode: typeof error.code === "number" ? error.code : undefined,
+      stdout: (error.stdout ?? "").toString().trim(),
+      stderrTail: getPluginUpdateOutputTail(error.stderr),
+      elapsedMs: Date.now() - startedAt,
+      failureReason: timeout ? "timeout" : "command_failed",
+    };
+  }
+}
+
+let runPluginUpdateCommand: PluginUpdateRunner = defaultRunPluginUpdateCommand;
+let runPluginEnableCommand: PluginUpdateRunner = defaultRunPluginEnableCommand;
+let runPluginMarketplaceUpdateCommand: PluginMarketplaceUpdateRunner =
+  defaultRunPluginMarketplaceUpdateCommand;
+const failedPluginUpdateAttempts = new Map<string, PluginUpdateOutcome>();
+
 /**
  * @internal Test-only. Replace the binary command runner with a stub to
  * simulate ENOENT / EACCES / ETIMEDOUT without spawning real processes.
@@ -140,6 +487,95 @@ let runCommand: RunCommand = defaultRunCommand;
  */
 export function _setRunCommandForTesting(fn?: RunCommand): void {
   runCommand = fn ?? defaultRunCommand;
+}
+
+/**
+ * @internal Test-only. Replace the plugin update runner and reset session
+ * suppression state.
+ */
+export function _setPluginUpdateCommandForTesting(
+  fn?: PluginUpdateRunner
+): void {
+  runPluginUpdateCommand = fn ?? defaultRunPluginUpdateCommand;
+  failedPluginUpdateAttempts.clear();
+}
+
+/** @internal Test-only. Replace the plugin marketplace refresh runner. */
+export function _setPluginMarketplaceUpdateCommandForTesting(
+  fn?: PluginMarketplaceUpdateRunner
+): void {
+  runPluginMarketplaceUpdateCommand =
+    fn ?? defaultRunPluginMarketplaceUpdateCommand;
+}
+
+/** @internal Test-only. Replace the plugin enable runner. */
+export function _setPluginEnableCommandForTesting(
+  fn?: PluginUpdateRunner
+): void {
+  runPluginEnableCommand = fn ?? defaultRunPluginEnableCommand;
+}
+
+/** @internal Test-only. Returns the bounded plugin-update stderr suffix. */
+export function _getPluginUpdateStderrTailForTesting(
+  stderr: string | Buffer | undefined
+): string {
+  return getPluginUpdateOutputTail(stderr);
+}
+
+/** @internal Test-only. Mirrors the route-level auto-update safety gate. */
+export function _shouldEnablePluginAutoUpdateForTesting(
+  requested: boolean,
+  checks: Array<Pick<CheckResult, "id" | "passed">>
+): boolean {
+  return shouldEnablePluginAutoUpdate(requested, checks);
+}
+
+/**
+ * @internal Test-only. Exposes plugin-version enrichment without relying
+ * on a developer machine's real Claude plugin registry.
+ */
+export async function _applyPluginVersionChecksForTesting(
+  checks: CheckResult[],
+  installed: Record<string, string>,
+  options: {
+    pluginAutoUpdateEnabled?: boolean;
+    readInstalledVersions?: () => Record<string, string>;
+    preferConfiguredMarketplace?: boolean;
+  } = {}
+): Promise<CheckResult[]> {
+  return applyPluginVersionChecks(checks, installed, {
+    pluginAutoUpdateEnabled: options.pluginAutoUpdateEnabled ?? false,
+    readInstalledVersions: options.readInstalledVersions ?? (() => installed),
+    preferConfiguredMarketplace: options.preferConfiguredMarketplace ?? false,
+  });
+}
+
+/**
+ * Per-binary override of the hardcoded KNOWN_*_LOCATIONS arrays consulted
+ * by collectBinaryDebug. Used to make tests host-independent: a test that
+ * asserts on "Not found" can pass `{ claude: [] }` so the host's actual
+ * Homebrew/local install does not leak into `foundAt[]`. Production never
+ * sets this.
+ */
+let knownLocationsForTest: Record<string, string[]> | null = null;
+
+/**
+ * @internal Test-only. Override the KNOWN_*_LOCATIONS arrays per-binary so
+ * a test can assert on a clean "no-installed-binary-anywhere" state without
+ * being defeated by the host machine's Homebrew/native installs. Pass
+ * `null` to restore defaults.
+ */
+export function _setKnownBinaryLocationsForTesting(
+  override: Record<string, string[]> | null
+): void {
+  knownLocationsForTest = override;
+}
+
+function effectiveKnownLocations(
+  binaryName: string,
+  defaults: string[]
+): string[] {
+  return knownLocationsForTest?.[binaryName] ?? defaults;
 }
 
 function parseVersion(output: string): string | undefined {
@@ -241,7 +677,9 @@ async function collectBinaryDebug(
     .map((segment) => path.join(segment, binaryName));
   const candidates = [
     ...pathSegmentCandidates,
-    ...knownLocations.map((loc) => expandTilde(loc)),
+    ...effectiveKnownLocations(binaryName, knownLocations).map((loc) =>
+      expandTilde(loc)
+    ),
   ];
 
   const knownHits: string[] = [];
@@ -336,7 +774,7 @@ function classifyBinaryRemediation(binaryName: string, spawnError: CommandError,
 }
 
 async function checkGit(_processManager: ProcessManager, override?: string): Promise<CheckResult> {
-  const resolved = await resolveBinary("git", override);
+  const resolved = await resolveBinaryFromLoginShell("git", override);
   if (resolved.source === "override_invalid") {
     return {
       id: "git",
@@ -370,7 +808,7 @@ async function checkGit(_processManager: ProcessManager, override?: string): Pro
 }
 
 async function checkClaudeCli(_processManager: ProcessManager, override?: string): Promise<CheckResult> {
-  const resolved = await resolveBinary("claude", override);
+  const resolved = await resolveBinaryFromLoginShell("claude", override);
   if (resolved.source === "override_invalid") {
     return {
       id: "claude-cli",
@@ -410,7 +848,7 @@ async function checkClaudeCli(_processManager: ProcessManager, override?: string
 }
 
 async function checkGhCli(_processManager: ProcessManager, override?: string): Promise<CheckResult> {
-  const resolved = await resolveBinary("gh", override);
+  const resolved = await resolveBinaryFromLoginShell("gh", override);
   if (resolved.source === "override_invalid") {
     return {
       id: "gh-cli",
@@ -450,7 +888,7 @@ async function checkGhCli(_processManager: ProcessManager, override?: string): P
 }
 
 async function checkGhAuth(_processManager: ProcessManager, override?: string): Promise<CheckResult> {
-  const resolved = await resolveBinary("gh", override);
+  const resolved = await resolveBinaryFromLoginShell("gh", override);
   if (resolved.source === "override_invalid") {
     return {
       id: "gh-auth",
@@ -476,18 +914,229 @@ async function checkGhAuth(_processManager: ProcessManager, override?: string): 
   }
 }
 
-function checkPlugin(name: string, label: string, required: boolean): CheckResult {
-  if (isPluginInstalled(name)) {
-    return { id: `plugin-${name}`, label, required, passed: true };
+async function readClaudePluginInventory(
+  claudeOverride?: string
+): Promise<PluginInventoryResult> {
+  const resolved = await resolveBinaryFromLoginShell("claude", claudeOverride);
+  if (resolved.source === "override_invalid") {
+    return {
+      source: "unavailable",
+      entries: new Map(),
+      error: "Claude binary override path does not exist or is not executable",
+    };
+  }
+
+  let jsonFailure: string | undefined;
+  try {
+    const { stdout } = await runCommand(resolved.path, ["plugin", "list", "--json"]);
+    return {
+      source: "json",
+      entries: toPluginInventoryMap(parseClaudePluginListJson(stdout)),
+    };
+  } catch (error) {
+    jsonFailure =
+      error instanceof Error
+        ? error.message
+        : typeof error === "object" && error !== null && "message" in error
+          ? String((error as { message?: unknown }).message)
+          : "Unable to parse plugin JSON inventory";
+  }
+
+  try {
+    const { stdout } = await runCommand(resolved.path, ["plugin", "list"]);
+    const entries = parseClaudePluginListText(stdout);
+    if (entries.length > 0) {
+      return {
+        source: "text",
+        entries: toPluginInventoryMap(entries),
+      };
+    }
+  } catch {
+    // Fall through to the deterministic unavailable result below.
   }
 
   return {
-    id: `plugin-${name}`,
-    label,
-    required,
+    source: "unavailable",
+    entries: new Map(),
+    error: jsonFailure,
+  };
+}
+
+function getClosedLoopPluginByCheckId(
+  checkId: string
+): (typeof CLOSEDLOOP_USER_PLUGINS)[number] | undefined {
+  return CLOSEDLOOP_USER_PLUGINS.find(
+    (plugin) => checkId === `plugin-${plugin.folder}`
+  );
+}
+
+async function applyPluginEnableChecks(
+  checks: CheckResult[],
+  options: {
+    claudeOverride?: string;
+    readInventory: () => Promise<PluginInventoryResult>;
+  }
+): Promise<CheckResult[]> {
+  const disabledPlugins = checks.flatMap((check) => {
+    if (!(check.id.startsWith("plugin-") && check.error === "Disabled")) {
+      return [];
+    }
+    const plugin = getClosedLoopPluginByCheckId(check.id);
+    return plugin ? [plugin] : [];
+  });
+
+  if (disabledPlugins.length === 0) {
+    return checks;
+  }
+
+  const pluginIds = disabledPlugins.map((plugin) => plugin.key);
+  const startedAt = Date.now();
+  gatewayLog.info(
+    "health-check",
+    `Starting ClosedLoop plugin enable attempt ${JSON.stringify({ pluginIds })}`
+  );
+
+  const enableResults = new Map<string, PluginUpdateCommandResult>();
+  for (const plugin of disabledPlugins) {
+    const result = await runPluginEnableCommand(plugin.key, {
+      claudeOverride: options.claudeOverride,
+      timeoutMs: PLUGIN_UPDATE_TIMEOUT_MS,
+    });
+    enableResults.set(plugin.key, result);
+  }
+
+  const postInventory = await options.readInventory();
+  const outcomes = Object.fromEntries(
+    disabledPlugins.map((plugin) => {
+      const postEntry = postInventory.entries.get(plugin.key);
+      const enabled = postEntry?.enabled === true;
+      return [
+        plugin.key,
+        resolvePostUpdateOutcome(enabled, enableResults.get(plugin.key)),
+      ];
+    })
+  ) as Record<string, PluginUpdateOutcome>;
+  const failedResult = [...enableResults.values()].find(
+    (result) => result.outcome === "failed" || result.outcome === "timeout"
+  );
+
+  gatewayLog.info(
+    "health-check",
+    `Completed ClosedLoop plugin enable attempt ${JSON.stringify({
+      pluginIds,
+      outcomes,
+      durationMs: Date.now() - startedAt,
+      exitCode: failedResult?.exitCode,
+      stderrTail:
+        failedResult?.stderrTail ||
+        getPluginUpdateOutputTail(failedResult?.stdout),
+    })}`
+  );
+
+  return checks.map((check) => {
+    const plugin = getClosedLoopPluginByCheckId(check.id);
+    if (!plugin || !pluginIds.includes(plugin.key)) {
+      return check;
+    }
+
+    const postEntry = postInventory.entries.get(plugin.key);
+    const enabled = postEntry?.enabled === true;
+    const outcome = outcomes[plugin.key] ?? "failed";
+    if (enabled) {
+      const { error: _error, remediation: _remediation, ...rest } = check;
+      return {
+        ...rest,
+        passed: true,
+        version: postEntry.version ?? check.version,
+        enableAttempted: true,
+        enableOutcome: "success",
+        enablePluginIds: pluginIds,
+      };
+    }
+
+    return {
+      ...check,
+      passed: false,
+      error:
+        outcome === "timeout"
+          ? "Enable timed out"
+          : "Automatic enable failed",
+      remediation: buildPluginInstallRemediation(plugin.key),
+      enableAttempted: true,
+      enableOutcome: outcome,
+      enablePluginIds: pluginIds,
+    };
+  });
+}
+
+function buildPluginInstallRemediation(pluginRef: string): string {
+  return `Run: claude plugin install ${pluginRef} --scope user, then claude plugin enable ${pluginRef} --scope user`;
+}
+
+function checkPlugin(
+  plugin: (typeof CLOSEDLOOP_USER_PLUGINS)[number],
+  pluginListJson: string | null,
+  pluginAutoUpdateEnabled: boolean
+): CheckResult {
+  const status = getPluginInstallStatus(plugin.folder, undefined, pluginListJson);
+  const base = {
+    id: `plugin-${plugin.folder}`,
+    label: plugin.label,
+    required: plugin.required,
+    ...(status.selectedUserVersion ? { version: status.selectedUserVersion } : {}),
+  };
+
+  if (status.hasValidUserScopedEntry) {
+    return { ...base, passed: true };
+  }
+
+  if (status.enabledStateUnverified) {
+    return {
+      ...base,
+      passed: false,
+      error: "Could not verify enabled state",
+      remediation: `Run: claude plugin enable ${status.pluginRef} --scope user, then rerun System Check`,
+      enableAttempted: false,
+      enablePluginIds: [status.pluginRef],
+      ...(!pluginAutoUpdateEnabled ? { enableOutcome: "skipped" as const } : {}),
+    };
+  }
+
+  if (status.disabled) {
+    return {
+      ...base,
+      passed: false,
+      error: "Disabled",
+      remediation: `Run: claude plugin enable ${status.pluginRef} --scope user`,
+      enableAttempted: false,
+      enablePluginIds: [status.pluginRef],
+      ...(!pluginAutoUpdateEnabled ? { enableOutcome: "skipped" as const } : {}),
+    };
+  }
+
+  if (!status.hasExistingUserInstallPath && status.hasProjectScopedEntry) {
+    return {
+      ...base,
+      passed: false,
+      error: "Installed at project scope",
+      remediation: `Run: claude plugin uninstall ${status.pluginRef} --scope project, then claude plugin install ${status.pluginRef} --scope user`
+    };
+  }
+
+  if (status.hasUserScopedEntry && !status.hasExistingUserInstallPath) {
+    return {
+      ...base,
+      passed: false,
+      error: "Install path missing",
+      remediation: `Run: claude plugin install ${status.pluginRef} --scope user`
+    };
+  }
+
+  return {
+    ...base,
     passed: false,
     error: "Not found",
-    remediation: `Install the closedloop-ai/${name} plugin in Claude Code`
+    remediation: `Run: claude plugin install ${status.pluginRef} --scope user`
   };
 }
 
@@ -529,7 +1178,7 @@ async function checkWorktreeDir(getConfigDir: () => string): Promise<CheckResult
 }
 
 async function checkCodex(_processManager: ProcessManager, override?: string): Promise<CheckResult> {
-  const resolved = await resolveBinary("codex", override);
+  const resolved = await resolveBinaryFromLoginShell("codex", override);
   if (resolved.source === "override_invalid") {
     return {
       id: "codex",
@@ -566,7 +1215,7 @@ async function checkPython3(_processManager: ProcessManager, override?: string):
   const REMEDIATION = process.platform === "darwin"
     ? "Install Python 3.10 or later: brew install python@3.13"
     : "Install Python 3.10 or later: sudo apt-get install python3 (or your distro's package manager)";
-  const resolved = await resolveBinary("python3", override);
+  const resolved = await resolveBinaryFromLoginShell("python3", override);
   if (resolved.source === "override_invalid") {
     return {
       id: "python3",
@@ -625,14 +1274,6 @@ async function checkPython3(_processManager: ProcessManager, override?: string):
   }
 }
 
-const PLUGIN_VERSION_MAP: Record<string, string> = {
-  "code@closedloop-ai": "code",
-  "self-learning@closedloop-ai": "self-learning",
-  "judges@closedloop-ai": "judges",
-  "code-review@closedloop-ai": "code-review",
-  "platform@closedloop-ai": "platform",
-};
-
 function parseStrictSemver(version: string): [number, number, number] | undefined {
   const parts = version.split(".");
   if (parts.length !== 3) {
@@ -663,89 +1304,494 @@ function compareStrictSemver(installed: string, latest: string): boolean | undef
   return true;
 }
 
-async function checkPluginVersions(installed: Record<string, string>): Promise<CheckResult | undefined> {
-  const entries = Object.entries(PLUGIN_VERSION_MAP);
+/** Builds the gateway-version health-check row from normalized semver strings. */
+function checkAppVersion(currentVersion: string, latestVersion: string): CheckResult {
+  const isUpToDate = compareStrictSemver(currentVersion, latestVersion);
+  if (isUpToDate === undefined) {
+    return {
+      id: "app-version",
+      label: "Gateway Version",
+      required: true,
+      passed: true,
+      version: currentVersion,
+      error: `Version format unrecognized (installed: ${currentVersion}, latest: ${latestVersion})`,
+    };
+  }
+
+  if (isUpToDate) {
+    return {
+      id: "app-version",
+      label: "Gateway Version",
+      required: true,
+      passed: true,
+      version: currentVersion,
+    };
+  }
+
+  return {
+    id: "app-version",
+    label: "Gateway Version",
+    required: true,
+    passed: false,
+    version: currentVersion,
+    error: `Update available: ${latestVersion}`,
+    remediation: "Open the ClosedLoop Gateway app to update",
+  };
+}
+
+async function applyPluginVersionChecks(
+  checks: CheckResult[],
+  installed: Record<string, string>,
+  options: {
+    pluginAutoUpdateEnabled: boolean;
+    claudeOverride?: string;
+    readInstalledVersions: () => Record<string, string>;
+    preferConfiguredMarketplace?: boolean;
+  }
+): Promise<CheckResult[]> {
+  const manifests = await fetchPluginManifests({
+    claudeOverride: options.claudeOverride,
+    preferConfiguredMarketplace: options.preferConfiguredMarketplace ?? true,
+  });
+  const versionChecks = new Map<string, Partial<CheckResult>>();
+  const outdatedPlugins: Array<{
+    plugin: (typeof CLOSEDLOOP_USER_PLUGINS)[number];
+    installedVersion: string;
+    latestVersion: string;
+  }> = [];
+
+  for (const manifest of manifests) {
+    const { plugin } = manifest;
+    const checkId = `plugin-${plugin.folder}`;
+    const installedVer = installed[plugin.key] ?? "";
+
+    if (manifest.error || !manifest.latestVersion) {
+      versionChecks.set(checkId, manifestUnavailableResult());
+      continue;
+    }
+
+    const cmp = compareStrictSemver(installedVer, manifest.latestVersion);
+
+    if (cmp === undefined) {
+      versionChecks.set(checkId, {
+        passed: false,
+        error: "Could not verify installed version",
+        remediation: `Reinstall the plugin: claude plugin install ${plugin.key} --scope user`,
+      });
+    } else if (cmp === false) {
+      outdatedPlugins.push({
+        plugin,
+        installedVersion: installedVer,
+        latestVersion: manifest.latestVersion,
+      });
+      versionChecks.set(checkId, {
+        passed: false,
+        version: installedVer,
+        error: `Update available: ${manifest.latestVersion}`,
+        remediation: `claude plugin update ${plugin.key} --scope user`,
+      });
+    } else {
+      versionChecks.set(checkId, {
+        passed: true,
+        version: installedVer,
+      });
+    }
+  }
+
+  if (options.pluginAutoUpdateEnabled && outdatedPlugins.length > 0) {
+    const updateResults = await runPluginUpdates(outdatedPlugins, options);
+    const finalInstalled = options.readInstalledVersions();
+    const affectedCheckIds = outdatedPlugins.map(
+      ({ plugin }) => `plugin-${plugin.folder}`
+    );
+
+    for (const outdated of outdatedPlugins) {
+      const { plugin, latestVersion } = outdated;
+      const checkId = `plugin-${plugin.folder}`;
+      const finalVersion =
+        finalInstalled[plugin.key] ?? installed[plugin.key] ?? "";
+      const current =
+        compareStrictSemver(finalVersion, latestVersion) === true;
+      if (current) {
+        versionChecks.set(checkId, {
+          passed: true,
+          version: finalVersion,
+          updateAttempted: true,
+          updateOutcome: "success",
+          updatePluginIds: affectedCheckIds,
+        });
+        continue;
+      }
+
+      const updateResult = updateResults.get(plugin.key);
+      const updateOutcome = resolvePostUpdateOutcome(false, updateResult);
+      versionChecks.set(checkId, {
+        passed: false,
+        version: finalVersion,
+        error: `Automatic update was attempted but did not succeed. Latest version: ${latestVersion}`,
+        remediation: buildPluginUpdateRemediation(plugin.key),
+        remediationLinks: [PLUGIN_AUTOUPDATE_DOCS_LINK],
+        updateAttempted: true,
+        updateOutcome,
+        updatePluginIds: affectedCheckIds,
+      });
+    }
+  }
+
+  return checks.map((check) => {
+    const versionCheck = versionChecks.get(check.id);
+    return versionCheck === undefined ? check : { ...check, ...versionCheck };
+  });
+}
+
+async function fetchPluginManifests(options: {
+  claudeOverride?: string;
+  preferConfiguredMarketplace: boolean;
+}): Promise<PluginManifest[]> {
+  if (options.preferConfiguredMarketplace) {
+    const configuredMarketplaceManifests =
+      await readConfiguredDirectoryMarketplaceManifests(options.claudeOverride);
+    if (configuredMarketplaceManifests) {
+      return configuredMarketplaceManifests;
+    }
+  }
 
   const results = await Promise.allSettled(
-    entries.map(([, folder]) =>
+    CLOSEDLOOP_USER_PLUGINS.map((plugin) =>
       fetch(
-        `https://raw.githubusercontent.com/closedloop-ai/claude-plugins/main/plugins/${folder}/.claude-plugin/plugin.json`,
+        `https://raw.githubusercontent.com/closedloop-ai/claude-plugins/main/plugins/${plugin.folder}/.claude-plugin/plugin.json`,
         { signal: AbortSignal.timeout(3000) }
       )
     )
   );
 
-  const outdated: { key: string; installed: string; latest: string }[] = [];
-  const upToDate: string[] = [];
-  let unverified = 0;
+  return Promise.all(
+    CLOSEDLOOP_USER_PLUGINS.map(
+      async (plugin, index): Promise<PluginManifest> => {
+        const result = results[index];
+        if (result.status === "rejected" || !result.value.ok) {
+          return { plugin, error: "manifest_unavailable" };
+        }
+        try {
+          const body = (await result.value.json()) as { version?: unknown };
+          return typeof body.version === "string"
+            ? { plugin, latestVersion: body.version }
+            : { plugin, error: "manifest_unavailable" };
+        } catch {
+          return { plugin, error: "manifest_unavailable" };
+        }
+      }
+    )
+  );
+}
 
-  for (let i = 0; i < entries.length; i++) {
-    const [pluginKey] = entries[i];
-    const result = results[i];
+async function readConfiguredDirectoryMarketplaceManifests(
+  claudeOverride?: string
+): Promise<PluginManifest[] | null> {
+  const root = await resolveConfiguredDirectoryMarketplaceRoot(claudeOverride);
+  if (!root) {
+    return null;
+  }
 
-    if (result.status === "rejected") {
-      unverified++;
-      continue;
+  let marketplacePlugins: Array<Record<string, unknown>>;
+  try {
+    const marketplaceJson = JSON.parse(
+      await fs.readFile(
+        path.join(root, ".claude-plugin", "marketplace.json"),
+        "utf-8"
+      )
+    ) as { plugins?: unknown };
+    marketplacePlugins = Array.isArray(marketplaceJson.plugins)
+      ? marketplaceJson.plugins.filter(
+          (entry): entry is Record<string, unknown> =>
+            typeof entry === "object" && entry !== null
+        )
+      : [];
+  } catch {
+    return CLOSEDLOOP_USER_PLUGINS.map((plugin) => ({
+      plugin,
+      error: "manifest_unavailable",
+    }));
+  }
+
+  return Promise.all(
+    CLOSEDLOOP_USER_PLUGINS.map(async (plugin): Promise<PluginManifest> => {
+      const marketplaceEntry = marketplacePlugins.find(
+        (entry) => entry.name === plugin.folder
+      );
+      const source =
+        typeof marketplaceEntry?.source === "string"
+          ? marketplaceEntry.source
+          : undefined;
+      if (!source) {
+        return { plugin, error: "manifest_unavailable" };
+      }
+
+      try {
+        const pluginJsonPath = path.resolve(
+          root,
+          source,
+          ".claude-plugin",
+          "plugin.json"
+        );
+        const body = JSON.parse(
+          await fs.readFile(pluginJsonPath, "utf-8")
+        ) as { version?: unknown };
+        return typeof body.version === "string"
+          ? { plugin, latestVersion: body.version }
+          : { plugin, error: "manifest_unavailable" };
+      } catch {
+        return { plugin, error: "manifest_unavailable" };
+      }
+    })
+  );
+}
+
+async function resolveConfiguredDirectoryMarketplaceRoot(
+  claudeOverride?: string
+): Promise<string | null> {
+  const resolved = await resolveBinaryFromLoginShell("claude", claudeOverride);
+  if (resolved.source === "override_invalid") {
+    return null;
+  }
+
+  try {
+    const { stdout } = await runCommand(resolved.path, [
+      "plugin",
+      "marketplace",
+      "list",
+      "--json",
+    ]);
+    const entries = JSON.parse(stdout) as unknown;
+    if (!Array.isArray(entries)) {
+      return null;
     }
 
-    const response = result.value;
-    if (!response.ok) {
-      unverified++;
-      continue;
+    const marketplace = entries.find((entry): entry is ClaudeMarketplaceListEntry => {
+      if (typeof entry !== "object" || entry === null) {
+        return false;
+      }
+      const record = entry as ClaudeMarketplaceListEntry;
+      return record.name === CLOSEDLOOP_MARKETPLACE_NAME;
+    });
+    if (marketplace?.source !== "directory") {
+      return null;
     }
 
-    let latestVer: string;
-    try {
-      const body = (await response.json()) as { version?: unknown };
-      if (typeof body.version !== "string") {
-        unverified++;
+    const directoryPath =
+      typeof marketplace.path === "string"
+        ? marketplace.path
+        : typeof marketplace.installLocation === "string"
+          ? marketplace.installLocation
+          : undefined;
+    return directoryPath && path.isAbsolute(directoryPath)
+      ? directoryPath
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function manifestUnavailableResult(): Partial<CheckResult> {
+  return {
+    passed: false,
+    error: "Could not verify latest version",
+    remediation: "Check your network connection and re-run System Check",
+  };
+}
+
+async function runPluginUpdates(
+  outdatedPlugins: Array<{
+    plugin: (typeof CLOSEDLOOP_USER_PLUGINS)[number];
+    installedVersion: string;
+    latestVersion: string;
+  }>,
+  options: {
+    claudeOverride?: string;
+    readInstalledVersions: () => Record<string, string>;
+  }
+): Promise<Map<string, PluginUpdateCommandResult>> {
+  const updateResults = new Map<string, PluginUpdateCommandResult>();
+  const startedAt = Date.now();
+  const pluginIds = outdatedPlugins.map(({ plugin }) => plugin.key);
+  const versionsBefore = Object.fromEntries(
+    outdatedPlugins.map(({ plugin, installedVersion }) => [
+      plugin.key,
+      installedVersion,
+    ])
+  );
+
+  gatewayLog.info(
+    "health-check",
+    `Starting ClosedLoop plugin update attempt ${JSON.stringify({
+      pluginIds,
+      versionsBefore,
+    })}`
+  );
+
+  const marketplaceRefresh = await runPluginMarketplaceUpdateCommand({
+    claudeOverride: options.claudeOverride,
+    timeoutMs: PLUGIN_UPDATE_TIMEOUT_MS,
+  });
+  const marketplaceRefreshSucceeded =
+    marketplaceRefresh.outcome === "success";
+  if (!marketplaceRefreshSucceeded) {
+    gatewayLog.warn(
+      "health-check",
+      `ClosedLoop plugin marketplace refresh failed ${JSON.stringify({
+        marketplace: CLOSEDLOOP_MARKETPLACE_NAME,
+        outcome: marketplaceRefresh.outcome,
+        exitCode: marketplaceRefresh.exitCode,
+        failureReason: marketplaceRefresh.failureReason,
+        stderrTail: marketplaceRefresh.stderrTail ||
+          getPluginUpdateOutputTail(marketplaceRefresh.stdout),
+      })}`
+    );
+  }
+
+  Observability.pluginUpdateAttempted({
+    pluginIds,
+    versionsBefore,
+    versionsAfter: versionsBefore,
+    outcomes: Object.fromEntries(
+      pluginIds.map((pluginId) => [pluginId, "skipped"])
+    ) as Record<string, PluginUpdateOutcome>,
+    durationMs: 0,
+    command: "claude plugin update",
+    scope: "user",
+  });
+
+  if (marketplaceRefreshSucceeded) {
+    for (const { plugin, installedVersion, latestVersion } of outdatedPlugins) {
+      const suppressionKey = getFailedPluginUpdateAttemptKey(
+        plugin.key,
+        installedVersion,
+        latestVersion
+      );
+      const suppressedOutcome = failedPluginUpdateAttempts.get(suppressionKey);
+      if (suppressedOutcome) {
+        updateResults.set(plugin.key, {
+          outcome: "skipped",
+          stdout: "",
+          elapsedMs: 0,
+          failureReason:
+            suppressedOutcome === "timeout" ? "timeout" : "still_outdated",
+        });
         continue;
       }
-      latestVer = body.version;
-    } catch {
-      unverified++;
-      continue;
+
+      const result = await runPluginUpdateCommand(plugin.key, {
+        claudeOverride: options.claudeOverride,
+        timeoutMs: PLUGIN_UPDATE_TIMEOUT_MS,
+      });
+      updateResults.set(plugin.key, result);
+      if (result.outcome === "failed" || result.outcome === "timeout") {
+        failedPluginUpdateAttempts.set(suppressionKey, result.outcome);
+      }
     }
-
-    const installedVer = installed[pluginKey] ?? "";
-    const cmp = compareStrictSemver(installedVer, latestVer);
-
-    if (cmp === undefined) {
-      unverified++;
-    } else if (cmp === false) {
-      outdated.push({ key: pluginKey, installed: installedVer, latest: latestVer });
-    } else {
-      upToDate.push(pluginKey);
+  } else {
+    for (const { plugin } of outdatedPlugins) {
+      updateResults.set(plugin.key, {
+        ...marketplaceRefresh,
+        stdout: marketplaceRefresh.stdout,
+      });
     }
   }
 
-  if (outdated.length > 0) {
-    return {
-      id: "plugin-versions",
-      label: "Plugin Versions (@closedloop-ai)",
-      required: false,
-      passed: false,
-      error: "Outdated: " + outdated.map((p) => `${p.key} (${p.installed} -> ${p.latest})`).join(", "),
-      remediation: outdated.map((p) => `claude plugin install ${p.key}`).join(" && "),
-    };
+  const versionsAfterRecord = options.readInstalledVersions();
+  const versionsAfter = Object.fromEntries(
+    pluginIds.map((pluginId) => [pluginId, versionsAfterRecord[pluginId] ?? ""])
+  );
+  const outcomes = Object.fromEntries(
+    outdatedPlugins.map(({ plugin, latestVersion }) => {
+      const finalVersion = versionsAfterRecord[plugin.key] ?? "";
+      const current = compareStrictSemver(finalVersion, latestVersion) === true;
+      return [
+        plugin.key,
+        resolvePostUpdateOutcome(current, updateResults.get(plugin.key)),
+      ];
+    })
+  ) as Record<string, PluginUpdateOutcome>;
+  const failedResult = [...updateResults.values()].find(
+    (result) => result.outcome === "failed" || result.outcome === "timeout"
+  );
+  const failedOutputTail =
+    failedResult?.stderrTail || getPluginUpdateOutputTail(failedResult?.stdout);
+  const anyStillOutdated = outdatedPlugins.some(
+    ({ plugin, latestVersion }) =>
+      compareStrictSemver(versionsAfterRecord[plugin.key] ?? "", latestVersion) !==
+      true
+  );
+  if (marketplaceRefreshSucceeded) {
+    for (const { plugin, installedVersion, latestVersion } of outdatedPlugins) {
+      if (compareStrictSemver(versionsAfterRecord[plugin.key] ?? "", latestVersion) === true) {
+        continue;
+      }
+      failedPluginUpdateAttempts.set(
+        getFailedPluginUpdateAttemptKey(plugin.key, installedVersion, latestVersion),
+        outcomes[plugin.key] === "timeout" ? "timeout" : "failed"
+      );
+    }
   }
-
-  if (unverified > 0) {
-    return {
-      id: "plugin-versions",
-      label: "Plugin Versions (@closedloop-ai)",
-      required: false,
-      passed: false,
-      error: `${unverified}/${entries.length} plugin manifest(s) could not be verified`,
-    };
-  }
-
-  return {
-    id: "plugin-versions",
-    label: "Plugin Versions (@closedloop-ai)",
-    required: false,
-    passed: true,
+  const diagnostics: PluginUpdateDiagnostics = {
+    pluginIds,
+    versionsBefore,
+    versionsAfter,
+    outcomes,
+    durationMs: Date.now() - startedAt,
+    command: "claude plugin update",
+    scope: "user",
+    ...(failedResult?.exitCode !== undefined && {
+      exitCode: failedResult.exitCode,
+    }),
+    ...(failedResult?.failureReason !== undefined
+      ? { failureReason: failedResult.failureReason }
+      : anyStillOutdated
+        ? { failureReason: "still_outdated" as const }
+        : {}),
+    ...(failedOutputTail ? { stderrTail: failedOutputTail } : {}),
   };
+
+  gatewayLog.info(
+    "health-check",
+    `Completed ClosedLoop plugin update attempt ${JSON.stringify({
+      pluginIds,
+      versionsBefore,
+      versionsAfter,
+      outcomes,
+      durationMs: diagnostics.durationMs,
+      exitCode: diagnostics.exitCode,
+      failureReason: diagnostics.failureReason,
+      stderrTail: diagnostics.stderrTail,
+    })}`
+  );
+
+  if (anyStillOutdated) {
+    Observability.pluginUpdateFailed(diagnostics);
+  } else {
+    Observability.pluginUpdateSucceeded(diagnostics);
+  }
+
+  return updateResults;
+}
+
+function getFailedPluginUpdateAttemptKey(
+  pluginRef: string,
+  installedVersion: string,
+  latestVersion: string
+): string {
+  return `${pluginRef}\u0000${installedVersion}\u0000${latestVersion}`;
+}
+
+function buildPluginUpdateRemediation(pluginRef: string): string {
+  return [
+    "1. Open Claude Code.",
+    "2. Open the plugin marketplace and update the closedloop-ai marketplace, then update ClosedLoop plugins manually, or run:",
+    `claude plugin marketplace update ${CLOSEDLOOP_MARKETPLACE_NAME}`,
+    `claude plugin update ${pluginRef} --scope user`,
+    "3. Restart Claude Code if needed.",
+    "4. Re-run System Check.",
+  ].join("\n");
 }
 
 async function loadReposConfig(configDir: string): Promise<ReposConfig> {

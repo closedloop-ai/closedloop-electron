@@ -8,7 +8,7 @@ import type {
   OperationRequestContext,
 } from "../operation-dispatcher.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
-import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getShellEnv, resolveBinaryFromLoginShell } from "../shell-path.js";
 import { getOverrideBinaryPaths, getResolvedGitPath } from "./symphony-loop.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { retrySpawn, type RetrySpawnDeps } from "../../main/spawn-retry.js";
@@ -487,9 +487,9 @@ export function registerSymphonyInteractiveRoutes(
           source: "claude",
         });
       } catch (err) {
-        console.error(
-          "[commit-message] generation failed:",
-          err instanceof Error ? err.message : err
+        gatewayLog.error(
+          "commit-message",
+          `generation failed: ${err instanceof Error ? err.message : String(err)}`,
         );
         json(context, 200, {
           title: `Work on ${ticketId}`,
@@ -972,6 +972,7 @@ async function generateCommitWithClaude(
   deps: RetrySpawnDeps
 ): Promise<{ title: string; description: string }> {
   const env = await getShellEnv();
+  const claudeBin = (await resolveBinaryFromLoginShell("claude", getOverrideBinaryPaths()?.claude)).path;
   return retrySpawn(() => new Promise<{ title: string; description: string }>((resolve, reject) => {
     const prompt = [
       `Generate a git commit message for ticket ${ticketId}.`,
@@ -987,7 +988,7 @@ async function generateCommitWithClaude(
       "Do NOT include AI or assistant references.",
     ].join("\n");
 
-    const child = spawn(resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path, ["--model", "haiku", "-p", prompt], {
+    const child = spawn(claudeBin, ["--model", "haiku", "-p", prompt], {
       cwd: worktreeDir,
       stdio: ["ignore", "pipe", "pipe"],
       env,
@@ -1013,11 +1014,11 @@ async function generateCommitWithClaude(
       clearTimeout(timer);
 
       if (stderr) {
-        console.error("[commit-message] claude stderr:", stderr.slice(0, 500));
+        gatewayLog.error("commit-message", `claude stderr: ${stderr.slice(0, 500)}`);
       }
 
       if (code !== 0) {
-        console.error(`[commit-message] claude exited with code ${code}`);
+        gatewayLog.error("commit-message", `claude exited with code ${code}`);
       }
 
       // Parse stdout regardless of exit code — claude may produce
@@ -1046,7 +1047,7 @@ async function generateCommitWithClaude(
 
     child.on("error", (err) => {
       clearTimeout(timer);
-      console.error("[commit-message] failed to spawn claude:", err.message);
+      gatewayLog.error("commit-message", `failed to spawn claude: ${err.message}`);
       reject(err);
     });
   }), deps);

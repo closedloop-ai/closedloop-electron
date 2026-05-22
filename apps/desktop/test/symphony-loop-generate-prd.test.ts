@@ -10,6 +10,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
@@ -111,7 +112,7 @@ test("GENERATE_PRD: rejects with 400 when no repo configured", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId: LOOP_UUID,
-        command: "GENERATE_PRD",
+        command: LoopCommand.GeneratePrd,
         closedLoopAuthToken: "tok",
         artifacts: [],
         prompt: "Generate a PRD",
@@ -182,7 +183,7 @@ test("GENERATE_PRD: accepts valid command and responds 200", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId: "00000000-0000-0000-0000-000000000010",
-        command: "GENERATE_PRD",
+        command: LoopCommand.GeneratePrd,
         closedLoopAuthToken: "tok",
         artifacts: [],
         prompt: "Generate a PRD for this project",
@@ -240,7 +241,7 @@ test("GENERATE_PRD: rejects with 400 when prompt is missing", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId: "00000000-0000-0000-0000-000000000020",
-        command: "GENERATE_PRD",
+        command: LoopCommand.GeneratePrd,
         closedLoopAuthToken: "tok",
         artifacts: [],
         repo: { fullName: "org/repo-noprompt", branch: "main" },
@@ -265,7 +266,7 @@ test("GENERATE_PRD: rejects with 400 when prompt is missing", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId: "00000000-0000-0000-0000-000000000021",
-        command: "GENERATE_PRD",
+        command: LoopCommand.GeneratePrd,
         closedLoopAuthToken: "tok",
         artifacts: [],
         prompt: "",
@@ -354,7 +355,7 @@ test("GENERATE_PRD: spawns with worktree cwd, writes context pack, no --add-dir"
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "GENERATE_PRD",
+        command: LoopCommand.GeneratePrd,
         closedLoopAuthToken: "tok",
         artifacts: [
           {
@@ -510,7 +511,7 @@ test("GENERATE_PRD: uploads { prd: { content } } when prd.md is written", async 
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "GENERATE_PRD",
+        command: LoopCommand.GeneratePrd,
         closedLoopAuthToken: "tok",
         artifacts: [],
         prompt: "Generate a PRD",
@@ -597,7 +598,7 @@ test("GENERATE_PRD: uploads empty artifacts when prd.md is not written", async (
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "GENERATE_PRD",
+        command: LoopCommand.GeneratePrd,
         closedLoopAuthToken: "tok",
         artifacts: [],
         prompt: "Generate a PRD",
@@ -679,7 +680,7 @@ test("GENERATE_PRD: cleans up worktree on failure (exit code 1)", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "GENERATE_PRD",
+        command: LoopCommand.GeneratePrd,
         closedLoopAuthToken: "tok",
         artifacts: [],
         prompt: "Generate a PRD",

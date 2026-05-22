@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import {
   runShutdownSequence,
+  type ShutdownFailure,
   type ShutdownDeps,
 } from "../src/main/shutdown.js";
 
@@ -26,6 +27,11 @@ function makeStubDeps(overrides?: Partial<ShutdownDeps>) {
     commandExecutor: {
       dispose: () => {
         calls.push("commandExecutor.dispose");
+      },
+    },
+    agentMonitor: {
+      stop: () => {
+        calls.push("agentMonitor.stop");
       },
     },
     server: {
@@ -60,6 +66,7 @@ describe("runShutdownSequence", () => {
       "observability.shutdown",
       "cloudSocket.stop",
       "commandExecutor.dispose",
+      "agentMonitor.stop",
       "server.stop",
       "desktopWindow.dispose",
       "tray.dispose",
@@ -67,33 +74,74 @@ describe("runShutdownSequence", () => {
   });
 
   test("timeout path: result is 'timed_out' when server.stop never resolves", async () => {
+    const failures: ShutdownFailure[] = [];
+    const logs: string[] = [];
     const { deps } = makeStubDeps({
       server: {
         stop: () => new Promise<void>(() => {}), // never resolves
       },
+      log: (message) => logs.push(message),
+      reportFailure: (failure) => failures.push(failure),
     });
 
-    // Stub setTimeoutFn that fires the callback immediately
-    const stubSetTimeout = ((cb: () => void) => {
-      cb();
-      return 999 as unknown as ReturnType<typeof setTimeout>;
-    }) as unknown as typeof setTimeout;
+    // Stub setTimeoutFn that fires after cleanup has advanced into server.stop.
+    const stubSetTimeout = ((cb: () => void) =>
+      setTimeout(cb, 0)) as unknown as typeof setTimeout;
 
     const result = await runShutdownSequence(deps, {
       setTimeoutFn: stubSetTimeout,
     });
 
     assert.equal(result, "timed_out");
+    assert.equal(failures.length, 1);
+    assert.equal(failures[0].result, "timed_out");
+    assert.equal(failures[0].phase, "server.stop");
+    assert.match(logs.join("\n"), /shutdown sequence end: timed_out/);
   });
 
   test("failed path: server.stop rejects with an error", async () => {
+    const failures: ShutdownFailure[] = [];
     const { deps } = makeStubDeps({
       server: {
         stop: () => Promise.reject(new Error("stop failed")),
       },
+      reportFailure: (failure) => failures.push(failure),
     });
 
     // Use a setTimeoutFn that never fires so timeout doesn't win
+    const neverTimeout = (() =>
+      42 as unknown as ReturnType<typeof setTimeout>) as unknown as typeof setTimeout;
+
+    const result = await runShutdownSequence(deps, {
+      setTimeoutFn: neverTimeout,
+    });
+
+    assert.equal(result, "failed");
+    assert.equal(failures.length, 1);
+    assert.deepEqual(
+      {
+        result: failures[0].result,
+        phase: failures[0].phase,
+        error: failures[0].error,
+      },
+      {
+        result: "failed",
+        phase: "server.stop",
+        error: "stop failed",
+      },
+    );
+  });
+
+  test("shutdown telemetry callback failures are swallowed", async () => {
+    const { deps } = makeStubDeps({
+      server: {
+        stop: () => Promise.reject(new Error("stop failed")),
+      },
+      reportFailure: () => {
+        throw new Error("telemetry unavailable");
+      },
+    });
+
     const neverTimeout = (() =>
       42 as unknown as ReturnType<typeof setTimeout>) as unknown as typeof setTimeout;
 

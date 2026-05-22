@@ -9,7 +9,9 @@ import type {
   DesktopCommandStreamEvent,
   ProtocolEnvelope,
 } from "./cloud-protocol.js";
+import type { CommandSignatureVerifier } from "./command-signature-verifier.js";
 import { Observability } from "./observability.js";
+import { COMMAND_SIGNING_REJECTION_REASONS } from "../shared/contracts.js";
 
 const COMMAND_RETENTION_MS = 10 * 60_000;
 const MAX_RETAINED_TERMINAL_COMMANDS = 200;
@@ -28,6 +30,11 @@ export interface CloudCommandExecutorOptions {
     activeCommands: number;
     queueDepth: number;
   }) => void;
+  commandSignatureVerifier?: CommandSignatureVerifier;
+  isCommandSigningEnforced?: () => boolean;
+  prepareCommandForExecution?: (
+    command: DesktopCommandEvent,
+  ) => Promise<DesktopCommandEvent>;
 }
 
 export class CloudCommandExecutor {
@@ -38,6 +45,7 @@ export class CloudCommandExecutor {
   private readonly trackedByCommandId = new Map<string, TrackedCommand>();
   private connected = false;
   private disposed = false;
+  private lastEmittedStats: { activeCommands: number; queueDepth: number } | null = null;
 
   constructor(options: CloudCommandExecutorOptions) {
     this.options = options;
@@ -64,6 +72,35 @@ export class CloudCommandExecutor {
         this.replayBuffered(command.commandId, 0);
       }
       return;
+    }
+
+    const signatureBodyOverride = getSignatureBodyOverride(command);
+    if (this.options.isCommandSigningEnforced?.()) {
+      const verification = this.options.commandSignatureVerifier?.verify(
+        command,
+        signatureBodyOverride,
+      ) ?? {
+        ok: false as const,
+        reason: COMMAND_SIGNING_REJECTION_REASONS.noKeysAuthorized,
+      };
+      if (!verification.ok) {
+        gatewayLog.warn(
+          "command-executor",
+          `Rejected command ${command.commandId}: ${verification.reason}`,
+        );
+        this.options.sendCommandAck({
+          commandId: command.commandId,
+          accepted: false,
+          state: "failed",
+          reason: verification.reason,
+        });
+        return;
+      }
+    } else if (command.signature || command.signaturePayload || command.publicKeyFingerprint) {
+      gatewayLog.debug(
+        "command-executor",
+        `Ignoring command signature fields for ${command.commandId}; server support is disabled`,
+      );
     }
 
     const validationError = validateCommand(command);
@@ -172,7 +209,11 @@ export class CloudCommandExecutor {
     this.inFlightByCommandId.clear();
     this.lockOwners.clear();
     this.trackedByCommandId.clear();
-    this.notifyQueueStats();
+    // Intentionally do not call notifyQueueStats() here: dispose() runs during
+    // app shutdown after Observability has already been torn down, and the
+    // app-level debounce has already been cancelled. Emitting a final {0,0}
+    // would re-arm that debounce timer and cause a telemetry call after
+    // Observability.shutdown() has returned.
   }
 
   getStats(): { activeCommands: number; queueDepth: number } {
@@ -246,7 +287,10 @@ export class CloudCommandExecutor {
     Observability.commandStarted(command.commandId, command.operationId);
 
     try {
-      await this.executeViaGateway(command, abortController.signal);
+      const preparedCommand = this.options.prepareCommandForExecution
+        ? await this.options.prepareCommandForExecution(command)
+        : command;
+      await this.executeViaGateway(preparedCommand, abortController.signal);
       if (!isTerminalState(tracked.terminalState)) {
         this.emitTrackedEvent(command.commandId, "done", { type: "done" });
         Observability.commandCompleted(
@@ -502,7 +546,20 @@ export class CloudCommandExecutor {
   }
 
   private notifyQueueStats(): void {
-    this.options.onQueueStatsChange?.(this.getStats());
+    const stats = this.getStats();
+    // Skip the callback when neither counter changed. schedule() is called on
+    // every setConnected(true) and every execute() boundary, so without this
+    // guard an idle reconnect would emit a spurious 0/0 telemetry event that
+    // does not correspond to a real queue mutation.
+    if (
+      this.lastEmittedStats &&
+      this.lastEmittedStats.activeCommands === stats.activeCommands &&
+      this.lastEmittedStats.queueDepth === stats.queueDepth
+    ) {
+      return;
+    }
+    this.lastEmittedStats = stats;
+    this.options.onQueueStatsChange?.(stats);
   }
 
   private pruneTerminalCommands(): void {
@@ -606,6 +663,19 @@ function asRecord(value: unknown): Record<string, unknown> {
     return {};
   }
   return value as Record<string, unknown>;
+}
+
+function getSignatureBodyOverride(command: DesktopCommandEvent): unknown {
+  if (
+    command.path === "/api/gateway/symphony/loop" ||
+    command.path === "/api/gateway/symphony/loop/kill"
+  ) {
+    const body = asRecord(command.body);
+    if (body.userIntent !== undefined) {
+      return body.userIntent;
+    }
+  }
+  return undefined;
 }
 
 function asNonEmptyString(value: unknown): string | null {

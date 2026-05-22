@@ -22,6 +22,29 @@ export default tseslint.config(
       // Allow empty catch blocks (common pattern in this codebase)
       "@typescript-eslint/no-empty-function": "off",
       "no-empty": ["error", { allowEmptyCatch: true }],
+      "no-restricted-syntax": [
+        "error",
+        {
+          selector: "CallExpression[callee.name='execFileSync'][arguments.0.value='which']",
+          message: "Use resolveBinaryFromLoginShell or resolveBinaryFromLoginShellSync for binary discovery.",
+        },
+        {
+          selector: "CallExpression[callee.name='execSync'][arguments.0.value=/\\bwhich\\b/]",
+          message: "Use resolveBinaryFromLoginShell or resolveBinaryFromLoginShellSync for binary discovery.",
+        },
+      ],
+    },
+  },
+  {
+    files: ["src/main/**/*.ts", "src/server/**/*.ts"],
+    rules: {
+      "no-console": "error",
+    },
+  },
+  {
+    files: ["src/main/gateway-logger.ts"],
+    rules: {
+      "no-console": ["error", { allow: ["error", "warn", "log"] }],
     },
   },
 );

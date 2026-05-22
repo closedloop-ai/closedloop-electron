@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import type { ServerResponse } from "node:http";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import type { ProcessManager } from "../process-manager.js";
-import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getShellEnv, resolveBinaryFromLoginShell } from "../shell-path.js";
 import { getOverrideBinaryPaths } from "./symphony-loop.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { createStreamState, processStreamEvent } from "./stream-events.js";
@@ -123,6 +123,7 @@ async function streamClaude(
     "WebSearch,WebFetch,Bash",
     expectedMcpUrl
   );
+  const claudeBin = (await resolveBinaryFromLoginShell("claude", getOverrideBinaryPaths()?.claude)).path;
 
   await new Promise<void>((resolve) => {
     let handled = false;
@@ -151,7 +152,7 @@ async function streamClaude(
 
     void processManager
       .spawnStreaming({
-        command: resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path,
+        command: claudeBin,
         args: [
           "-p",
           "--verbose",
@@ -211,6 +212,7 @@ async function streamCodex(
 ): Promise<void> {
   let assistantContent = "";
   const codexShellEnv = await getShellEnv();
+  const codexBin = (await resolveBinaryFromLoginShell("codex", getOverrideBinaryPaths()?.codex)).path;
 
   await new Promise<void>((resolve) => {
     let handled = false;
@@ -239,7 +241,7 @@ async function streamCodex(
 
     void processManager
       .spawnStreaming({
-        command: resolveBinarySync("codex", getOverrideBinaryPaths()?.codex).path,
+        command: codexBin,
         args: ["exec", "--full-auto", "--json", "-m", "codex-mini-latest", message],
         cwd: terminalCwd,
         env: codexShellEnv,

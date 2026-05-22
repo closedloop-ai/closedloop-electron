@@ -18,11 +18,13 @@ import {
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { promisify } from "node:util";
+import { inspect, promisify } from "node:util";
+import { gatewayLog } from "../../main/gateway-logger.js";
 import { expandHomePath } from "../../shared/path-utils.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { getShellEnv } from "../shell-path.js";
-import { getResolvedGitPath } from "./symphony-loop.js";
+import { getResolvedClaudePath, getResolvedGitPath } from "./symphony-loop.js";
+import { isPluginInstalled } from "./plugin-cache.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -41,14 +43,20 @@ export const CLONE_GIT_TIMEOUT = 300_000;
 
 export function loopLog(loopId: string, ...args: unknown[]): void {
   const short = loopId.slice(0, 8);
-  const ts = new Date().toISOString().slice(11, 23);
-  console.log(`[symphony-loop][${ts}][${short}]`, ...args);
+  gatewayLog.info("symphony-loop", `[${short}] ${formatLoopLogArgs(args)}`);
 }
 
 export function loopError(loopId: string, ...args: unknown[]): void {
   const short = loopId.slice(0, 8);
-  const ts = new Date().toISOString().slice(11, 23);
-  console.error(`[symphony-loop][${ts}][${short}]`, ...args);
+  gatewayLog.error("symphony-loop", `[${short}] ${formatLoopLogArgs(args)}`);
+}
+
+function formatLoopLogArgs(args: unknown[]): string {
+  return args
+    .map((arg) =>
+      typeof arg === "string" ? arg : inspect(arg, { depth: 4, breakLength: 120 }),
+    )
+    .join(" ");
 }
 
 export class SymphonyDirNotConfiguredError extends Error {
@@ -741,4 +749,53 @@ export function getLockDir(
     "locks",
     `${repoName}-${sanitizedTicket}`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Auto-bootstrap gate (FEA-652 Part B)
+// ---------------------------------------------------------------------------
+
+export function hasBootstrapArtifacts(dir: string): boolean {
+  const metadataPath = path.join(dir, ".closedloop-ai", "bootstrap-metadata.json");
+  if (existsSync(metadataPath)) return true;
+
+  const agentsDir = path.join(dir, ".claude", "agents");
+  try {
+    const files = readdirSync(agentsDir);
+    return files.some((f) => f.endsWith(".md"));
+  } catch {
+    return false;
+  }
+}
+
+export async function runBootstrapIfNeeded(
+  worktreeDir: string,
+  loopId: string,
+): Promise<void> {
+  if (hasBootstrapArtifacts(worktreeDir)) {
+    loopLog(loopId, "Bootstrap skipped — artifacts already present");
+    return;
+  }
+
+  if (!isPluginInstalled("bootstrap")) {
+    loopLog(loopId, "Bootstrap skipped — plugin not installed");
+    return;
+  }
+
+  try {
+    loopLog(loopId, "Running bootstrap (no artifacts detected)...");
+    const claudePath = getResolvedClaudePath();
+    const env = await getShellEnv();
+    await execFileAsync(claudePath, ["-p", "/bootstrap:agent-bootstrap"], {
+      cwd: worktreeDir,
+      env,
+      timeout: 15 * 60 * 1000,
+    });
+    loopLog(loopId, "Bootstrap completed");
+  } catch (err) {
+    loopError(
+      loopId,
+      `Bootstrap failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }

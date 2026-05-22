@@ -3,7 +3,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
-import { parseTokenUsage } from "../src/main/token-usage.js";
+import {
+  parseApiKeySource,
+  parseTokenUsage,
+  resolveClaudeOutputPath,
+} from "../src/main/token-usage.js";
 
 const tempDirs: string[] = [];
 
@@ -19,9 +23,13 @@ function makeTempDir(): string {
   return dir;
 }
 
-function writeJsonl(dir: string, lines: unknown[]): void {
+function writeJsonl(
+  dir: string,
+  lines: unknown[],
+  filename = "claude-output.jsonl",
+): void {
   const content = lines.map((l) => JSON.stringify(l)).join("\n") + "\n";
-  fs.writeFileSync(path.join(dir, "claude-output.jsonl"), content, "utf-8");
+  fs.writeFileSync(path.join(dir, filename), content, "utf-8");
 }
 
 test("(a) normal case: accumulates all four token types and deduplicates models", () => {
@@ -256,4 +264,134 @@ test("(h) tokensByModel: missing JSONL returns empty object", () => {
   const dir = makeTempDir();
   const result = parseTokenUsage(dir);
   assert.deepEqual(result.tokensByModel, {});
+});
+
+test("resolveClaudeOutputPath uses sidecar-selected renamed output", () => {
+  const dir = makeTempDir();
+  writeJsonl(dir, [
+    { type: "system", subtype: "init", apiKeySource: "ANTHROPIC_API_KEY" },
+    {
+      type: "assistant",
+      message: {
+        model: "claude-opus-4",
+        usage: { input_tokens: 7, output_tokens: 3 },
+      },
+    },
+  ], "claude-output-run-1.jsonl");
+  fs.writeFileSync(
+    path.join(dir, "claude-output.name.txt"),
+    "claude-output-run-1.jsonl\n",
+    "utf-8",
+  );
+
+  assert.equal(
+    resolveClaudeOutputPath(dir),
+    path.join(dir, "claude-output-run-1.jsonl"),
+  );
+  assert.equal(parseTokenUsage(dir).inputTokens, 7);
+  assert.equal(parseApiKeySource(dir), "ANTHROPIC_API_KEY");
+});
+
+test("resolveClaudeOutputPath treats an empty sidecar as legacy-only", () => {
+  const dir = makeTempDir();
+  writeJsonl(dir, [
+    {
+      type: "assistant",
+      message: {
+        model: "claude-opus-4",
+        usage: { input_tokens: 5, output_tokens: 1 },
+      },
+    },
+  ]);
+  writeJsonl(dir, [
+    {
+      type: "assistant",
+      message: {
+        model: "claude-opus-4",
+        usage: { input_tokens: 999, output_tokens: 1 },
+      },
+    },
+  ], "claude-output-stale.jsonl");
+  fs.writeFileSync(path.join(dir, "claude-output.name.txt"), "", "utf-8");
+
+  assert.equal(resolveClaudeOutputPath(dir), path.join(dir, "claude-output.jsonl"));
+  assert.equal(parseTokenUsage(dir).inputTokens, 5);
+});
+
+test("resolveClaudeOutputPath falls back from stale sidecar to newest renamed output", () => {
+  const dir = makeTempDir();
+  const older = path.join(dir, "claude-output-old.jsonl");
+  const newer = path.join(dir, "claude-output-new.jsonl");
+  writeJsonl(dir, [
+    {
+      type: "assistant",
+      message: {
+        model: "claude-opus-4",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    },
+  ], path.basename(older));
+  writeJsonl(dir, [
+    {
+      type: "assistant",
+      message: {
+        model: "claude-opus-4",
+        usage: { input_tokens: 11, output_tokens: 1 },
+      },
+    },
+  ], path.basename(newer));
+  fs.utimesSync(older, new Date(1000), new Date(1000));
+  fs.utimesSync(newer, new Date(2000), new Date(2000));
+  fs.writeFileSync(
+    path.join(dir, "claude-output.name.txt"),
+    "claude-output-missing.jsonl\n",
+    "utf-8",
+  );
+
+  assert.equal(resolveClaudeOutputPath(dir), newer);
+  assert.equal(parseTokenUsage(dir).inputTokens, 11);
+});
+
+test("resolveClaudeOutputPath preserves legacy fixed-path fallback", () => {
+  const dir = makeTempDir();
+  writeJsonl(dir, [
+    {
+      type: "assistant",
+      message: {
+        model: "claude-opus-4",
+        usage: { input_tokens: 13, output_tokens: 2 },
+      },
+    },
+  ]);
+
+  assert.equal(resolveClaudeOutputPath(dir), path.join(dir, "claude-output.jsonl"));
+  assert.equal(parseTokenUsage(dir).inputTokens, 13);
+});
+
+test("resolveClaudeOutputPath returns null when no output files exist", () => {
+  const dir = makeTempDir();
+
+  assert.equal(resolveClaudeOutputPath(dir), null);
+  assert.equal(parseTokenUsage(dir).turns, 0);
+});
+
+test("resolveClaudeOutputPath rejects sidecar path traversal", () => {
+  const dir = makeTempDir();
+  const outsideDir = makeTempDir();
+  writeJsonl(outsideDir, [
+    {
+      type: "assistant",
+      message: {
+        model: "claude-opus-4",
+        usage: { input_tokens: 99, output_tokens: 1 },
+      },
+    },
+  ], "claude-output-evil.jsonl");
+  fs.writeFileSync(
+    path.join(dir, "claude-output.name.txt"),
+    "../claude-output-evil.jsonl\n",
+    "utf-8",
+  );
+
+  assert.equal(resolveClaudeOutputPath(dir), null);
 });

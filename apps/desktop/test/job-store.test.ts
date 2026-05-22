@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { JobStore, isTerminalJobStatus } from "../src/main/job-store.js";
 import type { LocalJob, LocalJobStatus } from "../src/main/job-store.js";
 
@@ -15,7 +16,7 @@ function makeJob(overrides: Partial<LocalJob> = {}): LocalJob {
     id: overrides.id ?? "job-1",
     kind: "SYMPHONY_LOOP",
     loopId: overrides.loopId ?? "loop-1",
-    command: "PLAN",
+    command: LoopCommand.Plan,
     status: "RUNNING" as LocalJobStatus,
     startedAt: now,
     updatedAt: now,
@@ -99,10 +100,30 @@ test("isTerminalJobStatus returns correct values", () => {
   assert.ok(isTerminalJobStatus("CANCELLED"));
   assert.ok(isTerminalJobStatus("STOPPED"));
   assert.ok(isTerminalJobStatus("UNKNOWN"));
+  assert.ok(isTerminalJobStatus("TIMED_OUT"));
   assert.ok(!isTerminalJobStatus("QUEUED"));
   assert.ok(!isTerminalJobStatus("STARTING"));
   assert.ok(!isTerminalJobStatus("RUNNING"));
   assert.ok(!isTerminalJobStatus("CANCEL_PENDING"));
+});
+
+test("upsert TIMED_OUT moves job to terminal", () => {
+  store.upsert(makeJob({ id: "j1", status: "RUNNING" }));
+  assert.equal(store.listRunning().length, 1);
+
+  store.upsert(makeJob({ id: "j1", status: "TIMED_OUT", liveActivity: "Loop timed out — restart from the loop list." }));
+  assert.equal(store.listRunning().length, 0);
+  assert.equal(store.listCompleted().length, 1);
+  assert.equal(store.listCompleted()[0].status, "TIMED_OUT");
+  assert.equal(store.listCompleted()[0].liveActivity, "Loop timed out — restart from the loop list.");
+});
+
+test("TIMED_OUT job persists across JobStore instantiation", () => {
+  store.upsert(makeJob({ id: "j1", loopId: "loop-1", status: "TIMED_OUT", liveActivity: "Loop timed out — restart from the loop list." }));
+
+  const store2 = new JobStore({ cwd: tmpDir, name: "test-jobs" });
+  assert.equal(store2.getByLoopId("loop-1")?.status, "TIMED_OUT");
+  assert.equal(store2.getByLoopId("loop-1")?.liveActivity, "Loop timed out — restart from the loop list.");
 });
 
 test("persists and restores across instances", () => {
@@ -114,4 +135,58 @@ test("persists and restores across instances", () => {
   assert.equal(store2.listCompleted().length, 1);
   assert.equal(store2.getByLoopId("la")?.id, "a");
   assert.equal(store2.getByLoopId("lb")?.id, "b");
+});
+
+test("persists execute finalization diagnostics and recovery inputs across instances", () => {
+  const finalizedAt = new Date().toISOString();
+  store.upsert(
+    makeJob({
+      id: "exec-1",
+      loopId: "loop-exec-1",
+      command: LoopCommand.Execute,
+      status: "COMPLETED",
+      artifactSlug: "artifact-slug",
+      baseBranch: "release/test",
+      webAppOrigin: "https://app.closedloop.ai",
+      expectedMcpUrl: "http://127.0.0.1:8787/mcp",
+      committer: {
+        name: "Test Committer",
+        email: "test@example.com",
+      },
+      finalizationSource: "boot-recovery",
+      executeFinalizationStatus: "success",
+      executeFinalizationPath: "artifact-existing",
+      executeFinalizationStartedAt: finalizedAt,
+      executeFinalizationCompletedAt: finalizedAt,
+      executeFinalizationReason: "existing execution-result.json reused",
+      executeFinalizationPreExecutionResultPresent: true,
+      executeFinalizationPrePrBodyPresent: false,
+      executeFinalizationPostExecutionResultPresent: true,
+      executeFinalizationPostPrBodyPresent: false,
+    }),
+  );
+
+  const store2 = new JobStore({ cwd: tmpDir, name: "test-jobs" });
+  const restored = store2.getByLoopId("loop-exec-1");
+  assert.ok(restored);
+  assert.equal(restored.command, LoopCommand.Execute);
+  assert.equal(restored.artifactSlug, "artifact-slug");
+  assert.equal(restored.baseBranch, "release/test");
+  assert.equal(restored.webAppOrigin, "https://app.closedloop.ai");
+  assert.equal(restored.expectedMcpUrl, "http://127.0.0.1:8787/mcp");
+  assert.deepEqual(restored.committer, {
+    name: "Test Committer",
+    email: "test@example.com",
+  });
+  assert.equal(restored.finalizationSource, "boot-recovery");
+  assert.equal(restored.executeFinalizationStatus, "success");
+  assert.equal(restored.executeFinalizationPath, "artifact-existing");
+  assert.equal(
+    restored.executeFinalizationReason,
+    "existing execution-result.json reused",
+  );
+  assert.equal(restored.executeFinalizationPreExecutionResultPresent, true);
+  assert.equal(restored.executeFinalizationPrePrBodyPresent, false);
+  assert.equal(restored.executeFinalizationPostExecutionResultPresent, true);
+  assert.equal(restored.executeFinalizationPostPrBodyPresent, false);
 });

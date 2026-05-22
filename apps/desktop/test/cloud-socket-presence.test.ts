@@ -1,9 +1,25 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { afterEach, describe, test } from "node:test";
-import { CloudSocketService, type CloudSocketOptions } from "../src/main/cloud-socket.js";
+import {
+  CloudSocketService,
+  parseDesktopAgentSessionsAck,
+  buildRelayValidationPopHeaders,
+  parseDesktopHelloAck,
+  parseServerCapabilities,
+  refreshRelayValidationPopHeadersForSocket,
+  type CloudSocketOptions,
+} from "../src/main/cloud-socket.js";
 import { GATEWAY_PROTOCOL_VERSION } from "../src/shared/contracts.js";
+import { buildCommandSigningCapabilities } from "../src/shared/command-signing-policy.js";
 import { gatewayLog } from "../src/main/gateway-logger.js";
+import {
+  DesktopPopUnavailableError,
+  DESKTOP_POP_GATEWAY_ID_HEADER,
+  DESKTOP_POP_SIGNATURE_HEADER,
+  DESKTOP_POP_TIMESTAMP_HEADER,
+  RELAY_API_KEY_VERIFY_PATH,
+} from "../src/main/desktop-pop.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -79,6 +95,118 @@ describe("T-6.1: Presence state log deduplication", () => {
   });
 });
 
+describe("relay validation PoP headers", () => {
+  test("managed keys sign the relay API-key verification path", async () => {
+    let capturedRequest: unknown;
+    const headers = await buildRelayValidationPopHeaders(
+      "DESKTOP_MANAGED",
+      (request) => {
+        capturedRequest = request;
+        return {
+          [DESKTOP_POP_GATEWAY_ID_HEADER]: "gateway-1",
+          [DESKTOP_POP_TIMESTAMP_HEADER]: "1713984000",
+          [DESKTOP_POP_SIGNATURE_HEADER]: "signature",
+        };
+      },
+    );
+
+    assert.deepEqual(capturedRequest, {
+      method: "POST",
+      pathname: RELAY_API_KEY_VERIFY_PATH,
+    });
+    assert.deepEqual(headers, {
+      [DESKTOP_POP_GATEWAY_ID_HEADER]: "gateway-1",
+      [DESKTOP_POP_TIMESTAMP_HEADER]: "1713984000",
+      [DESKTOP_POP_SIGNATURE_HEADER]: "signature",
+    });
+  });
+
+  test("manual keys omit relay PoP headers and do not call signer", async () => {
+    let signerCalled = false;
+    const headers = await buildRelayValidationPopHeaders(
+      "USER_CREATED",
+      () => {
+        signerCalled = true;
+        return null;
+      },
+    );
+
+    assert.equal(headers, undefined);
+    assert.equal(signerCalled, false);
+  });
+
+  test("managed signing unavailable falls back to bearer-only compatibility", async () => {
+    const unavailableReports: Array<{ surface: string; reason: string }> = [];
+    const headers = await buildRelayValidationPopHeaders(
+      "DESKTOP_MANAGED",
+      () => null,
+      (surface, reason) => unavailableReports.push({ surface, reason }),
+    );
+
+    assert.equal(headers, undefined);
+    assert.deepEqual(unavailableReports, [{
+      surface: RELAY_API_KEY_VERIFY_PATH,
+      reason: "sign_failed_or_null",
+    }]);
+    assert.equal(
+      gatewayLog.getEntries().some(
+        (entry) =>
+          entry.tag === "desktop-pop" &&
+          entry.message.includes("continuing bearer-only compatibility mode"),
+      ),
+      true,
+    );
+  });
+
+  test("managed signing reports precise redacted unavailable reasons", async () => {
+    const unavailableReports: Array<{ surface: string; reason: string }> = [];
+
+    const headers = await buildRelayValidationPopHeaders(
+      "DESKTOP_MANAGED",
+      () => {
+        throw new DesktopPopUnavailableError("safe_storage_unavailable");
+      },
+      (surface, reason) => unavailableReports.push({ surface, reason }),
+    );
+
+    assert.equal(headers, undefined);
+    assert.deepEqual(unavailableReports, [{
+      surface: RELAY_API_KEY_VERIFY_PATH,
+      reason: "safe_storage_unavailable",
+    }]);
+  });
+
+  test("manual reconnect refreshes stale relay PoP extraHeaders", async () => {
+    const socket = {
+      io: {
+        opts: {
+          extraHeaders: {
+            [DESKTOP_POP_GATEWAY_ID_HEADER]: "gateway-1",
+            [DESKTOP_POP_TIMESTAMP_HEADER]: "1713984000",
+            [DESKTOP_POP_SIGNATURE_HEADER]: "old-signature",
+          },
+        },
+      },
+    };
+
+    await refreshRelayValidationPopHeadersForSocket(
+      socket as unknown as Parameters<typeof refreshRelayValidationPopHeadersForSocket>[0],
+      "DESKTOP_MANAGED",
+      () => ({
+        [DESKTOP_POP_GATEWAY_ID_HEADER]: "gateway-1",
+        [DESKTOP_POP_TIMESTAMP_HEADER]: "1713984060",
+        [DESKTOP_POP_SIGNATURE_HEADER]: "new-signature",
+      }),
+    );
+
+    assert.deepEqual(socket.io.opts.extraHeaders, {
+      [DESKTOP_POP_GATEWAY_ID_HEADER]: "gateway-1",
+      [DESKTOP_POP_TIMESTAMP_HEADER]: "1713984060",
+      [DESKTOP_POP_SIGNATURE_HEADER]: "new-signature",
+    });
+  });
+});
+
 // ---------------------------------------------------------------------------
 // T-3.1: GATEWAY_PROTOCOL_VERSION constant value
 // ---------------------------------------------------------------------------
@@ -120,12 +248,13 @@ class FakeSocket extends EventEmitter {
 }
 
 describe("T-3.1: hello payload version fields", () => {
-  test("CloudSocketService emits all three version fields in desktop.hello", () => {
+  test("CloudSocketService emits version fields and local capabilities in desktop.hello", () => {
     const service = new CloudSocketService(
       createStubOptions({
         desktopClientVersion: "0.13.9-test",
         gatewayProtocolVersion: "0.1.0",
         pluginVersion: "1.0.0-test",
+        getCapabilities: () => ({ commandSigning: true }),
       }),
     );
 
@@ -148,6 +277,214 @@ describe("T-3.1: hello payload version fields", () => {
     assert.equal(hello["desktopClientVersion"], "0.13.9-test", "desktopClientVersion must match");
     assert.equal(hello["gatewayProtocolVersion"], "0.1.0", "gatewayProtocolVersion must match");
     assert.equal(hello["pluginVersion"], "1.0.0-test", "pluginVersion must match");
+    assert.deepEqual(hello["capabilities"], { commandSigning: true });
+
+    service.stop();
+  });
+
+  test("CloudSocketService omits commandSigningRequired until enforcement opt-in is enabled", () => {
+    const service = new CloudSocketService(
+      createStubOptions({
+        getCapabilities: () =>
+          buildCommandSigningCapabilities({
+            commandSigningEnforcementEnabled: false,
+          }),
+      }),
+    );
+    const fakeSocket = new FakeSocket();
+    (service as unknown as Record<string, unknown>)["socket"] = fakeSocket;
+
+    const proto = Object.getPrototypeOf(service) as Record<string, (...args: unknown[]) => void>;
+    proto["emitHello"].call(service);
+
+    const hello = fakeSocket.emittedEvents.find((e) => e.name === "desktop.hello")
+      ?.payload as Record<string, unknown>;
+    assert.deepEqual(hello["capabilities"], {
+      tools: {
+        claude: false,
+        codex: false,
+        git: false,
+        gh: false,
+        python3: false,
+      },
+      versions: {},
+      commandSigning: true,
+    });
+
+    service.stop();
+  });
+
+  test("CloudSocketService includes commandSigningRequired when enforcement opt-in is enabled", () => {
+    const service = new CloudSocketService(
+      createStubOptions({
+        getCapabilities: () =>
+          buildCommandSigningCapabilities({
+            commandSigningEnforcementEnabled: true,
+          }),
+      }),
+    );
+    const fakeSocket = new FakeSocket();
+    (service as unknown as Record<string, unknown>)["socket"] = fakeSocket;
+
+    const proto = Object.getPrototypeOf(service) as Record<string, (...args: unknown[]) => void>;
+    proto["emitHello"].call(service);
+
+    const hello = fakeSocket.emittedEvents.find((e) => e.name === "desktop.hello")
+      ?.payload as Record<string, unknown>;
+    assert.equal(
+      (hello["capabilities"] as Record<string, unknown>).commandSigningRequired,
+      true,
+    );
+
+    service.stop();
+  });
+
+  test("parseServerCapabilities requires explicit true flags", () => {
+    assert.deepEqual(
+      parseServerCapabilities({
+        computeTargetSigning: true,
+        agentSessionSync: true,
+      }),
+      {
+        computeTargetSigning: true,
+        agentSessionSync: true,
+      },
+    );
+    assert.equal(
+      parseServerCapabilities({ computeTargetSigning: false }),
+      undefined,
+    );
+    assert.deepEqual(parseServerCapabilities({ agentSessionSync: true }), {
+      agentSessionSync: true,
+    });
+    assert.equal(
+      parseServerCapabilities({ computeTargetSigning: "true" }),
+      undefined,
+    );
+    assert.equal(parseServerCapabilities(undefined), undefined);
+  });
+
+  test("parseDesktopHelloAck ignores identity fields owned by server analytics", () => {
+    const ack = parseDesktopHelloAck({
+      computeTargetId: "target-1",
+      sessionId: "session-1",
+      serverTime: "2026-05-11T00:00:00.000Z",
+      clerkUserId: " clerk_user_1 ",
+      organizationId: " org-1 ",
+      userId: "user_db_1",
+      serverCapabilities: {
+        computeTargetSigning: true,
+        agentSessionSync: true,
+      },
+      resumeFromSequence: { "cmd-1": 2 },
+    });
+
+    assert.ok(ack);
+    assert.equal(ack.computeTargetId, "target-1");
+    assert.equal(
+      (ack as unknown as Record<string, unknown>).clerkUserId,
+      undefined,
+    );
+    assert.equal(
+      (ack as unknown as Record<string, unknown>).organizationId,
+      undefined,
+    );
+    assert.equal(
+      (ack as unknown as Record<string, unknown>).userId,
+      undefined,
+    );
+    assert.deepEqual(ack.serverCapabilities, {
+      computeTargetSigning: true,
+      agentSessionSync: true,
+    });
+    assert.deepEqual(ack.resumeFromSequence, { "cmd-1": 2 });
+  });
+
+  test("parseDesktopHelloAck accepts older ack payloads without identity", () => {
+    const ack = parseDesktopHelloAck({
+      computeTargetId: "target-1",
+      sessionId: "session-1",
+      serverTime: "2026-05-11T00:00:00.000Z",
+    });
+
+    assert.ok(ack);
+    assert.equal(ack.computeTargetId, "target-1");
+    assert.equal(
+      (ack as unknown as Record<string, unknown>).clerkUserId,
+      undefined,
+    );
+    assert.equal(
+      (ack as unknown as Record<string, unknown>).organizationId,
+      undefined,
+    );
+  });
+
+  test("parseDesktopAgentSessionsAck keeps malformed payloads retryable", () => {
+    assert.deepEqual(parseDesktopAgentSessionsAck({ accepted: true }), {
+      accepted: true,
+    });
+    assert.deepEqual(
+      parseDesktopAgentSessionsAck({ reason: "feature_disabled" }),
+      {
+        accepted: false,
+        reason: "feature_disabled",
+      },
+    );
+    assert.deepEqual(parseDesktopAgentSessionsAck({ reason: "bogus" }), {
+      accepted: false,
+      reason: "rate_limited",
+    });
+  });
+
+  test("sendAgentSessions keeps batches retryable until the relay is ready", async () => {
+    const service = new CloudSocketService(createStubOptions());
+
+    const ack = await service.sendAgentSessions({
+      schemaVersion: 1,
+      batchId: "batch-1",
+      syncMode: "incremental",
+      sessionCount: 0,
+      sessions: [],
+    });
+
+    assert.deepEqual(ack, {
+      accepted: false,
+      reason: "rate_limited",
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// T-6.2: Capability flags loopRunnerRefreshSupported and loopRunnerHeartbeatSupported
+// ---------------------------------------------------------------------------
+
+describe("T-6.2: capability flags loopRunnerRefreshSupported and loopRunnerHeartbeatSupported", () => {
+  test("desktop.hello capabilities include loopRunnerRefreshSupported=true and loopRunnerHeartbeatSupported=true", () => {
+    const service = new CloudSocketService(
+      createStubOptions({
+        getCapabilities: () => ({
+          tools: { claude: false, codex: false, git: false, gh: false, python3: false },
+          versions: {},
+          commandSigning: true,
+          loopRunnerRefreshSupported: true,
+          loopRunnerHeartbeatSupported: true,
+        }),
+      }),
+    );
+
+    const fakeSocket = new FakeSocket();
+    (service as unknown as Record<string, unknown>)["socket"] = fakeSocket;
+
+    const proto = Object.getPrototypeOf(service) as Record<string, (...args: unknown[]) => void>;
+    proto["emitHello"].call(service);
+
+    const hello = fakeSocket.emittedEvents.find((e) => e.name === "desktop.hello")
+      ?.payload as Record<string, unknown>;
+    assert.ok(hello, "Expected desktop.hello to be emitted");
+
+    const caps = hello["capabilities"] as Record<string, unknown>;
+    assert.equal(caps["loopRunnerRefreshSupported"], true, "loopRunnerRefreshSupported must be true");
+    assert.equal(caps["loopRunnerHeartbeatSupported"], true, "loopRunnerHeartbeatSupported must be true");
 
     service.stop();
   });

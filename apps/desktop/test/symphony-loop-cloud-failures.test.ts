@@ -19,10 +19,10 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { JobStore } from "../src/main/job-store.js";
 import { LoopTokenStore } from "../src/main/loop-token-store.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
-import { configureBinaryPathsResolver } from "../src/server/operations/symphony-loop.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
@@ -166,7 +166,7 @@ test("EXECUTE: artifact upload failure sets ARTIFACT_UPLOAD_FAILED in completed 
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -259,7 +259,7 @@ test("EXECUTE local-direct: callback failure fails fast before spawn", async () 
   const loopId = "00000000-0000-0000-0000-000000000600";
   const requestBody = {
     loopId,
-    command: "EXECUTE",
+    command: LoopCommand.Execute,
     closedLoopAuthToken: "tok",
     prompt: "test",
     artifacts: [],
@@ -383,7 +383,7 @@ test("EXECUTE relay: event post failure logged as warning in job store", async (
       },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -500,7 +500,7 @@ test("PLAN: pre-spawn log-file failure cleans up persisted loop token", async ()
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "PLAN",
+        command: LoopCommand.Plan,
         closedLoopAuthToken: "prespawn-token",
         artifacts: [],
         repo: { fullName: `prespawn-fail/${repoName}`, branch: "main" },
@@ -579,7 +579,7 @@ test("PLAN: non-zero exit cleans up persisted loop token", async () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "PLAN",
+        command: LoopCommand.Plan,
         closedLoopAuthToken: "nonzero-token",
         artifacts: [],
         repo: { fullName: `nonzero-fail/${path.basename(repoPath)}`, branch: "main" },
@@ -592,6 +592,17 @@ test("PLAN: non-zero exit cleans up persisted loop token", async () => {
   // Wait for the error event indicating the process failed
   await waitForTerminalEvent(mock.requests, loopId);
 
+  // The token is deleted after the error event is posted (post-event cleanup
+  // continues with jobStore upsert and worktree cleanup before the synchronous
+  // deleteLoopToken call). Poll briefly to absorb that gap on slow CI runners.
+  const tokenDeadline = Date.now() + 5_000;
+  while (
+    loopTokenStore.getLoopToken(loopId) !== null &&
+    Date.now() < tokenDeadline
+  ) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+
   assert.equal(
     loopTokenStore.getLoopToken(loopId),
     null,
@@ -603,7 +614,7 @@ test("PLAN: non-zero exit cleans up persisted loop token", async () => {
 // Test 6: Repo not found emits REPO_NOT_FOUND error event and returns 404
 // ---------------------------------------------------------------------------
 
-test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async (t) => {
+test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cloud-fail-repo-not-found-"));
   tempPathsToClean.push(tmpDir);
 
@@ -613,6 +624,8 @@ test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async (t) => {
   // fails immediately rather than invoking the real gh (which would make a
   // network call and time out).
   const fakeGhPath = await writeFakeFailingGh(tmpDir);
+  process.env.PATH = `${path.dirname(fakeGhPath)}:${process.env.PATH ?? "/usr/bin:/bin"}`;
+  setShellPathForTest();
 
   const mock = await startMockApiServer();
   mockServersToClose.push(mock.server);
@@ -632,15 +645,11 @@ test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async (t) => {
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
     getSymphonyDir: () => tmpDir,
+    getBinaryPaths: () => ({ gh: fakeGhPath }),
     jobStore,
   });
   serversToClose.push(server);
   await server.start();
-
-  // Configure after server.start() so the router's own configureBinaryPathsResolver
-  // call (which resets to null) doesn't overwrite our fake gh.
-  configureBinaryPathsResolver(() => ({ gh: fakeGhPath }));
-  t.after(() => configureBinaryPathsResolver(null));
 
   const loopId = "00000000-0000-0000-0000-000000001001";
 
@@ -651,7 +660,7 @@ test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async (t) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -659,7 +668,7 @@ test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async (t) => {
       }),
     }
   );
-  const eventReq = await mock.waitForRequest(`/loops/${loopId}/events`);
+  const eventReq = await mock.waitForRequest(`/loops/${loopId}/events`, 60_000);
   const response = await responsePromise;
 
   const event = JSON.parse(eventReq.body) as Record<string, unknown>;
@@ -685,7 +694,7 @@ test("EXECUTE: repo not found emits REPO_NOT_FOUND error event", async (t) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -744,7 +753,7 @@ test("EXECUTE: localRepoPath outside sandbox emits REPO_NOT_ALLOWED error event"
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -831,7 +840,7 @@ test("EXECUTE: fullName-resolved path outside allowedDirs emits REPO_NOT_ALLOWED
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
@@ -865,6 +874,9 @@ test("EXECUTE: fullName-resolved path outside allowedDirs emits REPO_NOT_ALLOWED
 test("EXECUTE: postLoopEventBounded times out after 1000ms when API server hangs", async (t) => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cloud-fail-hanging-"));
   tempPathsToClean.push(tmpDir);
+  const outsidePath = path.join(os.tmpdir(), "outside-sandbox-1005");
+  await fs.mkdir(outsidePath, { recursive: true });
+  tempPathsToClean.push(outsidePath);
 
   // Create an inline hanging HTTP server that accepts TCP connections and
   // reads request bodies but never calls res.end() -- hangs indefinitely.
@@ -887,6 +899,15 @@ test("EXECUTE: postLoopEventBounded times out after 1000ms when API server hangs
     hangingServer.once("error", reject);
   });
   const hangingPort = (hangingServer.address() as import("net").AddressInfo).port;
+  t.after(async () => {
+    for (const socket of hangingSockets) {
+      socket.destroy();
+    }
+    hangingSockets.clear();
+    await new Promise<void>((resolve, reject) => {
+      hangingServer.close((err) => (err ? reject(err) : resolve()));
+    });
+  });
 
   const jobStore = new JobStore({ cwd: tmpDir, name: "test-jobs-hanging" });
 
@@ -908,16 +929,8 @@ test("EXECUTE: postLoopEventBounded times out after 1000ms when API server hangs
   serversToClose.push(server);
   await server.start();
 
-  // Set up a fake gh binary that exits non-zero so the auto-clone attempt
-  // fails immediately rather than invoking the real gh (which would make a
-  // network call and time out). Must be configured after server.start() so
-  // the router's own configureBinaryPathsResolver call doesn't overwrite it.
-  const fakeGhPath = await writeFakeFailingGh(tmpDir);
-  configureBinaryPathsResolver(() => ({ gh: fakeGhPath }));
-  t.after(() => configureBinaryPathsResolver(null));
-
-  // Use a nonexistent repo fullName to trigger REPO_NOT_FOUND, which calls
-  // postLoopEventBounded -- the bounded wait should timeout after 1000ms.
+  // Use a repo path outside the sandbox to trigger REPO_NOT_ALLOWED, which calls
+  // postLoopEventBounded without involving auto-clone or any other slow setup.
   const loopId = "00000000-0000-0000-0000-000000001005";
   const responsePromise = fetch(
     `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
@@ -926,11 +939,12 @@ test("EXECUTE: postLoopEventBounded times out after 1000ms when API server hangs
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "EXECUTE",
+        command: LoopCommand.Execute,
         closedLoopAuthToken: "tok",
         prompt: "test",
         artifacts: [],
-        repo: { fullName: "org/nonexistent-repo-1005", branch: "main" },
+        localRepoPath: outsidePath,
+        repo: { fullName: "org/test-repo", branch: "main" },
       }),
     }
   );
@@ -946,7 +960,7 @@ test("EXECUTE: postLoopEventBounded times out after 1000ms when API server hangs
     ),
   ]);
 
-  assert.equal(response.status, 404); // response settled correctly despite hanging server
+  assert.equal(response.status, 403); // response settled correctly despite hanging server
 
   // Assert hanging server received at least one request
   assert.ok(
@@ -966,14 +980,4 @@ test("EXECUTE: postLoopEventBounded times out after 1000ms when API server hangs
     `Expected aborted fetch to close the socket, but no sockets were closed (still ${hangingSockets.size} open). ` +
     "This means postLoopEventBounded is not aborting the underlying fetch."
   );
-
-  // Socket cleanup: destroy any remaining sockets BEFORE closing the server so
-  // hangingServer.close() can resolve promptly.
-  for (const socket of hangingSockets) {
-    socket.destroy();
-  }
-  hangingSockets.clear();
-  await new Promise<void>((resolve, reject) => {
-    hangingServer.close((err) => (err ? reject(err) : resolve()));
-  });
 });

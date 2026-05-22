@@ -8,5 +8,9 @@ dist
 .closedloop/
 .closedloop-ai/code-review/*
 apps/desktop/src/shared/build-info.ts
+apps/desktop/resources/generated/
 .env.local
 dist-dmg/
+
+# Generated agent-monitor runtime tree
+apps/desktop/.generated/

@@ -12,14 +12,20 @@ import { gatewayLog } from "../main/gateway-logger.js";
 import type { LocalSessionStore } from "../main/local-session-store.js";
 import type { JobStore } from "../main/job-store.js";
 import type { LoopTokenStore } from "../main/loop-token-store.js";
+import type { ApiKeyProvenance } from "../main/api-key-store.js";
+import type { DesktopPopSigner } from "../main/desktop-pop.js";
+import type { DesktopPopUnavailableReporter } from "../main/desktop-pop-sign-utils.js";
 import {
   GatewayRouter,
+  type DesktopSecurityUpgradePayload,
+  type DesktopSecurityUpgradeResult,
   type GatewayActivityEvent,
   type GatewayApprovalRequest,
   type GatewayApprovalResult,
 } from "./router.js";
 import type { WorktreeProvider } from "./operations/symphony-loop.js";
 import type { RetrySpawnDeps } from "../main/spawn-retry.js";
+import { LoopSchedulerContext } from "../main/loop-scheduler-context.js";
 
 export interface DesktopGatewayServerOptions {
   host: string;
@@ -38,9 +44,13 @@ export interface DesktopGatewayServerOptions {
   machineName: string;
   version: string;
   capabilities: ComputeTargetCapabilities;
+  getOnboardingCompleted?: () => boolean;
   discoveryFilePath?: string;
   sessionStore?: LocalSessionStore;
   getApiKey?: () => string | null;
+  getApiKeyProvenance?: () => ApiKeyProvenance | null;
+  signDesktopRequest?: DesktopPopSigner;
+  onDesktopPopUnavailable?: DesktopPopUnavailableReporter;
   getApiOrigin?: () => string;
   prodOriginsOnly?: boolean;
   jobStore?: JobStore;
@@ -48,7 +58,17 @@ export interface DesktopGatewayServerOptions {
   retrySpawnDeps?: RetrySpawnDeps;
   onUnexpectedClose?: () => void;
   loopTokenStore?: LoopTokenStore;
-  getGatewayId: () => string;
+  /**
+   * Per-process container for loop heartbeat/refresh/sleep timers. If not
+   * provided, the server constructs and owns one, disposing it in `stop()`.
+   * Production passes the app-level singleton so its lifetime matches app boot.
+   */
+  schedulers?: LoopSchedulerContext;
+  getGatewayId?: () => string;
+  getComputeTargetId?: () => string | null;
+  handleSecurityUpgrade?: (
+    payload: DesktopSecurityUpgradePayload
+  ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult;
   getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
   applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
   checkForUpdate?: () => Promise<{ updateAvailable: boolean; version?: string }>;
@@ -59,6 +79,9 @@ export interface DesktopGatewayServerOptions {
 export class DesktopGatewayServer {
   private readonly options: DesktopGatewayServerOptions;
   private readonly router: GatewayRouter;
+  private readonly schedulers: LoopSchedulerContext;
+  /** True when this server constructed its own LoopSchedulerContext and must dispose it on stop(). */
+  private readonly ownsSchedulers: boolean;
   private server: Server | null = null;
   private alive = false;
   private activePort: number;
@@ -66,10 +89,16 @@ export class DesktopGatewayServer {
   constructor(options: DesktopGatewayServerOptions) {
     this.options = {
       ...options,
+      getGatewayId: options.getGatewayId ?? (() => ""),
       discoveryFilePath:
         options.discoveryFilePath ??
         path.join(os.homedir(), ".closedloop-ai", "electron-port"),
     };
+    // When no scheduler context is injected (tests, ad-hoc usage), the server
+    // owns a fresh one and tears it down in stop() — so a test that only
+    // constructs DesktopGatewayServer cannot leak heartbeat/refresh timers.
+    this.schedulers = options.schedulers ?? new LoopSchedulerContext();
+    this.ownsSchedulers = options.schedulers === undefined;
     this.activePort = this.options.preferredPort;
     this.router = new GatewayRouter({
       webAppOrigin: this.options.webAppOrigin,
@@ -78,6 +107,7 @@ export class DesktopGatewayServer {
       machineName: this.options.machineName,
       version: this.options.version,
       capabilities: this.options.capabilities,
+      getOnboardingCompleted: this.options.getOnboardingCompleted,
       getActivePort: () => this.activePort,
       getAllowedDirectories: this.options.getAllowedDirectories,
       getSymphonyDir: this.options.getSymphonyDir,
@@ -86,13 +116,19 @@ export class DesktopGatewayServer {
       evaluateApproval: this.options.evaluateApproval,
       sessionStore: this.options.sessionStore,
       getApiKey: this.options.getApiKey,
+      getApiKeyProvenance: this.options.getApiKeyProvenance,
+      signDesktopRequest: this.options.signDesktopRequest,
+      onDesktopPopUnavailable: this.options.onDesktopPopUnavailable,
       getApiOrigin: this.options.getApiOrigin,
       prodOriginsOnly: this.options.prodOriginsOnly,
       jobStore: this.options.jobStore,
       worktreeProvider: this.options.worktreeProvider,
       loopTokenStore: this.options.loopTokenStore,
+      schedulers: this.schedulers,
       retrySpawnDeps: this.options.retrySpawnDeps,
-      getGatewayId: this.options.getGatewayId,
+      getGatewayId: this.options.getGatewayId ?? (() => ""),
+      getComputeTargetId: this.options.getComputeTargetId,
+      handleSecurityUpgrade: this.options.handleSecurityUpgrade,
       getBinaryPaths: this.options.getBinaryPaths,
       applyBinaryPathPatch: this.options.applyBinaryPathPatch,
       checkForUpdate: this.options.checkForUpdate,
@@ -128,6 +164,15 @@ export class DesktopGatewayServer {
     checkForUpdate?: () => Promise<{ updateAvailable: boolean; version?: string }>,
     applyUpdate?: () => Promise<void>,
     isUpdateAndRestartEnabled?: () => boolean,
+    getApiKeyProvenance?: () => ApiKeyProvenance | null,
+    signDesktopRequest?: DesktopPopSigner,
+    onDesktopPopUnavailable?: DesktopPopUnavailableReporter,
+    getComputeTargetId?: () => string | null,
+    handleSecurityUpgrade?: (
+      payload: DesktopSecurityUpgradePayload
+    ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult,
+    getOnboardingCompleted?: () => boolean,
+    schedulers?: LoopSchedulerContext,
   ): DesktopGatewayServer {
     return new DesktopGatewayServer({
       host: "127.0.0.1",
@@ -146,6 +191,9 @@ export class DesktopGatewayServer {
       capabilities,
       sessionStore,
       getApiKey,
+      getApiKeyProvenance,
+      signDesktopRequest,
+      onDesktopPopUnavailable,
       getApiOrigin,
       prodOriginsOnly,
       jobStore,
@@ -153,11 +201,15 @@ export class DesktopGatewayServer {
       loopTokenStore,
       retrySpawnDeps,
       getGatewayId,
+      getComputeTargetId,
+      handleSecurityUpgrade,
+      getOnboardingCompleted,
       getBinaryPaths,
       applyBinaryPathPatch,
       checkForUpdate,
       applyUpdate,
       isUpdateAndRestartEnabled,
+      schedulers,
     });
   }
 
@@ -174,6 +226,8 @@ export class DesktopGatewayServer {
       status: "ok",
       machineName: this.options.machineName,
       capabilities: this.options.capabilities,
+      gatewayId: this.options.getGatewayId?.() || undefined,
+      onboardingCompleted: this.options.getOnboardingCompleted?.() ?? false,
       version: this.options.version,
       port: this.activePort,
     };
@@ -235,6 +289,9 @@ export class DesktopGatewayServer {
   async stop(): Promise<void> {
     this.alive = false;
     if (!this.server) {
+      if (this.ownsSchedulers) {
+        this.schedulers[Symbol.dispose]();
+      }
       return;
     }
 
@@ -254,6 +311,9 @@ export class DesktopGatewayServer {
       // Force-drop active NDJSON/SSE streams so close() can actually complete.
       runningServer.closeAllConnections();
     });
+    if (this.ownsSchedulers) {
+      this.schedulers[Symbol.dispose]();
+    }
   }
 
   isAlive(): boolean {

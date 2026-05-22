@@ -3,6 +3,13 @@
  * Extracted from app.ts so it can be imported in plain Node tests.
  */
 
+import {
+  BROWSER_COMMAND_KEY_APPROVAL_REQUEST_OPERATION_ID,
+  BROWSER_COMMAND_KEY_APPROVAL_REQUEST_PATH,
+  BROWSER_COMMAND_KEY_REVOKE_OPERATION_ID,
+  BROWSER_COMMAND_KEY_REVOKE_PATH,
+} from "../shared/contracts.js";
+
 export const SUPPORTED_OPERATION_IDS = [
   "symphony_launch",
   "symphony_loop",
@@ -31,8 +38,11 @@ export const SUPPORTED_OPERATION_IDS = [
   "deploy",
   "learnings",
   "filesystem",
+  "desktop_security_upgrade",
   "binary_paths_settings",
-  "update_and_restart"
+  "update_and_restart",
+  BROWSER_COMMAND_KEY_REVOKE_OPERATION_ID,
+  BROWSER_COMMAND_KEY_APPROVAL_REQUEST_OPERATION_ID
 ] as const;
 
 export type OperationId = (typeof SUPPORTED_OPERATION_IDS)[number];
@@ -129,8 +139,17 @@ export function resolveOperationId(pathname: string): OperationId | null {
   if (pathname === "/api/gateway/health-check") {
     return "health_check";
   }
+  if (pathname === "/api/gateway/security/upgrade") {
+    return "desktop_security_upgrade";
+  }
   if (pathname.startsWith("/api/gateway/settings/binary-paths")) {
     return "binary_paths_settings";
+  }
+  if (pathname === BROWSER_COMMAND_KEY_REVOKE_PATH) {
+    return BROWSER_COMMAND_KEY_REVOKE_OPERATION_ID;
+  }
+  if (pathname === BROWSER_COMMAND_KEY_APPROVAL_REQUEST_PATH) {
+    return BROWSER_COMMAND_KEY_APPROVAL_REQUEST_OPERATION_ID;
   }
   if (pathname === "/api/gateway/repos") {
     return "repos_config";

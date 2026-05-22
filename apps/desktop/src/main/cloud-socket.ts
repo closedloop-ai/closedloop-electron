@@ -5,6 +5,14 @@ import {
   PROTOCOL_VERSION,
   type CloudSocketStatus,
   type CommandEventRecord,
+  type DesktopAgentSessionsAck,
+  DesktopAgentSessionsAckReason,
+  type DesktopAgentSessionsEvent,
+  DESKTOP_AGENT_SESSIONS_SOCKET_EVENT,
+  type DesktopAnalyticsAck,
+  DesktopAnalyticsAckReason,
+  type DesktopAnalyticsEvent,
+  DESKTOP_ANALYTICS_SOCKET_EVENT,
   type DesktopCancelEvent,
   type DesktopCommandAckEvent,
   type DesktopCommandEvent,
@@ -16,13 +24,28 @@ import {
   type ProtocolEnvelope
 } from "./cloud-protocol.js";
 import { normalizeAndValidateOrigin } from "./origin-policy.js";
+import type { ApiKeyProvenance } from "./api-key-store.js";
+import {
+  buildManagedDesktopPopHeaders,
+  type DesktopPopUnavailableReporter,
+} from "./desktop-pop-sign-utils.js";
+import {
+  RELAY_API_KEY_VERIFY_PATH,
+  type DesktopPopHeaders,
+  type DesktopPopSigner,
+} from "./desktop-pop.js";
 import type { DesktopTelemetryEvent } from "./telemetry-protocol.js";
 
 export interface CloudSocketOptions {
   getRelayOrigin: () => string;
   getApiKey: () => string | null;
+  getApiKeyProvenance?: () => ApiKeyProvenance | null;
+  signDesktopRequest?: DesktopPopSigner;
+  onDesktopPopUnavailable?: DesktopPopUnavailableReporter;
   getAllowedDirectories: () => string[];
+  getCapabilities?: () => Record<string, unknown>;
   getMaxInFlightCommands: () => number;
+  getGatewayId?: () => string | null;
   machineName: string;
   pluginVersion: string;
   desktopClientVersion: string;
@@ -42,11 +65,16 @@ export class CloudSocketService {
   private stopped = true;
   private targetId: string | null = null;
   private helloAckTimer: NodeJS.Timeout | null = null;
+  private reconnectTimer: NodeJS.Timeout | null = null;
   private awaitingHelloAck = false;
   private lastPresenceState: string | null = null;
   private hadSuccessfulConnection = false;
   private degradedSince: number | null = null;
   private recoveryTimer: NodeJS.Timeout | null = null;
+  private analyticsDisabledForSession = false;
+  private agentSessionsDisabledForSession = false;
+  private analyticsQueue: QueuedAnalyticsEvent[] = [];
+  private readonly analyticsInFlight = new Set<Promise<void>>();
 
   constructor(options: CloudSocketOptions) {
     this.options = options;
@@ -58,6 +86,7 @@ export class CloudSocketService {
     this.awaitingHelloAck = false;
     this.disconnectSocket();
     this.clearHelloAckTimer();
+    this.clearReconnectTimer();
 
     const apiKey = this.options.getApiKey();
     if (!apiKey) {
@@ -75,7 +104,15 @@ export class CloudSocketService {
     }
 
     this.notifyStatus({ state: "idle" });
-    this.connect(apiKey, relayOrigin);
+    const relayValidationPopHeaders = await buildRelayValidationPopHeaders(
+      this.options.getApiKeyProvenance?.() ?? "USER_CREATED",
+      this.options.signDesktopRequest,
+      this.options.onDesktopPopUnavailable,
+    );
+    if (this.stopped) {
+      return;
+    }
+    this.connect(apiKey, relayOrigin, relayValidationPopHeaders);
   }
 
   stop(): void {
@@ -85,7 +122,10 @@ export class CloudSocketService {
     this.lastPresenceState = null;
     this.hadSuccessfulConnection = false;
     this.degradedSince = null;
+    this.analyticsDisabledForSession = false;
+    this.agentSessionsDisabledForSession = false;
     this.clearHelloAckTimer();
+    this.clearReconnectTimer();
     this.clearRecoveryTimer();
     this.disconnectSocket();
   }
@@ -97,6 +137,96 @@ export class CloudSocketService {
 
   sendTelemetry(event: Omit<DesktopTelemetryEvent, keyof EnvelopeOnlyFields>): void {
     this.emit("desktop.telemetry", event);
+  }
+
+  emitAnalytics(event: Omit<DesktopAnalyticsEvent, keyof EnvelopeOnlyFields>): void {
+    if (this.analyticsDisabledForSession) {
+      return;
+    }
+    if (!this.isRelayReady()) {
+      this.queueAnalyticsEvent(event);
+      return;
+    }
+    this.trackAnalyticsSend(this.sendAnalyticsNow(event));
+  }
+
+  async sendAgentSessions(
+    event: Omit<DesktopAgentSessionsEvent, keyof EnvelopeOnlyFields>,
+  ): Promise<DesktopAgentSessionsAck> {
+    if (this.agentSessionsDisabledForSession) {
+      return {
+        accepted: false,
+        reason: DesktopAgentSessionsAckReason.FeatureDisabled,
+      };
+    }
+    if (!this.isRelayReady()) {
+      return {
+        accepted: false,
+        reason: DesktopAgentSessionsAckReason.RateLimited,
+      };
+    }
+
+    const socket = this.socket;
+    if (!socket?.connected) {
+      return {
+        accepted: false,
+        reason: DesktopAgentSessionsAckReason.RateLimited,
+      };
+    }
+
+    const payload = {
+      ...createEnvelope(),
+      ...event,
+    };
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        gatewayLog.debug(
+          "cloud-socket",
+          "desktop.agent-sessions ack timed out; will retry later",
+        );
+        resolve({
+          accepted: false,
+          reason: DesktopAgentSessionsAckReason.AckTimeout,
+        });
+      }, AGENT_SESSIONS_ACK_TIMEOUT_MS);
+
+      socket.emit(
+        DESKTOP_AGENT_SESSIONS_SOCKET_EVENT,
+        payload,
+        (ack: unknown) => {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          clearTimeout(timer);
+          const parsedAck = parseDesktopAgentSessionsAck(ack);
+          if (
+            parsedAck.accepted === false &&
+            parsedAck.reason === DesktopAgentSessionsAckReason.FeatureDisabled
+          ) {
+            this.agentSessionsDisabledForSession = true;
+          }
+          resolve(parsedAck);
+        },
+      );
+    });
+  }
+
+  async flushAnalytics(options: { timeoutMs: number }): Promise<void> {
+    this.drainAnalyticsQueue();
+    if (this.analyticsInFlight.size === 0) {
+      return;
+    }
+    await Promise.race([
+      Promise.allSettled([...this.analyticsInFlight]).then(() => undefined),
+      delay(options.timeoutMs),
+    ]);
   }
 
   sendCommandAck(event: Omit<DesktopCommandAckEvent, keyof EnvelopeOnlyFields>): void {
@@ -133,17 +263,22 @@ export class CloudSocketService {
     }
   }
 
-  private connect(apiKey: string, relayOrigin: string): void {
+  private connect(
+    apiKey: string,
+    relayOrigin: string,
+    relayValidationPopHeaders?: DesktopPopHeaders,
+  ): void {
     const socket = io(`${relayOrigin}/desktop-gateway`, {
       transports: ["websocket"],
-      reconnection: true,
+      reconnection: false,
       reconnectionDelay: 1000,
       reconnectionDelayMax: 30_000,
       timeout: 10_000,
       autoConnect: false,
       auth: {
         apiKey
-      }
+      },
+      ...(relayValidationPopHeaders ? { extraHeaders: relayValidationPopHeaders } : {})
     });
     this.socket = socket;
 
@@ -151,6 +286,7 @@ export class CloudSocketService {
       if (this.stopped) {
         return;
       }
+      this.clearReconnectTimer();
       gatewayLog.info("cloud-socket", "Connected to relay, sending hello handshake");
       this.awaitingHelloAck = true;
       this.emitHello();
@@ -175,6 +311,7 @@ export class CloudSocketService {
         this.notifyStatus({ state: "degraded", error: `Cloud socket connection failed: ${message}` });
       }
       this.degradedSince ??= Date.now();
+      this.scheduleSocketReconnect(socket);
     });
 
     socket.on("disconnect", (reason) => {
@@ -187,43 +324,50 @@ export class CloudSocketService {
       this.notifyStatus({ state: "degraded", error: `Cloud socket disconnected: ${reason}` });
       this.degradedSince ??= Date.now();
       this.options.onDisconnect?.(reason);
+      this.scheduleSocketReconnect(socket);
     });
 
     socket.on("desktop.hello.ack", (payload: unknown) => {
       const event = asObject(payload);
-      const computeTargetId = asNonEmptyString(event.computeTargetId);
-      if (!computeTargetId) {
+      const ackEvent = parseDesktopHelloAck(payload);
+      if (!ackEvent) {
         gatewayLog.warn("cloud-socket", "hello.ack missing computeTargetId, ignoring");
         return;
       }
 
-      this.targetId = computeTargetId;
+      this.targetId = ackEvent.computeTargetId;
       this.awaitingHelloAck = false;
       this.hadSuccessfulConnection = true;
       this.degradedSince = null;
       this.clearHelloAckTimer();
-      gatewayLog.info("cloud-socket", `Hello ack received, targetId=${computeTargetId}`);
-      const ackEvent: DesktopHelloAckEvent = {
-        ...createEnvelope(),
-        computeTargetId,
-        sessionId: asNonEmptyString(event.sessionId) ?? "",
-        serverTime: asNonEmptyString(event.serverTime) ?? new Date().toISOString(),
-        resumeFromSequence:
-          event.resumeFromSequence && typeof event.resumeFromSequence === "object"
-            ? (event.resumeFromSequence as Record<string, number>)
-            : undefined
-      };
+      const rawServerCapabilities = asObject(event.serverCapabilities);
+      const parsedServerCapabilities = parseServerCapabilities(
+        event.serverCapabilities,
+      );
+      const rawComputeTargetSigning =
+        rawServerCapabilities.computeTargetSigning;
+      const rawAgentSessionSync = rawServerCapabilities.agentSessionSync;
+      gatewayLog.info(
+        "cloud-socket",
+        `Hello ack received, targetId=${ackEvent.computeTargetId}, serverCapabilityKeys=${formatObjectKeysForLog(rawServerCapabilities)}, computeTargetSigning=${formatPrimitiveForLog(rawComputeTargetSigning)}, parsedComputeTargetSigning=${parsedServerCapabilities?.computeTargetSigning === true}, agentSessionSync=${formatPrimitiveForLog(rawAgentSessionSync)}, parsedAgentSessionSync=${parsedServerCapabilities?.agentSessionSync === true}`,
+      );
       this.options.onHelloAck?.(ackEvent);
-      this.notifyStatus({ state: "online", targetId: computeTargetId });
+      this.notifyStatus({ state: "online", targetId: ackEvent.computeTargetId });
       this.sendPresence({
         state: "online"
       });
+      this.drainAnalyticsQueue();
     });
 
     socket.on("desktop.command", (payload: unknown) => {
       const parsed = parseDesktopCommand(payload);
       if (!parsed) {
-        gatewayLog.warn("cloud-socket", "Received unparseable desktop.command, ignoring");
+        const rawPath = asNonEmptyString(asObject(payload).path);
+        if (rawPath?.startsWith("/api/engineer/")) {
+          gatewayLog.warn("cloud-socket", `Received legacy /api/engineer/ command (${rawPath}), ignoring — desktop only accepts /api/gateway/ commands`);
+        } else {
+          gatewayLog.warn("cloud-socket", "Received unparseable desktop.command, ignoring");
+        }
         return;
       }
       gatewayLog.debug("cloud-socket", `Command received: ${parsed.operationId} ${parsed.method} ${parsed.path} (commandId=${parsed.commandId})`);
@@ -262,9 +406,12 @@ export class CloudSocketService {
   }
 
   private emitHello(): void {
+    const gatewayId = this.options.getGatewayId?.() ?? undefined;
     const hello: DesktopHelloEvent = {
       ...createEnvelope(),
       computeTargetId: this.targetId ?? undefined,
+      gatewayId,
+      ...(gatewayId ? { desktopSecurityUpgradeProtocolVersion: 1 as const } : {}),
       machineName: this.options.machineName,
       platform: process.platform,
       pluginVersion: this.options.pluginVersion,
@@ -272,7 +419,10 @@ export class CloudSocketService {
       gatewayProtocolVersion: this.options.gatewayProtocolVersion,
       supportedOperations: this.options.getEnabledOperations(),
       maxInFlightCommands: Math.max(1, this.options.getMaxInFlightCommands()),
-      allowedDirectoriesHash: hashAllowedDirectories(this.options.getAllowedDirectories())
+      allowedDirectoriesHash: hashAllowedDirectories(this.options.getAllowedDirectories()),
+      ...(this.options.getCapabilities
+        ? { capabilities: this.options.getCapabilities() }
+        : {})
     };
     this.socket?.emit("desktop.hello", hello);
   }
@@ -287,16 +437,144 @@ export class CloudSocketService {
     });
   }
 
+  private isRelayReady(): boolean {
+    return Boolean(
+      this.socket?.connected &&
+        this.targetId &&
+        !this.awaitingHelloAck &&
+        !this.stopped,
+    );
+  }
+
+  private queueAnalyticsEvent(
+    event: Omit<DesktopAnalyticsEvent, keyof EnvelopeOnlyFields>,
+  ): void {
+    const now = Date.now();
+    this.analyticsQueue = this.analyticsQueue.filter(
+      (entry) => entry.expiresAt > now,
+    );
+    while (this.analyticsQueue.length >= ANALYTICS_QUEUE_MAX) {
+      this.analyticsQueue.shift();
+    }
+    this.analyticsQueue.push({
+      event,
+      expiresAt: now + ANALYTICS_QUEUE_TTL_MS,
+    });
+  }
+
+  private drainAnalyticsQueue(): void {
+    if (!this.isRelayReady() || this.analyticsDisabledForSession) {
+      return;
+    }
+    const now = Date.now();
+    const ready = this.analyticsQueue.filter((entry) => entry.expiresAt > now);
+    this.analyticsQueue = [];
+    for (const entry of ready) {
+      if (this.analyticsDisabledForSession || !this.isRelayReady()) {
+        this.queueAnalyticsEvent(entry.event);
+        continue;
+      }
+      this.trackAnalyticsSend(this.sendAnalyticsNow(entry.event));
+    }
+  }
+
+  private sendAnalyticsNow(
+    event: Omit<DesktopAnalyticsEvent, keyof EnvelopeOnlyFields>,
+  ): Promise<void> {
+    const socket = this.socket;
+    if (!socket?.connected) {
+      this.queueAnalyticsEvent(event);
+      return Promise.resolve();
+    }
+    const payload = {
+      ...createEnvelope(),
+      ...event,
+    };
+    return new Promise((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        gatewayLog.debug(
+          "cloud-socket",
+          "desktop.analytics ack timed out; dropping best-effort event",
+        );
+        resolve();
+      }, ANALYTICS_ACK_TIMEOUT_MS);
+
+      socket.emit(DESKTOP_ANALYTICS_SOCKET_EVENT, payload, (ack: unknown) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        this.handleAnalyticsAck(parseDesktopAnalyticsAck(ack));
+        resolve();
+      });
+    });
+  }
+
+  private handleAnalyticsAck(ack: DesktopAnalyticsAck): void {
+    if (ack.accepted) {
+      return;
+    }
+    if (ack.reason === DesktopAnalyticsAckReason.FeatureDisabled) {
+      this.analyticsDisabledForSession = true;
+      this.analyticsQueue = [];
+      return;
+    }
+    gatewayLog.debug(
+      "cloud-socket",
+      `desktop.analytics rejected: reason=${ack.reason}`,
+    );
+  }
+
+  private trackAnalyticsSend(send: Promise<void>): void {
+    this.analyticsInFlight.add(send);
+    void send.finally(() => {
+      this.analyticsInFlight.delete(send);
+    });
+  }
+
   private disconnectSocket(): void {
     if (!this.socket) {
       return;
     }
     this.awaitingHelloAck = false;
     this.clearHelloAckTimer();
+    this.clearReconnectTimer();
 
     this.socket.removeAllListeners();
     this.socket.disconnect();
     this.socket = null;
+  }
+
+  private scheduleSocketReconnect(socket: Socket): void {
+    if (this.reconnectTimer || this.stopped) {
+      return;
+    }
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      void this.reconnectSocket(socket);
+    }, RECONNECT_DELAY_MS);
+  }
+
+  private async reconnectSocket(socket: Socket): Promise<void> {
+    if (this.stopped || this.socket !== socket) {
+      return;
+    }
+    await refreshRelayValidationPopHeadersForSocket(
+      socket,
+      this.options.getApiKeyProvenance?.() ?? "USER_CREATED",
+      this.options.signDesktopRequest,
+      this.options.onDesktopPopUnavailable,
+    );
+    if (this.stopped || this.socket !== socket) {
+      return;
+    }
+    socket.connect();
   }
 
   private scheduleHelloAckTimeout(): void {
@@ -323,6 +601,14 @@ export class CloudSocketService {
     }
     clearTimeout(this.helloAckTimer);
     this.helloAckTimer = null;
+  }
+
+  private clearReconnectTimer(): void {
+    if (!this.reconnectTimer) {
+      return;
+    }
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
   }
 
   private startRecoveryTimer(): void {
@@ -352,11 +638,63 @@ export class CloudSocketService {
   }
 }
 
+/**
+ * Builds PoP headers for the relay's API-key verification request only when using a managed key.
+ */
+export async function buildRelayValidationPopHeaders(
+  apiKeyProvenance: ApiKeyProvenance,
+  signDesktopRequest?: DesktopPopSigner,
+  onUnavailable?: DesktopPopUnavailableReporter,
+): Promise<DesktopPopHeaders | undefined> {
+  return buildManagedDesktopPopHeaders({
+    apiKeyProvenance,
+    signDesktopRequest,
+    request: {
+      method: "POST",
+      pathname: RELAY_API_KEY_VERIFY_PATH,
+    },
+    surface: RELAY_API_KEY_VERIFY_PATH,
+    unavailableMessage: "PoP signing unavailable for relay validation; continuing bearer-only compatibility mode",
+    onUnavailable,
+  });
+}
+
+/**
+ * Refreshes Socket.IO Engine extraHeaders before a manual reconnect attempt.
+ */
+export async function refreshRelayValidationPopHeadersForSocket(
+  socket: Socket,
+  apiKeyProvenance: ApiKeyProvenance,
+  signDesktopRequest?: DesktopPopSigner,
+  onUnavailable?: DesktopPopUnavailableReporter,
+): Promise<void> {
+  const headers = await buildRelayValidationPopHeaders(
+    apiKeyProvenance,
+    signDesktopRequest,
+    onUnavailable,
+  );
+  if (headers) {
+    socket.io.opts.extraHeaders = headers;
+  } else {
+    delete socket.io.opts.extraHeaders;
+  }
+}
+
 type EnvelopeOnlyFields = ProtocolEnvelope;
 
 const HELLO_ACK_TIMEOUT_MS = 10_000;
+const RECONNECT_DELAY_MS = 1_000;
 const RECOVERY_TIMEOUT_MS = 2 * 60_000;
 const RECOVERY_CHECK_INTERVAL_MS = 30_000;
+const ANALYTICS_QUEUE_MAX = 200;
+const ANALYTICS_QUEUE_TTL_MS = 15 * 60_000;
+const ANALYTICS_ACK_TIMEOUT_MS = 1_500;
+const AGENT_SESSIONS_ACK_TIMEOUT_MS = 10_000;
+
+type QueuedAnalyticsEvent = {
+  event: Omit<DesktopAnalyticsEvent, keyof EnvelopeOnlyFields>;
+  expiresAt: number;
+};
 
 function createEnvelope() {
   return {
@@ -394,7 +732,108 @@ function parseDesktopCommand(payload: unknown): DesktopCommandEvent | null {
     queuedAt: asNonEmptyString(event.queuedAt) ?? undefined,
     lockKey: asNonEmptyString(event.lockKey) ?? undefined,
     requiresApproval: Boolean(event.requiresApproval),
-    approvalReason: asNonEmptyString(event.approvalReason) ?? undefined
+    approvalReason: asNonEmptyString(event.approvalReason) ?? undefined,
+    ...(asNonEmptyString(event.signature)
+      ? { signature: asNonEmptyString(event.signature)! }
+      : {}),
+    ...(asNonEmptyString(event.signaturePayload)
+      ? { signaturePayload: asNonEmptyString(event.signaturePayload)! }
+      : {}),
+    ...(asNonEmptyString(event.publicKeyFingerprint)
+      ? {
+          publicKeyFingerprint:
+            asNonEmptyString(event.publicKeyFingerprint)!,
+        }
+      : {})
+  };
+}
+
+/**
+ * Parses server-advertised Desktop capabilities. Only an explicit boolean true
+ * enables command-signing enforcement; missing, false, or malformed values
+ * preserve legacy unsigned command compatibility.
+ */
+export function parseServerCapabilities(value: unknown):
+  | { computeTargetSigning?: boolean; agentSessionSync?: boolean }
+  | undefined {
+  const record = asObject(value);
+  const parsed: {
+    computeTargetSigning?: boolean;
+    agentSessionSync?: boolean;
+  } = {};
+  if (record.computeTargetSigning === true) {
+    parsed.computeTargetSigning = true;
+  }
+  if (record.agentSessionSync === true) {
+    parsed.agentSessionSync = true;
+  }
+  return Object.keys(parsed).length > 0 ? parsed : undefined;
+}
+
+export function parseDesktopHelloAck(
+  payload: unknown,
+): DesktopHelloAckEvent | null {
+  const event = asObject(payload);
+  const computeTargetId = asNonEmptyString(event.computeTargetId);
+  if (!computeTargetId) {
+    return null;
+  }
+  const parsedServerCapabilities = parseServerCapabilities(
+    event.serverCapabilities,
+  );
+
+  return {
+    ...createEnvelope(),
+    computeTargetId,
+    sessionId: asNonEmptyString(event.sessionId) ?? "",
+    serverTime: asNonEmptyString(event.serverTime) ?? new Date().toISOString(),
+    ...(parsedServerCapabilities
+      ? { serverCapabilities: parsedServerCapabilities }
+      : {}),
+    resumeFromSequence:
+      event.resumeFromSequence && typeof event.resumeFromSequence === "object"
+        ? (event.resumeFromSequence as Record<string, number>)
+        : undefined
+  };
+}
+
+export function parseDesktopAnalyticsAck(
+  payload: unknown,
+): DesktopAnalyticsAck {
+  const event = asObject(payload);
+  if (event.accepted === true) {
+    return { accepted: true };
+  }
+  if (
+    event.reason === DesktopAnalyticsAckReason.FeatureDisabled ||
+    event.reason === DesktopAnalyticsAckReason.RateLimited ||
+    event.reason === DesktopAnalyticsAckReason.ValidationFailed
+  ) {
+    return { accepted: false, reason: event.reason };
+  }
+  return {
+    accepted: false,
+    reason: DesktopAnalyticsAckReason.ValidationFailed,
+  };
+}
+
+export function parseDesktopAgentSessionsAck(
+  payload: unknown,
+): DesktopAgentSessionsAck {
+  const event = asObject(payload);
+  if (event.accepted === true) {
+    return { accepted: true };
+  }
+  if (
+    event.reason === DesktopAgentSessionsAckReason.FeatureDisabled ||
+    event.reason === DesktopAgentSessionsAckReason.RateLimited ||
+    event.reason === DesktopAgentSessionsAckReason.ValidationFailed
+  ) {
+    return { accepted: false, reason: event.reason };
+  }
+  return {
+    accepted: false,
+    reason: DesktopAgentSessionsAckReason.RateLimited,
   };
 }
 
@@ -411,6 +850,21 @@ function asNonEmptyString(value: unknown): string | null {
   }
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
+}
+
+function formatObjectKeysForLog(value: Record<string, unknown>): string {
+  const keys = Object.keys(value).sort();
+  return keys.length > 0 ? keys.join(",") : "none";
+}
+
+function formatPrimitiveForLog(value: unknown): string {
+  if (
+    value === null ||
+    ["boolean", "number", "string", "undefined"].includes(typeof value)
+  ) {
+    return String(value);
+  }
+  return typeof value;
 }
 
 function asFiniteInteger(value: unknown): number | null {
@@ -497,4 +951,10 @@ function looksLikeAuthError(error: unknown): boolean {
     return true;
   }
   return false;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }

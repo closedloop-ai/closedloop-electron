@@ -4,12 +4,16 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, test } from "node:test";
 import {
+  CLOSEDLOOP_REQUIRED_PLUGIN_IDS,
   compareSemverDescending,
   findPluginScript,
   findPluginVersions,
   getCodePluginVersion,
   getPluginCacheRoot,
-  isPluginInstalled
+  getPluginInstallStatus,
+  isPluginInstalled,
+  parseClaudePluginListJson,
+  parseClaudePluginListText,
 } from "../src/server/operations/plugin-cache.js";
 
 const tempDirs: string[] = [];
@@ -60,6 +64,93 @@ describe("compareSemverDescending", () => {
 
   test("compares patch versions", () => {
     assert.ok(compareSemverDescending("1.0.2", "1.0.1") < 0);
+  });
+});
+
+describe("Claude plugin inventory parsing", () => {
+  test("parses JSON inventory with enabled plugin fields", () => {
+    const entries = parseClaudePluginListJson(
+      JSON.stringify([
+        {
+          id: "code@closedloop-ai",
+          version: "1.2.3",
+          enabled: true,
+          installPath: "/tmp/code",
+        },
+      ])
+    );
+
+    assert.deepEqual(entries, [
+      {
+        id: "code@closedloop-ai",
+        version: "1.2.3",
+        enabled: true,
+        installPath: "/tmp/code",
+      },
+    ]);
+  });
+
+  test("parses real CLI JSON object with installed plugins", () => {
+    const entries = parseClaudePluginListJson(
+      JSON.stringify({
+        installed: [
+          {
+            name: "code@closedloop-ai",
+            version: "1.2.3",
+            enabled: true,
+            installPath: "/tmp/code",
+          },
+        ],
+      })
+    );
+
+    assert.deepEqual(entries, [
+      {
+        id: "code@closedloop-ai",
+        version: "1.2.3",
+        enabled: true,
+        installPath: "/tmp/code",
+      },
+    ]);
+  });
+
+  test("treats missing JSON enabled field as unknown", () => {
+    const entries = parseClaudePluginListJson(
+      JSON.stringify([{ id: "judges@closedloop-ai", version: "1.0.0" }])
+    );
+
+    assert.deepEqual(entries, [
+      {
+        id: "judges@closedloop-ai",
+        version: "1.0.0",
+        enabled: "unknown",
+      },
+    ]);
+  });
+
+  test("parses text fallback enabled and disabled status", () => {
+    const entries = parseClaudePluginListText(`
+code@closedloop-ai
+  Status: enabled
+
+platform@closedloop-ai
+  Status: disabled
+`);
+
+    assert.deepEqual(entries, [
+      { id: "code@closedloop-ai", enabled: true },
+      { id: "platform@closedloop-ai", enabled: false },
+    ]);
+  });
+
+  test("required ClosedLoop plugin inventory excludes bootstrap", () => {
+    assert.deepEqual([...CLOSEDLOOP_REQUIRED_PLUGIN_IDS], [
+      "code@closedloop-ai",
+      "code-review@closedloop-ai",
+      "judges@closedloop-ai",
+      "platform@closedloop-ai",
+      "self-learning@closedloop-ai",
+    ]);
   });
 });
 
@@ -150,7 +241,7 @@ describe("isPluginInstalled", () => {
     const registry = {
       version: 2,
       plugins: {
-        "code@closedloop-ai": [{ installPath, version: "1.0.0" }]
+        "code@closedloop-ai": [{ installPath, scope: "user", version: "1.0.0" }]
       }
     };
     const registryPath = path.join(tmpDir, "installed_plugins.json");
@@ -164,7 +255,7 @@ describe("isPluginInstalled", () => {
     const registry = {
       version: 2,
       plugins: {
-        "code@closedloop-ai": [{ installPath: path.join(tmpDir, "nonexistent"), version: "1.0.0" }]
+        "code@closedloop-ai": [{ installPath: path.join(tmpDir, "nonexistent"), scope: "user", version: "1.0.0" }]
       }
     };
     const registryPath = path.join(tmpDir, "installed_plugins.json");
@@ -186,6 +277,192 @@ describe("isPluginInstalled", () => {
     const tmpDir = await makeTempDir();
     assert.equal(isPluginInstalled("code", path.join(tmpDir, "missing.json")), false);
   });
+
+  test("returns false for project-only entries even when install path exists", async () => {
+    const tmpDir = await makeTempDir();
+    const installPath = path.join(tmpDir, "project-plugin");
+    await fs.mkdir(installPath, { recursive: true });
+    const registry = {
+      version: 2,
+      plugins: {
+        "code@closedloop-ai": [
+          { installPath, projectPath: tmpDir, scope: "project", version: "1.0.0" }
+        ]
+      }
+    };
+    const registryPath = path.join(tmpDir, "installed_plugins.json");
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+
+    assert.equal(isPluginInstalled("code", registryPath), false);
+  });
+
+  test("returns true for legacy missing-scope entries with an existing install path", async () => {
+    const tmpDir = await makeTempDir();
+    const installPath = path.join(tmpDir, "legacy-user-plugin");
+    await fs.mkdir(installPath, { recursive: true });
+    const registry = {
+      version: 2,
+      plugins: {
+        "code@closedloop-ai": [{ installPath, version: "1.0.0" }]
+      }
+    };
+    const registryPath = path.join(tmpDir, "installed_plugins.json");
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+
+    assert.equal(isPluginInstalled("code", registryPath), true);
+  });
+
+  test("returns false for missing-scope entries without an existing install path", async () => {
+    const tmpDir = await makeTempDir();
+    const registry = {
+      version: 2,
+      plugins: {
+        "code@closedloop-ai": [
+          { installPath: path.join(tmpDir, "missing-plugin"), version: "1.0.0" }
+        ]
+      }
+    };
+    const registryPath = path.join(tmpDir, "installed_plugins.json");
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+
+    assert.equal(isPluginInstalled("code", registryPath), false);
+  });
+
+  test("returns false for disabled user-scoped entries", async () => {
+    const tmpDir = await makeTempDir();
+    const installPath = path.join(tmpDir, "disabled-plugin");
+    await fs.mkdir(installPath, { recursive: true });
+    const registry = {
+      version: 2,
+      plugins: {
+        "code@closedloop-ai": [
+          { enabled: false, installPath, scope: "user", version: "1.0.0" }
+        ]
+      }
+    };
+    const registryPath = path.join(tmpDir, "installed_plugins.json");
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+
+    assert.equal(isPluginInstalled("code", registryPath), false);
+  });
+});
+
+describe("getPluginInstallStatus", () => {
+  test("passes enabled user-scope entries and selects user version", async () => {
+    const tmpDir = await makeTempDir();
+    const projectPath = path.join(tmpDir, "project-plugin");
+    const userPath = path.join(tmpDir, "user-plugin");
+    await fs.mkdir(projectPath, { recursive: true });
+    await fs.mkdir(userPath, { recursive: true });
+    const registry = {
+      version: 2,
+      plugins: {
+        "code@closedloop-ai": [
+          { installPath: projectPath, projectPath: tmpDir, scope: "project", version: "0.9.0" },
+          { installPath: userPath, scope: "user", version: "1.2.3" }
+        ]
+      }
+    };
+    const listJson = JSON.stringify([
+      { id: "code@closedloop-ai", projectPath: tmpDir, scope: "project", version: "0.9.0" },
+      { enabled: true, id: "code@closedloop-ai", scope: "user", version: "1.2.3" }
+    ]);
+    const registryPath = path.join(tmpDir, "installed_plugins.json");
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+
+    const status = getPluginInstallStatus("code", registryPath, listJson);
+
+    assert.equal(status.hasValidUserScopedEntry, true);
+    assert.equal(status.disabled, false);
+    assert.equal(status.hasProjectScopedEntry, true);
+    assert.deepEqual(status.projectScopedPaths, [tmpDir]);
+    assert.equal(status.selectedUserVersion, "1.2.3");
+  });
+
+  test("detects project scope even when the list entry has no project path", async () => {
+    const tmpDir = await makeTempDir();
+    const registry = {
+      version: 2,
+      plugins: {
+        "code@closedloop-ai": [{ scope: "project", version: "1.2.3" }]
+      }
+    };
+    const registryPath = path.join(tmpDir, "installed_plugins.json");
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+
+    const status = getPluginInstallStatus(
+      "code",
+      registryPath,
+      JSON.stringify([{ id: "code@closedloop-ai", scope: "project", version: "1.2.3" }])
+    );
+
+    assert.equal(status.hasValidUserScopedEntry, false);
+    assert.equal(status.hasProjectScopedEntry, true);
+    assert.deepEqual(status.projectScopedPaths, []);
+  });
+
+  test("classifies legacy missing-scope registry entries as user scoped", async () => {
+    const tmpDir = await makeTempDir();
+    const installPath = path.join(tmpDir, "legacy-user-plugin");
+    await fs.mkdir(installPath, { recursive: true });
+    const registry = {
+      version: 1,
+      plugins: {
+        "code@closedloop-ai": [{ installPath, version: "1.2.3" }]
+      }
+    };
+    const registryPath = path.join(tmpDir, "installed_plugins.json");
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+
+    const status = getPluginInstallStatus("code", registryPath);
+
+    assert.equal(status.hasValidUserScopedEntry, true);
+    assert.equal(status.hasUserScopedEntry, true);
+    assert.equal(status.hasExistingUserInstallPath, true);
+    assert.equal(status.selectedUserVersion, "1.2.3");
+  });
+
+  test("marks list parse failures as unverifiable when a user install path exists", async () => {
+    const tmpDir = await makeTempDir();
+    const installPath = path.join(tmpDir, "user-plugin");
+    await fs.mkdir(installPath, { recursive: true });
+    const registry = {
+      version: 2,
+      plugins: {
+        "code@closedloop-ai": [{ installPath, scope: "user", version: "1.2.3" }]
+      }
+    };
+    const registryPath = path.join(tmpDir, "installed_plugins.json");
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+
+    const status = getPluginInstallStatus("code", registryPath, "{not-json");
+
+    assert.equal(status.hasValidUserScopedEntry, false);
+    assert.equal(status.enabledStateUnverified, true);
+  });
+
+  test("marks a missing user entry in the list snapshot as unverifiable", async () => {
+    const tmpDir = await makeTempDir();
+    const installPath = path.join(tmpDir, "user-plugin");
+    await fs.mkdir(installPath, { recursive: true });
+    const registry = {
+      version: 2,
+      plugins: {
+        "code@closedloop-ai": [{ installPath, scope: "user", version: "1.2.3" }]
+      }
+    };
+    const registryPath = path.join(tmpDir, "installed_plugins.json");
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+
+    const status = getPluginInstallStatus(
+      "code",
+      registryPath,
+      JSON.stringify([{ enabled: true, id: "platform@closedloop-ai", scope: "user" }])
+    );
+
+    assert.equal(status.hasValidUserScopedEntry, false);
+    assert.equal(status.enabledStateUnverified, true);
+  });
 });
 
 describe("getCodePluginVersion", () => {
@@ -206,7 +483,7 @@ describe("getCodePluginVersion", () => {
     const registry = {
       version: 2,
       plugins: {
-        "code@closedloop-ai": [{ installPath: tmpDir, version: "1.2.3" }]
+        "code@closedloop-ai": [{ installPath: tmpDir, scope: "user", version: "1.2.3" }]
       }
     };
     const registryPath = path.join(tmpDir, "installed_plugins.json");
@@ -261,7 +538,7 @@ describe("getCodePluginVersion", () => {
     const registry = {
       version: 2,
       plugins: {
-        "code@closedloop-ai": [{ installPath: tmpDir, version: "installed" }]
+        "code@closedloop-ai": [{ installPath: tmpDir, scope: "user", version: "installed" }]
       }
     };
     const registryPath = path.join(tmpDir, "installed_plugins.json");
@@ -276,7 +553,7 @@ describe("getCodePluginVersion", () => {
     const registry = {
       version: 2,
       plugins: {
-        "code@closedloop-ai": [{ installPath: tmpDir, version: "1.0.0" }]
+        "code@closedloop-ai": [{ installPath: tmpDir, scope: "user", version: "1.0.0" }]
       }
     };
     const registryPath = path.join(tmpDir, "installed_plugins.json");
@@ -291,7 +568,24 @@ describe("getCodePluginVersion", () => {
     const registry = {
       version: 2,
       plugins: {
-        "code@closedloop-ai": [{ installPath: path.join(tmpDir, "gone"), version: "1.2.3" }]
+        "code@closedloop-ai": [{ installPath: path.join(tmpDir, "gone"), scope: "user", version: "1.2.3" }]
+      }
+    };
+    const registryPath = path.join(tmpDir, "installed_plugins.json");
+    await fs.writeFile(registryPath, JSON.stringify(registry));
+
+    assert.equal(getCodePluginVersion(registryPath), "unknown");
+  });
+
+  test("returns 'unknown' for project-scoped registry versions", async () => {
+    const tmpDir = await makeTempDir();
+    delete process.env["CL_PLUGIN_VERSION"];
+    const installPath = path.join(tmpDir, "project-plugin");
+    await fs.mkdir(installPath, { recursive: true });
+    const registry = {
+      version: 2,
+      plugins: {
+        "code@closedloop-ai": [{ installPath, scope: "project", version: "1.2.3" }]
       }
     };
     const registryPath = path.join(tmpDir, "installed_plugins.json");

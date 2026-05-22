@@ -5,6 +5,24 @@ const desktopApi = {
   updateSettings: (partial: unknown) =>
     ipcRenderer.invoke("desktop:update-settings", partial) as Promise<unknown>,
   getRuntimeStatus: () => ipcRenderer.invoke("desktop:get-runtime-status") as Promise<unknown>,
+  listCommandSigningKeys: () =>
+    ipcRenderer.invoke("desktop:list-command-signing-keys") as Promise<unknown>,
+  listAuthorizedKeys: () =>
+    ipcRenderer.invoke("desktop:list-authorized-keys") as Promise<unknown>,
+  authorizeKey: (payload: unknown) =>
+    ipcRenderer.invoke("desktop:authorize-key", payload) as Promise<unknown>,
+  removeAuthorizedKey: (fingerprint: string) =>
+    ipcRenderer.invoke("desktop:remove-authorized-key", fingerprint) as Promise<unknown>,
+  listOrgPublicKeys: () =>
+    ipcRenderer.invoke("desktop:list-org-public-keys") as Promise<unknown>,
+  approveOrgPublicKey: (fingerprint: string) =>
+    ipcRenderer.invoke("desktop:approve-org-public-key", fingerprint) as Promise<unknown>,
+  rejectOrgPublicKey: (fingerprint: string) =>
+    ipcRenderer.invoke("desktop:reject-org-public-key", fingerprint) as Promise<unknown>,
+  authorizeCommandSigningKey: (fingerprint: string) =>
+    ipcRenderer.invoke("desktop:authorize-command-signing-key", fingerprint) as Promise<unknown>,
+  revokeCommandSigningKey: (fingerprint: string) =>
+    ipcRenderer.invoke("desktop:revoke-command-signing-key", fingerprint) as Promise<unknown>,
   getActivityEvents: () => ipcRenderer.invoke("desktop:get-activity-events") as Promise<unknown>,
   clearActivityEvents: () =>
     ipcRenderer.invoke("desktop:clear-activity-events") as Promise<unknown>,
@@ -37,7 +55,24 @@ const desktopApi = {
   getOnboardingState: () => ipcRenderer.invoke("desktop:get-onboarding-state") as Promise<unknown>,
   completeOnboarding: (payload: unknown) =>
     ipcRenderer.invoke("desktop:complete-onboarding", payload) as Promise<unknown>,
-  pickSandboxDirectory: () => ipcRenderer.invoke("desktop:pick-sandbox-directory") as Promise<unknown>,
+  startDeviceOnboarding: (payload: unknown) =>
+    ipcRenderer.invoke("desktop:start-device-onboarding", payload) as Promise<unknown>,
+  dismissOnboardingPopup: (payload: { permanent: boolean }) =>
+    ipcRenderer.invoke("desktop:dismiss-onboarding-popup", payload) as Promise<unknown>,
+  onboardingPopupCta: () =>
+    ipcRenderer.invoke("desktop:onboarding-popup-cta") as Promise<unknown>,
+  pickSandboxDirectory: () =>
+    ipcRenderer.invoke("desktop:pick-sandbox-directory") as Promise<{
+      path: string;
+      isGitRepo: boolean;
+      suggestedPath: string | undefined;
+    } | null>,
+  inspectSandboxPath: (path: string) =>
+    ipcRenderer.invoke("desktop:inspect-sandbox-path", path) as Promise<{
+      path: string;
+      isGitRepo: boolean;
+      suggestedPath: string | undefined;
+    } | null>,
   getDangerousAutoApprove: () =>
     ipcRenderer.invoke("desktop:get-dangerous-auto-approve") as Promise<boolean>,
   setDangerousAutoApprove: (enabled: boolean) =>
@@ -56,6 +91,9 @@ const desktopApi = {
     ipcRenderer.invoke("desktop:get-job-log-tail", jobId, lines) as Promise<unknown>,
   getLogs: () => ipcRenderer.invoke("desktop:get-logs") as Promise<unknown>,
   clearLogs: () => ipcRenderer.invoke("desktop:clear-logs") as Promise<unknown>,
+  getLogFilePath: () =>
+    ipcRenderer.invoke("desktop:get-log-file-path") as Promise<string>,
+  openLogFile: () => ipcRenderer.invoke("desktop:open-log-file") as Promise<unknown>,
   getAppVersion: () => ipcRenderer.invoke("desktop:get-app-version") as Promise<string>,
   getBinaryPaths: () => ipcRenderer.invoke("desktop:get-binary-paths") as Promise<unknown>,
   patchBinaryPaths: (patch: unknown) =>
@@ -73,7 +111,25 @@ const desktopApi = {
   renameConfig: (id: string, name: string) =>
     ipcRenderer.invoke("desktop:rename-config", { id, name }) as Promise<unknown>,
   applyConfig: (id: string) =>
-    ipcRenderer.invoke("desktop:apply-config", { id }) as Promise<unknown>
+    ipcRenderer.invoke("desktop:apply-config", { id }) as Promise<unknown>,
+  getAgentMonitorUrl: () =>
+    ipcRenderer.invoke("desktop:get-agent-monitor-url") as Promise<{
+      url: string | null;
+      ready: boolean;
+      enabled: boolean;
+      planExtractionEnabled: boolean;
+    }>,
+  openAgentMonitor: () =>
+    ipcRenderer.invoke("desktop:open-agent-monitor") as Promise<unknown>,
+  getAgentMonitorHooksEnabled: () =>
+    ipcRenderer.invoke(
+      "desktop:get-agent-monitor-hooks-enabled",
+    ) as Promise<boolean>,
+  setAgentMonitorHooksEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke(
+      "desktop:set-agent-monitor-hooks-enabled",
+      enabled,
+    ) as Promise<{ ok: boolean; enabled: boolean; error?: string }>
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);
@@ -82,6 +138,26 @@ ipcRenderer.on("desktop:navigate-tab", (_event, tab: string) => {
   window.dispatchEvent(new CustomEvent("desktop:navigate-tab", { detail: tab }));
 });
 
+ipcRenderer.on("desktop:navigate-settings-tab", (_event, tab: string) => {
+  window.dispatchEvent(new CustomEvent("desktop:navigate-settings-tab", { detail: tab }));
+});
+
+ipcRenderer.on("desktop:command-keys-changed", () => {
+  window.dispatchEvent(new CustomEvent("desktop:command-keys-changed"));
+});
+
 ipcRenderer.on("desktop:update-available", (_event, result) => {
   window.dispatchEvent(new CustomEvent("desktop:update-available", { detail: result }));
+});
+
+ipcRenderer.on("desktop:update-status", (_event, result) => {
+  window.dispatchEvent(new CustomEvent("desktop:update-status", { detail: result }));
+});
+
+ipcRenderer.on("desktop:onboarding-state-changed", () => {
+  window.dispatchEvent(new CustomEvent("desktop:onboarding-state-changed"));
+});
+
+ipcRenderer.on("desktop:show-onboarding-popup", () => {
+  window.dispatchEvent(new CustomEvent("desktop:show-onboarding-popup"));
 });

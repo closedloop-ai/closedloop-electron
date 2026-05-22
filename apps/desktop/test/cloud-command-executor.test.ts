@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import http from "node:http";
 import { afterEach, test } from "node:test";
-import { CloudCommandExecutor } from "../src/main/cloud-command-executor.js";
+import {
+  CloudCommandExecutor,
+  type CloudCommandExecutorOptions,
+} from "../src/main/cloud-command-executor.js";
+import { COMMAND_SIGNING_REJECTION_REASONS } from "../src/shared/contracts.js";
 import type {
   DesktopCancelEvent,
   DesktopCommandAckEvent,
@@ -568,21 +572,126 @@ test("Observability.commandFailed is called on gateway error", async () => {
   }
 });
 
+test("rejects unsigned commands before queueing when server signing support is enforced", () => {
+  const acks: Array<
+    Omit<DesktopCommandAckEvent, "protocolVersion" | "messageId" | "timestamp">
+  > = [];
+  const events: Array<
+    Omit<
+      DesktopCommandStreamEvent,
+      "protocolVersion" | "messageId" | "timestamp"
+    >
+  > = [];
+  const commandId = "0196b1bb-7a00-7000-8000-000000000006";
+
+  executor = createExecutor({
+    maxInFlightCommands: 1,
+    onAck: (ack) => acks.push(ack),
+    onEvent: (event) => events.push(event),
+    isCommandSigningEnforced: () => true,
+    commandSignatureVerifier: {
+      verify: () => ({
+        ok: false,
+        reason: COMMAND_SIGNING_REJECTION_REASONS.unsignedCommand,
+      }),
+    },
+  });
+  executor.setConnected(true);
+  executor.enqueue(buildCommand(commandId, { command: "status" }));
+
+  assert.deepEqual(acks, [
+    {
+      commandId,
+      accepted: false,
+      state: "failed",
+      reason: COMMAND_SIGNING_REJECTION_REASONS.unsignedCommand,
+    },
+  ]);
+  assert.deepEqual(events, []);
+  assert.deepEqual(executor.getStats(), { activeCommands: 0, queueDepth: 0 });
+});
+
+test("ignores invalid signed envelopes when server signing support is disabled", async () => {
+  await startGateway(async (_request, response) => {
+    response.statusCode = 200;
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ ok: true }));
+  });
+
+  const acks: Array<
+    Omit<DesktopCommandAckEvent, "protocolVersion" | "messageId" | "timestamp">
+  > = [];
+  const events: Array<
+    Omit<
+      DesktopCommandStreamEvent,
+      "protocolVersion" | "messageId" | "timestamp"
+    >
+  > = [];
+  const commandId = "0196b1bb-7a00-7000-8000-000000000007";
+
+  executor = createExecutor({
+    maxInFlightCommands: 1,
+    onAck: (ack) => acks.push(ack),
+    onEvent: (event) => events.push(event),
+    isCommandSigningEnforced: () => false,
+    commandSignatureVerifier: {
+      verify: () => ({
+        ok: false,
+        reason: COMMAND_SIGNING_REJECTION_REASONS.invalidSignature,
+      }),
+    },
+  });
+  executor.setConnected(true);
+  executor.enqueue({
+    ...buildCommand(commandId, { command: "status" }),
+    signature: "not-valid",
+    signaturePayload: "{",
+    publicKeyFingerprint: "cl:unknown",
+  });
+
+  await waitFor(() => countDone(events, commandId) === 1);
+  assert.equal(acks[0].accepted, true);
+  assert.deepEqual(executor.getStats(), { activeCommands: 0, queueDepth: 0 });
+});
+
 function createExecutor(options: {
   maxInFlightCommands: number;
+  onAck?: (
+    event: Omit<
+      DesktopCommandAckEvent,
+      "protocolVersion" | "messageId" | "timestamp"
+    >,
+  ) => void;
   onEvent: (
     event: Omit<
       DesktopCommandStreamEvent,
       "protocolVersion" | "messageId" | "timestamp"
     >,
   ) => void;
+  onQueueStatsChange?: (stats: {
+    activeCommands: number;
+    queueDepth: number;
+  }) => void;
+  commandSignatureVerifier?: CloudCommandExecutorOptions["commandSignatureVerifier"];
+  isCommandSigningEnforced?: CloudCommandExecutorOptions["isCommandSigningEnforced"];
+  prepareCommandForExecution?: CloudCommandExecutorOptions["prepareCommandForExecution"];
 }): CloudCommandExecutor {
   return new CloudCommandExecutor({
     getGatewayPort: () => gatewayPort,
     getGatewayAuthToken: () => "test-gateway-token",
     maxInFlightCommands: options.maxInFlightCommands,
-    sendCommandAck: () => {},
+    sendCommandAck: options.onAck ?? (() => {}),
     sendCommandEvent: options.onEvent,
+    onQueueStatsChange: options.onQueueStatsChange,
+    ...(options.commandSignatureVerifier
+      ? { commandSignatureVerifier: options.commandSignatureVerifier }
+      : {}),
+    ...(options.isCommandSigningEnforced
+      ? { isCommandSigningEnforced: options.isCommandSigningEnforced }
+      : {}),
+    ...(options.prepareCommandForExecution
+      ? { prepareCommandForExecution: options.prepareCommandForExecution }
+      : {}),
   });
 }
 
@@ -703,3 +812,126 @@ function asRecord(value: unknown): Record<string, unknown> {
   }
   return value as Record<string, unknown>;
 }
+
+// --- onQueueStatsChange dedupe ---
+
+test("onQueueStatsChange: first notification on empty idle executor fires once", () => {
+  const stats: Array<{ activeCommands: number; queueDepth: number }> = [];
+  executor = createExecutor({
+    maxInFlightCommands: 1,
+    onEvent: () => {},
+    onQueueStatsChange: (s) => stats.push(s),
+  });
+  executor.setConnected(true);
+  assert.deepStrictEqual(stats, [{ activeCommands: 0, queueDepth: 0 }]);
+});
+
+test("onQueueStatsChange: idempotent setConnected(true) on idle executor does not re-fire", () => {
+  const stats: Array<{ activeCommands: number; queueDepth: number }> = [];
+  executor = createExecutor({
+    maxInFlightCommands: 1,
+    onEvent: () => {},
+    onQueueStatsChange: (s) => stats.push(s),
+  });
+  executor.setConnected(true);
+  executor.setConnected(false);
+  executor.setConnected(true);
+  assert.strictEqual(
+    stats.length,
+    1,
+    "no-op schedule with unchanged 0/0 counts should not emit twice",
+  );
+});
+
+test("onQueueStatsChange: depth-only change emits (enqueue beyond max in-flight, then cancel)", async () => {
+  let releaseC1: (() => void) | null = null;
+  const c1Blocker = new Promise<void>((resolve) => {
+    releaseC1 = resolve;
+  });
+
+  await startGateway(async (request, response) => {
+    const url = new URL(request.url ?? "/", "http://localhost");
+    const command = url.searchParams.get("command") ?? "unknown";
+    if (command === "c1") {
+      await c1Blocker;
+    }
+    response.statusCode = 200;
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ ok: true }));
+  });
+
+  const stats: Array<{ activeCommands: number; queueDepth: number }> = [];
+  executor = createExecutor({
+    maxInFlightCommands: 1,
+    onEvent: () => {},
+    onQueueStatsChange: (s) => stats.push(s),
+  });
+  executor.setConnected(true); // emits {0,0}
+  executor.enqueue(
+    buildCommand("c1", { command: "c1" }, { repoPath: "/repo/a" }),
+  );
+  // Wait for c1 to enter flight so stats settles at {1,0}.
+  await waitFor(
+    () =>
+      stats.some((s) => s.activeCommands === 1 && s.queueDepth === 0),
+  );
+
+  // c2 enqueued while c1 is in-flight with max=1 → sits in queue; depth grows.
+  executor.enqueue(
+    buildCommand("c2", { command: "c2" }, { repoPath: "/repo/b" }),
+  );
+  await waitFor(
+    () =>
+      stats.some((s) => s.activeCommands === 1 && s.queueDepth === 1),
+  );
+
+  // Cancel the queued c2 → depth drops back; active unchanged.
+  executor.cancel(buildCancel("c2", "user cancel"));
+  await waitFor(
+    () => {
+      const last = stats[stats.length - 1];
+      return last.activeCommands === 1 && last.queueDepth === 0;
+    },
+  );
+
+  // No consecutive duplicates (dedupe guard works).
+  for (let i = 1; i < stats.length; i++) {
+    assert.ok(
+      stats[i].activeCommands !== stats[i - 1].activeCommands ||
+        stats[i].queueDepth !== stats[i - 1].queueDepth,
+      `consecutive duplicate emission at index ${i}: ${JSON.stringify(stats[i])}`,
+    );
+  }
+
+  // Both partial-delta cases observed:
+  //   {1,0} → {1,1}  depth-only (enqueue)
+  //   {1,1} → {1,0}  depth-only (cancel)
+  const pairs = stats.map((s) => `${s.activeCommands}/${s.queueDepth}`);
+  assert.ok(
+    pairs.includes("1/0") && pairs.includes("1/1"),
+    `expected depth-only transitions through 1/0 and 1/1, got: ${pairs.join(", ")}`,
+  );
+
+  releaseC1?.();
+  await waitFor(() => stats.some((s) => s.activeCommands === 0));
+});
+
+test("onQueueStatsChange: dispose does not fire a final notification", () => {
+  // dispose() must stay silent so it cannot re-arm a shutdown-side debounce
+  // timer that outlives Observability.shutdown().
+  const stats: Array<{ activeCommands: number; queueDepth: number }> = [];
+  executor = createExecutor({
+    maxInFlightCommands: 1,
+    onEvent: () => {},
+    onQueueStatsChange: (s) => stats.push(s),
+  });
+  executor.setConnected(true); // emits {0,0}
+  const beforeDispose = stats.length;
+  executor.dispose();
+  assert.strictEqual(
+    stats.length,
+    beforeDispose,
+    "dispose() must not invoke onQueueStatsChange",
+  );
+  executor = null; // prevent afterEach double-dispose
+});

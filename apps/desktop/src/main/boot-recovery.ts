@@ -1,4 +1,9 @@
+import {
+  getCloudLoopStatus,
+  type CloudLoopStatus,
+} from "../server/operations/loop-http.js";
 import { startOutputTailer } from "../server/operations/output-tailer.js";
+import { refreshLoopTokenSingleflight } from "./loop-refresh.js";
 import {
   cleanupAdditionalWorktreesWithDefaultProvider,
   registerRecoveredLoop,
@@ -13,13 +18,17 @@ import {
   type LoopFinalizerDeps,
 } from "./loop-finalizer.js";
 import type { TelemetryEmitter } from "./telemetry-protocol.js";
+import { LoopSchedulerContext } from "./loop-scheduler-context.js";
 
 export interface BootRecoveryDeps {
   jobStore: JobStore;
   telemetry: TelemetryEmitter;
   getApiKey: () => string | null;
   getApiOrigin: () => string;
+  getAllowedDirectories?: () => string[];
   loopTokenStore: LoopTokenStore;
+  /** Instance-scoped scheduler context. Defaults to a new LoopSchedulerContext when omitted. */
+  schedulers?: LoopSchedulerContext;
 }
 
 interface LiveJobHandle {
@@ -31,8 +40,9 @@ interface LiveJobHandle {
 const DEFAULT_WATCHER_POLL_MS = 3000;
 const MAX_RECOVERY_ATTEMPTS = 3;
 
-export class BootRecoveryService {
+export class BootRecoveryService implements Disposable {
   private readonly deps: BootRecoveryDeps;
+  private readonly schedulers: LoopSchedulerContext;
   private liveHandles: LiveJobHandle[] = [];
   private readonly backgroundTasks = new Set<Promise<void>>();
   private deadJobFinalizationTask: Promise<void> | null = null;
@@ -41,6 +51,7 @@ export class BootRecoveryService {
 
   constructor(deps: BootRecoveryDeps) {
     this.deps = deps;
+    this.schedulers = deps.schedulers ?? new LoopSchedulerContext();
   }
 
   async run(deadJobs: LocalJob[]): Promise<void> {
@@ -109,7 +120,14 @@ export class BootRecoveryService {
   private async finalizeDeadJobs(deadJobs: LocalJob[]): Promise<void> {
     if (this.disposed) return;
 
-    const { jobStore, telemetry, getApiKey, getApiOrigin, loopTokenStore } = this.deps;
+    const {
+      jobStore,
+      telemetry,
+      getApiKey,
+      getApiOrigin,
+      loopTokenStore,
+    } = this.deps;
+    const getAllowedDirectories = this.deps.getAllowedDirectories ?? (() => []);
     const apiKey = getApiKey();
     const apiBaseUrl = getApiOrigin();
     const recoveryCandidates = this.buildRecoveryCandidates(deadJobs);
@@ -135,8 +153,7 @@ export class BootRecoveryService {
         continue;
       }
       try {
-        const authToken = loopTokenStore.getLoopToken(job.loopId);
-        if (!authToken) {
+        if (!loopTokenStore.getLoopToken(job.loopId)) {
           gatewayLog.warn(
             "boot-recovery",
             `Skipping dead loop finalization: missing loop token for loopId=${job.loopId} (phase=dead-finalization)`,
@@ -147,20 +164,27 @@ export class BootRecoveryService {
           "boot-recovery",
           `Token source for loopId=${job.loopId}: LOOP_TOKEN_STORE`,
         );
+        const reconcileResult = await this.reconcileCloudLoopStatus(job, apiBaseUrl);
+        if (reconcileResult.kind === "timed_out") {
+          continue;
+        }
         jobStore.upsert({
           ...job,
           recoveryAttempts: attempts + 1,
+          finalizationSource: "boot-recovery",
+          liveActivity: "Boot recovery replaying finalization after restart",
           updatedAt: new Date().toISOString(),
         });
         const outcome = await finalizeLoopFromRuntime(job, "boot-recovery", {
           jobStore,
           telemetry,
-          apiAuthToken: authToken,
+          getToken: () => loopTokenStore.getLoopTokenString(job.loopId),
           apiBaseUrl,
           isProcessRunning,
+          getAllowedDirectories,
           loopTokenStore,
-          cleanupAdditionalWorktrees:
-            cleanupAdditionalWorktreesWithDefaultProvider,
+          cleanupAdditionalWorktrees: cleanupAdditionalWorktreesWithDefaultProvider,
+          schedulers: this.schedulers,
         });
         if (!outcome.cloudFinalized && outcome.retryableFailure) {
           const latest = jobStore.getByLoopId(job.loopId);
@@ -220,6 +244,46 @@ export class BootRecoveryService {
     });
   }
 
+  private async reconcileCloudLoopStatus(
+    job: LocalJob,
+    apiBaseUrl: string,
+  ): Promise<CloudLoopStatus> {
+    const { loopTokenStore } = this.deps;
+    const getToken = () => loopTokenStore.getLoopTokenString(job.loopId);
+
+    let result = await getCloudLoopStatus(apiBaseUrl, job.loopId, getToken);
+
+    // On 401, refresh the loop token exactly once (singleflight-coalesced) and
+    // retry. getToken closes over the store, so the retry picks up the new
+    // token automatically once the refresh has written it.
+    if (result.kind === "unauthorized") {
+      const refresh = await refreshLoopTokenSingleflight(
+        job.loopId,
+        apiBaseUrl,
+        getToken,
+        loopTokenStore,
+      );
+      if (refresh.success) {
+        result = await getCloudLoopStatus(apiBaseUrl, job.loopId, getToken);
+      }
+    }
+
+
+    if (result.kind === "timed_out") {
+      const current = this.deps.jobStore.getByLoopId(job.loopId) ?? job;
+      this.deps.jobStore.upsert({
+        ...current,
+        status: "TIMED_OUT",
+        liveActivity: "Loop timed out — restart from the loop list.",
+        completedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        cloudFinalizedAt: new Date().toISOString(),
+      });
+      this.deps.loopTokenStore.deleteLoopToken(job.loopId);
+    }
+    return result;
+  }
+
   private async reattachLiveJob(job: LocalJob, apiBaseUrl: string): Promise<void> {
     const { jobStore } = this.deps;
     const { loopId, pid } = job;
@@ -241,11 +305,24 @@ export class BootRecoveryService {
 
     // TOCTOU guard: process was alive when liveJobs was built, but may have exited since.
     if (!isProcessRunning(pid)) {
-      this.finalizeRecoveredJob(loopId, loopAuthToken, effectiveApiBaseUrl, undefined);
+      this.finalizeRecoveredJob(loopId, () => this.deps.loopTokenStore.getLoopTokenString(loopId), effectiveApiBaseUrl, undefined);
+      return;
+    }
+
+    const reconcileResult = await this.reconcileCloudLoopStatus(job, effectiveApiBaseUrl);
+    if (reconcileResult.kind === "timed_out") {
       return;
     }
 
     registerRecoveredLoop(loopId, pid);
+    const latest = jobStore.getByLoopId(loopId);
+    if (latest) {
+      jobStore.upsert({
+        ...latest,
+        liveActivity: "Boot recovery reattached after desktop restart",
+        updatedAt: new Date().toISOString(),
+      });
+    }
 
     gatewayLog.info(
       "boot-recovery",
@@ -263,7 +340,7 @@ export class BootRecoveryService {
         job.jsonlPath,
         effectiveApiBaseUrl,
         loopId,
-        loopAuthToken,
+        () => this.deps.loopTokenStore.getLoopTokenString(loopId),
         job.lastObservedJsonlOffset ?? 0,
         (offset) => {
           const current = jobStore.getByLoopId(loopId);
@@ -271,6 +348,8 @@ export class BootRecoveryService {
             jobStore.upsert({ ...current, lastObservedJsonlOffset: offset });
           }
         },
+        job.claudeWorkDir,
+        this.deps.loopTokenStore,
       );
     } else {
       gatewayLog.warn(
@@ -278,6 +357,23 @@ export class BootRecoveryService {
         `Cannot start output tailer for loopId=${loopId}: no jsonlPath (claudeWorkDir=${job.claudeWorkDir ?? "none"})`,
       );
     }
+
+    const getToken = () => this.deps.loopTokenStore.getLoopTokenString(loopId);
+
+    const loopTokenMeta = this.deps.loopTokenStore.getLoopToken(loopId);
+    this.schedulers.startRefresh(loopId, loopTokenMeta?.expiresAt, {
+      apiBaseUrl: effectiveApiBaseUrl,
+      getToken,
+      loopTokenStore: this.deps.loopTokenStore,
+    });
+
+    this.schedulers.startHeartbeat(loopId, { apiBaseUrl: effectiveApiBaseUrl, getToken });
+
+    this.schedulers.registerSleep(loopId, {
+      apiBaseUrl: effectiveApiBaseUrl,
+      getToken,
+      loopTokenStore: this.deps.loopTokenStore,
+    });
 
     const watcherPollMs =
       Number(process.env.CLOSEDLOOP_WATCHER_POLL_MS) || DEFAULT_WATCHER_POLL_MS;
@@ -290,7 +386,8 @@ export class BootRecoveryService {
         clearInterval(watcherId);
         this.liveHandles = this.liveHandles.filter((value) => value.loopId !== loopId);
         unregisterLoop(loopId);
-        this.finalizeRecoveredJob(loopId, loopAuthToken, effectiveApiBaseUrl, tailer);
+        this.schedulers.teardownLoop(loopId);
+        this.finalizeRecoveredJob(loopId, () => this.deps.loopTokenStore.getLoopTokenString(loopId), effectiveApiBaseUrl, tailer);
       }
     }, watcherPollMs);
 
@@ -299,11 +396,12 @@ export class BootRecoveryService {
 
   private finalizeRecoveredJob(
     loopId: string,
-    loopAuthToken: string,
+    getToken: () => string | null,
     apiBaseUrl: string,
     tailer: LiveJobHandle["tailer"] | undefined,
   ): void {
     const { jobStore, telemetry, loopTokenStore } = this.deps;
+    const getAllowedDirectories = this.deps.getAllowedDirectories ?? (() => []);
 
     const run = async () => {
       if (this.disposed) {
@@ -326,15 +424,23 @@ export class BootRecoveryService {
         return;
       }
 
+      jobStore.upsert({
+        ...job,
+        finalizationSource: "boot-recovery",
+        liveActivity: "Boot recovery took ownership of finalization",
+        updatedAt: new Date().toISOString(),
+      });
+
       const finalizerDeps: LoopFinalizerDeps = {
         jobStore,
         telemetry,
-        apiAuthToken: loopAuthToken,
+        getToken,
         apiBaseUrl,
         isProcessRunning,
+        getAllowedDirectories,
         loopTokenStore,
-        cleanupAdditionalWorktrees:
-          cleanupAdditionalWorktreesWithDefaultProvider,
+        cleanupAdditionalWorktrees: cleanupAdditionalWorktreesWithDefaultProvider,
+        schedulers: this.schedulers,
       };
 
       try {
@@ -354,13 +460,15 @@ export class BootRecoveryService {
     void this.trackBackgroundTask(run()).catch(() => {});
   }
 
-  dispose(): void {
+  [Symbol.dispose](): void {
     this.disposed = true;
     for (const handle of this.liveHandles) {
       clearInterval(handle.watcherId);
       handle.tailer?.stop();
+      this.schedulers.teardownLoop(handle.loopId);
     }
     this.liveHandles = [];
+    this.schedulers[Symbol.dispose]();
   }
 
   private sweepOrphanedTokens(): void {

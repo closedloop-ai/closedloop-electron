@@ -5,6 +5,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { summarizeJsonlRecord, startOutputTailer } from "../src/server/operations/output-tailer.js";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
@@ -245,7 +246,7 @@ async function startEventServer(options?: {
 function buildLoopBody(overrides?: Partial<Record<string, unknown>>): Record<string, unknown> {
   return {
     loopId: "aaaaaaaa-0000-0000-0000-000000000001",
-    command: "EVALUATE_PRD",
+    command: LoopCommand.EvaluatePrd,
     closedLoopAuthToken: "cl-token",
     apiBaseUrl: "https://api.example.com",
     artifacts: [{ type: "PRD", content: "PRD content for output test" }],
@@ -423,7 +424,7 @@ describe("T-5.2: Output events arrive before completed event", () => {
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
 
-    const tailer = startOutputTailer(nonExistentJsonl, apiBaseUrl, "test-loop-id", "token", 0);
+    const tailer = startOutputTailer(nonExistentJsonl, apiBaseUrl, "test-loop-id", () => "token", 0);
     await assert.doesNotReject(() => tailer.flush());
 
     // No output events should be posted since file doesn't exist
@@ -506,7 +507,7 @@ describe("T-5.3: Partial JSONL writes", () => {
       jsonlPath,
       apiBaseUrl,
       "partial-offset-loop",
-      "token",
+      () => "token",
       0,
       (o) => {
         committedOffsets.push(o);
@@ -532,7 +533,7 @@ describe("T-5.3: Partial JSONL writes", () => {
       jsonlPath,
       apiBaseUrl,
       "partial-offset-loop",
-      "token",
+      () => "token",
       resumeFrom,
       (o) => {
         committedOffsets.push(o);
@@ -564,7 +565,7 @@ describe("T-5.3: Partial JSONL writes", () => {
       jsonlPath,
       apiBaseUrl,
       "auth-reject-loop",
-      "token",
+      () => "token",
       0,
       (o) => {
         committedOffsets.push(o);
@@ -606,7 +607,7 @@ describe("T-5.3: Partial JSONL writes", () => {
       jsonlPath,
       apiBaseUrl,
       "auth-retry-loop",
-      "token",
+      () => "token",
       0,
       (o) => {
         committedOffsets.push(o);
@@ -652,7 +653,7 @@ describe("T-5.3: Partial JSONL writes", () => {
       jsonlPath,
       apiBaseUrl,
       "flush-auth-retry-loop",
-      "token",
+      () => "token",
       0,
       (o) => {
         committedOffsets.push(o);
@@ -685,7 +686,7 @@ describe("T-5.3: Partial JSONL writes", () => {
     const eventSrv = await startEventServer();
     const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
 
-    const tailer = startOutputTailer(jsonlPath, apiBaseUrl, "partial-test-loop", "token", 0);
+    const tailer = startOutputTailer(jsonlPath, apiBaseUrl, "partial-test-loop", () => "token", 0);
 
     // Write an incomplete line (no trailing newline)
     const incompleteLine = '{"type":"assistant","message":{"content":[{"type":"text","text":"hel';
@@ -694,7 +695,7 @@ describe("T-5.3: Partial JSONL writes", () => {
     // Flush: no complete lines yet — 0 events
     await tailer.flush();
     // Re-create tailer since flush() stops it
-    const tailer2 = startOutputTailer(jsonlPath, apiBaseUrl, "partial-test-loop", "token", 0);
+    const tailer2 = startOutputTailer(jsonlPath, apiBaseUrl, "partial-test-loop", () => "token", 0);
 
     const collectedBeforeComplete = eventSrv.getCollected().filter((e) => e.type === "output");
     assert.equal(
@@ -898,7 +899,7 @@ describe("T-5.6: Throttle", () => {
     ];
     writeFileSync(jsonlPath, lines.join("\n") + "\n");
 
-    const tailer = startOutputTailer(jsonlPath, apiBaseUrl, "throttle-test-loop", "token", 0);
+    const tailer = startOutputTailer(jsonlPath, apiBaseUrl, "throttle-test-loop", () => "token", 0);
     await tailer.flush();
 
     const outputEvents = eventSrv.getCollected().filter((e) => e.type === "output");

@@ -20,6 +20,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, test } from "node:test";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { TELEMETRY_MAX_FIELD_BYTES } from "../src/main/telemetry-protocol.js";
@@ -164,7 +165,7 @@ function initCapturingObservability(): {
 
 /**
  * Create a fake claude binary that exits with the given code.
- * DECOMPOSE / EVALUATE_PRD use `which claude` (preflight) then `claude` directly.
+ * DECOMPOSE / EVALUATE_PRD resolve claude during preflight, then spawn it.
  */
 async function createFakeClaudeBin(
   fakeBin: string,
@@ -175,7 +176,11 @@ async function createFakeClaudeBin(
     path.join(fakeBin, "claude"),
     `#!/bin/sh\nexit ${exitCode}\n`,
     { mode: 0o755 },
-  );
+	  );
+}
+
+function getClaudeBinaryPath(fakeBin: string): () => { claude: string } {
+  return () => ({ claude: path.join(fakeBin, "claude") });
 }
 
 // ---------------------------------------------------------------------------
@@ -212,11 +217,12 @@ test("telemetry: job.failed emitted with correct category/trace/diagnostics on p
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    getBinaryPaths: getClaudeBinaryPath(fakeBin),
   });
   serversToClose.push(server);
   await server.start();
 
-  const loopId = "00000000-0000-0000-0000-000000000a01";
+  const loopId = "10000000-0000-0000-0000-000000000a01";
   const response = await fetch(
     `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
@@ -224,7 +230,7 @@ test("telemetry: job.failed emitted with correct category/trace/diagnostics on p
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "DECOMPOSE",
+        command: LoopCommand.Decompose,
         closedLoopAuthToken: "tok",
         artifacts: [{ type: "PRD", content: "PRD content for telemetry test" }],
         prompt: "Decompose this feature into tasks",
@@ -281,6 +287,12 @@ test("telemetry: job.failed emitted with correct category/trace/diagnostics on p
     (diag.diagnosticsVersion ?? 0) >= 1,
     "diagnosticsVersion must be >= 1",
   );
+  // job.failed includes lifecycle.command when a command is provided on the request
+  assert.equal(
+    diag.lifecycle?.command,
+    LoopCommand.Decompose,
+    "job.failed must include lifecycle.command matching the request",
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -317,11 +329,12 @@ test("telemetry: job.completed emitted with correct category/trace on process ex
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    getBinaryPaths: getClaudeBinaryPath(fakeBin),
   });
   serversToClose.push(server);
   await server.start();
 
-  const loopId = "00000000-0000-0000-0000-000000000a02";
+  const loopId = "20000000-0000-0000-0000-000000000a02";
   const response = await fetch(
     `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
@@ -329,7 +342,7 @@ test("telemetry: job.completed emitted with correct category/trace on process ex
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "DECOMPOSE",
+        command: LoopCommand.Decompose,
         closedLoopAuthToken: "tok",
         artifacts: [{ type: "PRD", content: "PRD content for telemetry test" }],
         prompt: "Decompose this feature into tasks",
@@ -358,11 +371,11 @@ test("telemetry: job.completed emitted with correct category/trace on process ex
   assert.ok(event.trace, "trace must be present");
   assert.equal(event.trace?.loopId, loopId, "trace.loopId must match");
   assert.equal(event.trace?.jobId, loopId, "trace.jobId must match loopId");
-  // job.completed has no diagnostics
+  // job.completed includes lifecycle.command when a command is provided
   assert.equal(
-    event.diagnostics,
-    undefined,
-    "job.completed must not emit diagnostics",
+    event.diagnostics?.lifecycle?.command,
+    LoopCommand.Decompose,
+    "job.completed must include lifecycle.command matching the request",
   );
 });
 
@@ -404,7 +417,7 @@ test("telemetry: preflight.binary_not_found emitted when claude is absent from P
   serversToClose.push(server);
   await server.start();
 
-  const loopId = "00000000-0000-0000-0000-000000000a03";
+  const loopId = "30000000-0000-0000-0000-000000000a03";
   const response = await fetch(
     `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
     {
@@ -412,7 +425,7 @@ test("telemetry: preflight.binary_not_found emitted when claude is absent from P
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "DECOMPOSE",
+        command: LoopCommand.Decompose,
         closedLoopAuthToken: "tok",
         artifacts: [{ type: "PRD", content: "PRD content for telemetry test" }],
         prompt: "Decompose this feature into tasks",
@@ -493,7 +506,7 @@ test("telemetry: preflight.spawn_failed emitted when log file open fails (EISDIR
   const { waitForCategory } = initCapturingObservability();
 
   // loopId determines the worktree path — we use a known value to predict the path
-  const loopId = "00000000-0000-0000-0000-000000000a04";
+  const loopId = "40000000-0000-0000-0000-000000000a04";
 
   const repoPath = path.join(tmpDir, "spawn-fail-repo");
   await fs.mkdir(repoPath, { recursive: true });
@@ -542,6 +555,7 @@ test("telemetry: preflight.spawn_failed emitted when log file open fails (EISDIR
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    getBinaryPaths: getClaudeBinaryPath(fakeBin),
   });
   serversToClose.push(server);
   await server.start();
@@ -553,7 +567,7 @@ test("telemetry: preflight.spawn_failed emitted when log file open fails (EISDIR
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         loopId,
-        command: "PLAN",
+        command: LoopCommand.Plan,
         closedLoopAuthToken: "tok",
         artifacts: [],
         repo: {
@@ -619,11 +633,12 @@ test("telemetry: commandId and operationId from request headers appear in trace 
     worktreeProvider: fakeWorktreeProvider,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    getBinaryPaths: getClaudeBinaryPath(fakeBin),
   });
   serversToClose.push(server);
   await server.start();
 
-  const loopId = "00000000-0000-0000-0000-000000000a05";
+  const loopId = "50000000-0000-0000-0000-000000000a05";
   const testCommandId = "cmd-test-abc123";
   const testOperationId = "op-test-xyz789";
 
@@ -638,7 +653,7 @@ test("telemetry: commandId and operationId from request headers appear in trace 
       },
       body: JSON.stringify({
         loopId,
-        command: "DECOMPOSE",
+        command: LoopCommand.Decompose,
         closedLoopAuthToken: "tok",
         artifacts: [{ type: "PRD", content: "PRD content for telemetry test" }],
         prompt: "Decompose this feature into tasks",
@@ -695,7 +710,7 @@ test("telemetry: Observability truncates logTail to TELEMETRY_MAX_FIELD_BYTES vi
   Observability.jobFailed(
     "cmd-trunc",
     "OP_TRUNC",
-    "00000000-0000-0000-0000-000000000b01",
+    "60000000-0000-0000-0000-000000000b01",
     1,
     { logTail: largeTail },
   );

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
@@ -13,6 +13,15 @@ import { startOutputTailer } from "../src/server/operations/output-tailer.js";
 
 const tempPathsToClean: string[] = [];
 const eventServersToClose: http.Server[] = [];
+const tailersToStop: Array<{ stop: () => void }> = [];
+
+function startTrackedTailer(
+  ...args: Parameters<typeof startOutputTailer>
+): ReturnType<typeof startOutputTailer> {
+  const t = startOutputTailer(...args);
+  tailersToStop.push(t);
+  return t;
+}
 
 afterEach(async () => {
   delete process.env.CLOSEDLOOP_TAILER_POLL_MS;
@@ -20,6 +29,14 @@ afterEach(async () => {
   delete process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_BASE_MS;
   delete process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_MAX_MS;
   delete process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_MAX_COUNT;
+
+  for (const t of tailersToStop.splice(0)) {
+    try {
+      t.stop();
+    } catch {
+      // ignore — already stopped
+    }
+  }
 
   for (const srv of eventServersToClose.splice(0)) {
     await new Promise<void>((resolve, reject) => {
@@ -72,18 +89,23 @@ async function waitForCondition(
 /**
  * Start an event-capture HTTP server. Pass `outputStatusCodes` to simulate
  * non-200 responses for sequential output events.
+ *
+ * Each captured entry includes `_authHeader` with the raw Authorization header
+ * value from the request (empty string if absent), so tests can assert which
+ * token was used for a given POST.
  */
 async function startEventServer(options?: {
   outputStatusCodes?: number[];
 }): Promise<{
   port: number;
-  getCollected: () => Array<{ seq: number; type: string } & Record<string, unknown>>;
+  getCollected: () => Array<{ seq: number; type: string; _authHeader: string } & Record<string, unknown>>;
   waitForCount: (n: number, type?: string, timeoutMs?: number) => Promise<void>;
 }> {
-  const collected: Array<{ seq: number; type: string } & Record<string, unknown>> = [];
+  const collected: Array<{ seq: number; type: string; _authHeader: string } & Record<string, unknown>> = [];
   let outputStatusIndex = 0;
 
   const server = http.createServer((req, res) => {
+    const authHeader = req.headers["authorization"] ?? "";
     let raw = "";
     req.on("data", (chunk: Buffer) => {
       raw += chunk.toString();
@@ -108,7 +130,12 @@ async function startEventServer(options?: {
       res.statusCode = statusCode;
       res.end("{}");
 
-      const entry = { seq: collected.length, type: String(body.type ?? ""), ...body };
+      const entry = {
+        seq: collected.length,
+        type: String(body.type ?? ""),
+        _authHeader: String(authHeader),
+        ...body,
+      };
       collected.push(entry);
     });
   });
@@ -140,6 +167,163 @@ async function startEventServer(options?: {
 // Test #6: No double-count across throttle/retry
 // ---------------------------------------------------------------------------
 
+test("flush follows sidecar-selected renamed output after fixed path disappears", async () => {
+  process.env.CLOSEDLOOP_TAILER_POLL_MS = "600000";
+  process.env.CLOSEDLOOP_TAILER_THROTTLE_MS = "0";
+
+  const tmpDir = makeTempDir();
+  const jsonlPath = path.join(tmpDir, "claude-output.jsonl");
+  const renamedPath = path.join(tmpDir, "claude-output-run-1.jsonl");
+  const eventSrv = await startEventServer();
+  const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+  const assistantLine = JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [{ type: "text", text: "final chunk" }],
+      usage: {
+        input_tokens: 4,
+        output_tokens: 2,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+    },
+  });
+  writeFileSync(jsonlPath, `${assistantLine}\n`);
+
+  const tailer = startTrackedTailer(
+    jsonlPath,
+    apiBaseUrl,
+    "rename-flush-loop",
+    () => "token",
+    0,
+    undefined,
+    tmpDir,
+  );
+
+  renameSync(jsonlPath, renamedPath);
+  writeFileSync(
+    path.join(tmpDir, "claude-output.name.txt"),
+    "claude-output-run-1.jsonl\n",
+  );
+
+  await tailer.flush();
+
+  const outputEvents = eventSrv.getCollected().filter((e) => e.type === "output");
+  assert.equal(outputEvents.length, 1);
+  const data = outputEvents[0]?.data as Record<string, unknown> | undefined;
+  assert.ok(data !== undefined);
+  assert.equal(data.chunk, "final chunk");
+  const tokenUsage = data.tokenUsage as Record<string, unknown> | undefined;
+  assert.ok(tokenUsage !== undefined);
+  assert.equal(tokenUsage.inputTokens, 4);
+});
+
+test("flush preserves saved offset when boot recovery follows renamed output", async () => {
+  process.env.CLOSEDLOOP_TAILER_POLL_MS = "600000";
+  process.env.CLOSEDLOOP_TAILER_THROTTLE_MS = "0";
+
+  const tmpDir = makeTempDir();
+  const jsonlPath = path.join(tmpDir, "claude-output.jsonl");
+  const renamedPath = path.join(tmpDir, "claude-output-run-1.jsonl");
+  const eventSrv = await startEventServer();
+  const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+  const deliveredLine = `${JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [{ type: "text", text: "already delivered" }],
+      usage: { input_tokens: 11, output_tokens: 3 },
+    },
+  })}\n`;
+  const pendingLine = `${JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [{ type: "text", text: "after restart" }],
+      usage: { input_tokens: 5, output_tokens: 2 },
+    },
+  })}\n`;
+  writeFileSync(renamedPath, deliveredLine + pendingLine);
+  writeFileSync(
+    path.join(tmpDir, "claude-output.name.txt"),
+    "claude-output-run-1.jsonl\n",
+  );
+
+  const committedOffsets: number[] = [];
+  const tailer = startTrackedTailer(
+    jsonlPath,
+    apiBaseUrl,
+    "boot-rename-offset-loop",
+    () => "token",
+    Buffer.byteLength(deliveredLine),
+    (offset) => {
+      committedOffsets.push(offset);
+    },
+    tmpDir,
+  );
+
+  await tailer.flush();
+
+  const outputEvents = eventSrv.getCollected().filter((e) => e.type === "output");
+  assert.equal(outputEvents.length, 1);
+  const data = outputEvents[0]?.data as Record<string, unknown> | undefined;
+  assert.ok(data !== undefined);
+  assert.equal(data.chunk, "after restart");
+  assert.equal(committedOffsets.at(-1), Buffer.byteLength(deliveredLine + pendingLine));
+});
+
+test("flush resets stale pre-spawn offset when fixed JSONL is replaced", async () => {
+  process.env.CLOSEDLOOP_TAILER_POLL_MS = "600000";
+  process.env.CLOSEDLOOP_TAILER_THROTTLE_MS = "0";
+
+  const tmpDir = makeTempDir();
+  const jsonlPath = path.join(tmpDir, "claude-output.jsonl");
+  const eventSrv = await startEventServer();
+  const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+  const staleLine = `${JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [{ type: "text", text: "stale prior run" }],
+      usage: { input_tokens: 100, output_tokens: 50 },
+    },
+  })}\n`;
+  writeFileSync(jsonlPath, staleLine);
+
+  const tailer = startTrackedTailer(
+    jsonlPath,
+    apiBaseUrl,
+    "replace-offset-loop",
+    () => "token",
+    Buffer.byteLength(staleLine),
+    undefined,
+    tmpDir,
+  );
+
+  renameSync(jsonlPath, path.join(tmpDir, "claude-output-prior.jsonl"));
+  writeFileSync(
+    jsonlPath,
+    `${JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [{ type: "text", text: "current run" }],
+        usage: { input_tokens: 6, output_tokens: 2 },
+      },
+    })}\n`,
+  );
+
+  await tailer.flush();
+
+  const outputEvents = eventSrv.getCollected().filter((e) => e.type === "output");
+  assert.equal(outputEvents.length, 1);
+  const data = outputEvents[0]?.data as Record<string, unknown> | undefined;
+  assert.ok(data !== undefined);
+  assert.equal(data.chunk, "current run");
+  const tokenUsage = data.tokenUsage as Record<string, unknown> | undefined;
+  assert.ok(tokenUsage !== undefined);
+  assert.equal(tokenUsage.inputTokens, 6);
+});
+
 test("token totals only advance after successful POST commit, not on throttle/retry", async () => {
   // Use very long poll interval so the interval never fires -- we control timing via flush()
   process.env.CLOSEDLOOP_TAILER_POLL_MS = "600000";
@@ -170,11 +354,11 @@ test("token totals only advance after successful POST commit, not on throttle/re
   writeFileSync(jsonlPath, `${assistantLine}\n`);
 
   const committedOffsets: number[] = [];
-  const tailer = startOutputTailer(
+  const tailer = startTrackedTailer(
     jsonlPath,
     apiBaseUrl,
     "no-double-count-loop",
-    "token",
+    () => "token",
     0,
     (o) => {
       committedOffsets.push(o);
@@ -192,11 +376,11 @@ test("token totals only advance after successful POST commit, not on throttle/re
 
   // Start a fresh tailer from offset 0 (simulates restart after failure).
   // Flush gets the 200 response.
-  const tailer2 = startOutputTailer(
+  const tailer2 = startTrackedTailer(
     jsonlPath,
     apiBaseUrl,
     "no-double-count-loop",
-    "token",
+    () => "token",
     0,
     (o) => {
       committedOffsets.push(o);
@@ -264,7 +448,7 @@ test("lastDisplay === null: assistant usage-only line commits tokenTotals withou
   // Write both lines; they form one frame (last newline is the frame boundary)
   writeFileSync(jsonlPath, `${usageOnlyLine}\n${displayLine}\n`);
 
-  const tailer = startOutputTailer(jsonlPath, apiBaseUrl, "usage-only-loop", "token", 0);
+  const tailer = startTrackedTailer(jsonlPath, apiBaseUrl, "usage-only-loop", () => "token", 0);
   await tailer.flush();
 
   const outputEvents = eventSrv.getCollected().filter((e) => e.type === "output");
@@ -323,11 +507,11 @@ test("lastDisplay === null branch alone: usage-only frame commits tokenTotals fo
   writeFileSync(jsonlPath, `${usageOnlyLine}\n`);
 
   const committedOffsets: number[] = [];
-  const tailer = startOutputTailer(
+  const tailer = startTrackedTailer(
     jsonlPath,
     apiBaseUrl,
     "usage-only-commit-loop",
-    "token",
+    () => "token",
     0,
     (o) => {
       committedOffsets.push(o);
@@ -353,11 +537,11 @@ test("lastDisplay === null branch alone: usage-only frame commits tokenTotals fo
   writeFileSync(jsonlPath, `${usageOnlyLine}\n${displayOnlyLine}\n`);
 
   const committedOffsets2: number[] = [];
-  const tailer2 = startOutputTailer(
+  const tailer2 = startTrackedTailer(
     jsonlPath,
     apiBaseUrl,
     "usage-only-commit-loop",
-    "token",
+    () => "token",
     frame1CommittedOffset,
     (o) => {
       committedOffsets2.push(o);
@@ -436,7 +620,7 @@ test("single-flight: overlapping interval ticks are serialized, not concurrent",
   );
   writeFileSync(jsonlPath, lines.join("\n") + "\n");
 
-  const tailer = startOutputTailer(jsonlPath, apiBaseUrl, "single-flight-loop", "token", 0);
+  const tailer = startTrackedTailer(jsonlPath, apiBaseUrl, "single-flight-loop", () => "token", 0);
 
   // Run for long enough to trigger multiple interval ticks (poll 10ms, response 50ms)
   await new Promise<void>((resolve) => {
@@ -450,4 +634,178 @@ test("single-flight: overlapping interval ticks are serialized, not concurrent",
     1,
     `Expected at most 1 concurrent POST (single-flight), but saw ${maxConcurrentPosts} concurrent`,
   );
+});
+
+// ---------------------------------------------------------------------------
+// Test #9: getToken callable re-evaluated per POST -- token change mid-run
+// ---------------------------------------------------------------------------
+
+test("getToken callable: token change mid-run is picked up by next POST without restarting the tailer", async () => {
+  // Use a long poll interval so the interval never fires -- we control timing via flush()
+  process.env.CLOSEDLOOP_TAILER_POLL_MS = "600000";
+  process.env.CLOSEDLOOP_TAILER_THROTTLE_MS = "0";
+
+  const tmpDir = makeTempDir();
+  const jsonlPath = path.join(tmpDir, "claude-output.jsonl");
+
+  const eventSrv = await startEventServer();
+  const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+  // Mutable token that the getToken callable will close over
+  let currentToken = "token-first";
+  const getToken = () => currentToken;
+
+  const firstLine = JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [{ type: "text", text: "first output" }],
+      usage: { input_tokens: 3, output_tokens: 1 },
+    },
+  });
+  writeFileSync(jsonlPath, `${firstLine}\n`);
+
+  const tailer = startTrackedTailer(
+    jsonlPath,
+    apiBaseUrl,
+    "token-change-mid-run-loop",
+    getToken,
+    0,
+  );
+
+  // Flush once with the first token -- this should POST with "token-first"
+  await tailer.flush();
+
+  const eventsAfterFirst = eventSrv.getCollected().filter((e) => e.type === "output");
+  assert.equal(eventsAfterFirst.length, 1, "Expected 1 output event after first flush");
+  assert.equal(
+    eventsAfterFirst[0]?._authHeader,
+    "Bearer token-first",
+    `Expected Authorization header "Bearer token-first" on first POST, got "${eventsAfterFirst[0]?._authHeader}"`,
+  );
+
+  // Change the token WITHOUT restarting the tailer
+  currentToken = "token-second";
+
+  // Append a second line to give the tailer new content to POST
+  const secondLine = JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [{ type: "text", text: "second output" }],
+      usage: { input_tokens: 2, output_tokens: 1 },
+    },
+  });
+  const firstLineBytes = Buffer.byteLength(`${firstLine}\n`);
+
+  // Create a new tailer starting from after the first committed line, using the same
+  // mutable getToken -- this simulates the tailer continuing to run mid-session
+  // (flush() stops the tailer; we start a continuation with the updated token)
+  writeFileSync(jsonlPath, `${firstLine}\n${secondLine}\n`);
+
+  const tailer2 = startTrackedTailer(
+    jsonlPath,
+    apiBaseUrl,
+    "token-change-mid-run-loop",
+    getToken,
+    firstLineBytes,
+  );
+
+  await tailer2.flush();
+
+  const eventsAfterSecond = eventSrv.getCollected().filter((e) => e.type === "output");
+  assert.equal(eventsAfterSecond.length, 2, "Expected 2 output events total after second flush");
+  assert.equal(
+    eventsAfterSecond[1]?._authHeader,
+    "Bearer token-second",
+    `Expected Authorization header "Bearer token-second" on second POST, got "${eventsAfterSecond[1]?._authHeader}"`,
+  );
+
+  // Confirm the first POST still used the old token
+  assert.equal(
+    eventsAfterSecond[0]?._authHeader,
+    "Bearer token-first",
+    `First POST should still show "Bearer token-first", got "${eventsAfterSecond[0]?._authHeader}"`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Test #10: getToken re-evaluated per POST via the poll loop (AC-002)
+// ---------------------------------------------------------------------------
+
+test("getToken callable: token change mid-run is picked up by the poll loop without flush() or restart", async () => {
+  // Short poll interval so the interval fires automatically -- no flush() needed
+  process.env.CLOSEDLOOP_TAILER_POLL_MS = "20";
+  process.env.CLOSEDLOOP_TAILER_THROTTLE_MS = "0";
+
+  const tmpDir = makeTempDir();
+  const jsonlPath = path.join(tmpDir, "claude-output.jsonl");
+
+  const eventSrv = await startEventServer();
+  const apiBaseUrl = `http://127.0.0.1:${eventSrv.port}`;
+
+  // Mutable token closed over by getToken -- mutated in place between POSTs
+  let currentToken = "token-alpha";
+  const getToken = () => currentToken;
+
+  const firstLine = JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [{ type: "text", text: "first poll output" }],
+      usage: { input_tokens: 3, output_tokens: 1 },
+    },
+  });
+  writeFileSync(jsonlPath, `${firstLine}\n`);
+
+  // Start the tailer with a short poll interval -- do NOT call flush()
+  const tailer = startTrackedTailer(
+    jsonlPath,
+    apiBaseUrl,
+    "token-change-poll-loop",
+    getToken,
+    0,
+  );
+
+  // Wait for the poll loop to deliver the first POST
+  await eventSrv.waitForCount(1);
+
+  const eventsAfterFirst = eventSrv.getCollected().filter((e) => e.type === "output");
+  assert.equal(eventsAfterFirst.length, 1, "Expected 1 output event after first poll");
+  assert.equal(
+    eventsAfterFirst[0]?._authHeader,
+    "Bearer token-alpha",
+    `Expected Authorization header "Bearer token-alpha" on first POST, got "${eventsAfterFirst[0]?._authHeader}"`,
+  );
+
+  // Mutate the token in place -- same tailer instance, no restart, no flush()
+  currentToken = "token-beta";
+
+  // Append a second line to give the still-running tailer new content to POST
+  const secondLine = JSON.stringify({
+    type: "assistant",
+    message: {
+      content: [{ type: "text", text: "second poll output" }],
+      usage: { input_tokens: 2, output_tokens: 1 },
+    },
+  });
+  // Append to the same file -- tailer is still running and will pick it up on the next poll
+  await fs.appendFile(jsonlPath, `${secondLine}\n`);
+
+  // Wait for the poll loop to deliver the second POST
+  await eventSrv.waitForCount(2);
+
+  const eventsAfterSecond = eventSrv.getCollected().filter((e) => e.type === "output");
+  assert.equal(eventsAfterSecond.length, 2, "Expected 2 output events total after second poll");
+  assert.equal(
+    eventsAfterSecond[1]?._authHeader,
+    "Bearer token-beta",
+    `Expected Authorization header "Bearer token-beta" on second POST, got "${eventsAfterSecond[1]?._authHeader}"`,
+  );
+
+  // Confirm the first POST still shows the original token
+  assert.equal(
+    eventsAfterSecond[0]?._authHeader,
+    "Bearer token-alpha",
+    `First POST should still show "Bearer token-alpha", got "${eventsAfterSecond[0]?._authHeader}"`,
+  );
+
+  tailer.stop();
 });

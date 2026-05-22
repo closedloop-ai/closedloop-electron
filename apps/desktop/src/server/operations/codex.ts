@@ -3,9 +3,11 @@ import { createWriteStream, existsSync, unlinkSync, writeFileSync } from "node:f
 import fs from "node:fs/promises";
 import type { ServerResponse } from "node:http";
 import path from "node:path";
+import { inspect } from "node:util";
+import { gatewayLog } from "../../main/gateway-logger.js";
 import type { OperationDispatcher, OperationRequestContext } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError } from "../security.js";
-import { getShellEnv, resolveBinarySync } from "../shell-path.js";
+import { getShellEnv, resolveBinaryFromLoginShell, resolveBinaryFromLoginShellSync } from "../shell-path.js";
 import { getOverrideBinaryPaths, getResolvedGitPath } from "./symphony-loop.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
@@ -14,6 +16,7 @@ import { assertRepoAllowed, ensureWorktreeForReview, resolveWorktreeDir, resolve
 import { json } from "./response-utils.js";
 
 const CODEX_SESSION_ID_REGEX = /session id:\s*([0-9a-f-]{36})/i;
+const CODEX_ROLLOUT_ITEM_RECORDING_DIAGNOSTIC_REGEX = /^\d{4}-\d{2}-\d{2}T[^\s]+\s+ERROR\s+codex_core::session:\s+failed to record rollout items:\s+thread\s+[0-9a-f-]{36}\s+not found$/i;
 const FINDINGS_CODE_BLOCK_REGEX = /```json\s*\n([\s\S]*?)\n\s*```/;
 const FINDINGS_ARRAY_REGEX = /\[[\s\S]*\]/;
 const PR_PREFIX_REGEX = /^pr-/;
@@ -161,15 +164,35 @@ export function extractTextFromNdjsonLog(raw: string, truncated = false): string
     try {
       const event = JSON.parse(line) as { type?: string; content?: string; error?: string };
       if (event.type === "text" && typeof event.content === "string") {
-        parts.push(event.content);
+        const content = stripCodexNonUserDiagnostics(event.content);
+        if (content) {
+          parts.push(content);
+        }
       } else if (event.type === "error" && typeof event.error === "string") {
-        parts.push(event.error);
+        const error = stripCodexNonUserDiagnostics(event.error);
+        if (error) {
+          parts.push(error);
+        }
       }
     } catch {
-      parts.push(line);
+      const content = stripCodexNonUserDiagnostics(line);
+      if (content) {
+        parts.push(content);
+      }
     }
   }
   return parts.join("");
+}
+
+/**
+ * Removes Codex CLI diagnostics that describe local rollout recording failures,
+ * not model review output or actionable user-facing failures.
+ */
+export function stripCodexNonUserDiagnostics(text: string): string {
+  return text
+    .split("\n")
+    .filter((line) => !CODEX_ROLLOUT_ITEM_RECORDING_DIAGNOSTIC_REGEX.test(line.trim()))
+    .join("\n");
 }
 
 function tryKillRunningReview(state: ReviewState): void {
@@ -720,26 +743,33 @@ export function registerCodexRoutes(
     }
 
     try {
-      console.log(
-        `[review-verdict] Starting verdict extraction for ${ticketId}, provider=${provider}, session=${sessionId}`
+      gatewayLog.debug(
+        "review-verdict",
+        `Starting verdict extraction for ${ticketId}, provider=${provider}, session=${sessionId}`,
       );
       const collected = provider === "codex"
         ? await runCodexVerdict(worktreeDir, sessionId)
         : await runClaudeVerdict(worktreeDir, sessionId, expectedMcpUrl);
 
-      console.log(`[review-verdict] Collected ${collected.length} chars of output`);
+      gatewayLog.debug(
+        "review-verdict",
+        `Collected ${collected.length} chars of output`,
+      );
 
       const verdict = extractVerdictTag(collected);
       if (verdict) {
-        console.log(`[review-verdict] Extracted verdict: ${verdict.verdict} — ${verdict.reason}`);
+        gatewayLog.debug(
+          "review-verdict",
+          `Extracted verdict: ${verdict.verdict} -- ${verdict.reason}`,
+        );
       } else {
-        console.log("[review-verdict] No verdict tag found in output");
+        gatewayLog.debug("review-verdict", "No verdict tag found in output");
       }
 
       json(context, 200, { verdict: verdict ?? null });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error("[review-verdict] Extraction failed:", msg);
+      gatewayLog.error("review-verdict", `Extraction failed: ${msg}`);
       json(context, 200, { verdict: null, error: msg });
     }
   });
@@ -848,8 +878,9 @@ export function registerCodexRoutes(
       // Detect context window exhaustion — codex exited mid-review, findings are incomplete
       const isContextError = exitCode !== 0 && /context window|out of room/i.test(stderrHolder.value);
 
-      if (exitCode !== 0 && !isContextError && stderrHolder.value.trim()) {
-        writeEvent(context.response, { type: "error", error: stderrHolder.value.trim() });
+      const stderrForUser = stripCodexNonUserDiagnostics(stderrHolder.value).trim();
+      if (exitCode !== 0 && !isContextError && stderrForUser) {
+        writeEvent(context.response, { type: "error", error: stderrForUser });
       }
 
       const finalState: ReviewState = {
@@ -1129,7 +1160,8 @@ export function registerCodexRoutes(
     ];
 
     try {
-      const child = spawn(resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path, args, {
+      const claudeBin = (await resolveBinaryFromLoginShell("claude", getOverrideBinaryPaths()?.claude)).path;
+      const child = spawn(claudeBin, args, {
         cwd: worktreeDir,
         stdio: ["pipe", "pipe", "pipe"],
         env: await getShellEnv(),
@@ -1476,8 +1508,9 @@ function similarityScore(messageA: string, messageB: string, fileA: string, file
 
 async function spawnClaudeReview(cwd: string, model: string): Promise<ChildProcess> {
   const allowedTools = await withMcpTools("Bash,Read,Glob,Grep,Task,TodoWrite");
+  const claudeBin = (await resolveBinaryFromLoginShell("claude", getOverrideBinaryPaths()?.claude)).path;
   return spawn(
-    resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path,
+    claudeBin,
     [
       "-p",
       "--verbose",
@@ -1622,7 +1655,10 @@ function resolveEffectiveReviewMode(
     // HEAD == merge-base → merged PR, apply the PR diff as uncommitted changes
     return applyMergedPrDiff(worktreeDir, ticketId);
   } catch (err) {
-    console.warn("[codex-review] Merged PR detection failed, falling back to --base:", err);
+    gatewayLog.warn(
+      "codex-review",
+      `Merged PR detection failed, falling back to --base: ${inspect(err, { depth: 2 })}`,
+    );
   }
   return reviewMode;
 }
@@ -1635,15 +1671,15 @@ function applyMergedPrDiff(
   if (!/^\d+$/.test(prNum)) {
     return "base";
   }
-  console.log("[codex-review] Merged PR detected. Applying gh pr diff.");
+  gatewayLog.debug("codex-review", "Merged PR detected. Applying gh pr diff.");
 
-  const ghBin = resolveBinarySync("gh", getOverrideBinaryPaths()?.gh).path;
+  const ghBin = resolveBinaryFromLoginShellSync("gh", getOverrideBinaryPaths()?.gh).path;
   const diffResult = spawnSync(ghBin, ["pr", "diff", prNum], {
     cwd: worktreeDir, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024, timeout: 30_000,
   });
   const diff = (diffResult.stdout as string) ?? "";
   if (!diff.trim()) {
-    console.log("[codex-review] gh pr diff returned empty");
+    gatewayLog.debug("codex-review", "gh pr diff returned empty");
     return "base";
   }
 
@@ -1660,14 +1696,17 @@ function applyMergedPrDiff(
     });
     const baseCommit = (baseCommitResult.stdout as string).trim();
     if (!baseCommit || baseCommitResult.status !== 0) {
-      console.warn("[codex-review] Failed to resolve base commit for merged PR");
+      gatewayLog.warn("codex-review", "Failed to resolve base commit for merged PR");
       return "base";
     }
     const checkoutResult = spawnSync(gitBin, ["checkout", "--detach", baseCommit], {
       cwd: worktreeDir, stdio: "pipe", timeout: 10_000,
     });
     if (checkoutResult.status !== 0) {
-      console.warn("[codex-review] Failed to checkout base commit:", baseCommit);
+      gatewayLog.warn(
+        "codex-review",
+        `Failed to checkout base commit: ${baseCommit}`,
+      );
       return "base";
     }
   }
@@ -1678,12 +1717,15 @@ function applyMergedPrDiff(
   try {
     execSync(`${gitBin2} apply "${patchPath}"`, { cwd: worktreeDir, stdio: "pipe" });
   } catch (err) {
-    console.warn("[codex-review] Failed to apply PR diff:", err);
+    gatewayLog.warn(
+      "codex-review",
+      `Failed to apply PR diff: ${inspect(err, { depth: 2 })}`,
+    );
     unlinkSync(patchPath);
     return "base";
   }
   unlinkSync(patchPath);
-  console.log("[codex-review] PR diff applied as uncommitted changes");
+  gatewayLog.debug("codex-review", "PR diff applied as uncommitted changes");
   return "uncommitted";
 }
 
@@ -1704,7 +1746,8 @@ async function spawnCodexReviewProcess(options: {
 
   args.push("-c", `model=${options.model}`, "-c", `model_reasoning_effort=${options.reasoningEffort}`);
 
-  return spawn(resolveBinarySync("codex", getOverrideBinaryPaths()?.codex).path, args, {
+  const codexBin = (await resolveBinaryFromLoginShell("codex", getOverrideBinaryPaths()?.codex)).path;
+  return spawn(codexBin, args, {
     cwd: options.cwd,
     detached: false,
     stdio: ["ignore", "pipe", "pipe"],
@@ -1764,7 +1807,8 @@ async function streamClaudeReview(
   });
 }
 
-function streamCodexReview(
+/** @internal Streams Codex review stdout to SSE while retaining stderr for diagnostics. */
+export function streamCodexReview(
   child: ChildProcess,
   response: ServerResponse,
   logPath: string,
@@ -1773,6 +1817,15 @@ function streamCodexReview(
 ): Promise<void> {
   const logStream = createWriteStream(logPath, { flags: "a", encoding: "utf-8" });
   let eventCount = 0;
+  const keepaliveInterval = setInterval(() => {
+    if (!response.destroyed && response.writable) {
+      writeEvent(response, { type: "keepalive" });
+    }
+  }, 25_000);
+  keepaliveInterval.unref();
+  const stopKeepalive = () => clearInterval(keepaliveInterval);
+
+  response.once?.("close", stopKeepalive);
 
   child.stdout?.setEncoding("utf-8");
   child.stdout?.on("data", (chunk: string | Buffer) => {
@@ -1788,7 +1841,10 @@ function streamCodexReview(
     eventCount++;
     const ok = writeEvent(response, { type: "text", content: text });
     if (eventCount <= 3 || eventCount % 50 === 0) {
-      console.log(`[codex-stream] event #${eventCount}: write=${ok}, destroyed=${response.destroyed}, writable=${response.writable}, content=${text.length} chars`);
+      gatewayLog.debug(
+        "codex-stream",
+        `event #${eventCount}: write=${ok}, destroyed=${response.destroyed}, writable=${response.writable}, content=${text.length} chars`,
+      );
     }
   });
 
@@ -1797,12 +1853,14 @@ function streamCodexReview(
     const text = typeof chunk === "string" ? chunk : chunk.toString("utf-8");
     logStream.write(text);
     stderrHolder.value += text;
-    eventCount++;
-    writeEvent(response, { type: "text", content: text });
   });
 
   child.on("close", () => {
-    console.log(`[codex-stream] child closed, total events: ${eventCount}, response destroyed: ${response.destroyed}`);
+    stopKeepalive();
+    gatewayLog.debug(
+      "codex-stream",
+      `child closed, total events: ${eventCount}, response destroyed: ${response.destroyed}`,
+    );
     logStream.end();
   });
 
@@ -1819,7 +1877,8 @@ async function streamCodexConversation(
   onSessionId: (sessionId: string) => Promise<void>
 ): Promise<void> {
   try {
-    const child = spawn(resolveBinarySync("codex", getOverrideBinaryPaths()?.codex).path, args, {
+    const codexBin = (await resolveBinaryFromLoginShell("codex", getOverrideBinaryPaths()?.codex)).path;
+    const child = spawn(codexBin, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
       env: await getShellEnv({ FORCE_COLOR: "0" }),
@@ -2207,7 +2266,10 @@ function runVerdictProcess(
     });
 
     child.stderr?.on("data", (data: Buffer) => {
-      console.log(`[review-verdict] ${cmd} stderr: ${data.toString().trim().slice(0, 300)}`);
+      gatewayLog.debug(
+        "review-verdict",
+        `${cmd} stderr: ${data.toString().trim().slice(0, 300)}`,
+      );
     });
 
     child.on("close", (code) => {
@@ -2218,7 +2280,7 @@ function runVerdictProcess(
           collected += text;
         }
       }
-      console.log(`[review-verdict] ${cmd} exited with code ${code}`);
+      gatewayLog.debug("review-verdict", `${cmd} exited with code ${code}`);
       if (code === 0) {
         resolve(collected);
       } else {
@@ -2257,8 +2319,9 @@ function extractClaudeVerdictLine(trimmedLine: string): string | null {
 }
 
 async function runCodexVerdict(worktreeDir: string, sessionId: string): Promise<string> {
+  const codexBin = (await resolveBinaryFromLoginShell("codex", getOverrideBinaryPaths()?.codex)).path;
   return runVerdictProcess(
-    resolveBinarySync("codex", getOverrideBinaryPaths()?.codex).path,
+    codexBin,
     ["exec", "resume", sessionId, VERDICT_PROMPT, "--full-auto", "--json"],
     { cwd: worktreeDir, env: await getShellEnv({ FORCE_COLOR: "0" }) },
     extractCodexVerdictLine
@@ -2271,10 +2334,12 @@ async function runClaudeVerdict(
   expectedMcpUrl?: string
 ): Promise<string> {
   const allowedTools = await withMcpTools("Read,Glob,Grep", expectedMcpUrl);
+  const claudeBin = (await resolveBinaryFromLoginShell("claude", getOverrideBinaryPaths()?.claude)).path;
   return runVerdictProcess(
-    resolveBinarySync("claude", getOverrideBinaryPaths()?.claude).path,
+    claudeBin,
     [
       "-p",
+      "--verbose",
       "--resume",
       sessionId,
       "--output-format",

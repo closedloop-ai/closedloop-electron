@@ -6,7 +6,8 @@
  * to eliminate duplication.
  */
 
-import { execFile } from "node:child_process";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
@@ -20,6 +21,21 @@ import {
 import { DesktopGatewayServer } from "../src/server/server.js";
 import type { WorktreeProvider } from "../src/server/operations/symphony-loop.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
+
+// ---------------------------------------------------------------------------
+// Multi-repo PRD command set
+// ---------------------------------------------------------------------------
+
+/**
+ * Peer-enabled PRD-side LoopCommands. Iterating this constant lets the
+ * multi-repo test files (-contract, -spawn, -worktree) cover both
+ * GENERATE_PRD and REQUEST_PRD_CHANGES from one declaration. Adding a new
+ * peer-enabled PRD command becomes a one-line edit here rather than three.
+ */
+export const PRD_PEER_COMMANDS = [
+  LoopCommand.GeneratePrd,
+  LoopCommand.RequestPrdChanges,
+] as const;
 
 const execFileAsync = promisify(execFile);
 
@@ -40,15 +56,17 @@ const ENV_KEYS = [
   "CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE",
 ] as const;
 
-export function saveEnv(): Record<string, string | undefined> {
+export function saveEnvVars(
+  keys: readonly string[],
+): Record<string, string | undefined> {
   const saved: Record<string, string | undefined> = {};
-  for (const key of ENV_KEYS) {
+  for (const key of keys) {
     saved[key] = process.env[key];
   }
   return saved;
 }
 
-export function restoreEnv(saved: Record<string, string | undefined>): void {
+export function restoreEnvVars(saved: Record<string, string | undefined>): void {
   for (const [key, value] of Object.entries(saved)) {
     if (value === undefined) {
       delete process.env[key];
@@ -58,20 +76,96 @@ export function restoreEnv(saved: Record<string, string | undefined>): void {
   }
 }
 
+export function saveEnv(): Record<string, string | undefined> {
+  return saveEnvVars(ENV_KEYS);
+}
+
+export function restoreEnv(saved: Record<string, string | undefined>): void {
+  restoreEnvVars(saved);
+}
+
 // ---------------------------------------------------------------------------
 // Git helpers
 // ---------------------------------------------------------------------------
 
-export async function initGitRepo(repoPath: string): Promise<void> {
+export async function initGitRepo(
+  repoPath: string,
+  options: { allowEmpty?: boolean } = {},
+): Promise<void> {
+  const commitStep = options.allowEmpty
+    ? `git commit --allow-empty -m initial`
+    : `echo "# initial" > README.md && git add . && git commit -m initial`;
   await execFileAsync("/bin/sh", ["-c", [
     `git init -b main "${repoPath}"`,
     `cd "${repoPath}"`,
     `git config user.email test@test.com`,
     `git config user.name Test`,
-    `echo "# initial" > README.md`,
-    `git add .`,
-    `git commit -m initial`,
+    commitStep,
   ].join(" && ")]);
+  // Fail loudly if a fake git binary on PATH no-op'd init without creating
+  // .git metadata. Otherwise callers that depend on real git state (e.g.,
+  // `makeRecordingGitWorktreeProvider`) silently break.
+  try {
+    execFileSync("git", ["rev-parse", "--git-dir"], {
+      cwd: repoPath,
+      stdio: "pipe",
+    });
+  } catch (err) {
+    throw new Error(
+      `initGitRepo(${repoPath}): git init appeared to succeed but no .git ` +
+        `metadata was created. A fake git binary on PATH is the most likely cause. ` +
+        `${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+export async function findFileRecursive(
+  dir: string,
+  filename: string,
+): Promise<string | null> {
+  let entries: Awaited<ReturnType<typeof fs.readdir>>;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isFile() && entry.name === filename) return fullPath;
+    if (entry.isDirectory()) {
+      const result = await findFileRecursive(fullPath, filename);
+      if (result !== null) return result;
+    }
+  }
+  return null;
+}
+
+/**
+ * Poll for a file by name under `searchRoot` until found or the deadline
+ * expires. Useful when a test spawns a subprocess that creates the file at
+ * an a-priori-unknown path inside the search tree (e.g., a per-loop workdir).
+ */
+export async function findFilePolling(
+  searchRoot: string,
+  filename: string,
+  timeoutMs = 20_000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const found = await findFileRecursive(searchRoot, filename);
+    if (found !== null) return found;
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(
+    `Timed out waiting for ${filename} under ${searchRoot} after ${timeoutMs}ms`,
+  );
+}
+
+export async function findSpawnArgsFile(
+  searchRoot: string,
+  timeoutMs = 20_000,
+): Promise<string> {
+  return findFilePolling(searchRoot, "spawn-args.txt", timeoutMs);
 }
 
 // ---------------------------------------------------------------------------
@@ -392,7 +486,8 @@ export async function setupStubClaudeBlocking(
  * `findWorktreeForBranch` returns null, `branchExists` always returns true,
  * and `getCurrentBranch` returns `currentBranchLabel` verbatim.
  *
- * Tests that need to record call arguments should build their own provider.
+ * Tests that need real git metadata and call recording should use
+ * makeRecordingGitWorktreeProvider.
  */
 export function makeFakeWorktreeProvider(currentBranchLabel: string): WorktreeProvider {
   return {
@@ -410,6 +505,50 @@ export function makeFakeWorktreeProvider(currentBranchLabel: string): WorktreePr
     },
     branchExists: async () => true,
   };
+}
+
+export function makeRecordingGitWorktreeProvider(currentBranchLabel: string): {
+  provider: WorktreeProvider;
+  ensureWorktreeCalls: Array<{
+    repoPath: string;
+    worktreeDir: string;
+    branchName: string;
+    baseBranch: string;
+  }>;
+  removeCalls: Array<{ worktreeDir: string; repoPath: string; loopId?: string }>;
+} {
+  const ensureWorktreeCalls: Array<{
+    repoPath: string;
+    worktreeDir: string;
+    branchName: string;
+    baseBranch: string;
+  }> = [];
+  const removeCalls: Array<{
+    worktreeDir: string;
+    repoPath: string;
+    loopId?: string;
+  }> = [];
+
+  const provider: WorktreeProvider = {
+    async ensureWorktree(repoPath, worktreeDir, branchName, baseBranch) {
+      ensureWorktreeCalls.push({ repoPath, worktreeDir, branchName, baseBranch });
+      await fs.mkdir(worktreeDir, { recursive: true });
+      await initGitRepo(worktreeDir, { allowEmpty: true });
+    },
+    findWorktreeForBranch() {
+      return null;
+    },
+    async removeWorktree(worktreeDir, repoPath, loopId) {
+      removeCalls.push({ worktreeDir, repoPath, loopId });
+      await fs.rm(worktreeDir, { recursive: true, force: true });
+    },
+    getCurrentBranch() {
+      return currentBranchLabel;
+    },
+    branchExists: async () => true,
+  };
+
+  return { provider, ensureWorktreeCalls, removeCalls };
 }
 
 // ---------------------------------------------------------------------------

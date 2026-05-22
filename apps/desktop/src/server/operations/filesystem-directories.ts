@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { OperationDispatcher } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
+import { isGitRepository } from "../../shared/git-utils.js";
 import { expandHome } from "./symphony-utils.js";
 import { json } from "./response-utils.js";
 
@@ -50,7 +51,7 @@ export function registerFilesystemDirectoriesRoutes(
         }
 
         const fullPath = path.join(expandedPath, entry.name);
-        const isGitRepo = existsSync(path.join(fullPath, ".git"));
+        const isGitRepo = isGitRepository(fullPath);
         const displayPath = pathParam.startsWith("~") ? path.join(pathParam, entry.name) : fullPath;
 
         directories.push({

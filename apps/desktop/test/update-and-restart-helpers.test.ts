@@ -39,15 +39,19 @@ test("force-interactive operations ignore always-allow rules", () => {
 test("packaged update can only apply after the payload is downloaded", () => {
   assert.equal(
     canApplyPackagedUpdate("1.0.0", {
-      availableVersion: "1.0.1",
-      downloadedVersion: null,
+      status: "available",
+      available: true,
+      downloaded: false,
+      version: "1.0.1",
     }),
     false
   );
   assert.equal(
     canApplyPackagedUpdate("1.0.0", {
-      availableVersion: "1.0.1",
-      downloadedVersion: "1.0.1",
+      status: "downloaded",
+      available: true,
+      downloaded: true,
+      version: "1.0.1",
     }),
     true
   );
@@ -58,8 +62,10 @@ test("packaged update gateway check reports true only when the download is ready
     resolvePackagedUpdateCheckResult(
       "1.0.0",
       {
-        availableVersion: "1.0.1",
-        downloadedVersion: null,
+        status: "available",
+        available: true,
+        downloaded: false,
+        version: "1.0.1",
       },
       "1.0.1"
     ),
@@ -72,8 +78,10 @@ test("packaged update gateway check reports true only when the download is ready
     resolvePackagedUpdateCheckResult(
       "1.0.0",
       {
-        availableVersion: "1.0.1",
-        downloadedVersion: "1.0.1",
+        status: "downloaded",
+        available: true,
+        downloaded: true,
+        version: "1.0.1",
       },
       "1.0.1"
     ),

@@ -1,7 +1,10 @@
-import { openSync, readSync, closeSync, existsSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { openSync, readSync, closeSync, existsSync, statSync } from "node:fs";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
 import { gatewayLog } from "../../main/gateway-logger.js";
+import { withTokenRefreshRetry } from "../../main/loop-refresh.js";
+import type { LoopTokenStore } from "../../main/loop-token-store.js";
+import { resolveClaudeOutputPath } from "../../main/token-usage.js";
+import { postLoopEvent, type LoopHttpResult } from "./loop-http.js";
 
 export function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -131,57 +134,6 @@ export function summarizeJsonlRecord(record: Record<string, unknown>): string | 
 }
 
 // ---------------------------------------------------------------------------
-// API communication
-// ---------------------------------------------------------------------------
-
-async function postLoopEvent(
-  apiBaseUrl: string,
-  loopId: string,
-  token: string,
-  event: {
-    type: string;
-    data: {
-      chunk: string;
-      tokenUsage?: {
-        inputTokens: number;
-        outputTokens: number;
-        cacheCreationInputTokens?: number;
-        cacheReadInputTokens?: number;
-      };
-    };
-  }
-): Promise<number | null> {
-  const url = `${apiBaseUrl}/loops/${loopId}/events`;
-  try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${token}`,
-        "Content-Type": "application/json",
-        "x-loop-event-nonce": randomUUID(),
-      },
-      body: JSON.stringify({
-        type: event.type,
-        data: event.data,
-        timestamp: new Date().toISOString(),
-      }),
-    });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
-      gatewayLog.error(
-        "output-tailer",
-        `POST ${event.type} to ${url} failed: ${resp.status} ${resp.statusText} ${text}`,
-      );
-    }
-    return resp.status;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    gatewayLog.error("output-tailer", `POST ${event.type} network error: ${msg}`);
-    return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Output tailer
 // ---------------------------------------------------------------------------
 
@@ -208,18 +160,34 @@ export function startOutputTailer(
   jsonlPath: string,
   apiBaseUrl: string,
   loopId: string,
-  token: string,
+  getToken: () => string | null,
   initialByteOffset: number,
   onOffset?: (offset: number) => void,
+  claudeWorkDir?: string,
+  loopTokenStore?: LoopTokenStore,
 ): { stop: () => void; flush: () => Promise<void> } {
-  const pollIntervalMs = Number(process.env.CLOSEDLOOP_TAILER_POLL_MS) || DEFAULT_POLL_MS;
-  const throttleMs = Number(process.env.CLOSEDLOOP_TAILER_THROTTLE_MS) || DEFAULT_THROTTLE_MS;
-  const authRetryBaseMs =
-    Number(process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_BASE_MS) || DEFAULT_AUTH_RETRY_BASE_MS;
-  const authRetryMaxMs =
-    Number(process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_MAX_MS) || DEFAULT_AUTH_RETRY_MAX_MS;
-  const authRetryMaxCount =
-    Number(process.env.CLOSEDLOOP_TAILER_AUTH_RETRY_MAX_COUNT) || DEFAULT_AUTH_RETRY_MAX_COUNT;
+  const parseEnvNumber = (name: string, fallback: number): number => {
+    const raw = process.env[name];
+    if (raw === undefined || raw === "") return fallback;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : fallback;
+  };
+  // pollIntervalMs falls back when 0 because a 0ms setInterval would spin the loop.
+  const pollIntervalMs =
+    Number(process.env.CLOSEDLOOP_TAILER_POLL_MS) || DEFAULT_POLL_MS;
+  const throttleMs = parseEnvNumber("CLOSEDLOOP_TAILER_THROTTLE_MS", DEFAULT_THROTTLE_MS);
+  const authRetryBaseMs = parseEnvNumber(
+    "CLOSEDLOOP_TAILER_AUTH_RETRY_BASE_MS",
+    DEFAULT_AUTH_RETRY_BASE_MS,
+  );
+  const authRetryMaxMs = parseEnvNumber(
+    "CLOSEDLOOP_TAILER_AUTH_RETRY_MAX_MS",
+    DEFAULT_AUTH_RETRY_MAX_MS,
+  );
+  const authRetryMaxCount = parseEnvNumber(
+    "CLOSEDLOOP_TAILER_AUTH_RETRY_MAX_COUNT",
+    DEFAULT_AUTH_RETRY_MAX_COUNT,
+  );
   let stopped = false;
   let authRetriesExhausted = false;
   let authRetryAttempt = 0;
@@ -241,6 +209,57 @@ export function startOutputTailer(
   /** Single-flight guard: prevents overlapping pollOnce executions. */
   let inFlightPoll: Promise<void> | null = null;
 
+  function readFileIdentity(candidatePath: string): string | null {
+    try {
+      const stats = statSync(candidatePath);
+      if (!stats.isFile()) {
+        return null;
+      }
+      return `${stats.dev}:${stats.ino}`;
+    } catch {
+      return null;
+    }
+  }
+
+  function resolveReadableJsonlPath(): string | null {
+    if (existsSync(jsonlPath)) {
+      return jsonlPath;
+    }
+    if (claudeWorkDir) {
+      return resolveClaudeOutputPath(claudeWorkDir);
+    }
+    return null;
+  }
+
+  const initialReadableJsonlPath = resolveReadableJsonlPath();
+  let activeJsonlPath = initialReadableJsonlPath ?? jsonlPath;
+  let activeFileIdentity =
+    initialReadableJsonlPath === null
+      ? null
+      : readFileIdentity(initialReadableJsonlPath);
+
+  function updateActiveJsonlPath(candidatePath: string): boolean {
+    const identity = readFileIdentity(candidatePath);
+    if (identity === null) {
+      return false;
+    }
+    if (identity !== activeFileIdentity) {
+      readByteOffset = 0;
+      pendingRemainder = Buffer.alloc(0);
+      committedByteOffset = 0;
+      tokenTotals = {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheCreationInputTokens: 0,
+        cacheReadInputTokens: 0,
+      };
+      lastSentAt = null;
+    }
+    activeJsonlPath = candidatePath;
+    activeFileIdentity = identity;
+    return true;
+  }
+
   function reportCommit(framedEndExclusive: number): void {
     if (framedEndExclusive > committedByteOffset) {
       committedByteOffset = framedEndExclusive;
@@ -253,19 +272,43 @@ export function startOutputTailer(
     nextAuthRetryAt = 0;
   }
 
-  function shouldRetryAuthStatus(status: number | null): boolean {
-    if (status === null) return true;
-    if (status === 401 || status === 403) return true;
-    return status >= 500;
+  // Retry policy keyed on the structured `kind` discriminator from
+  // postLoopEvent so the decision doesn't depend on substring matching of
+  // human-readable error strings (the old `error.includes("401")` approach
+  // silently broke whenever the error-string format drifted).
+  function shouldRetryOnResult(result: LoopHttpResult): boolean {
+    if (result.success) return false;
+    switch (result.kind) {
+      case "http":
+        // Auth failures (401/403) and server errors (5xx) are retried; other
+        // 4xx are terminal (request shape is wrong, retrying won't help).
+        return result.status === 401 || result.status === 403 || result.status >= 500;
+      case "network":
+      case "timeout":
+        return true;
+      case "auth":
+        // Missing token usually means the gateway hasn't been re-authed yet;
+        // retry with the same backoff as 401 so the tailer waits for the
+        // token to appear rather than spinning or giving up immediately.
+        return true;
+    }
   }
 
-  function scheduleAuthRetry(status: number | null): void {
+  function formatResultForLog(result: LoopHttpResult): string {
+    if (result.success) return `success status=${result.status}`;
+    if (result.kind === "http") {
+      return `kind=${result.kind} status=${result.status} error=${result.error}`;
+    }
+    return `kind=${result.kind} error=${result.error}`;
+  }
+
+  function scheduleAuthRetry(result: LoopHttpResult): void {
     authRetryAttempt += 1;
     if (authRetryAttempt > authRetryMaxCount) {
       authRetriesExhausted = true;
       gatewayLog.warn(
         "output-tailer",
-        `Stopping tailer for loopId=${loopId}: exhausted auth retries after ${authRetryMaxCount} attempts (last status=${status ?? "network"})`,
+        `Stopping tailer for loopId=${loopId}: exhausted auth retries after ${authRetryMaxCount} attempts (last ${formatResultForLog(result)})`,
       );
       return;
     }
@@ -273,7 +316,7 @@ export function startOutputTailer(
     nextAuthRetryAt = Date.now() + delayMs;
     gatewayLog.warn(
       "output-tailer",
-      `Retrying output tailer for loopId=${loopId}: attempt=${authRetryAttempt}/${authRetryMaxCount} status=${status ?? "network"} backoffMs=${delayMs}`,
+      `Retrying output tailer for loopId=${loopId}: attempt=${authRetryAttempt}/${authRetryMaxCount} ${formatResultForLog(result)} backoffMs=${delayMs}`,
     );
   }
 
@@ -283,10 +326,12 @@ export function startOutputTailer(
     if (stopped) return;
     if (authRetriesExhausted && !forceAttempt) return;
     if (!ignoreBackoff && nextAuthRetryAt > Date.now()) return;
-    if (!existsSync(jsonlPath)) return;
+    const readableJsonlPath = resolveReadableJsonlPath();
+    if (readableJsonlPath === null) return;
+    if (!updateActiveJsonlPath(readableJsonlPath)) return;
     let fd: number | null = null;
     try {
-      fd = openSync(jsonlPath, "r");
+      fd = openSync(activeJsonlPath, "r");
       const chunkSize = 65536;
       const chunk = Buffer.alloc(chunkSize);
       let bytesRead: number;
@@ -372,14 +417,23 @@ export function startOutputTailer(
         candidateTotals.cacheCreationInputTokens > 0 ||
         candidateTotals.cacheReadInputTokens > 0;
 
-      const status = await postLoopEvent(apiBaseUrl, loopId, token, {
+      const outputEventBody = {
         type: LoopEventType.Output,
         data: {
           chunk: lastDisplay,
           tokenUsage: hasAnyTokens ? candidateTotals : undefined,
         },
-      });
-      if (status !== null && status >= 200 && status < 300) {
+      };
+      const result = loopTokenStore
+        ? await withTokenRefreshRetry(
+            loopId,
+            apiBaseUrl,
+            getToken,
+            loopTokenStore,
+            (gt) => postLoopEvent(apiBaseUrl, loopId, gt, outputEventBody),
+          )
+        : await postLoopEvent(apiBaseUrl, loopId, getToken, outputEventBody);
+      if (result.success) {
         resetAuthRetryState();
         authRetriesExhausted = false;
         pendingRemainder = suffix;
@@ -388,8 +442,8 @@ export function startOutputTailer(
         reportCommit(framedEndExclusive);
         continue;
       }
-      if (shouldRetryAuthStatus(status)) {
-        scheduleAuthRetry(status);
+      if (shouldRetryOnResult(result)) {
+        scheduleAuthRetry(result);
       }
       break;
     }

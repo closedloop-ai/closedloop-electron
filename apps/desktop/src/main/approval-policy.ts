@@ -33,8 +33,11 @@ export const OPERATION_RISK_TIERS: Record<OperationId, Exclude<RiskTier, "none">
   codex_argue:             "medium",
   deploy:                  "high",
   learnings:               "medium",
+  desktop_security_upgrade: "high",
   binary_paths_settings:   "medium",
-  update_and_restart:      "high"
+  update_and_restart:      "high",
+  browser_key_revoke: "high",
+  browser_key_approval_request: "high"
 };
 
 /**

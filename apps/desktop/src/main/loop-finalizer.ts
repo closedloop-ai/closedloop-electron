@@ -1,11 +1,39 @@
-import { execFileSync } from "node:child_process";
-import { getResolvedGitPath } from "../server/operations/symphony-loop.js";
-import crypto from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import path from "node:path";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { LoopEventType } from "@closedloop-ai/loops-api/events";
-import { parseExecutionResultFile } from "@closedloop-ai/loops-api/execution-result";
+import {
+  getPrimaryRepoResult,
+  parseExecutionResultFile,
+  type RepoExecutionResult,
+} from "@closedloop-ai/loops-api/execution-result";
+import { execFileSync } from "node:child_process";
+import { existsSync, promises as fs, readFileSync } from "node:fs";
+import path from "node:path";
+import {
+  postLoopEvent,
+  uploadArtifacts,
+  type LoopHttpResult,
+} from "../server/operations/loop-http.js";
+import { withTokenRefreshRetry } from "./loop-refresh.js";
+import { readEffectiveStatusFromState } from "../server/operations/symphony-job-snapshot.js";
+import {
+  EVALUATE_COMMAND_ARTIFACT,
+  type ExecuteFinalizationResult,
+  finalizeAdditionalReposAndPersist,
+  getResolvedGitPath,
+  readBootstrapOutputs,
+  readEvaluateOutputs,
+  runExecuteFinalization,
+} from "../server/operations/symphony-loop.js";
+import {
+  assertPathAllowed,
+  DirectoryNotAllowedError,
+} from "../server/security.js";
+import { validateOutboundUrlForSurface } from "../server/outbound-url-policy.js";
+import {
+  IMPORTED_PLAN_MARKDOWN_FILE,
+  toUploadedPlanArtifact,
+} from "../shared/plan-artifact-utils.js";
 import {
   readLogTail,
   readTextFile,
@@ -18,16 +46,38 @@ import {
   type LocalJob,
 } from "./job-store.js";
 import type { LoopTokenStore } from "./loop-token-store.js";
-import type { TelemetryEmitter } from "./telemetry-protocol.js";
-import { parseApiKeySource, parseTokenUsage } from "./token-usage.js";
-import { readEffectiveStatusFromState } from "../server/operations/symphony-job-snapshot.js";
+import type { LoopSchedulerContext } from "./loop-scheduler-context.js";
+import { Observability } from "./observability.js";
+import type {
+  SupportUploadReason,
+  TelemetryEmitter,
+} from "./telemetry-protocol.js";
+import {
+  parseApiKeySource,
+  parseTokenUsage,
+  resolveClaudeOutputPath,
+} from "./token-usage.js";
+import { parseUserVisibleLoopFailurePayload } from "./user-visible-loop-failure.js";
+
+async function callWithRefreshRetry(
+  loopId: string,
+  apiBaseUrl: string,
+  getToken: () => string | null,
+  loopTokenStore: LoopTokenStore | undefined,
+  fn: (getToken: () => string | null) => Promise<LoopHttpResult>,
+): Promise<LoopHttpResult> {
+  return loopTokenStore
+    ? withTokenRefreshRetry(loopId, apiBaseUrl, getToken, loopTokenStore, fn)
+    : fn(getToken);
+}
 
 export interface LoopFinalizerDeps {
   jobStore: JobStore;
   telemetry: TelemetryEmitter;
-  apiAuthToken: string;
+  getToken: () => string | null;
   apiBaseUrl: string;
   isProcessRunning: (pid: number) => boolean;
+  getAllowedDirectories?: () => string[];
   /** When set, persisted loop runner token is cleared after terminal status is written. */
   loopTokenStore?: LoopTokenStore;
   /**
@@ -40,6 +90,13 @@ export interface LoopFinalizerDeps {
     entries: readonly { dir: string; repoPath: string }[],
     loopId: string,
   ) => Promise<void>;
+  /**
+   * Scheduler context whose `teardownLoop(loopId)` will be invoked after the
+   * loop reaches a terminal status. When omitted, scheduler teardown is
+   * skipped — callers must pass the same LoopSchedulerContext instance that
+   * owns the timers for teardown to take effect.
+   */
+  schedulers?: LoopSchedulerContext;
 }
 
 export type LoopFinalizationReason =
@@ -53,6 +110,44 @@ export interface LoopFinalizationOutcome {
   error?: string;
 }
 
+export const EXECUTE_NO_WORK_MESSAGE =
+  "EXECUTE loop completed with 0 tokens -- no work was done";
+export const EXECUTE_NO_WORK_LIVE_ACTIVITY =
+  "Error: Loop produced no output (0 tokens)";
+
+type ParsedTokenUsage = ReturnType<typeof parseTokenUsage>;
+type TokenUsageActivity = Pick<
+  ParsedTokenUsage,
+  | "inputTokens"
+  | "outputTokens"
+  | "cacheCreationInputTokens"
+  | "cacheReadInputTokens"
+>;
+
+const SUPPORT_BUNDLE_UPLOADED_EVENT_TYPE = "support_bundle_uploaded";
+const SUPPORT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024;
+
+type SupportUploadCandidate = {
+  name: "claude-output.jsonl" | "perf.jsonl";
+  path: string;
+  key: string;
+  sizeBytes: number;
+};
+
+export type SupportUploadResult =
+  | { outcome: "skipped"; failed: false; reason: string }
+  | { outcome: "succeeded"; failed: false; uploadedKeys: string[] }
+  | { outcome: "failed"; failed: true; error: string };
+
+export type SupportUploadDeps = {
+  job: LocalJob;
+  claudeWorkDir: string;
+  apiBaseUrl: string;
+  getToken: () => string | null;
+  jobStore?: JobStore;
+  loopTokenStore?: LoopTokenStore;
+};
+
 export function parseJobWarnings(job: Pick<LocalJob, "warning">): string[] {
   if (!job.warning) {
     return [];
@@ -65,8 +160,67 @@ export function parseJobWarnings(job: Pick<LocalJob, "warning">): string[] {
 
 type ArtifactUploadDeps = Pick<
   LoopFinalizerDeps,
-  "jobStore" | "apiAuthToken" | "apiBaseUrl"
+  "jobStore" | "getToken" | "apiBaseUrl" | "getAllowedDirectories" | "loopTokenStore"
 >;
+
+function hasTerminalExecuteFinalization(
+  status: LocalJob["executeFinalizationStatus"] | undefined,
+): boolean {
+  return (
+    status === "success" ||
+    status === "no-changes" ||
+    status === "skipped"
+  );
+}
+
+function hasTokenUsageActivity(tokenUsage: TokenUsageActivity): boolean {
+  return (
+    tokenUsage.inputTokens > 0 ||
+    tokenUsage.outputTokens > 0 ||
+    tokenUsage.cacheCreationInputTokens > 0 ||
+    tokenUsage.cacheReadInputTokens > 0
+  );
+}
+
+export function isExecuteNoWorkCompletion(
+  command: string,
+  tokenUsage: TokenUsageActivity,
+): boolean {
+  return command === LoopCommand.Execute && !hasTokenUsageActivity(tokenUsage);
+}
+
+function isExecuteNoWorkFailure(
+  job: Pick<LocalJob, "command" | "status" | "liveActivity">,
+): boolean {
+  return (
+    String(job.command) === LoopCommand.Execute &&
+    job.status === "FAILED" &&
+    job.liveActivity === EXECUTE_NO_WORK_LIVE_ACTIVITY
+  );
+}
+
+function getExecuteFinalizationMetadata(
+  job: LocalJob,
+  command: string,
+): Record<string, unknown> {
+  if (command !== LoopCommand.Execute) {
+    return {};
+  }
+  return {
+    ...(job.finalizationSource
+      ? { finalizationSource: job.finalizationSource }
+      : {}),
+    ...(job.executeFinalizationStatus
+      ? { executeFinalizationStatus: job.executeFinalizationStatus }
+      : {}),
+    ...(job.executeFinalizationPath
+      ? { executeFinalizationPath: job.executeFinalizationPath }
+      : {}),
+    ...(job.executeFinalizationReason
+      ? { executeFinalizationReason: job.executeFinalizationReason }
+      : {}),
+  };
+}
 
 /** Read Claude session id from the loop workdir (matches legacy symphony-loop completion path). */
 function readLoopSessionId(claudeWorkDir: string): string | undefined {
@@ -94,6 +248,25 @@ function getCurrentBranchFromWorktree(worktreeDir: string): string | null {
   }
 }
 
+function getBranchNameFromAllowedWorktree(
+  worktreeDir: string,
+  getAllowedDirectories?: () => string[],
+): string | undefined {
+  if (getAllowedDirectories) {
+    try {
+      assertPathAllowed(worktreeDir, getAllowedDirectories());
+    } catch (err) {
+      if (err instanceof DirectoryNotAllowedError) {
+        return undefined;
+      }
+      throw err;
+    }
+  }
+
+  const branch = getCurrentBranchFromWorktree(worktreeDir);
+  return branch ?? undefined;
+}
+
 /**
  * Session + branch fields shared by artifact upload metadata and completed-event `result`
  * so reboot replay and live exit stay compatible with the pre-finalizer desktop shape.
@@ -103,22 +276,33 @@ function getCompletionCorrelationFields(
   command: string,
   claudeWorkDir: string,
   artifacts: Record<string, unknown>,
+  getAllowedDirectories?: () => string[],
 ): { sessionId?: string; branchName?: string } {
   const sessionId = readLoopSessionId(claudeWorkDir);
   let branchName: string | undefined;
 
-  if (command === "EXECUTE" && artifacts.executionResult) {
-    const parsed = parseExecutionResultFile(artifacts.executionResult);
-    if (parsed?.branchName) {
-      branchName = parsed.branchName;
+  if (command === LoopCommand.Execute && artifacts.executionResult) {
+    const primaryFullName = job.primaryRepoFullName ?? "";
+    const parsed = parseExecutionResultFile(
+      artifacts.executionResult,
+      primaryFullName,
+    );
+    if (parsed.ok) {
+      // Match buildCompletedEventResult's lookup so reboot replay and live
+      // exit pick the same entry — never rely on positional ordering.
+      const lookupName = primaryFullName || parsed.results[0]?.fullName || "";
+      const primary = getPrimaryRepoResult(parsed.results, lookupName);
+      if (primary?.status === "success" && primary.branchName) {
+        branchName = primary.branchName;
+      }
     }
   }
 
   if (!branchName && job.worktreeDir) {
-    const fromGit = getCurrentBranchFromWorktree(job.worktreeDir);
-    if (fromGit) {
-      branchName = fromGit;
-    }
+    branchName = getBranchNameFromAllowedWorktree(
+      job.worktreeDir,
+      getAllowedDirectories,
+    );
   }
 
   return { sessionId, branchName };
@@ -130,18 +314,55 @@ function buildCompletedEventResult(
   command: string,
   claudeWorkDir: string,
   artifacts: Record<string, unknown>,
-): Record<string, unknown> {
+  getAllowedDirectories?: () => string[],
+): { result: Record<string, unknown>; results?: RepoExecutionResult[] } {
   const result: Record<string, unknown> = {
     exitCode: job.exitCode ?? 0,
     subtype: command.toLowerCase(),
   };
+  let results: RepoExecutionResult[] | undefined;
+  const setNoChangesFields = (): void => {
+    result.prUrl = null;
+    result.prNumber = null;
+    result.has_changes = false;
+  };
 
-  if (command === "EXECUTE" && artifacts.executionResult) {
-    const execResult = artifacts.executionResult as Record<string, unknown>;
-    result.prUrl = execResult.pr_url;
-    result.prNumber = execResult.pr_number;
-    result.branchName = execResult.branch_name;
-    result.has_changes = execResult.has_changes ?? false;
+  if (command === LoopCommand.Execute && artifacts.executionResult) {
+    const primaryFullName = job.primaryRepoFullName ?? "";
+    const parsed = parseExecutionResultFile(artifacts.executionResult);
+    if (!parsed.ok) {
+      gatewayLog.warn(
+        "execution-result-parse-failed",
+        `loopId=${job.loopId} error=${parsed.error}`,
+      );
+      setNoChangesFields();
+    } else if (parsed.schemaVersion !== 2) {
+      gatewayLog.warn(
+        "execution-result-unsupported-schema",
+        `loopId=${job.loopId} schemaVersion=${parsed.schemaVersion}`,
+      );
+      setNoChangesFields();
+    } else {
+      const lookupName = primaryFullName || parsed.results[0]?.fullName || "";
+      const primaryResult = getPrimaryRepoResult(parsed.results, lookupName);
+
+      results = parsed.results;
+
+      if (primaryResult === null) {
+        gatewayLog.warn(
+          "primary-repo-not-found-in-results",
+          `loopId=${job.loopId} primaryFullName=${lookupName}`,
+        );
+        setNoChangesFields();
+      } else if (primaryResult.status === "success") {
+        result.prUrl = primaryResult.prUrl;
+        result.prNumber = primaryResult.prNumber;
+        result.branchName = primaryResult.branchName;
+        result.has_changes = primaryResult.hasChanges;
+      } else {
+        setNoChangesFields();
+      }
+    }
   }
 
   const { sessionId, branchName } = getCompletionCorrelationFields(
@@ -149,6 +370,7 @@ function buildCompletedEventResult(
     command,
     claudeWorkDir,
     artifacts,
+    getAllowedDirectories,
   );
 
   const missingBranch =
@@ -163,7 +385,13 @@ function buildCompletedEventResult(
     result.sessionId = sessionId;
   }
 
-  return result;
+  return {
+    result: {
+      ...result,
+      ...getExecuteFinalizationMetadata(job, command),
+    },
+    ...(results ? { results } : {}),
+  };
 }
 
 function buildArtifactUploadMetadata(
@@ -171,18 +399,21 @@ function buildArtifactUploadMetadata(
   command: string,
   claudeWorkDir: string,
   artifacts: Record<string, unknown>,
+  getAllowedDirectories?: () => string[],
 ): Record<string, unknown> {
   const { sessionId, branchName } = getCompletionCorrelationFields(
     job,
     command,
     claudeWorkDir,
     artifacts,
+    getAllowedDirectories,
   );
   return {
     finishedAt: new Date().toISOString(),
     command: command.toLowerCase(),
     ...(sessionId ? { sessionId } : {}),
     ...(branchName ? { branchName } : {}),
+    ...getExecuteFinalizationMetadata(job, command),
   };
 }
 
@@ -203,19 +434,22 @@ export async function tryUploadArtifacts(
     return { artifacts, failed: false };
   }
 
-  const uploadResult = await uploadArtifacts(
-    deps.apiBaseUrl,
-    job.loopId,
-    deps.apiAuthToken,
-    {
+  const uploadBody = {
+    artifacts,
+    metadata: buildArtifactUploadMetadata(
+      job,
+      command,
+      claudeWorkDir,
       artifacts,
-      metadata: buildArtifactUploadMetadata(
-        job,
-        command,
-        claudeWorkDir,
-        artifacts,
-      ),
-    },
+      deps.getAllowedDirectories,
+    ),
+  };
+  const uploadResult = await callWithRefreshRetry(
+    job.loopId,
+    deps.apiBaseUrl,
+    deps.getToken,
+    deps.loopTokenStore,
+    (getToken) => uploadArtifacts(deps.apiBaseUrl, job.loopId, getToken, uploadBody),
   );
   if (!uploadResult.success) {
     warnings.push("ARTIFACT_UPLOAD_FAILED");
@@ -245,11 +479,12 @@ export async function tryPostCompletedEvent(
   }
 
   const tokensUsed = parseTokenUsage(claudeWorkDir);
-  const result = buildCompletedEventResult(
+  const completedResult = buildCompletedEventResult(
     job,
     command,
     claudeWorkDir,
     artifacts,
+    deps.getAllowedDirectories,
   );
 
   gatewayLog.info(
@@ -261,7 +496,7 @@ export async function tryPostCompletedEvent(
 
   const completedEvent: Record<string, unknown> = {
     type: LoopEventType.Completed,
-    result,
+    result: completedResult.result,
     tokensUsed: {
       input: tokensUsed.inputTokens,
       output: tokensUsed.outputTokens,
@@ -272,14 +507,16 @@ export async function tryPostCompletedEvent(
     },
     ...(apiKeySource != null ? { apiKeySource } : {}),
     loopId: job.loopId,
+    ...(completedResult.results ? { results: completedResult.results } : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
   };
 
-  const eventResult = await postLoopEvent(
-    deps.apiBaseUrl,
+  const eventResult = await callWithRefreshRetry(
     job.loopId,
-    deps.apiAuthToken,
-    completedEvent,
+    deps.apiBaseUrl,
+    deps.getToken,
+    deps.loopTokenStore,
+    (getToken) => postLoopEvent(deps.apiBaseUrl, job.loopId, getToken, completedEvent),
   );
   if (!eventResult.success) {
     warnings.push("EVENT_POST_FAILED");
@@ -310,19 +547,31 @@ export async function tryPostErrorEvent(
   const apiKeySource = parseApiKeySource(claudeWorkDir);
   const logTail =
     readLogTail(path.join(claudeWorkDir, "symphony-loop.log")) ?? undefined;
+  const noWorkProduced = isExecuteNoWorkFailure(job);
+  const userVisibleFailure = parseUserVisibleLoopFailurePayload(
+    job.userVisibleLoopFailure,
+  );
   const errorCode =
-    job.status === "FAILED"
-      ? LoopErrorCode.ProcessFailed
-      : LoopErrorCode.ProcessStopped;
+    userVisibleFailure?.code ??
+    (noWorkProduced
+      ? LoopErrorCode.NoWorkProduced
+      : job.status === "FAILED"
+        ? LoopErrorCode.ProcessFailed
+        : LoopErrorCode.ProcessStopped);
   const errorMessage =
-    job.status === "FAILED"
-      ? `Process exited with code ${job.exitCode ?? 1}`
-      : `Process ended with terminal status ${job.status}`;
-  const hasTokenActivity =
-    tokenUsage.inputTokens > 0 ||
-    tokenUsage.outputTokens > 0 ||
-    tokenUsage.cacheCreationInputTokens > 0 ||
-    tokenUsage.cacheReadInputTokens > 0;
+    userVisibleFailure?.message ??
+    (noWorkProduced
+      ? EXECUTE_NO_WORK_MESSAGE
+      : job.status === "FAILED"
+        ? `Process exited with code ${job.exitCode ?? 1}`
+        : `Process ended with terminal status ${job.status}`);
+  const correlationFields = getCompletionCorrelationFields(
+    job,
+    String(job.command),
+    claudeWorkDir,
+    readArtifacts(String(job.command), claudeWorkDir, job.worktreeDir),
+  );
+  const hasTokenActivity = hasTokenUsageActivity(tokenUsage);
   const errorEvent: Record<string, unknown> = {
     type: LoopEventType.Error,
     code: errorCode,
@@ -340,14 +589,22 @@ export async function tryPostErrorEvent(
       : {}),
     ...(logTail ? { logTail } : {}),
     ...(apiKeySource != null ? { apiKeySource } : {}),
+    ...(userVisibleFailure ? { result: userVisibleFailure.result } : {}),
+    ...(correlationFields.sessionId
+      ? { sessionId: correlationFields.sessionId }
+      : {}),
+    ...(correlationFields.branchName
+      ? { branchName: correlationFields.branchName }
+      : {}),
     ...(warnings.length > 0 ? { warnings } : {}),
   };
 
-  const eventResult = await postLoopEvent(
-    deps.apiBaseUrl,
+  const eventResult = await callWithRefreshRetry(
     job.loopId,
-    deps.apiAuthToken,
-    errorEvent,
+    deps.apiBaseUrl,
+    deps.getToken,
+    deps.loopTokenStore,
+    (getToken) => postLoopEvent(deps.apiBaseUrl, job.loopId, getToken, errorEvent),
   );
   if (!eventResult.success) {
     warnings.push("EVENT_POST_FAILED");
@@ -385,6 +642,7 @@ export function persistFinalJobStatus(
     ...current,
     status: resolvedStatus,
     exitCode: job.exitCode ?? 0,
+    liveActivity: job.liveActivity ?? current.liveActivity,
     updatedAt: now,
     completedAt: current.completedAt ?? now,
     finalStatusPersistedAt: now,
@@ -424,11 +682,7 @@ export function emitFinalizationTelemetry(
     const logPath = path.join(claudeWorkDir, "symphony-loop.log");
     const logTail = readLogTail(logPath) ?? undefined;
     const parsed = parseTokenUsage(claudeWorkDir);
-    const hasTokenActivity =
-      parsed.inputTokens > 0 ||
-      parsed.outputTokens > 0 ||
-      parsed.cacheCreationInputTokens > 0 ||
-      parsed.cacheReadInputTokens > 0;
+    const hasTokenActivity = hasTokenUsageActivity(parsed);
     if (logTail || hasTokenActivity) {
       diagnostics = {
         logTail,
@@ -489,8 +743,10 @@ function readArtifacts(
   claudeWorkDir: string,
   worktreeDir?: string,
 ): Record<string, unknown> {
-  if (command === "PLAN" || command === "REQUEST_CHANGES") {
-    const plan = readJsonFileSync(path.join(claudeWorkDir, "plan.json"));
+  if (command === LoopCommand.Plan || command === LoopCommand.RequestChanges) {
+    const plan = toUploadedPlanArtifact(
+      readJsonFileSync(path.join(claudeWorkDir, "plan.json")),
+    );
     const openQuestions = readTextFile(
       path.join(claudeWorkDir, "open-questions.md"),
     );
@@ -501,7 +757,12 @@ function readArtifacts(
       judges: judges ?? undefined,
     };
   }
-  if (command === "EXECUTE") {
+  if (command === LoopCommand.Execute) {
+    const plan =
+      toUploadedPlanArtifact(readJsonFileSync(path.join(claudeWorkDir, "plan.json"))) ??
+      toUploadedPlanArtifact(
+        readTextFile(path.join(claudeWorkDir, IMPORTED_PLAN_MARKDOWN_FILE)),
+      );
     const executionResult = readJsonFileSync(
       path.join(claudeWorkDir, "execution-result.json"),
     );
@@ -509,109 +770,414 @@ function readArtifacts(
       path.join(claudeWorkDir, "code-judges.json"),
     );
     return {
+      plan: plan ?? undefined,
       executionResult: executionResult ?? undefined,
       codeJudges: codeJudges ?? undefined,
     };
   }
-  if (command === "DECOMPOSE") {
+  if (command === LoopCommand.Decompose) {
     const features = readJsonFileSync(
       path.join(claudeWorkDir, "features.json"),
     );
     return { features: features ?? undefined };
   }
-  if (command === "EVALUATE_PRD") {
-    const judges = readJsonFileSync(
-      path.join(claudeWorkDir, "prd-judges.json"),
+  if (
+    command === LoopCommand.EvaluatePrd ||
+    command === LoopCommand.EvaluatePlan ||
+    command === LoopCommand.EvaluateCode ||
+    command === LoopCommand.EvaluateFeature
+  ) {
+    return readEvaluateOutputs(
+      claudeWorkDir,
+      EVALUATE_COMMAND_ARTIFACT[command],
     );
-    return { prdJudges: judges ?? undefined };
   }
-  if (command === "EVALUATE_PLAN") {
-    const judges = readJsonFileSync(
-      path.join(claudeWorkDir, "plan-judges.json"),
-    );
-    return { planJudges: judges ?? undefined };
-  }
-  if (command === "EVALUATE_CODE") {
-    const judges = readJsonFileSync(
-      path.join(claudeWorkDir, "code-judges.json"),
-    );
-    return { codeJudges: judges ?? undefined };
-  }
-  if (command === "GENERATE_PRD") {
+  if (
+    command === LoopCommand.GeneratePrd ||
+    command === LoopCommand.RequestPrdChanges
+  ) {
+    // Both PRD commands write the (re)generated PRD to prd.md in the same
+    // worktree. Live completion in handleProcessCompletion handles both via
+    // the same dispatch (see symphony-loop.ts); boot recovery must mirror
+    // that, otherwise a REQUEST_PRD_CHANGES loop finalized after an Electron
+    // restart would silently lose the generated artifact.
     const baseDir = worktreeDir ?? claudeWorkDir;
     const prdContent = readTextFile(path.join(baseDir, "prd.md"));
     return { prd: prdContent ? { content: prdContent } : undefined };
   }
+  if (command === LoopCommand.Bootstrap) {
+    return readBootstrapOutputs(claudeWorkDir);
+  }
   return {};
 }
 
-async function postLoopEvent(
+function supportUploadSuffix(s3StateKey: string | undefined): string | undefined {
+  if (!s3StateKey) {
+    return undefined;
+  }
+  const parts = s3StateKey.split("/").filter(Boolean);
+  return parts.at(-1);
+}
+
+function emitSupportUploadLifecycle(
+  job: LocalJob,
+  outcome: "started" | "skipped" | "succeeded" | "failed",
+  details: {
+    attemptedLogicalNames?: string[];
+    attemptedUploadedNames?: string[];
+    reason?: SupportUploadReason;
+    uploadedCount?: number;
+    durationMs?: number;
+  } = {},
+): void {
+  Observability.supportUploadLifecycle({
+    outcome,
+    loopId: job.loopId,
+    s3StateKeySuffix: supportUploadSuffix(job.s3StateKey),
+    ...details,
+  });
+}
+
+async function collectSupportUploadCandidates(
+  job: LocalJob,
+  claudeWorkDir: string,
+): Promise<{ candidates: SupportUploadCandidate[]; skippedReasons: string[] }> {
+  const skippedReasons: string[] = [];
+  const candidates: SupportUploadCandidate[] = [];
+  const s3StateKey = job.s3StateKey;
+  if (!s3StateKey) {
+    return { candidates, skippedReasons: ["missing_s3_state_key"] };
+  }
+
+  const paths: Array<{ name: SupportUploadCandidate["name"]; path: string | null }> = [
+    {
+      name: "claude-output.jsonl",
+      path: resolveClaudeOutputPath(claudeWorkDir),
+    },
+    {
+      name: "perf.jsonl",
+      path: path.join(claudeWorkDir, "perf.jsonl"),
+    },
+  ];
+
+  for (const candidate of paths) {
+    if (!candidate.path) {
+      skippedReasons.push(`${candidate.name}:missing`);
+      gatewayLog.warn(
+        "loop-finalizer",
+        `Support upload skipped missing ${candidate.name} for loopId=${job.loopId}`,
+      );
+      continue;
+    }
+    let stat;
+    try {
+      stat = await fs.stat(candidate.path);
+    } catch {
+      skippedReasons.push(`${candidate.name}:missing`);
+      gatewayLog.warn(
+        "loop-finalizer",
+        `Support upload skipped missing ${candidate.name} for loopId=${job.loopId}`,
+      );
+      continue;
+    }
+    if (!stat.isFile()) {
+      skippedReasons.push(`${candidate.name}:not_file`);
+      continue;
+    }
+    if (stat.size > SUPPORT_UPLOAD_MAX_BYTES) {
+      skippedReasons.push(`${candidate.name}:too_large`);
+      gatewayLog.warn(
+        "loop-finalizer",
+        `Support upload skipped ${candidate.name} larger than 50MB for loopId=${job.loopId}`,
+      );
+      continue;
+    }
+    candidates.push({
+      name: candidate.name,
+      path: candidate.path,
+      key: `${s3StateKey}/support/${candidate.name}`,
+      sizeBytes: stat.size,
+    });
+  }
+
+  return { candidates, skippedReasons };
+}
+
+async function requestSupportUploadUrls(
   apiBaseUrl: string,
   loopId: string,
-  token: string,
-  eventBody: Record<string, unknown>,
-): Promise<{ success: boolean; error?: string }> {
-  const url = `${apiBaseUrl}/loops/${loopId}/events`;
-  const payload: Record<string, unknown> = {
-    ...eventBody,
-    timestamp: eventBody.timestamp ?? new Date().toISOString(),
-  };
+  getToken: () => string | null,
+  keys: string[],
+): Promise<
+  | { success: true; urlsByKey: Map<string, string> }
+  | { success: false; reason: SupportUploadReason; error: string }
+> {
+  const token = getToken();
+  if (token === null) {
+    return {
+      success: false,
+      reason: "missing_token",
+      error: "No loop token available for support upload",
+    };
+  }
+  const url = `${apiBaseUrl}/loops/${encodeURIComponent(loopId)}/upload-urls`;
   try {
-    const resp = await fetch(url, {
+    const response = await fetch(url, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
-        "x-loop-event-nonce": crypto.randomUUID(),
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ keys }),
     });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
       return {
         success: false,
-        error: `HTTP ${resp.status} ${resp.statusText} ${text}`,
+        reason: "upload_url_http_error",
+        error: `upload-url HTTP ${response.status} ${response.statusText} ${text}`,
       };
     }
-    return { success: true };
+    const envelope = (await response.json().catch(() => null)) as
+      | {
+          success?: unknown;
+          data?: { urls?: unknown };
+        }
+      | null;
+    if (!envelope || typeof envelope !== "object") {
+      return {
+        success: false,
+        reason: "upload_url_malformed_response",
+        error: "malformed upload-url envelope",
+      };
+    }
+    if (envelope.success !== true) {
+      return {
+        success: false,
+        reason: "upload_url_success_false",
+        error: "upload-url response success was false or missing",
+      };
+    }
+    if (!Array.isArray(envelope.data?.urls)) {
+      return {
+        success: false,
+        reason: "upload_url_malformed_response",
+        error: "malformed upload-url envelope",
+      };
+    }
+    const urlsByKey = new Map<string, string>();
+    for (const entry of envelope.data.urls) {
+      if (
+        entry &&
+        typeof entry === "object" &&
+        typeof (entry as { key?: unknown }).key === "string" &&
+        typeof (entry as { url?: unknown }).url === "string"
+      ) {
+        urlsByKey.set(
+          (entry as { key: string }).key,
+          (entry as { url: string }).url,
+        );
+      }
+    }
+    for (const key of keys) {
+      if (!urlsByKey.has(key)) {
+        return {
+          success: false,
+          reason: "upload_url_missing_url",
+          error: `missing upload URL for ${key}`,
+        };
+      }
+    }
+    return { success: true, urlsByKey };
   } catch (err) {
     return {
       success: false,
+      reason: "upload_url_request_failed",
       error: err instanceof Error ? err.message : String(err),
     };
   }
 }
 
-async function uploadArtifacts(
-  apiBaseUrl: string,
-  loopId: string,
-  token: string,
-  body: Record<string, unknown>,
-): Promise<{ success: boolean; error?: string }> {
-  const url = `${apiBaseUrl}/loops/${loopId}/upload-artifacts`;
+async function putSupportFile(
+  candidate: SupportUploadCandidate,
+  url: string,
+): Promise<
+  | { success: true }
+  | { success: false; reason: SupportUploadReason; error: string }
+> {
+  const policyDecision = validateOutboundUrlForSurface("loop_support_upload", url);
+  Observability.outboundNetworkDecision(policyDecision.diagnostics);
+  if (!policyDecision.allowed) {
+    return {
+      success: false,
+      reason: "put_url_denied",
+      error: `upload URL denied: ${policyDecision.diagnostics.reason}`,
+    };
+  }
   try {
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
+    const body = await fs.readFile(candidate.path);
+    const response = await fetch(url, {
+      method: "PUT",
+      body,
+      redirect: "error",
     });
-    if (!resp.ok) {
-      const text = await resp.text().catch(() => "");
+    if (!response.ok) {
       return {
         success: false,
-        error: `HTTP ${resp.status} ${resp.statusText} ${text}`,
+        reason: "put_http_error",
+        error: `PUT ${candidate.name} HTTP ${response.status} ${response.statusText}`,
       };
     }
     return { success: true };
   } catch (err) {
     return {
       success: false,
+      reason: "put_request_failed",
       error: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+/**
+ * Upload raw failure support files and publish their S3 keys to the cloud.
+ * Best-effort by design: callers continue terminal finalization on failure.
+ */
+export async function tryUploadSupportBundle({
+  job,
+  claudeWorkDir,
+  apiBaseUrl,
+  getToken,
+  jobStore,
+  loopTokenStore,
+}: SupportUploadDeps): Promise<SupportUploadResult> {
+  const startedAt = Date.now();
+  if (job.supportBundleUploadedAt) {
+    emitSupportUploadLifecycle(job, "skipped", {
+      reason: "already_uploaded",
+      durationMs: Date.now() - startedAt,
+    });
+    return { outcome: "skipped", failed: false, reason: "already_uploaded" };
+  }
+  if (!job.s3StateKey) {
+    emitSupportUploadLifecycle(job, "skipped", {
+      reason: "missing_s3_state_key",
+      durationMs: Date.now() - startedAt,
+    });
+    return { outcome: "skipped", failed: false, reason: "missing_s3_state_key" };
+  }
+
+  emitSupportUploadLifecycle(job, "started");
+  const { candidates } = await collectSupportUploadCandidates(
+    job,
+    claudeWorkDir,
+  );
+  const attemptedLogicalNames = candidates.map((candidate) => candidate.name);
+  if (candidates.length === 0) {
+    const reason: SupportUploadReason = "no_uploadable_files";
+    emitSupportUploadLifecycle(job, "skipped", {
+      attemptedLogicalNames,
+      reason,
+      durationMs: Date.now() - startedAt,
+    });
+    return { outcome: "skipped", failed: false, reason };
+  }
+
+  const uploadUrls = await requestSupportUploadUrls(
+    apiBaseUrl,
+    job.loopId,
+    getToken,
+    candidates.map((candidate) => candidate.key),
+  );
+  if (!uploadUrls.success) {
+    gatewayLog.warn(
+      "loop-finalizer",
+      `Support upload URL request failed for loopId=${job.loopId}: ${uploadUrls.error}`,
+    );
+    emitSupportUploadLifecycle(job, "failed", {
+      attemptedLogicalNames,
+      reason: uploadUrls.reason,
+      durationMs: Date.now() - startedAt,
+    });
+    return { outcome: "failed", failed: true, error: uploadUrls.error };
+  }
+
+  const uploaded: SupportUploadCandidate[] = [];
+  for (const candidate of candidates) {
+    const uploadUrl = uploadUrls.urlsByKey.get(candidate.key);
+    if (!uploadUrl) {
+      const error = `missing upload URL for ${candidate.key}`;
+      emitSupportUploadLifecycle(job, "failed", {
+        attemptedLogicalNames,
+        reason: "upload_url_missing_url",
+        uploadedCount: uploaded.length,
+        durationMs: Date.now() - startedAt,
+      });
+      return { outcome: "failed", failed: true, error };
+    }
+    const putResult = await putSupportFile(candidate, uploadUrl);
+    if (!putResult.success) {
+      gatewayLog.warn(
+        "loop-finalizer",
+        `Support upload failed for ${candidate.name} loopId=${job.loopId}: ${putResult.error}`,
+      );
+      emitSupportUploadLifecycle(job, "failed", {
+        attemptedLogicalNames,
+        attemptedUploadedNames: uploaded.map((item) => item.name),
+        reason: putResult.reason,
+        uploadedCount: uploaded.length,
+        durationMs: Date.now() - startedAt,
+      });
+      return { outcome: "failed", failed: true, error: putResult.error };
+    }
+    uploaded.push(candidate);
+  }
+
+  const supportEventBody = {
+    type: SUPPORT_BUNDLE_UPLOADED_EVENT_TYPE,
+    keys: uploaded.map((candidate) => candidate.key),
+    files: uploaded.map((candidate) => ({
+      name: candidate.name,
+      key: candidate.key,
+      sizeBytes: candidate.sizeBytes,
+    })),
+  };
+  const eventResult = await callWithRefreshRetry(
+    job.loopId,
+    apiBaseUrl,
+    getToken,
+    loopTokenStore,
+    (gt) => postLoopEvent(apiBaseUrl, job.loopId, gt, supportEventBody),
+  );
+  if (!eventResult.success) {
+    const error = eventResult.error ?? "support event post failed";
+    emitSupportUploadLifecycle(job, "failed", {
+      attemptedLogicalNames,
+      attemptedUploadedNames: uploaded.map((item) => item.name),
+      reason: "event_post_failed",
+      uploadedCount: uploaded.length,
+      durationMs: Date.now() - startedAt,
+    });
+    return { outcome: "failed", failed: true, error };
+  }
+
+  const now = new Date().toISOString();
+  const current = jobStore?.getByLoopId(job.loopId) ?? job;
+  jobStore?.upsert({
+    ...current,
+    supportBundleUploadedAt: now,
+    updatedAt: now,
+  });
+  emitSupportUploadLifecycle(job, "succeeded", {
+    attemptedLogicalNames,
+    attemptedUploadedNames: uploaded.map((item) => item.name),
+    uploadedCount: uploaded.length,
+    durationMs: Date.now() - startedAt,
+  });
+  return {
+    outcome: "succeeded",
+    failed: false,
+    uploadedKeys: uploaded.map((candidate) => candidate.key),
+  };
 }
 
 /**
@@ -640,15 +1206,14 @@ async function cleanupPersistedAdditionalWorktrees(
     }
   }
   const current = jobStore.getByLoopId(job.loopId) ?? job;
-  const { additionalWorktreeDirs: _drop, ...rest } = current;
-  void _drop;
+  const { additionalWorktreeDirs: _, ...rest } = current;
   jobStore.upsert({
     ...rest,
     updatedAt: new Date().toISOString(),
   });
 }
 
-function isRetryableFinalizationError(error?: string): boolean {
+export function isRetryableFinalizationError(error?: string): boolean {
   if (!error) {
     return false;
   }
@@ -668,12 +1233,13 @@ export async function finalizeLoopFromRuntime(
   const {
     jobStore,
     telemetry,
-    apiAuthToken,
+    getToken,
     apiBaseUrl,
     isProcessRunning,
     loopTokenStore,
     cleanupAdditionalWorktrees,
   } = deps;
+  const getAllowedDirectories = deps.getAllowedDirectories ?? (() => []);
 
   if (
     job.status === "CANCEL_PENDING" &&
@@ -734,6 +1300,22 @@ export async function finalizeLoopFromRuntime(
   const worktreeDir = resolvedJob.worktreeDir;
   const warnings = parseJobWarnings(resolvedJob);
 
+  if (
+    (resolvedJob.status === "COMPLETED" || resolvedJob.status === "RUNNING") &&
+    isExecuteNoWorkCompletion(command, parseTokenUsage(claudeWorkDir))
+  ) {
+    gatewayLog.error(
+      "loop-finalizer",
+      `${EXECUTE_NO_WORK_MESSAGE}, loopId=${resolvedJob.loopId}, reason=${reason}`,
+    );
+    resolvedJob = {
+      ...resolvedJob,
+      status: "FAILED",
+      exitCode: 0,
+      liveActivity: EXECUTE_NO_WORK_LIVE_ACTIVITY,
+    };
+  }
+
   const isSuccessStatus =
     resolvedJob.status === "COMPLETED" || resolvedJob.status === "RUNNING";
   const shouldPostErrorEvent =
@@ -741,12 +1323,102 @@ export async function finalizeLoopFromRuntime(
     resolvedJob.status === "STOPPED" ||
     resolvedJob.status === "UNKNOWN";
 
-  const artifactDeps = { jobStore, apiAuthToken, apiBaseUrl };
+  const artifactDeps = {
+    jobStore,
+    getToken,
+    apiBaseUrl,
+    getAllowedDirectories,
+    loopTokenStore,
+  };
   const now = new Date().toISOString();
   const persistBeforeCloud = reason !== "live-exit";
 
   if (persistBeforeCloud) {
     persistFinalJobStatus(resolvedJob, isSuccessStatus, warnings, jobStore);
+    resolvedJob = jobStore.getByLoopId(resolvedJob.loopId) ?? resolvedJob;
+  }
+
+  let executeFinalization: ExecuteFinalizationResult | null = null;
+  if (
+    command === LoopCommand.Execute &&
+    isSuccessStatus &&
+    !hasTerminalExecuteFinalization(resolvedJob.executeFinalizationStatus)
+  ) {
+    executeFinalization = await runExecuteFinalization({
+      worktreeDir: resolvedJob.worktreeDir,
+      claudeWorkDir,
+      loopId: resolvedJob.loopId,
+      artifactSlug: resolvedJob.artifactSlug,
+      baseBranch: resolvedJob.baseBranch ?? "main",
+      webAppOrigin: resolvedJob.webAppOrigin ?? "",
+      committer: resolvedJob.committer,
+      getAllowedDirectories,
+      expectedMcpUrl: resolvedJob.expectedMcpUrl,
+      jobStore,
+      source: reason === "live-exit" ? "live-exit" : "boot-recovery",
+      primaryFullName: resolvedJob.primaryRepoFullName ?? "",
+    });
+    if (
+      executeFinalization.status === "error" &&
+      !warnings.includes("GIT_PUSH_FAILED")
+    ) {
+      warnings.push("GIT_PUSH_FAILED");
+    }
+    resolvedJob = jobStore.getByLoopId(resolvedJob.loopId) ?? resolvedJob;
+  }
+
+  // Recovery path: replay multi-repo finalization for any persisted
+  // additional-repo worktrees. The live-exit path runs its own copy of this
+  // helper inside `handleProcessCompletion` (same idempotency check, so a
+  // double invocation here is a no-op). This guards the crash window between
+  // primary push/PR creation and the live block that persists the combined
+  // V2 envelope: without this, side-repo commits/pushes are never replayed
+  // and the cloud receives a primary-only envelope.
+  if (
+    command === LoopCommand.Execute &&
+    isSuccessStatus &&
+    reason !== "live-exit" &&
+    resolvedJob.additionalWorktreeDirs &&
+    resolvedJob.additionalWorktreeDirs.length > 0
+  ) {
+    try {
+      const outcome = await finalizeAdditionalReposAndPersist({
+        additionalEntries: resolvedJob.additionalWorktreeDirs,
+        primaryFullName: resolvedJob.primaryRepoFullName ?? "",
+        primaryBaseBranch: resolvedJob.baseBranch ?? "main",
+        executeFinalization,
+        claudeWorkDir,
+        loopId: resolvedJob.loopId,
+        apiBaseUrl,
+        getToken,
+        webAppOrigin: resolvedJob.webAppOrigin ?? "",
+        getAllowedDirectories,
+        artifactSlug: resolvedJob.artifactSlug,
+        expectedMcpUrl: resolvedJob.expectedMcpUrl,
+        committer: resolvedJob.committer,
+      });
+      gatewayLog.info(
+        "loop-finalizer",
+        `Additional-repo recovery for loopId=${resolvedJob.loopId}: ${outcome.status}`,
+      );
+      if (
+        outcome.status === "ok" &&
+        outcome.results.some((r) => r.status === "failed")
+      ) {
+        if (!warnings.includes("GIT_PUSH_FAILED")) {
+          warnings.push("GIT_PUSH_FAILED");
+        }
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      gatewayLog.warn(
+        "loop-finalizer",
+        `Additional-repo recovery threw for loopId=${resolvedJob.loopId}: ${message}`,
+      );
+      if (!warnings.includes("GIT_PUSH_FAILED")) {
+        warnings.push("GIT_PUSH_FAILED");
+      }
+    }
   }
 
   let remoteError: string | undefined;
@@ -798,6 +1470,21 @@ export async function finalizeLoopFromRuntime(
       cloudFinalized = true;
     }
   } else if (shouldPostErrorEvent) {
+    const supportResult = await tryUploadSupportBundle({
+      job: resolvedJob,
+      claudeWorkDir,
+      apiBaseUrl,
+      getToken,
+      jobStore,
+      loopTokenStore,
+    });
+    if (supportResult.failed) {
+      warnings.push("SUPPORT_UPLOAD_FAILED");
+      gatewayLog.warn(
+        "loop-finalizer",
+        `Support upload failed for loopId=${resolvedJob.loopId}: ${supportResult.error}`,
+      );
+    }
     const postResult = await tryPostErrorEvent(
       resolvedJob,
       claudeWorkDir,
@@ -850,6 +1537,7 @@ export async function finalizeLoopFromRuntime(
   );
 
   if (cloudFinalized || !retryableFailure) {
+    deps.schedulers?.teardownLoop(resolvedJob.loopId);
     loopTokenStore?.deleteLoopToken(resolvedJob.loopId);
   }
 

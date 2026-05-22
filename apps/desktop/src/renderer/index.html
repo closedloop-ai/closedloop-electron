@@ -6,31 +6,73 @@
     <title>ClosedLoop Gateway</title>
     <style>
       :root {
-        --bg: #f4f1ea;
-        --panel: #fffdf8;
-        --ink: #1f2937;
-        --muted: #6b7280;
-        --accent: #0f766e;
-        --border: #d6d3d1;
-        --surface: #ffffff;
-        --surface-alt: #f8fafc;
-        --accent-ink: #ffffff;
-        --focus: rgba(15, 118, 110, 0.28);
+        /* --- shadcn tokens (mirrored from packages/design-system/styles/globals.css) --- */
+        --background: oklch(0.985 0.001 267);
+        --foreground: oklch(0.232 0 0);
+        --card: oklch(0.989 0 0);
+        --card-foreground: oklch(0.232 0 0);
+        --popover: oklch(0.989 0 0);
+        --popover-foreground: oklch(0.232 0 0);
+        --primary: oklch(0.528 0.214 267);
+        --primary-foreground: oklch(1 0 0);
+        --secondary: oklch(0.925 0.058 146.3);
+        --secondary-foreground: oklch(0.381 0.113 149);
+        --muted: oklch(0.7 0 0 / 0.12);
+        --muted-foreground: oklch(0.466 0 0);
+        --accent: oklch(0.94 0.04 267);
+        --accent-foreground: oklch(0.232 0 0);
+        --destructive: oklch(0.62 0.22 29.2);
+        --destructive-foreground: oklch(1 0 0);
+        --success: oklch(0.629 0.144 155.113);
+        --success-foreground: oklch(0.35 0.1 165);
+        --warning: oklch(0.82 0.17 85);
+        --warning-foreground: oklch(0.45 0.12 85);
+        --info: oklch(0.6 0.15 250);
+        --info-foreground: oklch(0.45 0.12 250);
+        --ai: oklch(0.6 0.2 295);
+        --ai-foreground: oklch(0.4 0.15 295);
+        --border: oklch(0.5 0.008 267 / 0.1);
+        --input-border: oklch(0.5 0.008 267 / 0.14);
+        --ring: oklch(0.861 0.04 250);
+        --sidebar: oklch(0.96 0.005 267);
+        --sidebar-foreground: oklch(0.253 0 0);
+        --radius: 0.5rem;
+
         color-scheme: light;
       }
 
       @media (prefers-color-scheme: dark) {
         :root {
-          --bg: #0f1723;
-          --panel: #111c2a;
-          --ink: #e2e8f0;
-          --muted: #94a3b8;
-          --accent: #14b8a6;
-          --border: #334155;
-          --surface: #0b1320;
-          --surface-alt: #1a2637;
-          --accent-ink: #03201f;
-          --focus: rgba(20, 184, 166, 0.35);
+          --background: oklch(0.24 0.005 270);
+          --foreground: oklch(0.948 0.002 270);
+          --card: oklch(0.285 0.012 270);
+          --card-foreground: oklch(0.943 0 0);
+          --popover: oklch(0.27 0.007 270);
+          --popover-foreground: oklch(0.943 0 0);
+          --primary: oklch(0.542 0.214 266);
+          --primary-foreground: oklch(0.976 0.014 263);
+          --secondary: oklch(0.346 0.063 150);
+          --secondary-foreground: oklch(0.808 0.176 141);
+          --muted: oklch(1 0.003 270 / 0.04);
+          --muted-foreground: oklch(0.759 0 0);
+          --accent: oklch(0.3 0.05 270);
+          --accent-foreground: oklch(0.95 0 270);
+          --destructive: oklch(0.62 0.22 29.2);
+          --destructive-foreground: oklch(1 0 0);
+          --success: oklch(0.6626 0.1659 148.11);
+          --success-foreground: oklch(0.7 0.12 165);
+          --warning: oklch(0.8068 0.1549 94.06);
+          --warning-foreground: oklch(0.85 0.15 85);
+          --info: oklch(0.55 0.12 250);
+          --info-foreground: oklch(0.75 0.15 250);
+          --ai: oklch(0.55 0.18 295);
+          --ai-foreground: oklch(0.8 0.15 295);
+          --border: oklch(1 0.005 270 / 0.06);
+          --input-border: oklch(0.5 0.01 270 / 0.25);
+          --ring: oklch(0.5 0.1 270 / 0.8);
+          --sidebar: oklch(0.22 0 0);
+          --sidebar-foreground: oklch(0.887 0 0);
+
           color-scheme: dark;
         }
       }
@@ -42,47 +84,8 @@
       body {
         margin: 0;
         font-family: "Avenir Next", "Segoe UI", sans-serif;
-        background: radial-gradient(circle at 10% 20%, var(--surface-alt), var(--bg) 60%);
-        color: var(--ink);
-      }
-
-      header {
-        padding: 16px 20px 0;
-        background: var(--panel);
-      }
-
-      .header-main {
-        display: flex;
-        align-items: flex-start;
-        justify-content: space-between;
-        gap: 16px;
-        flex-wrap: wrap;
-      }
-
-      .header-controls {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        flex-wrap: wrap;
-      }
-
-      .header-controls > * {
-        align-self: center;
-      }
-
-      .header-controls button {
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        height: 36px;
-        padding: 0 12px;
-        line-height: 1;
-        font-size: 12px;
-        border: 1px solid var(--border);
-        background: var(--surface);
-        color: var(--ink);
-        border-radius: 8px;
-        cursor: pointer;
+        background: var(--sidebar);
+        color: var(--foreground);
       }
 
       .control-group {
@@ -94,7 +97,7 @@
         margin-bottom: 0;
         border: 1px solid var(--border);
         border-radius: 8px;
-        background: var(--surface);
+        background: var(--card);
         font-size: 12px;
         line-height: 1;
         white-space: nowrap;
@@ -110,32 +113,21 @@
 
       .control-group.danger-toggle {
         border-color: var(--border);
-        color: var(--muted);
+        color: var(--muted-foreground);
         transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s;
       }
 
       .control-group.danger-toggle:hover {
-        border-color: #d97706;
-        color: #d97706;
+        border-color: var(--warning);
+        color: var(--warning);
       }
 
       .control-group.danger-toggle.active {
-        background: rgba(217, 119, 6, 0.1);
-        color: #d97706;
-        border-color: #d97706;
-        box-shadow: 0 0 0 2px rgba(217, 119, 6, 0.15);
+        background: color-mix(in srgb, var(--warning) 10%, transparent);
+        color: var(--warning);
+        border-color: var(--warning);
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--warning) 15%, transparent);
         font-weight: 600;
-      }
-
-      header h1 {
-        margin: 0;
-        font-size: 20px;
-      }
-
-      .sub {
-        margin-top: 4px;
-        color: var(--muted);
-        font-size: 13px;
       }
 
       .runtime-health {
@@ -145,7 +137,7 @@
         padding: 4px 10px;
         border: 1px solid var(--border);
         border-radius: 999px;
-        background: var(--surface);
+        background: var(--card);
         font-weight: 600;
       }
 
@@ -153,54 +145,20 @@
         width: 9px;
         height: 9px;
         border-radius: 50%;
-        background: #dc2626;
+        background: var(--destructive);
       }
 
       .runtime-health.healthy .dot {
-        background: #16a34a;
+        background: var(--success);
       }
 
       .runtime-health.unhealthy .dot {
-        background: #dc2626;
-      }
-
-      nav {
-        display: flex;
-        gap: 4px;
-        padding: 0 20px;
-        background: var(--panel);
-        border-bottom: 1px solid var(--border);
-      }
-
-      nav button {
-        border: none;
-        border-bottom: 2px solid transparent;
-        background: none;
-        color: var(--muted);
-        padding: 10px 12px;
-        font-size: 13px;
-        font-weight: 500;
-        cursor: pointer;
-        transition: color 0.15s, border-color 0.15s;
-      }
-
-      nav button:hover {
-        color: var(--ink);
-      }
-
-      nav button.active {
-        color: var(--ink);
-        border-bottom-color: var(--accent);
-        font-weight: 600;
-      }
-
-      main {
-        padding: 16px 20px 20px;
+        background: var(--destructive);
       }
 
       .panel {
         display: none;
-        background: var(--panel);
+        background: var(--card);
         border: 1px solid var(--border);
         border-radius: 12px;
         padding: 16px;
@@ -211,12 +169,12 @@
       }
 
       .muted {
-        color: var(--muted);
+        color: var(--muted-foreground);
       }
 
       .dashboard-summary {
         display: grid;
-        grid-template-columns: repeat(3, 1fr);
+        grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
         gap: 10px;
         margin-bottom: 16px;
       }
@@ -224,13 +182,13 @@
       .status-card {
         border: 1px solid var(--border);
         border-radius: 10px;
-        background: var(--surface);
+        background: var(--card);
         padding: 10px;
         min-width: 0;
       }
 
       .status-label {
-        color: var(--muted);
+        color: var(--muted-foreground);
         font-size: 12px;
         margin-bottom: 4px;
       }
@@ -244,19 +202,19 @@
       }
 
       .status-value.ok {
-        color: #16a34a;
+        color: var(--success);
       }
 
       .status-value.warn {
-        color: #d97706;
+        color: var(--warning);
       }
 
       .status-value.err {
-        color: #dc2626;
+        color: var(--destructive);
       }
 
       .status-detail {
-        color: var(--muted);
+        color: var(--muted-foreground);
         font-size: 11px;
         margin-top: 4px;
         overflow: hidden;
@@ -265,7 +223,7 @@
       }
 
       .status-detail a {
-        color: var(--accent);
+        color: var(--primary);
         font-weight: 600;
       }
 
@@ -274,7 +232,7 @@
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.06em;
-        color: var(--muted);
+        color: var(--muted-foreground);
         margin-bottom: 6px;
       }
 
@@ -294,12 +252,12 @@
         align-items: baseline;
         gap: 12px;
         padding: 8px 12px;
-        background: var(--surface);
+        background: var(--card);
         min-width: 0;
       }
 
       .config-row-label {
-        color: var(--muted);
+        color: var(--muted-foreground);
         font-size: 12px;
         flex-shrink: 0;
         width: 90px;
@@ -315,11 +273,11 @@
       }
 
       .warning-text {
-        color: #d97706;
+        color: var(--warning);
       }
 
       .critical-text {
-        color: #dc2626;
+        color: var(--destructive);
       }
 
       .mono {
@@ -333,11 +291,11 @@
         gap: 12px;
         padding: 10px 14px;
         margin-bottom: 12px;
-        background: var(--surface);
+        background: var(--card);
         border: 1px solid var(--border);
-        border-left: 3px solid var(--accent);
+        border-left: 3px solid var(--primary);
         border-radius: 8px;
-        color: var(--ink);
+        color: var(--foreground);
         font-size: 13px;
         font-weight: 500;
       }
@@ -351,8 +309,8 @@
         padding: 5px 14px;
         border: none;
         border-radius: 6px;
-        background: var(--accent);
-        color: var(--accent-ink);
+        background: var(--primary);
+        color: var(--primary-foreground);
         font-size: 12px;
         font-weight: 600;
         cursor: pointer;
@@ -388,7 +346,7 @@
 
       .settings-group-desc {
         font-size: 12px;
-        color: var(--muted);
+        color: var(--muted-foreground);
         margin: 0 0 14px;
         line-height: 1.45;
       }
@@ -399,7 +357,7 @@
 
       .field-help {
         margin: 6px 0 0;
-        color: var(--muted);
+        color: var(--muted-foreground);
         font-size: 12px;
         line-height: 1.45;
       }
@@ -407,7 +365,7 @@
       label {
         display: block;
         font-size: 12px;
-        color: var(--muted);
+        color: var(--muted-foreground);
         margin-bottom: 8px;
       }
 
@@ -418,14 +376,14 @@
         border: 1px solid var(--border);
         border-radius: 8px;
         padding: 8px;
-        background: var(--surface);
-        color: var(--ink);
+        background: var(--card);
+        color: var(--foreground);
       }
 
       select {
         padding-right: 28px;
         appearance: none;
-        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%236b7280' d='M2.5 4.5L6 8l3.5-3.5'/%3E%3C/svg%3E");
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23737373' d='M2.5 4.5L6 8l3.5-3.5'/%3E%3C/svg%3E");
         background-repeat: no-repeat;
         background-position: right 10px center;
       }
@@ -434,7 +392,7 @@
       textarea:focus,
       select:focus,
       button:focus-visible {
-        outline: 2px solid var(--focus);
+        outline: 2px solid var(--ring);
         outline-offset: 1px;
       }
 
@@ -450,17 +408,17 @@
       }
 
       .actions button {
-        border: 1px solid var(--accent);
-        background: var(--accent);
-        color: var(--accent-ink);
+        border: 1px solid var(--primary);
+        background: var(--primary);
+        color: var(--primary-foreground);
         border-radius: 8px;
         padding: 8px 12px;
         cursor: pointer;
       }
 
       .actions button.secondary {
-        background: var(--surface);
-        color: var(--ink);
+        background: var(--card);
+        color: var(--foreground);
         border-color: var(--border);
       }
 
@@ -477,7 +435,7 @@
 
       .cli-tool-card {
         position: relative;
-        background: var(--surface);
+        background: var(--card);
         border: 1px solid var(--border);
         border-radius: 10px;
         padding: 14px 16px 14px 18px;
@@ -497,24 +455,17 @@
       }
 
       .cli-tool-card.state-override::before {
-        background: var(--accent);
+        background: var(--primary);
       }
 
       .cli-tool-card.state-missing::before,
       .cli-tool-card.state-invalid::before {
-        background: #d97706; /* amber-600 */
-      }
-
-      @media (prefers-color-scheme: dark) {
-        .cli-tool-card.state-missing::before,
-        .cli-tool-card.state-invalid::before {
-          background: #f59e0b; /* amber-500 */
-        }
+        background: var(--warning);
       }
 
       .cli-tool-card:focus-within {
-        border-color: var(--accent);
-        box-shadow: 0 0 0 3px var(--focus);
+        border-color: var(--primary);
+        box-shadow: 0 0 0 3px var(--ring);
       }
 
       .cli-tool-header {
@@ -535,7 +486,7 @@
       .cli-tool-label {
         font-size: 14px;
         font-weight: 600;
-        color: var(--ink);
+        color: var(--foreground);
         letter-spacing: -0.005em;
       }
 
@@ -551,7 +502,7 @@
         padding: 3px 9px 3px 8px;
         border-radius: 999px;
         background: transparent;
-        color: var(--muted);
+        color: var(--muted-foreground);
         border: 1px solid var(--border);
         white-space: nowrap;
         transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
@@ -567,37 +518,28 @@
       }
 
       .cli-tool-card.state-ok .cli-tool-badge {
-        color: var(--accent);
-        border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
-        background: color-mix(in srgb, var(--accent) 8%, transparent);
+        color: var(--primary);
+        border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
+        background: color-mix(in srgb, var(--primary) 8%, transparent);
       }
 
       .cli-tool-card.state-override .cli-tool-badge {
-        color: var(--accent);
-        border-color: var(--accent);
-        background: color-mix(in srgb, var(--accent) 12%, transparent);
+        color: var(--primary);
+        border-color: var(--primary);
+        background: color-mix(in srgb, var(--primary) 12%, transparent);
       }
 
       .cli-tool-card.state-missing .cli-tool-badge,
       .cli-tool-card.state-invalid .cli-tool-badge {
-        color: #b45309; /* amber-700 */
-        border-color: color-mix(in srgb, #d97706 40%, var(--border));
-        background: color-mix(in srgb, #d97706 10%, transparent);
-      }
-
-      @media (prefers-color-scheme: dark) {
-        .cli-tool-card.state-missing .cli-tool-badge,
-        .cli-tool-card.state-invalid .cli-tool-badge {
-          color: #fbbf24;
-          border-color: color-mix(in srgb, #f59e0b 50%, var(--border));
-          background: color-mix(in srgb, #f59e0b 15%, transparent);
-        }
+        color: var(--warning);
+        border-color: color-mix(in srgb, var(--warning) 40%, var(--border));
+        background: color-mix(in srgb, var(--warning) 10%, transparent);
       }
 
       .cli-tool-hint {
         margin: 0;
         font-size: 11px;
-        color: var(--muted);
+        color: var(--muted-foreground);
         line-height: 1.45;
       }
 
@@ -607,14 +549,7 @@
 
       .cli-tool-card.state-missing .cli-tool-hint,
       .cli-tool-card.state-invalid .cli-tool-hint {
-        color: #b45309;
-      }
-
-      @media (prefers-color-scheme: dark) {
-        .cli-tool-card.state-missing .cli-tool-hint,
-        .cli-tool-card.state-invalid .cli-tool-hint {
-          color: #fbbf24;
-        }
+        color: var(--warning);
       }
 
       .cli-tool-input-row {
@@ -635,15 +570,15 @@
 
       /* Auto-detected path displays muted to signal "default, not pinned". */
       .cli-tool-input-row input[data-mode="detected"] {
-        color: var(--muted);
+        color: var(--muted-foreground);
       }
 
       .cli-tool-input-row input[data-mode="detected"]:focus {
-        color: var(--ink);
+        color: var(--foreground);
       }
 
       .cli-tool-input-row input::placeholder {
-        color: var(--muted);
+        color: var(--muted-foreground);
         opacity: 0.55;
       }
 
@@ -658,17 +593,17 @@
         font-size: 12px;
         font-weight: 600;
         line-height: 1;
-        border: 1px solid var(--accent);
-        background: var(--accent);
-        color: var(--accent-ink);
+        border: 1px solid var(--primary);
+        background: var(--primary);
+        color: var(--primary-foreground);
         border-radius: 8px;
         cursor: pointer;
         transition: filter 0.12s ease;
       }
 
       .cli-tool-actions button.secondary {
-        background: var(--surface);
-        color: var(--ink);
+        background: var(--card);
+        color: var(--foreground);
         border-color: var(--border);
       }
 
@@ -691,7 +626,7 @@
         border-radius: 10px;
         padding: 12px 14px;
         margin-bottom: 10px;
-        background: var(--surface);
+        background: var(--card);
         position: relative;
       }
 
@@ -715,27 +650,27 @@
       }
 
       .approval-status-dot.pending {
-        background: #f59e0b;
-        box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.2);
+        background: var(--warning);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 20%, transparent);
         animation: pulse-dot 2s ease-in-out infinite;
       }
 
       .approval-status-dot.approved {
-        background: #16a34a;
+        background: var(--success);
       }
 
       .approval-status-dot.denied,
       .approval-status-dot.expired {
-        background: #dc2626;
+        background: var(--destructive);
       }
 
       .approval-status-dot.always_allow {
-        background: #2563eb;
+        background: var(--info);
       }
 
       @keyframes pulse-dot {
-        0%, 100% { box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.2); }
-        50% { box-shadow: 0 0 0 6px rgba(245, 158, 11, 0.08); }
+        0%, 100% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--warning) 20%, transparent); }
+        50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--warning) 8%, transparent); }
       }
 
       .approval-title {
@@ -757,28 +692,28 @@
       }
 
       .approval-badge.pending {
-        border-color: #f59e0b;
-        color: #f59e0b;
+        border-color: var(--warning);
+        color: var(--warning);
       }
 
       .approval-badge.approved {
-        border-color: #16a34a;
-        color: #16a34a;
+        border-color: var(--success);
+        color: var(--success);
       }
 
       .approval-badge.denied,
       .approval-badge.expired {
-        border-color: #dc2626;
-        color: #dc2626;
+        border-color: var(--destructive);
+        color: var(--destructive);
       }
 
       .approval-badge.always_allow {
-        border-color: #2563eb;
-        color: #2563eb;
+        border-color: var(--info);
+        color: var(--info);
       }
 
       .approval-meta {
-        color: var(--muted);
+        color: var(--muted-foreground);
         font-size: 12px;
         margin-bottom: 6px;
         line-height: 1.4;
@@ -797,44 +732,29 @@
       }
 
       .approval-risk-tier.risk-low {
-        background: rgba(22, 163, 74, 0.12);
-        color: #16a34a;
+        background: color-mix(in srgb, var(--success) 12%, transparent);
+        color: var(--success);
       }
 
       .approval-risk-tier.risk-medium {
-        background: rgba(245, 158, 11, 0.12);
-        color: #d97706;
+        background: color-mix(in srgb, var(--warning) 12%, transparent);
+        color: var(--warning);
       }
 
       .approval-risk-tier.risk-high {
-        background: rgba(220, 38, 38, 0.12);
-        color: #dc2626;
-      }
-
-      @media (prefers-color-scheme: dark) {
-        .approval-risk-tier.risk-low {
-          background: rgba(22, 163, 74, 0.18);
-          color: #4ade80;
-        }
-        .approval-risk-tier.risk-medium {
-          background: rgba(245, 158, 11, 0.18);
-          color: #fbbf24;
-        }
-        .approval-risk-tier.risk-high {
-          background: rgba(220, 38, 38, 0.18);
-          color: #f87171;
-        }
+        background: color-mix(in srgb, var(--destructive) 12%, transparent);
+        color: var(--destructive);
       }
 
       .approval-reason {
-        color: var(--ink);
+        color: var(--foreground);
         font-size: 13px;
         margin-bottom: 8px;
         line-height: 1.4;
       }
 
       .approval-empty {
-        color: var(--muted);
+        color: var(--muted-foreground);
         border: 1px dashed var(--border);
         border-radius: 10px;
         padding: 12px;
@@ -870,13 +790,13 @@
         height: 14px;
         left: 3px;
         top: 3px;
-        background: var(--surface);
+        background: var(--card);
         border-radius: 50%;
         transition: transform 0.2s;
       }
 
       .toggle-switch input:checked + .toggle-track {
-        background: var(--accent);
+        background: var(--primary);
       }
 
       .toggle-switch input:checked + .toggle-track::after {
@@ -889,7 +809,7 @@
         justify-content: space-between;
         margin-bottom: 10px;
         padding: 8px 12px;
-        background: var(--surface);
+        background: var(--card);
         border: 1px solid var(--border);
         border-radius: 8px;
       }
@@ -900,7 +820,7 @@
         gap: 10px;
         font-size: 12px;
         font-weight: 500;
-        color: var(--muted);
+        color: var(--muted-foreground);
         cursor: pointer;
         user-select: none;
       }
@@ -908,6 +828,21 @@
       .logs-actions {
         display: flex;
         gap: 4px;
+      }
+
+      .logs-paused-banner {
+        display: none;
+        margin: 0 0 10px;
+        padding: 7px 10px;
+        border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
+        border-radius: 8px;
+        color: var(--warning);
+        background: color-mix(in srgb, var(--warning) 8%, transparent);
+        font-size: 12px;
+      }
+
+      .logs-paused-banner.visible {
+        display: block;
       }
 
       .logs-btn {
@@ -919,15 +854,15 @@
         border-radius: 6px;
         border: 1px solid var(--border);
         background: transparent;
-        color: var(--muted);
+        color: var(--muted-foreground);
         cursor: pointer;
         transition: background 0.15s, color 0.15s, border-color 0.15s;
       }
 
       .logs-btn:hover {
-        background: var(--surface-alt);
-        color: var(--ink);
-        border-color: var(--ink);
+        background: var(--muted);
+        color: var(--foreground);
+        border-color: var(--foreground);
       }
 
       .logs-container {
@@ -936,7 +871,7 @@
         line-height: 1;
         max-height: calc(100vh - 200px);
         overflow-y: auto;
-        background: var(--surface);
+        background: var(--card);
         border: 1px solid var(--border);
         border-radius: 8px;
         padding: 4px 0;
@@ -950,42 +885,56 @@
       }
 
       .log-row:hover {
-        background: var(--surface-alt);
+        background: var(--muted);
       }
 
       .log-row.log-error {
-        border-left-color: #dc2626;
-        background: rgba(220, 38, 38, 0.06);
+        border-left-color: var(--destructive);
+        background: color-mix(in srgb, var(--destructive) 6%, transparent);
       }
 
       .log-row.log-warn {
-        border-left-color: #d97706;
-        background: rgba(245, 158, 11, 0.04);
+        border-left-color: var(--warning);
+        background: color-mix(in srgb, var(--warning) 4%, transparent);
+      }
+
+      .log-row.log-previous {
+        opacity: 0.72;
       }
 
       .log-ts {
-        color: var(--muted);
+        color: var(--muted-foreground);
         opacity: 0.7;
         flex-shrink: 0;
       }
 
       .log-tag {
-        color: var(--accent);
+        color: var(--primary);
         flex-shrink: 0;
         min-width: 110px;
       }
 
+      .log-session {
+        color: var(--muted-foreground);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 1px 6px;
+        font-size: 10px;
+        line-height: 1.2;
+        white-space: nowrap;
+      }
+
       .log-msg {
-        color: var(--ink);
+        color: var(--foreground);
         word-break: break-word;
       }
 
       .log-row.log-error .log-msg {
-        color: #f87171;
+        color: var(--destructive);
       }
 
       .log-row.log-warn .log-msg {
-        color: #fbbf24;
+        color: var(--warning);
       }
 
       .tier-override-row {
@@ -995,7 +944,7 @@
         padding: 8px 12px;
         border: 1px solid var(--border);
         border-radius: 10px;
-        background: var(--surface);
+        background: var(--card);
         margin-bottom: 6px;
       }
 
@@ -1025,14 +974,14 @@
         background: none;
         border: 1px solid var(--border);
         border-radius: 8px;
-        color: var(--muted);
+        color: var(--muted-foreground);
         cursor: pointer;
         transition: border-color 0.15s, color 0.15s;
       }
 
       .tier-override-row button:hover {
-        border-color: #dc2626;
-        color: #dc2626;
+        border-color: var(--destructive);
+        color: var(--destructive);
       }
 
       .tier-override-add {
@@ -1060,20 +1009,20 @@
         font-size: 12px;
         font-weight: 500;
         border: 1px solid var(--border);
-        background: var(--surface);
-        color: var(--ink);
+        background: var(--card);
+        color: var(--foreground);
         border-radius: 8px;
         cursor: pointer;
         transition: border-color 0.15s, color 0.15s;
       }
 
       .tier-override-add button:hover {
-        border-color: var(--accent);
-        color: var(--accent);
+        border-color: var(--primary);
+        color: var(--primary);
       }
 
       .tier-override-empty {
-        color: var(--muted);
+        color: var(--muted-foreground);
         font-size: 13px;
         padding: 8px 0;
       }
@@ -1090,7 +1039,7 @@
         padding: 10px 12px;
         border: 1px solid var(--border);
         border-radius: 10px;
-        background: var(--surface);
+        background: var(--card);
         margin-bottom: 6px;
       }
 
@@ -1110,7 +1059,7 @@
       .always-allow-rule .rule-scope {
         font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
         font-size: 11px;
-        color: var(--muted);
+        color: var(--muted-foreground);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -1118,11 +1067,11 @@
 
       .always-allow-rule .rule-ttl {
         font-size: 11px;
-        color: var(--muted);
+        color: var(--muted-foreground);
       }
 
       .always-allow-rule .rule-ttl.expiring-soon {
-        color: #d97706;
+        color: var(--warning);
       }
 
       .always-allow-rule button {
@@ -1133,20 +1082,20 @@
         background: none;
         border: 1px solid var(--border);
         border-radius: 8px;
-        color: var(--muted);
+        color: var(--muted-foreground);
         cursor: pointer;
         transition: border-color 0.15s, color 0.15s;
       }
 
       .always-allow-rule button:hover {
-        border-color: #dc2626;
-        color: #dc2626;
+        border-color: var(--destructive);
+        color: var(--destructive);
       }
 
       .resolved-section-header {
         font-size: 12px;
         font-weight: 600;
-        color: var(--muted);
+        color: var(--muted-foreground);
         text-transform: uppercase;
         letter-spacing: 0.5px;
         margin: 16px 0 8px;
@@ -1168,7 +1117,7 @@
         overflow-y: auto;
         border: 1px solid var(--border);
         border-radius: 10px;
-        background: var(--surface);
+        background: var(--card);
         padding: 10px;
       }
 
@@ -1177,7 +1126,7 @@
         border-radius: 10px;
         padding: 10px 12px;
         margin-bottom: 10px;
-        background: var(--surface-alt);
+        background: var(--muted);
       }
 
       .activity-card:last-child {
@@ -1199,26 +1148,26 @@
       }
 
       .activity-dot.success {
-        background: #16a34a;
+        background: var(--success);
       }
 
       .activity-dot.client-error {
-        background: #d97706;
+        background: var(--warning);
       }
 
       .activity-dot.server-error {
-        background: #dc2626;
+        background: var(--destructive);
       }
 
       .activity-dot.redirect {
-        background: #2563eb;
+        background: var(--info);
       }
 
       .activity-method {
         font-family: "Berkeley Mono", "JetBrains Mono", "SF Mono", "Fira Code", monospace;
         font-size: 10px;
         font-weight: 700;
-        color: var(--muted);
+        color: var(--muted-foreground);
         flex-shrink: 0;
       }
 
@@ -1241,38 +1190,38 @@
       }
 
       .activity-badge.success {
-        border-color: #16a34a;
-        color: #16a34a;
+        border-color: var(--success);
+        color: var(--success);
       }
 
       .activity-badge.client-error {
-        border-color: #d97706;
-        color: #d97706;
+        border-color: var(--warning);
+        color: var(--warning);
       }
 
       .activity-badge.server-error {
-        border-color: #dc2626;
-        color: #dc2626;
+        border-color: var(--destructive);
+        color: var(--destructive);
       }
 
       .activity-badge.redirect {
-        border-color: #2563eb;
-        color: #2563eb;
+        border-color: var(--info);
+        color: var(--info);
       }
 
       .activity-badge.security {
-        border-color: #dc2626;
-        color: #dc2626;
+        border-color: var(--destructive);
+        color: var(--destructive);
       }
 
       .activity-meta {
-        color: var(--muted);
+        color: var(--muted-foreground);
         font-size: 12px;
         line-height: 1.4;
       }
 
       .activity-detail {
-        color: var(--muted);
+        color: var(--muted-foreground);
         font-size: 12px;
         margin-top: 4px;
       }
@@ -1282,7 +1231,7 @@
       }
 
       .activity-card.expandable:hover {
-        border-color: var(--accent);
+        border-color: var(--primary);
         transition: border-color 0.15s ease;
       }
 
@@ -1292,7 +1241,7 @@
         justify-content: center;
         width: 16px;
         height: 16px;
-        color: var(--muted);
+        color: var(--muted-foreground);
         transition: transform 0.25s ease;
         flex-shrink: 0;
         font-size: 10px;
@@ -1326,7 +1275,7 @@
       .activity-method-path {
         font-family: "Berkeley Mono", "JetBrains Mono", "SF Mono", "Fira Code", monospace;
         font-size: 11px;
-        color: var(--accent);
+        color: var(--primary);
         font-weight: 600;
         word-break: break-all;
         line-height: 1.4;
@@ -1340,7 +1289,7 @@
         font-size: 10px;
         text-transform: uppercase;
         letter-spacing: 0.08em;
-        color: var(--muted);
+        color: var(--muted-foreground);
         font-weight: 600;
         margin-bottom: 4px;
       }
@@ -1349,9 +1298,9 @@
         font-family: "Berkeley Mono", "JetBrains Mono", "SF Mono", "Fira Code", monospace;
         font-size: 11px;
         line-height: 1.5;
-        background: var(--surface);
+        background: var(--card);
         border: 1px solid var(--border);
-        border-left: 3px solid var(--accent);
+        border-left: 3px solid var(--primary);
         border-radius: 6px;
         padding: 8px 10px;
         margin: 0;
@@ -1359,25 +1308,17 @@
         word-break: break-all;
         max-height: 200px;
         overflow-y: auto;
-        color: var(--ink);
+        color: var(--foreground);
       }
 
-      .json-key { color: #0f766e; }
-      .json-str { color: #b45309; }
-      .json-num { color: #7c3aed; }
-      .json-bool { color: #2563eb; }
-      .json-null { color: #9ca3af; font-style: italic; }
-
-      @media (prefers-color-scheme: dark) {
-        .json-key { color: #5eead4; }
-        .json-str { color: #fbbf24; }
-        .json-num { color: #c4b5fd; }
-        .json-bool { color: #60a5fa; }
-        .json-null { color: #6b7280; }
-      }
+      .json-key { color: var(--primary); }
+      .json-str { color: var(--warning); }
+      .json-num { color: var(--ai); }
+      .json-bool { color: var(--info); }
+      .json-null { color: var(--muted-foreground); font-style: italic; }
 
       pre {
-        background: var(--surface-alt);
+        background: var(--muted);
         border: 1px solid var(--border);
         padding: 12px;
         border-radius: 8px;
@@ -1393,7 +1334,7 @@
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 0.08em;
-        color: var(--muted);
+        color: var(--muted-foreground);
         margin: 0 0 8px;
       }
 
@@ -1422,7 +1363,7 @@
       .job-list {
         border: 1px solid var(--border);
         border-radius: 10px;
-        background: var(--surface);
+        background: var(--card);
         padding: 10px;
       }
 
@@ -1431,7 +1372,7 @@
         border-radius: 10px;
         padding: 10px 12px;
         margin-bottom: 8px;
-        background: var(--surface-alt);
+        background: var(--muted);
       }
 
       .job-card:last-child {
@@ -1464,49 +1405,50 @@
       }
 
       .job-status-badge.running {
-        border-color: #16a34a;
-        color: #16a34a;
+        border-color: var(--success);
+        color: var(--success);
       }
 
       .job-status-badge.queued,
       .job-status-badge.starting {
-        border-color: #2563eb;
-        color: #2563eb;
+        border-color: var(--info);
+        color: var(--info);
       }
 
       .job-status-badge.cancel-pending {
-        border-color: #d97706;
-        color: #d97706;
+        border-color: var(--warning);
+        color: var(--warning);
       }
 
       .job-status-badge.completed {
-        border-color: #6b7280;
-        color: #6b7280;
+        border-color: var(--muted-foreground);
+        color: var(--muted-foreground);
       }
 
       .job-status-badge.failed {
-        border-color: #dc2626;
-        color: #dc2626;
+        border-color: var(--destructive);
+        color: var(--destructive);
       }
 
       .job-status-badge.awaiting-user {
-        border-color: #8b5cf6;
-        color: #8b5cf6;
+        border-color: var(--ai);
+        color: var(--ai);
       }
 
-      .job-status-badge.stopped {
-        border-color: #f59e0b;
-        color: #f59e0b;
+      .job-status-badge.stopped,
+      .job-status-badge.timed-out {
+        border-color: var(--warning);
+        color: var(--warning);
       }
 
       .job-status-badge.cancelled,
       .job-status-badge.unknown {
-        border-color: #9ca3af;
-        color: #9ca3af;
+        border-color: var(--muted-foreground);
+        color: var(--muted-foreground);
       }
 
       .job-meta {
-        color: var(--muted);
+        color: var(--muted-foreground);
         font-size: 12px;
         line-height: 1.4;
       }
@@ -1514,7 +1456,7 @@
       .job-phase {
         font-family: "Berkeley Mono", "JetBrains Mono", "SF Mono", "Fira Code", monospace;
         font-size: 11px;
-        color: var(--accent);
+        color: var(--primary);
         margin-top: 2px;
       }
 
@@ -1523,14 +1465,14 @@
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 0.08em;
-        color: var(--muted);
+        color: var(--muted-foreground);
         margin: 16px 0 8px;
       }
 
       .onboarding-overlay {
         position: fixed;
         inset: 0;
-        background: rgba(15, 23, 42, 0.72);
+        background: oklch(0 0 0 / 0.72);
         display: flex;
         align-items: center;
         justify-content: center;
@@ -1546,7 +1488,7 @@
         width: min(760px, 100%);
         max-height: calc(100vh - 40px);
         overflow-y: auto;
-        background: var(--panel);
+        background: var(--card);
         border: 1px solid var(--border);
         border-radius: 14px;
         padding: 22px;
@@ -1567,30 +1509,30 @@
         display: flex;
         gap: 0;
         border-bottom: 1px solid var(--border);
-        margin: -16px -22px 20px;
-        padding: 0 22px;
+        margin: -16px -16px 20px;
+        padding: 0 16px;
       }
 
       .settings-sub-nav button {
         background: none;
         border: none;
         border-bottom: 2px solid transparent;
-        color: var(--muted);
-        padding: 10px 16px;
-        font-size: 12px;
-        font-weight: 600;
-        letter-spacing: 0.02em;
+        color: var(--muted-foreground);
+        padding: 10px 12px;
+        font-size: 13px;
+        font-weight: 500;
         cursor: pointer;
         transition: color 0.15s, border-color 0.15s;
       }
 
       .settings-sub-nav button:hover {
-        color: var(--ink);
+        color: var(--foreground);
       }
 
       .settings-sub-nav button.active {
-        color: var(--accent);
-        border-bottom-color: var(--accent);
+        color: var(--foreground);
+        border-bottom-color: var(--primary);
+        font-weight: 600;
       }
 
       .settings-sub-panel {
@@ -1625,14 +1567,14 @@
         padding: 8px 12px;
         border: 1px solid var(--border);
         border-radius: 8px;
-        background: var(--surface);
-        color: var(--ink);
+        background: var(--card);
+        color: var(--foreground);
         font-size: 13px;
       }
 
       .saved-configs-create input:focus {
         outline: none;
-        border-color: var(--accent);
+        border-color: var(--primary);
       }
 
       .saved-configs-create button {
@@ -1641,9 +1583,9 @@
         font-size: 13px;
         font-weight: 600;
         cursor: pointer;
-        background: var(--accent);
-        color: var(--accent-ink);
-        border: 1px solid var(--accent);
+        background: var(--primary);
+        color: var(--primary-foreground);
+        border: 1px solid var(--primary);
       }
 
       .saved-configs-create button:disabled {
@@ -1652,9 +1594,9 @@
       }
 
       .saved-configs-create button.confirming {
-        background: #d97706;
-        border-color: #d97706;
-        color: #fff;
+        background: var(--warning);
+        border-color: var(--warning);
+        color: var(--primary-foreground);
       }
 
       .saved-configs-list {
@@ -1670,12 +1612,12 @@
         padding: 10px 12px;
         border: 1px solid var(--border);
         border-radius: 10px;
-        background: var(--surface);
+        background: var(--card);
       }
 
       .saved-config-row.active {
-        border-color: var(--accent);
-        box-shadow: inset 0 0 0 1px var(--accent);
+        border-color: var(--primary);
+        box-shadow: inset 0 0 0 1px var(--primary);
       }
 
       .saved-config-info {
@@ -1689,7 +1631,7 @@
       .saved-config-name {
         font-weight: 600;
         font-size: 13px;
-        color: var(--ink);
+        color: var(--foreground);
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -1697,7 +1639,7 @@
 
       .saved-config-meta {
         font-size: 11px;
-        color: var(--muted);
+        color: var(--muted-foreground);
       }
 
       .saved-config-badge {
@@ -1709,8 +1651,8 @@
         font-weight: 600;
         letter-spacing: 0.02em;
         text-transform: uppercase;
-        background: var(--accent);
-        color: var(--accent-ink);
+        background: var(--primary);
+        color: var(--primary-foreground);
       }
 
       .saved-config-actions {
@@ -1726,30 +1668,30 @@
         background: none;
         border: 1px solid var(--border);
         border-radius: 8px;
-        color: var(--muted);
+        color: var(--muted-foreground);
         cursor: pointer;
         transition: border-color 0.15s, color 0.15s, background 0.15s;
       }
 
       .saved-config-actions button:hover {
-        color: var(--ink);
-        border-color: var(--ink);
+        color: var(--foreground);
+        border-color: var(--foreground);
       }
 
       .saved-config-actions button.switch-btn:hover {
-        color: var(--accent);
-        border-color: var(--accent);
+        color: var(--primary);
+        border-color: var(--primary);
       }
 
       .saved-config-actions button.delete-btn:hover {
-        color: #dc2626;
-        border-color: #dc2626;
+        color: var(--destructive);
+        border-color: var(--destructive);
       }
 
       .saved-config-actions button.delete-btn.confirming {
-        color: #fff;
-        background: #dc2626;
-        border-color: #dc2626;
+        color: var(--primary-foreground);
+        background: var(--destructive);
+        border-color: var(--destructive);
       }
 
       .saved-config-rename {
@@ -1762,10 +1704,10 @@
       .saved-config-rename input {
         flex: 1;
         padding: 6px 10px;
-        border: 1px solid var(--accent);
+        border: 1px solid var(--primary);
         border-radius: 8px;
-        background: var(--bg);
-        color: var(--ink);
+        background: var(--background);
+        color: var(--foreground);
         font-size: 13px;
       }
 
@@ -1798,21 +1740,21 @@
       }
 
       .saved-configs-status.success {
-        background: color-mix(in srgb, var(--accent) 12%, var(--surface));
-        border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
-        color: var(--accent);
+        background: color-mix(in srgb, var(--primary) 12%, var(--card));
+        border-color: color-mix(in srgb, var(--primary) 50%, var(--border));
+        color: var(--primary);
       }
 
       .saved-configs-status.warning {
-        background: color-mix(in srgb, #d97706 14%, var(--surface));
-        border-color: color-mix(in srgb, #d97706 55%, var(--border));
-        color: #d97706;
+        background: color-mix(in srgb, var(--warning) 14%, var(--card));
+        border-color: color-mix(in srgb, var(--warning) 55%, var(--border));
+        color: var(--warning);
       }
 
       .saved-configs-status.error {
-        background: color-mix(in srgb, #dc2626 14%, var(--surface));
-        border-color: color-mix(in srgb, #dc2626 55%, var(--border));
-        color: #dc2626;
+        background: color-mix(in srgb, var(--destructive) 14%, var(--card));
+        border-color: color-mix(in srgb, var(--destructive) 55%, var(--border));
+        color: var(--destructive);
       }
 
       .saved-configs-empty {
@@ -1820,7 +1762,7 @@
         text-align: center;
         border: 1px dashed var(--border);
         border-radius: 10px;
-        color: var(--muted);
+        color: var(--muted-foreground);
         font-size: 12px;
         margin: 0;
       }
@@ -1841,42 +1783,1103 @@
       }
 
       .settings-tab-footer button:not(.secondary) {
-        background: var(--accent);
-        color: var(--accent-ink);
-        border-color: var(--accent);
+        background: var(--primary);
+        color: var(--primary-foreground);
+        border-color: var(--primary);
       }
 
       .settings-tab-footer button.secondary {
-        background: var(--surface);
-        color: var(--ink);
+        background: var(--card);
+        color: var(--foreground);
+      }
+
+      /* ============================================================
+         Security tab — "Console" layout
+         ============================================================ */
+
+      #settings-security {
+        --sec-mono: "Berkeley Mono", "JetBrains Mono", "SF Mono", "Fira Code", ui-monospace, monospace;
+        --sec-ok: var(--success);
+        --sec-warn: var(--warning);
+        --sec-danger: var(--destructive);
+      }
+
+      .sec-eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-family: var(--sec-mono);
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--muted-foreground);
+        margin: 0 0 10px;
+      }
+
+      .sec-eyebrow::before {
+        content: "";
+        width: 18px;
+        height: 1px;
+        background: currentColor;
+        opacity: 0.5;
+      }
+
+      .sec-eyebrow .sec-count {
+        margin-left: 4px;
+        padding: 1px 7px;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--foreground) 8%, transparent);
+        color: var(--foreground);
+        font-size: 10px;
+        letter-spacing: 0.04em;
+      }
+
+      /* Posture strip ---------------------------------------------- */
+      .sec-posture {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 10px;
+        margin-bottom: 22px;
+      }
+
+      .sec-tile {
+        position: relative;
+        padding: 14px 16px 14px 18px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+      }
+
+      .sec-tile::before {
+        content: "";
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 3px;
+        background: var(--muted);
+        opacity: 0.5;
+        border-top-left-radius: 12px;
+        border-bottom-left-radius: 12px;
+      }
+
+      .sec-tile.tone-ok::before { background: var(--sec-ok); opacity: 1; }
+      .sec-tile.tone-warn::before { background: var(--sec-warn); opacity: 1; }
+      .sec-tile.tone-danger::before { background: var(--sec-danger); opacity: 1; }
+
+      .sec-tile:hover {
+        transform: translateY(-1px);
+        border-color: color-mix(in srgb, var(--foreground) 25%, var(--border));
+      }
+
+      .sec-tile-label {
+        font-family: var(--sec-mono);
+        font-size: 9.5px;
+        font-weight: 600;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--muted-foreground);
+        margin: 0 0 6px;
+      }
+
+      .sec-tile-value {
+        font-size: 18px;
+        font-weight: 600;
+        letter-spacing: -0.012em;
+        color: var(--foreground);
+        margin: 0;
+        line-height: 1.15;
+      }
+
+      .sec-tile.tone-ok .sec-tile-value { color: var(--sec-ok); }
+      .sec-tile.tone-warn .sec-tile-value { color: var(--sec-warn); }
+      .sec-tile.tone-danger .sec-tile-value { color: var(--sec-danger); }
+
+      .sec-tile-detail {
+        margin: 6px 0 0;
+        font-size: 11.5px;
+        color: var(--muted-foreground);
+        line-height: 1.4;
+      }
+
+      /* Section card ----------------------------------------------- */
+      .sec-section {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 14px;
+        padding: 18px 20px;
+        margin-bottom: 18px;
+      }
+
+      .sec-section-head {
+        display: flex;
+        align-items: flex-end;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 14px;
+      }
+
+      .sec-section-title {
+        font-size: 16px;
+        font-weight: 600;
+        margin: 0;
+        letter-spacing: -0.012em;
+      }
+
+      .sec-section-desc {
+        font-size: 12px;
+        color: var(--muted-foreground);
+        margin: 4px 0 0;
+        line-height: 1.5;
+        max-width: 56ch;
+      }
+
+      /* Sandbox perimeter ------------------------------------------ */
+      .sec-perimeter {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        align-items: stretch;
+        gap: 12px;
+      }
+
+      .sec-path-display {
+        position: relative;
+        padding: 16px 18px 14px;
+        background: color-mix(in srgb, var(--primary) 6%, var(--muted));
+        border: 1px solid color-mix(in srgb, var(--primary) 25%, var(--border));
+        border-radius: 10px;
+        min-width: 0;
+      }
+
+      .sec-path-tag {
+        font-family: var(--sec-mono);
+        font-size: 9.5px;
+        font-weight: 600;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--sec-ok);
+        margin: 0 0 6px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .sec-path-tag::before {
+        content: "";
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: currentColor;
+        box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 22%, transparent);
+      }
+
+      .sec-path-value {
+        font-family: var(--sec-mono);
+        font-size: 14px;
+        font-weight: 500;
+        color: var(--foreground);
+        word-break: break-all;
+        line-height: 1.45;
+        margin: 0;
+      }
+
+      .sec-path-empty {
+        font-family: var(--sec-mono);
+        font-size: 13px;
+        color: var(--muted-foreground);
+        font-style: italic;
+      }
+
+      .sec-perimeter-action {
+        display: flex;
+        align-items: flex-end;
+      }
+
+      .sec-perimeter-action button {
+        padding: 9px 16px;
+        border-radius: 9px;
+        font-size: 12.5px;
+        font-weight: 600;
+        cursor: pointer;
+        background: var(--card);
+        color: var(--foreground);
+        border: 1px solid var(--border);
+        transition: border-color 0.15s, color 0.15s;
+        white-space: nowrap;
+      }
+
+      .sec-perimeter-action button:hover {
+        border-color: var(--primary);
+        color: var(--primary);
+      }
+
+      .sec-perimeter-warning {
+        grid-column: 1 / -1;
+        margin: 4px 0 0;
+        padding: 8px 12px;
+        background: color-mix(in srgb, var(--sec-warn) 10%, transparent);
+        border: 1px solid color-mix(in srgb, var(--sec-warn) 35%, var(--border));
+        border-radius: 8px;
+        color: var(--sec-warn);
+        font-size: 12px;
+        line-height: 1.4;
+      }
+
+      .sec-perimeter-warning:empty {
+        display: none;
+      }
+
+      .sec-denylist {
+        grid-column: 1 / -1;
+        margin: 14px 0 0;
+        padding-top: 14px;
+        border-top: 1px dashed var(--border);
+      }
+
+      .sec-denylist-label {
+        font-family: var(--sec-mono);
+        font-size: 9.5px;
+        font-weight: 600;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--sec-danger);
+        margin: 0 0 8px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .sec-denylist-label::before {
+        content: "";
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: currentColor;
+      }
+
+      .sec-denylist-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .sec-deny-chip {
+        font-family: var(--sec-mono);
+        font-size: 11px;
+        padding: 3px 9px;
+        border-radius: 6px;
+        background: color-mix(in srgb, var(--sec-danger) 8%, transparent);
+        border: 1px solid color-mix(in srgb, var(--sec-danger) 25%, var(--border));
+        color: color-mix(in srgb, var(--sec-danger) 80%, var(--foreground));
+      }
+
+      /* Browser command keys --------------------------------------- */
+      .sec-enforcement {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 12px;
+        align-items: center;
+        padding: 14px 16px;
+        margin-bottom: 16px;
+        background: color-mix(in srgb, var(--primary) 6%, var(--muted));
+        border: 1px solid color-mix(in srgb, var(--primary) 22%, var(--border));
+        border-radius: 10px;
+      }
+
+      .sec-enforcement-title {
+        margin: 0;
+        font-size: 13.5px;
+        font-weight: 600;
+      }
+
+      .sec-enforcement-copy {
+        margin: 4px 0 0;
+        color: var(--muted-foreground);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .sec-toggle {
+        display: inline-flex;
+        align-items: center;
+        align-self: center;
+        justify-self: end;
+        gap: 8px;
+        margin: 0;
+        color: var(--foreground);
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 18px;
+        white-space: nowrap;
+      }
+
+      .sec-toggle input {
+        display: block;
+        width: 18px;
+        height: 18px;
+        margin: 0;
+        accent-color: var(--primary);
+      }
+
+      .sec-keys-zone {
+        margin-top: 6px;
+      }
+
+      .sec-keys-zone + .sec-keys-zone {
+        margin-top: 22px;
+      }
+
+      .sec-key-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .sec-key-card {
+        position: relative;
+        display: grid;
+        grid-template-columns: auto 1fr auto;
+        align-items: center;
+        gap: 14px;
+        padding: 12px 14px 12px 16px;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 11px;
+        overflow: hidden;
+        transition: border-color 0.15s ease, transform 0.15s ease;
+        animation: sec-fade-in 0.32s ease both;
+      }
+
+      @keyframes sec-fade-in {
+        from { opacity: 0; transform: translateY(4px); }
+        to { opacity: 1; transform: translateY(0); }
+      }
+
+      .sec-key-card::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 3px;
+      }
+
+      .sec-key-card.is-authorized::before { background: var(--sec-ok); }
+      .sec-key-card.is-pending::before { background: var(--sec-warn); }
+
+      .sec-key-card:hover {
+        border-color: color-mix(in srgb, var(--foreground) 22%, var(--border));
+      }
+
+      .sec-avatar {
+        width: 36px;
+        height: 36px;
+        border-radius: 10px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: var(--sec-mono);
+        font-size: 13px;
+        font-weight: 600;
+        color: var(--primary-foreground);
+        letter-spacing: 0.02em;
+        flex-shrink: 0;
+        background: linear-gradient(135deg, var(--sec-avatar-from, var(--primary)), var(--sec-avatar-to, var(--primary)));
+        box-shadow: inset 0 0 0 1px oklch(1 0 0 / 0.18);
+      }
+
+      .sec-key-body {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .sec-key-name {
+        font-size: 13.5px;
+        font-weight: 600;
+        color: var(--foreground);
+        line-height: 1.2;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .sec-key-meta {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .sec-key-email {
+        font-size: 11.5px;
+        color: var(--muted-foreground);
+      }
+
+      .sec-fingerprint {
+        font-family: var(--sec-mono);
+        font-size: 10.5px;
+        padding: 2px 7px;
+        border-radius: 5px;
+        background: color-mix(in srgb, var(--foreground) 7%, transparent);
+        color: color-mix(in srgb, var(--foreground) 85%, var(--muted-foreground));
+        letter-spacing: 0.02em;
+      }
+
+      .sec-key-card.is-pending .sec-fingerprint {
+        background: color-mix(in srgb, var(--sec-warn) 12%, transparent);
+        color: color-mix(in srgb, var(--sec-warn) 90%, var(--foreground));
+      }
+
+      .sec-key-actions {
+        display: flex;
+        gap: 6px;
+        flex-shrink: 0;
+      }
+
+      .sec-key-actions button {
+        padding: 6px 12px;
+        font-size: 11.5px;
+        font-weight: 600;
+        border-radius: 7px;
+        cursor: pointer;
+        border: 1px solid var(--border);
+        background: var(--card);
+        color: var(--muted-foreground);
+        transition: color 0.15s, border-color 0.15s, background 0.15s;
+      }
+
+      .sec-key-actions button:hover {
+        color: var(--foreground);
+        border-color: var(--foreground);
+      }
+
+      .sec-key-actions button.is-primary {
+        background: var(--primary);
+        color: var(--primary-foreground);
+        border-color: var(--primary);
+      }
+
+      .sec-key-actions button.is-primary:hover {
+        filter: brightness(1.06);
+        color: var(--primary-foreground);
+        border-color: var(--primary);
+      }
+
+      .sec-key-actions button.is-danger:hover {
+        color: var(--sec-danger);
+        border-color: var(--sec-danger);
+      }
+
+      .sec-empty {
+        padding: 18px 16px;
+        text-align: center;
+        border: 1px dashed var(--border);
+        border-radius: 10px;
+        color: var(--muted-foreground);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .sec-empty strong {
+        display: block;
+        color: var(--foreground);
+        font-size: 13px;
+        margin-bottom: 2px;
+      }
+
+      .sec-error {
+        margin-top: 10px;
+        padding: 10px 12px;
+        background: color-mix(in srgb, var(--sec-danger) 10%, transparent);
+        border: 1px solid color-mix(in srgb, var(--sec-danger) 35%, var(--border));
+        border-radius: 8px;
+        color: var(--sec-danger);
+        font-size: 12px;
+      }
+
+      /* Manual key entry disclosure -------------------------------- */
+      .sec-manual {
+        margin-top: 16px;
+        border: 1px solid var(--border);
+        border-radius: 11px;
+        background: var(--card);
+        overflow: hidden;
+      }
+
+      .sec-manual > summary {
+        list-style: none;
+        cursor: pointer;
+        padding: 12px 16px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        font-size: 12.5px;
+        font-weight: 600;
+        color: var(--foreground);
+        transition: background 0.15s;
+      }
+
+      .sec-manual > summary::-webkit-details-marker { display: none; }
+
+      .sec-manual > summary:hover {
+        background: color-mix(in srgb, var(--foreground) 4%, transparent);
+      }
+
+      .sec-manual-summary-meta {
+        font-family: var(--sec-mono);
+        font-size: 10px;
+        font-weight: 500;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--muted-foreground);
+      }
+
+      .sec-manual-chevron {
+        width: 10px;
+        height: 10px;
+        border-right: 1.5px solid var(--muted-foreground);
+        border-bottom: 1.5px solid var(--muted-foreground);
+        transform: rotate(-45deg);
+        transition: transform 0.2s ease;
+        margin-right: 4px;
+      }
+
+      .sec-manual[open] .sec-manual-chevron {
+        transform: rotate(45deg);
+      }
+
+      .sec-manual-body {
+        padding: 4px 16px 16px;
+        border-top: 1px solid var(--border);
+        margin-top: 0;
+      }
+
+      .sec-manual-body label {
+        margin-top: 12px;
+      }
+
+      .sec-manual-body textarea {
+        font-family: var(--sec-mono);
+        font-size: 12px;
+        resize: vertical;
+        min-height: 64px;
+      }
+
+      .sec-manual-body input {
+        margin-top: 8px;
+      }
+
+      .sec-manual-body .actions {
+        margin-top: 10px;
+      }
+
+      .sec-manual-body .actions button {
+        padding: 7px 14px;
+        font-size: 12px;
+        font-weight: 600;
+        border-radius: 8px;
+        cursor: pointer;
+        background: var(--primary);
+        color: var(--primary-foreground);
+        border: 1px solid var(--primary);
+      }
+
+      @media (max-width: 720px) {
+        .sec-posture { grid-template-columns: 1fr; }
+        .sec-perimeter { grid-template-columns: 1fr; }
+        .sec-perimeter-action { justify-content: stretch; }
+        .sec-perimeter-action button { width: 100%; }
+        .sec-key-card { grid-template-columns: auto 1fr; }
+        .sec-key-actions { grid-column: 1 / -1; justify-content: flex-end; }
+      }
+
+      /* CSS-only tooltip (used by [data-tooltip]) ------------------ */
+      [data-tooltip] {
+        position: relative;
+      }
+
+      [data-tooltip]::after {
+        content: attr(data-tooltip);
+        position: absolute;
+        z-index: 100;
+        bottom: calc(100% + 8px);
+        left: 50%;
+        transform: translate(-50%, 4px);
+        padding: 8px 11px;
+        background: var(--foreground);
+        color: var(--background);
+        font-family: "Avenir Next", "Segoe UI", sans-serif;
+        font-size: 11.5px;
+        font-weight: 500;
+        line-height: 1.45;
+        letter-spacing: 0;
+        text-transform: none;
+        text-align: left;
+        border-radius: 8px;
+        width: max-content;
+        max-width: 260px;
+        white-space: normal;
+        pointer-events: none;
+        opacity: 0;
+        visibility: hidden;
+        box-shadow: 0 6px 20px oklch(0 0 0 / 0.22);
+        transition: opacity 0.12s ease 0s, transform 0.12s ease 0s, visibility 0s linear 0.12s;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        [data-tooltip]::after {
+          box-shadow: 0 6px 20px oklch(0 0 0 / 0.55);
+        }
+      }
+
+      [data-tooltip]:hover::after,
+      [data-tooltip]:focus-visible::after {
+        opacity: 1;
+        visibility: visible;
+        transform: translate(-50%, 0);
+        transition-delay: 0.12s, 0.12s, 0s;
+      }
+
+      [data-tooltip][data-tooltip-pos="bottom"]::after {
+        bottom: auto;
+        top: calc(100% + 8px);
+        transform: translate(-50%, -4px);
+      }
+
+      [data-tooltip][data-tooltip-pos="bottom"]:hover::after,
+      [data-tooltip][data-tooltip-pos="bottom"]:focus-visible::after {
+        transform: translate(-50%, 0);
+      }
+
+      #onboardingPopupBackdrop {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.5);
+        align-items: center;
+        justify-content: center;
+        z-index: 9999;
+      }
+
+      #onboardingPopupBackdrop.visible {
+        display: flex;
+      }
+
+      #onboardingPopup {
+        max-width: 440px;
+        width: calc(100% - 48px);
+        background: var(--card);
+        color: var(--foreground);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 24px;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+      }
+
+      #onboardingPopup h2 {
+        margin: 0 0 8px;
+        font-size: 16px;
+        font-weight: 600;
+      }
+
+      #onboardingPopup p {
+        margin: 0 0 20px;
+        font-size: 13px;
+        line-height: 1.5;
+        color: var(--muted-foreground);
+      }
+
+      #onboardingPopupActions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        justify-content: flex-end;
+      }
+
+      #onboardingPopupActions button {
+        padding: 8px 14px;
+        border-radius: 6px;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--foreground);
+      }
+
+      #onboardingPopupActions button.primary {
+        background: var(--primary);
+        color: var(--primary-foreground);
+        border-color: transparent;
+      }
+
+      #onboardingPopupActions button:hover {
+        filter: brightness(1.1);
+      }
+
+      /* ════════════════════════════════════════════════════════════
+         ClosedLoop Gateway shell — left sidebar + topbar.
+         Ported from the Claude Design "Dashboard.html" handoff bundle;
+         color tokens mirror packages/design-system/styles/globals.css.
+         ════════════════════════════════════════════════════════════ */
+      :root {
+        /* Chart palette — 8 tokens (globals.css ships 5; 6-8 added here). */
+        --chart-1: oklch(0.62 0.22 266);
+        --chart-2: oklch(0.7 0.15 221);
+        --chart-3: oklch(0.7 0.19 158);
+        --chart-4: oklch(0.75 0.18 119);
+        --chart-5: oklch(0.66 0.2 52);
+        --chart-6: oklch(0.66 0.22 25);
+        --chart-7: oklch(0.7 0.18 340);
+        --chart-8: oklch(0.62 0.2 295);
+        --sidebar-primary: oklch(0.322 0 0);
+        --sidebar-primary-foreground: oklch(0.985 0 0);
+        --sidebar-accent: oklch(0.92 0.008 267);
+        --sidebar-accent-foreground: oklch(0.322 0 0);
+        --sidebar-border: oklch(0.933 0 0);
+        --sidebar-ring: oklch(0.762 0 0);
+        --radius-sm: calc(var(--radius) - 4px);
+        --radius-md: calc(var(--radius) - 2px);
+        --radius-lg: var(--radius);
+        --radius-xl: calc(var(--radius) + 4px);
+        --font-sans: "Geist", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+        --font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --sidebar-primary: oklch(0.476 0.199 270);
+          --sidebar-primary-foreground: oklch(1 0 0);
+          --sidebar-accent: oklch(0.262 0.008 270);
+          --sidebar-accent-foreground: oklch(0.961 0.002 270);
+          --sidebar-border: oklch(0.266 0.005 270);
+          --sidebar-ring: oklch(0.852 0.004 270);
+        }
+      }
+
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+      }
+
+      body {
+        font-family: var(--font-sans);
+        background: var(--sidebar);
+        color: var(--foreground);
+      }
+
+      /* ── App shell ─────────────────────────────────────────────── */
+      .app {
+        display: grid;
+        grid-template-columns: 232px 1fr;
+        height: 100%;
+        background: var(--sidebar);
+        --status: var(--success);
+        --status-foreground: var(--success-foreground);
+      }
+      .app.sidebar-collapsed {
+        grid-template-columns: 60px 1fr;
+      }
+      .app.state-degraded {
+        --status: var(--warning);
+        --status-foreground: var(--warning-foreground);
+      }
+      .app.state-disconnected {
+        --status: var(--destructive);
+        --status-foreground: var(--destructive-foreground);
+      }
+      .app .main {
+        background: var(--background);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        margin: 8px 8px 8px 0;
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        box-shadow: 0 1px 2px 0 rgb(0 0 0 / 0.04);
+      }
+
+      /* ── Sidebar ───────────────────────────────────────────────── */
+      .sidebar {
+        display: flex;
+        flex-direction: column;
+        padding: 10px 8px 8px;
+        gap: 2px;
+        color: var(--sidebar-foreground);
+        overflow: hidden;
+        min-width: 0;
+      }
+      .sb-brand {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 8px 18px;
+      }
+      .sb-brand .mark {
+        width: 22px;
+        height: 22px;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--foreground);
+      }
+      .sb-brand .name {
+        font-weight: 600;
+        font-size: 13px;
+        letter-spacing: -0.005em;
+        line-height: 1;
+        color: var(--foreground);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .sb-nav {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        flex: 1;
+        overflow-y: auto;
+        min-height: 0;
+      }
+      .sb-section {
+        font-size: 11px;
+        font-weight: 500;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted-foreground);
+        padding: 18px 10px 4px;
+      }
+      .sb-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 10px;
+        border-radius: 6px;
+        color: var(--sidebar-foreground);
+        cursor: pointer;
+        font-size: 13px;
+        user-select: none;
+        white-space: nowrap;
+        overflow: hidden;
+        border: 0;
+        background: none;
+        width: 100%;
+        text-align: left;
+        font-family: inherit;
+        transition: background 0.12s, color 0.12s;
+      }
+      .sb-item:hover {
+        background: var(--sidebar-accent);
+      }
+      .sb-item.active {
+        background: var(--sidebar-accent);
+        color: var(--sidebar-accent-foreground);
+        font-weight: 500;
+      }
+      .sb-item > .ico {
+        width: 16px;
+        height: 16px;
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .sb-item > .ico svg {
+        width: 16px;
+        height: 16px;
+      }
+      .sb-item > .sb-label {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .sb-item .count {
+        margin-left: auto;
+        background: var(--muted);
+        color: var(--muted-foreground);
+        font-size: 11px;
+        padding: 1px 6px;
+        border-radius: 9999px;
+        font-family: var(--font-mono);
+        font-weight: 500;
+      }
+      .sb-item .count:empty,
+      .sb-item .count[data-count="0"] {
+        display: none;
+      }
+      .sb-spacer {
+        flex: 0 0 6px;
+      }
+      .sb-foot {
+        margin: 8px 2px 2px;
+        padding: 9px 10px;
+        border-radius: 8px;
+        background: var(--card);
+        border: 1px solid var(--border);
+      }
+      .sb-foot .runtime-health {
+        border: 0;
+        background: none;
+        padding: 0;
+        font-size: 12px;
+      }
+      .sb-version {
+        padding: 6px 12px 4px;
+        font-size: 11px;
+        font-family: var(--font-mono);
+        color: var(--muted-foreground);
+        letter-spacing: 0.02em;
+      }
+      /* Collapsed sidebar */
+      .app.sidebar-collapsed .sb-brand {
+        justify-content: center;
+        padding: 6px 0 12px;
+      }
+      .app.sidebar-collapsed .sb-brand .name,
+      .app.sidebar-collapsed .sb-item > .sb-label,
+      .app.sidebar-collapsed .sb-item .count,
+      .app.sidebar-collapsed .sb-section,
+      .app.sidebar-collapsed .sb-foot,
+      .app.sidebar-collapsed .sb-version {
+        display: none;
+      }
+      .app.sidebar-collapsed .sb-item {
+        justify-content: center;
+        padding: 6px;
+      }
+      /* Agent nav hidden when the Agent Dashboard sidecar is disabled */
+      .app.agent-disabled .sb-item[data-kind="agent"] {
+        display: none;
+      }
+
+      /* ── Topbar ────────────────────────────────────────────────── */
+      .topbar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 9px 16px;
+        border-bottom: 1px solid var(--border);
+        background: var(--background);
+        flex-shrink: 0;
+      }
+      .sidebar-toggle {
+        appearance: none;
+        border: 1px solid transparent;
+        background: transparent;
+        color: var(--muted-foreground);
+        width: 28px;
+        height: 28px;
+        border-radius: 6px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        flex-shrink: 0;
+        transition: background 0.12s, color 0.12s;
+      }
+      .sidebar-toggle:hover {
+        background: var(--muted);
+        color: var(--foreground);
+      }
+      .sidebar-toggle svg {
+        width: 16px;
+        height: 16px;
+      }
+      .crumbs {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 13px;
+        color: var(--muted-foreground);
+        min-width: 0;
+      }
+      .crumbs .sep {
+        opacity: 0.5;
+      }
+      .crumbs .here {
+        color: var(--foreground);
+        font-weight: 500;
+      }
+      .topbar .topbar-actions {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: nowrap;
+      }
+
+      /* ── Page (scroll region inside .main) ─────────────────────── */
+      .page {
+        padding: 16px 20px 24px;
+        overflow-y: auto;
+        flex: 1;
+        min-height: 0;
+      }
+      .page > .panel {
+        margin: 0;
+      }
+      /* Agent Dashboard iframe panel renders full-bleed — the iframe sits
+         flush against the topbar and the bottom of the content area. */
+      #claude-dashboard.panel {
+        padding: 0;
+        border: 0;
+        background: transparent;
+        border-radius: 0;
+      }
+      .app.agent-view .page {
+        padding: 0;
+        overflow: hidden;
       }
     </style>
   </head>
   <body>
-    <header>
-      <div class="header-main">
-        <div>
-          <h1>ClosedLoop Gateway <span id="appVersion" style="font-size: 12px; font-weight: 400; color: var(--muted)"></span></h1>
-          <div class="sub">
-            <span id="runtimeStatus" class="runtime-health unhealthy">
-              <span class="dot"></span>
-              <span class="label">Unhealthy</span>
-            </span>
-          </div>
-        </div>
-        <div class="header-controls">
-          <label class="control-group danger-toggle" id="dangerAutoApproveLabel" for="dangerAutoApproveToggle">
-            <input type="checkbox" id="dangerAutoApproveToggle" />
-            Auto-Approve All
-          </label>
-          <label class="control-group" for="headerPauseToggle">
-            <input type="checkbox" id="headerPauseToggle" />
-            Pause Incoming Commands
-          </label>
-          <button class="secondary" id="headerConnectionToggle">Disconnect</button>
+    <div
+      id="onboardingPopupBackdrop"
+      hidden
+    >
+      <div
+        id="onboardingPopup"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="onboardingPopupTitle"
+        aria-describedby="onboardingPopupBody"
+      >
+        <h2 id="onboardingPopupTitle">Finish setting up ClosedLoop</h2>
+        <p id="onboardingPopupBody">
+          Your desktop app is connected. Head back to the ClosedLoop web app to
+          finish your account setup.
+        </p>
+        <div id="onboardingPopupActions">
+          <button
+            type="button"
+            id="onboardingPopupDismissPermanent"
+          >
+            Don't show again
+          </button>
+          <button
+            type="button"
+            id="onboardingPopupDismissSession"
+          >
+            Remind me later
+          </button>
+          <button
+            type="button"
+            class="primary"
+            id="onboardingPopupCta"
+          >
+            Open web app
+          </button>
         </div>
       </div>
-    </header>
+    </div>
     <div id="onboardingOverlay" class="onboarding-overlay hidden">
       <div class="onboarding-card">
         <h2 style="margin-top: 0">Setup Required</h2>
@@ -1923,7 +2926,7 @@
           <p class="muted warning-text" id="onboardingSandboxWarning"></p>
         </div>
         <details id="onboardingBinaryPathsDetails" style="margin: 8px 0;">
-          <summary style="cursor: pointer; font-weight: 600; color: var(--accent); padding: 4px 0; user-select: none;">Configure binary paths (optional)</summary>
+          <summary style="cursor: pointer; font-weight: 600; color: var(--primary); padding: 4px 0; user-select: none;">Configure binary paths (optional)</summary>
           <p class="field-help" style="margin: 6px 0 12px;">Leave blank to auto-detect. Only set these if the diagnostics check shows a binary as "not found" even though it's installed.</p>
           <div class="row">
             <label for="onboardingBinaryPathClaude">claude</label>
@@ -1947,56 +2950,60 @@
           </div>
         </details>
         <div class="actions">
+          <button class="secondary" id="connectInBrowser">Connect in browser</button>
           <button id="completeOnboarding">Complete Setup</button>
         </div>
         <p class="muted" id="onboardingMessage"></p>
       </div>
     </div>
-    <nav>
-      <button data-tab="dashboard" class="active">Dashboard</button>
-      <button data-tab="approvals">Approvals</button>
-      <button data-tab="activity">Requests</button>
-      <button data-tab="logs">Diagnostics</button>
-      <button data-tab="settings">Settings</button>
-    </nav>
-    <main>
+    <div class="app state-disconnected agent-view" id="appShell">
+      <aside class="sidebar">
+        <div class="sb-brand">
+          <span class="mark" aria-hidden="true">
+            <svg viewBox="0 0 100 100" fill="none" width="22" height="22">
+              <path d="M0.424623 49.6765C0.339767 56.2176 1.55939 62.7103 4.01272 68.7779C6.46604 74.8455 10.1042 80.3673 14.7161 85.0227C19.3281 89.6781 24.8219 93.3744 30.8788 95.8973C36.9358 98.4202 43.4352 99.7193 50 99.7193C56.5648 99.7193 63.0643 98.4202 69.1212 95.8973C75.1782 93.3744 80.672 89.6781 85.2839 85.0227C89.8958 80.3673 93.534 74.8455 95.9873 68.7779C98.4406 62.7103 99.6603 56.2176 99.5754 49.6765C99.5754 49.5115 99.5754 49.3546 99.5754 49.1895H71.7496C71.7496 49.3546 71.7496 49.5115 71.7496 49.6765C71.7496 53.9658 70.473 58.1587 68.0814 61.7249C65.6898 65.2912 62.2906 68.0706 58.3136 69.7117C54.3367 71.3527 49.9606 71.7817 45.739 70.9443C41.5174 70.1069 37.6398 68.0408 34.5966 65.0072C31.5535 61.9737 29.4815 58.109 28.6428 53.902C27.804 49.695 28.2361 45.3346 29.8845 41.3723C31.5329 37.4101 34.3235 34.0239 37.9033 31.6421C41.4831 29.2603 45.6914 27.9899 49.9959 27.9915H50.0704L50.0373 0.280626C43.524 0.275203 37.0735 1.54886 31.0545 4.02881C25.0354 6.50876 19.5659 10.1464 14.9583 14.7338C10.3508 19.3211 6.69575 24.7683 4.20197 30.764C1.70819 36.7597 0.424621 43.1863 0.424623 49.6765Z" fill="currentColor"></path>
+              <path d="M57.1534 0.801147V29.2137C60.1811 30.2616 62.939 31.9629 65.2303 34.1961C67.5215 36.4293 69.2895 39.1392 70.4077 42.1323H99.004C97.3792 31.6897 92.4381 22.0411 84.906 14.6024C77.3738 7.16375 67.6471 2.32669 57.1534 0.801147Z" fill="#41A3FF"></path>
+            </svg>
+          </span>
+          <span class="name">ClosedLoop Gateway</span>
+        </div>
+        <nav class="sb-nav" id="sidebarNav" aria-label="Primary"></nav>
+        <div class="sb-spacer"></div>
+        <div class="sb-foot">
+          <span id="runtimeStatus" class="runtime-health unhealthy">
+            <span class="dot"></span>
+            <span class="label">Unhealthy</span>
+          </span>
+        </div>
+        <div class="sb-version"><span id="appVersion"></span></div>
+      </aside>
+      <main class="main">
+        <header class="topbar">
+          <button class="sidebar-toggle" id="sidebarToggle" type="button" title="Collapse sidebar" aria-label="Collapse sidebar">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/></svg>
+          </button>
+          <div class="crumbs">
+            <span class="group" id="crumbGroup" hidden></span>
+            <span class="sep" id="crumbSep" hidden>/</span>
+            <span class="here" id="crumbHere">Dashboard</span>
+          </div>
+          <div class="topbar-actions">
+            <label class="control-group danger-toggle" id="dangerAutoApproveLabel" for="dangerAutoApproveToggle">
+              <input type="checkbox" id="dangerAutoApproveToggle" />
+              Auto-Approve All
+            </label>
+            <label class="control-group" for="headerPauseToggle">
+              <input type="checkbox" id="headerPauseToggle" />
+              Pause Incoming Commands
+            </label>
+            <button class="secondary" id="headerConnectionToggle">Disconnect</button>
+          </div>
+        </header>
+        <div class="page">
       <div id="updateBanner">
         <span id="updateBannerText">A new version is available</span>
-        <button id="updateBannerBtn">Update &amp; Restart</button>
+        <button id="updateBannerBtn">Update &amp; restart</button>
       </div>
-      <section id="dashboard" class="panel active">
-        <div class="dashboard-summary">
-          <div class="status-card">
-            <div class="status-label">Gateway Port</div>
-            <div class="status-value" id="dashboardPort">Loading...</div>
-          </div>
-          <div class="status-card">
-            <div class="status-label">Cloud Connection</div>
-            <div class="status-value" id="dashboardCloud">Loading...</div>
-            <div class="status-detail" id="wsStatusDetail">Loading...</div>
-          </div>
-          <div class="status-card">
-            <div class="status-label">Remote Commands</div>
-            <div class="status-value" id="dashboardCommandsState">Loading...</div>
-          </div>
-        </div>
-        <div class="config-section-label">Endpoints</div>
-        <div class="dashboard-config">
-          <div class="config-row">
-            <div class="config-row-label">Target ID</div>
-            <div class="config-row-value mono" id="dashboardTarget" title="">Loading...</div>
-          </div>
-          <div class="config-row">
-            <div class="config-row-label">Relay Origin</div>
-            <div class="config-row-value mono" id="dashboardRelayOrigin" title="">Loading...</div>
-          </div>
-          <div class="config-row">
-            <div class="config-row-label">API Origin</div>
-            <div class="config-row-value mono" id="dashboardApiOrigin" title="">Loading...</div>
-          </div>
-        </div>
-        <div id="dashboardApproval"></div>
-      </section>
       <section id="approvals" class="panel">
         <p class="muted">Pending requests that need approval (Approve, Decline, or Always Allow).</p>
         <div class="actions" style="margin-bottom: 12px">
@@ -2044,12 +3051,33 @@
             <button class="logs-btn" id="refreshLogsBtn" title="Refresh logs">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M1.5 1.5v4.5h4.5"/><path d="M2.3 10a6 6 0 1 0 .9-4.8L1.5 6"/></svg>
             </button>
+            <button class="logs-btn" id="pauseLogsBtn" title="Pause logs">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><rect x="4" y="3" width="2.5" height="10" rx="0.8"/><rect x="9.5" y="3" width="2.5" height="10" rx="0.8"/></svg>
+            </button>
+            <button class="logs-btn" id="openLogFileBtn" title="Open log file">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9 2H4.5A1.5 1.5 0 0 0 3 3.5v9A1.5 1.5 0 0 0 4.5 14h7a1.5 1.5 0 0 0 1.5-1.5V6"/><path d="M9 2v4h4"/><path d="M6 10h4"/></svg>
+            </button>
             <button class="logs-btn" id="clearLogsBtn" title="Clear logs">
               <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="2" x2="14" y2="14"/><line x1="14" y1="2" x2="2" y2="14"/></svg>
             </button>
           </div>
         </div>
+        <div id="logsPausedBanner" class="logs-paused-banner">Paused - 0 new entries queued</div>
         <div id="logsList" class="logs-container"></div>
+      </section>
+      <section id="claude-dashboard" class="panel active">
+        <div id="claudeDashConsent" style="display:none;align-items:center;gap:10px;padding:10px 14px;border-bottom:1px solid var(--border,#2a2a2a);font-size:13px">
+          <label class="toggle-switch" title="Installs Claude Code hooks in ~/.claude/settings.json so this dashboard receives live session events. Off by default; fully removable.">
+            <input type="checkbox" id="claudeDashHooksToggle" />
+            <span class="toggle-track"></span>
+          </label>
+          <span>Enable Claude Code session tracking</span>
+          <span id="claudeDashHooksHint" style="color:var(--muted-foreground,#888)">— off (no changes to your global Claude config)</span>
+        </div>
+        <div id="claudeDashStatus" style="padding:48px 20px;text-align:center;color:var(--muted-foreground,#888)">
+          Starting Agent Dashboard…
+        </div>
+        <iframe id="claudeDashFrame" title="Claude Code Agent Monitor" style="display:none;width:100%;border:0;background:#fff"></iframe>
       </section>
       <section id="settings" class="panel">
         <div class="settings-sub-nav">
@@ -2061,6 +3089,46 @@
 
         <!-- Relay / Gateway sub-tab -->
         <div id="settings-relay-gateway" class="settings-sub-panel active">
+          <div class="settings-group">
+            <h3 class="settings-group-title">Connection Status</h3>
+            <p class="settings-group-desc">Live gateway port, cloud connection, and endpoint configuration.</p>
+            <div class="dashboard-summary">
+              <div class="status-card">
+                <div class="status-label">Gateway Port</div>
+                <div class="status-value" id="dashboardPort">Loading...</div>
+              </div>
+              <div class="status-card">
+                <div class="status-label">Cloud Connection</div>
+                <div class="status-value" id="dashboardCloud">Loading...</div>
+                <div class="status-detail" id="wsStatusDetail">Loading...</div>
+              </div>
+              <div class="status-card">
+                <div class="status-label">Remote Commands</div>
+                <div class="status-value" id="dashboardCommandsState">Loading...</div>
+              </div>
+              <div class="status-card">
+                <div class="status-label">Connection Security</div>
+                <div class="status-value" id="dashboardSecurity">Loading...</div>
+                <div class="status-detail" id="dashboardSecurityDetail">Loading...</div>
+              </div>
+            </div>
+            <div class="config-section-label">Endpoints</div>
+            <div class="dashboard-config">
+              <div class="config-row">
+                <div class="config-row-label">Target ID</div>
+                <div class="config-row-value mono" id="dashboardTarget" title="">Loading...</div>
+              </div>
+              <div class="config-row">
+                <div class="config-row-label">Relay Origin</div>
+                <div class="config-row-value mono" id="dashboardRelayOrigin" title="">Loading...</div>
+              </div>
+              <div class="config-row">
+                <div class="config-row-label">API Origin</div>
+                <div class="config-row-value mono" id="dashboardApiOrigin" title="">Loading...</div>
+              </div>
+            </div>
+            <div id="dashboardApproval"></div>
+          </div>
           <div class="settings-columns">
             <div class="settings-group">
               <h3 class="settings-group-title">Cloud Relay</h3>
@@ -2099,6 +3167,16 @@
                 <label for="webAppOrigin">Web App Origin (CORS)</label>
                 <input id="webAppOrigin" />
               </div>
+              <div class="row">
+                <label for="agentMonitorEnabled">Agent Dashboard</label>
+                <div>
+                  <label class="toggle-switch" title="Runs the local Agent Dashboard sidecar that powers the Dashboard and agent views in the sidebar. On by default.">
+                    <input id="agentMonitorEnabled" type="checkbox" />
+                    <span class="toggle-track"></span>
+                  </label>
+                  <p class="field-help" style="margin-top:8px">Runs the local Agent Dashboard sidecar that powers the Dashboard and agent views in the sidebar. On by default; turning it off hides those views.</p>
+                </div>
+              </div>
             </div>
           </div>
           <!-- Saved Configs section -->
@@ -2122,18 +3200,108 @@
 
         <!-- Security sub-tab -->
         <div id="settings-security" class="settings-sub-panel">
-          <div class="settings-group" style="border-bottom:none; margin-bottom:0; padding-bottom:0">
-            <h3 class="settings-group-title">Sandbox Directory</h3>
-            <p class="settings-group-desc">Controls which directories gateway operations can access. Paths outside this directory are blocked. Sensitive system paths (~/.ssh, ~/.aws, etc.) are always denied.</p>
-            <div class="row" style="margin-bottom:0">
-              <label for="sandboxBaseDirectory">Sandbox Base Directory</label>
-              <input id="sandboxBaseDirectory" readonly />
-              <div class="actions" style="margin-top: 8px">
-                <button class="secondary" id="pickSandboxBaseDirectory">Choose Directory</button>
-              </div>
-              <p class="muted warning-text" id="sandboxBaseWarning"></p>
+          <!-- Posture strip: at-a-glance security state -->
+          <div class="sec-posture">
+            <div class="sec-tile" id="postureSandbox">
+              <p class="sec-tile-label">Sandbox</p>
+              <p class="sec-tile-value">Not set</p>
+              <p class="sec-tile-detail">Choose a base directory below.</p>
+            </div>
+            <div class="sec-tile" id="postureSigning">
+              <p class="sec-tile-label">Signing Keys</p>
+              <p class="sec-tile-value">--</p>
+              <p class="sec-tile-detail">Loading authorization state...</p>
+            </div>
+            <div class="sec-tile tone-danger" id="postureDenylist" data-tooltip-pos="bottom" data-tooltip="A built-in list of sensitive paths (SSH keys, GPG, AWS credentials, macOS Keychain, /etc, /bin, /sbin) that the gateway will never read or write &mdash; even if they sit inside your sandbox. Cannot be disabled.">
+              <p class="sec-tile-label">Always Denied</p>
+              <p class="sec-tile-value">7 paths</p>
+              <p class="sec-tile-detail">Built-in protections that override your sandbox.</p>
             </div>
           </div>
+
+          <!-- Sandbox perimeter -->
+          <section class="sec-section">
+            <div class="sec-section-head">
+              <div>
+                <p class="sec-eyebrow">Perimeter</p>
+                <h3 class="sec-section-title">Sandbox Directory</h3>
+                <p class="sec-section-desc">Gateway operations can only read or write inside this directory. Anything outside &mdash; or inside the always-denied list &mdash; is blocked.</p>
+              </div>
+            </div>
+
+            <div class="sec-perimeter">
+              <div class="sec-path-display">
+                <p class="sec-path-tag">Allowed Root</p>
+                <p class="sec-path-value" id="sandboxBaseDisplay">
+                  <span class="sec-path-empty">No directory selected</span>
+                </p>
+                <input id="sandboxBaseDirectory" type="hidden" readonly />
+              </div>
+              <div class="sec-perimeter-action">
+                <button id="pickSandboxBaseDirectory" type="button">Choose Directory</button>
+              </div>
+              <p class="sec-perimeter-warning" id="sandboxBaseWarning"></p>
+
+              <div class="sec-denylist">
+                <p class="sec-denylist-label" data-tooltip="Blocked even if inside your sandbox. Built-in safety net for credentials and system files; cannot be turned off.">Always Denied</p>
+                <div class="sec-denylist-chips">
+                  <span class="sec-deny-chip" data-tooltip="SSH private keys and known-hosts file">~/.ssh</span>
+                  <span class="sec-deny-chip" data-tooltip="GPG keyring and signing keys">~/.gnupg</span>
+                  <span class="sec-deny-chip" data-tooltip="AWS access keys and CLI credentials">~/.aws</span>
+                  <span class="sec-deny-chip" data-tooltip="macOS Keychain databases">~/Library/Keychains</span>
+                  <span class="sec-deny-chip" data-tooltip="System-wide configuration (passwd, hosts, etc.)">/etc</span>
+                  <span class="sec-deny-chip" data-tooltip="Core system binaries">/bin</span>
+                  <span class="sec-deny-chip" data-tooltip="Privileged system binaries">/sbin</span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- Browser command keys -->
+          <section class="sec-section" hidden id="browserCommandKeysSection">
+            <div class="sec-section-head">
+              <div>
+                <p class="sec-eyebrow">Authorization</p>
+                <h3 class="sec-section-title">Browser Command Keys</h3>
+                <p class="sec-section-desc" id="commandSigningEnforcementIntro">Browser command keys let this Desktop trust specific web browsers. Enable trusted keys when commands should require an approved browser key.</p>
+              </div>
+              <button class="secondary" id="refreshCommandKeys" type="button" style="padding:6px 12px;border-radius:8px;font-size:12px;cursor:pointer;background:var(--card);color:var(--foreground);border:1px solid var(--border);">Refresh</button>
+            </div>
+
+            <div class="sec-enforcement" id="commandSigningEnforcementState">
+              <div>
+                <p class="sec-enforcement-title">Trusted browser enforcement</p>
+                <p class="sec-enforcement-copy" id="commandSigningEnforcementCopy">Enforcement is off, so signed-in browser sessions with access to this Desktop can send commands without an approved key.</p>
+              </div>
+              <label class="sec-toggle" for="commandSigningEnforcementEnabled">
+                <input id="commandSigningEnforcementEnabled" type="checkbox" />
+                Require trusted keys
+              </label>
+            </div>
+
+            <div id="commandSigningKeysList"></div>
+
+            <details class="sec-manual">
+              <summary>
+                <span style="display:flex;align-items:center;gap:10px;">
+                  <span class="sec-manual-chevron"></span>
+                  Add a key manually
+                </span>
+                <span class="sec-manual-summary-meta">Advanced</span>
+              </summary>
+              <div class="sec-manual-body">
+                <label for="commandKeyPublicKey">Public Key (Base64 Ed25519)</label>
+                <textarea id="commandKeyPublicKey" rows="3" placeholder="MCowBQYDK2VwAyEA..."></textarea>
+                <label for="commandKeyLabel" style="margin-top:10px;">Label (optional)</label>
+                <input id="commandKeyLabel" placeholder="e.g. Daniel's MacBook" />
+                <div class="actions">
+                  <button id="authorizePastedCommandKey" type="button">Authorize Key</button>
+                </div>
+                <p class="muted" id="commandKeyMessage" style="margin-top:8px;font-size:12px;"></p>
+              </div>
+            </details>
+          </section>
+
           <div class="settings-tab-footer">
             <button id="saveSecurity">Save</button>
             <button class="secondary" id="reloadSecurity">Reload</button>
@@ -2277,36 +3445,409 @@
           </div>
         </div>
       </section>
-    </main>
+        </div>
+      </main>
+    </div>
     <script>
       const api = window.desktopApi;
-      const tabs = document.querySelectorAll("nav button");
-      const panels = document.querySelectorAll(".panel");
+      const PANELS = document.querySelectorAll(".panel");
+      const appShell = document.getElementById("appShell");
 
-      function activateTab(tabName) {
-        tabs.forEach((button) => button.classList.remove("active"));
-        panels.forEach((panel) => panel.classList.remove("active"));
-        const tabButton = document.querySelector(`nav button[data-tab="${tabName}"]`);
-        if (tabButton) {
-          tabButton.classList.add("active");
-          document.getElementById(tabName)?.classList.add("active");
+      // ── Left sidebar navigation ──────────────────────────────────────
+      // Agent items drive the embedded Agent Dashboard iframe (one panel,
+      // routed via postMessage); Gateway items map to their own panels.
+      const SVG_ICONS = {
+        dashboard: '<rect width="7" height="9" x="3" y="3" rx="1"/><rect width="7" height="5" x="14" y="3" rx="1"/><rect width="7" height="9" x="14" y="12" rx="1"/><rect width="7" height="5" x="3" y="16" rx="1"/>',
+        kanban: '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="M15 3v18"/>',
+        sessions: '<path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>',
+        activity: '<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>',
+        analytics: '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
+        workflows: '<rect width="8" height="8" x="3" y="3" rx="2"/><path d="M7 11v4a2 2 0 0 0 2 2h4"/><rect width="8" height="8" x="13" y="13" rx="2"/>',
+        boxes: '<path d="M2.97 12.92A2 2 0 0 0 2 14.63v3.24a2 2 0 0 0 .97 1.71l3 1.8a2 2 0 0 0 2.06 0L12 19v-5.5l-5-3-4.03 2.42Z"/><path d="m7 16.5-4.74-2.85"/><path d="m7 16.5 5-3"/><path d="M7 16.5v5.17"/><path d="M12 13.5V19l3.97 2.38a2 2 0 0 0 2.06 0l3-1.8a2 2 0 0 0 .97-1.71v-3.24a2 2 0 0 0-.97-1.71L17 10.5l-5 3Z"/><path d="m17 16.5-5-3"/><path d="m17 16.5 4.74-2.85"/><path d="M17 16.5v5.17"/><path d="M7.97 4.42A2 2 0 0 0 7 6.13v4.37l5 3 5-3V6.13a2 2 0 0 0-.97-1.71l-3-1.8a2 2 0 0 0-2.06 0l-3 1.8Z"/><path d="M12 8 7.26 5.15"/><path d="m12 8 4.74-2.85"/><path d="M12 13.5V8"/>',
+        play: '<polygon points="6 3 20 12 6 21 6 3"/>',
+        sparkles: '<path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z"/><path d="M20 3v4"/><path d="M22 5h-4"/><path d="M4 17v2"/><path d="M5 18H3"/>',
+        wrench: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+        users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
+        package: '<path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><polyline points="3.29 7 12 12 20.71 7"/><path d="m7.5 4.27 9 5.15"/>',
+        "file-text": '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/>',
+        settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
+        shield: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
+        inbox: '<polyline points="22 12 16 12 14 15 10 15 8 12 2 12"/><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/>',
+        stethoscope: '<path d="M11 2v2"/><path d="M5 2v2"/><path d="M5 3H4a2 2 0 0 0-2 2v4a6 6 0 0 0 12 0V5a2 2 0 0 0-2-2h-1"/><path d="M8 15a6 6 0 0 0 12 0v-3"/><circle cx="20" cy="10" r="2"/>',
+      };
+      function navIcon(name) {
+        return '<span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+          (SVG_ICONS[name] || "") + "</svg></span>";
+      }
+
+      const NAV_ITEMS = [
+        { id: "dashboard",      label: "Dashboard",      icon: "dashboard",   kind: "agent",   route: "/" },
+        { id: "kanban",         label: "Kanban Board",   icon: "kanban",      kind: "agent",   route: "/kanban" },
+        { id: "sessions",       label: "Sessions",       icon: "sessions",    kind: "agent",   route: "/sessions" },
+        { id: "activity-feed",  label: "Activity Feed",  icon: "activity",    kind: "agent",   route: "/activity" },
+        { id: "analytics",      label: "Analytics",      icon: "analytics",   kind: "agent",   route: "/analytics" },
+        { id: "workflows",      label: "Workflows",      icon: "workflows",   kind: "agent",   route: "/workflows" },
+        { id: "cc-config",      label: "CC Config",      icon: "boxes",       kind: "agent",   route: "/cc-config" },
+        { id: "run",            label: "Run",            icon: "play",        kind: "agent",   route: "/run" },
+        { id: "plans",          label: "Plans",          icon: "file-text",   kind: "agent",   route: "/plans",    planExtractionOnly: true },
+        { id: "packs",          label: "Packs",          icon: "package",     kind: "agent",   route: "/packs" },
+        { id: "agent-settings", label: "Agent Settings", icon: "settings",    kind: "agent",   route: "/settings" },
+        { type: "group", label: "Gateway" },
+        { id: "approvals",      label: "Approvals",      icon: "shield",      kind: "gateway", panel: "approvals", count: true },
+        { id: "requests",       label: "Requests",       icon: "inbox",       kind: "gateway", panel: "activity" },
+        { id: "diagnostics",    label: "Diagnostics",    icon: "stethoscope", kind: "gateway", panel: "logs" },
+        { id: "settings",       label: "Settings",       icon: "settings",    kind: "gateway", panel: "settings" },
+      ];
+
+      // Map legacy tab names (tray menu, IPC events) to new nav ids.
+      const LEGACY_TAB_ALIAS = {
+        dashboard: "dashboard",
+        "claude-dashboard": "dashboard",
+        approvals: "approvals",
+        activity: "requests",
+        logs: "diagnostics",
+        settings: "settings",
+      };
+
+      let currentNavId = "dashboard";
+      let pendingAgentRoute = "/";
+      let bootNavDone = false;
+      let cachedPlanExtractionEnabled = false;
+      let agentMonitorFrameOrigin = null;
+
+      function shouldShowNavItem(item) {
+        return !item.planExtractionOnly || cachedPlanExtractionEnabled;
+      }
+
+      function buildSidebar() {
+        const nav = document.getElementById("sidebarNav");
+        nav.innerHTML = "";
+        for (const item of NAV_ITEMS) {
+          if (item.type === "group") {
+            const group = document.createElement("div");
+            group.className = "sb-section";
+            group.textContent = item.label;
+            nav.appendChild(group);
+            continue;
+          }
+          if (!shouldShowNavItem(item)) {
+            continue;
+          }
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "sb-item";
+          btn.dataset.nav = item.id;
+          btn.dataset.kind = item.kind;
+          btn.title = item.label;
+          let html = navIcon(item.icon) + '<span class="sb-label">' + item.label + "</span>";
+          if (item.count) {
+            html += '<span class="count" id="approvalsCount" data-count="0"></span>';
+          }
+          btn.innerHTML = html;
+          btn.addEventListener("click", () => activateNav(item.id));
+          nav.appendChild(btn);
         }
-        if (tabName === "logs") {
-          void renderLogs();
-          startLogsAutoRefresh();
-          api.getSettings().then(s => { verboseToggle.checked = !!s.verboseLogging; });
-        } else {
-          stopLogsAutoRefresh();
+        const activeId = nav.querySelector(`.sb-item[data-nav="${currentNavId}"]`)
+          ? currentNavId
+          : "dashboard";
+        nav.querySelector(`.sb-item[data-nav="${activeId}"]`)?.classList.add("active");
+      }
+
+      function setBreadcrumb(item) {
+        const group = document.getElementById("crumbGroup");
+        const sep = document.getElementById("crumbSep");
+        group.textContent = item.kind === "agent" ? "Agents" : "Gateway";
+        group.hidden = false;
+        sep.hidden = false;
+        document.getElementById("crumbHere").textContent = item.label;
+      }
+
+      function updateApprovalsBadge(count) {
+        const el = document.getElementById("approvalsCount");
+        if (!el) return;
+        const n = Number(count) || 0;
+        el.dataset.count = String(n);
+        el.textContent = n > 0 ? String(n) : "";
+      }
+
+      // Drive the embedded Agent Dashboard route. Once the iframe is loaded
+      // navigation is a postMessage (no reload); before then the route is
+      // baked into the initial iframe src by startClaudeDashboard().
+      function navigateAgentRoute(route) {
+        pendingAgentRoute = route || "/";
+        const frame = document.getElementById("claudeDashFrame");
+        if (claudeDashLoaded && frame && frame.contentWindow && agentMonitorFrameOrigin) {
+          try {
+            frame.contentWindow.postMessage(
+              { type: "closedloop:navigate", path: pendingAgentRoute },
+              agentMonitorFrameOrigin,
+            );
+          } catch (_) {
+            /* cross-origin timing race — safe to ignore */
+          }
         }
       }
 
-      tabs.forEach((tab) => {
-        tab.addEventListener("click", () => activateTab(tab.dataset.tab));
-      });
+      function activateNav(id) {
+        const item = NAV_ITEMS.find((n) => n.id === id && n.type !== "group");
+        if (!item) return;
+        if (item.kind === "agent" && !cachedAgentMonitorEnabled) {
+          // Agent views need the sidecar enabled — fall back to Settings.
+          activateNav("settings");
+          activateSettingsTab("relay-gateway");
+          return;
+        }
+        currentNavId = id;
+        document.querySelectorAll("#sidebarNav .sb-item").forEach((el) => {
+          el.classList.toggle("active", el.dataset.nav === id);
+        });
+        const panelId = item.kind === "agent" ? "claude-dashboard" : item.panel;
+        PANELS.forEach((panel) => panel.classList.toggle("active", panel.id === panelId));
+        // Agent views render the iframe full-bleed (no .page padding).
+        appShell.classList.toggle("agent-view", item.kind === "agent");
+        setBreadcrumb(item);
+        if (panelId === "logs") {
+          void pollLogs();
+          startLogsAutoRefresh();
+          api.getSettings().then((s) => { verboseToggle.checked = !!s.verboseLogging; });
+        } else {
+          stopLogsAutoRefresh();
+        }
+        if (item.kind === "agent") {
+          // The session-tracking consent toggle belongs on Agent Settings
+          // only — not stacked above every agent view.
+          const consent = document.getElementById("claudeDashConsent");
+          if (consent) {
+            consent.style.display = id === "agent-settings" ? "flex" : "none";
+          }
+          startClaudeDashboard();
+          navigateAgentRoute(item.route);
+        } else {
+          stopClaudeDashboardPoll();
+        }
+      }
+
+      // Backward-compatible shim for the tray menu and IPC navigation events.
+      function activateTab(name) {
+        activateNav(LEGACY_TAB_ALIAS[name] || name);
+      }
 
       window.addEventListener("desktop:navigate-tab", (event) => {
         activateTab(event.detail);
       });
+
+      const sidebarToggle = document.getElementById("sidebarToggle");
+      sidebarToggle.addEventListener("click", () => {
+        const collapsed = appShell.classList.toggle("sidebar-collapsed");
+        try {
+          localStorage.setItem("cl:sidebar-collapsed", collapsed ? "1" : "0");
+        } catch (_) {
+          /* localStorage unavailable */
+        }
+        sizeClaudeFrame();
+      });
+      try {
+        if (localStorage.getItem("cl:sidebar-collapsed") === "1") {
+          appShell.classList.add("sidebar-collapsed");
+        }
+      } catch (_) {
+        /* localStorage unavailable */
+      }
+
+      buildSidebar();
+      // Fallback: render the initial view even if settings never load.
+      setTimeout(() => {
+        if (!bootNavDone) {
+          bootNavDone = true;
+          activateNav(currentNavId);
+        }
+      }, 1500);
+
+      // --- Claude Dashboard (generated Agent Monitor sidecar) --------------
+      // Embed the already-running localhost sidecar in an iframe once it is
+      // healthy. When the feature is enabled, the sidecar starts at app boot
+      // (fire-and-forget); here we just poll readiness and lazily set src once.
+      let claudeDashTimer = null;
+      let claudeDashLoaded = false;
+
+      function syncAgentMonitorTabVisibility(enabled) {
+        cachedAgentMonitorEnabled = enabled === true;
+        // Agent nav items are hidden in the sidebar when the sidecar is off.
+        appShell.classList.toggle("agent-disabled", !cachedAgentMonitorEnabled);
+
+        const frame = document.getElementById("claudeDashFrame");
+        const status = document.getElementById("claudeDashStatus");
+        const toggle = document.getElementById("claudeDashHooksToggle");
+        const hint = document.getElementById("claudeDashHooksHint");
+
+        if (toggle) {
+          toggle.disabled = !cachedAgentMonitorEnabled;
+          if (!cachedAgentMonitorEnabled) {
+            toggle.checked = false;
+          }
+        }
+
+        if (!cachedAgentMonitorEnabled) {
+          stopClaudeDashboardPoll();
+          claudeDashLoaded = false;
+          agentMonitorFrameOrigin = null;
+          if (frame) {
+            frame.src = "about:blank";
+            frame.style.display = "none";
+          }
+          if (status) {
+            status.style.display = "block";
+            status.textContent = "Agent Dashboard is disabled in Settings.";
+          }
+          if (hint) {
+            hint.textContent =
+              "— enable Agent Dashboard in Settings to manage session tracking";
+          }
+          const current = NAV_ITEMS.find((n) => n.id === currentNavId);
+          if (current && current.kind === "agent") {
+            activateTab("settings");
+            activateSettingsTab("relay-gateway");
+          }
+        } else if (hint) {
+          hint.textContent = "— off (no changes to your global Claude config)";
+        }
+
+        // Render the initial view once the enabled-state is known on boot.
+        if (!bootNavDone) {
+          bootNavDone = true;
+          activateNav(currentNavId);
+        }
+      }
+
+      function sizeClaudeFrame() {
+        const frame = document.getElementById("claudeDashFrame");
+        if (!frame || frame.style.display === "none") return;
+        // Fill exactly from the iframe's top to the bottom of the .page
+        // container — no gap above (page padding is removed in agent view)
+        // or below. Measured live, so the consent bar / resize are handled.
+        const page = frame.closest(".page");
+        const top = frame.getBoundingClientRect().top;
+        const bottom = page
+          ? page.getBoundingClientRect().bottom
+          : window.innerHeight;
+        frame.style.height = Math.max(320, bottom - top) + "px";
+      }
+      window.addEventListener("resize", sizeClaudeFrame);
+
+      function stopClaudeDashboardPoll() {
+        if (claudeDashTimer) { clearInterval(claudeDashTimer); claudeDashTimer = null; }
+      }
+
+      async function refreshClaudeHooksToggle() {
+        const toggle = document.getElementById("claudeDashHooksToggle");
+        const hint = document.getElementById("claudeDashHooksHint");
+        if (!cachedAgentMonitorEnabled) {
+          if (toggle) toggle.disabled = true;
+          if (hint) {
+            hint.textContent =
+              "— enable Agent Dashboard in Settings to manage session tracking";
+          }
+          return;
+        }
+        try {
+          const enabled = await api.getAgentMonitorHooksEnabled();
+          toggle.checked = !!enabled;
+          toggle.disabled = false;
+          hint.textContent = enabled
+            ? "— on (Claude Code hooks installed in ~/.claude/settings.json)"
+            : "— off (no changes to your global Claude config)";
+        } catch (_) { /* leave as-is */ }
+      }
+
+      (function wireClaudeHooksToggle() {
+        const toggle = document.getElementById("claudeDashHooksToggle");
+        const hint = document.getElementById("claudeDashHooksHint");
+        if (!toggle) return;
+        toggle.addEventListener("change", async () => {
+          const want = toggle.checked;
+          toggle.disabled = true;
+          hint.textContent = want ? "— enabling…" : "— disabling…";
+          try {
+            const res = await api.setAgentMonitorHooksEnabled(want);
+            if (!res || !res.ok) {
+              toggle.checked = !want;
+              hint.textContent = "— failed: " + ((res && res.error) || "unknown error");
+            } else {
+              await refreshClaudeHooksToggle();
+            }
+          } catch (e) {
+            toggle.checked = !want;
+            hint.textContent = "— failed: " + (e && e.message ? e.message : "error");
+          } finally {
+            toggle.disabled = false;
+          }
+        });
+      })();
+
+      function startClaudeDashboard() {
+        const frame = document.getElementById("claudeDashFrame");
+        const status = document.getElementById("claudeDashStatus");
+        if (!cachedAgentMonitorEnabled) {
+          frame.style.display = "none";
+          status.style.display = "block";
+          status.textContent = "Agent Dashboard is disabled in Settings.";
+          return;
+        }
+        void refreshClaudeHooksToggle();
+        if (claudeDashLoaded) { sizeClaudeFrame(); return; }
+        status.style.display = "block";
+        status.textContent = "Starting Agent Dashboard…";
+
+        const tick = async () => {
+          try {
+            const r = await api.getAgentMonitorUrl();
+            if (r && r.ready && r.url) {
+              if (cachedPlanExtractionEnabled !== (r.planExtractionEnabled === true)) {
+                cachedPlanExtractionEnabled = r.planExtractionEnabled === true;
+                buildSidebar();
+              }
+              const frameUrl = new URL(r.url);
+              agentMonitorFrameOrigin = frameUrl.origin;
+              // Embed mode hides the sidecar's own sidebar/chrome; the
+              // initial route is baked in so the first paint lands right.
+              frameUrl.pathname = pendingAgentRoute || "/";
+              frameUrl.searchParams.set("embed", "1");
+              frameUrl.searchParams.set(
+                "closedloop_host_origin",
+                window.location.origin || "null",
+              );
+              frameUrl.searchParams.set(
+                "closedloop_plan_extraction",
+                r.planExtractionEnabled ? "1" : "0",
+              );
+              frame.src = frameUrl.toString();
+              frame.style.display = "block";
+              status.style.display = "none";
+              claudeDashLoaded = true;
+              sizeClaudeFrame();
+              stopClaudeDashboardPoll();
+            }
+          } catch (_) { /* keep polling */ }
+        };
+
+        void tick();
+        if (!claudeDashLoaded && !claudeDashTimer) {
+          const startedAt = Date.now();
+          claudeDashTimer = setInterval(() => {
+            if (claudeDashLoaded) { stopClaudeDashboardPoll(); return; }
+            if (Date.now() - startedAt > 60000) {
+              stopClaudeDashboardPoll();
+              status.innerHTML =
+                'Agent Dashboard did not start. ' +
+                '<button id="claudeDashRetry" class="logs-btn" style="width:auto;padding:4px 10px">Retry</button>';
+              document.getElementById("claudeDashRetry")
+                ?.addEventListener("click", () => { claudeDashLoaded = false; startClaudeDashboard(); });
+            } else {
+              void tick();
+            }
+          }, 1000);
+        }
+      }
 
       // Settings sub-tab switching
       const settingsSubTabs = document.querySelectorAll(".settings-sub-nav button");
@@ -2332,9 +3873,26 @@
         btn.addEventListener("click", () => activateSettingsTab(btn.dataset.settingsTab));
       });
 
+      window.addEventListener("desktop:navigate-settings-tab", (event) => {
+        activateTab("settings");
+        activateSettingsTab(event.detail);
+        if (event.detail === "security") {
+          setTimeout(() => {
+            document.getElementById("browserCommandKeysSection")?.scrollIntoView({
+              block: "start"
+            });
+          }, 0);
+        }
+      });
+
+      window.addEventListener("desktop:command-keys-changed", () => {
+        void refreshCommandSigningKeys();
+      });
+
       const relayOrigin = document.getElementById("relayOrigin");
       const apiOrigin = document.getElementById("apiOrigin");
       const webAppOrigin = document.getElementById("webAppOrigin");
+      const agentMonitorEnabled = document.getElementById("agentMonitorEnabled");
       const apiKey = document.getElementById("apiKey");
       const apiKeyStatus = document.getElementById("apiKeyStatus");
       const sandboxBaseDirectory = document.getElementById("sandboxBaseDirectory");
@@ -2347,6 +3905,16 @@
       const alwaysAllowRulesContainer = document.getElementById("alwaysAllowRulesContainer");
       const relayGatewayMessage = document.getElementById("relayGatewayMessage");
       const securityMessage = document.getElementById("securityMessage");
+      const browserCommandKeysSection = document.getElementById("browserCommandKeysSection");
+      const commandSigningKeysList = document.getElementById("commandSigningKeysList");
+      const refreshCommandKeys = document.getElementById("refreshCommandKeys");
+      const commandSigningEnforcementEnabled = document.getElementById("commandSigningEnforcementEnabled");
+      const commandSigningEnforcementCopy = document.getElementById("commandSigningEnforcementCopy");
+      const commandSigningEnforcementIntro = document.getElementById("commandSigningEnforcementIntro");
+      const commandKeyPublicKey = document.getElementById("commandKeyPublicKey");
+      const commandKeyLabel = document.getElementById("commandKeyLabel");
+      const authorizePastedCommandKey = document.getElementById("authorizePastedCommandKey");
+      const commandKeyMessage = document.getElementById("commandKeyMessage");
       const policiesMessage = document.getElementById("policiesMessage");
       const setCliToolHint = (name, text) => {
         const hint = document.querySelector(`[data-tool-hint="${name}"]`);
@@ -2358,6 +3926,8 @@
       const dashboardRelayOrigin = document.getElementById("dashboardRelayOrigin");
       const dashboardApiOrigin = document.getElementById("dashboardApiOrigin");
       const dashboardCommandsState = document.getElementById("dashboardCommandsState");
+      const dashboardSecurity = document.getElementById("dashboardSecurity");
+      const dashboardSecurityDetail = document.getElementById("dashboardSecurityDetail");
       const dashboardApproval = document.getElementById("dashboardApproval");
       const approvalsList = document.getElementById("approvalsList");
       const activityList = document.getElementById("activityList");
@@ -2366,6 +3936,9 @@
       const runtimeStatus = document.getElementById("runtimeStatus");
       const wsStatusDetail = document.getElementById("wsStatusDetail");
       const sandboxBaseWarning = document.getElementById("sandboxBaseWarning");
+      const sandboxBaseDisplay = document.getElementById("sandboxBaseDisplay");
+      const postureSandbox = document.getElementById("postureSandbox");
+      const postureSigning = document.getElementById("postureSigning");
       const headerPauseToggle = document.getElementById("headerPauseToggle");
       const headerConnectionToggle = document.getElementById("headerConnectionToggle");
       const onboardingOverlay = document.getElementById("onboardingOverlay");
@@ -2385,6 +3958,10 @@
       let cachedCommandsPaused = false;
       let cachedConnectionEnabled = true;
       let cachedPort = 19432;
+      let cachedAgentMonitorEnabled = false;
+      let cachedCommandSigningEnforcementEnabled = false;
+      let cachedCommandSigningAuthorizedCount = 0;
+      let cachedCommandSigningPendingCount = 0;
 
       async function refreshRuntime() {
         const status = await api.getRuntimeStatus();
@@ -2395,6 +3972,10 @@
         cachedPort = status.port ?? 19432;
         const runtimeHealth = describeRuntimeHealth(cloudStatus, cachedConnectionEnabled);
         runtimeStatus.className = `runtime-health ${runtimeHealth.tone}`;
+        appShell.classList.remove("state-degraded", "state-disconnected");
+        if (runtimeHealth.tone !== "healthy") {
+          appShell.classList.add("state-disconnected");
+        }
         runtimeStatus.title = runtimeHealth.detail;
         runtimeStatus.style.cursor = isAuthError(cloudStatus.error) ? "pointer" : "";
         runtimeStatus.onclick = isAuthError(cloudStatus.error) ? () => activateTab("settings") : null;
@@ -2428,6 +4009,10 @@
         const cmdTone = !cachedConnectionEnabled || cachedCommandsPaused ? "warn" : "ok";
         dashboardCommandsState.textContent = cmdText;
         dashboardCommandsState.className = `status-value ${cmdTone}`;
+        const security = describeConnectionSecurity(status.connectionSecurity, cloudStatus);
+        dashboardSecurity.textContent = security.label;
+        dashboardSecurity.className = `status-value ${security.tone}`;
+        dashboardSecurityDetail.textContent = security.detail;
 
         // Config rows
         dashboardTarget.textContent = cloudStatus.state === "online" && cloudStatus.targetId
@@ -2458,6 +4043,46 @@
           return "Disconnected";
         }
         return "Connecting";
+      }
+
+      function describeConnectionSecurity(connectionSecurity, cloudStatus) {
+        const mode = connectionSecurity?.mode || "unknown";
+        const isOnline = cloudStatus.state === "online";
+        if (mode === "enhanced") {
+          return {
+            label: "Enhanced",
+            tone: "ok",
+            detail: isOnline
+              ? "Managed key with request signing is active."
+              : "Managed key and signing are configured."
+          };
+        }
+        if (mode === "signing_unavailable") {
+          return {
+            label: "Needs Attention",
+            tone: "warn",
+            detail: connectionSecurity?.detail || "Managed key is present but signing is unavailable."
+          };
+        }
+        if (mode === "standard") {
+          return {
+            label: "Standard",
+            tone: "",
+            detail: "Using a manually configured bearer key."
+          };
+        }
+        if (mode === "unconfigured") {
+          return {
+            label: "Not Configured",
+            tone: "warn",
+            detail: "No cloud API key is configured."
+          };
+        }
+        return {
+          label: "Unknown",
+          tone: "warn",
+          detail: "Security mode is not available."
+        };
       }
 
       function isAuthError(errorText) {
@@ -2722,12 +4347,17 @@
         }
       }
 
+      function formatByteCount(value) {
+        const bytes = Number(value);
+        if (!Number.isFinite(bytes) || bytes < 0) return null;
+        if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + " MB";
+        if (bytes >= 1024) return (bytes / 1024).toFixed(1) + " KB";
+        return bytes + " B";
+      }
+
       function renderActivityCard(event) {
         const card = document.createElement("div");
         card.className = "activity-card";
-
-        const hasExpand = Boolean(event.requestBody || event.responseBody);
-        if (hasExpand) card.classList.add("expandable");
 
         const top = document.createElement("div");
         top.className = "activity-top";
@@ -2755,13 +4385,6 @@
         badge.textContent = kind === "security" ? "Security" : statusLabel(statusCode);
         top.appendChild(badge);
 
-        if (hasExpand) {
-          const chevron = document.createElement("span");
-          chevron.className = "activity-chevron";
-          chevron.textContent = "\u25BE";
-          top.appendChild(chevron);
-        }
-
         card.appendChild(top);
 
         const meta = document.createElement("div");
@@ -2775,7 +4398,13 @@
           : duration >= 1000
             ? (duration / 1000).toFixed(1) + "s"
             : duration + "ms";
-        meta.textContent = `Received ${timeFmt(receivedAt)} \u2192 Responded ${timeFmt(respondedAt)} (${durationFmt})`;
+        const sizeParts = [];
+        const requestSize = formatByteCount(event.requestSizeBytes);
+        const responseSize = formatByteCount(event.responseSizeBytes);
+        if (requestSize) sizeParts.push(`Req ${requestSize}`);
+        if (responseSize) sizeParts.push(`Res ${responseSize}`);
+        meta.textContent = `Received ${timeFmt(receivedAt)} \u2192 Responded ${timeFmt(respondedAt)} (${durationFmt})` +
+          (sizeParts.length ? ` | ${sizeParts.join(" | ")}` : "");
         card.appendChild(meta);
 
         if (event.detail) {
@@ -2783,70 +4412,6 @@
           detail.className = "activity-detail";
           detail.textContent = String(event.detail);
           card.appendChild(detail);
-        }
-
-        if (hasExpand) {
-          const expand = document.createElement("div");
-          expand.className = "activity-expand";
-          const inner = document.createElement("div");
-          inner.className = "activity-expand-inner";
-
-          const sep = document.createElement("hr");
-          sep.className = "activity-separator";
-          inner.appendChild(sep);
-
-          const methodPath = document.createElement("div");
-          methodPath.className = "activity-method-path";
-          methodPath.textContent = `${event.method} ${event.path}`;
-          inner.appendChild(methodPath);
-
-          if (event.requestBody) {
-            const section = document.createElement("div");
-            section.className = "activity-body-section";
-            const label = document.createElement("div");
-            label.className = "activity-body-label";
-            label.textContent = "Request Body";
-            section.appendChild(label);
-            const block = document.createElement("pre");
-            const reqFmt = formatBody(event.requestBody);
-            block.className = "activity-body-block" + (reqFmt.isJson ? " json" : "");
-            block.innerHTML = reqFmt.html;
-            section.appendChild(block);
-            inner.appendChild(section);
-          }
-
-          if (event.responseBody) {
-            const section = document.createElement("div");
-            section.className = "activity-body-section";
-            const label = document.createElement("div");
-            label.className = "activity-body-label";
-            label.textContent = "Response Body";
-            section.appendChild(label);
-            const block = document.createElement("pre");
-            const resFmt = formatBody(event.responseBody);
-            block.className = "activity-body-block" + (resFmt.isJson ? " json" : "");
-            block.innerHTML = resFmt.html;
-            section.appendChild(block);
-            inner.appendChild(section);
-          }
-
-          expand.appendChild(inner);
-          card.appendChild(expand);
-
-          if (event.id && expandedActivityIds.has(event.id)) {
-            card.classList.add("expanded");
-          }
-
-          top.addEventListener("click", () => {
-            const nowExpanded = card.classList.toggle("expanded");
-            if (event.id) {
-              if (nowExpanded) {
-                expandedActivityIds.add(event.id);
-              } else {
-                expandedActivityIds.delete(event.id);
-              }
-            }
-          });
         }
 
         return card;
@@ -3055,6 +4620,7 @@
         ]);
         cachedPendingApprovals = Array.isArray(approvals) ? approvals : [];
         cachedResolvedApprovals = Array.isArray(resolved) ? resolved : [];
+        updateApprovalsBadge(cachedPendingApprovals.length);
         renderApprovals();
       }
 
@@ -3063,11 +4629,192 @@
         relayOrigin.value = settings.relayOrigin || "";
         apiOrigin.value = settings.apiOrigin || "";
         webAppOrigin.value = settings.webAppOrigin || "";
+        cachedPlanExtractionEnabled = settings.planExtractionEnabled === true;
+        cachedAgentMonitorEnabled = settings.agentMonitorEnabled === true;
+        buildSidebar();
+        if (agentMonitorEnabled) {
+          agentMonitorEnabled.checked = cachedAgentMonitorEnabled;
+        }
+        syncAgentMonitorTabVisibility(cachedAgentMonitorEnabled);
         sandboxBaseDirectory.value = settings.sandboxBaseDirectory || "";
+        cachedCommandSigningEnforcementEnabled = settings.commandSigningEnforcementEnabled === true;
+        if (commandSigningEnforcementEnabled) {
+          commandSigningEnforcementEnabled.checked = cachedCommandSigningEnforcementEnabled;
+        }
         defaultApprovalTier.value = settings.defaultApprovalTier === "auto" ? "high" : (settings.defaultApprovalTier || "high");
         renderTierOverrides(settings.autoApprovalRules || {});
         renderAlwaysAllowRules(settings.alwaysAllowRules || []);
-        updateSandboxBaseWarning();
+        void refreshSandboxWarningFromPath(sandboxBaseDirectory, updateSandboxBaseWarning);
+        void refreshCommandSigningKeys();
+      }
+
+      async function refreshCommandSigningKeys() {
+        if (!commandSigningKeysList) return;
+        commandSigningKeysList.innerHTML = '<p class="sec-empty">Loading keys...</p>';
+        try {
+          const state = await api.listCommandSigningKeys();
+          const serverSupported = state.serverSupported === true;
+          if (browserCommandKeysSection) {
+            browserCommandKeysSection.hidden = !serverSupported;
+          }
+          if (!serverSupported) {
+            cachedCommandSigningAuthorizedCount = 0;
+            cachedCommandSigningPendingCount = 0;
+            cachedCommandSigningEnforcementEnabled = state.enforcementEnabled === true;
+            if (commandSigningEnforcementEnabled) {
+              commandSigningEnforcementEnabled.checked = cachedCommandSigningEnforcementEnabled;
+            }
+            commandSigningKeysList.innerHTML = "";
+            updateSigningPostureUnavailable();
+            return;
+          }
+          const available = Array.isArray(state.available) ? state.available : [];
+          const authorized = Array.isArray(state.authorized) ? state.authorized : [];
+          const availableError = typeof state.availableError === "string" ? state.availableError : "";
+          const enforcementEnabled = state.enforcementEnabled === true;
+          cachedCommandSigningEnforcementEnabled = enforcementEnabled;
+          cachedCommandSigningAuthorizedCount = authorized.length;
+          cachedCommandSigningPendingCount = available.length;
+          if (commandSigningEnforcementEnabled) {
+            commandSigningEnforcementEnabled.checked = enforcementEnabled;
+          }
+
+          commandSigningKeysList.innerHTML = "";
+          updateSigningPosture(authorized.length, available.length, availableError);
+          updateCommandSigningEnforcementCopy(enforcementEnabled, authorized.length, available.length);
+
+          // Trusted zone
+          const trustedZone = document.createElement("div");
+          trustedZone.className = "sec-keys-zone";
+          const trustedHeader = document.createElement("p");
+          trustedHeader.className = "sec-eyebrow";
+          trustedHeader.innerHTML = `Trusted <span class="sec-count">${authorized.length}</span>`;
+          trustedZone.appendChild(trustedHeader);
+          const trustedList = document.createElement("div");
+          trustedList.className = "sec-key-list";
+          trustedZone.appendChild(trustedList);
+
+          if (authorized.length === 0) {
+            renderKeysEmpty(trustedList, "authorized");
+          } else {
+            for (const key of authorized) {
+              const { card, actions } = buildKeyCard(key, "authorized");
+              const remove = document.createElement("button");
+              remove.className = "is-danger";
+              remove.type = "button";
+              remove.textContent = "Revoke";
+              remove.addEventListener("click", async () => {
+                await (api.removeAuthorizedKey
+                  ? api.removeAuthorizedKey(key.fingerprint)
+                  : api.revokeCommandSigningKey(key.fingerprint));
+                await refreshCommandSigningKeys();
+              });
+              actions.appendChild(remove);
+              trustedList.appendChild(card);
+            }
+          }
+          commandSigningKeysList.appendChild(trustedZone);
+
+          // Pending zone
+          const pendingZone = document.createElement("div");
+          pendingZone.className = "sec-keys-zone";
+          const pendingHeader = document.createElement("p");
+          pendingHeader.className = "sec-eyebrow";
+          pendingHeader.innerHTML = `Awaiting Approval <span class="sec-count">${available.length}</span>`;
+          pendingZone.appendChild(pendingHeader);
+          const pendingList = document.createElement("div");
+          pendingList.className = "sec-key-list";
+          pendingZone.appendChild(pendingList);
+
+          if (available.length === 0) {
+            renderKeysEmpty(pendingList, "pending");
+          } else {
+            for (const key of available) {
+              const { card, actions } = buildKeyCard(key, "pending");
+              const approve = document.createElement("button");
+              approve.className = "is-primary";
+              approve.type = "button";
+              approve.textContent = "Approve";
+              approve.addEventListener("click", async () => {
+                await (api.approveOrgPublicKey
+                  ? api.approveOrgPublicKey(key.fingerprint)
+                  : api.authorizeCommandSigningKey(key.fingerprint));
+                await refreshCommandSigningKeys();
+              });
+              const reject = document.createElement("button");
+              reject.type = "button";
+              reject.textContent = "Reject";
+              reject.addEventListener("click", async () => {
+                if (api.rejectOrgPublicKey) {
+                  await api.rejectOrgPublicKey(key.fingerprint);
+                }
+                await refreshCommandSigningKeys();
+              });
+              actions.append(approve, reject);
+              pendingList.appendChild(card);
+            }
+          }
+          commandSigningKeysList.appendChild(pendingZone);
+
+          if (availableError) {
+            const warning = document.createElement("p");
+            warning.className = "sec-error";
+            warning.textContent = `Failed to load org keys: ${availableError}`;
+            commandSigningKeysList.appendChild(warning);
+          }
+        } catch (error) {
+          commandSigningKeysList.innerHTML = "";
+          const err = document.createElement("p");
+          err.className = "sec-error";
+          err.textContent = `Failed to load keys: ${error.message}`;
+          commandSigningKeysList.appendChild(err);
+          updateSigningPosture(0, 0, error.message);
+          updateCommandSigningEnforcementCopy(
+            cachedCommandSigningEnforcementEnabled,
+            cachedCommandSigningAuthorizedCount,
+            cachedCommandSigningPendingCount
+          );
+        }
+      }
+
+      function updateCommandSigningEnforcementCopy(enforcementEnabled, authorizedCount, pendingCount) {
+        if (!commandSigningEnforcementCopy || !commandSigningEnforcementIntro) return;
+        if (enforcementEnabled && authorizedCount > 0) {
+          commandSigningEnforcementIntro.textContent = "Only trusted browser keys can send cloud commands to this Desktop.";
+          commandSigningEnforcementCopy.textContent =
+            authorizedCount === 1
+              ? "Enforcement is enabled. Only the trusted browser key can send cloud commands to this Desktop."
+              : `Enforcement is enabled. Only ${authorizedCount} trusted browser keys can send cloud commands to this Desktop.`;
+          return;
+        }
+        if (enforcementEnabled) {
+          commandSigningEnforcementIntro.textContent = "Trusted browser enforcement is enabled with no trusted keys.";
+          commandSigningEnforcementCopy.textContent =
+            "Browser commands will be rejected until a key is approved.";
+          return;
+        }
+        commandSigningEnforcementIntro.textContent =
+          "Browser command keys let this Desktop trust specific web browsers. Enable trusted keys when commands should require an approved browser key.";
+        commandSigningEnforcementCopy.textContent = pendingCount > 0
+          ? "Enforcement is off, so signed-in browser sessions with access to this Desktop can send commands without an approved key. Approve pending keys, then require trusted keys when ready."
+          : "Enforcement is off, so signed-in browser sessions with access to this Desktop can send commands without an approved key. If you require trusted keys before approving one, browser commands will be rejected.";
+      }
+
+      async function authorizePastedCommandSigningKey() {
+        if (!commandKeyPublicKey || !commandKeyMessage) return;
+        commandKeyMessage.textContent = "";
+        try {
+          await api.authorizeKey({
+            publicKeyBase64: commandKeyPublicKey.value,
+            label: commandKeyLabel?.value || undefined
+          });
+          commandKeyPublicKey.value = "";
+          if (commandKeyLabel) commandKeyLabel.value = "";
+          commandKeyMessage.textContent = "Key authorized.";
+          await refreshCommandSigningKeys();
+        } catch (error) {
+          commandKeyMessage.textContent = `Failed to authorize key: ${error.message}`;
+        }
       }
 
       const binaryPathInputs = {
@@ -3343,18 +5090,178 @@
         }
       }
 
-      function updateSandboxBaseWarning() {
+      function updateSandboxBaseWarning({ isGitRepo, suggestedPath } = {}) {
         const sandbox = sandboxBaseDirectory.value.trim();
+        renderSandboxPathDisplay(sandbox);
         if (!sandbox) {
           sandboxBaseWarning.textContent = "Sandbox base directory is required.";
+          updateSandboxPosture("danger", "Not set", "Choose a base directory below.");
           return;
         }
         if (isRiskyAllowedDirectory(sandbox)) {
           sandboxBaseWarning.textContent =
             "Warning: this sandbox is broad or sensitive. Choose a tighter directory such as ~/Source.";
+          updateSandboxPosture("warn", "Broad scope", "Tighten to a project directory.");
+          return;
+        }
+        if (isGitRepo) {
+          sandboxBaseWarning.textContent = gitRepoWarningMessage(suggestedPath);
+          updateSandboxPosture("warn", "Git repo", "Consider a parent directory.");
           return;
         }
         sandboxBaseWarning.textContent = "";
+        const tail = sandbox.split("/").filter(Boolean).slice(-2).join("/");
+        updateSandboxPosture("ok", "Locked", tail ? `Scoped to /${tail}` : "Scoped.");
+      }
+
+      function renderSandboxPathDisplay(sandbox) {
+        if (!sandboxBaseDisplay) return;
+        if (!sandbox) {
+          sandboxBaseDisplay.innerHTML = '<span class="sec-path-empty">No directory selected</span>';
+          return;
+        }
+        sandboxBaseDisplay.textContent = sandbox;
+      }
+
+      function updateSandboxPosture(tone, value, detail) {
+        if (!postureSandbox) return;
+        postureSandbox.classList.remove("tone-ok", "tone-warn", "tone-danger");
+        postureSandbox.classList.add(`tone-${tone}`);
+        const valueEl = postureSandbox.querySelector(".sec-tile-value");
+        const detailEl = postureSandbox.querySelector(".sec-tile-detail");
+        if (valueEl) valueEl.textContent = value;
+        if (detailEl) detailEl.textContent = detail;
+      }
+
+      function updateSigningPosture(authorizedCount, pendingCount, errorMessage) {
+        if (!postureSigning) return;
+        postureSigning.classList.remove("tone-ok", "tone-warn", "tone-danger");
+        const valueEl = postureSigning.querySelector(".sec-tile-value");
+        const detailEl = postureSigning.querySelector(".sec-tile-detail");
+        if (errorMessage) {
+          postureSigning.classList.add("tone-danger");
+          if (valueEl) valueEl.textContent = "Unavailable";
+          if (detailEl) detailEl.textContent = errorMessage;
+          return;
+        }
+        if (pendingCount > 0) {
+          postureSigning.classList.add("tone-warn");
+          if (valueEl) valueEl.textContent = `${pendingCount} pending`;
+          if (detailEl) detailEl.textContent = `${authorizedCount} authorized, ${pendingCount} awaiting approval.`;
+          return;
+        }
+        if (authorizedCount > 0) {
+          postureSigning.classList.add("tone-ok");
+          if (valueEl) valueEl.textContent = `${authorizedCount} trusted`;
+          if (detailEl) detailEl.textContent = authorizedCount === 1 ? "1 browser key authorized." : `${authorizedCount} browser keys authorized.`;
+          return;
+        }
+        postureSigning.classList.add("tone-warn");
+        if (valueEl) valueEl.textContent = "None";
+        if (detailEl) detailEl.textContent = "No browser keys are trusted yet.";
+      }
+
+      function updateSigningPostureUnavailable() {
+        if (!postureSigning) return;
+        postureSigning.classList.remove("tone-ok", "tone-warn", "tone-danger");
+        postureSigning.classList.add("tone-warn");
+        const valueEl = postureSigning.querySelector(".sec-tile-value");
+        const detailEl = postureSigning.querySelector(".sec-tile-detail");
+        if (valueEl) valueEl.textContent = "Unavailable";
+        if (detailEl) detailEl.textContent = "Current server does not support trusted browser keys.";
+      }
+
+      function avatarColorsFor(seed) {
+        let hash = 0;
+        const str = String(seed || "?");
+        for (let i = 0; i < str.length; i++) {
+          hash = (hash * 31 + str.charCodeAt(i)) | 0;
+        }
+        const hue = Math.abs(hash) % 360;
+        const hueB = (hue + 38) % 360;
+        return {
+          from: `hsl(${hue}, 62%, 48%)`,
+          to: `hsl(${hueB}, 58%, 38%)`
+        };
+      }
+
+      function avatarInitialsFor(name, email) {
+        const source = (name || email || "?").trim();
+        if (!source) return "?";
+        const parts = source.split(/[\s@._-]+/).filter(Boolean);
+        if (parts.length === 0) return source[0].toUpperCase();
+        if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+        return (parts[0][0] + parts[1][0]).toUpperCase();
+      }
+
+      function shortFingerprint(fingerprint) {
+        const fp = String(fingerprint || "");
+        if (fp.length <= 16) return fp;
+        return `${fp.slice(0, 8)}...${fp.slice(-6)}`;
+      }
+
+      function buildKeyCard(key, variant) {
+        const card = document.createElement("div");
+        card.className = `sec-key-card ${variant === "authorized" ? "is-authorized" : "is-pending"}`;
+
+        const ownerName = key.ownerName || "";
+        const ownerEmail = key.ownerEmail || "";
+        const displayName = ownerName || ownerEmail || shortFingerprint(key.fingerprint) || "Unknown";
+
+        const avatar = document.createElement("div");
+        avatar.className = "sec-avatar";
+        const colors = avatarColorsFor(ownerEmail || ownerName || key.fingerprint);
+        avatar.style.setProperty("--sec-avatar-from", colors.from);
+        avatar.style.setProperty("--sec-avatar-to", colors.to);
+        avatar.textContent = avatarInitialsFor(ownerName, ownerEmail);
+
+        const body = document.createElement("div");
+        body.className = "sec-key-body";
+
+        const name = document.createElement("div");
+        name.className = "sec-key-name";
+        name.textContent = displayName;
+        name.title = displayName;
+
+        const meta = document.createElement("div");
+        meta.className = "sec-key-meta";
+        if (ownerEmail && ownerEmail !== displayName) {
+          const email = document.createElement("span");
+          email.className = "sec-key-email";
+          email.textContent = ownerEmail;
+          meta.appendChild(email);
+        }
+        const fp = document.createElement("span");
+        fp.className = "sec-fingerprint";
+        fp.textContent = shortFingerprint(key.fingerprint);
+        fp.title = key.fingerprint || "";
+        meta.appendChild(fp);
+
+        body.append(name, meta);
+
+        const actions = document.createElement("div");
+        actions.className = "sec-key-actions";
+        card.append(avatar, body, actions);
+        return { card, actions };
+      }
+
+      function renderKeysEmpty(container, variant) {
+        const empty = document.createElement("div");
+        empty.className = "sec-empty";
+        const heading = document.createElement("strong");
+        const detail = document.createTextNode(
+          variant === "authorized"
+            ? "Approve a pending key below or add one manually to start accepting signed cloud commands."
+            : "When teammates register a browser, their key shows up here for your approval."
+        );
+        heading.textContent = variant === "authorized" ? "No trusted keys yet" : "Nothing waiting";
+        empty.append(heading, detail);
+        container.appendChild(empty);
+      }
+
+      function gitRepoWarningMessage(suggestedPath) {
+        const suggestion = suggestedPath ? ` Consider using the parent directory instead: ${suggestedPath}` : "";
+        return `Warning: this directory is a git repository. Sandboxing a git repo may expose source history to agents.${suggestion}`;
       }
 
       function isRiskyAllowedDirectory(input) {
@@ -3413,19 +5320,37 @@
         await api.updateSettings({
           relayOrigin: relayOrigin.value.trim(),
           apiOrigin: apiOrigin.value.trim(),
-          webAppOrigin: webAppOrigin.value.trim()
+          webAppOrigin: webAppOrigin.value.trim(),
+          agentMonitorEnabled: agentMonitorEnabled?.checked === true
         });
+        syncAgentMonitorTabVisibility(agentMonitorEnabled?.checked === true);
         relayGatewayMessage.textContent = "Saved.";
         await Promise.all([refreshRuntime(), refreshApprovals()]);
       }
 
       async function saveSecuritySettings() {
         clearAllSettingsMessages();
+        const nextEnforcementEnabled = commandSigningEnforcementEnabled?.checked === true;
+        if (
+          nextEnforcementEnabled &&
+          !cachedCommandSigningEnforcementEnabled &&
+          cachedCommandSigningAuthorizedCount === 0
+        ) {
+          const confirmed = window.confirm(
+            "Requiring trusted keys before approving a browser key will reject browser commands until a key is approved. Enable anyway?"
+          );
+          if (!confirmed) {
+            securityMessage.textContent = "Trusted browser enforcement was not enabled.";
+            return;
+          }
+        }
         await api.updateSettings({
-          sandboxBaseDirectory: sandboxBaseDirectory.value.trim()
+          sandboxBaseDirectory: sandboxBaseDirectory.value.trim(),
+          commandSigningEnforcementEnabled: nextEnforcementEnabled
         });
+        cachedCommandSigningEnforcementEnabled = nextEnforcementEnabled;
         securityMessage.textContent = "Saved.";
-        await refreshRuntime();
+        await Promise.all([refreshRuntime(), refreshCommandSigningKeys()]);
       }
 
       async function savePoliciesSettings() {
@@ -3756,13 +5681,14 @@
       }
 
       async function pickDirectoryForInput(targetInput, warningUpdater) {
-        const selectedPath = await api.pickSandboxDirectory();
-        if (!selectedPath || typeof selectedPath !== "string") {
+        const result = await api.pickSandboxDirectory();
+        if (!result) {
           return;
         }
-        targetInput.value = selectedPath;
+        const { path, isGitRepo, suggestedPath } = result;
+        targetInput.value = path;
         if (typeof warningUpdater === "function") {
-          warningUpdater();
+          warningUpdater({ isGitRepo, suggestedPath });
         }
       }
 
@@ -3777,7 +5703,9 @@
         onboardingApiKeyHint.textContent = state?.hasStoredApiKey
           ? "A cloud API key is already stored. You can leave this blank."
           : "No stored API key found. Enter one now or later in Settings.";
-        updateOnboardingSandboxWarning();
+        const managedProvisioning = state?.managedProvisioning;
+        onboardingMessage.textContent = managedProvisioning?.message || "";
+        void refreshSandboxWarningFromPath(onboardingSandboxDir, updateOnboardingSandboxWarning);
 
         if (state?.completed) {
           onboardingOverlay.classList.add("hidden");
@@ -3786,7 +5714,7 @@
         }
       }
 
-      function updateOnboardingSandboxWarning() {
+      function updateOnboardingSandboxWarning({ isGitRepo, suggestedPath } = {}) {
         const sandbox = onboardingSandboxDir.value.trim();
         if (!sandbox) {
           onboardingSandboxWarning.textContent = "Sandbox base directory is required.";
@@ -3797,7 +5725,46 @@
             "Warning: this directory is broad/sensitive and may expose personal files or secrets. Choose a scoped directory like ~/Source.";
           return;
         }
+        if (isGitRepo) {
+          onboardingSandboxWarning.textContent = gitRepoWarningMessage(suggestedPath);
+          return;
+        }
         onboardingSandboxWarning.textContent = "";
+      }
+
+      async function refreshSandboxWarningFromPath(inputEl, warningUpdater) {
+        const sandbox = inputEl.value.trim();
+        if (!sandbox) {
+          warningUpdater();
+          return;
+        }
+        if (isRiskyAllowedDirectory(sandbox)) {
+          warningUpdater();
+          return;
+        }
+        try {
+          const result = await api.inspectSandboxPath(sandbox);
+          if (inputEl.value.trim() !== sandbox) return;
+          if (!result) {
+            warningUpdater();
+            return;
+          }
+          warningUpdater({ isGitRepo: result.isGitRepo, suggestedPath: result.suggestedPath });
+        } catch {
+          warningUpdater();
+        }
+      }
+
+      function debouncedSandboxWarning(inputEl, warningUpdater, delayMs = 200) {
+        let timer = null;
+        return () => {
+          warningUpdater();
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(() => {
+            timer = null;
+            void refreshSandboxWarningFromPath(inputEl, warningUpdater);
+          }, delayMs);
+        };
       }
 
       async function completeOnboarding() {
@@ -3832,14 +5799,32 @@
         }
       }
 
+      async function connectInBrowser() {
+        onboardingMessage.textContent = "Opening browser connection...";
+        try {
+          await api.startDeviceOnboarding({
+            webAppOrigin: onboardingWebAppOrigin.value.trim()
+          });
+          await loadOnboardingState();
+        } catch (error) {
+          onboardingMessage.textContent = `Failed to connect in browser: ${error.message}`;
+        }
+      }
+
       // --- Logs tab ---
       const logsList = document.getElementById("logsList");
+      const logsPausedBanner = document.getElementById("logsPausedBanner");
+      const pauseLogsBtn = document.getElementById("pauseLogsBtn");
+      const openLogFileBtn = document.getElementById("openLogFileBtn");
 
       let logsAutoRefreshTimer = null;
+      let logsPaused = false;
+      let lastVisibleLogCount = 0;
+      const renderedLogKeys = new Set();
 
       function startLogsAutoRefresh() {
         stopLogsAutoRefresh();
-        logsAutoRefreshTimer = setInterval(() => void renderLogs(), 3000);
+        logsAutoRefreshTimer = setInterval(() => void pollLogs(), 3000);
       }
 
       function stopLogsAutoRefresh() {
@@ -3849,28 +5834,149 @@
         }
       }
 
-      async function renderLogs() {
-        const wasAtBottom = logsList.scrollTop + logsList.clientHeight >= logsList.scrollHeight - 20;
+      async function pollLogs() {
         const entries = await api.getLogs();
         if (!entries || !entries.length) {
-          logsList.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px 20px;color:var(--muted);text-align:center;gap:6px"><div style="font-size:13px">No log entries yet</div><div style="font-size:11px;opacity:0.7">Turn on Verbose to capture detailed diagnostics.</div></div>';
+          updatePausedBanner(0);
+          if (!logsPaused) {
+            renderLogs([]);
+          }
           return;
         }
-        const html = entries.map(e => {
-          const isError = e.level === "error";
-          const isWarn = e.level === "warn";
-          const rowClass = isError ? "log-row log-error" : isWarn ? "log-row log-warn" : "log-row";
-          const ts = e.timestamp.slice(11, 23);
-          return `<div class="${rowClass}"><span class="log-ts">${ts}</span><span class="log-tag">${escapeHtml(e.tag)}</span><span class="log-msg">${escapeHtml(e.message)}</span></div>`;
-        }).join("");
-        logsList.innerHTML = html;
+
+        const queued = Math.max(0, entries.length - lastVisibleLogCount);
+        updatePausedBanner(queued);
+        if (logsPaused || isSelectingLogs()) {
+          return;
+        }
+
+        renderLogs(entries);
+      }
+
+      function renderLogs(entries = []) {
+        const wasAtBottom = logsList.scrollTop + logsList.clientHeight >= logsList.scrollHeight - 20;
+        if (!entries.length) {
+          logsList.textContent = "";
+          renderedLogKeys.clear();
+          lastVisibleLogCount = 0;
+          logsList.appendChild(buildEmptyLogsMessage());
+          return;
+        }
+
+        const placeholder = logsList.querySelector("[data-empty-logs]");
+        placeholder?.remove();
+        for (const entry of entries) {
+          const key = logEntryKey(entry);
+          if (renderedLogKeys.has(key)) {
+            continue;
+          }
+          renderedLogKeys.add(key);
+          logsList.appendChild(buildLogRow(entry));
+        }
+        trimRenderedLogs(500);
+        lastVisibleLogCount = entries.length;
         if (wasAtBottom) {
           logsList.scrollTop = logsList.scrollHeight;
         }
       }
 
-      function escapeHtml(s) {
-        return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      function buildEmptyLogsMessage() {
+        const empty = document.createElement("div");
+        empty.dataset.emptyLogs = "true";
+        empty.style.display = "flex";
+        empty.style.flexDirection = "column";
+        empty.style.alignItems = "center";
+        empty.style.justifyContent = "center";
+        empty.style.padding = "40px 20px";
+        empty.style.color = "var(--muted-foreground)";
+        empty.style.textAlign = "center";
+        empty.style.gap = "6px";
+        const title = document.createElement("div");
+        title.style.fontSize = "13px";
+        title.textContent = "No log entries yet";
+        const hint = document.createElement("div");
+        hint.style.fontSize = "11px";
+        hint.style.opacity = "0.7";
+        hint.textContent = "Turn on Verbose to capture detailed diagnostics.";
+        empty.append(title, hint);
+        return empty;
+      }
+
+      function buildLogRow(entry) {
+        const row = document.createElement("div");
+        const isError = entry.level === "error";
+        const isWarn = entry.level === "warn";
+        row.className = isError
+          ? "log-row log-error"
+          : isWarn
+            ? "log-row log-warn"
+            : "log-row";
+        if (entry.session === "previous") {
+          row.classList.add("log-previous");
+        }
+        row.dataset.logKey = logEntryKey(entry);
+
+        const timestamp = document.createElement("span");
+        timestamp.className = "log-ts";
+        timestamp.textContent = typeof entry.timestamp === "string"
+          ? entry.timestamp.slice(11, 23)
+          : "";
+        const tag = document.createElement("span");
+        tag.className = "log-tag";
+        tag.textContent = entry.tag || "desktop";
+        const message = document.createElement("span");
+        message.className = "log-msg";
+        message.textContent = entry.message || "";
+        row.append(timestamp, tag);
+        if (entry.session === "previous") {
+          const session = document.createElement("span");
+          session.className = "log-session";
+          session.textContent = "previous session";
+          row.append(session);
+        }
+        row.append(message);
+        return row;
+      }
+
+      function logEntryKey(entry) {
+        return [
+          entry.timestamp || "",
+          entry.level || "",
+          entry.tag || "",
+          entry.message || "",
+          entry.session || "current"
+        ].join("|");
+      }
+
+      function trimRenderedLogs(maxRows) {
+        while (logsList.children.length > maxRows) {
+          const first = logsList.firstElementChild;
+          if (!first) break;
+          if (first.dataset.emptyLogs) {
+            first.remove();
+            continue;
+          }
+          renderedLogKeys.delete(first.dataset.logKey || "");
+          first.remove();
+        }
+      }
+
+      function isSelectingLogs() {
+        const selection = window.getSelection();
+        if (!selection || selection.isCollapsed) {
+          return false;
+        }
+        const node = selection.anchorNode;
+        if (!node) {
+          return false;
+        }
+        const element = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
+        return Boolean(element && logsList.contains(element));
+      }
+
+      function updatePausedBanner(queuedCount) {
+        logsPausedBanner.textContent = `Paused - ${queuedCount} new entries queued`;
+        logsPausedBanner.classList.toggle("visible", logsPaused);
       }
 
       const verboseToggle = document.getElementById("verboseLogging");
@@ -3878,10 +5984,33 @@
         await api.updateSettings({ verboseLogging: verboseToggle.checked });
       });
 
-      document.getElementById("refreshLogsBtn").addEventListener("click", renderLogs);
+      document.getElementById("refreshLogsBtn").addEventListener("click", () => void pollLogs());
+      pauseLogsBtn.addEventListener("click", async () => {
+        logsPaused = !logsPaused;
+        pauseLogsBtn.title = logsPaused ? "Resume logs" : "Pause logs";
+        updatePausedBanner(0);
+        if (!logsPaused) {
+          await pollLogs();
+        }
+      });
+      openLogFileBtn.addEventListener("click", async () => {
+        const result = await api.openLogFile();
+        if (result && result.ok === false) {
+          logsPausedBanner.textContent = `Failed to open log file: ${result.error || "unknown error"}`;
+          logsPausedBanner.classList.add("visible");
+        }
+      });
+      api.getLogFilePath?.().then((logPath) => {
+        if (logPath) {
+          openLogFileBtn.title = `Open log file: ${logPath}`;
+        }
+      }).catch(() => {});
       document.getElementById("clearLogsBtn").addEventListener("click", async () => {
         await api.clearLogs();
-        await renderLogs();
+        logsList.textContent = "";
+        renderedLogKeys.clear();
+        lastVisibleLogCount = 0;
+        await pollLogs();
       });
 
       document.getElementById("saveRelayGateway").addEventListener("click", saveRelayGatewaySettings);
@@ -3914,8 +6043,15 @@
         .getElementById("pickOnboardingSandbox")
         .addEventListener("click", () => void pickDirectoryForInput(onboardingSandboxDir, updateOnboardingSandboxWarning));
       document.getElementById("completeOnboarding").addEventListener("click", () => void completeOnboarding());
-      sandboxBaseDirectory.addEventListener("input", updateSandboxBaseWarning);
-      onboardingSandboxDir.addEventListener("input", updateOnboardingSandboxWarning);
+      document.getElementById("connectInBrowser").addEventListener("click", () => void connectInBrowser());
+      sandboxBaseDirectory.addEventListener(
+        "input",
+        debouncedSandboxWarning(sandboxBaseDirectory, updateSandboxBaseWarning),
+      );
+      onboardingSandboxDir.addEventListener(
+        "input",
+        debouncedSandboxWarning(onboardingSandboxDir, updateOnboardingSandboxWarning),
+      );
       document.getElementById("refreshApprovals").addEventListener("click", refreshApprovals);
       document.getElementById("clearApprovals").addEventListener("click", clearApprovals);
       const dangerAutoApproveToggle = document.getElementById("dangerAutoApproveToggle");
@@ -3929,6 +6065,8 @@
       document.getElementById("clearActivity").addEventListener("click", clearActivity);
       showRequestEvents.addEventListener("change", renderActivity);
       showSecurityEvents.addEventListener("change", renderActivity);
+      refreshCommandKeys?.addEventListener("click", () => void refreshCommandSigningKeys());
+      authorizePastedCommandKey?.addEventListener("click", () => void authorizePastedCommandSigningKey());
 
       const debugAuthSection = document.getElementById("debugAuthSection");
       const debugTokenOutput = document.getElementById("debugTokenOutput");
@@ -3988,7 +6126,13 @@
             ? result.remoteHash.slice(0, 7)
             : "unknown";
         updateBannerText.textContent = `A new version is available (${label})`;
+        updateBannerBtn.disabled = false;
         updateBanner.classList.add("visible");
+      }
+
+      function hideUpdateBanner() {
+        updateBanner.classList.remove("visible");
+        updateBannerBtn.disabled = true;
       }
 
       async function triggerUpdate() {
@@ -3999,15 +6143,74 @@
           updateBannerText.textContent = "Restarting\u2026";
         } catch (error) {
           updateBannerText.textContent = `Update failed: ${error.message || error}`;
-          updateBannerBtn.disabled = false;
+          updateBannerBtn.disabled = true;
         }
       }
 
       window.addEventListener("desktop:update-available", (event) => {
+        if (event.detail?.readyToInstall === false) {
+          hideUpdateBanner();
+          return;
+        }
         showUpdateBanner(event.detail);
       });
 
+      window.addEventListener("desktop:update-status", (event) => {
+        const status = event.detail;
+        if (status?.readyToInstall === true || status?.status === "downloaded") {
+          showUpdateBanner(status);
+          return;
+        }
+        if (status?.status === "available" || status?.status === "downloading" || status?.status === "not-available" || status?.status === "error") {
+          hideUpdateBanner();
+        }
+      });
+
+      window.addEventListener("desktop:onboarding-state-changed", () => {
+        void loadOnboardingState();
+      });
+
       updateBannerBtn.addEventListener("click", triggerUpdate);
+
+      const onboardingPopupBackdrop = document.getElementById("onboardingPopupBackdrop");
+      const onboardingPopupCtaBtn = document.getElementById("onboardingPopupCta");
+      const onboardingPopupDismissSessionBtn = document.getElementById("onboardingPopupDismissSession");
+      const onboardingPopupDismissPermanentBtn = document.getElementById("onboardingPopupDismissPermanent");
+
+      function showOnboardingPopup() {
+        if (!onboardingPopupBackdrop) {
+          return;
+        }
+        onboardingPopupBackdrop.hidden = false;
+        onboardingPopupBackdrop.classList.add("visible");
+      }
+
+      function hideOnboardingPopup() {
+        if (!onboardingPopupBackdrop) {
+          return;
+        }
+        onboardingPopupBackdrop.classList.remove("visible");
+        onboardingPopupBackdrop.hidden = true;
+      }
+
+      window.addEventListener("desktop:show-onboarding-popup", () => {
+        showOnboardingPopup();
+      });
+
+      onboardingPopupCtaBtn?.addEventListener("click", () => {
+        hideOnboardingPopup();
+        void window.desktopApi.onboardingPopupCta();
+      });
+
+      onboardingPopupDismissSessionBtn?.addEventListener("click", () => {
+        hideOnboardingPopup();
+        void window.desktopApi.dismissOnboardingPopup({ permanent: false });
+      });
+
+      onboardingPopupDismissPermanentBtn?.addEventListener("click", () => {
+        hideOnboardingPopup();
+        void window.desktopApi.dismissOnboardingPopup({ permanent: true });
+      });
     </script>
   </body>
 </html>

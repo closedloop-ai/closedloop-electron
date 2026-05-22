@@ -1,16 +1,24 @@
-import { createRequire } from "node:module";
 import Store from "electron-store";
+import {
+  getElectronSafeStorage,
+  type SafeStorageLike,
+} from "./electron-safe-storage.js";
 
-const require = createRequire(import.meta.url);
+export type { SafeStorageLike } from "./electron-safe-storage.js";
 
 /**
- * Subset of Electron safeStorage used by this store (injectable for Node tests).
+ * Metadata stored alongside a loop runner auth token.
+ * `expiresAt` is a Unix timestamp in milliseconds.
+ * `jti` is the JWT ID from the most recently issued token.
+ * `lastIdempotencyKey` is persisted so a force-quit mid-refresh can reuse the
+ * same key on the next launch (AC-008).
  */
-export type SafeStorageLike = {
-  isEncryptionAvailable(): boolean;
-  encryptString(plainText: string): Buffer;
-  decryptString(encrypted: Buffer): string;
-};
+export interface LoopTokenMeta {
+  token: string;
+  expiresAt?: number;
+  jti?: string;
+  lastIdempotencyKey?: string;
+}
 
 type LoopTokenStoreSchema = {
   encryptedLoopTokens: Record<string, string>;
@@ -26,46 +34,21 @@ export interface LoopTokenStoreOptions {
   safeStorage?: SafeStorageLike;
 }
 
-function resolveSafeStorage(override?: SafeStorageLike): SafeStorageLike {
-  if (override) {
-    return override;
-  }
-  try {
-    const electron = require("electron") as unknown;
-    if (
-      electron &&
-      typeof electron === "object" &&
-      electron !== null &&
-      "safeStorage" in electron
-    ) {
-      const ss = (electron as { safeStorage?: SafeStorageLike }).safeStorage;
-      if (
-        ss &&
-        typeof ss.isEncryptionAvailable === "function" &&
-        typeof ss.encryptString === "function" &&
-        typeof ss.decryptString === "function"
-      ) {
-        return ss;
-      }
-    }
-  } catch {
-    /* not running in Electron */
-  }
-  throw new Error(
-    "LoopTokenStore requires Electron main process or options.safeStorage",
-  );
-}
-
 /**
  * Encrypted persistence for per-loop runner auth tokens, keyed by `loopId`.
  * Uses the same pattern as {@link ApiKeyStore}: electron-store + safeStorage.
+ *
+ * On-disk format: encrypted JSON serialization of {@link LoopTokenMeta}.
+ * Legacy entries (encrypted plain strings written before this schema change) are
+ * transparently migrated on read via JSON-parse discrimination.
+ * Legacy migration tracked for removal by FEA-1319.
  */
 export class LoopTokenStore {
   private readonly store: Store<LoopTokenStoreSchema>;
   private readonly safe: SafeStorageLike;
 
   constructor(options?: LoopTokenStoreOptions) {
-    this.safe = resolveSafeStorage(options?.safeStorage);
+    this.safe = getElectronSafeStorage(options?.safeStorage, "LoopTokenStore");
     this.store = new Store<LoopTokenStoreSchema>({
       name: options?.name ?? "desktop-loop-tokens",
       cwd: options?.cwd,
@@ -84,17 +67,26 @@ export class LoopTokenStore {
     this.store.set("encryptedLoopTokens", map);
   }
 
-  setLoopToken(loopId: string, token: string): void {
+  setLoopToken(loopId: string, meta: LoopTokenMeta): void {
     if (!this.safe.isEncryptionAvailable()) {
       throw new Error("safeStorage is not available on this system");
     }
-    const encrypted = this.safe.encryptString(token).toString("base64");
+    const serialized = JSON.stringify(meta);
+    const encrypted = this.safe.encryptString(serialized).toString("base64");
     const map = this.getEncryptedMap();
     map[loopId] = encrypted;
     this.setEncryptedMap(map);
   }
 
-  getLoopToken(loopId: string): string | null {
+  /**
+   * Returns the full token metadata for the given loop, or `null` if not found
+   * or decryption fails.
+   *
+   * Legacy entries encrypted as plain strings (written before the LoopTokenMeta
+   * schema change) are transparently promoted to `{ token: <value> }`.
+   * Legacy migration removal tracked by FEA-1319.
+   */
+  getLoopToken(loopId: string): LoopTokenMeta | null {
     const encrypted = this.getEncryptedMap()[loopId];
     if (!encrypted) {
       return null;
@@ -103,12 +95,38 @@ export class LoopTokenStore {
       return null;
     }
     try {
-      const token = this.safe.decryptString(Buffer.from(encrypted, "base64"));
-      const trimmed = token.trim();
-      return trimmed.length > 0 ? trimmed : null;
+      const decrypted = this.safe.decryptString(Buffer.from(encrypted, "base64"));
+      const trimmed = decrypted.trim();
+      if (trimmed.length === 0) {
+        return null;
+      }
+      // Legacy migration (FEA-1319): discriminate JSON-encoded LoopTokenMeta from legacy plain-string entries written by pre-PLN-650 builds.
+      try {
+        const parsed: unknown = JSON.parse(trimmed);
+        if (
+          parsed !== null &&
+          typeof parsed === "object" &&
+          "token" in parsed &&
+          typeof (parsed as Record<string, unknown>).token === "string"
+        ) {
+          return parsed as LoopTokenMeta;
+        }
+      } catch {
+        // Not valid JSON — treat as legacy plain-string token.
+      }
+      // Legacy migration (FEA-1319): encrypted value was a raw token string written by pre-PLN-650 builds.
+      return { token: trimmed };
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Convenience method for callers that only need the raw token string.
+   * Returns `null` if no token is stored or decryption fails.
+   */
+  getLoopTokenString(loopId: string): string | null {
+    return this.getLoopToken(loopId)?.token ?? null;
   }
 
   deleteLoopToken(loopId: string): void {

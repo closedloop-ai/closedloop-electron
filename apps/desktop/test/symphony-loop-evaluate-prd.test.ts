@@ -8,10 +8,12 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 import {
-  readEvaluatePrdOutputs,
+  EvaluateArtifact,
+  readEvaluateOutputs,
   writePrdArtifact,
 } from "../src/server/operations/symphony-loop.js";
 import { LoopArtifactType } from "@closedloop-ai/loops-api/artifacts";
+import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { DesktopGatewayServer } from "../src/server/server.js";
 import {
@@ -202,7 +204,7 @@ async function startEventServer(): Promise<{
 function buildEvaluatePrdBody(overrides?: Partial<Record<string, unknown>>): Record<string, unknown> {
   return {
     loopId: "11111111-0000-0000-0000-000000000001",
-    command: "EVALUATE_PRD",
+    command: LoopCommand.EvaluatePrd,
     closedLoopAuthToken: "cl-token",
     apiBaseUrl: "https://api.example.com",
     artifacts: [{ type: "PRD", content: "PRD content for evaluation" }],
@@ -267,7 +269,7 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
         },
         body: JSON.stringify({
           loopId,
-          command: "EVALUATE_PRD",
+          command: LoopCommand.EvaluatePrd,
           closedLoopAuthToken: "cl-token",
           apiBaseUrl,
           artifacts: [{ type: "PRD", content: "PRD content here" }],
@@ -322,7 +324,7 @@ describe("T-5.1: EVALUATE_PRD dispatch validation", () => {
         },
         body: JSON.stringify({
           loopId,
-          command: "EVALUATE_PRD",
+          command: LoopCommand.EvaluatePrd,
           closedLoopAuthToken: "cl-token",
           apiBaseUrl,
           artifacts: [{ type: "PRD", content: "PRD content here" }],
@@ -397,7 +399,7 @@ describe("T-5.2: writePrdArtifact", () => {
   test("(c) FEATURE fallback type writes prd.md", async () => {
     const tmpDir = makeTempDir();
     await writePrdArtifact(tmpDir, [
-      { type: LoopArtifactType.Feature, content: "Fallback PRD content" },
+      { id: "artifact-001", type: LoopArtifactType.Feature, content: "Fallback PRD content" },
     ]);
     const prdPath = path.join(tmpDir, "prd.md");
     assert.ok(existsSync(prdPath), "prd.md should exist for FEATURE type");
@@ -427,6 +429,43 @@ describe("T-5.2: writePrdArtifact", () => {
     assert.equal(content, "Prompt-as-fallback content");
   });
 
+  test("(f) picks the primary PRD when a PRD context ref precedes it", async () => {
+    // Backend appends the primary artifact last; refs come first. If a PRD
+    // context ref shares the primary's type, find() would shadow the primary
+    // and judges would score the wrong document. findLast picks the trailing
+    // primary even with a same-type ref present.
+    const tmpDir = makeTempDir();
+    await writePrdArtifact(tmpDir, [
+      { type: "PRD", content: "PARENT PRD (context ref)" },
+      { type: "PRD", content: "PRIMARY PRD" },
+    ]);
+    assert.equal(
+      await fs.readFile(path.join(tmpDir, "prd.md"), "utf-8"),
+      "PRIMARY PRD",
+    );
+  });
+
+  test("(g) delegates to resolvePrimaryArtifact: primaryArtifactId selects first artifact over findLast", async () => {
+    // Both artifacts share LoopArtifactType.Prd. Without primaryArtifactId,
+    // findLast would return the last (second) artifact. With primaryArtifactId
+    // pointing to the first artifact's id, id-based selection wins and the
+    // first artifact's content is written to prd.md.
+    const tmpDir = makeTempDir();
+    await writePrdArtifact(
+      tmpDir,
+      [
+        { id: "prd-primary", type: LoopArtifactType.Prd, content: "FIRST PRD (primary)" },
+        { id: "prd-last", type: LoopArtifactType.Prd, content: "SECOND PRD (trailing)" },
+      ],
+      undefined,
+      "prd-primary",
+    );
+    assert.equal(
+      await fs.readFile(path.join(tmpDir, "prd.md"), "utf-8"),
+      "FIRST PRD (primary)",
+    );
+  });
+
   test("prompt without repo contains skill --workdir runDir but not REPO_PATH=", async () => {
     // Verify evaluate-prd-prompt.txt matches harness-agent EVALUATE_PRD when no target repo.
     const tmpDir = makeTempDir();
@@ -450,7 +489,7 @@ describe("T-5.2: writePrdArtifact", () => {
         },
         body: JSON.stringify({
           loopId,
-          command: "EVALUATE_PRD",
+          command: LoopCommand.EvaluatePrd,
           closedLoopAuthToken: "cl-token",
           apiBaseUrl,
           artifacts: [{ type: "PRD", content: "PRD content here" }],
@@ -520,7 +559,7 @@ describe("T-5.2: writePrdArtifact", () => {
         },
         body: JSON.stringify({
           loopId,
-          command: "EVALUATE_PRD",
+          command: LoopCommand.EvaluatePrd,
           closedLoopAuthToken: "cl-token",
           apiBaseUrl,
           artifacts: [{ type: "PRD", content: "PRD content here" }],
@@ -563,10 +602,10 @@ describe("T-5.2: writePrdArtifact", () => {
 });
 
 // ---------------------------------------------------------------------------
-// T-5.3: readEvaluatePrdOutputs unit tests
+// T-5.3: readEvaluateOutputs(EvaluateArtifact.Prd) unit tests
 // ---------------------------------------------------------------------------
 
-describe("T-5.3: readEvaluatePrdOutputs", () => {
+describe("T-5.3: readEvaluateOutputs(EvaluateArtifact.Prd)", () => {
   test("file exists: returns prdJudges from prd-judges.json", () => {
     const tmpDir = makeTempDir();
     const prdJudgesData = { scores: [{ judge: "quality", score: 8 }] };
@@ -575,13 +614,13 @@ describe("T-5.3: readEvaluatePrdOutputs", () => {
       JSON.stringify(prdJudgesData)
     );
 
-    const result = readEvaluatePrdOutputs(tmpDir);
+    const result = readEvaluateOutputs(tmpDir, EvaluateArtifact.Prd);
     assert.deepEqual(result.prdJudges, prdJudgesData);
   });
 
   test("file absent: returns { prdJudges: undefined }", () => {
     const tmpDir = makeTempDir();
-    const result = readEvaluatePrdOutputs(tmpDir);
+    const result = readEvaluateOutputs(tmpDir, EvaluateArtifact.Prd);
     assert.equal(result.prdJudges, undefined);
   });
 
@@ -590,7 +629,7 @@ describe("T-5.3: readEvaluatePrdOutputs", () => {
     writeFileSync(path.join(tmpDir, "prd-judges.json"), "not valid json {{{{");
     let result: Record<string, unknown> | undefined;
     assert.doesNotThrow(() => {
-      result = readEvaluatePrdOutputs(tmpDir);
+      result = readEvaluateOutputs(tmpDir, EvaluateArtifact.Prd);
     });
     assert.equal(result?.prdJudges, undefined);
   });
@@ -635,7 +674,7 @@ describe("T-5.4: Temp dir cleanup after EVALUATE_PRD completes", () => {
         },
         body: JSON.stringify({
           loopId,
-          command: "EVALUATE_PRD",
+          command: LoopCommand.EvaluatePrd,
           closedLoopAuthToken: "cl-token",
           apiBaseUrl,
           artifacts: [{ type: "PRD", content: "PRD content for cleanup test" }],
@@ -698,7 +737,7 @@ describe("T-5.5: BINARY_NOT_FOUND when claude not in PATH", () => {
         },
         body: JSON.stringify({
           loopId,
-          command: "EVALUATE_PRD",
+          command: LoopCommand.EvaluatePrd,
           closedLoopAuthToken: "cl-token",
           apiBaseUrl,
           artifacts: [{ type: "PRD", content: "PRD content for binary test" }],

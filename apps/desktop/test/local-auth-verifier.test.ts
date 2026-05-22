@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 import { verifyChallenge } from "../src/main/local-auth-verifier.js";
+import {
+  DESKTOP_POP_GATEWAY_ID_HEADER,
+  DESKTOP_POP_SIGNATURE_HEADER,
+  DESKTOP_POP_TIMESTAMP_HEADER,
+  LOCAL_AUTH_VERIFY_PATH,
+} from "../src/main/desktop-pop.js";
 
 const VERIFY_URL = "https://api.test.com/compute-targets/local-auth/verify";
 
@@ -208,5 +214,108 @@ test("unexpected response format on 200 returns { ok: false, error: 'unexpected 
   assert.equal(result.ok, false);
   if (!result.ok) {
     assert.equal(result.error, "unexpected response format");
+  }
+});
+
+test("managed key verification adds Desktop PoP headers", async () => {
+  let capturedInit: RequestInit | undefined;
+  let capturedSigningRequest: unknown;
+
+  globalThis.fetch = async (_url, init) => {
+    capturedInit = init;
+    return new Response(JSON.stringify({ ok: true, sessionTtlSeconds: 600 }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  };
+
+  await verifyChallenge({
+    challengeToken: "tok",
+    requestOrigin: "http://localhost:3000",
+    apiOrigin: "https://api.test.com",
+    apiKey: "managed-key",
+    apiKeyProvenance: "DESKTOP_MANAGED",
+    signDesktopRequest: (request) => {
+      capturedSigningRequest = request;
+      return {
+        [DESKTOP_POP_GATEWAY_ID_HEADER]: "gateway-1",
+        [DESKTOP_POP_TIMESTAMP_HEADER]: "1713984000",
+        [DESKTOP_POP_SIGNATURE_HEADER]: "signature",
+      };
+    },
+  });
+
+  assert.deepEqual(capturedSigningRequest, {
+    method: "POST",
+    pathname: LOCAL_AUTH_VERIFY_PATH,
+  });
+  const headers = new Headers(capturedInit!.headers as HeadersInit);
+  assert.equal(headers.get(DESKTOP_POP_GATEWAY_ID_HEADER), "gateway-1");
+  assert.equal(headers.get(DESKTOP_POP_TIMESTAMP_HEADER), "1713984000");
+  assert.equal(headers.get(DESKTOP_POP_SIGNATURE_HEADER), "signature");
+});
+
+test("manual key verification omits Desktop PoP headers and does not call signer", async () => {
+  let capturedInit: RequestInit | undefined;
+  let signerCalled = false;
+
+  globalThis.fetch = async (_url, init) => {
+    capturedInit = init;
+    return new Response(JSON.stringify({ ok: true, sessionTtlSeconds: 600 }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  };
+
+  await verifyChallenge({
+    challengeToken: "tok",
+    requestOrigin: "http://localhost:3000",
+    apiOrigin: "https://api.test.com",
+    apiKey: "manual-key",
+    apiKeyProvenance: "USER_CREATED",
+    signDesktopRequest: () => {
+      signerCalled = true;
+      return null;
+    },
+  });
+
+  assert.equal(signerCalled, false);
+  const headers = new Headers(capturedInit!.headers as HeadersInit);
+  assert.equal(headers.get(DESKTOP_POP_GATEWAY_ID_HEADER), null);
+  assert.equal(headers.get(DESKTOP_POP_TIMESTAMP_HEADER), null);
+  assert.equal(headers.get(DESKTOP_POP_SIGNATURE_HEADER), null);
+});
+
+test("managed key signing unavailable preserves existing 5xx semantics without retry", async () => {
+  let fetchCalls = 0;
+  const unavailableReports: Array<{ surface: string; reason: string }> = [];
+
+  globalThis.fetch = async () => {
+    fetchCalls += 1;
+    return new Response(JSON.stringify({ error: "temporary failure" }), {
+      status: 503,
+      headers: { "Content-Type": "application/json" }
+    });
+  };
+
+  const result = await verifyChallenge({
+    challengeToken: "tok",
+    requestOrigin: "http://localhost:3000",
+    apiOrigin: "https://api.test.com",
+    apiKey: "managed-key",
+    apiKeyProvenance: "DESKTOP_MANAGED",
+    signDesktopRequest: () => null,
+    onDesktopPopUnavailable: (surface, reason) => unavailableReports.push({ surface, reason }),
+  });
+
+  assert.equal(fetchCalls, 1);
+  assert.deepEqual(unavailableReports, [{
+    surface: LOCAL_AUTH_VERIFY_PATH,
+    reason: "sign_failed_or_null",
+  }]);
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.statusCode, 503);
+    assert.equal(result.error, "temporary failure");
   }
 });

@@ -1,21 +1,33 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
+import { LoopErrorCode } from "@closedloop-ai/loops-api/error-codes";
 import { afterEach, mock, test } from "node:test";
 import { DesktopGatewayServer } from "../src/server/server.js";
+import { GatewayRouter, type GatewayActivityEvent } from "../src/server/router.js";
 import { Observability } from "../src/main/observability.js";
 import type { EnrichedTelemetryEvent } from "../src/main/telemetry-service.js";
 import { saveCodexChatSession } from "../src/server/operations/codex.js";
-import { _setRunCommandForTesting } from "../src/server/operations/health-check.js";
+import {
+  _setKnownBinaryLocationsForTesting,
+  _setPluginEnableCommandForTesting,
+  _setRunCommandForTesting,
+} from "../src/server/operations/health-check.js";
 import { EMPTY_CAPABILITIES } from "../src/shared/contracts.js";
 import { resetShellPathCache, setShellPathForTest } from "../src/server/shell-path.js";
 import { SymphonyDirNotConfiguredError, tryAssertRepoAllowed, tryAssertPathAllowed } from "../src/server/operations/symphony-utils.js";
 import { JobStore } from "../src/main/job-store.js";
 import type { LocalJob, LocalJobStatus } from "../src/main/job-store.js";
+
+const GENERIC_JSON_LIMIT_BYTES = 256 * 1024;
+const SYMPHONY_LOOP_LIMIT_BYTES = 1024 * 1024;
+const RELAY_DISPATCH_LIMIT_BYTES = 1_048_576;
 
 const serversToClose: DesktopGatewayServer[] = [];
 const blockersToClose: net.Server[] = [];
@@ -24,8 +36,64 @@ const childPidsToKill: number[] = [];
 const originalSymphonyWorktreeParentDir = process.env.SYMPHONY_WORKTREE_PARENT_DIR;
 const originalHome = process.env.HOME;
 const originalPath = process.env.PATH;
+const originalFetch = globalThis.fetch;
+
+class TestResponse extends EventEmitter {
+  statusCode = 200;
+  finished = false;
+  readonly headers = new Map<string, string | number | readonly string[]>();
+  readonly chunks: Buffer[] = [];
+
+  setHeader(name: string, value: string | number | readonly string[]): void {
+    this.headers.set(name.toLowerCase(), value);
+  }
+
+  write(chunk: unknown, encodingOrCallback?: BufferEncoding | ((error?: Error) => void)): boolean {
+    this.appendChunk(chunk, encodingOrCallback);
+    return true;
+  }
+
+  end(chunk?: unknown, encodingOrCallback?: BufferEncoding | (() => void)): this {
+    if (chunk != null && typeof chunk !== "function") {
+      this.appendChunk(chunk, encodingOrCallback);
+    }
+    this.finished = true;
+    this.emit("finish");
+    return this;
+  }
+
+  text(): string {
+    return Buffer.concat(this.chunks).toString("utf-8");
+  }
+
+  json(): Record<string, unknown> {
+    return JSON.parse(this.text()) as Record<string, unknown>;
+  }
+
+  private appendChunk(
+    chunk: unknown,
+    encodingOrCallback?: BufferEncoding | ((error?: Error) => void) | (() => void)
+  ): void {
+    if (typeof chunk === "string") {
+      this.chunks.push(Buffer.from(
+        chunk,
+        typeof encodingOrCallback === "string" ? encodingOrCallback : "utf8"
+      ));
+      return;
+    }
+    if (Buffer.isBuffer(chunk)) {
+      this.chunks.push(chunk);
+      return;
+    }
+    if (chunk instanceof Uint8Array) {
+      this.chunks.push(Buffer.from(chunk));
+    }
+  }
+}
 
 afterEach(async () => {
+  globalThis.fetch = originalFetch;
+
   if (originalSymphonyWorktreeParentDir === undefined) {
     delete process.env.SYMPHONY_WORKTREE_PARENT_DIR;
   } else {
@@ -72,8 +140,152 @@ afterEach(async () => {
   // Reset Observability singleton so telemetry state does not bleed between tests
   await Observability.shutdown();
   Observability.reset();
+  _setRunCommandForTesting();
+  _setPluginEnableCommandForTesting();
   mock.restoreAll();
 });
+
+function createGatewayRouter(
+  overrides: Partial<ConstructorParameters<typeof GatewayRouter>[0]> = {}
+): GatewayRouter {
+  return new GatewayRouter({
+    webAppOrigin: "https://app.closedloop.ai",
+    getAllowedDirectories: () => [os.tmpdir()],
+    machineName: "router-test-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    getActivePort: () => 0,
+    getGatewayId: () => "test-gateway-id",
+    ...overrides,
+  });
+}
+
+async function dispatchMockRequest(input: {
+  router: GatewayRouter;
+  method?: string;
+  path: string;
+  headers?: http.IncomingHttpHeaders;
+  chunks?: Array<string | Buffer>;
+  remoteAddress?: string;
+}): Promise<TestResponse> {
+  const request = Readable.from(input.chunks ?? []) as Readable & {
+    method?: string;
+    url?: string;
+    headers: http.IncomingHttpHeaders;
+    socket: { remoteAddress?: string };
+  };
+  request.method = input.method ?? "POST";
+  request.url = input.path;
+  request.headers = input.headers ?? {};
+  request.socket = { remoteAddress: input.remoteAddress ?? "127.0.0.1" };
+
+  const response = new TestResponse();
+  await input.router.handle(
+    request as unknown as http.IncomingMessage,
+    response as unknown as http.ServerResponse
+  );
+  if (!response.finished) {
+    await new Promise<void>((resolve) => response.once("finish", () => resolve()));
+  }
+  return response;
+}
+
+function sizeOfJson(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+function buildRelayEnvelope(loopBody: Record<string, unknown>): Record<string, unknown> {
+  return {
+    targetId: "019e0-loop-target",
+    operation: {
+      protocolVersion: "1",
+      messageId: "019e0-message",
+      timestamp: "2026-05-07T00:00:00.000Z",
+      type: "command",
+      commandId: "019e0-command",
+      operationId: "symphony_loop",
+      params: {
+        request: {
+          method: "POST",
+          path: "/api/gateway/symphony/loop",
+          headers: {
+            "content-type": "application/json",
+            "x-desktop-source": "cloud-socket",
+          },
+          body: { kind: "json", value: loopBody },
+        },
+        commandId: "019e0-command",
+        lockKey: null,
+        timeoutMs: null,
+        requiresApproval: null,
+        approvalReason: null,
+      },
+      streaming: false,
+    },
+  };
+}
+
+function buildCloudCompatibleLoopFixture(): {
+  body: Record<string, unknown>;
+  bodySizeBytes: number;
+  envelopeSizeBytes: number;
+  envelopeOverheadBytes: number;
+} {
+  const body = {
+    loopId: "019e0-loop",
+    command: "execute",
+    closedLoopAuthToken: "clt_" + "t".repeat(96),
+    apiBaseUrl: "https://api.closedloop.ai",
+    artifacts: [
+      {
+        id: "019e0-artifact",
+        type: "IMPLEMENTATION_PLAN",
+        title: "Synthetic maximum relay-compatible plan",
+        content: "",
+        raw: {
+          slug: "PLN-507",
+          content: "raw-plan-" + "r".repeat(24_000),
+        },
+      },
+    ],
+    prompt: "Implement the approved plan with compatibility checks.",
+    repo: { fullName: "closedloop-ai/closedloop-electron", branch: "main" },
+    committer: { name: "Desktop User", email: "desktop@example.com" },
+    artifactSlug: "PLN-507",
+    parentLoopId: "019e0-parent-loop",
+    parentBranchName: "main",
+    parentSessionId: "019e0-parent-session",
+    localRepoPath: "/Users/test/Source/closedloop-electron",
+    userContext: "u".repeat(16_000),
+    attachments: Array.from({ length: 3 }, (_, index) => ({
+      id: `019e0-attachment-${index}`,
+      filename: `attachment-${index}.txt`,
+      mimeType: "text/plain",
+      sizeBytes: 1024 * (index + 1),
+      signedUrl: `https://closedloop-files.s3.us-east-1.amazonaws.com/context/${index}?X-Amz-Credential=test&X-Amz-Signature=${"a".repeat(64)}`,
+      signedUrlExpiresAt: "2026-05-07T01:00:00.000Z",
+    })),
+    additionalRepos: [
+      { fullName: "closedloop-ai/symphony-alpha", branch: "main" },
+      { fullName: "closedloop-ai/claude-plugins", branch: "main" },
+    ],
+    primaryArtifactId: "019e0-artifact",
+  };
+
+  const baseEnvelopeSize = sizeOfJson(buildRelayEnvelope(body));
+  const fillerBytes = RELAY_DISPATCH_LIMIT_BYTES - baseEnvelopeSize - 2048;
+  assert.ok(fillerBytes > GENERIC_JSON_LIMIT_BYTES);
+  (body.artifacts[0] as { content: string }).content = "a".repeat(fillerBytes);
+
+  const bodySizeBytes = sizeOfJson(body);
+  const envelopeSizeBytes = sizeOfJson(buildRelayEnvelope(body));
+  return {
+    body,
+    bodySizeBytes,
+    envelopeSizeBytes,
+    envelopeOverheadBytes: envelopeSizeBytes - bodySizeBytes,
+  };
+}
 
 test("uses closedloop-ai discovery file path by default", () => {
   const server = new DesktopGatewayServer({
@@ -107,6 +319,8 @@ test("returns health contract with active port and CORS headers", async () => {
     machineName: "test-machine",
     version: "0.1.0-test",
     capabilities: EMPTY_CAPABILITIES,
+    getGatewayId: () => "019dd8f5-5a1a-4bce-ae72-a3c973850f81",
+    getOnboardingCompleted: () => true,
     discoveryFilePath: discoveryFile
   });
   serversToClose.push(server);
@@ -116,9 +330,17 @@ test("returns health contract with active port and CORS headers", async () => {
   assert.equal(healthResponse.status, 200);
   assert.equal(healthResponse.headers.get("access-control-allow-origin"), "https://app.symphony.com");
 
-  const healthBody = (await healthResponse.json()) as { status: string; port: number; machineName: string };
+  const healthBody = (await healthResponse.json()) as {
+    status: string;
+    port: number;
+    machineName: string;
+    gatewayId?: string;
+    onboardingCompleted?: boolean;
+  };
   assert.equal(healthBody.status, "ok");
   assert.equal(healthBody.machineName, "test-machine");
+  assert.equal(healthBody.gatewayId, "019dd8f5-5a1a-4bce-ae72-a3c973850f81");
+  assert.equal(healthBody.onboardingCompleted, true);
   assert.equal(healthBody.port, server.getActivePort());
 
   const discoveryPort = await fs.readFile(discoveryFile, "utf-8");
@@ -418,7 +640,7 @@ test("prodOriginsOnly: loopback webAppOrigin preflight from that origin echoes i
 test("requires gateway token when configured", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-auth-token-"));
   tempPathsToClean.push(tmpDir);
-  const activityEvents: Array<{ type: string; statusCode: number; path: string; detail?: string }> = [];
+  const activityEvents: GatewayActivityEvent[] = [];
 
   const server = new DesktopGatewayServer({
     host: "127.0.0.1",
@@ -432,12 +654,7 @@ test("requires gateway token when configured", async () => {
     capabilities: EMPTY_CAPABILITIES,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     onActivityEvent: (event) => {
-      activityEvents.push({
-        type: event.type,
-        statusCode: event.statusCode,
-        path: event.path,
-        detail: event.detail
-      });
+      activityEvents.push(event);
     }
   });
   serversToClose.push(server);
@@ -459,9 +676,325 @@ test("requires gateway token when configured", async () => {
   assert.equal(activityEvents[0].type, "security");
   assert.equal(activityEvents[0].statusCode, 401);
   assert.equal(activityEvents[0].path, "/api/gateway/unimplemented-route");
+  assert.equal(Object.hasOwn(activityEvents[0], "requestBody"), false);
+  assert.equal(Object.hasOwn(activityEvents[0], "responseBody"), false);
   assert.equal(activityEvents[1].type, "request");
   assert.equal(activityEvents[1].statusCode, 501);
   assert.equal(activityEvents[1].path, "/api/gateway/unimplemented-route");
+  assert.equal(Object.hasOwn(activityEvents[1], "requestBody"), false);
+  assert.equal(Object.hasOwn(activityEvents[1], "responseBody"), false);
+});
+
+test("records gateway activity byte counts without raw request or response bodies", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-safe-activity-"));
+  tempPathsToClean.push(tmpDir);
+  const activityEvents: GatewayActivityEvent[] = [];
+  const requestBody = JSON.stringify({ secret: "do-not-store", value: "hello" });
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "safe-activity-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    onActivityEvent: (event) => activityEvents.push(event),
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: requestBody,
+    }
+  );
+  const responseText = await response.text();
+
+  assert.equal(response.status, 501);
+  assert.equal(activityEvents.length, 1);
+  const [event] = activityEvents;
+  assert.equal(event.requestSizeBytes, Buffer.byteLength(requestBody));
+  assert.equal(event.responseSizeBytes, Buffer.byteLength(responseText));
+  assert.equal(Object.hasOwn(event, "requestBody"), false);
+  assert.equal(Object.hasOwn(event, "responseBody"), false);
+});
+
+test("keeps approval and dispatch body available while activity capture stays payload-free", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-body-preserved-"));
+  tempPathsToClean.push(tmpDir);
+  const activityEvents: GatewayActivityEvent[] = [];
+  const requestBody = JSON.stringify({ approval: "body survives" });
+  let approvalBody: string | null = null;
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "body-preserved-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    onActivityEvent: (event) => activityEvents.push(event),
+    evaluateApproval: (request) => {
+      approvalBody = request.body;
+      return { allow: false, statusCode: 202, payload: { error: "approval required" } };
+    },
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/unimplemented-route`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: requestBody,
+    }
+  );
+
+  assert.equal(response.status, 202);
+  assert.equal(approvalBody, requestBody);
+  assert.equal(activityEvents.length, 1);
+  assert.equal(activityEvents[0].detail, "approval required");
+  assert.equal(Object.hasOwn(activityEvents[0], "requestBody"), false);
+  assert.equal(Object.hasOwn(activityEvents[0], "responseBody"), false);
+});
+
+test("rejects oversized numeric Content-Length before dispatch with safe 413 activity", async () => {
+  const activityEvents: GatewayActivityEvent[] = [];
+  const router = createGatewayRouter({
+    onActivityEvent: (event) => activityEvents.push(event),
+    evaluateApproval: () => {
+      throw new Error("approval should not run for oversized requests");
+    },
+  });
+
+  const response = await dispatchMockRequest({
+    router,
+    method: "POST",
+    path: "/api/gateway/unimplemented-route",
+    headers: { "content-length": String(GENERIC_JSON_LIMIT_BYTES + 1) },
+  });
+
+  assert.equal(response.statusCode, 413);
+  assert.deepEqual(response.json(), {
+    error: "request body too large",
+    code: "request_body_too_large",
+    maxBytes: GENERIC_JSON_LIMIT_BYTES,
+  });
+  assert.equal(activityEvents.length, 1);
+  assert.equal(activityEvents[0].type, "security");
+  assert.equal(activityEvents[0].detail, "request_body_too_large");
+  assert.equal(activityEvents[0].requestSizeBytes, GENERIC_JSON_LIMIT_BYTES + 1);
+  assert.equal(Object.hasOwn(activityEvents[0], "requestBody"), false);
+  assert.equal(Object.hasOwn(activityEvents[0], "responseBody"), false);
+});
+
+test("treats malformed or absent Content-Length as absent and enforces streamed byte count", async () => {
+  const acceptedBodies: string[] = [];
+  const router = createGatewayRouter({
+    evaluateApproval: (request) => {
+      acceptedBodies.push(request.body);
+      return { allow: false, statusCode: 202, payload: { error: "accepted under limit" } };
+    },
+  });
+  const body = JSON.stringify({ ok: true });
+
+  const malformed = await dispatchMockRequest({
+    router,
+    method: "POST",
+    path: "/api/gateway/unimplemented-route",
+    headers: { "content-length": "not-a-number" },
+    chunks: [body],
+  });
+  const absent = await dispatchMockRequest({
+    router,
+    method: "POST",
+    path: "/api/gateway/unimplemented-route",
+    chunks: [body],
+  });
+
+  assert.equal(malformed.statusCode, 202);
+  assert.equal(absent.statusCode, 202);
+  assert.deepEqual(acceptedBodies, [body, body]);
+});
+
+test("rejects chunked gateway bodies once streamed bytes exceed the route limit", async () => {
+  const activityEvents: GatewayActivityEvent[] = [];
+  const router = createGatewayRouter({
+    onActivityEvent: (event) => activityEvents.push(event),
+    evaluateApproval: () => {
+      throw new Error("approval should not run after streamed overflow");
+    },
+  });
+
+  const response = await dispatchMockRequest({
+    router,
+    method: "POST",
+    path: "/api/gateway/unimplemented-route",
+    chunks: [
+      Buffer.alloc(GENERIC_JSON_LIMIT_BYTES, "a"),
+      Buffer.from("b"),
+    ],
+  });
+
+  assert.equal(response.statusCode, 413);
+  assert.equal(response.json().code, "request_body_too_large");
+  assert.equal(activityEvents[0].requestSizeBytes, GENERIC_JSON_LIMIT_BYTES + 1);
+});
+
+test("accepts cloud-relay-compatible symphony loop body above the generic JSON cap", async () => {
+  const fixture = buildCloudCompatibleLoopFixture();
+  assert.ok(fixture.bodySizeBytes > GENERIC_JSON_LIMIT_BYTES);
+  assert.ok(fixture.bodySizeBytes <= SYMPHONY_LOOP_LIMIT_BYTES);
+  assert.ok(fixture.envelopeSizeBytes <= RELAY_DISPATCH_LIMIT_BYTES);
+  assert.ok(fixture.envelopeOverheadBytes > 0);
+
+  const activityEvents: GatewayActivityEvent[] = [];
+  let approvalBodySize = 0;
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [os.tmpdir()],
+    machineName: "loop-limit-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(os.tmpdir(), `loop-limit-${Date.now()}`),
+    onActivityEvent: (event) => activityEvents.push(event),
+    evaluateApproval: (request) => {
+      approvalBodySize = Buffer.byteLength(request.body);
+      return { allow: false, statusCode: 202, payload: { error: "accepted for approval" } };
+    },
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(fixture.body),
+    }
+  );
+
+  assert.equal(response.status, 202);
+  assert.equal(approvalBodySize, fixture.bodySizeBytes);
+  assert.equal(activityEvents.length, 1);
+  assert.equal(activityEvents[0].requestSizeBytes, fixture.bodySizeBytes);
+});
+
+test("uses large route-specific limits for upload and run-viewer multipart routes", async () => {
+  const body = Buffer.alloc(GENERIC_JSON_LIMIT_BYTES + 1, "x");
+  const router = createGatewayRouter();
+
+  const uploadResponse = await dispatchMockRequest({
+    router,
+    method: "POST",
+    path: "/api/gateway/symphony/upload/TICKET-1",
+    headers: {
+      "content-length": String(body.byteLength),
+      "content-type": "application/json",
+    },
+    chunks: [body],
+  });
+  const runViewerResponse = await dispatchMockRequest({
+    router,
+    method: "POST",
+    path: "/api/gateway/run-viewer-extract",
+    headers: {
+      "content-length": String(body.byteLength),
+      "content-type": "application/json",
+    },
+    chunks: [body],
+  });
+
+  assert.equal(uploadResponse.statusCode, 400);
+  assert.equal(uploadResponse.json().error, "repo parameter is required");
+  assert.equal(runViewerResponse.statusCode, 400);
+  assert.equal(runViewerResponse.json().error, "Invalid form data");
+});
+
+test("counts streaming fallback responses without capturing response bodies", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-stream-activity-"));
+  tempPathsToClean.push(tmpDir);
+  const activityEvents: GatewayActivityEvent[] = [];
+  const chunks = Array.from({ length: 25 }, (_, index) =>
+    JSON.stringify({ type: "text", index, content: "x".repeat(512) }) + "\n"
+  );
+  const upstream = http.createServer((_request, response) => {
+    response.statusCode = 200;
+    response.setHeader("content-type", "application/x-ndjson");
+    for (const chunk of chunks) {
+      response.write(chunk);
+    }
+    response.end();
+  });
+  blockersToClose.push(upstream);
+  await new Promise<void>((resolve, reject) => {
+    upstream.listen(0, "127.0.0.1", () => resolve());
+    upstream.once("error", reject);
+  });
+  const address = upstream.address();
+  assert.ok(address && typeof address !== "string");
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "stream-activity-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    fallbackGatewayOrigin: `http://127.0.0.1:${address.port}`,
+    onActivityEvent: (event) => activityEvents.push(event),
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/fallback-stream`
+  );
+  const responseText = await response.text();
+
+  assert.equal(response.status, 200);
+  assert.equal(responseText, chunks.join(""));
+  assert.equal(activityEvents.length, 1);
+  assert.equal(activityEvents[0].responseSizeBytes, Buffer.byteLength(responseText));
+  assert.equal(Object.hasOwn(activityEvents[0], "responseBody"), false);
+});
+
+test("Desktop 413 body preserves gateway returned 413 parsing shape", async () => {
+  const router = createGatewayRouter();
+  const response = await dispatchMockRequest({
+    router,
+    method: "POST",
+    path: "/api/gateway/unimplemented-route",
+    headers: { "content-length": String(GENERIC_JSON_LIMIT_BYTES + 1) },
+  });
+
+  const terminalError = `gateway returned ${response.statusCode}: ${response.text()}`;
+  const statusMatch = /^gateway returned (\d{3})/.exec(terminalError);
+  const body = JSON.parse(terminalError.slice(terminalError.indexOf(": ") + 2)) as {
+    code?: string;
+    maxBytes?: number;
+  };
+
+  assert.equal(statusMatch?.[1], "413");
+  assert.equal(body.code, "request_body_too_large");
+  assert.equal(body.maxBytes, GENERIC_JSON_LIMIT_BYTES);
 });
 
 test("rejects trusted browser origin without session token (origin-only bypass removed)", async () => {
@@ -2000,6 +2533,231 @@ test("supports core git action routes", async () => {
   assert.equal(branchesBody.branches.some((branch) => branch.name === "feature/AI-501"), true);
 });
 
+test("classifies git action failures with additive structured error fields", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-git-action-errors-"));
+  tempPathsToClean.push(tmpDir);
+  const repoPath = path.join(tmpDir, "repo-git-errors");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'case "$1" in',
+    '  rev-parse) echo "main" ;;',
+    '  add) exit 0 ;;',
+    '  commit) echo "pre-commit hook: eslint failed" >&2; exit 1 ;;',
+    '  push) echo "Permission denied (publickey)." >&2; exit 128 ;;',
+    '  status) echo "fatal: not a git repository" >&2; exit 128 ;;',
+    '  *) exit 0 ;;',
+    'esac',
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "git-action-errors-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const commitResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "commit", message: "test", repoPath })
+  });
+  assert.equal(commitResponse.status, 500);
+  const commitBody = await commitResponse.json() as {
+    error: string;
+    code: string;
+    details: { action: string; category: string; hookType: string; stderrExcerpt: string };
+  };
+  assert.equal(commitBody.error, "Pre-commit hook failed");
+  assert.equal(commitBody.code, LoopErrorCode.ProcessFailed);
+  assert.equal(commitBody.details.category, "pre_commit_hook");
+  assert.equal(commitBody.details.action, "commit");
+  assert.equal(commitBody.details.hookType, "lint");
+  assert.match(commitBody.details.stderrExcerpt, /eslint failed/);
+
+  const pushResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "push", repoPath })
+  });
+  assert.equal(pushResponse.status, 500);
+  const pushBody = await pushResponse.json() as {
+    error: string;
+    code: string;
+    details: { action: string; category: string; stderrExcerpt: string };
+  };
+  assert.equal(pushBody.error, "Git push authentication failed");
+  assert.equal(pushBody.code, LoopErrorCode.ProcessFailed);
+  assert.equal(pushBody.details.category, "git_push_auth");
+  assert.equal(pushBody.details.action, "push");
+  assert.match(pushBody.details.stderrExcerpt, /Permission denied/);
+
+  const statusResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "status", repoPath })
+  });
+  assert.equal(statusResponse.status, 500);
+  const statusBody = await statusResponse.json() as {
+    error: string;
+    code: string;
+    details: { action: string; category: string; exitCode: number; stderrExcerpt: string };
+  };
+  assert.equal(statusBody.code, LoopErrorCode.ProcessFailed);
+  assert.equal(statusBody.details.category, "git_command_failed");
+  assert.equal(statusBody.details.action, "status");
+  assert.equal(statusBody.details.exitCode, 128);
+  assert.match(statusBody.details.stderrExcerpt, /not a git repository/);
+});
+
+test("classifies pre-commit hook failures written to stdout", async () => {
+  const tmpDir = await fs.mkdtemp(
+    path.join(os.tmpdir(), "desktop-gateway-git-hook-stdout-")
+  );
+  tempPathsToClean.push(tmpDir);
+  const repoPath = path.join(tmpDir, "repo-git-hook-stdout");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  const fakeGitScript = [
+    "#!/bin/sh",
+    'case "$1" in',
+    '  rev-parse) echo "main" ;;',
+    '  add) exit 0 ;;',
+    '  commit) echo "pre-commit hook: tsc type error"; exit 1 ;;',
+    '  *) exit 0 ;;',
+    'esac',
+  ].join("\n");
+  await fs.writeFile(path.join(fakeBin, "git"), fakeGitScript, { mode: 0o755 });
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "git-hook-stdout-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const commitResponse = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/git`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "commit", message: "test", repoPath })
+    }
+  );
+  assert.equal(commitResponse.status, 500);
+  const commitBody = await commitResponse.json() as {
+    error: string;
+    code: string;
+    details: {
+      action: string;
+      category: string;
+      hookType: string;
+      stderrExcerpt: string;
+    };
+  };
+  assert.equal(commitBody.error, "Pre-commit hook failed");
+  assert.equal(commitBody.code, LoopErrorCode.ProcessFailed);
+  assert.equal(commitBody.details.category, "pre_commit_hook");
+  assert.equal(commitBody.details.hookType, "typecheck");
+  assert.match(commitBody.details.stderrExcerpt, /type error/);
+});
+
+test("classifies git repo policy, missing repo, and spawn failures", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-git-repo-errors-"));
+  tempPathsToClean.push(tmpDir);
+  const allowedRepoPath = path.join(tmpDir, "repo");
+  await fs.mkdir(allowedRepoPath, { recursive: true });
+  const missingRepoPath = path.join(tmpDir, "missing-repo");
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  process.env.PATH = fakeBin;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [allowedRepoPath, tmpDir],
+    machineName: "git-repo-errors-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port")
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const missingResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "status", repoPath: missingRepoPath })
+  });
+  assert.equal(missingResponse.status, 404);
+  const missingBody = await missingResponse.json() as {
+    error: string;
+    code: string;
+    details: { category: string };
+  };
+  assert.equal(missingBody.error, "repository not found");
+  assert.equal(missingBody.code, LoopErrorCode.RepoNotFound);
+  assert.equal(missingBody.details.category, "repo_not_found");
+
+  const disallowedResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "status", repoPath: path.join(os.homedir(), ".ssh") })
+  });
+  assert.equal(disallowedResponse.status, 403);
+  const disallowedBody = await disallowedResponse.json() as {
+    error: string;
+    code: string;
+    details: { category: string };
+  };
+  assert.equal(disallowedBody.error, "directory not allowed");
+  assert.equal(disallowedBody.code, LoopErrorCode.RepoNotAllowed);
+  assert.equal(disallowedBody.details.category, "repo_not_allowed");
+
+  const spawnResponse = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/git`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ action: "status", repoPath: allowedRepoPath })
+  });
+  assert.equal(spawnResponse.status, 500);
+  const spawnBody = await spawnResponse.json() as {
+    error: string;
+    code: string;
+    details: { category: string; action: string };
+  };
+  assert.equal(spawnBody.code, LoopErrorCode.SpawnFailed);
+  assert.equal(spawnBody.details.category, "spawn_failed");
+  assert.equal(spawnBody.details.action, "status");
+});
+
 test("supports git diff route for working tree changes", async () => {
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-git-diff-"));
   tempPathsToClean.push(tmpDir);
@@ -3479,6 +4237,8 @@ test("symphony/status returns IN_PROGRESS when state.json says COMPLETED but pro
 async function createHealthCheckFixture(
   pythonBinaryContent: string | null
 ): Promise<{ tmpDir: string; binDir: string; symphonyDir: string }> {
+  mockClosedLoopPluginManifestFetch("1.0.0");
+
   const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "desktop-gateway-python-hc-"));
   tempPathsToClean.push(tmpDir);
 
@@ -3490,10 +4250,26 @@ async function createHealthCheckFixture(
   await fs.mkdir(binDir, { recursive: true });
   await fs.mkdir(symphonyDir, { recursive: true });
 
+  const pluginNames = ["code", "platform", "judges", "code-review", "self-learning"];
+
   // Write fake binaries for git, claude, gh
   const fakeBinaries: Array<[string, string]> = [
     ["git", '#!/bin/sh\necho "git version 2.40.0"'],
-    ["claude", '#!/bin/sh\necho "1.5.0"'],
+    [
+      "claude",
+      `#!/bin/sh
+if [ "$1 $2 $3" = "plugin list --json" ]; then
+  printf '%s\\n' '${JSON.stringify(pluginNames.map((name) => ({
+    enabled: true,
+    id: `${name}@closedloop-ai`,
+    scope: "user",
+    version: "1.0.0",
+  })))}'
+  exit 0
+fi
+echo "1.5.0"
+`,
+    ],
     [
       "gh",
       '#!/bin/sh\nif [ "$1" = "auth" ]; then\n  exit 0\nfi\necho "gh version 2.40.0 (2024-01-01)"\n',
@@ -3515,12 +4291,11 @@ async function createHealthCheckFixture(
   const pluginsDir = path.join(homeDir, ".claude", "plugins");
   await fs.mkdir(pluginsDir, { recursive: true });
 
-  const pluginNames = ["code", "platform", "judges", "code-review", "self-learning"];
-  const pluginsRecord: Record<string, Array<{ installPath: string; version: string }>> = {};
+  const pluginsRecord: Record<string, Array<{ installPath: string; scope: string; version: string }>> = {};
   for (const name of pluginNames) {
     const installPath = path.join(tmpDir, `plugin-${name}`);
     await fs.mkdir(installPath, { recursive: true });
-    pluginsRecord[`${name}@closedloop-ai`] = [{ installPath, version: "1.0.0" }];
+    pluginsRecord[`${name}@closedloop-ai`] = [{ installPath, scope: "user", version: "1.0.0" }];
   }
   await fs.writeFile(
     path.join(pluginsDir, "installed_plugins.json"),
@@ -3540,6 +4315,284 @@ async function createHealthCheckFixture(
   );
 
   return { tmpDir, binDir, symphonyDir };
+}
+
+function installHealthCheckCommandStub(options: {
+  isCodeEnabled: () => boolean;
+  pythonStdout?: string;
+}): void {
+  _setRunCommandForTesting(async (cmd, args) => {
+    const binary = path.basename(cmd);
+    if (binary === "git" && args[0] === "--version") {
+      return { stdout: "git version 2.40.0" };
+    }
+    if (binary === "gh" && args[0] === "--version") {
+      return { stdout: "gh version 2.40.0 (2024-01-01)" };
+    }
+    if (binary === "gh" && args[0] === "auth" && args[1] === "status") {
+      return { stdout: "" };
+    }
+    if (binary === "codex" && args[0] === "--version") {
+      return { stdout: "0.1.0" };
+    }
+    if (binary === "python3" && args[0] === "--version") {
+      return { stdout: options.pythonStdout ?? "Python 3.11.0" };
+    }
+    if (binary === "claude" && args[0] === "--version") {
+      return { stdout: "1.5.0" };
+    }
+    if (
+      binary === "claude" &&
+      args[0] === "plugin" &&
+      args[1] === "list" &&
+      args[2] === "--json"
+    ) {
+      return {
+        stdout: JSON.stringify([
+          {
+            id: "code@closedloop-ai",
+            version: "1.0.0",
+            enabled: options.isCodeEnabled(),
+            installPath: "/tmp/code",
+            scope: "user",
+          },
+          {
+            id: "code-review@closedloop-ai",
+            version: "1.0.0",
+            enabled: true,
+            installPath: "/tmp/code-review",
+            scope: "user",
+          },
+          {
+            id: "judges@closedloop-ai",
+            version: "1.0.0",
+            enabled: true,
+            installPath: "/tmp/judges",
+            scope: "user",
+          },
+          {
+            id: "platform@closedloop-ai",
+            version: "1.0.0",
+            enabled: true,
+            installPath: "/tmp/platform",
+            scope: "user",
+          },
+          {
+            id: "self-learning@closedloop-ai",
+            version: "1.0.0",
+            enabled: true,
+            installPath: "/tmp/self-learning",
+            scope: "user",
+          },
+        ]),
+      };
+    }
+
+    throw { code: "ENOENT", stderr: "", message: `unexpected ${binary} ${args.join(" ")}` };
+  });
+}
+
+async function startHealthCheckServer(
+  tmpDir: string,
+  binDir: string,
+  symphonyDir: string,
+  machineName: string
+): Promise<DesktopGatewayServer> {
+  process.env.HOME = path.join(tmpDir, "home");
+  process.env.PATH = binDir;
+  setShellPathForTest();
+
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName,
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getBinaryPaths: () => ({
+      claude: path.join(binDir, "claude"),
+      codex: path.join(binDir, "codex"),
+      gh: path.join(binDir, "gh"),
+      git: path.join(binDir, "git"),
+      python3: path.join(binDir, "python3"),
+    }),
+    getSymphonyDir: () => symphonyDir,
+  });
+  serversToClose.push(server);
+  await server.start();
+  return server;
+}
+
+test("health-check fails disabled required plugin without auto-enable gate", async () => {
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.11.0"\n'
+  );
+  const enableCalls: string[] = [];
+  installHealthCheckCommandStub({ isCodeEnabled: () => false });
+  _setPluginEnableCommandForTesting(async (pluginRef) => {
+    enableCalls.push(pluginRef);
+    return { outcome: "success", stdout: "", elapsedMs: 1 };
+  });
+  const server = await startHealthCheckServer(
+    tmpDir,
+    binDir,
+    symphonyDir,
+    "plugin-disabled-no-gate"
+  );
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{
+      id: string;
+      passed: boolean;
+      error?: string;
+      enableOutcome?: string;
+    }>;
+    allRequiredPassed: boolean;
+  };
+
+  const check = body.checks.find((entry) => entry.id === "plugin-code");
+  assert.ok(check, "code plugin check should be present");
+  assert.equal(check.passed, false);
+  assert.equal(check.error, "Disabled");
+  assert.equal(check.enableOutcome, "skipped");
+  assert.equal(body.allRequiredPassed, false);
+  assert.deepEqual(enableCalls, []);
+});
+
+test("health-check auto-enables disabled plugin and verifies post-state", async () => {
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.11.0"\n'
+  );
+  let codeEnabled = false;
+  const enableCalls: string[] = [];
+  installHealthCheckCommandStub({
+    isCodeEnabled: () => codeEnabled,
+  });
+  _setPluginEnableCommandForTesting(async (pluginRef) => {
+    enableCalls.push(pluginRef);
+    codeEnabled = true;
+    return { outcome: "success", stdout: "", elapsedMs: 1 };
+  });
+  const server = await startHealthCheckServer(
+    tmpDir,
+    binDir,
+    symphonyDir,
+    "plugin-disabled-with-gate"
+  );
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check?pluginAutoUpdate=1`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{
+      id: string;
+      passed: boolean;
+      enableAttempted?: boolean;
+      enableOutcome?: string;
+      enablePluginIds?: string[];
+    }>;
+    allRequiredPassed: boolean;
+  };
+
+  const check = body.checks.find((entry) => entry.id === "plugin-code");
+  assert.ok(check, "code plugin check should be present");
+  assert.equal(check.passed, true);
+  assert.equal(check.enableAttempted, true);
+  assert.equal(check.enableOutcome, "success");
+  assert.deepEqual(check.enablePluginIds, ["code@closedloop-ai"]);
+  assert.equal(body.allRequiredPassed, true);
+  assert.deepEqual(enableCalls, ["code@closedloop-ai"]);
+});
+
+test("health-check keeps disabled plugin failed when auto-enable command fails", async () => {
+  const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
+    '#!/bin/sh\necho "Python 3.11.0"\n'
+  );
+  const enableCalls: string[] = [];
+  installHealthCheckCommandStub({
+    isCodeEnabled: () => false,
+  });
+  _setPluginEnableCommandForTesting(async (pluginRef) => {
+    enableCalls.push(pluginRef);
+    return {
+      outcome: "failed",
+      stdout: "",
+      elapsedMs: 1,
+      failureReason: "command_failed",
+      stderrTail: "enable failed",
+    };
+  });
+  const server = await startHealthCheckServer(
+    tmpDir,
+    binDir,
+    symphonyDir,
+    "plugin-enable-fails"
+  );
+
+  const response = await fetch(`http://127.0.0.1:${server.getActivePort()}/api/gateway/health-check?pluginAutoUpdate=1`);
+  assert.equal(response.status, 200);
+  const body = (await response.json()) as {
+    checks: Array<{
+      id: string;
+      passed: boolean;
+      enableAttempted?: boolean;
+      enableOutcome?: string;
+    }>;
+    allRequiredPassed: boolean;
+  };
+
+  const check = body.checks.find((entry) => entry.id === "plugin-code");
+  assert.ok(check, "code plugin check should be present");
+  assert.equal(check.passed, false);
+  assert.equal(check.enableAttempted, true);
+  assert.equal(check.enableOutcome, "failed");
+  assert.equal(body.allRequiredPassed, false);
+  assert.deepEqual(enableCalls, ["code@closedloop-ai"]);
+});
+
+function getHealthCheckBinaryPaths(binDir: string): () => {
+  claude: string;
+  gh: string;
+  codex: string;
+  python3: string;
+  git: string;
+} {
+  return () => ({
+    claude: path.join(binDir, "claude"),
+    gh: path.join(binDir, "gh"),
+    codex: path.join(binDir, "codex"),
+    python3: path.join(binDir, "python3"),
+    git: path.join(binDir, "git"),
+  });
+}
+
+function mockClosedLoopPluginManifestFetch(version: string): void {
+  const passthroughFetch = globalThis.fetch;
+  globalThis.fetch = (async (
+    input: RequestInfo | URL,
+    init?: RequestInit
+  ): Promise<Response> => {
+    const url =
+      typeof input === "string"
+        ? input
+        : input instanceof URL
+          ? input.toString()
+          : input.url;
+
+    if (
+      url.startsWith(
+        "https://raw.githubusercontent.com/closedloop-ai/claude-plugins/main/plugins/"
+      )
+    ) {
+      return Response.json({ version });
+    }
+
+    return passthroughFetch(input, init);
+  }) as typeof fetch;
 }
 
 test("python3 health check: passes for version 3.11.0 (control)", async () => {
@@ -3600,6 +4653,7 @@ test("python3 health check: fails when python3 not found", async () => {
     capabilities: EMPTY_CAPABILITIES,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getSymphonyDir: () => symphonyDir,
+    getBinaryPaths: getHealthCheckBinaryPaths(binDir),
   });
   serversToClose.push(server);
   await server.start();
@@ -3615,13 +4669,13 @@ test("python3 health check: fails when python3 not found", async () => {
   assert.ok(pythonCheck, "python3 check should be present");
   assert.equal(pythonCheck.passed, false, "python3 not found should fail");
   assert.equal(pythonCheck.required, true, "python3 check should be required");
-  // Remediation is either an install hint (binary not found anywhere) or a PATH hint
-  // (binary found at a known location like /usr/bin/python3 but not on the test PATH).
-  // Both are valid and informative; accept either.
+  // Remediation may point to the configured missing test override, an install
+  // hint, or a PATH hint if a known host location is found.
   assert.ok(
-    pythonCheck.remediation?.includes("Install Python 3.10 or later") ||
+    pythonCheck.remediation?.includes("Update python3 binary path") ||
+      pythonCheck.remediation?.includes("Install Python 3.10 or later") ||
       pythonCheck.remediation?.includes("PATH"),
-    `remediation should mention install or PATH, got: ${pythonCheck.remediation}`
+    `remediation should mention settings, install, or PATH, got: ${pythonCheck.remediation}`
   );
   assert.equal(body.allRequiredPassed, false, "allRequiredPassed should be false when python3 missing");
 });
@@ -3646,6 +4700,7 @@ test("python3 health check: fails for version below floor (3.9.7)", async () => 
     capabilities: EMPTY_CAPABILITIES,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getSymphonyDir: () => symphonyDir,
+    getBinaryPaths: getHealthCheckBinaryPaths(binDir),
   });
   serversToClose.push(server);
   await server.start();
@@ -3695,6 +4750,7 @@ test("python3 health check: fails for suffixed below-floor version (3.9rc1)", as
     capabilities: EMPTY_CAPABILITIES,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getSymphonyDir: () => symphonyDir,
+    getBinaryPaths: getHealthCheckBinaryPaths(binDir),
   });
   serversToClose.push(server);
   await server.start();
@@ -3741,6 +4797,7 @@ test("python3 health check: passes for version with extra suffix (3.10.1.post1)"
     capabilities: EMPTY_CAPABILITIES,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getSymphonyDir: () => symphonyDir,
+    getBinaryPaths: getHealthCheckBinaryPaths(binDir),
   });
   serversToClose.push(server);
   await server.start();
@@ -3780,6 +4837,7 @@ test("python3 health check: fails for unparseable version string", async () => {
     capabilities: EMPTY_CAPABILITIES,
     discoveryFilePath: path.join(tmpDir, "electron-port"),
     getSymphonyDir: () => symphonyDir,
+    getBinaryPaths: getHealthCheckBinaryPaths(binDir),
   });
   serversToClose.push(server);
   await server.start();
@@ -3805,6 +4863,10 @@ test("python3 health check: fails for unparseable version string", async () => {
 // ---- Phase 1 tests: claude-cli rich diagnostics ----
 
 test("claude-cli ENOENT with no foundAt: error is Not found, remediation mentions npm install", async () => {
+  // Hide the KNOWN_CLAUDE_LOCATIONS sweep so the host's installed claude
+  // (e.g. /opt/homebrew/bin/claude on a developer Mac) cannot leak into the
+  // foundAt[] list — this test is asserting the truly-not-installed state.
+  _setKnownBinaryLocationsForTesting({ claude: [] });
   const { tmpDir, binDir, symphonyDir } = await createHealthCheckFixture(
     '#!/bin/sh\necho "Python 3.11.0"\n'
   );
@@ -3840,16 +4902,9 @@ test("claude-cli ENOENT with no foundAt: error is Not found, remediation mention
   const check = body.checks.find((c) => c.id === "claude-cli");
   assert.ok(check, "claude-cli check should be present");
   assert.equal(check.passed, false);
-  // System may have claude installed at a known location (e.g., /opt/homebrew/bin/claude),
-  // in which case the error will be "Found at ... but not on PATH" instead of "Not found".
-  const foundAt = check.debug?.foundAt ?? [];
-  if (foundAt.length === 0) {
-    assert.equal(check.error, "Not found", "error should be 'Not found' if claude is not at any known location");
-    assert.ok(check.remediation?.includes("npm install"), `remediation should mention npm install, got: ${check.remediation}`);
-  } else {
-    assert.ok(check.error?.includes("Found at"), `error should mention a found location, got: ${check.error}`);
-    assert.ok(check.remediation?.includes("PATH"), `remediation should mention PATH when binary is found at known location, got: ${check.remediation}`);
-  }
+  assert.equal(check.error, "Not found");
+  assert.ok(check.remediation?.includes("npm install"), `remediation should mention npm install, got: ${check.remediation}`);
+  _setKnownBinaryLocationsForTesting(null);
 });
 
 test("claude-cli ENOENT with foundAt: error mentions path, remediation mentions Add to PATH", async () => {
@@ -3901,7 +4956,7 @@ test("claude-cli ETIMEDOUT: error mentions Timed out, remediation mentions termi
   // Mock runCommand so `claude --version` throws ETIMEDOUT immediately.
   // Avoids spawning a real process or waiting on the 3s command timeout,
   // and dodges shell-portability issues (dash on Ubuntu rejects `read -t`).
-  // Match by basename because resolveBinary() may pass a full resolved path
+  // Match by basename because resolveBinaryFromLoginShell() may pass a full resolved path
   // (e.g. /Users/.../bin/claude) rather than the bare binary name.
   _setRunCommandForTesting(async (cmd) => {
     if (path.basename(cmd) === "claude") {

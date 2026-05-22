@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "version": "0.13.14",
+  "version": "0.15.60",
   "description": "ClosedLoop Desktop",
   "author": "ClosedLoop AI <support@closedloop.ai>",
   "private": true,
@@ -9,34 +9,47 @@
   "scripts": {
     "dev": "pnpm build && ELECTRON_BIN=$(bash scripts/patch-electron-plist.sh | tail -1) && \"$ELECTRON_BIN\" .",
     "start": "ELECTRON_BIN=$(bash scripts/patch-electron-plist.sh | tail -1) && \"$ELECTRON_BIN\" .",
+    "clean:dist": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "clean:package": "node -e \"require('fs').rmSync('dist-dmg',{recursive:true,force:true})\"",
     "prebuild": "node -e \"const{execSync:e}=require('child_process'),{writeFileSync:w}=require('fs');const h=e('git rev-parse HEAD').toString().trim();w('src/shared/build-info.ts','// AUTO-GENERATED — do not edit\\nexport const BUILD_COMMIT_HASH = \\\"'+h+'\\\";\\n');\"",
-    "build": "pnpm prebuild && tsc -p tsconfig.json",
+    "build": "pnpm clean:dist && pnpm prebuild && tsc -p tsconfig.json && pnpm build:agent-monitor",
+    "build:agent-monitor": "node scripts/build-agent-monitor.mjs",
+    "dashboard:reset": "node scripts/reset-dashboard-db.mjs",
+    "dashboard:reset-packs": "node scripts/reset-dashboard-db.mjs --packs-only",
+    "stage:package": "node scripts/stage-packaging-app.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src/",
-    "test": "tsx --test test/*.test.ts",
-    "package": "pnpm build && electron-builder --mac --config electron-builder.yml",
-    "release": "pnpm build && electron-builder --mac --publish always --config electron-builder.yml"
+    "test": "tsx --test test/*.test.ts && node --test \"scripts/agent-monitor-packs/__tests__/*.test.js\"",
+    "package": "pnpm clean:package && pnpm build && pnpm stage:package && node scripts/run-electron-builder.mjs",
+    "release": "pnpm clean:package && pnpm build && pnpm stage:package && node scripts/run-electron-builder.mjs --publish always"
   },
   "dependencies": {
-    "@closedloop-ai/loops-api": "0.2.5",
+    "@closedloop-ai/loops-api": "0.2.11",
+    "agent-dashboard": "github:hoangsonww/Claude-Code-Agent-Monitor#840c518d7fa69231de049e41b893938228b67e40",
     "busboy": "^1.6.0",
+    "electron-log": "^5.4.3",
     "electron-store": "^8.2.0",
     "electron-updater": "^6.8.3",
     "glob": "^11.0.1",
-    "posthog-node": "^5.28.8",
     "socket.io-client": "^4.8.1",
     "zod": "^4.0.0"
   },
   "devDependencies": {
+    "@vitejs/plugin-react": "4.3.4",
     "@types/busboy": "^1.5.4",
     "@types/node": "^22.13.8",
     "@typescript-eslint/eslint-plugin": "^8.57.1",
     "@typescript-eslint/parser": "^8.57.1",
+    "agent-dashboard-client": "github:hoangsonww/Claude-Code-Agent-Monitor#840c518d7fa69231de049e41b893938228b67e40&path:/client",
+    "autoprefixer": "10.4.20",
     "electron": "^35.0.2",
     "electron-builder": "^26.8.1",
     "eslint": "^10.0.3",
+    "postcss": "8.5.1",
+    "tailwindcss": "3.4.17",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",
-    "typescript-eslint": "^8.57.1"
+    "typescript-eslint": "^8.57.1",
+    "vite": "6.1.0"
   }
 }

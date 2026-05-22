@@ -1,7 +1,17 @@
 import { TelemetryService, type EnrichedTelemetryEvent } from "./telemetry-service.js";
-import { PostHogAnalytics } from "./posthog-analytics.js";
-import { gatewayLog } from "./gateway-logger.js";
 import type {
+  DesktopAnalyticsEvent,
+  DesktopAnalyticsEventName,
+} from "./cloud-protocol.js";
+import type { AgentSessionSyncTelemetryEvent } from "./agent-session-sync-service.js";
+import type { LoopCommand } from "@closedloop-ai/loops-api/commands";
+import type {
+  DesktopShutdownDiagnostics,
+  DesktopUpdateDiagnostics,
+  ExecutePlanSourceDiagnostics,
+  OutboundNetworkDiagnostics,
+  PluginUpdateDiagnostics,
+  SupportUploadDiagnostics,
   TelemetryCategory,
   TelemetryDiagnostics,
   TelemetryEmitter,
@@ -11,9 +21,14 @@ import type {
 
 export interface ObservabilityOptions {
   telemetrySend: (event: EnrichedTelemetryEvent) => void;
-  posthog?: { apiKey: string; host: string };
+  analytics?: ProductAnalyticsTransport;
   desktopClientVersion?: string;
 }
+
+export type ProductAnalyticsTransport = {
+  send: (event: Omit<DesktopAnalyticsEvent, "protocolVersion" | "messageId" | "timestamp">) => void;
+  flush: (options: { timeoutMs: number }) => Promise<void>;
+};
 
 type HealthCheckTelemetryInput = {
   id: string;
@@ -31,9 +46,8 @@ type HealthCheckTelemetryInput = {
 
 export class Observability {
   private static telemetry: TelemetryService | null = null;
-  private static posthog: PostHogAnalytics | null = null;
+  private static analytics: ProductAnalyticsTransport | null = null;
   private static desktopClientVersion = "";
-  private static desktopId = "";
 
   // Checks for which healthcheck telemetry is emitted. Extend this allowlist in future PRs.
   private static readonly HEALTH_CHECK_TELEMETRY_IDS = new Set(["claude-cli"]);
@@ -50,22 +64,12 @@ export class Observability {
   >();
 
   static init(options: ObservabilityOptions): void {
-    // Shut down any previous PostHog client to avoid leaking flush timers
-    Observability.posthog?.shutdown().catch(() => {});
-
     Observability.telemetry = new TelemetryService({
       sendTelemetry: options.telemetrySend,
     });
+    Observability.analytics = options.analytics ?? null;
     Observability.desktopClientVersion = options.desktopClientVersion ?? "";
-    Observability.desktopId = "";
     Observability.healthCheckState.clear();
-
-    if (options.posthog) {
-      Observability.posthog = new PostHogAnalytics(options.posthog);
-      gatewayLog.info("observability", "PostHog analytics initialized");
-    } else {
-      Observability.posthog = null;
-    }
   }
 
   static initNoOp(): void {
@@ -73,24 +77,20 @@ export class Observability {
   }
 
   static reset(): void {
-    // Shut down PostHog client to avoid leaking flush timers
-    Observability.posthog?.shutdown().catch(() => {});
     Observability.telemetry = null;
-    Observability.posthog = null;
+    Observability.analytics = null;
     Observability.desktopClientVersion = "";
-    Observability.desktopId = "";
     Observability.healthCheckState.clear();
   }
 
   static async shutdown(): Promise<void> {
-    await Observability.posthog?.shutdown();
+    await Observability.analytics?.flush({ timeoutMs: 1_500 });
   }
 
   // --- Context injection ---
 
   static setTargetId(id: string): void {
     Observability.telemetry?.setTargetId(id);
-    Observability.desktopId = id;
   }
 
   static setGatewaySessionId(id: string): void {
@@ -112,7 +112,7 @@ export class Observability {
       commandId,
       operationId,
     });
-    Observability.capturePostHog("command_initiated", {
+    Observability.captureAnalytics("command_initiated", {
       command_id: commandId,
       operation_type: operationId,
     });
@@ -123,7 +123,7 @@ export class Observability {
       commandId,
       operationId,
     });
-    Observability.capturePostHog("command_started", {
+    Observability.captureAnalytics("command_started", {
       command_id: commandId,
       operation_type: operationId,
     });
@@ -134,7 +134,7 @@ export class Observability {
       commandId,
       operationId,
     }, { extra: { latencyMs } });
-    Observability.capturePostHog("command_completed", {
+    Observability.captureAnalytics("command_completed", {
       command_id: commandId,
       operation_type: operationId,
       latency_ms: latencyMs,
@@ -146,7 +146,7 @@ export class Observability {
       commandId,
       operationId,
     });
-    Observability.capturePostHog("command_failed", {
+    Observability.captureAnalytics("command_failed", {
       command_id: commandId,
       operation_type: operationId,
       error_class: "timeout",
@@ -158,7 +158,7 @@ export class Observability {
       commandId,
       operationId,
     });
-    Observability.capturePostHog("command_failed", {
+    Observability.captureAnalytics("command_failed", {
       command_id: commandId,
       operation_type: operationId,
       error_class: "cancelled",
@@ -170,17 +170,17 @@ export class Observability {
       commandId,
       operationId,
     });
-    Observability.capturePostHog("command_failed", {
+    Observability.captureAnalytics("command_failed", {
       command_id: commandId,
       operation_type: operationId,
       error_class: "gateway_error",
     });
   }
 
-  // --- Approval lifecycle (PostHog only) ---
+  // --- Approval lifecycle (product analytics only) ---
 
   static approvalRequested(operationId: string, commandId?: string): void {
-    Observability.capturePostHog("approval_requested", {
+    Observability.captureAnalytics("approval_requested", {
       operation_type: operationId,
       ...(commandId ? { command_id: commandId } : {}),
     });
@@ -192,7 +192,7 @@ export class Observability {
     timeToResolveMs: number,
     commandId?: string,
   ): void {
-    Observability.capturePostHog("approval_resolved", {
+    Observability.captureAnalytics("approval_resolved", {
       operation_type: operationId,
       outcome,
       time_to_resolve_ms: timeToResolveMs,
@@ -202,18 +202,16 @@ export class Observability {
 
   // --- Connection lifecycle ---
 
-  static connectionEstablished(desktopId: string, version: string, environment: string): void {
+  static connectionEstablished(desktopId: string, environment: string): void {
     Observability.emitTelemetry("info", "connection.established", "Connection established", { computeTargetId: desktopId });
-    Observability.capturePostHog("desktop_connection_established", {
-      desktop_id: desktopId,
-      version,
+    Observability.captureAnalytics("desktop_connection_established", {
       environment,
     });
   }
 
   static reconnectionResumed(reason: string, replayCommandCount: number): void {
     Observability.emitTelemetry("info", "connection.reconnection_resumed", "Reconnection resumed", {}, { extra: { reason, replayCommandCount } });
-    Observability.capturePostHog("desktop_reconnection_resumed", {
+    Observability.captureAnalytics("desktop_reconnection_resumed", {
       reason,
       replay_command_count: replayCommandCount,
     });
@@ -221,31 +219,183 @@ export class Observability {
 
   static connectionDegraded(error: string): void {
     Observability.emitTelemetry("warn", "connection.degraded", error, {});
-    Observability.capturePostHog("desktop_connection_degraded", { error });
+    Observability.captureAnalytics("desktop_connection_degraded", { error });
   }
 
   static connectionLost(reason?: string): void {
     Observability.emitTelemetry("warn", "connection.lost", reason ?? "Connection lost", {});
-    Observability.capturePostHog("desktop_connection_lost", { reason });
+    Observability.captureAnalytics("desktop_connection_lost", { reason });
   }
 
-  // --- Sandbox (PostHog only) ---
+  /** Emits a redacted diagnostic when Desktop PoP cannot sign a managed-key request. */
+  static desktopPopUnavailable(surface: string, reason: string): void {
+    Observability.emitTelemetry(
+      "warn",
+      "desktop_pop.unavailable",
+      "Desktop PoP unavailable; continuing compatibility mode",
+      {},
+      { extra: { surface, reason } },
+    );
+    Observability.captureAnalytics("desktop_pop_unavailable", { surface, reason });
+  }
+
+  /** Emits a descriptor-only outbound network policy decision for SSRF-sensitive fetches. */
+  static outboundNetworkDecision(input: OutboundNetworkDiagnostics): void {
+    const severity: TelemetrySeverity =
+      input.decision === "denied" ? "warn" : "info";
+    const message =
+      input.decision === "denied"
+        ? "Outbound network request denied"
+        : "Outbound network request allowed";
+    Observability.emitTelemetry(
+      severity,
+      "desktop.outbound_network_decision",
+      message,
+      {},
+      { outboundNetwork: input },
+    );
+  }
+
+  /** Emits structured lifecycle diagnostics for failure support bundle uploads. */
+  static supportUploadLifecycle(input: SupportUploadDiagnostics): void {
+    const severity: TelemetrySeverity =
+      input.outcome === "failed" ? "warn" : "info";
+    Observability.emitTelemetry(
+      severity,
+      "desktop.support_upload",
+      `Support upload ${input.outcome}`,
+      { loopId: input.loopId, jobId: input.loopId },
+      { supportUpload: input },
+    );
+  }
+
+  /** Emits bounded Desktop auto-update telemetry through the relay path. */
+  static electronUpdateInitiated(input: DesktopUpdateDiagnostics): void {
+    Observability.emitTelemetry(
+      "info",
+      "electron_update.initiated",
+      "Electron update initiated",
+      {},
+      { desktopUpdate: input },
+    );
+  }
+
+  /** Emits bounded Desktop auto-update failure telemetry through the relay path. */
+  static electronUpdateFailed(input: DesktopUpdateDiagnostics): void {
+    Observability.emitTelemetry(
+      "error",
+      "electron_update.failed",
+      "Electron update failed",
+      {},
+      { desktopUpdate: input },
+    );
+  }
+
+  /** Emits bounded Desktop shutdown failure telemetry through the relay path. */
+  static desktopShutdownFailed(input: DesktopShutdownDiagnostics): void {
+    Observability.emitTelemetry(
+      "error",
+      "desktop.shutdown_failed",
+      "Desktop shutdown failed",
+      {},
+      { desktopShutdown: input },
+    );
+  }
+
+  /** Emits bounded ClosedLoop plugin update attempt telemetry through the relay path. */
+  static pluginUpdateAttempted(input: PluginUpdateDiagnostics): void {
+    Observability.emitTelemetry(
+      "info",
+      "plugin_update.attempted",
+      "Plugin update attempted",
+      {},
+      { pluginUpdate: input },
+    );
+    Observability.captureAnalytics("plugin_update_attempted", {
+      plugin_count: input.pluginIds.length,
+      duration_ms: input.durationMs,
+    });
+  }
+
+  /** Emits bounded ClosedLoop plugin update success telemetry through the relay path. */
+  static pluginUpdateSucceeded(input: PluginUpdateDiagnostics): void {
+    Observability.emitTelemetry(
+      "info",
+      "plugin_update.succeeded",
+      "Plugin update succeeded",
+      {},
+      { pluginUpdate: input },
+    );
+    Observability.captureAnalytics("plugin_update_succeeded", {
+      plugin_count: input.pluginIds.length,
+      duration_ms: input.durationMs,
+    });
+  }
+
+  /** Emits bounded ClosedLoop plugin update failure telemetry through the relay path. */
+  static pluginUpdateFailed(input: PluginUpdateDiagnostics): void {
+    Observability.emitTelemetry(
+      "error",
+      "plugin_update.failed",
+      "Plugin update failed",
+      {},
+      { pluginUpdate: input },
+    );
+    Observability.captureAnalytics("plugin_update_failed", {
+      plugin_count: input.pluginIds.length,
+      duration_ms: input.durationMs,
+      failure_reason: input.failureReason,
+    });
+  }
+
+  // --- Sandbox (product analytics only) ---
 
   static sandboxBlocked(operationClass: string): void {
-    Observability.capturePostHog("sandbox_blocked_operation", {
+    Observability.captureAnalytics("sandbox_blocked_operation", {
       operation_class: operationClass,
+    });
+  }
+
+  // --- Agent session sync (product analytics only) ---
+
+  static agentSessionSyncBatchFailed(event: AgentSessionSyncTelemetryEvent): void {
+    Observability.captureAnalytics("agent_session_sync_batch_failed", {
+      reason: event.reason,
+      sync_mode: event.syncMode,
+      session_count: event.sessionCount,
+      payload_bytes: event.payloadBytes,
     });
   }
 
   // --- Job lifecycle (telemetry only) ---
 
-  static jobStarted(commandId: string | undefined, operationId: string | undefined, loopId: string, pid: number): void {
+  static jobStarted(commandId: string | undefined, operationId: string | undefined, loopId: string, pid: number, command?: LoopCommand): void {
     Observability.emitTelemetry("info", "job.started", `Job started with pid=${pid}`, {
       commandId,
       operationId,
       loopId,
       jobId: loopId,
-    });
+    }, Observability.withLifecycleCommand(undefined, command));
+  }
+
+  static jobPlanSourceResolved(
+    commandId: string | undefined,
+    operationId: string | undefined,
+    loopId: string,
+    planSource: ExecutePlanSourceDiagnostics,
+  ): void {
+    Observability.emitTelemetry(
+      "info",
+      "job.plan_source_resolved",
+      `EXECUTE plan source resolved: ${planSource.source}`,
+      {
+        commandId,
+        operationId,
+        loopId,
+        jobId: loopId,
+      },
+      { planSource },
+    );
   }
 
   static jobCompleted(
@@ -254,6 +404,7 @@ export class Observability {
     loopId: string,
     diagnostics?: TelemetryDiagnostics,
     loopSessionId?: string,
+    command?: LoopCommand,
   ): void {
     Observability.emitTelemetry("info", "job.completed", "Job completed successfully", {
       commandId,
@@ -261,7 +412,7 @@ export class Observability {
       loopId,
       jobId: loopId,
       loopSessionId,
-    }, diagnostics);
+    }, Observability.withLifecycleCommand(diagnostics, command));
   }
 
   static jobFailed(
@@ -271,13 +422,15 @@ export class Observability {
     exitCode: number,
     diagnostics?: TelemetryDiagnostics,
     loopSessionId?: string,
+    command?: LoopCommand,
   ): void {
+    const baseDiagnostics: TelemetryDiagnostics = diagnostics ? { ...diagnostics, exitCode } : { exitCode };
     Observability.emitTelemetry(
       "error",
       "job.failed",
       `Process exited with code ${exitCode}`,
       { commandId, operationId, loopId, jobId: loopId, loopSessionId },
-      diagnostics ? { ...diagnostics, exitCode } : { exitCode },
+      Observability.withLifecycleCommand(baseDiagnostics, command),
     );
   }
 
@@ -288,13 +441,15 @@ export class Observability {
     exitCode: number,
     diagnostics?: TelemetryDiagnostics,
     loopSessionId?: string,
+    command?: LoopCommand,
   ): void {
+    const baseDiagnostics: TelemetryDiagnostics = diagnostics ? { ...diagnostics, exitCode } : { exitCode };
     Observability.emitTelemetry(
       "info",
       "job.cancelled",
       `Process cancelled (exit code ${exitCode})`,
       { commandId, operationId, loopId, jobId: loopId, loopSessionId },
-      diagnostics ? { ...diagnostics, exitCode } : { exitCode },
+      Observability.withLifecycleCommand(baseDiagnostics, command),
     );
   }
 
@@ -390,16 +545,83 @@ export class Observability {
         stderr: check.debug?.stderr,
       },
     });
-    Observability.capturePostHog(category, {
-      check_id: check.id,
-      error_code: errorCode,
-      found_elsewhere: (check.debug?.foundAt?.length ?? 0) > 0,
-      platform: check.debug?.platform,
-      shell: check.debug?.shell,
-    });
+    if (
+      category === "healthcheck.failure_detected" ||
+      category === "healthcheck.failure_persistent" ||
+      category === "healthcheck.recovered"
+    ) {
+      Observability.captureAnalytics(category, {
+        check_id: check.id,
+        error_code: errorCode,
+        found_elsewhere: (check.debug?.foundAt?.length ?? 0) > 0,
+        platform: check.debug?.platform,
+        shell: check.debug?.shell,
+      });
+    }
+  }
+
+  // --- Queue stats (telemetry only) ---
+
+  static queueStatsChanged(activeCommands: number, queueDepth: number): void {
+    Observability.emitTelemetry("info", "queue.stats_changed", "Queue stats changed", {}, { extra: { activeCommands, queueDepth } });
+  }
+
+  // --- Onboarding popup (telemetry only) ---
+
+  static onboardingPopupShown(): void {
+    Observability.emitTelemetry(
+      "info",
+      "onboarding.popup_shown",
+      "Onboarding reminder popup shown",
+      {},
+    );
+  }
+
+  static onboardingPopupCtaClicked(): void {
+    Observability.emitTelemetry(
+      "info",
+      "onboarding.popup_cta_clicked",
+      "Onboarding reminder popup CTA clicked",
+      {},
+    );
+  }
+
+  static onboardingPopupDismissedSession(): void {
+    Observability.emitTelemetry(
+      "info",
+      "onboarding.popup_dismissed_session",
+      "Onboarding reminder popup dismissed for session",
+      {},
+    );
+  }
+
+  static onboardingPopupDismissedPermanent(): void {
+    Observability.emitTelemetry(
+      "info",
+      "onboarding.popup_dismissed_permanent",
+      "Onboarding reminder popup dismissed permanently",
+      {},
+    );
+  }
+
+  static onboardingPopupSuppressedAuto(): void {
+    Observability.emitTelemetry(
+      "info",
+      "onboarding.popup_suppressed_auto",
+      "Onboarding reminder popup auto-suppressed; web wizard already complete",
+      {},
+    );
   }
 
   // --- Internal helpers ---
+
+  private static withLifecycleCommand(
+    diagnostics: TelemetryDiagnostics | undefined,
+    command: LoopCommand | undefined,
+  ): TelemetryDiagnostics | undefined {
+    if (command === undefined) return diagnostics;
+    return { ...diagnostics, lifecycle: { ...diagnostics?.lifecycle, command } };
+  }
 
   // commandId is a log/event attribute for correlation only — must not be promoted to a Datadog metric tag dimension
   private static emitTelemetry(
@@ -418,10 +640,30 @@ export class Observability {
     });
   }
 
-  private static capturePostHog(event: string, properties: Record<string, unknown>): void {
-    Observability.posthog?.capture(Observability.desktopId || "unknown", event, {
-      ...properties,
-      desktop_client_version: Observability.desktopClientVersion,
+  private static captureAnalytics(
+    event: DesktopAnalyticsEventName,
+    properties: Record<string, unknown>,
+  ): void {
+    Observability.analytics?.send({
+      event,
+      properties: sanitizeAnalyticsProperties({
+        ...properties,
+        desktop_client_version: Observability.desktopClientVersion,
+        platform: process.platform,
+      }),
+      occurredAt: new Date().toISOString(),
     });
   }
+}
+
+function sanitizeAnalyticsProperties(
+  properties: Record<string, unknown>,
+): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(properties)) {
+    if (value !== undefined) {
+      sanitized[key] = value;
+    }
+  }
+  return sanitized;
 }

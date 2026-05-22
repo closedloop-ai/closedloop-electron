@@ -1,9 +1,5 @@
 import type { GatewayApprovalResult } from "../server/router.js";
-
-export type PackagedUpdateState = {
-  availableVersion: string | null;
-  downloadedVersion: string | null;
-};
+import type { PackagedUpdateState } from "./packaged-update-state.js";
 
 export function buildUpdateAndRestartDisabledResult(): GatewayApprovalResult {
   return {
@@ -27,9 +23,7 @@ export function canApplyPackagedUpdate(
   currentVersion: string,
   state: PackagedUpdateState
 ): boolean {
-  return Boolean(
-    state.downloadedVersion && state.downloadedVersion !== currentVersion
-  );
+  return Boolean(state.downloaded && state.version && state.version !== currentVersion);
 }
 
 export function resolvePackagedUpdateCheckResult(
@@ -40,7 +34,7 @@ export function resolvePackagedUpdateCheckResult(
   if (canApplyPackagedUpdate(currentVersion, state)) {
     return {
       updateAvailable: true,
-      version: state.downloadedVersion ?? undefined,
+      version: state.version,
     };
   }
 

@@ -18,7 +18,8 @@ jobs:
 
       - name: Check desktop version bump
         run: |
-          BASE="${{ github.event.pull_request.base.sha }}"
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          BASE=$(git merge-base "origin/$BASE_REF" HEAD)
 
           OLD_VERSION=$(git show "$BASE":apps/desktop/package.json | jq -r .version)
           NEW_VERSION=$(jq -r .version apps/desktop/package.json)

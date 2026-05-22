@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { shouldAutoApprove, OPERATION_RISK_TIERS, riskTierOrder, FORCE_INTERACTIVE_OPERATIONS } from "../src/main/approval-policy.js";
 import { SUPPORTED_OPERATION_IDS, resolveOperationId } from "../src/main/approval-operations.js";
+import {
+  BROWSER_COMMAND_KEY_APPROVAL_REQUEST_OPERATION_ID,
+  BROWSER_COMMAND_KEY_APPROVAL_REQUEST_PATH,
+  BROWSER_COMMAND_KEY_REVOKE_OPERATION_ID,
+  BROWSER_COMMAND_KEY_REVOKE_PATH,
+} from "../src/shared/contracts.js";
 
 // --- riskTierOrder ---
 
@@ -65,6 +71,30 @@ test("resolveOperationId maps known paths correctly", () => {
   assert.equal(resolveOperationId("/api/gateway/health-check"), "health_check");
   assert.equal(resolveOperationId("/api/gateway/symphony/launch"), "symphony_launch");
   assert.equal(resolveOperationId("/api/gateway/deploy/anything"), "deploy");
+  assert.equal(
+    BROWSER_COMMAND_KEY_REVOKE_OPERATION_ID,
+    "browser_key_revoke",
+  );
+  assert.equal(
+    BROWSER_COMMAND_KEY_REVOKE_PATH,
+    "/api/gateway/internal/browser-key/revoke",
+  );
+  assert.equal(
+    BROWSER_COMMAND_KEY_APPROVAL_REQUEST_OPERATION_ID,
+    "browser_key_approval_request",
+  );
+  assert.equal(
+    BROWSER_COMMAND_KEY_APPROVAL_REQUEST_PATH,
+    "/api/gateway/internal/browser-key/approval-request",
+  );
+  assert.equal(
+    resolveOperationId(BROWSER_COMMAND_KEY_REVOKE_PATH),
+    BROWSER_COMMAND_KEY_REVOKE_OPERATION_ID,
+  );
+  assert.equal(
+    resolveOperationId(BROWSER_COMMAND_KEY_APPROVAL_REQUEST_PATH),
+    BROWSER_COMMAND_KEY_APPROVAL_REQUEST_OPERATION_ID,
+  );
 });
 
 test("resolveOperationId maps previously unmapped routes", () => {
