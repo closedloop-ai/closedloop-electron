@@ -403,7 +403,7 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
     'CURSOR_MODULES = ["cursor-home", "cursor-parser", "cursor-import", "cursor-watcher"]',
     'COPILOT_MODULES = ["copilot-home", "copilot-parser", "copilot-import", "copilot-watcher"]',
     'OPENCODE_MODULES = ["opencode-home", "opencode-parser", "opencode-import", "opencode-watcher"]',
-    'SHARED_MODULES = ["harness-watcher-utils", "import-session-utils", "parser-utils", "catchup-cache"]',
+    "SHARED_MODULES = [",
     "MULTI_HARNESS_SPECS = [",
     "watcherPatchLines",
     "importPatchLines",
@@ -498,6 +498,42 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
   assert.match(stateSnippet, /Cursor/);
   assert.match(stateSnippet, /Copilot/);
   assert.match(stateSnippet, /OpenCode/);
+});
+
+test("FEA-1334 ingest orchestrator + progress card are wired into the build", () => {
+  // Build script registers the new shared modules, wires the orchestrator
+  // into server/index.js, and patches the /api/import/progress endpoint.
+  for (const needle of [
+    '"ingest-paths"',
+    '"ingest-progress"',
+    '"ingest-orchestrator"',
+    "ingestAllHarnesses",
+    "patchImportRoute",
+    'router.get("/progress"',
+    "FEA-1334 ingest orchestrator wiring",
+  ]) {
+    assert.ok(
+      buildScriptSource.includes(needle),
+      `build-agent-monitor.mjs missing FEA-1334 wiring: ${needle}`,
+    );
+  }
+
+  // The new shared modules exist in-repo and get copied into the tree.
+  for (const m of ["ingest-paths", "ingest-progress", "ingest-orchestrator"]) {
+    assert.ok(
+      existsSync(
+        new URL(`../scripts/agent-monitor-shared/${m}.js`, import.meta.url),
+      ),
+      `scripts/agent-monitor-shared/${m}.js missing`,
+    );
+  }
+
+  // Renderer drives the floating progress card off an IPC proxy so it never
+  // makes a cross-origin fetch to the sidecar.
+  assert.match(preloadSource, /getAgentMonitorIngestProgress/);
+  assert.match(appSource, /desktop:get-agent-monitor-ingest-progress/);
+  assert.match(indexHtml, /id="ingestBanner"/);
+  assert.match(indexHtml, /getAgentMonitorIngestProgress/);
 });
 
 test("Codex harness filter now uses server-backed pagination and rebuilds on snippet edits", () => {

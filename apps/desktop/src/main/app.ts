@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -2412,6 +2412,61 @@ export class DesktopApplication {
       enabled: this.isAgentMonitorEnabled(),
       planExtractionEnabled: this.isPlanExtractionEnabled(),
     }));
+    // FEA-1334: proxy the sidecar's cold-start ingest progress so the renderer
+    // can drive the floating progress card without a cross-origin fetch.
+    // Returns null whenever the sidecar is not reachable — the renderer treats
+    // that as "keep polling, nothing to show yet".
+    ipcMain.handle("desktop:get-agent-monitor-ingest-progress", async () => {
+      const baseUrl = this.agentMonitor.getUrl();
+      if (!baseUrl) {
+        return null;
+      }
+      try {
+        const response = await fetch(`${baseUrl}/api/import/progress`, {
+          signal: AbortSignal.timeout(2_000),
+        });
+        if (!response.ok) {
+          return null;
+        }
+        return await response.json();
+      } catch {
+        return null;
+      }
+    });
+    // FEA-1334: clear the dashboard DB and restart the sidecar so it
+    // re-imports every agent session from scratch. The sidecar's empty-DB
+    // boot path clears the persisted ingest caches and re-runs the
+    // orchestrator, which the progress banner tracks.
+    ipcMain.handle("desktop:reprocess-agent-logs", async () => {
+      if (!this.isAgentMonitorEnabled()) {
+        return { ok: false, error: "Agent Dashboard is disabled in Settings." };
+      }
+      try {
+        await this.agentMonitor.stop();
+        const agentMonitorDir = path.join(
+          app.getPath("userData"),
+          "agent-monitor",
+        );
+        for (const name of [
+          "dashboard.db",
+          "dashboard.db-wal",
+          "dashboard.db-shm",
+        ]) {
+          try {
+            rmSync(path.join(agentMonitorDir, name));
+          } catch {
+            /* file may not exist — fine */
+          }
+        }
+        void this.agentMonitor.start();
+        return { ok: true };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    });
     ipcMain.handle("desktop:open-agent-monitor", () =>
       this.openClaudeDashboard(),
     );

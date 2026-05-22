@@ -1,0 +1,119 @@
+/**
+ * @file ingest-orchestrator.js
+ * @description Single coordination point for the cold-start ingest of every
+ * non-Claude harness (FEA-1334). Before this, server/index.js fired four
+ * independent fire-and-forget import chains (Codex / Cursor / Copilot /
+ * OpenCode) with no shared progress signal. This orchestrator runs them as
+ * one coordinated unit and feeds the shared ingest-progress singleton, which
+ * `GET /api/import/progress` exposes to the desktop renderer's floating
+ * progress card.
+ *
+ * Harnesses are dependency-injected (the `harnesses` argument) rather than
+ * required here directly: the per-harness importer modules live at different
+ * relative paths in the generated runtime tree than in the source tree, so a
+ * static require would only resolve in one of them. Injection keeps this
+ * module pure coordination logic — identical in both trees and trivially
+ * unit-testable with fakes.
+ *
+ * Claude is NOT imported here — each harness is dependency-injected by the
+ * caller.  The generated server/index.js injects Claude into the harness
+ * array when the DB is empty (`existingCount === 0`) so the one-time legacy
+ * import shares the progress bar alongside the non-Claude catch-up.
+ */
+
+/**
+ * @typedef {Object} HarnessSpec
+ * @property {string} key - stable harness id ("codex", "cursor", ...).
+ * @property {(dbModule: any, opts: ImportOpts) => Promise<any>} importAll -
+ *   the harness's importAll*Sessions function. It should call
+ *   `opts.onBegin(totalFiles)` once before its parse loop and
+ *   `opts.onProgress()` once per source handled, and honour `opts.signal`.
+ */
+
+/**
+ * @typedef {Object} ImportOpts
+ * @property {AbortSignal} [signal]
+ * @property {(total: number) => void} [onBegin]
+ * @property {() => void} [onProgress]
+ */
+
+/**
+ * Run every injected harness importer in parallel, reporting progress into
+ * the ingest-progress singleton (or an injected equivalent for tests).
+ * Always resolves — a single harness throwing must never abort the others
+ * or reject the orchestrator.
+ *
+ * @param {Object} args
+ * @param {any} args.dbModule - the agent-monitor db module.
+ * @param {HarnessSpec[]} args.harnesses - injected harness importers.
+ * @param {AbortSignal} [args.signal] - cancels not-yet-started harness work.
+ * @param {any} [args.progress] - progress sink; defaults to ./ingest-progress.
+ * @returns {Promise<{ ran: boolean }>}
+ */
+async function ingestAllHarnesses({ dbModule, harnesses, signal, progress } = {}) {
+  const prog = progress || require("./ingest-progress");
+
+  if (!dbModule || !Array.isArray(harnesses) || harnesses.length === 0) {
+    return { ran: false };
+  }
+
+  prog.beginRun();
+
+  await Promise.all(
+    harnesses.map(async (harness) => {
+      const key = harness && harness.key;
+      if (!key) return;
+
+      // Register the harness immediately so it shows in the progress
+      // snapshot even before its importer reports a discovered total.
+      prog.beginHarness(key, 0);
+
+      const importAll = harness.importAll;
+      if (typeof importAll !== "function" || (signal && signal.aborted)) {
+        prog.completeHarness(key);
+        return;
+      }
+
+      try {
+        const result = await importAll(dbModule, {
+          signal,
+          onBegin: (total) => prog.beginHarness(key, total),
+          onProgress: () => prog.tick(key, { parsed: 1 }),
+        });
+        // importAll*Sessions resolves { imported, skipped, errors }. Roll the
+        // newly-imported count into progress so the card's "caught up"
+        // summary can report real numbers.
+        if (result && typeof result.imported === "number" && result.imported > 0) {
+          prog.tick(key, { imported: result.imported });
+        }
+      } catch {
+        /* non-fatal — one harness failing must not abort the others */
+      }
+      prog.completeHarness(key);
+    }),
+  );
+
+  // Record the dashboard DB session count so the progress banner shows the
+  // same number as the dashboard's "Total Sessions" stat (rather than a
+  // per-harness imported tally that can drift from a concurrent watcher).
+  // Best-effort — the count is a display nicety, not core.
+  try {
+    if (
+      typeof prog.setSessionsInDb === "function" &&
+      dbModule.db &&
+      typeof dbModule.db.prepare === "function"
+    ) {
+      const row = dbModule.db
+        .prepare("SELECT COUNT(*) AS c FROM sessions")
+        .get();
+      if (row && Number.isFinite(row.c)) prog.setSessionsInDb(row.c);
+    }
+  } catch {
+    /* non-fatal */
+  }
+
+  prog.endRun();
+  return { ran: true };
+}
+
+module.exports = { ingestAllHarnesses };
