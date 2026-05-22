@@ -151,7 +151,8 @@ test("session overview token totals include compaction baselines", () => {
 test("re-import metadata refresh is not gated only on message-count changes", () => {
   assert.match(buildScriptSource, /function patchImportHistoryMetadataRefresh/);
   assert.match(buildScriptSource, /CLOSEDLOOP metadata refresh parity/);
-  assert.match(buildScriptSource, /const nextPermissionMode = meta\.permission_mode \|\| session\.permissionMode \|\| null;/);
+  assert.match(buildScriptSource, /const nextEntryPoint = session\.entrypoint \|\| meta\.entrypoint \|\| null;/);
+  assert.match(buildScriptSource, /const nextPermissionMode = session\.permissionMode \|\| meta\.permission_mode \|\| null;/);
   assert.match(buildScriptSource, /JSON\.stringify\(meta\.usage_extras \|\| null\) !== JSON\.stringify\(nextUsageExtras\)/);
   if (generatedImportHistorySource !== null) {
     assert.match(generatedImportHistorySource, /CLOSEDLOOP metadata refresh parity/);
