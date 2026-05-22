@@ -50,6 +50,13 @@ function collectToolCalls(value, depth = 0, out = []) {
   return out;
 }
 
+function pushTurnDuration(turnDurations, startedAtIso, endedAtIso) {
+  if (!startedAtIso || !endedAtIso) return;
+  const durationMs = new Date(endedAtIso).getTime() - new Date(startedAtIso).getTime();
+  if (!Number.isFinite(durationMs) || durationMs < 0) return;
+  turnDurations.push({ durationMs, timestamp: endedAtIso });
+}
+
 function normalizeChatRequest(request, sessionData) {
   if (!request || typeof request !== "object") return [];
 
@@ -161,9 +168,11 @@ function parseChatSessionFile(filePath, workspacePath) {
   let assistantMessageCount = 0;
   const messageTimestamps = [];
   const toolUses = [];
+  const turnDurations = [];
   const apiErrors = [];
   let thinkingBlockCount = 0;
   const toolResultErrors = [];
+  let pendingTurnStartedAt = null;
 
   const noteTs = (raw) => {
     const iso = toIso(raw);
@@ -181,9 +190,12 @@ function parseChatSessionFile(filePath, workspacePath) {
 
     if (role === "user" || role === "human") {
       userMessageCount++;
+      if (iso) pendingTurnStartedAt = iso;
     } else if (role === "assistant" || role === "copilot" || role === "bot") {
       assistantMessageCount++;
       if (iso) messageTimestamps.push(iso);
+      pushTurnDuration(turnDurations, pendingTurnStartedAt, iso);
+      pendingTurnStartedAt = null;
     }
 
     // Tool uses embedded in messages
@@ -252,7 +264,7 @@ function parseChatSessionFile(filePath, workspacePath) {
     compactions: [],
     apiErrors,
     fileModifiedAt,
-    turnDurations: [],
+    turnDurations,
     entrypoint: "copilot",
     permissionMode: null,
     thinkingBlockCount,
@@ -279,11 +291,13 @@ async function parseCliEventFile(filePath, sessionId) {
   let assistantMessageCount = 0;
   const messageTimestamps = [];
   const toolUses = [];
+  const turnDurations = [];
   const apiErrors = [];
   let thinkingBlockCount = 0;
   const toolResultErrors = [];
   let tokenInput = 0;
   let tokenOutput = 0;
+  let pendingTurnStartedAt = null;
 
   const noteTs = (raw) => {
     const iso = toIso(raw);
@@ -314,10 +328,13 @@ async function parseCliEventFile(filePath, sessionId) {
     // Messages
     if (type === "user_message" || type === "user_input" || type === "prompt") {
       userMessageCount++;
+      if (iso) pendingTurnStartedAt = iso;
     }
     if (type === "assistant_message" || type === "response" || type === "completion") {
       assistantMessageCount++;
       if (iso) messageTimestamps.push(iso);
+      pushTurnDuration(turnDurations, pendingTurnStartedAt, iso);
+      pendingTurnStartedAt = null;
     }
 
     // Tool calls
@@ -391,7 +408,7 @@ async function parseCliEventFile(filePath, sessionId) {
     compactions: [],
     apiErrors,
     fileModifiedAt,
-    turnDurations: [],
+    turnDurations,
     entrypoint: "copilot",
     permissionMode: null,
     thinkingBlockCount,

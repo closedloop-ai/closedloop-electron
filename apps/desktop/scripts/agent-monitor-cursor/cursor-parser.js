@@ -12,6 +12,13 @@ const readline = require("readline");
 const { sessionIdFromTranscriptPath } = require("./cursor-home");
 const { toIso, safeJson } = require("../agent-monitor-shared/parser-utils");
 
+function pushTurnDuration(turnDurations, startedAtIso, endedAtIso) {
+  if (!startedAtIso || !endedAtIso) return;
+  const durationMs = new Date(endedAtIso).getTime() - new Date(startedAtIso).getTime();
+  if (!Number.isFinite(durationMs) || durationMs < 0) return;
+  turnDurations.push({ durationMs, timestamp: endedAtIso });
+}
+
 /**
  * Parse a single Cursor agent transcript JSONL file.
  * Returns null when the file carries no usable timestamp.
@@ -34,12 +41,14 @@ async function parseTranscriptFile(filePath) {
   let assistantMessageCount = 0;
   const messageTimestamps = [];
   const toolUses = [];
+  const turnDurations = [];
   const apiErrors = [];
   let thinkingBlockCount = 0;
   const toolResultErrors = [];
   let tokenInput = 0;
   let tokenOutput = 0;
   let tokenCacheRead = 0;
+  let pendingTurnStartedAt = null;
 
   const noteTs = (raw) => {
     const iso = toIso(raw);
@@ -85,6 +94,7 @@ async function parseTranscriptFile(filePath) {
     if (type === "user_message" || type === "human_message" ||
         (type === "message" && (payload.role === "user" || payload.author === "user"))) {
       userMessageCount++;
+      if (iso) pendingTurnStartedAt = iso;
     }
 
     // Assistant messages
@@ -92,6 +102,8 @@ async function parseTranscriptFile(filePath) {
         (type === "message" && (payload.role === "assistant" || payload.author === "assistant"))) {
       assistantMessageCount++;
       if (iso) messageTimestamps.push(iso);
+      pushTurnDuration(turnDurations, pendingTurnStartedAt, iso);
+      pendingTurnStartedAt = null;
     }
 
     // Thinking/reasoning
@@ -188,7 +200,7 @@ async function parseTranscriptFile(filePath) {
     compactions: [],
     apiErrors,
     fileModifiedAt,
-    turnDurations: [],
+    turnDurations,
     entrypoint: "cursor",
     permissionMode: null,
     thinkingBlockCount,

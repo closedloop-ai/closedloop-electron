@@ -60,6 +60,13 @@ function collectToolUse(toolUses, toolResultErrors, partRow, part, firstTimestam
   }
 }
 
+function pushTurnDuration(turnDurations, startedAtIso, endedAtIso) {
+  if (!startedAtIso || !endedAtIso) return;
+  const durationMs = new Date(endedAtIso).getTime() - new Date(startedAtIso).getTime();
+  if (!Number.isFinite(durationMs) || durationMs < 0) return;
+  turnDurations.push({ durationMs, timestamp: endedAtIso });
+}
+
 function parseSessionRow(sessionRow, getMessages, getParts) {
   const messageRows = getMessages.all(sessionRow.id);
   if (!Array.isArray(messageRows) || messageRows.length === 0) return null;
@@ -72,9 +79,11 @@ function parseSessionRow(sessionRow, getMessages, getParts) {
   let assistantMessageCount = 0;
   const messageTimestamps = [];
   const toolUses = [];
+  const turnDurations = [];
   const apiErrors = [];
   let thinkingBlockCount = 0;
   const toolResultErrors = [];
+  let pendingTurnStartedAt = null;
 
   const noteTs = (raw) => {
     const iso = toIso(raw);
@@ -100,9 +109,12 @@ function parseSessionRow(sessionRow, getMessages, getParts) {
 
     if (role === "user" || role === "human") {
       userMessageCount++;
+      if (iso) pendingTurnStartedAt = iso;
     } else if (role === "assistant" || role === "ai" || role === "model") {
       assistantMessageCount++;
       if (iso) messageTimestamps.push(iso);
+      pushTurnDuration(turnDurations, pendingTurnStartedAt, iso);
+      pendingTurnStartedAt = null;
     }
 
     const errorMessage = extractErrorMessage(data.error);
@@ -176,7 +188,7 @@ function parseSessionRow(sessionRow, getMessages, getParts) {
     compactions: [],
     apiErrors,
     fileModifiedAt: Number(sessionRow.time_updated || 0) || null,
-    turnDurations: [],
+    turnDurations,
     entrypoint: "opencode",
     permissionMode: sessionRow.permission || null,
     thinkingBlockCount,

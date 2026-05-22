@@ -1020,6 +1020,36 @@ function patchDbFile(file) {
     source = source.replace(stmtsNeedle, `\n${replacement}`);
   }
 
+  const sessionTotalsNeedle = [
+    "  sessionTokenTotals: db.prepare(`",
+    "    SELECT",
+    "      COALESCE(SUM(input_tokens), 0) as input_tokens,",
+    "      COALESCE(SUM(output_tokens), 0) as output_tokens,",
+    "      COALESCE(SUM(cache_read_tokens), 0) as cache_read_tokens,",
+    "      COALESCE(SUM(cache_write_tokens), 0) as cache_write_tokens",
+    "    FROM token_usage",
+    "    WHERE session_id = ?",
+    "  `),",
+  ].join("\n");
+  const sessionTotalsReplacement = [
+    "  sessionTokenTotals: db.prepare(`",
+    "    SELECT",
+    "      COALESCE(SUM(input_tokens + baseline_input), 0) as input_tokens,",
+    "      COALESCE(SUM(output_tokens + baseline_output), 0) as output_tokens,",
+    "      COALESCE(SUM(cache_read_tokens + baseline_cache_read), 0) as cache_read_tokens,",
+    "      COALESCE(SUM(cache_write_tokens + baseline_cache_write), 0) as cache_write_tokens",
+    "    FROM token_usage",
+    "    WHERE session_id = ?",
+    "  `),",
+  ].join("\n");
+  if (source.includes(sessionTotalsNeedle)) {
+    source = source.replace(sessionTotalsNeedle, sessionTotalsReplacement);
+  } else if (!source.includes("COALESCE(SUM(input_tokens + baseline_input), 0) as input_tokens")) {
+    throw new Error(
+      `Unable to patch ${file}: expected the sessionTokenTotals query (baseline session totals).`,
+    );
+  }
+
   // CLOSEDLOOP plan-extraction (FEA-1189): ensure the strategy §9.2 plans /
   // plan_versions tables exist at startup, regardless of route load order.
   // Idempotent CREATE TABLE IF NOT EXISTS — never an ALTER migration.

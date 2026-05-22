@@ -8,16 +8,56 @@ import { test } from "node:test";
 
 const require = createRequire(import.meta.url);
 
+type ParsedTurnDuration = {
+  durationMs: number;
+  timestamp: string;
+};
+
+type ParsedToolUse = {
+  name: string;
+};
+
+type ParsedMultiHarnessSession = {
+  sessionId: string;
+  name: string;
+  cwd: string | null;
+  model: string | null;
+  version: string | null;
+  userMessages: number;
+  assistantMessages: number;
+  toolUses: ParsedToolUse[];
+  thinkingBlockCount: number;
+  turnDurations: ParsedTurnDuration[];
+  entrypoint: string;
+  startedAt: string;
+  endedAt: string;
+  tokensByModel: Record<
+    string,
+    {
+      input: number;
+      output: number;
+      cacheRead: number;
+      cacheWrite: number;
+    }
+  >;
+};
+
 const copilotHome = require("../scripts/agent-monitor-copilot/copilot-home.js") as {
   workspacePathFromUri: (folder: string) => string | null;
 };
 const copilotParser = require("../scripts/agent-monitor-copilot/copilot-parser.js") as {
-  parseChatSessionFile: (filePath: string, workspacePath: string | null) => Record<string, any> | null;
+  parseChatSessionFile: (
+    filePath: string,
+    workspacePath: string | null,
+  ) => ParsedMultiHarnessSession | null;
 };
 const codexParser = require("../scripts/agent-monitor-codex/codex-parser.js") as Record<string, unknown>;
 const cursorParser = require("../scripts/agent-monitor-cursor/cursor-parser.js") as Record<string, unknown>;
+const cursorTranscriptParser = cursorParser as {
+  parseTranscriptFile: (filePath: string) => Promise<ParsedMultiHarnessSession | null>;
+};
 const opencodeParser = require("../scripts/agent-monitor-opencode/opencode-parser.js") as {
-  loadSessionsFromDb: (dbPath: string) => Array<Record<string, any>>;
+  loadSessionsFromDb: (dbPath: string) => ParsedMultiHarnessSession[];
 };
 
 test("Copilot workspace file URIs decode to filesystem paths", () => {
@@ -59,6 +99,12 @@ test("Copilot Chat parser supports request-based session files", () => {
   assert.equal(parsed.toolUses.length, 1);
   assert.equal(parsed.toolUses[0].name, "search");
   assert.equal(parsed.thinkingBlockCount, 1);
+  assert.deepEqual(parsed.turnDurations, [
+    {
+      durationMs: 60_000,
+      timestamp: "2024-03-09T16:01:00.000Z",
+    },
+  ]);
   assert.equal(parsed.entrypoint, "copilot");
   assert.equal(parsed.startedAt, "2024-03-09T16:00:00.000Z");
   assert.equal(parsed.endedAt, "2024-03-09T16:01:00.000Z");
@@ -202,12 +248,58 @@ test("OpenCode parser loads sessions from opencode.db", () => {
   assert.equal(parsed.toolUses.length, 1);
   assert.equal(parsed.toolUses[0].name, "read");
   assert.equal(parsed.thinkingBlockCount, 1);
+  assert.deepEqual(parsed.turnDurations, [
+    {
+      durationMs: 30_000,
+      timestamp: "2024-03-09T16:00:30.000Z",
+    },
+  ]);
   assert.deepEqual(parsed.tokensByModel["big-pickle"], {
     input: 100,
     output: 25,
     cacheRead: 40,
     cacheWrite: 0,
   });
+});
+
+test("Cursor parser derives turn durations from user/assistant timestamps", async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cursor-transcript-"));
+  const sessionDir = path.join(dir, "session-123");
+  mkdirSync(sessionDir, { recursive: true });
+  const filePath = path.join(sessionDir, "rollout.jsonl");
+  writeFileSync(
+    filePath,
+    [
+      {
+        timestamp: "2024-03-09T16:00:00.000Z",
+        type: "session_meta",
+        payload: {
+          cwd: "/Users/dev/cursor project",
+          model: "claude-3-7-sonnet",
+        },
+      },
+      {
+        timestamp: "2024-03-09T16:00:05.000Z",
+        type: "user_message",
+        payload: { message: "Investigate failing test" },
+      },
+      {
+        timestamp: "2024-03-09T16:00:11.500Z",
+        type: "assistant_message",
+        payload: { message: "Looking now" },
+      },
+    ].map((line) => JSON.stringify(line)).join("\n"),
+    "utf8",
+  );
+
+  const parsed = await cursorTranscriptParser.parseTranscriptFile(filePath);
+  assert.ok(parsed, "expected a parsed Cursor transcript");
+  assert.deepEqual(parsed.turnDurations, [
+    {
+      durationMs: 6_500,
+      timestamp: "2024-03-09T16:00:11.500Z",
+    },
+  ]);
 });
 
 test("multi-harness parsers no longer re-export shared timestamp helpers", () => {
