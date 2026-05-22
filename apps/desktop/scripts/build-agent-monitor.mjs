@@ -66,6 +66,12 @@ const generatedHooksRoute = path.join(
   "routes",
   "hooks.js",
 );
+const generatedImportRoute = path.join(
+  generatedRootDir,
+  "server",
+  "routes",
+  "import.js",
+);
 const generatedPricingRoute = path.join(
   generatedRootDir,
   "server",
@@ -108,7 +114,17 @@ const CODEX_MODULES = ["codex-home", "codex-parser", "codex-import", "codex-watc
 const CURSOR_MODULES = ["cursor-home", "cursor-parser", "cursor-import", "cursor-watcher"];
 const COPILOT_MODULES = ["copilot-home", "copilot-parser", "copilot-import", "copilot-watcher"];
 const OPENCODE_MODULES = ["opencode-home", "opencode-parser", "opencode-import", "opencode-watcher"];
-const SHARED_MODULES = ["harness-watcher-utils", "import-session-utils", "parser-utils", "catchup-cache"];
+const SHARED_MODULES = [
+  "harness-watcher-utils",
+  "import-session-utils",
+  "parser-utils",
+  "catchup-cache",
+  // CLOSEDLOOP FEA-1334: cold-start ingest orchestration + persisted-cache
+  // path resolution + the progress singleton GET /api/import/progress reads.
+  "ingest-paths",
+  "ingest-progress",
+  "ingest-orchestrator",
+];
 const MULTI_HARNESS_SPECS = [
   {
     key: "codex",
@@ -270,18 +286,29 @@ const HOST_DEFAULT_PRICING = [
   ["claude-haiku-4-5%", "Claude Haiku 4.5", 1, 5, 0.1, 1.25],
   ["claude-3-5-haiku%", "Claude Haiku 3.5", 0.8, 4, 0.08, 1],
   ["claude-3-haiku%", "Claude Haiku 3", 0.25, 1.25, 0.03, 0.3],
-  // GPT-5 family
-  ["gpt-5.5%", "GPT-5.5", 5, 30, 0.5, 0],
-  ["gpt-5.4-mini%", "GPT-5.4 mini", 0.75, 4.5, 0.075, 0],
-  ["gpt-5.4-nano%", "GPT-5.4 nano", 0.2, 1.25, 0.02, 0],
-  ["gpt-5.4%", "GPT-5.4", 2.5, 15, 0.25, 0],
-  ["gpt-5-codex%", "GPT-5 Codex", 1.25, 10, 0.125, 0],
-  ["gpt-5-mini%", "GPT-5 mini", 0.25, 2, 0.025, 0],
-  ["gpt-5-nano%", "GPT-5 nano", 0.05, 0.4, 0.005, 0],
-  ["gpt-5%", "GPT-5", 1.25, 10, 0.125, 0],
+  // GPT-5 family — cache_write rates are the prompt caching write rate
+  // (typically equal to the input rate per 1M tokens for cached writes).
+  ["gpt-5.5%", "GPT-5.5", 5, 30, 0.5, 5],
+  ["gpt-5.4-mini%", "GPT-5.4 mini", 0.75, 4.5, 0.075, 0.75],
+  ["gpt-5.4-nano%", "GPT-5.4 nano", 0.2, 1.25, 0.02, 0.2],
+  ["gpt-5.4%", "GPT-5.4", 2.5, 15, 0.25, 2.5],
+  ["gpt-5-codex%", "GPT-5 Codex", 1.25, 10, 0.125, 1.25],
+  ["gpt-5-mini%", "GPT-5 mini", 0.25, 2, 0.025, 0.25],
+  ["gpt-5-nano%", "GPT-5 nano", 0.05, 0.4, 0.005, 0.05],
+  ["gpt-5%", "GPT-5", 1.25, 10, 0.125, 1.25],
   // OpenCode-hosted free models
   ["big-pickle%", "Big Pickle", 0, 0, 0, 0],
   ["opencode/big-pickle%", "OpenCode Big Pickle", 0, 0, 0, 0],
+  // Fallback patterns for non-Claude harness parsers — when the model
+  // field is missing from the raw data, each parser falls back to a
+  // hardcoded default key (e.g. "gpt-codex", "cursor-default", etc.).
+  // These entries ensure the fallback key has a reasonable pricing match,
+  // even if the exact model is unknown. The broadest pattern comes last
+  // so more specific rules match first.
+  ["gpt-codex%", "GPT Codex (fallback)", 1.25, 10, 0.125, 1.25],
+  ["cursor-default%", "Cursor default (fallback)", 3, 15, 0.3, 3],
+  ["copilot-default%", "Copilot default (fallback)", 3, 15, 0.3, 3],
+  ["opencode-default%", "OpenCode default (fallback)", 0, 0, 0, 0],
   // Legacy
   ["claude-3-opus%", "Claude Opus 3", 15, 75, 1.5, 18.75],
 ];
@@ -541,6 +568,12 @@ function materializeRuntimeTree() {
   );
   patchImportHistory(generatedImportHistory);
   patchImportHistoryForPullRequests(generatedImportHistory);
+  // CLOSEDLOOP token reconciliation fix: replace the subagent-only guard
+  // with an unconditional writeSessionTokens call so non-Claude harnesses
+  // can update token_usage on re-import. Must run AFTER patchImportHistory
+  // since both modify the same file.
+  patchImportHistoryTokenReconcile(generatedImportHistory);
+  patchImportHistoryMetaImported(generatedImportHistory);
   mkdirSync(path.join(generatedRootDir, "client"), { recursive: true });
   cpSync(sourceClientDistDir, path.join(generatedRootDir, "client", "dist"), {
     recursive: true,
@@ -553,6 +586,7 @@ function materializeRuntimeTree() {
   patchDbFile(generatedDbFile);
   patchPricingRoute(generatedPricingRoute);
   patchHooksRoute(generatedHooksRoute);
+  patchImportRoute(generatedImportRoute);
   patchPushFile(generatedPushLib);
   patchCcDiscovery(generatedCcDiscovery);
   writeFileSync(generatedUninstallHooks, UNINSTALL_HOOKS_SOURCE, "utf8");
@@ -682,24 +716,50 @@ function patchServerIndex(file) {
       "    }",
     ],
   );
-  const importPatchLines = MULTI_HARNESS_SPECS.flatMap(
-    ({ key, importFn, importModule, importedLog, errorLog }) => [
-      "  try {",
-      `    const { ${importFn} } = require("./lib/${importModule}");`,
-      `    ${importFn}(_dbMod)`,
-      "      .then(({ imported, errors }) => {",
-      "        if (imported > 0)",
-      `          console.log("Imported " + imported + " ${importedLog}");`,
-      "        if (errors > 0)",
-      `          console.log(errors + " ${errorLog}");`,
-      "      })",
-      "      .catch(() => {});",
-      "  } catch (err) {",
-      `    console.warn("${key} import failed to start:", err.message);`,
-      "  }",
-      "",
-    ],
+  // CLOSEDLOOP FEA-1334: a single ingest orchestrator replaces the four
+  // independent per-harness import chains. It runs every non-Claude importer
+  // as one coordinated unit (still fire-and-forget, still never blocks boot)
+  // and feeds the ingest-progress singleton that GET /api/import/progress
+  // exposes to the desktop floating progress card. The harness importers are
+  // dependency-injected so ingest-orchestrator.js stays a pure, identical
+  // module in both the generated runtime tree and the source tree.
+  const orchestratorHarnessLines = MULTI_HARNESS_SPECS.map(
+    ({ key, importFn, importModule }) =>
+      `        { key: ${JSON.stringify(key)}, importAll: require("./lib/${importModule}").${importFn} },`,
   );
+  const importPatchLines = [
+    "  try {",
+    "    // CLOSEDLOOP FEA-1334: a fresh/empty DB no longer matches the",
+    "    // persisted ingest caches — drop them so every harness re-parses in",
+    "    // full and reports an honest total to the progress bar.",
+    "    if (existingCount === 0) {",
+    "      try {",
+    '        require("./agent-monitor-shared/ingest-paths").clearIngestState();',
+    "      } catch (e) { void e; }",
+    "    }",
+    '    const { ingestAllHarnesses } = require("./agent-monitor-shared/ingest-orchestrator");',
+    "    const _ingestHarnesses = [",
+    ...orchestratorHarnessLines,
+    "    ];",
+    "    // CLOSEDLOOP FEA-1334: on an empty DB the one-time Claude legacy",
+    "    // import is the bulk of the cold-start work — run it through the",
+    "    // orchestrator too so it shares the progress bar.",
+    "    if (existingCount === 0) {",
+    "      _ingestHarnesses.unshift({",
+    '        key: "claude",',
+    "        importAll: async (db, opts) => {",
+    "          const _r = await importAllSessions(db, opts);",
+    "          try { await backfillCompactions(db); } catch (e) { void e; }",
+    "          return _r;",
+    "        },",
+    "      });",
+    "    }",
+    "    ingestAllHarnesses({ dbModule: _dbMod, harnesses: _ingestHarnesses }).catch(() => {});",
+    "  } catch (err) {",
+    '    console.warn("ingest orchestrator failed to start:", err.message);',
+    "  }",
+    "",
+  ];
 
   // CLOSEDLOOP multi-harness support — start watchers for all non-Claude harnesses
   // next to cc-watcher (these tools have no hooks; the watcher is their only live path).
@@ -755,12 +815,12 @@ function patchServerIndex(file) {
     );
   }
 
-  // CLOSEDLOOP multi-harness support — import sessions from all non-Claude
-  // harnesses on every startup (not gated on a zero-row count, unlike the
-  // Claude import: these tools have no hooks so sessions created while the
-  // app was closed must still appear; all imports are idempotent).
-  // Fire-and-forget; never blocks boot.
-  if (!source.includes("importAllCodexSessions")) {
+  // CLOSEDLOOP FEA-1334 — import sessions from all non-Claude harnesses on
+  // every startup via the unified ingest orchestrator (not gated on a
+  // zero-row count, unlike the Claude import: these tools have no hooks so
+  // sessions created while the app was closed must still appear; all imports
+  // are idempotent). Fire-and-forget; never blocks boot.
+  if (!source.includes("ingestAllHarnesses")) {
     const tailNeedle = [
       "  }",
       "}",
@@ -814,6 +874,41 @@ function patchServerIndex(file) {
         '    console.warn("[plans] backfill failed:", e && e.message);',
         "  }",
         '  const existingCount = dbModule.db.prepare("SELECT COUNT(*) AS c FROM sessions").get().c;',
+      ].join("\n"),
+    );
+  }
+
+  // CLOSEDLOOP FEA-1334: the one-time Claude legacy import now runs through the
+  // ingest orchestrator (see the claude harness in the multi-harness block) so
+  // it shares the desktop progress bar. Remove the standalone fire-and-forget
+  // block so the same sessions are not imported twice.
+  if (source.includes("importAllSessions(dbModule)\n      .then(")) {
+    const legacyClaudeBlock = [
+      "  if (existingCount === 0) {",
+      "    importAllSessions(dbModule)",
+      "      .then(({ imported, skipped, errors }) => {",
+      "        if (imported > 0) console.log(`Imported ${imported} legacy sessions from ~/.claude/`);",
+      "        if (errors > 0) console.log(`${errors} session files had errors during import`);",
+      "      })",
+      "      .then(() => backfillCompactions(dbModule))",
+      "      .then(({ backfilled }) => {",
+      "        if (backfilled > 0)",
+      "          console.log(`Backfilled ${backfilled} compaction events from ~/.claude/`);",
+      "      })",
+      "      .catch(() => {});",
+      "  }",
+    ].join("\n");
+    if (!source.includes(legacyClaudeBlock)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the standalone Claude legacy-import block (FEA-1334).`,
+      );
+    }
+    source = source.replace(
+      legacyClaudeBlock,
+      [
+        "  // CLOSEDLOOP FEA-1334: the one-time Claude legacy import runs through",
+        "  // the ingest orchestrator below (the claude harness) so it shares the",
+        "  // desktop progress bar; the standalone import block was removed.",
       ].join("\n"),
     );
   }
@@ -1067,6 +1162,36 @@ function patchDbFile(file) {
     source = source.replace(stmtsNeedle, `\n${replacement}`);
   }
 
+  const sessionTotalsNeedle = [
+    "  sessionTokenTotals: db.prepare(`",
+    "    SELECT",
+    "      COALESCE(SUM(input_tokens), 0) as input_tokens,",
+    "      COALESCE(SUM(output_tokens), 0) as output_tokens,",
+    "      COALESCE(SUM(cache_read_tokens), 0) as cache_read_tokens,",
+    "      COALESCE(SUM(cache_write_tokens), 0) as cache_write_tokens",
+    "    FROM token_usage",
+    "    WHERE session_id = ?",
+    "  `),",
+  ].join("\n");
+  const sessionTotalsReplacement = [
+    "  sessionTokenTotals: db.prepare(`",
+    "    SELECT",
+    "      COALESCE(SUM(input_tokens + baseline_input), 0) as input_tokens,",
+    "      COALESCE(SUM(output_tokens + baseline_output), 0) as output_tokens,",
+    "      COALESCE(SUM(cache_read_tokens + baseline_cache_read), 0) as cache_read_tokens,",
+    "      COALESCE(SUM(cache_write_tokens + baseline_cache_write), 0) as cache_write_tokens",
+    "    FROM token_usage",
+    "    WHERE session_id = ?",
+    "  `),",
+  ].join("\n");
+  if (source.includes(sessionTotalsNeedle)) {
+    source = source.replace(sessionTotalsNeedle, sessionTotalsReplacement);
+  } else if (!source.includes("COALESCE(SUM(input_tokens + baseline_input), 0) as input_tokens")) {
+    throw new Error(
+      `Unable to patch ${file}: expected the sessionTokenTotals query (baseline session totals).`,
+    );
+  }
+
   // CLOSEDLOOP plan-extraction (FEA-1189): ensure the strategy §9.2 plans /
   // plan_versions tables exist at startup, regardless of route load order.
   // Idempotent CREATE TABLE IF NOT EXISTS — never an ALTER migration.
@@ -1256,6 +1381,41 @@ function patchHooksRoute(file) {
   writeFileSync(file, source, "utf8");
 }
 
+// CLOSEDLOOP FEA-1334: expose cold-start ingest progress so the desktop
+// renderer can show a floating "catching up on agent history" card on every
+// launch. The ingest orchestrator writes into the ingest-progress singleton;
+// this read-only endpoint snapshots it. Idempotent string-anchor patch.
+function patchImportRoute(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes('router.get("/progress"')) return;
+
+  const needle = "module.exports = router;";
+  if (!source.includes(needle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the import-route module.exports anchor (FEA-1334 progress endpoint).`,
+    );
+  }
+  source = source.replace(
+    needle,
+    [
+      "// CLOSEDLOOP FEA-1334: read-only snapshot of cold-start ingest progress",
+      "// for the desktop floating progress card. The ingest orchestrator writes",
+      "// into the ingest-progress singleton; this endpoint only reads it.",
+      'router.get("/progress", (_req, res) => {',
+      "  try {",
+      '    const progress = require("../agent-monitor-shared/ingest-progress");',
+      "    res.json(progress.snapshot());",
+      "  } catch (err) {",
+      "    res.status(500).json({ error: String((err && err.message) || err) });",
+      "  }",
+      "});",
+      "",
+      needle,
+    ].join("\n"),
+  );
+  writeFileSync(file, source, "utf8");
+}
+
 // CLOSEDLOOP plan-extraction (FEA-1189): wire plan capture into the single
 // shared import sink so Claude (session.toolUses) AND Codex (session.plans)
 // plans are persisted on the import/watch path — the primary path, since hooks
@@ -1300,6 +1460,181 @@ function patchImportHistory(file) {
     "  } catch (e) { void e; /* plan extraction is best-effort; never blocks import */ }",
   ].join("\n");
   source = source.replace(needle, inject);
+
+  // CLOSEDLOOP FEA-1334: give importAllSessions optional progress hooks so the
+  // first-run Claude legacy import drives the desktop ingest progress bar.
+  // Other callers (CLI mode, the /api/import rescan route) omit `opts` and are
+  // unaffected.
+  if (!source.includes("FEA-1334 progress hooks")) {
+    const headNeedle = [
+      "async function importAllSessions(dbModule) {",
+      "  if (!fs.existsSync(PROJECTS_DIR)) return { imported: 0, skipped: 0, errors: 0 };",
+      "",
+      "  const projectDirs = fs",
+      "    .readdirSync(PROJECTS_DIR, { withFileTypes: true })",
+      "    .filter((d) => d.isDirectory())",
+      "    .map((d) => d.name);",
+    ].join("\n");
+    if (!source.includes(headNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the importAllSessions head (FEA-1334 progress hooks).`,
+      );
+    }
+    source = source.replace(
+      headNeedle,
+      [
+        "async function importAllSessions(dbModule, opts = {}) {",
+        "  // FEA-1334 progress hooks — optional; the importer is unchanged when omitted.",
+        '  const _onBegin = opts && typeof opts.onBegin === "function" ? opts.onBegin : null;',
+        '  const _onProgress = opts && typeof opts.onProgress === "function" ? opts.onProgress : null;',
+        "  const _signal = opts && opts.signal ? opts.signal : null;",
+        "  if (!fs.existsSync(PROJECTS_DIR)) {",
+        "    if (_onBegin) _onBegin(0);",
+        "    return { imported: 0, skipped: 0, errors: 0 };",
+        "  }",
+        "",
+        "  const projectDirs = fs",
+        "    .readdirSync(PROJECTS_DIR, { withFileTypes: true })",
+        "    .filter((d) => d.isDirectory())",
+        "    .map((d) => d.name);",
+        "",
+        "  if (_onBegin) {",
+        "    let _total = 0;",
+        "    for (const _d of projectDirs) {",
+        "      try {",
+        "        _total += fs",
+        "          .readdirSync(path.join(PROJECTS_DIR, _d))",
+        '          .filter((f) => f.endsWith(".jsonl")).length;',
+        "      } catch (e) { void e; }",
+        "    }",
+        "    _onBegin(_total);",
+        "  }",
+      ].join("\n"),
+    );
+
+    const loopNeedle = [
+      "    const batch = [];",
+      "    for (const file of files) {",
+      "      try {",
+      "        const session = await parseSessionFile(path.join(projPath, file));",
+    ].join("\n");
+    if (!source.includes(loopNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the importAllSessions file loop (FEA-1334 progress hooks).`,
+      );
+    }
+    source = source.replace(
+      loopNeedle,
+      [
+        "    const batch = [];",
+        "    for (const file of files) {",
+        "      if (_signal && _signal.aborted) break;",
+        "      if (_onProgress) _onProgress();",
+        "      try {",
+        "        const session = await parseSessionFile(path.join(projPath, file));",
+      ].join("\n"),
+    );
+  }
+
+  writeFileSync(file, source, "utf8");
+}
+
+/**
+ * CLOSEDLOOP token reconciliation fix: replace the subagent-only token guard
+ * in importSession's existing-session branch with an unconditional call to
+ * writeSessionTokens. Without this, parsers that extract fresh token data
+ * on every re-import (OpenCode, Copilot, Cursor, Codex) never update a
+ * session's token_usage row after the initial import — the upstream code
+ * only reconciled tokens when parsedSubagents existed with non-zero tokens.
+ */
+function patchImportHistoryTokenReconcile(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("CLOSEDLOOP token reconciliation")) {
+    writeFileSync(file, source, "utf8");
+    return;
+  }
+  const needle = [
+    "    // Reconcile token usage. The earlier importer dropped subagent tokens",
+    "    // entirely, so any session with subagent JSONLs has under-counted totals.",
+    "    // replaceTokenUsage's baseline-shift logic guarantees this can never",
+    "    // reduce a session's totals — at worst it's a no-op.",
+    "    if (",
+    "      session.parsedSubagents &&",
+    "      session.parsedSubagents.some(",
+    "        (s) =>",
+    "          s.tokensByModel &&",
+    "          Object.values(s.tokensByModel).some(",
+    "            (t) => (t.input || 0) + (t.output || 0) + (t.cacheRead || 0) + (t.cacheWrite || 0) > 0",
+    "          )",
+    "      )",
+    "    ) {",
+    "      const written = writeSessionTokens(",
+    "        dbModule,",
+    "        session.sessionId,",
+    "        combineSessionTokens(session)",
+    "      );",
+    "      if (written > 0) backfilled = true;",
+    "    }",
+  ].join("\n");
+  if (!source.includes(needle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the subagent-only token guard (CLOSEDLOOP token reconciliation).`,
+    );
+  }
+  const replacement = [
+    "    // CLOSEDLOOP token reconciliation — unconditionally write tokens for",
+    "    // every re-import so parsers that extract fresh token data (OpenCode,",
+    "    // Copilot, Cursor, Codex) can update totals when a session is",
+    "    // re-imported. The upstream code only reconciled when subagents had",
+    "    // non-zero tokens, which meant sessions without subagents (most",
+    "    // non-Claude sessions) never had their token_usage refreshed.",
+    "    // replaceTokenUsage's baseline-shift logic guarantees this can never",
+    "    // reduce a session's totals — at worst it's a no-op.",
+    "    {",
+    "      const written = writeSessionTokens(",
+    "        dbModule,",
+    "        session.sessionId,",
+    "        combineSessionTokens(session)",
+    "      );",
+    "      if (written > 0) backfilled = true;",
+    "    }",
+  ].join("\n");
+  source = source.replace(needle, replacement);
+  writeFileSync(file, source, "utf8");
+}
+
+/**
+ * CLOSEDLOOP meta.imported fix: for legacy sessions imported before the
+ * `imported` metadata flag existed, stamp the flag instead of returning
+ * early with `{ skipped: true }` so event backfill and token reconciliation
+ * can proceed during re-import. The high-water-mark dedup protects against
+ * duplicate events and the baseline-shifting upsert protects against
+ * double-counted tokens.
+ */
+function patchImportHistoryMetaImported(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("CLOSEDLOOP meta.imported fix")) {
+    writeFileSync(file, source, "utf8");
+    return;
+  }
+  const needle =
+    '    if (!meta.imported) return { skipped: true };';
+  if (!source.includes(needle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the meta.imported early return (CLOSEDLOOP meta.imported fix).`,
+    );
+  }
+  const replacement = [
+    "    // CLOSEDLOOP meta.imported fix: legacy session imported before the",
+    '    // `imported` metadata flag existed — stamp it and continue so event',
+    "    // backfill and token reconciliation can proceed. The high-water-mark",
+    "    // dedup protects against duplicate events and the baseline-shifting",
+    "    // upsert protects against double-counted tokens.",
+    "    if (!meta.imported) {",
+    "      meta.imported = true;",
+    "    }",
+  ].join("\n");
+  source = source.replace(needle, replacement);
   writeFileSync(file, source, "utf8");
 }
 
@@ -1860,6 +2195,37 @@ function assertGeneratedTree() {
         `Generated server/index.js is missing the ${label} watcher/import wiring (${fn}).`,
       );
     }
+  }
+
+  // CLOSEDLOOP FEA-1334 hard-gates: a future upstream bump that breaks an
+  // anchor must fail the build, not silently drop the ingest orchestrator or
+  // the progress endpoint that powers the desktop floating progress card.
+  if (!serverIndex.includes("ingestAllHarnesses")) {
+    throw new Error(
+      "Generated server/index.js is missing the FEA-1334 ingest orchestrator wiring (ingestAllHarnesses).",
+    );
+  }
+  if (!serverIndex.includes('key: "claude"')) {
+    throw new Error(
+      "Generated server/index.js is missing the FEA-1334 Claude orchestrator harness.",
+    );
+  }
+  if (serverIndex.includes("legacy sessions from ~/.claude/")) {
+    throw new Error(
+      "Generated server/index.js still has the standalone Claude import block — FEA-1334 expects it removed (the orchestrator now runs it).",
+    );
+  }
+  const fea1334ImportHistory = readFileSync(generatedImportHistory, "utf8");
+  if (!fea1334ImportHistory.includes("FEA-1334 progress hooks")) {
+    throw new Error(
+      "Generated scripts/import-history.js is missing the FEA-1334 importAllSessions progress hooks.",
+    );
+  }
+  const importRouteSource = readFileSync(generatedImportRoute, "utf8");
+  if (!importRouteSource.includes('router.get("/progress"')) {
+    throw new Error(
+      "Generated server/routes/import.js is missing the FEA-1334 /api/import/progress endpoint.",
+    );
   }
   for (const { modules } of MULTI_HARNESS_SPECS) {
     for (const m of modules) {

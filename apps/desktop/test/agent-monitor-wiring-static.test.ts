@@ -8,6 +8,10 @@ const read = (relative: string): string =>
 const appSource = read("../src/main/app.ts");
 const agentMonitorPathSource = read("../src/main/agent-monitor-path.ts");
 const buildScriptSource = read("../scripts/build-agent-monitor.mjs");
+const generatedDbUrl = new URL("../.generated/agent-monitor/server/db.js", import.meta.url);
+const generatedDbSource = existsSync(generatedDbUrl)
+  ? readFileSync(generatedDbUrl, "utf8")
+  : null;
 const plansRouteSource = read("../scripts/agent-monitor-plans/plans-route.js");
 const claudeDocSource = read("../CLAUDE.md");
 const shutdownSource = read("../src/main/shutdown.ts");
@@ -113,6 +117,23 @@ test("build script materializes a generated runtime tree with the host patches",
   assert.match(buildScriptSource, /stopCcWatcher/);
 });
 
+test("session overview token totals include compaction baselines", () => {
+  assert.match(
+    buildScriptSource,
+    /COALESCE\(SUM\(input_tokens \+ baseline_input\), 0\) as input_tokens/,
+  );
+  if (generatedDbSource !== null) {
+    assert.match(
+      generatedDbSource,
+      /COALESCE\(SUM\(input_tokens \+ baseline_input\), 0\) as input_tokens/,
+    );
+    assert.match(
+      generatedDbSource,
+      /COALESCE\(SUM\(cache_write_tokens \+ baseline_cache_write\), 0\) as cache_write_tokens/,
+    );
+  }
+});
+
 test("electron-builder ships the generated agent-monitor runtime tree unpacked", () => {
   assert.match(
     electronBuilder,
@@ -182,13 +203,10 @@ test("agent monitor defaults on; plan extraction is feature-gated and defaults o
   assert.match(settingsStoreSource, /setAgentMonitorEnabled\(agentMonitorEnabled: boolean\)/);
   assert.match(settingsStoreSource, /getPlanExtractionEnabled\(\)/);
   assert.match(settingsStoreSource, /setPlanExtractionEnabled\(planExtractionEnabled: boolean\)/);
+  // update() handles all registered flags generically via FLAG_KEYS loop
   assert.match(
     settingsStoreSource,
-    /if \(typeof partial\.agentMonitorEnabled === "boolean"\) \{[\s\S]*this\.store\.set\("agentMonitorEnabled"/,
-  );
-  assert.match(
-    settingsStoreSource,
-    /if \(typeof partial\.planExtractionEnabled === "boolean"\) \{[\s\S]*this\.store\.set\("planExtractionEnabled"/,
+    /for \(const key of FLAG_KEYS\)/,
   );
 });
 
@@ -280,7 +298,9 @@ test("renderer wires the Agent Dashboard sidecar into the sidebar and gates it o
   assert.match(indexHtml, /<nav class="sb-nav" id="sidebarNav"/);
   assert.match(indexHtml, /agent-disabled/);
   assert.match(indexHtml, /<section id="claude-dashboard" class="panel active">/);
-  assert.match(indexHtml, /id="agentMonitorEnabled"/);
+  // agentMonitorEnabled toggle moved to the Feature Flags panel (rendered via JS from the registry).
+  assert.match(indexHtml, /id="featureFlagsList"/);
+  assert.match(indexHtml, /function renderFeatureFlagsPanel/);
   assert.match(indexHtml, /function syncAgentMonitorTabVisibility/);
   assert.match(indexHtml, /kind === "agent" && !cachedAgentMonitorEnabled/);
   assert.match(indexHtml, /id="claudeDashFrame"/);
@@ -403,7 +423,7 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
     'CURSOR_MODULES = ["cursor-home", "cursor-parser", "cursor-import", "cursor-watcher"]',
     'COPILOT_MODULES = ["copilot-home", "copilot-parser", "copilot-import", "copilot-watcher"]',
     'OPENCODE_MODULES = ["opencode-home", "opencode-parser", "opencode-import", "opencode-watcher"]',
-    'SHARED_MODULES = ["harness-watcher-utils", "import-session-utils", "parser-utils", "catchup-cache"]',
+    "SHARED_MODULES = [",
     "MULTI_HARNESS_SPECS = [",
     "watcherPatchLines",
     "importPatchLines",
@@ -498,6 +518,42 @@ test("Cursor, Copilot, and OpenCode harnesses are wired into the generated build
   assert.match(stateSnippet, /Cursor/);
   assert.match(stateSnippet, /Copilot/);
   assert.match(stateSnippet, /OpenCode/);
+});
+
+test("FEA-1334 ingest orchestrator + progress card are wired into the build", () => {
+  // Build script registers the new shared modules, wires the orchestrator
+  // into server/index.js, and patches the /api/import/progress endpoint.
+  for (const needle of [
+    '"ingest-paths"',
+    '"ingest-progress"',
+    '"ingest-orchestrator"',
+    "ingestAllHarnesses",
+    "patchImportRoute",
+    'router.get("/progress"',
+    "FEA-1334 ingest orchestrator wiring",
+  ]) {
+    assert.ok(
+      buildScriptSource.includes(needle),
+      `build-agent-monitor.mjs missing FEA-1334 wiring: ${needle}`,
+    );
+  }
+
+  // The new shared modules exist in-repo and get copied into the tree.
+  for (const m of ["ingest-paths", "ingest-progress", "ingest-orchestrator"]) {
+    assert.ok(
+      existsSync(
+        new URL(`../scripts/agent-monitor-shared/${m}.js`, import.meta.url),
+      ),
+      `scripts/agent-monitor-shared/${m}.js missing`,
+    );
+  }
+
+  // Renderer drives the floating progress card off an IPC proxy so it never
+  // makes a cross-origin fetch to the sidecar.
+  assert.match(preloadSource, /getAgentMonitorIngestProgress/);
+  assert.match(appSource, /desktop:get-agent-monitor-ingest-progress/);
+  assert.match(indexHtml, /id="ingestBanner"/);
+  assert.match(indexHtml, /getAgentMonitorIngestProgress/);
 });
 
 test("Codex harness filter now uses server-backed pagination and rebuilds on snippet edits", () => {
