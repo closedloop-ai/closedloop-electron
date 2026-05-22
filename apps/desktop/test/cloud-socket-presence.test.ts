@@ -453,7 +453,9 @@ describe("T-3.1: hello payload version fields", () => {
       reason: "rate_limited",
     });
   });
+});
 
+describe("agent-session ack timing", () => {
   test("sendAgentSessions waits for the longer relay ack window before timing out", async () => {
     mock.timers.enable({ apis: ["setTimeout"] });
 
