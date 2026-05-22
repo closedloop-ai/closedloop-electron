@@ -1562,6 +1562,7 @@
         align-items: center;
         justify-content: center;
         gap: 12px;
+        min-height: 360px;
         padding: 64px 24px;
         text-align: center;
       }
@@ -2984,6 +2985,14 @@
         background: transparent;
         border-radius: 0;
       }
+      #claude-dashboard.panel.active {
+        display: flex;
+        flex-direction: column;
+        min-height: 100%;
+      }
+      #claudeDashStatus {
+        flex: 1;
+      }
       .app.agent-view .page {
         padding: 0;
         overflow: hidden;
@@ -3396,9 +3405,7 @@
           <span>Enable Claude Code session tracking</span>
           <span id="claudeDashHooksHint" style="color:var(--muted-foreground,#888)">— off (no changes to your global Claude config)</span>
         </div>
-        <div id="claudeDashStatus" class="dash-loading">
-          <div class="dash-loading-spinner"></div>
-        </div>
+        <div id="claudeDashStatus" class="dash-loading" aria-live="polite"></div>
         <iframe id="claudeDashFrame" title="Claude Code Agent Monitor" style="display:none;width:100%;border:0;background:#fff"></iframe>
       </section>
       <section id="settings" class="panel">
@@ -4126,8 +4133,13 @@
         const status = document.getElementById("claudeDashStatus");
         if (!status) return;
         status.className = "dash-loading";
-        status.innerHTML = '<div class="dash-loading-spinner"></div>';
+        status.innerHTML =
+          '<div class="dash-loading-spinner"></div>' +
+          '<div class="dash-loading-title">Starting your dashboard…</div>' +
+          '<div class="dash-loading-sub">Reading your agent sessions. ' +
+          "This takes a few seconds the first time.</div>";
       }
+      renderDashLoading();
 
       function startClaudeDashboard() {
         const frame = document.getElementById("claudeDashFrame");

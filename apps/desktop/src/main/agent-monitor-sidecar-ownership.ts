@@ -10,6 +10,26 @@ export function parseListenerPid(stdout: string): number | null {
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
+export type ListenerProbe =
+  | { kind: "pid"; pid: number }
+  | { kind: "none" }
+  | { kind: "unavailable" };
+
+export function resolveListenerProbe(
+  status: number | null,
+  error: Error | null | undefined,
+  stdout: string,
+): ListenerProbe {
+  if (error) {
+    return { kind: "unavailable" };
+  }
+  if (status !== 0) {
+    return { kind: "none" };
+  }
+  const pid = parseListenerPid(stdout);
+  return pid == null ? { kind: "none" } : { kind: "pid", pid };
+}
+
 export function isAgentMonitorCommand(
   command: string,
   expectedEntryFile: string,
@@ -25,14 +45,16 @@ export function isAgentMonitorCommand(
 }
 
 export function ownsHealthyListener(
-  listenerPid: number | null,
+  listenerProbe: ListenerProbe,
   expectedPid: number,
   childRunning: boolean,
   sidecarHealthy: boolean,
 ): boolean {
-  return (
-    listenerPid === expectedPid &&
-    childRunning &&
-    sidecarHealthy
-  );
+  if (!childRunning || !sidecarHealthy) {
+    return false;
+  }
+  if (listenerProbe.kind === "unavailable") {
+    return true;
+  }
+  return listenerProbe.kind === "pid" && listenerProbe.pid === expectedPid;
 }

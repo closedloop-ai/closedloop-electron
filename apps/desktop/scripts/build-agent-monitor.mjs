@@ -79,6 +79,11 @@ const generatedPricingRoute = path.join(
   "pricing.js",
 );
 const generatedPushLib = path.join(generatedRootDir, "server", "lib", "push.js");
+const generatedWebSocketFile = path.join(
+  generatedRootDir,
+  "server",
+  "websocket.js",
+);
 const generatedCcDiscovery = path.join(
   generatedRootDir,
   "server",
@@ -602,6 +607,7 @@ function materializeRuntimeTree() {
   patchHooksRoute(generatedHooksRoute);
   patchImportRoute(generatedImportRoute);
   patchPushFile(generatedPushLib);
+  patchWebSocketFile(generatedWebSocketFile);
   patchCcDiscovery(generatedCcDiscovery);
   writeFileSync(generatedUninstallHooks, UNINSTALL_HOOKS_SOURCE, "utf8");
 }
@@ -669,6 +675,40 @@ function patchServerIndex(file) {
     source = source.replace(
       listenNeedle,
       'server.listen(port, "127.0.0.1", () => {',
+    );
+  }
+
+  if (!source.includes("__closedloopDestroyConnections")) {
+    const serverNeedle = [
+      "function startServer(app, port) {",
+      "  const server = http.createServer(app);",
+      "  initWebSocket(server);",
+    ].join("\n");
+    if (!source.includes(serverNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the startServer bootstrap for socket ownership tracking.`,
+      );
+    }
+    source = source.replace(
+      serverNeedle,
+      [
+        "function startServer(app, port) {",
+        "  const server = http.createServer(app);",
+        "  initWebSocket(server);",
+        "  const sockets = new Set();",
+        "  server.on(\"connection\", (socket) => {",
+        "    sockets.add(socket);",
+        "    socket.on(\"close\", () => {",
+        "      sockets.delete(socket);",
+        "    });",
+        "  });",
+        "  server.__closedloopDestroyConnections = () => {",
+        "    for (const socket of sockets) {",
+        "      try { socket.destroy(); } catch { /* ignore */ }",
+        "    }",
+        "    sockets.clear();",
+        "  };",
+      ].join("\n"),
     );
   }
 
@@ -829,6 +869,78 @@ function patchServerIndex(file) {
     );
   }
 
+  if (!source.includes('require("./websocket").closeWebSocket();')) {
+    const shutdownNeedle = [
+      "    // Stop all file watchers and clear their retry intervals",
+      '    try { require("./lib/cc-watcher").stopCcWatcher(); } catch { /* ignore */ }',
+      '    try { require("./lib/codex-watcher").stopCodexWatcher(); } catch { /* ignore */ }',
+      '    try { require("./lib/cursor-watcher").stopCursorWatcher(); } catch { /* ignore */ }',
+      '    try { require("./lib/copilot-watcher").stopCopilotWatcher(); } catch { /* ignore */ }',
+      '    try { require("./lib/opencode-watcher").stopOpenCodeWatcher(); } catch { /* ignore */ }',
+      "    if (httpServer) {",
+    ].join("\n");
+    if (!source.includes(shutdownNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the shutdown cleanup block for sidecar ownership hardening.`,
+      );
+    }
+    source = source.replace(
+      shutdownNeedle,
+      [
+        "    // Stop all file watchers and clear their retry intervals",
+        '    try { require("./lib/cc-watcher").stopCcWatcher(); } catch { /* ignore */ }',
+        '    try { require("./lib/codex-watcher").stopCodexWatcher(); } catch { /* ignore */ }',
+        '    try { require("./lib/cursor-watcher").stopCursorWatcher(); } catch { /* ignore */ }',
+        '    try { require("./lib/copilot-watcher").stopCopilotWatcher(); } catch { /* ignore */ }',
+        '    try { require("./lib/opencode-watcher").stopOpenCodeWatcher(); } catch { /* ignore */ }',
+        "    try { updateScheduler && updateScheduler.stop(); } catch { /* ignore */ }",
+        "    if (catalogFetchTimer) clearInterval(catalogFetchTimer);",
+        '    try { require("./websocket").closeWebSocket(); } catch { /* ignore */ }',
+        "    if (httpServer) {",
+      ].join("\n"),
+    );
+  }
+
+  if (!source.includes("httpServer.closeAllConnections")) {
+    const closeNeedle = [
+      "    if (httpServer) {",
+      "      httpServer.close(() => {",
+      '        console.log("HTTP server closed.");',
+      "      });",
+      "    }",
+    ].join("\n");
+    if (!source.includes(closeNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the HTTP shutdown block for forced connection teardown.`,
+      );
+    }
+    source = source.replace(
+      closeNeedle,
+      [
+        "    if (httpServer) {",
+        "      httpServer.close(() => {",
+        '        console.log("HTTP server closed.");',
+        "      });",
+        "      try {",
+        "        if (typeof httpServer.closeAllConnections === \"function\") {",
+        "          httpServer.closeAllConnections();",
+        "        }",
+        "      } catch { /* ignore */ }",
+        "      try {",
+        "        if (typeof httpServer.closeIdleConnections === \"function\") {",
+        "          httpServer.closeIdleConnections();",
+        "        }",
+        "      } catch { /* ignore */ }",
+        "      try {",
+        "        if (typeof httpServer.__closedloopDestroyConnections === \"function\") {",
+        "          httpServer.__closedloopDestroyConnections();",
+        "        }",
+        "      } catch { /* ignore */ }",
+        "    }",
+      ].join("\n"),
+    );
+  }
+
   // CLOSEDLOOP FEA-1334 — import sessions from all non-Claude harnesses on
   // every startup via the unified ingest orchestrator (not gated on a
   // zero-row count, unlike the Claude import: these tools have no hooks so
@@ -861,6 +973,50 @@ function patchServerIndex(file) {
         "}",
         "",
         "module.exports = { createApp, startServer };",
+      ].join("\n"),
+    );
+  }
+
+  if (!source.includes("let updateScheduler = null;")) {
+    const serverNeedle = [
+      "  const PORT = parseInt(process.env.DASHBOARD_PORT || \"4820\", 10);",
+      "  const app = createApp();",
+      "  let httpServer = null;",
+    ].join("\n");
+    if (!source.includes(serverNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the main bootstrap for scheduler handle ownership.`,
+      );
+    }
+    source = source.replace(
+      serverNeedle,
+      [
+        "  const PORT = parseInt(process.env.DASHBOARD_PORT || \"4820\", 10);",
+        "  const app = createApp();",
+        "  let httpServer = null;",
+        "  let updateScheduler = null;",
+        "  let catalogFetchTimer = null;",
+      ].join("\n"),
+    );
+  }
+
+  if (!source.includes("updateScheduler = startUpdateScheduler({ broadcast });")) {
+    const updateNeedle = [
+      '    const { startUpdateScheduler } = require("./update-scheduler");',
+      '    const { broadcast } = require("./websocket");',
+      "    startUpdateScheduler({ broadcast });",
+    ].join("\n");
+    if (!source.includes(updateNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the update scheduler startup block for handle ownership.`,
+      );
+    }
+    source = source.replace(
+      updateNeedle,
+      [
+        '    const { startUpdateScheduler } = require("./update-scheduler");',
+        '    const { broadcast } = require("./websocket");',
+        "    updateScheduler = startUpdateScheduler({ broadcast });",
       ].join("\n"),
     );
   }
@@ -1072,6 +1228,70 @@ function patchServerIndex(file) {
         "  } catch (e) {",
         '    console.warn("[catalog] startup failed:", e && e.message);',
         "  }",
+      ].join("\n"),
+    );
+  }
+
+  if (!source.includes("catalogFetchTimer = require(\"./lib/catalog-fetcher\").scheduleCatalogFetch(dbModule.db);")) {
+    const catalogNeedle = '    require("./lib/catalog-fetcher").scheduleCatalogFetch(dbModule.db);';
+    if (!source.includes(catalogNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the catalog schedule startup block for timer ownership.`,
+      );
+    }
+    source = source.replace(
+      catalogNeedle,
+      '    catalogFetchTimer = require("./lib/catalog-fetcher").scheduleCatalogFetch(dbModule.db);',
+    );
+  }
+
+  writeFileSync(file, source, "utf8");
+}
+
+function patchWebSocketFile(file) {
+  let source = readFileSync(file, "utf8");
+
+  if (!source.includes("function closeWebSocket()")) {
+    const closeNeedle = [
+      "function getConnectionCount() {",
+      "  if (!wss) return 0;",
+      "  let count = 0;",
+      "  wss.clients.forEach((client) => {",
+      "    if (client.readyState === 1) count++;",
+      "  });",
+      "  return count;",
+      "}",
+      "",
+      "module.exports = { initWebSocket, broadcast, getConnectionCount };",
+    ].join("\n");
+    if (!source.includes(closeNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the websocket export block for closeWebSocket.`,
+      );
+    }
+    source = source.replace(
+      closeNeedle,
+      [
+        "function getConnectionCount() {",
+        "  if (!wss) return 0;",
+        "  let count = 0;",
+        "  wss.clients.forEach((client) => {",
+        "    if (client.readyState === 1) count++;",
+        "  });",
+        "  return count;",
+        "}",
+        "",
+        "function closeWebSocket() {",
+        "  if (!wss) return;",
+        "  const server = wss;",
+        "  wss = null;",
+        "  server.clients.forEach((client) => {",
+        "    try { client.terminate(); } catch { /* ignore */ }",
+        "  });",
+        "  try { server.close(); } catch { /* ignore */ }",
+        "}",
+        "",
+        "module.exports = { initWebSocket, broadcast, getConnectionCount, closeWebSocket };",
       ].join("\n"),
     );
   }

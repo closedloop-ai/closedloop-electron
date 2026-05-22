@@ -44,6 +44,7 @@ const loadRowsSnippet = read(
 const hostFlagsSource = read(
   "../scripts/agent-monitor-plans/client/closedloop-host-flags.ts",
 );
+const sessionsOverlaySource = read("../scripts/agent-monitor-client/Sessions.tsx");
 const desktopPkg = JSON.parse(read("../package.json")) as {
   version: string;
   scripts: Record<string, string>;
@@ -202,8 +203,9 @@ test("runtime resolves the generated tree and sidecar wiring still uses the fixe
   assert.match(sidecarSource, /path\.dirname\(packageRoot\)/);
   assert.match(sidecarSource, /process\.resourcesPath,\s*"app\.asar",\s*"app",\s*"node_modules"/);
   assert.match(sidecarSource, /reapStaleAgentMonitorListener\(this\.port, entryFile\)/);
-  assert.match(sidecarSource, /listenerPidForPort\(this\.port\)/);
+  assert.match(sidecarSource, /probeListenerForPort\(this\.port\)/);
   assert.match(sidecarSource, /ownsHealthyListener\(/);
+  assert.match(sidecarSource, /resolveListenerProbe/);
   assert.match(sidecarSource, /spawnSync\(\s*"lsof"/);
   assert.match(sidecarSource, /spawnSync\(\s*"ps"/);
   assert.match(sidecarSource, /\/api\/health/);
@@ -212,6 +214,12 @@ test("runtime resolves the generated tree and sidecar wiring still uses the fixe
     /async stop\(\): Promise<void> \{[\s\S]*this\.started = false;[\s\S]*this\.stopping = true;[\s\S]*this\.restartAttempts = 0;[\s\S]*this\.stopping = false;/,
   );
   assert.match(sidecarSource, /const shouldRestart = this\.started && !this\.stopping;/);
+  assert.match(buildScriptSource, /function patchWebSocketFile/);
+  assert.match(buildScriptSource, /updateScheduler = startUpdateScheduler\(\{ broadcast \}\);/);
+  assert.match(buildScriptSource, /catalogFetchTimer = require\("\.\/lib\/catalog-fetcher"\)\.scheduleCatalogFetch\(dbModule\.db\);/);
+  assert.match(buildScriptSource, /require\("\.\/websocket"\)\.closeWebSocket\(\);/);
+  assert.match(buildScriptSource, /httpServer\.closeAllConnections\(\)/);
+  assert.match(buildScriptSource, /httpServer\.__closedloopDestroyConnections\(\)/);
 });
 
 test("docs and ignores describe generated pnpm-managed inputs, not vendor source", () => {
@@ -341,6 +349,7 @@ test("renderer wires the Agent Dashboard sidecar into the sidebar and gates it o
   assert.match(indexHtml, /function syncAgentMonitorTabVisibility/);
   assert.match(indexHtml, /kind === "agent" && !cachedAgentMonitorEnabled/);
   assert.match(indexHtml, /id="claudeDashFrame"/);
+  assert.match(indexHtml, /id="claudeDashStatus" class="dash-loading" aria-live="polite"/);
   assert.match(indexHtml, /api\.getAgentMonitorUrl\(\)/);
   assert.match(indexHtml, /searchParams\.set\(\s*"closedloop_plan_extraction",[\s\S]*r\.planExtractionEnabled \? "1" : "0"/);
   // Embed mode + host postMessage navigation.
@@ -352,6 +361,10 @@ test("renderer wires the Agent Dashboard sidecar into the sidebar and gates it o
   assert.match(indexHtml, /planExtractionOnly: true/);
   assert.match(indexHtml, /id="claudeDashHooksToggle"/);
   assert.match(indexHtml, /api\.setAgentMonitorHooksEnabled/);
+  assert.match(indexHtml, /renderDashLoading\(\);/);
+  assert.match(indexHtml, /Starting your dashboard…/);
+  assert.match(indexHtml, /Reading your agent sessions\./);
+  assert.match(indexHtml, /#claude-dashboard\.panel\.active/);
   // Iframe-in-hidden-panel height fix must be present.
   assert.match(indexHtml, /function sizeClaudeFrame/);
   assert.match(indexHtml, /window\.addEventListener\("resize", sizeClaudeFrame\)/);
@@ -370,6 +383,11 @@ test("renderer agent nav stays aligned with the embedded monitor router", () => 
   // dependency contents directly.
   assert.match(buildScriptSource, /from: embedAppSource,[\s\S]*to: path\.join\("src", "App\.tsx"\)/);
   assert.match(buildScriptSource, /for \(const override of CLIENT_FULL_FILE_OVERRIDES\)/);
+});
+
+test("owned sessions overlay keeps harness and status filters on a horizontal scroller", () => {
+  assert.match(sessionsOverlaySource, /mt-3 flex items-center gap-3 overflow-x-auto pb-1/);
+  assert.match(sessionsOverlaySource, /min-w-max/);
 });
 
 test("plans UI is gated by the host-loaded plan extraction flag", () => {

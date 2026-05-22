@@ -5,6 +5,7 @@ import {
   isAgentMonitorCommand,
   ownsHealthyListener,
   parseListenerPid,
+  resolveListenerProbe,
 } from "../src/main/agent-monitor-sidecar-ownership.js";
 
 test("parseListenerPid returns the first valid listener pid", () => {
@@ -17,6 +18,17 @@ test("parseListenerPid rejects blank or invalid lsof output", () => {
   assert.equal(parseListenerPid("\n\n"), null);
   assert.equal(parseListenerPid("not-a-pid\n"), null);
   assert.equal(parseListenerPid("0\n"), null);
+});
+
+test("resolveListenerProbe distinguishes pid, no-listener, and unavailable states", () => {
+  assert.deepEqual(resolveListenerProbe(0, null, "81392\n"), {
+    kind: "pid",
+    pid: 81392,
+  });
+  assert.deepEqual(resolveListenerProbe(1, null, ""), { kind: "none" });
+  assert.deepEqual(resolveListenerProbe(null, new Error("spawn ENOENT"), ""), {
+    kind: "unavailable",
+  });
 });
 
 test("isAgentMonitorCommand matches packaged or generated sidecars only", () => {
@@ -46,10 +58,11 @@ test("isAgentMonitorCommand matches packaged or generated sidecars only", () => 
   assert.equal(isAgentMonitorCommand("", expectedEntryFile), false);
 });
 
-test("ownsHealthyListener only accepts the pid this app launched", () => {
-  assert.equal(ownsHealthyListener(123, 123, true, true), true);
-  assert.equal(ownsHealthyListener(999, 123, true, true), false);
-  assert.equal(ownsHealthyListener(123, 123, false, true), false);
-  assert.equal(ownsHealthyListener(123, 123, true, false), false);
-  assert.equal(ownsHealthyListener(null, 123, true, true), false);
+test("ownsHealthyListener falls back to HTTP health only when pid probing is unavailable", () => {
+  assert.equal(ownsHealthyListener({ kind: "pid", pid: 123 }, 123, true, true), true);
+  assert.equal(ownsHealthyListener({ kind: "pid", pid: 999 }, 123, true, true), false);
+  assert.equal(ownsHealthyListener({ kind: "none" }, 123, true, true), false);
+  assert.equal(ownsHealthyListener({ kind: "unavailable" }, 123, true, true), true);
+  assert.equal(ownsHealthyListener({ kind: "pid", pid: 123 }, 123, false, true), false);
+  assert.equal(ownsHealthyListener({ kind: "pid", pid: 123 }, 123, true, false), false);
 });

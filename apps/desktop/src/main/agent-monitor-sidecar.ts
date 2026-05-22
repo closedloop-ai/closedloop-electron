@@ -10,7 +10,7 @@ import { resolveAgentMonitorPaths } from "./agent-monitor-path.js";
 import {
   isAgentMonitorCommand,
   ownsHealthyListener,
-  parseListenerPid,
+  resolveListenerProbe,
 } from "./agent-monitor-sidecar-ownership.js";
 
 const TAG = "agent-monitor";
@@ -257,9 +257,9 @@ export class AgentMonitorSidecar {
       if (this.stopping || this.child == null) {
         return false;
       }
-      const listenerPid = listenerPidForPort(this.port);
+      const listenerProbe = probeListenerForPort(this.port);
       if (ownsHealthyListener(
-        listenerPid,
+        listenerProbe,
         expectedPid,
         isRunning(expectedPid),
         await healthOk(this.port),
@@ -311,10 +311,18 @@ async function reapStaleAgentMonitorListener(
   port: number,
   expectedEntryFile: string,
 ): Promise<void> {
-  const pid = listenerPidForPort(port);
-  if (pid == null) {
+  const listenerProbe = probeListenerForPort(port);
+  if (listenerProbe.kind === "unavailable") {
+    gatewayLog.warn(
+      TAG,
+      `listener probe unavailable while checking port ${port}; skipping stale sidecar reap`,
+    );
     return;
   }
+  if (listenerProbe.kind !== "pid") {
+    return;
+  }
+  const pid = listenerProbe.pid;
   if (!isAgentMonitorProcess(pid, expectedEntryFile)) {
     gatewayLog.warn(
       TAG,
@@ -328,26 +336,24 @@ async function reapStaleAgentMonitorListener(
   );
   killGroup(pid, "SIGTERM");
   await waitForPortRelease(port, STOP_GRACE_MS);
-  if (listenerPidForPort(port) === pid && isRunning(pid)) {
+  const postTermProbe = probeListenerForPort(port);
+  if (postTermProbe.kind === "pid" && postTermProbe.pid === pid && isRunning(pid)) {
     killGroup(pid, "SIGKILL");
     await waitForPortRelease(port, STOP_GRACE_MS);
   }
 }
 
-function listenerPidForPort(port: number): number | null {
+function probeListenerForPort(port: number) {
   const result = spawnSync(
     "lsof",
     ["-n", "-P", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"],
     { encoding: "utf8" },
   );
-  if (result.error) {
+  const probe = resolveListenerProbe(result.status, result.error, result.stdout);
+  if (probe.kind === "unavailable") {
     gatewayLog.warn(TAG, `lsof failed while probing port ${port}: ${describe(result.error)}`);
-    return null;
   }
-  if (result.status !== 0) {
-    return null;
-  }
-  return parseListenerPid(result.stdout);
+  return probe;
 }
 
 function isAgentMonitorProcess(pid: number, expectedEntryFile: string): boolean {
@@ -363,7 +369,8 @@ function isAgentMonitorProcess(pid: number, expectedEntryFile: string): boolean 
 async function waitForPortRelease(port: number, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (listenerPidForPort(port) == null) {
+    const listenerProbe = probeListenerForPort(port);
+    if (listenerProbe.kind !== "pid") {
       return;
     }
     await delay(100);
