@@ -429,7 +429,7 @@
       "post_install": {
         "title": "Optional: install ECC's rules library",
         "body": "Claude's plugin system can't distribute rules. To get ECC's full rule library, copy the rules/ tree from a shallow clone of the upstream repo.",
-        "copy_command": "git clone --depth 1 https://github.com/affaan-m/everything-claude-code /tmp/ecc-rules && mkdir -p ~/.claude/rules/ecc && cp -r /tmp/ecc-rules/rules/common /tmp/ecc-rules/rules/typescript ~/.claude/rules/ecc/ && rm -rf /tmp/ecc-rules",
+        "copy_command": "rm -rf /tmp/ecc-rules && git clone --depth 1 https://github.com/affaan-m/everything-claude-code /tmp/ecc-rules && mkdir -p ~/.claude/rules/ecc && cp -r /tmp/ecc-rules/rules/common /tmp/ecc-rules/rules/typescript ~/.claude/rules/ecc/ && rm -rf /tmp/ecc-rules",
         "url": "https://github.com/affaan-m/everything-claude-code#rules",
         "required": false
       },
