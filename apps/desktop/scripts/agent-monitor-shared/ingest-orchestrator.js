@@ -92,6 +92,25 @@ async function ingestAllHarnesses({ dbModule, harnesses, signal, progress } = {}
     }),
   );
 
+  // Record the dashboard DB session count so the progress banner shows the
+  // same number as the dashboard's "Total Sessions" stat (rather than a
+  // per-harness imported tally that can drift from a concurrent watcher).
+  // Best-effort — the count is a display nicety, not core.
+  try {
+    if (
+      typeof prog.setSessionsInDb === "function" &&
+      dbModule.db &&
+      typeof dbModule.db.prepare === "function"
+    ) {
+      const row = dbModule.db
+        .prepare("SELECT COUNT(*) AS c FROM sessions")
+        .get();
+      if (row && Number.isFinite(row.c)) prog.setSessionsInDb(row.c);
+    }
+  } catch {
+    /* non-fatal */
+  }
+
   prog.endRun();
   return { ran: true };
 }

@@ -22,6 +22,10 @@ function emptyState() {
     total: 0,
     parsed: 0,
     imported: 0,
+    // Total sessions in the dashboard DB once the run finishes. This is the
+    // same COUNT(*) the dashboard's "Total Sessions" stat shows, so the
+    // progress banner and the dashboard always display the same number.
+    sessionsInDb: null,
     /** @type {Record<string, { total: number, parsed: number, imported: number, complete: boolean }>} */
     byHarness: {},
   };
@@ -90,6 +94,18 @@ function completeHarness(harness) {
   state.updatedAt = Date.now();
 }
 
+/**
+ * Record the total session count in the dashboard DB (COUNT(*) FROM sessions).
+ * The orchestrator sets this once the run finishes so the progress banner can
+ * show the same number as the dashboard's "Total Sessions" stat.
+ */
+function setSessionsInDb(count) {
+  if (Number.isFinite(count) && count >= 0) {
+    state.sessionsInDb = count;
+    state.updatedAt = Date.now();
+  }
+}
+
 /** Mark the whole run finished. */
 function endRun() {
   state.running = false;
@@ -119,6 +135,7 @@ function snapshot() {
     total: state.total,
     parsed: state.parsed,
     imported: state.imported,
+    sessionsInDb: state.sessionsInDb,
     byHarness,
   };
 }
@@ -133,6 +150,7 @@ module.exports = {
   beginHarness,
   tick,
   completeHarness,
+  setSessionsInDb,
   endRun,
   snapshot,
   reset,

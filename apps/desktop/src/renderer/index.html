@@ -2914,7 +2914,7 @@
         width: 0%;
         border-radius: 999px;
         background: var(--primary);
-        transition: width 300ms ease;
+        transition: width 700ms ease;
       }
       .ingest-banner.done .ingest-fill {
         background: var(--success);
@@ -4023,6 +4023,7 @@
         let dismissed = false;
         let everConnected = false;
         let currentRunId = null; // startedAt of the run the banner tracks
+        let barPrimed = false; // has the 0→ fill animation been primed
         const startedAt = Date.now();
 
         function schedule(ms) {
@@ -4037,6 +4038,29 @@
         }
         function hide() {
           banner.classList.remove("visible");
+        }
+
+        // Set the fill width. The first call of a run starts at 0 and then
+        // animates to the target so the user always sees the bar fill — even
+        // when the orchestrator finished before the renderer's first poll
+        // (in which case it animates 0 → 100 in one sweep).
+        function setFill(pct) {
+          const target = Math.max(0, Math.min(100, Math.round(pct)));
+          if (!barPrimed) {
+            barPrimed = true;
+            barFill.style.transition = "none";
+            barFill.style.width = "0%";
+            void barFill.offsetWidth; // commit 0% before re-enabling transition
+            barFill.style.transition = "";
+            // Start the fill ~220ms in, after the banner has slid down, so
+            // the 0 → target sweep is clearly visible rather than racing the
+            // slide-in animation.
+            setTimeout(function () {
+              barFill.style.width = target + "%";
+            }, 220);
+          } else {
+            barFill.style.width = target + "%";
+          }
         }
 
         function renderRail(snap) {
@@ -4067,31 +4091,24 @@
           const parsed = Math.min(snap.parsed || 0, total || snap.parsed || 0);
           const pct =
             total > 0 ? Math.min(100, Math.round((parsed / total) * 100)) : 0;
-          barFill.style.width = pct + "%";
-          countEl.textContent =
-            total > 0
-              ? fmt(parsed) + " / " + fmt(total) + " files · " + pct + "%"
-              : "Scanning for files…";
-          const imported = snap.imported || 0;
-          addedEl.textContent =
-            imported > 0 ? fmt(imported) + " new sessions added" : "";
+          setFill(pct);
+          countEl.textContent = total > 0 ? pct + "%" : "Scanning…";
+          addedEl.textContent = "";
           renderRail(snap);
         }
 
         function renderDone(snap) {
           banner.classList.add("done");
           titleEl.textContent = "✓ Agent history imported";
-          barFill.style.width = "100%";
-          const imported = snap.imported || 0;
-          const total = snap.total || 0;
-          countEl.textContent = fmt(total) + " files processed";
-          addedEl.textContent =
-            imported > 0
-              ? "Added " +
-                fmt(imported) +
-                " new session" +
-                (imported === 1 ? "" : "s")
-              : "No new sessions — your history was already up to date";
+          setFill(100);
+          // Show the dashboard's own session count so the banner and the
+          // "Total Sessions" stat always agree (one number, no confusion).
+          const n = snap.sessionsInDb;
+          countEl.textContent =
+            typeof n === "number"
+              ? fmt(n) + (n === 1 ? " session tracked" : " sessions tracked")
+              : "";
+          addedEl.textContent = "";
           renderRail(snap);
         }
 
@@ -4123,10 +4140,12 @@
           }
 
           // A fresh run (new startedAt) — e.g. the sidecar was restarted via
-          // the Settings toggle — clears a prior dismissal so it shows again.
+          // the Settings toggle — clears a prior dismissal and re-primes the
+          // fill animation so the banner shows (and fills) again.
           if (runId !== currentRunId) {
             currentRunId = runId;
             dismissed = false;
+            barPrimed = false;
           }
 
           if (snap.running) {
