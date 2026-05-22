@@ -127,6 +127,8 @@ export interface DesktopSettings {
   onboardingCompleted: boolean;
   /** Permanent dismissal of the onboarding reminder popup. Session dismissals are not persisted. */
   onboardingPopupDismissedPermanent: boolean;
+  /** First-launch Agent Dashboard welcome has been shown and dismissed (FEA-1333). */
+  dashboardWelcomeSeen: boolean;
   cloudCommandsPaused: boolean;
   cloudConnectionEnabled: boolean;
   /** Enables the Claude Dashboard sidecar/tab. Off by default. */
@@ -149,6 +151,7 @@ export interface DesktopSettings {
   };
   savedConfigs: SavedConfig[];
   activeConfigId: string | null;
+  updateAndRestartEnabled: boolean;
 }
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
@@ -157,6 +160,7 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   sandboxBaseDirectory: "",
   onboardingCompleted: false,
   onboardingPopupDismissedPermanent: false,
+  dashboardWelcomeSeen: false,
   cloudCommandsPaused: false,
   cloudConnectionEnabled: true,
   agentMonitorEnabled: true,
@@ -169,5 +173,6 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   verboseLogging: false,
   binaryPaths: {},
   savedConfigs: [],
-  activeConfigId: null
+  activeConfigId: null,
+  updateAndRestartEnabled: false
 };

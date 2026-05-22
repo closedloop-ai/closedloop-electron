@@ -803,6 +803,67 @@
         transform: translateX(16px);
       }
 
+      .toggle-switch input:disabled + .toggle-track {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+
+      .flag-row {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        padding: 12px 0;
+        border-bottom: 1px solid var(--border);
+        gap: 16px;
+      }
+      .flag-row:last-child { border-bottom: none; }
+      .flag-info { flex: 1; min-width: 0; }
+      .flag-label {
+        font-weight: 500;
+        font-size: 13px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .flag-key {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--muted-foreground);
+        margin-top: 2px;
+      }
+      .flag-desc {
+        font-size: 12px;
+        color: var(--muted-foreground);
+        margin-top: 4px;
+        line-height: 1.45;
+      }
+      .flag-badge {
+        display: inline-block;
+        font-size: 10px;
+        font-weight: 600;
+        padding: 1px 6px;
+        border-radius: 4px;
+        text-transform: uppercase;
+        letter-spacing: 0.02em;
+      }
+      .flag-badge[data-source="default"] { background: var(--border); color: var(--muted-foreground); }
+      .flag-badge[data-source="user"] { background: var(--primary); color: #fff; }
+      .flag-badge[data-source="env"] { background: #b45309; color: #fff; }
+      .flag-category {
+        display: inline-block;
+        font-size: 10px;
+        padding: 1px 5px;
+        border-radius: 3px;
+        background: var(--border);
+        color: var(--muted-foreground);
+      }
+      .flag-toggle { flex-shrink: 0; padding-top: 2px; }
+      .flag-restart-hint {
+        font-size: 10px;
+        color: #b45309;
+        margin-top: 2px;
+      }
+
       .logs-toolbar {
         display: flex;
         align-items: center;
@@ -1492,6 +1553,95 @@
         border: 1px solid var(--border);
         border-radius: 14px;
         padding: 22px;
+      }
+
+      /* ── Dashboard load screen + first-run welcome (FEA-1333) ───── */
+      .dash-loading {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        padding: 64px 24px;
+        text-align: center;
+      }
+      .dash-loading-spinner {
+        width: 30px;
+        height: 30px;
+        border-radius: 50%;
+        border: 3px solid var(--muted);
+        border-top-color: var(--primary);
+        animation: dash-spin 0.8s linear infinite;
+      }
+      @keyframes dash-spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      .dash-loading-title {
+        font-size: 15px;
+        font-weight: 600;
+        color: var(--foreground);
+      }
+      .dash-loading-sub {
+        font-size: 13px;
+        color: var(--muted-foreground);
+        max-width: 380px;
+        line-height: 1.5;
+      }
+      /* The welcome reuses .onboarding-overlay for the backdrop; it must sit
+         above the ingest banner (z-index 1300) as a first-run takeover. */
+      #dashboardWelcome {
+        z-index: 1400;
+      }
+      .welcome-card {
+        width: min(560px, 100%);
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 32px;
+        text-align: center;
+      }
+      .welcome-card h1 {
+        margin: 0 0 10px;
+        font-size: 22px;
+        color: var(--foreground);
+      }
+      .welcome-subhead {
+        margin: 0 0 22px;
+        color: var(--muted-foreground);
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      .welcome-bullets {
+        list-style: none;
+        margin: 0 0 24px;
+        padding: 0;
+        text-align: left;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .welcome-bullets li {
+        display: flex;
+        gap: 10px;
+        font-size: 13px;
+        line-height: 1.45;
+        color: var(--foreground);
+      }
+      .welcome-bullets .welcome-check {
+        flex: none;
+        color: var(--primary);
+        font-weight: 700;
+      }
+      .welcome-actions {
+        display: flex;
+        justify-content: center;
+      }
+      .welcome-footer {
+        margin: 16px 0 0;
+        font-size: 12px;
+        color: var(--muted-foreground);
       }
 
       .settings-columns {
@@ -2838,6 +2988,118 @@
         padding: 0;
         overflow: hidden;
       }
+
+      /* ── Ingest progress banner (FEA-1334) ────────────────────────
+         Full-width bar that slides in from the top edge while the app
+         imports agent-history backlog. Lives outside the dashboard
+         iframe and stays visible until the user dismisses it. */
+      .ingest-banner {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 1300;
+        background: var(--card);
+        color: var(--card-foreground);
+        border-bottom: 1px solid var(--border);
+        box-shadow: 0 4px 18px oklch(0 0 0 / 0.18);
+        transform: translateY(-100%);
+        transition: transform 260ms ease;
+        font-size: 13px;
+      }
+      .ingest-banner.visible {
+        transform: translateY(0);
+      }
+      .ingest-banner-body {
+        padding: 10px 16px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .ingest-banner-line {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .ingest-banner-title {
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      .ingest-banner-count {
+        color: var(--muted-foreground);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .ingest-banner-spacer {
+        flex: 1 1 auto;
+      }
+      .ingest-banner-dismiss {
+        flex: none;
+        width: 22px;
+        height: 22px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        color: var(--muted-foreground);
+        cursor: pointer;
+        font-size: 16px;
+        line-height: 1;
+        padding: 0;
+      }
+      .ingest-banner-dismiss:hover {
+        background: var(--muted);
+        color: var(--foreground);
+      }
+      .ingest-track {
+        height: 8px;
+        border-radius: 999px;
+        background: var(--muted);
+        overflow: hidden;
+      }
+      .ingest-fill {
+        height: 100%;
+        width: 0%;
+        border-radius: 999px;
+        background: var(--primary);
+        transition: width 700ms ease;
+      }
+      .ingest-banner.done .ingest-fill {
+        background: var(--success);
+      }
+      .ingest-banner-sub {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
+        color: var(--muted-foreground);
+        font-size: 12px;
+      }
+      .ingest-rail {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      .ingest-chip {
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: var(--muted);
+        color: var(--muted-foreground);
+        white-space: nowrap;
+      }
+      .ingest-chip.active {
+        color: var(--foreground);
+      }
+      .ingest-chip.done {
+        background: var(--secondary);
+        color: var(--secondary-foreground);
+      }
+      .ingest-banner-added {
+        font-weight: 600;
+        color: var(--foreground);
+      }
     </style>
   </head>
   <body>
@@ -2954,6 +3216,66 @@
           <button id="completeOnboarding">Complete Setup</button>
         </div>
         <p class="muted" id="onboardingMessage"></p>
+      </div>
+    </div>
+    <div id="dashboardWelcome" class="onboarding-overlay hidden">
+      <div class="welcome-card">
+        <h1>See every coding agent you use — in one place</h1>
+        <p class="welcome-subhead">
+          ClosedLoop watches your local Claude Code, Codex, Cursor, Copilot,
+          and OpenCode sessions — so you can see your work across every tool
+          in one dashboard.
+        </p>
+        <ul class="welcome-bullets">
+          <li>
+            <span class="welcome-check">✓</span>
+            <span><strong>One view across five agents</strong> — sessions,
+            tokens, and cost, rolled up together.</span>
+          </li>
+          <li>
+            <span class="welcome-check">✓</span>
+            <span><strong>Streams in live</strong> — new sessions appear in
+            the dashboard as your agents run.</span>
+          </li>
+          <li>
+            <span class="welcome-check">✓</span>
+            <span><strong>Stays on your machine</strong> — it reads each
+            agent's local data; nothing is uploaded.</span>
+          </li>
+        </ul>
+        <div class="welcome-actions">
+          <button id="dashboardWelcomeStart" class="primary">Get started →</button>
+        </div>
+        <p class="welcome-footer">
+          You can turn the dashboard off anytime in Settings.
+        </p>
+      </div>
+    </div>
+    <div id="ingestBanner" class="ingest-banner" role="status" aria-live="polite">
+      <div class="ingest-banner-body">
+        <div class="ingest-banner-line">
+          <span class="ingest-banner-title" id="ingestTitle"
+            >Importing your agent history…</span
+          >
+          <span class="ingest-banner-count" id="ingestCount"></span>
+          <span class="ingest-banner-spacer"></span>
+          <button
+            type="button"
+            class="ingest-banner-dismiss"
+            id="ingestDismiss"
+            title="Dismiss"
+            aria-label="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+        <div class="ingest-track">
+          <div class="ingest-fill" id="ingestBarFill"></div>
+        </div>
+        <div class="ingest-banner-sub">
+          <span class="ingest-rail" id="ingestHarnessRail"></span>
+          <span class="ingest-banner-added" id="ingestAdded"></span>
+        </div>
       </div>
     </div>
     <div class="app state-disconnected agent-view" id="appShell">
@@ -3074,8 +3396,13 @@
           <span>Enable Claude Code session tracking</span>
           <span id="claudeDashHooksHint" style="color:var(--muted-foreground,#888)">— off (no changes to your global Claude config)</span>
         </div>
-        <div id="claudeDashStatus" style="padding:48px 20px;text-align:center;color:var(--muted-foreground,#888)">
-          Starting Agent Dashboard…
+        <div id="claudeDashStatus" class="dash-loading">
+          <div class="dash-loading-spinner"></div>
+          <div class="dash-loading-title">Starting your dashboard…</div>
+          <div class="dash-loading-sub">
+            Reading your agent sessions. This takes a few seconds the first
+            time.
+          </div>
         </div>
         <iframe id="claudeDashFrame" title="Claude Code Agent Monitor" style="display:none;width:100%;border:0;background:#fff"></iframe>
       </section>
@@ -3085,6 +3412,7 @@
           <button data-settings-tab="security">Security</button>
           <button data-settings-tab="policies">Policies</button>
           <button data-settings-tab="binary-paths">CLI Tools</button>
+          <button data-settings-tab="feature-flags">Labs</button>
         </div>
 
         <!-- Relay / Gateway sub-tab -->
@@ -3168,13 +3496,11 @@
                 <input id="webAppOrigin" />
               </div>
               <div class="row">
-                <label for="agentMonitorEnabled">Agent Dashboard</label>
+                <label for="reprocessLogsBtn">Reprocess all logs</label>
                 <div>
-                  <label class="toggle-switch" title="Runs the local Agent Dashboard sidecar that powers the Dashboard and agent views in the sidebar. On by default.">
-                    <input id="agentMonitorEnabled" type="checkbox" />
-                    <span class="toggle-track"></span>
-                  </label>
-                  <p class="field-help" style="margin-top:8px">Runs the local Agent Dashboard sidecar that powers the Dashboard and agent views in the sidebar. On by default; turning it off hides those views.</p>
+                  <button type="button" class="secondary" id="reprocessLogsBtn">Reprocess all logs</button>
+                  <p class="field-help" style="margin-top:8px">Clears the dashboard database and re-imports every agent session from scratch. The progress bar at the top tracks the re-import.</p>
+                  <p class="muted" id="reprocessLogsMessage"></p>
                 </div>
               </div>
             </div>
@@ -3444,6 +3770,18 @@
             <p class="muted" id="policiesMessage"></p>
           </div>
         </div>
+
+        <!-- Feature Flags sub-tab -->
+        <div id="settings-feature-flags" class="settings-sub-panel">
+          <div class="settings-group">
+            <h3 class="settings-group-title">Labs</h3>
+            <p class="settings-group-desc">Early access to experimental features and advanced controls. Flip a switch, see what happens.</p>
+            <div id="featureFlagsList"></div>
+          </div>
+          <div class="settings-tab-footer">
+            <p class="muted" id="featureFlagsMessage"></p>
+          </div>
+        </div>
       </section>
         </div>
       </main>
@@ -3469,6 +3807,7 @@
         wrench: '<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
         users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>',
         package: '<path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><polyline points="3.29 7 12 12 20.71 7"/><path d="m7.5 4.27 9 5.15"/>',
+        "git-pull-request": '<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><line x1="6" x2="6" y1="9" y2="21"/>',
         "file-text": '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/>',
         settings: '<path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/>',
         shield: '<path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/>',
@@ -3491,6 +3830,7 @@
         { id: "run",            label: "Run",            icon: "play",        kind: "agent",   route: "/run" },
         { id: "plans",          label: "Plans",          icon: "file-text",   kind: "agent",   route: "/plans",    planExtractionOnly: true },
         { id: "packs",          label: "Packs",          icon: "package",     kind: "agent",   route: "/packs" },
+        { id: "pull-requests",  label: "Pull Requests",  icon: "git-pull-request", kind: "agent", route: "/pull-requests" },
         { id: "agent-settings", label: "Agent Settings", icon: "settings",    kind: "agent",   route: "/settings" },
         { type: "group", label: "Gateway" },
         { id: "approvals",      label: "Approvals",      icon: "shield",      kind: "gateway", panel: "approvals", count: true },
@@ -3784,6 +4124,20 @@
         });
       })();
 
+      // FEA-1333: render the branded dashboard load screen. Called instead of
+      // flattening #claudeDashStatus to plain text, so the spinner + copy
+      // survive each (re)start of the dashboard.
+      function renderDashLoading() {
+        const status = document.getElementById("claudeDashStatus");
+        if (!status) return;
+        status.className = "dash-loading";
+        status.innerHTML =
+          '<div class="dash-loading-spinner"></div>' +
+          '<div class="dash-loading-title">Starting your dashboard…</div>' +
+          '<div class="dash-loading-sub">Reading your agent sessions. ' +
+          "This takes a few seconds the first time.</div>";
+      }
+
       function startClaudeDashboard() {
         const frame = document.getElementById("claudeDashFrame");
         const status = document.getElementById("claudeDashStatus");
@@ -3796,7 +4150,7 @@
         void refreshClaudeHooksToggle();
         if (claudeDashLoaded) { sizeClaudeFrame(); return; }
         status.style.display = "block";
-        status.textContent = "Starting Agent Dashboard…";
+        renderDashLoading();
 
         const tick = async () => {
           try {
@@ -3849,6 +4203,232 @@
         }
       }
 
+      // ── Ingest progress banner (FEA-1334) ──────────────────────────
+      // Polls the agent-monitor sidecar's cold-start ingest progress and
+      // drives the full-width top banner. Runs on every launch, independent
+      // of which view is active. The banner stays up until the user
+      // dismisses it; a fresh run (e.g. toggling Agent Dashboard in
+      // Settings, which restarts the sidecar) re-shows it.
+      (function setupIngestProgressBanner() {
+        const banner = document.getElementById("ingestBanner");
+        if (!banner) return;
+        const titleEl = document.getElementById("ingestTitle");
+        const barFill = document.getElementById("ingestBarFill");
+        const countEl = document.getElementById("ingestCount");
+        const railEl = document.getElementById("ingestHarnessRail");
+        const addedEl = document.getElementById("ingestAdded");
+        const dismissBtn = document.getElementById("ingestDismiss");
+
+        // Render order for the per-harness chips; only harnesses present in
+        // the run are shown (Claude only appears on a first-run import).
+        const HARNESS_ORDER = ["claude", "codex", "cursor", "copilot", "opencode"];
+        const HARNESS_LABELS = {
+          claude: "Claude",
+          codex: "Codex",
+          cursor: "Cursor",
+          copilot: "Copilot",
+          opencode: "OpenCode",
+        };
+        const POLL_FAST_MS = 500;
+        const POLL_WAIT_MS = 1500;
+        const POLL_IDLE_MS = 5000;
+        const GIVE_UP_MS = 120000;
+
+        let pollTimer = null;
+        let dismissed = false;
+        let everConnected = false;
+        let currentRunId = null; // startedAt of the run the banner tracks
+        let barPrimed = false; // has the 0→ fill animation been primed
+        const startedAt = Date.now();
+
+        function schedule(ms) {
+          if (pollTimer) clearTimeout(pollTimer);
+          pollTimer = setTimeout(tick, ms);
+        }
+        function fmt(n) {
+          return (n || 0).toLocaleString();
+        }
+        function show() {
+          banner.classList.add("visible");
+        }
+        function hide() {
+          banner.classList.remove("visible");
+        }
+
+        // Set the fill width. The first call of a run starts at 0 and then
+        // animates to the target so the user always sees the bar fill — even
+        // when the orchestrator finished before the renderer's first poll
+        // (in which case it animates 0 → 100 in one sweep).
+        function setFill(pct) {
+          const target = Math.max(0, Math.min(100, Math.round(pct)));
+          if (!barPrimed) {
+            barPrimed = true;
+            barFill.style.transition = "none";
+            barFill.style.width = "0%";
+            void barFill.offsetWidth; // commit 0% before re-enabling transition
+            barFill.style.transition = "";
+            // Start the fill ~220ms in, after the banner has slid down, so
+            // the 0 → target sweep is clearly visible rather than racing the
+            // slide-in animation.
+            setTimeout(function () {
+              barFill.style.width = target + "%";
+            }, 220);
+          } else {
+            barFill.style.width = target + "%";
+          }
+        }
+
+        function renderRail(snap) {
+          railEl.innerHTML = "";
+          const by = snap.byHarness || {};
+          for (const key of HARNESS_ORDER) {
+            const h = by[key];
+            if (!h) continue;
+            const chip = document.createElement("span");
+            chip.className = "ingest-chip";
+            let mark = "·";
+            if (h.complete) {
+              mark = "✓";
+              chip.classList.add("done");
+            } else if (h.parsed > 0) {
+              mark = "⟳";
+              chip.classList.add("active");
+            }
+            chip.textContent = mark + " " + (HARNESS_LABELS[key] || key);
+            railEl.appendChild(chip);
+          }
+        }
+
+        function renderRunning(snap) {
+          banner.classList.remove("done");
+          titleEl.textContent = "Importing your agent history…";
+          const total = snap.total || 0;
+          const parsed = Math.min(snap.parsed || 0, total || snap.parsed || 0);
+          const pct =
+            total > 0 ? Math.min(100, Math.round((parsed / total) * 100)) : 0;
+          setFill(pct);
+          countEl.textContent = total > 0 ? pct + "%" : "Scanning…";
+          addedEl.textContent = "";
+          renderRail(snap);
+        }
+
+        function renderDone(snap) {
+          banner.classList.add("done");
+          titleEl.textContent = "✓ Agent history imported";
+          setFill(100);
+          // Show the dashboard's own session count so the banner and the
+          // "Total Sessions" stat always agree (one number, no confusion).
+          const n = snap.sessionsInDb;
+          countEl.textContent =
+            typeof n === "number"
+              ? fmt(n) + (n === 1 ? " session tracked" : " sessions tracked")
+              : "";
+          addedEl.textContent = "";
+          renderRail(snap);
+        }
+
+        async function tick() {
+          let snap = null;
+          try {
+            snap = await api.getAgentMonitorIngestProgress();
+          } catch (_) {
+            snap = null;
+          }
+
+          if (!snap) {
+            // Sidecar unreachable — still booting, restarting, or the
+            // dashboard is disabled. Keep waiting; only give up if we never
+            // reached it at all (a permanently-disabled dashboard).
+            if (!everConnected && Date.now() - startedAt > GIVE_UP_MS) {
+              return;
+            }
+            schedule(POLL_WAIT_MS);
+            return;
+          }
+          everConnected = true;
+          const runId = snap.startedAt || 0;
+
+          // Orchestrator has not begun yet — keep waiting quietly.
+          if (!snap.running && !snap.finishedAt) {
+            schedule(POLL_WAIT_MS);
+            return;
+          }
+
+          // A fresh run (new startedAt) — e.g. the sidecar was restarted via
+          // the Settings toggle — clears a prior dismissal and re-primes the
+          // fill animation so the banner shows (and fills) again.
+          if (runId !== currentRunId) {
+            currentRunId = runId;
+            dismissed = false;
+            barPrimed = false;
+          }
+
+          if (snap.running) {
+            if (!dismissed) {
+              show();
+              renderRunning(snap);
+            }
+            schedule(dismissed ? POLL_IDLE_MS : POLL_FAST_MS);
+            return;
+          }
+
+          // Finished. Keep the banner up (no auto-fade) until dismissed, as
+          // long as the orchestrator actually had agent history to process.
+          const hadWork = (snap.total || 0) > 0 || (snap.imported || 0) > 0;
+          if (hadWork && !dismissed) {
+            show();
+            renderDone(snap);
+          }
+          // Keep polling slowly so a later sidecar restart re-shows the bar.
+          schedule(POLL_IDLE_MS);
+        }
+
+        dismissBtn.addEventListener("click", () => {
+          dismissed = true;
+          hide();
+          // Keep polling (idle) so a future run still re-shows the banner.
+          schedule(POLL_IDLE_MS);
+        });
+
+        // Kick off polling; the sidecar boots in parallel with the renderer.
+        schedule(POLL_WAIT_MS);
+      })();
+
+      // ── Reprocess all logs button (FEA-1334) ───────────────────────
+      // Clears the dashboard DB and restarts the sidecar, which triggers a
+      // full re-import — the top progress banner tracks it.
+      (function setupReprocessLogsButton() {
+        const btn = document.getElementById("reprocessLogsBtn");
+        const msg = document.getElementById("reprocessLogsMessage");
+        if (!btn) return;
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          const original = btn.textContent;
+          btn.textContent = "Reprocessing…";
+          if (msg) msg.textContent = "";
+          try {
+            const r = await api.reprocessAgentLogs();
+            if (r && r.ok) {
+              if (msg)
+                msg.textContent =
+                  "Re-import started — watch the progress bar at the top of the window.";
+            } else {
+              if (msg)
+                msg.textContent =
+                  "Could not reprocess: " + ((r && r.error) || "unknown error");
+            }
+          } catch (e) {
+            if (msg)
+              msg.textContent =
+                "Could not reprocess: " +
+                (e && e.message ? e.message : String(e));
+          } finally {
+            btn.textContent = original;
+            btn.disabled = false;
+          }
+        });
+      })();
+
       // Settings sub-tab switching
       const settingsSubTabs = document.querySelectorAll(".settings-sub-nav button");
       const settingsSubPanels = document.querySelectorAll(".settings-sub-panel");
@@ -3866,6 +4446,9 @@
         }
         if (tabName === "relay-gateway" && typeof loadSavedConfigs === "function") {
           void loadSavedConfigs();
+        }
+        if (tabName === "feature-flags" && typeof renderFeatureFlagsPanel === "function") {
+          void renderFeatureFlagsPanel();
         }
       }
 
@@ -3889,10 +4472,71 @@
         void refreshCommandSigningKeys();
       });
 
+      // ── Feature Flags panel ──────────────────────────────────────────
+      const featureFlagsList = document.getElementById("featureFlagsList");
+      const featureFlagsMessage = document.getElementById("featureFlagsMessage");
+
+      async function renderFeatureFlagsPanel() {
+        if (!featureFlagsList) return;
+        try {
+          const data = await api.getAllFlags();
+          const { registry, flags } = data;
+          featureFlagsList.innerHTML = "";
+          for (const def of registry) {
+            const state = flags.find((f) => f.key === def.key);
+            const value = state ? state.value : def.default;
+            const source = state ? state.source : "default";
+            const isEnvLocked = source === "env";
+
+            const row = document.createElement("div");
+            row.className = "flag-row";
+            row.innerHTML = `
+              <div class="flag-info">
+                <div class="flag-label">
+                  ${def.label}
+                  <span class="flag-badge" data-source="${source}">${source}</span>
+                  <span class="flag-category">${def.category}</span>
+                </div>
+                <div class="flag-key">${def.key}</div>
+                <div class="flag-desc">${def.description}</div>
+                ${def.requiresRestart ? '<div class="flag-restart-hint">Requires restart to take full effect</div>' : ""}
+              </div>
+              <div class="flag-toggle">
+                <label class="toggle-switch" ${isEnvLocked ? `title="Forced by env var ${def.envOverride || ""}"` : ""}>
+                  <input type="checkbox" data-flag-key="${def.key}" ${value ? "checked" : ""} ${isEnvLocked ? "disabled" : ""} />
+                  <span class="toggle-track"></span>
+                </label>
+              </div>`;
+            row.querySelector("input")?.addEventListener("change", async (e) => {
+              const checkbox = e.target;
+              const key = checkbox.dataset.flagKey;
+              if (featureFlagsMessage) featureFlagsMessage.textContent = "";
+              await api.updateSettings({ [key]: checkbox.checked });
+              if (key === "agentMonitorEnabled") {
+                syncAgentMonitorTabVisibility(checkbox.checked);
+              }
+              if (featureFlagsMessage) featureFlagsMessage.textContent = "Saved.";
+              setTimeout(() => {
+                if (featureFlagsMessage) featureFlagsMessage.textContent = "";
+              }, 2000);
+            });
+            featureFlagsList.appendChild(row);
+          }
+        } catch (err) {
+          featureFlagsList.innerHTML = '<p class="muted">Failed to load feature flags.</p>';
+        }
+      }
+
+      api.onFlagsChanged(() => {
+        const flagsPanel = document.getElementById("settings-feature-flags");
+        if (flagsPanel?.classList.contains("active")) {
+          void renderFeatureFlagsPanel();
+        }
+      });
+
       const relayOrigin = document.getElementById("relayOrigin");
       const apiOrigin = document.getElementById("apiOrigin");
       const webAppOrigin = document.getElementById("webAppOrigin");
-      const agentMonitorEnabled = document.getElementById("agentMonitorEnabled");
       const apiKey = document.getElementById("apiKey");
       const apiKeyStatus = document.getElementById("apiKeyStatus");
       const sandboxBaseDirectory = document.getElementById("sandboxBaseDirectory");
@@ -4632,9 +5276,6 @@
         cachedPlanExtractionEnabled = settings.planExtractionEnabled === true;
         cachedAgentMonitorEnabled = settings.agentMonitorEnabled === true;
         buildSidebar();
-        if (agentMonitorEnabled) {
-          agentMonitorEnabled.checked = cachedAgentMonitorEnabled;
-        }
         syncAgentMonitorTabVisibility(cachedAgentMonitorEnabled);
         sandboxBaseDirectory.value = settings.sandboxBaseDirectory || "";
         cachedCommandSigningEnforcementEnabled = settings.commandSigningEnforcementEnabled === true;
@@ -5321,9 +5962,7 @@
           relayOrigin: relayOrigin.value.trim(),
           apiOrigin: apiOrigin.value.trim(),
           webAppOrigin: webAppOrigin.value.trim(),
-          agentMonitorEnabled: agentMonitorEnabled?.checked === true
         });
-        syncAgentMonitorTabVisibility(agentMonitorEnabled?.checked === true);
         relayGatewayMessage.textContent = "Saved.";
         await Promise.all([refreshRuntime(), refreshApprovals()]);
       }
@@ -5692,6 +6331,36 @@
         }
       }
 
+      // Set once the user dismisses the welcome. Guards against an in-session
+      // refresh of onboarding state (desktop:onboarding-state-changed) re-
+      // showing the welcome even if the persist IPC failed.
+      let dashboardWelcomeDismissedThisSession = false;
+
+      // FEA-1333: show the one-time Agent Dashboard welcome — but only once
+      // the gateway "Setup Required" overlay is satisfied, so the two
+      // first-run overlays never stack on top of each other.
+      function maybeShowDashboardWelcome(state) {
+        if (dashboardWelcomeDismissedThisSession) return;
+        if (!state || !state.completed) return;
+        if (state.settings && state.settings.dashboardWelcomeSeen) return;
+        const welcome = document.getElementById("dashboardWelcome");
+        if (welcome) welcome.classList.remove("hidden");
+      }
+
+      document
+        .getElementById("dashboardWelcomeStart")
+        ?.addEventListener("click", async () => {
+          // Suppress synchronously on click — independent of the persist IPC.
+          dashboardWelcomeDismissedThisSession = true;
+          document.getElementById("dashboardWelcome")?.classList.add("hidden");
+          try {
+            await api.markDashboardWelcomeSeen();
+          } catch (_) {
+            /* best-effort persistence — the session guard above already
+               prevents any re-show until the next launch */
+          }
+        });
+
       async function loadOnboardingState() {
         const state = await api.getOnboardingState();
         const settings = state?.settings || {};
@@ -5712,6 +6381,7 @@
         } else {
           onboardingOverlay.classList.remove("hidden");
         }
+        maybeShowDashboardWelcome(state);
       }
 
       function updateOnboardingSandboxWarning({ isGitRepo, suggestedPath } = {}) {
@@ -5791,8 +6461,9 @@
           if (Object.keys(binaryPaths).length > 0) {
             payload.binaryPaths = binaryPaths;
           }
-          await api.completeOnboarding(payload);
+          const completedState = await api.completeOnboarding(payload);
           onboardingOverlay.classList.add("hidden");
+          maybeShowDashboardWelcome(completedState);
           await Promise.all([loadSettings(), refreshRuntime(), refreshApiKeyStatus(), refreshApprovals()]);
         } catch (error) {
           onboardingMessage.textContent = `Failed to complete setup: ${error.message}`;

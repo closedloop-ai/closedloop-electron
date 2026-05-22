@@ -16,6 +16,7 @@ const {
   extractErrorMessage,
   toIso,
   safeJson,
+  pushTurnDuration,
 } = require("../agent-monitor-shared/parser-utils");
 
 function hasRenderableContent(value, depth = 0) {
@@ -152,6 +153,29 @@ function parseChatSessionFile(filePath, workspacePath) {
   if (!data || typeof data !== "object") return null;
 
   const sessionId = data.sessionId || data.id || path.basename(filePath, ".json");
+
+  // P1 Fix: extract token usage from raw requests BEFORE normalization,
+  // since normalizeChatMessages reduces each request to {role, timestamp}
+  // and drops the original usage/response payloads.
+  const rawRequests = Array.isArray(data.requests) ? data.requests : [];
+  const requestTokenFields = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  for (const req of rawRequests) {
+    if (!req || typeof req !== "object") continue;
+    const usageInfo =
+      req.usage || req.tokenUsage || req.token_count ||
+      req.response?.usage || req.result?.usage || null;
+    if (usageInfo && typeof usageInfo === "object") {
+      if (usageInfo.input_tokens != null) requestTokenFields.input += usageInfo.input_tokens;
+      if (usageInfo.output_tokens != null) requestTokenFields.output += usageInfo.output_tokens;
+      if (usageInfo.prompt_tokens != null) requestTokenFields.input += usageInfo.prompt_tokens;
+      if (usageInfo.completion_tokens != null) requestTokenFields.output += usageInfo.completion_tokens;
+      if (usageInfo.cache_read_tokens != null) requestTokenFields.cacheRead += usageInfo.cache_read_tokens;
+      if (usageInfo.cached_input_tokens != null) requestTokenFields.cacheRead += usageInfo.cached_input_tokens;
+      if (usageInfo.cache_write_tokens != null) requestTokenFields.cacheWrite += usageInfo.cache_write_tokens;
+      if (usageInfo.cache_creation_input_tokens != null) requestTokenFields.cacheWrite += usageInfo.cache_creation_input_tokens;
+    }
+  }
+
   const messages = normalizeChatMessages(data);
   if (!Array.isArray(messages) || messages.length === 0) return null;
 
@@ -161,9 +185,12 @@ function parseChatSessionFile(filePath, workspacePath) {
   let assistantMessageCount = 0;
   const messageTimestamps = [];
   const toolUses = [];
+  const turnDurations = [];
   const apiErrors = [];
   let thinkingBlockCount = 0;
   const toolResultErrors = [];
+  const tokenFields = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  let pendingTurnStartedAt = null;
 
   const noteTs = (raw) => {
     const iso = toIso(raw);
@@ -181,9 +208,12 @@ function parseChatSessionFile(filePath, workspacePath) {
 
     if (role === "user" || role === "human") {
       userMessageCount++;
+      if (iso) pendingTurnStartedAt = iso;
     } else if (role === "assistant" || role === "copilot" || role === "bot") {
       assistantMessageCount++;
       if (iso) messageTimestamps.push(iso);
+      pushTurnDuration(turnDurations, pendingTurnStartedAt, iso);
+      pendingTurnStartedAt = null;
     }
 
     // Tool uses embedded in messages
@@ -214,6 +244,41 @@ function parseChatSessionFile(filePath, workspacePath) {
         timestamp: iso,
       });
     }
+
+    // Token usage embedded in messages/requests
+    const usageInfo =
+      msg.usage || msg.tokenUsage || msg.token_count || msg.response?.usage || msg.result?.usage || null;
+    if (usageInfo && typeof usageInfo === "object") {
+      if (usageInfo.input_tokens != null) tokenFields.input += usageInfo.input_tokens;
+      if (usageInfo.output_tokens != null) tokenFields.output += usageInfo.output_tokens;
+      if (usageInfo.prompt_tokens != null) tokenFields.input += usageInfo.prompt_tokens;
+      if (usageInfo.completion_tokens != null) tokenFields.output += usageInfo.completion_tokens;
+      if (usageInfo.cache_read_tokens != null) tokenFields.cacheRead += usageInfo.cache_read_tokens;
+      if (usageInfo.cached_input_tokens != null) tokenFields.cacheRead += usageInfo.cached_input_tokens;
+      if (usageInfo.cache_write_tokens != null) tokenFields.cacheWrite += usageInfo.cache_write_tokens;
+      if (usageInfo.cache_creation_input_tokens != null) tokenFields.cacheWrite += usageInfo.cache_creation_input_tokens;
+    }
+  }
+
+  // Merge request-level tokens (from raw requests before normalization)
+  // with message-level tokens. Use summation since each request is unique.
+  tokenFields.input += requestTokenFields.input;
+  tokenFields.output += requestTokenFields.output;
+  tokenFields.cacheRead += requestTokenFields.cacheRead;
+  tokenFields.cacheWrite += requestTokenFields.cacheWrite;
+
+  // Token usage from top-level session data
+  const topUsage = data.usage || data.tokenUsage || data.token_count || null;
+  if (topUsage && typeof topUsage === "object") {
+    if (topUsage.input_tokens != null) tokenFields.input = Math.max(tokenFields.input, topUsage.input_tokens);
+    if (topUsage.output_tokens != null) tokenFields.output = Math.max(tokenFields.output, topUsage.output_tokens);
+    if (topUsage.prompt_tokens != null) tokenFields.input = Math.max(tokenFields.input, topUsage.prompt_tokens);
+    if (topUsage.completion_tokens != null) tokenFields.output = Math.max(tokenFields.output, topUsage.completion_tokens);
+    if (topUsage.cache_read_tokens != null) tokenFields.cacheRead = Math.max(tokenFields.cacheRead, topUsage.cache_read_tokens);
+    if (topUsage.cached_input_tokens != null) tokenFields.cacheRead = Math.max(tokenFields.cacheRead, topUsage.cached_input_tokens);
+    if (topUsage.cache_write_tokens != null) tokenFields.cacheWrite = Math.max(tokenFields.cacheWrite, topUsage.cache_write_tokens);
+    // P2 Fix: also map cache_creation_input_tokens to cacheWrite (alias)
+    if (topUsage.cache_creation_input_tokens != null) tokenFields.cacheWrite = Math.max(tokenFields.cacheWrite, topUsage.cache_creation_input_tokens);
   }
 
   if (!firstTimestamp) {
@@ -233,6 +298,17 @@ function parseChatSessionFile(filePath, workspacePath) {
 
   const projectName = cwd ? path.basename(cwd) : `Copilot Chat ${sessionId.slice(0, 8)}`;
 
+  const tokensByModel = {};
+  if (tokenFields.input || tokenFields.output || tokenFields.cacheRead || tokenFields.cacheWrite) {
+    const key = model || "copilot-default";
+    tokensByModel[key] = {
+      input: tokenFields.input,
+      output: tokenFields.output,
+      cacheRead: tokenFields.cacheRead,
+      cacheWrite: tokenFields.cacheWrite,
+    };
+  }
+
   return {
     sessionId: `copilot-chat-${sessionId}`,
     name: `${projectName} (copilot)`,
@@ -246,13 +322,13 @@ function parseChatSessionFile(filePath, workspacePath) {
     teams: [],
     userMessages: userMessageCount,
     assistantMessages: assistantMessageCount,
-    tokensByModel: {},
+    tokensByModel,
     messageTimestamps,
     toolUses,
     compactions: [],
     apiErrors,
     fileModifiedAt,
-    turnDurations: [],
+    turnDurations,
     entrypoint: "copilot",
     permissionMode: null,
     thinkingBlockCount,
@@ -279,11 +355,16 @@ async function parseCliEventFile(filePath, sessionId) {
   let assistantMessageCount = 0;
   const messageTimestamps = [];
   const toolUses = [];
+  const turnDurations = [];
   const apiErrors = [];
   let thinkingBlockCount = 0;
   const toolResultErrors = [];
   let tokenInput = 0;
   let tokenOutput = 0;
+  let tokenCacheRead = 0;
+  let tokenCacheWrite = 0;
+  let tokenReasoning = 0;
+  let pendingTurnStartedAt = null;
 
   const noteTs = (raw) => {
     const iso = toIso(raw);
@@ -314,10 +395,13 @@ async function parseCliEventFile(filePath, sessionId) {
     // Messages
     if (type === "user_message" || type === "user_input" || type === "prompt") {
       userMessageCount++;
+      if (iso) pendingTurnStartedAt = iso;
     }
     if (type === "assistant_message" || type === "response" || type === "completion") {
       assistantMessageCount++;
       if (iso) messageTimestamps.push(iso);
+      pushTurnDuration(turnDurations, pendingTurnStartedAt, iso);
+      pendingTurnStartedAt = null;
     }
 
     // Tool calls
@@ -336,6 +420,12 @@ async function parseCliEventFile(filePath, sessionId) {
       if (info.output_tokens != null) tokenOutput = info.output_tokens;
       if (info.prompt_tokens != null) tokenInput = info.prompt_tokens;
       if (info.completion_tokens != null) tokenOutput = info.completion_tokens;
+      if (info.cache_read_tokens != null) tokenCacheRead = info.cache_read_tokens;
+      if (info.cached_input_tokens != null) tokenCacheRead = info.cached_input_tokens;
+      if (info.cache_write_tokens != null) tokenCacheWrite = info.cache_write_tokens;
+      if (info.cache_creation_input_tokens != null) tokenCacheWrite = info.cache_creation_input_tokens;
+      if (info.reasoning_tokens != null) tokenReasoning = info.reasoning_tokens;
+      if (info.reasoning_output_tokens != null) tokenReasoning = info.reasoning_output_tokens;
       if (payload.model) model = payload.model;
     }
 
@@ -357,13 +447,13 @@ async function parseCliEventFile(filePath, sessionId) {
   if (!firstTimestamp) return null;
 
   const tokensByModel = {};
-  if (tokenInput || tokenOutput) {
+  if (tokenInput || tokenOutput || tokenCacheRead || tokenCacheWrite || tokenReasoning) {
     const key = model || "copilot-default";
     tokensByModel[key] = {
       input: tokenInput,
-      output: tokenOutput,
-      cacheRead: 0,
-      cacheWrite: 0,
+      output: tokenOutput + tokenReasoning,
+      cacheRead: tokenCacheRead,
+      cacheWrite: tokenCacheWrite,
     };
   }
 
@@ -391,7 +481,7 @@ async function parseCliEventFile(filePath, sessionId) {
     compactions: [],
     apiErrors,
     fileModifiedAt,
-    turnDurations: [],
+    turnDurations,
     entrypoint: "copilot",
     permissionMode: null,
     thinkingBlockCount,
