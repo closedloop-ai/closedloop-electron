@@ -33,11 +33,11 @@ function createStubOptions(
     getApiKey: () => "test-key",
     getAllowedDirectories: () => ["/tmp"],
     getMaxInFlightCommands: () => 5,
+    getEnabledOperations: () => ["test_op"],
     machineName: "test-machine",
     pluginVersion: "1.0.0-test",
     desktopClientVersion: "0.13.9-test",
     gatewayProtocolVersion: "0.1.0",
-    supportedOperations: ["test_op"],
     ...overrides,
   };
 }

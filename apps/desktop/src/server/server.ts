@@ -71,6 +71,9 @@ export interface DesktopGatewayServerOptions {
   ) => Promise<DesktopSecurityUpgradeResult> | DesktopSecurityUpgradeResult;
   getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
   applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string };
+  checkForUpdate?: () => Promise<{ updateAvailable: boolean; version?: string }>;
+  applyUpdate?: () => Promise<void>;
+  isUpdateAndRestartEnabled?: () => boolean;
 }
 
 export class DesktopGatewayServer {
@@ -128,6 +131,9 @@ export class DesktopGatewayServer {
       handleSecurityUpgrade: this.options.handleSecurityUpgrade,
       getBinaryPaths: this.options.getBinaryPaths,
       applyBinaryPathPatch: this.options.applyBinaryPathPatch,
+      checkForUpdate: this.options.checkForUpdate,
+      applyUpdate: this.options.applyUpdate,
+      isUpdateAndRestartEnabled: this.options.isUpdateAndRestartEnabled,
     });
   }
 
@@ -155,6 +161,9 @@ export class DesktopGatewayServer {
     getGatewayId: () => string = () => "",
     getBinaryPaths?: () => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string },
     applyBinaryPathPatch?: (patch: Partial<Record<"claude" | "gh" | "codex" | "python3" | "git", string | null>>) => { claude?: string; gh?: string; codex?: string; python3?: string; git?: string },
+    checkForUpdate?: () => Promise<{ updateAvailable: boolean; version?: string }>,
+    applyUpdate?: () => Promise<void>,
+    isUpdateAndRestartEnabled?: () => boolean,
     getApiKeyProvenance?: () => ApiKeyProvenance | null,
     signDesktopRequest?: DesktopPopSigner,
     onDesktopPopUnavailable?: DesktopPopUnavailableReporter,
@@ -197,6 +206,9 @@ export class DesktopGatewayServer {
       getOnboardingCompleted,
       getBinaryPaths,
       applyBinaryPathPatch,
+      checkForUpdate,
+      applyUpdate,
+      isUpdateAndRestartEnabled,
       schedulers,
     });
   }
