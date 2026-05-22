@@ -129,7 +129,12 @@ const desktopApi = {
     ipcRenderer.invoke(
       "desktop:set-agent-monitor-hooks-enabled",
       enabled,
-    ) as Promise<{ ok: boolean; enabled: boolean; error?: string }>
+    ) as Promise<{ ok: boolean; enabled: boolean; error?: string }>,
+  getAllFlags: () =>
+    ipcRenderer.invoke("desktop:get-all-flags") as Promise<unknown>,
+  onFlagsChanged: (callback: () => void) => {
+    ipcRenderer.on("desktop:flags-changed", callback);
+  }
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);
