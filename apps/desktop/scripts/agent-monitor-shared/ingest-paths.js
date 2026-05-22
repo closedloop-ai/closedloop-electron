@@ -11,6 +11,7 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const INGEST_STATE_VERSION = 2;
 
 /**
  * Directory that holds durable agent-monitor state. Mirrors the directory of
@@ -64,4 +65,9 @@ function clearIngestState() {
   }
 }
 
-module.exports = { ingestStateDir, ingestCachePath, clearIngestState };
+module.exports = {
+  INGEST_STATE_VERSION,
+  ingestStateDir,
+  ingestCachePath,
+  clearIngestState,
+};
