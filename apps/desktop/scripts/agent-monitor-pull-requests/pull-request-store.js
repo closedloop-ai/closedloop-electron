@@ -176,15 +176,14 @@ function listSessionsWithPullRequests(db, { limit = 100, offset = 0 } = {}) {
        LIMIT ? OFFSET ?`,
     )
     .all(limit, offset);
+  const prBySessionStmt = db.prepare(
+    `SELECT id, pr_url, pr_number, repo_full_name, branch_name, head_sha,
+            title, harness, observed_at
+     FROM pull_requests WHERE session_id IS ?
+     ORDER BY observed_at DESC`,
+  );
   for (const row of rows) {
-    row.pull_requests = db
-      .prepare(
-        `SELECT id, pr_url, pr_number, repo_full_name, branch_name, head_sha,
-                title, harness, observed_at
-         FROM pull_requests WHERE session_id IS ?
-         ORDER BY observed_at DESC`,
-      )
-      .all(row.session_id);
+    row.pull_requests = prBySessionStmt.all(row.session_id);
   }
   return rows;
 }

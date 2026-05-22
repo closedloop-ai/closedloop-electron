@@ -72,7 +72,9 @@ function extractPrUrlsFromText(text) {
  */
 function isPrCreateCommand(cmd) {
   if (typeof cmd !== "string") return false;
-  return /(?:^|[;&|(\n\t])\s*gh\s+pr\s+create(?:$|[\s'")])/.test(cmd);
+  // Matches `gh pr create` at command position (or after shell separators),
+  // with optional env-var prefixes like `GH_TOKEN=xxx gh pr create`.
+  return /(?:^|[;&|(\n\t])\s*(?:\S+=\S+\s+)*gh\s+pr\s+create(?:$|[\s'")])/.test(cmd);
 }
 
 /** Parse one JSONL line as JSON. Returns null on any error (lines are skipped). */
