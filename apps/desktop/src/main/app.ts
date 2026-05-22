@@ -2503,6 +2503,18 @@ export class DesktopApplication {
         ) {
           await this.applyAgentMonitorSetting(nextPartial.agentMonitorEnabled);
         }
+        if (
+          typeof nextPartial.cloudCommandsPaused === "boolean" &&
+          nextPartial.cloudCommandsPaused !== this.cloudCommandsPaused
+        ) {
+          this.setCloudCommandsPaused(nextPartial.cloudCommandsPaused);
+        }
+        if (
+          typeof nextPartial.cloudConnectionEnabled === "boolean" &&
+          nextPartial.cloudConnectionEnabled !== this.cloudConnectionEnabled
+        ) {
+          this.setCloudConnectionEnabled(nextPartial.cloudConnectionEnabled);
+        }
 
         if (
           typeof partial.sandboxBaseDirectory === "string" &&
