@@ -203,13 +203,10 @@ test("agent monitor defaults on; plan extraction is feature-gated and defaults o
   assert.match(settingsStoreSource, /setAgentMonitorEnabled\(agentMonitorEnabled: boolean\)/);
   assert.match(settingsStoreSource, /getPlanExtractionEnabled\(\)/);
   assert.match(settingsStoreSource, /setPlanExtractionEnabled\(planExtractionEnabled: boolean\)/);
+  // update() handles all registered flags generically via FLAG_KEYS loop
   assert.match(
     settingsStoreSource,
-    /if \(typeof partial\.agentMonitorEnabled === "boolean"\) \{[\s\S]*this\.store\.set\("agentMonitorEnabled"/,
-  );
-  assert.match(
-    settingsStoreSource,
-    /if \(typeof partial\.planExtractionEnabled === "boolean"\) \{[\s\S]*this\.store\.set\("planExtractionEnabled"/,
+    /for \(const key of FLAG_KEYS\)/,
   );
 });
 
@@ -301,7 +298,9 @@ test("renderer wires the Agent Dashboard sidecar into the sidebar and gates it o
   assert.match(indexHtml, /<nav class="sb-nav" id="sidebarNav"/);
   assert.match(indexHtml, /agent-disabled/);
   assert.match(indexHtml, /<section id="claude-dashboard" class="panel active">/);
-  assert.match(indexHtml, /id="agentMonitorEnabled"/);
+  // agentMonitorEnabled toggle moved to the Feature Flags panel (rendered via JS from the registry).
+  assert.match(indexHtml, /id="featureFlagsList"/);
+  assert.match(indexHtml, /function renderFeatureFlagsPanel/);
   assert.match(indexHtml, /function syncAgentMonitorTabVisibility/);
   assert.match(indexHtml, /kind === "agent" && !cachedAgentMonitorEnabled/);
   assert.match(indexHtml, /id="claudeDashFrame"/);

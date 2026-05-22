@@ -62,7 +62,7 @@ function extractErrorMessage(value, depth = 0) {
 }
 
 /**
- * Record a normalized turn duration from a request/response timestamp pair.
+ * Push a turn-duration entry if both timestamps are valid and the duration is non-negative.
  */
 function pushTurnDuration(turnDurations, startedAtIso, endedAtIso) {
   if (!startedAtIso || !endedAtIso) return;

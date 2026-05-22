@@ -26,6 +26,7 @@ import {
   normalizeScopePath,
 } from "../shared/sandbox-policy.js";
 import { isGitRepository } from "../shared/git-utils.js";
+import { FEATURE_FLAGS, type FlagKey } from "../shared/feature-flags.js";
 import { ApiKeyStore } from "./api-key-store.js";
 import { AuthorizedCommandKeyStore } from "./authorized-command-key-store.js";
 import {
@@ -2510,7 +2511,7 @@ export class DesktopApplication {
       "desktop:update-settings",
       async (
         _event,
-        partial: {
+        partial: Partial<Record<FlagKey, boolean>> & {
           sandboxBaseDirectory?: string;
           onboardingCompleted?: boolean;
           relayOrigin?: string;
@@ -2522,10 +2523,6 @@ export class DesktopApplication {
             "auto" | "none" | "low" | "medium" | "high"
           >;
           verboseLogging?: boolean;
-          updateAndRestartEnabled?: boolean;
-          agentMonitorEnabled?: boolean;
-          planExtractionEnabled?: boolean;
-          commandSigningEnforcementEnabled?: boolean;
         },
       ) => {
         if ("binaryPaths" in partial) {
@@ -2614,6 +2611,18 @@ export class DesktopApplication {
         ) {
           await this.applyAgentMonitorSetting(nextPartial.agentMonitorEnabled);
         }
+        if (
+          typeof nextPartial.cloudCommandsPaused === "boolean" &&
+          nextPartial.cloudCommandsPaused !== this.cloudCommandsPaused
+        ) {
+          this.setCloudCommandsPaused(nextPartial.cloudCommandsPaused);
+        }
+        if (
+          typeof nextPartial.cloudConnectionEnabled === "boolean" &&
+          nextPartial.cloudConnectionEnabled !== this.cloudConnectionEnabled
+        ) {
+          this.setCloudConnectionEnabled(nextPartial.cloudConnectionEnabled);
+        }
 
         if (
           typeof partial.sandboxBaseDirectory === "string" &&
@@ -2624,10 +2633,19 @@ export class DesktopApplication {
           await seedReposConfig(selectedSandbox);
         }
 
+        // Notify renderer of flag changes so the Feature Flags panel can refresh.
+        this.desktopWindow
+          .getWindow()
+          ?.webContents.send("desktop:flags-changed");
+
         this.restartCloudSocket();
         return updated;
       },
     );
+    ipcMain.handle("desktop:get-all-flags", () => ({
+      registry: FEATURE_FLAGS,
+      flags: this.settingsStore.getAllFlags(),
+    }));
     ipcMain.handle("desktop:get-runtime-status", () => ({
       port: this.server.getActivePort(),
       cloudStatus: this.cloudStatus,

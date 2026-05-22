@@ -311,12 +311,18 @@ async function parseRolloutFile(filePath) {
       latestTotals.reasoning_output_tokens ||
       latestTotals.reasoningOutputTokens ||
       0;
-    if (input || output || cached || reasoning) {
+    const cacheWrite =
+      latestTotals.cache_write_tokens ||
+      latestTotals.cacheWriteTokens ||
+      latestTotals.cache_creation_input_tokens ||
+      latestTotals.cacheCreationInputTokens ||
+      0;
+    if (input || output || cached || reasoning || cacheWrite) {
       tokensByModel[key] = {
         input,
         output: output + reasoning,
         cacheRead: cached,
-        cacheWrite: 0,
+        cacheWrite,
       };
     }
   }

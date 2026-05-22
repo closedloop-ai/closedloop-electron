@@ -278,18 +278,29 @@ const HOST_DEFAULT_PRICING = [
   ["claude-haiku-4-5%", "Claude Haiku 4.5", 1, 5, 0.1, 1.25],
   ["claude-3-5-haiku%", "Claude Haiku 3.5", 0.8, 4, 0.08, 1],
   ["claude-3-haiku%", "Claude Haiku 3", 0.25, 1.25, 0.03, 0.3],
-  // GPT-5 family
-  ["gpt-5.5%", "GPT-5.5", 5, 30, 0.5, 0],
-  ["gpt-5.4-mini%", "GPT-5.4 mini", 0.75, 4.5, 0.075, 0],
-  ["gpt-5.4-nano%", "GPT-5.4 nano", 0.2, 1.25, 0.02, 0],
-  ["gpt-5.4%", "GPT-5.4", 2.5, 15, 0.25, 0],
-  ["gpt-5-codex%", "GPT-5 Codex", 1.25, 10, 0.125, 0],
-  ["gpt-5-mini%", "GPT-5 mini", 0.25, 2, 0.025, 0],
-  ["gpt-5-nano%", "GPT-5 nano", 0.05, 0.4, 0.005, 0],
-  ["gpt-5%", "GPT-5", 1.25, 10, 0.125, 0],
+  // GPT-5 family — cache_write rates are the prompt caching write rate
+  // (typically equal to the input rate per 1M tokens for cached writes).
+  ["gpt-5.5%", "GPT-5.5", 5, 30, 0.5, 5],
+  ["gpt-5.4-mini%", "GPT-5.4 mini", 0.75, 4.5, 0.075, 0.75],
+  ["gpt-5.4-nano%", "GPT-5.4 nano", 0.2, 1.25, 0.02, 0.2],
+  ["gpt-5.4%", "GPT-5.4", 2.5, 15, 0.25, 2.5],
+  ["gpt-5-codex%", "GPT-5 Codex", 1.25, 10, 0.125, 1.25],
+  ["gpt-5-mini%", "GPT-5 mini", 0.25, 2, 0.025, 0.25],
+  ["gpt-5-nano%", "GPT-5 nano", 0.05, 0.4, 0.005, 0.05],
+  ["gpt-5%", "GPT-5", 1.25, 10, 0.125, 1.25],
   // OpenCode-hosted free models
   ["big-pickle%", "Big Pickle", 0, 0, 0, 0],
   ["opencode/big-pickle%", "OpenCode Big Pickle", 0, 0, 0, 0],
+  // Fallback patterns for non-Claude harness parsers — when the model
+  // field is missing from the raw data, each parser falls back to a
+  // hardcoded default key (e.g. "gpt-codex", "cursor-default", etc.).
+  // These entries ensure the fallback key has a reasonable pricing match,
+  // even if the exact model is unknown. The broadest pattern comes last
+  // so more specific rules match first.
+  ["gpt-codex%", "GPT Codex (fallback)", 1.25, 10, 0.125, 1.25],
+  ["cursor-default%", "Cursor default (fallback)", 3, 15, 0.3, 3],
+  ["copilot-default%", "Copilot default (fallback)", 3, 15, 0.3, 3],
+  ["opencode-default%", "OpenCode default (fallback)", 0, 0, 0, 0],
   // Legacy
   ["claude-3-opus%", "Claude Opus 3", 15, 75, 1.5, 18.75],
 ];
@@ -530,6 +541,12 @@ function materializeRuntimeTree() {
     path.join(generatedLibDir, "catalog-seed.json"),
   );
   patchImportHistory(generatedImportHistory);
+  // CLOSEDLOOP token reconciliation fix: replace the subagent-only guard
+  // with an unconditional writeSessionTokens call so non-Claude harnesses
+  // can update token_usage on re-import. Must run AFTER patchImportHistory
+  // since both modify the same file.
+  patchImportHistoryTokenReconcile(generatedImportHistory);
+  patchImportHistoryMetaImported(generatedImportHistory);
   mkdirSync(path.join(generatedRootDir, "client"), { recursive: true });
   cpSync(sourceClientDistDir, path.join(generatedRootDir, "client", "dist"), {
     recursive: true,
@@ -1447,6 +1464,105 @@ function patchImportHistory(file) {
     );
   }
 
+  writeFileSync(file, source, "utf8");
+}
+
+/**
+ * CLOSEDLOOP token reconciliation fix: replace the subagent-only token guard
+ * in importSession's existing-session branch with an unconditional call to
+ * writeSessionTokens. Without this, parsers that extract fresh token data
+ * on every re-import (OpenCode, Copilot, Cursor, Codex) never update a
+ * session's token_usage row after the initial import — the upstream code
+ * only reconciled tokens when parsedSubagents existed with non-zero tokens.
+ */
+function patchImportHistoryTokenReconcile(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("CLOSEDLOOP token reconciliation")) {
+    writeFileSync(file, source, "utf8");
+    return;
+  }
+  const needle = [
+    "    // Reconcile token usage. The earlier importer dropped subagent tokens",
+    "    // entirely, so any session with subagent JSONLs has under-counted totals.",
+    "    // replaceTokenUsage's baseline-shift logic guarantees this can never",
+    "    // reduce a session's totals — at worst it's a no-op.",
+    "    if (",
+    "      session.parsedSubagents &&",
+    "      session.parsedSubagents.some(",
+    "        (s) =>",
+    "          s.tokensByModel &&",
+    "          Object.values(s.tokensByModel).some(",
+    "            (t) => (t.input || 0) + (t.output || 0) + (t.cacheRead || 0) + (t.cacheWrite || 0) > 0",
+    "          )",
+    "      )",
+    "    ) {",
+    "      const written = writeSessionTokens(",
+    "        dbModule,",
+    "        session.sessionId,",
+    "        combineSessionTokens(session)",
+    "      );",
+    "      if (written > 0) backfilled = true;",
+    "    }",
+  ].join("\n");
+  if (!source.includes(needle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the subagent-only token guard (CLOSEDLOOP token reconciliation).`,
+    );
+  }
+  const replacement = [
+    "    // CLOSEDLOOP token reconciliation — unconditionally write tokens for",
+    "    // every re-import so parsers that extract fresh token data (OpenCode,",
+    "    // Copilot, Cursor, Codex) can update totals when a session is",
+    "    // re-imported. The upstream code only reconciled when subagents had",
+    "    // non-zero tokens, which meant sessions without subagents (most",
+    "    // non-Claude sessions) never had their token_usage refreshed.",
+    "    // replaceTokenUsage's baseline-shift logic guarantees this can never",
+    "    // reduce a session's totals — at worst it's a no-op.",
+    "    {",
+    "      const written = writeSessionTokens(",
+    "        dbModule,",
+    "        session.sessionId,",
+    "        combineSessionTokens(session)",
+    "      );",
+    "      if (written > 0) backfilled = true;",
+    "    }",
+  ].join("\n");
+  source = source.replace(needle, replacement);
+  writeFileSync(file, source, "utf8");
+}
+
+/**
+ * CLOSEDLOOP meta.imported fix: for legacy sessions imported before the
+ * `imported` metadata flag existed, stamp the flag instead of returning
+ * early with `{ skipped: true }` so event backfill and token reconciliation
+ * can proceed during re-import. The high-water-mark dedup protects against
+ * duplicate events and the baseline-shifting upsert protects against
+ * double-counted tokens.
+ */
+function patchImportHistoryMetaImported(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("CLOSEDLOOP meta.imported fix")) {
+    writeFileSync(file, source, "utf8");
+    return;
+  }
+  const needle =
+    '    if (!meta.imported) return { skipped: true };';
+  if (!source.includes(needle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the meta.imported early return (CLOSEDLOOP meta.imported fix).`,
+    );
+  }
+  const replacement = [
+    "    // CLOSEDLOOP meta.imported fix: legacy session imported before the",
+    '    // `imported` metadata flag existed — stamp it and continue so event',
+    "    // backfill and token reconciliation can proceed. The high-water-mark",
+    "    // dedup protects against duplicate events and the baseline-shifting",
+    "    // upsert protects against double-counted tokens.",
+    "    if (!meta.imported) {",
+    "      meta.imported = true;",
+    "    }",
+  ].join("\n");
+  source = source.replace(needle, replacement);
   writeFileSync(file, source, "utf8");
 }
 

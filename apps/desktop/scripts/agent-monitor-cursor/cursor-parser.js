@@ -10,7 +10,7 @@ const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
 const { sessionIdFromTranscriptPath } = require("./cursor-home");
-const { pushTurnDuration, toIso, safeJson } = require("../agent-monitor-shared/parser-utils");
+const { toIso, safeJson, pushTurnDuration } = require("../agent-monitor-shared/parser-utils");
 
 /**
  * Parse a single Cursor agent transcript JSONL file.
@@ -41,6 +41,7 @@ async function parseTranscriptFile(filePath) {
   let tokenInput = 0;
   let tokenOutput = 0;
   let tokenCacheRead = 0;
+  let tokenCacheWrite = 0;
   let pendingTurnStartedAt = null;
 
   const noteTs = (raw) => {
@@ -142,6 +143,8 @@ async function parseTranscriptFile(filePath) {
       if (info.output_tokens != null) tokenOutput = info.output_tokens;
       if (info.cache_read_tokens != null) tokenCacheRead = info.cache_read_tokens;
       if (info.cached_input_tokens != null) tokenCacheRead = info.cached_input_tokens;
+      if (info.cache_write_tokens != null) tokenCacheWrite = info.cache_write_tokens;
+      if (info.cache_creation_input_tokens != null) tokenCacheWrite = info.cache_creation_input_tokens;
       if (payload.model) model = payload.model;
     }
 
@@ -159,13 +162,13 @@ async function parseTranscriptFile(filePath) {
   if (!firstTimestamp) return null;
 
   const tokensByModel = {};
-  if (tokenInput || tokenOutput || tokenCacheRead) {
+  if (tokenInput || tokenOutput || tokenCacheRead || tokenCacheWrite) {
     const key = model || "cursor-default";
     tokensByModel[key] = {
       input: tokenInput,
       output: tokenOutput,
       cacheRead: tokenCacheRead,
-      cacheWrite: 0,
+      cacheWrite: tokenCacheWrite,
     };
   }
 
