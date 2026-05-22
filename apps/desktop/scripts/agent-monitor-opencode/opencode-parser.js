@@ -11,9 +11,9 @@ const { DatabaseSync } = require("node:sqlite");
 const { getOpenCodeDbPath } = require("./opencode-home");
 const {
   extractErrorMessage,
+  pushTurnDuration,
   safeJson,
   toIso,
-  pushTurnDuration,
 } = require("../agent-monitor-shared/parser-utils");
 
 function parseJsonCell(value) {
