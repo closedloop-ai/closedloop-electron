@@ -1998,6 +1998,17 @@ function assertGeneratedTree() {
       "Generated scripts/import-history.js is missing the PR-capture sink or sourceLogPath (FEA-1226).",
     );
   }
+  {
+    const prSidebarSource = readFileSync(
+      path.join(sourceClientDir, "src", "components", "Sidebar.tsx"),
+      "utf8",
+    );
+    if (!prSidebarSource.includes('to: "/pull-requests"')) {
+      throw new Error(
+        "Patched client Sidebar.tsx is missing the /pull-requests nav entry (FEA-1226).",
+      );
+    }
+  }
 
   // CLOSEDLOOP pack-observability hard-gates (FEA-1224): a future upstream
   // bump that breaks any anchor must fail the build, not silently drop a page.

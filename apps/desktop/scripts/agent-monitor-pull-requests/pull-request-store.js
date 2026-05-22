@@ -190,8 +190,14 @@ function listSessionsWithPullRequests(db, { limit = 100, offset = 0 } = {}) {
 }
 
 function countSessionsWithPullRequests(db) {
+  // Count GROUP BY groups, not COUNT(DISTINCT) — SQLite's COUNT(DISTINCT)
+  // excludes NULL, but listSessionsWithPullRequests groups all NULL
+  // session_id PRs into one row. Counting the grouped rows keeps `total`
+  // consistent with the list length when orphan (unimported-session) PRs exist.
   return db
-    .prepare(`SELECT COUNT(DISTINCT session_id) AS c FROM pull_requests`)
+    .prepare(
+      `SELECT COUNT(*) AS c FROM (SELECT 1 FROM pull_requests GROUP BY session_id)`,
+    )
     .get().c;
 }
 
