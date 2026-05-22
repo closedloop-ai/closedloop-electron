@@ -179,6 +179,25 @@ test("tolerates bare/legacy records (no envelope, no timestamp on items)", async
   assert.equal(s.toolUses[0].name, "apply_patch");
 });
 
+test("does not fabricate turn durations for untimestamped legacy user records", async () => {
+  const file = writeRollout(`rollout-legacy-turns-${UUID}.jsonl`, [
+    { session_id: UUID, cwd: "/x", timestamp: "2026-05-18T09:00:00.000Z" },
+    { type: "message", role: "user", content: "hi" },
+    {
+      timestamp: "2026-05-18T09:00:05.000Z",
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "hello" }],
+      },
+    },
+  ]);
+  const s = (await parseRolloutFile(file)) as ParsedCodexSession;
+  assert.ok(s);
+  assert.deepEqual(s.turnDurations, []);
+});
+
 test("returns null when the file has no usable timestamp", async () => {
   const file = writeRollout(`rollout-empty-${UUID}.jsonl`, [
     { type: "event_msg", payload: { type: "agent_message_delta", delta: "x" } },
