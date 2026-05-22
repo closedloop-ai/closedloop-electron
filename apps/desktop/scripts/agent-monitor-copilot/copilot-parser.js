@@ -311,7 +311,7 @@ function parseChatSessionFile(filePath, workspacePath) {
 
   return {
     sessionId: `copilot-chat-${sessionId}`,
-    name: `${projectName} (copilot)`,
+    name: projectName,
     cwd,
     model,
     version: null,
@@ -464,7 +464,7 @@ async function parseCliEventFile(filePath, sessionId) {
 
   return {
     sessionId: `copilot-cli-${sessionId}`,
-    name: `${projectName} (copilot)`,
+    name: projectName,
     cwd,
     model,
     version,

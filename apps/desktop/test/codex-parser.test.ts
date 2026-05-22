@@ -129,7 +129,7 @@ test("parses the modern RolloutLine envelope into the shared session shape", asy
   assert.equal(s.model, "gpt-5-codex");
   assert.equal(s.gitBranch, "main");
   assert.equal(s.version, "0.40.0");
-  assert.equal(s.name, "myproj (codex)");
+  assert.equal(s.name, "myproj");
   assert.equal(s.entrypoint, "codex");
   assert.equal(s.userMessages, 1);
   assert.equal(s.assistantMessages, 1);
