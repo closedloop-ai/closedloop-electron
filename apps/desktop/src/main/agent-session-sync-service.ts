@@ -26,7 +26,8 @@ const TAG = "agent-session-sync";
 const SYNC_INTERVAL_MS = 5_000;
 const MIN_INCREMENTAL_SYNC_INTERVAL_MS = 30_000;
 // Maximum number of candidate session IDs to pull from the queue per sync cycle.
-const SESSION_BATCH_SIZE = 10;
+const INCREMENTAL_SESSION_BATCH_SIZE = 10;
+export const BACKFILL_SESSION_BATCH_SIZE = 3;
 // Maximum serialized JSON payload size per batch (256 KiB).
 export const SESSION_PAYLOAD_BYTE_CAP = 262_144;
 
@@ -237,11 +238,17 @@ export class AgentSessionSyncService {
             MIN_INCREMENTAL_SYNC_INTERVAL_MS
         ) {
           syncMode = "incremental";
-          candidateIds = this.incrementalQueue.slice(0, SESSION_BATCH_SIZE);
+          candidateIds = this.incrementalQueue.slice(
+            0,
+            INCREMENTAL_SESSION_BATCH_SIZE,
+          );
           this.lastIncrementalBatchAttemptedAtMs = nowMs;
         } else if (this.backfillQueue.length > 0) {
           syncMode = "backfill";
-          candidateIds = this.backfillQueue.slice(0, SESSION_BATCH_SIZE);
+          candidateIds = this.backfillQueue.slice(
+            0,
+            BACKFILL_SESSION_BATCH_SIZE,
+          );
         }
 
         if (!syncMode || candidateIds.length === 0) {
