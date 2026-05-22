@@ -6,6 +6,10 @@ import { test } from "node:test";
 import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { enrichJobSnapshot, shouldApplyStateStatus } from "../src/server/operations/symphony-job-snapshot.js";
 import type { LocalJob, LocalJobStatus } from "../src/main/job-store.js";
+import {
+  clearPendingLoopExit,
+  registerPendingLoopExit,
+} from "../src/server/operations/symphony-loop-lifecycle.js";
 
 function makeJob(overrides: Partial<LocalJob> = {}): LocalJob {
   const now = new Date().toISOString();
@@ -72,6 +76,32 @@ test("RUNNING job with dead process becomes STOPPED", async () => {
   );
   assert.equal(snapshot.status, "STOPPED");
   assert.equal(snapshot.processRunning, false);
+});
+
+test("RUNNING job with pending exit and dead process stays RUNNING", async () => {
+  registerPendingLoopExit("loop-1");
+  try {
+    const snapshot = await enrichJobSnapshot(
+      makeJob({ status: "RUNNING", pid: 999999999 })
+    );
+    assert.equal(snapshot.status, "RUNNING");
+    assert.equal(snapshot.processRunning, false);
+  } finally {
+    clearPendingLoopExit("loop-1");
+  }
+});
+
+test("CANCEL_PENDING job with pending exit and dead process becomes CANCELLED", async () => {
+  registerPendingLoopExit("loop-1");
+  try {
+    const snapshot = await enrichJobSnapshot(
+      makeJob({ status: "CANCEL_PENDING", pid: 999999999 })
+    );
+    assert.equal(snapshot.status, "CANCELLED");
+    assert.equal(snapshot.processRunning, false);
+  } finally {
+    clearPendingLoopExit("loop-1");
+  }
 });
 
 // -- Snapshot shape --
