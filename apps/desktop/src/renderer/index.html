@@ -4003,12 +4003,16 @@
         ];
         const POLL_FAST_MS = 600;
         const POLL_WAIT_MS = 1500;
+        const POLL_IDLE_MS = 5000;
         const GIVE_UP_MS = 120000;
 
         let pollTimer = null;
         let hideTimer = null;
         let dismissed = false;
         let sawRunning = false;
+        let everConnected = false;
+        let currentRunId = null; // startedAt of the run the card is tracking
+        let toastedRunId = null; // startedAt of the run already toasted
         const startedAt = Date.now();
 
         function stopPolling() {
@@ -4086,56 +4090,75 @@
           }
 
           if (!snap) {
-            // Sidecar not reachable yet (still booting, or the dashboard is
-            // disabled). Keep waiting, but give up eventually so a disabled
-            // dashboard does not poll forever.
-            if (Date.now() - startedAt > GIVE_UP_MS) {
+            // Sidecar unreachable — still booting, restarting, or the
+            // dashboard is disabled. Keep waiting; only give up if we never
+            // reached it at all (a permanently-disabled dashboard).
+            if (!everConnected && Date.now() - startedAt > GIVE_UP_MS) {
               stopPolling();
               return;
             }
             schedule(POLL_WAIT_MS);
             return;
           }
+          everConnected = true;
+          const runId = snap.startedAt || 0;
 
           if (snap.running) {
+            // A fresh run (new startedAt) — e.g. the sidecar was restarted
+            // from the Settings toggle — resets the card so it shows again.
+            if (runId !== currentRunId) {
+              currentRunId = runId;
+              dismissed = false;
+              sawRunning = false;
+              if (hideTimer) {
+                clearTimeout(hideTimer);
+                hideTimer = null;
+              }
+            }
             sawRunning = true;
             if (!dismissed) {
               card.hidden = false;
               renderRunning(snap);
             }
-            schedule(dismissed ? POLL_WAIT_MS : POLL_FAST_MS);
+            schedule(dismissed ? POLL_IDLE_MS : POLL_FAST_MS);
             return;
           }
 
-          // Not running — distinguish "not started yet" from "finished".
+          // Not running, no finishedAt — orchestrator has not begun yet.
           if (!snap.finishedAt) {
-            if (Date.now() - startedAt > GIVE_UP_MS) {
-              stopPolling();
-              return;
-            }
             schedule(POLL_WAIT_MS);
             return;
           }
 
-          // Finished. Show the caught-up toast only if the user actually saw
-          // a running state — a tiny backlog that finishes between polls
-          // should not flash any UI.
-          if (sawRunning && !dismissed) {
+          // Finished. Surface the caught-up toast once per run, as long as
+          // the orchestrator had agent history to look at — `total > 0`
+          // covers a small backlog that finished between polls. A machine
+          // with zero agent history shows nothing. Auto-fades after 6s.
+          const hadWork =
+            sawRunning || (snap.total || 0) > 0 || (snap.imported || 0) > 0;
+          if (hadWork && !dismissed && runId !== toastedRunId) {
+            toastedRunId = runId;
+            currentRunId = runId;
             card.hidden = false;
             renderDone(snap);
             if (hideTimer) clearTimeout(hideTimer);
             hideTimer = setTimeout(() => {
               card.hidden = true;
-            }, 3500);
+            }, 6000);
           }
-          stopPolling();
+          // Keep polling slowly so a later sidecar restart re-shows the card.
+          schedule(POLL_IDLE_MS);
         }
 
         dismissBtn.addEventListener("click", () => {
           dismissed = true;
           card.hidden = true;
-          if (hideTimer) clearTimeout(hideTimer);
-          stopPolling();
+          if (hideTimer) {
+            clearTimeout(hideTimer);
+            hideTimer = null;
+          }
+          // Keep polling (idle) so a future run still re-shows the card.
+          schedule(POLL_IDLE_MS);
         });
 
         // Kick off polling; the sidecar boots in parallel with the renderer.
