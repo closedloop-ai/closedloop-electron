@@ -16,11 +16,13 @@ const { listAllRolloutFiles } = require("./codex-home");
 const { importSession } = require("../../scripts/import-history");
 const { reactivateImportedSession } = require("../agent-monitor-shared/import-session-utils");
 const { createCatchupCache } = require("../agent-monitor-shared/catchup-cache");
+const { ingestCachePath } = require("../agent-monitor-shared/ingest-paths");
 
-// Per-process cache of (path, mtime, size) for rollout files already parsed
-// and imported. The catchup poll runs every 5 s and would otherwise re-parse
-// every file on every tick — see FEA-1316.
-const catchupCache = createCatchupCache();
+// Cache of (path, mtime, size) for rollout files already parsed and imported.
+// The catchup poll runs every 5 s and would otherwise re-parse every file on
+// every tick (FEA-1316); the persisted backing file additionally lets a fresh
+// process skip unchanged files on the cold-start boot import (FEA-1334).
+const catchupCache = createCatchupCache({ persistPath: ingestCachePath("codex") });
 
 /**
  * Import (or idempotently backfill) a single Codex rollout file.
@@ -45,10 +47,18 @@ function importCodexSession(dbModule, session) {
  * repeat runs: importSession skips already-imported sessions (or backfills
  * only genuinely-new events via its per-event-type high-water-mark).
  *
+ * @param {any} dbModule
+ * @param {{ signal?: AbortSignal, onBegin?: (total: number) => void,
+ *           onProgress?: () => void }} [opts] - ingest-orchestrator progress
+ *   hooks (FEA-1334). The watcher catchup tick calls this with no opts.
  * Returns { imported, skipped, errors }.
  */
-async function importAllCodexSessions(dbModule) {
+async function importAllCodexSessions(dbModule, opts = {}) {
+  const onBegin = typeof opts.onBegin === "function" ? opts.onBegin : null;
+  const onProgress = typeof opts.onProgress === "function" ? opts.onProgress : null;
+  const signal = opts.signal || null;
   const files = listAllRolloutFiles();
+  if (onBegin) onBegin(files.length);
   let imported = 0;
   let skipped = 0;
   let errors = 0;
@@ -68,6 +78,8 @@ async function importAllCodexSessions(dbModule) {
   const batch = [];
   const parsedEntries = [];
   for (const filePath of files) {
+    if (signal && signal.aborted) break;
+    if (onProgress) onProgress();
     const { unchanged, stat } = catchupCache.isUnchanged(filePath);
     if (unchanged) {
       skipped++;
@@ -90,6 +102,7 @@ async function importAllCodexSessions(dbModule) {
   if (batch.length > 0) importBatch(batch);
   for (const { path, stat } of parsedEntries) catchupCache.markSeenWith(path, stat);
   catchupCache.pruneTo(files);
+  catchupCache.flush();
 
   return { imported, skipped, errors };
 }

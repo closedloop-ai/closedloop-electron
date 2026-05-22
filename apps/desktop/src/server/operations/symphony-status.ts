@@ -2,6 +2,8 @@ import { existsSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { isTerminalJobStatus, type JobStore, type LocalJobStatus } from "../../main/job-store.js";
+import { gatewayLog } from "../../main/gateway-logger.js";
+import { detectSuccessFromOutput } from "../../main/token-usage.js";
 import type { OperationDispatcher } from "../operation-dispatcher.js";
 import { DirectoryNotAllowedError, assertPathAllowed } from "../security.js";
 import { expandHome, readProcessPidSync, resolveWorktreeDir } from "./symphony-utils.js";
@@ -193,6 +195,35 @@ async function resolveEffectiveState(
   }
 
   if (pid !== null && !processRunning) {
+    const claudeWorkDir = path.join(worktreeDir, ".closedloop-ai", "work");
+    const successCheck = detectSuccessFromOutput(claudeWorkDir);
+    switch (successCheck.outcome) {
+      case "missing":
+        gatewayLog.warn(
+          "symphony-status-fallback",
+          `JSONL output file missing for worktree=${worktreeDir} pid=${pid}`
+        );
+        break;
+      case "unreadable":
+        gatewayLog.warn(
+          "symphony-status-fallback",
+          `JSONL output file unreadable for worktree=${worktreeDir} pid=${pid}: ${successCheck.error}`
+        );
+        break;
+      case "success":
+        gatewayLog.info(
+          "symphony-status-fallback",
+          `JSONL fallback detected success record for worktree=${worktreeDir} pid=${pid}`
+        );
+        return {
+          status: "COMPLETED",
+          phase: "Completed",
+          fallbackDetected: true,
+          ...base
+        };
+      case "no-success":
+        break;
+    }
     return {
       status: "STOPPED",
       phase: "Process stopped unexpectedly",

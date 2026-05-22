@@ -25,7 +25,15 @@ import {
 const TAG = "agent-session-sync";
 const SYNC_INTERVAL_MS = 5_000;
 const MIN_INCREMENTAL_SYNC_INTERVAL_MS = 30_000;
+// Maximum number of candidate session IDs to pull from the queue per sync cycle.
 const SESSION_BATCH_SIZE = 10;
+// Maximum serialized JSON payload size per batch (256 KiB).
+export const SESSION_PAYLOAD_BYTE_CAP = 262_144;
+
+export function estimateSessionPayloadBytes(session: SyncedAgentSession): number {
+  return Buffer.byteLength(JSON.stringify(session));
+}
+
 const { app } = electron;
 
 type SessionCursorRow = {
@@ -98,11 +106,20 @@ export type SessionAttributionResolverCache = {
   repoFullNameByPath: Map<string, string | null>;
 };
 
+export type AgentSessionSyncTelemetryEvent = {
+  outcome: "failure";
+  reason: DesktopAgentSessionsAckReason;
+  syncMode: AgentSessionSyncMode;
+  sessionCount: number;
+  payloadBytes: number;
+};
+
 export interface AgentSessionSyncServiceOptions {
   isAgentMonitorEnabled: () => boolean;
   isRelayReady: () => boolean;
   sendBatch: (batch: AgentSessionSyncBatch) => Promise<DesktopAgentSessionsAck>;
   getUserDataPath?: () => string;
+  onBatchOutcome?: (event: AgentSessionSyncTelemetryEvent) => void;
 }
 
 export class AgentSessionSyncService {
@@ -114,6 +131,7 @@ export class AgentSessionSyncService {
   private observedIdsAtTopUpdatedAt = new Set<string>();
   private lastIncrementalBatchAttemptedAtMs = 0;
   private featureDisabledForRelaySession = false;
+  private firstAckReceived = false;
   private incrementalQueue: string[] = [];
   private readonly incrementalQueuedIds = new Set<string>();
   private backfillQueue: string[] = [];
@@ -148,6 +166,7 @@ export class AgentSessionSyncService {
     }
     if (!this.options.isRelayReady()) {
       this.featureDisabledForRelaySession = false;
+      this.firstAckReceived = false;
       this.lastIncrementalBatchAttemptedAtMs = 0;
     }
     if (!this.shouldRun()) {
@@ -159,9 +178,13 @@ export class AgentSessionSyncService {
   }
 
   private shouldRun(): boolean {
-    return (
-      this.options.isAgentMonitorEnabled() && this.options.isRelayReady()
-    ) && !this.featureDisabledForRelaySession;
+    // Allow syncing when the relay reports ready via serverCapabilities, or
+    // when we have already received a confirmed ack in this relay session
+    // (so the service does not rely solely on serverCapabilities.agentSessionSync).
+    // The firstAckReceived flag starts false, so initial syncs still proceed
+    // via isRelayReady() before any ack is received.
+    const relayAccepting = this.options.isRelayReady() || this.firstAckReceived;
+    return this.options.isAgentMonitorEnabled() && relayAccepting && !this.featureDisabledForRelaySession;
   }
 
   private ensureTimer(): void {
@@ -198,6 +221,7 @@ export class AgentSessionSyncService {
       let syncMode: AgentSessionSyncMode | null = null;
       let syncIds: string[] = [];
       let batch: AgentSessionSyncBatch | null = null;
+      let accumulatedBytes = 0;
 
       const db = new DatabaseSync(dbPath);
       try {
@@ -206,27 +230,50 @@ export class AgentSessionSyncService {
         this.enqueueIncrementalUpdates(db);
 
         const nowMs = Date.now();
+        let candidateIds: string[] = [];
         if (
           this.incrementalQueue.length > 0 &&
           nowMs - this.lastIncrementalBatchAttemptedAtMs >=
             MIN_INCREMENTAL_SYNC_INTERVAL_MS
         ) {
           syncMode = "incremental";
-          syncIds = this.incrementalQueue.slice(0, SESSION_BATCH_SIZE);
+          candidateIds = this.incrementalQueue.slice(0, SESSION_BATCH_SIZE);
           this.lastIncrementalBatchAttemptedAtMs = nowMs;
         } else if (this.backfillQueue.length > 0) {
           syncMode = "backfill";
-          syncIds = this.backfillQueue.slice(0, SESSION_BATCH_SIZE);
+          candidateIds = this.backfillQueue.slice(0, SESSION_BATCH_SIZE);
         }
 
-        if (!syncMode || syncIds.length === 0) {
+        if (!syncMode || candidateIds.length === 0) {
           return;
         }
 
-        const sessions = loadSyncedSessions(db, syncIds, this.attributionCache);
-        if (sessions.length === 0) {
-          this.dequeue(syncMode, syncIds);
+        // Load all candidate sessions from SQLite, then accumulate into the
+        // batch until adding the next session would exceed the 256 KiB cap.
+        // Always include at least one session even if it alone exceeds the cap.
+        const candidateSessions = loadSyncedSessions(
+          db,
+          candidateIds,
+          this.attributionCache,
+        );
+        if (candidateSessions.length === 0) {
+          this.dequeue(syncMode, candidateIds);
           return;
+        }
+
+        const sessions: SyncedAgentSession[] = [];
+        syncIds = [];
+        for (const session of candidateSessions) {
+          const sessionBytes = estimateSessionPayloadBytes(session);
+          if (
+            sessions.length > 0 &&
+            accumulatedBytes + sessionBytes > SESSION_PAYLOAD_BYTE_CAP
+          ) {
+            break;
+          }
+          sessions.push(session);
+          syncIds.push(session.externalSessionId);
+          accumulatedBytes += sessionBytes;
         }
 
         batch = {
@@ -245,7 +292,7 @@ export class AgentSessionSyncService {
       }
 
       const ack = await this.options.sendBatch(batch);
-      this.handleBatchAck(syncMode, syncIds, batch.sessionCount, ack);
+      this.handleBatchAck(syncMode, syncIds, batch.sessionCount, accumulatedBytes, ack);
     } catch (error) {
       gatewayLog.warn(
         TAG,
@@ -328,9 +375,11 @@ export class AgentSessionSyncService {
     syncMode: AgentSessionSyncMode,
     ids: string[],
     sessionCount: number,
+    payloadBytes: number,
     ack: DesktopAgentSessionsAck,
   ): void {
     if (ack.accepted) {
+      this.firstAckReceived = true;
       this.dequeue(syncMode, ids);
       gatewayLog.info(
         TAG,
@@ -345,23 +394,32 @@ export class AgentSessionSyncService {
         `dropping ${ids.length} ${syncMode} agent-session payload(s) after validation_failed to avoid a permanent sync stall`,
       );
       this.dequeue(syncMode, ids);
-      return;
-    }
-
-    if (ack.reason === DesktopAgentSessionsAckReason.FeatureDisabled) {
+    } else if (ack.reason === DesktopAgentSessionsAckReason.FeatureDisabled) {
       this.featureDisabledForRelaySession = true;
       this.clearTimer();
       gatewayLog.info(
         TAG,
         "pausing agent-session sync until the relay reconnects because the current relay session rejected agent-session batches with feature_disabled",
       );
-      return;
+    } else if (ack.reason === DesktopAgentSessionsAckReason.AckTimeout) {
+      gatewayLog.debug(
+        TAG,
+        `agent-session batch (${syncMode}) timed out waiting for a server ack (client-side timeout, not a server rejection); batch left queued for retry`,
+      );
+    } else {
+      gatewayLog.debug(
+        TAG,
+        `agent-session batch rejected by server (${syncMode}): ${ack.reason}`,
+      );
     }
 
-    gatewayLog.debug(
-      TAG,
-      `agent-session batch rejected (${syncMode}): ${ack.reason}`,
-    );
+    this.options.onBatchOutcome?.({
+      outcome: "failure",
+      reason: ack.reason,
+      syncMode,
+      sessionCount,
+      payloadBytes,
+    });
   }
 
   private dequeue(syncMode: AgentSessionSyncMode, ids: string[]): void {

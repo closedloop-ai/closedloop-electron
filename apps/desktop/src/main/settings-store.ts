@@ -215,6 +215,10 @@ export class SettingsStore {
     return this.getFlag("cloudCommandsPaused");
   }
 
+  getUpdateAndRestartEnabled(): boolean {
+    return this.getFlag("updateAndRestartEnabled");
+  }
+
   getCloudConnectionEnabled(): boolean {
     return this.getFlag("cloudConnectionEnabled");
   }
@@ -249,6 +253,10 @@ export class SettingsStore {
 
   setCloudCommandsPaused(cloudCommandsPaused: boolean): void {
     this.setFlag("cloudCommandsPaused", cloudCommandsPaused);
+  }
+
+  setUpdateAndRestartEnabled(updateAndRestartEnabled: boolean): void {
+    this.setFlag("updateAndRestartEnabled", updateAndRestartEnabled);
   }
 
   setCloudConnectionEnabled(cloudConnectionEnabled: boolean): void {

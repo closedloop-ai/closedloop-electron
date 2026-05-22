@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -86,7 +86,7 @@ import {
   SUPPORTED_OPERATION_IDS,
   resolveOperationId,
 } from "./approval-operations.js";
-import { shouldAutoApprove, OPERATION_RISK_TIERS } from "./approval-policy.js";
+import { shouldAutoApprove, OPERATION_RISK_TIERS, FORCE_INTERACTIVE_OPERATIONS } from "./approval-policy.js";
 import { gatewayLog, isNetworkError } from "./gateway-logger.js";
 import { ActivityLogStore } from "./activity-log-store.js";
 import { ApprovalStore } from "./approval-store.js";
@@ -131,6 +131,12 @@ import { BootRecoveryService } from "./boot-recovery.js";
 import { LoopTokenStore } from "./loop-token-store.js";
 import { prepareLoopCommandForExecution } from "./loop-command-preparer.js";
 import { GatewayIdentityStore } from "./gateway-identity.js";
+import {
+  buildUpdateAndRestartDisabledResult,
+  canApplyPackagedUpdate,
+  resolvePackagedUpdateCheckResult,
+  shouldHonorAlwaysAllowRule,
+} from "./update-and-restart-helpers.js";
 import {
   createQueueStatsDebounce,
   type QueueStatsDebounce,
@@ -340,6 +346,29 @@ export class DesktopApplication {
       () => this.getActiveGatewayId(),
       () => this.settingsStore.getBinaryPaths(),
       (patch) => this.applyBinaryPathPatchAndInvalidateCaches(patch),
+      async () => {
+        if (app.isPackaged) {
+          const result = await autoUpdater.checkForUpdates();
+          const remoteVersion = result?.updateInfo?.version;
+          return resolvePackagedUpdateCheckResult(
+            app.getVersion(),
+            this.packagedUpdateState,
+            remoteVersion
+          );
+        }
+        return this.checkForUpdate();
+      },
+      async () => {
+        if (app.isPackaged) {
+          if (!canApplyPackagedUpdate(app.getVersion(), this.packagedUpdateState)) {
+            throw new Error("Update has not finished downloading yet");
+          }
+          autoUpdater.quitAndInstall();
+          return;
+        }
+        await this.applyUpdate();
+      },
+      () => this.settingsStore.getUpdateAndRestartEnabled(),
       () => this.apiKeyStore.getApiKeyProvenance(),
       (request) => this.signDesktopRequest(request),
       (surface, reason) => this.reportDesktopPopUnavailable(surface, reason),
@@ -391,7 +420,12 @@ export class DesktopApplication {
       pluginVersion: getCodePluginVersion(),
       desktopClientVersion: app.getVersion(),
       gatewayProtocolVersion: GATEWAY_PROTOCOL_VERSION,
-      supportedOperations: [...SUPPORTED_OPERATION_IDS],
+      getEnabledOperations: () => {
+        const enabled = this.settingsStore.getUpdateAndRestartEnabled();
+        return SUPPORTED_OPERATION_IDS.filter(
+          (id) => id !== "update_and_restart" || enabled
+        );
+      },
       onStatusChange: (status) => this.onCloudSocketStatus(status),
       onDisconnect: (reason) => {
         this.serverCommandSigningSupported = false;
@@ -509,6 +543,9 @@ export class DesktopApplication {
         this.cloudStatus.state === "online",
       sendBatch: (batch) => this.cloudSocket.sendAgentSessions(batch),
       getUserDataPath: () => app.getPath("userData"),
+      onBatchOutcome: (event) => {
+        Observability.agentSessionSyncBatchFailed(event);
+      },
     });
     this.recovery = new GatewayRecoveryManager({
       probe: () => this.probeGatewayAlive(),
@@ -2101,6 +2138,13 @@ export class DesktopApplication {
       };
     }
 
+    if (
+      operationId === "update_and_restart" &&
+      !this.settingsStore.getUpdateAndRestartEnabled()
+    ) {
+      return buildUpdateAndRestartDisabledResult();
+    }
+
     const settings = this.settingsStore.getAll();
     const requestScopePath = resolveApprovalScopePath(request.body);
     const activeAlwaysAllowRules = pruneExpiredAlwaysAllowRules(
@@ -2109,7 +2153,13 @@ export class DesktopApplication {
     if (activeAlwaysAllowRules.length !== settings.alwaysAllowRules.length) {
       this.settingsStore.setAlwaysAllowRules(activeAlwaysAllowRules);
     }
+    const isForceInteractiveOperation =
+      !shouldHonorAlwaysAllowRule(
+        operationId,
+        FORCE_INTERACTIVE_OPERATIONS as ReadonlySet<string>
+      );
     if (
+      !isForceInteractiveOperation &&
       matchesAlwaysAllowRule(activeAlwaysAllowRules, {
         operationId,
         method: request.method,
@@ -2122,7 +2172,10 @@ export class DesktopApplication {
 
     const configuredTier =
       settings.autoApprovalRules[operationId] ?? settings.defaultApprovalTier;
+    // Force-interactive operations skip auto-approve and always go through
+    // the interactive approval queue.
     if (
+      !isForceInteractiveOperation &&
       shouldAutoApprove(
         operationId,
         configuredTier,
@@ -2154,7 +2207,7 @@ export class DesktopApplication {
       APPROVAL_TIMEOUT_MS,
     );
 
-    if (decision === "always_allow") {
+    if (decision === "always_allow" && !isForceInteractiveOperation) {
       this.saveAlwaysAllowRuleForPending(pending);
     }
 
@@ -2360,6 +2413,61 @@ export class DesktopApplication {
       enabled: this.isAgentMonitorEnabled(),
       planExtractionEnabled: this.isPlanExtractionEnabled(),
     }));
+    // FEA-1334: proxy the sidecar's cold-start ingest progress so the renderer
+    // can drive the floating progress card without a cross-origin fetch.
+    // Returns null whenever the sidecar is not reachable — the renderer treats
+    // that as "keep polling, nothing to show yet".
+    ipcMain.handle("desktop:get-agent-monitor-ingest-progress", async () => {
+      const baseUrl = this.agentMonitor.getUrl();
+      if (!baseUrl) {
+        return null;
+      }
+      try {
+        const response = await fetch(`${baseUrl}/api/import/progress`, {
+          signal: AbortSignal.timeout(2_000),
+        });
+        if (!response.ok) {
+          return null;
+        }
+        return await response.json();
+      } catch {
+        return null;
+      }
+    });
+    // FEA-1334: clear the dashboard DB and restart the sidecar so it
+    // re-imports every agent session from scratch. The sidecar's empty-DB
+    // boot path clears the persisted ingest caches and re-runs the
+    // orchestrator, which the progress banner tracks.
+    ipcMain.handle("desktop:reprocess-agent-logs", async () => {
+      if (!this.isAgentMonitorEnabled()) {
+        return { ok: false, error: "Agent Dashboard is disabled in Settings." };
+      }
+      try {
+        await this.agentMonitor.stop();
+        const agentMonitorDir = path.join(
+          app.getPath("userData"),
+          "agent-monitor",
+        );
+        for (const name of [
+          "dashboard.db",
+          "dashboard.db-wal",
+          "dashboard.db-shm",
+        ]) {
+          try {
+            rmSync(path.join(agentMonitorDir, name));
+          } catch {
+            /* file may not exist — fine */
+          }
+        }
+        void this.agentMonitor.start();
+        return { ok: true };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    });
     ipcMain.handle("desktop:open-agent-monitor", () =>
       this.openClaudeDashboard(),
     );

@@ -134,7 +134,32 @@ const desktopApi = {
     ipcRenderer.invoke("desktop:get-all-flags") as Promise<unknown>,
   onFlagsChanged: (callback: () => void) => {
     ipcRenderer.on("desktop:flags-changed", callback);
-  }
+  },
+  // FEA-1334: cold-start ingest progress for the floating progress card.
+  // Resolves null when the sidecar is unreachable or has no progress yet.
+  getAgentMonitorIngestProgress: () =>
+    ipcRenderer.invoke(
+      "desktop:get-agent-monitor-ingest-progress",
+    ) as Promise<{
+      running: boolean;
+      startedAt: number | null;
+      updatedAt: number | null;
+      finishedAt: number | null;
+      total: number;
+      parsed: number;
+      imported: number;
+      byHarness: Record<
+        string,
+        { total: number; parsed: number; imported: number; complete: boolean }
+      >;
+    } | null>,
+  // FEA-1334: clear the dashboard DB and restart the sidecar so it re-imports
+  // every agent session from scratch. The progress banner tracks the re-import.
+  reprocessAgentLogs: () =>
+    ipcRenderer.invoke("desktop:reprocess-agent-logs") as Promise<{
+      ok: boolean;
+      error?: string;
+    }>
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);

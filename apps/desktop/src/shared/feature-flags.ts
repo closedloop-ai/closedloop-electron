@@ -61,6 +61,14 @@ const FEATURE_FLAGS_INTERNAL = [
       "Pauses execution of cloud-dispatched commands while keeping the relay connection alive.",
     category: "Cloud" as const,
   },
+  {
+    key: "updateAndRestartEnabled" as const,
+    default: false,
+    label: "Auto-Update & Restart",
+    description:
+      "Automatically download and install updates, then restart the app.",
+    category: "Experimental" as const,
+  },
 ] as const;
 
 export type FlagKey = (typeof FEATURE_FLAGS_INTERNAL)[number]["key"];

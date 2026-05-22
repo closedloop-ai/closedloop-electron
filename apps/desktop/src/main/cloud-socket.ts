@@ -50,7 +50,7 @@ export interface CloudSocketOptions {
   pluginVersion: string;
   desktopClientVersion: string;
   gatewayProtocolVersion: string;
-  supportedOperations: string[];
+  getEnabledOperations: () => string[];
   onStatusChange?: (status: CloudSocketStatus) => void;
   onHelloAck?: (event: DesktopHelloAckEvent) => void;
   onCommand?: (event: DesktopCommandEvent) => void;
@@ -192,7 +192,7 @@ export class CloudSocketService {
         );
         resolve({
           accepted: false,
-          reason: DesktopAgentSessionsAckReason.RateLimited,
+          reason: DesktopAgentSessionsAckReason.AckTimeout,
         });
       }, AGENT_SESSIONS_ACK_TIMEOUT_MS);
 
@@ -362,7 +362,12 @@ export class CloudSocketService {
     socket.on("desktop.command", (payload: unknown) => {
       const parsed = parseDesktopCommand(payload);
       if (!parsed) {
-        gatewayLog.warn("cloud-socket", "Received unparseable desktop.command, ignoring");
+        const rawPath = asNonEmptyString(asObject(payload).path);
+        if (rawPath?.startsWith("/api/engineer/")) {
+          gatewayLog.warn("cloud-socket", `Received legacy /api/engineer/ command (${rawPath}), ignoring — desktop only accepts /api/gateway/ commands`);
+        } else {
+          gatewayLog.warn("cloud-socket", "Received unparseable desktop.command, ignoring");
+        }
         return;
       }
       gatewayLog.debug("cloud-socket", `Command received: ${parsed.operationId} ${parsed.method} ${parsed.path} (commandId=${parsed.commandId})`);
@@ -412,7 +417,7 @@ export class CloudSocketService {
       pluginVersion: this.options.pluginVersion,
       desktopClientVersion: this.options.desktopClientVersion,
       gatewayProtocolVersion: this.options.gatewayProtocolVersion,
-      supportedOperations: this.options.supportedOperations,
+      supportedOperations: this.options.getEnabledOperations(),
       maxInFlightCommands: Math.max(1, this.options.getMaxInFlightCommands()),
       allowedDirectoriesHash: hashAllowedDirectories(this.options.getAllowedDirectories()),
       ...(this.options.getCapabilities
