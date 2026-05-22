@@ -6,6 +6,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import {
+  BACKFILL_SESSION_BATCH_SIZE,
   AgentSessionSyncService,
   estimateSessionPayloadBytes,
   estimateTokenUsageCostUsd,
@@ -653,6 +654,44 @@ test("agent-session payload-aware batcher sends a single oversized session alone
     "oversized session must be sent alone as a batch of 1",
   );
   assert.equal(oversizeBatch.sessions[0].externalSessionId, "sess-oversize");
+
+  service.stop();
+  db.close();
+});
+
+test("agent-session sync uses smaller batches for backfill than incremental", async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), "agent-session-sync-service-"));
+  const db = createServiceTestDatabase(rootDir);
+
+  for (let index = 0; index < BACKFILL_SESSION_BATCH_SIZE + 2; index += 1) {
+    insertSessionRow(db, {
+      id: `sess-backfill-${index + 1}`,
+      startedAt: "2026-05-20T12:00:00.000Z",
+      updatedAt: `2026-05-20T12:0${index}:00.000Z`,
+    });
+  }
+
+  const receivedBatches: import("../src/main/agent-session-sync-contract.js").AgentSessionSyncBatch[] = [];
+  const service = new AgentSessionSyncService({
+    isAgentMonitorEnabled: () => true,
+    isRelayReady: () => true,
+    sendBatch: async (batch) => {
+      receivedBatches.push(batch);
+      return { accepted: true };
+    },
+    getUserDataPath: () => path.join(rootDir, "user-data"),
+  });
+
+  service.start();
+  await flushAgentSessionSync();
+
+  assert.ok(receivedBatches.length >= 1, "expected at least one backfill batch");
+  assert.equal(receivedBatches[0].syncMode, "backfill");
+  assert.equal(
+    receivedBatches[0].sessions.length,
+    BACKFILL_SESSION_BATCH_SIZE,
+    "backfill batches should use the smaller backfill-specific size",
+  );
 
   service.stop();
   db.close();
