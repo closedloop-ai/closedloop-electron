@@ -174,6 +174,11 @@ test("electron-builder ships the generated agent-monitor runtime tree unpacked",
     stagePackagingSource,
     /dependency\.resolved[\s\S]*packageJson\.dependencies\?\.\[dependencyName\][\s\S]*dependency\.version/,
   );
+  assert.match(stagePackagingSource, /\.generated", "agent-monitor"/);
+  assert.match(
+    stagePackagingSource,
+    /await cp\(generatedAgentMonitorDir, stageGeneratedAgentMonitorDir, \{\s*recursive: true,\s*\}\);/,
+  );
 });
 
 test("runtime resolves the generated tree and sidecar wiring still uses the fixed port", () => {
