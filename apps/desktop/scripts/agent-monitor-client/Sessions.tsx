@@ -335,7 +335,7 @@ export function Sessions() {
                       <div>
                         <div className="flex items-center gap-2">
                           <p className="text-sm font-medium text-gray-200">
-                            {session.name || `${t("defaultName")}${session.id.slice(0, 8)}`}
+                            {displaySessionName(session, t("defaultName"))}
                           </p>
                           <HarnessBadge harness={session.harness} />
                           {dashboardRunIds.has(session.id) && (
