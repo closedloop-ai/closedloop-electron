@@ -10,14 +10,7 @@ const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
 const { sessionIdFromTranscriptPath } = require("./cursor-home");
-const { toIso, safeJson } = require("../agent-monitor-shared/parser-utils");
-
-function pushTurnDuration(turnDurations, startedAtIso, endedAtIso) {
-  if (!startedAtIso || !endedAtIso) return;
-  const durationMs = new Date(endedAtIso).getTime() - new Date(startedAtIso).getTime();
-  if (!Number.isFinite(durationMs) || durationMs < 0) return;
-  turnDurations.push({ durationMs, timestamp: endedAtIso });
-}
+const { pushTurnDuration, toIso, safeJson } = require("../agent-monitor-shared/parser-utils");
 
 /**
  * Parse a single Cursor agent transcript JSONL file.

@@ -11,6 +11,7 @@ const { DatabaseSync } = require("node:sqlite");
 const { getOpenCodeDbPath } = require("./opencode-home");
 const {
   extractErrorMessage,
+  pushTurnDuration,
   safeJson,
   toIso,
 } = require("../agent-monitor-shared/parser-utils");
@@ -58,13 +59,6 @@ function collectToolUse(toolUses, toolResultErrors, partRow, part, firstTimestam
       timestamp,
     });
   }
-}
-
-function pushTurnDuration(turnDurations, startedAtIso, endedAtIso) {
-  if (!startedAtIso || !endedAtIso) return;
-  const durationMs = new Date(endedAtIso).getTime() - new Date(startedAtIso).getTime();
-  if (!Number.isFinite(durationMs) || durationMs < 0) return;
-  turnDurations.push({ durationMs, timestamp: endedAtIso });
 }
 
 function parseSessionRow(sessionRow, getMessages, getParts) {

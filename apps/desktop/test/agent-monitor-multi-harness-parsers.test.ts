@@ -307,4 +307,8 @@ test("multi-harness parsers no longer re-export shared timestamp helpers", () =>
   assert.equal("toIso" in cursorParser, false);
   assert.equal("toIso" in copilotParser, false);
   assert.equal("toIso" in opencodeParser, false);
+  assert.equal("pushTurnDuration" in codexParser, false);
+  assert.equal("pushTurnDuration" in cursorParser, false);
+  assert.equal("pushTurnDuration" in copilotParser, false);
+  assert.equal("pushTurnDuration" in opencodeParser, false);
 });

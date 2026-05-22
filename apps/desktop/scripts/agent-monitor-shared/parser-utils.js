@@ -61,4 +61,14 @@ function extractErrorMessage(value, depth = 0) {
   return null;
 }
 
-module.exports = { toIso, safeJson, extractErrorMessage };
+/**
+ * Record a normalized turn duration from a request/response timestamp pair.
+ */
+function pushTurnDuration(turnDurations, startedAtIso, endedAtIso) {
+  if (!startedAtIso || !endedAtIso) return;
+  const durationMs = new Date(endedAtIso).getTime() - new Date(startedAtIso).getTime();
+  if (!Number.isFinite(durationMs) || durationMs < 0) return;
+  turnDurations.push({ durationMs, timestamp: endedAtIso });
+}
+
+module.exports = { toIso, safeJson, extractErrorMessage, pushTurnDuration };

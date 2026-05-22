@@ -14,6 +14,7 @@ const path = require("path");
 const readline = require("readline");
 const {
   extractErrorMessage,
+  pushTurnDuration,
   toIso,
   safeJson,
 } = require("../agent-monitor-shared/parser-utils");
@@ -48,13 +49,6 @@ function collectToolCalls(value, depth = 0, out = []) {
     collectToolCalls(value[key], depth + 1, out);
   }
   return out;
-}
-
-function pushTurnDuration(turnDurations, startedAtIso, endedAtIso) {
-  if (!startedAtIso || !endedAtIso) return;
-  const durationMs = new Date(endedAtIso).getTime() - new Date(startedAtIso).getTime();
-  if (!Number.isFinite(durationMs) || durationMs < 0) return;
-  turnDurations.push({ durationMs, timestamp: endedAtIso });
 }
 
 function normalizeChatRequest(request, sessionData) {
