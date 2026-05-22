@@ -26,6 +26,15 @@ import { effectiveSessionStatus, isSessionAwaitingInput } from "../lib/types";
 import type { Session, DashboardEvent } from "../lib/types";
 
 const PAGE_SIZE = 10;
+const LEGACY_HARNESS_SUFFIX_RE = /\s+\((claude|codex|cursor|copilot|opencode)\)$/i;
+
+function displaySessionName(session: Session, fallbackLabel: string): string {
+  const rawName = session.name?.trim();
+  if (!rawName) {
+    return `${fallbackLabel}${session.id.slice(0, 8)}`;
+  }
+  return rawName.replace(LEGACY_HARNESS_SUFFIX_RE, "");
+}
 
 export function Sessions() {
   const navigate = useNavigate();
@@ -336,7 +345,7 @@ export function Sessions() {
                       <div>
                         <div className="flex items-center gap-2">
                           <p className="text-sm font-medium text-gray-200">
-                            {session.name || `${t("defaultName")}${session.id.slice(0, 8)}`}
+                            {displaySessionName(session, t("defaultName"))}
                           </p>
                           <HarnessBadge harness={session.harness} />
                           {dashboardRunIds.has(session.id) && (

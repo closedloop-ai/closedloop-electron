@@ -11,10 +11,16 @@ const repoRoot = path.resolve(appDir, "../..");
 const stageRoot = getPackagingStageRoot();
 const stageAppDir = getPackagingStageAppDir();
 const buildOutputDir = path.join(appDir, "dist");
+const generatedAgentMonitorDir = path.join(appDir, ".generated", "agent-monitor");
 const packageJsonFile = path.join(appDir, "package.json");
 const repoNpmrcFile = path.join(repoRoot, ".npmrc");
 const stageRootPackageJsonFile = path.join(stageRoot, "package.json");
 const stageBuildOutputDir = path.join(stageAppDir, "dist");
+const stageGeneratedAgentMonitorDir = path.join(
+  stageAppDir,
+  ".generated",
+  "agent-monitor",
+);
 const rendererEntryFile = path.join(appDir, "src/renderer/index.html");
 const stageRendererDir = path.join(stageAppDir, "src/renderer");
 const stageNpmrcFile = path.join(stageAppDir, ".npmrc");
@@ -157,7 +163,15 @@ await rm(path.join(stageAppDir, "node_modules", "better-sqlite3"), {
 await stat(buildOutputDir).catch(() => {
   throw new Error("apps/desktop/dist is missing. Run `pnpm build` before staging the packaging app.");
 });
+await stat(generatedAgentMonitorDir).catch(() => {
+  throw new Error(
+    "apps/desktop/.generated/agent-monitor is missing. Run `pnpm -C apps/desktop build:agent-monitor` before staging the packaging app.",
+  );
+});
 
 await cp(buildOutputDir, stageBuildOutputDir, { recursive: true });
+await cp(generatedAgentMonitorDir, stageGeneratedAgentMonitorDir, {
+  recursive: true,
+});
 await mkdir(stageRendererDir, { recursive: true });
 await cp(rendererEntryFile, path.join(stageRendererDir, "index.html"));
