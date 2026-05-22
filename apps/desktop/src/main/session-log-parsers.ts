@@ -22,7 +22,7 @@
 
 import type {
   GitActivityEventInput,
-  GitActivitySourceClient,
+  GitActivityHarness,
 } from "../shared/git-activity-types.js";
 
 // Matches a confirmed PR URL. The `(?!new\b)` lookahead rejects
@@ -201,9 +201,9 @@ function parseLoopPrLink(
       prNumber: ref.prNumber,
       repoFullName: ref.repoFullName,
       branchName: typeof parsed.branchName === "string" ? parsed.branchName : null,
-      commitSha: typeof parsed.commitSha === "string" ? parsed.commitSha : null,
-      sourceClient: "closedloop-loop",
-      sourceSessionId: sessionId,
+      headSha: typeof parsed.commitSha === "string" ? parsed.commitSha : null,
+      harness: "closedloop-loop",
+      externalSessionId: sessionId,
     },
   ];
 }
@@ -266,9 +266,9 @@ function parseClaudeLine(
         prNumber: ref.prNumber,
         repoFullName: ref.repoFullName,
         branchName,
-        commitSha: null,
-        sourceClient: "claude-code",
-        sourceSessionId: sessionId,
+        headSha: null,
+        harness: "claude-code",
+        externalSessionId: sessionId,
       });
     }
   }
@@ -346,9 +346,9 @@ function codexEvents(
     prNumber: ref.prNumber,
     repoFullName: ref.repoFullName,
     branchName,
-    commitSha: null,
-    sourceClient: "codex" as GitActivitySourceClient,
-    sourceSessionId: sessionId,
+    headSha: null,
+    harness: "codex" as GitActivityHarness,
+    externalSessionId: sessionId,
   }));
 }
 

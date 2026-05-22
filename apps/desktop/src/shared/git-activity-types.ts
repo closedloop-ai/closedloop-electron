@@ -10,28 +10,45 @@
  * the same event shape via an ingest endpoint — keep this contract stable.
  */
 
-export type GitActivitySourceClient =
+/**
+ * Which agent harness produced the activity. Field name (`harness`) and values
+ * align with symphony-alpha's `AgentSession.harness` so a captured record maps
+ * cleanly onto the cloud session model when Phase 2 sync lands.
+ */
+export type GitActivityHarness =
   | "claude-code"
   | "codex"
   | "closedloop-loop";
 
+/**
+ * A captured "this session produced this PR" record.
+ *
+ * Field names mirror symphony-alpha so a record is a clean projection of the
+ * cloud's `AgentSession` ⋈ `PullRequestDetail` join — the join the cloud
+ * cannot currently make on its own (it has no stored session→PR edge):
+ *   - `externalSessionId` → `AgentSession.externalSessionId`
+ *   - `harness`           → `AgentSession.harness`
+ *   - `repoFullName` + `prNumber` → `PullRequestDetail` identity `(repository, number)`
+ *   - `headSha`           → `BranchDetail.headSha`
+ */
 export interface GitActivityEvent {
-  /** Deterministic 16-char hex digest of (sourceClient, sourceSessionId, prUrl). Used for dedup. */
+  /** Deterministic 16-char hex digest of (harness, externalSessionId, prUrl). Used for dedup. */
   id: string;
   /** Event kind — reserved for future "push" / "issue" types. */
   type: "pr-link";
   /** Canonicalized https://github.com/<owner>/<repo>/pull/<n> URL. */
   prUrl: string;
   prNumber: number;
-  /** "<owner>/<repo>" (lowercase repo names not normalized — match GitHub's API casing). */
+  /** "<owner>/<repo>" — together with prNumber, the PR's identity. */
   repoFullName: string;
   /** Best-effort, may be null if not inferrable from the source line. */
   branchName: string | null;
-  /** Best-effort, may be null if not inferrable from the source line. */
-  commitSha: string | null;
-  sourceClient: GitActivitySourceClient;
-  /** JSONL filename basename (no extension) — used as a stable per-session key. */
-  sourceSessionId: string;
+  /** Branch head commit SHA at capture time. Best-effort, may be null. */
+  headSha: string | null;
+  /** The agent harness that produced the PR. */
+  harness: GitActivityHarness;
+  /** Harness session id (Claude `sessionId` / Codex `session_meta.id` / loop `sessionId`). */
+  externalSessionId: string;
   /** ISO-8601 timestamp of when the tailer observed the URL. NOT the PR creation time. */
   observedAt: string;
 }

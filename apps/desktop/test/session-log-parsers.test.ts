@@ -35,16 +35,16 @@ function parseFixture(name: string): GitActivityEventInput[] {
 }
 
 function eventKey(e: {
-  sourceClient: string;
-  sourceSessionId: string;
+  harness: string;
+  externalSessionId: string;
   prUrl: string;
   prNumber: number;
   repoFullName: string;
   branchName: string | null;
 }): string {
   return [
-    e.sourceClient,
-    e.sourceSessionId,
+    e.harness,
+    e.externalSessionId,
     e.prUrl,
     e.prNumber,
     e.repoFullName,
@@ -88,7 +88,7 @@ describe("parseSessionLine — golden master against real-schema fixtures", () =
   test("every captured event carries a real (not fallback) session id", () => {
     for (const f of ["claude-code-session.jsonl", "codex-session.jsonl", "loop-pr-link.jsonl"]) {
       for (const e of parseFixture(f)) {
-        assert.match(e.sourceSessionId, /^fixture-(cc|codex|loop)-\d+$/);
+        assert.match(e.externalSessionId, /^fixture-(cc|codex|loop)-\d+$/);
       }
     }
   });
@@ -232,7 +232,7 @@ describe("real-schema parsing details", () => {
       state,
     );
     assert.equal(events.length, 1);
-    assert.equal(events[0].sourceSessionId, "real-codex-id");
+    assert.equal(events[0].externalSessionId, "real-codex-id");
   });
 });
 

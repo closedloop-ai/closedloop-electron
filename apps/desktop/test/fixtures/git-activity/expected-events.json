@@ -1,5 +1,5 @@
 {
-  "_comment": "Golden master for FEA-1226 parser tests. Each key is a fixture file; the array is the exact set of GitActivityEvents the parser MUST produce from it (order-independent). `id` and `observedAt` are omitted — they are derived. Files not listed (or listed empty) must produce ZERO events. See README.md for the signature-type matrix.",
+  "_comment": "Golden master for FEA-1226 parser tests. Each key is a fixture file; the array is the exact set of GitActivityEvents the parser MUST produce from it (order-independent). `id` and `observedAt` are omitted — they are derived. Field names (harness, externalSessionId, headSha) mirror symphony-alpha's AgentSession/PullRequestDetail/BranchDetail. Files not listed (or listed empty) must produce ZERO events. See README.md for the signature-type matrix.",
   "claude-code-session.jsonl": [
     {
       "type": "pr-link",
@@ -7,9 +7,9 @@
       "prNumber": 4821,
       "repoFullName": "loopco/desktop",
       "branchName": "feat/widget-polish",
-      "commitSha": null,
-      "sourceClient": "claude-code",
-      "sourceSessionId": "fixture-cc-001"
+      "headSha": null,
+      "harness": "claude-code",
+      "externalSessionId": "fixture-cc-001"
     },
     {
       "type": "pr-link",
@@ -17,9 +17,9 @@
       "prNumber": 77,
       "repoFullName": "loopco/api",
       "branchName": "fix/login-bug",
-      "commitSha": null,
-      "sourceClient": "claude-code",
-      "sourceSessionId": "fixture-cc-001"
+      "headSha": null,
+      "harness": "claude-code",
+      "externalSessionId": "fixture-cc-001"
     }
   ],
   "codex-session.jsonl": [
@@ -29,9 +29,9 @@
       "prNumber": 512,
       "repoFullName": "loopco/desktop",
       "branchName": "feat/sync-engine",
-      "commitSha": null,
-      "sourceClient": "codex",
-      "sourceSessionId": "fixture-codex-001"
+      "headSha": null,
+      "harness": "codex",
+      "externalSessionId": "fixture-codex-001"
     },
     {
       "type": "pr-link",
@@ -39,9 +39,9 @@
       "prNumber": 88,
       "repoFullName": "loopco/api",
       "branchName": "fix/rate-limit",
-      "commitSha": null,
-      "sourceClient": "codex",
-      "sourceSessionId": "fixture-codex-001"
+      "headSha": null,
+      "harness": "codex",
+      "externalSessionId": "fixture-codex-001"
     }
   ],
   "loop-pr-link.jsonl": [
@@ -51,9 +51,9 @@
       "prNumber": 4821,
       "repoFullName": "loopco/desktop",
       "branchName": null,
-      "commitSha": null,
-      "sourceClient": "closedloop-loop",
-      "sourceSessionId": "fixture-loop-001"
+      "headSha": null,
+      "harness": "closedloop-loop",
+      "externalSessionId": "fixture-loop-001"
     },
     {
       "type": "pr-link",
@@ -61,9 +61,9 @@
       "prNumber": 88,
       "repoFullName": "loopco/api",
       "branchName": null,
-      "commitSha": null,
-      "sourceClient": "closedloop-loop",
-      "sourceSessionId": "fixture-loop-001"
+      "headSha": null,
+      "harness": "closedloop-loop",
+      "externalSessionId": "fixture-loop-001"
     },
     {
       "type": "pr-link",
@@ -71,9 +71,9 @@
       "prNumber": 512,
       "repoFullName": "loopco/desktop",
       "branchName": null,
-      "commitSha": null,
-      "sourceClient": "closedloop-loop",
-      "sourceSessionId": "fixture-loop-002"
+      "headSha": null,
+      "harness": "closedloop-loop",
+      "externalSessionId": "fixture-loop-002"
     }
   ],
   "negatives.jsonl": []

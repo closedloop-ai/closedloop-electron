@@ -4,7 +4,7 @@ import type {
   GitActivityAddResult,
   GitActivityEvent,
   GitActivityEventInput,
-  GitActivitySourceClient,
+  GitActivityHarness,
 } from "../shared/git-activity-types.js";
 
 export type { GitActivityEventInput };
@@ -79,8 +79,8 @@ export class GitActivityStore {
       return "disabled";
     }
     const id = computeEventId(
-      input.sourceClient,
-      input.sourceSessionId,
+      input.harness,
+      input.externalSessionId,
       input.prUrl,
     );
     if (this.events.some((e) => e.id === id)) {
@@ -151,12 +151,12 @@ export class GitActivityStore {
 
 /** Exposed for parsers/tests that want to predict the id of an event. */
 export function computeEventId(
-  sourceClient: GitActivitySourceClient,
-  sourceSessionId: string,
+  harness: GitActivityHarness,
+  externalSessionId: string,
   prUrl: string,
 ): string {
   return createHash("sha256")
-    .update(`${sourceClient}|${sourceSessionId}|${prUrl}`)
+    .update(`${harness}|${externalSessionId}|${prUrl}`)
     .digest("hex")
     .slice(0, 16);
 }

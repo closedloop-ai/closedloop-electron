@@ -34,9 +34,9 @@ function makeEvent(overrides: Partial<GitActivityEventInput> = {}): GitActivityE
     prNumber: 42,
     repoFullName: "closedloop-ai/closedloop-electron",
     branchName: "feature/something",
-    commitSha: "abc1234",
-    sourceClient: "claude-code",
-    sourceSessionId: "session-abc",
+    headSha: "abc1234",
+    harness: "claude-code",
+    externalSessionId: "session-abc",
     ...overrides,
   };
 }
@@ -61,7 +61,7 @@ describe("GitActivityStore add()", () => {
     assert.equal(observed, 1);
   });
 
-  test("returns 'duplicate' on second add with same (sourceClient, sourceSessionId, prUrl)", () => {
+  test("returns 'duplicate' on second add with same (harness, externalSessionId, prUrl)", () => {
     const store = createStore("dedup");
     store.setEnabled(true);
     store.add(makeEvent());
@@ -76,15 +76,15 @@ describe("GitActivityStore add()", () => {
   test("treats the same PR in different sessions as distinct events", () => {
     const store = createStore("multi-session");
     store.setEnabled(true);
-    store.add(makeEvent({ sourceSessionId: "session-a" }));
-    store.add(makeEvent({ sourceSessionId: "session-b" }));
+    store.add(makeEvent({ externalSessionId: "session-a" }));
+    store.add(makeEvent({ externalSessionId: "session-b" }));
     assert.equal(store.list().length, 2);
   });
 
   test("derives a stable id matching computeEventId()", () => {
     const store = createStore("id-stable");
     store.setEnabled(true);
-    store.add(makeEvent({ sourceSessionId: "sess-fixed" }));
+    store.add(makeEvent({ externalSessionId: "sess-fixed" }));
     const event = store.list()[0];
     const expected = computeEventId(
       "claude-code",

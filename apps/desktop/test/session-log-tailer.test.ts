@@ -92,7 +92,7 @@ describe("SessionLogTailer — initial scan over real-schema fixtures", () => {
     assert.equal(events.length, 7, `got: ${events.map((e) => e.prUrl).join(", ")}`);
 
     const byClient: Record<string, number> = {};
-    for (const e of events) byClient[e.sourceClient] = (byClient[e.sourceClient] ?? 0) + 1;
+    for (const e of events) byClient[e.harness] = (byClient[e.harness] ?? 0) + 1;
     assert.equal(byClient["claude-code"], 2);
     assert.equal(byClient["codex"], 2);
     assert.equal(byClient["closedloop-loop"], 3);
