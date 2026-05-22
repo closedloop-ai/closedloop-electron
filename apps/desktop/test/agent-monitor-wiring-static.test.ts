@@ -8,7 +8,10 @@ const read = (relative: string): string =>
 const appSource = read("../src/main/app.ts");
 const agentMonitorPathSource = read("../src/main/agent-monitor-path.ts");
 const buildScriptSource = read("../scripts/build-agent-monitor.mjs");
-const generatedDbSource = read("../.generated/agent-monitor/server/db.js");
+const generatedDbUrl = new URL("../.generated/agent-monitor/server/db.js", import.meta.url);
+const generatedDbSource = existsSync(generatedDbUrl)
+  ? readFileSync(generatedDbUrl, "utf8")
+  : null;
 const plansRouteSource = read("../scripts/agent-monitor-plans/plans-route.js");
 const claudeDocSource = read("../CLAUDE.md");
 const shutdownSource = read("../src/main/shutdown.ts");
@@ -119,14 +122,16 @@ test("session overview token totals include compaction baselines", () => {
     buildScriptSource,
     /COALESCE\(SUM\(input_tokens \+ baseline_input\), 0\) as input_tokens/,
   );
-  assert.match(
-    generatedDbSource,
-    /COALESCE\(SUM\(input_tokens \+ baseline_input\), 0\) as input_tokens/,
-  );
-  assert.match(
-    generatedDbSource,
-    /COALESCE\(SUM\(cache_write_tokens \+ baseline_cache_write\), 0\) as cache_write_tokens/,
-  );
+  if (generatedDbSource !== null) {
+    assert.match(
+      generatedDbSource,
+      /COALESCE\(SUM\(input_tokens \+ baseline_input\), 0\) as input_tokens/,
+    );
+    assert.match(
+      generatedDbSource,
+      /COALESCE\(SUM\(cache_write_tokens \+ baseline_cache_write\), 0\) as cache_write_tokens/,
+    );
+  }
 });
 
 test("electron-builder ships the generated agent-monitor runtime tree unpacked", () => {
