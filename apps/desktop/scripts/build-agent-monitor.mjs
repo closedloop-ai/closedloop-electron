@@ -60,6 +60,7 @@ const generatedSessionsRoute = path.join(
   "sessions.js",
 );
 const generatedDbFile = path.join(generatedRootDir, "server", "db.js");
+const generatedCompatSqlite = path.join(generatedRootDir, "server", "compat-sqlite.js");
 const generatedHooksRoute = path.join(
   generatedRootDir,
   "server",
@@ -429,6 +430,7 @@ function currentStamp() {
     sourceSessionsRoute,
     sourceHooksRoute,
     sourceDbFile,
+    sourceCompatSqlite,
     sourcePushLib,
     sourceClientIndex,
     fileURLToPath(import.meta.url),
@@ -610,6 +612,9 @@ function materializeRuntimeTree() {
   patchDbFile(generatedDbFile);
   patchPricingRoute(generatedPricingRoute);
   patchHooksRoute(generatedHooksRoute);
+  patchCompatSqliteBeginImmediate(generatedCompatSqlite);
+  patchHooksTranscriptOutsideTx(generatedHooksRoute);
+  patchHooksWriteQueueAndWatchdog(generatedHooksRoute);
   patchImportRoute(generatedImportRoute);
   patchPushFile(generatedPushLib);
   patchWebSocketFile(generatedWebSocketFile);
@@ -1620,6 +1625,420 @@ function patchHooksRoute(file) {
   writeFileSync(file, source, "utf8");
 }
 
+// CLOSEDLOOP FEA-1363: Fix SQLite write contention under 22+ concurrent agents.
+// Three patches below address five compounding SQLite problems that cause the
+// agent monitor dashboard to corrupt when many agents fire hooks simultaneously.
+
+// Patch 1/3: Use BEGIN IMMEDIATE instead of DEFERRED in the compat-sqlite
+// transaction wrapper. DEFERRED lets two transactions both succeed at BEGIN,
+// then deadlock upgrading to a write lock. IMMEDIATE acquires upfront so
+// busy_timeout can serialize properly.
+function patchCompatSqliteBeginImmediate(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes('"BEGIN IMMEDIATE"')) return;
+  const needle = 'db.exec("BEGIN");';
+  if (!source.includes(needle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected db.exec("BEGIN") anchor (FEA-1363).`,
+    );
+  }
+  source = source.replace(needle, 'db.exec("BEGIN IMMEDIATE");');
+  writeFileSync(file, source, "utf8");
+}
+
+// Patch 2/3: Move transcript disk I/O outside the SQLite write transaction.
+// transcriptCache.extract() does synchronous file reads (50-200ms) while holding
+// the write lock, blocking all other hook events. This patch:
+//   a) Extracts processEventCore as an unwrapped function accepting pre-computed
+//      transcriptData
+//   b) Re-creates processEvent as db.transaction(processEventCore) for compat
+//   c) Moves transcript extraction to the POST handler call site, before the tx
+function patchHooksTranscriptOutsideTx(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("processEventCore")) return;
+
+  // (a) Unwrap processEvent into processEventCore
+  const sigNeedle = "const processEvent = db.transaction((hookType, data) => {";
+  if (!source.includes(sigNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected processEvent signature anchor (FEA-1363).`,
+    );
+  }
+  source = source.replace(
+    sigNeedle,
+    "function processEventCore(hookType, data, transcriptData) {",
+  );
+
+  // (b) Use pre-computed transcriptData instead of extracting inside the tx
+  const extractNeedle = [
+    "  if (data.transcript_path) {",
+    "    const result = transcriptCache.extract(data.transcript_path);",
+  ].join("\n");
+  if (!source.includes(extractNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected transcriptCache.extract anchor inside processEvent (FEA-1363).`,
+    );
+  }
+  source = source.replace(extractNeedle, [
+    "  if (transcriptData) {",
+    "    const result = transcriptData;",
+  ].join("\n"));
+
+  // (c) Close the unwrapped function + re-create transaction-wrapped version
+  const closeNeedle = [
+    '  broadcast("new_event", event);',
+    "  return event;",
+    "});",
+  ].join("\n");
+  if (!source.includes(closeNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected processEvent closing anchor (FEA-1363).`,
+    );
+  }
+  source = source.replace(closeNeedle, [
+    '  broadcast("new_event", event);',
+    "  return event;",
+    "}",
+    "const processEvent = db.transaction(processEventCore);",
+  ].join("\n"));
+
+  // (d) Pre-compute transcript data at the POST handler call site
+  const callNeedle = "  const result = processEvent(hook_type, data);";
+  if (!source.includes(callNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected processEvent call site anchor (FEA-1363).`,
+    );
+  }
+  source = source.replace(callNeedle, [
+    "  let transcriptData = null;",
+    "  if (data.transcript_path) {",
+    "    transcriptData = transcriptCache.extract(data.transcript_path);",
+    "  }",
+    "  const result = processEvent(hook_type, data, transcriptData);",
+  ].join("\n"));
+
+  writeFileSync(file, source, "utf8");
+}
+
+// Patch 3/3: Add write queue for batching + wrap watchdog in a transaction.
+//   a) Adds a setImmediate-based write queue that coalesces hook events arriving
+//      in the same event-loop tick into a single batched transaction, reducing
+//      lock contention ~20x under 22+ concurrent agents
+//   b) Wraps the watchdog's read-check-write cycle in a single transaction so
+//      a hook event committed between read and write can't cause stale decisions
+function patchHooksWriteQueueAndWatchdog(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("hookWriteQueue")) return;
+
+  // (a) Insert write queue infrastructure before the POST handler
+  const postNeedle = 'router.post("/event", (req, res) => {';
+  if (!source.includes(postNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected router.post("/event") anchor (FEA-1363).`,
+    );
+  }
+  source = source.replace(postNeedle, [
+    "// FEA-1363: Write queue coalesces concurrent hook events into batched transactions.",
+    "const hookWriteQueue = [];",
+    "let hookDrainScheduled = false;",
+    "",
+    "function enqueueHookEvent(hookType, data, transcriptData, planCapture) {",
+    "  hookWriteQueue.push({ hookType, data, transcriptData, planCapture });",
+    "  if (!hookDrainScheduled) {",
+    "    hookDrainScheduled = true;",
+    "    setImmediate(drainHookQueue);",
+    "  }",
+    "}",
+    "",
+    "function drainHookQueue() {",
+    "  hookDrainScheduled = false;",
+    "  const batch = hookWriteQueue.splice(0);",
+    "  if (batch.length === 0) return;",
+    "  try {",
+    "    db.transaction(() => {",
+    "      for (const item of batch) {",
+    "        try {",
+    "          processEventCore(item.hookType, item.data, item.transcriptData);",
+    "        } catch (err) {",
+    '          console.warn("[hooks] batch event failed:", item.hookType, err?.message || err);',
+    "        }",
+    "      }",
+    "    })();",
+    "  } catch (err) {",
+    '    console.warn("[hooks] batch transaction failed:", err?.message || err);',
+    "    return;",
+    "  }",
+    "  for (const item of batch) {",
+    "    if (item.planCapture) {",
+    "      try {",
+    "        const planResult = upsertPlanCapture(db, item.planCapture);",
+    "        if (planResult && !planResult.deduped) {",
+    '          broadcast("plan_captured", {',
+    "            plan_id: planResult.planId,",
+    "            version: planResult.version,",
+    "            session_id: item.planCapture.created_from_session_id,",
+    "          });",
+    "        }",
+    "      } catch (e) {",
+    '        console.warn("[plans] batch plan capture failed:", e && e.message);',
+    "      }",
+    "    }",
+    "    if (item.hookType === \"SubagentStop\" && item.data.session_id && item.data.transcript_path) {",
+    "      scanAndImportSubagents(dbModule, item.data.session_id, item.data.transcript_path)",
+    "        .then(({ created }) => {",
+    "          if (created > 0) {",
+    '            broadcast("new_event", {',
+    "              session_id: item.data.session_id,",
+    "              agent_id: null,",
+    '              event_type: "SubagentJsonlImported",',
+    "              tool_name: null,",
+    "              summary: `Imported ${created} subagent record(s) from JSONL`,",
+    "              created_at: new Date().toISOString(),",
+    "            });",
+    "          }",
+    "        })",
+    "        .catch(() => {});",
+    "    }",
+    "  }",
+    "}",
+    "",
+    postNeedle,
+  ].join("\n"));
+
+  // (b) Replace the synchronous processEvent flow in the POST handler with
+  //     eager validation + enqueue + immediate response
+  const syncFlowNeedle = [
+    "",
+    "  let transcriptData = null;",
+    "  if (data.transcript_path) {",
+    "    transcriptData = transcriptCache.extract(data.transcript_path);",
+    "  }",
+    "  const result = processEvent(hook_type, data, transcriptData);",
+    "  if (!result) {",
+    "    return res.status(400).json({",
+    '      error: { code: "MISSING_SESSION", message: "session_id is required in data" },',
+    "    });",
+    "  }",
+    "  try {",
+    "    const capture = extractPlanFromHookEvent(hook_type, data);",
+    "    if (capture) {",
+    "      const planResult = upsertPlanCapture(db, capture);",
+    "      if (planResult && !planResult.deduped) {",
+    '        broadcast("plan_captured", {',
+    "          plan_id: planResult.planId,",
+    "          version: planResult.version,",
+    "          session_id: capture.created_from_session_id,",
+    "        });",
+    "      }",
+    "    }",
+    "  } catch (e) {",
+    '    console.warn("[plans] hook capture failed:", e && e.message);',
+    "  }",
+    "",
+    "",
+    '  res.json({ ok: true, event: result });',
+  ].join("\n");
+  if (!source.includes(syncFlowNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected synchronous processEvent flow anchor (FEA-1363).`,
+    );
+  }
+  source = source.replace(syncFlowNeedle, [
+    "",
+    "  if (!data.session_id) {",
+    "    return res.status(400).json({",
+    '      error: { code: "MISSING_SESSION", message: "session_id is required in data" },',
+    "    });",
+    "  }",
+    "  let transcriptData = null;",
+    "  if (data.transcript_path) {",
+    "    transcriptData = transcriptCache.extract(data.transcript_path);",
+    "  }",
+    "  let planCapture = null;",
+    "  try {",
+    "    planCapture = extractPlanFromHookEvent(hook_type, data);",
+    "  } catch (e) {",
+    '    console.warn("[plans] hook capture failed:", e && e.message);',
+    "  }",
+    "  enqueueHookEvent(hook_type, data, transcriptData, planCapture);",
+    "  res.json({ ok: true });",
+  ].join("\n"));
+
+  // (c) Remove the post-response SubagentStop block (now handled in drainHookQueue)
+  const subagentStopNeedle = [
+    "",
+    "  // After SubagentStop, scan the session's subagent JSONL files and ingest any",
+    "  // tool calls that aren't yet in the events table. Subagent tool_use blocks",
+    "  // never fire hooks on the parent session — this scan is the only path that",
+    "  // attributes them to the subagent's agent_id.",
+    '  if (hook_type === "SubagentStop" && data.session_id && data.transcript_path) {',
+    "    scanAndImportSubagents(dbModule, data.session_id, data.transcript_path)",
+    "      .then(({ created }) => {",
+    "        if (created > 0) {",
+    "          // Nudge SessionDetail to refetch — the page already debounces",
+    "          // bursts of new_event into a single paginated reload.",
+    '          broadcast("new_event", {',
+    "            session_id: data.session_id,",
+    "            agent_id: null,",
+    '            event_type: "SubagentJsonlImported",',
+    "            tool_name: null,",
+    "            summary: `Imported ${created} subagent record(s) from JSONL`,",
+    "            created_at: new Date().toISOString(),",
+    "          });",
+    "        }",
+    "      })",
+    "      .catch(() => {",
+    "        // non-fatal — partial JSONL during a live run is expected",
+    "      });",
+    "  }",
+  ].join("\n");
+  if (!source.includes(subagentStopNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected SubagentStop post-response anchor (FEA-1363).`,
+    );
+  }
+  source = source.replace(subagentStopNeedle, "");
+
+  // (d) Wrap watchdog read-check-write in a transaction with broadcasts after commit
+  const watchdogNeedle = "function watchdogCheck() {";
+  if (!source.includes(watchdogNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected watchdogCheck function anchor (FEA-1363).`,
+    );
+  }
+  // Replace the entire watchdog function body
+  const watchdogEndNeedle = [
+    "  } catch (err) {",
+    "    // Watchdog is best-effort — log but never crash the server",
+    '    console.warn("[WATCHDOG] Error during check:", err?.message || err);',
+    "  }",
+    "}",
+  ].join("\n");
+  if (!source.includes(watchdogEndNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected watchdogCheck closing anchor (FEA-1363).`,
+    );
+  }
+  const watchdogFull = source.substring(
+    source.indexOf(watchdogNeedle),
+    source.indexOf(watchdogEndNeedle) + watchdogEndNeedle.length,
+  );
+  source = source.replace(watchdogFull, [
+    "function watchdogCheck() {",
+    "  try {",
+    '    const os = require("os");',
+    '    const path = require("path");',
+    '    const fs = require("fs");',
+    "    const cutoff = new Date(Date.now() - STALE_THRESHOLD_MS).toISOString();",
+    "    const staleSessions = db",
+    "      .prepare(",
+    "        `SELECT s.id, s.status, s.cwd,",
+    "                (SELECT MAX(e.created_at) FROM events e WHERE e.session_id = s.id) as last_event,",
+    "                (SELECT e.data FROM events e WHERE e.session_id = s.id",
+    "                 AND e.event_type IN ('SessionStart','UserPromptSubmit','PreToolUse','Stop','Notification')",
+    "                 ORDER BY e.created_at DESC LIMIT 1) as last_data",
+    "         FROM sessions s",
+    "         WHERE s.status = 'active' AND s.updated_at < ?`",
+    "      )",
+    "      .all(cutoff);",
+    "",
+    "    // Phase 1: Extract transcripts outside the transaction (disk I/O)",
+    "    const sessionsWithErrors = [];",
+    "    for (const sess of staleSessions) {",
+    "      let tPath = null;",
+    "      if (sess.last_data) {",
+    "        try {",
+    "          tPath = JSON.parse(sess.last_data).transcript_path;",
+    "        } catch {}",
+    "      }",
+    "      if (!tPath && sess.cwd) {",
+    '        const slug = sess.cwd.replace(/[\\/\\.]/g, "-");',
+    '        const candidate = path.join(os.homedir(), ".claude", "projects", slug, `${sess.id}.jsonl`);',
+    "        if (fs.existsSync(candidate)) tPath = candidate;",
+    "      }",
+    "      if (!tPath) continue;",
+    "      const result = transcriptCache.extract(tPath);",
+    "      if (!result || !result.errors || result.errors.length === 0) continue;",
+    "      sessionsWithErrors.push({ sess, result });",
+    "    }",
+    "    if (sessionsWithErrors.length === 0) return;",
+    "",
+    "    // Phase 2: Atomic read-check-write inside a single transaction",
+    "    const pendingBroadcasts = [];",
+    "    db.transaction(() => {",
+    "      for (const { sess, result } of sessionsWithErrors) {",
+    "        const existingErrorCount = db",
+    "          .prepare(",
+    '            "SELECT COUNT(*) as cnt FROM events WHERE session_id = ? AND event_type = \'APIError\'"',
+    "          )",
+    "          .get(sess.id).cnt;",
+    "        const mainAgent = db",
+    '          .prepare("SELECT * FROM agents WHERE session_id = ? AND type = \'main\' LIMIT 1")',
+    "          .get(sess.id);",
+    "        const mainAgentId = mainAgent?.id ?? null;",
+    "",
+    "        if (existingErrorCount < result.errors.length) {",
+    "          const existingSummaries = new Set(",
+    "            db",
+    "              .prepare(`SELECT summary FROM events WHERE session_id = ? AND event_type = 'APIError'`)",
+    "              .all(sess.id)",
+    "              .map((r) => r.summary)",
+    "          );",
+    "",
+    "          let newErrorRecorded = false;",
+    "          for (const apiErr of result.errors) {",
+    "            const summary = `${apiErr.type}: ${apiErr.message}`;",
+    "            if (existingSummaries.has(summary)) continue;",
+    "            stmts.insertEvent.run(",
+    "              sess.id,",
+    "              mainAgentId,",
+    '              "APIError",',
+    "              null,",
+    "              summary,",
+    "              JSON.stringify(apiErr)",
+    "            );",
+    '            pendingBroadcasts.push(["new_event", {',
+    "              session_id: sess.id,",
+    "              agent_id: mainAgentId,",
+    '              event_type: "APIError",',
+    "              tool_name: null,",
+    "              summary,",
+    "              created_at: apiErr.timestamp || new Date().toISOString(),",
+    "            }]);",
+    "            newErrorRecorded = true;",
+    "          }",
+    "",
+    "          if (newErrorRecorded) {",
+    "            const curSession = stmts.getSession.get(sess.id);",
+    '            if (curSession && curSession.status === "active") {',
+    '              stmts.updateSession.run(null, "error", null, null, sess.id);',
+    '              pendingBroadcasts.push(["session_updated", stmts.getSession.get(sess.id)]);',
+    "            }",
+    '            if (mainAgent && mainAgent.status !== "completed" && mainAgent.status !== "error") {',
+    '              stmts.updateAgent.run(null, "error", null, null, null, null, mainAgentId);',
+    "              if (mainAgentId) {",
+    "                stmts.clearAgentAwaitingInput.run(mainAgentId);",
+    '                pendingBroadcasts.push(["agent_updated", stmts.getAgent.get(mainAgentId)]);',
+    "              }",
+    "            }",
+    "          }",
+    "        }",
+    "      }",
+    "    })();",
+    "",
+    "    // Phase 3: Broadcast after commit",
+    "    for (const [event, data] of pendingBroadcasts) {",
+    "      broadcast(event, data);",
+    "    }",
+    "  } catch (err) {",
+    '    console.warn("[WATCHDOG] Error during check:", err?.message || err);',
+    "  }",
+    "}",
+  ].join("\n"));
+
+  writeFileSync(file, source, "utf8");
+}
+
 // CLOSEDLOOP FEA-1334: expose cold-start ingest progress so the desktop
 // renderer can show a floating "catching up on agent history" card on every
 // launch. The ingest orchestrator writes into the ingest-progress singleton;
@@ -2621,6 +3040,36 @@ function assertGeneratedTree() {
   ) {
     throw new Error(
       "Generated server/routes/hooks.js is missing the live hook plan capture wiring (FEA-1189).",
+    );
+  }
+
+  // CLOSEDLOOP FEA-1363: SQLite write contention fix hard-gates. A future
+  // upstream bump that breaks an anchor must fail the build, not silently
+  // revert to the contention-prone code paths.
+  const compatSqliteSource = readFileSync(generatedCompatSqlite, "utf8");
+  if (!compatSqliteSource.includes('"BEGIN IMMEDIATE"')) {
+    throw new Error(
+      "Generated server/compat-sqlite.js is missing BEGIN IMMEDIATE (FEA-1363).",
+    );
+  }
+  if (!hooksRouteSource.includes("processEventCore")) {
+    throw new Error(
+      "Generated server/routes/hooks.js is missing processEventCore extraction (FEA-1363).",
+    );
+  }
+  if (!hooksRouteSource.includes("hookWriteQueue")) {
+    throw new Error(
+      "Generated server/routes/hooks.js is missing the write queue (FEA-1363).",
+    );
+  }
+  if (!hooksRouteSource.includes("drainHookQueue")) {
+    throw new Error(
+      "Generated server/routes/hooks.js is missing drainHookQueue (FEA-1363).",
+    );
+  }
+  if (!hooksRouteSource.includes("pendingBroadcasts")) {
+    throw new Error(
+      "Generated server/routes/hooks.js is missing watchdog transaction wrapping (FEA-1363).",
     );
   }
 
