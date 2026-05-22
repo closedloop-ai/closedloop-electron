@@ -68,6 +68,10 @@ test("pnpm-managed agent-monitor source packages are declared and wired into bui
     "node scripts/build-agent-monitor.mjs",
   );
   assert.match(desktopPkg.scripts.build ?? "", /pnpm build:agent-monitor/);
+  assert.match(
+    desktopPkg.scripts.start ?? "",
+    /pnpm build:agent-monitor/,
+  );
   assert.equal(
     desktopPkg.dependencies["agent-dashboard"],
     "github:hoangsonww/Claude-Code-Agent-Monitor#840c518d7fa69231de049e41b893938228b67e40",
