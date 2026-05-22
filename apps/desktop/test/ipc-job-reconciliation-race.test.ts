@@ -8,13 +8,16 @@
  * persists STOPPED to the JobStore, causing the live-exit finalizer to post a
  * PROCESS_STOPPED error instead of a COMPLETED event.
  *
- * The fix has two parts:
+ * The fix has three parts:
  *   1. onceComplete persists exitCode synchronously before the first await,
  *      "claiming" the job for the live-exit handler.
  *   2. The IPC handler skips reconciliation for jobs with exitCode already set.
+ *   3. A pending-exit marker suppresses STOPPED before the detached child's
+ *      Node exit event has been delivered.
  */
 
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -22,10 +25,16 @@ import { afterEach, test } from "node:test";
 import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { JobStore, isTerminalJobStatus, type LocalJob } from "../src/main/job-store.js";
 import { enrichJobSnapshot } from "../src/server/operations/symphony-job-snapshot.js";
+import {
+  clearPendingLoopExit,
+  registerPendingLoopExit,
+} from "../src/server/operations/symphony-loop-lifecycle.js";
 
 let tempDirs: string[] = [];
 
 afterEach(() => {
+  clearPendingLoopExit("loop-race-1");
+  clearPendingLoopExit("loop-short-lived-detached");
   for (const dir of tempDirs.splice(0)) {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -138,6 +147,24 @@ test("IPC reconciliation sets STOPPED for dead process with no exitCode (orphane
     "without exitCode, reconciliation should proceed normally");
 });
 
+test("IPC reconciliation keeps pending-exit dead process running until exit handler claims it", async () => {
+  const { store } = makeTempJobStore("race-pending-exit");
+  const job = makeRunningJob();
+  store.upsert(job);
+  registerPendingLoopExit(job.loopId);
+
+  const snapshot = await enrichJobSnapshot(job);
+  assert.equal(snapshot.status, "RUNNING");
+  assert.equal(snapshot.processRunning, false);
+
+  const result = simulateIpcReconciliation(store, [snapshot]);
+  assert.equal(result.length, 1);
+  assert.equal(result[0]?.status, "RUNNING");
+
+  const afterReconcile = store.getByLoopId("loop-race-1");
+  assert.equal(afterReconcile?.status, "RUNNING");
+});
+
 test("IPC reconciliation sets CANCELLED for dead CANCEL_PENDING job with no exitCode", async () => {
   const { store } = makeTempJobStore("race-cancel-pending");
   const job = makeRunningJob({ status: "CANCEL_PENDING" });
@@ -198,4 +225,77 @@ test("IPC reconciliation passes through non-terminal snapshots", async () => {
   const result = simulateIpcReconciliation(store, [snapshot]);
   assert.equal(result.length, 1, "still-running job should be in the result");
   assert.equal(result[0]?.status, "RUNNING");
+});
+
+test("short-lived detached child never snapshots as STOPPED before exitCode claim", async () => {
+  const { store } = makeTempJobStore("race-short-lived-detached");
+  const loopId = "loop-short-lived-detached";
+  const child = spawn(process.execPath, ["-e", ""], {
+    detached: true,
+    stdio: "ignore",
+  });
+  const pid = child.pid;
+  assert.equal(typeof pid, "number");
+
+  const now = new Date().toISOString();
+  const job: LocalJob = {
+    id: loopId,
+    kind: "SYMPHONY_LOOP",
+    loopId,
+    command: LoopCommand.Plan,
+    status: "RUNNING",
+    pid,
+    startedAt: now,
+    updatedAt: now,
+  };
+  store.upsert(job);
+  registerPendingLoopExit(loopId);
+
+  let exitDelivered = false;
+  let exitCode: number | null = null;
+  child.on("exit", (code) => {
+    exitDelivered = true;
+    exitCode = code;
+  });
+
+  const statuses: LocalJob["status"][] = [];
+  try {
+    for (let i = 0; i < 500 && !exitDelivered; i += 1) {
+      const snapshot = await enrichJobSnapshot(job);
+      statuses.push(snapshot.status);
+      assert.notEqual(snapshot.status, "STOPPED");
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      if (exitDelivered) {
+        resolve();
+        return;
+      }
+      const timeout = setTimeout(() => {
+        reject(new Error("Timed out waiting for detached child exit"));
+      }, 5_000);
+      child.once("exit", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+
+    const claimed = store.getByLoopId(loopId);
+    assert.ok(claimed);
+    store.upsert({
+      ...claimed,
+      exitCode: exitCode ?? 0,
+      updatedAt: new Date().toISOString(),
+    });
+    clearPendingLoopExit(loopId);
+
+    const afterClaim = await enrichJobSnapshot(store.getByLoopId(loopId)!);
+    assert.equal(afterClaim.status, "STOPPED");
+    simulateIpcReconciliation(store, [afterClaim]);
+    assert.equal(store.getByLoopId(loopId)?.status, "RUNNING");
+    assert.ok(statuses.length > 0, "test must poll at least once before exit claim");
+  } finally {
+    clearPendingLoopExit(loopId);
+  }
 });
