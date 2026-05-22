@@ -24,7 +24,7 @@ const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
 const { sessionIdFromRolloutPath } = require("./codex-home");
-const { toIso, safeJson, pushTurnDuration } = require("../agent-monitor-shared/parser-utils");
+const { pushTurnDuration, toIso, safeJson } = require("../agent-monitor-shared/parser-utils");
 
 const RESPONSE_ITEM_TYPES = new Set([
   "message",
@@ -131,7 +131,7 @@ async function parseRolloutFile(filePath) {
     return iso;
   };
 
-  const handleResponseItem = (p, iso) => {
+  const handleResponseItem = (p, iso, explicitIso) => {
     sawResponseItems = true;
     const itype = p.type;
     if (itype === "message") {
@@ -139,7 +139,7 @@ async function parseRolloutFile(filePath) {
       const text = extractText(p.content);
       if (role === "user") {
         userMessageCount++;
-        if (iso) pendingTurnStartedAt = iso;
+        if (explicitIso) pendingTurnStartedAt = explicitIso;
       } else {
         assistantMessageCount++;
         if (iso) messageTimestamps.push(iso);
@@ -192,7 +192,7 @@ async function parseRolloutFile(filePath) {
     }
   };
 
-  const handleEvent = (p, iso) => {
+  const handleEvent = (p, iso, explicitIso) => {
     const et = p.type;
     if (!et) return;
     // CLOSEDLOOP plan-extraction (FEA-1189): the strongest Codex plan signal —
@@ -213,7 +213,7 @@ async function parseRolloutFile(filePath) {
     }
     if (et === "user_message") {
       userMessageCount++;
-      if (iso) pendingTurnStartedAt = iso;
+      if (explicitIso) pendingTurnStartedAt = explicitIso;
     } else if (et === "agent_message" || et === "agent_message_delta") {
       if (et === "agent_message") {
         assistantMessageCount++;
@@ -271,7 +271,8 @@ async function parseRolloutFile(filePath) {
     }
     const c = classify(rec);
     if (!c) continue;
-    const iso = noteTs(c.ts) || lastTs;
+    const explicitIso = noteTs(c.ts);
+    const iso = explicitIso || lastTs;
 
     if (c.kind === "session_meta") {
       const p = c.p || {};
@@ -287,13 +288,13 @@ async function parseRolloutFile(filePath) {
       if (p.model) model = p.model; // authoritative
       if (!cwd && p.cwd) cwd = p.cwd;
     } else if (c.kind === "response_item") {
-      handleResponseItem(c.p || {}, iso);
+      handleResponseItem(c.p || {}, iso, explicitIso);
     } else if (c.kind === "event") {
-      handleEvent(c.p || {}, iso);
+      handleEvent(c.p || {}, iso, explicitIso);
     } else if (c.kind === "auto") {
       const p = c.p || {};
-      if (RESPONSE_ITEM_TYPES.has(p.type)) handleResponseItem(p, iso);
-      else handleEvent(p, iso);
+      if (RESPONSE_ITEM_TYPES.has(p.type)) handleResponseItem(p, iso, explicitIso);
+      else handleEvent(p, iso, explicitIso);
     }
   }
 

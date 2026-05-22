@@ -234,6 +234,14 @@ const PACK_CATALOG_CLIENT_PAGES = [
   "Sparkline",
 ];
 
+// CLOSEDLOOP engineer GitHub activity capture (FEA-1226): PR records captured
+// from session logs (command-gated to `gh pr create` output) into the shared
+// dashboard.db. Same materialization pattern as agent-monitor-plans —
+// pr-parsers + pull-request-store + pr-extractor into server/lib;
+// pull-requests-route.js into server/routes; PullRequests.tsx into the client.
+const prModulesDir = path.join(appDir, "scripts", "agent-monitor-pull-requests");
+const PR_MODULES = ["pr-parsers", "pull-request-store", "pr-extractor"];
+
 // CLOSEDLOOP embed integration: the agent monitor ships as an <iframe> inside
 // the desktop app. These ClosedLoop-authored files are copied over the
 // upstream client source before the Vite build — Layout.tsx adds embed mode
@@ -423,6 +431,9 @@ function currentStamp() {
     ...PACK_CATALOG_CLIENT_PAGES.map((p) =>
       path.join(packModulesDir, "client", `${p}.tsx`),
     ),
+    ...PR_MODULES.map((m) => path.join(prModulesDir, `${m}.js`)),
+    path.join(prModulesDir, "pull-requests-route.js"),
+    path.join(prModulesDir, "client", "PullRequests.tsx"),
     embedAppSource,
     embedLayoutSource,
     embedTailwindSource,
@@ -504,6 +515,14 @@ function materializeRuntimeTree() {
       path.join(generatedLibDir, `${m}.js`),
     );
   }
+  // CLOSEDLOOP engineer GitHub activity capture (FEA-1226): pr-parsers +
+  // pull-request-store + pr-extractor into server/lib alongside plan modules.
+  for (const m of PR_MODULES) {
+    cpSync(
+      path.join(prModulesDir, `${m}.js`),
+      path.join(generatedLibDir, `${m}.js`),
+    );
+  }
   cpSync(
     path.join(sourceRootDir, "scripts"),
     path.join(generatedRootDir, "scripts"),
@@ -540,7 +559,15 @@ function materializeRuntimeTree() {
     path.join(packModulesDir, "catalog-seed.json"),
     path.join(generatedLibDir, "catalog-seed.json"),
   );
+  // CLOSEDLOOP engineer GitHub activity capture (FEA-1226): the pull-requests
+  // HTTP route alongside the plans/packs routes. Reads the `pull_requests`
+  // table created by ensurePullRequestSchema.
+  cpSync(
+    path.join(prModulesDir, "pull-requests-route.js"),
+    path.join(generatedRootDir, "server", "routes", "pull-requests.js"),
+  );
   patchImportHistory(generatedImportHistory);
+  patchImportHistoryForPullRequests(generatedImportHistory);
   // CLOSEDLOOP token reconciliation fix: replace the subagent-only guard
   // with an unconditional writeSessionTokens call so non-Claude harnesses
   // can update token_usage on re-import. Must run AFTER patchImportHistory
@@ -934,6 +961,26 @@ function patchServerIndex(file) {
     );
   }
 
+  // CLOSEDLOOP engineer GitHub activity capture (FEA-1226): register the
+  // /api/pull-requests route (read surface for the Pull Requests page + tile).
+  if (!source.includes('require("./routes/pull-requests")')) {
+    const requireNeedle = 'const skillsRouter = require("./routes/skills");';
+    const openApiNeedle = '  app.get("/api/openapi.json", (_req, res) => {';
+    if (!source.includes(requireNeedle) || !source.includes(openApiNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the skills-router require / openapi anchors (pull-requests route, FEA-1226).`,
+      );
+    }
+    source = source.replace(
+      requireNeedle,
+      `${requireNeedle}\nconst pullRequestsRouter = require("./routes/pull-requests");`,
+    );
+    source = source.replace(
+      openApiNeedle,
+      `  app.use("/api/pull-requests", pullRequestsRouter);\n${openApiNeedle}`,
+    );
+  }
+
   // CLOSEDLOOP pack catalog (FEA-1314): register /api/catalog route + seed
   // the catalog table + kick off the first GitHub fetch at startup. The
   // fetch is async and best-effort — boot doesn't wait on it.
@@ -1212,6 +1259,31 @@ function patchDbFile(file) {
         '  require("./lib/catalog-store").ensureCatalogSchema(db);',
         "} catch (e) {",
         '  console.warn("[catalog] schema init failed:", e && e.message);',
+        "}",
+        "",
+        exportNeedle,
+      ].join("\n"),
+    );
+  }
+
+  // CLOSEDLOOP engineer GitHub activity capture (FEA-1226): ensure the
+  // `pull_requests` table exists at startup, regardless of route load order.
+  // Idempotent CREATE TABLE IF NOT EXISTS — never an ALTER migration.
+  if (!source.includes("ensurePullRequestSchema")) {
+    const exportNeedle =
+      "module.exports = { db, stmts, DB_PATH, DEFAULT_PRICING };";
+    if (!source.includes(exportNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the db module.exports tail (pull-request schema, FEA-1226).`,
+      );
+    }
+    source = source.replace(
+      exportNeedle,
+      [
+        "try {",
+        '  require("./lib/pull-request-store").ensurePullRequestSchema(db);',
+        "} catch (e) {",
+        '  console.warn("[pull-requests] schema init failed:", e && e.message);',
         "}",
         "",
         exportNeedle,
@@ -1566,6 +1638,59 @@ function patchImportHistoryMetaImported(file) {
   writeFileSync(file, source, "utf8");
 }
 
+// CLOSEDLOOP engineer GitHub activity capture (FEA-1226): two idempotent
+// patches to import-history.js — (1) expose the source JSONL path on the
+// normalized session object so the PR extractor can re-read it for
+// command-gating (the normalized object drops tool_result output); (2) extract
+// PRs in importSession, right after the FEA-1189 plan block. Runs after
+// patchImportHistory so the plan block is in place to anchor on.
+function patchImportHistoryForPullRequests(file) {
+  let source = readFileSync(file, "utf8");
+
+  // (1) parseSessionFile return — add sourceLogPath: filePath.
+  if (!source.includes("sourceLogPath: filePath")) {
+    const needle = "  return {\n    sessionId,\n    name: sessionName,";
+    if (!source.includes(needle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the parseSessionFile return head (sourceLogPath, FEA-1226).`,
+      );
+    }
+    source = source.replace(
+      needle,
+      "  return {\n    sessionId,\n    sourceLogPath: filePath,\n    name: sessionName,",
+    );
+  }
+
+  // (2) importSession — extract PRs after the FEA-1189 plan block.
+  if (!source.includes("FEA-1226 pull-request extraction")) {
+    const anchor =
+      "  } catch (e) { void e; /* plan extraction is best-effort; never blocks import */ }";
+    if (!source.includes(anchor)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the FEA-1189 plan block tail (PR extraction, FEA-1226).`,
+      );
+    }
+    const inject = [
+      anchor,
+      "  // FEA-1226 pull-request extraction — capture `gh pr create` PR URLs",
+      "  // from the session's raw JSONL into the pull_requests table. Runs once",
+      "  // per importSession; best-effort, never blocks import.",
+      "  try {",
+      '    const { extractPullRequestsFromSession } = require("../server/lib/pr-extractor");',
+      '    const { upsertPullRequest } = require("../server/lib/pull-request-store");',
+      "    for (const __pr of extractPullRequestsFromSession(session)) {",
+      "      try {",
+      "        upsertPullRequest(dbModule.db, __pr);",
+      "      } catch (e) { void e; /* idempotent dedup — non-fatal */ }",
+      "    }",
+      "  } catch (e) { void e; /* PR extraction is best-effort; never blocks import */ }",
+    ].join("\n");
+    source = source.replace(anchor, inject);
+  }
+
+  writeFileSync(file, source, "utf8");
+}
+
 // CLOSEDLOOP Codex support (Addition #6): surface the harness in the client
 // (Claude/Codex badge + filter). The client source comes from the pinned
 // pnpm package, so we string-patch it in place BEFORE `vite build` — the same
@@ -1634,6 +1759,14 @@ function patchClientSource() {
   cpSync(
     path.join(planModulesDir, "client", "closedloop-host-flags.ts"),
     path.join(sourceClientDir, "src", "lib", "closedloop-host-flags.ts"),
+  );
+  // CLOSEDLOOP engineer GitHub activity capture (FEA-1226): drop the Pull
+  // Requests page into the pinned client before Vite build. The route is
+  // declared in scripts/agent-monitor-embed/App.tsx; the Sidebar nav entry is
+  // added below via the declarative edits array.
+  cpSync(
+    path.join(prModulesDir, "client", "PullRequests.tsx"),
+    path.join(sourceClientDir, "src", "pages", "PullRequests.tsx"),
   );
   // CLOSEDLOOP pack-observability (FEA-1224): drop the four pack/skill/tool/
   // sub-agent pages into the pinned client before Vite build. Routes + NavLink
@@ -1947,6 +2080,25 @@ function patchClientSource() {
         "] as const;",
       ].join("\n"),
     },
+    // CLOSEDLOOP engineer GitHub activity capture (FEA-1226): one ungated
+    // top-level nav entry (Pull Requests). Runs after the FEA-1224 pack edits
+    // so the `Package` lucide import + the `/packs` nav row are present to
+    // anchor on.
+    {
+      rel: "src/components/Sidebar.tsx",
+      guard: "  GitPullRequest,",
+      find: '  Package,\n} from "lucide-react";',
+      replace: '  Package,\n  GitPullRequest,\n} from "lucide-react";',
+    },
+    {
+      rel: "src/components/Sidebar.tsx",
+      guard: 'to: "/pull-requests"',
+      find: '  { to: "/packs", icon: Package, key: "Packs" },',
+      replace: [
+        '  { to: "/packs", icon: Package, key: "Packs" },',
+        '  { to: "/pull-requests", icon: GitPullRequest, key: "Pull Requests" },',
+      ].join("\n"),
+    },
   ];
 
   for (const e of edits) {
@@ -2170,6 +2322,58 @@ function assertGeneratedTree() {
     throw new Error(
       "Generated server/routes/hooks.js is missing the live hook plan capture wiring (FEA-1189).",
     );
+  }
+
+  // CLOSEDLOOP engineer GitHub activity capture hard-gates (FEA-1226): a future
+  // upstream bump that breaks an anchor must fail the build, not silently drop
+  // PR capture.
+  for (const m of PR_MODULES) {
+    if (!existsSync(path.join(generatedRootDir, "server", "lib", `${m}.js`))) {
+      throw new Error(
+        `Generated server/lib/${m}.js missing (PR capture, FEA-1226).`,
+      );
+    }
+  }
+  if (
+    !existsSync(
+      path.join(generatedRootDir, "server", "routes", "pull-requests.js"),
+    )
+  ) {
+    throw new Error(
+      "Generated server/routes/pull-requests.js missing (PR capture, FEA-1226).",
+    );
+  }
+  if (!dbSource.includes("ensurePullRequestSchema")) {
+    throw new Error(
+      "Generated server/db.js is missing the pull-request schema init (FEA-1226).",
+    );
+  }
+  if (
+    !serverIndex.includes('require("./routes/pull-requests")') ||
+    !serverIndex.includes('app.use("/api/pull-requests", pullRequestsRouter)')
+  ) {
+    throw new Error(
+      "Generated server/index.js is missing the /api/pull-requests route wiring (FEA-1226).",
+    );
+  }
+  if (
+    !importHistorySource.includes("FEA-1226 pull-request extraction") ||
+    !importHistorySource.includes("sourceLogPath: filePath")
+  ) {
+    throw new Error(
+      "Generated scripts/import-history.js is missing the PR-capture sink or sourceLogPath (FEA-1226).",
+    );
+  }
+  {
+    const prSidebarSource = readFileSync(
+      path.join(sourceClientDir, "src", "components", "Sidebar.tsx"),
+      "utf8",
+    );
+    if (!prSidebarSource.includes('to: "/pull-requests"')) {
+      throw new Error(
+        "Patched client Sidebar.tsx is missing the /pull-requests nav entry (FEA-1226).",
+      );
+    }
   }
 
   // CLOSEDLOOP pack-observability hard-gates (FEA-1224): a future upstream
