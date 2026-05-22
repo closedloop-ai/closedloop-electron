@@ -532,7 +532,7 @@ test("FEA-1334 ingest orchestrator + progress card are wired into the build", ()
   // makes a cross-origin fetch to the sidecar.
   assert.match(preloadSource, /getAgentMonitorIngestProgress/);
   assert.match(appSource, /desktop:get-agent-monitor-ingest-progress/);
-  assert.match(indexHtml, /id="ingestProgressCard"/);
+  assert.match(indexHtml, /id="ingestBanner"/);
   assert.match(indexHtml, /getAgentMonitorIngestProgress/);
 });
 

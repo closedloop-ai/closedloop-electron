@@ -2839,98 +2839,101 @@
         overflow: hidden;
       }
 
-      /* ── Ingest progress card (FEA-1334) ──────────────────────────
-         Floating bottom-right card shown on every launch while the
-         agent-history backlog is imported. Lives outside the dashboard
-         iframe so it stays visible across every view. */
-      .ingest-card {
+      /* ── Ingest progress banner (FEA-1334) ────────────────────────
+         Full-width bar that slides in from the top edge while the app
+         imports agent-history backlog. Lives outside the dashboard
+         iframe and stays visible until the user dismisses it. */
+      .ingest-banner {
         position: fixed;
-        right: 18px;
-        bottom: 18px;
-        z-index: 1200;
-        width: 320px;
-        padding: 14px 16px;
+        top: 0;
+        left: 0;
+        right: 0;
+        z-index: 1300;
         background: var(--card);
         color: var(--card-foreground);
-        border: 1px solid var(--border);
-        border-radius: var(--radius);
-        box-shadow: 0 8px 28px oklch(0 0 0 / 0.22);
+        border-bottom: 1px solid var(--border);
+        box-shadow: 0 4px 18px oklch(0 0 0 / 0.18);
+        transform: translateY(-100%);
+        transition: transform 260ms ease;
         font-size: 13px;
-        animation: ingest-card-in 160ms ease-out;
       }
-      .ingest-card[hidden] {
-        display: none;
+      .ingest-banner.visible {
+        transform: translateY(0);
       }
-      @keyframes ingest-card-in {
-        from {
-          opacity: 0;
-          transform: translateY(8px);
-        }
-        to {
-          opacity: 1;
-          transform: translateY(0);
-        }
+      .ingest-banner-body {
+        padding: 10px 16px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
       }
-      .ingest-card-head {
+      .ingest-banner-line {
         display: flex;
         align-items: center;
-        justify-content: space-between;
-        gap: 8px;
-        margin-bottom: 10px;
+        gap: 12px;
       }
-      .ingest-card-title {
+      .ingest-banner-title {
         font-weight: 600;
+        white-space: nowrap;
       }
-      .ingest-card-dismiss {
+      .ingest-banner-count {
+        color: var(--muted-foreground);
+        font-variant-numeric: tabular-nums;
+        white-space: nowrap;
+      }
+      .ingest-banner-spacer {
+        flex: 1 1 auto;
+      }
+      .ingest-banner-dismiss {
         flex: none;
-        width: 20px;
-        height: 20px;
+        width: 22px;
+        height: 22px;
         display: flex;
         align-items: center;
         justify-content: center;
         border: 0;
-        border-radius: 4px;
+        border-radius: 5px;
         background: transparent;
         color: var(--muted-foreground);
         cursor: pointer;
-        font-size: 15px;
+        font-size: 16px;
         line-height: 1;
         padding: 0;
       }
-      .ingest-card-dismiss:hover {
+      .ingest-banner-dismiss:hover {
         background: var(--muted);
         color: var(--foreground);
       }
-      .ingest-bar {
-        height: 6px;
+      .ingest-track {
+        height: 8px;
         border-radius: 999px;
         background: var(--muted);
         overflow: hidden;
       }
-      .ingest-bar-fill {
+      .ingest-fill {
         height: 100%;
         width: 0%;
         border-radius: 999px;
         background: var(--primary);
-        transition: width 240ms ease;
+        transition: width 300ms ease;
       }
-      .ingest-card.ingest-done .ingest-bar-fill {
+      .ingest-banner.done .ingest-fill {
         background: var(--success);
       }
-      .ingest-count {
-        margin-top: 8px;
+      .ingest-banner-sub {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        flex-wrap: wrap;
         color: var(--muted-foreground);
-        font-variant-numeric: tabular-nums;
+        font-size: 12px;
       }
       .ingest-rail {
-        margin-top: 10px;
         display: flex;
         flex-wrap: wrap;
         gap: 6px;
       }
       .ingest-chip {
-        font-size: 11px;
-        padding: 2px 7px;
+        padding: 2px 8px;
         border-radius: 999px;
         background: var(--muted);
         color: var(--muted-foreground);
@@ -2942,6 +2945,10 @@
       .ingest-chip.done {
         background: var(--secondary);
         color: var(--secondary-foreground);
+      }
+      .ingest-banner-added {
+        font-weight: 600;
+        color: var(--foreground);
       }
     </style>
   </head>
@@ -3061,32 +3068,32 @@
         <p class="muted" id="onboardingMessage"></p>
       </div>
     </div>
-    <div
-      id="ingestProgressCard"
-      class="ingest-card"
-      hidden
-      role="status"
-      aria-live="polite"
-    >
-      <div class="ingest-card-head">
-        <span class="ingest-card-title" id="ingestTitle"
-          >Catching up on agent history</span
-        >
-        <button
-          type="button"
-          class="ingest-card-dismiss"
-          id="ingestDismiss"
-          title="Dismiss"
-          aria-label="Dismiss"
-        >
-          ×
-        </button>
+    <div id="ingestBanner" class="ingest-banner" role="status" aria-live="polite">
+      <div class="ingest-banner-body">
+        <div class="ingest-banner-line">
+          <span class="ingest-banner-title" id="ingestTitle"
+            >Importing your agent history…</span
+          >
+          <span class="ingest-banner-count" id="ingestCount"></span>
+          <span class="ingest-banner-spacer"></span>
+          <button
+            type="button"
+            class="ingest-banner-dismiss"
+            id="ingestDismiss"
+            title="Dismiss"
+            aria-label="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+        <div class="ingest-track">
+          <div class="ingest-fill" id="ingestBarFill"></div>
+        </div>
+        <div class="ingest-banner-sub">
+          <span class="ingest-rail" id="ingestHarnessRail"></span>
+          <span class="ingest-banner-added" id="ingestAdded"></span>
+        </div>
       </div>
-      <div class="ingest-bar">
-        <div class="ingest-bar-fill" id="ingestBarFill"></div>
-      </div>
-      <div class="ingest-count" id="ingestCount">Scanning…</div>
-      <div class="ingest-rail" id="ingestHarnessRail"></div>
     </div>
     <div class="app state-disconnected agent-view" id="appShell">
       <aside class="sidebar">
@@ -3981,79 +3988,81 @@
         }
       }
 
-      // ── Ingest progress card (FEA-1334) ────────────────────────────
+      // ── Ingest progress banner (FEA-1334) ──────────────────────────
       // Polls the agent-monitor sidecar's cold-start ingest progress and
-      // drives the floating bottom-right card. Runs on every launch,
-      // independent of which view is active, so the user always sees the
-      // app catching up on agent-history backlog.
-      (function setupIngestProgressCard() {
-        const card = document.getElementById("ingestProgressCard");
-        if (!card) return;
+      // drives the full-width top banner. Runs on every launch, independent
+      // of which view is active. The banner stays up until the user
+      // dismisses it; a fresh run (e.g. toggling Agent Dashboard in
+      // Settings, which restarts the sidecar) re-shows it.
+      (function setupIngestProgressBanner() {
+        const banner = document.getElementById("ingestBanner");
+        if (!banner) return;
         const titleEl = document.getElementById("ingestTitle");
         const barFill = document.getElementById("ingestBarFill");
         const countEl = document.getElementById("ingestCount");
         const railEl = document.getElementById("ingestHarnessRail");
+        const addedEl = document.getElementById("ingestAdded");
         const dismissBtn = document.getElementById("ingestDismiss");
 
-        const HARNESSES = [
-          ["codex", "Codex"],
-          ["cursor", "Cursor"],
-          ["copilot", "Copilot"],
-          ["opencode", "OpenCode"],
-        ];
-        const POLL_FAST_MS = 600;
+        // Render order for the per-harness chips; only harnesses present in
+        // the run are shown (Claude only appears on a first-run import).
+        const HARNESS_ORDER = ["claude", "codex", "cursor", "copilot", "opencode"];
+        const HARNESS_LABELS = {
+          claude: "Claude",
+          codex: "Codex",
+          cursor: "Cursor",
+          copilot: "Copilot",
+          opencode: "OpenCode",
+        };
+        const POLL_FAST_MS = 500;
         const POLL_WAIT_MS = 1500;
         const POLL_IDLE_MS = 5000;
         const GIVE_UP_MS = 120000;
 
         let pollTimer = null;
-        let hideTimer = null;
         let dismissed = false;
-        let sawRunning = false;
         let everConnected = false;
-        let currentRunId = null; // startedAt of the run the card is tracking
-        let toastedRunId = null; // startedAt of the run already toasted
+        let currentRunId = null; // startedAt of the run the banner tracks
         const startedAt = Date.now();
 
-        function stopPolling() {
-          if (pollTimer) {
-            clearTimeout(pollTimer);
-            pollTimer = null;
-          }
-        }
         function schedule(ms) {
-          stopPolling();
+          if (pollTimer) clearTimeout(pollTimer);
           pollTimer = setTimeout(tick, ms);
         }
         function fmt(n) {
           return (n || 0).toLocaleString();
         }
+        function show() {
+          banner.classList.add("visible");
+        }
+        function hide() {
+          banner.classList.remove("visible");
+        }
 
         function renderRail(snap) {
           railEl.innerHTML = "";
           const by = snap.byHarness || {};
-          for (const [key, label] of HARNESSES) {
+          for (const key of HARNESS_ORDER) {
             const h = by[key];
+            if (!h) continue;
             const chip = document.createElement("span");
             chip.className = "ingest-chip";
             let mark = "·";
-            if (h) {
-              if (h.complete) {
-                mark = "✓";
-                chip.classList.add("done");
-              } else if (h.parsed > 0) {
-                mark = "⟳";
-                chip.classList.add("active");
-              }
+            if (h.complete) {
+              mark = "✓";
+              chip.classList.add("done");
+            } else if (h.parsed > 0) {
+              mark = "⟳";
+              chip.classList.add("active");
             }
-            chip.textContent = mark + " " + label;
+            chip.textContent = mark + " " + (HARNESS_LABELS[key] || key);
             railEl.appendChild(chip);
           }
         }
 
         function renderRunning(snap) {
-          card.classList.remove("ingest-done");
-          titleEl.textContent = "Catching up on agent history";
+          banner.classList.remove("done");
+          titleEl.textContent = "Importing your agent history…";
           const total = snap.total || 0;
           const parsed = Math.min(snap.parsed || 0, total || snap.parsed || 0);
           const pct =
@@ -4061,23 +4070,28 @@
           barFill.style.width = pct + "%";
           countEl.textContent =
             total > 0
-              ? fmt(parsed) + " / " + fmt(total) + " sessions · " + pct + "%"
-              : "Scanning your agent history…";
+              ? fmt(parsed) + " / " + fmt(total) + " files · " + pct + "%"
+              : "Scanning for files…";
+          const imported = snap.imported || 0;
+          addedEl.textContent =
+            imported > 0 ? fmt(imported) + " new sessions added" : "";
           renderRail(snap);
         }
 
         function renderDone(snap) {
-          card.classList.add("ingest-done");
-          titleEl.textContent = "✓ Caught up";
+          banner.classList.add("done");
+          titleEl.textContent = "✓ Agent history imported";
           barFill.style.width = "100%";
           const imported = snap.imported || 0;
-          countEl.textContent =
+          const total = snap.total || 0;
+          countEl.textContent = fmt(total) + " files processed";
+          addedEl.textContent =
             imported > 0
-              ? "Imported " +
+              ? "Added " +
                 fmt(imported) +
                 " new session" +
                 (imported === 1 ? "" : "s")
-              : "Your agent history is up to date";
+              : "No new sessions — your history was already up to date";
           renderRail(snap);
         }
 
@@ -4094,7 +4108,6 @@
             // dashboard is disabled. Keep waiting; only give up if we never
             // reached it at all (a permanently-disabled dashboard).
             if (!everConnected && Date.now() - startedAt > GIVE_UP_MS) {
-              stopPolling();
               return;
             }
             schedule(POLL_WAIT_MS);
@@ -4103,61 +4116,43 @@
           everConnected = true;
           const runId = snap.startedAt || 0;
 
+          // Orchestrator has not begun yet — keep waiting quietly.
+          if (!snap.running && !snap.finishedAt) {
+            schedule(POLL_WAIT_MS);
+            return;
+          }
+
+          // A fresh run (new startedAt) — e.g. the sidecar was restarted via
+          // the Settings toggle — clears a prior dismissal so it shows again.
+          if (runId !== currentRunId) {
+            currentRunId = runId;
+            dismissed = false;
+          }
+
           if (snap.running) {
-            // A fresh run (new startedAt) — e.g. the sidecar was restarted
-            // from the Settings toggle — resets the card so it shows again.
-            if (runId !== currentRunId) {
-              currentRunId = runId;
-              dismissed = false;
-              sawRunning = false;
-              if (hideTimer) {
-                clearTimeout(hideTimer);
-                hideTimer = null;
-              }
-            }
-            sawRunning = true;
             if (!dismissed) {
-              card.hidden = false;
+              show();
               renderRunning(snap);
             }
             schedule(dismissed ? POLL_IDLE_MS : POLL_FAST_MS);
             return;
           }
 
-          // Not running, no finishedAt — orchestrator has not begun yet.
-          if (!snap.finishedAt) {
-            schedule(POLL_WAIT_MS);
-            return;
-          }
-
-          // Finished. Surface the caught-up toast once per run, as long as
-          // the orchestrator had agent history to look at — `total > 0`
-          // covers a small backlog that finished between polls. A machine
-          // with zero agent history shows nothing. Auto-fades after 6s.
-          const hadWork =
-            sawRunning || (snap.total || 0) > 0 || (snap.imported || 0) > 0;
-          if (hadWork && !dismissed && runId !== toastedRunId) {
-            toastedRunId = runId;
-            currentRunId = runId;
-            card.hidden = false;
+          // Finished. Keep the banner up (no auto-fade) until dismissed, as
+          // long as the orchestrator actually had agent history to process.
+          const hadWork = (snap.total || 0) > 0 || (snap.imported || 0) > 0;
+          if (hadWork && !dismissed) {
+            show();
             renderDone(snap);
-            if (hideTimer) clearTimeout(hideTimer);
-            hideTimer = setTimeout(() => {
-              card.hidden = true;
-            }, 6000);
           }
-          // Keep polling slowly so a later sidecar restart re-shows the card.
+          // Keep polling slowly so a later sidecar restart re-shows the bar.
           schedule(POLL_IDLE_MS);
         }
 
         dismissBtn.addEventListener("click", () => {
           dismissed = true;
-          card.hidden = true;
-          if (hideTimer) {
-            clearTimeout(hideTimer);
-            hideTimer = null;
-          }
-          // Keep polling (idle) so a future run still re-shows the card.
+          hide();
+          // Keep polling (idle) so a future run still re-shows the banner.
           schedule(POLL_IDLE_MS);
         });
 

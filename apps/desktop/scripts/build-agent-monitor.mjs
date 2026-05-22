@@ -685,13 +685,32 @@ function patchServerIndex(file) {
   );
   const importPatchLines = [
     "  try {",
+    "    // CLOSEDLOOP FEA-1334: a fresh/empty DB no longer matches the",
+    "    // persisted ingest caches — drop them so every harness re-parses in",
+    "    // full and reports an honest total to the progress bar.",
+    "    if (existingCount === 0) {",
+    "      try {",
+    '        require("./agent-monitor-shared/ingest-paths").clearIngestState();',
+    "      } catch (e) { void e; }",
+    "    }",
     '    const { ingestAllHarnesses } = require("./agent-monitor-shared/ingest-orchestrator");',
-    "    ingestAllHarnesses({",
-    "      dbModule: _dbMod,",
-    "      harnesses: [",
+    "    const _ingestHarnesses = [",
     ...orchestratorHarnessLines,
-    "      ],",
-    "    }).catch(() => {});",
+    "    ];",
+    "    // CLOSEDLOOP FEA-1334: on an empty DB the one-time Claude legacy",
+    "    // import is the bulk of the cold-start work — run it through the",
+    "    // orchestrator too so it shares the progress bar.",
+    "    if (existingCount === 0) {",
+    "      _ingestHarnesses.unshift({",
+    '        key: "claude",',
+    "        importAll: async (db, opts) => {",
+    "          const _r = await importAllSessions(db, opts);",
+    "          try { await backfillCompactions(db); } catch (e) { void e; }",
+    "          return _r;",
+    "        },",
+    "      });",
+    "    }",
+    "    ingestAllHarnesses({ dbModule: _dbMod, harnesses: _ingestHarnesses }).catch(() => {});",
     "  } catch (err) {",
     '    console.warn("ingest orchestrator failed to start:", err.message);',
     "  }",
@@ -811,6 +830,41 @@ function patchServerIndex(file) {
         '    console.warn("[plans] backfill failed:", e && e.message);',
         "  }",
         '  const existingCount = dbModule.db.prepare("SELECT COUNT(*) AS c FROM sessions").get().c;',
+      ].join("\n"),
+    );
+  }
+
+  // CLOSEDLOOP FEA-1334: the one-time Claude legacy import now runs through the
+  // ingest orchestrator (see the claude harness in the multi-harness block) so
+  // it shares the desktop progress bar. Remove the standalone fire-and-forget
+  // block so the same sessions are not imported twice.
+  if (source.includes("importAllSessions(dbModule)\n      .then(")) {
+    const legacyClaudeBlock = [
+      "  if (existingCount === 0) {",
+      "    importAllSessions(dbModule)",
+      "      .then(({ imported, skipped, errors }) => {",
+      "        if (imported > 0) console.log(`Imported ${imported} legacy sessions from ~/.claude/`);",
+      "        if (errors > 0) console.log(`${errors} session files had errors during import`);",
+      "      })",
+      "      .then(() => backfillCompactions(dbModule))",
+      "      .then(({ backfilled }) => {",
+      "        if (backfilled > 0)",
+      "          console.log(`Backfilled ${backfilled} compaction events from ~/.claude/`);",
+      "      })",
+      "      .catch(() => {});",
+      "  }",
+    ].join("\n");
+    if (!source.includes(legacyClaudeBlock)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the standalone Claude legacy-import block (FEA-1334).`,
+      );
+    }
+    source = source.replace(
+      legacyClaudeBlock,
+      [
+        "  // CLOSEDLOOP FEA-1334: the one-time Claude legacy import runs through",
+        "  // the ingest orchestrator below (the claude harness) so it shares the",
+        "  // desktop progress bar; the standalone import block was removed.",
       ].join("\n"),
     );
   }
@@ -1287,6 +1341,82 @@ function patchImportHistory(file) {
     "  } catch (e) { void e; /* plan extraction is best-effort; never blocks import */ }",
   ].join("\n");
   source = source.replace(needle, inject);
+
+  // CLOSEDLOOP FEA-1334: give importAllSessions optional progress hooks so the
+  // first-run Claude legacy import drives the desktop ingest progress bar.
+  // Other callers (CLI mode, the /api/import rescan route) omit `opts` and are
+  // unaffected.
+  if (!source.includes("FEA-1334 progress hooks")) {
+    const headNeedle = [
+      "async function importAllSessions(dbModule) {",
+      "  if (!fs.existsSync(PROJECTS_DIR)) return { imported: 0, skipped: 0, errors: 0 };",
+      "",
+      "  const projectDirs = fs",
+      "    .readdirSync(PROJECTS_DIR, { withFileTypes: true })",
+      "    .filter((d) => d.isDirectory())",
+      "    .map((d) => d.name);",
+    ].join("\n");
+    if (!source.includes(headNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the importAllSessions head (FEA-1334 progress hooks).`,
+      );
+    }
+    source = source.replace(
+      headNeedle,
+      [
+        "async function importAllSessions(dbModule, opts = {}) {",
+        "  // FEA-1334 progress hooks — optional; the importer is unchanged when omitted.",
+        '  const _onBegin = opts && typeof opts.onBegin === "function" ? opts.onBegin : null;',
+        '  const _onProgress = opts && typeof opts.onProgress === "function" ? opts.onProgress : null;',
+        "  const _signal = opts && opts.signal ? opts.signal : null;",
+        "  if (!fs.existsSync(PROJECTS_DIR)) {",
+        "    if (_onBegin) _onBegin(0);",
+        "    return { imported: 0, skipped: 0, errors: 0 };",
+        "  }",
+        "",
+        "  const projectDirs = fs",
+        "    .readdirSync(PROJECTS_DIR, { withFileTypes: true })",
+        "    .filter((d) => d.isDirectory())",
+        "    .map((d) => d.name);",
+        "",
+        "  if (_onBegin) {",
+        "    let _total = 0;",
+        "    for (const _d of projectDirs) {",
+        "      try {",
+        "        _total += fs",
+        "          .readdirSync(path.join(PROJECTS_DIR, _d))",
+        '          .filter((f) => f.endsWith(".jsonl")).length;',
+        "      } catch (e) { void e; }",
+        "    }",
+        "    _onBegin(_total);",
+        "  }",
+      ].join("\n"),
+    );
+
+    const loopNeedle = [
+      "    const batch = [];",
+      "    for (const file of files) {",
+      "      try {",
+      "        const session = await parseSessionFile(path.join(projPath, file));",
+    ].join("\n");
+    if (!source.includes(loopNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the importAllSessions file loop (FEA-1334 progress hooks).`,
+      );
+    }
+    source = source.replace(
+      loopNeedle,
+      [
+        "    const batch = [];",
+        "    for (const file of files) {",
+        "      if (_signal && _signal.aborted) break;",
+        "      if (_onProgress) _onProgress();",
+        "      try {",
+        "        const session = await parseSessionFile(path.join(projPath, file));",
+      ].join("\n"),
+    );
+  }
+
   writeFileSync(file, source, "utf8");
 }
 
@@ -1775,6 +1905,22 @@ function assertGeneratedTree() {
   if (!serverIndex.includes("ingestAllHarnesses")) {
     throw new Error(
       "Generated server/index.js is missing the FEA-1334 ingest orchestrator wiring (ingestAllHarnesses).",
+    );
+  }
+  if (!serverIndex.includes('key: "claude"')) {
+    throw new Error(
+      "Generated server/index.js is missing the FEA-1334 Claude orchestrator harness.",
+    );
+  }
+  if (serverIndex.includes("legacy sessions from ~/.claude/")) {
+    throw new Error(
+      "Generated server/index.js still has the standalone Claude import block — FEA-1334 expects it removed (the orchestrator now runs it).",
+    );
+  }
+  const fea1334ImportHistory = readFileSync(generatedImportHistory, "utf8");
+  if (!fea1334ImportHistory.includes("FEA-1334 progress hooks")) {
+    throw new Error(
+      "Generated scripts/import-history.js is missing the FEA-1334 importAllSessions progress hooks.",
     );
   }
   const importRouteSource = readFileSync(generatedImportRoute, "utf8");

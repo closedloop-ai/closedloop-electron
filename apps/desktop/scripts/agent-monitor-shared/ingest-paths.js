@@ -8,6 +8,7 @@
  * absent (standalone runs, unit tests) we fall back to a temp directory so
  * callers never need a guard.
  */
+const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
@@ -33,4 +34,34 @@ function ingestCachePath(name) {
   return path.join(ingestStateDir(), `ingest-cache-${name}.json`);
 }
 
-module.exports = { ingestStateDir, ingestCachePath };
+/**
+ * Delete every persisted ingest cache (the per-source catchup caches and the
+ * OpenCode DB fingerprint). The caches record "this file is already imported
+ * into the dashboard DB" — if that DB is wiped or recreated, the caches are
+ * stale and would make the importers skip files that the fresh DB does not
+ * actually contain. Callers clear them whenever the DB starts empty so a
+ * fresh database always triggers a full re-parse. Best-effort.
+ */
+function clearIngestState() {
+  const dir = ingestStateDir();
+  let entries;
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return; // nothing persisted yet
+  }
+  for (const name of entries) {
+    if (
+      /^ingest-cache-.+\.json$/.test(name) ||
+      name === "ingest-opencode-fingerprint.txt"
+    ) {
+      try {
+        fs.rmSync(path.join(dir, name));
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+}
+
+module.exports = { ingestStateDir, ingestCachePath, clearIngestState };
