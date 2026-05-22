@@ -54,6 +54,7 @@ const ENV_KEYS = [
   "PATH",
   "HOME",
   "CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE",
+  "CLOSEDLOOP_BOOTSTRAP_TIMEOUT_MS",
 ] as const;
 
 export function saveEnvVars(
@@ -177,7 +178,10 @@ export async function findSpawnArgsFile(
  * contains a key from the map will receive the mapped status code and an error
  * body. All other requests receive HTTP 200.
  */
-export async function startMockApiServer(failUrls?: Map<string, number>): Promise<{
+export async function startMockApiServer(
+  failUrls?: Map<string, number>,
+  failRequest?: (request: RecordedRequest) => number | undefined,
+): Promise<{
   server: http.Server;
   port: number;
   requests: RecordedRequest[];
@@ -216,6 +220,7 @@ export async function startMockApiServer(failUrls?: Map<string, number>): Promis
           }
         }
       }
+      failStatus ??= failRequest?.(recorded);
 
       if (failStatus !== undefined) {
         res.statusCode = failStatus;

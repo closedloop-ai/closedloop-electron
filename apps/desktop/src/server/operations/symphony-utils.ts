@@ -1,4 +1,4 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
 import {
   closeSync,
   constants,
@@ -27,6 +27,26 @@ import { getResolvedClaudePath, getResolvedGitPath } from "./symphony-loop.js";
 import { isPluginInstalled } from "./plugin-cache.js";
 
 const execFileAsync = promisify(execFile);
+const BOOTSTRAP_TIMEOUT_MS = 15 * 60 * 1000;
+const BOOTSTRAP_OUTPUT_TAIL_BYTES = 4096;
+
+export type BootstrapRunResult =
+  | { status: "skipped-artifacts" }
+  | { status: "skipped-plugin-missing" }
+  | { status: "completed" }
+  | {
+      status: "failed";
+      exitCode: number | null;
+      signal: NodeJS.Signals | null;
+      stdoutTail: string;
+      stderrTail: string;
+    }
+  | {
+      status: "timed-out";
+      timeoutMs: number;
+      stdoutTail: string;
+      stderrTail: string;
+    };
 
 /** Timeout for local-only git commands (rev-parse, checkout, diff, worktree list/prune). */
 const LOCAL_GIT_TIMEOUT = 10_000;
@@ -768,34 +788,187 @@ export function hasBootstrapArtifacts(dir: string): boolean {
   }
 }
 
+export function resolveBootstrapTimeoutMs(): number {
+  const raw = process.env.CLOSEDLOOP_BOOTSTRAP_TIMEOUT_MS;
+  if (!raw) return BOOTSTRAP_TIMEOUT_MS;
+
+  if (!/^\d+$/.test(raw)) return BOOTSTRAP_TIMEOUT_MS;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : BOOTSTRAP_TIMEOUT_MS;
+}
+
+function appendBoundedTail(current: string, chunk: Buffer): string {
+  const next = current + chunk.toString("utf-8");
+  return next.length > BOOTSTRAP_OUTPUT_TAIL_BYTES
+    ? next.slice(next.length - BOOTSTRAP_OUTPUT_TAIL_BYTES)
+    : next;
+}
+
+export function redactBootstrapDiagnosticTail(
+  text: string,
+  worktreeDir: string,
+): string {
+  let redacted = text;
+  const pathsToRedact = [
+    worktreeDir,
+    path.dirname(worktreeDir),
+    os.homedir(),
+  ].filter((value) => value.length > 1);
+
+  for (const sensitivePath of pathsToRedact) {
+    redacted = redacted.split(sensitivePath).join("[redacted-path]");
+  }
+
+  return redacted
+    .replaceAll(
+      /\b(?:Bearer\s+)?(?:sk-[A-Za-z0-9_-]{8,}|[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,})\b/g,
+      "[redacted-token]",
+    )
+    .replaceAll(
+      /\b([A-Z0-9_]*(?:TOKEN|SECRET|KEY|PASSWORD|AUTH)[A-Z0-9_]*)=([^\s"'`]+)/gi,
+      "$1=[redacted-secret]",
+    );
+}
+
+async function runBootstrapProcess(
+  worktreeDir: string,
+  loopId: string,
+  timeoutMs: number,
+): Promise<BootstrapRunResult> {
+  const claudePath = getResolvedClaudePath();
+  const env = await getShellEnv();
+
+  return await new Promise<BootstrapRunResult>((resolve) => {
+    let settled = false;
+    let stdoutTail = "";
+    let stderrTail = "";
+
+    const child = spawn(claudePath, ["-p", "/bootstrap:agent-bootstrap"], {
+      cwd: worktreeDir,
+      detached: true,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+
+    const timer = setTimeout(() => {
+      if (child.pid) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch (groupErr) {
+          try {
+            child.kill("SIGKILL");
+          } catch (childErr) {
+            loopError(
+              loopId,
+              `Bootstrap timeout cleanup failed: group=${String(groupErr)} child=${String(childErr)}`,
+            );
+          }
+        }
+      }
+      settle({
+        status: "timed-out",
+        timeoutMs,
+        stdoutTail: redactBootstrapDiagnosticTail(stdoutTail, worktreeDir),
+        stderrTail: redactBootstrapDiagnosticTail(stderrTail, worktreeDir),
+      });
+    }, timeoutMs);
+    timer.unref();
+
+    const settle = (result: BootstrapRunResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+
+    child.stdout?.on("data", (chunk: Buffer) => {
+      stdoutTail = appendBoundedTail(stdoutTail, chunk);
+    });
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderrTail = appendBoundedTail(stderrTail, chunk);
+    });
+
+    child.on("error", (err) => {
+      stderrTail = appendBoundedTail(stderrTail, Buffer.from(String(err)));
+      settle({
+        status: "failed",
+        exitCode: null,
+        signal: null,
+        stdoutTail: redactBootstrapDiagnosticTail(stdoutTail, worktreeDir),
+        stderrTail: redactBootstrapDiagnosticTail(stderrTail, worktreeDir),
+      });
+    });
+
+    child.on("close", (exitCode, signal) => {
+      if (exitCode === 0) {
+        settle({ status: "completed" });
+        return;
+      }
+
+      settle({
+        status: "failed",
+        exitCode,
+        signal,
+        stdoutTail: redactBootstrapDiagnosticTail(stdoutTail, worktreeDir),
+        stderrTail: redactBootstrapDiagnosticTail(stderrTail, worktreeDir),
+      });
+    });
+
+    child.unref();
+  });
+}
+
 export async function runBootstrapIfNeeded(
   worktreeDir: string,
   loopId: string,
-): Promise<void> {
+): Promise<BootstrapRunResult> {
   if (hasBootstrapArtifacts(worktreeDir)) {
     loopLog(loopId, "Bootstrap skipped — artifacts already present");
-    return;
+    return { status: "skipped-artifacts" };
   }
 
   if (!isPluginInstalled("bootstrap")) {
     loopLog(loopId, "Bootstrap skipped — plugin not installed");
-    return;
+    return { status: "skipped-plugin-missing" };
   }
 
   try {
     loopLog(loopId, "Running bootstrap (no artifacts detected)...");
-    const claudePath = getResolvedClaudePath();
-    const env = await getShellEnv();
-    await execFileAsync(claudePath, ["-p", "/bootstrap:agent-bootstrap"], {
-      cwd: worktreeDir,
-      env,
-      timeout: 15 * 60 * 1000,
-    });
-    loopLog(loopId, "Bootstrap completed");
+    const result = await runBootstrapProcess(
+      worktreeDir,
+      loopId,
+      resolveBootstrapTimeoutMs(),
+    );
+    if (result.status === "completed") {
+      loopLog(loopId, "Bootstrap completed");
+    } else if (result.status === "timed-out") {
+      loopError(
+        loopId,
+        `Bootstrap timed out after ${result.timeoutMs}ms (continuing) stdout=${result.stdoutTail} stderr=${result.stderrTail}`,
+      );
+    } else if (result.status === "failed") {
+      loopError(
+        loopId,
+        `Bootstrap failed (continuing) exitCode=${result.exitCode ?? "null"} signal=${result.signal ?? "null"} stdout=${result.stdoutTail} stderr=${result.stderrTail}`,
+      );
+    }
+    return result;
   } catch (err) {
     loopError(
       loopId,
       `Bootstrap failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
     );
+    return {
+      status: "failed",
+      exitCode: null,
+      signal: null,
+      stdoutTail: "",
+      stderrTail: redactBootstrapDiagnosticTail(
+        err instanceof Error ? err.message : String(err),
+        worktreeDir,
+      ),
+    };
   }
 }

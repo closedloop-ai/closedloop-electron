@@ -73,6 +73,43 @@ function createTestGateway(tmpDir: string, mockPort: number) {
   });
 }
 
+async function writeBootstrapPluginRegistry(homeDir: string): Promise<void> {
+  const installPath = path.join(homeDir, ".claude", "plugins", "bootstrap-install");
+  await fs.mkdir(installPath, { recursive: true });
+  const registryPath = path.join(homeDir, ".claude", "plugins", "installed_plugins.json");
+  await fs.mkdir(path.dirname(registryPath), { recursive: true });
+  await fs.writeFile(
+    registryPath,
+    JSON.stringify({
+      plugins: {
+        "bootstrap@closedloop-ai": [
+          { installPath, scope: "user", enabled: true, version: "1.0.0" },
+        ],
+      },
+    }),
+  );
+}
+
+function bootstrapOutputChunks(
+  requests: Array<{ url: string; body: string }>,
+  loopId: string,
+): string[] {
+  return requests
+    .filter((request) => request.url.includes(`/loops/${loopId}/events`))
+    .flatMap((request) => {
+      try {
+        const event = JSON.parse(request.body) as { type?: unknown; data?: { chunk?: unknown } };
+        return event.type === "output" &&
+          typeof event.data?.chunk === "string" &&
+          event.data.chunk.startsWith("[bootstrap-")
+          ? [event.data.chunk]
+          : [];
+      } catch {
+        return [];
+      }
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Test 1: PLAN with 2 additionalRepos — assert args contain
 //         --add-dir <worktreeDir1> and --add-dir <worktreeDir2>
@@ -97,12 +134,17 @@ test("PLAN with 2 additionalRepos passes --add-dir for each worktree to run-loop
   process.env.HOME = tmpDir;
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  await writeBootstrapPluginRegistry(tmpDir);
 
   await createFakeRunLoopScript(tmpDir, MULTI_REPO_CAPTURE_SCRIPT);
 
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
-  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  await fs.writeFile(
+    path.join(fakeBin, "claude"),
+    "#!/bin/sh\necho bootstrap failed for continuation >&2\nexit 42\n",
+    { mode: 0o755 },
+  );
 
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
@@ -144,6 +186,13 @@ test("PLAN with 2 additionalRepos passes --add-dir for each worktree to run-loop
     terminalEvent.type,
     "completed",
     `Expected terminal event type 'completed', got '${terminalEvent.type}': ${JSON.stringify(terminalEvent)}`,
+  );
+  assert.equal(
+    bootstrapOutputChunks(mock.requests, loopId).filter((chunk) =>
+      chunk.startsWith("[bootstrap-failed]"),
+    ).length,
+    3,
+    "expected failed bootstrap markers for both additional repos and the primary repo",
   );
 
   // Find spawn-args.txt under tmpDir (written to $CLOSEDLOOP_WORKDIR by the fake script)
