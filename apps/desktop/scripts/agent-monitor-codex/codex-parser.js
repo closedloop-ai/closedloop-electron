@@ -24,7 +24,7 @@ const fs = require("fs");
 const path = require("path");
 const readline = require("readline");
 const { sessionIdFromRolloutPath } = require("./codex-home");
-const { toIso, safeJson } = require("../agent-monitor-shared/parser-utils");
+const { toIso, safeJson, pushTurnDuration } = require("../agent-monitor-shared/parser-utils");
 
 const RESPONSE_ITEM_TYPES = new Set([
   "message",
@@ -112,6 +112,7 @@ async function parseRolloutFile(filePath) {
   let assistantMessageCount = 0;
   const messageTimestamps = [];
   const toolUses = [];
+  const turnDurations = [];
   const plans = []; // CLOSEDLOOP plan-extraction (FEA-1189)
   const apiErrors = [];
   let thinkingBlockCount = 0;
@@ -119,6 +120,7 @@ async function parseRolloutFile(filePath) {
   let latestTotals = null; // cumulative token_count totals (last wins)
   let sawResponseItems = false;
   let lastTs = null;
+  let pendingTurnStartedAt = null;
 
   const noteTs = (raw) => {
     const iso = toIso(raw);
@@ -137,9 +139,12 @@ async function parseRolloutFile(filePath) {
       const text = extractText(p.content);
       if (role === "user") {
         userMessageCount++;
+        if (iso) pendingTurnStartedAt = iso;
       } else {
         assistantMessageCount++;
         if (iso) messageTimestamps.push(iso);
+        pushTurnDuration(turnDurations, pendingTurnStartedAt, iso);
+        pendingTurnStartedAt = null;
         // Fallback plan signal: <proposed_plan> block in an assistant message
         // (medium confidence — flagged for user confirmation downstream).
         const pm = PROPOSED_PLAN_RE.exec(text);
@@ -208,10 +213,13 @@ async function parseRolloutFile(filePath) {
     }
     if (et === "user_message") {
       userMessageCount++;
+      if (iso) pendingTurnStartedAt = iso;
     } else if (et === "agent_message" || et === "agent_message_delta") {
       if (et === "agent_message") {
         assistantMessageCount++;
         if (iso) messageTimestamps.push(iso);
+        pushTurnDuration(turnDurations, pendingTurnStartedAt, iso);
+        pendingTurnStartedAt = null;
       }
     } else if (et === "agent_reasoning" || et === "agent_reasoning_section_break") {
       if (et === "agent_reasoning") thinkingBlockCount++;
@@ -302,12 +310,18 @@ async function parseRolloutFile(filePath) {
       latestTotals.reasoning_output_tokens ||
       latestTotals.reasoningOutputTokens ||
       0;
-    if (input || output || cached || reasoning) {
+    const cacheWrite =
+      latestTotals.cache_write_tokens ||
+      latestTotals.cacheWriteTokens ||
+      latestTotals.cache_creation_input_tokens ||
+      latestTotals.cacheCreationInputTokens ||
+      0;
+    if (input || output || cached || reasoning || cacheWrite) {
       tokensByModel[key] = {
         input,
         output: output + reasoning,
         cacheRead: cached,
-        cacheWrite: 0,
+        cacheWrite,
       };
     }
   }
@@ -341,7 +355,7 @@ async function parseRolloutFile(filePath) {
     compactions: [],
     apiErrors,
     fileModifiedAt,
-    turnDurations: [],
+    turnDurations,
     entrypoint: "codex",
     permissionMode: null,
     thinkingBlockCount,
