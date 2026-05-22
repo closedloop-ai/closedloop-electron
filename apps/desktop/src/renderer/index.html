@@ -3398,11 +3398,6 @@
         </div>
         <div id="claudeDashStatus" class="dash-loading">
           <div class="dash-loading-spinner"></div>
-          <div class="dash-loading-title">Starting your dashboard…</div>
-          <div class="dash-loading-sub">
-            Reading your agent sessions. This takes a few seconds the first
-            time.
-          </div>
         </div>
         <iframe id="claudeDashFrame" title="Claude Code Agent Monitor" style="display:none;width:100%;border:0;background:#fff"></iframe>
       </section>
@@ -4131,11 +4126,7 @@
         const status = document.getElementById("claudeDashStatus");
         if (!status) return;
         status.className = "dash-loading";
-        status.innerHTML =
-          '<div class="dash-loading-spinner"></div>' +
-          '<div class="dash-loading-title">Starting your dashboard…</div>' +
-          '<div class="dash-loading-sub">Reading your agent sessions. ' +
-          "This takes a few seconds the first time.</div>";
+        status.innerHTML = '<div class="dash-loading-spinner"></div>';
       }
 
       function startClaudeDashboard() {

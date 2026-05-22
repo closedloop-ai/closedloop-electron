@@ -174,6 +174,11 @@ test("electron-builder ships the generated agent-monitor runtime tree unpacked",
     stagePackagingSource,
     /dependency\.resolved[\s\S]*packageJson\.dependencies\?\.\[dependencyName\][\s\S]*dependency\.version/,
   );
+  assert.match(stagePackagingSource, /\.generated", "agent-monitor"/);
+  assert.match(
+    stagePackagingSource,
+    /await cp\(generatedAgentMonitorDir, stageGeneratedAgentMonitorDir, \{\s*recursive: true,\s*\}\);/,
+  );
 });
 
 test("runtime resolves the generated tree and sidecar wiring still uses the fixed port", () => {
@@ -196,6 +201,11 @@ test("runtime resolves the generated tree and sidecar wiring still uses the fixe
   assert.match(sidecarSource, /resolveRuntimeSupportNodePaths\("agent-dashboard"\)/);
   assert.match(sidecarSource, /path\.dirname\(packageRoot\)/);
   assert.match(sidecarSource, /process\.resourcesPath,\s*"app\.asar",\s*"app",\s*"node_modules"/);
+  assert.match(sidecarSource, /reapStaleAgentMonitorListener\(this\.port, entryFile\)/);
+  assert.match(sidecarSource, /listenerPidForPort\(this\.port\)/);
+  assert.match(sidecarSource, /ownsHealthyListener\(/);
+  assert.match(sidecarSource, /spawnSync\(\s*"lsof"/);
+  assert.match(sidecarSource, /spawnSync\(\s*"ps"/);
   assert.match(sidecarSource, /\/api\/health/);
   assert.match(
     sidecarSource,

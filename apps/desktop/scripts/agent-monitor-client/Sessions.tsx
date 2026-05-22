@@ -26,7 +26,6 @@ import { effectiveSessionStatus, isSessionAwaitingInput } from "../lib/types";
 import type { Session, DashboardEvent } from "../lib/types";
 
 const PAGE_SIZE = 10;
-
 export function Sessions() {
   const navigate = useNavigate();
   const { t } = useTranslation("sessions");
