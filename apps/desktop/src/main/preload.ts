@@ -147,7 +147,14 @@ const desktopApi = {
         string,
         { total: number; parsed: number; imported: number; complete: boolean }
       >;
-    } | null>
+    } | null>,
+  // FEA-1334: clear the dashboard DB and restart the sidecar so it re-imports
+  // every agent session from scratch. The progress banner tracks the re-import.
+  reprocessAgentLogs: () =>
+    ipcRenderer.invoke("desktop:reprocess-agent-logs") as Promise<{
+      ok: boolean;
+      error?: string;
+    }>
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);

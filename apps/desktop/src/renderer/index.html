@@ -3316,6 +3316,14 @@
                   <p class="field-help" style="margin-top:8px">Runs the local Agent Dashboard sidecar that powers the Dashboard and agent views in the sidebar. On by default; turning it off hides those views.</p>
                 </div>
               </div>
+              <div class="row">
+                <label for="reprocessLogsBtn">Reprocess all logs</label>
+                <div>
+                  <button type="button" class="secondary" id="reprocessLogsBtn">Reprocess all logs</button>
+                  <p class="field-help" style="margin-top:8px">Clears the dashboard database and re-imports every agent session from scratch. The progress bar at the top tracks the re-import.</p>
+                  <p class="muted" id="reprocessLogsMessage"></p>
+                </div>
+              </div>
             </div>
           </div>
           <!-- Saved Configs section -->
@@ -4177,6 +4185,41 @@
 
         // Kick off polling; the sidecar boots in parallel with the renderer.
         schedule(POLL_WAIT_MS);
+      })();
+
+      // ── Reprocess all logs button (FEA-1334) ───────────────────────
+      // Clears the dashboard DB and restarts the sidecar, which triggers a
+      // full re-import — the top progress banner tracks it.
+      (function setupReprocessLogsButton() {
+        const btn = document.getElementById("reprocessLogsBtn");
+        const msg = document.getElementById("reprocessLogsMessage");
+        if (!btn) return;
+        btn.addEventListener("click", async () => {
+          btn.disabled = true;
+          const original = btn.textContent;
+          btn.textContent = "Reprocessing…";
+          if (msg) msg.textContent = "";
+          try {
+            const r = await api.reprocessAgentLogs();
+            if (r && r.ok) {
+              if (msg)
+                msg.textContent =
+                  "Re-import started — watch the progress bar at the top of the window.";
+            } else {
+              if (msg)
+                msg.textContent =
+                  "Could not reprocess: " + ((r && r.error) || "unknown error");
+            }
+          } catch (e) {
+            if (msg)
+              msg.textContent =
+                "Could not reprocess: " +
+                (e && e.message ? e.message : String(e));
+          } finally {
+            btn.textContent = original;
+            btn.disabled = false;
+          }
+        });
       })();
 
       // Settings sub-tab switching

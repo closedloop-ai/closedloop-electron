@@ -1,6 +1,6 @@
 import os from "node:os";
 import path from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -2381,6 +2381,40 @@ export class DesktopApplication {
         return await response.json();
       } catch {
         return null;
+      }
+    });
+    // FEA-1334: clear the dashboard DB and restart the sidecar so it
+    // re-imports every agent session from scratch. The sidecar's empty-DB
+    // boot path clears the persisted ingest caches and re-runs the
+    // orchestrator, which the progress banner tracks.
+    ipcMain.handle("desktop:reprocess-agent-logs", async () => {
+      if (!this.isAgentMonitorEnabled()) {
+        return { ok: false, error: "Agent Dashboard is disabled in Settings." };
+      }
+      try {
+        await this.agentMonitor.stop();
+        const agentMonitorDir = path.join(
+          app.getPath("userData"),
+          "agent-monitor",
+        );
+        for (const name of [
+          "dashboard.db",
+          "dashboard.db-wal",
+          "dashboard.db-shm",
+        ]) {
+          try {
+            rmSync(path.join(agentMonitorDir, name));
+          } catch {
+            /* file may not exist — fine */
+          }
+        }
+        void this.agentMonitor.start();
+        return { ok: true };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
       }
     });
     ipcMain.handle("desktop:open-agent-monitor", () =>
