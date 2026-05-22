@@ -89,12 +89,6 @@ export function Sessions() {
           sort_desc: sortDesc,
           limit: 10000,
           offset: 0,
-          q: search || undefined,
-          cwd: cwd || undefined,
-          sort_by: sortBy,
-          sort_desc: sortDesc,
-          limit: 10000,
-          offset: 0,
         });
         let rows = res.sessions;
         rows = rows.filter(isSessionAwaitingInput);
@@ -174,9 +168,6 @@ export function Sessions() {
   }, [loadDashboardRuns]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const paged = sessions;
-  const filtered = sessions;
-
   const wsConnected = useSyncExternalStore(eventBus.onConnection, () => eventBus.connected);
 
   return (
@@ -298,7 +289,7 @@ export function Sessions() {
         </div>
       </div>
 
-      {!loading && filtered.length === 0 ? (
+      {!loading && sessions.length === 0 ? (
         <EmptyState
           icon={FolderOpen}
           title={t("noSessions")}
@@ -335,7 +326,7 @@ export function Sessions() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {paged.map((session) => (
+                {sessions.map((session) => (
                   <tr
                     key={session.id}
                     onClick={() => navigate(`/sessions/${session.id}`)}
