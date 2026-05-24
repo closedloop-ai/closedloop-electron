@@ -69,6 +69,14 @@ const FEATURE_FLAGS_INTERNAL = [
       "Automatically download and install updates, then restart the app.",
     category: "Experimental" as const,
   },
+  {
+    key: "agentSessionChunkedSyncEnabled" as const,
+    default: false,
+    label: "Chunked Session Sync",
+    description:
+      "Splits oversized agent sessions into multiple smaller batches for sync. Enable after the relay supports chunked ingestion.",
+    category: "Experimental" as const,
+  },
 ] as const;
 
 export type FlagKey = (typeof FEATURE_FLAGS_INTERNAL)[number]["key"];
