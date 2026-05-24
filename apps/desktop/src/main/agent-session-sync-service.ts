@@ -467,14 +467,14 @@ export class AgentSessionSyncService {
   ): void {
     if (ack.accepted) {
       this.firstAckReceived = true;
-      for (const id of ids) {
-        this.timeoutCountById.delete(id);
-      }
       // Only dequeue the session after all chunks have been sent.
       const hasMoreChunks = this.pendingChunks !== null &&
         ids.length === 1 &&
         this.pendingChunks.sessionId === ids[0];
       if (!hasMoreChunks) {
+        for (const id of ids) {
+          this.timeoutCountById.delete(id);
+        }
         this.dequeue(syncMode, ids);
       }
       const deadLetterSuffix = this.deadLetteredIds.size > 0
@@ -1017,7 +1017,7 @@ export function chunkOversizedSession(
 
   for (const event of session.events) {
     const eventBytes = Buffer.byteLength(JSON.stringify(event));
-    if (currentEvents.length > 0 && currentBytes + eventBytes > eventBudget) {
+    if (currentBytes > 0 && currentBytes + eventBytes > eventBudget) {
       chunks.push({ ...session, events: currentEvents });
       currentEvents = [];
       currentBytes = 0;
