@@ -310,6 +310,13 @@ const LOCAL_CALLBACK_FAIL_FAST_COMMANDS = new Set<LoopCommand>([
   LoopCommand.RequestPrdChanges,
   LoopCommand.GeneratePrd,
 ]);
+const BOOTSTRAP_PREFLIGHT_COMMANDS = new Set<LoopCommand>([
+  LoopCommand.Plan,
+  LoopCommand.Execute,
+  LoopCommand.RequestChanges,
+  LoopCommand.RequestPrdChanges,
+  LoopCommand.GeneratePrd,
+]);
 interface LoopArtifact {
   id: string;
   type: LoopArtifactType;
@@ -7166,12 +7173,7 @@ async function handleLoopRequest(
       });
     }
 
-    if (
-      worktreeDir &&
-      (body.command === LoopCommand.Plan ||
-        body.command === LoopCommand.Execute ||
-        body.command === LoopCommand.RequestChanges)
-    ) {
+    if (worktreeDir && BOOTSTRAP_PREFLIGHT_COMMANDS.has(body.command)) {
       for (const addEntry of additionalWorktreeDirs) {
         await runLoopBootstrapPreflight({
           worktreeDir: addEntry.dir,

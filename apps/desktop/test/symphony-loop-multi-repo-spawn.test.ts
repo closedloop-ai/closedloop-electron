@@ -384,6 +384,7 @@ for (const command of PRD_PEER_COMMANDS) {
     process.env.HOME = tmpDir;
     process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
     process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+    await writeBootstrapPluginRegistry(tmpDir);
 
     // Dedicated capture files (outside the worktree so they survive cleanup).
     // Multi-line values like the pretty-printed peer-repos.json manifest and
@@ -471,6 +472,13 @@ for (const command of PRD_PEER_COMMANDS) {
       "completed",
       `Expected completed, got '${terminalEvent.type}': ${JSON.stringify(terminalEvent)}`,
     );
+    assert.equal(
+      bootstrapOutputChunks(mock.requests, loopId).filter((chunk) =>
+        chunk.startsWith("[bootstrap-completed]"),
+      ).length,
+      3,
+      `${command}: expected bootstrap to run for both additional repos and the primary repo`,
+    );
 
     // AC-001: --add-dir for each peer; the worktree dirs live under worktreeParent.
     const argv = await fs.readFile(argvFile, "utf-8");
@@ -531,6 +539,7 @@ for (const command of PRD_PEER_COMMANDS) {
     process.env.HOME = tmpDir;
     process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
     process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+    await writeBootstrapPluginRegistry(tmpDir);
 
     const argvFile = path.join(tmpDir, `capture-empty-argv-${command}.txt`);
     const promptFile = path.join(tmpDir, `capture-empty-prompt-${command}.txt`);
@@ -597,6 +606,13 @@ for (const command of PRD_PEER_COMMANDS) {
 
     assert.equal(response.status, 200);
     await waitForTerminalEvent(mock.requests, loopId);
+    assert.equal(
+      bootstrapOutputChunks(mock.requests, loopId).filter((chunk) =>
+        chunk.startsWith("[bootstrap-completed]"),
+      ).length,
+      1,
+      `${command}: expected bootstrap to run for the primary repo`,
+    );
 
     const argv = await fs.readFile(argvFile, "utf-8");
     assert.ok(
