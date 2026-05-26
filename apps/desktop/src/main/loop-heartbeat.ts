@@ -19,7 +19,12 @@ export const getHeartbeatIntervalMs = (): number =>
 // Subset of LoopSchedulerDeps the heartbeat needs.
 // ---------------------------------------------------------------------------
 
-export type HeartbeatDeps = Pick<LoopSchedulerDeps, "apiBaseUrl" | "getToken">;
+export type HeartbeatDeps = Pick<
+  LoopSchedulerDeps,
+  "apiBaseUrl" | "getToken" | "getSessionToken"
+> & {
+  loopTokenStore?: LoopSchedulerDeps["loopTokenStore"];
+};
 
 // ---------------------------------------------------------------------------
 // Shared tick logic (exported so LoopSchedulerContext can reuse it)
@@ -51,13 +56,35 @@ export async function runHeartbeatTick(
     `Issuing heartbeat for loopId=${loopId}`,
   );
 
-  const result = await postLoopHeartbeat(apiBaseUrl, loopId, deps.getToken);
+  const result = await postLoopHeartbeat(
+    apiBaseUrl,
+    loopId,
+    deps.getToken,
+    deps.getSessionToken,
+  );
 
   if (result.success) {
-    gatewayLog.info(
-      "loop-heartbeat",
-      `Heartbeat succeeded for loopId=${loopId}`,
-    );
+    const canAdoptRevival =
+      result.revived === true &&
+      result.token !== undefined &&
+      deps.loopTokenStore !== undefined;
+
+    if (canAdoptRevival) {
+      gatewayLog.info(
+        "loop-heartbeat",
+        `Loop revived for loopId=${loopId}; adopting new runner token`,
+      );
+      deps.loopTokenStore.setLoopToken(loopId, {
+        token: result.token,
+        jti: result.jti,
+        expiresAt: result.expiresAt !== undefined ? result.expiresAt.getTime() : undefined,
+      });
+    } else {
+      gatewayLog.info(
+        "loop-heartbeat",
+        `Heartbeat succeeded for loopId=${loopId}`,
+      );
+    }
     return;
   }
 
@@ -75,6 +102,15 @@ export async function runHeartbeatTick(
       `Heartbeat endpoint returned 404 for loopId=${loopId}; disabling endpoint and stopping scheduler`,
     );
     markEndpointDisabled(apiBaseUrl, heartbeatPath);
+    stopFn();
+    return;
+  }
+
+  if (result.kind === "http" && result.status === 410) {
+    gatewayLog.warn(
+      "loop-heartbeat",
+      `Heartbeat for loopId=${loopId} returned 410 Gone; loop is terminal — stopping scheduler`,
+    );
     stopFn();
     return;
   }

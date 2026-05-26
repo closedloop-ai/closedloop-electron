@@ -24,7 +24,7 @@ async function handleResumeForLoop(
   loopId: string,
   deps: LoopSchedulerDeps,
 ): Promise<void> {
-  const { apiBaseUrl, getToken, loopTokenStore } = deps;
+  const { apiBaseUrl, getToken, getSessionToken, loopTokenStore } = deps;
 
   // Trigger an immediate token refresh via the singleflight primitive so that
   // concurrent resume handlers for the same loop coalesce into one network call.
@@ -57,7 +57,7 @@ async function handleResumeForLoop(
   // Trigger an immediate heartbeat via the heartbeat module's public API.
   // sendHeartbeatNow is fire-and-forget and handles errors internally; errors
   // are logged by the heartbeat module, so no additional try/catch is needed.
-  sendHeartbeatNow(loopId, { apiBaseUrl, getToken });
+  sendHeartbeatNow(loopId, { apiBaseUrl, getToken, getSessionToken, loopTokenStore });
 }
 
 // ---------------------------------------------------------------------------

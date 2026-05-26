@@ -17,6 +17,7 @@ import type { LoopTokenStore } from "./loop-token-store.js";
 export interface LoopSchedulerDeps {
   apiBaseUrl: string;
   getToken: () => string | null;
+  getSessionToken?: () => Promise<string | null>;
   loopTokenStore: LoopTokenStore;
 }
 

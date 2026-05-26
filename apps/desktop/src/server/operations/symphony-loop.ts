@@ -7928,6 +7928,7 @@ async function handleLoopRequest(
       apiBaseUrl,
       getToken: () =>
         loopTokenStore?.getLoopToken(body.loopId)?.token ?? body.closedLoopAuthToken,
+      loopTokenStore,
     });
 
     json(context, 200, {

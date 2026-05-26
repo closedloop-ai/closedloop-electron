@@ -15,8 +15,15 @@ import { loopError, loopLog } from "./symphony-utils.js";
 // parsing substrings out of the human-readable `error` string.
 // ---------------------------------------------------------------------------
 
+export type HeartbeatRevivalFields = {
+  revived: boolean;
+  token?: string;
+  expiresAt?: Date;
+  jti?: string;
+};
+
 export type LoopHttpResult =
-  | { success: true; status: number }
+  | ({ success: true; status: number } & Partial<HeartbeatRevivalFields>)
   | { success: false; kind: "http"; status: number; error: string }
   | { success: false; kind: "network"; error: string }
   | { success: false; kind: "timeout"; error: "timeout" }
@@ -266,24 +273,41 @@ export async function getCloudLoopStatus(
  * Returns the same `LoopHttpResult` discriminated union as `postLoopEvent`
  * so callers can branch on `kind === "http" && status === 404` without
  * parsing strings.
+ *
+ * When `getSessionToken` is supplied and resolves to a non-null string, the
+ * token is forwarded as `X-Session-Token`. The server uses this to attempt
+ * revival of a TIMED_OUT loop. On a successful revival response the returned
+ * success object includes `revived: true` plus the replacement runner token
+ * fields (`token`, `expiresAt`, `jti`).
  */
 export async function postLoopHeartbeat(
   apiBaseUrl: string,
   loopId: string,
   getToken: () => string | null,
+  getSessionToken?: () => Promise<string | null>,
 ): Promise<LoopHttpResult> {
   const url = `${apiBaseUrl}/loops/${encodeURIComponent(loopId)}/heartbeat`;
   const token = getToken();
   if (token === null) {
     return { success: false, kind: "auth", error: "missing_token" };
   }
+
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+  };
+
+  if (getSessionToken !== undefined) {
+    const sessionToken = await getSessionToken();
+    if (sessionToken !== null) {
+      headers["X-Session-Token"] = sessionToken;
+    }
+  }
+
   try {
     const resp = await fetch(url, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
+      headers,
     });
     if (!resp.ok) {
       return {
@@ -293,9 +317,51 @@ export async function postLoopHeartbeat(
         error: `HTTP ${resp.status} ${resp.statusText}`,
       };
     }
-    return { success: true, status: resp.status };
+
+    const revivalFields = await parseHeartbeatRevivalFields(resp);
+    return { success: true, status: resp.status, ...revivalFields };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { success: false, kind: "network", error: msg };
+  }
+}
+
+/**
+ * Attempts to parse revival fields from a successful heartbeat response body.
+ *
+ * Returns a `HeartbeatRevivalFields` partial when `revived` is true and the
+ * body contains valid token fields; returns an empty object otherwise.
+ * Never throws — a malformed body is treated as a non-revival response.
+ */
+async function parseHeartbeatRevivalFields(
+  resp: Response,
+): Promise<Partial<HeartbeatRevivalFields>> {
+  try {
+    const raw = (await resp.json()) as Record<string, unknown>;
+    // The API wraps the payload in { success, data }; unwrap if present.
+    const data =
+      raw.data !== undefined && typeof raw.data === "object" && raw.data !== null
+        ? (raw.data as Record<string, unknown>)
+        : raw;
+
+    if (data.revived !== true) {
+      return {};
+    }
+    const result: HeartbeatRevivalFields = { revived: true };
+    if (typeof data.token === "string") {
+      result.token = data.token;
+    }
+    if (typeof data.expiresAt === "string") {
+      const parsed = new Date(data.expiresAt);
+      if (!isNaN(parsed.getTime())) {
+        result.expiresAt = parsed;
+      }
+    }
+    if (typeof data.jti === "string") {
+      result.jti = data.jti;
+    }
+    return result;
+  } catch {
+    return {};
   }
 }

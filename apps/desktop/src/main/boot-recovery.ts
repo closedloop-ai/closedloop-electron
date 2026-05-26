@@ -268,7 +268,6 @@ export class BootRecoveryService implements Disposable {
       }
     }
 
-
     if (result.kind === "timed_out") {
       const current = this.deps.jobStore.getByLoopId(job.loopId) ?? job;
       this.deps.jobStore.upsert({
@@ -367,7 +366,7 @@ export class BootRecoveryService implements Disposable {
       loopTokenStore: this.deps.loopTokenStore,
     });
 
-    this.schedulers.startHeartbeat(loopId, { apiBaseUrl: effectiveApiBaseUrl, getToken });
+    this.schedulers.startHeartbeat(loopId, { apiBaseUrl: effectiveApiBaseUrl, getToken, loopTokenStore: this.deps.loopTokenStore });
 
     this.schedulers.registerSleep(loopId, {
       apiBaseUrl: effectiveApiBaseUrl,

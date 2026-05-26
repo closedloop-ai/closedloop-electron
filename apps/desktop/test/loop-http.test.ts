@@ -12,6 +12,7 @@
  *   - uploadArtifacts: HTTP error response handling
  *   - postLoopEventBounded: AbortController-based timeout abort
  *   - gatewayLog entries for success, failure, and network error paths
+ *   - postLoopHeartbeat: X-Session-Token header presence/absence (AC-005)
  */
 
 import assert from "node:assert/strict";
@@ -21,6 +22,7 @@ import {
   getCloudLoopStatus,
   postLoopEvent,
   postLoopEventBounded,
+  postLoopHeartbeat,
   uploadArtifacts,
 } from "../src/server/operations/loop-http.js";
 
@@ -863,5 +865,70 @@ describe("getCloudLoopStatus", () => {
     );
 
     assert.equal(result.kind, "error");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// postLoopHeartbeat — X-Session-Token header presence/absence (AC-005)
+// ---------------------------------------------------------------------------
+
+describe("postLoopHeartbeat X-Session-Token header", () => {
+  test("includes X-Session-Token header when getSessionToken resolves to a non-null string", async () => {
+    installFetchStub({ status: 200, responseBody: "{}" });
+
+    await postLoopHeartbeat(
+      "https://api.example.com",
+      "loop-session-hdr",
+      () => "runner-token",
+      () => Promise.resolve("clerk-session-token"),
+    );
+
+    assert.equal(capturedRequests.length, 1);
+    const req = capturedRequests[0];
+    assert.ok(req, "Expected a captured request");
+    assert.equal(
+      req.headers["x-session-token"],
+      "clerk-session-token",
+      "X-Session-Token must be set when getSessionToken returns a non-null string",
+    );
+    assert.equal(req.headers["authorization"], "Bearer runner-token");
+  });
+
+  test("omits X-Session-Token header when getSessionToken is not provided", async () => {
+    installFetchStub({ status: 200, responseBody: "{}" });
+
+    await postLoopHeartbeat(
+      "https://api.example.com",
+      "loop-no-session-hdr",
+      () => "runner-token",
+      // getSessionToken not provided (undefined)
+    );
+
+    assert.equal(capturedRequests.length, 1);
+    const req = capturedRequests[0];
+    assert.ok(req, "Expected a captured request");
+    assert.ok(
+      !("x-session-token" in req.headers),
+      "X-Session-Token must be absent when getSessionToken is not provided",
+    );
+  });
+
+  test("omits X-Session-Token header when getSessionToken resolves to null", async () => {
+    installFetchStub({ status: 200, responseBody: "{}" });
+
+    await postLoopHeartbeat(
+      "https://api.example.com",
+      "loop-null-session-hdr",
+      () => "runner-token",
+      () => Promise.resolve(null),
+    );
+
+    assert.equal(capturedRequests.length, 1);
+    const req = capturedRequests[0];
+    assert.ok(req, "Expected a captured request");
+    assert.ok(
+      !("x-session-token" in req.headers),
+      "X-Session-Token must be absent when getSessionToken resolves to null",
+    );
   });
 });
