@@ -39,9 +39,6 @@ export interface LoopTokenStoreOptions {
  * Uses the same pattern as {@link ApiKeyStore}: electron-store + safeStorage.
  *
  * On-disk format: encrypted JSON serialization of {@link LoopTokenMeta}.
- * Legacy entries (encrypted plain strings written before this schema change) are
- * transparently migrated on read via JSON-parse discrimination.
- * Legacy migration tracked for removal by FEA-1319.
  */
 export class LoopTokenStore {
   private readonly store: Store<LoopTokenStoreSchema>;
@@ -81,10 +78,6 @@ export class LoopTokenStore {
   /**
    * Returns the full token metadata for the given loop, or `null` if not found
    * or decryption fails.
-   *
-   * Legacy entries encrypted as plain strings (written before the LoopTokenMeta
-   * schema change) are transparently promoted to `{ token: <value> }`.
-   * Legacy migration removal tracked by FEA-1319.
    */
   getLoopToken(loopId: string): LoopTokenMeta | null {
     const encrypted = this.getEncryptedMap()[loopId];
@@ -100,22 +93,16 @@ export class LoopTokenStore {
       if (trimmed.length === 0) {
         return null;
       }
-      // Legacy migration (FEA-1319): discriminate JSON-encoded LoopTokenMeta from legacy plain-string entries written by pre-PLN-650 builds.
-      try {
-        const parsed: unknown = JSON.parse(trimmed);
-        if (
-          parsed !== null &&
-          typeof parsed === "object" &&
-          "token" in parsed &&
-          typeof (parsed as Record<string, unknown>).token === "string"
-        ) {
-          return parsed as LoopTokenMeta;
-        }
-      } catch {
-        // Not valid JSON — treat as legacy plain-string token.
+      const parsed: unknown = JSON.parse(trimmed);
+      if (
+        parsed !== null &&
+        typeof parsed === "object" &&
+        "token" in parsed &&
+        typeof (parsed as Record<string, unknown>).token === "string"
+      ) {
+        return parsed as LoopTokenMeta;
       }
-      // Legacy migration (FEA-1319): encrypted value was a raw token string written by pre-PLN-650 builds.
-      return { token: trimmed };
+      return null;
     } catch {
       return null;
     }

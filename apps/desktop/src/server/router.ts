@@ -19,6 +19,7 @@ import { registerGitActionRoutes } from "./operations/git-action.js";
 import { registerGitBranchesRoutes } from "./operations/git-branches.js";
 import { registerGitBranchWorktreeRoutes } from "./operations/git-branch-worktree.js";
 import { registerGitDiffRoutes } from "./operations/git-diff.js";
+import { registerGitLocalChangesRoutes } from "./operations/git-local-changes.js";
 import { registerGitPrRoutes } from "./operations/git-pr.js";
 import { registerGitRepoPathRoutes } from "./operations/git-repo-path.js";
 import { registerGitWorktreeRoutes } from "./operations/git-worktree.js";
@@ -206,6 +207,11 @@ export class GatewayRouter {
       this.options.getAllowedDirectories
     );
     registerGitBranchWorktreeRoutes(this.operationDispatcher, getSymphonyDir);
+    registerGitLocalChangesRoutes(
+      this.operationDispatcher,
+      this.processManager,
+      this.options.getAllowedDirectories
+    );
     registerGitDiffRoutes(
       this.operationDispatcher,
       this.processManager,
