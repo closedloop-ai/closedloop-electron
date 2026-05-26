@@ -689,7 +689,7 @@ const RECOVERY_CHECK_INTERVAL_MS = 30_000;
 const ANALYTICS_QUEUE_MAX = 200;
 const ANALYTICS_QUEUE_TTL_MS = 15 * 60_000;
 const ANALYTICS_ACK_TIMEOUT_MS = 1_500;
-const AGENT_SESSIONS_ACK_TIMEOUT_MS = 10_000;
+const AGENT_SESSIONS_ACK_TIMEOUT_MS = 30_000;
 
 type QueuedAnalyticsEvent = {
   event: Omit<DesktopAnalyticsEvent, keyof EnvelopeOnlyFields>;

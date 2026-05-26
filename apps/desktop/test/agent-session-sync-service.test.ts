@@ -6,12 +6,15 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import {
+  BACKFILL_SESSION_BATCH_SIZE,
   AgentSessionSyncService,
+  chunkOversizedSession,
   estimateSessionPayloadBytes,
   estimateTokenUsageCostUsd,
   listAllSessionCursorRows,
   listUpdatedSessionCursorRows,
   loadSyncedSessions,
+  MAX_CONSECUTIVE_TIMEOUTS,
   SESSION_PAYLOAD_BYTE_CAP,
 } from "../src/main/agent-session-sync-service.js";
 import { DesktopAgentSessionsAckReason } from "../src/main/cloud-protocol.js";
@@ -600,10 +603,10 @@ test("agent-session payload-aware batcher keeps each batch at or below SESSION_P
   db.close();
 });
 
-test("agent-session payload-aware batcher sends a single oversized session alone rather than dropping it", async () => {
-  // A session whose serialized size exceeds SESSION_PAYLOAD_BYTE_CAP must still
-  // be sent as a batch of exactly 1 (the batcher always includes at least one
-  // session regardless of its size).
+test("agent-session payload-aware batcher skips oversized sessions and advances the queue", async () => {
+  // A session whose serialized size exceeds SESSION_PAYLOAD_BYTE_CAP must be
+  // skipped (dead-lettered) so it does not permanently block the queue.
+  // The smaller session behind it must still be sent successfully.
   const rootDir = mkdtempSync(path.join(tmpdir(), "agent-session-sync-service-"));
   const db = createServiceTestDatabase(rootDir);
 
@@ -616,7 +619,7 @@ test("agent-session payload-aware batcher sends a single oversized session alone
   });
   insertEventRow(db, "sess-oversize", JSON.stringify({ pad: oversizePadding }));
 
-  // Insert a second, small session to confirm it is excluded from the same batch.
+  // Insert a second, small session to confirm it is sent after the oversized one is skipped.
   insertSessionRow(db, {
     id: "sess-small",
     startedAt: "2026-05-20T12:01:00.000Z",
@@ -635,36 +638,78 @@ test("agent-session payload-aware batcher sends a single oversized session alone
   });
 
   service.start();
-  // Flush twice so both the oversized session and the small session can be sent
-  // in separate backfill cycles.
-  await flushAgentSessionSync();
-  service.refresh();
   await flushAgentSessionSync();
 
-  // The first batch must contain exactly the oversized session alone.
-  assert.ok(receivedBatches.length >= 1, "expected at least one batch");
+  // The oversized session must be skipped; the small session must be sent.
+  assert.equal(receivedBatches.length, 1, "expected exactly one batch (small session only)");
+  assert.equal(
+    receivedBatches[0].sessions[0].externalSessionId,
+    "sess-small",
+    "the small session must be sent after skipping the oversized one",
+  );
   const oversizeBatch = receivedBatches.find((b) =>
     b.sessions.some((s) => s.externalSessionId === "sess-oversize"),
   );
-  assert.ok(oversizeBatch, "expected batch containing oversized session");
-  assert.equal(
-    oversizeBatch.sessions.length,
-    1,
-    "oversized session must be sent alone as a batch of 1",
-  );
-  assert.equal(oversizeBatch.sessions[0].externalSessionId, "sess-oversize");
+  assert.equal(oversizeBatch, undefined, "oversized session must not be sent");
 
   service.stop();
   db.close();
 });
 
-test("agent-session sync handleBatchAck logs ack_timeout and invokes telemetry callback with ack_timeout reason", async () => {
+test("agent-session sync uses smaller batches for backfill than incremental", async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), "agent-session-sync-service-"));
   const db = createServiceTestDatabase(rootDir);
+
+  for (let index = 0; index < BACKFILL_SESSION_BATCH_SIZE + 2; index += 1) {
+    insertSessionRow(db, {
+      id: `sess-backfill-${index + 1}`,
+      startedAt: "2026-05-20T12:00:00.000Z",
+      updatedAt: `2026-05-20T12:0${index}:00.000Z`,
+    });
+  }
+
+  const receivedBatches: import("../src/main/agent-session-sync-contract.js").AgentSessionSyncBatch[] = [];
+  const service = new AgentSessionSyncService({
+    isAgentMonitorEnabled: () => true,
+    isRelayReady: () => true,
+    sendBatch: async (batch) => {
+      receivedBatches.push(batch);
+      return { accepted: true };
+    },
+    getUserDataPath: () => path.join(rootDir, "user-data"),
+  });
+
+  service.start();
+  await flushAgentSessionSync();
+
+  assert.ok(receivedBatches.length >= 1, "expected at least one backfill batch");
+  assert.equal(receivedBatches[0].syncMode, "backfill");
+  assert.equal(
+    receivedBatches[0].sessions.length,
+    BACKFILL_SESSION_BATCH_SIZE,
+    "backfill batches should use the smaller backfill-specific size",
+  );
+
+  service.stop();
+  db.close();
+});
+
+test("agent-session sync retries on ack_timeout then dead-letters after MAX_CONSECUTIVE_TIMEOUTS", async () => {
+  // Uses a normal-sized session that times out due to server issues (not payload
+  // size). Oversized sessions are skipped immediately; this test covers the
+  // dead-letter path for sessions that fit within the cap but still time out.
+  const rootDir = mkdtempSync(path.join(tmpdir(), "agent-session-sync-service-"));
+  const db = createServiceTestDatabase(rootDir);
+
   insertSessionRow(db, {
     id: "sess-timeout",
     startedAt: "2026-05-20T12:00:00.000Z",
     updatedAt: "2026-05-20T12:05:00.000Z",
+  });
+  insertSessionRow(db, {
+    id: "sess-healthy",
+    startedAt: "2026-05-20T11:00:00.000Z",
+    updatedAt: "2026-05-20T11:05:00.000Z",
   });
 
   const telemetryEvents: import("../src/main/agent-session-sync-service.js").AgentSessionSyncTelemetryEvent[] = [];
@@ -674,10 +719,14 @@ test("agent-session sync handleBatchAck logs ack_timeout and invokes telemetry c
     isRelayReady: () => true,
     sendBatch: async (batch) => {
       sentBatches.push(batch);
-      return {
-        accepted: false,
-        reason: DesktopAgentSessionsAckReason.AckTimeout,
-      };
+      // Timeout every batch that contains sess-timeout; accept others.
+      if (batch.sessions.some((s) => s.externalSessionId === "sess-timeout")) {
+        return {
+          accepted: false,
+          reason: DesktopAgentSessionsAckReason.AckTimeout,
+        };
+      }
+      return { accepted: true };
     },
     getUserDataPath: () => path.join(rootDir, "user-data"),
     onBatchOutcome: (event) => {
@@ -688,33 +737,123 @@ test("agent-session sync handleBatchAck logs ack_timeout and invokes telemetry c
   service.start();
   await flushAgentSessionSync();
 
-  // The ack_timeout path must fire the telemetry callback exactly once with the
-  // correct reason.
-  assert.equal(telemetryEvents.length, 1, "expected exactly one telemetry event");
-  const event = telemetryEvents[0];
-  assert.equal(event.outcome, "failure");
-  assert.equal(
-    event.reason,
-    DesktopAgentSessionsAckReason.AckTimeout,
-    "telemetry reason must be ack_timeout",
-  );
+  // First timeout: session stays queued for retry.
+  assert.equal(telemetryEvents.length, 1, "expected one telemetry event after first timeout");
+  assert.equal(telemetryEvents[0].reason, DesktopAgentSessionsAckReason.AckTimeout);
 
-  // The session must remain queued (not dequeued) for retry: driving a second
-  // sync cycle must re-send the same session, proving handleBatchAck did not
-  // drop it on ack_timeout.
+  // Drive remaining cycles — session retries then gets dead-lettered.
+  for (let i = 1; i < MAX_CONSECUTIVE_TIMEOUTS; i++) {
+    service.refresh();
+    await flushAgentSessionSync();
+  }
+
+  // After dead-lettering, the healthy session should be sent and accepted.
   service.refresh();
   await flushAgentSessionSync();
-  assert.equal(
-    sentBatches.length,
-    2,
-    "ack_timeout must leave the session queued for retry (second sync cycle must re-send)",
+  const healthyBatch = sentBatches.find((b) =>
+    b.sessions.some((s) => s.externalSessionId === "sess-healthy"),
   );
-  assert.equal(
-    sentBatches[1].sessions[0].externalSessionId,
-    "sess-timeout",
-    "retried batch must re-send the same session",
-  );
+  assert.ok(healthyBatch, "queue must advance past the dead-lettered session to sess-healthy");
 
   service.stop();
   db.close();
+});
+
+test("chunked sync splits oversized sessions into multiple batches when enabled", async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), "agent-session-sync-service-"));
+  const db = createServiceTestDatabase(rootDir);
+
+  // Create an oversized session with many events.
+  const eventData = JSON.stringify({ pad: "z".repeat(Math.floor(SESSION_PAYLOAD_BYTE_CAP / 3)) });
+  insertSessionRow(db, {
+    id: "sess-chunked",
+    startedAt: "2026-05-20T12:00:00.000Z",
+    updatedAt: "2026-05-20T12:05:00.000Z",
+  });
+  // Insert enough events that total payload exceeds the cap.
+  for (let i = 0; i < 5; i++) {
+    insertEventRow(db, "sess-chunked", eventData);
+  }
+
+  const receivedBatches: import("../src/main/agent-session-sync-contract.js").AgentSessionSyncBatch[] = [];
+  const service = new AgentSessionSyncService({
+    isAgentMonitorEnabled: () => true,
+    isRelayReady: () => true,
+    isChunkedSyncEnabled: () => true,
+    sendBatch: async (batch) => {
+      receivedBatches.push(batch);
+      return { accepted: true };
+    },
+    getUserDataPath: () => path.join(rootDir, "user-data"),
+  });
+
+  service.start();
+  // Flush enough cycles to send all chunks.
+  for (let i = 0; i < 10; i++) {
+    service.refresh();
+    await flushAgentSessionSync();
+  }
+
+  // All batches must contain the same session ID.
+  assert.ok(receivedBatches.length >= 2, `expected ≥2 chunked batches, got ${receivedBatches.length}`);
+  for (const batch of receivedBatches) {
+    assert.equal(batch.sessions[0].externalSessionId, "sess-chunked");
+    // Each batch must be within the payload cap (the first chunk can be slightly over
+    // due to base session metadata, but subsequent chunks must fit).
+    const batchBytes = estimateSessionPayloadBytes(batch.sessions[0]);
+    assert.ok(
+      batchBytes <= SESSION_PAYLOAD_BYTE_CAP * 1.1,
+      `chunk payload ${batchBytes} exceeds cap ${SESSION_PAYLOAD_BYTE_CAP} by more than 10%`,
+    );
+  }
+
+  // Total events across all chunks must equal the original 5.
+  const totalEvents = receivedBatches.reduce(
+    (sum, b) => sum + b.sessions[0].events.length,
+    0,
+  );
+  assert.equal(totalEvents, 5, "all events must be sent across chunks");
+
+  service.stop();
+  db.close();
+});
+
+test("chunkOversizedSession splits events to fit within byte cap", () => {
+  const session = {
+    externalSessionId: "sess-unit",
+    name: null,
+    status: "completed",
+    harness: "claude",
+    cwd: null,
+    model: null,
+    startedAt: "2026-05-20T12:00:00.000Z",
+    updatedAt: "2026-05-20T12:05:00.000Z",
+    endedAt: null,
+    awaitingInputSince: null,
+    metadata: null,
+    agents: [],
+    events: Array.from({ length: 10 }, (_, i) => ({
+      externalEventId: String(i),
+      agentExternalId: null,
+      eventType: "tool_use",
+      toolName: null,
+      summary: null,
+      data: { pad: "x".repeat(1000) },
+      createdAt: "2026-05-20T12:01:00.000Z",
+    })),
+    tokenUsageByModel: [],
+  };
+
+  // Use a small cap so events get split.
+  const smallCap = estimateSessionPayloadBytes({ ...session, events: [] }) + 3000;
+  const chunks = chunkOversizedSession(session as any, smallCap);
+
+  assert.ok(chunks.length >= 2, `expected ≥2 chunks, got ${chunks.length}`);
+  const totalEvents = chunks.reduce((sum, c) => sum + c.events.length, 0);
+  assert.equal(totalEvents, 10, "all events must appear across chunks");
+
+  // Every chunk has the same session metadata.
+  for (const chunk of chunks) {
+    assert.equal(chunk.externalSessionId, "sess-unit");
+  }
 });

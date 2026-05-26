@@ -35,8 +35,11 @@ import {
   setupStubClaude,
   startMockApiServer,
   waitForCompletedEvent,
+  waitForFile,
+  waitForPidsGone,
   waitForTerminalEvent,
   writeFakeGhScript,
+  writeBootstrapPluginRegistry,
 } from "./symphony-test-utils.js";
 
 const fakeWorktreeProvider = makeFakeWorktreeProvider("symphony/cloud-failures-test");
@@ -97,6 +100,21 @@ async function writeFakeFailingGh(dir: string): Promise<string> {
     path.join(dir, "fake-bin"),
     '#!/bin/sh\necho "not found" >&2\nexit 1\n',
   );
+}
+
+function loopEvents(
+  requests: Array<{ url: string; body: string }>,
+  loopId: string,
+): Array<Record<string, unknown>> {
+  return requests
+    .filter((request) => request.url.includes(`/loops/${loopId}/events`))
+    .flatMap((request) => {
+      try {
+        return [JSON.parse(request.body) as Record<string, unknown>];
+      } catch {
+        return [];
+      }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -607,6 +625,240 @@ test("PLAN: non-zero exit cleans up persisted loop token", async () => {
     loopTokenStore.getLoopToken(loopId),
     null,
     "Persisted loop token should be cleaned up after non-zero exit"
+  );
+});
+
+test("PLAN: hanging bootstrap times out after Started and run-loop still spawns", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cloud-fail-bootstrap-timeout-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-bootstrap-timeout");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+  process.env.CLOSEDLOOP_BOOTSTRAP_TIMEOUT_MS = "100";
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+  await writeBootstrapPluginRegistry(tmpDir);
+
+  const spawnMarker = path.join(tmpDir, "run-loop-spawned");
+  await createFakeRunLoopScript(
+    tmpDir,
+    `#!/bin/sh\ntouch '${spawnMarker}'\nexit 0\n`,
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  const childPidFile = path.join(tmpDir, "bootstrap-child.pid");
+  const grandchildPidFile = path.join(tmpDir, "bootstrap-grandchild.pid");
+  await fs.writeFile(
+    path.join(fakeBin, "claude"),
+    [
+      "#!/bin/sh",
+      [
+        "sh -c '",
+        `echo $$ > "${childPidFile}"; `,
+        "sh -c '\\''",
+        `echo $$ > "${grandchildPidFile}"; `,
+        "trap \"\" TERM; echo grandchild-ready; sleep 20",
+        "'\\'' & ",
+        "trap \"\" TERM; echo child-ready; sleep 20",
+        "' &",
+      ].join(""),
+      "sleep 20",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer();
+  mockServersToClose.push(mock.server);
+
+  const jobStore = new JobStore({ cwd: tmpDir, name: "test-jobs-bootstrap-timeout" });
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "bootstrap-timeout-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000000850";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: LoopCommand.Plan,
+        closedLoopAuthToken: "bootstrap-token",
+        artifacts: [],
+        repo: {
+          fullName: `bootstrap-timeout/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected bootstrap timeout to continue to launch, got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  await waitForFile(spawnMarker);
+  await waitForCompletedEvent(mock.requests, loopId);
+  const job = await waitForJobTerminal(jobStore, loopId);
+  assert.equal(job.status, "COMPLETED");
+  await waitForPidsGone([childPidFile, grandchildPidFile]);
+
+  const events = loopEvents(mock.requests, loopId);
+  const startedIndex = events.findIndex((event) => event.type === "started");
+  const bootstrapOutputIndex = events.findIndex((event) => {
+    const data = event.data as { chunk?: unknown } | undefined;
+    return event.type === "output" && typeof data?.chunk === "string" && data.chunk.startsWith("[bootstrap-");
+  });
+  const timeoutIndex = events.findIndex((event) => {
+    const data = event.data as { chunk?: unknown } | undefined;
+    return event.type === "output" && typeof data?.chunk === "string" && data.chunk.startsWith("[bootstrap-timeout]");
+  });
+
+  assert.notEqual(startedIndex, -1, "expected Started event");
+  assert.notEqual(bootstrapOutputIndex, -1, "expected bootstrap output event");
+  assert.notEqual(timeoutIndex, -1, "expected bootstrap timeout output event");
+  assert.ok(
+    startedIndex < bootstrapOutputIndex,
+    `Started must precede bootstrap output: ${JSON.stringify(events)}`,
+  );
+  for (const event of events) {
+    const data = event.data as { chunk?: unknown } | undefined;
+    if (event.type !== "output" || typeof data?.chunk !== "string") continue;
+    if (!data.chunk.startsWith("[bootstrap-")) continue;
+    assert.equal(data.chunk.includes(tmpDir), false);
+    assert.equal(data.chunk.includes("bootstrap-token"), false);
+    assert.equal(data.chunk.includes("child-ready"), false);
+    assert.equal(data.chunk.includes("grandchild-ready"), false);
+  }
+});
+
+test("PLAN: bootstrap output post failure is non-terminal and run-loop still spawns", async () => {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "cloud-fail-bootstrap-output-"));
+  tempPathsToClean.push(tmpDir);
+
+  const repoPath = path.join(tmpDir, "repo-bootstrap-output");
+  await fs.mkdir(repoPath, { recursive: true });
+
+  const worktreeParent = path.join(tmpDir, "worktrees");
+  await fs.mkdir(worktreeParent, { recursive: true });
+
+  process.env.HOME = tmpDir;
+  process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
+  process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+
+  await writeBootstrapPluginRegistry(tmpDir);
+
+  const spawnMarker = path.join(tmpDir, "run-loop-spawned-output-post-fail");
+  await createFakeRunLoopScript(
+    tmpDir,
+    `#!/bin/sh\ntouch '${spawnMarker}'\nexit 0\n`,
+  );
+
+  const fakeBin = path.join(tmpDir, "fake-bin");
+  await fs.mkdir(fakeBin, { recursive: true });
+  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", {
+    mode: 0o755,
+  });
+  process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
+  setShellPathForTest();
+
+  const mock = await startMockApiServer(undefined, (request) => {
+    if (!request.url.includes("/events")) return undefined;
+    try {
+      const event = JSON.parse(request.body) as { type?: unknown; data?: { chunk?: unknown } };
+      return event.type === "output" &&
+        typeof event.data?.chunk === "string" &&
+        event.data.chunk.startsWith("[bootstrap-")
+        ? 500
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  });
+  mockServersToClose.push(mock.server);
+
+  const jobStore = new JobStore({ cwd: tmpDir, name: "test-jobs-bootstrap-output-post-fail" });
+  const server = new DesktopGatewayServer({
+    host: "127.0.0.1",
+    preferredPort: 0,
+    fallbackPorts: [0],
+    webAppOrigin: "https://app.symphony.com",
+    getAllowedDirectories: () => [tmpDir],
+    machineName: "bootstrap-output-post-fail-machine",
+    version: "0.1.0-test",
+    capabilities: EMPTY_CAPABILITIES,
+    worktreeProvider: fakeWorktreeProvider,
+    discoveryFilePath: path.join(tmpDir, "electron-port"),
+    getApiOrigin: () => `http://127.0.0.1:${mock.port}`,
+    jobStore,
+  });
+  serversToClose.push(server);
+  await server.start();
+
+  const loopId = "00000000-0000-0000-0000-000000000851";
+  const response = await fetch(
+    `http://127.0.0.1:${server.getActivePort()}/api/gateway/symphony/loop`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        loopId,
+        command: LoopCommand.Plan,
+        closedLoopAuthToken: "bootstrap-token",
+        artifacts: [],
+        repo: {
+          fullName: `bootstrap-output/${path.basename(repoPath)}`,
+          branch: "main",
+        },
+      }),
+    },
+  );
+
+  assert.equal(
+    response.status,
+    200,
+    `Expected bootstrap output post failure to continue launch, got ${response.status}: ${await response.text().catch(() => "")}`,
+  );
+
+  await waitForFile(spawnMarker);
+  await waitForCompletedEvent(mock.requests, loopId);
+  const job = await waitForJobTerminal(jobStore, loopId);
+  assert.equal(job.status, "COMPLETED");
+
+  const events = loopEvents(mock.requests, loopId);
+  assert.ok(
+    events.some((event) => {
+      const data = event.data as { chunk?: unknown } | undefined;
+      return event.type === "output" &&
+        typeof data?.chunk === "string" &&
+        data.chunk.startsWith("[bootstrap-");
+    }),
+    "expected failed bootstrap output posts to be attempted",
   );
 });
 

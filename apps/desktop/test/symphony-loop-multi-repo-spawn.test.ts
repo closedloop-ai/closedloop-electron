@@ -30,6 +30,7 @@ import {
   PRD_PEER_COMMANDS,
   startMockApiServer,
   waitForTerminalEvent,
+  writeBootstrapPluginRegistry,
 } from "./symphony-test-utils.js";
 
 // ---------------------------------------------------------------------------
@@ -73,6 +74,26 @@ function createTestGateway(tmpDir: string, mockPort: number) {
   });
 }
 
+function bootstrapOutputChunks(
+  requests: Array<{ url: string; body: string }>,
+  loopId: string,
+): string[] {
+  return requests
+    .filter((request) => request.url.includes(`/loops/${loopId}/events`))
+    .flatMap((request) => {
+      try {
+        const event = JSON.parse(request.body) as { type?: unknown; data?: { chunk?: unknown } };
+        return event.type === "output" &&
+          typeof event.data?.chunk === "string" &&
+          event.data.chunk.startsWith("[bootstrap-")
+          ? [event.data.chunk]
+          : [];
+      } catch {
+        return [];
+      }
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Test 1: PLAN with 2 additionalRepos — assert args contain
 //         --add-dir <worktreeDir1> and --add-dir <worktreeDir2>
@@ -97,12 +118,17 @@ test("PLAN with 2 additionalRepos passes --add-dir for each worktree to run-loop
   process.env.HOME = tmpDir;
   process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
   process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+  await writeBootstrapPluginRegistry(tmpDir);
 
   await createFakeRunLoopScript(tmpDir, MULTI_REPO_CAPTURE_SCRIPT);
 
   const fakeBin = path.join(tmpDir, "fake-bin");
   await fs.mkdir(fakeBin, { recursive: true });
-  await fs.writeFile(path.join(fakeBin, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  await fs.writeFile(
+    path.join(fakeBin, "claude"),
+    "#!/bin/sh\necho bootstrap failed for continuation >&2\nexit 42\n",
+    { mode: 0o755 },
+  );
 
   process.env.PATH = `${fakeBin}:/usr/bin:/bin`;
   setShellPathForTest();
@@ -144,6 +170,13 @@ test("PLAN with 2 additionalRepos passes --add-dir for each worktree to run-loop
     terminalEvent.type,
     "completed",
     `Expected terminal event type 'completed', got '${terminalEvent.type}': ${JSON.stringify(terminalEvent)}`,
+  );
+  assert.equal(
+    bootstrapOutputChunks(mock.requests, loopId).filter((chunk) =>
+      chunk.startsWith("[bootstrap-failed]"),
+    ).length,
+    3,
+    "expected failed bootstrap markers for both additional repos and the primary repo",
   );
 
   // Find spawn-args.txt under tmpDir (written to $CLOSEDLOOP_WORKDIR by the fake script)
@@ -351,6 +384,7 @@ for (const command of PRD_PEER_COMMANDS) {
     process.env.HOME = tmpDir;
     process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
     process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+    await writeBootstrapPluginRegistry(tmpDir);
 
     // Dedicated capture files (outside the worktree so they survive cleanup).
     // Multi-line values like the pretty-printed peer-repos.json manifest and
@@ -438,6 +472,13 @@ for (const command of PRD_PEER_COMMANDS) {
       "completed",
       `Expected completed, got '${terminalEvent.type}': ${JSON.stringify(terminalEvent)}`,
     );
+    assert.equal(
+      bootstrapOutputChunks(mock.requests, loopId).filter((chunk) =>
+        chunk.startsWith("[bootstrap-completed]"),
+      ).length,
+      3,
+      `${command}: expected bootstrap to run for both additional repos and the primary repo`,
+    );
 
     // AC-001: --add-dir for each peer; the worktree dirs live under worktreeParent.
     const argv = await fs.readFile(argvFile, "utf-8");
@@ -498,6 +539,7 @@ for (const command of PRD_PEER_COMMANDS) {
     process.env.HOME = tmpDir;
     process.env.CLOSEDLOOP_SYMPHONY_TEST_RAW_CLAUDE_PIPELINE = "1";
     process.env.SYMPHONY_WORKTREE_PARENT_DIR = worktreeParent;
+    await writeBootstrapPluginRegistry(tmpDir);
 
     const argvFile = path.join(tmpDir, `capture-empty-argv-${command}.txt`);
     const promptFile = path.join(tmpDir, `capture-empty-prompt-${command}.txt`);
@@ -564,6 +606,13 @@ for (const command of PRD_PEER_COMMANDS) {
 
     assert.equal(response.status, 200);
     await waitForTerminalEvent(mock.requests, loopId);
+    assert.equal(
+      bootstrapOutputChunks(mock.requests, loopId).filter((chunk) =>
+        chunk.startsWith("[bootstrap-completed]"),
+      ).length,
+      1,
+      `${command}: expected bootstrap to run for the primary repo`,
+    );
 
     const argv = await fs.readFile(argvFile, "utf-8");
     assert.ok(

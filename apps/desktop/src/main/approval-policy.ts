@@ -14,6 +14,8 @@ export const OPERATION_RISK_TIERS: Record<OperationId, Exclude<RiskTier, "none">
   symphony_logs:           "low",
   symphony_chat_history:   "medium",
   git_action:              "medium",
+  git_local_changes:       "low",
+  git_local_commit_push:   "high",
   git_pr:                  "medium",
   git_branch_worktree:     "low",
   symphony_launch:         "medium",
@@ -46,6 +48,7 @@ export const OPERATION_RISK_TIERS: Record<OperationId, Exclude<RiskTier, "none">
  */
 export const FORCE_INTERACTIVE_OPERATIONS: ReadonlySet<OperationId> = new Set<OperationId>([
   "update_and_restart",
+  "git_local_commit_push",
 ]);
 
 /** Converts a RiskTier to a numeric value for threshold comparison. */
