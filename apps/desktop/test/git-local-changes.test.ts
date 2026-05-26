@@ -123,6 +123,60 @@ describe("registerGitLocalChangesRoutes", () => {
     assert.equal(JSON.stringify(files).includes("old\\nnew"), false);
   });
 
+  test("decodes Git-quoted status paths without treating filename arrows as renames", async () => {
+    const root = await makeTempDir();
+    const { repoPath } = await createRepo(root);
+    await fs.writeFile(path.join(repoPath, "a -> b.txt"), "arrow old\n", "utf-8");
+    await fs.writeFile(path.join(repoPath, "café.txt"), "cafe old\n", "utf-8");
+    execSync("git add . && git commit -q -m quoted-path-fixtures", {
+      cwd: repoPath,
+      stdio: "pipe",
+    });
+    await fs.writeFile(path.join(repoPath, "a -> b.txt"), "arrow new\n", "utf-8");
+    await fs.writeFile(path.join(repoPath, "café.txt"), "cafe new\n", "utf-8");
+
+    const response = await dispatch(makeDispatcher(root), {
+      method: "GET",
+      pathname: "/api/gateway/git/local-changes",
+      query: { repoPath, repoFullName: "acme/widget", headBranch: "feature" },
+    });
+
+    assert.equal(response.status, 200);
+    const files = response.body.files as Array<{ path: string; previousPath: string | null; status: string }>;
+    assert.equal(
+      files.some((file) => file.path === "a -> b.txt" && file.previousPath === null && file.status === "modified"),
+      true
+    );
+    assert.equal(files.some((file) => file.path === "café.txt" && file.status === "modified"), true);
+  });
+
+  test("parses quoted rename status paths with arrow markers inside filenames", async () => {
+    const root = await makeTempDir();
+    const { repoPath } = await createRepo(root);
+    await fs.writeFile(path.join(repoPath, "old -> name.txt"), "rename old\n", "utf-8");
+    execSync("git add . && git commit -q -m quoted-rename-fixture", {
+      cwd: repoPath,
+      stdio: "pipe",
+    });
+    execSync("git mv 'old -> name.txt' 'new -> name.txt'", { cwd: repoPath, stdio: "pipe" });
+
+    const response = await dispatch(makeDispatcher(root), {
+      method: "GET",
+      pathname: "/api/gateway/git/local-changes",
+      query: { repoPath, repoFullName: "acme/widget", headBranch: "feature" },
+    });
+
+    assert.equal(response.status, 200);
+    const files = response.body.files as Array<{ path: string; previousPath: string | null; status: string }>;
+    assert.equal(
+      files.some(
+        (file) =>
+          file.path === "new -> name.txt" && file.previousPath === "old -> name.txt" && file.status === "renamed"
+      ),
+      true
+    );
+  });
+
   test("returns local working-tree diff shape and rejects path traversal", async () => {
     const root = await makeTempDir();
     const { repoPath } = await createRepo(root);
@@ -176,9 +230,33 @@ describe("registerGitLocalChangesRoutes", () => {
     assert.equal(response.status, 200);
     assert.equal(response.body.path, "asset.bin");
     assert.equal(response.body.isBinary, true);
+    assert.equal(response.body.isNew, true);
+    assert.equal(response.body.isDeleted, false);
     assert.equal(response.body.oldContent, "");
     assert.equal(response.body.newContent, "");
     assert.equal(JSON.stringify(response.body).includes("\u0000"), false);
+  });
+
+  test("preserves deleted flags for tracked binary local diffs", async () => {
+    const root = await makeTempDir();
+    const { repoPath } = await createRepo(root);
+    await fs.writeFile(path.join(repoPath, "tracked.bin"), Buffer.from([0, 1, 2, 3, 4, 5]));
+    execSync("git add . && git commit -q -m binary-fixture", { cwd: repoPath, stdio: "pipe" });
+    await fs.rm(path.join(repoPath, "tracked.bin"));
+
+    const response = await dispatch(makeDispatcher(root), {
+      method: "POST",
+      pathname: "/api/gateway/git/local-changes/diff",
+      body: { repoPath, repoFullName: "acme/widget", headBranch: "feature", path: "tracked.bin" },
+    });
+
+    assert.equal(response.status, 200);
+    assert.equal(response.body.path, "tracked.bin");
+    assert.equal(response.body.isBinary, true);
+    assert.equal(response.body.isNew, false);
+    assert.equal(response.body.isDeleted, true);
+    assert.equal(response.body.oldContent, "");
+    assert.equal(response.body.newContent, "");
   });
 
   test("commit-push validates branch and pushes HEAD to the requested branch", async () => {

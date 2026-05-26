@@ -56,6 +56,7 @@ Gateway route handlers live under `apps/desktop/src/server/operations/`.
 - When classifying failed spawned commands or gateway operations, inspect every captured output stream that can feed the user-facing excerpt or diagnostic payload, not only `stderr`. Add focused coverage for stdout-only and stderr-only failure markers when the classification depends on process output.
 - When adapting cloud relay command bodies before forwarding them to local gateway routes, preserve each route handler's request contract. Add focused coverage for every route whose body is transformed, especially when one route swaps credentials and another route must keep its original payload fields.
 - When a gateway request includes `localRepoPath`, never serialize or forward the raw request path into runtime context, environment, process args, or persisted metadata after sandbox policy rejects it. Only materialize the policy-approved resolved path returned by `tryAssertRepoAllowed`/`assertPathAllowed`, such as `expandedRepoPath`; optional-repo commands that ignore a rejected path must also omit it from `.closedloop-ai/context/*` files.
+- When parsing Git CLI path output, account for Git C-quoted paths and format-specific separators instead of using JSON parsing or unqualified string splits. Add focused coverage for non-ASCII filenames, quoted filenames containing separator text, and binary add/delete metadata when the route returns file status or diff shape.
 
 ## Testing Guidelines
 Tests run with `tsx --test` (Node test runner) via `just desktop-test`.

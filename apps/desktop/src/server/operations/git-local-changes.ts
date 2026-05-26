@@ -16,6 +16,8 @@ export const GitLocalChangesRoute = {
 
 const LOCAL_GIT_TIMEOUT_MS = 10_000;
 const BINARY_SNIFF_BYTES = 8192;
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder("utf-8", { fatal: false });
 
 type LocalChangeStatus = "added" | "modified" | "removed" | "renamed" | "copied";
 
@@ -315,22 +317,22 @@ async function readLocalDiff(
 
   const binaryResult = await gitRead(processManager, repoPath, ["diff", "--numstat", "HEAD", "--", filePath]);
   const isBinary = binaryResult.ok && binaryResult.stdout.trim().startsWith("-\t-");
-  if (isBinary) {
-    return {
-      ok: true,
-      payload: { path: filePath, oldContent: "", newContent: "", isNew: false, isDeleted: false, isBinary: true },
-    };
-  }
-
   const oldPath = previousPath ?? statusLine.previousPath ?? filePath;
   const isNew = statusLine.status === "added";
   const isDeleted = statusLine.status === "removed";
+  if (isBinary) {
+    return {
+      ok: true,
+      payload: { path: filePath, oldContent: "", newContent: "", isNew, isDeleted, isBinary: true },
+    };
+  }
+
   const oldContent = isNew ? "" : await readHeadContent(processManager, repoPath, oldPath);
   const workingFile = isDeleted ? { isBinary: false, content: "" } : await readWorkingFile(repoPath, filePath);
   if (workingFile.isBinary) {
     return {
       ok: true,
-      payload: { path: filePath, oldContent: "", newContent: "", isNew, isDeleted: false, isBinary: true },
+      payload: { path: filePath, oldContent: "", newContent: "", isNew, isDeleted, isBinary: true },
     };
   }
 
@@ -418,11 +420,38 @@ function parseStatusLine(line: string): ParsedStatusLine | null {
   if (!payload) {
     return null;
   }
-  const renameParts = payload.split(" -> ");
-  const previousPath = renameParts.length === 2 ? unquoteGitPath(renameParts[0]) : null;
-  const filePath = unquoteGitPath(renameParts.length === 2 ? renameParts[1] : payload);
+  const renameParts = code.includes("R") || code.includes("C") ? splitRenamePayload(payload) : null;
+  const previousPath = renameParts ? unquoteGitPath(renameParts.previousPath) : null;
+  const filePath = unquoteGitPath(renameParts ? renameParts.filePath : payload);
   const status = classifyStatus(code);
   return { code, filePath, previousPath, status };
+}
+
+function splitRenamePayload(payload: string): { previousPath: string; filePath: string } | null {
+  let quoted = false;
+  let escaped = false;
+  for (let index = 0; index < payload.length; index += 1) {
+    const char = payload[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (quoted && char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (char === "\"") {
+      quoted = !quoted;
+      continue;
+    }
+    if (!quoted && payload.startsWith(" -> ", index)) {
+      return {
+        previousPath: payload.slice(0, index),
+        filePath: payload.slice(index + 4),
+      };
+    }
+  }
+  return null;
 }
 
 function classifyStatus(code: string): LocalChangeStatus {
@@ -594,9 +623,67 @@ function unquoteGitPath(input: string): string {
   if (!(input.startsWith("\"") && input.endsWith("\""))) {
     return input;
   }
-  try {
-    return JSON.parse(input) as string;
-  } catch {
-    return input.slice(1, -1);
+  const bytes: number[] = [];
+  const content = input.slice(1, -1);
+  for (let index = 0; index < content.length; index += 1) {
+    const char = content[index];
+    if (char !== "\\") {
+      bytes.push(...textEncoder.encode(char));
+      continue;
+    }
+    index += 1;
+    if (index >= content.length) {
+      bytes.push("\\".charCodeAt(0));
+      break;
+    }
+    const escaped = content[index];
+    const simpleEscape = simpleGitEscapeByte(escaped);
+    if (simpleEscape !== null) {
+      bytes.push(simpleEscape);
+      continue;
+    }
+    if (isOctalDigit(escaped)) {
+      let octal = escaped;
+      while (index + 1 < content.length && octal.length < 3 && isOctalDigit(content[index + 1])) {
+        index += 1;
+        octal += content[index];
+      }
+      bytes.push(Number.parseInt(octal, 8));
+      continue;
+    }
+    bytes.push(...textEncoder.encode(escaped));
   }
+  return textDecoder.decode(new Uint8Array(bytes));
+}
+
+function simpleGitEscapeByte(value: string): number | null {
+  if (value === "a") {
+    return 0x07;
+  }
+  if (value === "b") {
+    return 0x08;
+  }
+  if (value === "f") {
+    return 0x0c;
+  }
+  if (value === "n") {
+    return 0x0a;
+  }
+  if (value === "r") {
+    return 0x0d;
+  }
+  if (value === "t") {
+    return 0x09;
+  }
+  if (value === "v") {
+    return 0x0b;
+  }
+  if (value === "\\" || value === "\"") {
+    return value.charCodeAt(0);
+  }
+  return null;
+}
+
+function isOctalDigit(value: string): boolean {
+  return value >= "0" && value <= "7";
 }
