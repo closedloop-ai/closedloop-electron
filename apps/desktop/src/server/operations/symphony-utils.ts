@@ -901,6 +901,26 @@ async function runBootstrapProcess(
       });
     });
 
+    child.on("exit", (exitCode, signal) => {
+      setImmediate(() => {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+
+        if (exitCode === 0) {
+          settle({ status: "completed" });
+          return;
+        }
+
+        settle({
+          status: "failed",
+          exitCode,
+          signal,
+          stdoutTail: redactBootstrapDiagnosticTail(stdoutTail, worktreeDir),
+          stderrTail: redactBootstrapDiagnosticTail(stderrTail, worktreeDir),
+        });
+      });
+    });
+
     child.on("close", (exitCode, signal) => {
       if (exitCode === 0) {
         settle({ status: "completed" });
@@ -915,8 +935,6 @@ async function runBootstrapProcess(
         stderrTail: redactBootstrapDiagnosticTail(stderrTail, worktreeDir),
       });
     });
-
-    child.unref();
   });
 }
 
