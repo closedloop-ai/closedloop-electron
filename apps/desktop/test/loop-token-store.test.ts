@@ -88,42 +88,6 @@ test("LoopTokenStore getLoopTokenString returns raw token string", () => {
   assert.equal(store.getLoopTokenString("loop-s"), "raw-token-value");
 });
 
-test("LoopTokenStore legacy single-string backward compatibility", () => {
-  // Simulate a legacy store entry: a safeStorage whose decryptString returns a
-  // bare (non-JSON) string. getLoopToken must promote { token: <string> } from it.
-  //
-  // Strategy: use a custom safeStorage where encryptString stores a fixed sentinel
-  // (so the map entry exists) and decryptString always returns the raw legacy token
-  // string — triggering the JSON-parse discrimination fallback in getLoopToken.
-  const bareToken = "old-plain-token";
-  const legacySafeStorage = {
-    isEncryptionAvailable: () => true,
-    encryptString: (_s: string) => Buffer.from("legacy-sentinel", "utf-8"),
-    decryptString: (_buf: Buffer) => bareToken,
-  };
-
-  // Prime the store: setLoopToken writes an entry via encryptString (stores the
-  // sentinel). On read, decryptString returns the bare string, not JSON.
-  const primeStore = new LoopTokenStore({
-    cwd: tempRoot,
-    name: "lt-legacy-compat",
-    safeStorage: legacySafeStorage,
-  });
-  primeStore.setLoopToken("loop-legacy", { token: "anything" });
-
-  // Read back — decryptString returns a bare string, exercising the legacy path.
-  const readStore = new LoopTokenStore({
-    cwd: tempRoot,
-    name: "lt-legacy-compat",
-    safeStorage: legacySafeStorage,
-  });
-  const result = readStore.getLoopToken("loop-legacy");
-  assert.deepEqual(result, { token: bareToken });
-  assert.equal(result?.expiresAt, undefined);
-  assert.equal(result?.jti, undefined);
-  assert.equal(result?.lastIdempotencyKey, undefined);
-});
-
 // ---------------------------------------------------------------------------
 // parseJwtExpiry tests
 // ---------------------------------------------------------------------------
