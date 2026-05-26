@@ -15,10 +15,12 @@ import { isTerminalJobStatus, type JobStore, type LocalJob } from "./job-store.j
 import type { LoopTokenStore } from "./loop-token-store.js";
 import {
   finalizeLoopFromRuntime,
+  makeHeartbeatFinalizeFn,
   type LoopFinalizerDeps,
 } from "./loop-finalizer.js";
 import type { TelemetryEmitter } from "./telemetry-protocol.js";
 import { LoopSchedulerContext } from "./loop-scheduler-context.js";
+import { classifyLoopStatus, type TerminalReason } from "./loop-status-classifier.js";
 
 export interface BootRecoveryDeps {
   jobStore: JobStore;
@@ -39,6 +41,32 @@ interface LiveJobHandle {
 
 const DEFAULT_WATCHER_POLL_MS = 3000;
 const MAX_RECOVERY_ATTEMPTS = 3;
+
+/**
+ * Maps a `CloudLoopStatus` union onto the HTTP status input expected by
+ * {@link classifyLoopStatus}: 401 for `unauthorized`, the carried status for
+ * `error`, and null otherwise (the classifier reads the `kind` string for the
+ * timed_out/active cases).
+ */
+function cloudStatusToHttp(result: CloudLoopStatus): number | null {
+  if (result.kind === "unauthorized") return 401;
+  if (result.kind === "error") return result.status ?? null;
+  return null;
+}
+
+/** Human-readable fragment for the UNKNOWN finalization message. */
+function terminalReasonMessage(reason: TerminalReason): string {
+  switch (reason) {
+    case "unauthorized":
+      return "unauthorized after token refresh";
+    case "not_found":
+      return "HTTP 404";
+    case "gone":
+      return "HTTP 410";
+    case "timed_out":
+      return "timed out";
+  }
+}
 
 export class BootRecoveryService implements Disposable {
   private readonly deps: BootRecoveryDeps;
@@ -268,16 +296,35 @@ export class BootRecoveryService implements Disposable {
       }
     }
 
+    // Determine if the result is terminal via the shared classifier (SSOT), so
+    // this path interprets 401/404/410/timed_out identically to reattachLiveJob
+    // below. Map the CloudLoopStatus union onto the classifier's HTTP input.
+    const disposition = classifyLoopStatus(
+      cloudStatusToHttp(result),
+      result.kind,
+    );
 
-    if (result.kind === "timed_out") {
+    if (disposition.kind === "terminal") {
       const current = this.deps.jobStore.getByLoopId(job.loopId) ?? job;
+      const now = new Date().toISOString();
+      // timed_out persists an explicit TIMED_OUT with its own message; every
+      // other terminal reason (unauthorized/404/410) finalizes as UNKNOWN.
+      const finalized =
+        disposition.reason === "timed_out"
+          ? {
+              status: "TIMED_OUT" as const,
+              liveActivity: "Loop timed out — restart from the loop list.",
+            }
+          : {
+              status: "UNKNOWN" as const,
+              liveActivity: `Boot recovery: loop terminated server-side (${terminalReasonMessage(disposition.reason)})`,
+            };
       this.deps.jobStore.upsert({
         ...current,
-        status: "TIMED_OUT",
-        liveActivity: "Loop timed out — restart from the loop list.",
-        completedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        cloudFinalizedAt: new Date().toISOString(),
+        ...finalized,
+        completedAt: now,
+        updatedAt: now,
+        cloudFinalizedAt: now,
       });
       this.deps.loopTokenStore.deleteLoopToken(job.loopId);
     }
@@ -310,8 +357,31 @@ export class BootRecoveryService implements Disposable {
     }
 
     const reconcileResult = await this.reconcileCloudLoopStatus(job, effectiveApiBaseUrl);
-    if (reconcileResult.kind === "timed_out") {
+    const disposition = classifyLoopStatus(
+      cloudStatusToHttp(reconcileResult),
+      reconcileResult.kind,
+    );
+
+    if (disposition.kind === "terminal") {
+      // reconcileCloudLoopStatus already persisted the terminal status,
+      // set cloudFinalizedAt, and deleted the loop token for all terminal
+      // cases (timed_out, unauthorized, 404, 410). Tear down schedulers
+      // and skip reattach.
+      this.schedulers.teardownLoop(loopId);
+      gatewayLog.warn(
+        "boot-recovery",
+        `Skipping live reattach for loopId=${loopId}: terminal disposition (${disposition.reason})`,
+      );
       return;
+    }
+
+    if (disposition.kind === "transient") {
+      // Transient error (5xx or network): cloud might come back.
+      // Do a conservative reattach; the next heartbeat cycle will re-classify.
+      gatewayLog.warn(
+        "boot-recovery",
+        `Transient error during reconcile for loopId=${loopId} (${disposition.reason}): reattaching conservatively`,
+      );
     }
 
     registerRecoveredLoop(loopId, pid);
@@ -367,7 +437,25 @@ export class BootRecoveryService implements Disposable {
       loopTokenStore: this.deps.loopTokenStore,
     });
 
-    this.schedulers.startHeartbeat(loopId, { apiBaseUrl: effectiveApiBaseUrl, getToken });
+    this.schedulers.startHeartbeat(loopId, {
+      apiBaseUrl: effectiveApiBaseUrl,
+      getToken,
+      jobStore: this.deps.jobStore,
+      finalizeFn: makeHeartbeatFinalizeFn(
+        {
+          jobStore: this.deps.jobStore,
+          telemetry: this.deps.telemetry,
+          getToken,
+          apiBaseUrl: effectiveApiBaseUrl,
+          isProcessRunning,
+          getAllowedDirectories: this.deps.getAllowedDirectories ?? (() => []),
+          loopTokenStore: this.deps.loopTokenStore,
+          cleanupAdditionalWorktrees: cleanupAdditionalWorktreesWithDefaultProvider,
+          schedulers: this.schedulers,
+        },
+        "boot-recovery",
+      ),
+    });
 
     this.schedulers.registerSleep(loopId, {
       apiBaseUrl: effectiveApiBaseUrl,
