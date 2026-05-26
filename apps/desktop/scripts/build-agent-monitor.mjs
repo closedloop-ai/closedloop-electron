@@ -1062,10 +1062,13 @@ function patchServerIndex(file) {
         // still goes through the importSession PR-extract block on the hook
         // → POST path.
         //
-        // Deferred via setImmediate so even the first-run scan happens AFTER
-        // the sidecar reports ready — boot is never blocked. The mtime cache
-        // in pr_backfill_seen makes subsequent boots ~stat-time even on
-        // machines with thousands of session logs (see PR #238 review).
+        // Deferred via setImmediate so the first-run scan runs after the
+        // current synchronous startup tick completes — boot is not blocked
+        // by it. Note: this is NOT tied to a sidecar "ready" signal; it
+        // simply defers to the next event-loop tick, which is enough to
+        // keep the boot critical path clean even at thousands of files.
+        // The mtime cache in pr_backfill_seen makes subsequent boots
+        // ~stat-time at any scale (see PR #238 review feedback).
         "  setImmediate(() => {",
         "    try {",
         '      require("./lib/pr-backfill").runClaudePrBackfill(dbModule.db);',

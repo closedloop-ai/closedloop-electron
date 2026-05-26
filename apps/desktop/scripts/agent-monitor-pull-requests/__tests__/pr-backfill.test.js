@@ -6,6 +6,11 @@
  * `if (existingCount === 0)` gap in the upstream legacy-session import.
  * Uses Node's built-in node:sqlite (DatabaseSync) — same DB surface as
  * pull-request-store.test.js so the suites share conventions.
+ *
+ * Three invariants from the PR #238 Codex review that this suite asserts:
+ *   - A read failure must NOT cache the mtime (else file is permanently skipped).
+ *   - A per-draft upsert failure must NOT cache the mtime (same risk).
+ *   - A non-ENOENT projects-dir error must surface, not be silently swallowed.
  */
 "use strict";
 
@@ -55,6 +60,19 @@ function stageProjectsTree(entries) {
     );
   }
   return root;
+}
+
+/**
+ * Build an fs wrapper that delegates to the real fs except for a single
+ * call we want to override. Used to simulate EACCES / EIO without chmod.
+ */
+function fsWithOverride(overrides) {
+  return new Proxy(fs, {
+    get(target, prop) {
+      if (prop in overrides) return overrides[prop];
+      return target[prop];
+    },
+  });
 }
 
 describe("runClaudePrBackfill", () => {
@@ -236,28 +254,126 @@ describe("runClaudePrBackfill", () => {
     assert.equal(r.errors, 0);
   });
 
-  test("non-ENOENT projects-dir error is counted and surfaced, not swallowed (Codex P2 fix)", () => {
-    // Inject a stub db that fails the seen-state prepare to simulate a
-    // schema problem (a different non-ENOENT-class failure path the
-    // backfill must NOT silently swallow). The fresh-DB / missing-dir
-    // cases are already covered above — this asserts the broader invariant
-    // that "any error is reported, only ENOENT is silent."
-    const stubDb = {
-      prepare() {
-        throw new Error("simulated schema-missing failure");
+  test("EACCES on the projects-dir readdirSync is surfaced, not silently swallowed (Codex P2 — exact path)", () => {
+    const db = freshDb();
+    const eacces = Object.assign(new Error("EACCES: permission denied"), {
+      code: "EACCES",
+    });
+    const fakeFs = fsWithOverride({
+      readdirSync: () => {
+        throw eacces;
       },
-    };
+    });
+
+    const r = runClaudePrBackfill(db, {
+      projectsDir: "/this/path/wont/be/touched",
+      fs: fakeFs,
+    });
+    assert.equal(r.errors, 1, "EACCES from projects-dir read must be counted");
+    assert.equal(r.scanned, 0);
+    assert.equal(r.captured, 0);
+  });
+
+  test("read failure does NOT cache the mtime — next boot retries the file (Codex P1)", () => {
     const root = stageProjectsTree([
       {
-        projDir: "-Users-andreweye-projD",
-        sessionId: "sess-D",
+        projDir: "-Users-andreweye-projE",
+        sessionId: "sess-E",
         fixture: "claude-code-session.jsonl",
       },
     ]);
-    const r = runClaudePrBackfill(stubDb, { projectsDir: root });
-    assert.equal(r.errors, 1, "schema-prepare failure must be counted");
-    assert.equal(r.captured, 0);
-    assert.equal(r.scanned, 0);
+    const filePath = path.join(
+      root,
+      "-Users-andreweye-projE",
+      "sess-E.jsonl",
+    );
+    const realFs = fs;
+
+    // First boot: readFileSync throws EACCES → file stays uncached.
+    const failingFs = fsWithOverride({
+      readFileSync: (p, enc) => {
+        if (p === filePath) {
+          throw Object.assign(new Error("EACCES: permission denied"), {
+            code: "EACCES",
+          });
+        }
+        return realFs.readFileSync(p, enc);
+      },
+    });
+    const db = freshDb();
+    const first = runClaudePrBackfill(db, { projectsDir: root, fs: failingFs });
+    assert.equal(first.errors, 1, "read failure must be counted");
+    assert.equal(first.captured, 0);
+    assert.equal(first.scanned, 1);
+
+    // Verify the file was NOT marked seen — the cache must be empty for it.
+    const cacheRows = db
+      .prepare("SELECT * FROM pr_backfill_seen WHERE session_id = ?")
+      .all("sess-E");
+    assert.equal(
+      cacheRows.length,
+      0,
+      "a failed read must NOT cache the mtime — else the file is skipped forever",
+    );
+
+    // Second boot: real fs, file is readable now → captures land normally.
+    const second = runClaudePrBackfill(db, { projectsDir: root });
+    assert.equal(second.scanned, 1, "uncached file must be re-attempted");
+    assert.equal(second.captured, 2);
+    assert.equal(second.errors, 0);
+  });
+
+  test("per-draft upsert failure does NOT cache the mtime — next boot retries (Codex P1)", () => {
+    const root = stageProjectsTree([
+      {
+        projDir: "-Users-andreweye-projF",
+        sessionId: "sess-F",
+        fixture: "claude-code-session.jsonl",
+      },
+    ]);
+    const db = freshDb();
+
+    // Wrap the db.prepare so the upsertPullRequest prepared statement throws,
+    // simulating a transient DB error during the per-draft loop. Leave the
+    // upsertSeen prepared statement intact so we can prove that — despite
+    // upsertSeen still working — the backfill MUST NOT call it after upsert
+    // failures. (If it did, the file would be permanently skipped and the
+    // dropped PRs would be lost forever.)
+    const realPrepare = db.prepare.bind(db);
+    const wrappedDb = new Proxy(db, {
+      get(target, prop) {
+        if (prop === "prepare") {
+          return (sql) => {
+            const stmt = realPrepare(sql);
+            if (sql.startsWith("INSERT INTO pull_requests")) {
+              return {
+                get: stmt.get.bind(stmt),
+                all: stmt.all.bind(stmt),
+                run: () => {
+                  throw new Error("simulated transient DB error");
+                },
+              };
+            }
+            return stmt;
+          };
+        }
+        return target[prop];
+      },
+    });
+
+    const r = runClaudePrBackfill(wrappedDb, { projectsDir: root });
+    assert.equal(r.scanned, 1);
+    assert.ok(r.errors >= 1, "at least one upsert failure must be counted");
+
+    // Cache must be empty for this file — fileSucceeded gate must have held.
+    const cacheRows = db
+      .prepare("SELECT * FROM pr_backfill_seen WHERE session_id = ?")
+      .all("sess-F");
+    assert.equal(
+      cacheRows.length,
+      0,
+      "an upsert failure must NOT cache the mtime — else the dropped PRs are lost forever",
+    );
   });
 });
 

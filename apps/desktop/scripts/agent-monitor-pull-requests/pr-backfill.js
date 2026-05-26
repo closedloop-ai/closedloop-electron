@@ -18,8 +18,26 @@
  * — no readFile, no parse, no upsert calls. First boot after the feature
  * ships pays the full scan cost once; every subsequent boot is ~stat-time.
  *
- * Called from server/index.js via setImmediate so even the first-run scan
- * happens AFTER the sidecar reports ready — boot is never blocked.
+ * Two correctness invariants the cache MUST preserve, both flagged by the
+ * Codex review on PR #238:
+ *
+ *   1. A read failure must NOT cache the mtime. If fs.readFileSync throws
+ *      (EACCES, iCloud placeholder eviction, TOCTOU ENOENT after statSync),
+ *      we leave the file uncached so the next boot retries it. That's why
+ *      this module reads the file itself instead of using the session-shaped
+ *      extractPullRequestsFromSession entry — that entry swallows read
+ *      failures and returns [], which the cache cannot distinguish from
+ *      "file read fine, just no PRs in it."
+ *
+ *   2. A per-draft upsert failure must NOT cache the mtime. If a single
+ *      upsertPullRequest call throws mid-loop (transient DB error,
+ *      constraint bug), we'd drop that PR; if we ALSO cache the mtime,
+ *      the file is permanently skipped on every later boot and the PR is
+ *      lost forever. The fileSucceeded flag below tracks per-file success
+ *      and gates the upsertSeen call accordingly.
+ *
+ * Called from server/index.js via setImmediate so the first-run scan
+ * happens after the current event-loop tick — boot is not blocked by it.
  *
  * Materialized into the generated server/lib by build-agent-monitor.mjs;
  * relative requires (./claude-home, ./pr-extractor, ./pull-request-store)
@@ -29,7 +47,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const { extractPullRequestsFromSession } = require("./pr-extractor");
+const { extractPullRequestsFromText } = require("./pr-extractor");
 const { upsertPullRequest } = require("./pull-request-store");
 
 /**
@@ -57,9 +75,9 @@ function resolveClaudeProjectsDir() {
  * Walk Claude session log files and upsert any captured PRs. Best-effort and
  * never blocks the caller — every fs / SQL op is try/catch-isolated.
  *
- * Per-file mtime skip: each scanned file's mtime is persisted to
- * `pr_backfill_seen`; on the next boot a file whose mtime matches the
- * stored value is skipped entirely (just one `fs.statSync` call, no read).
+ * Per-file mtime skip: each successfully-scanned file's mtime is persisted
+ * to `pr_backfill_seen`; on the next boot a file whose mtime matches the
+ * stored value is skipped (just one `fs.statSync` call, no read).
  *
  * Only walks top-level `<projDir>/<sessionId>.jsonl` — subagent JSONLs under
  * `<projDir>/<sessionId>/subagents/` are intentionally skipped, matching the
@@ -68,16 +86,21 @@ function resolveClaudeProjectsDir() {
  *
  * Error handling: ENOENT on the projects dir is normal (fresh machine) and
  * returns zeros silently. Any other filesystem error is counted, logged, and
- * does not abort the backfill — partial progress is preferable to none.
+ * does not abort the backfill — partial progress is preferable to none. Any
+ * per-file read OR upsert failure leaves the file's mtime uncached so the
+ * next boot retries it (no silent permanent-skip on transient errors).
  *
  * @param {object} db - node:sqlite Database or better-sqlite3 handle
  * @param {object} [options]
  * @param {string} [options.projectsDir] - override the Claude projects dir
  *   (tests use this to point at a fixture tree)
+ * @param {object} [options.fs] - inject a custom fs implementation (tests
+ *   use this to simulate EACCES on readdirSync without chmod-ing real dirs)
  * @returns {{captured:number, deduped:number, scanned:number, skipped:number, errors:number}}
  */
 function runClaudePrBackfill(db, options = {}) {
   const projectsDir = options.projectsDir || resolveClaudeProjectsDir();
+  const fsImpl = options.fs || fs;
   let captured = 0;
   let deduped = 0;
   let scanned = 0;
@@ -87,7 +110,7 @@ function runClaudePrBackfill(db, options = {}) {
 
   let projectDirs;
   try {
-    projectDirs = fs
+    projectDirs = fsImpl
       .readdirSync(projectsDir, { withFileTypes: true })
       .filter((d) => d.isDirectory())
       .map((d) => d.name);
@@ -130,7 +153,7 @@ function runClaudePrBackfill(db, options = {}) {
     const projPath = path.join(projectsDir, projDir);
     let files;
     try {
-      files = fs.readdirSync(projPath).filter((f) => f.endsWith(".jsonl"));
+      files = fsImpl.readdirSync(projPath).filter((f) => f.endsWith(".jsonl"));
     } catch (e) {
       // A single unreadable project dir is logged and skipped — must not
       // abort the whole backfill. ENOENT here only happens on a TOCTOU race
@@ -147,7 +170,7 @@ function runClaudePrBackfill(db, options = {}) {
 
       let stat;
       try {
-        stat = fs.statSync(filePath);
+        stat = fsImpl.statSync(filePath);
       } catch (e) {
         if (e && e.code !== "ENOENT") {
           errors += 1;
@@ -157,7 +180,7 @@ function runClaudePrBackfill(db, options = {}) {
       }
       const mtimeMs = stat.mtimeMs;
 
-      // Has this exact file (by session_id) been scanned with this same mtime?
+      // Has this exact file (by session_id) been scanned at this same mtime?
       // If so, no need to re-read / re-parse — the upsert would dedup anyway.
       let seen;
       try {
@@ -173,31 +196,51 @@ function runClaudePrBackfill(db, options = {}) {
       }
 
       scanned += 1;
+
+      // Read the file OURSELVES so a read failure surfaces here instead of
+      // being swallowed by extractPullRequestsFromSession's []-on-throw
+      // behavior. Caching the mtime of an unreadable file would skip it
+      // forever on the same mtime.
+      let text;
       try {
-        for (const draft of extractPullRequestsFromSession({
-          sessionId,
-          sourceLogPath: filePath,
-        })) {
+        text = fsImpl.readFileSync(filePath, "utf8");
+      } catch (e) {
+        errors += 1;
+        lastError = e;
+        continue; // do NOT upsertSeen — let the next boot retry
+      }
+
+      let fileSucceeded = true;
+      try {
+        for (const draft of extractPullRequestsFromText(text, sessionId)) {
           try {
             const r = upsertPullRequest(db, draft);
             if (r && r.created) captured += 1;
             else deduped += 1;
           } catch (e) {
+            // A single failed upsert MUST mark this file as not-yet-fully-
+            // succeeded. Otherwise we'd cache the mtime and permanently
+            // skip the file on every subsequent boot — and the dropped
+            // PR would be lost forever.
+            fileSucceeded = false;
             errors += 1;
             lastError = e;
           }
         }
-        // Record the mtime AFTER the scan succeeds so a mid-scan crash
-        // leaves the file in "unseen" state and the next boot retries it.
+      } catch (e) {
+        // Parser-level failure — same logic: don't cache.
+        fileSucceeded = false;
+        errors += 1;
+        lastError = e;
+      }
+
+      if (fileSucceeded) {
         try {
           upsertSeen.run(sessionId, filePath, mtimeMs, new Date().toISOString());
         } catch (e) {
           errors += 1;
           lastError = e;
         }
-      } catch (e) {
-        errors += 1;
-        lastError = e;
       }
     }
   }
