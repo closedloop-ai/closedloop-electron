@@ -1,0 +1,67 @@
+[
+  {
+    "id": "fixture-sess-active-1",
+    "name": "Fixture Active Session 1",
+    "status": "active",
+    "cwd": "/tmp/fixture-repo-a",
+    "model": "claude-opus-4-7",
+    "started_at": "2026-05-20T10:00:00.000Z",
+    "ended_at": null,
+    "metadata": null,
+    "updated_at": "2026-05-20T10:30:00.000Z",
+    "awaiting_input_since": null,
+    "harness": "claude"
+  },
+  {
+    "id": "fixture-sess-active-2",
+    "name": "Fixture Active Session 2",
+    "status": "active",
+    "cwd": "/tmp/fixture-repo-b",
+    "model": "claude-sonnet-4-6",
+    "started_at": "2026-05-21T11:00:00.000Z",
+    "ended_at": null,
+    "metadata": null,
+    "updated_at": "2026-05-21T11:45:00.000Z",
+    "awaiting_input_since": null,
+    "harness": "claude"
+  },
+  {
+    "id": "fixture-sess-completed-1",
+    "name": "Fixture Completed Session 1",
+    "status": "completed",
+    "cwd": "/tmp/fixture-repo-a",
+    "model": "claude-opus-4-7",
+    "started_at": "2026-05-15T08:00:00.000Z",
+    "ended_at": "2026-05-15T09:30:00.000Z",
+    "metadata": null,
+    "updated_at": "2026-05-15T09:30:00.000Z",
+    "awaiting_input_since": null,
+    "harness": "claude"
+  },
+  {
+    "id": "fixture-sess-completed-2",
+    "name": "Fixture Completed Session 2",
+    "status": "completed",
+    "cwd": "/tmp/fixture-repo-c",
+    "model": "claude-haiku-4-5",
+    "started_at": "2026-05-16T08:00:00.000Z",
+    "ended_at": "2026-05-16T08:15:00.000Z",
+    "metadata": null,
+    "updated_at": "2026-05-16T08:15:00.000Z",
+    "awaiting_input_since": null,
+    "harness": "codex"
+  },
+  {
+    "id": "fixture-sess-error-1",
+    "name": "Fixture Error Session",
+    "status": "error",
+    "cwd": "/tmp/fixture-repo-b",
+    "model": "claude-opus-4-7",
+    "started_at": "2026-05-17T08:00:00.000Z",
+    "ended_at": "2026-05-17T08:05:00.000Z",
+    "metadata": null,
+    "updated_at": "2026-05-17T08:05:00.000Z",
+    "awaiting_input_since": null,
+    "harness": "claude"
+  }
+]
