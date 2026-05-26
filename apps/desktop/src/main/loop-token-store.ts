@@ -93,7 +93,16 @@ export class LoopTokenStore {
       if (trimmed.length === 0) {
         return null;
       }
-      return JSON.parse(trimmed) as LoopTokenMeta;
+      const parsed: unknown = JSON.parse(trimmed);
+      if (
+        parsed !== null &&
+        typeof parsed === "object" &&
+        "token" in parsed &&
+        typeof (parsed as Record<string, unknown>).token === "string"
+      ) {
+        return parsed as LoopTokenMeta;
+      }
+      return null;
     } catch {
       return null;
     }
