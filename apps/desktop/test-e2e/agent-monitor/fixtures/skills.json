@@ -1,0 +1,41 @@
+[
+  {
+    "skill_id": "fixture-skill-alpha-1",
+    "pack_id": "fixture-pack-alpha",
+    "harness": "claude",
+    "install_path": "/tmp/fixture-claude/plugins/alpha",
+    "name": "alpha-skill-one",
+    "version": "1.0.0",
+    "description": "First skill from fixture pack alpha",
+    "source_url": null,
+    "detected_at": "2026-05-10T00:00:00.000Z",
+    "last_seen_at": "2026-05-22T00:00:00.000Z",
+    "uninstalled_at": null
+  },
+  {
+    "skill_id": "fixture-skill-alpha-2",
+    "pack_id": "fixture-pack-alpha",
+    "harness": "claude",
+    "install_path": "/tmp/fixture-claude/plugins/alpha",
+    "name": "alpha-skill-two",
+    "version": "1.0.0",
+    "description": "Second skill from fixture pack alpha",
+    "source_url": null,
+    "detected_at": "2026-05-10T00:00:00.000Z",
+    "last_seen_at": "2026-05-22T00:00:00.000Z",
+    "uninstalled_at": null
+  },
+  {
+    "skill_id": "fixture-skill-beta-1",
+    "pack_id": "fixture-pack-beta",
+    "harness": "claude",
+    "install_path": "/tmp/fixture-claude/plugins/beta",
+    "name": "beta-skill-one",
+    "version": "2.3.1",
+    "description": "Only skill from fixture pack beta",
+    "source_url": null,
+    "detected_at": "2026-05-11T00:00:00.000Z",
+    "last_seen_at": "2026-05-22T00:00:00.000Z",
+    "uninstalled_at": null
+  }
+]

@@ -1,6 +1,6 @@
 {
   "name": "desktop",
-  "version": "0.15.82",
+  "version": "0.15.83",
   "description": "ClosedLoop Desktop",
   "author": "ClosedLoop AI <support@closedloop.ai>",
   "private": true,
@@ -20,6 +20,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint src/",
     "test": "tsx --test test/*.test.ts && node --test \"scripts/agent-monitor-packs/__tests__/*.test.js\" \"scripts/agent-monitor-pull-requests/__tests__/*.test.js\"",
+    "pretest:contract": "pnpm build:agent-monitor",
+    "test:contract": "node --test \"test-e2e/agent-monitor/specs/api-contract/*.test.mjs\"",
+    "pretest:e2e": "pnpm build:agent-monitor",
+    "test:e2e": "playwright test --config test-e2e/agent-monitor/playwright.config.ts",
     "package": "pnpm clean:package && pnpm build && pnpm stage:package && node scripts/run-electron-builder.mjs",
     "release": "pnpm clean:package && pnpm build && pnpm stage:package && node scripts/run-electron-builder.mjs --publish always"
   },
@@ -35,11 +39,12 @@
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "4.3.4",
+    "@playwright/test": "^1.60.0",
     "@types/busboy": "^1.5.4",
     "@types/node": "^22.13.8",
     "@typescript-eslint/eslint-plugin": "^8.57.1",
     "@typescript-eslint/parser": "^8.57.1",
+    "@vitejs/plugin-react": "4.3.4",
     "agent-dashboard-client": "github:hoangsonww/Claude-Code-Agent-Monitor#840c518d7fa69231de049e41b893938228b67e40&path:/client",
     "autoprefixer": "10.4.20",
     "electron": "^35.0.2",
