@@ -277,14 +277,20 @@ async function readLocalStatus(
 
   const parsed = statusResult.stdout.split("\n").map(parseStatusLine).filter((line): line is ParsedStatusLine => Boolean(line));
   const stats = await readNumstat(processManager, repoPath);
-  const files = parsed.map((line) => ({
-    path: line.filePath,
-    previousPath: line.previousPath,
-    status: line.status,
-    additions: stats.get(line.filePath)?.additions ?? 0,
-    deletions: stats.get(line.filePath)?.deletions ?? 0,
-    patch: null,
-  }));
+  const files = await Promise.all(
+    parsed.map(async (line) => {
+      const lineStats =
+        stats.get(line.filePath) ?? (line.code === "??" ? await readUntrackedTextStats(repoPath, line.filePath) : null);
+      return {
+        path: line.filePath,
+        previousPath: line.previousPath,
+        status: line.status,
+        additions: lineStats?.additions ?? 0,
+        deletions: lineStats?.deletions ?? 0,
+        patch: null,
+      };
+    })
+  );
 
   return { ok: true, files };
 }
@@ -516,6 +522,23 @@ async function readWorkingFile(
     };
   } catch {
     return { isBinary: false, content: "" };
+  }
+}
+
+async function readUntrackedTextStats(repoPath: string, filePath: string): Promise<{ additions: number; deletions: number } | null> {
+  try {
+    const buffer = await fs.readFile(path.join(repoPath, filePath));
+    if (buffer.subarray(0, BINARY_SNIFF_BYTES).includes(0)) {
+      return { additions: 0, deletions: 0 };
+    }
+    const content = buffer.toString("utf-8");
+    if (!content) {
+      return { additions: 0, deletions: 0 };
+    }
+    const additions = content.endsWith("\n") ? content.split("\n").length - 1 : content.split("\n").length;
+    return { additions, deletions: 0 };
+  } catch {
+    return null;
   }
 }
 

@@ -115,9 +115,18 @@ describe("registerGitLocalChangesRoutes", () => {
     assert.equal(response.status, 200);
     assert.equal(response.body.repoPath, repoPath);
     assert.equal(response.body.branch, "feature");
-    const files = response.body.files as Array<{ path: string; previousPath: string | null; status: string; patch: null }>;
+    const files = response.body.files as Array<{
+      additions: number;
+      path: string;
+      previousPath: string | null;
+      status: string;
+      patch: null;
+    }>;
     assert.equal(files.some((file) => file.path === "tracked.txt" && file.status === "modified"), true);
-    assert.equal(files.some((file) => file.path === "added.txt" && file.status === "added"), true);
+    assert.equal(
+      files.some((file) => file.path === "added.txt" && file.status === "added" && file.additions === 1),
+      true
+    );
     assert.equal(files.some((file) => file.path === "rename-new.txt" && file.previousPath === "rename-old.txt"), true);
     assert.equal(files.every((file) => file.patch === null), true);
     assert.equal(JSON.stringify(files).includes("old\\nnew"), false);
