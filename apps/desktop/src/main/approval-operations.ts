@@ -31,6 +31,8 @@ export const SUPPORTED_OPERATION_IDS = [
   "codex_review",
   "codex_argue",
   "git_action",
+  "git_local_changes",
+  "git_local_commit_push",
   "git_pr",
   "git_branch_worktree",
   "health_check",
@@ -129,6 +131,15 @@ export function resolveOperationId(pathname: string): OperationId | null {
   }
   if (pathname === "/api/gateway/git/branch-worktree") {
     return "git_branch_worktree";
+  }
+  if (
+    pathname === "/api/gateway/git/local-changes" ||
+    pathname === "/api/gateway/git/local-changes/diff"
+  ) {
+    return "git_local_changes";
+  }
+  if (pathname === "/api/gateway/git/local-changes/commit-push") {
+    return "git_local_commit_push";
   }
   if (pathname.startsWith("/api/gateway/git/pr") || pathname === "/api/gateway/git/user") {
     return "git_pr";
