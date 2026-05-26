@@ -1057,14 +1057,22 @@ function patchServerIndex(file) {
         // plan backfill for pull-request URLs. Same `existingCount === 0` gap
         // — historical sessions that ran before this feature shipped never
         // get re-imported, so their captured PRs never reach the DB. This
-        // standalone file scan (idempotent, deterministic-id-deduped) closes
-        // that gap. Forward-looking capture still goes through the
-        // importSession PR-extract block on the hook → POST path.
-        "  try {",
-        '    require("./lib/pr-backfill").runClaudePrBackfill(dbModule.db);',
-        "  } catch (e) {",
-        '    console.warn("[pull-requests] backfill failed:", e && e.message);',
-        "  }",
+        // standalone file scan (idempotent, deterministic-id-deduped, mtime-
+        // skipped on repeat boots) closes that gap. Forward-looking capture
+        // still goes through the importSession PR-extract block on the hook
+        // → POST path.
+        //
+        // Deferred via setImmediate so even the first-run scan happens AFTER
+        // the sidecar reports ready — boot is never blocked. The mtime cache
+        // in pr_backfill_seen makes subsequent boots ~stat-time even on
+        // machines with thousands of session logs (see PR #238 review).
+        "  setImmediate(() => {",
+        "    try {",
+        '      require("./lib/pr-backfill").runClaudePrBackfill(dbModule.db);',
+        "    } catch (e) {",
+        '      console.warn("[pull-requests] backfill failed:", e && e.message);',
+        "    }",
+        "  });",
         '  const existingCount = dbModule.db.prepare("SELECT COUNT(*) AS c FROM sessions").get().c;',
       ].join("\n"),
     );

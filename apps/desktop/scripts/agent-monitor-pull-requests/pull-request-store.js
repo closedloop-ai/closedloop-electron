@@ -54,6 +54,18 @@ function ensurePullRequestSchema(db) {
       ON pull_requests(repo_full_name, pr_number);
     CREATE INDEX IF NOT EXISTS idx_pull_requests_observed
       ON pull_requests(observed_at DESC);
+
+    -- FEA-1226 backfill mtime cache. pr-backfill records the source JSONL's
+    -- mtime at last scan so subsequent boots can fs.statSync + skip any file
+    -- that has not changed (no readFile, no parse, no upsert calls). This is
+    -- what keeps repeat-boot cost ~100ms on machines with thousands of
+    -- session logs, instead of re-reading hundreds of MB on every boot.
+    CREATE TABLE IF NOT EXISTS pr_backfill_seen (
+      session_id     TEXT PRIMARY KEY,
+      file_path      TEXT NOT NULL,
+      file_mtime_ms  REAL NOT NULL,
+      scanned_at     TEXT NOT NULL
+    );
   `);
 }
 

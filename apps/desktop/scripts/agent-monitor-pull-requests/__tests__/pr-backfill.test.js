@@ -21,7 +21,11 @@ const { runClaudePrBackfill, resolveClaudeProjectsDir } = require("../pr-backfil
 
 const FIXTURES = path.join(__dirname, "fixtures");
 
-/** A fresh in-memory DB with the pull_requests schema. */
+/**
+ * A fresh in-memory DB with both `pull_requests` and `pr_backfill_seen`
+ * tables (ensurePullRequestSchema creates both — the mtime cache lives in
+ * the store so all PR-related schema bootstraps in one call).
+ */
 function freshDb() {
   const db = new DatabaseSync(":memory:");
   // listSessionsWithPullRequests LEFT JOINs sessions — provide the columns it reads.
@@ -67,6 +71,7 @@ describe("runClaudePrBackfill", () => {
     const r = runClaudePrBackfill(db, { projectsDir: root });
 
     assert.equal(r.scanned, 1, "should scan the one staged session file");
+    assert.equal(r.skipped, 0);
     assert.equal(r.errors, 0, "no errors expected");
     assert.equal(r.captured, 2, "claude-code-session.jsonl yields 2 PR rows");
     assert.equal(r.deduped, 0);
@@ -83,7 +88,38 @@ describe("runClaudePrBackfill", () => {
     }
   });
 
-  test("is idempotent — re-running upserts dedup into 0 new captures", () => {
+  test("idempotent — re-running with unchanged mtimes skips files entirely (no rescan)", () => {
+    const root = stageProjectsTree([
+      {
+        projDir: "-Users-andreweye-fixture",
+        sessionId: "canonical-session-1",
+        fixture: "claude-code-session.jsonl",
+      },
+    ]);
+    const db = freshDb();
+
+    const first = runClaudePrBackfill(db, { projectsDir: root });
+    assert.equal(first.captured, 2);
+    assert.equal(first.scanned, 1);
+    assert.equal(first.skipped, 0);
+
+    const second = runClaudePrBackfill(db, { projectsDir: root });
+    assert.equal(
+      second.scanned,
+      0,
+      "unchanged mtime must skip the file without reading/parsing",
+    );
+    assert.equal(second.skipped, 1, "should be reported as skipped");
+    assert.equal(second.captured, 0);
+    assert.equal(second.deduped, 0);
+    assert.equal(
+      store.countPullRequests(db),
+      2,
+      "DB row count must not grow on re-runs",
+    );
+  });
+
+  test("file with bumped mtime is rescanned and captures stay deduped at the SQLite layer", () => {
     const root = stageProjectsTree([
       {
         projDir: "-Users-andreweye-fixture",
@@ -96,15 +132,23 @@ describe("runClaudePrBackfill", () => {
     const first = runClaudePrBackfill(db, { projectsDir: root });
     assert.equal(first.captured, 2);
 
-    const second = runClaudePrBackfill(db, { projectsDir: root });
-    assert.equal(second.scanned, 1);
-    assert.equal(second.captured, 0, "second run should capture nothing new");
-    assert.equal(second.deduped, 2, "both PRs should be reported as deduped");
-    assert.equal(
-      store.countPullRequests(db),
-      2,
-      "DB row count must not grow on re-runs",
+    // Bump the file's mtime to simulate the session being appended to
+    // (live Claude session writing more lines while the app was off).
+    const filePath = path.join(
+      root,
+      "-Users-andreweye-fixture",
+      "canonical-session-1.jsonl",
     );
+    const stat = fs.statSync(filePath);
+    const futureTime = new Date(stat.mtimeMs + 60_000);
+    fs.utimesSync(filePath, futureTime, futureTime);
+
+    const second = runClaudePrBackfill(db, { projectsDir: root });
+    assert.equal(second.scanned, 1, "bumped mtime must trigger a rescan");
+    assert.equal(second.skipped, 0);
+    assert.equal(second.captured, 0, "deterministic id dedups DB writes");
+    assert.equal(second.deduped, 2, "both PRs reported as deduped this time");
+    assert.equal(store.countPullRequests(db), 2);
   });
 
   test("walks multiple project dirs", () => {
@@ -166,7 +210,13 @@ describe("runClaudePrBackfill", () => {
     const r = runClaudePrBackfill(db, {
       projectsDir: path.join(os.tmpdir(), "prbackfill-does-not-exist-xyz"),
     });
-    assert.deepEqual(r, { captured: 0, deduped: 0, scanned: 0, errors: 0 });
+    assert.deepEqual(r, {
+      captured: 0,
+      deduped: 0,
+      scanned: 0,
+      skipped: 0,
+      errors: 0,
+    });
     assert.equal(store.countPullRequests(db), 0);
   });
 
@@ -184,6 +234,30 @@ describe("runClaudePrBackfill", () => {
     assert.equal(r.scanned, 1);
     assert.equal(r.captured, 0, "negatives fixture must NOT produce captures");
     assert.equal(r.errors, 0);
+  });
+
+  test("non-ENOENT projects-dir error is counted and surfaced, not swallowed (Codex P2 fix)", () => {
+    // Inject a stub db that fails the seen-state prepare to simulate a
+    // schema problem (a different non-ENOENT-class failure path the
+    // backfill must NOT silently swallow). The fresh-DB / missing-dir
+    // cases are already covered above — this asserts the broader invariant
+    // that "any error is reported, only ENOENT is silent."
+    const stubDb = {
+      prepare() {
+        throw new Error("simulated schema-missing failure");
+      },
+    };
+    const root = stageProjectsTree([
+      {
+        projDir: "-Users-andreweye-projD",
+        sessionId: "sess-D",
+        fixture: "claude-code-session.jsonl",
+      },
+    ]);
+    const r = runClaudePrBackfill(stubDb, { projectsDir: root });
+    assert.equal(r.errors, 1, "schema-prepare failure must be counted");
+    assert.equal(r.captured, 0);
+    assert.equal(r.scanned, 0);
   });
 });
 
