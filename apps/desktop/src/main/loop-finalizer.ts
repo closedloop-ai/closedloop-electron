@@ -44,6 +44,7 @@ import {
   isTerminalJobStatus,
   type JobStore,
   type LocalJob,
+  type LocalJobFinalizationSource,
 } from "./job-store.js";
 import type { LoopTokenStore } from "./loop-token-store.js";
 import type { LoopSchedulerContext } from "./loop-scheduler-context.js";
@@ -1223,6 +1224,43 @@ export function isRetryableFinalizationError(error?: string): boolean {
   }
   const status = Number(statusMatch[1]);
   return status === 429 || status >= 500;
+}
+
+/**
+ * Builds the `finalizeFn` callback wired into a heartbeat scheduler. On a
+ * terminal server signal the scheduler invokes this to persist the terminal
+ * status onto the local job and then run full loop finalization via
+ * {@link finalizeLoopFromRuntime}. Centralizes the upsert → re-read → finalize
+ * sequence that boot-recovery and the symphony-loop launch path would
+ * otherwise each inline; callers supply their own `LoopFinalizerDeps` (e.g.
+ * real vs. no-op telemetry, with or without a worktree-cleanup provider).
+ *
+ * `finalizationSource` is the attribution stamped onto the persisted job and
+ * surfaced in telemetry metadata; callers pass an accurate value for their path
+ * (the boot-recovery service uses "boot-recovery"; the symphony-loop launch
+ * path uses "heartbeat-terminal"). The `finalizeLoopFromRuntime` *reason* is
+ * intentionally fixed to "boot-recovery" because it is a behavioral selector
+ * (post-hoc reconciliation semantics: persist-before-cloud, RUNNING-job
+ * handling, the `job.recovery.finalize_replayed` telemetry category) that is
+ * correct for every heartbeat-terminal finalization regardless of caller.
+ */
+export function makeHeartbeatFinalizeFn(
+  finalizerDeps: LoopFinalizerDeps,
+  finalizationSource: LocalJobFinalizationSource,
+): (job: LocalJob, targetStatus: "TIMED_OUT" | "UNKNOWN") => Promise<void> {
+  return async (job, targetStatus) => {
+    finalizerDeps.jobStore.upsert({
+      ...job,
+      status: targetStatus,
+      finalizationSource,
+      liveActivity: `Heartbeat terminal signal: ${targetStatus}`,
+      completedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const updatedJob =
+      finalizerDeps.jobStore.getByLoopId(job.loopId) ?? { ...job, status: targetStatus };
+    await finalizeLoopFromRuntime(updatedJob, "boot-recovery", finalizerDeps);
+  };
 }
 
 export async function finalizeLoopFromRuntime(

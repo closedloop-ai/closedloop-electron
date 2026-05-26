@@ -23,7 +23,7 @@ export type LocalJobCommitter = {
   email: string;
 };
 
-export type LocalJobFinalizationSource = "live-exit" | "boot-recovery";
+export type LocalJobFinalizationSource = "live-exit" | "boot-recovery" | "heartbeat-terminal";
 
 export type LocalJobExecuteFinalizationStatus =
   | "pending"
@@ -265,4 +265,26 @@ export class JobStore {
     this.store.set("activeJobs", [...this.activeJobs.values()]);
     this.store.set("terminalJobs", this.terminalJobs);
   }
+}
+
+/**
+ * Returns an inert no-op `JobStore` for heartbeat callers that do not own a
+ * real store (the one-shot sleep-resume probe and the legacy no-store launch
+ * path). Every read returns empty and `upsert` echoes its argument, so
+ * `runHeartbeatTick` finds no local job and skips finalization — leaving the
+ * owning scheduler as the single actor responsible for terminalizing a job.
+ *
+ * Centralized here so the `as unknown as JobStore` escape hatch lives in one
+ * place; if `JobStore` gains a method the heartbeat path begins to call, this
+ * stub is the single spot to update.
+ */
+export function createStubJobStore(): JobStore {
+  return {
+    getByLoopId: () => undefined,
+    getById: () => undefined,
+    upsert: (j: LocalJob) => j,
+    listRunning: () => [],
+    listCompleted: () => [],
+    reconcile: () => [],
+  } as unknown as JobStore;
 }
