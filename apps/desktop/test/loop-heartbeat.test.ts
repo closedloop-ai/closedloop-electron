@@ -5,6 +5,9 @@
  *   - periodic heartbeat firing at the configured interval
  *   - fire-and-forget error handling (fetch throws — must not propagate)
  *   - fire-and-forget error handling (non-200 HTTP response — must not propagate)
+ *   - job finalization on terminal signals: 404 triggers finalizeFn(job, "UNKNOWN") and stops the heartbeat
+ *   - job finalization on terminal signals: 410 triggers finalizeFn(job, "UNKNOWN") and stops the heartbeat
+ *   - job finalization on terminal signals: 401 triggers finalizeFn(job, "UNKNOWN") and stops the heartbeat (no token refresh)
  *   - 404 gate integration: 404 response disables the endpoint and stops the loop's scheduler
  *   - CLOSEDLOOP_HEARTBEAT_INTERVAL_MS env var override
  *   - stop() cancels a running heartbeat scheduler cleanly
@@ -23,8 +26,21 @@ import { flushAsync } from "./loop-token-test-utils.js";
 // Per-test scheduler context. Cleared in afterEach via Symbol.dispose so
 // timers never leak across tests.
 let ctx: LoopSchedulerContext;
+
+// Minimal no-op HeartbeatDeps extras used by tests that do not need
+// finalization behaviour. Tests that exercise terminal-signal paths should
+// supply their own jobStore / finalizeFn stubs.
+const noopJobStore = {
+  getByLoopId: (_loopId: string) => undefined,
+} as unknown as import("../src/main/job-store.js").JobStore;
+const noopFinalizeFn = async () => {};
+
 const start = (loopId: string, deps: { apiBaseUrl: string; getToken: () => string | null }) =>
-  ctx.startHeartbeat(loopId, deps);
+  ctx.startHeartbeat(loopId, {
+    ...deps,
+    jobStore: noopJobStore,
+    finalizeFn: noopFinalizeFn,
+  });
 const stop = (loopId: string) => ctx.stopHeartbeat(loopId);
 const stopAll = () => ctx[Symbol.dispose]();
 
@@ -229,6 +245,159 @@ describe("loop-heartbeat: fire-and-forget error handling", () => {
     mock.timers.tick(1000);
     await flushAsync();
     assert.equal(capturedHeartbeats.length, 2, "heartbeat must fire again after a 500 response");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Job finalization on terminal signals (404 / 410 / 401)
+// ---------------------------------------------------------------------------
+
+describe("loop-heartbeat: job finalization on terminal heartbeat signals", () => {
+  /**
+   * Table-driven cases for status codes that must trigger finalization.
+   *
+   * Per loop-heartbeat.ts classifyLoopStatus mapping:
+   *  - 404 → terminal reason "not_found"  → targetStatus "UNKNOWN"
+   *  - 410 → terminal reason "gone"       → targetStatus "UNKNOWN"
+   *  - 401 → terminal reason "unauthorized" → targetStatus "UNKNOWN"
+   *  (Only "timed_out" reason maps to "TIMED_OUT"; all others map to "UNKNOWN")
+   */
+  const terminalSignalCases: {
+    label: string;
+    httpStatus: number;
+    loopId: string;
+    expectedTargetStatus: "TIMED_OUT" | "UNKNOWN";
+    description: string;
+  }[] = [
+    {
+      label: "404",
+      httpStatus: 404,
+      loopId: "loop-finalize-404",
+      expectedTargetStatus: "UNKNOWN",
+      description: "404 response triggers finalizeFn with UNKNOWN and stops the heartbeat",
+    },
+    {
+      label: "410",
+      httpStatus: 410,
+      loopId: "loop-finalize-410",
+      expectedTargetStatus: "UNKNOWN",
+      description: "410 response triggers finalizeFn with UNKNOWN and stops the heartbeat",
+    },
+    {
+      label: "401",
+      httpStatus: 401,
+      loopId: "loop-finalize-401",
+      expectedTargetStatus: "UNKNOWN",
+      description: "401 response triggers finalizeFn with UNKNOWN and stops the heartbeat (no token refresh)",
+    },
+  ];
+
+  for (const { label, httpStatus, loopId, expectedTargetStatus, description } of terminalSignalCases) {
+    test(description, async () => {
+      process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+
+      mock.timers.enable({ apis: ["Date", "setInterval"] });
+
+      installHeartbeatFetchStub(httpStatus);
+
+      // Build a minimal LocalJob fixture matching the loop ID.
+      const testJob: import("../src/main/job-store.js").LocalJob = {
+        id: `job-${label}`,
+        kind: "SYMPHONY_LOOP",
+        loopId,
+        command: "PLAN",
+        status: "RUNNING",
+        startedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+
+      // Stub JobStore that returns the fixture for the matching loop ID.
+      const stubJobStore = {
+        getByLoopId: (id: string) => (id === loopId ? testJob : undefined),
+      } as unknown as import("../src/main/job-store.js").JobStore;
+
+      // Mock finalizeFn that records every call.
+      const finalizeCalls: Array<{
+        job: import("../src/main/job-store.js").LocalJob;
+        targetStatus: "TIMED_OUT" | "UNKNOWN";
+      }> = [];
+      const mockFinalizeFn = async (
+        job: import("../src/main/job-store.js").LocalJob,
+        targetStatus: "TIMED_OUT" | "UNKNOWN",
+      ) => {
+        finalizeCalls.push({ job, targetStatus });
+      };
+
+      // Start the heartbeat with the real jobStore stub and mock finalizeFn.
+      ctx.startHeartbeat(loopId, {
+        apiBaseUrl: "https://api.example.com",
+        getToken: () => "tok",
+        jobStore: stubJobStore,
+        finalizeFn: mockFinalizeFn,
+      });
+
+      // First tick receives the terminal HTTP response.
+      mock.timers.tick(1000);
+      await flushAsync();
+      assert.equal(capturedHeartbeats.length, 1, `heartbeat must have fired once (received ${label})`);
+
+      // finalizeFn must have been called exactly once with the correct job and status.
+      assert.equal(finalizeCalls.length, 1, `finalizeFn must be called once on ${label}`);
+      const call = finalizeCalls[0];
+      assert.ok(call, "finalizeCalls[0] must exist");
+      assert.equal(call.job, testJob, `finalizeFn must receive the job returned by jobStore.getByLoopId`);
+      assert.equal(
+        call.targetStatus,
+        expectedTargetStatus,
+        `finalizeFn must be called with targetStatus=${expectedTargetStatus} on ${label}`,
+      );
+
+      // Heartbeat scheduler must have stopped — no further fetch calls after the terminal tick.
+      mock.timers.tick(1000);
+      await flushAsync();
+      assert.equal(
+        capturedHeartbeats.length,
+        1,
+        `heartbeat must not fire again after ${label} stops the scheduler`,
+      );
+    });
+  }
+
+  test("404 response: finalizeFn is NOT called when jobStore returns undefined (no matching job)", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+
+    installHeartbeatFetchStub(404);
+
+    const stubJobStore = {
+      getByLoopId: (_id: string) => undefined,
+    } as unknown as import("../src/main/job-store.js").JobStore;
+
+    const finalizeCalls: unknown[] = [];
+    const mockFinalizeFn = async (
+      job: import("../src/main/job-store.js").LocalJob,
+      targetStatus: "TIMED_OUT" | "UNKNOWN",
+    ) => {
+      finalizeCalls.push({ job, targetStatus });
+    };
+
+    ctx.startHeartbeat("loop-finalize-404-nojob", {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "tok",
+      jobStore: stubJobStore,
+      finalizeFn: mockFinalizeFn,
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+
+    assert.equal(finalizeCalls.length, 0, "finalizeFn must not be called when no job is found in store");
+
+    // Scheduler must still stop even without a job to finalize.
+    mock.timers.tick(1000);
+    await flushAsync();
+    assert.equal(capturedHeartbeats.length, 1, "heartbeat must not fire again after 404 even with no job found");
   });
 });
 
