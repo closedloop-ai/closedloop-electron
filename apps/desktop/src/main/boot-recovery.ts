@@ -441,17 +441,20 @@ export class BootRecoveryService implements Disposable {
       apiBaseUrl: effectiveApiBaseUrl,
       getToken,
       jobStore: this.deps.jobStore,
-      finalizeFn: makeHeartbeatFinalizeFn({
-        jobStore: this.deps.jobStore,
-        telemetry: this.deps.telemetry,
-        getToken,
-        apiBaseUrl: effectiveApiBaseUrl,
-        isProcessRunning,
-        getAllowedDirectories: this.deps.getAllowedDirectories ?? (() => []),
-        loopTokenStore: this.deps.loopTokenStore,
-        cleanupAdditionalWorktrees: cleanupAdditionalWorktreesWithDefaultProvider,
-        schedulers: this.schedulers,
-      }),
+      finalizeFn: makeHeartbeatFinalizeFn(
+        {
+          jobStore: this.deps.jobStore,
+          telemetry: this.deps.telemetry,
+          getToken,
+          apiBaseUrl: effectiveApiBaseUrl,
+          isProcessRunning,
+          getAllowedDirectories: this.deps.getAllowedDirectories ?? (() => []),
+          loopTokenStore: this.deps.loopTokenStore,
+          cleanupAdditionalWorktrees: cleanupAdditionalWorktreesWithDefaultProvider,
+          schedulers: this.schedulers,
+        },
+        "boot-recovery",
+      ),
     });
 
     this.schedulers.registerSleep(loopId, {

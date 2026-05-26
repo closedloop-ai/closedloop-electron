@@ -23,7 +23,7 @@ export type LocalJobCommitter = {
   email: string;
 };
 
-export type LocalJobFinalizationSource = "live-exit" | "boot-recovery";
+export type LocalJobFinalizationSource = "live-exit" | "boot-recovery" | "heartbeat-terminal";
 
 export type LocalJobExecuteFinalizationStatus =
   | "pending"

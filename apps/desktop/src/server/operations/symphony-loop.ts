@@ -7936,17 +7936,22 @@ async function handleLoopRequest(
       // undefined) and a no-op finalizeFn that the owning scheduler never needs.
       jobStore: jobStore ?? createStubJobStore(),
       finalizeFn: jobStore
-        ? makeHeartbeatFinalizeFn({
-            jobStore,
-            telemetry: { emit: () => {} },
-            getToken: () =>
-              loopTokenStore?.getLoopToken(body.loopId)?.token ?? body.closedLoopAuthToken,
-            apiBaseUrl,
-            isProcessRunning,
-            getAllowedDirectories,
-            loopTokenStore,
-            schedulers,
-          })
+        ? makeHeartbeatFinalizeFn(
+            {
+              jobStore,
+              // Real telemetry so heartbeat-terminated loops launched via this
+              // path are visible to monitoring (not swallowed by a no-op).
+              telemetry: Observability.getTelemetryEmitter(),
+              getToken: () =>
+                loopTokenStore?.getLoopToken(body.loopId)?.token ?? body.closedLoopAuthToken,
+              apiBaseUrl,
+              isProcessRunning,
+              getAllowedDirectories,
+              loopTokenStore,
+              schedulers,
+            },
+            "heartbeat-terminal",
+          )
         : async () => {},
     });
 

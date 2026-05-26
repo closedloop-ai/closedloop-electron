@@ -44,6 +44,7 @@ import {
   isTerminalJobStatus,
   type JobStore,
   type LocalJob,
+  type LocalJobFinalizationSource,
 } from "./job-store.js";
 import type { LoopTokenStore } from "./loop-token-store.js";
 import type { LoopSchedulerContext } from "./loop-scheduler-context.js";
@@ -1233,15 +1234,25 @@ export function isRetryableFinalizationError(error?: string): boolean {
  * sequence that boot-recovery and the symphony-loop launch path would
  * otherwise each inline; callers supply their own `LoopFinalizerDeps` (e.g.
  * real vs. no-op telemetry, with or without a worktree-cleanup provider).
+ *
+ * `finalizationSource` is the attribution stamped onto the persisted job and
+ * surfaced in telemetry metadata; callers pass an accurate value for their path
+ * (the boot-recovery service uses "boot-recovery"; the symphony-loop launch
+ * path uses "heartbeat-terminal"). The `finalizeLoopFromRuntime` *reason* is
+ * intentionally fixed to "boot-recovery" because it is a behavioral selector
+ * (post-hoc reconciliation semantics: persist-before-cloud, RUNNING-job
+ * handling, the `job.recovery.finalize_replayed` telemetry category) that is
+ * correct for every heartbeat-terminal finalization regardless of caller.
  */
 export function makeHeartbeatFinalizeFn(
   finalizerDeps: LoopFinalizerDeps,
+  finalizationSource: LocalJobFinalizationSource,
 ): (job: LocalJob, targetStatus: "TIMED_OUT" | "UNKNOWN") => Promise<void> {
   return async (job, targetStatus) => {
     finalizerDeps.jobStore.upsert({
       ...job,
       status: targetStatus,
-      finalizationSource: "boot-recovery",
+      finalizationSource,
       liveActivity: `Heartbeat terminal signal: ${targetStatus}`,
       completedAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
