@@ -49,11 +49,13 @@ import type {
   LocalJobExecuteFinalizationStatus,
   LocalJobFinalizationSource,
 } from "../../main/job-store.js";
+import { createStubJobStore } from "../../main/job-store.js";
 import {
   EXECUTE_NO_WORK_MESSAGE,
   finalizeLoopFromRuntime,
   isExecuteNoWorkCompletion,
   isRetryableFinalizationError,
+  makeHeartbeatFinalizeFn,
   tryUploadArtifacts,
   tryUploadSupportBundle,
   type LoopFinalizerDeps,
@@ -7929,8 +7931,32 @@ async function handleLoopRequest(
       getToken: () =>
         loopTokenStore?.getLoopToken(body.loopId)?.token ?? body.closedLoopAuthToken,
       // getSessionToken intentionally omitted: no cloud session source exists here
-      // yet, so revival is inert. Wire it when FEA-1392 lands.
+      // yet, so revival is inert. Wire it when FEA-1392 lands. loopTokenStore is
+      // still threaded so an already-revived loop can adopt its fresh token.
       loopTokenStore,
+      // When jobStore is absent (legacy no-store path), the heartbeat cannot look up or
+      // finalize a local job. Provide a no-op stub so the TypeScript type is satisfied
+      // (runHeartbeatTick logs a warning and skips finalizeFn when getByLoopId returns
+      // undefined) and a no-op finalizeFn that the owning scheduler never needs.
+      jobStore: jobStore ?? createStubJobStore(),
+      finalizeFn: jobStore
+        ? makeHeartbeatFinalizeFn(
+            {
+              jobStore,
+              // Real telemetry so heartbeat-terminated loops launched via this
+              // path are visible to monitoring (not swallowed by a no-op).
+              telemetry: Observability.getTelemetryEmitter(),
+              getToken: () =>
+                loopTokenStore?.getLoopToken(body.loopId)?.token ?? body.closedLoopAuthToken,
+              apiBaseUrl,
+              isProcessRunning,
+              getAllowedDirectories,
+              loopTokenStore,
+              schedulers,
+            },
+            "heartbeat-terminal",
+          )
+        : async () => {},
     });
 
     json(context, 200, {

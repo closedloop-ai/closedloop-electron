@@ -266,7 +266,7 @@ export class AgentSessionSyncService {
       } else {
         const db = new DatabaseSync(dbPath);
         try {
-          db.exec("PRAGMA busy_timeout = 1000");
+          db.exec("PRAGMA busy_timeout = 5000");
           this.initializeBackfillQueueIfNeeded(db);
           this.enqueueIncrementalUpdates(db);
 

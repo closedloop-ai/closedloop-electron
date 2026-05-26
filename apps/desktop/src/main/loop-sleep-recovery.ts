@@ -2,6 +2,7 @@ import electron from "electron";
 import { gatewayLog } from "./gateway-logger.js";
 import type { LoopSchedulerDeps } from "./loop-lifecycle.js";
 import { sendHeartbeatNow } from "./loop-heartbeat.js";
+import { createStubJobStore } from "./job-store.js";
 import { refreshLoopTokenSingleflight } from "./loop-refresh.js";
 
 // Extract powerMonitor via default import so the module loads correctly in
@@ -57,7 +58,27 @@ async function handleResumeForLoop(
   // Trigger an immediate heartbeat via the heartbeat module's public API.
   // sendHeartbeatNow is fire-and-forget and handles errors internally; errors
   // are logged by the heartbeat module, so no additional try/catch is needed.
-  sendHeartbeatNow(loopId, { apiBaseUrl, getToken, getSessionToken, loopTokenStore });
+  //
+  // Sleep recovery does not own a jobStore or finalizer — those belong to the
+  // dedicated heartbeat scheduler that runs alongside. Provide a stub jobStore
+  // whose getByLoopId always returns undefined so runHeartbeatTick skips
+  // finalization on a terminal signal. sendHeartbeatNow suppresses the 404-gate
+  // side effect for exactly this reason: if this one-shot heartbeat tripped the
+  // process-wide gate, the real heartbeat scheduler's next tick would skip the
+  // round trip and never finalize. With the gate left open, that scheduler
+  // still observes the terminal signal and finalizes the job.
+  //
+  // getSessionToken / loopTokenStore are threaded through so that if the server
+  // revives the loop on this resume heartbeat, the fresh runner token is
+  // adopted into the store the owning scheduler reads from.
+  sendHeartbeatNow(loopId, {
+    apiBaseUrl,
+    getToken,
+    getSessionToken,
+    loopTokenStore,
+    jobStore: createStubJobStore(),
+    finalizeFn: async () => {},
+  });
 }
 
 // ---------------------------------------------------------------------------

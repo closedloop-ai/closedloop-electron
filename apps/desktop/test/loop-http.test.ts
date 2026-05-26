@@ -788,7 +788,7 @@ describe("getCloudLoopStatus", () => {
       () => "my-token",
     );
 
-    assert.deepEqual(result, { kind: "error", message: "HTTP 503" });
+    assert.deepEqual(result, { kind: "error", message: "HTTP 503", status: 503 });
   });
 
   test("fetch throws ECONNREFUSED: returns { kind: 'error' }, message includes ECONNREFUSED", async () => {

@@ -6,6 +6,9 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { LoopCommand } from "@closedloop-ai/loops-api/commands";
+import { getActiveLoopPid } from "../src/server/operations/symphony-loop.js";
+import { isProcessRunning } from "../src/server/operations/symphony-utils.js";
+import { LoopSchedulerContext } from "../src/main/loop-scheduler-context.js";
 
 async function waitForCondition(
   fn: () => boolean,
@@ -25,6 +28,7 @@ import { BootRecoveryService } from "../src/main/boot-recovery.js";
 import { JobStore, type LocalJob } from "../src/main/job-store.js";
 import { LoopTokenStore } from "../src/main/loop-token-store.js";
 import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
+import { createLocalJob } from "./job-store-test-utils.js";
 import { initGitRepo, restoreEnv } from "./symphony-test-utils.js";
 import type { TelemetryEventPayload } from "../src/main/telemetry-protocol.js";
 import { cleanupAdditionalWorktrees } from "../src/server/operations/symphony-loop.js";
@@ -122,20 +126,13 @@ function createLoopTokenStore(name: string): LoopTokenStore {
 }
 
 function createJob(overrides?: Partial<LocalJob>): LocalJob {
-  const now = new Date().toISOString();
   const repoDir = path.join(tempRoot, "repo");
-  return {
-    id: "loop-1",
-    kind: "SYMPHONY_LOOP",
-    loopId: "loop-1",
+  return createLocalJob({
     command: LoopCommand.Plan,
-    status: "RUNNING",
-    startedAt: now,
-    updatedAt: now,
     localRepoPath: repoDir,
     claudeWorkDir: path.join(repoDir, "workdir"),
     ...overrides,
-  };
+  });
 }
 
 test("finalizes dead CANCEL_PENDING jobs to CANCELLED without loop events", async () => {
@@ -1572,6 +1569,166 @@ test("reattachLiveJob starts heartbeat scheduler for recovered loop", async () =
 });
 
 
+// ---------------------------------------------------------------------------
+// T-4.3: Table-driven boot-recovery tests for terminal / transient / live
+// status-check responses on the reattachLiveJob path.
+//
+// Each case drives a live job (pid = process.pid) through reattachLiveJobs()
+// with a mocked GET /loops/:id status endpoint returning the prescribed
+// HTTP status or body. Shared assertions:
+//   Terminal  → job has cloudFinalizedAt, schedulers.teardownLoop() called,
+//               registerRecoveredLoop NOT called (getActiveLoopPid returns null)
+//   Transient → job NOT finalized, registerRecoveredLoop IS called,
+//               tailer starts and POSTs events
+// ---------------------------------------------------------------------------
+
+// Each test case uses a unique loopId to avoid cross-test pollution of the
+// module-level `runningLoops` map in symphony-loop.ts. The map is only cleared
+// when `unregisterLoop` is called (e.g. when the watcher detects process exit),
+// so reusing "loop-1" across tests would cause `getActiveLoopPid` to return a
+// stale value from an earlier test. Unique IDs ensure clean assertions.
+// Each case is keyed by a single discriminator; the loopId, store name, token
+// store name, and workdir are all derived from `key` in the test body so the
+// per-row fixture carries no redundant identity triplet.
+const reattachStatusCases = [
+  {
+    key: "401",
+    name: "reattachLiveJob does not reattach on HTTP 401 (unauthorized after failed refresh-retry)",
+    // The status endpoint returns 401, which triggers a token refresh attempt.
+    // The refresh endpoint also returns 401 (or any non-success), so the refresh
+    // fails and the result stays `unauthorized` — terminal disposition.
+    statusHandler: () => new Response("Unauthorized", { status: 401 }),
+    port: 4040,
+    disposition: "terminal" as const,
+  },
+  {
+    key: "404",
+    name: "reattachLiveJob does not reattach on HTTP 404 (loop not found)",
+    statusHandler: () => new Response("Not Found", { status: 404 }),
+    port: 4041,
+    disposition: "terminal" as const,
+  },
+  {
+    key: "410",
+    name: "reattachLiveJob does not reattach on HTTP 410 (loop gone)",
+    statusHandler: () => new Response("Gone", { status: 410 }),
+    port: 4042,
+    disposition: "terminal" as const,
+  },
+  {
+    key: "5xx",
+    name: "reattachLiveJob conservatively reattaches on 5xx transient error from status check",
+    // 502 from the status-check endpoint — cloud may recover; do not terminalize.
+    statusHandler: () => new Response("Bad Gateway", { status: 502 }),
+    port: 4043,
+    disposition: "transient" as const,
+  },
+] as const;
+
+for (const tc of reattachStatusCases) {
+  test(tc.name, async () => {
+    const { key } = tc;
+    const loopId = `loop-reattach-${key}`;
+    const repoDir = path.join(tempRoot, "repo");
+    const claudeWorkDir = path.join(repoDir, `workdir-${key}`);
+    await fs.mkdir(claudeWorkDir, { recursive: true });
+    const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+    await fs.writeFile(jsonlPath, "");
+
+    const loopTokenStore = createLoopTokenStore(`boot-recovery-reattach-${key}-tokens`);
+    loopTokenStore.setLoopToken(loopId, { token: "loop-token" });
+
+    const jobStore = createStore(`boot-recovery-reattach-${key}`);
+    const liveJob = createJob({
+      id: loopId,
+      loopId,
+      pid: process.pid,
+      status: "RUNNING",
+      claudeWorkDir,
+      jsonlPath,
+      lastObservedJsonlOffset: 0,
+    });
+    jobStore.upsert(liveJob);
+
+    // Spy on teardownLoop to verify it is called for terminal cases.
+    const teardownCalls: string[] = [];
+    const schedulers = new LoopSchedulerContext();
+    const origTeardown = schedulers.teardownLoop.bind(schedulers);
+    schedulers.teardownLoop = (id: string) => {
+      teardownCalls.push(id);
+      origTeardown(id);
+    };
+
+    // installCloudStatusFetchMock delegates GET /loops/:id to the handler;
+    // all other requests (refresh-token, events) return success.
+    installCloudStatusFetchMock(tc.statusHandler);
+
+    const service = new BootRecoveryService({
+      jobStore,
+      telemetry: { emit: (event) => telemetryEvents.push(event) },
+      getApiKey: () => "test-key",
+      getApiOrigin: () => `http://127.0.0.1:${tc.port}`,
+      loopTokenStore,
+      schedulers,
+    });
+    await service.reattachLiveJobs();
+    // Allow any background microtasks to settle.
+    await sleep(100);
+
+    const persisted = jobStore.getByLoopId(loopId);
+    assert.ok(persisted, "expected job to exist in store");
+
+    if (tc.disposition === "terminal") {
+      assert.ok(
+        persisted.cloudFinalizedAt,
+        `expected cloudFinalizedAt to be set for terminal case (${key})`,
+      );
+      assert.equal(loopTokenStore.getLoopToken(loopId), null,
+        `expected loop token cleared for terminal case (${key})`);
+      assert.ok(
+        teardownCalls.includes(loopId),
+        `expected schedulers.teardownLoop("${loopId}") to be called for terminal case (${key})`,
+      );
+      // registerRecoveredLoop was NOT called — the loopId must be absent from
+      // the module-level runningLoops map (getActiveLoopPid returns null).
+      assert.equal(
+        getActiveLoopPid(loopId),
+        null,
+        `expected registerRecoveredLoop NOT called for terminal case (${key})`,
+      );
+    } else {
+      // Transient: job must NOT be finalized; tailer must be running.
+      assert.equal(
+        persisted.cloudFinalizedAt,
+        undefined,
+        `expected cloudFinalizedAt NOT set for transient case (${key})`,
+      );
+      // registerRecoveredLoop should have been called (conservative reattach).
+      assert.notEqual(
+        getActiveLoopPid(loopId),
+        null,
+        `expected registerRecoveredLoop called for transient case (${key})`,
+      );
+
+      // Verify the tailer is running by writing a JSONL record and waiting for the POST.
+      await fs.appendFile(
+        jsonlPath,
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"transient-test"}],"usage":{"input_tokens":1,"output_tokens":1}}}\n',
+      );
+      await waitForCondition(
+        () => fetchCalls.some((c) => c.url.includes(`/loops/${loopId}/events`)),
+        5000,
+      );
+      assert.ok(
+        fetchCalls.some((c) => c.url.includes(`/loops/${loopId}/events`)),
+        `expected tailer to POST /events for transient case (${key})`,
+      );
+    }
+
+    service[Symbol.dispose]();
+  });
+}
+
 test("AC-004: per-request provider resolution uses token at call time, not at construction time", async () => {
   // Verifies that getToken() is resolved on every fetch call so that a token
   // rotation between the artifact-upload and the completed-event POST results
@@ -1640,5 +1797,96 @@ test("AC-004: per-request provider resolution uses token at call time, not at co
     completedEventCall.authHeader,
     "Bearer token-after-upload",
     "completed-event POST must use token resolved at post time (per-request resolution)",
+  );
+});
+
+// AC-007 regression: RUNNING job with dead PID at boot must be finalized as UNKNOWN.
+//
+// Flow mirrors what app.ts does at startup:
+//   1. reconcileJobStore() detects the dead PID and maps the job to UNKNOWN.
+//   2. The reconciled UNKNOWN job is passed to BootRecoveryService.run().
+//   3. finalizeDeadJobs() picks it up, posts an error event, sets
+//      finalStatusPersistedAt, and clears the loop token.
+//   4. reattachLiveJobs() never registers the loop (process was already dead),
+//      so getActiveLoopPid returns null — the job is NOT presented as active.
+//
+// Uses a unique loopId ("loop-ac007") to avoid cross-test pollution of the
+// module-level runningLoops map in symphony-loop.ts (same precaution taken by
+// the reattachStatusCases suite; see comment at line ~1590).
+test("AC-007 regression: RUNNING job with dead PID at boot is finalized as UNKNOWN and not presented as active", async () => {
+  const loopId = "loop-ac007";
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-ac007-tokens");
+  loopTokenStore.setLoopToken(loopId, { token: "loop-token" });
+
+  const jobStore = createStore("boot-recovery-ac007");
+  // Seed the job as RUNNING with a dead PID (9_999_999 is guaranteed not to exist).
+  const runningJob = createJob({
+    id: loopId,
+    loopId,
+    status: "RUNNING",
+    pid: 9_999_999,
+    claudeWorkDir,
+  });
+  jobStore.upsert(runningJob);
+
+  // Simulate reconcileJobStore(): detect the dead PID and transition to UNKNOWN.
+  // reconcile() returns the jobs it moved to terminal state, matching what app.ts
+  // passes as the `deadJobs` argument to BootRecoveryService.run(). Uses the same
+  // production liveness predicate (isProcessRunning) rather than a hand-rolled
+  // process.kill probe, so the regression tracks the real predicate.
+  const deadJobs = jobStore.reconcile((job) => {
+    if (isProcessRunning(job.pid!)) return job;
+    const now = new Date().toISOString();
+    return { ...job, status: "UNKNOWN", updatedAt: now, completedAt: now };
+  });
+
+  // Verify the reconciliation produced exactly one UNKNOWN job.
+  assert.equal(deadJobs.length, 1, "expected reconcileJobStore to produce one dead job");
+  assert.equal(deadJobs[0].status, "UNKNOWN", "expected reconciled job status to be UNKNOWN");
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    getApiKey: () => "test-key",
+    getApiOrigin: () => "http://127.0.0.1:4024",
+    loopTokenStore,
+  });
+  await service.run(deadJobs);
+  service[Symbol.dispose]();
+
+  const persisted = jobStore.getByLoopId(loopId);
+  assert.ok(persisted, "expected job to exist in store after boot recovery");
+
+  // AC-007a: job status remains UNKNOWN (not promoted to a different terminal status).
+  assert.equal(persisted.status, "UNKNOWN", "expected status to remain UNKNOWN after finalization");
+
+  // AC-007b: finalStatusPersistedAt is set — the job was finalized.
+  assert.ok(persisted.finalStatusPersistedAt, "expected finalStatusPersistedAt to be set");
+
+  // AC-007c: loop token is deleted — not lingering after finalization.
+  assert.equal(loopTokenStore.getLoopToken(loopId), null, "expected loop token to be cleared");
+
+  // AC-007d: an error event was posted to the cloud with PROCESS_STOPPED code.
+  assert.ok(
+    fetchCalls.some(
+      (c) =>
+        c.body.includes('"type":"error"') &&
+        c.body.includes('"code":"PROCESS_STOPPED"') &&
+        c.authHeader === "Bearer loop-token",
+    ),
+    "expected error event with PROCESS_STOPPED code to be posted",
+  );
+
+  // AC-007e: job is NOT presented as active — getActiveLoopPid returns null
+  // because reattachLiveJobs() never called registerRecoveredLoop (the process was dead).
+  assert.equal(
+    getActiveLoopPid(loopId),
+    null,
+    "expected dead-PID-at-boot loop to not be registered as active",
   );
 });

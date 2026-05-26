@@ -221,7 +221,7 @@ export type CloudLoopStatus =
   | { kind: "timed_out" }
   | { kind: "active" }
   | { kind: "unauthorized" }
-  | { kind: "error"; message: string };
+  | { kind: "error"; message: string; status?: number };
 
 export async function getCloudLoopStatus(
   apiBaseUrl: string,
@@ -245,7 +245,7 @@ export async function getCloudLoopStatus(
       return { kind: "unauthorized" };
     }
     if (!resp.ok) {
-      return { kind: "error", message: `HTTP ${resp.status}` };
+      return { kind: "error", message: `HTTP ${resp.status}`, status: resp.status };
     }
     const raw = (await resp.json()) as Record<string, unknown>;
     const status = typeof raw?.status === "string" ? raw.status : null;
