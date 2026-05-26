@@ -754,18 +754,22 @@ function parseDesktopCommand(payload: unknown): DesktopCommandEvent | null {
  * preserve legacy unsigned command compatibility.
  */
 export function parseServerCapabilities(value: unknown):
-  | { computeTargetSigning?: boolean; agentSessionSync?: boolean }
+  | { computeTargetSigning?: boolean; agentSessionSync?: boolean; agentSessionChunkedSync?: boolean }
   | undefined {
   const record = asObject(value);
   const parsed: {
     computeTargetSigning?: boolean;
     agentSessionSync?: boolean;
+    agentSessionChunkedSync?: boolean;
   } = {};
   if (record.computeTargetSigning === true) {
     parsed.computeTargetSigning = true;
   }
   if (record.agentSessionSync === true) {
     parsed.agentSessionSync = true;
+  }
+  if (record.agentSessionChunkedSync === true) {
+    parsed.agentSessionChunkedSync = true;
   }
   return Object.keys(parsed).length > 0 ? parsed : undefined;
 }

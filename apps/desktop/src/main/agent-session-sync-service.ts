@@ -343,7 +343,7 @@ export class AgentSessionSyncService {
                   TAG,
                   `skipping oversized session ${session.externalSessionId} (~${formatBytes(sessionBytes)}) — ` +
                     `exceeds ${formatBytes(SESSION_PAYLOAD_BYTE_CAP)} payload cap; ` +
-                    `enable chunked session sync or wait for server-side support`,
+                    `enable chunked session sync and ensure server supports it`,
                 );
               }
               continue;

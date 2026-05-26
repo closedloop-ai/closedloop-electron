@@ -220,6 +220,7 @@ export class DesktopApplication {
   private cloudConnectionEnabled: boolean;
   private serverCommandSigningSupported = false;
   private serverAgentSessionSyncSupported = false;
+  private serverAgentSessionChunkedSyncSupported = false;
   private updateCheckTimer: NodeJS.Timeout | null = null;
   private packagedUpdateState: PackagedUpdateState =
     createInitialPackagedUpdateState();
@@ -440,6 +441,8 @@ export class DesktopApplication {
           event.serverCapabilities?.computeTargetSigning === true;
         this.serverAgentSessionSyncSupported =
           event.serverCapabilities?.agentSessionSync === true;
+        this.serverAgentSessionChunkedSyncSupported =
+          event.serverCapabilities?.agentSessionChunkedSync === true;
         gatewayLog.info(
           "command-signing",
           `Server support from hello ack: computeTargetId=${event.computeTargetId}, computeTargetSigning=${event.serverCapabilities?.computeTargetSigning === true}`,
@@ -541,7 +544,9 @@ export class DesktopApplication {
       isRelayReady: () =>
         this.serverAgentSessionSyncSupported &&
         this.cloudStatus.state === "online",
-      isChunkedSyncEnabled: () => this.settingsStore.getFlag("agentSessionChunkedSyncEnabled"),
+      isChunkedSyncEnabled: () =>
+        this.settingsStore.getFlag("agentSessionChunkedSyncEnabled") &&
+        this.serverAgentSessionChunkedSyncSupported,
       sendBatch: (batch) => this.cloudSocket.sendAgentSessions(batch),
       getUserDataPath: () => app.getPath("userData"),
       onBatchOutcome: (event) => {

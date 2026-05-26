@@ -43,6 +43,7 @@ export interface DesktopHelloAckEvent extends ProtocolEnvelope {
   serverCapabilities?: {
     computeTargetSigning?: boolean;
     agentSessionSync?: boolean;
+    agentSessionChunkedSync?: boolean;
   };
 }
 
