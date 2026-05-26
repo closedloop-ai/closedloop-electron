@@ -88,40 +88,39 @@ test("LoopTokenStore getLoopTokenString returns raw token string", () => {
   assert.equal(store.getLoopTokenString("loop-s"), "raw-token-value");
 });
 
-test("LoopTokenStore legacy single-string backward compatibility", () => {
-  // Simulate a legacy store entry: a safeStorage whose decryptString returns a
-  // bare (non-JSON) string. getLoopToken must promote { token: <string> } from it.
-  //
-  // Strategy: use a custom safeStorage where encryptString stores a fixed sentinel
-  // (so the map entry exists) and decryptString always returns the raw legacy token
-  // string — triggering the JSON-parse discrimination fallback in getLoopToken.
-  const bareToken = "old-plain-token";
-  const legacySafeStorage = {
-    isEncryptionAvailable: () => true,
-    encryptString: (_s: string) => Buffer.from("legacy-sentinel", "utf-8"),
-    decryptString: (_buf: Buffer) => bareToken,
-  };
+// ---------------------------------------------------------------------------
+// Boundary-validation tests (AC-001, AC-002)
+// ---------------------------------------------------------------------------
 
-  // Prime the store: setLoopToken writes an entry via encryptString (stores the
-  // sentinel). On read, decryptString returns the bare string, not JSON.
-  const primeStore = new LoopTokenStore({
-    cwd: tempRoot,
-    name: "lt-legacy-compat",
-    safeStorage: legacySafeStorage,
-  });
-  primeStore.setLoopToken("loop-legacy", { token: "anything" });
-
-  // Read back — decryptString returns a bare string, exercising the legacy path.
-  const readStore = new LoopTokenStore({
-    cwd: tempRoot,
-    name: "lt-legacy-compat",
-    safeStorage: legacySafeStorage,
-  });
-  const result = readStore.getLoopToken("loop-legacy");
-  assert.deepEqual(result, { token: bareToken });
-  assert.equal(result?.expiresAt, undefined);
-  assert.equal(result?.jti, undefined);
-  assert.equal(result?.lastIdempotencyKey, undefined);
+test("LoopTokenStore getLoopToken returns null for valid JSON missing string token", () => {
+  // Regression: PR #237 removed the parsed-object guard; a corrupt entry that
+  // parses to JSON but lacks a string `token` must resolve to null, not a
+  // LoopTokenMeta with undefined .token.
+  const corruptPayloads = [
+    "{}",
+    '{"token":123}',
+    '{"token":null}',
+    '{"other":"field"}',
+    '"just-a-string"',
+    "42",
+  ];
+  for (const payload of corruptPayloads) {
+    const store = new LoopTokenStore({
+      cwd: tempRoot,
+      name: `lt-corrupt-${Buffer.from(payload).toString("hex")}`,
+      safeStorage: {
+        isEncryptionAvailable: () => true,
+        encryptString: (s: string) => Buffer.from(`stub:${s}`, "utf-8"),
+        decryptString: () => payload,
+      },
+    });
+    store.setLoopToken("loop-corrupt", { token: "placeholder" });
+    assert.equal(
+      store.getLoopToken("loop-corrupt"),
+      null,
+      `expected null for payload: ${payload}`,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------

@@ -114,7 +114,7 @@ test("FEA-1363: hooks.js has write queue with setImmediate batching", { skip: sk
   assert.match(generatedHooksSource!, /enqueueHookEvent/);
 });
 
-test("FEA-1363: hooks.js write queue has per-event error isolation", { skip: skipGenerated }, () => {
+test("FEA-1363: hooks.js write queue has per-event error isolation via savepoints", { skip: skipGenerated }, () => {
   assert.ok(generatedHooksSource);
   const drainStart = generatedHooksSource!.indexOf("function drainHookQueue()");
   const drainEnd = generatedHooksSource!.indexOf("router.post(");
@@ -122,6 +122,20 @@ test("FEA-1363: hooks.js write queue has per-event error isolation", { skip: ski
   const drainBody = generatedHooksSource!.slice(drainStart, drainEnd);
   assert.match(drainBody, /try\s*\{[\s\S]*?processEventCore/, "per-event try/catch wraps processEventCore");
   assert.match(drainBody, /catch\s*\(err\)/, "catch block exists for per-event isolation");
+  assert.match(drainBody, /SAVEPOINT hook_event/, "savepoint created before each event");
+  assert.match(drainBody, /RELEASE hook_event/, "savepoint released on success");
+  assert.match(drainBody, /ROLLBACK TO hook_event/, "savepoint rolled back on failure");
+});
+
+test("FEA-1363: hooks.js write queue has retry backoff with limit", { skip: skipGenerated }, () => {
+  assert.ok(generatedHooksSource);
+  const drainStart = generatedHooksSource!.indexOf("function drainHookQueue()");
+  const drainEnd = generatedHooksSource!.indexOf("router.post(");
+  assert.ok(drainStart > 0 && drainEnd > drainStart, "drainHookQueue bounds found");
+  const drainBody = generatedHooksSource!.slice(drainStart, drainEnd);
+  assert.match(drainBody, /MAX_HOOK_DRAIN_RETRIES/, "retry limit constant referenced");
+  assert.match(drainBody, /hookDrainRetries/, "retry counter tracked");
+  assert.match(drainBody, /setTimeout\(drainHookQueue/, "uses setTimeout for backoff instead of setImmediate");
 });
 
 test("FEA-1363: hooks.js POST handler validates session_id before enqueue", { skip: skipGenerated }, () => {

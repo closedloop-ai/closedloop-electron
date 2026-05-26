@@ -152,6 +152,8 @@ export interface DesktopSettings {
   savedConfigs: SavedConfig[];
   activeConfigId: string | null;
   updateAndRestartEnabled: boolean;
+  /** Splits oversized agent sessions into chunked batches for sync. Requires relay support. */
+  agentSessionChunkedSyncEnabled: boolean;
 }
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
@@ -174,5 +176,6 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   binaryPaths: {},
   savedConfigs: [],
   activeConfigId: null,
-  updateAndRestartEnabled: false
+  updateAndRestartEnabled: false,
+  agentSessionChunkedSyncEnabled: false,
 };

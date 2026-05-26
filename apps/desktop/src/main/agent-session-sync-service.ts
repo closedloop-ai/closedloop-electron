@@ -30,6 +30,9 @@ const INCREMENTAL_SESSION_BATCH_SIZE = 10;
 export const BACKFILL_SESSION_BATCH_SIZE = 3;
 // Maximum serialized JSON payload size per batch (256 KiB).
 export const SESSION_PAYLOAD_BYTE_CAP = 262_144;
+// After this many consecutive ack timeouts on the same session, dead-letter it
+// so one oversized or slow session does not permanently block the queue.
+export const MAX_CONSECUTIVE_TIMEOUTS = 3;
 
 export function estimateSessionPayloadBytes(session: SyncedAgentSession): number {
   return Buffer.byteLength(JSON.stringify(session));
@@ -118,6 +121,7 @@ export type AgentSessionSyncTelemetryEvent = {
 export interface AgentSessionSyncServiceOptions {
   isAgentMonitorEnabled: () => boolean;
   isRelayReady: () => boolean;
+  isChunkedSyncEnabled?: () => boolean;
   sendBatch: (batch: AgentSessionSyncBatch) => Promise<DesktopAgentSessionsAck>;
   getUserDataPath?: () => string;
   onBatchOutcome?: (event: AgentSessionSyncTelemetryEvent) => void;
@@ -142,6 +146,16 @@ export class AgentSessionSyncService {
     launchMetadataRootByCwd: new Map(),
     repoFullNameByPath: new Map(),
   };
+  /** Consecutive timeout count per session ID for dead-letter detection. */
+  private readonly timeoutCountById = new Map<string, number>();
+  /** Session IDs removed from the queue after exceeding MAX_CONSECUTIVE_TIMEOUTS. */
+  private readonly deadLetteredIds = new Set<string>();
+  /** Remaining chunks for an oversized session being sent in parts. */
+  private pendingChunks: {
+    sessionId: string;
+    syncMode: AgentSessionSyncMode;
+    chunks: SyncedAgentSession[];
+  } | null = null;
 
   constructor(options: AgentSessionSyncServiceOptions) {
     this.options = options;
@@ -224,74 +238,140 @@ export class AgentSessionSyncService {
       let batch: AgentSessionSyncBatch | null = null;
       let accumulatedBytes = 0;
 
-      const db = new DatabaseSync(dbPath);
-      try {
-        db.exec("PRAGMA busy_timeout = 5000");
-        this.initializeBackfillQueueIfNeeded(db);
-        this.enqueueIncrementalUpdates(db);
-
-        const nowMs = Date.now();
-        let candidateIds: string[] = [];
-        if (
-          this.incrementalQueue.length > 0 &&
-          nowMs - this.lastIncrementalBatchAttemptedAtMs >=
-            MIN_INCREMENTAL_SYNC_INTERVAL_MS
-        ) {
-          syncMode = "incremental";
-          candidateIds = this.incrementalQueue.slice(
-            0,
-            INCREMENTAL_SESSION_BATCH_SIZE,
-          );
-          this.lastIncrementalBatchAttemptedAtMs = nowMs;
-        } else if (this.backfillQueue.length > 0) {
-          syncMode = "backfill";
-          candidateIds = this.backfillQueue.slice(
-            0,
-            BACKFILL_SESSION_BATCH_SIZE,
-          );
+      // If there are pending chunks from a previous oversized session split,
+      // send the next chunk without touching the DB or queues.
+      if (this.pendingChunks && this.pendingChunks.chunks.length > 0) {
+        const { sessionId, syncMode: chunkMode, chunks } = this.pendingChunks;
+        const chunk = chunks.shift()!;
+        accumulatedBytes = estimateSessionPayloadBytes(chunk);
+        const isLast = chunks.length === 0;
+        if (isLast) {
+          this.pendingChunks = null;
         }
-
-        if (!syncMode || candidateIds.length === 0) {
-          return;
-        }
-
-        // Load all candidate sessions from SQLite, then accumulate into the
-        // batch until adding the next session would exceed the 256 KiB cap.
-        // Always include at least one session even if it alone exceeds the cap.
-        const candidateSessions = loadSyncedSessions(
-          db,
-          candidateIds,
-          this.attributionCache,
+        gatewayLog.info(
+          TAG,
+          `sending chunked session ${sessionId} (~${formatBytes(accumulatedBytes)}); ` +
+            `${chunks.length} chunk(s) remaining`,
         );
-        if (candidateSessions.length === 0) {
-          this.dequeue(syncMode, candidateIds);
-          return;
-        }
-
-        const sessions: SyncedAgentSession[] = [];
-        syncIds = [];
-        for (const session of candidateSessions) {
-          const sessionBytes = estimateSessionPayloadBytes(session);
-          if (
-            sessions.length > 0 &&
-            accumulatedBytes + sessionBytes > SESSION_PAYLOAD_BYTE_CAP
-          ) {
-            break;
-          }
-          sessions.push(session);
-          syncIds.push(session.externalSessionId);
-          accumulatedBytes += sessionBytes;
-        }
-
         batch = {
           schemaVersion: AGENT_SESSION_SYNC_SCHEMA_VERSION,
           batchId: randomUUID(),
-          syncMode,
-          sessionCount: sessions.length,
-          sessions,
+          syncMode: chunkMode,
+          sessionCount: 1,
+          sessions: [chunk],
         };
-      } finally {
-        db.close();
+        syncMode = chunkMode;
+        syncIds = [sessionId];
+        // Skip DB access — go straight to send.
+      } else {
+        const db = new DatabaseSync(dbPath);
+        try {
+          db.exec("PRAGMA busy_timeout = 5000");
+          this.initializeBackfillQueueIfNeeded(db);
+          this.enqueueIncrementalUpdates(db);
+
+          const nowMs = Date.now();
+          let candidateIds: string[] = [];
+          if (
+            this.incrementalQueue.length > 0 &&
+            nowMs - this.lastIncrementalBatchAttemptedAtMs >=
+              MIN_INCREMENTAL_SYNC_INTERVAL_MS
+          ) {
+            syncMode = "incremental";
+            candidateIds = this.incrementalQueue.slice(
+              0,
+              INCREMENTAL_SESSION_BATCH_SIZE,
+            );
+            this.lastIncrementalBatchAttemptedAtMs = nowMs;
+          } else if (this.backfillQueue.length > 0) {
+            syncMode = "backfill";
+            candidateIds = this.backfillQueue.slice(
+              0,
+              BACKFILL_SESSION_BATCH_SIZE,
+            );
+          }
+
+          if (!syncMode || candidateIds.length === 0) {
+            return;
+          }
+
+          const chunkedSyncEnabled = this.options.isChunkedSyncEnabled?.() ?? false;
+
+          // Load all candidate sessions from SQLite, then accumulate into the
+          // batch until adding the next session would exceed the 256 KiB cap.
+          // Sessions that individually exceed the cap are either chunked (if
+          // the feature flag is on) or skipped/dead-lettered.
+          const candidateSessions = loadSyncedSessions(
+            db,
+            candidateIds,
+            this.attributionCache,
+          );
+          if (candidateSessions.length === 0) {
+            this.dequeue(syncMode, candidateIds);
+            return;
+          }
+
+          const sessions: SyncedAgentSession[] = [];
+          const skippedOversized: string[] = [];
+          syncIds = [];
+          for (const session of candidateSessions) {
+            const sessionBytes = estimateSessionPayloadBytes(session);
+            if (sessionBytes > SESSION_PAYLOAD_BYTE_CAP && sessions.length === 0) {
+              if (chunkedSyncEnabled) {
+                // Split the oversized session into event-paginated chunks.
+                const chunks = chunkOversizedSession(session, SESSION_PAYLOAD_BYTE_CAP);
+                const first = chunks.shift()!;
+                if (chunks.length > 0) {
+                  this.pendingChunks = {
+                    sessionId: session.externalSessionId,
+                    syncMode,
+                    chunks,
+                  };
+                }
+                sessions.push(first);
+                syncIds.push(session.externalSessionId);
+                accumulatedBytes += estimateSessionPayloadBytes(first);
+                gatewayLog.info(
+                  TAG,
+                  `chunking oversized session ${session.externalSessionId} (~${formatBytes(sessionBytes)}) into ` +
+                    `${chunks.length + 1} chunks of ≤${formatBytes(SESSION_PAYLOAD_BYTE_CAP)}`,
+                );
+              } else {
+                skippedOversized.push(session.externalSessionId);
+                this.deadLetteredIds.add(session.externalSessionId);
+                gatewayLog.warn(
+                  TAG,
+                  `skipping oversized session ${session.externalSessionId} (~${formatBytes(sessionBytes)}) — ` +
+                    `exceeds ${formatBytes(SESSION_PAYLOAD_BYTE_CAP)} payload cap; ` +
+                    `enable chunked session sync or wait for server-side support`,
+                );
+              }
+              continue;
+            }
+            if (
+              sessions.length > 0 &&
+              accumulatedBytes + sessionBytes > SESSION_PAYLOAD_BYTE_CAP
+            ) {
+              break;
+            }
+            sessions.push(session);
+            syncIds.push(session.externalSessionId);
+            accumulatedBytes += sessionBytes;
+          }
+          if (skippedOversized.length > 0) {
+            this.dequeue(syncMode, skippedOversized);
+          }
+
+          batch = {
+            schemaVersion: AGENT_SESSION_SYNC_SCHEMA_VERSION,
+            batchId: randomUUID(),
+            syncMode,
+            sessionCount: sessions.length,
+            sessions,
+          };
+        } finally {
+          db.close();
+        }
       }
 
       if (!batch || !syncMode || syncIds.length === 0) {
@@ -387,12 +467,37 @@ export class AgentSessionSyncService {
   ): void {
     if (ack.accepted) {
       this.firstAckReceived = true;
-      this.dequeue(syncMode, ids);
+      // Only dequeue the session after all chunks have been sent.
+      const hasMoreChunks = this.pendingChunks !== null &&
+        ids.length === 1 &&
+        this.pendingChunks.sessionId === ids[0];
+      if (!hasMoreChunks) {
+        for (const id of ids) {
+          this.timeoutCountById.delete(id);
+        }
+        this.dequeue(syncMode, ids);
+      }
+      const deadLetterSuffix = this.deadLetteredIds.size > 0
+        ? ` deadLettered=${this.deadLetteredIds.size}`
+        : "";
+      const chunkSuffix = hasMoreChunks
+        ? ` (chunk; ${this.pendingChunks!.chunks.length} remaining)`
+        : "";
       gatewayLog.info(
         TAG,
-        `synced ${sessionCount} agent sessions (${syncMode}); remaining incremental=${this.incrementalQueue.length} backfill=${this.backfillQueue.length}`,
+        `synced ${sessionCount} agent sessions (${syncMode})${chunkSuffix}; remaining incremental=${this.incrementalQueue.length} backfill=${this.backfillQueue.length}${deadLetterSuffix}`,
       );
       return;
+    }
+
+    // On any failure, discard remaining chunks for this session — partial
+    // chunk sequences are not useful without server-side reassembly.
+    if (this.pendingChunks && ids.includes(this.pendingChunks.sessionId)) {
+      gatewayLog.warn(
+        TAG,
+        `discarding ${this.pendingChunks.chunks.length} remaining chunk(s) for session ${this.pendingChunks.sessionId} after batch failure (${ack.reason})`,
+      );
+      this.pendingChunks = null;
     }
 
     if (ack.reason === DesktopAgentSessionsAckReason.ValidationFailed) {
@@ -409,10 +514,34 @@ export class AgentSessionSyncService {
         "pausing agent-session sync until the relay reconnects because the current relay session rejected agent-session batches with feature_disabled",
       );
     } else if (ack.reason === DesktopAgentSessionsAckReason.AckTimeout) {
-      gatewayLog.debug(
-        TAG,
-        `agent-session batch (${syncMode}) timed out waiting for a server ack (client-side timeout, not a server rejection); batch left queued for retry`,
-      );
+      const deadLettered: string[] = [];
+      for (const id of ids) {
+        const count = (this.timeoutCountById.get(id) ?? 0) + 1;
+        if (count >= MAX_CONSECUTIVE_TIMEOUTS) {
+          deadLettered.push(id);
+          this.timeoutCountById.delete(id);
+          this.deadLetteredIds.add(id);
+        } else {
+          this.timeoutCountById.set(id, count);
+        }
+      }
+      if (deadLettered.length > 0) {
+        this.dequeue(syncMode, deadLettered);
+        gatewayLog.warn(
+          TAG,
+          `dead-lettered ${deadLettered.length} oversized/slow agent session(s) after ${MAX_CONSECUTIVE_TIMEOUTS} consecutive ack timeouts ` +
+            `(payload ~${formatBytes(payloadBytes)}); ids: ${deadLettered.join(", ")}; ` +
+            `remaining incremental=${this.incrementalQueue.length} backfill=${this.backfillQueue.length} deadLettered=${this.deadLetteredIds.size}`,
+        );
+      }
+      if (deadLettered.length < ids.length) {
+        const attempt = this.timeoutCountById.get(ids.find((id) => !this.deadLetteredIds.has(id))!) ?? 0;
+        gatewayLog.info(
+          TAG,
+          `agent-session batch (${syncMode}, ~${formatBytes(payloadBytes)}) timed out waiting for server ack ` +
+            `(attempt ${attempt}/${MAX_CONSECUTIVE_TIMEOUTS}); batch left queued for retry`,
+        );
+      }
     } else {
       gatewayLog.debug(
         TAG,
@@ -856,4 +985,49 @@ function sqliteLikeMatch(value: string, pattern: string): boolean {
 
 function roundUsd(value: number): number {
   return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+/**
+ * Split an oversized session into multiple chunks, each within the byte cap.
+ * Every chunk contains the full session metadata, agents, and token usage;
+ * only the events array is paginated across chunks.
+ */
+export function chunkOversizedSession(
+  session: SyncedAgentSession,
+  maxBytes: number,
+): SyncedAgentSession[] {
+  const baseSession: SyncedAgentSession = { ...session, events: [] };
+  const baseBytes = estimateSessionPayloadBytes(baseSession);
+  const eventBudget = maxBytes - baseBytes;
+
+  // If session metadata alone exceeds the cap, send it without events.
+  if (eventBudget <= 0 || session.events.length === 0) {
+    return [baseSession];
+  }
+
+  const chunks: SyncedAgentSession[] = [];
+  let currentEvents: typeof session.events = [];
+  let currentBytes = 0;
+
+  for (const event of session.events) {
+    const eventBytes = Buffer.byteLength(JSON.stringify(event));
+    if (currentBytes > 0 && currentBytes + eventBytes > eventBudget) {
+      chunks.push({ ...session, events: currentEvents });
+      currentEvents = [];
+      currentBytes = 0;
+    }
+    currentEvents.push(event);
+    currentBytes += eventBytes;
+  }
+  if (currentEvents.length > 0) {
+    chunks.push({ ...session, events: currentEvents });
+  }
+
+  return chunks.length > 0 ? chunks : [baseSession];
 }

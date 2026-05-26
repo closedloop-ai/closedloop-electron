@@ -1741,6 +1741,8 @@ function patchHooksWriteQueueAndWatchdog(file) {
     "// FEA-1363: Write queue coalesces concurrent hook events into batched transactions.",
     "const hookWriteQueue = [];",
     "let hookDrainScheduled = false;",
+    "let hookDrainRetries = 0;",
+    "const MAX_HOOK_DRAIN_RETRIES = 5;",
     "",
     "function enqueueHookEvent(hookType, data, transcriptData, planCapture) {",
     "  hookWriteQueue.push({ hookType, data, transcriptData, planCapture });",
@@ -1758,20 +1760,31 @@ function patchHooksWriteQueueAndWatchdog(file) {
     "  try {",
     "    db.transaction(() => {",
     "      for (let i = 0; i < batch.length; i++) {",
+    "        db.exec('SAVEPOINT hook_event');",
     "        try {",
     "          processEventCore(batch[i].hookType, batch[i].data, batch[i].transcriptData);",
+    "          db.exec('RELEASE hook_event');",
     "          succeeded.add(i);",
     "        } catch (err) {",
+    "          db.exec('ROLLBACK TO hook_event');",
+    "          db.exec('RELEASE hook_event');",
     '          console.warn("[hooks] batch event failed:", batch[i].hookType, err?.message || err);',
     "        }",
     "      }",
     "    })();",
+    "    hookDrainRetries = 0;",
     "  } catch (err) {",
-    '    console.warn("[hooks] batch transaction failed, requeuing:", err?.message || err);',
+    "    hookDrainRetries++;",
+    "    if (hookDrainRetries > MAX_HOOK_DRAIN_RETRIES) {",
+    '      console.error("[hooks] batch transaction failed after " + MAX_HOOK_DRAIN_RETRIES + " retries, dropping " + batch.length + " events:", err?.message || err);',
+    "      hookDrainRetries = 0;",
+    "      return;",
+    "    }",
+    '    console.warn("[hooks] batch transaction failed (attempt " + hookDrainRetries + "/" + MAX_HOOK_DRAIN_RETRIES + "), requeuing:", err?.message || err);',
     "    hookWriteQueue.unshift(...batch);",
     "    if (!hookDrainScheduled) {",
     "      hookDrainScheduled = true;",
-    "      setImmediate(drainHookQueue);",
+    "      setTimeout(drainHookQueue, Math.min(1000 * Math.pow(2, hookDrainRetries - 1), 30000));",
     "    }",
     "    return;",
     "  }",
@@ -3074,6 +3087,16 @@ function assertGeneratedTree() {
   if (!hooksRouteSource.includes("drainHookQueue")) {
     throw new Error(
       "Generated server/routes/hooks.js is missing drainHookQueue (FEA-1363).",
+    );
+  }
+  if (!hooksRouteSource.includes("SAVEPOINT hook_event")) {
+    throw new Error(
+      "Generated server/routes/hooks.js is missing per-event savepoints in drainHookQueue (FEA-1363).",
+    );
+  }
+  if (!hooksRouteSource.includes("MAX_HOOK_DRAIN_RETRIES")) {
+    throw new Error(
+      "Generated server/routes/hooks.js is missing retry backoff limit in drainHookQueue (FEA-1363).",
     );
   }
   if (!hooksRouteSource.includes("pendingBroadcasts")) {

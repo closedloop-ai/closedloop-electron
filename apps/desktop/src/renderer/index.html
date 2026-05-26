@@ -415,6 +415,16 @@
         border-color: var(--border);
       }
 
+      .actions button.destructive-outline {
+        background: transparent;
+        color: var(--destructive);
+        border-color: var(--destructive);
+      }
+
+      .actions button.destructive-outline:hover {
+        background: color-mix(in srgb, var(--destructive) 10%, transparent);
+      }
+
       /* CLI Tools settings tab */
       .cli-tools-intro {
         margin-bottom: 18px;
@@ -3310,17 +3320,6 @@
             <span class="sep" id="crumbSep" hidden>/</span>
             <span class="here" id="crumbHere">Dashboard</span>
           </div>
-          <div class="topbar-actions">
-            <label class="control-group danger-toggle" id="dangerAutoApproveLabel" for="dangerAutoApproveToggle">
-              <input type="checkbox" id="dangerAutoApproveToggle" />
-              Auto-Approve All
-            </label>
-            <label class="control-group" for="headerPauseToggle">
-              <input type="checkbox" id="headerPauseToggle" />
-              Pause Incoming Commands
-            </label>
-            <button class="secondary" id="headerConnectionToggle">Disconnect</button>
-          </div>
         </header>
         <div id="updateBanner">
           <span id="updateBannerText">A new version is available</span>
@@ -3329,9 +3328,17 @@
         <div class="page">
       <section id="approvals" class="panel">
         <p class="muted">Pending requests that need approval (Approve, Decline, or Always Allow).</p>
-        <div class="actions" style="margin-bottom: 12px">
+        <div class="actions" style="margin-bottom: 12px; align-items: center">
           <button id="refreshApprovals">Refresh Approvals</button>
           <button class="secondary" id="clearApprovals">Clear Queue</button>
+          <label class="control-group danger-toggle" id="dangerAutoApproveLabel" for="dangerAutoApproveToggle" style="margin-left: auto">
+            <input type="checkbox" id="dangerAutoApproveToggle" />
+            Auto-Approve All
+          </label>
+          <label class="control-group" for="headerPauseToggle">
+            <input type="checkbox" id="headerPauseToggle" />
+            Pause Incoming Commands
+          </label>
         </div>
         <div id="approvalsList"></div>
       </section>
@@ -3450,6 +3457,9 @@
               </div>
             </div>
             <div id="dashboardApproval"></div>
+            <div class="actions" style="margin-top: 12px">
+              <button class="destructive-outline" id="headerConnectionToggle">Disconnect</button>
+            </div>
           </div>
           <div class="settings-columns">
             <div class="settings-group">
@@ -4663,6 +4673,8 @@
 
         headerPauseToggle.checked = cachedCommandsPaused;
         headerConnectionToggle.textContent = cachedConnectionEnabled ? "Disconnect" : "Reconnect";
+        headerConnectionToggle.classList.toggle("destructive-outline", cachedConnectionEnabled);
+        headerConnectionToggle.classList.toggle("secondary", !cachedConnectionEnabled);
       }
 
       function describeOrigin(origin) {
@@ -4917,6 +4929,8 @@
         ["/api/gateway/codex/", "codex_review"],
         ["/api/gateway/git/pr", "git_pr"],
         ["/api/gateway/git/branch-worktree", "git_branch_worktree"],
+        ["/api/gateway/git/local-changes/commit-push", "git_local_commit_push"],
+        ["/api/gateway/git/local-changes", "git_local_changes"],
         ["/api/gateway/git", "git_action"],
         ["/api/gateway/health-check", "health_check"],
         ["/api/gateway/repos", "repos_config"],
@@ -5092,6 +5106,8 @@
         codex_review: "Code Review",
         codex_argue: "Code Argue",
         git_action: "Git Action",
+        git_local_changes: "Branch View Local Changes",
+        git_local_commit_push: "Commit and Push Local Changes",
         git_pr: "Pull Request",
         git_branch_worktree: "Branch Worktree",
         health_check: "Health Check",
