@@ -49,11 +49,13 @@ import type {
   LocalJobExecuteFinalizationStatus,
   LocalJobFinalizationSource,
 } from "../../main/job-store.js";
+import { createStubJobStore } from "../../main/job-store.js";
 import {
   EXECUTE_NO_WORK_MESSAGE,
   finalizeLoopFromRuntime,
   isExecuteNoWorkCompletion,
   isRetryableFinalizationError,
+  makeHeartbeatFinalizeFn,
   tryUploadArtifacts,
   tryUploadSupportBundle,
   type LoopFinalizerDeps,
@@ -7929,42 +7931,23 @@ async function handleLoopRequest(
       getToken: () =>
         loopTokenStore?.getLoopToken(body.loopId)?.token ?? body.closedLoopAuthToken,
       // When jobStore is absent (legacy no-store path), the heartbeat cannot look up or
-      // finalize a local job. Provide a no-op stub so the TypeScript type is satisfied;
-      // runHeartbeatTick will log a warning and skip finalizeFn when getByLoopId returns
-      // undefined.
-      jobStore: jobStore ?? ({
-        getByLoopId: () => undefined,
-        getById: () => undefined,
-        upsert: (j: LocalJob) => j,
-        listRunning: () => [],
-        listCompleted: () => [],
-        reconcile: () => [],
-      } as unknown as JobStore),
-      finalizeFn: async (job, targetStatus) => {
-        if (!jobStore) return;
-        const getToken = () =>
-          loopTokenStore?.getLoopToken(body.loopId)?.token ?? body.closedLoopAuthToken;
-        jobStore.upsert({
-          ...job,
-          status: targetStatus,
-          finalizationSource: "boot-recovery",
-          liveActivity: `Heartbeat terminal signal: ${targetStatus}`,
-          completedAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        });
-        const updatedJob = jobStore.getByLoopId(job.loopId) ?? { ...job, status: targetStatus };
-        const finalizerDeps: LoopFinalizerDeps = {
-          jobStore,
-          telemetry: { emit: () => {} },
-          getToken,
-          apiBaseUrl,
-          isProcessRunning,
-          getAllowedDirectories,
-          loopTokenStore,
-          schedulers,
-        };
-        await finalizeLoopFromRuntime(updatedJob, "boot-recovery", finalizerDeps);
-      },
+      // finalize a local job. Provide a no-op stub so the TypeScript type is satisfied
+      // (runHeartbeatTick logs a warning and skips finalizeFn when getByLoopId returns
+      // undefined) and a no-op finalizeFn that the owning scheduler never needs.
+      jobStore: jobStore ?? createStubJobStore(),
+      finalizeFn: jobStore
+        ? makeHeartbeatFinalizeFn({
+            jobStore,
+            telemetry: { emit: () => {} },
+            getToken: () =>
+              loopTokenStore?.getLoopToken(body.loopId)?.token ?? body.closedLoopAuthToken,
+            apiBaseUrl,
+            isProcessRunning,
+            getAllowedDirectories,
+            loopTokenStore,
+            schedulers,
+          })
+        : async () => {},
     });
 
     json(context, 200, {

@@ -2,7 +2,7 @@ import electron from "electron";
 import { gatewayLog } from "./gateway-logger.js";
 import type { LoopSchedulerDeps } from "./loop-lifecycle.js";
 import { sendHeartbeatNow } from "./loop-heartbeat.js";
-import type { JobStore, LocalJob } from "./job-store.js";
+import { createStubJobStore } from "./job-store.js";
 import { refreshLoopTokenSingleflight } from "./loop-refresh.js";
 
 // Extract powerMonitor via default import so the module loads correctly in
@@ -67,19 +67,10 @@ async function handleResumeForLoop(
   // process-wide gate, the real heartbeat scheduler's next tick would skip the
   // round trip and never finalize. With the gate left open, that scheduler
   // still observes the terminal signal and finalizes the job.
-  const stubJobStore = {
-    getByLoopId: () => undefined,
-    getById: () => undefined,
-    upsert: (j: LocalJob) => j,
-    listRunning: () => [],
-    listCompleted: () => [],
-    reconcile: () => [],
-  } as unknown as JobStore;
-
   sendHeartbeatNow(loopId, {
     apiBaseUrl,
     getToken,
-    jobStore: stubJobStore,
+    jobStore: createStubJobStore(),
     finalizeFn: async () => {},
   });
 }

@@ -22,6 +22,8 @@ import {
   resetAllGates,
 } from "../src/main/loop-404-gate.js";
 import { flushAsync } from "./loop-token-test-utils.js";
+import { createLocalJob, makeStubJobStore } from "./job-store-test-utils.js";
+import type { LocalJob } from "../src/main/job-store.js";
 
 // Per-test scheduler context. Cleared in afterEach via Symbol.dispose so
 // timers never leak across tests.
@@ -262,37 +264,34 @@ describe("loop-heartbeat: job finalization on terminal heartbeat signals", () =>
    *  - 401 → terminal reason "unauthorized" → targetStatus "UNKNOWN"
    *  (Only "timed_out" reason maps to "TIMED_OUT"; all others map to "UNKNOWN")
    */
+  // The status→reason→targetStatus mapping is proven exhaustively in
+  // loop-status-classifier.test.ts; at the heartbeat layer every terminal HTTP
+  // code maps to UNKNOWN (the TIMED_OUT branch is unreachable here because the
+  // heartbeat always classifies with cloudKind=null). So we cover only the two
+  // behaviorally-distinct codes: 404 (also trips the endpoint-disable gate) and
+  // a non-404 (401, which the heartbeat must NOT token-refresh, unlike boot
+  // recovery). 410 is omitted as it is identical to the 404 case minus the gate.
   const terminalSignalCases: {
     label: string;
     httpStatus: number;
     loopId: string;
-    expectedTargetStatus: "TIMED_OUT" | "UNKNOWN";
     description: string;
   }[] = [
     {
       label: "404",
       httpStatus: 404,
       loopId: "loop-finalize-404",
-      expectedTargetStatus: "UNKNOWN",
       description: "404 response triggers finalizeFn with UNKNOWN and stops the heartbeat",
-    },
-    {
-      label: "410",
-      httpStatus: 410,
-      loopId: "loop-finalize-410",
-      expectedTargetStatus: "UNKNOWN",
-      description: "410 response triggers finalizeFn with UNKNOWN and stops the heartbeat",
     },
     {
       label: "401",
       httpStatus: 401,
       loopId: "loop-finalize-401",
-      expectedTargetStatus: "UNKNOWN",
       description: "401 response triggers finalizeFn with UNKNOWN and stops the heartbeat (no token refresh)",
     },
   ];
 
-  for (const { label, httpStatus, loopId, expectedTargetStatus, description } of terminalSignalCases) {
+  for (const { label, httpStatus, loopId, description } of terminalSignalCases) {
     test(description, async () => {
       process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
 
@@ -300,29 +299,16 @@ describe("loop-heartbeat: job finalization on terminal heartbeat signals", () =>
 
       installHeartbeatFetchStub(httpStatus);
 
-      // Build a minimal LocalJob fixture matching the loop ID.
-      const testJob: import("../src/main/job-store.js").LocalJob = {
-        id: `job-${label}`,
-        kind: "SYMPHONY_LOOP",
-        loopId,
-        command: "PLAN",
-        status: "RUNNING",
-        startedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-
-      // Stub JobStore that returns the fixture for the matching loop ID.
-      const stubJobStore = {
-        getByLoopId: (id: string) => (id === loopId ? testJob : undefined),
-      } as unknown as import("../src/main/job-store.js").JobStore;
+      const testJob = createLocalJob({ id: `job-${label}`, loopId });
+      const stubJobStore = makeStubJobStore({ [loopId]: testJob });
 
       // Mock finalizeFn that records every call.
       const finalizeCalls: Array<{
-        job: import("../src/main/job-store.js").LocalJob;
+        job: LocalJob;
         targetStatus: "TIMED_OUT" | "UNKNOWN";
       }> = [];
       const mockFinalizeFn = async (
-        job: import("../src/main/job-store.js").LocalJob,
+        job: LocalJob,
         targetStatus: "TIMED_OUT" | "UNKNOWN",
       ) => {
         finalizeCalls.push({ job, targetStatus });
@@ -348,8 +334,8 @@ describe("loop-heartbeat: job finalization on terminal heartbeat signals", () =>
       assert.equal(call.job, testJob, `finalizeFn must receive the job returned by jobStore.getByLoopId`);
       assert.equal(
         call.targetStatus,
-        expectedTargetStatus,
-        `finalizeFn must be called with targetStatus=${expectedTargetStatus} on ${label}`,
+        "UNKNOWN",
+        `finalizeFn must be called with targetStatus=UNKNOWN on ${label}`,
       );
 
       // Heartbeat scheduler must have stopped — no further fetch calls after the terminal tick.
@@ -370,13 +356,11 @@ describe("loop-heartbeat: job finalization on terminal heartbeat signals", () =>
 
     installHeartbeatFetchStub(404);
 
-    const stubJobStore = {
-      getByLoopId: (_id: string) => undefined,
-    } as unknown as import("../src/main/job-store.js").JobStore;
+    const stubJobStore = makeStubJobStore();
 
     const finalizeCalls: unknown[] = [];
     const mockFinalizeFn = async (
-      job: import("../src/main/job-store.js").LocalJob,
+      job: LocalJob,
       targetStatus: "TIMED_OUT" | "UNKNOWN",
     ) => {
       finalizeCalls.push({ job, targetStatus });

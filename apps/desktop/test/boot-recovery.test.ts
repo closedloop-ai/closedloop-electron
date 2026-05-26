@@ -7,6 +7,7 @@ import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { LoopCommand } from "@closedloop-ai/loops-api/commands";
 import { getActiveLoopPid } from "../src/server/operations/symphony-loop.js";
+import { isProcessRunning } from "../src/server/operations/symphony-utils.js";
 import { LoopSchedulerContext } from "../src/main/loop-scheduler-context.js";
 
 async function waitForCondition(
@@ -27,6 +28,7 @@ import { BootRecoveryService } from "../src/main/boot-recovery.js";
 import { JobStore, type LocalJob } from "../src/main/job-store.js";
 import { LoopTokenStore } from "../src/main/loop-token-store.js";
 import { createTestLoopTokenSafeStorage } from "./loop-token-test-utils.js";
+import { createLocalJob } from "./job-store-test-utils.js";
 import { initGitRepo, restoreEnv } from "./symphony-test-utils.js";
 import type { TelemetryEventPayload } from "../src/main/telemetry-protocol.js";
 import { cleanupAdditionalWorktrees } from "../src/server/operations/symphony-loop.js";
@@ -124,20 +126,13 @@ function createLoopTokenStore(name: string): LoopTokenStore {
 }
 
 function createJob(overrides?: Partial<LocalJob>): LocalJob {
-  const now = new Date().toISOString();
   const repoDir = path.join(tempRoot, "repo");
-  return {
-    id: "loop-1",
-    kind: "SYMPHONY_LOOP",
-    loopId: "loop-1",
+  return createLocalJob({
     command: LoopCommand.Plan,
-    status: "RUNNING",
-    startedAt: now,
-    updatedAt: now,
     localRepoPath: repoDir,
     claudeWorkDir: path.join(repoDir, "workdir"),
     ...overrides,
-  };
+  });
 }
 
 test("finalizes dead CANCEL_PENDING jobs to CANCELLED without loop events", async () => {
@@ -1592,8 +1587,12 @@ test("reattachLiveJob starts heartbeat scheduler for recovered loop", async () =
 // when `unregisterLoop` is called (e.g. when the watcher detects process exit),
 // so reusing "loop-1" across tests would cause `getActiveLoopPid` to return a
 // stale value from an earlier test. Unique IDs ensure clean assertions.
+// Each case is keyed by a single discriminator; the loopId, store name, token
+// store name, and workdir are all derived from `key` in the test body so the
+// per-row fixture carries no redundant identity triplet.
 const reattachStatusCases = [
   {
+    key: "401",
     name: "reattachLiveJob does not reattach on HTTP 401 (unauthorized after failed refresh-retry)",
     // The status endpoint returns 401, which triggers a token refresh attempt.
     // The refresh endpoint also returns 401 (or any non-success), so the refresh
@@ -1601,53 +1600,45 @@ const reattachStatusCases = [
     statusHandler: () => new Response("Unauthorized", { status: 401 }),
     port: 4040,
     disposition: "terminal" as const,
-    loopId: "loop-reattach-401",
-    storeNameSuffix: "401",
-    tokenStoreSuffix: "401-tokens",
   },
   {
+    key: "404",
     name: "reattachLiveJob does not reattach on HTTP 404 (loop not found)",
     statusHandler: () => new Response("Not Found", { status: 404 }),
     port: 4041,
     disposition: "terminal" as const,
-    loopId: "loop-reattach-404",
-    storeNameSuffix: "404",
-    tokenStoreSuffix: "404-tokens",
   },
   {
+    key: "410",
     name: "reattachLiveJob does not reattach on HTTP 410 (loop gone)",
     statusHandler: () => new Response("Gone", { status: 410 }),
     port: 4042,
     disposition: "terminal" as const,
-    loopId: "loop-reattach-410",
-    storeNameSuffix: "410",
-    tokenStoreSuffix: "410-tokens",
   },
   {
+    key: "5xx",
     name: "reattachLiveJob conservatively reattaches on 5xx transient error from status check",
     // 502 from the status-check endpoint — cloud may recover; do not terminalize.
     statusHandler: () => new Response("Bad Gateway", { status: 502 }),
     port: 4043,
     disposition: "transient" as const,
-    loopId: "loop-reattach-5xx",
-    storeNameSuffix: "5xx",
-    tokenStoreSuffix: "5xx-tokens",
   },
 ] as const;
 
 for (const tc of reattachStatusCases) {
   test(tc.name, async () => {
-    const { loopId } = tc;
+    const { key } = tc;
+    const loopId = `loop-reattach-${key}`;
     const repoDir = path.join(tempRoot, "repo");
-    const claudeWorkDir = path.join(repoDir, `workdir-${tc.storeNameSuffix}`);
+    const claudeWorkDir = path.join(repoDir, `workdir-${key}`);
     await fs.mkdir(claudeWorkDir, { recursive: true });
     const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
     await fs.writeFile(jsonlPath, "");
 
-    const loopTokenStore = createLoopTokenStore(`boot-recovery-reattach-${tc.tokenStoreSuffix}`);
+    const loopTokenStore = createLoopTokenStore(`boot-recovery-reattach-${key}-tokens`);
     loopTokenStore.setLoopToken(loopId, { token: "loop-token" });
 
-    const jobStore = createStore(`boot-recovery-reattach-${tc.storeNameSuffix}`);
+    const jobStore = createStore(`boot-recovery-reattach-${key}`);
     const liveJob = createJob({
       id: loopId,
       loopId,
@@ -1690,33 +1681,33 @@ for (const tc of reattachStatusCases) {
     if (tc.disposition === "terminal") {
       assert.ok(
         persisted.cloudFinalizedAt,
-        `expected cloudFinalizedAt to be set for terminal case (${tc.storeNameSuffix})`,
+        `expected cloudFinalizedAt to be set for terminal case (${key})`,
       );
       assert.equal(loopTokenStore.getLoopToken(loopId), null,
-        `expected loop token cleared for terminal case (${tc.storeNameSuffix})`);
+        `expected loop token cleared for terminal case (${key})`);
       assert.ok(
         teardownCalls.includes(loopId),
-        `expected schedulers.teardownLoop("${loopId}") to be called for terminal case (${tc.storeNameSuffix})`,
+        `expected schedulers.teardownLoop("${loopId}") to be called for terminal case (${key})`,
       );
       // registerRecoveredLoop was NOT called — the loopId must be absent from
       // the module-level runningLoops map (getActiveLoopPid returns null).
       assert.equal(
         getActiveLoopPid(loopId),
         null,
-        `expected registerRecoveredLoop NOT called for terminal case (${tc.storeNameSuffix})`,
+        `expected registerRecoveredLoop NOT called for terminal case (${key})`,
       );
     } else {
       // Transient: job must NOT be finalized; tailer must be running.
       assert.equal(
         persisted.cloudFinalizedAt,
         undefined,
-        `expected cloudFinalizedAt NOT set for transient case (${tc.storeNameSuffix})`,
+        `expected cloudFinalizedAt NOT set for transient case (${key})`,
       );
       // registerRecoveredLoop should have been called (conservative reattach).
       assert.notEqual(
         getActiveLoopPid(loopId),
         null,
-        `expected registerRecoveredLoop called for transient case (${tc.storeNameSuffix})`,
+        `expected registerRecoveredLoop called for transient case (${key})`,
       );
 
       // Verify the tailer is running by writing a JSONL record and waiting for the POST.
@@ -1730,7 +1721,7 @@ for (const tc of reattachStatusCases) {
       );
       assert.ok(
         fetchCalls.some((c) => c.url.includes(`/loops/${loopId}/events`)),
-        `expected tailer to POST /events for transient case (${tc.storeNameSuffix})`,
+        `expected tailer to POST /events for transient case (${key})`,
       );
     }
 
@@ -1845,20 +1836,13 @@ test("AC-007 regression: RUNNING job with dead PID at boot is finalized as UNKNO
 
   // Simulate reconcileJobStore(): detect the dead PID and transition to UNKNOWN.
   // reconcile() returns the jobs it moved to terminal state, matching what app.ts
-  // passes as the `deadJobs` argument to BootRecoveryService.run().
+  // passes as the `deadJobs` argument to BootRecoveryService.run(). Uses the same
+  // production liveness predicate (isProcessRunning) rather than a hand-rolled
+  // process.kill probe, so the regression tracks the real predicate.
   const deadJobs = jobStore.reconcile((job) => {
+    if (isProcessRunning(job.pid!)) return job;
     const now = new Date().toISOString();
-    let processAlive = false;
-    try {
-      process.kill(job.pid!, 0);
-      processAlive = true;
-    } catch {
-      processAlive = false;
-    }
-    if (!processAlive) {
-      return { ...job, status: "UNKNOWN", updatedAt: now, completedAt: now };
-    }
-    return job;
+    return { ...job, status: "UNKNOWN", updatedAt: now, completedAt: now };
   });
 
   // Verify the reconciliation produced exactly one UNKNOWN job.

@@ -1225,6 +1225,33 @@ export function isRetryableFinalizationError(error?: string): boolean {
   return status === 429 || status >= 500;
 }
 
+/**
+ * Builds the `finalizeFn` callback wired into a heartbeat scheduler. On a
+ * terminal server signal the scheduler invokes this to persist the terminal
+ * status onto the local job and then run full loop finalization via
+ * {@link finalizeLoopFromRuntime}. Centralizes the upsert → re-read → finalize
+ * sequence that boot-recovery and the symphony-loop launch path would
+ * otherwise each inline; callers supply their own `LoopFinalizerDeps` (e.g.
+ * real vs. no-op telemetry, with or without a worktree-cleanup provider).
+ */
+export function makeHeartbeatFinalizeFn(
+  finalizerDeps: LoopFinalizerDeps,
+): (job: LocalJob, targetStatus: "TIMED_OUT" | "UNKNOWN") => Promise<void> {
+  return async (job, targetStatus) => {
+    finalizerDeps.jobStore.upsert({
+      ...job,
+      status: targetStatus,
+      finalizationSource: "boot-recovery",
+      liveActivity: `Heartbeat terminal signal: ${targetStatus}`,
+      completedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const updatedJob =
+      finalizerDeps.jobStore.getByLoopId(job.loopId) ?? { ...job, status: targetStatus };
+    await finalizeLoopFromRuntime(updatedJob, "boot-recovery", finalizerDeps);
+  };
+}
+
 export async function finalizeLoopFromRuntime(
   job: LocalJob,
   reason: LoopFinalizationReason,

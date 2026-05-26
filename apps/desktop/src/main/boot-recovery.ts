@@ -15,11 +15,12 @@ import { isTerminalJobStatus, type JobStore, type LocalJob } from "./job-store.j
 import type { LoopTokenStore } from "./loop-token-store.js";
 import {
   finalizeLoopFromRuntime,
+  makeHeartbeatFinalizeFn,
   type LoopFinalizerDeps,
 } from "./loop-finalizer.js";
 import type { TelemetryEmitter } from "./telemetry-protocol.js";
 import { LoopSchedulerContext } from "./loop-scheduler-context.js";
-import { classifyLoopStatus } from "./loop-status-classifier.js";
+import { classifyLoopStatus, type TerminalReason } from "./loop-status-classifier.js";
 
 export interface BootRecoveryDeps {
   jobStore: JobStore;
@@ -40,6 +41,32 @@ interface LiveJobHandle {
 
 const DEFAULT_WATCHER_POLL_MS = 3000;
 const MAX_RECOVERY_ATTEMPTS = 3;
+
+/**
+ * Maps a `CloudLoopStatus` union onto the HTTP status input expected by
+ * {@link classifyLoopStatus}: 401 for `unauthorized`, the carried status for
+ * `error`, and null otherwise (the classifier reads the `kind` string for the
+ * timed_out/active cases).
+ */
+function cloudStatusToHttp(result: CloudLoopStatus): number | null {
+  if (result.kind === "unauthorized") return 401;
+  if (result.kind === "error") return result.status ?? null;
+  return null;
+}
+
+/** Human-readable fragment for the UNKNOWN finalization message. */
+function terminalReasonMessage(reason: TerminalReason): string {
+  switch (reason) {
+    case "unauthorized":
+      return "unauthorized after token refresh";
+    case "not_found":
+      return "HTTP 404";
+    case "gone":
+      return "HTTP 410";
+    case "timed_out":
+      return "timed out";
+  }
+}
 
 export class BootRecoveryService implements Disposable {
   private readonly deps: BootRecoveryDeps;
@@ -269,36 +296,35 @@ export class BootRecoveryService implements Disposable {
       }
     }
 
-    // Determine if the result is terminal and what status/message to persist.
-    const isTerminalUnauthorized = result.kind === "unauthorized";
-    const isTerminal404or410 =
-      result.kind === "error" && (result.status === 404 || result.status === 410);
+    // Determine if the result is terminal via the shared classifier (SSOT), so
+    // this path interprets 401/404/410/timed_out identically to reattachLiveJob
+    // below. Map the CloudLoopStatus union onto the classifier's HTTP input.
+    const disposition = classifyLoopStatus(
+      cloudStatusToHttp(result),
+      result.kind,
+    );
 
-    if (result.kind === "timed_out") {
+    if (disposition.kind === "terminal") {
       const current = this.deps.jobStore.getByLoopId(job.loopId) ?? job;
+      const now = new Date().toISOString();
+      // timed_out persists an explicit TIMED_OUT with its own message; every
+      // other terminal reason (unauthorized/404/410) finalizes as UNKNOWN.
+      const finalized =
+        disposition.reason === "timed_out"
+          ? {
+              status: "TIMED_OUT" as const,
+              liveActivity: "Loop timed out — restart from the loop list.",
+            }
+          : {
+              status: "UNKNOWN" as const,
+              liveActivity: `Boot recovery: loop terminated server-side (${terminalReasonMessage(disposition.reason)})`,
+            };
       this.deps.jobStore.upsert({
         ...current,
-        status: "TIMED_OUT",
-        liveActivity: "Loop timed out — restart from the loop list.",
-        completedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        cloudFinalizedAt: new Date().toISOString(),
-      });
-      this.deps.loopTokenStore.deleteLoopToken(job.loopId);
-    } else if (isTerminalUnauthorized || isTerminal404or410) {
-      // Server definitively reaped this loop (401 after refresh-and-retry,
-      // 404 not found, or 410 gone). Finalize as UNKNOWN.
-      const reason = isTerminalUnauthorized
-        ? "unauthorized after token refresh"
-        : `HTTP ${result.kind === "error" ? result.status : "unknown"}`;
-      const current = this.deps.jobStore.getByLoopId(job.loopId) ?? job;
-      this.deps.jobStore.upsert({
-        ...current,
-        status: "UNKNOWN",
-        liveActivity: `Boot recovery: loop terminated server-side (${reason})`,
-        completedAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        cloudFinalizedAt: new Date().toISOString(),
+        ...finalized,
+        completedAt: now,
+        updatedAt: now,
+        cloudFinalizedAt: now,
       });
       this.deps.loopTokenStore.deleteLoopToken(job.loopId);
     }
@@ -331,15 +357,10 @@ export class BootRecoveryService implements Disposable {
     }
 
     const reconcileResult = await this.reconcileCloudLoopStatus(job, effectiveApiBaseUrl);
-
-    // Map CloudLoopStatus to classifier inputs.
-    let httpStatusForClassifier: number | null = null;
-    if (reconcileResult.kind === "unauthorized") {
-      httpStatusForClassifier = 401;
-    } else if (reconcileResult.kind === "error") {
-      httpStatusForClassifier = reconcileResult.status ?? null;
-    }
-    const disposition = classifyLoopStatus(httpStatusForClassifier, reconcileResult.kind);
+    const disposition = classifyLoopStatus(
+      cloudStatusToHttp(reconcileResult),
+      reconcileResult.kind,
+    );
 
     if (disposition.kind === "terminal") {
       // reconcileCloudLoopStatus already persisted the terminal status,
@@ -420,31 +441,17 @@ export class BootRecoveryService implements Disposable {
       apiBaseUrl: effectiveApiBaseUrl,
       getToken,
       jobStore: this.deps.jobStore,
-      finalizeFn: (job, targetStatus) => {
-        const { jobStore, telemetry, loopTokenStore } = this.deps;
-        const getAllowedDirectories = this.deps.getAllowedDirectories ?? (() => []);
-        jobStore.upsert({
-          ...job,
-          status: targetStatus,
-          finalizationSource: "boot-recovery",
-          liveActivity: `Heartbeat terminal signal: ${targetStatus}`,
-          completedAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        });
-        const updatedJob = jobStore.getByLoopId(job.loopId) ?? { ...job, status: targetStatus };
-        const finalizerDeps: LoopFinalizerDeps = {
-          jobStore,
-          telemetry,
-          getToken,
-          apiBaseUrl: effectiveApiBaseUrl,
-          isProcessRunning,
-          getAllowedDirectories,
-          loopTokenStore,
-          cleanupAdditionalWorktrees: cleanupAdditionalWorktreesWithDefaultProvider,
-          schedulers: this.schedulers,
-        };
-        return finalizeLoopFromRuntime(updatedJob, "boot-recovery", finalizerDeps).then(() => {});
-      },
+      finalizeFn: makeHeartbeatFinalizeFn({
+        jobStore: this.deps.jobStore,
+        telemetry: this.deps.telemetry,
+        getToken,
+        apiBaseUrl: effectiveApiBaseUrl,
+        isProcessRunning,
+        getAllowedDirectories: this.deps.getAllowedDirectories ?? (() => []),
+        loopTokenStore: this.deps.loopTokenStore,
+        cleanupAdditionalWorktrees: cleanupAdditionalWorktreesWithDefaultProvider,
+        schedulers: this.schedulers,
+      }),
     });
 
     this.schedulers.registerSleep(loopId, {
