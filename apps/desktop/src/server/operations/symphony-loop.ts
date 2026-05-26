@@ -7928,6 +7928,8 @@ async function handleLoopRequest(
       apiBaseUrl,
       getToken: () =>
         loopTokenStore?.getLoopToken(body.loopId)?.token ?? body.closedLoopAuthToken,
+      // getSessionToken intentionally omitted: no cloud session source exists here
+      // yet, so revival is inert. Wire it when FEA-1392 lands.
       loopTokenStore,
     });
 

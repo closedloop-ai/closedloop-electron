@@ -17,6 +17,10 @@ import type { LoopTokenStore } from "./loop-token-store.js";
 export interface LoopSchedulerDeps {
   apiBaseUrl: string;
   getToken: () => string | null;
+  // Forward-only plumbing (FEA-1392): no call site populates this yet, so the
+  // `X-Session-Token` heartbeat header is not sent and cloud loop revival is not
+  // active. A real cloud session-token source must be wired into both heartbeat
+  // call sites (symphony-loop.ts, boot-recovery.ts) before revival works end-to-end.
   getSessionToken?: () => Promise<string | null>;
   loopTokenStore: LoopTokenStore;
 }
