@@ -21,7 +21,17 @@ export const getHeartbeatIntervalMs = (): number =>
 // Subset of LoopSchedulerDeps the heartbeat needs.
 // ---------------------------------------------------------------------------
 
-export type HeartbeatDeps = Pick<LoopSchedulerDeps, "apiBaseUrl" | "getToken"> & {
+export type HeartbeatDeps = Pick<
+  LoopSchedulerDeps,
+  "apiBaseUrl" | "getToken" | "getSessionToken"
+> & {
+  /**
+   * Optional loop token store. When the heartbeat reports `revived: true` with
+   * a fresh runner token, the adopted token is written here via
+   * `setLoopToken` so recovered/revived loops keep heartbeating with valid
+   * credentials.
+   */
+  loopTokenStore?: LoopSchedulerDeps["loopTokenStore"];
   /**
    * Reference to the job store for reading the local job record by loopId.
    * Used by the heartbeat tick to look up a job before passing it to
@@ -75,13 +85,35 @@ export async function runHeartbeatTick(
     `Issuing heartbeat for loopId=${loopId}`,
   );
 
-  const result = await postLoopHeartbeat(apiBaseUrl, loopId, deps.getToken);
+  const result = await postLoopHeartbeat(
+    apiBaseUrl,
+    loopId,
+    deps.getToken,
+    deps.getSessionToken,
+  );
 
   if (result.success) {
-    gatewayLog.info(
-      "loop-heartbeat",
-      `Heartbeat succeeded for loopId=${loopId}`,
-    );
+    const { loopTokenStore } = deps;
+    if (
+      result.revived === true &&
+      result.token !== undefined &&
+      loopTokenStore !== undefined
+    ) {
+      gatewayLog.info(
+        "loop-heartbeat",
+        `Loop revived for loopId=${loopId}; adopting new runner token`,
+      );
+      loopTokenStore.setLoopToken(loopId, {
+        token: result.token,
+        jti: result.jti,
+        expiresAt: result.expiresAt !== undefined ? result.expiresAt.getTime() : undefined,
+      });
+    } else {
+      gatewayLog.info(
+        "loop-heartbeat",
+        `Heartbeat succeeded for loopId=${loopId}`,
+      );
+    }
     return;
   }
 

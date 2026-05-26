@@ -25,7 +25,7 @@ async function handleResumeForLoop(
   loopId: string,
   deps: LoopSchedulerDeps,
 ): Promise<void> {
-  const { apiBaseUrl, getToken, loopTokenStore } = deps;
+  const { apiBaseUrl, getToken, getSessionToken, loopTokenStore } = deps;
 
   // Trigger an immediate token refresh via the singleflight primitive so that
   // concurrent resume handlers for the same loop coalesce into one network call.
@@ -67,9 +67,15 @@ async function handleResumeForLoop(
   // process-wide gate, the real heartbeat scheduler's next tick would skip the
   // round trip and never finalize. With the gate left open, that scheduler
   // still observes the terminal signal and finalizes the job.
+  //
+  // getSessionToken / loopTokenStore are threaded through so that if the server
+  // revives the loop on this resume heartbeat, the fresh runner token is
+  // adopted into the store the owning scheduler reads from.
   sendHeartbeatNow(loopId, {
     apiBaseUrl,
     getToken,
+    getSessionToken,
+    loopTokenStore,
     jobStore: createStubJobStore(),
     finalizeFn: async () => {},
   });
