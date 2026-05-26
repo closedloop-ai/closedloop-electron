@@ -541,6 +541,7 @@ export class DesktopApplication {
       isRelayReady: () =>
         this.serverAgentSessionSyncSupported &&
         this.cloudStatus.state === "online",
+      isChunkedSyncEnabled: () => this.settingsStore.getFlag("agentSessionChunkedSyncEnabled"),
       sendBatch: (batch) => this.cloudSocket.sendAgentSessions(batch),
       getUserDataPath: () => app.getPath("userData"),
       onBatchOutcome: (event) => {
