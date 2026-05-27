@@ -33,6 +33,9 @@ export const SESSION_PAYLOAD_BYTE_CAP = 262_144;
 // After this many consecutive ack timeouts on the same session, dead-letter it
 // so one oversized or slow session does not permanently block the queue.
 export const MAX_CONSECUTIVE_TIMEOUTS = 3;
+const SESSION_SYNC_STATE_LOCAL_ONLY = "local_only";
+const SESSION_SYNC_STATE_FULL_SYNCED = "full_synced";
+const SESSION_SYNC_STATE_EXCLUDED = "excluded";
 
 export function estimateSessionPayloadBytes(session: SyncedAgentSession): number {
   return Buffer.byteLength(JSON.stringify(session));
@@ -44,6 +47,12 @@ type SessionCursorRow = {
   id: string;
   updated_at: string;
 };
+
+type SessionSyncState =
+  | "local_only"
+  | "metadata_synced"
+  | "full_synced"
+  | "excluded";
 
 type SessionRow = {
   id: string;
@@ -267,6 +276,7 @@ export class AgentSessionSyncService {
         const db = new DatabaseSync(dbPath);
         try {
           db.exec("PRAGMA busy_timeout = 1000");
+          ensureSessionSyncStateColumn(db);
           this.initializeBackfillQueueIfNeeded(db);
           this.enqueueIncrementalUpdates(db);
 
@@ -395,14 +405,16 @@ export class AgentSessionSyncService {
       return;
     }
 
-    const rows = listAllSessionCursorRows(db);
-    if (rows.length === 0) {
+    const allRows = listAllSessionCursorRows(db);
+    if (allRows.length === 0) {
       return;
     }
 
-    this.observedTopUpdatedAt = rows[0].updated_at;
+    const rows = listBackfillSessionCursorRows(db);
+
+    this.observedTopUpdatedAt = allRows[0].updated_at;
     this.observedIdsAtTopUpdatedAt = collectIdsAtTimestamp(
-      rows,
+      allRows,
       this.observedTopUpdatedAt,
     );
     for (const row of rows) {
@@ -472,6 +484,7 @@ export class AgentSessionSyncService {
         ids.length === 1 &&
         this.pendingChunks.sessionId === ids[0];
       if (!hasMoreChunks) {
+        this.markSessionsFullySynced(ids);
         for (const id of ids) {
           this.timeoutCountById.delete(id);
         }
@@ -575,6 +588,33 @@ export class AgentSessionSyncService {
       this.backfillQueuedIds.delete(id);
     }
   }
+
+  private markSessionsFullySynced(ids: string[]): void {
+    if (ids.length === 0) {
+      return;
+    }
+
+    const dbPath = resolveAgentMonitorDatabasePath(
+      this.options.getUserDataPath?.(),
+    );
+    if (!existsSync(dbPath)) {
+      return;
+    }
+
+    const db = new DatabaseSync(dbPath);
+    try {
+      db.exec("PRAGMA busy_timeout = 1000");
+      ensureSessionSyncStateColumn(db);
+      updateSessionSyncState(db, ids, SESSION_SYNC_STATE_FULL_SYNCED);
+    } catch (error) {
+      gatewayLog.warn(
+        TAG,
+        `failed to persist session sync state: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      db.close();
+    }
+  }
 }
 
 export function resolveAgentMonitorDatabasePath(
@@ -593,6 +633,29 @@ export function listAllSessionCursorRows(db: DatabaseSync): SessionCursorRow[] {
       `,
     )
     .all() as SessionCursorRow[];
+}
+
+export function listBackfillSessionCursorRows(
+  db: DatabaseSync,
+): SessionCursorRow[] {
+  if (!hasSessionSyncStateColumn(db)) {
+    return listAllSessionCursorRows(db);
+  }
+
+  return db
+    .prepare(
+      `
+        SELECT id, updated_at
+        FROM sessions
+        WHERE COALESCE(sync_state, ?) NOT IN (?, ?)
+        ORDER BY updated_at DESC, id DESC
+      `,
+    )
+    .all(
+      SESSION_SYNC_STATE_LOCAL_ONLY,
+      SESSION_SYNC_STATE_FULL_SYNCED,
+      SESSION_SYNC_STATE_EXCLUDED,
+    ) as SessionCursorRow[];
 }
 
 export function listUpdatedSessionCursorRows(
@@ -623,6 +686,173 @@ function collectIdsAtTimestamp(
     ids.add(row.id);
   }
   return ids;
+}
+
+function hasSessionSyncStateColumn(db: DatabaseSync): boolean {
+  const rows = db.prepare("PRAGMA table_info(sessions)").all() as Array<{
+    name?: string;
+  }>;
+  return rows.some((row) => row.name === "sync_state");
+}
+
+function ensureSessionSyncStateColumn(db: DatabaseSync): void {
+  if (!hasSessionSyncStateColumn(db)) {
+    db.exec(`
+      ALTER TABLE sessions
+      ADD COLUMN sync_state TEXT NOT NULL DEFAULT 'local_only'
+        CHECK(sync_state IN ('local_only','metadata_synced','full_synced','excluded'))
+    `);
+  }
+  db.exec(
+    "CREATE INDEX IF NOT EXISTS idx_sessions_sync_state ON sessions(sync_state)",
+  );
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_sessions_sync_state_after_insert
+    AFTER INSERT ON sessions
+    FOR EACH ROW
+    WHEN COALESCE(NEW.sync_state, '${SESSION_SYNC_STATE_LOCAL_ONLY}') != '${SESSION_SYNC_STATE_EXCLUDED}'
+    BEGIN
+      UPDATE sessions
+      SET sync_state = '${SESSION_SYNC_STATE_LOCAL_ONLY}'
+      WHERE id = NEW.id;
+    END;
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_sessions_sync_state_after_update
+    AFTER UPDATE OF
+      name,
+      status,
+      cwd,
+      model,
+      started_at,
+      updated_at,
+      ended_at,
+      awaiting_input_since,
+      metadata,
+      harness
+    ON sessions
+    FOR EACH ROW
+    WHEN COALESCE(NEW.sync_state, '${SESSION_SYNC_STATE_LOCAL_ONLY}') != '${SESSION_SYNC_STATE_EXCLUDED}'
+    BEGIN
+      UPDATE sessions
+      SET sync_state = '${SESSION_SYNC_STATE_LOCAL_ONLY}'
+      WHERE id = NEW.id;
+    END;
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_agents_sync_state_after_insert
+    AFTER INSERT ON agents
+    FOR EACH ROW
+    BEGIN
+      UPDATE sessions
+      SET sync_state = '${SESSION_SYNC_STATE_LOCAL_ONLY}'
+      WHERE id = NEW.session_id
+        AND COALESCE(sync_state, '${SESSION_SYNC_STATE_LOCAL_ONLY}') != '${SESSION_SYNC_STATE_EXCLUDED}';
+    END;
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_agents_sync_state_after_update
+    AFTER UPDATE ON agents
+    FOR EACH ROW
+    BEGIN
+      UPDATE sessions
+      SET sync_state = '${SESSION_SYNC_STATE_LOCAL_ONLY}'
+      WHERE id IN (OLD.session_id, NEW.session_id)
+        AND COALESCE(sync_state, '${SESSION_SYNC_STATE_LOCAL_ONLY}') != '${SESSION_SYNC_STATE_EXCLUDED}';
+    END;
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_agents_sync_state_after_delete
+    AFTER DELETE ON agents
+    FOR EACH ROW
+    BEGIN
+      UPDATE sessions
+      SET sync_state = '${SESSION_SYNC_STATE_LOCAL_ONLY}'
+      WHERE id = OLD.session_id
+        AND COALESCE(sync_state, '${SESSION_SYNC_STATE_LOCAL_ONLY}') != '${SESSION_SYNC_STATE_EXCLUDED}';
+    END;
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_events_sync_state_after_insert
+    AFTER INSERT ON events
+    FOR EACH ROW
+    BEGIN
+      UPDATE sessions
+      SET sync_state = '${SESSION_SYNC_STATE_LOCAL_ONLY}'
+      WHERE id = NEW.session_id
+        AND COALESCE(sync_state, '${SESSION_SYNC_STATE_LOCAL_ONLY}') != '${SESSION_SYNC_STATE_EXCLUDED}';
+    END;
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_events_sync_state_after_update
+    AFTER UPDATE ON events
+    FOR EACH ROW
+    BEGIN
+      UPDATE sessions
+      SET sync_state = '${SESSION_SYNC_STATE_LOCAL_ONLY}'
+      WHERE id IN (OLD.session_id, NEW.session_id)
+        AND COALESCE(sync_state, '${SESSION_SYNC_STATE_LOCAL_ONLY}') != '${SESSION_SYNC_STATE_EXCLUDED}';
+    END;
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_events_sync_state_after_delete
+    AFTER DELETE ON events
+    FOR EACH ROW
+    BEGIN
+      UPDATE sessions
+      SET sync_state = '${SESSION_SYNC_STATE_LOCAL_ONLY}'
+      WHERE id = OLD.session_id
+        AND COALESCE(sync_state, '${SESSION_SYNC_STATE_LOCAL_ONLY}') != '${SESSION_SYNC_STATE_EXCLUDED}';
+    END;
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_token_usage_sync_state_after_insert
+    AFTER INSERT ON token_usage
+    FOR EACH ROW
+    BEGIN
+      UPDATE sessions
+      SET sync_state = '${SESSION_SYNC_STATE_LOCAL_ONLY}'
+      WHERE id = NEW.session_id
+        AND COALESCE(sync_state, '${SESSION_SYNC_STATE_LOCAL_ONLY}') != '${SESSION_SYNC_STATE_EXCLUDED}';
+    END;
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_token_usage_sync_state_after_update
+    AFTER UPDATE ON token_usage
+    FOR EACH ROW
+    BEGIN
+      UPDATE sessions
+      SET sync_state = '${SESSION_SYNC_STATE_LOCAL_ONLY}'
+      WHERE id IN (OLD.session_id, NEW.session_id)
+        AND COALESCE(sync_state, '${SESSION_SYNC_STATE_LOCAL_ONLY}') != '${SESSION_SYNC_STATE_EXCLUDED}';
+    END;
+  `);
+  db.exec(`
+    CREATE TRIGGER IF NOT EXISTS trg_token_usage_sync_state_after_delete
+    AFTER DELETE ON token_usage
+    FOR EACH ROW
+    BEGIN
+      UPDATE sessions
+      SET sync_state = '${SESSION_SYNC_STATE_LOCAL_ONLY}'
+      WHERE id = OLD.session_id
+        AND COALESCE(sync_state, '${SESSION_SYNC_STATE_LOCAL_ONLY}') != '${SESSION_SYNC_STATE_EXCLUDED}';
+    END;
+  `);
+}
+
+function updateSessionSyncState(
+  db: DatabaseSync,
+  ids: string[],
+  state: SessionSyncState,
+): void {
+  if (ids.length === 0) {
+    return;
+  }
+
+  const placeholders = ids.map(() => "?").join(", ");
+  db.prepare(
+    `UPDATE sessions SET sync_state = ? WHERE id IN (${placeholders})`,
+  ).run(state, ...ids);
 }
 
 export function loadSyncedSessions(

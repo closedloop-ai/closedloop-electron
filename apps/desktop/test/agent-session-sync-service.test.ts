@@ -11,6 +11,7 @@ import {
   chunkOversizedSession,
   estimateSessionPayloadBytes,
   estimateTokenUsageCostUsd,
+  listBackfillSessionCursorRows,
   listAllSessionCursorRows,
   listUpdatedSessionCursorRows,
   loadSyncedSessions,
@@ -18,6 +19,7 @@ import {
   SESSION_PAYLOAD_BYTE_CAP,
 } from "../src/main/agent-session-sync-service.js";
 import { DesktopAgentSessionsAckReason } from "../src/main/cloud-protocol.js";
+import type { SyncedAgentSession } from "../src/main/agent-session-sync-contract.js";
 
 function createServiceTestDatabase(rootDir: string): DatabaseSync {
   const userDataDir = path.join(rootDir, "user-data");
@@ -37,7 +39,9 @@ function createServiceTestDatabase(rootDir: string): DatabaseSync {
       ended_at TEXT,
       awaiting_input_since TEXT,
       metadata TEXT,
-      harness TEXT NOT NULL
+      harness TEXT NOT NULL,
+      sync_state TEXT NOT NULL DEFAULT 'local_only'
+        CHECK(sync_state IN ('local_only','metadata_synced','full_synced','excluded'))
     );
     CREATE TABLE agents (
       id TEXT PRIMARY KEY,
@@ -373,6 +377,34 @@ test("agent-session sync cursor queries preserve updated_at ordering", () => {
   db.close();
 });
 
+test("agent-session backfill cursor excludes fully synced sessions", () => {
+  const db = new DatabaseSync(":memory:");
+  db.exec(`
+    CREATE TABLE sessions (
+      id TEXT PRIMARY KEY,
+      updated_at TEXT NOT NULL,
+      sync_state TEXT NOT NULL DEFAULT 'local_only'
+        CHECK(sync_state IN ('local_only','metadata_synced','full_synced','excluded'))
+    );
+  `);
+  db.prepare(
+    "INSERT INTO sessions (id, updated_at, sync_state) VALUES (?, ?, ?)",
+  ).run("sess-local", "2026-05-20T12:02:00.000Z", "local_only");
+  db.prepare(
+    "INSERT INTO sessions (id, updated_at, sync_state) VALUES (?, ?, ?)",
+  ).run("sess-synced", "2026-05-20T12:03:00.000Z", "full_synced");
+  db.prepare(
+    "INSERT INTO sessions (id, updated_at, sync_state) VALUES (?, ?, ?)",
+  ).run("sess-excluded", "2026-05-20T12:01:00.000Z", "excluded");
+
+  assert.deepEqual(
+    listBackfillSessionCursorRows(db).map((row) => ({ ...row })),
+    [{ id: "sess-local", updated_at: "2026-05-20T12:02:00.000Z" }],
+  );
+
+  db.close();
+});
+
 test("agent-session sync picks up new sessions added at the current top timestamp", async () => {
   const rootDir = mkdtempSync(path.join(tmpdir(), "agent-session-sync-service-"));
   const db = createServiceTestDatabase(rootDir);
@@ -513,6 +545,89 @@ test("agent-session sync throttles repeated incremental full-session syncs", asy
     service.stop();
     db.close();
   }
+});
+
+test("agent-session sync only backfills unsynced sessions across restarts", async () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), "agent-session-sync-service-"));
+  const db = createServiceTestDatabase(rootDir);
+  insertSessionRow(db, {
+    id: "sess-1",
+    startedAt: "2026-05-20T12:00:00.000Z",
+    updatedAt: "2026-05-20T12:00:00.000Z",
+  });
+
+  let sendCount = 0;
+  const service = new AgentSessionSyncService({
+    isAgentMonitorEnabled: () => true,
+    isRelayReady: () => true,
+    sendBatch: async () => {
+      sendCount += 1;
+      return { accepted: true };
+    },
+    getUserDataPath: () => path.join(rootDir, "user-data"),
+  });
+
+  service.start();
+  await flushAgentSessionSync();
+  service.stop();
+
+  assert.equal(sendCount, 1);
+  assert.equal(
+    db.prepare("SELECT sync_state FROM sessions WHERE id = ?").get("sess-1")
+      ?.sync_state,
+    "full_synced",
+  );
+
+  let secondRunCount = 0;
+  const restarted = new AgentSessionSyncService({
+    isAgentMonitorEnabled: () => true,
+    isRelayReady: () => true,
+    sendBatch: async () => {
+      secondRunCount += 1;
+      return { accepted: true };
+    },
+    getUserDataPath: () => path.join(rootDir, "user-data"),
+  });
+
+  restarted.start();
+  await flushAgentSessionSync();
+  restarted.stop();
+
+  assert.equal(secondRunCount, 0);
+
+  db.prepare("UPDATE sessions SET updated_at = ? WHERE id = ?").run(
+    "2026-05-20T12:10:00.000Z",
+    "sess-1",
+  );
+  assert.equal(
+    db.prepare("SELECT sync_state FROM sessions WHERE id = ?").get("sess-1")
+      ?.sync_state,
+    "local_only",
+  );
+
+  let thirdRunCount = 0;
+  const restartedAfterMutation = new AgentSessionSyncService({
+    isAgentMonitorEnabled: () => true,
+    isRelayReady: () => true,
+    sendBatch: async () => {
+      thirdRunCount += 1;
+      return { accepted: true };
+    },
+    getUserDataPath: () => path.join(rootDir, "user-data"),
+  });
+
+  restartedAfterMutation.start();
+  await flushAgentSessionSync();
+  restartedAfterMutation.stop();
+
+  assert.equal(thirdRunCount, 1);
+  assert.equal(
+    db.prepare("SELECT sync_state FROM sessions WHERE id = ?").get("sess-1")
+      ?.sync_state,
+    "full_synced",
+  );
+
+  db.close();
 });
 
 test("agent-session sync cost estimator falls back to zero without pricing", () => {
@@ -819,7 +934,7 @@ test("chunked sync splits oversized sessions into multiple batches when enabled"
 });
 
 test("chunkOversizedSession splits events to fit within byte cap", () => {
-  const session = {
+  const session: SyncedAgentSession = {
     externalSessionId: "sess-unit",
     name: null,
     status: "completed",
@@ -846,7 +961,7 @@ test("chunkOversizedSession splits events to fit within byte cap", () => {
 
   // Use a small cap so events get split.
   const smallCap = estimateSessionPayloadBytes({ ...session, events: [] }) + 3000;
-  const chunks = chunkOversizedSession(session as any, smallCap);
+  const chunks = chunkOversizedSession(session, smallCap);
 
   assert.ok(chunks.length >= 2, `expected ≥2 chunks, got ${chunks.length}`);
   const totalEvents = chunks.reduce((sum, c) => sum + c.events.length, 0);
