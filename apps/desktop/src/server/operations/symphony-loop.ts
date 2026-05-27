@@ -7132,6 +7132,18 @@ async function handleLoopRequest(
           token: body.closedLoopAuthToken,
           expiresAt: initialExpiresAt,
         } satisfies LoopTokenMeta);
+        // Persist the cloud session token (forwarded as X-Session-Token on
+        // heartbeats to revive a TIMED_OUT loop) encrypted via safeStorage,
+        // stored separately from the runner token so refresh/revival rotation
+        // never clobbers it. Merge semantics: a re-request that omits the token
+        // keeps the previously-persisted value rather than stripping it.
+        const sessionToken =
+          body.cloudSessionToken ??
+          loopTokenStore.getCloudSessionToken(body.loopId) ??
+          undefined;
+        if (sessionToken !== undefined) {
+          loopTokenStore.setCloudSessionToken(body.loopId, sessionToken);
+        }
       }
     } catch (err) {
       loopLog(
@@ -7869,11 +7881,6 @@ async function handleLoopRequest(
         typeof rawBody.s3StateKey === "string" && rawBody.s3StateKey.length > 0
           ? rawBody.s3StateKey
           : existing?.s3StateKey;
-      // body.cloudSessionToken is already trimmed, length-bounded, and
-      // normalized to undefined-when-empty by parseCloudSessionToken at the
-      // gateway boundary, so no ad-hoc shape check is needed here.
-      const cloudSessionToken =
-        body.cloudSessionToken ?? existing?.cloudSessionToken;
       jobStore.upsert({
         id: body.loopId,
         kind: "SYMPHONY_LOOP",
@@ -7893,7 +7900,6 @@ async function handleLoopRequest(
         worktreeDir: worktreeDir ?? undefined,
         claudeWorkDir,
         ...(s3StateKey ? { s3StateKey } : {}),
-        ...(cloudSessionToken ? { cloudSessionToken } : {}),
         // Persist so finalizer/boot-recovery can remove these after a crash
         // or graceful shutdown; in-process spawn keeps its own local copy for
         // live cleanup on exit.
@@ -7943,14 +7949,13 @@ async function handleLoopRequest(
         loopTokenStore,
       });
     }
-    // Read the effective session token from the job store, which was just
-    // upserted (line ~7895) with the merged value (body token falling back to
+    // Read the effective session token from the encrypted LoopTokenStore, which
+    // was just populated above with the merged value (body token falling back to
     // the previously-persisted token). This keeps the live heartbeat consistent
-    // with the boot-recovery path, which also reads job.cloudSessionToken — so a
-    // re-request that omits cloudSessionToken does not strip the X-Session-Token
-    // header. Fall back to the raw body value on the legacy no-store path.
+    // with the boot-recovery path, which also reads it from LoopTokenStore. Fall
+    // back to the raw body value on the legacy no-store path.
     const effectiveCloudSessionToken =
-      jobStore?.getByLoopId(body.loopId)?.cloudSessionToken ?? body.cloudSessionToken;
+      loopTokenStore?.getCloudSessionToken(body.loopId) ?? body.cloudSessionToken;
     const getSessionToken = createGetSessionToken(effectiveCloudSessionToken);
 
     schedulers.startHeartbeat(body.loopId, {

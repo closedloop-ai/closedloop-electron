@@ -438,7 +438,9 @@ export class BootRecoveryService implements Disposable {
       loopTokenStore: this.deps.loopTokenStore,
     });
 
-    const getSessionToken = createGetSessionToken(job.cloudSessionToken);
+    const getSessionToken = createGetSessionToken(
+      this.deps.loopTokenStore.getCloudSessionToken(loopId) ?? undefined,
+    );
 
     this.schedulers.startHeartbeat(loopId, {
       apiBaseUrl: effectiveApiBaseUrl,

@@ -138,12 +138,6 @@ export type LocalJob = {
   executeFinalizationPostExecutionResultPresent?: boolean;
   executeFinalizationPostPrBodyPresent?: boolean;
   apiBaseUrl?: string;
-  /**
-   * Cloud session token from the originating loop request.
-   * Persisted so heartbeat and finalization paths can authenticate
-   * cloud-side calls without depending on in-memory request state.
-   */
-  cloudSessionToken?: string;
 };
 
 const TERMINAL_STATUSES: ReadonlySet<LocalJobStatus> = new Set([
