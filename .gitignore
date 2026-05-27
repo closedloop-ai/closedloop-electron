@@ -14,3 +14,8 @@ dist-dmg/
 
 # Generated agent-monitor runtime tree
 apps/desktop/.generated/
+.gstack/
+
+# Playwright test artifacts (apps/desktop/test-e2e)
+apps/desktop/test-results/
+apps/desktop/playwright-report/

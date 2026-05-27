@@ -1,0 +1,46 @@
+[
+  {
+    "pack_id": "fixture-pack-alpha",
+    "harness": "claude",
+    "install_path": "/tmp/fixture-claude/plugins/alpha",
+    "install_kind": "directory",
+    "source_url": "https://github.com/example/fixture-alpha",
+    "version": "1.0.0",
+    "detected_at": "2026-05-10T00:00:00.000Z",
+    "last_seen_at": "2026-05-22T00:00:00.000Z",
+    "uninstalled_at": null
+  },
+  {
+    "pack_id": "fixture-pack-beta",
+    "harness": "claude",
+    "install_path": "/tmp/fixture-claude/plugins/beta",
+    "install_kind": "symlink",
+    "source_url": "https://github.com/example/fixture-beta",
+    "version": "2.3.1",
+    "detected_at": "2026-05-11T00:00:00.000Z",
+    "last_seen_at": "2026-05-22T00:00:00.000Z",
+    "uninstalled_at": null
+  },
+  {
+    "pack_id": "fixture-pack-beta",
+    "harness": "codex",
+    "install_path": "/tmp/fixture-codex/plugins/beta",
+    "install_kind": "directory",
+    "source_url": "https://github.com/example/fixture-beta",
+    "version": "2.3.1",
+    "detected_at": "2026-05-12T00:00:00.000Z",
+    "last_seen_at": "2026-05-22T00:00:00.000Z",
+    "uninstalled_at": null
+  },
+  {
+    "pack_id": "fixture-pack-gamma",
+    "harness": "claude",
+    "install_path": "/tmp/fixture-claude/plugins/gamma",
+    "install_kind": "directory",
+    "source_url": null,
+    "version": null,
+    "detected_at": "2026-05-13T00:00:00.000Z",
+    "last_seen_at": "2026-05-22T00:00:00.000Z",
+    "uninstalled_at": null
+  }
+]
