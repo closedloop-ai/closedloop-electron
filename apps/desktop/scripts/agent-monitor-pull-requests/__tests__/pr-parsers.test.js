@@ -110,6 +110,61 @@ describe("isPrCreateCommand — command gate", () => {
   });
 });
 
+describe("codex error-path gating", () => {
+  test("ignores failed exec_command_end gh pr create output", () => {
+    const state = createSessionParserState();
+    const events = parseSessionLine(
+      {
+        type: "event_msg",
+        payload: {
+          type: "exec_command_end",
+          parsed_cmd: [{ type: "unknown", cmd: "gh pr create --fill" }],
+          aggregated_output:
+            "a pull request for branch \"feat/test\" already exists:\nhttps://github.com/closedloop-ai/closedloop-electron/pull/240\n",
+          exit_code: 1,
+          status: "failed",
+        },
+      },
+      "codex-session",
+      state,
+    );
+    assert.deepEqual(events, []);
+  });
+
+  test("ignores failed function_call_output gh pr create output", () => {
+    const state = createSessionParserState();
+    parseSessionLine(
+      {
+        type: "response_item",
+        payload: {
+          type: "function_call",
+          name: "exec_command",
+          arguments: JSON.stringify({ cmd: "gh pr create --fill" }),
+          call_id: "call-1",
+        },
+      },
+      "codex-session",
+      state,
+    );
+
+    const events = parseSessionLine(
+      {
+        type: "response_item",
+        payload: {
+          type: "function_call_output",
+          call_id: "call-1",
+          output:
+            "Process exited with code 1\nOutput:\na pull request for branch \"feat/test\" already exists:\nhttps://github.com/closedloop-ai/closedloop-electron/pull/240\n",
+        },
+      },
+      "codex-session",
+      state,
+    );
+
+    assert.deepEqual(events, []);
+  });
+});
+
 describe("extractPrUrlsFromText", () => {
   test("extracts a confirmed PR URL", () => {
     const refs = extractPrUrlsFromText("see https://github.com/closedloop-ai/symphony-alpha/pull/1199");

@@ -156,6 +156,24 @@ function extractHeadBranch(command) {
   return match ? match[1] : null;
 }
 
+function hasSuccessfulCodexExitCode(output) {
+  if (typeof output !== "string") return null;
+  const match = /^\s*Process exited with code (\d+)\b/m.exec(output);
+  if (!match) return null;
+  return Number.parseInt(match[1], 10) === 0;
+}
+
+function isSuccessfulExecCommandEnd(payload) {
+  if (!isRecord(payload)) return false;
+  if (typeof payload.exit_code === "number") {
+    return payload.exit_code === 0;
+  }
+  if (typeof payload.status === "string") {
+    return payload.status === "completed";
+  }
+  return false;
+}
+
 function loopEvent(parsed, fallbackSessionId) {
   const prUrl = typeof parsed.prUrl === "string" ? parsed.prUrl : null;
   if (!prUrl) return [];
@@ -256,11 +274,15 @@ function codexEvents(parsed, fallbackSessionId, state) {
       const command = callId ? state.codexCallCommands.get(callId) : undefined;
       if (callId) state.codexCallCommands.delete(callId);
       if (!isPrCreateCommand(command)) return [];
+      if (hasSuccessfulCodexExitCode(flattenContent(payload.output)) === false) {
+        return [];
+      }
       return codexEventsFor(flattenContent(payload.output), command || "", sessionId);
     }
     case "exec_command_end": {
       const command = extractParsedCmd(payload.parsed_cmd);
       if (!isPrCreateCommand(command)) return [];
+      if (!isSuccessfulExecCommandEnd(payload)) return [];
       return codexEventsFor(
         flattenContent(payload.aggregated_output),
         command,
