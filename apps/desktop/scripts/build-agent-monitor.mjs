@@ -1436,6 +1436,67 @@ function patchDbFile(file) {
     );
   }
 
+  // CLOSEDLOOP FEA-1390: align the startup stale-session cleanup with the
+  // runtime sweep at server/index.js:291. Upstream hardcodes a 1-hour
+  // threshold and marks sessions 'completed' on boot, which reaps long
+  // Bash tools and awaiting-input pauses falsely. We make the threshold
+  // configurable via DASHBOARD_STALE_MINUTES (default 180, matching the
+  // runtime sweep), anchor on updated_at instead of started_at, and use
+  // 'abandoned' so we don't claim a session finished cleanly when we only
+  // lost contact with it.
+  const startupStaleNeedle = [
+    "// Startup cleanup: mark stale active sessions as completed.",
+    "// Legacy sessions (created before SessionEnd hook) will never receive a SessionEnd event,",
+    "// so they stay \"active\" forever. Complete any active session whose last event is older than",
+    "// 1 hour — the CLI process is certainly gone by then.",
+    "db.prepare(",
+    "  `",
+    "  UPDATE sessions SET",
+    "    status = 'completed',",
+    "    ended_at = COALESCE(ended_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+    "  WHERE status = 'active'",
+    "    AND started_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour')",
+    "    AND NOT EXISTS (",
+    "      SELECT 1 FROM events e",
+    "      WHERE e.session_id = sessions.id",
+    "        AND e.created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 hour')",
+    "    )",
+    "`",
+    ").run();",
+  ].join("\n");
+  const startupStaleReplacement = [
+    "// CLOSEDLOOP FEA-1390: Startup cleanup aligned with the runtime sweep",
+    "// (server/index.js DASHBOARD_STALE_MINUTES, default 180). Uses 'abandoned'",
+    "// — not 'completed' — and anchors on updated_at so an active session that",
+    "// was paused on a long Bash tool / awaiting-input prompt is NOT silently",
+    "// flipped to a finished state on the next dashboard boot.",
+    "const _ccStaleMinutes = (() => {",
+    "  const raw = parseInt(process.env.DASHBOARD_STALE_MINUTES, 10);",
+    "  return Number.isFinite(raw) && raw > 0 ? raw : 180;",
+    "})();",
+    "db.prepare(",
+    "  `",
+    "  UPDATE sessions SET",
+    "    status = 'abandoned',",
+    "    ended_at = COALESCE(ended_at, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+    "  WHERE status = 'active'",
+    "    AND updated_at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-' || ? || ' minutes')",
+    "    AND NOT EXISTS (",
+    "      SELECT 1 FROM events e",
+    "      WHERE e.session_id = sessions.id",
+    "        AND e.created_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-' || ? || ' minutes')",
+    "    )",
+    "`",
+    ").run(_ccStaleMinutes, _ccStaleMinutes);",
+  ].join("\n");
+  if (source.includes(startupStaleNeedle)) {
+    source = source.replace(startupStaleNeedle, startupStaleReplacement);
+  } else if (!source.includes("CLOSEDLOOP FEA-1390")) {
+    throw new Error(
+      `Unable to patch ${file}: expected the startup stale-session cleanup block (FEA-1390). Upstream may have changed the SQL.`,
+    );
+  }
+
   // CLOSEDLOOP plan-extraction (FEA-1189): ensure the strategy §9.2 plans /
   // plan_versions tables exist at startup, regardless of route load order.
   // Idempotent CREATE TABLE IF NOT EXISTS — never an ALTER migration.

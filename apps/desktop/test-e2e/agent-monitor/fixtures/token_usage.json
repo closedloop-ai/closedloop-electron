@@ -1,0 +1,50 @@
+[
+  {
+    "session_id": "fixture-sess-active-1",
+    "model": "claude-opus-4-7",
+    "input_tokens": 1000,
+    "output_tokens": 200,
+    "cache_read_tokens": 5000,
+    "cache_write_tokens": 800,
+    "baseline_input": 0,
+    "baseline_output": 0,
+    "baseline_cache_read": 0,
+    "baseline_cache_write": 0
+  },
+  {
+    "session_id": "fixture-sess-active-2",
+    "model": "claude-sonnet-4-6",
+    "input_tokens": 500,
+    "output_tokens": 100,
+    "cache_read_tokens": 2000,
+    "cache_write_tokens": 400,
+    "baseline_input": 0,
+    "baseline_output": 0,
+    "baseline_cache_read": 0,
+    "baseline_cache_write": 0
+  },
+  {
+    "session_id": "fixture-sess-completed-1",
+    "model": "claude-opus-4-7",
+    "input_tokens": 2000,
+    "output_tokens": 500,
+    "cache_read_tokens": 10000,
+    "cache_write_tokens": 1500,
+    "baseline_input": 0,
+    "baseline_output": 0,
+    "baseline_cache_read": 0,
+    "baseline_cache_write": 0
+  },
+  {
+    "session_id": "fixture-sess-completed-2",
+    "model": "claude-haiku-4-5",
+    "input_tokens": 300,
+    "output_tokens": 50,
+    "cache_read_tokens": 1000,
+    "cache_write_tokens": 200,
+    "baseline_input": 0,
+    "baseline_output": 0,
+    "baseline_cache_read": 0,
+    "baseline_cache_write": 0
+  }
+]
