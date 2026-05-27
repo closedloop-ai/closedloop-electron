@@ -40,6 +40,7 @@ interface CapturedFetchCall {
   url: string;
   method: string;
   authorization: string | undefined;
+  sessionToken: string | undefined;
 }
 
 let capturedFetchCalls: CapturedFetchCall[] = [];
@@ -61,6 +62,7 @@ function installFetchStub(handleRefresh: () => Promise<Response>): void {
       url,
       method: init?.method ?? "GET",
       authorization: headers.get("authorization") ?? undefined,
+      sessionToken: headers.get("x-session-token") ?? undefined,
     });
     if (url.includes("refresh-token")) return handleRefresh();
     return new Response("", { status: 200 });
@@ -435,5 +437,75 @@ describe("loop-sleep-recovery: init() idempotency", () => {
         "replaced deps must be used — calls must go to the second apiBaseUrl",
       );
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Sleep-recovery passthrough: getSessionToken forwarded to heartbeat (AC-001, AC-002)
+// ---------------------------------------------------------------------------
+
+describe("loop-sleep-recovery: getSessionToken passthrough to heartbeat", () => {
+  test("onResume passes getSessionToken to the heartbeat call as X-Session-Token header", async () => {
+    installSuccessFetchStub();
+
+    const store = makeStore("store-session-passthrough");
+    store.setLoopToken("loop-session", { token: "runner-token" });
+
+    registerLoop("loop-session", {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "gateway-token",
+      getSessionToken: () => Promise.resolve("clerk-session-token"),
+      loopTokenStore: store,
+    });
+
+    onResume();
+    await flushAsync();
+
+    const heartbeatCalls = capturedFetchCalls.filter((c) =>
+      c.url.includes("heartbeat"),
+    );
+    assert.equal(
+      heartbeatCalls.length,
+      1,
+      "expected exactly one heartbeat call on resume",
+    );
+
+    const hb = heartbeatCalls[0];
+    assert.ok(hb, "expected a heartbeat call");
+    assert.equal(
+      hb.sessionToken,
+      "clerk-session-token",
+      "X-Session-Token must be forwarded from getSessionToken to the heartbeat request",
+    );
+  });
+
+  test("onResume omits X-Session-Token when getSessionToken is not provided", async () => {
+    installSuccessFetchStub();
+
+    const store = makeStore("store-no-session");
+    store.setLoopToken("loop-no-session", { token: "runner-token" });
+
+    registerLoop("loop-no-session", {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "gateway-token",
+      // getSessionToken intentionally omitted
+      loopTokenStore: store,
+    });
+
+    onResume();
+    await flushAsync();
+
+    const heartbeatCalls = capturedFetchCalls.filter((c) =>
+      c.url.includes("heartbeat"),
+    );
+    assert.equal(heartbeatCalls.length, 1, "expected exactly one heartbeat call");
+
+    const hb = heartbeatCalls[0];
+    assert.ok(hb, "expected a heartbeat call");
+    assert.equal(
+      hb.sessionToken,
+      undefined,
+      "X-Session-Token must be absent when getSessionToken is not registered",
+    );
   });
 });

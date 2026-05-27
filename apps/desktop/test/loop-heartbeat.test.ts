@@ -9,19 +9,27 @@
  *   - job finalization on terminal signals: 410 triggers finalizeFn(job, "UNKNOWN") and stops the heartbeat
  *   - job finalization on terminal signals: 401 triggers finalizeFn(job, "UNKNOWN") and stops the heartbeat (no token refresh)
  *   - 404 gate integration: 404 response disables the endpoint and stops the loop's scheduler
+ *   - 410 stop behavior: 410 response stops the heartbeat scheduler (loop is terminal)
+ *   - token adoption on revival: revived:true response persists new token via loopTokenStore.setLoopToken
  *   - CLOSEDLOOP_HEARTBEAT_INTERVAL_MS env var override
  *   - stop() cancels a running heartbeat scheduler cleanly
  *   - stopAll() cancels all active heartbeat schedulers
  */
 
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, mock, test } from "node:test";
 import { LoopSchedulerContext } from "../src/main/loop-scheduler-context.js";
 import {
   isEndpointDisabled,
   resetAllGates,
 } from "../src/main/loop-404-gate.js";
-import { flushAsync } from "./loop-token-test-utils.js";
+import {
+  createTestLoopTokenStore,
+  flushAsync,
+} from "./loop-token-test-utils.js";
 import { createLocalJob, makeStubJobStore } from "./job-store-test-utils.js";
 import type { LocalJob } from "../src/main/job-store.js";
 
@@ -37,11 +45,21 @@ const noopJobStore = {
 } as unknown as import("../src/main/job-store.js").JobStore;
 const noopFinalizeFn = async () => {};
 
-const start = (loopId: string, deps: { apiBaseUrl: string; getToken: () => string | null }) =>
+// `start` defaults the (now required) jobStore / finalizeFn to no-ops so tests
+// that only care about heartbeat firing stay terse, while still accepting the
+// optional revival fields (loopTokenStore / getSessionToken) that the token
+// adoption tests pass through. Tests exercising finalization call
+// ctx.startHeartbeat directly with their own jobStore / finalizeFn stubs.
+type StartDeps = Parameters<LoopSchedulerContext["startHeartbeat"]>[1];
+const start = (
+  loopId: string,
+  deps: Omit<StartDeps, "jobStore" | "finalizeFn"> &
+    Partial<Pick<StartDeps, "jobStore" | "finalizeFn">>,
+) =>
   ctx.startHeartbeat(loopId, {
-    ...deps,
     jobStore: noopJobStore,
     finalizeFn: noopFinalizeFn,
+    ...deps,
   });
 const stop = (loopId: string) => ctx.stopHeartbeat(loopId);
 const stopAll = () => ctx[Symbol.dispose]();
@@ -57,9 +75,11 @@ interface CapturedHeartbeat {
   url: string;
   method: string;
   authorization: string | undefined;
+  sessionToken: string | undefined;
 }
 
 let capturedHeartbeats: CapturedHeartbeat[] = [];
+let tempRoot = "";
 
 // ---------------------------------------------------------------------------
 // Fetch stub helpers
@@ -72,6 +92,7 @@ function installHeartbeatFetchStub(status: number, body = ""): void {
       url: String(input),
       method: init?.method ?? "GET",
       authorization: headers.get("authorization") ?? undefined,
+      sessionToken: headers.get("x-session-token") ?? undefined,
     });
     return new Response(body, { status });
   }) as typeof fetch;
@@ -82,7 +103,7 @@ function installHeartbeatFetchStub(status: number, body = ""): void {
  */
 function installThrowingFetchStub(): void {
   globalThis.fetch = (async () => {
-    capturedHeartbeats.push({ url: "throw", method: "POST", authorization: undefined });
+    capturedHeartbeats.push({ url: "throw", method: "POST", authorization: undefined, sessionToken: undefined });
     throw new Error("ECONNREFUSED simulated network error");
   }) as typeof fetch;
 }
@@ -91,13 +112,14 @@ function installThrowingFetchStub(): void {
 // Test lifecycle
 // ---------------------------------------------------------------------------
 
-beforeEach(() => {
+beforeEach(async () => {
   capturedHeartbeats = [];
   resetAllGates();
   ctx = new LoopSchedulerContext();
+  tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "loop-heartbeat-test-"));
 });
 
-afterEach(() => {
+afterEach(async () => {
   // Cancel all heartbeat timers left by the test.
   stopAll();
 
@@ -116,6 +138,11 @@ afterEach(() => {
 
   // Reset 404 gate state.
   resetAllGates();
+
+  // Clean up temp directory.
+  if (tempRoot) {
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -560,5 +587,106 @@ describe("loop-heartbeat: clean stop", () => {
       1,
       "only one heartbeat must fire when start() is called twice (second replaces first)",
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 410 stop behavior (AC-003)
+// ---------------------------------------------------------------------------
+
+describe("loop-heartbeat: 410 stop behavior", () => {
+  test("a 410 response stops the heartbeat scheduler (loop is terminal)", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+
+    installHeartbeatFetchStub(410);
+
+    start("loop-410", { apiBaseUrl: "https://api.example.com", getToken: () => "tok" });
+
+    // First interval fires and receives 410.
+    mock.timers.tick(1000);
+    await flushAsync();
+    assert.equal(capturedHeartbeats.length, 1, "heartbeat must have fired once (received 410)");
+
+    // Subsequent interval ticks must not call fetch again (scheduler stopped).
+    mock.timers.tick(1000);
+    await flushAsync();
+    assert.equal(
+      capturedHeartbeats.length,
+      1,
+      "heartbeat must not fire again after 410 stops the scheduler",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Token adoption on revival (AC-001, AC-002)
+// ---------------------------------------------------------------------------
+
+describe("loop-heartbeat: token adoption on revival", () => {
+  test("revived:true response persists the new runner token via loopTokenStore.setLoopToken", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+
+    const revivedBody = JSON.stringify({
+      revived: true,
+      token: "new-runner-token",
+      jti: "new-jti-abc",
+      expiresAt: new Date("2099-01-01T00:00:00.000Z").toISOString(),
+    });
+    installHeartbeatFetchStub(200, revivedBody);
+
+    const store = createTestLoopTokenStore(tempRoot, "store-revival");
+    // Pre-seed a token so the runner token is not null.
+    store.setLoopToken("loop-revival", { token: "old-runner-token" });
+
+    start("loop-revival", {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "old-runner-token",
+      loopTokenStore: store,
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+    assert.equal(capturedHeartbeats.length, 1, "heartbeat must have fired once");
+
+    // The store must now hold the new token.
+    const stored = store.getLoopToken("loop-revival");
+    assert.ok(stored !== null, "token must be stored after revival");
+    assert.equal(stored.token, "new-runner-token", "stored token must match revived token");
+    assert.equal(stored.jti, "new-jti-abc", "stored jti must match revived jti");
+
+    // Heartbeat scheduler must remain running (revival does not stop it).
+    mock.timers.tick(1000);
+    await flushAsync();
+    assert.equal(capturedHeartbeats.length, 2, "scheduler must continue running after revival");
+  });
+
+  test("revived:true without token fields does not update the store", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+
+    // Malformed revival response: revived is true but no token field.
+    installHeartbeatFetchStub(200, JSON.stringify({ revived: true }));
+
+    const store = createTestLoopTokenStore(tempRoot, "store-revival-no-token");
+    store.setLoopToken("loop-revival-nt", { token: "original-token" });
+
+    start("loop-revival-nt", {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "original-token",
+      loopTokenStore: store,
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+
+    // The store must still have the original token unchanged (no token field to adopt).
+    const stored = store.getLoopToken("loop-revival-nt");
+    assert.ok(stored !== null, "token must still be in store");
+    assert.equal(stored.token, "original-token", "original token must be unchanged when revival has no token field");
   });
 });

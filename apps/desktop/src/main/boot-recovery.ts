@@ -437,9 +437,13 @@ export class BootRecoveryService implements Disposable {
       loopTokenStore: this.deps.loopTokenStore,
     });
 
+    // getSessionToken intentionally omitted: no cloud session source exists here
+    // yet, so revival is inert. Wire it when FEA-1392 lands. loopTokenStore is
+    // still threaded so an already-revived loop can adopt its fresh token.
     this.schedulers.startHeartbeat(loopId, {
       apiBaseUrl: effectiveApiBaseUrl,
       getToken,
+      loopTokenStore: this.deps.loopTokenStore,
       jobStore: this.deps.jobStore,
       finalizeFn: makeHeartbeatFinalizeFn(
         {

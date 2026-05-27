@@ -7930,6 +7930,10 @@ async function handleLoopRequest(
       apiBaseUrl,
       getToken: () =>
         loopTokenStore?.getLoopToken(body.loopId)?.token ?? body.closedLoopAuthToken,
+      // getSessionToken intentionally omitted: no cloud session source exists here
+      // yet, so revival is inert. Wire it when FEA-1392 lands. loopTokenStore is
+      // still threaded so an already-revived loop can adopt its fresh token.
+      loopTokenStore,
       // When jobStore is absent (legacy no-store path), the heartbeat cannot look up or
       // finalize a local job. Provide a no-op stub so the TypeScript type is satisfied
       // (runHeartbeatTick logs a warning and skips finalizeFn when getByLoopId returns
