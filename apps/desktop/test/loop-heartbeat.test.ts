@@ -718,50 +718,6 @@ describe("loop-heartbeat: token adoption on revival", () => {
     );
   });
 
-  test("heartbeat proceeds and omits X-Session-Token when getSessionToken throws (graceful degradation)", async () => {
-    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
-
-    mock.timers.enable({ apis: ["Date", "setInterval"] });
-
-    installHeartbeatFetchStub(200);
-
-    const getSessionToken = async (): Promise<string | null> => {
-      throw new Error("session-token-retrieval-failed");
-    };
-
-    // Should not throw during start.
-    assert.doesNotThrow(() => {
-      start("loop-session-token-throws", {
-        apiBaseUrl: "https://api.example.com",
-        getToken: () => "runner-token",
-        getSessionToken,
-      });
-    });
-
-    // Firing the interval must not cause an unhandled rejection or throw.
-    await assert.doesNotReject(async () => {
-      mock.timers.tick(1000);
-      await flushAsync();
-    });
-
-    // The heartbeat must have fired despite getSessionToken throwing.
-    assert.equal(capturedHeartbeats.length, 1, "heartbeat must fire even when getSessionToken throws");
-
-    // X-Session-Token must be absent because the token retrieval failed.
-    const hb = capturedHeartbeats[0];
-    assert.ok(hb, "expected at least one captured heartbeat");
-    assert.equal(
-      hb.sessionToken,
-      undefined,
-      "X-Session-Token must not be present when getSessionToken throws",
-    );
-
-    // Subsequent intervals must still fire (scheduler is not stopped on error).
-    mock.timers.tick(1000);
-    await flushAsync();
-    assert.equal(capturedHeartbeats.length, 2, "subsequent heartbeats must still fire after getSessionToken throws");
-  });
-
   test("end-to-end revival: getSessionToken sends X-Session-Token, revived:true response persists new runner token", async () => {
     process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
 

@@ -7914,6 +7914,16 @@ async function handleLoopRequest(
     }
 
     Observability.jobStarted(commandId, operationId, body.loopId, pid, body.command);
+    // One event per loop start: did the inbound request carry a cloudSessionToken?
+    // This is the signal for the cloud sender (symphony) landing (FEA-1408) — keyed
+    // off the request body, not the persisted/effective value. Presence only; the
+    // token value is never emitted.
+    Observability.loopRequestCloudSessionToken(
+      commandId,
+      operationId,
+      body.loopId,
+      body.cloudSessionToken !== undefined,
+    );
 
     // Write PID file (safe to await now — close handler is already registered)
     await fs.writeFile(path.join(claudeWorkDir, "process.pid"), String(pid));

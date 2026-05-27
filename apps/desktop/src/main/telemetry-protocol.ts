@@ -59,7 +59,7 @@ export type TelemetryCategory =
   | "loop.perf.skill"
   | "loop.perf.spawn"
   | "loop.perf.parse_failure"
-  | "loop.heartbeat.session_token_error";
+  | "loop.request.cloud_session_token";
 
 export interface TelemetryTraceContext {
   computeTargetId?: string;

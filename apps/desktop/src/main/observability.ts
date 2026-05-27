@@ -560,20 +560,26 @@ export class Observability {
     }
   }
 
-  // --- Heartbeat session token (telemetry only) ---
+  // --- Loop request cloud session token (telemetry only) ---
 
   /**
-   * Emits a warning-severity telemetry event when `getSessionToken()` throws
-   * during a heartbeat. The error message is included but the token value is
-   * never logged or emitted.
+   * Emits one event per loop start recording whether the inbound loop-start
+   * request carried a `cloudSessionToken`. Lets us observe when the cloud
+   * sender (symphony) begins populating the field end-to-end (see FEA-1408).
+   * The token value itself is never logged or emitted — only its presence.
    */
-  static heartbeatSessionTokenError(loopId: string, errorMessage: string): void {
+  static loopRequestCloudSessionToken(
+    commandId: string | undefined,
+    operationId: string | undefined,
+    loopId: string,
+    present: boolean,
+  ): void {
     Observability.emitTelemetry(
-      "warn",
-      "loop.heartbeat.session_token_error",
-      "getSessionToken threw during heartbeat; proceeding without session token",
-      { loopId, jobId: loopId },
-      { extra: { errorMessage } },
+      "info",
+      "loop.request.cloud_session_token",
+      `Loop start request ${present ? "included" : "omitted"} cloudSessionToken`,
+      { commandId, operationId, loopId, jobId: loopId },
+      { extra: { present } },
     );
   }
 
