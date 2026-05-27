@@ -17,12 +17,27 @@ import type { LoopTokenStore } from "./loop-token-store.js";
 export interface LoopSchedulerDeps {
   apiBaseUrl: string;
   getToken: () => string | null;
-  // Forward-only plumbing (FEA-1392): no call site populates this yet, so the
-  // `X-Session-Token` heartbeat header is not sent and cloud loop revival is not
-  // active. A real cloud session-token source must be wired into both heartbeat
-  // call sites (symphony-loop.ts, boot-recovery.ts) before revival works end-to-end.
   getSessionToken?: () => Promise<string | null>;
   loopTokenStore: LoopTokenStore;
+}
+
+/**
+ * Creates a `getSessionToken` closure for use in heartbeat scheduler deps.
+ *
+ * Returns the trimmed token when one is present, and `null` for any absent
+ * or empty/whitespace-only value (graceful absence — an expected outcome, so
+ * it is signalled in the return value rather than by throwing). Incoming
+ * request tokens are already trimmed and length-bounded at the gateway
+ * boundary (`parseCloudSessionToken` in `symphony-loop-request.ts`); the
+ * `trim()` here also normalizes persisted tokens read back on boot recovery.
+ */
+export function createGetSessionToken(
+  cloudSessionToken: string | undefined,
+): () => Promise<string | null> {
+  return async () => {
+    const trimmed = cloudSessionToken?.trim();
+    return trimmed !== undefined && trimmed !== "" ? trimmed : null;
+  };
 }
 
 /**

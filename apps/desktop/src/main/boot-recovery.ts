@@ -12,6 +12,7 @@ import {
 import { isProcessRunning } from "../server/operations/symphony-utils.js";
 import { gatewayLog } from "./gateway-logger.js";
 import { isTerminalJobStatus, type JobStore, type LocalJob } from "./job-store.js";
+import { createGetSessionToken } from "./loop-lifecycle.js";
 import type { LoopTokenStore } from "./loop-token-store.js";
 import {
   finalizeLoopFromRuntime,
@@ -437,12 +438,14 @@ export class BootRecoveryService implements Disposable {
       loopTokenStore: this.deps.loopTokenStore,
     });
 
-    // getSessionToken intentionally omitted: no cloud session source exists here
-    // yet, so revival is inert. Wire it when FEA-1392 lands. loopTokenStore is
-    // still threaded so an already-revived loop can adopt its fresh token.
+    const getSessionToken = createGetSessionToken(
+      this.deps.loopTokenStore.getCloudSessionToken(loopId) ?? undefined,
+    );
+
     this.schedulers.startHeartbeat(loopId, {
       apiBaseUrl: effectiveApiBaseUrl,
       getToken,
+      getSessionToken,
       loopTokenStore: this.deps.loopTokenStore,
       jobStore: this.deps.jobStore,
       finalizeFn: makeHeartbeatFinalizeFn(

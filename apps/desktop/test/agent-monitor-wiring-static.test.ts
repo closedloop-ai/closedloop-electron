@@ -202,7 +202,7 @@ test("runtime resolves the generated tree and sidecar wiring still uses the fixe
   assert.match(sidecarSource, /resolveRuntimeSupportNodePaths\("agent-dashboard"\)/);
   assert.match(sidecarSource, /path\.dirname\(packageRoot\)/);
   assert.match(sidecarSource, /process\.resourcesPath,\s*"app\.asar",\s*"app",\s*"node_modules"/);
-  assert.match(sidecarSource, /const healthy = await this\.waitForHealth\(\);/);
+  assert.match(sidecarSource, /const healthy = await this\.waitForHealth\(child\);/);
   assert.match(sidecarSource, /\/api\/health/);
   assert.doesNotMatch(sidecarSource, /spawnSync\(\s*"lsof"/);
   assert.doesNotMatch(sidecarSource, /spawnSync\(\s*"ps"/);
@@ -217,6 +217,74 @@ test("runtime resolves the generated tree and sidecar wiring still uses the fixe
   assert.match(buildScriptSource, /require\("\.\/websocket"\)\.closeWebSocket\(\);/);
   assert.match(buildScriptSource, /httpServer\.closeAllConnections\(\)/);
   assert.match(buildScriptSource, /httpServer\.__closedloopDestroyConnections\(\)/);
+});
+
+// FEA-1403: when port 4820 is held by a foreign process (orphaned dev sidecar,
+// stale standalone build, etc.), /api/health answers 200 OK before OUR
+// just-spawned child has even hit listen(). Readiness must be scoped to the
+// child we spawned — not to "anyone on the port" — otherwise the supervisor's
+// restartAttempts=0 reset fires every cycle and the documented 5-attempt cap
+// is never reached. The supervisor loops forever at "attempt 1/5".
+test("FEA-1403: agent monitor readiness is scoped to the spawned child, not to any process on the port", () => {
+  // The stability window must outlast the observed EADDRINUSE crash latency.
+  // Live testing on a dev build with port 4820 held by a foreign process
+  // showed the child reaching listen() (and crashing) up to ~2.5s after
+  // spawn — slower than the original ~300ms estimate, because SQLite init +
+  // migrations + Express boot run before listen(). Parse the constant
+  // numerically so a future change shortening it below the safety margin
+  // fails this test.
+  const stabilityMatch = sidecarSource.match(
+    /const READY_STABILITY_WINDOW_MS = ([\d_]+)/,
+  );
+  assert.ok(
+    stabilityMatch,
+    "READY_STABILITY_WINDOW_MS constant must be defined in agent-monitor-sidecar.ts",
+  );
+  const stabilityMs = Number(stabilityMatch[1].replaceAll("_", ""));
+  assert.ok(
+    stabilityMs >= 3_000,
+    `READY_STABILITY_WINDOW_MS must be >= 3000ms to outlast the observed ~2500ms EADDRINUSE crash window, got ${stabilityMs}ms`,
+  );
+
+  // waitForHealth takes the spawned child as a parameter so it can verify
+  // identity, not just the port answering.
+  assert.match(
+    sidecarSource,
+    /private async waitForHealth\(child: ChildProcess\): Promise<boolean>/,
+  );
+
+  // Single source of truth for the identity-and-alive predicate. Three
+  // call sites share this guard (waitForHealth poll, post-health gate,
+  // post-stability gate); keeping them in one method means a future change
+  // cannot quietly drop half the check at one site.
+  assert.match(
+    sidecarSource,
+    /private isChildAliveAndCurrent\(child: ChildProcess\): boolean \{\s*return this\.child === child && child\.exitCode === null;\s*\}/,
+  );
+
+  // waitForHealth bails when our child is no longer the active one or has
+  // already exited — a 200 OK from a foreign process must NOT be credited.
+  assert.match(
+    sidecarSource,
+    /this\.stopping[\s\S]{0,100}!this\.isChildAliveAndCurrent\(child\)/,
+  );
+
+  // The "agent monitor ready" log + restartAttempts = 0 reset only fire
+  // after the stability window AND after re-verifying our child is still
+  // the active live one via the shared predicate. The reset is GUARDED —
+  // not unconditional.
+  assert.match(
+    sidecarSource,
+    /await delay\(READY_STABILITY_WINDOW_MS\);[\s\S]{0,400}this\.isChildAliveAndCurrent\(child\)[\s\S]{0,400}this\.restartAttempts = 0;/,
+  );
+
+  // Guard: there must NOT be an ungated `restartAttempts = 0` immediately
+  // following `await this.waitForHealth(...)` — that was the original bug.
+  // The post-waitForHealth success path must check child identity first.
+  assert.doesNotMatch(
+    sidecarSource,
+    /const healthy = await this\.waitForHealth\(child\);\s*if \(healthy\) \{\s*this\.restartAttempts = 0;/,
+  );
 });
 
 test("docs and ignores describe generated pnpm-managed inputs, not vendor source", () => {

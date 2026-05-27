@@ -239,4 +239,55 @@ describe("parseSymphonyLoopRequestBody", () => {
         err.message.includes("branchName"),
     );
   });
+
+  test("accepts and trims a valid cloud session token", () => {
+    const parsed = parseSymphonyLoopRequestBody({
+      loopId: "aaaaaaaa-0000-0000-0000-000000000010",
+      command: LoopCommand.Plan,
+      closedLoopAuthToken: "token",
+      artifacts: [],
+      repo: { fullName: "org/repo", branch: "main" },
+      cloudSessionToken: "  session-tok-abc123  ",
+    });
+
+    assert.equal(parsed.cloudSessionToken, "session-tok-abc123");
+  });
+
+  test("treats an absent or empty cloud session token as undefined", () => {
+    const absent = parseSymphonyLoopRequestBody({
+      loopId: "aaaaaaaa-0000-0000-0000-000000000011",
+      command: LoopCommand.Plan,
+      closedLoopAuthToken: "token",
+      artifacts: [],
+      repo: { fullName: "org/repo", branch: "main" },
+    });
+    assert.equal(absent.cloudSessionToken, undefined);
+
+    const whitespace = parseSymphonyLoopRequestBody({
+      loopId: "aaaaaaaa-0000-0000-0000-000000000012",
+      command: LoopCommand.Plan,
+      closedLoopAuthToken: "token",
+      artifacts: [],
+      repo: { fullName: "org/repo", branch: "main" },
+      cloudSessionToken: "   ",
+    });
+    assert.equal(whitespace.cloudSessionToken, undefined);
+  });
+
+  test("rejects an oversized cloud session token", () => {
+    assert.throws(
+      () =>
+        parseSymphonyLoopRequestBody({
+          loopId: "aaaaaaaa-0000-0000-0000-000000000013",
+          command: LoopCommand.Plan,
+          closedLoopAuthToken: "token",
+          artifacts: [],
+          repo: { fullName: "org/repo", branch: "main" },
+          cloudSessionToken: "x".repeat(4097),
+        }),
+      (err) =>
+        err instanceof SymphonyLoopRequestValidationError &&
+        err.message.includes("cloudSessionToken is malformed"),
+    );
+  });
 });

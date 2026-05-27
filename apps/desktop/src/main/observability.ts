@@ -560,6 +560,29 @@ export class Observability {
     }
   }
 
+  // --- Loop request cloud session token (telemetry only) ---
+
+  /**
+   * Emits one event per loop start recording whether the inbound loop-start
+   * request carried a `cloudSessionToken`. Lets us observe when the cloud
+   * sender (symphony) begins populating the field end-to-end (see FEA-1408).
+   * The token value itself is never logged or emitted — only its presence.
+   */
+  static loopRequestCloudSessionToken(
+    commandId: string | undefined,
+    operationId: string | undefined,
+    loopId: string,
+    present: boolean,
+  ): void {
+    Observability.emitTelemetry(
+      "info",
+      "loop.request.cloud_session_token",
+      `Loop start request ${present ? "included" : "omitted"} cloudSessionToken`,
+      { commandId, operationId, loopId, jobId: loopId },
+      { extra: { present } },
+    );
+  }
+
   // --- Queue stats (telemetry only) ---
 
   static queueStatsChanged(activeCommands: number, queueDepth: number): void {
