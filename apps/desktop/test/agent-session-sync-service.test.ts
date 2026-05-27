@@ -839,12 +839,11 @@ test("chunked sync splits oversized sessions into multiple batches when enabled"
     );
   }
 
-  // Total events across all chunks must equal the original 5.
   const totalEvents = receivedBatches.reduce(
     (sum, b) => sum + b.sessions[0].events.length,
     0,
   );
-  assert.equal(totalEvents, 5, "all events must be sent across chunks");
+  assert.equal(totalEvents, chunkEventsNeeded, "all events must be sent across chunks");
 
   service.stop();
   db.close();
