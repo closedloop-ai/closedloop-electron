@@ -11,10 +11,12 @@ import {
   chunkOversizedSession,
   estimateSessionPayloadBytes,
   estimateTokenUsageCostUsd,
+  isSessionInSandbox,
   listAllSessionCursorRows,
   listUpdatedSessionCursorRows,
   loadSyncedSessions,
   MAX_CONSECUTIVE_TIMEOUTS,
+  sanitizeSessionForSync,
   SESSION_PAYLOAD_BYTE_CAP,
 } from "../src/main/agent-session-sync-service.js";
 import { DesktopAgentSessionsAckReason } from "../src/main/cloud-protocol.js";
@@ -96,6 +98,7 @@ function insertSessionRow(
     updatedAt: string;
     status?: string;
     harness?: string;
+    cwd?: string | null;
   },
 ): void {
   db.prepare(`
@@ -107,7 +110,7 @@ function insertSessionRow(
     session.id,
     session.id,
     session.status ?? "active",
-    null,
+    session.cwd ?? "/home/user/Work",
     null,
     session.startedAt,
     session.updatedAt,
@@ -386,6 +389,7 @@ test("agent-session sync picks up new sessions added at the current top timestam
   const service = new AgentSessionSyncService({
     isAgentMonitorEnabled: () => true,
     isRelayReady: () => true,
+    getSandboxBaseDirectory: () => "/",
     sendBatch: async (batch) => {
       batches.push(batch.sessions.map((session) => session.externalSessionId));
       return { accepted: true };
@@ -424,6 +428,7 @@ test("agent-session sync pauses after feature_disabled until relay reconnects", 
   const service = new AgentSessionSyncService({
     isAgentMonitorEnabled: () => true,
     isRelayReady: () => relayReady,
+    getSandboxBaseDirectory: () => "/",
     sendBatch: async () => {
       sendCount += 1;
       if (sendCount === 1) {
@@ -475,6 +480,7 @@ test("agent-session sync throttles repeated incremental full-session syncs", asy
   const service = new AgentSessionSyncService({
     isAgentMonitorEnabled: () => true,
     isRelayReady: () => true,
+    getSandboxBaseDirectory: () => "/",
     sendBatch: async (batch) => {
       syncModes.push(batch.syncMode);
       return { accepted: true };
@@ -557,10 +563,13 @@ test("agent-session payload-aware batcher keeps each batch at or below SESSION_P
   const rootDir = mkdtempSync(path.join(tmpdir(), "agent-session-sync-service-"));
   const db = createServiceTestDatabase(rootDir);
 
-  // Each session has a large event data payload (~100 KiB each).
+  // Each session has many events with long tool_name fields (~100 KiB each).
+  // Event data is stripped by transcript sanitization (FEA-1407) so tool_name
+  // is used for padding since it survives sanitization.
   // Three sessions together (~300 KiB) exceed the 256 KiB cap, so the batcher
   // must exclude at least one from the first batch.
-  const largePadding = "x".repeat(100_000);
+  const longToolName = "T".repeat(500);
+  const eventsPerSession = Math.ceil(100_000 / 600);
   const sessionIds = ["sess-pad-1", "sess-pad-2", "sess-pad-3"];
   for (const id of sessionIds) {
     insertSessionRow(db, {
@@ -568,13 +577,19 @@ test("agent-session payload-aware batcher keeps each batch at or below SESSION_P
       startedAt: "2026-05-20T12:00:00.000Z",
       updatedAt: "2026-05-20T12:05:00.000Z",
     });
-    insertEventRow(db, id, JSON.stringify({ pad: largePadding }));
+    for (let i = 0; i < eventsPerSession; i++) {
+      db.prepare(`
+        INSERT INTO events (session_id, agent_id, event_type, tool_name, summary, data, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(id, null, "tool_use", longToolName, null, null, "2026-05-20T12:00:00.000Z");
+    }
   }
 
   const receivedBatches: import("../src/main/agent-session-sync-contract.js").AgentSessionSyncBatch[] = [];
   const service = new AgentSessionSyncService({
     isAgentMonitorEnabled: () => true,
     isRelayReady: () => true,
+    getSandboxBaseDirectory: () => "/",
     sendBatch: async (batch) => {
       receivedBatches.push(batch);
       return { accepted: true };
@@ -611,13 +626,21 @@ test("agent-session payload-aware batcher skips oversized sessions and advances 
   const db = createServiceTestDatabase(rootDir);
 
   // Pad the session so its payload exceeds 256 KiB on its own.
-  const oversizePadding = "y".repeat(SESSION_PAYLOAD_BYTE_CAP + 1000);
+  // Use many events with long tool_name values since event.data is stripped
+  // by transcript sanitization (FEA-1407) before size estimation.
+  const longToolName = "T".repeat(500);
   insertSessionRow(db, {
     id: "sess-oversize",
     startedAt: "2026-05-20T12:00:00.000Z",
     updatedAt: "2026-05-20T12:05:00.000Z",
   });
-  insertEventRow(db, "sess-oversize", JSON.stringify({ pad: oversizePadding }));
+  const eventsNeeded = Math.ceil((SESSION_PAYLOAD_BYTE_CAP + 1000) / 600);
+  for (let i = 0; i < eventsNeeded; i++) {
+    db.prepare(`
+      INSERT INTO events (session_id, agent_id, event_type, tool_name, summary, data, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run("sess-oversize", null, "tool_use", longToolName, null, null, `2026-05-20T12:0${String(i % 10).padStart(1, "0")}:00.000Z`);
+  }
 
   // Insert a second, small session to confirm it is sent after the oversized one is skipped.
   insertSessionRow(db, {
@@ -630,6 +653,7 @@ test("agent-session payload-aware batcher skips oversized sessions and advances 
   const service = new AgentSessionSyncService({
     isAgentMonitorEnabled: () => true,
     isRelayReady: () => true,
+    getSandboxBaseDirectory: () => "/",
     sendBatch: async (batch) => {
       receivedBatches.push(batch);
       return { accepted: true };
@@ -672,6 +696,7 @@ test("agent-session sync uses smaller batches for backfill than incremental", as
   const service = new AgentSessionSyncService({
     isAgentMonitorEnabled: () => true,
     isRelayReady: () => true,
+    getSandboxBaseDirectory: () => "/",
     sendBatch: async (batch) => {
       receivedBatches.push(batch);
       return { accepted: true };
@@ -717,6 +742,7 @@ test("agent-session sync retries on ack_timeout then dead-letters after MAX_CONS
   const service = new AgentSessionSyncService({
     isAgentMonitorEnabled: () => true,
     isRelayReady: () => true,
+    getSandboxBaseDirectory: () => "/",
     sendBatch: async (batch) => {
       sentBatches.push(batch);
       // Timeout every batch that contains sess-timeout; accept others.
@@ -763,16 +789,21 @@ test("chunked sync splits oversized sessions into multiple batches when enabled"
   const rootDir = mkdtempSync(path.join(tmpdir(), "agent-session-sync-service-"));
   const db = createServiceTestDatabase(rootDir);
 
-  // Create an oversized session with many events.
-  const eventData = JSON.stringify({ pad: "z".repeat(Math.floor(SESSION_PAYLOAD_BYTE_CAP / 3)) });
+  // Create an oversized session with many events. Use long tool_name fields
+  // since event data is stripped by transcript sanitization (FEA-1407).
+  const longToolName = "Z".repeat(500);
   insertSessionRow(db, {
     id: "sess-chunked",
     startedAt: "2026-05-20T12:00:00.000Z",
     updatedAt: "2026-05-20T12:05:00.000Z",
   });
-  // Insert enough events that total payload exceeds the cap.
-  for (let i = 0; i < 5; i++) {
-    insertEventRow(db, "sess-chunked", eventData);
+  // Insert enough events that total payload exceeds the cap even after sanitization.
+  const chunkEventsNeeded = Math.ceil((SESSION_PAYLOAD_BYTE_CAP * 2) / 600);
+  for (let i = 0; i < chunkEventsNeeded; i++) {
+    db.prepare(`
+      INSERT INTO events (session_id, agent_id, event_type, tool_name, summary, data, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run("sess-chunked", null, "tool_use", longToolName, null, null, "2026-05-20T12:00:00.000Z");
   }
 
   const receivedBatches: import("../src/main/agent-session-sync-contract.js").AgentSessionSyncBatch[] = [];
@@ -780,6 +811,7 @@ test("chunked sync splits oversized sessions into multiple batches when enabled"
     isAgentMonitorEnabled: () => true,
     isRelayReady: () => true,
     isChunkedSyncEnabled: () => true,
+    getSandboxBaseDirectory: () => "/",
     sendBatch: async (batch) => {
       receivedBatches.push(batch);
       return { accepted: true };
@@ -856,4 +888,143 @@ test("chunkOversizedSession splits events to fit within byte cap", () => {
   for (const chunk of chunks) {
     assert.equal(chunk.externalSessionId, "sess-unit");
   }
+});
+
+// ---------------------------------------------------------------------------
+// FEA-1407: isSessionInSandbox
+// ---------------------------------------------------------------------------
+
+test("isSessionInSandbox returns true for cwd inside sandbox", () => {
+  assert.equal(isSessionInSandbox("/home/user/Work/acme", "/home/user/Work"), true);
+});
+
+test("isSessionInSandbox returns true for cwd equal to sandbox", () => {
+  assert.equal(isSessionInSandbox("/home/user/Work", "/home/user/Work"), true);
+});
+
+test("isSessionInSandbox returns false for cwd outside sandbox", () => {
+  assert.equal(isSessionInSandbox("/home/user/personal", "/home/user/Work"), false);
+});
+
+test("isSessionInSandbox returns false for null cwd", () => {
+  assert.equal(isSessionInSandbox(null, "/home/user/Work"), false);
+});
+
+test("isSessionInSandbox returns false for empty cwd", () => {
+  assert.equal(isSessionInSandbox("", "/home/user/Work"), false);
+});
+
+test("isSessionInSandbox returns false for null sandbox (setup incomplete)", () => {
+  assert.equal(isSessionInSandbox("/home/user/Work/acme", null), false);
+});
+
+test("isSessionInSandbox returns false for empty sandbox", () => {
+  assert.equal(isSessionInSandbox("/home/user/Work/acme", ""), false);
+});
+
+test("isSessionInSandbox with sandbox '/' allows all absolute paths", () => {
+  assert.equal(isSessionInSandbox("/home/user/anything", "/"), true);
+  assert.equal(isSessionInSandbox("/tmp/test", "/"), true);
+});
+
+test("isSessionInSandbox rejects prefix-match without path separator", () => {
+  assert.equal(isSessionInSandbox("/home/user/Workspace-evil", "/home/user/Workspace"), false);
+});
+
+test("isSessionInSandbox handles trailing slashes", () => {
+  assert.equal(isSessionInSandbox("/home/user/Work/acme", "/home/user/Work/"), true);
+});
+
+// ---------------------------------------------------------------------------
+// FEA-1407: sanitizeSessionForSync
+// ---------------------------------------------------------------------------
+
+test("sanitizeSessionForSync strips content fields", () => {
+  const session = {
+    externalSessionId: "sess-1",
+    status: "completed",
+    startedAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T01:00:00Z",
+    metadata: { key: "secret-value" },
+    agents: [
+      {
+        externalAgentId: "agent-1",
+        name: "main",
+        type: "main",
+        status: "completed",
+        task: "implement the feature with secret credentials",
+        metadata: { internal: "data" },
+      },
+    ],
+    events: [
+      {
+        externalEventId: "1",
+        eventType: "UserPromptSubmit",
+        toolName: null,
+        summary: "user typed a secret API key",
+        data: { content: "sk-secret-key-12345" },
+        createdAt: "2026-01-01T00:01:00Z",
+      },
+      {
+        externalEventId: "2",
+        eventType: "PreToolUse",
+        toolName: "Read",
+        summary: "read .env file containing passwords",
+        data: { path: "/home/user/.env", content: "DB_PASSWORD=hunter2" },
+        createdAt: "2026-01-01T00:02:00Z",
+      },
+    ],
+    tokenUsageByModel: [
+      {
+        model: "claude-opus-4-6",
+        inputTokens: 1000,
+        outputTokens: 500,
+        cacheReadTokens: 200,
+        cacheWriteTokens: 100,
+        estimatedCostUsd: 0.05,
+      },
+    ],
+  };
+
+  const sanitized = sanitizeSessionForSync(session as any);
+
+  assert.equal(sanitized.metadata, null, "session metadata should be null");
+  assert.equal(sanitized.agents[0].task, null, "agent task should be null");
+  assert.equal(sanitized.agents[0].metadata, null, "agent metadata should be null");
+  assert.equal(sanitized.events[0].summary, null, "event summary should be null");
+  assert.equal(sanitized.events[0].data, null, "event data should be null");
+  assert.equal(sanitized.events[1].summary, null);
+  assert.equal(sanitized.events[1].data, null);
+
+  assert.equal(sanitized.name, null, "session name should be null");
+  assert.equal(sanitized.externalSessionId, "sess-1", "session ID preserved");
+  assert.equal(sanitized.status, "completed", "status preserved");
+  assert.equal(sanitized.events[0].eventType, "UserPromptSubmit", "eventType preserved");
+  assert.equal(sanitized.events[1].toolName, "Read", "toolName preserved");
+  assert.equal(sanitized.events[0].createdAt, "2026-01-01T00:01:00Z", "createdAt preserved");
+  assert.equal(sanitized.tokenUsageByModel[0].inputTokens, 1000, "token usage preserved");
+  assert.equal(sanitized.tokenUsageByModel[0].estimatedCostUsd, 0.05, "cost preserved");
+
+  assert.equal(sanitized.agents[0].externalAgentId, "agent-1", "agent ID preserved");
+  assert.equal(sanitized.agents[0].name, "main", "agent name preserved");
+  assert.equal(sanitized.agents[0].status, "completed", "agent status preserved");
+});
+
+test("sanitizeSessionForSync does not mutate the original session", () => {
+  const session = {
+    externalSessionId: "sess-orig",
+    status: "active",
+    startedAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T01:00:00Z",
+    metadata: { secret: true },
+    agents: [{ externalAgentId: "a1", name: "main", type: "main", status: "active", task: "secret task", metadata: { x: 1 } }],
+    events: [{ externalEventId: "1", eventType: "Test", toolName: null, summary: "secret", data: { key: "val" }, createdAt: "2026-01-01T00:00:00Z" }],
+    tokenUsageByModel: [],
+  };
+
+  sanitizeSessionForSync(session as any);
+
+  assert.deepEqual(session.metadata, { secret: true }, "original metadata unchanged");
+  assert.equal(session.agents[0].task, "secret task", "original agent task unchanged");
+  assert.equal(session.events[0].summary, "secret", "original event summary unchanged");
 });

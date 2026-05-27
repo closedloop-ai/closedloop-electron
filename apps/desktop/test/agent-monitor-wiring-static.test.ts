@@ -114,6 +114,9 @@ test("build script materializes a generated runtime tree with the host patches",
   assert.match(buildScriptSource, /CCAM_AUTO_INSTALL_HOOKS === "1"/);
   assert.match(buildScriptSource, /Database = require\("\.\/compat-sqlite"\);/);
   assert.match(buildScriptSource, /function patchHooksRoute/);
+  assert.match(buildScriptSource, /function patchHooksSandboxFilter/);
+  assert.match(buildScriptSource, /function patchImportHistorySandboxFilter/);
+  assert.match(buildScriptSource, /FEA-1407 sandbox scoping/);
   assert.match(buildScriptSource, /extractPlanFromHookEvent/);
   assert.match(buildScriptSource, /upsertPlanCapture\(db, capture\)/);
   assert.match(buildScriptSource, /req\.query\.harness/);
@@ -198,6 +201,8 @@ test("runtime resolves the generated tree and sidecar wiring still uses the fixe
   assert.match(sidecarSource, /CCAM_VAPID_KEYS_PATH/);
   assert.match(sidecarSource, /CCAM_ENABLE_RUN:\s*"0"/);
   assert.match(sidecarSource, /CCAM_AUTO_INSTALL_HOOKS:\s*"0"/);
+  assert.match(sidecarSource, /SANDBOX_BASE_DIRECTORY/);
+  assert.match(sidecarSource, /setSandboxBaseDirectory/);
   assert.match(sidecarSource, /NODE_PATH/);
   assert.match(sidecarSource, /resolveRuntimeSupportNodePaths\("agent-dashboard"\)/);
   assert.match(sidecarSource, /path\.dirname\(packageRoot\)/);

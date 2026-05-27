@@ -21,6 +21,7 @@ import {
   readLaunchMetadata,
   type LaunchMetadata,
 } from "../server/operations/symphony-utils.js";
+import { expandHomePath } from "../shared/path-utils.js";
 
 const TAG = "agent-session-sync";
 const SYNC_INTERVAL_MS = 5_000;
@@ -122,6 +123,7 @@ export interface AgentSessionSyncServiceOptions {
   isAgentMonitorEnabled: () => boolean;
   isRelayReady: () => boolean;
   isChunkedSyncEnabled?: () => boolean;
+  getSandboxBaseDirectory?: () => string;
   sendBatch: (batch: AgentSessionSyncBatch) => Promise<DesktopAgentSessionsAck>;
   getUserDataPath?: () => string;
   onBatchOutcome?: (event: AgentSessionSyncTelemetryEvent) => void;
@@ -301,11 +303,25 @@ export class AgentSessionSyncService {
           // batch until adding the next session would exceed the 256 KiB cap.
           // Sessions that individually exceed the cap are either chunked (if
           // the feature flag is on) or skipped/dead-lettered.
-          const candidateSessions = loadSyncedSessions(
+          const rawSessions = loadSyncedSessions(
             db,
             candidateIds,
             this.attributionCache,
           );
+
+          const sandboxBase = this.options.getSandboxBaseDirectory?.() ?? "";
+          const sandboxSkipped: string[] = [];
+          const candidateSessions = rawSessions.filter((s) => {
+            if (isSessionInSandbox(s.cwd, sandboxBase)) {
+              return true;
+            }
+            sandboxSkipped.push(s.externalSessionId);
+            return false;
+          });
+          if (sandboxSkipped.length > 0) {
+            this.dequeue(syncMode, sandboxSkipped);
+          }
+
           if (candidateSessions.length === 0) {
             this.dequeue(syncMode, candidateIds);
             return;
@@ -315,33 +331,33 @@ export class AgentSessionSyncService {
           const skippedOversized: string[] = [];
           syncIds = [];
           for (const session of candidateSessions) {
-            const sessionBytes = estimateSessionPayloadBytes(session);
+            const sanitized = sanitizeSessionForSync(session);
+            const sessionBytes = estimateSessionPayloadBytes(sanitized);
             if (sessionBytes > SESSION_PAYLOAD_BYTE_CAP && sessions.length === 0) {
               if (chunkedSyncEnabled) {
-                // Split the oversized session into event-paginated chunks.
-                const chunks = chunkOversizedSession(session, SESSION_PAYLOAD_BYTE_CAP);
+                const chunks = chunkOversizedSession(sanitized, SESSION_PAYLOAD_BYTE_CAP);
                 const first = chunks.shift()!;
                 if (chunks.length > 0) {
                   this.pendingChunks = {
-                    sessionId: session.externalSessionId,
+                    sessionId: sanitized.externalSessionId,
                     syncMode,
                     chunks,
                   };
                 }
                 sessions.push(first);
-                syncIds.push(session.externalSessionId);
+                syncIds.push(sanitized.externalSessionId);
                 accumulatedBytes += estimateSessionPayloadBytes(first);
                 gatewayLog.info(
                   TAG,
-                  `chunking oversized session ${session.externalSessionId} (~${formatBytes(sessionBytes)}) into ` +
+                  `chunking oversized session ${sanitized.externalSessionId} (~${formatBytes(sessionBytes)}) into ` +
                     `${chunks.length + 1} chunks of ≤${formatBytes(SESSION_PAYLOAD_BYTE_CAP)}`,
                 );
               } else {
-                skippedOversized.push(session.externalSessionId);
-                this.deadLetteredIds.add(session.externalSessionId);
+                skippedOversized.push(sanitized.externalSessionId);
+                this.deadLetteredIds.add(sanitized.externalSessionId);
                 gatewayLog.warn(
                   TAG,
-                  `skipping oversized session ${session.externalSessionId} (~${formatBytes(sessionBytes)}) — ` +
+                  `skipping oversized session ${sanitized.externalSessionId} (~${formatBytes(sessionBytes)}) — ` +
                     `exceeds ${formatBytes(SESSION_PAYLOAD_BYTE_CAP)} payload cap; ` +
                     `enable chunked session sync or wait for server-side support`,
                 );
@@ -354,8 +370,8 @@ export class AgentSessionSyncService {
             ) {
               break;
             }
-            sessions.push(session);
-            syncIds.push(session.externalSessionId);
+            sessions.push(sanitized);
+            syncIds.push(sanitized.externalSessionId);
             accumulatedBytes += sessionBytes;
           }
           if (skippedOversized.length > 0) {
@@ -575,6 +591,47 @@ export class AgentSessionSyncService {
       this.backfillQueuedIds.delete(id);
     }
   }
+}
+
+export function isSessionInSandbox(
+  cwd: string | null | undefined,
+  sandboxBaseDirectory: string | null | undefined,
+): boolean {
+  if (!sandboxBaseDirectory) {
+    return false;
+  }
+  if (!cwd) {
+    return false;
+  }
+  const normalizedCwd = path.resolve(expandHomePath(cwd));
+  const normalizedSandbox = path.resolve(expandHomePath(sandboxBaseDirectory));
+  if (normalizedCwd === normalizedSandbox) {
+    return true;
+  }
+  const prefix = normalizedSandbox.endsWith(path.sep)
+    ? normalizedSandbox
+    : normalizedSandbox + path.sep;
+  return normalizedCwd.startsWith(prefix);
+}
+
+export function sanitizeSessionForSync(
+  session: SyncedAgentSession,
+): SyncedAgentSession {
+  return {
+    ...session,
+    name: null,
+    metadata: null,
+    agents: session.agents.map((agent) => ({
+      ...agent,
+      task: null,
+      metadata: null,
+    })),
+    events: session.events.map((event) => ({
+      ...event,
+      summary: null,
+      data: null,
+    })),
+  };
 }
 
 export function resolveAgentMonitorDatabasePath(
