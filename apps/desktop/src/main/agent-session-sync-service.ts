@@ -320,6 +320,10 @@ export class AgentSessionSyncService {
           });
           if (sandboxSkipped.length > 0) {
             this.dequeue(syncMode, sandboxSkipped);
+            gatewayLog.debug(
+              TAG,
+              `filtered ${sandboxSkipped.length} session(s) outside sandbox`,
+            );
           }
 
           if (candidateSessions.length === 0) {
