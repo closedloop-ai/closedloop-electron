@@ -203,13 +203,9 @@ export class AgentMonitorSidecar {
     // is still the active one and still alive, then hold for a short stability
     // window and re-verify once more. Only then is readiness real and the
     // restart counter is safe to clear.
-    if (
-      healthy &&
-      this.child === child &&
-      child.exitCode === null
-    ) {
+    if (healthy && this.isChildAliveAndCurrent(child)) {
       await delay(READY_STABILITY_WINDOW_MS);
-      if (this.child === child && child.exitCode === null) {
+      if (this.isChildAliveAndCurrent(child)) {
         this.restartAttempts = 0;
         gatewayLog.info(
           TAG,
@@ -224,6 +220,15 @@ export class AgentMonitorSidecar {
       `agent monitor did not become healthy on port ${this.port}`,
     );
     this.flushReady(false);
+  }
+
+  // Single source of truth for "the child we just spawned is still our
+  // active reference AND still running". Keeping this in one place means a
+  // future change cannot quietly skip half the guard at one of the three
+  // call sites (waitForHealth poll, post-health gate, post-stability gate)
+  // and reintroduce the false-positive-ready race fixed in FEA-1403.
+  private isChildAliveAndCurrent(child: ChildProcess): boolean {
+    return this.child === child && child.exitCode === null;
   }
 
   private handleExit(
@@ -277,11 +282,7 @@ export class AgentMonitorSidecar {
       // OUR child still serving it. If `this.child` has been replaced by a
       // newer launch, or the spawned child has already exited, abandon the
       // poll so the caller does not credit the success to this process.
-      if (
-        this.stopping ||
-        this.child !== child ||
-        child.exitCode !== null
-      ) {
+      if (this.stopping || !this.isChildAliveAndCurrent(child)) {
         return false;
       }
       if (await healthOk(this.port)) {

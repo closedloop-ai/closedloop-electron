@@ -253,19 +253,29 @@ test("FEA-1403: agent monitor readiness is scoped to the spawned child, not to a
     /private async waitForHealth\(child: ChildProcess\): Promise<boolean>/,
   );
 
+  // Single source of truth for the identity-and-alive predicate. Three
+  // call sites share this guard (waitForHealth poll, post-health gate,
+  // post-stability gate); keeping them in one method means a future change
+  // cannot quietly drop half the check at one site.
+  assert.match(
+    sidecarSource,
+    /private isChildAliveAndCurrent\(child: ChildProcess\): boolean \{\s*return this\.child === child && child\.exitCode === null;\s*\}/,
+  );
+
   // waitForHealth bails when our child is no longer the active one or has
   // already exited — a 200 OK from a foreign process must NOT be credited.
   assert.match(
     sidecarSource,
-    /this\.child !== child[\s\S]{0,200}child\.exitCode !== null/,
+    /this\.stopping[\s\S]{0,100}!this\.isChildAliveAndCurrent\(child\)/,
   );
 
   // The "agent monitor ready" log + restartAttempts = 0 reset only fire
   // after the stability window AND after re-verifying our child is still
-  // the active live one. The reset is GUARDED — not unconditional.
+  // the active live one via the shared predicate. The reset is GUARDED —
+  // not unconditional.
   assert.match(
     sidecarSource,
-    /await delay\(READY_STABILITY_WINDOW_MS\);[\s\S]{0,400}this\.child === child[\s\S]{0,200}child\.exitCode === null[\s\S]{0,400}this\.restartAttempts = 0;/,
+    /await delay\(READY_STABILITY_WINDOW_MS\);[\s\S]{0,400}this\.isChildAliveAndCurrent\(child\)[\s\S]{0,400}this\.restartAttempts = 0;/,
   );
 
   // Guard: there must NOT be an ungated `restartAttempts = 0` immediately
