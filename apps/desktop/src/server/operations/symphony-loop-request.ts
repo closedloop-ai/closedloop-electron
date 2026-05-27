@@ -5,6 +5,10 @@ import { z } from "zod";
 const nullableString = z.string().nullable().optional();
 const REPOSITORY_FULL_NAME_REGEX = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/;
 const BRANCH_NAME_MAX_LENGTH = 256;
+// Cloud session tokens are signed JWTs; 4096 is a generous upper bound that
+// keeps the value within safe HTTP header limits when forwarded as
+// `X-Session-Token` and prevents unbounded header injection.
+const CLOUD_SESSION_TOKEN_MAX_LENGTH = 4096;
 
 const supportingArtifactSchema = z
   .object({
@@ -81,6 +85,11 @@ const branchMaterializationSchema = z
   })
   .strict();
 
+const cloudSessionTokenSchema = z
+  .string()
+  .trim()
+  .max(CLOUD_SESSION_TOKEN_MAX_LENGTH);
+
 export type SymphonyLoopSupportingArtifact = z.infer<
   typeof supportingArtifactSchema
 >;
@@ -134,14 +143,21 @@ export function parseSymphonyLoopRequestBody(
   const branchMaterialization = parseBranchMaterialization(
     rawBody.branchMaterialization,
   );
-  const { branchMaterialization: _rawBranchMaterialization, ...loopBody } =
-    rawBody;
+  const cloudSessionToken = parseCloudSessionToken(rawBody.cloudSessionToken);
+  // Strip the raw extension fields so they cannot bypass validation via the
+  // untyped `...loopBody` passthrough spread below.
+  const {
+    branchMaterialization: _rawBranchMaterialization,
+    cloudSessionToken: _rawCloudSessionToken,
+    ...loopBody
+  } = rawBody;
 
   return {
     ...(loopBody as unknown as LoopRequestBody),
     supportingArtifacts,
     codeEvaluationContext,
     ...(branchMaterialization ? { branchMaterialization } : {}),
+    ...(cloudSessionToken ? { cloudSessionToken } : {}),
   };
 }
 
@@ -188,6 +204,22 @@ function parseBranchMaterialization(
     );
   }
   return result.data;
+}
+
+function parseCloudSessionToken(value: unknown): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const result = cloudSessionTokenSchema.safeParse(value);
+  if (!result.success) {
+    throw new SymphonyLoopRequestValidationError(
+      `cloudSessionToken is malformed: ${formatZodIssues(result.error)}`,
+    );
+  }
+  // Treat an empty/whitespace-only token as absent rather than rejecting the
+  // whole loop request — the session token is optional and the heartbeat
+  // degrades gracefully without it.
+  return result.data.length > 0 ? result.data : undefined;
 }
 
 function formatZodIssues(error: z.ZodError): string {

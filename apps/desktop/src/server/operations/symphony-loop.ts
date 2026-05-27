@@ -7869,10 +7869,11 @@ async function handleLoopRequest(
         typeof rawBody.s3StateKey === "string" && rawBody.s3StateKey.length > 0
           ? rawBody.s3StateKey
           : existing?.s3StateKey;
+      // body.cloudSessionToken is already trimmed, length-bounded, and
+      // normalized to undefined-when-empty by parseCloudSessionToken at the
+      // gateway boundary, so no ad-hoc shape check is needed here.
       const cloudSessionToken =
-        typeof body.cloudSessionToken === "string" && body.cloudSessionToken.length > 0
-          ? body.cloudSessionToken
-          : existing?.cloudSessionToken;
+        body.cloudSessionToken ?? existing?.cloudSessionToken;
       jobStore.upsert({
         id: body.loopId,
         kind: "SYMPHONY_LOOP",
@@ -7940,11 +7941,7 @@ async function handleLoopRequest(
     // header. Fall back to the raw body value on the legacy no-store path.
     const effectiveCloudSessionToken =
       jobStore?.getByLoopId(body.loopId)?.cloudSessionToken ?? body.cloudSessionToken;
-    const getSessionToken = createGetSessionToken(
-      effectiveCloudSessionToken,
-      body.loopId,
-      "in the request",
-    );
+    const getSessionToken = createGetSessionToken(effectiveCloudSessionToken);
 
     schedulers.startHeartbeat(body.loopId, {
       apiBaseUrl,

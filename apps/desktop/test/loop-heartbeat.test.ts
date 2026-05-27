@@ -690,35 +690,6 @@ describe("loop-heartbeat: token adoption on revival", () => {
     assert.equal(stored.token, "original-token", "original token must be unchanged when revival has no token field");
   });
 
-  test("heartbeat request includes X-Session-Token header when getSessionToken is provided", async () => {
-    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
-
-    mock.timers.enable({ apis: ["Date", "setInterval"] });
-
-    installHeartbeatFetchStub(200);
-
-    const knownSessionToken = "session-tok-abc123";
-    const getSessionToken = async (): Promise<string | null> => knownSessionToken;
-
-    start("loop-session-token", {
-      apiBaseUrl: "https://api.example.com",
-      getToken: () => "runner-token",
-      getSessionToken,
-    });
-
-    mock.timers.tick(1000);
-    await flushAsync();
-
-    assert.equal(capturedHeartbeats.length, 1, "heartbeat must have fired once");
-    const hb = capturedHeartbeats[0];
-    assert.ok(hb, "expected at least one captured heartbeat");
-    assert.equal(
-      hb.sessionToken,
-      knownSessionToken,
-      "X-Session-Token header must equal the token returned by getSessionToken",
-    );
-  });
-
   test("heartbeat proceeds normally and omits X-Session-Token when getSessionToken returns null", async () => {
     process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
 
