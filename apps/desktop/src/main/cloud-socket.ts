@@ -67,6 +67,12 @@ export class CloudSocketService {
   private helloAckTimer: NodeJS.Timeout | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private awaitingHelloAck = false;
+  // Consecutive `desktop.hello.ack` timeouts on the *current* socket. Resets
+  // on every fresh `connect` event, on a successful `desktop.hello.ack`, and
+  // on stop(). When this reaches MAX_HELLO_ACK_TIMEOUTS_PER_SOCKET we force a
+  // full socket recycle instead of re-emitting hello on the (apparently dead
+  // or relay-side-stuck) socket until the 60s recovery timer fires.
+  private helloAckTimeoutCount = 0;
   private lastPresenceState: string | null = null;
   private hadSuccessfulConnection = false;
   private degradedSince: number | null = null;
@@ -84,6 +90,7 @@ export class CloudSocketService {
     this.stopped = false;
     this.targetId = null;
     this.awaitingHelloAck = false;
+    this.helloAckTimeoutCount = 0;
     this.disconnectSocket();
     this.clearHelloAckTimer();
     this.clearReconnectTimer();
@@ -119,6 +126,7 @@ export class CloudSocketService {
     this.stopped = true;
     this.targetId = null;
     this.awaitingHelloAck = false;
+    this.helloAckTimeoutCount = 0;
     this.lastPresenceState = null;
     this.hadSuccessfulConnection = false;
     this.degradedSince = null;
@@ -289,6 +297,7 @@ export class CloudSocketService {
       this.clearReconnectTimer();
       gatewayLog.info("cloud-socket", "Connected to relay, sending hello handshake");
       this.awaitingHelloAck = true;
+      this.helloAckTimeoutCount = 0;
       this.emitHello();
       this.scheduleHelloAckTimeout();
     });
@@ -337,6 +346,7 @@ export class CloudSocketService {
 
       this.targetId = ackEvent.computeTargetId;
       this.awaitingHelloAck = false;
+      this.helloAckTimeoutCount = 0;
       this.hadSuccessfulConnection = true;
       this.degradedSince = null;
       this.clearHelloAckTimer();
@@ -583,12 +593,65 @@ export class CloudSocketService {
       if (this.stopped || !this.awaitingHelloAck) {
         return;
       }
-      gatewayLog.warn("cloud-socket", "Hello ack timeout -- retrying handshake");
+      const socket = this.socket;
+      const consecutive = ++this.helloAckTimeoutCount;
+      // Diagnostic context: when the relay is silently stuck we need enough
+      // detail in the desktop log to discriminate "first hello hangs" from
+      // "Nth hello hangs", and to correlate with a specific socket.id on
+      // the server-side trace. Intentionally excludes PII (machineName,
+      // allowedDirectoriesHash) — versions + IDs only.
+      const targetIdLabel = this.targetId ?? "(none — first connect)";
+      const gatewayId = this.options.getGatewayId?.() ?? "(none)";
+      gatewayLog.warn(
+        "cloud-socket",
+        `Hello ack timeout (${consecutive}/${MAX_HELLO_ACK_TIMEOUTS_PER_SOCKET}) -- socketId=${socket?.id ?? "(no socket)"}, computeTargetId=${targetIdLabel}, gatewayId=${gatewayId}, desktopClientVersion=${this.options.desktopClientVersion}, gatewayProtocolVersion=${this.options.gatewayProtocolVersion}`,
+      );
+
+      if (consecutive >= MAX_HELLO_ACK_TIMEOUTS_PER_SOCKET) {
+        // Two consecutive timeouts on the same socket means re-emitting hello
+        // is not going to help — the relay is either hung inside its hello
+        // handler or our hello is being silently dropped. Recycle the socket
+        // so we get a fresh socket.id on the server side and bypass any
+        // per-socket stuck state.
+        //
+        // We do BOTH `socket.disconnect()` AND `scheduleSocketReconnect()`:
+        //   - When socket.connected is true, disconnect() will fire our
+        //     existing 'disconnect' listener which itself schedules a
+        //     reconnect. scheduleSocketReconnect() is idempotent (the inner
+        //     `if (this.reconnectTimer)` short-circuit), so the double call
+        //     is harmless.
+        //   - When socket.connected is false (transient half-open transport
+        //     state, or the listener already fired without us noticing),
+        //     disconnect() is a no-op and the listener won't fire again —
+        //     so the explicit scheduleSocketReconnect() is the only thing
+        //     guaranteeing recovery in ~20s instead of waiting the 60s
+        //     RECOVERY_TIMEOUT_MS.
+        gatewayLog.warn(
+          "cloud-socket",
+          `Forcing reconnect after ${consecutive} consecutive hello ack timeouts`,
+        );
+        this.notifyStatus({
+          state: "degraded",
+          error: "Relay did not respond to handshake — reconnecting",
+        });
+        if (socket) {
+          socket.disconnect();
+          this.scheduleSocketReconnect(socket);
+        } else {
+          // Defensive: this.socket can be null only after stop() or before
+          // start(), both of which short-circuited at the top of this
+          // callback. A full restart() handles the otherwise-unreachable
+          // case without leaving the service stuck.
+          this.restart();
+        }
+        return;
+      }
+
       this.notifyStatus({
         state: "degraded",
-        error: "Connected to cloud socket but did not receive desktop.hello.ack"
+        error: "Relay did not respond to handshake — retrying",
       });
-      if (this.socket?.connected) {
+      if (socket?.connected) {
         this.emitHello();
         this.scheduleHelloAckTimeout();
       }
@@ -683,6 +746,13 @@ export async function refreshRelayValidationPopHeadersForSocket(
 type EnvelopeOnlyFields = ProtocolEnvelope;
 
 const HELLO_ACK_TIMEOUT_MS = 10_000;
+// After this many consecutive hello-ack timeouts on the same socket we force
+// a full socket recycle. Two timeouts = ~20s of relay silence, which is well
+// past the threshold where another hello on the same socket could reasonably
+// succeed. The prior implementation re-emitted forever and relied on the 60s
+// recovery timer to break the loop, leaving users in Disconnected for an extra
+// 40s after the problem was already evident. See FEA-1404.
+const MAX_HELLO_ACK_TIMEOUTS_PER_SOCKET = 2;
 const RECONNECT_DELAY_MS = 1_000;
 const RECOVERY_TIMEOUT_MS = 2 * 60_000;
 const RECOVERY_CHECK_INTERVAL_MS = 30_000;

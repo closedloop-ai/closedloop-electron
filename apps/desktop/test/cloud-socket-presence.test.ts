@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { afterEach, describe, mock, test } from "node:test";
 import {
   CloudSocketService,
@@ -452,6 +453,191 @@ describe("T-3.1: hello payload version fields", () => {
       accepted: false,
       reason: "rate_limited",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FEA-1404: hello-ack timeout recovery + diagnostics
+// ---------------------------------------------------------------------------
+
+describe("FEA-1404: hello-ack timeout recovery", () => {
+  test("first hello-ack timeout re-emits hello on same socket; second timeout forces reconnect", () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+
+    const service = new CloudSocketService(
+      createStubOptions({
+        desktopClientVersion: "0.15.86-test",
+        gatewayProtocolVersion: "0.1.0",
+      }),
+    );
+    const fakeSocket = new FakeSocket();
+    (fakeSocket as unknown as { id: string }).id = "sock-FEA1404";
+    (service as unknown as Record<string, unknown>)["socket"] = fakeSocket;
+    (service as unknown as Record<string, unknown>)["stopped"] = false;
+    (service as unknown as Record<string, unknown>)["awaitingHelloAck"] = true;
+
+    // Prime the timer + counter as the connect handler would.
+    const proto = Object.getPrototypeOf(service) as Record<
+      string,
+      (...args: unknown[]) => void
+    >;
+    proto["emitHello"].call(service);
+    proto["scheduleHelloAckTimeout"].call(service);
+
+    assert.equal(fakeSocket.emittedEvents.length, 1, "initial hello emitted");
+
+    // Tick to first timeout (10s).
+    mock.timers.tick(10_000);
+
+    // After the first timeout, hello must have been re-emitted on the same
+    // socket (cumulative 2 emits) — the socket must still be connected.
+    assert.equal(
+      fakeSocket.emittedEvents.length,
+      2,
+      "first timeout re-emits hello on the same socket",
+    );
+    assert.equal(
+      fakeSocket.connected,
+      true,
+      "socket must remain connected after the first timeout",
+    );
+    assert.equal(
+      (service as unknown as { helloAckTimeoutCount: number })
+        .helloAckTimeoutCount,
+      1,
+      "counter advances to 1 after first timeout",
+    );
+
+    // Tick to second timeout (another 10s). This is the MAX; the supervisor
+    // must NOT re-emit hello on the same socket — instead it disconnects so
+    // the existing 'disconnect' listener can schedule a fresh handshake.
+    mock.timers.tick(10_000);
+
+    assert.equal(
+      fakeSocket.emittedEvents.length,
+      2,
+      "second timeout must NOT re-emit hello — it must recycle the socket",
+    );
+    assert.equal(
+      fakeSocket.connected,
+      false,
+      "second timeout must call socket.disconnect() to force a clean reconnect",
+    );
+    assert.equal(
+      (service as unknown as { helloAckTimeoutCount: number })
+        .helloAckTimeoutCount,
+      2,
+      "counter advances to 2 (MAX_HELLO_ACK_TIMEOUTS_PER_SOCKET)",
+    );
+    // End-to-end recovery chain assertion: socket.disconnect() alone is not
+    // enough. We need scheduleSocketReconnect to have been called so that a
+    // fresh handshake actually happens in ~20s, not after the 60s recovery
+    // timer. FakeSocket.disconnect() does not emit a 'disconnect' event, so
+    // this check would fail if the supervisor relied solely on the listener
+    // chain to schedule the reconnect.
+    assert.notEqual(
+      (service as unknown as { reconnectTimer: NodeJS.Timeout | null })
+        .reconnectTimer,
+      null,
+      "second timeout must schedule a reconnect timer (not rely solely on the disconnect listener firing)",
+    );
+
+    service.stop();
+  });
+
+  test("hello-ack timeout log includes socketId, computeTargetId, gatewayId, and versions", () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    gatewayLog.setVerbose(false);
+    gatewayLog.clear();
+
+    const service = new CloudSocketService(
+      createStubOptions({
+        getGatewayId: () => "gw-test-123",
+        desktopClientVersion: "0.15.86-test",
+        gatewayProtocolVersion: "0.2.0-test",
+      }),
+    );
+    const fakeSocket = new FakeSocket();
+    (fakeSocket as unknown as { id: string }).id = "sock-diag";
+    (service as unknown as Record<string, unknown>)["socket"] = fakeSocket;
+    (service as unknown as Record<string, unknown>)["stopped"] = false;
+    (service as unknown as Record<string, unknown>)["awaitingHelloAck"] = true;
+
+    const proto = Object.getPrototypeOf(service) as Record<
+      string,
+      (...args: unknown[]) => void
+    >;
+    proto["scheduleHelloAckTimeout"].call(service);
+    mock.timers.tick(10_000);
+
+    const entries = gatewayLog.getEntries();
+    const timeoutEntry = entries.find(
+      (e) =>
+        e.tag === "cloud-socket" && /Hello ack timeout/.test(e.message),
+    );
+    assert.ok(timeoutEntry, "hello ack timeout entry must be logged");
+    assert.match(timeoutEntry.message, /socketId=sock-diag/);
+    assert.match(
+      timeoutEntry.message,
+      /computeTargetId=\(none — first connect\)/,
+    );
+    assert.match(timeoutEntry.message, /gatewayId=gw-test-123/);
+    assert.match(timeoutEntry.message, /desktopClientVersion=0\.15\.86-test/);
+    assert.match(timeoutEntry.message, /gatewayProtocolVersion=0\.2\.0-test/);
+    // The "(1/2)" counter helps correlate cycles in the log.
+    assert.match(timeoutEntry.message, /\(1\/2\)/);
+
+    service.stop();
+  });
+
+  test("counter resets on stop() and start() so a fresh connect always begins at 0", async () => {
+    // Pre-poison the counter to simulate a service that previously timed out.
+    const service = new CloudSocketService(
+      createStubOptions({
+        getApiKey: () => null, // makes start() bail right after the reset
+      }),
+    );
+    (service as unknown as Record<string, unknown>)["helloAckTimeoutCount"] = 7;
+
+    service.stop();
+    assert.equal(
+      (service as unknown as { helloAckTimeoutCount: number })
+        .helloAckTimeoutCount,
+      0,
+      "stop() must reset helloAckTimeoutCount to 0",
+    );
+
+    (service as unknown as Record<string, unknown>)["helloAckTimeoutCount"] = 9;
+    await service.start();
+    assert.equal(
+      (service as unknown as { helloAckTimeoutCount: number })
+        .helloAckTimeoutCount,
+      0,
+      "start() must reset helloAckTimeoutCount to 0",
+    );
+  });
+
+  test("source contains a reset of helloAckTimeoutCount on the desktop.hello.ack listener", () => {
+    // Belt-and-suspenders: the desktop.hello.ack listener is attached only
+    // inside connect() against a live Socket.IO instance, so it's not
+    // ergonomic to drive from a unit test. Pin the reset via a source check
+    // so a future refactor that removes it fails this test.
+    const source = readFileSync(
+      new URL("../src/main/cloud-socket.ts", import.meta.url),
+      "utf8",
+    );
+    const ackHandlerSection = source.match(
+      /socket\.on\("desktop\.hello\.ack",[\s\S]{0,2000}?\}\);/,
+    );
+    assert.ok(
+      ackHandlerSection,
+      "desktop.hello.ack listener must exist in cloud-socket.ts",
+    );
+    assert.match(
+      ackHandlerSection[0],
+      /this\.helloAckTimeoutCount = 0;/,
+      "desktop.hello.ack listener must reset helloAckTimeoutCount to 0",
+    );
   });
 });
 
