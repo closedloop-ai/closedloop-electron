@@ -689,4 +689,161 @@ describe("loop-heartbeat: token adoption on revival", () => {
     assert.ok(stored !== null, "token must still be in store");
     assert.equal(stored.token, "original-token", "original token must be unchanged when revival has no token field");
   });
+
+  test("heartbeat request includes X-Session-Token header when getSessionToken is provided", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+
+    installHeartbeatFetchStub(200);
+
+    const knownSessionToken = "session-tok-abc123";
+    const getSessionToken = async (): Promise<string | null> => knownSessionToken;
+
+    start("loop-session-token", {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "runner-token",
+      getSessionToken,
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+
+    assert.equal(capturedHeartbeats.length, 1, "heartbeat must have fired once");
+    const hb = capturedHeartbeats[0];
+    assert.ok(hb, "expected at least one captured heartbeat");
+    assert.equal(
+      hb.sessionToken,
+      knownSessionToken,
+      "X-Session-Token header must equal the token returned by getSessionToken",
+    );
+  });
+
+  test("heartbeat proceeds normally and omits X-Session-Token when getSessionToken returns null", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+
+    installHeartbeatFetchStub(200);
+
+    const getSessionToken = async (): Promise<string | null> => null;
+
+    start("loop-session-token-null", {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "runner-token",
+      getSessionToken,
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+
+    assert.equal(capturedHeartbeats.length, 1, "heartbeat must have fired once");
+    const hb = capturedHeartbeats[0];
+    assert.ok(hb, "expected at least one captured heartbeat");
+    assert.equal(
+      hb.sessionToken,
+      undefined,
+      "X-Session-Token header must not be present when getSessionToken returns null",
+    );
+  });
+
+  test("heartbeat proceeds and omits X-Session-Token when getSessionToken throws (graceful degradation)", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+
+    installHeartbeatFetchStub(200);
+
+    const getSessionToken = async (): Promise<string | null> => {
+      throw new Error("session-token-retrieval-failed");
+    };
+
+    // Should not throw during start.
+    assert.doesNotThrow(() => {
+      start("loop-session-token-throws", {
+        apiBaseUrl: "https://api.example.com",
+        getToken: () => "runner-token",
+        getSessionToken,
+      });
+    });
+
+    // Firing the interval must not cause an unhandled rejection or throw.
+    await assert.doesNotReject(async () => {
+      mock.timers.tick(1000);
+      await flushAsync();
+    });
+
+    // The heartbeat must have fired despite getSessionToken throwing.
+    assert.equal(capturedHeartbeats.length, 1, "heartbeat must fire even when getSessionToken throws");
+
+    // X-Session-Token must be absent because the token retrieval failed.
+    const hb = capturedHeartbeats[0];
+    assert.ok(hb, "expected at least one captured heartbeat");
+    assert.equal(
+      hb.sessionToken,
+      undefined,
+      "X-Session-Token must not be present when getSessionToken throws",
+    );
+
+    // Subsequent intervals must still fire (scheduler is not stopped on error).
+    mock.timers.tick(1000);
+    await flushAsync();
+    assert.equal(capturedHeartbeats.length, 2, "subsequent heartbeats must still fire after getSessionToken throws");
+  });
+
+  test("end-to-end revival: getSessionToken sends X-Session-Token, revived:true response persists new runner token", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+
+    const knownSessionToken = "session-tok-e2e-revival";
+    const revivedBody = JSON.stringify({
+      revived: true,
+      token: "new-runner-token-e2e",
+      jti: "new-jti-e2e-xyz",
+      expiresAt: new Date("2099-06-01T00:00:00.000Z").toISOString(),
+    });
+    installHeartbeatFetchStub(200, revivedBody);
+
+    const store = createTestLoopTokenStore(tempRoot, "store-e2e-revival");
+    store.setLoopToken("loop-e2e-revival", { token: "old-runner-token-e2e" });
+
+    const getSessionToken = async (): Promise<string | null> => knownSessionToken;
+
+    // (a) Start with both getSessionToken and loopTokenStore so all four
+    // assertions can be verified in a single heartbeat tick.
+    start("loop-e2e-revival", {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "old-runner-token-e2e",
+      getSessionToken,
+      loopTokenStore: store,
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+
+    // (a) Heartbeat fires.
+    assert.equal(capturedHeartbeats.length, 1, "heartbeat must have fired once");
+
+    // (b) X-Session-Token header is present and matches the value returned by getSessionToken.
+    const hb = capturedHeartbeats[0];
+    assert.ok(hb, "expected at least one captured heartbeat");
+    assert.equal(
+      hb.sessionToken,
+      knownSessionToken,
+      "X-Session-Token header must equal the token returned by getSessionToken",
+    );
+
+    // (c) revived:true response is processed — the store reflects the new token.
+    // (d) New runner token is persisted via loopTokenStore.setLoopToken.
+    const stored = store.getLoopToken("loop-e2e-revival");
+    assert.ok(stored !== null, "token must be stored after e2e revival");
+    assert.equal(stored.token, "new-runner-token-e2e", "stored token must match the revived runner token");
+    assert.equal(stored.jti, "new-jti-e2e-xyz", "stored jti must match the revived jti");
+
+    // Scheduler must remain running after revival.
+    mock.timers.tick(1000);
+    await flushAsync();
+    assert.equal(capturedHeartbeats.length, 2, "scheduler must continue running after e2e revival");
+  });
 });

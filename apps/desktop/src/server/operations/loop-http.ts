@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { gatewayLog } from "../../main/gateway-logger.js";
+import { Observability } from "../../main/observability.js";
 import { loopError, loopLog } from "./symphony-utils.js";
 
 // ---------------------------------------------------------------------------
@@ -298,7 +299,17 @@ export async function postLoopHeartbeat(
   };
 
   if (getSessionToken !== undefined) {
-    const sessionToken = await getSessionToken();
+    let sessionToken: string | null = null;
+    try {
+      sessionToken = await getSessionToken();
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      gatewayLog.warn(
+        "loop-heartbeat",
+        `getSessionToken threw for loopId=${loopId}; proceeding without session token: ${errorMessage}`,
+      );
+      Observability.heartbeatSessionTokenError(loopId, errorMessage);
+    }
     if (sessionToken !== null) {
       headers["X-Session-Token"] = sessionToken;
     }

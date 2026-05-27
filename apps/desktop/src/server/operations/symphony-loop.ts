@@ -61,6 +61,7 @@ import {
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
 import type { LoopTokenStore, LoopTokenMeta } from "../../main/loop-token-store.js";
+import { createGetSessionToken } from "../../main/loop-lifecycle.js";
 import type { LoopSchedulerContext } from "../../main/loop-scheduler-context.js";
 import { parseJwtExpiry } from "../../main/jwt-utils.js";
 import { Observability } from "../../main/observability.js";
@@ -7868,6 +7869,10 @@ async function handleLoopRequest(
         typeof rawBody.s3StateKey === "string" && rawBody.s3StateKey.length > 0
           ? rawBody.s3StateKey
           : existing?.s3StateKey;
+      const cloudSessionToken =
+        typeof body.cloudSessionToken === "string" && body.cloudSessionToken.length > 0
+          ? body.cloudSessionToken
+          : existing?.cloudSessionToken;
       jobStore.upsert({
         id: body.loopId,
         kind: "SYMPHONY_LOOP",
@@ -7887,6 +7892,7 @@ async function handleLoopRequest(
         worktreeDir: worktreeDir ?? undefined,
         claudeWorkDir,
         ...(s3StateKey ? { s3StateKey } : {}),
+        ...(cloudSessionToken ? { cloudSessionToken } : {}),
         // Persist so finalizer/boot-recovery can remove these after a crash
         // or graceful shutdown; in-process spawn keeps its own local copy for
         // live cleanup on exit.
@@ -7926,13 +7932,25 @@ async function handleLoopRequest(
         loopTokenStore,
       });
     }
+    // Read the effective session token from the job store, which was just
+    // upserted (line ~7895) with the merged value (body token falling back to
+    // the previously-persisted token). This keeps the live heartbeat consistent
+    // with the boot-recovery path, which also reads job.cloudSessionToken — so a
+    // re-request that omits cloudSessionToken does not strip the X-Session-Token
+    // header. Fall back to the raw body value on the legacy no-store path.
+    const effectiveCloudSessionToken =
+      jobStore?.getByLoopId(body.loopId)?.cloudSessionToken ?? body.cloudSessionToken;
+    const getSessionToken = createGetSessionToken(
+      effectiveCloudSessionToken,
+      body.loopId,
+      "in the request",
+    );
+
     schedulers.startHeartbeat(body.loopId, {
       apiBaseUrl,
       getToken: () =>
         loopTokenStore?.getLoopToken(body.loopId)?.token ?? body.closedLoopAuthToken,
-      // getSessionToken intentionally omitted: no cloud session source exists here
-      // yet, so revival is inert. Wire it when FEA-1392 lands. loopTokenStore is
-      // still threaded so an already-revived loop can adopt its fresh token.
+      getSessionToken,
       loopTokenStore,
       // When jobStore is absent (legacy no-store path), the heartbeat cannot look up or
       // finalize a local job. Provide a no-op stub so the TypeScript type is satisfied

@@ -106,6 +106,7 @@ export type SymphonyLoopRequestBody = LoopRequestBody & {
   parentSessionId?: string;
   artifactSlug?: string;
   branchMaterialization?: SymphonyBranchMaterialization;
+  cloudSessionToken?: string;
 };
 
 export class SymphonyLoopRequestValidationError extends Error {

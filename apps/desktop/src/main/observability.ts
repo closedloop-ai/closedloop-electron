@@ -560,6 +560,23 @@ export class Observability {
     }
   }
 
+  // --- Heartbeat session token (telemetry only) ---
+
+  /**
+   * Emits a warning-severity telemetry event when `getSessionToken()` throws
+   * during a heartbeat. The error message is included but the token value is
+   * never logged or emitted.
+   */
+  static heartbeatSessionTokenError(loopId: string, errorMessage: string): void {
+    Observability.emitTelemetry(
+      "warn",
+      "loop.heartbeat.session_token_error",
+      "getSessionToken threw during heartbeat; proceeding without session token",
+      { loopId, jobId: loopId },
+      { extra: { errorMessage } },
+    );
+  }
+
   // --- Queue stats (telemetry only) ---
 
   static queueStatsChanged(activeCommands: number, queueDepth: number): void {
