@@ -17,6 +17,16 @@ const READY_POLL_INTERVAL_MS = 500;
 // legacy import competing for the event loop. Ready != import-complete; the
 // iframe shows a loading state and populates progressively over the socket.
 const READY_TIMEOUT_MS = 60_000;
+// EADDRINUSE crashes do not surface until the child has finished its SQLite
+// init / migrations / Express boot and reached listen(). Live testing on a
+// dev build observed up to ~2.5s between spawn and the EADDRINUSE error;
+// production machines under load could be slower. Hold the readiness verdict
+// long enough that an exit during init reliably arrives before we reset the
+// restart counter, otherwise a foreign process on the same port answers
+// /api/health while our child is still initializing and the supervisor loops
+// forever at attempt 1/N. 5s leaves enough margin without making a real
+// successful boot feel sluggish (cold start is already 60s budget).
+const READY_STABILITY_WINDOW_MS = 5_000;
 const MAX_RESTART_ATTEMPTS = 5;
 const RESTART_BASE_DELAY_MS = 1_000;
 const RESTART_MAX_DELAY_MS = 30_000;
@@ -186,18 +196,39 @@ export class AgentMonitorSidecar {
     );
     child.on("exit", (code, signal) => this.handleExit(code, signal));
 
-    const healthy = await this.waitForHealth();
-    if (healthy) {
-      this.restartAttempts = 0;
-      gatewayLog.info(TAG, `agent monitor ready at http://${HOST}:${this.port}`);
-      this.flushReady(true);
-    } else {
-      gatewayLog.warn(
-        TAG,
-        `agent monitor did not become healthy on port ${this.port}`,
-      );
-      this.flushReady(false);
+    const healthy = await this.waitForHealth(child);
+    // Don't trust a bare /api/health 200 — a foreign process on the same port
+    // (orphaned dev sidecar, prior app instance, deliberate standalone build)
+    // will answer while OUR child is mid-EADDRINUSE crash. Re-verify our child
+    // is still the active one and still alive, then hold for a short stability
+    // window and re-verify once more. Only then is readiness real and the
+    // restart counter is safe to clear.
+    if (healthy && this.isChildAliveAndCurrent(child)) {
+      await delay(READY_STABILITY_WINDOW_MS);
+      if (this.isChildAliveAndCurrent(child)) {
+        this.restartAttempts = 0;
+        gatewayLog.info(
+          TAG,
+          `agent monitor ready at http://${HOST}:${this.port}`,
+        );
+        this.flushReady(true);
+        return;
+      }
     }
+    gatewayLog.warn(
+      TAG,
+      `agent monitor did not become healthy on port ${this.port}`,
+    );
+    this.flushReady(false);
+  }
+
+  // Single source of truth for "the child we just spawned is still our
+  // active reference AND still running". Keeping this in one place means a
+  // future change cannot quietly skip half the guard at one of the three
+  // call sites (waitForHealth poll, post-health gate, post-stability gate)
+  // and reintroduce the false-positive-ready race fixed in FEA-1403.
+  private isChildAliveAndCurrent(child: ChildProcess): boolean {
+    return this.child === child && child.exitCode === null;
   }
 
   private handleExit(
@@ -244,10 +275,14 @@ export class AgentMonitorSidecar {
     }, backoff);
   }
 
-  private async waitForHealth(): Promise<boolean> {
+  private async waitForHealth(child: ChildProcess): Promise<boolean> {
     const deadline = Date.now() + READY_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      if (this.stopping || this.child == null) {
+      // Identity-scoped: a 200 from /api/health is only meaningful if it's
+      // OUR child still serving it. If `this.child` has been replaced by a
+      // newer launch, or the spawned child has already exited, abandon the
+      // poll so the caller does not credit the success to this process.
+      if (this.stopping || !this.isChildAliveAndCurrent(child)) {
         return false;
       }
       if (await healthOk(this.port)) {
