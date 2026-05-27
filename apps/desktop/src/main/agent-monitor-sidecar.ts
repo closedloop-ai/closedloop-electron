@@ -17,6 +17,12 @@ const READY_POLL_INTERVAL_MS = 500;
 // legacy import competing for the event loop. Ready != import-complete; the
 // iframe shows a loading state and populates progressively over the socket.
 const READY_TIMEOUT_MS = 60_000;
+// EADDRINUSE crashes surface ~300ms after spawn (listen() fails fast). Holding
+// the readiness verdict for a window longer than that lets us catch a child
+// that exits *while* a foreign process on the same port is happily answering
+// /api/health — otherwise the restart-counter reset below masks the crash and
+// the supervisor loops forever at attempt 1/N.
+const READY_STABILITY_WINDOW_MS = 1_000;
 const MAX_RESTART_ATTEMPTS = 5;
 const RESTART_BASE_DELAY_MS = 1_000;
 const RESTART_MAX_DELAY_MS = 30_000;
@@ -186,18 +192,34 @@ export class AgentMonitorSidecar {
     );
     child.on("exit", (code, signal) => this.handleExit(code, signal));
 
-    const healthy = await this.waitForHealth();
-    if (healthy) {
-      this.restartAttempts = 0;
-      gatewayLog.info(TAG, `agent monitor ready at http://${HOST}:${this.port}`);
-      this.flushReady(true);
-    } else {
-      gatewayLog.warn(
-        TAG,
-        `agent monitor did not become healthy on port ${this.port}`,
-      );
-      this.flushReady(false);
+    const healthy = await this.waitForHealth(child);
+    // Don't trust a bare /api/health 200 — a foreign process on the same port
+    // (orphaned dev sidecar, prior app instance, deliberate standalone build)
+    // will answer while OUR child is mid-EADDRINUSE crash. Re-verify our child
+    // is still the active one and still alive, then hold for a short stability
+    // window and re-verify once more. Only then is readiness real and the
+    // restart counter is safe to clear.
+    if (
+      healthy &&
+      this.child === child &&
+      child.exitCode === null
+    ) {
+      await delay(READY_STABILITY_WINDOW_MS);
+      if (this.child === child && child.exitCode === null) {
+        this.restartAttempts = 0;
+        gatewayLog.info(
+          TAG,
+          `agent monitor ready at http://${HOST}:${this.port}`,
+        );
+        this.flushReady(true);
+        return;
+      }
     }
+    gatewayLog.warn(
+      TAG,
+      `agent monitor did not become healthy on port ${this.port}`,
+    );
+    this.flushReady(false);
   }
 
   private handleExit(
@@ -244,10 +266,18 @@ export class AgentMonitorSidecar {
     }, backoff);
   }
 
-  private async waitForHealth(): Promise<boolean> {
+  private async waitForHealth(child: ChildProcess): Promise<boolean> {
     const deadline = Date.now() + READY_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      if (this.stopping || this.child == null) {
+      // Identity-scoped: a 200 from /api/health is only meaningful if it's
+      // OUR child still serving it. If `this.child` has been replaced by a
+      // newer launch, or the spawned child has already exited, abandon the
+      // poll so the caller does not credit the success to this process.
+      if (
+        this.stopping ||
+        this.child !== child ||
+        child.exitCode !== null
+      ) {
         return false;
       }
       if (await healthOk(this.port)) {
