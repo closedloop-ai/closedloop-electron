@@ -639,6 +639,33 @@ describe("FEA-1404: hello-ack timeout recovery", () => {
       "desktop.hello.ack listener must reset helloAckTimeoutCount to 0",
     );
   });
+
+  test("source contains the defensive restart() fallback when socket is null at MAX timeouts", () => {
+    // Belt-and-suspenders for the otherwise-unreachable else branch in
+    // scheduleHelloAckTimeout: if a future refactor relaxes the short-circuit
+    // guards at the top of the callback (`this.stopped || !this.awaitingHelloAck`)
+    // such that the timeout body can reach the MAX path with `this.socket === null`,
+    // the supervisor must still drive recovery via restart() rather than
+    // silently no-op into the 60s RECOVERY_TIMEOUT_MS path. Pin the branch
+    // via source inspection.
+    const source = readFileSync(
+      new URL("../src/main/cloud-socket.ts", import.meta.url),
+      "utf8",
+    );
+    const forcingReconnectSection = source.match(
+      /Forcing reconnect after[\s\S]{0,1500}?\}\s*return;/,
+    );
+    assert.ok(
+      forcingReconnectSection,
+      "forcing-reconnect block must exist in cloud-socket.ts",
+    );
+    // The connected/half-open path uses socket.disconnect() + scheduleSocketReconnect.
+    assert.match(
+      forcingReconnectSection[0],
+      /if \(socket\) \{[\s\S]{0,400}socket\.disconnect\(\);[\s\S]{0,200}this\.scheduleSocketReconnect\(socket\);[\s\S]{0,200}\} else \{[\s\S]{0,500}this\.restart\(\);/,
+      "MAX-timeout block must include both the socket-present recovery and the defensive restart() fallback for the socket-null case",
+    );
+  });
 });
 
 describe("agent-session ack timing", () => {
