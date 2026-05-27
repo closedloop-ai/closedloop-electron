@@ -17,12 +17,16 @@ const READY_POLL_INTERVAL_MS = 500;
 // legacy import competing for the event loop. Ready != import-complete; the
 // iframe shows a loading state and populates progressively over the socket.
 const READY_TIMEOUT_MS = 60_000;
-// EADDRINUSE crashes surface ~300ms after spawn (listen() fails fast). Holding
-// the readiness verdict for a window longer than that lets us catch a child
-// that exits *while* a foreign process on the same port is happily answering
-// /api/health — otherwise the restart-counter reset below masks the crash and
-// the supervisor loops forever at attempt 1/N.
-const READY_STABILITY_WINDOW_MS = 1_000;
+// EADDRINUSE crashes do not surface until the child has finished its SQLite
+// init / migrations / Express boot and reached listen(). Live testing on a
+// dev build observed up to ~2.5s between spawn and the EADDRINUSE error;
+// production machines under load could be slower. Hold the readiness verdict
+// long enough that an exit during init reliably arrives before we reset the
+// restart counter, otherwise a foreign process on the same port answers
+// /api/health while our child is still initializing and the supervisor loops
+// forever at attempt 1/N. 5s leaves enough margin without making a real
+// successful boot feel sluggish (cold start is already 60s budget).
+const READY_STABILITY_WINDOW_MS = 5_000;
 const MAX_RESTART_ATTEMPTS = 5;
 const RESTART_BASE_DELAY_MS = 1_000;
 const RESTART_MAX_DELAY_MS = 30_000;

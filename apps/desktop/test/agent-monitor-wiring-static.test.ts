@@ -226,9 +226,13 @@ test("runtime resolves the generated tree and sidecar wiring still uses the fixe
 // restartAttempts=0 reset fires every cycle and the documented 5-attempt cap
 // is never reached. The supervisor loops forever at "attempt 1/5".
 test("FEA-1403: agent monitor readiness is scoped to the spawned child, not to any process on the port", () => {
-  // The stability window must outlast the observed EADDRINUSE crash latency
-  // (~300ms post-spawn). Parse the constant numerically so a future change
-  // shortening it below the safety margin fails this test.
+  // The stability window must outlast the observed EADDRINUSE crash latency.
+  // Live testing on a dev build with port 4820 held by a foreign process
+  // showed the child reaching listen() (and crashing) up to ~2.5s after
+  // spawn — slower than the original ~300ms estimate, because SQLite init +
+  // migrations + Express boot run before listen(). Parse the constant
+  // numerically so a future change shortening it below the safety margin
+  // fails this test.
   const stabilityMatch = sidecarSource.match(
     /const READY_STABILITY_WINDOW_MS = ([\d_]+)/,
   );
@@ -238,8 +242,8 @@ test("FEA-1403: agent monitor readiness is scoped to the spawned child, not to a
   );
   const stabilityMs = Number(stabilityMatch[1].replaceAll("_", ""));
   assert.ok(
-    stabilityMs >= 500,
-    `READY_STABILITY_WINDOW_MS must be >= 500ms to outlast the ~300ms EADDRINUSE crash window, got ${stabilityMs}ms`,
+    stabilityMs >= 3_000,
+    `READY_STABILITY_WINDOW_MS must be >= 3000ms to outlast the observed ~2500ms EADDRINUSE crash window, got ${stabilityMs}ms`,
   );
 
   // waitForHealth takes the spawned child as a parameter so it can verify
