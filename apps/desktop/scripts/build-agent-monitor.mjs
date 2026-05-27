@@ -246,7 +246,7 @@ const PACK_CATALOG_CLIENT_PAGES = [
 // pr-parsers + pull-request-store + pr-extractor into server/lib;
 // pull-requests-route.js into server/routes; PullRequests.tsx into the client.
 const prModulesDir = path.join(appDir, "scripts", "agent-monitor-pull-requests");
-const PR_MODULES = ["pr-parsers", "pull-request-store", "pr-extractor"];
+const PR_MODULES = ["pr-parsers", "pull-request-store", "pr-extractor", "pr-backfill"];
 
 // CLOSEDLOOP embed integration: the agent monitor ships as an <iframe> inside
 // the desktop app. These ClosedLoop-authored files are copied over the
@@ -1053,6 +1053,29 @@ function patchServerIndex(file) {
         "  } catch (e) {",
         '    console.warn("[plans] backfill failed:", e && e.message);',
         "  }",
+        // CLOSEDLOOP engineer GitHub activity capture (FEA-1226): mirror the
+        // plan backfill for pull-request URLs. Same `existingCount === 0` gap
+        // — historical sessions that ran before this feature shipped never
+        // get re-imported, so their captured PRs never reach the DB. This
+        // standalone file scan (idempotent, deterministic-id-deduped, mtime-
+        // skipped on repeat boots) closes that gap. Forward-looking capture
+        // still goes through the importSession PR-extract block on the hook
+        // → POST path.
+        //
+        // Deferred via setImmediate so the first-run scan runs after the
+        // current synchronous startup tick completes — boot is not blocked
+        // by it. Note: this is NOT tied to a sidecar "ready" signal; it
+        // simply defers to the next event-loop tick, which is enough to
+        // keep the boot critical path clean even at thousands of files.
+        // The mtime cache in pr_backfill_seen makes subsequent boots
+        // ~stat-time at any scale (see PR #238 review feedback).
+        "  setImmediate(() => {",
+        "    try {",
+        '      require("./lib/pr-backfill").runClaudePrBackfill(dbModule.db);',
+        "    } catch (e) {",
+        '      console.warn("[pull-requests] backfill failed:", e && e.message);',
+        "    }",
+        "  });",
         '  const existingCount = dbModule.db.prepare("SELECT COUNT(*) AS c FROM sessions").get().c;',
       ].join("\n"),
     );
@@ -2471,16 +2494,27 @@ function patchImportHistoryForPullRequests(file) {
       anchor,
       "  // FEA-1226 pull-request extraction — capture `gh pr create` PR URLs",
       "  // from the session's raw JSONL into the pull_requests table. Runs once",
-      "  // per importSession; best-effort, never blocks import.",
+      "  // per importSession; best-effort, never blocks import. Per-error",
+      "  // console.warn (not silent `void e`) so a regression in the require",
+      "  // chain or upsert path surfaces in main.log instead of vanishing — the",
+      "  // original silent swallow hid the FEA-1226 backfill gap for days.",
       "  try {",
       '    const { extractPullRequestsFromSession } = require("../server/lib/pr-extractor");',
       '    const { upsertPullRequest } = require("../server/lib/pull-request-store");',
+      "    let __prFirstUpsertErr = null;",
       "    for (const __pr of extractPullRequestsFromSession(session)) {",
       "      try {",
       "        upsertPullRequest(dbModule.db, __pr);",
-      "      } catch (e) { void e; /* idempotent dedup — non-fatal */ }",
+      "      } catch (e) {",
+      "        if (!__prFirstUpsertErr) __prFirstUpsertErr = e;",
+      "      }",
       "    }",
-      "  } catch (e) { void e; /* PR extraction is best-effort; never blocks import */ }",
+      "    if (__prFirstUpsertErr) {",
+      '      console.warn("[pull-requests] upsert failed for session", session && session.sessionId, "—", __prFirstUpsertErr && __prFirstUpsertErr.message);',
+      "    }",
+      "  } catch (e) {",
+      '    console.warn("[pull-requests] extract failed for session", session && session.sessionId, "—", e && e.message);',
+      "  }",
     ].join("\n");
     source = source.replace(anchor, inject);
   }
@@ -3204,6 +3238,11 @@ function assertGeneratedTree() {
   ) {
     throw new Error(
       "Generated scripts/import-history.js is missing the PR-capture sink or sourceLogPath (FEA-1226).",
+    );
+  }
+  if (!serverIndex.includes("runClaudePrBackfill")) {
+    throw new Error(
+      "Generated server/index.js is missing the ~/.claude/projects PR backfill (FEA-1226).",
     );
   }
   {
