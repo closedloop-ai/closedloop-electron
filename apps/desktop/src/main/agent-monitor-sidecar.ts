@@ -1,6 +1,8 @@
 import { app } from "electron";
 import { spawn, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 
@@ -45,11 +47,22 @@ const requireFromHere = createRequire(import.meta.url);
 export class AgentMonitorSidecar {
   private child: ChildProcess | null = null;
   private readonly port = AGENT_MONITOR_PORT;
+  private readonly sessionToken = randomUUID();
+  private readonly dataDir = path.join(
+    app.getPath("userData"),
+    "agent-monitor",
+  );
   private started = false;
   private stopping = false;
   private ready = false;
   private restartAttempts = 0;
   private readyResolvers: Array<(ok: boolean) => void> = [];
+  lastExitWasPortConflict: boolean = false;
+  private onTerminalFailure?: (reason: string) => void;
+
+  constructor(options?: { onTerminalFailure?: (reason: string) => void }) {
+    this.onTerminalFailure = options?.onTerminalFailure;
+  }
 
   isReady(): boolean {
     return this.ready;
@@ -113,6 +126,7 @@ export class AgentMonitorSidecar {
       }
       gatewayLog.info(TAG, "agent monitor stopped");
     } finally {
+      await this.deletePidFile();
       this.restartAttempts = 0;
       this.stopping = false;
     }
@@ -127,10 +141,86 @@ export class AgentMonitorSidecar {
     }
   }
 
+  private async deletePidFile(): Promise<void> {
+    try {
+      await fs.unlink(path.join(this.dataDir, "sidecar.pid"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        gatewayLog.warn(TAG, `failed to delete PID file: ${describe(error)}`);
+      }
+    }
+  }
+
+  private async reclaimOrphan(): Promise<void> {
+    const pidFile = path.join(this.dataDir, "sidecar.pid");
+    let raw: string;
+    try {
+      raw = await fs.readFile(pidFile, "utf-8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return;
+      }
+      gatewayLog.warn(TAG, `failed to read PID file: ${describe(error)}`);
+      return;
+    }
+    let pid: number;
+    let sessionToken: string | undefined;
+    try {
+      const parsed = JSON.parse(raw) as { pid: number; sessionToken?: string };
+      pid = parsed.pid;
+      sessionToken = parsed.sessionToken;
+    } catch (error) {
+      gatewayLog.warn(TAG, `failed to parse PID file: ${describe(error)}`);
+      await this.deletePidFile();
+      return;
+    }
+    if (!Number.isInteger(pid) || pid <= 0) {
+      gatewayLog.warn(
+        TAG,
+        `PID file contains invalid pid=${pid} — deleting without kill`,
+      );
+      await this.deletePidFile();
+      return;
+    }
+    if (!sessionToken) {
+      gatewayLog.warn(
+        TAG,
+        `PID file missing sessionToken — potential foreign process on pid=${pid}, skipping kill`,
+      );
+      await this.deletePidFile();
+      return;
+    }
+    if (isRunning(pid)) {
+      gatewayLog.info(TAG, `reclaiming orphan sidecar pid=${pid}`);
+      killGroup(pid, "SIGKILL");
+    }
+    await this.deletePidFile();
+  }
+
+  private async writePidFile(pid: number): Promise<void> {
+    const pidFile = path.join(this.dataDir, "sidecar.pid");
+    const tmpFile = `${pidFile}.tmp`;
+    const payload = JSON.stringify({
+      pid,
+      sessionToken: this.sessionToken,
+      recordedAt: new Date().toISOString(),
+    });
+    try {
+      await fs.mkdir(this.dataDir, { recursive: true });
+      await fs.writeFile(tmpFile, payload, "utf-8");
+      await fs.rename(tmpFile, pidFile);
+    } catch (error) {
+      gatewayLog.warn(TAG, `failed to write PID file: ${describe(error)}`);
+    }
+  }
+
   private async launch(): Promise<void> {
     if (!this.started || this.stopping) {
       return;
     }
+
+    this.lastExitWasPortConflict = false;
+    await this.reclaimOrphan();
 
     const { rootDir, entryFile } = resolveAgentMonitorPaths();
     if (!existsSync(entryFile)) {
@@ -143,17 +233,8 @@ export class AgentMonitorSidecar {
       return;
     }
 
-    const dbPath = path.join(
-      app.getPath("userData"),
-      "agent-monitor",
-      "dashboard.db",
-    );
-    const pushKeysPath = path.join(
-      app.getPath("userData"),
-      "agent-monitor",
-      "data",
-      "vapid-keys.json",
-    );
+    const dbPath = path.join(this.dataDir, "dashboard.db");
+    const pushKeysPath = path.join(this.dataDir, "data", "vapid-keys.json");
     const runtimeNodePath = buildRuntimeNodePath();
 
     const child = spawn(process.execPath, [entryFile], {
@@ -190,7 +271,12 @@ export class AgentMonitorSidecar {
     );
 
     pipeLines(child.stdout, (line) => gatewayLog.debug(TAG, line));
-    pipeLines(child.stderr, (line) => gatewayLog.warn(TAG, line));
+    pipeLines(child.stderr, (line) => {
+      if (line.includes("EADDRINUSE")) {
+        this.lastExitWasPortConflict = true;
+      }
+      gatewayLog.warn(TAG, line);
+    });
     child.on("error", (error) =>
       gatewayLog.error(TAG, `process error: ${describe(error)}`),
     );
@@ -211,9 +297,16 @@ export class AgentMonitorSidecar {
           TAG,
           `agent monitor ready at http://${HOST}:${this.port}`,
         );
+        await this.writePidFile(child.pid!);
         this.flushReady(true);
         return;
       }
+    }
+    // A newer launch() call has already replaced this.child — the current
+    // launch has been superseded, so suppress the stale warn and skip
+    // flushReady(false) to avoid overwriting the newer launch's outcome.
+    if (this.child !== child) {
+      return;
     }
     gatewayLog.warn(
       TAG,
@@ -235,6 +328,7 @@ export class AgentMonitorSidecar {
     code: number | null,
     signal: NodeJS.Signals | null,
   ): void {
+    void this.deletePidFile();
     const shouldRestart = this.started && !this.stopping;
     this.child = null;
     this.ready = false;
@@ -254,6 +348,10 @@ export class AgentMonitorSidecar {
         TAG,
         `giving up after ${this.restartAttempts} restart attempts`,
       );
+      const reason = this.lastExitWasPortConflict
+        ? `Agent monitor failed: port ${this.port} is in use by another process. Close the conflicting process and restart.`
+        : `Agent monitor failed after ${this.restartAttempts} restart attempts.`;
+      this.onTerminalFailure?.(reason);
       return;
     }
     const attempt = ++this.restartAttempts;
@@ -363,6 +461,12 @@ function pipeLines(
 }
 
 function killGroup(pid: number, signal: NodeJS.Signals): void {
+  // Defense-in-depth: a non-positive pid would make process.kill(-pid, ...)
+  // signal the current process group (pid=0 → -0 → 0), killing the app itself.
+  if (!Number.isInteger(pid) || pid <= 0) {
+    gatewayLog.warn(TAG, `killGroup ignoring invalid pid=${pid}`);
+    return;
+  }
   try {
     // Negative pid targets the detached process group.
     process.kill(-pid, signal);

@@ -290,7 +290,16 @@ export class DesktopApplication {
     this.gatewaySigningKeyStore = new GatewaySigningKeyStore();
     this.tray = new DesktopTray();
     this.desktopWindow = new DesktopWindow();
-    this.agentMonitor = new AgentMonitorSidecar();
+    this.agentMonitor = new AgentMonitorSidecar({
+      onTerminalFailure: (reason: string) => {
+        const notification = new Notification({
+          title: "ClosedLoop Agent Monitor",
+          body: reason,
+        });
+        notification.show();
+        this.tray.setState("degraded", reason);
+      },
+    });
     this.activityLog = new ActivityLogStore();
     this.jobStore = new JobStore();
     this.approvalStore = new ApprovalStore({

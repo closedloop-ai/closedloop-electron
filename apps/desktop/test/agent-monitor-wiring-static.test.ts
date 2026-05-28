@@ -321,7 +321,7 @@ test("agent monitor defaults on; plan extraction is feature-gated and defaults o
 });
 
 test("sidecar is feature-gated and, when enabled, starts before the gateway", () => {
-  assert.match(appSource, /this\.agentMonitor = new AgentMonitorSidecar\(\)/);
+  assert.match(appSource, /this\.agentMonitor = new AgentMonitorSidecar\([\s\S]*?\)/);
   assert.match(
     appSource,
     /if \(this\.settingsStore\.getAgentMonitorEnabled\(\)\) \{[\s\S]*void this\.agentMonitor\.start\(\);[\s\S]*syncAgentMonitorHooksOnBoot\(\);[\s\S]*this\.agentSessionSync\.start\(\);/,
