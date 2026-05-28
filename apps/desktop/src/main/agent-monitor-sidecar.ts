@@ -1,10 +1,11 @@
 import { app } from "electron";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { promisify } from "node:util";
 
 import { AGENT_MONITOR_PORT } from "../shared/contracts.js";
 import { gatewayLog } from "./gateway-logger.js";
@@ -38,6 +39,7 @@ const RESTART_MAX_DELAY_MS = 30_000;
 // grace + process-group SIGKILL keeps app shutdown within budget.
 const STOP_GRACE_MS = 2_000;
 const requireFromHere = createRequire(import.meta.url);
+const execFileAsync = promisify(execFile);
 
 // Runs the generated Claude-Code-Agent-Monitor runtime tree as a managed
 // localhost child process. The Electron binary is reused as the Node runtime
@@ -57,7 +59,7 @@ export class AgentMonitorSidecar {
   private ready = false;
   private restartAttempts = 0;
   private readyResolvers: Array<(ok: boolean) => void> = [];
-  lastExitWasPortConflict: boolean = false;
+  private lastExitWasPortConflict = false;
   private onTerminalFailure?: (reason: string) => void;
 
   constructor(options?: { onTerminalFailure?: (reason: string) => void }) {
@@ -165,10 +167,16 @@ export class AgentMonitorSidecar {
     }
     let pid: number;
     let sessionToken: string | undefined;
+    let recordedStartTime: string | null;
     try {
-      const parsed = JSON.parse(raw) as { pid: number; sessionToken?: string };
+      const parsed = JSON.parse(raw) as {
+        pid: number;
+        sessionToken?: string;
+        startTime?: string | null;
+      };
       pid = parsed.pid;
       sessionToken = parsed.sessionToken;
+      recordedStartTime = parsed.startTime ?? null;
     } catch (error) {
       gatewayLog.warn(TAG, `failed to parse PID file: ${describe(error)}`);
       await this.deletePidFile();
@@ -191,8 +199,35 @@ export class AgentMonitorSidecar {
       return;
     }
     if (isRunning(pid)) {
-      gatewayLog.info(TAG, `reclaiming orphan sidecar pid=${pid}`);
-      killGroup(pid, "SIGKILL");
+      // sessionToken presence only proves THIS app authored the PID file — it
+      // cannot prove the pid still belongs to our sidecar (the token is written
+      // and read by the same record, so it has no independent witness). PIDs are
+      // recycled, and our port is fixed, so a stale pid may now belong to an
+      // unrelated process. Before SIGKILL we verify ownership against the live
+      // process itself: its command line must still be running our sidecar
+      // entry, and its OS start-time must match what we recorded at spawn. Both
+      // are independent of the PID file, so a recycled/foreign pid fails the
+      // check and is never killed.
+      const { entryFile } = resolveAgentMonitorPaths();
+      const [command, liveStartTime] = await Promise.all([
+        getProcessCommand(pid),
+        getProcessStartTime(pid),
+      ]);
+      const runsOurEntry = command !== null && command.includes(entryFile);
+      // If we could not record a start-time at spawn (ps unavailable), fall back
+      // to the command-line identity alone rather than refusing to ever reclaim.
+      const startTimeMatches =
+        recordedStartTime === null ||
+        (liveStartTime !== null && liveStartTime === recordedStartTime);
+      if (runsOurEntry && startTimeMatches) {
+        gatewayLog.info(TAG, `reclaiming orphan sidecar pid=${pid}`);
+        killGroup(pid, "SIGKILL");
+      } else {
+        gatewayLog.warn(
+          TAG,
+          `pid=${pid} does not match our sidecar identity (recycled or foreign process) — skipping kill`,
+        );
+      }
     }
     await this.deletePidFile();
   }
@@ -203,6 +238,7 @@ export class AgentMonitorSidecar {
     const payload = JSON.stringify({
       pid,
       sessionToken: this.sessionToken,
+      startTime: await getProcessStartTime(pid),
       recordedAt: new Date().toISOString(),
     });
     try {
@@ -484,6 +520,47 @@ function isRunning(pid: number): boolean {
     return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+// OS-observed process identity used to confirm a recorded pid still belongs to
+// our sidecar before SIGKILL (see reclaimOrphan). `ps` is available on both
+// macOS (the packaged target) and Linux; on macOS another process's env is not
+// readable and there is no /proc, so the command line + start-time are the only
+// portable, independent ownership signals. Both helpers return null on any
+// failure so the caller fails safe (skip kill) rather than throwing.
+
+// Full argv of `pid` (-ww disables width truncation so a long entry path is
+// never cut off). Used to check the live process is still running our sidecar.
+async function getProcessCommand(pid: number): Promise<string | null> {
+  return queryProcess(pid, "command=");
+}
+
+// OS start-time of `pid`. Stable for the life of a process, so a recycled pid
+// (now a different process) reports a different value than what we recorded.
+async function getProcessStartTime(pid: number): Promise<string | null> {
+  return queryProcess(pid, "lstart=");
+}
+
+async function queryProcess(
+  pid: number,
+  field: "command=" | "lstart=",
+): Promise<string | null> {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return null;
+  }
+  try {
+    const { stdout } = await execFileAsync("ps", [
+      "-ww",
+      "-p",
+      String(pid),
+      "-o",
+      field,
+    ]);
+    const value = stdout.trim();
+    return value.length > 0 ? value : null;
+  } catch {
+    return null;
   }
 }
 

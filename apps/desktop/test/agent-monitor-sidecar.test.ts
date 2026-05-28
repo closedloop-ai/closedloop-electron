@@ -45,8 +45,13 @@ function methodBody(signature: string, windowChars: number): string {
   return sidecarSource.slice(idx, idx + windowChars);
 }
 
-const reclaimOrphanBody = methodBody("private async reclaimOrphan()", 1600);
-const handleExitBody = methodBody("private handleExit(", 1200);
+// Windows are sized to comfortably contain the full method body so a
+// boundary-straddling assertion target (e.g. a string near the method's end)
+// is never silently truncated out of the slice. Pad generously; the cost is a
+// few extra chars of unrelated source, the failure mode of being too small is a
+// misleading "not found" that blames production code for a test-window bug.
+const reclaimOrphanBody = methodBody("private async reclaimOrphan()", 3200);
+const handleExitBody = methodBody("private handleExit(", 2000);
 const launchBody = methodBody("private async launch()", 4000);
 
 // ---------------------------------------------------------------------------
@@ -65,8 +70,13 @@ describe("agent-monitor-sidecar.ts source-level invariants", () => {
     );
   });
 
-  test("AC-006b: writePidFile persists { pid, sessionToken, recordedAt } JSON", () => {
-    assert.match(sidecarSource, /pid,\s*sessionToken: this\.sessionToken,\s*recordedAt:/);
+  test("AC-006b: writePidFile persists { pid, sessionToken, startTime, recordedAt } JSON", () => {
+    // startTime (OS process start-time captured at spawn) is part of the
+    // ownership identity reclaimOrphan re-verifies against the live process.
+    assert.match(
+      sidecarSource,
+      /pid,\s*sessionToken: this\.sessionToken,\s*startTime: await getProcessStartTime\(pid\),\s*recordedAt:/,
+    );
   });
 
   test("AC-006c: writePidFile ensures agent-monitor directory exists with mkdir recursive", () => {
@@ -159,6 +169,37 @@ describe("agent-monitor-sidecar.ts source-level invariants", () => {
   test("AC-008c: reclaimOrphan only kills via SIGKILL — no SIGTERM path", () => {
     assert.match(reclaimOrphanBody, /SIGKILL/);
     assert.doesNotMatch(reclaimOrphanBody, /SIGTERM/);
+  });
+
+  test("AC-008d: reclaimOrphan verifies live-process ownership (command + start-time) before SIGKILL", () => {
+    // A live pid is only SIGKILLed when BOTH independent, PID-file-independent
+    // signals confirm it is still our sidecar: its command line runs our entry
+    // file, and its OS start-time matches the value recorded at spawn. This is
+    // the guard that prevents killing a recycled/foreign process holding the
+    // fixed port — sessionToken presence alone is insufficient (it has no
+    // independent witness).
+    assert.match(reclaimOrphanBody, /const runsOurEntry =\s*command !== null && command\.includes\(entryFile\)/);
+    assert.match(reclaimOrphanBody, /liveStartTime !== null && liveStartTime === recordedStartTime/);
+
+    // The ownership check must precede the SIGKILL — the kill is gated on it.
+    const ownershipPos = reclaimOrphanBody.indexOf("runsOurEntry && startTimeMatches");
+    const killGroupPos = reclaimOrphanBody.indexOf('killGroup(pid, "SIGKILL")');
+    assert.ok(ownershipPos >= 0, "ownership check (runsOurEntry && startTimeMatches) not found in reclaimOrphan");
+    assert.ok(killGroupPos >= 0, 'killGroup(pid, "SIGKILL") not found in reclaimOrphan');
+    assert.ok(
+      ownershipPos < killGroupPos,
+      `ownership check (pos ${ownershipPos}) must gate SIGKILL (pos ${killGroupPos})`,
+    );
+  });
+
+  test("AC-008e: reclaimOrphan logs and skips kill when the live process is not our sidecar", () => {
+    // The else-branch of the ownership check must warn and fall through to the
+    // unconditional deletePidFile WITHOUT calling killGroup, so a recycled or
+    // foreign pid is never signalled.
+    assert.match(
+      reclaimOrphanBody,
+      /recycled or foreign process[\s\S]{0,80}skipping kill/,
+    );
   });
 
   // -------------------------------------------------------------------------
