@@ -142,7 +142,12 @@ test("FEA-1363: hooks.js POST handler validates session_id before enqueue", { sk
   assert.ok(generatedHooksSource);
   const postStart = generatedHooksSource!.indexOf('router.post("/event"');
   assert.ok(postStart > 0, "POST handler found");
-  const postBody = generatedHooksSource!.slice(postStart, postStart + 800);
+  // Slice to end-of-handler rather than a fixed window: the FEA-1407 sandbox
+  // guard is injected ahead of the session_id check and pushes the enqueue
+  // call past any small fixed offset. indexOf returns first occurrences and
+  // postStart is past the helper functions, so this stays scoped to the
+  // POST /event body.
+  const postBody = generatedHooksSource!.slice(postStart);
   const sessionCheck = postBody.indexOf("data.session_id");
   const enqueue = postBody.indexOf("enqueueHookEvent");
   assert.ok(sessionCheck > 0 && enqueue > sessionCheck, "session_id check before enqueue");

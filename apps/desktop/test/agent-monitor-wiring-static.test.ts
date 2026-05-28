@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
 import { test } from "node:test";
 
 const read = (relative: string): string =>
@@ -19,6 +21,19 @@ const generatedImportHistoryUrl = new URL(
 const generatedImportHistorySource = existsSync(generatedImportHistoryUrl)
   ? readFileSync(generatedImportHistoryUrl, "utf8")
   : null;
+// Resolve the pinned upstream agent-dashboard source the same way the build
+// script does (createRequire from apps/desktop/package.json) so we can assert
+// the build-script patch anchors still match the source they patch.
+const requireFromApp = createRequire(new URL("../package.json", import.meta.url));
+const upstreamImportHistorySource = ((): string => {
+  const pkgRoot = path.dirname(
+    requireFromApp.resolve("agent-dashboard/package.json"),
+  );
+  return readFileSync(
+    path.join(pkgRoot, "scripts", "import-history.js"),
+    "utf8",
+  );
+})();
 const plansRouteSource = read("../scripts/agent-monitor-plans/plans-route.js");
 const claudeDocSource = read("../CLAUDE.md");
 const shutdownSource = read("../src/main/shutdown.ts");
@@ -133,6 +148,44 @@ test("build script materializes a generated runtime tree with the host patches",
   assert.match(buildScriptSource, /agent-monitor-client/);
   assert.match(buildScriptSource, /StatusBadge\.tsx/);
   assert.match(buildScriptSource, /Sessions\.tsx/);
+});
+
+// Regression for the FEA-1407 clean-build failure: the sandbox-filter patch
+// anchored on the old inline `path.join(os.homedir(), ".claude", "projects")`
+// form of PROJECTS_DIR, but the pinned upstream derives it via getProjectsDir().
+// The mismatch threw "expected PROJECTS_DIR anchor" on every clean build
+// (cleared .generated, fresh clone, CI). Assert the patch anchor still matches
+// the source it patches — not merely that the build script mentions the patch.
+test("patchImportHistorySandboxFilter anchor matches the pinned upstream import-history", () => {
+  const fnMatch = buildScriptSource.match(
+    /function patchImportHistorySandboxFilter[\s\S]*?const requireAnchor = (["'])((?:\\.|(?!\1).)*)\1;/,
+  );
+  assert.ok(
+    fnMatch,
+    "expected a requireAnchor string literal in patchImportHistorySandboxFilter",
+  );
+  const anchor = fnMatch[2];
+  assert.ok(
+    upstreamImportHistorySource.includes(anchor),
+    `patchImportHistorySandboxFilter anchor ${JSON.stringify(anchor)} is not present in the pinned upstream import-history.js — a clean build would throw. Update the anchor to match upstream.`,
+  );
+});
+
+// The build script hard-throws if a patch anchor is missing, but that only
+// fires on a clean materialize. Assert the generated tree actually carries the
+// applied FEA-1407 sandbox guard (helper + importSession guard), not just that
+// the build script defines the patch function.
+test("generated import-history applies the FEA-1407 sandbox guard", () => {
+  if (generatedImportHistorySource === null) return;
+  assert.match(generatedImportHistorySource, /FEA-1407 sandbox scoping/);
+  assert.match(
+    generatedImportHistorySource,
+    /function isSessionInSandbox\(cwd, sandboxBase\)/,
+  );
+  assert.match(
+    generatedImportHistorySource,
+    /if \(!isSessionInSandbox\(session\.cwd, process\.env\.SANDBOX_BASE_DIRECTORY\)\)/,
+  );
 });
 
 test("session overview token totals include compaction baselines", () => {
