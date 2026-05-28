@@ -12,6 +12,7 @@ import {
   DEFAULT_DESKTOP_SETTINGS,
   GATEWAY_PROTOCOL_VERSION,
   EMPTY_CAPABILITIES,
+  type ManagedKeyHintState,
   type SavedConfig,
   type DesktopSettings,
   type RiskTier,
@@ -62,7 +63,7 @@ import {
   GatewaySigningKeyStore,
   type GatewaySigningKeyResult,
 } from "./gateway-signing-key-store.js";
-import { SettingsStore, type SavedConfigManagedPatch } from "./settings-store.js";
+import { SettingsStore, shouldShowManagedKeyHint, type SavedConfigManagedPatch } from "./settings-store.js";
 import { DesktopTray } from "./tray.js";
 import { DesktopWindow } from "./window.js";
 import { AgentMonitorSidecar } from "./agent-monitor-sidecar.js";
@@ -575,6 +576,11 @@ export class DesktopApplication {
       getAllowedDirectories: () => this.getAllowedDirectoriesFromSandbox(),
       loopTokenStore: this.loopTokenStore,
       schedulers: this.schedulers,
+      // Wire PoP deps so boot-recovered loops attach X-Desktop-* headers and
+      // use the managed-key fallback for revival (AC-005).
+      getApiKeyProvenance: () => this.apiKeyStore.getApiKeyProvenance(),
+      signDesktopRequest: (request) => this.signDesktopRequest(request),
+      onDesktopPopUnavailable: (surface, reason) => this.reportDesktopPopUnavailable(surface, reason),
     });
     this.registerIpcHandlers();
     this.registerOnboardingFileOpenHandler();
@@ -3325,6 +3331,35 @@ export class DesktopApplication {
       this.restartCloudSocket();
       return appliedConfig;
     });
+
+    // Verify no channel name collision: grep confirms 'desktop:get-managed-key-hint-state'
+    // and 'desktop:dismiss-managed-key-hint' do not exist elsewhere in registerIpcHandlers.
+
+    ipcMain.handle("desktop:get-managed-key-hint-state", (): ManagedKeyHintState => {
+      try {
+        const provenance = this.apiKeyStore.getApiKeyProvenance();
+        const dismissedAt = this.settingsStore.getManagedKeyHintDismissedAt();
+        const lastSeenProvenance = this.settingsStore.getManagedKeyHintLastSeenProvenance();
+        const shouldShow = shouldShowManagedKeyHint(provenance, dismissedAt, lastSeenProvenance);
+        return { provenance, shouldShow };
+      } catch {
+        // Fail-closed: return safe default if apiKeyStore or settingsStore throws.
+        return { shouldShow: false, provenance: null };
+      }
+    });
+
+    ipcMain.handle("desktop:dismiss-managed-key-hint", (): { success: boolean } => {
+      try {
+        // Security: provenance is sourced from main-process apiKeyStore only —
+        // renderer is untrusted; we must never accept provenance from IPC event args.
+        const { dismissedAt, lastSeenProvenance } = buildDismissState(this.apiKeyStore);
+        this.settingsStore.setManagedKeyHintDismissedAt(dismissedAt);
+        this.settingsStore.setManagedKeyHintLastSeenProvenance(lastSeenProvenance);
+        return { success: true };
+      } catch {
+        return { success: false };
+      }
+    });
   }
 
   private signDesktopRequest(
@@ -3526,6 +3561,25 @@ function maybeString(value: unknown): string | null {
     return null;
   }
   return value.trim();
+}
+
+/**
+ * Builds the state to persist when the user dismisses the managed-key hint.
+ * Extracted as a standalone function to keep the ipcMain callback thin and
+ * enable unit testing without Electron IPC mocking.
+ *
+ * Security: provenance is sourced from the main-process apiKeyStore only —
+ * renderer is untrusted and must never control what is written to settings.
+ */
+function buildDismissState(apiKeyStore: ApiKeyStore): {
+  dismissedAt: string;
+  lastSeenProvenance: "DESKTOP_MANAGED" | "USER_CREATED";
+} {
+  const provenance = apiKeyStore.getApiKeyProvenance() ?? "USER_CREATED";
+  return {
+    dismissedAt: new Date().toISOString(),
+    lastSeenProvenance: provenance,
+  };
 }
 
 function describeRequestLocation(request: GatewayApprovalRequest): string {

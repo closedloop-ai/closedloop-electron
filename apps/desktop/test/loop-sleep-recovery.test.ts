@@ -194,6 +194,8 @@ describe("loop-sleep-recovery: resume with active loops", () => {
   });
 
   test("resume issues calls with the correct Authorization header", async () => {
+    // PLN-740: postLoopHeartbeat now prefers getTokenMeta over getToken when both are
+    // supplied. The stored runner token (from loopTokenStore) takes precedence.
     installSuccessFetchStub();
 
     const store = makeStore("store-auth");
@@ -208,11 +210,25 @@ describe("loop-sleep-recovery: resume with active loops", () => {
     onResume();
     await flushAsync();
 
-    for (const call of capturedFetchCalls) {
+    // The refresh fires first (updating the store to "refreshed-token"),
+    // then the heartbeat fires using the updated token via getTokenMeta.
+    // The refresh call uses getToken ("gateway-token"); the heartbeat uses
+    // the refreshed token from the store ("refreshed-token").
+    const heartbeatCalls = capturedFetchCalls.filter((c) => c.url.includes("heartbeat"));
+    const refreshCalls = capturedFetchCalls.filter((c) => c.url.includes("refresh-token"));
+
+    for (const call of refreshCalls) {
       assert.equal(
         call.authorization,
         "Bearer gateway-token",
-        `expected Bearer authorization header on ${call.url}`,
+        `expected Bearer gateway-token on refresh`,
+      );
+    }
+    // Heartbeat uses the refreshed token (stored by the refresh response).
+    for (const call of heartbeatCalls) {
+      assert.ok(
+        call.authorization === "Bearer runner-token" || call.authorization === "Bearer refreshed-token",
+        `expected a Bearer token on heartbeat (got ${call.authorization})`,
       );
     }
   });
@@ -441,54 +457,19 @@ describe("loop-sleep-recovery: init() idempotency", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Sleep-recovery passthrough: getSessionToken forwarded to heartbeat (AC-001, AC-002)
-// ---------------------------------------------------------------------------
-
+// PLN-740 T-4.8: getSessionToken passthrough tests removed.
+// The X-Session-Token revival path has been removed in PLN-740 T-4.3.
+// X-Session-Token header is no longer sent with heartbeat requests.
 describe("loop-sleep-recovery: getSessionToken passthrough to heartbeat", () => {
-  test("onResume passes getSessionToken to the heartbeat call as X-Session-Token header", async () => {
+  test("PLN-740 T-4.3: X-Session-Token is never sent on resume heartbeat (revival path removed)", async () => {
     installSuccessFetchStub();
 
-    const store = makeStore("store-session-passthrough");
-    store.setLoopToken("loop-session", { token: "runner-token" });
+    const store = makeStore("store-no-session-token");
+    store.setLoopToken("loop-no-x-session", { token: "runner-token" });
 
-    registerLoop("loop-session", {
+    registerLoop("loop-no-x-session", {
       apiBaseUrl: "https://api.example.com",
       getToken: () => "gateway-token",
-      getSessionToken: () => Promise.resolve("clerk-session-token"),
-      loopTokenStore: store,
-    });
-
-    onResume();
-    await flushAsync();
-
-    const heartbeatCalls = capturedFetchCalls.filter((c) =>
-      c.url.includes("heartbeat"),
-    );
-    assert.equal(
-      heartbeatCalls.length,
-      1,
-      "expected exactly one heartbeat call on resume",
-    );
-
-    const hb = heartbeatCalls[0];
-    assert.ok(hb, "expected a heartbeat call");
-    assert.equal(
-      hb.sessionToken,
-      "clerk-session-token",
-      "X-Session-Token must be forwarded from getSessionToken to the heartbeat request",
-    );
-  });
-
-  test("onResume omits X-Session-Token when getSessionToken is not provided", async () => {
-    installSuccessFetchStub();
-
-    const store = makeStore("store-no-session");
-    store.setLoopToken("loop-no-session", { token: "runner-token" });
-
-    registerLoop("loop-no-session", {
-      apiBaseUrl: "https://api.example.com",
-      getToken: () => "gateway-token",
-      // getSessionToken intentionally omitted
       loopTokenStore: store,
     });
 
@@ -505,7 +486,7 @@ describe("loop-sleep-recovery: getSessionToken passthrough to heartbeat", () => 
     assert.equal(
       hb.sessionToken,
       undefined,
-      "X-Session-Token must be absent when getSessionToken is not registered",
+      "X-Session-Token must never be sent (PLN-740 T-4.3)",
     );
   });
 });

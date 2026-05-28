@@ -7,37 +7,46 @@
  * there is no longer any module-level registry.
  */
 
+import type { ApiKeyProvenance } from "./api-key-store.js";
+import type { DesktopPopSigner } from "./desktop-pop.js";
+import type { DesktopPopUnavailableReporter } from "./desktop-pop-sign-utils.js";
 import type { LoopTokenStore } from "./loop-token-store.js";
+
+/**
+ * PoP (Proof-of-Possession) signing dependencies required for heartbeat
+ * revival authentication. Defined here (co-located with LoopSchedulerDeps) as
+ * the SSOT so router.ts, symphony-loop.ts, and boot-recovery.ts all import
+ * from one place.
+ *
+ * These are optional because GatewayRouterOptions declares them optional, and
+ * buildManagedDesktopPopHeaders degrades gracefully when they are absent.
+ */
+export type LoopPopDeps = {
+  getApiKey?: () => string | null;
+  getApiKeyProvenance?: () => ApiKeyProvenance | null;
+  signDesktopRequest?: DesktopPopSigner;
+  onDesktopPopUnavailable?: DesktopPopUnavailableReporter;
+};
 
 /**
  * Shared dependency interface for per-loop scheduler entries.
  * Heartbeat, refresh, and sleep-recovery all need the same three fields, so
  * a single canonical type avoids drift.
+ *
+ * PoP fields (getApiKey, getApiKeyProvenance, signDesktopRequest,
+ * onDesktopPopUnavailable) are optional — buildManagedDesktopPopHeaders
+ * degrades gracefully for non-DESKTOP_MANAGED keys or when the signer is
+ * absent. getApiKeyProvenance returns null in some contexts; call sites must
+ * handle null with nullish coalescing (?? 'USER_CREATED') since
+ * buildManagedDesktopPopHeaders requires a non-nullable ApiKeyProvenance.
+ *
+ * NOTE: isProcessRunning, getTokenMeta, and telemetry are HeartbeatDeps-only
+ * fields — they belong in the HeartbeatDeps intersection block, NOT here.
  */
-export interface LoopSchedulerDeps {
+export interface LoopSchedulerDeps extends LoopPopDeps {
   apiBaseUrl: string;
   getToken: () => string | null;
-  getSessionToken?: () => Promise<string | null>;
   loopTokenStore: LoopTokenStore;
-}
-
-/**
- * Creates a `getSessionToken` closure for use in heartbeat scheduler deps.
- *
- * Returns the trimmed token when one is present, and `null` for any absent
- * or empty/whitespace-only value (graceful absence — an expected outcome, so
- * it is signalled in the return value rather than by throwing). Incoming
- * request tokens are already trimmed and length-bounded at the gateway
- * boundary (`parseCloudSessionToken` in `symphony-loop-request.ts`); the
- * `trim()` here also normalizes persisted tokens read back on boot recovery.
- */
-export function createGetSessionToken(
-  cloudSessionToken: string | undefined,
-): () => Promise<string | null> {
-  return async () => {
-    const trimmed = cloudSessionToken?.trim();
-    return trimmed !== undefined && trimmed !== "" ? trimmed : null;
-  };
 }
 
 /**

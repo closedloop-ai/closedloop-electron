@@ -1,5 +1,6 @@
 import { postLoopHeartbeat } from "../server/operations/loop-http.js";
 import { gatewayLog } from "./gateway-logger.js";
+import type { LoopTokenMeta } from "./loop-token-store.js";
 import { parseEnvMs, type LoopSchedulerDeps } from "./loop-lifecycle.js";
 import {
   isEndpointDisabled,
@@ -7,6 +8,12 @@ import {
 } from "./loop-404-gate.js";
 import type { JobStore, LocalJob } from "./job-store.js";
 import { classifyLoopStatus } from "./loop-status-classifier.js";
+// Simple event emitter used for heartbeat-specific telemetry events.
+// Intentionally distinct from the heavier TelemetryEmitter in telemetry-protocol.ts
+// to keep the heartbeat module free of that module's category constraints.
+export interface HeartbeatTelemetryEmitter {
+  emit(event: string, data: Record<string, unknown>): void;
+}
 
 // ---------------------------------------------------------------------------
 // Default heartbeat interval: 30 minutes in milliseconds
@@ -23,7 +30,12 @@ export const getHeartbeatIntervalMs = (): number =>
 
 export type HeartbeatDeps = Pick<
   LoopSchedulerDeps,
-  "apiBaseUrl" | "getToken" | "getSessionToken"
+  | "apiBaseUrl"
+  | "getToken"
+  | "getApiKey"
+  | "getApiKeyProvenance"
+  | "signDesktopRequest"
+  | "onDesktopPopUnavailable"
 > & {
   /**
    * Optional loop token store. When the heartbeat reports `revived: true` with
@@ -48,6 +60,32 @@ export type HeartbeatDeps = Pick<
    *   explicit timed-out signals, "UNKNOWN" for all other terminal signals.
    */
   finalizeFn: (job: LocalJob, targetStatus: "TIMED_OUT" | "UNKNOWN") => Promise<void>;
+  /**
+   * Returns the full LoopTokenMeta for expiry detection (T-1.4).
+   * Enables the four-way Authorization ladder in postLoopHeartbeat to detect
+   * stale-but-present JWTs before sending them to the server.
+   * When absent, the legacy getToken path is used (no expiry check).
+   *
+   * NOTE: this is HeartbeatDeps-only — NOT part of LoopSchedulerDeps.
+   */
+  getTokenMeta?: () => LoopTokenMeta | null;
+  /**
+   * Process liveness checker (T-1.5). When supplied, terminal heartbeat
+   * signals are suppressed if the local process for the loop is still running.
+   * Optional — sendHeartbeatNow callers (boot-recovery, sleep-recovery) do not
+   * supply this since they use a stub jobStore that never returns a job.
+   *
+   * NOTE: this is HeartbeatDeps-only — NOT part of LoopSchedulerDeps.
+   */
+  isProcessRunning?: (pid: number) => boolean;
+  /**
+   * Telemetry emitter for observable events (T-1.5). Used to emit
+   * loop.heartbeat.terminal_finalization_suppressed when the process-alive
+   * guard prevents finalization.
+   *
+   * NOTE: this is HeartbeatDeps-only — NOT part of LoopSchedulerDeps.
+   */
+  telemetry?: HeartbeatTelemetryEmitter;
 };
 
 // ---------------------------------------------------------------------------
@@ -88,8 +126,14 @@ export async function runHeartbeatTick(
   const result = await postLoopHeartbeat(
     apiBaseUrl,
     loopId,
-    deps.getToken,
-    deps.getSessionToken,
+    {
+      getToken: deps.getToken,
+      getTokenMeta: deps.getTokenMeta,
+      getApiKey: deps.getApiKey,
+      getApiKeyProvenance: deps.getApiKeyProvenance,
+      signDesktopRequest: deps.signDesktopRequest,
+      onDesktopPopUnavailable: deps.onDesktopPopUnavailable,
+    },
   );
 
   if (result.success) {
@@ -118,9 +162,9 @@ export async function runHeartbeatTick(
   }
 
   // Map the LoopHttpResult to classifier inputs.
-  // - "auth" kind means getToken() returned null: treat as HTTP 401 (the
-  //   token refresh scheduler runs alongside heartbeat, so a missing token
-  //   at this point means the server cleared the loop tokens).
+  // - "auth" kind means both runner JWT and managed API key are unavailable —
+  //   treat as HTTP 401 (the token refresh scheduler runs alongside heartbeat,
+  //   so a missing token at this point means the server cleared the loop tokens).
   // - "network" / "timeout" kinds carry no HTTP status (null → transient).
   // - "http" kind carries an explicit HTTP status code.
   let httpStatus: number | null = null;
@@ -168,6 +212,36 @@ export async function runHeartbeatTick(
 
     const job = deps.jobStore.getByLoopId(loopId);
     if (job !== undefined) {
+      // T-1.5: Process-alive guard — suppress finalization when the local
+      // process is still running. Server HTTP 410 has dual semantics post-PLN-740
+      // ('loop terminal' OR 'auth rejected'); a live local process is
+      // unambiguous evidence the loop is not gone.
+      //
+      // This guard applies only to heartbeat-driven finalization and does NOT
+      // intercept cloud-initiated desktop.cancel commands, which follow a
+      // separate code path in cloud-socket.ts.
+      //
+      // Known limitation: PID recycling on macOS could cause a false positive if
+      // the process exits and the OS reuses the PID before the next heartbeat
+      // tick. T-1.4 eliminates the primary auth-rejected-410 case in practice,
+      // making this guard rarely triggered. Defense-in-depth only.
+      if (
+        job.pid != null &&
+        deps.isProcessRunning?.(job.pid) === true
+      ) {
+        gatewayLog.warn(
+          "loop-heartbeat",
+          `Terminal heartbeat signal suppressed: local process alive for loopId=${loopId} reason=${disposition.reason} pid=${job.pid}`,
+        );
+        deps.telemetry?.emit("loop.heartbeat.terminal_finalization_suppressed", {
+          loopId,
+          reason: disposition.reason as string,
+          jobPid: job.pid as number,
+          httpStatus: httpStatus as number | null,
+        });
+        // Do NOT call finalizeFn or stopFn — the loop process is still alive.
+        return;
+      }
       await deps.finalizeFn(job, terminalStatus);
     } else {
       gatewayLog.warn(

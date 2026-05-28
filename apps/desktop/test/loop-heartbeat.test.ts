@@ -14,6 +14,11 @@
  *   - CLOSEDLOOP_HEARTBEAT_INTERVAL_MS env var override
  *   - stop() cancels a running heartbeat scheduler cleanly
  *   - stopAll() cancels all active heartbeat schedulers
+ *   - PLN-740: PoP headers attached when DESKTOP_MANAGED (AC-007, AC-008)
+ *   - PLN-740: Authorization managed-key fallback when runner JWT null (AC-009)
+ *   - PLN-740: isJwtUsable helper edge cases (AC-011)
+ *   - PLN-740: postLoopHeartbeat managed-key swap on stale JWT (AC-011)
+ *   - PLN-740: process-alive guard suppresses finalization on terminal heartbeat (AC-012)
  */
 
 import assert from "node:assert/strict";
@@ -26,6 +31,7 @@ import {
   isEndpointDisabled,
   resetAllGates,
 } from "../src/main/loop-404-gate.js";
+import { isJwtUsable } from "../src/server/operations/loop-http.js";
 import {
   createTestLoopTokenStore,
   flushAsync,
@@ -75,7 +81,9 @@ interface CapturedHeartbeat {
   url: string;
   method: string;
   authorization: string | undefined;
-  sessionToken: string | undefined;
+  gatewayId: string | undefined;
+  desktopTimestamp: string | undefined;
+  desktopSignature: string | undefined;
 }
 
 let capturedHeartbeats: CapturedHeartbeat[] = [];
@@ -92,7 +100,10 @@ function installHeartbeatFetchStub(status: number, body = ""): void {
       url: String(input),
       method: init?.method ?? "GET",
       authorization: headers.get("authorization") ?? undefined,
-      sessionToken: headers.get("x-session-token") ?? undefined,
+      // PLN-740 T-3.1: capture X-Desktop-* PoP headers.
+      gatewayId: headers.get("x-desktop-gateway-id") ?? undefined,
+      desktopTimestamp: headers.get("x-desktop-timestamp") ?? undefined,
+      desktopSignature: headers.get("x-desktop-signature") ?? undefined,
     });
     return new Response(body, { status });
   }) as typeof fetch;
@@ -103,7 +114,14 @@ function installHeartbeatFetchStub(status: number, body = ""): void {
  */
 function installThrowingFetchStub(): void {
   globalThis.fetch = (async () => {
-    capturedHeartbeats.push({ url: "throw", method: "POST", authorization: undefined, sessionToken: undefined });
+    capturedHeartbeats.push({
+      url: "throw",
+      method: "POST",
+      authorization: undefined,
+      gatewayId: undefined,
+      desktopTimestamp: undefined,
+      desktopSignature: undefined,
+    });
     throw new Error("ECONNREFUSED simulated network error");
   }) as typeof fetch;
 }
@@ -216,7 +234,9 @@ describe("loop-heartbeat: periodic firing", () => {
 
     installHeartbeatFetchStub(200);
 
-    start("loop-no-token", { apiBaseUrl: "https://api.example.com", getToken: () => null });
+    // PLN-740 T-3.3: explicitly supply getApiKey: () => null to exercise the
+    // double-null guard (both runner JWT and managed API key unavailable).
+    start("loop-no-token", { apiBaseUrl: "https://api.example.com", getToken: () => null, getApiKey: () => null });
 
     mock.timers.tick(1000);
     await flushAsync();
@@ -690,87 +710,584 @@ describe("loop-heartbeat: token adoption on revival", () => {
     assert.equal(stored.token, "original-token", "original token must be unchanged when revival has no token field");
   });
 
-  test("heartbeat proceeds normally and omits X-Session-Token when getSessionToken returns null", async () => {
+});
+
+// ---------------------------------------------------------------------------
+// PLN-740 T-3.1: PoP headers attached when DESKTOP_MANAGED (AC-007)
+// ---------------------------------------------------------------------------
+
+describe("PLN-740 T-3.1: PoP headers for DESKTOP_MANAGED keys", () => {
+  /** Returns a mock signDesktopRequest that resolves to fixed PoP header values. */
+  function makeMockSigner(capturedRequests?: Array<{ method: string; pathname: string }>) {
+    return async (req: { method: string; pathname: string }) => {
+      capturedRequests?.push(req);
+      return {
+        "X-Desktop-Gateway-Id": "test-gw-id",
+        "X-Desktop-Timestamp": "1234567890",
+        "X-Desktop-Signature": "test-sig",
+      };
+    };
+  }
+
+  test("DESKTOP_MANAGED + signDesktopRequest: all three X-Desktop-* headers attached", async () => {
     process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
-
     mock.timers.enable({ apis: ["Date", "setInterval"] });
-
     installHeartbeatFetchStub(200);
 
-    const getSessionToken = async (): Promise<string | null> => null;
-
-    start("loop-session-token-null", {
+    start("loop-pop-managed", {
       apiBaseUrl: "https://api.example.com",
       getToken: () => "runner-token",
-      getSessionToken,
+      getApiKeyProvenance: () => "DESKTOP_MANAGED",
+      signDesktopRequest: makeMockSigner(),
     });
 
     mock.timers.tick(1000);
     await flushAsync();
-
-    assert.equal(capturedHeartbeats.length, 1, "heartbeat must have fired once");
+    assert.equal(capturedHeartbeats.length, 1);
     const hb = capturedHeartbeats[0];
-    assert.ok(hb, "expected at least one captured heartbeat");
-    assert.equal(
-      hb.sessionToken,
-      undefined,
-      "X-Session-Token header must not be present when getSessionToken returns null",
-    );
+    assert.ok(hb, "expected heartbeat");
+    assert.equal(hb.gatewayId, "test-gw-id", "X-Desktop-Gateway-Id must be present");
+    assert.equal(hb.desktopTimestamp, "1234567890", "X-Desktop-Timestamp must be present");
+    assert.equal(hb.desktopSignature, "test-sig", "X-Desktop-Signature must be present");
   });
 
-  test("end-to-end revival: getSessionToken sends X-Session-Token, revived:true response persists new runner token", async () => {
+  test("runner JWT available AND DESKTOP_MANAGED: runner JWT in Authorization AND PoP headers", async () => {
     process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
-
     mock.timers.enable({ apis: ["Date", "setInterval"] });
+    installHeartbeatFetchStub(200);
 
-    const knownSessionToken = "session-tok-e2e-revival";
-    const revivedBody = JSON.stringify({
-      revived: true,
-      token: "new-runner-token-e2e",
-      jti: "new-jti-e2e-xyz",
-      expiresAt: new Date("2099-06-01T00:00:00.000Z").toISOString(),
-    });
-    installHeartbeatFetchStub(200, revivedBody);
-
-    const store = createTestLoopTokenStore(tempRoot, "store-e2e-revival");
-    store.setLoopToken("loop-e2e-revival", { token: "old-runner-token-e2e" });
-
-    const getSessionToken = async (): Promise<string | null> => knownSessionToken;
-
-    // (a) Start with both getSessionToken and loopTokenStore so all four
-    // assertions can be verified in a single heartbeat tick.
-    start("loop-e2e-revival", {
+    start("loop-pop-jwt-and-pop", {
       apiBaseUrl: "https://api.example.com",
-      getToken: () => "old-runner-token-e2e",
-      getSessionToken,
+      getToken: () => "runner-jwt",
+      getApiKeyProvenance: () => "DESKTOP_MANAGED",
+      signDesktopRequest: makeMockSigner(),
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+    assert.equal(capturedHeartbeats.length, 1);
+    const hb = capturedHeartbeats[0];
+    assert.ok(hb);
+    assert.equal(hb.authorization, "Bearer runner-jwt", "Authorization must use runner JWT when available");
+    assert.ok(hb.gatewayId, "X-Desktop-Gateway-Id must be present alongside runner JWT");
+    assert.ok(hb.desktopTimestamp, "X-Desktop-Timestamp must be present alongside runner JWT");
+    assert.ok(hb.desktopSignature, "X-Desktop-Signature must be present alongside runner JWT");
+  });
+
+  test("signing request uses raw decoded loopId (not URL-encoded) in pathname", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+    installHeartbeatFetchStub(200);
+
+    const signingRequests: Array<{ method: string; pathname: string }> = [];
+
+    // Use a loopId with a URL-encodable character to verify decoded vs encoded.
+    const loopId = "loop id with space";
+    start(loopId, {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "runner-jwt",
+      getApiKeyProvenance: () => "DESKTOP_MANAGED",
+      signDesktopRequest: makeMockSigner(signingRequests),
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+    assert.equal(signingRequests.length, 1, "signDesktopRequest must be called once");
+    const sigReq = signingRequests[0];
+    assert.ok(sigReq, "signing request must exist");
+    assert.equal(sigReq.method, "POST", "signing request method must be POST");
+    // Pathname must use the raw decoded loopId — NOT encodeURIComponent(loopId).
+    assert.equal(
+      sigReq.pathname,
+      `/loops/${loopId}/heartbeat`,
+      "signing request pathname must use decoded loopId",
+    );
+    // Verify the fetch URL uses the encoded form.
+    const hb = capturedHeartbeats[0];
+    assert.ok(hb, "heartbeat must be captured");
+    assert.ok(
+      hb.url.includes(encodeURIComponent(loopId)),
+      "fetch URL must use URL-encoded loopId",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PLN-740 T-3.2: No PoP headers for USER_CREATED/null keys (AC-008)
+// ---------------------------------------------------------------------------
+
+describe("PLN-740 T-3.2: No PoP headers for non-DESKTOP_MANAGED keys", () => {
+  test("USER_CREATED provenance: no PoP headers attached", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+    installHeartbeatFetchStub(200);
+
+    const signer = async () => ({
+      "X-Desktop-Gateway-Id": "gw",
+      "X-Desktop-Timestamp": "ts",
+      "X-Desktop-Signature": "sig",
+    });
+
+    start("loop-pop-user-created", {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "runner-token",
+      getApiKeyProvenance: () => "USER_CREATED",
+      signDesktopRequest: signer,
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+    const hb = capturedHeartbeats[0];
+    assert.ok(hb);
+    assert.equal(hb.gatewayId, undefined, "no X-Desktop-Gateway-Id for USER_CREATED");
+    assert.equal(hb.desktopTimestamp, undefined, "no X-Desktop-Timestamp for USER_CREATED");
+    assert.equal(hb.desktopSignature, undefined, "no X-Desktop-Signature for USER_CREATED");
+  });
+
+  test("null provenance: no PoP headers attached", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+    installHeartbeatFetchStub(200);
+
+    start("loop-pop-null-prov", {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "runner-token",
+      getApiKeyProvenance: () => null,
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+    const hb = capturedHeartbeats[0];
+    assert.ok(hb);
+    assert.equal(hb.gatewayId, undefined, "no PoP header for null provenance");
+  });
+
+  test("DESKTOP_MANAGED but signDesktopRequest absent: no PoP headers, heartbeat still fires", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+    installHeartbeatFetchStub(200);
+
+    start("loop-pop-no-signer", {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "runner-token",
+      getApiKeyProvenance: () => "DESKTOP_MANAGED",
+      // signDesktopRequest intentionally omitted
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+    assert.equal(capturedHeartbeats.length, 1, "heartbeat must still fire without signer");
+    const hb = capturedHeartbeats[0];
+    assert.ok(hb);
+    assert.equal(hb.gatewayId, undefined, "no PoP headers when signer absent");
+    assert.equal(hb.authorization, "Bearer runner-token", "Authorization must still use runner JWT");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PLN-740 T-3.3: Authorization managed-key fallback when runner JWT null (AC-009)
+// ---------------------------------------------------------------------------
+
+describe("PLN-740 T-3.3: Authorization managed-key fallback (AC-009)", () => {
+  test("getToken=null + DESKTOP_MANAGED key: managed key in Authorization, PoP headers present", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+    installHeartbeatFetchStub(200);
+
+    start("loop-managed-auth", {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => null,
+      getApiKey: () => "sk_live_test_key",
+      getApiKeyProvenance: () => "DESKTOP_MANAGED",
+      signDesktopRequest: async () => ({
+        "X-Desktop-Gateway-Id": "gw",
+        "X-Desktop-Timestamp": "ts",
+        "X-Desktop-Signature": "sig",
+      }),
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+    assert.equal(capturedHeartbeats.length, 1, "fetch must be called (not short-circuited)");
+    const hb = capturedHeartbeats[0];
+    assert.ok(hb);
+    assert.equal(hb.authorization, "Bearer sk_live_test_key", "Authorization must use managed key");
+    assert.ok(hb.gatewayId, "X-Desktop-Gateway-Id must be present");
+    assert.ok(hb.desktopTimestamp, "X-Desktop-Timestamp must be present");
+    assert.ok(hb.desktopSignature, "X-Desktop-Signature must be present");
+  });
+
+  test("getToken=null + getApiKey=null: dual-null short-circuit, no fetch", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+    installHeartbeatFetchStub(200);
+
+    // PLN-740 T-3.3: both runner JWT and managed key null → short-circuit.
+    // postLoopHeartbeat returns { success: false, kind: 'auth', error: 'missing_token' }
+    // in this case; that result shape is unit-tested directly in loop-http.test.ts
+    // ("postLoopHeartbeat X-Session-Token header" describe block and the ladder-rung
+    // tests). At the runHeartbeatTick level the result is consumed internally
+    // (Promise<void>) so only observable side effects can be asserted here:
+    //   1. No fetch is issued (capturedHeartbeats.length === 0).
+    //   2. The scheduler is stopped (the 'auth' kind is mapped to HTTP 401 →
+    //      classifyLoopStatus returns terminal/unauthorized → stopFn is called),
+    //      so a subsequent tick also issues no fetch.
+    start("loop-dual-null", {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => null,
+      getApiKey: () => null,
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+    assert.equal(capturedHeartbeats.length, 0, "no fetch must be issued when both token sources are null");
+
+    // Verify the scheduler was stopped: the auth short-circuit is classified as
+    // terminal (unauthorized), which calls stopFn. A second tick must not produce
+    // any additional heartbeat attempts.
+    mock.timers.tick(1000);
+    await flushAsync();
+    assert.equal(
+      capturedHeartbeats.length,
+      0,
+      "heartbeat must not fire on subsequent ticks: scheduler must be stopped after dual-null auth short-circuit",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PLN-740 T-3.5: isJwtUsable helper + postLoopHeartbeat stale JWT swap (AC-011)
+// ---------------------------------------------------------------------------
+
+describe("PLN-740 T-3.5: isJwtUsable helper (AC-011)", () => {
+  test("meta === null → false (safety guard)", () => {
+    assert.equal(isJwtUsable(null, Date.now(), 30_000), false);
+  });
+
+  test("meta.expiresAt === undefined (legacy token) → true regardless of nowMs", () => {
+    // Legacy tokens (expiresAt === undefined) are treated as usable to avoid
+    // breaking tokens from older desktop versions.
+    assert.equal(isJwtUsable({ token: "tok" }, Date.now() + 999_999_999, 30_000), true);
+    assert.equal(isJwtUsable({ token: "tok" }, 0, 30_000), true);
+  });
+
+  test("expiresAt = nowMs + 3_600_000 (well in the future) → true", () => {
+    const nowMs = Date.now();
+    assert.equal(isJwtUsable({ token: "tok", expiresAt: nowMs + 3_600_000 }, nowMs, 30_000), true);
+  });
+
+  test("expiresAt = nowMs - 1_000 (already past) → false", () => {
+    const nowMs = Date.now();
+    assert.equal(isJwtUsable({ token: "tok", expiresAt: nowMs - 1_000 }, nowMs, 30_000), false);
+  });
+
+  test("expiresAt = nowMs + 5_000 with clockSkewMs=30_000 (within clock-skew) → false", () => {
+    const nowMs = Date.now();
+    // 5_000 < 30_000 skew window → treat as stale.
+    assert.equal(isJwtUsable({ token: "tok", expiresAt: nowMs + 5_000 }, nowMs, 30_000), false);
+  });
+});
+
+describe("PLN-740 T-3.5: postLoopHeartbeat stale JWT swap via HeartbeatDeps", () => {
+  test("stale JWT + DESKTOP_MANAGED key: managed key used in Authorization", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+    installHeartbeatFetchStub(200);
+
+    const store = createTestLoopTokenStore(tempRoot, "store-stale-jwt");
+    // Set an expired token (expiresAt in the past).
+    store.setLoopToken("loop-stale", {
+      token: "stale-runner-jwt",
+      expiresAt: Date.now() - 60_000,
+    });
+
+    start("loop-stale", {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "stale-runner-jwt",
+      getTokenMeta: () => store.getLoopToken("loop-stale"),
+      getApiKey: () => "sk_live_test_key",
+      getApiKeyProvenance: () => "DESKTOP_MANAGED",
+      signDesktopRequest: async () => ({
+        "X-Desktop-Gateway-Id": "gw",
+        "X-Desktop-Timestamp": "ts",
+        "X-Desktop-Signature": "sig",
+      }),
       loopTokenStore: store,
     });
 
     mock.timers.tick(1000);
     await flushAsync();
-
-    // (a) Heartbeat fires.
-    assert.equal(capturedHeartbeats.length, 1, "heartbeat must have fired once");
-
-    // (b) X-Session-Token header is present and matches the value returned by getSessionToken.
+    assert.equal(capturedHeartbeats.length, 1, "heartbeat must fire");
     const hb = capturedHeartbeats[0];
-    assert.ok(hb, "expected at least one captured heartbeat");
-    assert.equal(
-      hb.sessionToken,
-      knownSessionToken,
-      "X-Session-Token header must equal the token returned by getSessionToken",
-    );
+    assert.ok(hb);
+    assert.equal(hb.authorization, "Bearer sk_live_test_key", "managed key used when JWT stale");
+    assert.ok(hb.gatewayId, "PoP headers present alongside managed key");
+  });
 
-    // (c) revived:true response is processed — the store reflects the new token.
-    // (d) New runner token is persisted via loopTokenStore.setLoopToken.
-    const stored = store.getLoopToken("loop-e2e-revival");
-    assert.ok(stored !== null, "token must be stored after e2e revival");
-    assert.equal(stored.token, "new-runner-token-e2e", "stored token must match the revived runner token");
-    assert.equal(stored.jti, "new-jti-e2e-xyz", "stored jti must match the revived jti");
+  test("well-valid JWT: JWT used regardless of managed key availability", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+    installHeartbeatFetchStub(200);
 
-    // Scheduler must remain running after revival.
+    const store = createTestLoopTokenStore(tempRoot, "store-valid-jwt");
+    store.setLoopToken("loop-valid-jwt", {
+      token: "valid-runner-jwt",
+      expiresAt: Date.now() + 3_600_000,
+    });
+
+    start("loop-valid-jwt", {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "valid-runner-jwt",
+      getTokenMeta: () => store.getLoopToken("loop-valid-jwt"),
+      getApiKey: () => "sk_live_test_key",
+      getApiKeyProvenance: () => "DESKTOP_MANAGED",
+      signDesktopRequest: async () => ({
+        "X-Desktop-Gateway-Id": "gw",
+        "X-Desktop-Timestamp": "ts",
+        "X-Desktop-Signature": "sig",
+      }),
+      loopTokenStore: store,
+    });
+
     mock.timers.tick(1000);
     await flushAsync();
-    assert.equal(capturedHeartbeats.length, 2, "scheduler must continue running after e2e revival");
+    const hb = capturedHeartbeats[0];
+    assert.ok(hb);
+    assert.equal(hb.authorization, "Bearer valid-runner-jwt", "valid JWT takes precedence over managed key");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PLN-740 T-3.6: Process-alive guard suppresses finalization (AC-012)
+// ---------------------------------------------------------------------------
+
+describe("PLN-740 T-3.6: Process-alive guard on terminal heartbeat (AC-012)", () => {
+  test("HTTP 410 + isProcessRunning=true: finalizeFn NOT called, telemetry emitted", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+    installHeartbeatFetchStub(410);
+
+    const loopId = "loop-alive-guard";
+    const testJob = createLocalJob({ id: "job-alive", loopId, pid: 12345 });
+    const stubJobStore = makeStubJobStore({ [loopId]: testJob });
+
+    const finalizeCalls: unknown[] = [];
+    const mockFinalizeFn = async (j: LocalJob, s: "TIMED_OUT" | "UNKNOWN") => {
+      finalizeCalls.push({ j, s });
+    };
+
+    const telemetryEvents: Array<{ event: string; data: Record<string, unknown> }> = [];
+    const mockTelemetry = {
+      emit: (event: string, data: Record<string, unknown>) => {
+        telemetryEvents.push({ event, data });
+      },
+    };
+
+    ctx.startHeartbeat(loopId, {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "tok",
+      jobStore: stubJobStore,
+      finalizeFn: mockFinalizeFn,
+      isProcessRunning: (_pid: number) => true,
+      telemetry: mockTelemetry,
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+
+    // finalizeFn must NOT be called.
+    assert.equal(finalizeCalls.length, 0, "finalizeFn must not be called when process is alive");
+
+    // Telemetry must have been emitted with the correct event and fields.
+    const telemetryEvent = telemetryEvents.find(
+      (e) => e.event === "loop.heartbeat.terminal_finalization_suppressed",
+    );
+    assert.ok(telemetryEvent, "telemetry event must be emitted");
+    assert.equal(telemetryEvent.data.loopId, loopId, "telemetry.loopId must match");
+    assert.equal(telemetryEvent.data.jobPid, 12345, "telemetry.jobPid must match");
+    assert.equal(telemetryEvent.data.httpStatus, 410, "telemetry.httpStatus must be 410");
+  });
+
+  test("HTTP 401 + isProcessRunning=true: finalizeFn NOT called, telemetry emitted", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+    installHeartbeatFetchStub(401);
+
+    const loopId = "loop-alive-guard-401";
+    const testJob = createLocalJob({ id: "job-alive-401", loopId, pid: 22222 });
+    const stubJobStore = makeStubJobStore({ [loopId]: testJob });
+
+    const finalizeCalls: unknown[] = [];
+    const mockFinalizeFn = async (j: LocalJob, s: "TIMED_OUT" | "UNKNOWN") => {
+      finalizeCalls.push({ j, s });
+    };
+
+    const telemetryEvents: Array<{ event: string; data: Record<string, unknown> }> = [];
+    const mockTelemetry = {
+      emit: (event: string, data: Record<string, unknown>) => {
+        telemetryEvents.push({ event, data });
+      },
+    };
+
+    ctx.startHeartbeat(loopId, {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "tok",
+      jobStore: stubJobStore,
+      finalizeFn: mockFinalizeFn,
+      isProcessRunning: (_pid: number) => true,
+      telemetry: mockTelemetry,
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+
+    // finalizeFn must NOT be called.
+    assert.equal(finalizeCalls.length, 0, "finalizeFn must not be called when process is alive (401)");
+
+    // Telemetry must have been emitted with the correct event and fields.
+    const telemetryEvent = telemetryEvents.find(
+      (e) => e.event === "loop.heartbeat.terminal_finalization_suppressed",
+    );
+    assert.ok(telemetryEvent, "telemetry event must be emitted for 401");
+    assert.equal(telemetryEvent.data.loopId, loopId, "telemetry.loopId must match");
+    assert.equal(telemetryEvent.data.jobPid, 22222, "telemetry.jobPid must match");
+    assert.equal(telemetryEvent.data.httpStatus, 401, "telemetry.httpStatus must be 401");
+  });
+
+  test("HTTP 404 + isProcessRunning=true: finalizeFn NOT called, telemetry emitted", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+    installHeartbeatFetchStub(404);
+
+    const loopId = "loop-alive-guard-404";
+    const testJob = createLocalJob({ id: "job-alive-404", loopId, pid: 33333 });
+    const stubJobStore = makeStubJobStore({ [loopId]: testJob });
+
+    const finalizeCalls: unknown[] = [];
+    const mockFinalizeFn = async (j: LocalJob, s: "TIMED_OUT" | "UNKNOWN") => {
+      finalizeCalls.push({ j, s });
+    };
+
+    const telemetryEvents: Array<{ event: string; data: Record<string, unknown> }> = [];
+    const mockTelemetry = {
+      emit: (event: string, data: Record<string, unknown>) => {
+        telemetryEvents.push({ event, data });
+      },
+    };
+
+    ctx.startHeartbeat(loopId, {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "tok",
+      jobStore: stubJobStore,
+      finalizeFn: mockFinalizeFn,
+      isProcessRunning: (_pid: number) => true,
+      telemetry: mockTelemetry,
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+
+    // finalizeFn must NOT be called.
+    assert.equal(finalizeCalls.length, 0, "finalizeFn must not be called when process is alive (404)");
+
+    // Telemetry must have been emitted with the correct event and fields.
+    const telemetryEvent = telemetryEvents.find(
+      (e) => e.event === "loop.heartbeat.terminal_finalization_suppressed",
+    );
+    assert.ok(telemetryEvent, "telemetry event must be emitted for 404");
+    assert.equal(telemetryEvent.data.loopId, loopId, "telemetry.loopId must match");
+    assert.equal(telemetryEvent.data.jobPid, 33333, "telemetry.jobPid must match");
+    assert.equal(telemetryEvent.data.httpStatus, 404, "telemetry.httpStatus must be 404");
+  });
+
+  test("HTTP 410 + isProcessRunning=false: finalizeFn IS called (normal path)", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+    installHeartbeatFetchStub(410);
+
+    const loopId = "loop-dead-guard";
+    const testJob = createLocalJob({ id: "job-dead", loopId, pid: 99999 });
+    const stubJobStore = makeStubJobStore({ [loopId]: testJob });
+
+    const finalizeCalls: Array<[LocalJob, string]> = [];
+    const mockFinalizeFn = async (j: LocalJob, s: "TIMED_OUT" | "UNKNOWN") => {
+      finalizeCalls.push([j, s]);
+    };
+
+    ctx.startHeartbeat(loopId, {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "tok",
+      jobStore: stubJobStore,
+      finalizeFn: mockFinalizeFn,
+      isProcessRunning: (_pid: number) => false,
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+
+    assert.equal(finalizeCalls.length, 1, "finalizeFn must be called when process is NOT alive");
+    assert.equal(finalizeCalls[0]?.[1], "UNKNOWN", "targetStatus must be UNKNOWN for 410");
+  });
+
+  test("job.pid === null: finalization proceeds (cannot prove liveness)", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+    installHeartbeatFetchStub(410);
+
+    const loopId = "loop-null-pid";
+    const testJob = createLocalJob({ id: "job-null-pid", loopId, pid: undefined });
+    const stubJobStore = makeStubJobStore({ [loopId]: testJob });
+
+    const finalizeCalls: unknown[] = [];
+    const mockFinalizeFn = async (j: LocalJob, s: "TIMED_OUT" | "UNKNOWN") => {
+      finalizeCalls.push([j, s]);
+    };
+
+    const isProcessRunningMock = mock.fn((_pid: number) => true);
+
+    ctx.startHeartbeat(loopId, {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "tok",
+      jobStore: stubJobStore,
+      finalizeFn: mockFinalizeFn,
+      isProcessRunning: isProcessRunningMock,
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+
+    assert.equal(finalizeCalls.length, 1, "finalization must proceed when job.pid is null/undefined");
+    // isProcessRunning must not have been called since pid is null.
+    assert.equal(isProcessRunningMock.mock.callCount(), 0, "isProcessRunning must not be called for null pid");
+  });
+
+  test("transient or live disposition: isProcessRunning NOT called", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+    // 500 maps to transient disposition.
+    installHeartbeatFetchStub(500);
+
+    const loopId = "loop-transient-prd";
+    const testJob = createLocalJob({ id: "job-transient-prd", loopId, pid: 55555 });
+    const stubJobStore = makeStubJobStore({ [loopId]: testJob });
+
+    const isProcessRunningMock = mock.fn((_pid: number) => true);
+
+    ctx.startHeartbeat(loopId, {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => "tok",
+      jobStore: stubJobStore,
+      finalizeFn: async () => {},
+      isProcessRunning: isProcessRunningMock,
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+
+    assert.equal(
+      isProcessRunningMock.mock.callCount(),
+      0,
+      "isProcessRunning must NOT be called for transient disposition",
+    );
   });
 });

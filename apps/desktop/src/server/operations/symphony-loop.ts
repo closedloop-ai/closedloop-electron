@@ -61,7 +61,7 @@ import {
   type LoopFinalizerDeps,
 } from "../../main/loop-finalizer.js";
 import type { LoopTokenStore, LoopTokenMeta } from "../../main/loop-token-store.js";
-import { createGetSessionToken } from "../../main/loop-lifecycle.js";
+import type { LoopPopDeps } from "../../main/loop-lifecycle.js";
 import type { LoopSchedulerContext } from "../../main/loop-scheduler-context.js";
 import { parseJwtExpiry } from "../../main/jwt-utils.js";
 import { Observability } from "../../main/observability.js";
@@ -6091,6 +6091,7 @@ async function handleLoopRequest(
   worktreeProvider?: WorktreeProvider,
   loopTokenStore?: LoopTokenStore,
   getSymphonyDir?: () => string,
+  popDeps?: LoopPopDeps,
 ): Promise<void> {
   const wt = worktreeProvider ?? defaultWorktreeProvider;
   // Derive the callback URL from the gateway's trusted configuration.
@@ -7132,18 +7133,6 @@ async function handleLoopRequest(
           token: body.closedLoopAuthToken,
           expiresAt: initialExpiresAt,
         } satisfies LoopTokenMeta);
-        // Persist the cloud session token (forwarded as X-Session-Token on
-        // heartbeats to revive a TIMED_OUT loop) encrypted via safeStorage,
-        // stored separately from the runner token so refresh/revival rotation
-        // never clobbers it. Merge semantics: a re-request that omits the token
-        // keeps the previously-persisted value rather than stripping it.
-        const sessionToken =
-          body.cloudSessionToken ??
-          loopTokenStore.getCloudSessionToken(body.loopId) ??
-          undefined;
-        if (sessionToken !== undefined) {
-          loopTokenStore.setCloudSessionToken(body.loopId, sessionToken);
-        }
       }
     } catch (err) {
       loopLog(
@@ -7920,16 +7909,6 @@ async function handleLoopRequest(
     }
 
     Observability.jobStarted(commandId, operationId, body.loopId, pid, body.command);
-    // One event per loop start: did the inbound request carry a cloudSessionToken?
-    // This is the signal for the cloud sender (symphony) landing (FEA-1408) — keyed
-    // off the request body, not the persisted/effective value. Presence only; the
-    // token value is never emitted.
-    Observability.loopRequestCloudSessionToken(
-      commandId,
-      operationId,
-      body.loopId,
-      body.cloudSessionToken !== undefined,
-    );
 
     // Write PID file (safe to await now — close handler is already registered)
     await fs.writeFile(path.join(claudeWorkDir, "process.pid"), String(pid));
@@ -7947,23 +7926,31 @@ async function handleLoopRequest(
         apiBaseUrl,
         getToken: () => loopTokenStore.getLoopToken(body.loopId)?.token ?? null,
         loopTokenStore,
+        // Thread PoP deps into registerSleep so the sleep-recovery heartbeat
+        // on system wake fires with PoP headers and managed-key Authorization
+        // fallback. Without this, the sleep-recovery path (most likely revival
+        // trigger) fires without PoP headers — SEC-002 finding.
+        getApiKey: popDeps?.getApiKey,
+        getApiKeyProvenance: popDeps?.getApiKeyProvenance,
+        signDesktopRequest: popDeps?.signDesktopRequest,
+        onDesktopPopUnavailable: popDeps?.onDesktopPopUnavailable,
       });
     }
-    // Read the effective session token from the encrypted LoopTokenStore, which
-    // was just populated above with the merged value (body token falling back to
-    // the previously-persisted token). This keeps the live heartbeat consistent
-    // with the boot-recovery path, which also reads it from LoopTokenStore. Fall
-    // back to the raw body value on the legacy no-store path.
-    const effectiveCloudSessionToken =
-      loopTokenStore?.getCloudSessionToken(body.loopId) ?? body.cloudSessionToken;
-    const getSessionToken = createGetSessionToken(effectiveCloudSessionToken);
-
     schedulers.startHeartbeat(body.loopId, {
       apiBaseUrl,
       getToken: () =>
         loopTokenStore?.getLoopToken(body.loopId)?.token ?? body.closedLoopAuthToken,
-      getSessionToken,
       loopTokenStore,
+      // Thread PoP fields so every heartbeat attaches X-Desktop-* PoP headers
+      // when provenance is DESKTOP_MANAGED (AC-002, AC-004).
+      getApiKey: popDeps?.getApiKey,
+      getApiKeyProvenance: popDeps?.getApiKeyProvenance,
+      signDesktopRequest: popDeps?.signDesktopRequest,
+      onDesktopPopUnavailable: popDeps?.onDesktopPopUnavailable,
+      // Supply getTokenMeta for proactive JWT-expiry detection (T-1.4 / AC-011).
+      getTokenMeta: loopTokenStore
+        ? () => loopTokenStore.getLoopToken(body.loopId)
+        : undefined,
       // When jobStore is absent (legacy no-store path), the heartbeat cannot look up or
       // finalize a local job. Provide a no-op stub so the TypeScript type is satisfied
       // (runHeartbeatTick logs a warning and skips finalizeFn when getByLoopId returns
@@ -7987,6 +7974,8 @@ async function handleLoopRequest(
             "heartbeat-terminal",
           )
         : async () => {},
+      // Pass the process liveness checker for T-1.5 process-alive guard.
+      isProcessRunning,
     });
 
     json(context, 200, {
@@ -8119,6 +8108,7 @@ export function registerSymphonyLoopRoutes(
   loopTokenStore?: LoopTokenStore,
   getSymphonyDir?: () => string,
   getBinaryPaths?: BinaryPathsResolver,
+  popDeps?: LoopPopDeps,
 ): void {
   dispatcher.register("POST", "/api/gateway/symphony/loop", async (context) => {
     const run = () =>
@@ -8132,6 +8122,7 @@ export function registerSymphonyLoopRoutes(
         worktreeProvider,
         loopTokenStore,
         getSymphonyDir,
+        popDeps,
       );
 
     if (getBinaryPaths) {

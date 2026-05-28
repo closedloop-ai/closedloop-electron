@@ -12,7 +12,8 @@ import {
 import { isProcessRunning } from "../server/operations/symphony-utils.js";
 import { gatewayLog } from "./gateway-logger.js";
 import { isTerminalJobStatus, type JobStore, type LocalJob } from "./job-store.js";
-import { createGetSessionToken } from "./loop-lifecycle.js";
+import type { DesktopPopSigner } from "./desktop-pop.js";
+import type { DesktopPopUnavailableReporter } from "./desktop-pop-sign-utils.js";
 import type { LoopTokenStore } from "./loop-token-store.js";
 import {
   finalizeLoopFromRuntime,
@@ -32,6 +33,15 @@ export interface BootRecoveryDeps {
   loopTokenStore: LoopTokenStore;
   /** Instance-scoped scheduler context. Defaults to a new LoopSchedulerContext when omitted. */
   schedulers?: LoopSchedulerContext;
+  /**
+   * Optional PoP signing deps for heartbeat revival authentication (AC-005).
+   * When present, threaded into startHeartbeat and registerSleep so boot-recovered
+   * loops attach X-Desktop-* PoP headers and use the managed-key Authorization
+   * fallback when the runner JWT is unavailable.
+   */
+  getApiKeyProvenance?: () => import("./api-key-store.js").ApiKeyProvenance | null;
+  signDesktopRequest?: DesktopPopSigner;
+  onDesktopPopUnavailable?: DesktopPopUnavailableReporter;
 }
 
 interface LiveJobHandle {
@@ -438,16 +448,20 @@ export class BootRecoveryService implements Disposable {
       loopTokenStore: this.deps.loopTokenStore,
     });
 
-    const getSessionToken = createGetSessionToken(
-      this.deps.loopTokenStore.getCloudSessionToken(loopId) ?? undefined,
-    );
-
     this.schedulers.startHeartbeat(loopId, {
       apiBaseUrl: effectiveApiBaseUrl,
       getToken,
-      getSessionToken,
       loopTokenStore: this.deps.loopTokenStore,
+      // Thread PoP fields for heartbeat revival auth (AC-005).
+      getApiKey: this.deps.getApiKey,
+      getApiKeyProvenance: this.deps.getApiKeyProvenance,
+      signDesktopRequest: this.deps.signDesktopRequest,
+      onDesktopPopUnavailable: this.deps.onDesktopPopUnavailable,
+      // Supply getTokenMeta for proactive JWT-expiry detection (T-1.4 / AC-011).
+      getTokenMeta: () => this.deps.loopTokenStore.getLoopToken(loopId),
       jobStore: this.deps.jobStore,
+      // Pass the process liveness checker for T-1.5 process-alive guard.
+      isProcessRunning,
       finalizeFn: makeHeartbeatFinalizeFn(
         {
           jobStore: this.deps.jobStore,
@@ -468,6 +482,12 @@ export class BootRecoveryService implements Disposable {
       apiBaseUrl: effectiveApiBaseUrl,
       getToken,
       loopTokenStore: this.deps.loopTokenStore,
+      // Thread PoP deps into registerSleep so the sleep-recovery heartbeat on
+      // system wake fires with PoP headers (SEC-002 / AC-005).
+      getApiKey: this.deps.getApiKey,
+      getApiKeyProvenance: this.deps.getApiKeyProvenance,
+      signDesktopRequest: this.deps.signDesktopRequest,
+      onDesktopPopUnavailable: this.deps.onDesktopPopUnavailable,
     });
 
     const watcherPollMs =
