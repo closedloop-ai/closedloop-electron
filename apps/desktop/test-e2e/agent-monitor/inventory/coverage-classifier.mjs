@@ -242,7 +242,10 @@ function bindDetectionToTile(row, candidates) {
 
 const coverage = {
   $schema: "./coverage.schema.json",
-  generated_at: new Date().toISOString(),
+  // No generated_at timestamp — the git commit timestamp IS the generation
+  // time, and burning the wall-clock into the file caused a spurious diff
+  // every time anyone ran audit:classify, even when no classification
+  // actually changed (PR #246 review @ coverage.json:3).
   source: "manifest.scanned.json",
   total_detections: SCANNED.tiles.length,
   by_status: {

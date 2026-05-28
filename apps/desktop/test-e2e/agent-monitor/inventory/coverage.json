@@ -1,6 +1,5 @@
 {
   "$schema": "./coverage.schema.json",
-  "generated_at": "2026-05-28T14:10:21.414Z",
   "source": "manifest.scanned.json",
   "total_detections": 196,
   "by_status": {

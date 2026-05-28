@@ -27,7 +27,7 @@ import {
   seedFixtureDb,
 } from "../helpers/seed-fixture-db.mjs";
 import { launchSidecar } from "../helpers/launch-sidecar.mjs";
-import { loadManifest } from "./manifest-loader.mjs";
+import { endpointUrlForRow, loadManifest } from "./manifest-loader.mjs";
 import {
   computeOracle,
   compareNumeric,
@@ -37,16 +37,6 @@ import {
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPORT_PATH = join(HERE, "REPORT-AUDIT.md");
-
-function endpointUrlFor(row) {
-  if (!row.endpoint || row.endpoint === "derived") return null;
-  if (row.endpoint === "/api/stats") return "/api/stats?tz_offset=0";
-  if (row.endpoint === "/api/analytics") return "/api/analytics?tz_offset=0";
-  if (row.endpoint === "/api/pricing/totalCost") {
-    return "/api/pricing/cost?tz_offset=0";
-  }
-  return row.endpoint.startsWith("/") ? row.endpoint : `/${row.endpoint}`;
-}
 
 function md(value) {
   if (value == null) return "_n/a_";
@@ -105,7 +95,7 @@ async function main() {
 
       let apiValue = undefined;
       let apiCmp = null;
-      const url = endpointUrlFor(tile);
+      const url = endpointUrlForRow(tile);
       if (url) {
         try {
           const body = await fetchOnce(url);

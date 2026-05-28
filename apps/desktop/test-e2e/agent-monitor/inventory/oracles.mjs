@@ -150,13 +150,19 @@ export function dashboard_total_events(db) {
  * @param {DatabaseSync} db
  */
 export function dashboard_total_cost(db) {
+  // Include baseline_* columns so this oracle stays consistent with
+  // cost_breakdown_by_model_map and session_cost_by_id. The upstream
+  // pricing route also uses (input_tokens + baseline_input) — re-imports
+  // can produce nonzero baseline values, and a fixture with baselines
+  // would otherwise make oracle-vs-oracle comparisons disagree.
+  // See PR #246 review comment from @thadeusb @ oracles.mjs:152.
   const row = db
     .prepare(
       `SELECT COALESCE(SUM(
-         tu.input_tokens       * mp.input_per_mtok       / 1000000.0
-       + tu.output_tokens      * mp.output_per_mtok      / 1000000.0
-       + tu.cache_read_tokens  * mp.cache_read_per_mtok  / 1000000.0
-       + tu.cache_write_tokens * mp.cache_write_per_mtok / 1000000.0
+         (tu.input_tokens       + tu.baseline_input)       * mp.input_per_mtok       / 1000000.0
+       + (tu.output_tokens      + tu.baseline_output)      * mp.output_per_mtok      / 1000000.0
+       + (tu.cache_read_tokens  + tu.baseline_cache_read)  * mp.cache_read_per_mtok  / 1000000.0
+       + (tu.cache_write_tokens + tu.baseline_cache_write) * mp.cache_write_per_mtok / 1000000.0
        ), 0) AS total
        FROM token_usage tu
        LEFT JOIN model_pricing mp
@@ -872,13 +878,15 @@ export function session_agent_count_by_id(db, opts) {
  */
 export function session_cost_by_id(db, opts) {
   if (!opts?.sessionId) throw new Error("session_cost_by_id requires opts.sessionId");
+  // Baselines included — consistent with dashboard_total_cost and
+  // cost_breakdown_by_model_map. See PR #246 review @ oracles.mjs:152.
   const row = db
     .prepare(
       `SELECT COALESCE(SUM(
-         tu.input_tokens       * mp.input_per_mtok       / 1000000.0
-       + tu.output_tokens      * mp.output_per_mtok      / 1000000.0
-       + tu.cache_read_tokens  * mp.cache_read_per_mtok  / 1000000.0
-       + tu.cache_write_tokens * mp.cache_write_per_mtok / 1000000.0
+         (tu.input_tokens       + tu.baseline_input)       * mp.input_per_mtok       / 1000000.0
+       + (tu.output_tokens      + tu.baseline_output)      * mp.output_per_mtok      / 1000000.0
+       + (tu.cache_read_tokens  + tu.baseline_cache_read)  * mp.cache_read_per_mtok  / 1000000.0
+       + (tu.cache_write_tokens + tu.baseline_cache_write) * mp.cache_write_per_mtok / 1000000.0
        ), 0) AS total
        FROM token_usage tu
        LEFT JOIN model_pricing mp ON mp.model_pattern = tu.model

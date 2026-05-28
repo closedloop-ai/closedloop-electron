@@ -55,3 +55,29 @@ export function tilesForScreen(manifest, screen, tab = null) {
     (t) => t.screen === screen && (tab === null || t.tab === tab),
   );
 }
+
+/**
+ * Resolve a manifest row's endpoint declaration to the URL the test runner
+ * should actually GET. Centralized here so the API audit and the report
+ * generator can't drift apart (PR #246 review @ all-screens.api-audit:62).
+ *
+ * Returns null for derived / UI-only tiles that have no API counterpart.
+ *
+ * Special cases:
+ *   - /api/stats and /api/analytics always need tz_offset=0 to make their
+ *     daily-bucketing deterministic in the audit DB.
+ *   - The manifest writes /api/pricing/totalCost as a shorthand; the
+ *     sidecar actually exposes /api/pricing/cost.
+ *
+ * Anything else passes through; a missing leading slash is prepended so
+ * the caller can write fetch(`${baseUrl}${url}`) without thinking about it.
+ */
+export function endpointUrlForRow(row) {
+  if (!row?.endpoint || row.endpoint === "derived") return null;
+  if (row.endpoint === "/api/stats") return "/api/stats?tz_offset=0";
+  if (row.endpoint === "/api/analytics") return "/api/analytics?tz_offset=0";
+  if (row.endpoint === "/api/pricing/totalCost") {
+    return "/api/pricing/cost?tz_offset=0";
+  }
+  return row.endpoint.startsWith("/") ? row.endpoint : `/${row.endpoint}`;
+}

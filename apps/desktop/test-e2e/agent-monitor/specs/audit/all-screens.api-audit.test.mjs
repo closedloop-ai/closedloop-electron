@@ -14,7 +14,7 @@ import {
   seedFixtureDb,
 } from "../../helpers/seed-fixture-db.mjs";
 import { launchSidecar } from "../../helpers/launch-sidecar.mjs";
-import { loadManifest } from "../../inventory/manifest-loader.mjs";
+import { endpointUrlForRow, loadManifest } from "../../inventory/manifest-loader.mjs";
 import {
   computeOracle,
   compareNumeric,
@@ -59,19 +59,9 @@ async function fetchOnce(endpointWithQuery) {
   return body;
 }
 
-function buildEndpointUrl(row) {
-  if (!row.endpoint || row.endpoint === "derived") return null;
-  if (row.endpoint === "/api/stats") return "/api/stats?tz_offset=0";
-  if (row.endpoint === "/api/analytics") return "/api/analytics?tz_offset=0";
-  if (row.endpoint === "/api/pricing/totalCost") {
-    return "/api/pricing/cost?tz_offset=0";
-  }
-  return row.endpoint;
-}
-
 // One test per tile.
 for (const row of manifest.tiles) {
-  const url = buildEndpointUrl(row);
+  const url = endpointUrlForRow(row);
   if (!url) continue; // derived/UI-only tiles
 
   // Tiles with a filed bug fail expectedly — flag as `todo` so CI passes
