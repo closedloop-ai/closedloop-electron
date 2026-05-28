@@ -77,7 +77,14 @@ test.describe("Dashboard tiles · UI audit (manifest-driven)", () => {
   });
 
   for (const row of dashboardTiles) {
-    test(`UI audit · ${row.id} matches oracle "${row.oracle}"`, async ({
+    // Mirror the node:test todo handling: manifest tiles with a filed bug
+    // (bug_ref set) are expected to fail until the bug is patched. Skip the
+    // assertion so the audit-ui suite stays green without masking the bug —
+    // the node-side audit already keeps the assertion alive as a `todo`
+    // that flips to "todo passed" the moment the fix lands.
+    // See PR #246 GitHub-Codex review [P2] re dashboard.ui-audit.spec.ts:82.
+    const testFn = row.bug_ref ? test.skip : test;
+    testFn(`UI audit · ${row.id} matches oracle "${row.oracle}"${row.bug_ref ? ` (skip — bug ${row.bug_ref})` : ""}`, async ({
       page,
     }) => {
       // Compute oracle expectation from the fixture DB.
