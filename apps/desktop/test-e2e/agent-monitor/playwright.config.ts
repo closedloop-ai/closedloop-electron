@@ -25,8 +25,12 @@ function resolveBaseUrl(): string | undefined {
 }
 
 export default defineConfig({
-  testDir: "./specs/ui",
-  testMatch: /.*\.spec\.ts$/,
+  // Include both legacy UI specs and the new manifest-driven audit specs.
+  // The audit specs live alongside the API-audit .test.mjs files in
+  // ./specs/audit so the layer-1 and layer-2 audits for a screen are
+  // colocated.
+  testDir: "./specs",
+  testMatch: /(ui|audit)\/.*\.spec\.ts$/,
   workers: 1,
   fullyParallel: false,
   reporter: [["list"]],
