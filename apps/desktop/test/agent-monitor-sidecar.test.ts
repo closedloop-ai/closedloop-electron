@@ -60,7 +60,7 @@ const launchBody = methodBody("private async launch()", 4000);
 
 describe("agent-monitor-sidecar.ts source-level invariants", () => {
   // -------------------------------------------------------------------------
-  // AC-006: PID file lifecycle — write on stability, delete on stop()
+  // AC-006: PID file lifecycle — write after spawn, delete on stop()
   // -------------------------------------------------------------------------
 
   test("AC-006a: writePidFile uses atomic rename (write .tmp then rename)", () => {
@@ -103,12 +103,19 @@ describe("agent-monitor-sidecar.ts source-level invariants", () => {
     );
   });
 
-  test("AC-006f: writePidFile is called only after the stability window confirms readiness", () => {
-    // writePidFile must be called AFTER delay(READY_STABILITY_WINDOW_MS) and
-    // inside the isChildAliveAndCurrent check, not unconditionally after spawn.
-    assert.match(
-      sidecarSource,
-      /await delay\(READY_STABILITY_WINDOW_MS\)[\s\S]{0,400}await this\.writePidFile\(child\.pid!/,
+  test("AC-006f: writePidFile is called after spawn before health waits", () => {
+    // The PID file must be written as soon as a child pid exists, before
+    // waitForHealth() and the stability window, so a force-quit during startup
+    // leaves enough metadata for the next launch to reclaim the orphan.
+    const pidGuardPos = launchBody.indexOf("if (!child.pid)");
+    const writePidPos = launchBody.indexOf("await this.writePidFile(child.pid)");
+    const waitForHealthPos = launchBody.indexOf("const healthy = await this.waitForHealth(child)");
+    assert.ok(pidGuardPos >= 0, "child.pid guard not found in launch()");
+    assert.ok(writePidPos >= 0, "writePidFile(child.pid) not found in launch()");
+    assert.ok(waitForHealthPos >= 0, "waitForHealth(child) not found in launch()");
+    assert.ok(
+      pidGuardPos < writePidPos && writePidPos < waitForHealthPos,
+      "writePidFile(child.pid) must run after the pid guard and before waitForHealth(child)",
     );
   });
 

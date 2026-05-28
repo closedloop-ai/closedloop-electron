@@ -321,6 +321,7 @@ export class AgentMonitorSidecar {
       TAG,
       `starting agent monitor pid=${child.pid} port=${this.port}`,
     );
+    await this.writePidFile(child.pid);
 
     pipeLines(child.stdout, (line) => gatewayLog.debug(TAG, line));
     pipeLines(child.stderr, (line) => {
@@ -349,7 +350,6 @@ export class AgentMonitorSidecar {
           TAG,
           `agent monitor ready at http://${HOST}:${this.port}`,
         );
-        await this.writePidFile(child.pid!);
         this.flushReady(true);
         return;
       }
