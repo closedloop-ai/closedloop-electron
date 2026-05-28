@@ -1,3 +1,4 @@
+import type { ManagedKeyHintState } from "../shared/contracts.js";
 import { contextBridge, ipcRenderer } from "electron";
 
 const desktopApi = {
@@ -164,7 +165,21 @@ const desktopApi = {
     ipcRenderer.invoke("desktop:reprocess-agent-logs") as Promise<{
       ok: boolean;
       error?: string;
-    }>
+    }>,
+  /**
+   * Returns the current state of the managed-key revival limitation hint (D5).
+   * The main process reads provenance from apiKeyStore — renderer does not control
+   * what is returned.
+   */
+  getManagedKeyHintState: () =>
+    ipcRenderer.invoke("desktop:get-managed-key-hint-state") as Promise<ManagedKeyHintState>,
+  /**
+   * Dismisses the managed-key revival limitation hint (D5).
+   * The main process records the current provenance from apiKeyStore.
+   * The renderer does not supply any arguments — provenance is main-process-only.
+   */
+  dismissManagedKeyHint: () =>
+    ipcRenderer.invoke("desktop:dismiss-managed-key-hint") as Promise<{ success: boolean }>
 };
 
 contextBridge.exposeInMainWorld("desktopApi", desktopApi);

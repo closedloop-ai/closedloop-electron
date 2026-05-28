@@ -270,7 +270,15 @@ export class GatewayRouter {
       this.options.worktreeProvider,
       this.options.loopTokenStore,
       getSymphonyDir,
-      this.options.getBinaryPaths
+      this.options.getBinaryPaths,
+      // Pass PoP deps unconditionally — buildManagedDesktopPopHeaders degrades
+      // gracefully when provenance is not DESKTOP_MANAGED or signer is absent.
+      {
+        getApiKey: this.options.getApiKey,
+        getApiKeyProvenance: this.options.getApiKeyProvenance,
+        signDesktopRequest: this.options.signDesktopRequest,
+        onDesktopPopUnavailable: this.options.onDesktopPopUnavailable,
+      }
     );
     registerSymphonyLogsRoutes(this.operationDispatcher, this.options.getAllowedDirectories);
     registerSymphonyPlanRoutes(this.operationDispatcher, this.options.getAllowedDirectories);

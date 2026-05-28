@@ -3,6 +3,7 @@ import Store from "electron-store";
 import {
   DEFAULT_DESKTOP_SETTINGS,
   type AlwaysAllowRule,
+  type ApiKeyProvenance,
   type DesktopSettings,
   type RiskTier,
   type SavedConfig
@@ -41,6 +42,37 @@ type SavedConfigOriginsPatch = Pick<
 >;
 
 const DEFAULT_MANAGED_ONBOARDING_CONFIG_NAME = "Default";
+
+/**
+ * Determines whether the Settings panel should show the managed-key revival
+ * limitation hint (AC-010 / D5).
+ *
+ * Returns true when:
+ * - provenance is not DESKTOP_MANAGED (i.e. the key cannot revive timed-out loops)
+ * - AND the hint has never been dismissed (dismissedAt is null)
+ *   OR the last dismissal was while provenance was DESKTOP_MANAGED (regression
+ *   detected — user rotated back to USER_CREATED after pairing).
+ *
+ * Pure function — exported for unit testing without Electron IPC mocking.
+ */
+export function shouldShowManagedKeyHint(
+  provenance: ApiKeyProvenance | null,
+  dismissedAt: string | null,
+  lastSeenProvenance: "DESKTOP_MANAGED" | "USER_CREATED" | null,
+): boolean {
+  if (provenance === "DESKTOP_MANAGED") {
+    // Key supports revival — never show the hint.
+    return false;
+  }
+  if (dismissedAt === null) {
+    // Never dismissed — show.
+    return true;
+  }
+  // Dismissed before, but check if provenance regressed from DESKTOP_MANAGED:
+  // if lastSeenProvenance was DESKTOP_MANAGED when dismissed, the user has since
+  // rotated back to USER_CREATED — re-show the hint.
+  return lastSeenProvenance === "DESKTOP_MANAGED";
+}
 const UUID_V4_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -647,6 +679,24 @@ export class SettingsStore {
       this.store.set("defaultApprovalTier", partial.defaultApprovalTier);
     }
     return this.getAll();
+  }
+
+  // --- Managed-key hint getters/setters (D5 / AC-010) ---
+
+  getManagedKeyHintDismissedAt(): string | null {
+    return this.store.get("managedKeyHintDismissedAt", null);
+  }
+
+  setManagedKeyHintDismissedAt(value: string | null): void {
+    this.store.set("managedKeyHintDismissedAt", value);
+  }
+
+  getManagedKeyHintLastSeenProvenance(): "DESKTOP_MANAGED" | "USER_CREATED" | null {
+    return this.store.get("managedKeyHintLastSeenProvenance", null);
+  }
+
+  setManagedKeyHintLastSeenProvenance(value: "DESKTOP_MANAGED" | "USER_CREATED" | null): void {
+    this.store.set("managedKeyHintLastSeenProvenance", value);
   }
 
   private migrateSavedConfigManagedFields(): void {

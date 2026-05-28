@@ -3408,6 +3408,15 @@
         <iframe id="claudeDashFrame" title="Claude Code Agent Monitor" style="display:none;width:100%;border:0;background:#fff"></iframe>
       </section>
       <section id="settings" class="panel">
+        <!-- D5 / AC-010: Revival limitation hint for non-DESKTOP_MANAGED keys.
+             Copy is placeholder pending GAP-002 resolution (PM sign-off required).
+             Hidden by default; shown by JS when shouldShow is true. -->
+        <div id="managed-key-hint-banner" style="display:none; margin-bottom:12px; padding:10px 14px; background:var(--warning-bg,#fff8e1); border:1px solid var(--warning-border,#f5c518); border-radius:6px; font-size:13px; color:var(--text-primary,#333); justify-content:space-between; align-items:flex-start; gap:8px;">
+          <span id="managed-key-hint-text">
+            <strong>Loop revival unavailable:</strong> Long-running loops will not resume after sleep until you re-pair this device with a managed API key. <a href="#" id="managed-key-hint-link" style="color:inherit; text-decoration:underline;">Learn more</a>
+          </span>
+          <button id="managed-key-hint-dismiss" style="background:none; border:none; cursor:pointer; font-size:16px; line-height:1; padding:0 4px; color:inherit; flex-shrink:0;" aria-label="Dismiss">✕</button>
+        </div>
         <div class="settings-sub-nav">
           <button data-settings-tab="relay-gateway" class="active">Relay / Gateway</button>
           <button data-settings-tab="security">Security</button>
@@ -4474,6 +4483,36 @@
       window.addEventListener("desktop:command-keys-changed", () => {
         void refreshCommandSigningKeys();
       });
+
+      // ── Managed-key revival hint banner (D5 / AC-010) ────────────────
+      // Shown when provenance is not DESKTOP_MANAGED; dismissed state is
+      // persisted by the main process. Re-appears after provenance regression.
+      (function initManagedKeyHintBanner() {
+        const banner = document.getElementById("managed-key-hint-banner");
+        const dismissBtn = document.getElementById("managed-key-hint-dismiss");
+        if (!banner || !dismissBtn) return;
+
+        function refreshBanner() {
+          api.getManagedKeyHintState().then((state) => {
+            banner.style.display = state.shouldShow ? "flex" : "none";
+          }).catch(() => {
+            banner.style.display = "none";
+          });
+        }
+
+        dismissBtn.addEventListener("click", () => {
+          banner.style.display = "none";
+          api.dismissManagedKeyHint().catch(() => {});
+        });
+
+        // Refresh hint when the settings panel is shown.
+        window.addEventListener("desktop:navigate-tab", (e) => {
+          if (e.detail === "settings") refreshBanner();
+        });
+
+        // Initial load.
+        refreshBanner();
+      })();
 
       // ── Feature Flags panel ──────────────────────────────────────────
       const featureFlagsList = document.getElementById("featureFlagsList");
