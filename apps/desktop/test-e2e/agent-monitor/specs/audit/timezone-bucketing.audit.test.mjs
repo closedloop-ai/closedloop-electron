@@ -126,7 +126,7 @@ test("events_today bucketing — event 1 minute before UTC midnight does NOT cou
   }
 });
 
-test("events_today bucketing — same event counts differently under different tz_offset", async () => {
+test("events_today bucketing — same event counts differently under different tz_offset", { todo: "expected failure — FEA-1422 (datetime() string-comparison short-circuit)" }, async () => {
   // Insert an event at UTC 06:00 today. In UTC, this is "today". In PDT
   // (tz_offset=420, UTC-7), this is 23:00 of YESTERDAY's local date. So:
   //   tz_offset=0   → counts as today

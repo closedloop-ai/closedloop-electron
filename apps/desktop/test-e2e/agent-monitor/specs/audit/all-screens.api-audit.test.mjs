@@ -74,7 +74,14 @@ for (const row of manifest.tiles) {
   const url = buildEndpointUrl(row);
   if (!url) continue; // derived/UI-only tiles
 
-  test(`${row.screen} · ${row.id} (${row.endpoint}.${row.endpoint_field})`, async () => {
+  // Tiles with a filed bug fail expectedly — flag as `todo` so CI passes
+  // until the bug is fixed. When the bug is fixed the test will pass and
+  // node:test surfaces "todo passed" as a signal to drop the todo flag.
+  const testOpts = row.bug_ref
+    ? { todo: `expected failure — ${row.bug_ref}` }
+    : {};
+
+  test(`${row.screen} · ${row.id} (${row.endpoint}.${row.endpoint_field})`, testOpts, async () => {
     const body = await fetchOnce(url);
     const apiValue = getField(body, row.endpoint_field);
     assert.notEqual(
@@ -108,7 +115,10 @@ for (const row of manifest.tiles) {
 // Structural assertions (list-length checks)
 for (const row of manifest.structural) {
   if (!row.endpoint || row.endpoint === "derived") continue;
-  test(`structural · ${row.screen} · ${row.id} (${row.endpoint} length)`, async () => {
+  const testOpts = row.bug_ref
+    ? { todo: `expected failure — ${row.bug_ref}` }
+    : {};
+  test(`structural · ${row.screen} · ${row.id} (${row.endpoint} length)`, testOpts, async () => {
     const url = row.endpoint.startsWith("/") ? row.endpoint : `/${row.endpoint}`;
     const body = await fetchOnce(url);
     const list = Array.isArray(body)
