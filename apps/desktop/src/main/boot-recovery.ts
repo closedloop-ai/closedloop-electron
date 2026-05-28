@@ -462,6 +462,8 @@ export class BootRecoveryService implements Disposable {
       jobStore: this.deps.jobStore,
       // Pass the process liveness checker for T-1.5 process-alive guard.
       isProcessRunning,
+      // Canonical telemetry so the process-alive suppression event is observable.
+      telemetry: this.deps.telemetry,
       finalizeFn: makeHeartbeatFinalizeFn(
         {
           jobStore: this.deps.jobStore,

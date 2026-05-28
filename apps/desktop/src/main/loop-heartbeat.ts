@@ -8,12 +8,7 @@ import {
 } from "./loop-404-gate.js";
 import type { JobStore, LocalJob } from "./job-store.js";
 import { classifyLoopStatus } from "./loop-status-classifier.js";
-// Simple event emitter used for heartbeat-specific telemetry events.
-// Intentionally distinct from the heavier TelemetryEmitter in telemetry-protocol.ts
-// to keep the heartbeat module free of that module's category constraints.
-export interface HeartbeatTelemetryEmitter {
-  emit(event: string, data: Record<string, unknown>): void;
-}
+import type { TelemetryEmitter } from "./telemetry-protocol.js";
 
 // ---------------------------------------------------------------------------
 // Default heartbeat interval: 30 minutes in milliseconds
@@ -79,13 +74,13 @@ export type HeartbeatDeps = Pick<
    */
   isProcessRunning?: (pid: number) => boolean;
   /**
-   * Telemetry emitter for observable events (T-1.5). Used to emit
-   * loop.heartbeat.terminal_finalization_suppressed when the process-alive
-   * guard prevents finalization.
+   * Canonical telemetry emitter (telemetry-protocol.ts). Used to emit the
+   * `loop.heartbeat.terminal_finalization_suppressed` category when the
+   * process-alive guard prevents finalization.
    *
    * NOTE: this is HeartbeatDeps-only — NOT part of LoopSchedulerDeps.
    */
-  telemetry?: HeartbeatTelemetryEmitter;
+  telemetry?: TelemetryEmitter;
 };
 
 // ---------------------------------------------------------------------------
@@ -233,11 +228,18 @@ export async function runHeartbeatTick(
           "loop-heartbeat",
           `Terminal heartbeat signal suppressed: local process alive for loopId=${loopId} reason=${disposition.reason} pid=${job.pid}`,
         );
-        deps.telemetry?.emit("loop.heartbeat.terminal_finalization_suppressed", {
-          loopId,
-          reason: disposition.reason as string,
-          jobPid: job.pid as number,
-          httpStatus: httpStatus as number | null,
+        deps.telemetry?.emit({
+          severity: "warn",
+          category: "loop.heartbeat.terminal_finalization_suppressed",
+          message: `Terminal heartbeat signal suppressed: local process alive for loopId=${loopId}`,
+          trace: { loopId, jobId: loopId },
+          diagnostics: {
+            extra: {
+              reason: disposition.reason as string,
+              jobPid: job.pid as number,
+              httpStatus: httpStatus as number | null,
+            },
+          },
         });
         // Do NOT call finalizeFn or stopFn — the loop process is still alive.
         return;

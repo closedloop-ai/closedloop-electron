@@ -38,6 +38,10 @@ import {
 } from "./loop-token-test-utils.js";
 import { createLocalJob, makeStubJobStore } from "./job-store-test-utils.js";
 import type { LocalJob } from "../src/main/job-store.js";
+import type {
+  TelemetryEmitter,
+  TelemetryEventPayload,
+} from "../src/main/telemetry-protocol.js";
 
 // Per-test scheduler context. Cleared in afterEach via Symbol.dispose so
 // timers never leak across tests.
@@ -1062,143 +1066,71 @@ describe("PLN-740 T-3.5: postLoopHeartbeat stale JWT swap via HeartbeatDeps", ()
 // ---------------------------------------------------------------------------
 
 describe("PLN-740 T-3.6: Process-alive guard on terminal heartbeat (AC-012)", () => {
-  test("HTTP 410 + isProcessRunning=true: finalizeFn NOT called, telemetry emitted", async () => {
-    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
-    mock.timers.enable({ apis: ["Date", "setInterval"] });
-    installHeartbeatFetchStub(410);
+  // The guard branches on `job.pid != null && isProcessRunning(job.pid)`, NOT
+  // on the terminal HTTP status — the status is only copied into the telemetry
+  // payload. So the three terminal codes (410/gone, 401/unauthorized,
+  // 404/not_found) all exercise the same suppression path; table-drive them.
+  for (const { httpStatus, loopId, jobId, pid } of [
+    { httpStatus: 410, loopId: "loop-alive-guard", jobId: "job-alive", pid: 12345 },
+    { httpStatus: 401, loopId: "loop-alive-guard-401", jobId: "job-alive-401", pid: 22222 },
+    { httpStatus: 404, loopId: "loop-alive-guard-404", jobId: "job-alive-404", pid: 33333 },
+  ]) {
+    test(`HTTP ${httpStatus} + isProcessRunning=true: finalizeFn NOT called, telemetry emitted`, async () => {
+      process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+      mock.timers.enable({ apis: ["Date", "setInterval"] });
+      installHeartbeatFetchStub(httpStatus);
 
-    const loopId = "loop-alive-guard";
-    const testJob = createLocalJob({ id: "job-alive", loopId, pid: 12345 });
-    const stubJobStore = makeStubJobStore({ [loopId]: testJob });
+      const testJob = createLocalJob({ id: jobId, loopId, pid });
+      const stubJobStore = makeStubJobStore({ [loopId]: testJob });
 
-    const finalizeCalls: unknown[] = [];
-    const mockFinalizeFn = async (j: LocalJob, s: "TIMED_OUT" | "UNKNOWN") => {
-      finalizeCalls.push({ j, s });
-    };
+      const finalizeCalls: unknown[] = [];
+      const mockFinalizeFn = async (j: LocalJob, s: "TIMED_OUT" | "UNKNOWN") => {
+        finalizeCalls.push({ j, s });
+      };
 
-    const telemetryEvents: Array<{ event: string; data: Record<string, unknown> }> = [];
-    const mockTelemetry = {
-      emit: (event: string, data: Record<string, unknown>) => {
-        telemetryEvents.push({ event, data });
-      },
-    };
+      const telemetryEvents: TelemetryEventPayload[] = [];
+      const mockTelemetry: TelemetryEmitter = {
+        emit: (event) => {
+          telemetryEvents.push(event);
+        },
+      };
 
-    ctx.startHeartbeat(loopId, {
-      apiBaseUrl: "https://api.example.com",
-      getToken: () => "tok",
-      jobStore: stubJobStore,
-      finalizeFn: mockFinalizeFn,
-      isProcessRunning: (_pid: number) => true,
-      telemetry: mockTelemetry,
+      ctx.startHeartbeat(loopId, {
+        apiBaseUrl: "https://api.example.com",
+        getToken: () => "tok",
+        jobStore: stubJobStore,
+        finalizeFn: mockFinalizeFn,
+        isProcessRunning: (_pid: number) => true,
+        telemetry: mockTelemetry,
+      });
+
+      mock.timers.tick(1000);
+      await flushAsync();
+
+      // finalizeFn must NOT be called.
+      assert.equal(
+        finalizeCalls.length,
+        0,
+        `finalizeFn must not be called when process is alive (${httpStatus})`,
+      );
+
+      // Telemetry must have been emitted on the canonical category with the
+      // suppression context in trace + diagnostics.extra.
+      const telemetryEvent = telemetryEvents.find(
+        (e) => e.category === "loop.heartbeat.terminal_finalization_suppressed",
+      );
+      assert.ok(telemetryEvent, `telemetry event must be emitted for ${httpStatus}`);
+      assert.equal(telemetryEvent.severity, "warn", "telemetry.severity must be warn");
+      assert.equal(telemetryEvent.trace?.loopId, loopId, "telemetry.trace.loopId must match");
+      const extra = telemetryEvent.diagnostics?.extra ?? {};
+      assert.equal(extra.jobPid, pid, "telemetry.diagnostics.extra.jobPid must match");
+      assert.equal(
+        extra.httpStatus,
+        httpStatus,
+        `telemetry.diagnostics.extra.httpStatus must be ${httpStatus}`,
+      );
     });
-
-    mock.timers.tick(1000);
-    await flushAsync();
-
-    // finalizeFn must NOT be called.
-    assert.equal(finalizeCalls.length, 0, "finalizeFn must not be called when process is alive");
-
-    // Telemetry must have been emitted with the correct event and fields.
-    const telemetryEvent = telemetryEvents.find(
-      (e) => e.event === "loop.heartbeat.terminal_finalization_suppressed",
-    );
-    assert.ok(telemetryEvent, "telemetry event must be emitted");
-    assert.equal(telemetryEvent.data.loopId, loopId, "telemetry.loopId must match");
-    assert.equal(telemetryEvent.data.jobPid, 12345, "telemetry.jobPid must match");
-    assert.equal(telemetryEvent.data.httpStatus, 410, "telemetry.httpStatus must be 410");
-  });
-
-  test("HTTP 401 + isProcessRunning=true: finalizeFn NOT called, telemetry emitted", async () => {
-    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
-    mock.timers.enable({ apis: ["Date", "setInterval"] });
-    installHeartbeatFetchStub(401);
-
-    const loopId = "loop-alive-guard-401";
-    const testJob = createLocalJob({ id: "job-alive-401", loopId, pid: 22222 });
-    const stubJobStore = makeStubJobStore({ [loopId]: testJob });
-
-    const finalizeCalls: unknown[] = [];
-    const mockFinalizeFn = async (j: LocalJob, s: "TIMED_OUT" | "UNKNOWN") => {
-      finalizeCalls.push({ j, s });
-    };
-
-    const telemetryEvents: Array<{ event: string; data: Record<string, unknown> }> = [];
-    const mockTelemetry = {
-      emit: (event: string, data: Record<string, unknown>) => {
-        telemetryEvents.push({ event, data });
-      },
-    };
-
-    ctx.startHeartbeat(loopId, {
-      apiBaseUrl: "https://api.example.com",
-      getToken: () => "tok",
-      jobStore: stubJobStore,
-      finalizeFn: mockFinalizeFn,
-      isProcessRunning: (_pid: number) => true,
-      telemetry: mockTelemetry,
-    });
-
-    mock.timers.tick(1000);
-    await flushAsync();
-
-    // finalizeFn must NOT be called.
-    assert.equal(finalizeCalls.length, 0, "finalizeFn must not be called when process is alive (401)");
-
-    // Telemetry must have been emitted with the correct event and fields.
-    const telemetryEvent = telemetryEvents.find(
-      (e) => e.event === "loop.heartbeat.terminal_finalization_suppressed",
-    );
-    assert.ok(telemetryEvent, "telemetry event must be emitted for 401");
-    assert.equal(telemetryEvent.data.loopId, loopId, "telemetry.loopId must match");
-    assert.equal(telemetryEvent.data.jobPid, 22222, "telemetry.jobPid must match");
-    assert.equal(telemetryEvent.data.httpStatus, 401, "telemetry.httpStatus must be 401");
-  });
-
-  test("HTTP 404 + isProcessRunning=true: finalizeFn NOT called, telemetry emitted", async () => {
-    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
-    mock.timers.enable({ apis: ["Date", "setInterval"] });
-    installHeartbeatFetchStub(404);
-
-    const loopId = "loop-alive-guard-404";
-    const testJob = createLocalJob({ id: "job-alive-404", loopId, pid: 33333 });
-    const stubJobStore = makeStubJobStore({ [loopId]: testJob });
-
-    const finalizeCalls: unknown[] = [];
-    const mockFinalizeFn = async (j: LocalJob, s: "TIMED_OUT" | "UNKNOWN") => {
-      finalizeCalls.push({ j, s });
-    };
-
-    const telemetryEvents: Array<{ event: string; data: Record<string, unknown> }> = [];
-    const mockTelemetry = {
-      emit: (event: string, data: Record<string, unknown>) => {
-        telemetryEvents.push({ event, data });
-      },
-    };
-
-    ctx.startHeartbeat(loopId, {
-      apiBaseUrl: "https://api.example.com",
-      getToken: () => "tok",
-      jobStore: stubJobStore,
-      finalizeFn: mockFinalizeFn,
-      isProcessRunning: (_pid: number) => true,
-      telemetry: mockTelemetry,
-    });
-
-    mock.timers.tick(1000);
-    await flushAsync();
-
-    // finalizeFn must NOT be called.
-    assert.equal(finalizeCalls.length, 0, "finalizeFn must not be called when process is alive (404)");
-
-    // Telemetry must have been emitted with the correct event and fields.
-    const telemetryEvent = telemetryEvents.find(
-      (e) => e.event === "loop.heartbeat.terminal_finalization_suppressed",
-    );
-    assert.ok(telemetryEvent, "telemetry event must be emitted for 404");
-    assert.equal(telemetryEvent.data.loopId, loopId, "telemetry.loopId must match");
-    assert.equal(telemetryEvent.data.jobPid, 33333, "telemetry.jobPid must match");
-    assert.equal(telemetryEvent.data.httpStatus, 404, "telemetry.httpStatus must be 404");
-  });
+  }
 
   test("HTTP 410 + isProcessRunning=false: finalizeFn IS called (normal path)", async () => {
     process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";

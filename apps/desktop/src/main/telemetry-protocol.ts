@@ -58,7 +58,8 @@ export type TelemetryCategory =
   | "loop.perf.tool"
   | "loop.perf.skill"
   | "loop.perf.spawn"
-  | "loop.perf.parse_failure";
+  | "loop.perf.parse_failure"
+  | "loop.heartbeat.terminal_finalization_suppressed";
 
 export interface TelemetryTraceContext {
   computeTargetId?: string;
