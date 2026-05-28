@@ -990,7 +990,7 @@ test("sanitizeSessionForSync strips content fields", () => {
   // agent.task is stripped (contains user prompt)
   assert.equal(sanitized.agents[0].task, null, "agent task should be null");
 
-  // data.content is stripped, but other data keys are preserved
+  // content/stdout/stderr leaves are stripped recursively, other data keys preserved
   assert.equal(sanitized.events[0].data, null, "event with only content should be null");
   assert.deepEqual(sanitized.events[1].data, { path: "/home/user/.env" }, "non-content data keys preserved");
 
@@ -1043,4 +1043,47 @@ test("sanitizeSessionForSync preserves data without content key", () => {
   const sanitized = sanitizeSessionForSync(session as any);
 
   assert.deepEqual(sanitized.events[0].data, { command: "git status", cwd: "/home/user" }, "data without content key is fully preserved");
+});
+
+test("sanitizeSessionForSync strips content/stdout/stderr recursively inside tool_response", () => {
+  const session = {
+    externalSessionId: "sess-recursive",
+    status: "completed",
+    startedAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T01:00:00Z",
+    agents: [],
+    events: [
+      {
+        externalEventId: "1", eventType: "PostToolUse", toolName: "Read",
+        summary: "File read",
+        data: {
+          tool_name: "Read",
+          tool_response: { type: "text", file: { filePath: "/app/.env", content: "DB_PASSWORD=secret" } },
+        },
+        createdAt: "2026-01-01T00:01:00Z",
+      },
+      {
+        externalEventId: "2", eventType: "PostToolUse", toolName: "Bash",
+        summary: "Command ran",
+        data: {
+          tool_name: "Bash",
+          tool_response: { stdout: "secret output", stderr: "secret errors", interrupted: false, isImage: false },
+        },
+        createdAt: "2026-01-01T00:02:00Z",
+      },
+    ],
+    tokenUsageByModel: [],
+  };
+
+  const sanitized = sanitizeSessionForSync(session as any);
+
+  assert.deepEqual(sanitized.events[0].data, {
+    tool_name: "Read",
+    tool_response: { type: "text", file: { filePath: "/app/.env" } },
+  }, "Read: content stripped, filePath and type preserved");
+
+  assert.deepEqual(sanitized.events[1].data, {
+    tool_name: "Bash",
+    tool_response: { interrupted: false, isImage: false },
+  }, "Bash: stdout/stderr stripped, structural keys preserved");
 });

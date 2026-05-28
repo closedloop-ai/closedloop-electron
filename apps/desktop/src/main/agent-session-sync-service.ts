@@ -634,15 +634,27 @@ export function sanitizeSessionForSync(
   };
 }
 
+const STRIPPED_LEAF_KEYS = new Set(["prompt", "content", "stdout", "stderr"]);
+
 function stripDataContent(data: SyncJsonValue | undefined): SyncJsonValue | undefined {
-  if (!data || typeof data !== "object" || Array.isArray(data)) {
+  if (data === undefined || data === null) {
     return data;
   }
-  if ("content" in data) {
-    const { content: _, ...rest } = data;
-    return Object.keys(rest).length > 0 ? rest : null;
+  if (typeof data !== "object") {
+    return data;
   }
-  return data;
+  if (Array.isArray(data)) {
+    return data.map((item) => stripDataContent(item) ?? null);
+  }
+  const obj = data as Record<string, SyncJsonValue>;
+  const rest: Record<string, SyncJsonValue> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (STRIPPED_LEAF_KEYS.has(k)) {
+      continue;
+    }
+    rest[k] = (typeof v === "object" && v !== null ? stripDataContent(v) : v) ?? null;
+  }
+  return Object.keys(rest).length > 0 ? rest : null;
 }
 
 export function resolveAgentMonitorDatabasePath(
