@@ -96,19 +96,52 @@ function* iterJsxExpressions(source) {
   while (i < source.length) {
     const open = source.indexOf("{", i);
     if (open === -1) return;
+
     // Skip if the brace is clearly NOT a JSX expression slot.
-    const prevChar = (() => {
-      for (let k = open - 1; k >= 0; k--) {
+    //
+    // A `{` opens a JSX expression in these contexts:
+    //   1. Immediately after `>` (or whitespace after `>`)   — child position
+    //   2. After `"` or `'`                                  — end of an attribute string
+    //   3. After `=` IF preceded by a JSX attribute name      — `attr={expr}`
+    //
+    // Everything else (function bodies, object literals, type generics, IIFE
+    // patterns) is rejected. JSX attribute slots were previously dropped
+    // because prevChar === '=' fell into the reject branch — see PR #246
+    // codex-review finding [P2] #3.
+    const prevNonWs = (k) => {
+      for (; k >= 0; k--) {
         const c = source[k];
         if (c === " " || c === "\t" || c === "\n" || c === "\r") continue;
-        return c;
+        return { ch: c, idx: k };
       }
-      return "";
-    })();
-    if (
-      prevChar &&
-      !(prevChar === ">" || prevChar === '"' || prevChar === "'" || prevChar === "\n")
+      return null;
+    };
+    const prev = prevNonWs(open - 1);
+    const prevChar = prev ? prev.ch : "";
+
+    let accept = false;
+    if (!prevChar) {
+      // Start of file — treat as accept (defensive; rare in real files).
+      accept = true;
+    } else if (
+      prevChar === ">" ||
+      prevChar === '"' ||
+      prevChar === "'" ||
+      prevChar === "\n"
     ) {
+      accept = true;
+    } else if (prevChar === "=") {
+      // JSX attribute slot only if the char before `=` is a valid attribute
+      // name terminator: letter, digit, underscore, or hyphen. Reserves the
+      // `x = {...}` assignment pattern for the reject branch (one space at
+      // minimum between `=` and `{`).
+      const before = prevNonWs(prev.idx - 1);
+      if (before && /[A-Za-z0-9_\-]/.test(before.ch)) {
+        accept = true;
+      }
+    }
+
+    if (!accept) {
       // Not a JSX expression slot — advance past this brace.
       i = open + 1;
       continue;

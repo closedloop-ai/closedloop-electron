@@ -167,14 +167,29 @@ function classify(row) {
     };
   }
 
-  // 4. Manifest-covered screens — the broad sweep of detections per screen
-  //    is dominated by tile + tooltip + badge renderings of the same values
-  //    we audit via /api/* manifest tiles. Cross-ref each.
+  // 4. Manifest-covered screens — try to bind each detection to a specific
+  //    manifest tile via value-expression substring matching against the
+  //    tile's endpoint_field tail, oracle name tail, or id tail. A *bound*
+  //    cross_ref proves the rendered value is one we audit; an *unbound*
+  //    cross_ref (status: cross_ref_weak) flags that the screen has
+  //    coverage but this specific detection didn't match — the kind of
+  //    weak claim PR #246 codex-review finding [P2] #4 called out.
   if (MANIFEST_COVERED_SCREENS.has(row.screen)) {
+    const candidates = CURATED.tiles.filter((t) => t.screen === row.screen);
+    const bound = bindDetectionToTile(row, candidates);
+    if (bound) {
+      return {
+        status: "cross_ref",
+        covered_by: "all-screens.api-audit.test.mjs",
+        bound_to_tile: bound.tile.id,
+        bound_via: bound.via,
+        reason: `value_expr matched manifest tile ${bound.tile.id} via ${bound.via} (token: "${bound.token}")`,
+      };
+    }
     return {
-      status: "cross_ref",
+      status: "cross_ref_weak",
       covered_by: "all-screens.api-audit.test.mjs",
-      reason: `${row.screen} primary data summaries covered by manifest tiles (multiple scanner detections per screen reflect tile + tooltip + badge renderings of the same value)`,
+      reason: `${row.screen} has manifest coverage but this detection (\`${row.value_expr}\`) did not bind to a specific tile via endpoint_field/oracle/id substring match — needs explicit annotation in Phase 3`,
     };
   }
 
@@ -182,12 +197,62 @@ function classify(row) {
   return { status: "needs_review", reason: "no classifier rule matched" };
 }
 
+/**
+ * Try to match a detection's value_expr to a specific manifest tile by
+ * looking for tail-tokens of (endpoint_field | oracle | id) inside
+ * value_expr. Returns `{ tile, via, token }` on success, null on failure.
+ *
+ * The "tail" of a dotted path is the last segment. For oracle/id, we also
+ * strip a common prefix (e.g. `dashboard_total_sessions` → tail
+ * `total_sessions`). Matching is substring + case-insensitive to absorb
+ * surface variations (`stats.total_sessions.toLocaleString()` vs
+ * `total_sessions`).
+ */
+function bindDetectionToTile(row, candidates) {
+  const haystack = row.value_expr.toLowerCase();
+  // Prefer longest matching token so we don't bind to a generic
+  // `total` if a specific `total_sessions` is available.
+  const matches = [];
+  for (const tile of candidates) {
+    const tokens = [];
+    if (tile.endpoint_field) {
+      tokens.push({ via: "endpoint_field", t: tile.endpoint_field.split(".").pop() });
+    }
+    if (tile.oracle) {
+      const parts = tile.oracle.split("_");
+      // Drop a known leading category like "dashboard"/"analytics" so the
+      // tail reads as `total_sessions` instead of `dashboard_total_sessions`.
+      const tail = parts.slice(1).join("_") || parts.join("_");
+      if (tail) tokens.push({ via: "oracle_tail", t: tail });
+    }
+    if (tile.id) {
+      const idTail = tile.id.split(".").pop();
+      if (idTail) tokens.push({ via: "id_tail", t: idTail });
+    }
+    for (const { via, t } of tokens) {
+      if (t && t.length >= 4 && haystack.includes(t.toLowerCase())) {
+        matches.push({ tile, via, token: t });
+      }
+    }
+  }
+  if (matches.length === 0) return null;
+  matches.sort((a, b) => b.token.length - a.token.length);
+  return matches[0];
+}
+
 const coverage = {
   $schema: "./coverage.schema.json",
   generated_at: new Date().toISOString(),
   source: "manifest.scanned.json",
   total_detections: SCANNED.tiles.length,
-  by_status: { tested: 0, cross_ref: 0, bug_filed: 0, out_of_scope: 0, needs_review: 0 },
+  by_status: {
+    tested: 0,
+    cross_ref: 0,
+    cross_ref_weak: 0,
+    bug_filed: 0,
+    out_of_scope: 0,
+    needs_review: 0,
+  },
   rows: [],
 };
 
@@ -209,11 +274,12 @@ const OUT = join(HERE, "coverage.json");
 writeFileSync(OUT, JSON.stringify(coverage, null, 2));
 console.log(`Wrote ${OUT}`);
 console.log(
-  `Coverage: tested=${coverage.by_status.tested} cross_ref=${coverage.by_status.cross_ref} bug_filed=${coverage.by_status.bug_filed} out_of_scope=${coverage.by_status.out_of_scope} needs_review=${coverage.by_status.needs_review}`,
+  `Coverage: tested=${coverage.by_status.tested} cross_ref=${coverage.by_status.cross_ref} cross_ref_weak=${coverage.by_status.cross_ref_weak} bug_filed=${coverage.by_status.bug_filed} out_of_scope=${coverage.by_status.out_of_scope} needs_review=${coverage.by_status.needs_review}`,
 );
 const totalAccounted =
   coverage.by_status.tested +
   coverage.by_status.cross_ref +
+  coverage.by_status.cross_ref_weak +
   coverage.by_status.bug_filed +
   coverage.by_status.out_of_scope;
 console.log(

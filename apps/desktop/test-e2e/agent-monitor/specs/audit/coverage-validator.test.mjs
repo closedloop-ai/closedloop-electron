@@ -34,6 +34,7 @@ test("coverage.json accounts for every scanner detection", () => {
   const VALID_STATUSES = new Set([
     "tested",
     "cross_ref",
+    "cross_ref_weak",
     "bug_filed",
     "out_of_scope",
   ]);
@@ -107,6 +108,7 @@ test("coverage summary — counts add up", () => {
   const sum =
     coverage.by_status.tested +
     coverage.by_status.cross_ref +
+    (coverage.by_status.cross_ref_weak ?? 0) +
     coverage.by_status.bug_filed +
     coverage.by_status.out_of_scope +
     coverage.by_status.needs_review;
@@ -120,6 +122,16 @@ test("coverage summary — counts add up", () => {
     0,
     `${coverage.by_status.needs_review} detections still need review`,
   );
+});
+
+test("cross_ref_weak count is informational (Phase 3 will tighten)", () => {
+  // cross_ref_weak = detection in a manifest-covered screen that didn't
+  // bind to a specific tile via value_expr substring match. Today these
+  // pass; Phase 3 of PLN-738 drives the count toward 0 via explicit
+  // tile-to-renderer annotations. This test exists so the count is
+  // visible in CI output, not to fail the build.
+  const weak = coverage.by_status.cross_ref_weak ?? 0;
+  console.log(`  cross_ref_weak: ${weak} of ${coverage.total_detections}`);
 });
 
 // ---------------------------------------------------------------------
@@ -141,14 +153,16 @@ function detectionLabel(row) {
 for (const row of coverage.rows) {
   test(`detection · ${detectionLabel(row)}`, () => {
     assert.ok(
-      ["tested", "cross_ref", "bug_filed", "out_of_scope"].includes(row.status),
+      ["tested", "cross_ref", "cross_ref_weak", "bug_filed", "out_of_scope"].includes(
+        row.status,
+      ),
       `detection has no valid status: ${row.status}`,
     );
 
-    if (row.status === "cross_ref") {
+    if (row.status === "cross_ref" || row.status === "cross_ref_weak") {
       assert.ok(
         row.covered_by,
-        "cross_ref must specify covered_by",
+        `${row.status} must specify covered_by`,
       );
       assert.ok(
         existsSync(join(SPEC_DIR, row.covered_by)),
@@ -156,7 +170,11 @@ for (const row of coverage.rows) {
       );
     }
 
-    if (row.status === "out_of_scope" || row.status === "cross_ref") {
+    if (
+      row.status === "out_of_scope" ||
+      row.status === "cross_ref" ||
+      row.status === "cross_ref_weak"
+    ) {
       assert.ok(
         row.reason && row.reason.length > 5,
         "status requires a reason",
