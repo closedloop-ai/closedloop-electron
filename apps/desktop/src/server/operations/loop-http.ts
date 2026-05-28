@@ -1,5 +1,8 @@
 import crypto from "node:crypto";
+import { buildManagedDesktopPopHeaders } from "../../main/desktop-pop-sign-utils.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
+import type { LoopTokenMeta } from "../../main/loop-token-store.js";
+import type { LoopPopDeps } from "../../main/loop-lifecycle.js";
 import { loopError, loopLog } from "./symphony-utils.js";
 
 // ---------------------------------------------------------------------------
@@ -268,41 +271,199 @@ export async function getCloudLoopStatus(
 }
 
 /**
+ * Clock skew tolerance for JWT expiry detection (30 seconds in milliseconds).
+ * When a JWT's expiresAt is within this window, we treat it as stale and
+ * proactively swap to the managed API key to avoid a round-trip 410.
+ */
+export const CLOCK_SKEW_MS = 30_000;
+
+/**
+ * Determines whether a persisted runner JWT is still usable for a heartbeat.
+ *
+ * Returns false when:
+ * - `meta === null` (safety guard — caller should short-circuit before this)
+ * - `meta.expiresAt` is set and the token is within CLOCK_SKEW_MS of expiry
+ *
+ * Returns true when:
+ * - `meta.expiresAt === undefined` — legacy tokens (written by older desktop
+ *   versions that did not track expiresAt). Treated as usable to avoid
+ *   breaking existing tokens.
+ * - Token is well before expiry.
+ *
+ * exported-jwt-still-in-store: runner JWT lives in LoopTokenStore until
+ * finalization; refresh failures do not delete it, so this helper is the
+ * authoritative expiry check.
+ *
+ * Exported for unit testing.
+ */
+export function isJwtUsable(
+  meta: LoopTokenMeta | null,
+  nowMs: number,
+  clockSkewMs: number,
+): boolean {
+  if (meta === null) return false;
+  // Legacy tokens (expiresAt === undefined) are treated as usable — they may
+  // be expired if written by an older desktop version that did not track
+  // expiresAt. Accepted to avoid breaking existing tokens.
+  if (meta.expiresAt === undefined) return true;
+  return meta.expiresAt > nowMs + clockSkewMs;
+}
+
+/**
+ * Deps required by postLoopHeartbeat for PoP signing and managed-key fallback.
+ * Extends LoopPopDeps with optional token-meta retrieval for expiry detection.
+ */
+export type HeartbeatPopDeps = LoopPopDeps & {
+  /**
+   * Returns the full LoopTokenMeta for expiry detection (T-1.4).
+   * When absent, falls back to the legacy `getToken` path (no expiry check).
+   */
+  getTokenMeta?: () => LoopTokenMeta | null;
+  /**
+   * Legacy token getter — kept for backwards compatibility with sendHeartbeatNow
+   * callers that predate getTokenMeta.
+   */
+  getToken?: () => string | null;
+};
+
+/**
  * POST a heartbeat to `/loops/:id/heartbeat`.
  *
  * Returns the same `LoopHttpResult` discriminated union as `postLoopEvent`
  * so callers can branch on `kind === "http" && status === 404` without
  * parsing strings.
  *
- * When `getSessionToken` is supplied and resolves to a non-null string, the
- * token is forwarded as `X-Session-Token`. The server uses this to attempt
- * revival of a TIMED_OUT loop. On a successful revival response the returned
- * success object includes `revived: true` plus the replacement runner token
- * fields (`token`, `expiresAt`, `jti`).
+ * ## PoP header attachment (AC-002, AC-003)
+ * When provenance is DESKTOP_MANAGED, three X-Desktop-* PoP headers are
+ * unconditionally attached via buildManagedDesktopPopHeaders. For RUNNING
+ * loops the server's primary JWT auth succeeds and these headers are ignored;
+ * for TIMED_OUT loops the server falls back to PoP verification. This is
+ * intentional — the client cannot know loop status before sending.
+ *
+ * ## Authorization header strategy (AC-009, AC-011)
+ * Four-way ladder:
+ * 1. JWT usable (present and not near expiry)  → Bearer <runnerJWT>
+ * 2. JWT stale  AND no DESKTOP_MANAGED key     → Bearer <staleJWT> + warn
+ *    (last resort for USER_CREATED keys — preserves behavior, avoids silent fail)
+ * 3. JWT stale  AND DESKTOP_MANAGED key        → Bearer <sk_live_managedKey>
+ *    (proactive revival swap — avoids 410 from a known-stale token)
+ * 4. getTokenMeta returns null AND getApiKey returns null → short-circuit auth
+ *
+ * ## Security invariant
+ * The Authorization header value MUST NEVER appear in any gatewayLog entry.
+ * The current implementation does not log headers — preserve this invariant.
+ *
+ * On a successful revival response the returned success object includes
+ * `revived: true` plus the replacement runner token fields.
  */
 export async function postLoopHeartbeat(
   apiBaseUrl: string,
   loopId: string,
-  getToken: () => string | null,
-  getSessionToken?: () => Promise<string | null>,
+  popDeps: HeartbeatPopDeps,
 ): Promise<LoopHttpResult> {
-  const url = `${apiBaseUrl}/loops/${encodeURIComponent(loopId)}/heartbeat`;
-  const token = getToken();
-  if (token === null) {
+  const {
+    getToken,
+    getTokenMeta,
+    getApiKey,
+    getApiKeyProvenance,
+    signDesktopRequest,
+    onDesktopPopUnavailable,
+  } = popDeps;
+
+  // ------------------------------------------------------------------
+  // Determine which Authorization credential to use (four-way ladder).
+  // ------------------------------------------------------------------
+
+  // Resolve token meta — either from the new getTokenMeta (expiry-aware) or
+  // from the legacy getToken path (no expiry check).
+  let tokenMeta: LoopTokenMeta | null;
+  if (getTokenMeta !== undefined) {
+    tokenMeta = getTokenMeta();
+  } else if (getToken !== undefined) {
+    // Legacy path: construct a pseudo-meta with no expiresAt so isJwtUsable
+    // treats it as always usable.
+    const tok = getToken();
+    tokenMeta = tok !== null ? { token: tok, expiresAt: undefined } : null;
+  } else {
+    tokenMeta = null;
+  }
+
+  const nowMs = Date.now();
+  const provenance = getApiKeyProvenance?.() ?? "USER_CREATED";
+  const managedKey =
+    provenance === "DESKTOP_MANAGED" ? (getApiKey?.() ?? null) : null;
+
+  let authorizationValue: string;
+  const jwtUsable = tokenMeta !== null && isJwtUsable(tokenMeta, nowMs, CLOCK_SKEW_MS);
+
+  if (jwtUsable && tokenMeta !== null) {
+    // Ladder rung 1: JWT is valid and not near expiry — use it.
+    authorizationValue = `Bearer ${tokenMeta.token}`;
+  } else if (!jwtUsable && managedKey === null) {
+    if (tokenMeta !== null) {
+      // Ladder rung 2: JWT is stale but no managed key available — send
+      // the stale JWT as a last resort (preserves behavior for USER_CREATED
+      // keys; at least gives the server a chance to respond).
+      // expired-JWT-still-in-store: runner JWT lives in LoopTokenStore until
+      // finalization; refresh failures do not delete it, so getToken() alone
+      // cannot detect a stale token.
+      gatewayLog.warn(
+        "loop-heartbeat",
+        `Heartbeat for loopId=${loopId}: JWT is stale/expired and no DESKTOP_MANAGED key available; sending stale JWT as last resort`,
+      );
+      authorizationValue = `Bearer ${tokenMeta.token}`;
+    } else {
+      // Ladder rung 4: no token meta and no managed key — short-circuit.
+      return { success: false, kind: "auth", error: "missing_token" };
+    }
+  } else if (!jwtUsable && managedKey !== null) {
+    // Ladder rung 3: JWT is stale but DESKTOP_MANAGED key is available —
+    // proactive revival swap so the server can verify PoP and revive the loop.
+    authorizationValue = `Bearer ${managedKey}`;
+  } else {
+    // Ladder rung 4: no usable token of any kind — short-circuit.
     return { success: false, kind: "auth", error: "missing_token" };
   }
 
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${token}`,
-    "Content-Type": "application/json",
-  };
+  // ------------------------------------------------------------------
+  // Attach PoP headers when provenance is DESKTOP_MANAGED (AC-002).
+  // The PoP pathname is signed over the same encoded loop-id segment that is
+  // sent on the wire (see encodedLoopId below), so the signed path and the
+  // request path are byte-identical for any loopId — including ids that need
+  // percent-encoding. Loop ids are UUIDs today (encode is a no-op), but signing
+  // the encoded path removes the latent divergence the previous raw-path signing
+  // would have introduced.
+  // ------------------------------------------------------------------
+  // PoP headers are attached unconditionally when provenance is DESKTOP_MANAGED.
+  // For RUNNING loops the server primary JWT auth succeeds and these headers are
+  // ignored; for TIMED_OUT loops the server falls back to PoP verification.
+  // This is intentional — the client cannot know loop status before sending.
+  //
+  // Single source of truth for the loop-id path segment: used for both the PoP
+  // signature pathname and the fetch URL so the two can never diverge.
+  const encodedLoopId = encodeURIComponent(loopId);
+  const popHeaders = await buildManagedDesktopPopHeaders({
+    apiKeyProvenance: provenance,
+    signDesktopRequest,
+    request: {
+      method: "POST",
+      pathname: `/loops/${encodedLoopId}/heartbeat`,
+    },
+    surface: "loop-heartbeat",
+    unavailableMessage: "PoP signing unavailable for heartbeat; revival disabled for this loop",
+    onUnavailable: onDesktopPopUnavailable,
+  });
 
-  if (getSessionToken !== undefined) {
-    const sessionToken = await getSessionToken();
-    if (sessionToken !== null) {
-      headers["X-Session-Token"] = sessionToken;
-    }
-  }
+  const url = `${apiBaseUrl}/loops/${encodedLoopId}/heartbeat`;
+
+  const headers: Record<string, string> = {
+    // Security invariant: NEVER log the Authorization header value in any
+    // gatewayLog entry. The current implementation does not log headers — this
+    // comment preserves that invariant explicitly.
+    Authorization: authorizationValue,
+    "Content-Type": "application/json",
+    ...(popHeaders ?? {}),
+  };
 
   try {
     const resp = await fetch(url, {
