@@ -38,6 +38,11 @@ const RESTART_MAX_DELAY_MS = 30_000;
 // forced process.exit(0). DB integrity is already flushed by then, so a short
 // grace + process-group SIGKILL keeps app shutdown within budget.
 const STOP_GRACE_MS = 2_000;
+// Bounds how long reclaimOrphan waits for a SIGKILLed orphan to actually exit
+// (and release the fixed port) before launch() respawns. Kept short — same order
+// as STOP_GRACE_MS — so a lingering pid can never stall the fire-and-forget boot;
+// handleExit()'s exponential-backoff restart loop is the fallback if it times out.
+const RECLAIM_WAIT_TIMEOUT_MS = 2_000;
 const requireFromHere = createRequire(import.meta.url);
 const execFileAsync = promisify(execFile);
 
@@ -222,6 +227,17 @@ export class AgentMonitorSidecar {
       if (runsOurEntry && startTimeMatches) {
         gatewayLog.info(TAG, `reclaiming orphan sidecar pid=${pid}`);
         killGroup(pid, "SIGKILL");
+        // SIGKILL delivery is not synchronous with the OS releasing the orphan's
+        // listening socket on our fixed port. Wait (bounded) for the pid to
+        // actually exit so the imminent respawn in launch() binds on the first
+        // attempt instead of racing a not-yet-released port and hitting
+        // EADDRINUSE. The deadline guarantees this never stalls the
+        // fire-and-forget boot; if the pid lingers past it, handleExit()'s
+        // exponential-backoff restart loop recovers on a later attempt.
+        const deadline = Date.now() + RECLAIM_WAIT_TIMEOUT_MS;
+        while (isRunning(pid) && Date.now() < deadline) {
+          await delay(READY_POLL_INTERVAL_MS);
+        }
       } else {
         gatewayLog.warn(
           TAG,

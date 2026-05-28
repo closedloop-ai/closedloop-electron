@@ -50,7 +50,7 @@ function methodBody(signature: string, windowChars: number): string {
 // is never silently truncated out of the slice. Pad generously; the cost is a
 // few extra chars of unrelated source, the failure mode of being too small is a
 // misleading "not found" that blames production code for a test-window bug.
-const reclaimOrphanBody = methodBody("private async reclaimOrphan()", 3200);
+const reclaimOrphanBody = methodBody("private async reclaimOrphan()", 4000);
 const handleExitBody = methodBody("private handleExit(", 2000);
 const launchBody = methodBody("private async launch()", 4000);
 
@@ -200,6 +200,21 @@ describe("agent-monitor-sidecar.ts source-level invariants", () => {
       reclaimOrphanBody,
       /recycled or foreign process[\s\S]{0,80}skipping kill/,
     );
+  });
+
+  test("AC-008f: reclaimOrphan waits (bounded) for the SIGKILLed orphan to exit before returning", () => {
+    // SIGKILL is not synchronous with the orphan releasing the fixed port, so
+    // reclaimOrphan must poll isRunning(pid) on a bounded deadline after the kill
+    // before launch() respawns — otherwise the first respawn can race a
+    // not-yet-released socket and hit EADDRINUSE. Assert the exact bounded-wait
+    // invariant: a deadline built from the named timeout constant, gating a
+    // delay()-spaced isRunning(pid) poll loop, placed AFTER the SIGKILL.
+    assert.match(
+      reclaimOrphanBody,
+      /killGroup\(pid, "SIGKILL"\);[\s\S]{0,600}const deadline = Date\.now\(\) \+ RECLAIM_WAIT_TIMEOUT_MS;\s*while \(isRunning\(pid\) && Date\.now\(\) < deadline\) \{\s*await delay\(READY_POLL_INTERVAL_MS\);\s*\}/,
+    );
+    // The timeout constant must be defined so the wait is genuinely bounded.
+    assert.match(sidecarSource, /const RECLAIM_WAIT_TIMEOUT_MS = [\d_]+;/);
   });
 
   // -------------------------------------------------------------------------
