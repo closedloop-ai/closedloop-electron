@@ -69,6 +69,22 @@ async function postHook(hookEvent) {
   return res.json();
 }
 
+// Poll-with-timeout for cross-connection DB visibility. The sidecar writes
+// via its own DatabaseSync handle; the test reads via a separate handle.
+// node:sqlite + journal_mode=delete usually publishes commits immediately,
+// but on a freshly-started sidecar there's a small window where the second
+// connection can read stale state. Up to ~500ms of polling absorbs that
+// race without masking real bugs (a real bug would never succeed).
+async function pollSync(check, { timeoutMs = 500, intervalMs = 25 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const v = check();
+    if (v) return v;
+    if (Date.now() >= deadline) return null;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 test("Claude hooks · UserPromptSubmit creates a session", async () => {
   const userPrompt = FIXTURE.events.find(
     (e) => e.hook_type === "UserPromptSubmit",
@@ -77,9 +93,9 @@ test("Claude hooks · UserPromptSubmit creates a session", async () => {
 
   const db = new DatabaseSync(dbPath);
   try {
-    const session = db
-      .prepare(`SELECT * FROM sessions WHERE id = ?`)
-      .get(FIXTURE.session_id);
+    const session = await pollSync(() =>
+      db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(FIXTURE.session_id),
+    );
     assert.ok(session, "session row should exist after UserPromptSubmit");
     assert.equal(session.cwd, "/Users/dev/repo");
     assert.equal(session.status, "active");
