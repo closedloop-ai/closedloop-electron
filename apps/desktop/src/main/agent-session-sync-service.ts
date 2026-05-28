@@ -623,19 +623,26 @@ export function sanitizeSessionForSync(
 ): SyncedAgentSession {
   return {
     ...session,
-    name: null,
-    metadata: null,
     agents: session.agents.map((agent) => ({
       ...agent,
       task: null,
-      metadata: null,
     })),
     events: session.events.map((event) => ({
       ...event,
-      summary: null,
-      data: null,
+      data: stripDataContent(event.data),
     })),
   };
+}
+
+function stripDataContent(data: SyncJsonValue | undefined): SyncJsonValue | undefined {
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return data;
+  }
+  if ("content" in data) {
+    const { content: _, ...rest } = data;
+    return Object.keys(rest).length > 0 ? rest : null;
+  }
+  return data;
 }
 
 export function resolveAgentMonitorDatabasePath(

@@ -987,15 +987,18 @@ test("sanitizeSessionForSync strips content fields", () => {
 
   const sanitized = sanitizeSessionForSync(session as any);
 
-  assert.equal(sanitized.metadata, null, "session metadata should be null");
+  // agent.task is stripped (contains user prompt)
   assert.equal(sanitized.agents[0].task, null, "agent task should be null");
-  assert.equal(sanitized.agents[0].metadata, null, "agent metadata should be null");
-  assert.equal(sanitized.events[0].summary, null, "event summary should be null");
-  assert.equal(sanitized.events[0].data, null, "event data should be null");
-  assert.equal(sanitized.events[1].summary, null);
-  assert.equal(sanitized.events[1].data, null);
 
-  assert.equal(sanitized.name, null, "session name should be null");
+  // data.content is stripped, but other data keys are preserved
+  assert.equal(sanitized.events[0].data, null, "event with only content should be null");
+  assert.deepEqual(sanitized.events[1].data, { path: "/home/user/.env" }, "non-content data keys preserved");
+
+  // everything else is kept
+  assert.deepEqual(sanitized.metadata, { key: "secret-value" }, "session metadata preserved");
+  assert.deepEqual(sanitized.agents[0].metadata, { internal: "data" }, "agent metadata preserved");
+  assert.equal(sanitized.events[0].summary, "user typed a secret API key", "event summary preserved");
+  assert.equal(sanitized.events[1].summary, "read .env file containing passwords", "event summary preserved");
   assert.equal(sanitized.externalSessionId, "sess-1", "session ID preserved");
   assert.equal(sanitized.status, "completed", "status preserved");
   assert.equal(sanitized.events[0].eventType, "UserPromptSubmit", "eventType preserved");
@@ -1003,7 +1006,6 @@ test("sanitizeSessionForSync strips content fields", () => {
   assert.equal(sanitized.events[0].createdAt, "2026-01-01T00:01:00Z", "createdAt preserved");
   assert.equal(sanitized.tokenUsageByModel[0].inputTokens, 1000, "token usage preserved");
   assert.equal(sanitized.tokenUsageByModel[0].estimatedCostUsd, 0.05, "cost preserved");
-
   assert.equal(sanitized.agents[0].externalAgentId, "agent-1", "agent ID preserved");
   assert.equal(sanitized.agents[0].name, "main", "agent name preserved");
   assert.equal(sanitized.agents[0].status, "completed", "agent status preserved");
@@ -1017,13 +1019,28 @@ test("sanitizeSessionForSync does not mutate the original session", () => {
     updatedAt: "2026-01-01T01:00:00Z",
     metadata: { secret: true },
     agents: [{ externalAgentId: "a1", name: "main", type: "main", status: "active", task: "secret task", metadata: { x: 1 } }],
-    events: [{ externalEventId: "1", eventType: "Test", toolName: null, summary: "secret", data: { key: "val" }, createdAt: "2026-01-01T00:00:00Z" }],
+    events: [{ externalEventId: "1", eventType: "Test", toolName: null, summary: "kept", data: { content: "stripped", other: "kept" }, createdAt: "2026-01-01T00:00:00Z" }],
     tokenUsageByModel: [],
   };
 
   sanitizeSessionForSync(session as any);
 
-  assert.deepEqual(session.metadata, { secret: true }, "original metadata unchanged");
   assert.equal(session.agents[0].task, "secret task", "original agent task unchanged");
-  assert.equal(session.events[0].summary, "secret", "original event summary unchanged");
+  assert.deepEqual(session.events[0].data, { content: "stripped", other: "kept" }, "original event data unchanged");
+});
+
+test("sanitizeSessionForSync preserves data without content key", () => {
+  const session = {
+    externalSessionId: "sess-nocontent",
+    status: "active",
+    startedAt: "2026-01-01T00:00:00Z",
+    updatedAt: "2026-01-01T01:00:00Z",
+    agents: [],
+    events: [{ externalEventId: "1", eventType: "Test", toolName: "Bash", summary: "ran command", data: { command: "git status", cwd: "/home/user" }, createdAt: "2026-01-01T00:00:00Z" }],
+    tokenUsageByModel: [],
+  };
+
+  const sanitized = sanitizeSessionForSync(session as any);
+
+  assert.deepEqual(sanitized.events[0].data, { command: "git status", cwd: "/home/user" }, "data without content key is fully preserved");
 });
