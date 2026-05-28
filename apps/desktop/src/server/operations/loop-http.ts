@@ -427,26 +427,34 @@ export async function postLoopHeartbeat(
 
   // ------------------------------------------------------------------
   // Attach PoP headers when provenance is DESKTOP_MANAGED (AC-002).
-  // pathname uses the raw decoded loopId — matching the symphony-plan-loop.ts
-  // DELETE pattern and server-side path normalization in desktop-pop.ts.
+  // The PoP pathname is signed over the same encoded loop-id segment that is
+  // sent on the wire (see encodedLoopId below), so the signed path and the
+  // request path are byte-identical for any loopId — including ids that need
+  // percent-encoding. Loop ids are UUIDs today (encode is a no-op), but signing
+  // the encoded path removes the latent divergence the previous raw-path signing
+  // would have introduced.
   // ------------------------------------------------------------------
   // PoP headers are attached unconditionally when provenance is DESKTOP_MANAGED.
   // For RUNNING loops the server primary JWT auth succeeds and these headers are
   // ignored; for TIMED_OUT loops the server falls back to PoP verification.
   // This is intentional — the client cannot know loop status before sending.
+  //
+  // Single source of truth for the loop-id path segment: used for both the PoP
+  // signature pathname and the fetch URL so the two can never diverge.
+  const encodedLoopId = encodeURIComponent(loopId);
   const popHeaders = await buildManagedDesktopPopHeaders({
     apiKeyProvenance: provenance,
     signDesktopRequest,
     request: {
       method: "POST",
-      pathname: `/loops/${loopId}/heartbeat`,
+      pathname: `/loops/${encodedLoopId}/heartbeat`,
     },
     surface: "loop-heartbeat",
     unavailableMessage: "PoP signing unavailable for heartbeat; revival disabled for this loop",
     onUnavailable: onDesktopPopUnavailable,
   });
 
-  const url = `${apiBaseUrl}/loops/${encodeURIComponent(loopId)}/heartbeat`;
+  const url = `${apiBaseUrl}/loops/${encodedLoopId}/heartbeat`;
 
   const headers: Record<string, string> = {
     // Security invariant: NEVER log the Authorization header value in any

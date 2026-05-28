@@ -778,14 +778,19 @@ describe("PLN-740 T-3.1: PoP headers for DESKTOP_MANAGED keys", () => {
     assert.ok(hb.desktopSignature, "X-Desktop-Signature must be present alongside runner JWT");
   });
 
-  test("signing request uses raw decoded loopId (not URL-encoded) in pathname", async () => {
+  test("PR #248: signing request pathname matches the wire URL path (both encoded)", async () => {
+    // Regression for the PR #248 review comment: the PoP signature must be
+    // computed over the exact path that is sent on the wire. Previously the
+    // pathname was signed over the raw loopId while the fetch URL used
+    // encodeURIComponent(loopId), so the signed and sent paths diverged for any
+    // loopId needing percent-encoding (server-side PoP signature mismatch).
     process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
     mock.timers.enable({ apis: ["Date", "setInterval"] });
     installHeartbeatFetchStub(200);
 
     const signingRequests: Array<{ method: string; pathname: string }> = [];
 
-    // Use a loopId with a URL-encodable character to verify decoded vs encoded.
+    // Use a loopId with a URL-encodable character so raw and encoded differ.
     const loopId = "loop id with space";
     start(loopId, {
       apiBaseUrl: "https://api.example.com",
@@ -800,18 +805,98 @@ describe("PLN-740 T-3.1: PoP headers for DESKTOP_MANAGED keys", () => {
     const sigReq = signingRequests[0];
     assert.ok(sigReq, "signing request must exist");
     assert.equal(sigReq.method, "POST", "signing request method must be POST");
-    // Pathname must use the raw decoded loopId — NOT encodeURIComponent(loopId).
+    // The signed pathname must use the encoded loopId so it equals the wire path.
     assert.equal(
       sigReq.pathname,
-      `/loops/${loopId}/heartbeat`,
-      "signing request pathname must use decoded loopId",
+      `/loops/${encodeURIComponent(loopId)}/heartbeat`,
+      "signing request pathname must use the encoded loopId (parity with the wire URL)",
     );
-    // Verify the fetch URL uses the encoded form.
+    // The reviewed invariant: the signed pathname is byte-identical to the path
+    // segment of the URL actually sent to fetch.
     const hb = capturedHeartbeats[0];
     assert.ok(hb, "heartbeat must be captured");
-    assert.ok(
-      hb.url.includes(encodeURIComponent(loopId)),
-      "fetch URL must use URL-encoded loopId",
+    const wirePath = new URL(hb.url).pathname;
+    assert.equal(
+      sigReq.pathname,
+      wirePath,
+      "signed PoP pathname must equal the wire URL pathname",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PR #248: getTokenMeta must carry the body.closedLoopAuthToken fallback
+//
+// getTokenMeta wins over getToken in postLoopHeartbeat. The symphony-loop spawn
+// path wires getTokenMeta as:
+//   () => loopTokenStore.getLoopToken(loopId) ?? { token: body.closedLoopAuthToken }
+// Without the `?? { token: ... }` fallback, a USER_CREATED loop short-circuits
+// to missing_token whenever the token store is empty (e.g. safeStorage was
+// unavailable so setLoopToken threw at start). These tests pin the invariant:
+// the fallback is what keeps the heartbeat alive in that case.
+// ---------------------------------------------------------------------------
+
+describe("PR #248: getTokenMeta body-token fallback", () => {
+  test("empty store + USER_CREATED: getTokenMeta fallback sends Bearer <body token>", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+    installHeartbeatFetchStub(200);
+
+    // Empty store models safeStorage unavailable: setLoopToken threw at start,
+    // so getLoopToken returns null for this loop.
+    const tokenStore = createTestLoopTokenStore(tempRoot, "pr248-fallback");
+    const bodyToken = "body-fallback-token";
+    const loopId = "loop-pr248-fallback";
+
+    start(loopId, {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => tokenStore.getLoopToken(loopId)?.token ?? bodyToken,
+      getApiKeyProvenance: () => "USER_CREATED",
+      getApiKey: () => null,
+      loopTokenStore: tokenStore,
+      // Mirrors the symphony-loop wiring with the restored fallback.
+      getTokenMeta: () => tokenStore.getLoopToken(loopId) ?? { token: bodyToken },
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+    assert.equal(capturedHeartbeats.length, 1, "heartbeat must be sent, not short-circuited");
+    const hb = capturedHeartbeats[0];
+    assert.ok(hb);
+    assert.equal(
+      hb.authorization,
+      `Bearer ${bodyToken}`,
+      "Authorization must fall back to the body token when the store is empty",
+    );
+  });
+
+  test("regression: getTokenMeta WITHOUT fallback short-circuits to missing_token (no heartbeat)", async () => {
+    process.env.CLOSEDLOOP_HEARTBEAT_INTERVAL_MS = "1000";
+    mock.timers.enable({ apis: ["Date", "setInterval"] });
+    installHeartbeatFetchStub(200);
+
+    const tokenStore = createTestLoopTokenStore(tempRoot, "pr248-nofallback");
+    const loopId = "loop-pr248-nofallback";
+
+    start(loopId, {
+      apiBaseUrl: "https://api.example.com",
+      getToken: () => tokenStore.getLoopToken(loopId)?.token ?? "body-fallback-token",
+      getApiKeyProvenance: () => "USER_CREATED",
+      getApiKey: () => null,
+      loopTokenStore: tokenStore,
+      // The pre-fix wiring: no body-token fallback in the getTokenMeta path.
+      getTokenMeta: () => tokenStore.getLoopToken(loopId),
+    });
+
+    mock.timers.tick(1000);
+    await flushAsync();
+    // The dead getToken fallback never runs because getTokenMeta wins; with an
+    // empty store and no managed key the ladder short-circuits to missing_token
+    // and no request is sent. This is the regression the fallback prevents.
+    assert.equal(
+      capturedHeartbeats.length,
+      0,
+      "without the fallback the heartbeat short-circuits to missing_token (no fetch)",
     );
   });
 });

@@ -7948,8 +7948,16 @@ async function handleLoopRequest(
       signDesktopRequest: popDeps?.signDesktopRequest,
       onDesktopPopUnavailable: popDeps?.onDesktopPopUnavailable,
       // Supply getTokenMeta for proactive JWT-expiry detection (T-1.4 / AC-011).
+      // getTokenMeta wins over getToken in postLoopHeartbeat, so it must carry
+      // the same body.closedLoopAuthToken fallback getToken has — otherwise a
+      // USER_CREATED loop short-circuits to missing_token when safeStorage is
+      // unavailable (setLoopToken threw at start, so the store is empty). The
+      // synthesized meta omits expiresAt so isJwtUsable treats it as a usable
+      // legacy token, matching the pseudo-meta postLoopHeartbeat builds for the
+      // legacy getToken path.
       getTokenMeta: loopTokenStore
-        ? () => loopTokenStore.getLoopToken(body.loopId)
+        ? () =>
+            loopTokenStore.getLoopToken(body.loopId) ?? { token: body.closedLoopAuthToken }
         : undefined,
       // When jobStore is absent (legacy no-store path), the heartbeat cannot look up or
       // finalize a local job. Provide a no-op stub so the TypeScript type is satisfied
