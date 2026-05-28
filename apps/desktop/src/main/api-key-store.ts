@@ -3,6 +3,7 @@ import {
   getElectronSafeStorage,
   type SafeStorageLike,
 } from "./electron-safe-storage.js";
+import type { ApiKeyProvenance as ApiKeyProvenanceFromContracts } from "../shared/contracts.js";
 
 export type { SafeStorageLike } from "./electron-safe-storage.js";
 
@@ -12,8 +13,12 @@ type SecretsSchema = {
   [key: string]: string | undefined;
 };
 
-/** Provenance controls whether Desktop PoP signing applies to the active API key. */
-export type ApiKeyProvenance = "USER_CREATED" | "DESKTOP_MANAGED";
+/**
+ * Provenance controls whether Desktop PoP signing applies to the active API key.
+ * Re-exported from contracts.ts (SSOT) so all imports from api-key-store.ts
+ * continue to work without changes.
+ */
+export type ApiKeyProvenance = ApiKeyProvenanceFromContracts;
 
 /** Plaintext API key plus non-secret provenance metadata for request-signing decisions. */
 export type ApiKeyRecord = {

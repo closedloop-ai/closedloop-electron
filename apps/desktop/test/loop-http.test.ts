@@ -872,36 +872,17 @@ describe("getCloudLoopStatus", () => {
 // postLoopHeartbeat — X-Session-Token header presence/absence (AC-005)
 // ---------------------------------------------------------------------------
 
+// PLN-740 T-4.8: X-Session-Token header tests removed.
+// The X-Session-Token revival path has been removed in PLN-740 T-4.3.
+// X-Session-Token header is no longer sent with heartbeat requests.
 describe("postLoopHeartbeat X-Session-Token header", () => {
-  test("includes X-Session-Token header when getSessionToken resolves to a non-null string", async () => {
-    installFetchStub({ status: 200, responseBody: "{}" });
-
-    await postLoopHeartbeat(
-      "https://api.example.com",
-      "loop-session-hdr",
-      () => "runner-token",
-      () => Promise.resolve("clerk-session-token"),
-    );
-
-    assert.equal(capturedRequests.length, 1);
-    const req = capturedRequests[0];
-    assert.ok(req, "Expected a captured request");
-    assert.equal(
-      req.headers["x-session-token"],
-      "clerk-session-token",
-      "X-Session-Token must be set when getSessionToken returns a non-null string",
-    );
-    assert.equal(req.headers["authorization"], "Bearer runner-token");
-  });
-
-  test("omits X-Session-Token header when getSessionToken is not provided", async () => {
+  test("PLN-740 T-4.3: X-Session-Token header is never sent (revival path removed)", async () => {
     installFetchStub({ status: 200, responseBody: "{}" });
 
     await postLoopHeartbeat(
       "https://api.example.com",
       "loop-no-session-hdr",
-      () => "runner-token",
-      // getSessionToken not provided (undefined)
+      { getToken: () => "runner-token" },
     );
 
     assert.equal(capturedRequests.length, 1);
@@ -909,26 +890,8 @@ describe("postLoopHeartbeat X-Session-Token header", () => {
     assert.ok(req, "Expected a captured request");
     assert.ok(
       !("x-session-token" in req.headers),
-      "X-Session-Token must be absent when getSessionToken is not provided",
+      "X-Session-Token must never be sent (PLN-740 T-4.3)",
     );
-  });
-
-  test("omits X-Session-Token header when getSessionToken resolves to null", async () => {
-    installFetchStub({ status: 200, responseBody: "{}" });
-
-    await postLoopHeartbeat(
-      "https://api.example.com",
-      "loop-null-session-hdr",
-      () => "runner-token",
-      () => Promise.resolve(null),
-    );
-
-    assert.equal(capturedRequests.length, 1);
-    const req = capturedRequests[0];
-    assert.ok(req, "Expected a captured request");
-    assert.ok(
-      !("x-session-token" in req.headers),
-      "X-Session-Token must be absent when getSessionToken resolves to null",
-    );
+    assert.equal(req.headers["authorization"], "Bearer runner-token");
   });
 });

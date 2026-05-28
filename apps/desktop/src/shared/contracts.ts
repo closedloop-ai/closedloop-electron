@@ -120,6 +120,27 @@ export interface SavedConfig {
   pendingOnboardingAttemptId?: string | null;
 }
 
+/**
+ * API key provenance — indicates whether the key was created by the desktop
+ * (DESKTOP_MANAGED) or by the user in the web dashboard (USER_CREATED).
+ *
+ * Defined here as a standalone type alias (pure string literal union, no
+ * runtime value) so it can be used in both the shared DesktopSettings type
+ * and the ManagedKeyHintState below. This is the canonical SSOT definition;
+ * api-key-store.ts re-exports this alias so existing imports from that module
+ * continue to work without changes.
+ */
+export type ApiKeyProvenance = "USER_CREATED" | "DESKTOP_MANAGED";
+
+/**
+ * Returned by the desktop:get-managed-key-hint-state IPC channel.
+ * Indicates whether the Settings panel should show the revival-limitation hint.
+ */
+export type ManagedKeyHintState = {
+  provenance: ApiKeyProvenance | null;
+  shouldShow: boolean;
+};
+
 export interface DesktopSettings {
   autoApprovalRules: Record<string, RiskTier>;
   alwaysAllowRules: AlwaysAllowRule[];
@@ -154,6 +175,18 @@ export interface DesktopSettings {
   updateAndRestartEnabled: boolean;
   /** Splits oversized agent sessions into chunked batches for sync. Requires relay support. */
   agentSessionChunkedSyncEnabled: boolean;
+  /**
+   * ISO timestamp when the user last dismissed the managed-key revival hint
+   * (D5 / AC-010). Null means never dismissed.
+   */
+  managedKeyHintDismissedAt: string | null;
+  /**
+   * The API key provenance that was active when the user last dismissed the hint.
+   * Used to detect provenance regression (USER_CREATED → DESKTOP_MANAGED →
+   * USER_CREATED) so the hint reappears after a key rotation.
+   * Null means the hint has never been dismissed.
+   */
+  managedKeyHintLastSeenProvenance: "DESKTOP_MANAGED" | "USER_CREATED" | null;
 }
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
@@ -178,4 +211,6 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   activeConfigId: null,
   updateAndRestartEnabled: false,
   agentSessionChunkedSyncEnabled: false,
+  managedKeyHintDismissedAt: null,
+  managedKeyHintLastSeenProvenance: null,
 };

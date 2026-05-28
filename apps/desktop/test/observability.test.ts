@@ -21,9 +21,6 @@ const _jobPlanSourceResolvedCategoryCheck: TelemetryCategory =
   "job.plan_source_resolved";
 const _jobDecisionTableVerificationCategoryCheck: TelemetryCategory =
   "job.decision_table_verification";
-const _loopRequestCloudSessionTokenCategoryCheck: TelemetryCategory =
-  "loop.request.cloud_session_token";
-
 afterEach(async () => {
   await Observability.shutdown();
   Observability.reset();
@@ -343,33 +340,6 @@ describe("Observability", () => {
     assert.equal(telemetryEvents.length, 1);
     assert.equal(telemetryEvents[0].category, "queue.stats_changed");
     assert.equal(analyticsEvents.length, 0);
-  });
-
-  test("loop request cloud session token presence is telemetry-only and never emits the token", () => {
-    const telemetryEvents: EnrichedTelemetryEvent[] = [];
-    const analyticsEvents: AnalyticsEvent[] = [];
-    Observability.init({
-      telemetrySend: (event) => telemetryEvents.push(event),
-      analytics: {
-        send: (event) => analyticsEvents.push(event),
-        flush: async () => {},
-      },
-    });
-
-    Observability.loopRequestCloudSessionToken("cmd-1", "symphony_loop", "loop-1", true);
-    Observability.loopRequestCloudSessionToken("cmd-2", "symphony_loop", "loop-2", false);
-
-    assert.equal(telemetryEvents.length, 2);
-    assert.equal(analyticsEvents.length, 0);
-
-    const [present, absent] = telemetryEvents;
-    assert.equal(present.category, "loop.request.cloud_session_token");
-    assert.equal(present.severity, "info");
-    assert.equal(present.trace?.loopId, "loop-1");
-    assert.equal(present.trace?.jobId, "loop-1");
-    assert.equal(present.diagnostics?.extra?.present, true);
-
-    assert.equal(absent.diagnostics?.extra?.present, false);
   });
 
   test("outbound network decisions emit descriptor-only telemetry", () => {
