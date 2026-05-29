@@ -210,7 +210,11 @@ export class BootRecoveryService implements Disposable {
           "boot-recovery",
           `Token source for loopId=${job.loopId}: LOOP_TOKEN_STORE`,
         );
-        const reconcileResult = await this.reconcileCloudLoopStatus(job, apiBaseUrl);
+        // allowPopRevival=false: the local PID is dead, so PoP revival must not
+        // fire here (PR#256) — see reconcileCloudLoopStatus.
+        const reconcileResult = await this.reconcileCloudLoopStatus(job, apiBaseUrl, {
+          allowPopRevival: false,
+        });
         // timed_out was already persisted as terminal (TIMED_OUT) inside
         // reconcileCloudLoopStatus, so skip the UNKNOWN finalization below.
         // Every other reconcile outcome — including a cloud-reported "active"
@@ -315,7 +319,15 @@ export class BootRecoveryService implements Disposable {
   private async reconcileCloudLoopStatus(
     job: LocalJob,
     apiBaseUrl: string,
+    options: { allowPopRevival?: boolean } = {},
   ): Promise<CloudLoopStatus> {
+    // PR#256: PoP revival is only safe when the caller holds a live local PID
+    // (reattachLiveJob). The dead-job path (finalizeDeadJobs) passes false:
+    // reviving a loop with no local runner would resurrect it server-side with
+    // a fresh runner token only to be finalized moments later, risking an
+    // orphaned server-side loop with a fresh token and no process if that
+    // finalize POST exhausts the retry cap. Default false is the dead-safe value.
+    const { allowPopRevival = false } = options;
     const { loopTokenStore } = this.deps;
     const getToken = () => loopTokenStore.getLoopTokenString(job.loopId);
 
@@ -339,9 +351,12 @@ export class BootRecoveryService implements Disposable {
     // Determine if the result is terminal via the shared classifier (SSOT), so
     // this path interprets 401/404/410/timed_out identically to reattachLiveJob
     // below. Map the CloudLoopStatus union onto the classifier's HTTP input.
-    // Pass provenance context so DESKTOP_MANAGED loops with PoP can attempt
-    // revival before being classified terminal (PLN-757).
-    const provenanceCtx = this.buildProvenanceContext();
+    // Pass provenance context only when the caller allows PoP revival (live
+    // PID) so DESKTOP_MANAGED loops can attempt revival before being classified
+    // terminal (PLN-757). On the dead-job path (allowPopRevival=false) we omit
+    // provenance, so a 401 classifies terminal exactly like the legacy path and
+    // no revival heartbeat is ever POSTed (PR#256).
+    const provenanceCtx = allowPopRevival ? this.buildProvenanceContext() : undefined;
     const disposition = classifyLoopStatus(
       cloudStatusToHttp(result),
       result.kind,
@@ -352,14 +367,16 @@ export class BootRecoveryService implements Disposable {
     // giving up. The managed-key PoP heartbeat can revive a loop whose runner
     // JWT was rejected (401) — classifyLoopStatus only returns pop_fallback for
     // the 401 case — returning a fresh runner JWT, the boot-path analog of
-    // PLN-740's live revival. (timed_out is classified terminal first and never
-    // reaches this path.)
+    // PLN-740's live revival. This branch is only reachable from the live
+    // caller (reattachLiveJob) because pop_fallback requires provenance context,
+    // which is suppressed for the dead-job path above (PR#256). (timed_out is
+    // classified terminal first and never reaches this path.)
     if (disposition.kind === "pop_fallback") {
       const popResult = await this.attemptPopHeartbeatRevival(job, apiBaseUrl);
 
       if (popResult?.success) {
         // PoP heartbeat succeeded — the loop is alive. Return "active" so the
-        // caller (reattachLiveJob or finalizeDeadJobs) treats it as live.
+        // live caller treats it as live and reattaches.
         return { kind: "active" };
       }
 
@@ -369,19 +386,33 @@ export class BootRecoveryService implements Disposable {
         const heartbeatDisposition = classifyLoopStatus(heartbeatHttpStatus, null);
 
         if (heartbeatDisposition.kind === "terminal") {
+          // Definitive terminal heartbeat (401/404/410): the loop is dead
+          // server-side. Finalize terminal.
           this.finalizeAsTerminal(job, heartbeatDisposition.reason);
           return result;
         }
-        // Transient PoP error — fall through to finalize as unauthorized since
-        // we already exhausted the JWT-only path and the PoP path was inconclusive.
+
+        // PR#256: Non-terminal PoP heartbeat error (5xx, network, or timeout).
+        // This branch only runs for the live caller (reattachLiveJob), so the
+        // local PID is still running. Do NOT tear down a live loop on a
+        // transient blip — return a transient CloudLoopStatus so reattachLiveJob
+        // re-classifies it as `transient` and reattaches conservatively, letting
+        // the live heartbeat scheduler retry the revival on its next cycle. This
+        // matches the conservative-reattach policy reattachLiveJob already
+        // applies for transient reconcile errors. A null heartbeat status maps
+        // to transient/network_error; a 5xx maps to transient/server_error.
+        return {
+          kind: "error",
+          message: `PoP heartbeat revival inconclusive (${popResult.kind})`,
+          ...(heartbeatHttpStatus != null ? { status: heartbeatHttpStatus } : {}),
+        };
       }
 
-      // The PoP heartbeat returned a transient/inconclusive error — finalize as
-      // unauthorized terminal (the JWT path already failed and the PoP path
-      // could not confirm liveness). popResult is non-null here: pop_fallback is
-      // only dispatched when signDesktopRequest is present, so
-      // attemptPopHeartbeatRevival cannot have returned null.
-      this.finalizeAsTerminal(job, "unauthorized");
+      // Unreachable: pop_fallback is only dispatched when popAvailable is true,
+      // i.e. signDesktopRequest is present, and attemptPopHeartbeatRevival
+      // returns null only when signDesktopRequest is absent. Returning the
+      // original (terminal) result is a defensive no-op for this structurally
+      // impossible state and never finalizes a still-running live loop.
       return result;
     }
 
@@ -499,12 +530,19 @@ export class BootRecoveryService implements Disposable {
       return;
     }
 
-    const reconcileResult = await this.reconcileCloudLoopStatus(job, effectiveApiBaseUrl);
+    // allowPopRevival=true: isProcessRunning(pid) was just confirmed above, so a
+    // live runner exists to drive a revived loop (PR#256).
+    const reconcileResult = await this.reconcileCloudLoopStatus(job, effectiveApiBaseUrl, {
+      allowPopRevival: true,
+    });
     // Do NOT pass provenance context here: reconcileCloudLoopStatus already
     // consumed the PoP fallback opportunity (T-2.4). If it revived the loop,
-    // the result is "active" (live). If it failed, it already finalized as
-    // terminal. Passing provenance again would re-trigger pop_fallback on the
-    // same unauthorized result that reconcile already handled.
+    // the result is "active" (live). If the heartbeat was definitively terminal
+    // (401/404/410) it already finalized as terminal and the result classifies
+    // terminal. If the heartbeat was a transient blip (5xx/network/timeout) it
+    // returns a transient error (PR#256) so the conservative-reattach branch
+    // below keeps the live loop running. Passing provenance again would
+    // re-trigger pop_fallback on the same unauthorized result reconcile handled.
     const disposition = classifyLoopStatus(
       cloudStatusToHttp(reconcileResult),
       reconcileResult.kind,
