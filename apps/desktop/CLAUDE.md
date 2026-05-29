@@ -155,9 +155,12 @@ two sources, merged at build time by `loadHostDefaultPricing()` in
 The build runs two invariants. Both are hard build-time assertions —
 violation throws with an actionable message and aborts the build:
 
-- **OpenAI cache discount + zero-write** — `gpt-*` / `o1-*` / `o3-*` rows
-  must have `cache_read ≤ input × 0.55` AND `cache_write = 0` AND
-  `cache_write_1h = 0`. OpenAI publishes no cache-write surcharge.
+- **OpenAI zero-write + sanity floor** — `gpt-*` / `o1-*` / `o3-*` rows
+  must have `cache_write = 0` AND `cache_write_1h = 0` (OpenAI publishes
+  no cache-write surcharge), AND `cache_read ≤ input` (cached input must
+  not cost more than uncached — a true sanity check, not a guess at the
+  discount ratio). LiteLLM is trusted for the actual cache_read rate
+  (currently 10% for the GPT-5 family, 50% for older GPT-4o-style models).
 - **Anthropic 1h cache floor** — every `claude-*` row with positive input
   must have `cache_write_1h ≥ input × 1.5` (sanity floor for the 2×
   documented tier).

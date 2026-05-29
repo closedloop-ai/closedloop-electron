@@ -360,12 +360,16 @@ const HOST_FALLBACKS = [
   // even if the exact model is unknown. None of these synthetic ids live
   // in LiteLLM's catalog.
   //
-  // FEA-1432: gpt-codex fallback inherits OpenAI cache semantics:
-  // cache_read = input × 0.5 (50% discount), no cache_write surcharge
-  // (both 5-min and 1h tiers are 0). Previous FEA-1431 row used
-  // cache_read=0.125 (10% — mirrored bad LiteLLM data) and cache_write=1.25
-  // (a surcharge that OpenAI does not charge).
-  ["gpt-codex%", "GPT Codex (fallback)", 1.25, 10, 0.625, 0, 0],
+  // FEA-1431-bugfix: gpt-codex synthetic fallback should track the model
+  // it most likely stands in for. GPT-5 Codex (the most common underlying
+  // model for our Codex importer) is at $1.25 input / $10 output / $0.125
+  // cache_read (10% discount per OpenAI's current GPT-5 family pricing).
+  // Cache writes carry no surcharge per OpenAI's docs.
+  //
+  // (An earlier FEA-1432 build of this row set cache_read = $0.625 based on
+  // the outdated 50% discount assumption; the transformer also clamped real
+  // GPT-5 rows up to 50%. Both have been corrected to trust LiteLLM.)
+  ["gpt-codex%", "GPT Codex (fallback)", 1.25, 10, 0.125, 0, 0],
   ["cursor-default%", "Cursor default (fallback)", 3, 15, 0.3, 3, 0],
   ["copilot-default%", "Copilot default (fallback)", 3, 15, 0.3, 3, 0],
   ["opencode-default%", "OpenCode default (fallback)", 0, 0, 0, 0, 0],
@@ -527,21 +531,25 @@ export function loadHostDefaultPricing() {
   // still care about: OpenAI cache surcharge regressions and Anthropic
   // 1h cache-write under-pricing.)
   //
-  // Invariant #1 (FEA-1432): OpenAI cache pricing is vendor-specific.
-  // Cached input reads at a 50% discount; cache writes carry no surcharge
-  // (both 5-min and 1h columns must be 0). This is a hard build-time check —
-  // a regression in the LiteLLM transformer or HOST_FALLBACKS that
-  // restores a write surcharge or inflates cache_read above ~55% of input
-  // means we are about to charge users for cache traffic OpenAI does not
-  // charge for.
+  // Invariant #1: OpenAI rows must have zero cache-write surcharge.
+  // This is the only OpenAI-side rule that is a vendor-stated invariant
+  // rather than a guess at the discount ratio. OpenAI's documented behavior
+  // is that cached input has a discount but cache *writes* carry no charge —
+  // both `cache_write_per_mtok` and `cache_write_1h_per_mtok` must be 0.
+  //
+  // (FEA-1431-bugfix: the FEA-1432 "cache_read ≤ 55% of input" check that
+  // used to live here was based on the outdated assumption that OpenAI's
+  // cached discount was 50%. OpenAI re-priced cached input down to 10% of
+  // input for the GPT-5.4 family (and possibly others), and the 55% rule
+  // would have been a no-op floor against the real bug — the transformer
+  // CLAMPING the correct LiteLLM 10% values UP to 50%. Removed alongside
+  // the clamp. Trust LiteLLM; if a rate is genuinely wrong, fix it upstream.
+  // The looser sanity check `cache_read ≤ input` lives below as a
+  // never-charge-more-than-uncached floor.)
   /** @type {Array<{ pattern: string, problem: string }>} */
   const openaiViolations = [];
   for (const row of merged) {
     const pattern = row[0];
-    // FEA-1432 review fix: match isOpenAIKey() in fetch-litellm-pricing.mjs
-    // (gpt-, o1-, o3-). Earlier guard only covered gpt-, leaving a gap for
-    // a future HOST_FALLBACKS row on o1-/o3- with non-zero cache_write
-    // to slip past this invariant.
     if (
       !pattern.startsWith("gpt-") &&
       !pattern.startsWith("o1-") &&
@@ -554,16 +562,19 @@ export function loadHostDefaultPricing() {
     const cacheWriteRate = row[5];
     const cacheWrite1hRate = row[6];
     if (typeof inputRate !== "number") continue;
-    if (inputRate > 0 && typeof cacheReadRate === "number") {
-      // Allow a 5% headroom over the canonical 50% to absorb upstream
-      // rounding. Stricter bounds (the 40%/60% clamp window) live in the
-      // fetch transformer; this is the floor that must hold post-merge.
-      if (cacheReadRate > inputRate * 0.55) {
-        openaiViolations.push({
-          pattern,
-          problem: `cache_read=${cacheReadRate} > 55% of input=${inputRate}`,
-        });
-      }
+    // Sanity floor: cached input must not cost more than uncached input —
+    // that would be nonsensical (paying a premium for already-processed
+    // tokens). This catches genuine LiteLLM regressions without encoding
+    // any assumption about the specific discount ratio.
+    if (
+      inputRate > 0 &&
+      typeof cacheReadRate === "number" &&
+      cacheReadRate > inputRate
+    ) {
+      openaiViolations.push({
+        pattern,
+        problem: `cache_read=${cacheReadRate} > input=${inputRate} (cached input must not exceed uncached)`,
+      });
     }
     if (cacheWriteRate !== 0) {
       openaiViolations.push({

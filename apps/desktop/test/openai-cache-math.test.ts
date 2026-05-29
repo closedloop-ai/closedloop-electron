@@ -64,8 +64,9 @@ test("gpt-codex% fallback row has cache_write = 0 and cache_write_1h = 0", async
   // Tuple shape: [pattern, name, input, output, cache_read, cache_write, cache_write_1h]
   assert.equal(codex![5], 0, "cache_write (5-min) must be 0 for OpenAI");
   assert.equal(codex![6], 0, "cache_write_1h must be 0 for OpenAI");
-  // Sanity: cache_read at 50% of input.
-  assert.equal(codex![4], codex![2] * 0.5);
+  // FEA-1431-bugfix: cache_read at 10% of input (GPT-5 family discount;
+  // the synthetic fallback tracks the most likely underlying model).
+  assert.equal(codex![4], codex![2] * 0.1);
 });
 
 test("OpenAI cache_write_tokens contribute $0 to the estimated cost", async () => {

@@ -223,25 +223,21 @@ export function transformPricingMap(pricingMap) {
     let cacheReadPerMtok = roundTo6((cacheReadPerToken ?? 0) * 1_000_000);
     let cacheWritePerMtok = roundTo6((cacheWritePerToken ?? 0) * 1_000_000);
 
-    // FEA-1432 OpenAI cache math:
-    //   1. Clamp cache_read to input × 0.5 when LiteLLM reports a positive
-    //      but clearly-wrong ratio (e.g. GPT-5 series ships at 10% instead
-    //      of the canonical 50%). A 0 cache_read means LiteLLM is signaling
-    //      "no caching available for this model" — preserve it; clamping
-    //      would invent pricing for a feature the vendor does not offer.
-    //   2. Force cache_write (5-min) to 0 — OpenAI has no cache write surcharge.
-    if (isOpenAIKey(key) && inputPerMtok > 0 && cacheReadPerMtok > 0) {
-      const ratio = cacheReadPerMtok / inputPerMtok;
-      if (ratio < 0.4 || ratio > 0.6) {
-        const clamped = roundTo6(inputPerMtok * 0.5);
-        process.stderr.write(
-          `fetch-litellm-pricing: clamping ${key} cache_read ` +
-            `${cacheReadPerMtok} → ${clamped} ` +
-            `(LiteLLM ratio ${ratio.toFixed(2)} outside [0.4, 0.6])\n`,
-        );
-        cacheReadPerMtok = clamped;
-      }
-    }
+    // FEA-1431-bugfix: the FEA-1432 OpenAI cache_read CLAMP that previously
+    // lived here forced the ratio to 50% based on the (outdated) assumption
+    // that "OpenAI's cached discount is canonically 50%". OpenAI re-priced
+    // cached input down to 10% of input for the GPT-5.4 family (and possibly
+    // others) — LiteLLM has the correct 10% ratios; our clamp was rewriting
+    // them up to 50%, over-reporting cached input costs by 5×.
+    //
+    // The principle in HOST_FALLBACKS comments applies here equally: trust
+    // LiteLLM. If LiteLLM's rate is wrong, fix it upstream; do not encode
+    // a counter-assumption in the transformer.
+    //
+    // We still force `cache_write` (5-min) to 0 for OpenAI rows because the
+    // vendor has documented that there is no cache-write surcharge — that is
+    // a vendor-stated invariant, not a guess. The build-time invariant in
+    // build-agent-monitor.mjs checks both columns are 0.
     if (isOpenAIKey(key)) {
       cacheWritePerMtok = 0;
     }

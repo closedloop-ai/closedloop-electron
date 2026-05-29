@@ -189,19 +189,24 @@ test("FEA-1432: Anthropic 1h cache writes are derived as input × 2.0", async ()
   assert.equal(free![6], 0, "free row must have cache_write_1h = 0");
 });
 
-test("FEA-1432: OpenAI rows always carry cache_write = 0 and cache_write_1h = 0", async () => {
+test("FEA-1431-bugfix: OpenAI cache_read passes through LiteLLM unchanged; cache_writes always zero", async () => {
+  // FEA-1431-bugfix replaced the FEA-1432 cache_read CLAMP (which forced
+  // OpenAI rows to a 50% discount) with pure passthrough. The transformer
+  // trusts LiteLLM's cache_read rate verbatim — only cache_write columns
+  // are forced to 0 (vendor-stated invariant: OpenAI has no cache-write
+  // surcharge).
   const { transformPricingMap } = await loadScript();
   const rows = transformPricingMap({
-    "gpt-canonical": {
+    "gpt-50pct": {
       input_cost_per_token: 2.5e-6, // $2.5/Mtok
       output_cost_per_token: 1e-5,
-      cache_read_input_token_cost: 1.25e-6, // 50% — canonical
-      cache_creation_input_token_cost: 9.99e-6, // should be zeroed out
+      cache_read_input_token_cost: 1.25e-6, // 50% — older GPT-4o-style tier
+      cache_creation_input_token_cost: 9.99e-6, // must be zeroed out
     },
-    "gpt-bad-ratio": {
+    "gpt-10pct": {
       input_cost_per_token: 1.25e-6, // $1.25/Mtok
       output_cost_per_token: 1e-5,
-      cache_read_input_token_cost: 1.25e-7, // 10% — should clamp to 50%
+      cache_read_input_token_cost: 1.25e-7, // 10% — GPT-5/5.4 family tier
       cache_creation_input_token_cost: 0,
     },
     "gpt-no-cache": {
@@ -210,26 +215,27 @@ test("FEA-1432: OpenAI rows always carry cache_write = 0 and cache_write_1h = 0"
       cache_read_input_token_cost: 0, // signals "no caching available"
       cache_creation_input_token_cost: 0,
     },
-    "o3-bad-ratio": {
+    "o3-10pct": {
       input_cost_per_token: 2e-6,
       output_cost_per_token: 8e-6,
-      cache_read_input_token_cost: 5e-7, // 25% — clamp
+      cache_read_input_token_cost: 2e-7, // 10%
       cache_creation_input_token_cost: 1.5e-6, // surcharge → must zero out
     },
   });
 
-  const canonical = rows.find((r) => r[0] === "gpt-canonical%");
-  assert.ok(canonical);
-  assert.equal(canonical![4], 1.25, "canonical 50% cache_read preserved");
-  assert.equal(canonical![5], 0, "OpenAI cache_write surcharge zeroed out");
-  assert.equal(canonical![6], 0, "OpenAI cache_write_1h is 0");
+  const old50 = rows.find((r) => r[0] === "gpt-50pct%");
+  assert.ok(old50);
+  assert.equal(old50![4], 1.25, "50% cache_read passed through");
+  assert.equal(old50![5], 0, "OpenAI cache_write surcharge zeroed out");
+  assert.equal(old50![6], 0, "OpenAI cache_write_1h is 0");
 
-  const badRatio = rows.find((r) => r[0] === "gpt-bad-ratio%");
-  assert.ok(badRatio);
-  // Clamped to input × 0.5 = 0.625
-  assert.equal(badRatio![4], 0.625);
-  assert.equal(badRatio![5], 0);
-  assert.equal(badRatio![6], 0);
+  const new10 = rows.find((r) => r[0] === "gpt-10pct%");
+  assert.ok(new10);
+  // Pre-bugfix the transformer would have clamped 0.125 → 0.625.
+  // Post-bugfix it must pass 0.125 through verbatim.
+  assert.equal(new10![4], 0.125, "10% cache_read passed through (no clamp)");
+  assert.equal(new10![5], 0);
+  assert.equal(new10![6], 0);
 
   const noCache = rows.find((r) => r[0] === "gpt-no-cache%");
   assert.ok(noCache);
@@ -238,11 +244,11 @@ test("FEA-1432: OpenAI rows always carry cache_write = 0 and cache_write_1h = 0"
   assert.equal(noCache![5], 0);
   assert.equal(noCache![6], 0);
 
-  const o3BadRatio = rows.find((r) => r[0] === "o3-bad-ratio%");
-  assert.ok(o3BadRatio);
-  assert.equal(o3BadRatio![4], 1); // input × 0.5
-  assert.equal(o3BadRatio![5], 0);
-  assert.equal(o3BadRatio![6], 0);
+  const o3 = rows.find((r) => r[0] === "o3-10pct%");
+  assert.ok(o3);
+  assert.equal(o3![4], 0.2, "o3 10% cache_read passed through");
+  assert.equal(o3![5], 0);
+  assert.equal(o3![6], 0);
 });
 
 test("runFetchAndWrite writes pricing + meta with SHA-pinned bytes", async () => {
