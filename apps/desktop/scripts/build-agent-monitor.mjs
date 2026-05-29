@@ -1923,14 +1923,22 @@ function patchDbFile(file) {
   // The INSERT/addMissing patches below still pass the new column so a
   // fresh DB and an upgraded DB converge on the same shape.
   if (!source.includes("ADD COLUMN cache_write_1h_per_mtok")) {
-    const pricingMigrationNeedle = "addMissing(DEFAULT_PRICING);\n}\n";
+    // FEA-1431-bugfix: the migration MUST run BEFORE the top-up loop.
+    // Upstream's top-up `INSERT OR IGNORE INTO model_pricing (...,
+    // cache_write_1h_per_mtok)` is patched to reference the new column,
+    // and node:sqlite validates referenced columns at `db.prepare()` time
+    // (not at `run()` time). So preparing the patched INSERT against an
+    // unmigrated 6-column table throws synchronously and crashes the
+    // sidecar before the ALTER ever gets a chance. Anchor on the top-up
+    // comment and PREPEND the migration so the column exists by the time
+    // the INSERT prepare happens.
+    const pricingMigrationNeedle = "// Top-up: insert any default pattern";
     if (!source.includes(pricingMigrationNeedle)) {
       throw new Error(
-        `Unable to patch ${file}: expected addMissing(DEFAULT_PRICING); block (FEA-1432 migration).`,
+        `Unable to patch ${file}: expected "// Top-up:" comment anchor (FEA-1432 migration).`,
       );
     }
     const pricingMigrationBlock = [
-      "",
       "// FEA-1432: ensure existing model_pricing tables carry the 1h cache",
       "// write column. Mirrors the additive ALTER TABLE pattern used for the",
       "// sessions.harness migration; new DBs already have the column via the",
@@ -1942,6 +1950,11 @@ function patchDbFile(file) {
       "// for 1h cache writes once the parser learns the split. The UPDATE is",
       "// narrowly conditional on cache_write_1h_per_mtok = 0 so user-edited",
       "// rows are preserved.",
+      "//",
+      "// FEA-1431-bugfix: this block runs BEFORE the top-up below — the",
+      "// patched top-up INSERT references cache_write_1h_per_mtok, and",
+      "// node:sqlite validates that column exists at prepare time. Running",
+      "// the ALTER after the top-up would crash on every upgrader.",
       "try {",
       '  db.prepare("SELECT cache_write_1h_per_mtok FROM model_pricing LIMIT 1").get();',
       "} catch {",
@@ -1959,7 +1972,7 @@ function patchDbFile(file) {
     ].join("\n");
     source = source.replace(
       pricingMigrationNeedle,
-      `${pricingMigrationNeedle}${pricingMigrationBlock}`,
+      `${pricingMigrationBlock}${pricingMigrationNeedle}`,
     );
   }
 
