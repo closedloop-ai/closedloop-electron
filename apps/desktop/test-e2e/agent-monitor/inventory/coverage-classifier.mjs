@@ -47,6 +47,26 @@ const SERVER_RUNTIME_PATTERNS = [
   /formatBytes|formatUptime/,
 ];
 
+// "Out of scope: server-runtime health gauges" — composite/health figures
+// computed from process state (CPU load, memory %, heap %, the weighted
+// health-score index) and the cache-hit gauge in that same index. Not
+// log-parsed agent data. (FEA-1437 weak-triage category c; these are bare
+// local computed vars in Dashboard.tsx, distinct from token-derived metrics.)
+const HEALTH_GAUGE_PATTERNS = [
+  /^(load|memUsedPct|heapUsedPct|healthScore|cacheHitRate)$/,
+];
+
+// "Out of scope: local config/install state" — e.g. info.hooks.installed
+// reflects whether Claude Code hooks are written to ~/.claude/settings.json,
+// a config toggle, not a log-derived number.
+const CONFIG_STATE_PATTERNS = [/^info\.hooks\./];
+
+// "Out of scope: timestamp formatting" — fmt(...created_at/started_at/
+// last_seen_at/updated_at) renders a date, not a numeric audit target.
+const TIMESTAMP_PATTERNS = [
+  /^fmt\([a-z_]+\.(created_at|started_at|last_seen_at|updated_at)\)$/i,
+];
+
 // "Out of scope: filesystem-backed config" — CcConfig reads ~/.claude/*.
 const CONFIG_PATTERNS = [/^CcConfig$/];
 
@@ -129,6 +149,24 @@ function classify(row) {
     return {
       status: "out_of_scope",
       reason: "pagination/UI math — derived render-side from already-audited totals",
+    };
+  }
+  if (HEALTH_GAUGE_PATTERNS.some((re) => re.test(row.value_expr))) {
+    return {
+      status: "out_of_scope",
+      reason: "server-runtime health gauge (CPU load / memory % / heap % / composite health-score index / cache-hit gauge) — computed from process state, not log-parsed data",
+    };
+  }
+  if (CONFIG_STATE_PATTERNS.some((re) => re.test(row.value_expr))) {
+    return {
+      status: "out_of_scope",
+      reason: "local config/install state (Claude hooks install flag) — a config toggle, not a log-derived number",
+    };
+  }
+  if (TIMESTAMP_PATTERNS.some((re) => re.test(row.value_expr))) {
+    return {
+      status: "out_of_scope",
+      reason: "timestamp formatting (date display via fmt(...At)) — not a numeric audit target",
     };
   }
 

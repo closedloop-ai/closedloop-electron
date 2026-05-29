@@ -1,7 +1,7 @@
 {
   "$schema": "./manifest.schema.json",
   "version": 1,
-  "description": "UI Numbers Audit — manifest of every numeric tile, with the API endpoint it pulls from and the oracle that computes the expected value from the fixture DB. See PLN-738 / FEA-1415.",
+  "description": "UI Numbers Audit — manifest of every numeric tile, with the API endpoint it pulls from and the oracle that computes the expected value from the fixture DB. See PLN-738 / FEA-1415. | FEA-1437 pre-explorer: every tile carries a `selector` object — see PHASE3-RENDERER-MAP.md. present_in_code is false for ALL tiles (no data-testid exists yet); each `value` is the PROPOSED selector to add as a Phase-3 follow-up.",
   "tiles": [
     {
       "id": "dashboard.monitor.total_sessions",
@@ -18,7 +18,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-dashboard-monitor-total-sessions']",
+        "present_in_code": true,
+        "render_kind": "text",
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx (StatPill value, testid added FEA-1437 Phase 3)",
+        "followup": "Done — data-testid added to the StatPill value element."
+      }
     },
     {
       "id": "dashboard.monitor.total_sessions.trend_active",
@@ -36,7 +43,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-dashboard-monitor-total-sessions-trend-active']",
+        "present_in_code": true,
+        "render_kind": "text_sub",
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx (StatPill sub, subTestid added FEA-1437 Phase 3)",
+        "followup": "Done — data-testid added to the StatPill sub element."
+      }
     },
     {
       "id": "dashboard.monitor.active_agents",
@@ -53,7 +67,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-dashboard-monitor-active-agents']",
+        "present_in_code": true,
+        "render_kind": "text_sub",
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx — 'Total Agents' StatPill SUB line ('{active_agents} active'), subTestid added FEA-1437 Phase 3. The pill VALUE is overview.total_agents (a different number); the audit binds the SUB element, where active_agents renders.",
+        "followup": "Done — subTestid on the Total Agents pill sub binds active_agents to its real render site (not the section heading the old label-slice coincidentally matched)."
+      }
     },
     {
       "id": "dashboard.monitor.active_subagents",
@@ -70,8 +91,15 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null,
-      "notes": "Computed in the client by fetching subagents per active main session — no single API field. Oracle replicates the same derivation."
+      "bug_ref": "FEA-1442",
+      "notes": "Computed in the client by fetching subagents per active main session — no single API field. Oracle replicates the same derivation. FEA-1442: no Active Subagents tile is rendered today — audit test.skips until the tile (or descope) lands.",
+      "selector": {
+        "value": "[data-testid='audit-dashboard-monitor-active-subagents']",
+        "present_in_code": false,
+        "render_kind": "dom_count",
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx:1485",
+        "followup": "Either add a numeric total element with a data-testid, or test by counting rendered items under a data-testid'd agent-tree (allSubagents) container."
+      }
     },
     {
       "id": "dashboard.monitor.active_subagents.trend_total",
@@ -89,7 +117,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": "FEA-1442",
+      "selector": {
+        "value": "[data-testid='audit-dashboard-monitor-active-subagents-trend-total']",
+        "present_in_code": false,
+        "render_kind": "dom_count",
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx:1485",
+        "followup": "Either add a numeric total element with a data-testid, or test by counting rendered items under a data-testid'd agent-tree (allSubagents) container."
+      }
     },
     {
       "id": "dashboard.monitor.events_today",
@@ -106,8 +141,15 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null,
-      "notes": "Depends on the sidecar's interpretation of 'today' — UTC midnight vs. tz_offset. /api/stats accepts tz_offset."
+      "bug_ref": "FEA-1443",
+      "notes": "Depends on the sidecar's interpretation of 'today' — UTC midnight vs. tz_offset. /api/stats accepts tz_offset. FEA-1443: no Events Today tile is rendered today — audit test.skips until the tile (or descope) lands.",
+      "selector": {
+        "value": "[data-testid='audit-dashboard-monitor-events-today']",
+        "present_in_code": false,
+        "render_kind": "absent",
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx (no single line)",
+        "followup": "Tile is NOT rendered in the current overlay — add the tile (with data-testid) or reclassify the manifest row."
+      }
     },
     {
       "id": "dashboard.monitor.total_events",
@@ -124,7 +166,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-dashboard-monitor-total-events']",
+        "present_in_code": true,
+        "render_kind": "text",
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx (StatPill value, testid added FEA-1437 Phase 3)",
+        "followup": "Done — data-testid added to the StatPill value element."
+      }
     },
     {
       "id": "dashboard.monitor.total_cost",
@@ -142,7 +191,14 @@
       "owner": null,
       "status": "bug_filed",
       "bug_ref": "FEA-1418",
-      "notes": "Oracle replicates the per-row pricing formula: sum over token_usage of (input*input_per_mtok + output*output_per_mtok + cache_read*cache_read_per_mtok + cache_write*cache_write_per_mtok) / 1e6."
+      "notes": "Oracle replicates the per-row pricing formula: sum over token_usage of (input*input_per_mtok + output*output_per_mtok + cache_read*cache_read_per_mtok + cache_write*cache_write_per_mtok) / 1e6.",
+      "selector": {
+        "value": "[data-testid='audit-dashboard-monitor-total-cost']",
+        "present_in_code": true,
+        "render_kind": "text",
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx (StatPill value, testid added FEA-1437 Phase 3)",
+        "followup": "Done — data-testid added to the StatPill value element."
+      }
     },
     {
       "id": "analytics.tokens.total_input",
@@ -158,7 +214,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-analytics-tokens-total-input']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "upstream/Analytics.tsx:937",
+        "followup": "Add data-testid to the token bar list value element, keyed per tile."
+      }
     },
     {
       "id": "analytics.tokens.total_output",
@@ -174,7 +237,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-analytics-tokens-total-output']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "upstream/Analytics.tsx:940",
+        "followup": "Add data-testid to the token bar list value element, keyed per tile."
+      }
     },
     {
       "id": "analytics.tokens.total_cache_read",
@@ -190,7 +260,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-analytics-tokens-total-cache-read']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "upstream/Analytics.tsx:945",
+        "followup": "Add data-testid to the token bar list value element, keyed per tile."
+      }
     },
     {
       "id": "analytics.tokens.total_cache_write",
@@ -206,7 +283,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-analytics-tokens-total-cache-write']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "upstream/Analytics.tsx:950",
+        "followup": "Add data-testid to the token bar list value element, keyed per tile."
+      }
     },
     {
       "id": "analytics.avg_events_per_session",
@@ -222,7 +306,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-analytics-avg-events-per-session']",
+        "present_in_code": false,
+        "render_kind": "text_sub",
+        "renders_at": "upstream/Analytics.tsx:854",
+        "followup": "Add data-testid to the StatPill.sub secondary (sub) text element."
+      }
     },
     {
       "id": "analytics.total_subagents",
@@ -238,7 +329,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-analytics-total-subagents']",
+        "present_in_code": false,
+        "render_kind": "per_group",
+        "renders_at": "upstream/Analytics.tsx:1160",
+        "followup": "Add a single aggregate count element (sum across groups) with a data-testid; today only per-group counts render in .map(agent_types)."
+      }
     },
     {
       "id": "analytics.overview.total_sessions",
@@ -255,7 +353,14 @@
       "owner": null,
       "status": "pending",
       "bug_ref": null,
-      "notes": "Same number as /api/stats.total_sessions. If the two endpoints disagree, that's a bug (same DB, two reads)."
+      "notes": "Same number as /api/stats.total_sessions. If the two endpoints disagree, that's a bug (same DB, two reads).",
+      "selector": {
+        "value": "[data-testid='audit-analytics-overview-total-sessions']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "upstream/Analytics.tsx:816",
+        "followup": "Add data-testid to the StatPill value element, keyed per tile."
+      }
     },
     {
       "id": "analytics.overview.total_agents",
@@ -271,7 +376,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-analytics-overview-total-agents']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "upstream/Analytics.tsx:824",
+        "followup": "Add data-testid to the StatPill value element, keyed per tile."
+      }
     },
     {
       "id": "analytics.overview.total_events",
@@ -287,7 +399,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-analytics-overview-total-events']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "upstream/Analytics.tsx:852",
+        "followup": "Add data-testid to the StatPill value element, keyed per tile."
+      }
     },
     {
       "id": "analytics.overview.active_sessions",
@@ -303,7 +422,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-analytics-overview-active-sessions']",
+        "present_in_code": false,
+        "render_kind": "text_sub",
+        "renders_at": "upstream/Analytics.tsx:818",
+        "followup": "Add data-testid to the StatPill.sub secondary (sub) text element."
+      }
     },
     {
       "id": "analytics.overview.active_agents",
@@ -319,7 +445,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-analytics-overview-active-agents']",
+        "present_in_code": false,
+        "render_kind": "text_sub",
+        "renders_at": "upstream/Analytics.tsx:826",
+        "followup": "Add data-testid to the StatPill.sub secondary (sub) text element."
+      }
     },
     {
       "id": "pr.stats.pull_requests",
@@ -335,7 +468,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-pr-stats-pull-requests']",
+        "present_in_code": true,
+        "render_kind": "text",
+        "renders_at": "scripts/agent-monitor-pull-requests/client/PullRequests.tsx (summary stat grid value, testid added FEA-1437 Phase 3)",
+        "followup": "Done — data-testid added to the stat grid value element."
+      }
     },
     {
       "id": "pr.stats.sessions_with_pr",
@@ -351,7 +491,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-pr-stats-sessions-with-pr']",
+        "present_in_code": true,
+        "render_kind": "text",
+        "renders_at": "scripts/agent-monitor-pull-requests/client/PullRequests.tsx (summary stat grid value, testid added FEA-1437 Phase 3)",
+        "followup": "Done — data-testid added to the stat grid value element."
+      }
     },
     {
       "id": "pr.stats.repos",
@@ -367,7 +514,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-pr-stats-repos']",
+        "present_in_code": true,
+        "render_kind": "text",
+        "renders_at": "scripts/agent-monitor-pull-requests/client/PullRequests.tsx (summary stat grid value, testid added FEA-1437 Phase 3)",
+        "followup": "Done — data-testid added to the stat grid value element."
+      }
     },
     {
       "id": "dashboard.health.db.counts.sessions",
@@ -385,7 +539,14 @@
       "owner": null,
       "status": "pending",
       "bug_ref": null,
-      "notes": "Same number as /api/stats.total_sessions. Cross-endpoint disagreement = bug."
+      "notes": "Same number as /api/stats.total_sessions. Cross-endpoint disagreement = bug.",
+      "selector": {
+        "value": "[data-testid='audit-dashboard-health-db-counts-sessions']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx:912",
+        "followup": "Add data-testid to the Health Tip card value element, keyed per tile."
+      }
     },
     {
       "id": "dashboard.health.db.counts.agents",
@@ -402,7 +563,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-dashboard-health-db-counts-agents']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx:918",
+        "followup": "Add data-testid to the Health Tip card value element, keyed per tile."
+      }
     },
     {
       "id": "dashboard.health.db.counts.events",
@@ -419,7 +587,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-dashboard-health-db-counts-events']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx:924",
+        "followup": "Add data-testid to the Health Tip card value element, keyed per tile."
+      }
     },
     {
       "id": "dashboard.health.workflow.compaction.totalCompactions",
@@ -436,7 +611,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-dashboard-health-workflow-compaction-totalCompactions']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx:1042",
+        "followup": "Add data-testid to the Health Tip card value element, keyed per tile."
+      }
     },
     {
       "id": "dashboard.health.workflow.stats.successRate",
@@ -453,7 +635,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-dashboard-health-workflow-stats-successRate']",
+        "present_in_code": false,
+        "render_kind": "per_group",
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx:1260",
+        "followup": "Expose the aggregate success-rate PERCENTAGE (the workflow_success_rate oracle), not a summed count, with a data-testid. The per-row item.successRate values are percentages and cannot be summed."
+      }
     },
     {
       "id": "workflows.stats.totalSessions",
@@ -469,7 +658,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-workflows-stats-totalSessions']",
+        "present_in_code": false,
+        "render_kind": "chart_only",
+        "renders_at": "upstream/components/workflows/* (no single line)",
+        "followup": "Value renders only inside a chart/tooltip (ErrorPropagationMap/CompactionImpact denominators). Add a screen-reader / data-testid'd numeric caption, OR cover at the API layer only and annotate the tile as DOM-exempt."
+      }
     },
     {
       "id": "workflows.stats.totalAgents",
@@ -485,7 +681,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-workflows-stats-totalAgents']",
+        "present_in_code": false,
+        "render_kind": "chart_only",
+        "renders_at": "upstream/components/workflows/ModelDelegationFlow.tsx:273",
+        "followup": "Value renders only inside a chart/tooltip (internal countTotalAgents()). Add a screen-reader / data-testid'd numeric caption, OR cover at the API layer only and annotate the tile as DOM-exempt."
+      }
     },
     {
       "id": "workflows.stats.totalSubagents",
@@ -501,7 +704,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-workflows-stats-totalSubagents']",
+        "present_in_code": false,
+        "render_kind": "chart_only",
+        "renders_at": "upstream/components/workflows/* (no single line)",
+        "followup": "Value renders only inside a chart/tooltip (—). Add a screen-reader / data-testid'd numeric caption, OR cover at the API layer only and annotate the tile as DOM-exempt."
+      }
     },
     {
       "id": "workflows.stats.avgSubagents",
@@ -517,7 +727,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-workflows-stats-avgSubagents']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "upstream/components/workflows/WorkflowStats.tsx:287",
+        "followup": "Add data-testid to the StatCard value element, keyed per tile."
+      }
     },
     {
       "id": "workflows.stats.avgCompactions",
@@ -533,7 +750,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-workflows-stats-avgCompactions']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "upstream/components/workflows/WorkflowStats.tsx:314",
+        "followup": "Add data-testid to the StatCard value element, keyed per tile."
+      }
     },
     {
       "id": "workflows.stats.avgDurationSec",
@@ -549,7 +773,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-workflows-stats-avgDurationSec']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "upstream/components/workflows/WorkflowStats.tsx:323",
+        "followup": "Add data-testid to the StatCard value element, keyed per tile."
+      }
     },
     {
       "id": "workflows.stats.avgDepth",
@@ -565,7 +796,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-workflows-stats-avgDepth']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "upstream/components/workflows/WorkflowStats.tsx:278",
+        "followup": "Add data-testid to the StatCard value element, keyed per tile."
+      }
     },
     {
       "id": "tools.list.length",
@@ -581,7 +819,14 @@
       "priority": "P1",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-tool-row']",
+        "present_in_code": true,
+        "render_kind": "dom_count",
+        "renders_at": "scripts/agent-monitor-packs/client/Tools.tsx (one button per distinct tool from /api/events/facets; testid added FEA-1437 Phase 4)",
+        "followup": "Done — each tool row has data-testid='audit-tool-row'; the audit asserts toHaveCount == events_facets_tool_names_length."
+      }
     },
     {
       "id": "activityfeed.events.total",
@@ -597,7 +842,14 @@
       "priority": "P1",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-activityfeed-events-total']",
+        "present_in_code": false,
+        "render_kind": "text_embed",
+        "renders_at": "upstream/ActivityFeed.tsx:446",
+        "followup": "Wrap the numeric token in a data-testid span inside the pagination footer string (i18n interpolation must keep the number in its own element)."
+      }
     },
     {
       "id": "sessions.list.total",
@@ -614,7 +866,14 @@
       "owner": null,
       "status": "pending",
       "bug_ref": null,
-      "notes": "Cross-check: /api/sessions.total should equal /api/stats.total_sessions. Different endpoints, same DB."
+      "notes": "Cross-check: /api/sessions.total should equal /api/stats.total_sessions. Different endpoints, same DB.",
+      "selector": {
+        "value": "[data-testid='audit-sessions-list-total']",
+        "present_in_code": true,
+        "render_kind": "text_embed",
+        "renders_at": "scripts/agent-monitor-client/Sessions.tsx (i18n subtitle <p>, testid added FEA-1437 Phase 3)",
+        "followup": "Done — data-testid on the subtitle <p>; the count token is asserted within the i18n string via \\b<n>\\b."
+      }
     },
     {
       "id": "plans.total",
@@ -630,7 +889,14 @@
       "priority": "P1",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-plan-row']",
+        "present_in_code": false,
+        "render_kind": "dom_count",
+        "renders_at": "scripts/agent-monitor-plans/client/Plans.tsx (one button per plan; data-testid='audit-plan-row' added FEA-1437 Phase 4)",
+        "followup": "testid + dom_count assertion ready, but UI audit is BLOCKED on fixture data — seed-fixture-db.mjs seeds no plans, so /api/plans returns 0. Before enabling: seed N plan rows, confirm planStore.listPlans count == countPlans (no version-join drop), then flip present_in_code true and add specs/audit/plans.ui-audit.spec.ts (dom_count branch already supports it)."
+      }
     },
     {
       "id": "tools.event_types.length",
@@ -646,7 +912,14 @@
       "priority": "P1",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-tools-event-types-length']",
+        "present_in_code": false,
+        "render_kind": "dom_count",
+        "renders_at": "scripts/agent-monitor-packs/client/Tools.tsx — NOT rendered as a countable list. event_type only appears per-event in the right-hand detail panel; there is no distinct-event-types card list.",
+        "followup": "BLOCKED: no rendered element represents the distinct-event-types count. Add a count element (data-testid) on the Tools screen, or descope this tile. The Tools audit spec skips it (present_in_code false)."
+      }
     },
     {
       "id": "workflows.compaction.tokensRecovered",
@@ -662,7 +935,14 @@
       "priority": "P1",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-workflows-compaction-tokensRecovered']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "upstream/components/workflows/CompactionImpact.tsx:215",
+        "followup": "Add data-testid to the StatCard value element, keyed per tile."
+      }
     },
     {
       "id": "workflows.compaction.sessionsWithCompactions",
@@ -678,7 +958,14 @@
       "priority": "P1",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-workflows-compaction-sessionsWithCompactions']",
+        "present_in_code": false,
+        "render_kind": "chart_only",
+        "renders_at": "upstream/components/workflows/CompactionImpact.tsx:173",
+        "followup": "Value renders only inside a chart/tooltip (derived pct). Add a screen-reader / data-testid'd numeric caption, OR cover at the API layer only and annotate the tile as DOM-exempt."
+      }
     },
     {
       "id": "workflows.concurrency.aggregateLanes.length",
@@ -694,7 +981,14 @@
       "priority": "P1",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-workflows-concurrency-aggregateLanes-length']",
+        "present_in_code": false,
+        "render_kind": "chart_only",
+        "renders_at": "upstream/components/workflows/ConcurrencyTimeline.tsx (no single line)",
+        "followup": "Value renders only inside a chart/tooltip (timeline chart). Add a screen-reader / data-testid'd numeric caption, OR cover at the API layer only and annotate the tile as DOM-exempt."
+      }
     },
     {
       "id": "workflows.complexity.length",
@@ -710,7 +1004,14 @@
       "priority": "P1",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-workflows-complexity-length']",
+        "present_in_code": false,
+        "render_kind": "chart_only",
+        "renders_at": "upstream/components/workflows/SessionComplexityScatter.tsx (no single line)",
+        "followup": "Value renders only inside a chart/tooltip (scatter chart). Add a screen-reader / data-testid'd numeric caption, OR cover at the API layer only and annotate the tile as DOM-exempt."
+      }
     },
     {
       "id": "workflows.modelDelegation.tokensByModel.length",
@@ -726,7 +1027,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-workflows-modelDelegation-tokensByModel-length']",
+        "present_in_code": false,
+        "render_kind": "chart_only",
+        "renders_at": "upstream/components/workflows/ModelDelegationFlow.tsx (no single line)",
+        "followup": "Value renders only inside a chart/tooltip (delegation chart). Add a screen-reader / data-testid'd numeric caption, OR cover at the API layer only and annotate the tile as DOM-exempt."
+      }
     },
     {
       "id": "dashboard.health.workflow.errorPropagation.errorRate",
@@ -743,7 +1051,14 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-dashboard-health-workflow-errorPropagation-errorRate']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx:1031",
+        "followup": "Add data-testid to the Errors Tip card value element, keyed per tile."
+      }
     }
   ],
   "structural_assertions": [
@@ -760,7 +1075,14 @@
       "priority": "P1",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-skill-row']",
+        "present_in_code": true,
+        "render_kind": "dom_count",
+        "renders_at": "scripts/agent-monitor-packs/client/Skills.tsx (one button per skill across pack groups; testid added FEA-1437 Phase 4)",
+        "followup": "Done — every skill row has data-testid='audit-skill-row' (across all groups); the audit asserts toHaveCount == skills_total, which equals the sum of the per-group counts."
+      }
     },
     {
       "id": "kanban.agents.working.count",
@@ -775,7 +1097,14 @@
       "priority": "P1",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-kanban-agents-working-count']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "upstream/KanbanBoard.tsx:397",
+        "followup": "Add data-testid to the column count badge value element, keyed per tile."
+      }
     },
     {
       "id": "kanban.agents.waiting.count",
@@ -790,7 +1119,14 @@
       "priority": "P1",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-kanban-agents-waiting-count']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "upstream/KanbanBoard.tsx:397",
+        "followup": "Add data-testid to the column count badge value element, keyed per tile."
+      }
     },
     {
       "id": "kanban.agents.completed.count",
@@ -805,7 +1141,14 @@
       "priority": "P1",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-kanban-agents-completed-count']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "upstream/KanbanBoard.tsx:397",
+        "followup": "Add data-testid to the column count badge value element, keyed per tile."
+      }
     },
     {
       "id": "kanban.agents.error.count",
@@ -820,7 +1163,14 @@
       "priority": "P1",
       "owner": null,
       "status": "pending",
-      "bug_ref": null
+      "bug_ref": null,
+      "selector": {
+        "value": "[data-testid='audit-kanban-agents-error-count']",
+        "present_in_code": false,
+        "render_kind": "text",
+        "renders_at": "upstream/KanbanBoard.tsx:397",
+        "followup": "Add data-testid to the column count badge value element, keyed per tile."
+      }
     },
     {
       "id": "subagents.list.length",
@@ -836,7 +1186,14 @@
       "owner": null,
       "status": "bug_filed",
       "bug_ref": "FEA-1419",
-      "notes": "/api/agents silently drops the ?type= query param (FEA-1419). Until the upstream supports the filter, this audit will fail intentionally — it's the regression signal that proves the bug is still there."
+      "notes": "/api/agents silently drops the ?type= query param (FEA-1419). Until the upstream supports the filter, this audit will fail intentionally — it's the regression signal that proves the bug is still there.",
+      "selector": {
+        "value": "[data-testid='audit-subagents-list-length']",
+        "present_in_code": false,
+        "render_kind": "per_group",
+        "renders_at": "scripts/agent-monitor-packs/client/SubAgents.tsx:130",
+        "followup": "Add a single aggregate count element (sum across groups) with a data-testid; today only per-group counts render in per-type button count."
+      }
     },
     {
       "id": "packs.installed.list.length",
@@ -852,7 +1209,14 @@
       "owner": null,
       "status": "pending",
       "bug_ref": null,
-      "notes": "/api/packs dedupes by pack_id (one row per distinct pack), even if agent_packs has multiple rows per pack_id (one per install_scope/harness). Oracle uses COUNT(DISTINCT pack_id) to match. The packs_installed_count oracle counts all rows — useful for a different audit if we ever audit the per-scope view."
+      "notes": "/api/packs dedupes by pack_id (one row per distinct pack), even if agent_packs has multiple rows per pack_id (one per install_scope/harness). Oracle uses COUNT(DISTINCT pack_id) to match. The packs_installed_count oracle counts all rows — useful for a different audit if we ever audit the per-scope view.",
+      "selector": {
+        "value": "[data-testid='audit-pack-row']",
+        "present_in_code": false,
+        "render_kind": "dom_count",
+        "renders_at": "scripts/agent-monitor-packs/client/PacksInstalled.tsx (one button per installed pack; data-testid='audit-pack-row' added FEA-1437 Phase 4)",
+        "followup": "testid + dom_count assertion ready, but UI audit is BLOCKED: in the test sidecar the installed-packs list renders 0 rows (launch-sidecar.mjs sets SKIP_CATALOG_DETECTORS=1, and /api/packs may not surface the seeded agent_packs rows without install detection). Before enabling: confirm whether /api/packs should return the fixture agent_packs in-test (possible real bug) or whether install detection is required, then flip present_in_code and re-add specs/audit/packs.ui-audit.spec.ts."
+      }
     },
     {
       "id": "dashboard.monitor.active_agents_section.cards_count",
@@ -869,7 +1233,14 @@
       "owner": null,
       "status": "pending",
       "bug_ref": null,
-      "notes": "The Dashboard SECTION renders cards for both working AND waiting main agents (two API calls in Dashboard.tsx). This single-endpoint structural assertion covers only the working subset — paired with the working oracle so scopes match. TODO: add a parallel /api/agents?status=waiting assertion to cover the rendered union."
+      "notes": "The Dashboard SECTION renders cards for both working AND waiting main agents (two API calls in Dashboard.tsx). This single-endpoint structural assertion covers only the working subset — paired with the working oracle so scopes match. TODO: add a parallel /api/agents?status=waiting assertion to cover the rendered union.",
+      "selector": {
+        "value": "[data-testid='audit-dashboard-monitor-active-agents-section-cards-count']",
+        "present_in_code": false,
+        "render_kind": "dom_count",
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx:1939",
+        "followup": "Either add a numeric total element with a data-testid, or test by counting rendered items under a data-testid'd renderAgentNode() grid container."
+      }
     }
   ]
 }

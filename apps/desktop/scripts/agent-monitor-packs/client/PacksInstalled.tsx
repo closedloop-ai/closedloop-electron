@@ -141,6 +141,7 @@ export function PacksInstalled() {
               return (
                 <button
                   key={p.pack_id}
+                  data-testid="audit-pack-row"
                   onClick={() => setSelectedId(p.pack_id)}
                   className={`block w-full text-left rounded-lg border px-3 py-2 transition-colors ${
                     active
