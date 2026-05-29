@@ -9,10 +9,10 @@
 //     version that omit `billingMode` and treat them as `billingMode:
 //     "unknown"`. See the legacy-migration note in cloud-protocol.ts.
 //   - Removal: once the relay enforces v2 across all clients, the v1
-//     decode path can be deleted. Tracking ticket TBD — see the report
-//     attached to this commit (the user creates the tracking ticket in
-//     ClosedLoop and pastes the ID into the comment below in a follow-up
-//     PR before merge).
+//     decode path can be deleted. Tracking ticket: FEA-1439 ("Remove v1
+//     schema acceptance from agent-session sync relay (post FEA-1434
+//     rollout)"). Trigger: telemetry shows zero v1 payloads for 14d AND
+//     all installs past the FEA-1434 auto-update threshold.
 export const AGENT_SESSION_SYNC_SCHEMA_VERSION = 2 as const;
 
 export type AgentSessionSyncMode = "backfill" | "incremental";
