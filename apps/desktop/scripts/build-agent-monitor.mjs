@@ -270,6 +270,15 @@ const PACK_CATALOG_CLIENT_PAGES = [
 const prModulesDir = path.join(appDir, "scripts", "agent-monitor-pull-requests");
 const PR_MODULES = ["pr-parsers", "pull-request-store", "pr-extractor", "pr-backfill"];
 
+// CLOSEDLOOP token cost (FEA-1431): the canonical token-cost engine wrapping
+// @pydantic/genai-prices. Same materialization pattern as the modules above —
+// copied into the generated server/lib so the pricing route's
+// require("./cost-pricing") resolves, and so its require("@pydantic/genai-prices")
+// resolves by walking up to the (hoisted, prod) node_modules. The desktop-main
+// ESM twin (src/shared/token-cost.ts) is kept byte-equal by a parity test.
+const costModulesDir = path.join(appDir, "scripts", "agent-monitor-cost");
+const COST_MODULES = ["cost-pricing"];
+
 // CLOSEDLOOP embed integration: the agent monitor ships as an <iframe> inside
 // the desktop app. These ClosedLoop-authored files are copied over the
 // upstream client source before the Vite build — Layout.tsx adds embed mode
@@ -308,53 +317,6 @@ const CLIENT_FULL_FILE_OVERRIDES = [
     from: clientOverlayDashboardSource,
     to: path.join("src", "pages", "Dashboard.tsx"),
   },
-];
-
-// Host-owned pricing defaults for model IDs we ingest from non-Claude harnesses.
-// These keep cost stats working without requiring users to hand-enter common
-// rules after startup. Rates are per 1M tokens.
-const HOST_DEFAULT_PRICING = [
-  // Opus family
-  ["claude-opus-4-7%", "Claude Opus 4.7", 5, 25, 0.5, 6.25],
-  ["claude-opus-4-6%", "Claude Opus 4.6", 5, 25, 0.5, 6.25],
-  ["claude-opus-4-5%", "Claude Opus 4.5", 5, 25, 0.5, 6.25],
-  ["claude-opus-4-1%", "Claude Opus 4.1", 15, 75, 1.5, 18.75],
-  ["claude-opus-4-2%", "Claude Opus 4", 15, 75, 1.5, 18.75],
-  // Sonnet family
-  ["claude-sonnet-4-6%", "Claude Sonnet 4.6", 3, 15, 0.3, 3.75],
-  ["claude-sonnet-4-5%", "Claude Sonnet 4.5", 3, 15, 0.3, 3.75],
-  ["claude-sonnet-4-2%", "Claude Sonnet 4", 3, 15, 0.3, 3.75],
-  ["claude-3-7-sonnet%", "Claude Sonnet 3.7", 3, 15, 0.3, 3.75],
-  ["claude-3-5-sonnet%", "Claude Sonnet 3.5", 3, 15, 0.3, 3.75],
-  // Haiku family
-  ["claude-haiku-4-5%", "Claude Haiku 4.5", 1, 5, 0.1, 1.25],
-  ["claude-3-5-haiku%", "Claude Haiku 3.5", 0.8, 4, 0.08, 1],
-  ["claude-3-haiku%", "Claude Haiku 3", 0.25, 1.25, 0.03, 0.3],
-  // GPT-5 family — cache_write rates are the prompt caching write rate
-  // (typically equal to the input rate per 1M tokens for cached writes).
-  ["gpt-5.5%", "GPT-5.5", 5, 30, 0.5, 5],
-  ["gpt-5.4-mini%", "GPT-5.4 mini", 0.75, 4.5, 0.075, 0.75],
-  ["gpt-5.4-nano%", "GPT-5.4 nano", 0.2, 1.25, 0.02, 0.2],
-  ["gpt-5.4%", "GPT-5.4", 2.5, 15, 0.25, 2.5],
-  ["gpt-5-codex%", "GPT-5 Codex", 1.25, 10, 0.125, 1.25],
-  ["gpt-5-mini%", "GPT-5 mini", 0.25, 2, 0.025, 0.25],
-  ["gpt-5-nano%", "GPT-5 nano", 0.05, 0.4, 0.005, 0.05],
-  ["gpt-5%", "GPT-5", 1.25, 10, 0.125, 1.25],
-  // OpenCode-hosted free models
-  ["big-pickle%", "Big Pickle", 0, 0, 0, 0],
-  ["opencode/big-pickle%", "OpenCode Big Pickle", 0, 0, 0, 0],
-  // Fallback patterns for non-Claude harness parsers — when the model
-  // field is missing from the raw data, each parser falls back to a
-  // hardcoded default key (e.g. "gpt-codex", "cursor-default", etc.).
-  // These entries ensure the fallback key has a reasonable pricing match,
-  // even if the exact model is unknown. The broadest pattern comes last
-  // so more specific rules match first.
-  ["gpt-codex%", "GPT Codex (fallback)", 1.25, 10, 0.125, 1.25],
-  ["cursor-default%", "Cursor default (fallback)", 3, 15, 0.3, 3],
-  ["copilot-default%", "Copilot default (fallback)", 3, 15, 0.3, 3],
-  ["opencode-default%", "OpenCode default (fallback)", 0, 0, 0, 0],
-  // Legacy
-  ["claude-3-opus%", "Claude Opus 3", 15, 75, 1.5, 18.75],
 ];
 
 const force =
@@ -479,6 +441,7 @@ function currentStamp() {
     ...PR_MODULES.map((m) => path.join(prModulesDir, `${m}.js`)),
     path.join(prModulesDir, "pull-requests-route.js"),
     path.join(prModulesDir, "client", "PullRequests.tsx"),
+    ...COST_MODULES.map((m) => path.join(costModulesDir, `${m}.js`)),
     embedAppSource,
     embedLayoutSource,
     embedTailwindSource,
@@ -488,17 +451,6 @@ function currentStamp() {
     h.update(readFileSync(file));
   }
   return h.digest("hex");
-}
-
-function renderDefaultPricingSource(rows = HOST_DEFAULT_PRICING) {
-  return [
-    "const DEFAULT_PRICING = [",
-    ...rows.map(
-      ([pattern, name, input, output, cacheRead, cacheWrite]) =>
-        `  [${JSON.stringify(pattern)}, ${JSON.stringify(name)}, ${input}, ${output}, ${cacheRead}, ${cacheWrite}],`,
-    ),
-    "];",
-  ].join("\n");
 }
 
 function buildClient() {
@@ -567,6 +519,17 @@ function materializeRuntimeTree() {
   for (const m of PR_MODULES) {
     cpSync(
       path.join(prModulesDir, `${m}.js`),
+      path.join(generatedLibDir, `${m}.js`),
+    );
+  }
+  // CLOSEDLOOP token cost (FEA-1431): the canonical token-cost engine into
+  // server/lib so the pricing route's require("../lib/cost-pricing") resolves.
+  // The engine's own require("@pydantic/genai-prices") resolves by walking up
+  // to the hoisted (prod) node_modules — the same resolution the other
+  // server/lib modules rely on.
+  for (const m of COST_MODULES) {
+    cpSync(
+      path.join(costModulesDir, `${m}.js`),
       path.join(generatedLibDir, `${m}.js`),
     );
   }
@@ -1415,16 +1378,14 @@ function patchDbFile(file) {
     );
   }
 
-  const pricingBlock = /const DEFAULT_PRICING = \[[\s\S]*?\n\];\n\n\/\/ Top-up:/;
-  if (!pricingBlock.test(source)) {
-    throw new Error(
-      `Unable to patch ${file}: expected the DEFAULT_PRICING block.`,
-    );
-  }
-  source = source.replace(
-    pricingBlock,
-    `${renderDefaultPricingSource()}\n\n// Top-up:`,
-  );
+  // CLOSEDLOOP token cost (FEA-1431): we no longer override upstream's
+  // DEFAULT_PRICING seed. The hand-maintained host pricing table was the root
+  // cause of the cached-token overcharge bug; cost is now computed by the
+  // canonical token-cost engine (server/lib/cost-pricing.js) wrapping
+  // @pydantic/genai-prices. Upstream's own DEFAULT_PRICING remains in this file
+  // untouched — it is still exported via the module.exports anchor below and
+  // seeds the model_pricing table that the read-only catalog GET reads — but it
+  // no longer feeds any cost calculation.
 
   // CLOSEDLOOP Codex support (Addition #4): add a `harness` dimension so one
   // dashboard shows multiple harnesses. Additive + DEFAULT 'claude' so the
@@ -1649,28 +1610,197 @@ function patchDbFile(file) {
 function patchPricingRoute(file) {
   let source = readFileSync(file, "utf8");
 
-  if (!source.includes('String(row.model || "").toLowerCase()')) {
-    const matchNeedle = [
+  // CLOSEDLOOP token cost (FEA-1431): repoint the sidecar's cost math at the
+  // canonical token-cost engine wrapping @pydantic/genai-prices, and retire the
+  // hand-maintained pricing table that caused the cached-token overcharge bug.
+  // Three patches: (a) require the engine, (b) replace calculateCost to delegate
+  // to it, (c) remove the mutating PUT/DELETE endpoints (there is no longer a
+  // host-editable rule table to write to). GET /api/pricing stays read-only.
+
+  // (a) require the engine alongside the existing db require.
+  if (!source.includes('require("../lib/cost-pricing")')) {
+    const requireNeedle = 'const { stmts, db } = require("../db");';
+    if (!source.includes(requireNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the db require anchor (cost engine, FEA-1431).`,
+      );
+    }
+    source = source.replace(
+      requireNeedle,
+      [
+        requireNeedle,
+        "// CLOSEDLOOP token cost (FEA-1431): all cost math flows through the",
+        "// canonical token-cost engine (genai-prices). The model_pricing table and",
+        "// its rule-matching are no longer used for any cost calculation.",
+        'const { computeTokenCost } = require("../lib/cost-pricing");',
+      ].join("\n"),
+    );
+  }
+
+  // (b) replace the upstream rule-table calculateCost with an engine-delegating
+  // version. Keeps the 2-arg signature so callers (and the exported symbol)
+  // stay untouched; the pricingRules arg is intentionally ignored.
+  if (!source.includes("// CLOSEDLOOP FEA-1431 engine-delegating calculateCost")) {
+    const calcNeedle = [
+      "// Calculate cost for a set of token rows against pricing rules",
+      "function calculateCost(tokenRows, pricingRules) {",
+      "  let totalCost = 0;",
+      "  const breakdown = [];",
+      "",
+      "  // Sort by pattern length descending so specific patterns (e.g. claude-opus-4-5%)",
+      "  // match before catch-all patterns (e.g. claude-opus-4%)",
+      "  const sortedRules = [...pricingRules].sort(",
+      "    (a, b) => b.model_pattern.length - a.model_pattern.length",
+      "  );",
+      "",
       "  for (const row of tokenRows) {",
       "    const rule = sortedRules.find((p) => {",
       '      const pattern = p.model_pattern.replace(/%/g, ".*");',
       '      return new RegExp("^" + pattern + "$").test(row.model);',
       "    });",
+      "",
+      "    const rates = rule || {",
+      "      input_per_mtok: 0,",
+      "      output_per_mtok: 0,",
+      "      cache_read_per_mtok: 0,",
+      "      cache_write_per_mtok: 0,",
+      "    };",
+      "    const cost =",
+      "      (row.input_tokens / 1e6) * rates.input_per_mtok +",
+      "      (row.output_tokens / 1e6) * rates.output_per_mtok +",
+      "      (row.cache_read_tokens / 1e6) * rates.cache_read_per_mtok +",
+      "      (row.cache_write_tokens / 1e6) * rates.cache_write_per_mtok;",
+      "",
+      "    totalCost += cost;",
+      "    breakdown.push({",
+      "      model: row.model,",
+      "      input_tokens: row.input_tokens,",
+      "      output_tokens: row.output_tokens,",
+      "      cache_read_tokens: row.cache_read_tokens,",
+      "      cache_write_tokens: row.cache_write_tokens,",
+      "      cost: Math.round(cost * 10000) / 10000,",
+      "      matched_rule: rule?.model_pattern || null,",
+      "    });",
+      "  }",
+      "",
+      "  return { total_cost: Math.round(totalCost * 10000) / 10000, breakdown };",
+      "}",
     ].join("\n");
-    if (!source.includes(matchNeedle)) {
+    if (!source.includes(calcNeedle)) {
       throw new Error(
-        `Unable to patch ${file}: expected the pricing rule match block.`,
+        `Unable to patch ${file}: expected the upstream calculateCost body (cost engine, FEA-1431).`,
+      );
+    }
+    const calcReplacement = [
+      "// CLOSEDLOOP FEA-1431 engine-delegating calculateCost: every row is priced",
+      "// by the canonical token-cost engine (genai-prices), the single source of",
+      "// truth for rates. The `pricingRules` parameter is retained only for",
+      "// signature compatibility with the callers and the exported symbol — it is",
+      "// intentionally ignored (there is no hand-maintained rule table and nothing",
+      "// to override). Unpriced rows contribute `cost: null` to the breakdown",
+      "// (never a silent $0) and are skipped from the total. Costs are returned at",
+      "// full library precision — we do not round, clamp, or rewrite the number the",
+      "// library owns.",
+      "function calculateCost(tokenRows, _pricingRules) {",
+      "  let totalCost = 0;",
+      "  const breakdown = [];",
+      "",
+      "  for (const row of tokenRows) {",
+      "    const result = computeTokenCost({",
+      "      model: row.model,",
+      "      inputTokens: row.input_tokens,",
+      "      outputTokens: row.output_tokens,",
+      "      cacheReadTokens: row.cache_read_tokens,",
+      "      cacheWriteTokens: row.cache_write_tokens,",
+      "    });",
+      "    const priced = result.priced && result.costUsd != null;",
+      "    if (priced) {",
+      "      totalCost += result.costUsd;",
+      "    }",
+      "    breakdown.push({",
+      "      model: row.model,",
+      "      input_tokens: row.input_tokens,",
+      "      output_tokens: row.output_tokens,",
+      "      cache_read_tokens: row.cache_read_tokens,",
+      "      cache_write_tokens: row.cache_write_tokens,",
+      "      cost: priced ? result.costUsd : null,",
+      "      input_cost: priced ? result.inputCostUsd : null,",
+      "      output_cost: priced ? result.outputCostUsd : null,",
+      "      provider: result.provider,",
+      "      priced,",
+      "      unpriced_reason: priced ? null : result.reason,",
+      "      matched_rule: priced ? result.provider : null,",
+      "    });",
+      "  }",
+      "",
+      "  return { total_cost: totalCost, breakdown };",
+      "}",
+    ].join("\n");
+    source = source.replace(calcNeedle, calcReplacement);
+  }
+
+  // (c) remove the mutating PUT/DELETE pricing endpoints. genai-prices is the
+  // source of truth, so there is no host-editable rule table to write to. This
+  // is an internal sidecar route (consumed only by the bundled client, which
+  // ships as one unit) — no external migration is required.
+  if (source.includes('router.put("/"')) {
+    const mutatingNeedle = [
+      "// PUT /api/pricing - Create or update a pricing rule",
+      'router.put("/", (req, res) => {',
+      "  const {",
+      "    model_pattern,",
+      "    display_name,",
+      "    input_per_mtok,",
+      "    output_per_mtok,",
+      "    cache_read_per_mtok,",
+      "    cache_write_per_mtok,",
+      "  } = req.body;",
+      "  if (!model_pattern || !display_name) {",
+      "    return res.status(400).json({",
+      '      error: { code: "INVALID_INPUT", message: "model_pattern and display_name are required" },',
+      "    });",
+      "  }",
+      "",
+      "  stmts.upsertPricing.run(",
+      "    model_pattern,",
+      "    display_name,",
+      "    input_per_mtok ?? 0,",
+      "    output_per_mtok ?? 0,",
+      "    cache_read_per_mtok ?? 0,",
+      "    cache_write_per_mtok ?? 0",
+      "  );",
+      "",
+      "  const rule = stmts.getPricing.get(model_pattern);",
+      "  res.json({ pricing: rule });",
+      "});",
+      "",
+      "// DELETE /api/pricing/:pattern - Delete a pricing rule",
+      'router.delete("/:pattern", (req, res) => {',
+      "  const pattern = decodeURIComponent(req.params.pattern);",
+      "  const existing = stmts.getPricing.get(pattern);",
+      "  if (!existing) {",
+      "    return res",
+      "      .status(404)",
+      '      .json({ error: { code: "NOT_FOUND", message: "Pricing rule not found" } });',
+      "  }",
+      "  stmts.deletePricing.run(pattern);",
+      "  res.json({ ok: true });",
+      "});",
+      "",
+    ].join("\n");
+    if (!source.includes(mutatingNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the PUT/DELETE pricing endpoints to remove (cost engine, FEA-1431).`,
       );
     }
     source = source.replace(
-      matchNeedle,
+      mutatingNeedle,
       [
-        "  for (const row of tokenRows) {",
-        '    const modelId = String(row.model || "").toLowerCase();',
-        "    const rule = sortedRules.find((p) => {",
-        '      const pattern = String(p.model_pattern || "").toLowerCase().replace(/%/g, ".*");',
-        '      return new RegExp("^" + pattern + "$").test(modelId);',
-        "    });",
+        "// CLOSEDLOOP token cost (FEA-1431): the mutating PUT /api/pricing and",
+        "// DELETE /api/pricing/:pattern endpoints were removed. genai-prices is the",
+        "// single source of truth for rates, so there is no host-editable rule table",
+        "// to write to. GET /api/pricing below stays read-only.",
+        "",
       ].join("\n"),
     );
   }
@@ -3382,6 +3512,46 @@ function assertGeneratedTree() {
         "Patched client Sidebar.tsx is missing the /pull-requests nav entry (FEA-1226).",
       );
     }
+  }
+
+  // CLOSEDLOOP token cost hard-gates (FEA-1431): a future upstream bump that
+  // breaks an anchor must fail the build, not silently revert to the
+  // hand-maintained pricing table (the cached-token overcharge bug) or drop the
+  // canonical token-cost engine.
+  for (const m of COST_MODULES) {
+    if (!existsSync(path.join(generatedRootDir, "server", "lib", `${m}.js`))) {
+      throw new Error(
+        `Generated server/lib/${m}.js missing (token cost engine, FEA-1431).`,
+      );
+    }
+  }
+  const pricingRouteSource = readFileSync(generatedPricingRoute, "utf8");
+  if (!pricingRouteSource.includes('require("../lib/cost-pricing")')) {
+    throw new Error(
+      "Generated server/routes/pricing.js is missing the cost-engine require (FEA-1431).",
+    );
+  }
+  if (
+    !pricingRouteSource.includes(
+      "// CLOSEDLOOP FEA-1431 engine-delegating calculateCost",
+    )
+  ) {
+    throw new Error(
+      "Generated server/routes/pricing.js still uses the upstream rule-table calculateCost — the engine delegation patch did not apply (FEA-1431).",
+    );
+  }
+  if (pricingRouteSource.includes("rates.cache_read_per_mtok")) {
+    throw new Error(
+      "Generated server/routes/pricing.js still contains the upstream per-mtok cost formula — the overcharge-prone code was not removed (FEA-1431).",
+    );
+  }
+  if (
+    pricingRouteSource.includes('router.put("/"') ||
+    pricingRouteSource.includes('router.delete("/:pattern"')
+  ) {
+    throw new Error(
+      "Generated server/routes/pricing.js still exposes the mutating PUT/DELETE pricing endpoints — they must be removed (FEA-1431).",
+    );
   }
 
   // CLOSEDLOOP pack-observability hard-gates (FEA-1224): a future upstream
