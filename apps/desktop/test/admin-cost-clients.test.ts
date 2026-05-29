@@ -15,13 +15,19 @@
  *   (4) pagination follows next_page and concatenates pages, and exceeding the
  *       page cap throws rather than returning a partial (understated) bill;
  *   (5) a non-2xx response throws with the status, and malformed money throws
- *       rather than silently dropping a charge.
+ *       rather than silently dropping a charge;
+ *   (6) the thrown non-2xx error is scrubbed of any key-shaped token the vendor
+ *       echoes back in its error body, so the Admin key never lands in an error
+ *       message (and from there an IPC reply or the log file).
  *
  * The network is never touched: a recording fake fetch returns canned bodies.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { assertAllowedAdminHost } from "../src/main/admin-billing.js";
+import {
+  assertAllowedAdminHost,
+  redactKeyLikeTokens,
+} from "../src/main/admin-billing.js";
 import { AnthropicAdminClient } from "../src/main/anthropic-admin-client.js";
 import { OpenAiAdminClient } from "../src/main/openai-admin-client.js";
 import { makeFetch } from "./helpers/admin-fetch.js";
@@ -154,15 +160,51 @@ test("Anthropic: follows next_page pagination and concatenates results", async (
   assert.ok(calls[1].url.includes("page=PAGE_2_TOKEN"));
 });
 
-test("Anthropic: a non-2xx response throws with the status", async () => {
+test("Anthropic: a non-2xx response throws with the status, key scrubbed from the body", async () => {
+  // Model a vendor 401 body that echoes the key it received (OpenAI does this;
+  // we treat any vendor body as untrusted and scrub it).
   const { fetch } = makeFetch([{ error: "nope" }], {
     status: 401,
-    bodyText: '{"error":"invalid x-api-key"}',
+    bodyText:
+      '{"error":"Incorrect API key provided: sk-ant-admin-TEST. Check your key."}',
   });
   const client = new AnthropicAdminClient({ apiKey: "sk-ant-admin-TEST", fetch });
   await assert.rejects(
     () => client.fetchCostReport({ startingAt: "2026-05-20T00:00:00Z" }),
-    /Anthropic admin API HTTP 401/,
+    (err: unknown) => {
+      const message = (err as Error).message;
+      assert.match(message, /Anthropic admin API HTTP 401/);
+      // The exact key string must NOT appear; it is redacted instead.
+      assert.ok(
+        !message.includes("sk-ant-admin-TEST"),
+        "error message must not contain the Admin key",
+      );
+      assert.match(message, /sk-\[redacted\]/);
+      return true;
+    },
+  );
+});
+
+test("redactKeyLikeTokens scrubs plain and masked keys but leaves prose intact", () => {
+  // Plain key.
+  assert.equal(
+    redactKeyLikeTokens("Incorrect API key provided: sk-ant-admin-TEST."),
+    "Incorrect API key provided: sk-[redacted].",
+  );
+  // OpenAI-style asterisk-masked key.
+  assert.equal(
+    redactKeyLikeTokens("provided: sk-admin-****************************tK8F."),
+    "provided: sk-[redacted].",
+  );
+  // Both vendor prefixes in one body.
+  assert.equal(
+    redactKeyLikeTokens("sk-admin-AAAA and sk-ant-admin-BBBB"),
+    "sk-[redacted] and sk-[redacted]",
+  );
+  // Non-key text is untouched (no false positives on ordinary words).
+  assert.equal(
+    redactKeyLikeTokens("rate limit exceeded for this organization"),
+    "rate limit exceeded for this organization",
   );
 });
 

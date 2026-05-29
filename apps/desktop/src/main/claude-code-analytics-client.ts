@@ -106,6 +106,12 @@ function assertUtcDayString(value: string, field: string): string {
   if (Number.isNaN(parsed.getTime())) {
     throw new Error(`Claude Code analytics: ${field} is not a real date`);
   }
+  // JS Date silently overflows out-of-range days (e.g. 2024-02-30 → 2024-03-01),
+  // so the NaN check above is not enough. Require the parsed date to round-trip
+  // back to the same string, which rejects impossible calendar days.
+  if (parsed.toISOString().slice(0, 10) !== value) {
+    throw new Error(`Claude Code analytics: ${field} is not a real date`);
+  }
   return value;
 }
 
@@ -242,6 +248,9 @@ function tokenCount(raw: unknown): number {
   }
   if (typeof raw !== "number" || !Number.isFinite(raw)) {
     throw new Error("Claude Code analytics: token count must be a number");
+  }
+  if (raw < 0) {
+    throw new Error("Claude Code analytics: token count must be non-negative");
   }
   return raw;
 }

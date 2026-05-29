@@ -5260,12 +5260,22 @@
         if (count === 0) {
           return "No Claude Code usage reported for this window (requires a Team or Enterprise org).";
         }
-        const window = result.window;
-        const range = window ? ` (${window.startDay} → ${window.endDay})` : "";
+        // Local name — NOT the browser `window` global (which we never need here).
+        const queryWindow = result.window;
+        const range = queryWindow ? ` (${queryWindow.startDay} → ${queryWindow.endDay})` : "";
         return `Anthropic's estimate${range}.`;
       }
 
-      function renderClaudeCodeTotal(rows) {
+      // Inclusive day count for a {startDay, endDay} window, or null if unparseable.
+      function claudeCodeWindowDayCount(queryWindow) {
+        if (!queryWindow || !queryWindow.startDay || !queryWindow.endDay) return null;
+        const start = Date.parse(`${queryWindow.startDay}T00:00:00Z`);
+        const end = Date.parse(`${queryWindow.endDay}T00:00:00Z`);
+        if (Number.isNaN(start) || Number.isNaN(end) || end < start) return null;
+        return Math.round((end - start) / 86400000) + 1;
+      }
+
+      function renderClaudeCodeTotal(rows, queryWindow) {
         if (!claudeCodeUsageTotal) return;
         if (!Array.isArray(rows) || rows.length === 0) {
           claudeCodeUsageTotal.textContent = "";
@@ -5277,7 +5287,11 @@
             total += row.estimatedCostMicroCents;
           }
         }
-        claudeCodeUsageTotal.textContent = `7-day total: ${formatUsdFromMicroCents(total)}`;
+        // Derive the label from the actual window so it stays correct if the
+        // window ever becomes configurable, instead of hardcoding "7-day".
+        const days = claudeCodeWindowDayCount(queryWindow);
+        const label = days ? `${days}-day total` : "Total";
+        claudeCodeUsageTotal.textContent = `${label}: ${formatUsdFromMicroCents(total)}`;
       }
 
       async function refreshClaudeCodeUsage() {
@@ -5296,7 +5310,7 @@
         const records = result && Array.isArray(result.records) ? result.records : [];
         const rows = aggregateClaudeCodeRecords(records);
         renderClaudeCodeUsageTable(rows);
-        renderClaudeCodeTotal(rows);
+        renderClaudeCodeTotal(rows, result && result.window);
         if (claudeCodeUsageMessage) {
           claudeCodeUsageMessage.textContent = describeClaudeCodeResult(result);
         }

@@ -230,6 +230,13 @@ test("one vendor failing does not abort the other (per-vendor isolation)", async
   assert.equal(summary.errors.length, 1);
   assert.equal(summary.errors[0].vendor, "anthropic");
   assert.match(summary.errors[0].message, /HTTP 401/);
+  // The Admin key the service holds must never surface in the IPC-visible
+  // summary (the real client redacts upstream in requestAdminJson; the service
+  // must not reintroduce it). Guards the renderer-visible error path.
+  assert.ok(
+    !summary.errors[0].message.includes("sk-ant-admin-bad"),
+    "summary error must not contain the Admin key",
+  );
   // The healthy vendor still produced a row.
   assert.equal(summary.rowsWritten, 1);
 });

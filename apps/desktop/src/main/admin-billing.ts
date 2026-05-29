@@ -14,8 +14,12 @@
  *   2. Every outbound request host is checked against a fixed allowlist
  *      (api.anthropic.com / api.openai.com) via assertAllowedAdminHost, so a
  *      misconfigured base URL can never ship the Admin key to another host.
- * Errors thrown here include the HTTP status and the vendor's own error body
- * (which never contains your key) but never the key itself.
+ * Errors thrown here include the HTTP status and a truncated copy of the
+ * vendor's error body, scrubbed of any key-shaped token via redactKeyLikeTokens.
+ * We only ever put the key in request headers, but the vendor's *response* is
+ * outside our control — OpenAI's 401 body, for instance, echoes a masked copy of
+ * the key it received — so we redact before the body can reach an error message,
+ * an IPC reply, or the log file. The key itself is never placed in an error.
  */
 import {
   centsToMicroCents,
@@ -88,9 +92,28 @@ export function assertAllowedAdminHost(url: string, allowedHost: string): void {
 }
 
 /**
+ * Redact anything that looks like an API key from a string before it is placed
+ * in a thrown error or a log line. We send the Admin key only in request headers,
+ * but a vendor's error *response* is outside our control and can echo a copy of
+ * the key it received — e.g. OpenAI's 401 body: "Incorrect API key provided:
+ * sk-admin-…". The token class matches the characters a real key is made of
+ * (alphanumerics, `-`, `_`) plus `*` to also catch the asterisk-masked forms
+ * vendors print; it deliberately excludes `.` so a trailing sentence period is
+ * left intact. The full (unmasked) key is the only true secret and is always a
+ * contiguous run of these characters, so it is always fully scrubbed. Over-
+ * redaction is the intended posture: a secret leak is far worse than a slightly
+ * noisier diagnostic.
+ */
+export function redactKeyLikeTokens(text: string): string {
+  return text.replace(/sk-[A-Za-z0-9*_-]{4,}/g, "sk-[redacted]");
+}
+
+/**
  * GET `url` with `headers`, returning the parsed JSON body. Throws on a non-2xx
- * with the status and a truncated copy of the vendor's error body (never the
- * Admin key, which is only ever in the request headers).
+ * with the status and a truncated, key-scrubbed copy of the vendor's error body.
+ * The Admin key is only ever in the request headers; redactKeyLikeTokens scrubs
+ * any key-shaped token the vendor may echo back, so the key never lands in the
+ * thrown error.
  */
 export async function requestAdminJson(
   url: string,
@@ -103,7 +126,9 @@ export async function requestAdminJson(
     let bodyHint = "";
     try {
       const body = await response.text();
-      bodyHint = body ? `: ${body.slice(0, 200)}` : "";
+      // Redact before truncating so a key straddling the 200-char cut can't
+      // survive in a half-scrubbed form.
+      bodyHint = body ? `: ${redactKeyLikeTokens(body).slice(0, 200)}` : "";
     } catch {
       bodyHint = "";
     }

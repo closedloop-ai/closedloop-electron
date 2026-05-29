@@ -12,10 +12,10 @@
  *   (3) the client loops ONE request per UTC day across the window;
  *   (4) within a day it follows next_page and concatenates pages;
  *   (5) a non-2xx throws with the status; malformed money throws rather than
- *       silently dropping spend; exceeding the per-day page cap throws rather
- *       than returning a partial usage picture;
+ *       silently dropping spend; a negative token count throws; exceeding the
+ *       per-day page cap throws rather than returning a partial usage picture;
  *   (6) an unknown/future actor shape is surfaced (not dropped) under a stable
- *       label, and an inverted/oversized window is rejected.
+ *       label, and an inverted/oversized/impossible-date window is rejected.
  *
  * The network is never touched: the shared recording fake fetch returns canned
  * bodies (see test/helpers/admin-fetch.ts).
@@ -236,6 +236,35 @@ test("malformed estimated cost throws rather than dropping spend", async () => {
   );
 });
 
+test("a negative token count throws rather than recording a nonsensical value", async () => {
+  const { fetch } = makeFetch([
+    {
+      data: [
+        {
+          actor: { type: "user_actor", email_address: "a@example.com" },
+          model_breakdown: [
+            {
+              model: "m1",
+              estimated_cost: { amount: 100, currency: "USD" },
+              tokens: { input: -5, output: 10 },
+            },
+          ],
+        },
+      ],
+      has_more: false,
+      next_page: null,
+    },
+  ]);
+  const client = new ClaudeCodeAnalyticsClient({
+    apiKey: "sk-ant-admin-TEST",
+    fetch,
+  });
+  await assert.rejects(
+    () => client.fetchUsage({ startDay: "2026-05-20", endDay: "2026-05-20" }),
+    /token count must be non-negative/,
+  );
+});
+
 test("exceeding the per-day page cap throws instead of returning partial usage", async () => {
   const alwaysMore = {
     data: [
@@ -304,6 +333,12 @@ test("rejects an inverted window and a bad day string", async () => {
   await assert.rejects(
     () => client.fetchUsage({ startDay: "2026/05/20", endDay: "2026-05-20" }),
     /startDay must be YYYY-MM-DD/,
+  );
+  // A well-formed but impossible calendar day (Feb 30) must be rejected — JS
+  // Date silently overflows it to March 1, so the shape check alone is not enough.
+  await assert.rejects(
+    () => client.fetchUsage({ startDay: "2026-02-30", endDay: "2026-02-30" }),
+    /startDay is not a real date/,
   );
 });
 
