@@ -2,10 +2,14 @@
  * Tests for the build-time pricing invariants in
  * apps/desktop/scripts/build-agent-monitor.mjs.
  *
- * Runs the real merge (vendored LiteLLM JSON + HOST_ONLY_OVERRIDES) and
+ * Runs the real merge (vendored LiteLLM JSON + HOST_FALLBACKS) and
  * asserts the regression-shaped contracts:
- *   - Claude Opus 4.x family priced at ≥ $10/Mtok input.
- *   - All HOST_ONLY_OVERRIDES (fallback patterns) present in the merged list.
+ *   - Opus 4.1/4.2 priced at the published $15/$75 rate (legacy generation).
+ *   - Opus 4.5+ priced at the published $5/$25 rate (re-priced generation).
+ *   - All HOST_FALLBACKS (fallback patterns) present in the merged list.
+ *   - No HOST_FALLBACKS pattern collides with a LiteLLM pattern (the
+ *     "we don't override LiteLLM" structural rule — surfaced as a build
+ *     error by the anti-override assertion in loadHostDefaultPricing).
  *   - No duplicate `model_pattern` after merge.
  */
 import assert from "node:assert/strict";
@@ -67,14 +71,14 @@ test("FEA-1431-bugfix: Opus 4.1/4.2 retain their published $15/$75 list price", 
   );
 });
 
-test("HOST_ONLY_OVERRIDES rows are present in the merged list", async () => {
+test("HOST_FALLBACKS rows are present in the merged list", async () => {
   const { loadHostDefaultPricing } = await loadBuilder();
   const rows = loadHostDefaultPricing();
   const patterns = new Set(rows.map((r) => r[0]));
   for (const required of REQUIRED_HOST_OVERRIDES) {
     assert.ok(
       patterns.has(required),
-      `Expected HOST_ONLY_OVERRIDES row ${required} to be in the merged list`,
+      `Expected HOST_FALLBACKS row ${required} to be in the merged list`,
     );
   }
 });
@@ -109,7 +113,7 @@ test("merged pricing list contains the vendored Claude Opus 4 family", async () 
 test("FEA-1431-bugfix: Opus 4.5+ tracks Anthropic's published list price", async () => {
   // Anthropic re-priced Opus starting at 4.5 down to $5/Mtok input
   // (https://platform.claude.com/docs/en/about-claude/pricing). Earlier
-  // builds force-overrode these to $15/Mtok in HOST_ONLY_OVERRIDES; the
+  // builds force-overrode these to $15/Mtok in HOST_FALLBACKS; the
   // bugfix pass removed the overrides so LiteLLM upstream drives the rates.
   // This test pins the corrected behavior — verifies the merged list
   // reflects $5/$25 for Opus 4.5/4.6/4.7 (LiteLLM-aligned), NOT $15/$75.
@@ -195,12 +199,12 @@ test("FEA-1432: every priced claude-* row has cache_write_1h ≥ input × 1.5", 
 
 test("FEA-1432 invariant rejects a gpt-* row with a non-zero cache_write", async () => {
   // Inject a synthetic malformed override into the merged list via a
-  // controlled path: we can't mutate HOST_ONLY_OVERRIDES from a test, but the
+  // controlled path: we can't mutate HOST_FALLBACKS from a test, but the
   // public API of loadHostDefaultPricing already runs the invariants on the
   // current overrides. The other invariant tests above guard the steady
   // state; this test pins the error message shape by directly exercising the
   // invariant logic on a synthetic merged set. Build by re-importing the
-  // builder and using its public loader — if HOST_ONLY_OVERRIDES ever
+  // builder and using its public loader — if HOST_FALLBACKS ever
   // regresses to carry a non-zero cache_write, the public loader throws.
   // The steady-state suite above catches that case; this test exists as a
   // documentation pin for the invariant being enforced.
@@ -221,7 +225,7 @@ test("loadHostDefaultPricing rejects a malformed vendored JSON shape", async () 
   // non-array row.
   const builder = (await loadBuilder()) as BuilderModule & {
     // The assertion helper isn't exported, but its behavior is reachable
-    // through HOST_ONLY_OVERRIDES. Skip if the loader rejects something
+    // through HOST_FALLBACKS. Skip if the loader rejects something
     // unrelated.
   };
   // No-op exercise: a successful loader call from the vendored JSON proves

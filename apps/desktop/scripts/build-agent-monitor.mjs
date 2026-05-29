@@ -310,16 +310,34 @@ const CLIENT_FULL_FILE_OVERRIDES = [
   },
 ];
 
-// Host-owned overrides for model patterns LiteLLM does not carry. These keep
-// fallback / synthetic model IDs (used when a harness parser cannot identify
-// the underlying model) routed to a sensible pricing rule. They are merged on
-// top of the LiteLLM-derived rows in loadHostDefaultPricing() with override
-// precedence by model_pattern.
+// HOST_FALLBACKS — rows added on top of the LiteLLM-derived seed for
+// model_patterns that LiteLLM does NOT carry. Merge precedence is
+// LiteLLM-wins: a LiteLLM row always beats a HOST_FALLBACKS row with the
+// same model_pattern. A build-time assertion in loadHostDefaultPricing()
+// throws if any HOST_FALLBACKS row collides with a LiteLLM pattern — that
+// way the "we shouldn't be overriding anything LiteLLM does" rule is
+// enforced structurally, not just by convention.
 //
-// Do NOT add Claude/GPT rates here just because LiteLLM's value looks off — the
-// build-time invariants below catch real regressions. The right fix for a
-// genuine LiteLLM rate bug is to raise it upstream and document the deviation
-// inline with a TODO + ticket reference.
+// Two categories of entries are legitimate:
+//
+//   1. SYNTHETIC IDs. Internal model_pattern slugs our parsers emit when
+//      they cannot determine the actual vendor model (e.g. `gpt-codex`,
+//      `cursor-default`, `copilot-default`, `opencode-default`,
+//      `big-pickle`). These do not exist in any vendor's published price
+//      list; this is the only place they get pricing.
+//
+//   2. COVERAGE GAPS. Bare aliases for vendor models LiteLLM carries
+//      under a different shape. LiteLLM upstream indexes some Claude
+//      families only with date-suffixed keys (e.g. `claude-3-7-sonnet-
+//      20250219`) and omits the bare alias (`claude-3-7-sonnet`) that
+//      sessions actually report. The rows here fill those holes at the
+//      vendor's published list price. When LiteLLM publishes the bare
+//      key upstream, the build-time anti-override assertion will surface
+//      the collision and the override should be deleted.
+//
+// Do NOT add a HOST_FALLBACKS row to "correct" a LiteLLM rate you think
+// is wrong. If LiteLLM is wrong, file the fix upstream. The anti-override
+// assertion will refuse to build if you try.
 // 7-tuple shape:
 //   [model_pattern, display_name,
 //    input_per_mtok, output_per_mtok,
@@ -331,7 +349,7 @@ const CLIENT_FULL_FILE_OVERRIDES = [
 // rate card (see FEA-1432). OpenAI has no cache-write surcharge (cached input
 // reads at a 50% discount, writes are free); both write columns must be 0 for
 // all gpt-*/o1-*/o3-* rows.
-const HOST_ONLY_OVERRIDES = [
+const HOST_FALLBACKS = [
   // OpenCode-hosted free models (not in LiteLLM)
   ["big-pickle%", "Big Pickle", 0, 0, 0, 0, 0],
   ["opencode/big-pickle%", "OpenCode Big Pickle", 0, 0, 0, 0, 0],
@@ -396,7 +414,7 @@ const litellmPricingPath = path.join(scriptDir, "litellm-pricing.json");
  * The 7th column (`cache_write_1h_per_mtok`) was added in FEA-1432 to model
  * Anthropic's 1-hour ephemeral cache writes separately from the 5-minute tier
  * (the legacy `cache_write_per_mtok` column). LiteLLM-derived rows fill the
- * 7th column via the transformer; HOST_ONLY_OVERRIDES must include it
+ * 7th column via the transformer; HOST_FALLBACKS must include it
  * explicitly.
  *
  * @param {unknown} row
@@ -436,7 +454,7 @@ function assertWellFormedPricingRow(row, sourceLabel) {
 }
 
 /**
- * Load the vendored LiteLLM pricing JSON and merge HOST_ONLY_OVERRIDES on top
+ * Load the vendored LiteLLM pricing JSON and merge HOST_FALLBACKS on top
  * (overrides win on a model_pattern collision). Validates build-time pricing
  * invariants and throws with actionable context if any fail.
  *
@@ -466,14 +484,34 @@ export function loadHostDefaultPricing() {
 
   /** @type {Map<string, [string, string, number, number, number, number, number]>} */
   const byPattern = new Map();
+  /** @type {Set<string>} */
+  const litellmPatterns = new Set();
   for (const row of parsed) {
     assertWellFormedPricingRow(row, litellmPricingPath);
     byPattern.set(row[0], /** @type {any} */ (row));
+    litellmPatterns.add(row[0]);
   }
-  // HOST_ONLY_OVERRIDES win on collision.
-  for (const row of HOST_ONLY_OVERRIDES) {
-    assertWellFormedPricingRow(row, "HOST_ONLY_OVERRIDES");
+  // LiteLLM wins on collision. HOST_FALLBACKS can only fill gaps; if a
+  // fallback row's model_pattern matches a LiteLLM row, that's an attempt
+  // to override LiteLLM and the build throws. Catch the exact mistake
+  // FEA-1431 originally shipped (force-overriding Opus 4.5+ to $15/$75).
+  /** @type {string[]} */
+  const wouldOverride = [];
+  for (const row of HOST_FALLBACKS) {
+    assertWellFormedPricingRow(row, "HOST_FALLBACKS");
+    if (litellmPatterns.has(row[0])) {
+      wouldOverride.push(row[0]);
+      continue;
+    }
     byPattern.set(row[0], /** @type {any} */ (row));
+  }
+  if (wouldOverride.length > 0) {
+    throw new Error(
+      `HOST_FALLBACKS contains model_patterns that collide with LiteLLM: ${wouldOverride.join(", ")}. ` +
+        `Remove these rows — LiteLLM is the source of truth for vendor pricing. ` +
+        `If a LiteLLM rate is genuinely wrong, fix it upstream at ` +
+        `https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json`,
+    );
   }
 
   const merged = Array.from(byPattern.values());
@@ -492,7 +530,7 @@ export function loadHostDefaultPricing() {
   // Invariant #1 (FEA-1432): OpenAI cache pricing is vendor-specific.
   // Cached input reads at a 50% discount; cache writes carry no surcharge
   // (both 5-min and 1h columns must be 0). This is a hard build-time check —
-  // a regression in the LiteLLM transformer or HOST_ONLY_OVERRIDES that
+  // a regression in the LiteLLM transformer or HOST_FALLBACKS that
   // restores a write surcharge or inflates cache_read above ~55% of input
   // means we are about to charge users for cache traffic OpenAI does not
   // charge for.
@@ -502,7 +540,7 @@ export function loadHostDefaultPricing() {
     const pattern = row[0];
     // FEA-1432 review fix: match isOpenAIKey() in fetch-litellm-pricing.mjs
     // (gpt-, o1-, o3-). Earlier guard only covered gpt-, leaving a gap for
-    // a future HOST_ONLY_OVERRIDES row on o1-/o3- with non-zero cache_write
+    // a future HOST_FALLBACKS row on o1-/o3- with non-zero cache_write
     // to slip past this invariant.
     if (
       !pattern.startsWith("gpt-") &&

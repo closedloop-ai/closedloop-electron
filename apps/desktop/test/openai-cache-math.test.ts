@@ -60,7 +60,7 @@ test("gpt-codex% fallback row has cache_write = 0 and cache_write_1h = 0", async
   const { loadHostDefaultPricing } = await loadBuilder();
   const rows = loadHostDefaultPricing();
   const codex = rows.find((r) => r[0] === "gpt-codex%");
-  assert.ok(codex, "gpt-codex% must be present in HOST_ONLY_OVERRIDES");
+  assert.ok(codex, "gpt-codex% must be present in HOST_FALLBACKS");
   // Tuple shape: [pattern, name, input, output, cache_read, cache_write, cache_write_1h]
   assert.equal(codex![5], 0, "cache_write (5-min) must be 0 for OpenAI");
   assert.equal(codex![6], 0, "cache_write_1h must be 0 for OpenAI");
