@@ -374,20 +374,24 @@ export function Sessions() {
                       {session.agent_count ?? "-"}
                     </td>
                     {/*
-                      FEA-1433: distinguish three cost states.
-                        cost == null            → at least one of the
-                          session's models has no `model_pricing` rule.
-                          Render an em-dash with a tooltip that points the
-                          user at Settings → Pricing (handled by the desktop
-                          renderer outside the iframe). This is the
+                      FEA-1433: render three cost states (matching the
+                      sidecar's calculateSessionCostFea1433 contract).
+                        cost == null → EVERY model in the session is
+                          unpriced (no model_pricing rule matched any
+                          row). Render an em-dash with a tooltip pointing
+                          at Settings → Pricing. This is the strong
                           diagnostic signal — never silently show $0.
-                        cost == 0  && unpriced  → mixed state where every
-                          model is unpriced but cost happens to be 0. Same
-                          rendering as null (tooltip still relevant).
-                        cost > 0   || (cost === 0 && fully priced) → render
-                          the dollar value.
-                      Sort column already treats null as end-sort in the
-                      sidecar (see calculateSessionCostFea1433 patch in
+                        cost > 0 && unpriced_models non-empty → MIXED:
+                          some models priced, at least one not. Render
+                          the partial $ value with an asterisk + tooltip
+                          so the user sees the partial total AND knows
+                          it understates true cost (FEA-1433 review fix).
+                        cost > 0 && unpriced_models empty → fully priced.
+                          Render the dollar value.
+                        cost == 0 → no usage on a priced model. Render
+                          "-" (distinct from the unpriced em-dash).
+                      Sort column treats null as end-sort in the sidecar
+                      (see calculateSessionCostFea1433 patch in
                       build-agent-monitor.mjs).
                     */}
                     <td className="px-5 py-4 text-sm text-gray-400 font-mono">
@@ -404,7 +408,26 @@ export function Sessions() {
                           —
                         </span>
                       ) : session.cost > 0 ? (
-                        fmtCost(session.cost)
+                        (() => {
+                          const unpricedCount =
+                            session.unpriced_models?.length ?? 0;
+                          if (unpricedCount === 0) return fmtCost(session.cost);
+                          // Mixed: partial cost. Asterisk + tooltip.
+                          const sample = session.unpriced_models?.[0];
+                          const label =
+                            unpricedCount === 1
+                              ? `Partial — model "${sample}" is not in the pricing table; this total excludes its tokens. Open Settings → Pricing to add a rate.`
+                              : `Partial — ${unpricedCount} models (including "${sample}") are not in the pricing table; this total excludes their tokens. Open Settings → Pricing to add rates.`;
+                          return (
+                            <span
+                              className="cursor-help"
+                              title={label}
+                            >
+                              {fmtCost(session.cost)}
+                              <span className="text-amber-400 ml-0.5">*</span>
+                            </span>
+                          );
+                        })()
                       ) : (
                         "-"
                       )}
