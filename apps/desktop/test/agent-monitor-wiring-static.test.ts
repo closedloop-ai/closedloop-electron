@@ -28,6 +28,20 @@ const generatedHooksRouteUrl = new URL(
 const generatedHooksRouteSource = existsSync(generatedHooksRouteUrl)
   ? readFileSync(generatedHooksRouteUrl, "utf8")
   : null;
+const generatedPricingRouteUrl = new URL(
+  "../.generated/agent-monitor/server/routes/pricing.js",
+  import.meta.url,
+);
+const generatedPricingRouteSource = existsSync(generatedPricingRouteUrl)
+  ? readFileSync(generatedPricingRouteUrl, "utf8")
+  : null;
+const generatedAnalyticsRouteUrl = new URL(
+  "../.generated/agent-monitor/server/routes/analytics.js",
+  import.meta.url,
+);
+const generatedAnalyticsRouteSource = existsSync(generatedAnalyticsRouteUrl)
+  ? readFileSync(generatedAnalyticsRouteUrl, "utf8")
+  : null;
 // Resolve the pinned upstream agent-dashboard source the same way the build
 // script does (createRequire from apps/desktop/package.json) so we can assert
 // the build-script patch anchors still match the source they patch.
@@ -669,6 +683,84 @@ test("billing_mode write paths (FEA-1434) stamp every harness", () => {
         ),
       ),
       "generated server/agent-monitor-shared/billing-stamp.js missing",
+    );
+  }
+});
+
+test("two-ledger cost aggregation (FEA-1434) is wired into both cost endpoints", () => {
+  // Build script defines + invokes the analytics patch and extends the pricing
+  // patch with the /cost ledger split. These needles guard the patch anchors so
+  // a future upstream refactor that breaks them fails the build, not silently
+  // ships an un-split headline.
+  for (const needle of [
+    "function patchAnalyticsRoute",
+    "patchAnalyticsRoute(generatedAnalyticsRoute)",
+    "CLOSEDLOOP FEA-1434 two-ledger headline",
+    "CLOSEDLOOP FEA-1434 cost-endpoint ledger split",
+    // The headline must be keyed off headlineCost (metered + unknown), never a
+    // raw sum that would leak subscription spend into real cost.
+    "headlineCost(ledgerTotals)",
+    "cost_by_ledger: ledgerTotals",
+    // Both generated-tree hard-gates must exist.
+    "two-ledger cost split on GET /api/pricing/cost (FEA-1434)",
+    "missing the two-ledger headline split (FEA-1434)",
+  ]) {
+    assert.ok(
+      buildScriptSource.includes(needle),
+      `build-agent-monitor.mjs missing two-ledger cost wiring: ${needle}`,
+    );
+  }
+
+  // If a generated tree is present, both routes must carry the split: each
+  // requires the ledger engine, buckets by billing_mode via a LEFT JOIN, sets
+  // the headline from headlineCost, and exposes cost_by_ledger.
+  if (generatedAnalyticsRouteSource) {
+    assert.ok(
+      generatedAnalyticsRouteSource.includes('require("../lib/billing-mode")'),
+      "generated analytics.js missing billing-mode require",
+    );
+    assert.ok(
+      generatedAnalyticsRouteSource.includes("cost_by_ledger: ledgerTotals"),
+      "generated analytics.js missing cost_by_ledger",
+    );
+    assert.ok(
+      generatedAnalyticsRouteSource.includes("headlineCost(ledgerTotals)"),
+      "generated analytics.js missing headlineCost headline",
+    );
+    assert.ok(
+      generatedAnalyticsRouteSource.includes("LEFT JOIN sessions"),
+      "generated analytics.js missing billing_mode LEFT JOIN",
+    );
+    // The un-joined upstream scan must be gone — that's the bug we're fixing.
+    assert.ok(
+      !generatedAnalyticsRouteSource.includes(
+        'db.prepare("SELECT * FROM token_usage")',
+      ),
+      "generated analytics.js still uses the un-joined token_usage scan",
+    );
+  }
+  if (generatedPricingRouteSource) {
+    assert.ok(
+      generatedPricingRouteSource.includes('require("../lib/billing-mode")'),
+      "generated pricing.js missing billing-mode require",
+    );
+    assert.ok(
+      generatedPricingRouteSource.includes(
+        "CLOSEDLOOP FEA-1434 cost-endpoint ledger split",
+      ),
+      "generated pricing.js missing /cost ledger split",
+    );
+    assert.ok(
+      generatedPricingRouteSource.includes("cost_by_ledger: ledgerTotals"),
+      "generated pricing.js missing cost_by_ledger",
+    );
+    assert.ok(
+      generatedPricingRouteSource.includes("total_cost: headlineCost(ledgerTotals)"),
+      "generated pricing.js missing headlineCost headline on /cost",
+    );
+    assert.ok(
+      generatedPricingRouteSource.includes("GROUP BY s.billing_mode, tu.model"),
+      "generated pricing.js missing billing_mode-grouped ledger query",
     );
   }
 });

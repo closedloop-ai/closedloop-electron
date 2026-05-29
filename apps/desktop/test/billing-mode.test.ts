@@ -21,13 +21,17 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   BILLING_MODES,
+  addLedgerCost as addLedgerCostTwin,
   billingLedger as billingLedgerTwin,
   detectBillingModeForHarness as detectTwin,
+  emptyLedgerTotals as emptyLedgerTotalsTwin,
+  headlineCost as headlineCostTwin,
   isMeteredApi as isMeteredApiTwin,
   isSubscription as isSubscriptionTwin,
   normalizeBillingMode as normalizeTwin,
   type BillingMode,
   type BillingModeDetectionDeps,
+  type LedgerTotals,
 } from "../src/shared/billing-mode.js";
 
 // The sidecar engine is CommonJS (its dir is scoped type:commonjs). Load it via
@@ -38,6 +42,13 @@ const engine = require("../scripts/agent-monitor-billing/billing-mode.js") as {
   billingLedger: (mode: string) => string;
   isMeteredApi: (mode: string) => boolean;
   isSubscription: (mode: string) => boolean;
+  emptyLedgerTotals: () => LedgerTotals;
+  addLedgerCost: (
+    totals: LedgerTotals,
+    billingMode: string,
+    costUsd: number,
+  ) => LedgerTotals;
+  headlineCost: (totals: LedgerTotals) => number;
   normalizeBillingMode: (value: unknown) => string;
   detectBillingModeForHarness: (
     harness: string,
@@ -241,4 +252,90 @@ test("detection never surfaces a secret value (existence-only)", () => {
   // The output is an opaque mode, not the key; and never contains the secret.
   assert.equal(mode, "api");
   assert.ok(!String(mode).includes(secret));
+});
+
+// ── Ledger accounting (FEA-1434 two-ledger invariant) ────────────────────────
+
+test("emptyLedgerTotals is a fresh zeroed three-bucket accumulator", () => {
+  for (const empty of [emptyLedgerTotalsTwin(), engine.emptyLedgerTotals()]) {
+    assert.deepEqual(empty, { metered: 0, subscription: 0, unknown: 0 });
+  }
+  // Independent instances — mutating one must not affect the next call.
+  const a = emptyLedgerTotalsTwin();
+  a.metered = 99;
+  assert.equal(emptyLedgerTotalsTwin().metered, 0);
+});
+
+test("addLedgerCost routes each mode's cost into its ledger bucket (twin + engine)", () => {
+  for (const add of [addLedgerCostTwin, engine.addLedgerCost]) {
+    const empty = emptyLedgerTotalsTwin;
+    assert.deepEqual(add(empty(), "api", 1.5), {
+      metered: 1.5,
+      subscription: 0,
+      unknown: 0,
+    });
+    assert.deepEqual(add(empty(), "cursor_api", 2), {
+      metered: 2,
+      subscription: 0,
+      unknown: 0,
+    });
+    assert.deepEqual(add(empty(), "max_20x", 3), {
+      metered: 0,
+      subscription: 3,
+      unknown: 0,
+    });
+    assert.deepEqual(add(empty(), "opencode", 4), {
+      metered: 0,
+      subscription: 0,
+      unknown: 4,
+    });
+    assert.deepEqual(add(empty(), "unknown", 5), {
+      metered: 0,
+      subscription: 0,
+      unknown: 5,
+    });
+  }
+});
+
+test("addLedgerCost ignores non-finite costs so an unpriced row never corrupts a total", () => {
+  for (const add of [addLedgerCostTwin, engine.addLedgerCost]) {
+    // null/undefined/NaN/Infinity are all dropped; the accumulator is untouched.
+    for (const bad of [null, undefined, NaN, Infinity, -Infinity, "1.5"]) {
+      const totals = emptyLedgerTotalsTwin();
+      add(totals, "api", bad as unknown as number);
+      assert.deepEqual(totals, { metered: 0, subscription: 0, unknown: 0 });
+    }
+  }
+});
+
+test("addLedgerCost accumulates across many rows and returns the same object", () => {
+  const totals = emptyLedgerTotalsTwin();
+  const returned = addLedgerCostTwin(totals, "api", 1);
+  assert.equal(returned, totals, "mutates and returns the same accumulator");
+  addLedgerCostTwin(totals, "api", 0.25);
+  addLedgerCostTwin(totals, "pro", 10);
+  addLedgerCostTwin(totals, "opencode", 0.5);
+  assert.deepEqual(totals, { metered: 1.25, subscription: 10, unknown: 0.5 });
+});
+
+test("headlineCost = metered + unknown and EXCLUDES subscription (the safety invariant)", () => {
+  const totals: LedgerTotals = { metered: 7, subscription: 1000, unknown: 3 };
+  // Both implementations agree, and the headline never includes the $1000
+  // hypothetical subscription cost.
+  assert.equal(headlineCostTwin(totals), 10);
+  assert.equal(engine.headlineCost(totals), 10);
+  assert.equal(headlineCostTwin(totals), engine.headlineCost(totals));
+
+  // Adding subscription cost must not move the headline; adding metered/unknown
+  // must — proven by construction over the full mode domain.
+  for (const mode of BILLING_MODES) {
+    const t = emptyLedgerTotalsTwin();
+    addLedgerCostTwin(t, mode, 42);
+    const expectedHeadline = billingLedgerTwin(mode) === "subscription" ? 0 : 42;
+    assert.equal(
+      headlineCostTwin(t),
+      expectedHeadline,
+      `headline contribution for ${mode}`,
+    );
+  }
 });

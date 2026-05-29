@@ -98,6 +98,51 @@ function isSubscription(mode) {
 }
 
 /**
+ * ── Ledger accounting (pure) ──────────────────────────────────────────────────
+ * The two-ledger invariant lives here so the sidecar routes and any future
+ * desktop-main caller share one definition and cannot diverge. A LedgerTotals
+ * accumulator carries the three buckets; addLedgerCost() routes one priced row
+ * into its bucket via billingLedger(); headlineCost() defines what counts as
+ * real spend.
+ *
+ * Headline = metered + unknown (NOT subscription). Rationale: subscription rows
+ * are a hypothetical "would have cost" and must never inflate real spend, while
+ * legacy/opencode rows in the unknown bucket are pre-existing real numbers we
+ * must not silently zero out. Subscription cost stays visible in its own bucket
+ * for the two-ledger UI; it is simply excluded from the headline sum.
+ */
+
+/** Fresh zeroed accumulator. Shape is the wire contract for cost_by_ledger. */
+function emptyLedgerTotals() {
+  return { metered: 0, subscription: 0, unknown: 0 };
+}
+
+/**
+ * Add one priced row's cost to the bucket its billing mode maps to. Non-finite
+ * costs (null/undefined/NaN from an unpriced row) are ignored so an unpriced
+ * model never corrupts a ledger total — it simply does not contribute. Mutates
+ * and returns `totals` for fold-style accumulation.
+ * @param {{metered:number,subscription:number,unknown:number}} totals
+ * @param {string} billingMode
+ * @param {number} costUsd
+ */
+function addLedgerCost(totals, billingMode, costUsd) {
+  if (typeof costUsd !== "number" || !Number.isFinite(costUsd)) return totals;
+  totals[billingLedger(billingMode)] += costUsd;
+  return totals;
+}
+
+/**
+ * The headline "real spend" number: metered API spend plus unknown-ledger rows
+ * (legacy/opencode), explicitly EXCLUDING subscription-covered cost.
+ * @param {{metered:number,subscription:number,unknown:number}} totals
+ * @returns {number}
+ */
+function headlineCost(totals) {
+  return totals.metered + totals.unknown;
+}
+
+/**
  * Coerce a possibly-null/legacy/garbage value (e.g. a DB read from a row
  * written before this column existed, or a relay payload from an older build)
  * to a valid BillingMode. Unrecognized → "unknown".
@@ -203,6 +248,9 @@ module.exports = {
   billingLedger,
   isMeteredApi,
   isSubscription,
+  emptyLedgerTotals,
+  addLedgerCost,
+  headlineCost,
   normalizeBillingMode,
   detectBillingModeForHarness,
   // Exported for the parity test + targeted unit coverage.

@@ -79,6 +79,12 @@ const generatedPricingRoute = path.join(
   "routes",
   "pricing.js",
 );
+const generatedAnalyticsRoute = path.join(
+  generatedRootDir,
+  "server",
+  "routes",
+  "analytics.js",
+);
 const generatedPushLib = path.join(generatedRootDir, "server", "lib", "push.js");
 const generatedWebSocketFile = path.join(
   generatedRootDir,
@@ -649,6 +655,7 @@ function materializeRuntimeTree() {
   patchSessionsRoute(generatedSessionsRoute);
   patchDbFile(generatedDbFile);
   patchPricingRoute(generatedPricingRoute);
+  patchAnalyticsRoute(generatedAnalyticsRoute);
   patchHooksRoute(generatedHooksRoute);
   patchCompatSqliteBeginImmediate(generatedCompatSqlite);
   patchHooksTranscriptOutsideTx(generatedHooksRoute);
@@ -1968,6 +1975,182 @@ function patchPricingRoute(file) {
       ].join("\n"),
     );
   }
+
+  // (e) CLOSEDLOOP FEA-1434: split the all-sessions GET /api/pricing/cost into
+  // two ledgers. Bucket each (billing_mode, model) group's real cost so
+  // subscription-covered spend never inflates the headline total. The per-model
+  // `breakdown` and `daily_costs` are left exactly as upstream produced them; we
+  // only override total_cost (now metered + unknown) and add cost_by_ledger.
+  if (!source.includes("// CLOSEDLOOP FEA-1434 cost-endpoint ledger split")) {
+    // Require the ledger-accounting helpers alongside the cost engine that step
+    // (a) added. Both run in the same build, so the cost-engine require exists
+    // by the time this step runs.
+    const engineRequireNeedle =
+      'const { computeTokenCost } = require("../lib/cost-pricing");';
+    if (!source.includes(engineRequireNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the cost-engine require to attach the ledger helpers (two-ledger, FEA-1434).`,
+      );
+    }
+    source = source.replace(
+      engineRequireNeedle,
+      [
+        engineRequireNeedle,
+        "// CLOSEDLOOP FEA-1434: ledger-accounting helpers. Bucket each priced",
+        "// group by its session billing_mode and keep subscription-covered spend",
+        "// out of the headline cost total (metered + unknown only).",
+        "const {",
+        "  emptyLedgerTotals,",
+        "  addLedgerCost,",
+        "  headlineCost,",
+        "  normalizeBillingMode,",
+        '} = require("../lib/billing-mode");',
+      ].join("\n"),
+    );
+
+    const costBodyNeedle = [
+      "  const rules = stmts.listPricing.all();",
+      "  const result = calculateCost(allTokens, rules);",
+      "  const daily_costs = calculateDailyCosts(dailyTokens, rules);",
+      "  res.json({ ...result, daily_costs });",
+    ].join("\n");
+    if (!source.includes(costBodyNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the all-sessions /cost response body (two-ledger, FEA-1434).`,
+      );
+    }
+    source = source.replace(
+      costBodyNeedle,
+      [
+        "  const rules = stmts.listPricing.all();",
+        "  const result = calculateCost(allTokens, rules);",
+        "  const daily_costs = calculateDailyCosts(dailyTokens, rules);",
+        "  // CLOSEDLOOP FEA-1434 cost-endpoint ledger split: re-aggregate token",
+        "  // usage grouped by the session billing_mode (LEFT JOIN keeps orphan",
+        '  // rows in the "unknown" ledger instead of dropping them) and price each',
+        "  // group, then bucket. The headline total = metered + unknown;",
+        "  // subscription-covered spend is surfaced separately in cost_by_ledger",
+        "  // and is never summed into total_cost.",
+        "  const ledgerRows = db",
+        "    .prepare(",
+        '      "SELECT s.billing_mode AS billing_mode, tu.model AS model, SUM(tu.input_tokens + tu.baseline_input) as input_tokens, SUM(tu.output_tokens + tu.baseline_output) as output_tokens, SUM(tu.cache_read_tokens + tu.baseline_cache_read) as cache_read_tokens, SUM(tu.cache_write_tokens + tu.baseline_cache_write) as cache_write_tokens FROM token_usage tu LEFT JOIN sessions s ON s.id = tu.session_id GROUP BY s.billing_mode, tu.model"',
+        "    )",
+        "    .all();",
+        "  const ledgerTotals = emptyLedgerTotals();",
+        "  for (const row of ledgerRows) {",
+        "    const { total_cost } = calculateCost([row], rules);",
+        "    addLedgerCost(ledgerTotals, normalizeBillingMode(row.billing_mode), total_cost);",
+        "  }",
+        "  res.json({",
+        "    ...result,",
+        "    total_cost: headlineCost(ledgerTotals),",
+        "    cost_by_ledger: ledgerTotals,",
+        "    daily_costs,",
+        "  });",
+      ].join("\n"),
+    );
+  }
+
+  writeFileSync(file, source, "utf8");
+}
+
+// CLOSEDLOOP FEA-1434: split the analytics headline cost into two ledgers.
+// Upstream sums every token-usage row into one `total_cost`. We price each row
+// identically (genai-prices engine) but bucket it by the session's billing_mode
+// so subscription-covered spend (a hypothetical "would have cost") never
+// inflates the real headline total. Headline = metered + unknown; the full
+// per-ledger split is exposed as cost_by_ledger. Idempotent (early-return on an
+// already-patched tree); throws if an anchor is missing so a future upstream
+// refactor can't silently drop the split.
+function patchAnalyticsRoute(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("// CLOSEDLOOP FEA-1434 two-ledger headline")) {
+    return;
+  }
+
+  // (a) require the ledger-accounting helpers alongside the calculateCost import.
+  const requireNeedle = 'const { calculateCost } = require("./pricing");';
+  if (!source.includes(requireNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the calculateCost require anchor (two-ledger, FEA-1434).`,
+    );
+  }
+  source = source.replace(
+    requireNeedle,
+    [
+      requireNeedle,
+      "// CLOSEDLOOP FEA-1434: the two-ledger split. Each token-usage row is",
+      "// bucketed by its session's billing_mode so subscription-covered spend",
+      '// (a hypothetical "would have cost") never inflates the headline total.',
+      "const {",
+      "  emptyLedgerTotals,",
+      "  addLedgerCost,",
+      "  headlineCost,",
+      "  normalizeBillingMode,",
+      '} = require("../lib/billing-mode");',
+    ].join("\n"),
+  );
+
+  // (b) replace the headline cost loop. LEFT JOIN sessions so each row carries
+  // its billing_mode (orphan rows survive as ledger "unknown" rather than being
+  // dropped), bucket the per-row cost, and define the headline as metered +
+  // unknown (subscription excluded).
+  const loopNeedle = [
+    "  // Calculate total cost across all sessions",
+    "  const pricingRules = stmts.listPricing.all();",
+    '  const allTokenUsage = db.prepare("SELECT * FROM token_usage").all();',
+    "",
+    "  let totalCost = 0;",
+    "  for (const usage of allTokenUsage) {",
+    "    const { total_cost } = calculateCost([usage], pricingRules);",
+    "    totalCost += total_cost;",
+    "  }",
+  ].join("\n");
+  if (!source.includes(loopNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the headline cost loop (two-ledger, FEA-1434).`,
+    );
+  }
+  source = source.replace(
+    loopNeedle,
+    [
+      "  // CLOSEDLOOP FEA-1434 two-ledger headline: price every token-usage row",
+      "  // exactly as before (genai-prices engine), but bucket each row's cost by",
+      "  // the session's billing_mode. LEFT JOIN keeps orphan usage rows (no",
+      '  // matching session) in the "unknown" ledger instead of dropping them, so',
+      "  // the headline never silently shrinks. Headline total = metered + unknown",
+      "  // and EXCLUDES subscription-covered spend.",
+      "  const pricingRules = stmts.listPricing.all();",
+      "  const allTokenUsage = db",
+      "    .prepare(",
+      '      "SELECT tu.*, s.billing_mode AS billing_mode FROM token_usage tu LEFT JOIN sessions s ON s.id = tu.session_id"',
+      "    )",
+      "    .all();",
+      "",
+      "  const ledgerTotals = emptyLedgerTotals();",
+      "  for (const usage of allTokenUsage) {",
+      "    const { total_cost } = calculateCost([usage], pricingRules);",
+      "    addLedgerCost(",
+      "      ledgerTotals,",
+      "      normalizeBillingMode(usage.billing_mode),",
+      "      total_cost",
+      "    );",
+      "  }",
+      "  const totalCost = headlineCost(ledgerTotals);",
+    ].join("\n"),
+  );
+
+  // (c) expose the per-ledger breakdown alongside the headline total.
+  const responseNeedle = "    total_cost: totalCost,";
+  if (!source.includes(responseNeedle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected the total_cost response field (two-ledger, FEA-1434).`,
+    );
+  }
+  source = source.replace(
+    responseNeedle,
+    [responseNeedle, "    cost_by_ledger: ledgerTotals,"].join("\n"),
+  );
 
   writeFileSync(file, source, "utf8");
 }
@@ -3813,6 +3996,37 @@ function assertGeneratedTree() {
   ) {
     throw new Error(
       "Generated server/routes/pricing.js is missing the genai-prices version stamp on GET /api/pricing (FEA-1433).",
+    );
+  }
+  // CLOSEDLOOP token cost (FEA-1434): GET /api/pricing/cost must split spend
+  // into ledgers and expose cost_by_ledger, with the headline keyed off
+  // headlineCost (metered + unknown) — never a raw sum that leaks subscription.
+  if (
+    !pricingRouteSource.includes("// CLOSEDLOOP FEA-1434 cost-endpoint ledger split") ||
+    !pricingRouteSource.includes("cost_by_ledger") ||
+    !pricingRouteSource.includes("headlineCost(ledgerTotals)") ||
+    !pricingRouteSource.includes('require("../lib/billing-mode")')
+  ) {
+    throw new Error(
+      "Generated server/routes/pricing.js is missing the two-ledger cost split on GET /api/pricing/cost (FEA-1434).",
+    );
+  }
+  // CLOSEDLOOP token cost (FEA-1434): the analytics headline total must also be
+  // bucketed by billing_mode so subscription spend never inflates it.
+  const analyticsRouteSource = readFileSync(generatedAnalyticsRoute, "utf8");
+  if (
+    !analyticsRouteSource.includes("// CLOSEDLOOP FEA-1434 two-ledger headline") ||
+    !analyticsRouteSource.includes("cost_by_ledger") ||
+    !analyticsRouteSource.includes("headlineCost(ledgerTotals)") ||
+    !analyticsRouteSource.includes('require("../lib/billing-mode")')
+  ) {
+    throw new Error(
+      "Generated server/routes/analytics.js is missing the two-ledger headline split (FEA-1434).",
+    );
+  }
+  if (analyticsRouteSource.includes('db.prepare("SELECT * FROM token_usage")')) {
+    throw new Error(
+      "Generated server/routes/analytics.js still uses the un-joined token_usage scan — the billing_mode LEFT JOIN patch did not apply (FEA-1434).",
     );
   }
 
