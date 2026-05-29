@@ -1,0 +1,108 @@
+name: UI Numbers Audit Gate
+
+# FEA-1437 Phase 6 — gate PRs on the UI Numbers Audit. Two jobs:
+#   coverage  — fast, static: every scanner detection is classified (no
+#               needs_review), every harness parser has a contract test. This
+#               is the merge gate that fires when a new route / tile / parser
+#               lands without manifest coverage.
+#   ui-audit  — heavier: builds the agent-monitor sidecar and runs the headless
+#               Playwright tile audits (rendered DOM == oracle).
+# Real-Electron + visual-regression suites are intentionally NOT here; they run
+# elsewhere as non-blocking (flaky-by-nature) per PLN-760.
+#
+# NO `paths:` filter on purpose. The `coverage` job is intended to be a REQUIRED
+# status check, and "required check + paths filter" is a classic deadlock: a PR
+# that doesn't touch apps/desktop/** never triggers the job, so the required
+# status sits pending forever and the PR can't merge. Triggering on every PR
+# keeps the required check from hanging. The `coverage` job is fast; only mark
+# `coverage` as required (leave `ui-audit` optional — see apps/desktop/ci/README.md).
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches: [main]
+
+concurrency:
+  group: audit-gate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    name: Coverage gate (static)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate build info
+        run: pnpm -r prebuild
+      - name: Audit coverage gate
+        run: pnpm -C apps/desktop audit:coverage
+      - name: Coverage summary -> job summary
+        if: always()
+        # Reporting only — never let a summary glitch fail the gate job.
+        continue-on-error: true
+        run: |
+          COV=apps/desktop/test-e2e/agent-monitor/inventory/coverage.json
+          if [ -f "$COV" ]; then
+            {
+              echo "### UI Numbers Audit — coverage"
+              echo ""
+              echo "| status | count |"
+              echo "|---|---|"
+              # Resolve to an absolute path: require() treats a bare relative
+              # string as a node_modules specifier and would throw.
+              node -e '
+                const c = require(require("path").resolve(process.env.COV));
+                for (const [k, v] of Object.entries(c.by_status)) console.log(`| ${k} | ${v} |`);
+                console.log(`| **total** | **${c.total_detections}** |`);
+              '
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+        env:
+          COV: apps/desktop/test-e2e/agent-monitor/inventory/coverage.json
+
+  ui-audit:
+    name: UI tile audit (headless Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate build info
+        run: pnpm -r prebuild
+      - name: Install Playwright Chromium
+        run: pnpm -C apps/desktop exec playwright install --with-deps chromium
+      - name: Run headless tile audit
+        run: pnpm -C apps/desktop test:audit:ui
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-audit-report
+          path: apps/desktop/test-results/
+          retention-days: 7
+          if-no-files-found: ignore

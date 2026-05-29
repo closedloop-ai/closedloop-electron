@@ -66,9 +66,14 @@ export class AgentMonitorSidecar {
   private readyResolvers: Array<(ok: boolean) => void> = [];
   private lastExitWasPortConflict = false;
   private onTerminalFailure?: (reason: string) => void;
+  private sandboxBaseDirectory = "";
 
   constructor(options?: { onTerminalFailure?: (reason: string) => void }) {
     this.onTerminalFailure = options?.onTerminalFailure;
+  }
+
+  setSandboxBaseDirectory(dir: string): void {
+    this.sandboxBaseDirectory = dir;
   }
 
   isReady(): boolean {
@@ -305,6 +310,9 @@ export class AgentMonitorSidecar {
         // Hooks are host-managed via explicit opt-in (agent-monitor-hooks.ts).
         // Never let the generated server silently auto-install them.
         CCAM_AUTO_INSTALL_HOOKS: "0",
+        ...(this.sandboxBaseDirectory
+          ? { SANDBOX_BASE_DIRECTORY: this.sandboxBaseDirectory }
+          : {}),
       },
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],

@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import {
   classifyLoopStatus,
+  type ClassifierProvenanceContext,
   type LoopStatusDisposition,
 } from "../src/main/loop-status-classifier.js";
 
@@ -19,6 +20,7 @@ interface ClassifyCase {
   label: string;
   httpStatus: number | null;
   cloudKind: string | null;
+  provenanceCtx?: ClassifierProvenanceContext;
   expected: LoopStatusDisposition;
 }
 
@@ -85,12 +87,58 @@ const cases: ClassifyCase[] = [
     cloudKind: "active",
     expected: { kind: "live" },
   },
+
+  // --- Provenance-aware 401 classification (T-1.2) ---
+
+  // (a) 401 with DESKTOP_MANAGED provenance and PoP available → pop_fallback
+  {
+    label: "401 + DESKTOP_MANAGED + PoP available → pop_fallback(unauthorized)",
+    httpStatus: 401,
+    cloudKind: null,
+    provenanceCtx: { provenance: "DESKTOP_MANAGED", popAvailable: true },
+    expected: { kind: "pop_fallback", reason: "unauthorized" },
+  },
+  // (b) 401 with USER_CREATED provenance → still terminal
+  {
+    label: "401 + USER_CREATED → terminal(unauthorized)",
+    httpStatus: 401,
+    cloudKind: null,
+    provenanceCtx: { provenance: "USER_CREATED", popAvailable: false },
+    expected: { kind: "terminal", reason: "unauthorized" },
+  },
+  // (c) 401 with DESKTOP_MANAGED but no PoP → still terminal
+  {
+    label: "401 + DESKTOP_MANAGED + PoP unavailable → terminal(unauthorized)",
+    httpStatus: 401,
+    cloudKind: null,
+    provenanceCtx: { provenance: "DESKTOP_MANAGED", popAvailable: false },
+    expected: { kind: "terminal", reason: "unauthorized" },
+  },
+  // (d) Non-401 terminal codes are unaffected by provenance. The provenance
+  // check lives entirely inside the `httpStatus === 401` branch, so a single
+  // non-401 representative proves provenance is never consulted for 404/410/
+  // timed_out (those codes already have dedicated no-provenance coverage above).
+  {
+    label: "404 + DESKTOP_MANAGED + PoP available → terminal(not_found) (provenance irrelevant)",
+    httpStatus: 404,
+    cloudKind: null,
+    provenanceCtx: { provenance: "DESKTOP_MANAGED", popAvailable: true },
+    expected: { kind: "terminal", reason: "not_found" },
+  },
+  // (e) 401 with no provenance context (backward compatibility) → terminal
+  {
+    label: "401 + no provenance context → terminal(unauthorized) (backward compatible)",
+    httpStatus: 401,
+    cloudKind: null,
+    // provenanceCtx omitted
+    expected: { kind: "terminal", reason: "unauthorized" },
+  },
 ];
 
 describe("classifyLoopStatus", () => {
-  for (const { label, httpStatus, cloudKind, expected } of cases) {
+  for (const { label, httpStatus, cloudKind, provenanceCtx, expected } of cases) {
     test(label, () => {
-      const result = classifyLoopStatus(httpStatus, cloudKind);
+      const result = classifyLoopStatus(httpStatus, cloudKind, provenanceCtx);
       assert.deepEqual(result, expected);
     });
   }

@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { buildManagedDesktopPopHeaders } from "../../main/desktop-pop-sign-utils.js";
 import { gatewayLog } from "../../main/gateway-logger.js";
-import type { LoopTokenMeta } from "../../main/loop-token-store.js";
+import type { LoopTokenMeta, LoopTokenStore } from "../../main/loop-token-store.js";
 import type { LoopPopDeps } from "../../main/loop-lifecycle.js";
 import { loopError, loopLog } from "./symphony-utils.js";
 
@@ -31,6 +31,35 @@ export type LoopHttpResult =
   | { success: false; kind: "network"; error: string }
   | { success: false; kind: "timeout"; error: "timeout" }
   | { success: false; kind: "auth"; error: "missing_token" };
+
+/**
+ * Persists a freshly-minted runner token when a heartbeat response reports the
+ * loop was revived. Single source of truth for the revival-token write, shared
+ * by the live heartbeat path (loop-heartbeat.ts) and the boot-recovery PoP
+ * revival path (boot-recovery.ts) so the `expiresAt.getTime()` mapping and the
+ * revived/token guard cannot drift between them.
+ *
+ * @returns `true` when a revival token was adopted; `false` when the result is
+ *   not a revival (so callers can branch their own logging).
+ */
+export function persistRevivalToken(
+  loopTokenStore: Pick<LoopTokenStore, "setLoopToken"> | undefined,
+  loopId: string,
+  result: LoopHttpResult,
+): boolean {
+  if (loopTokenStore === undefined || !result.success) {
+    return false;
+  }
+  if (result.revived !== true || result.token === undefined) {
+    return false;
+  }
+  loopTokenStore.setLoopToken(loopId, {
+    token: result.token,
+    jti: result.jti,
+    expiresAt: result.expiresAt !== undefined ? result.expiresAt.getTime() : undefined,
+  });
+  return true;
+}
 
 /**
  * POST a single loop event to the cloud API.

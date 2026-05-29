@@ -74,6 +74,35 @@ function installCloudStatusFetchMock(
     return Response.json({ success: true });
   }) as typeof fetch;
 }
+/**
+ * Creates a LoopSchedulerContext with a teardownLoop spy that records calls
+ * into the returned `teardownCalls` array. Reused by terminal/transient
+ * reattach tests and PLN-757 PoP revival tests.
+ */
+function createSchedulersWithTeardownSpy(): {
+  schedulers: LoopSchedulerContext;
+  teardownCalls: string[];
+} {
+  const teardownCalls: string[] = [];
+  const schedulers = new LoopSchedulerContext();
+  const origTeardown = schedulers.teardownLoop.bind(schedulers);
+  schedulers.teardownLoop = (id: string) => {
+    teardownCalls.push(id);
+    origTeardown(id);
+  };
+  return { schedulers, teardownCalls };
+}
+
+/** Shared PoP signing deps for PLN-757 boot-recovery tests. */
+const testPopDeps = {
+  signDesktopRequest: async () => ({
+    "X-Desktop-Signature": "test-sig",
+    "X-Desktop-Timestamp": "test-ts",
+    "X-Desktop-Public-Key": "test-pk",
+  }),
+  onDesktopPopUnavailable: () => {},
+} as const;
+
 const originalFetch = globalThis.fetch;
 const originalPollMs = process.env.CLOSEDLOOP_TAILER_POLL_MS;
 const originalThrottleMs = process.env.CLOSEDLOOP_TAILER_THROTTLE_MS;
@@ -1650,14 +1679,7 @@ for (const tc of reattachStatusCases) {
     });
     jobStore.upsert(liveJob);
 
-    // Spy on teardownLoop to verify it is called for terminal cases.
-    const teardownCalls: string[] = [];
-    const schedulers = new LoopSchedulerContext();
-    const origTeardown = schedulers.teardownLoop.bind(schedulers);
-    schedulers.teardownLoop = (id: string) => {
-      teardownCalls.push(id);
-      origTeardown(id);
-    };
+    const { schedulers, teardownCalls } = createSchedulersWithTeardownSpy();
 
     // installCloudStatusFetchMock delegates GET /loops/:id to the handler;
     // all other requests (refresh-token, events) return success.
@@ -1888,5 +1910,507 @@ test("AC-007 regression: RUNNING job with dead PID at boot is finalized as UNKNO
     getActiveLoopPid(loopId),
     null,
     "expected dead-PID-at-boot loop to not be registered as active",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// PLN-757: Boot-recovery PoP heartbeat revival for DESKTOP_MANAGED loops
+//
+// T-3.1: Runner JWT 401 + successful PoP revival → loop revived, token persisted
+// T-3.2: Runner JWT 401 + PoP heartbeat returns 410 → loop finalized terminal
+// T-3.3: Runner JWT 401 + USER_CREATED provenance → no PoP attempted, terminal
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns true when `url`/`method` target the heartbeat endpoint
+ * (POST /loops/:id/heartbeat).
+ */
+function isHeartbeatRequest(url: string, method: string): boolean {
+  return url.includes("/heartbeat") && method === "POST";
+}
+
+/**
+ * Returns true when `url`/`method` target the refresh-token endpoint
+ * (POST /loops/:id/refresh-token).
+ */
+function isRefreshTokenRequest(url: string, method: string): boolean {
+  return url.includes("/refresh-token") && method === "POST";
+}
+
+/**
+ * Install a fetch mock that returns 401 on GET /loops/:id (status check),
+ * 401 on POST /loops/:id/refresh-token (refresh also fails), and delegates
+ * POST /loops/:id/heartbeat to `heartbeatHandler`. All other requests return
+ * success.
+ */
+function installPopRevivalFetchMock(
+  heartbeatHandler: (url: string) => Response,
+): void {
+  globalThis.fetch = (async (input: URL | RequestInfo, init?: RequestInit) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    const headers = new Headers(init?.headers);
+    fetchCalls.push({
+      url,
+      body: typeof init?.body === "string" ? init.body : "",
+      authHeader: headers.get("Authorization"),
+    });
+    if (isLoopStatusRequest(url, method)) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+    if (isRefreshTokenRequest(url, method)) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+    if (isHeartbeatRequest(url, method)) {
+      return heartbeatHandler(url);
+    }
+    return Response.json({ success: true });
+  }) as typeof fetch;
+}
+
+test("T-3.1 PLN-757: DESKTOP_MANAGED loop revived via PoP heartbeat on boot (runner JWT 401)", async () => {
+  const loopId = "loop-pop-revival-success";
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, `workdir-pop-success`);
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+  await fs.writeFile(jsonlPath, "");
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-pop-revival-success-tokens");
+  loopTokenStore.setLoopToken(loopId, { token: "stale-jwt" });
+
+  const jobStore = createStore("boot-recovery-pop-revival-success");
+  const liveJob = createJob({
+    id: loopId,
+    loopId,
+    pid: process.pid,
+    status: "RUNNING",
+    claudeWorkDir,
+    jsonlPath,
+    lastObservedJsonlOffset: 0,
+  });
+  jobStore.upsert(liveJob);
+
+  // PoP heartbeat succeeds with revival fields: fresh token, jti, expiresAt
+  installPopRevivalFetchMock(() =>
+    Response.json({
+      success: true,
+      data: {
+        revived: true,
+        token: "fresh-runner-jwt",
+        jti: "fresh-jti-001",
+        expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      },
+    }),
+  );
+
+  const schedulers = new LoopSchedulerContext();
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    getApiKey: () => "managed-api-key",
+    getApiOrigin: () => "http://127.0.0.1:4050",
+    loopTokenStore,
+    schedulers,
+    // DESKTOP_MANAGED provenance with PoP deps present
+    getApiKeyProvenance: () => "DESKTOP_MANAGED",
+    ...testPopDeps,
+  });
+  await service.reattachLiveJobs();
+  await sleep(100);
+
+  const persisted = jobStore.getByLoopId(loopId);
+  assert.ok(persisted, "expected job to exist in store");
+
+  // AC-001: Loop is NOT finalized as UNKNOWN — it was revived and reattached.
+  assert.equal(
+    persisted.cloudFinalizedAt,
+    undefined,
+    "expected cloudFinalizedAt NOT set — loop was revived, not finalized",
+  );
+  assert.notEqual(
+    persisted.status,
+    "UNKNOWN",
+    "expected status to NOT be UNKNOWN after PoP revival",
+  );
+
+  // AC-003: Revival token persisted to the loop token store.
+  const tokenMeta = loopTokenStore.getLoopToken(loopId);
+  assert.ok(tokenMeta, "expected revival token to be persisted");
+  assert.equal(tokenMeta.token, "fresh-runner-jwt", "expected fresh runner JWT in token store");
+  assert.equal(tokenMeta.jti, "fresh-jti-001", "expected fresh jti in token store");
+  assert.ok(tokenMeta.expiresAt, "expected expiresAt in token store");
+
+  // AC-004: PoP heartbeat was attempted (heartbeat endpoint was called).
+  assert.ok(
+    fetchCalls.some((c) => c.url.includes(`/loops/${loopId}/heartbeat`)),
+    "expected PoP heartbeat to have been attempted",
+  );
+
+  // Loop was reattached (registerRecoveredLoop was called).
+  assert.notEqual(
+    getActiveLoopPid(loopId),
+    null,
+    "expected loop to be registered as active after PoP revival",
+  );
+
+  service[Symbol.dispose]();
+});
+
+test("T-3.2 PLN-757: DESKTOP_MANAGED loop finalized terminal when PoP heartbeat returns 410", async () => {
+  const loopId = "loop-pop-revival-410";
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, `workdir-pop-410`);
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+  await fs.writeFile(jsonlPath, "");
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-pop-revival-410-tokens");
+  loopTokenStore.setLoopToken(loopId, { token: "stale-jwt" });
+
+  const jobStore = createStore("boot-recovery-pop-revival-410");
+  const liveJob = createJob({
+    id: loopId,
+    loopId,
+    pid: process.pid,
+    status: "RUNNING",
+    claudeWorkDir,
+    jsonlPath,
+    lastObservedJsonlOffset: 0,
+  });
+  jobStore.upsert(liveJob);
+
+  // PoP heartbeat returns 410 (revival refused / cap reached)
+  installPopRevivalFetchMock(() =>
+    new Response("Gone", { status: 410 }),
+  );
+
+  const { schedulers, teardownCalls } = createSchedulersWithTeardownSpy();
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    getApiKey: () => "managed-api-key",
+    getApiOrigin: () => "http://127.0.0.1:4051",
+    loopTokenStore,
+    schedulers,
+    getApiKeyProvenance: () => "DESKTOP_MANAGED",
+    ...testPopDeps,
+  });
+  await service.reattachLiveJobs();
+  await sleep(100);
+
+  const persisted = jobStore.getByLoopId(loopId);
+  assert.ok(persisted, "expected job to exist in store");
+
+  // AC-002: Loop IS finalized as terminal (PoP heartbeat returned 410).
+  assert.ok(
+    persisted.cloudFinalizedAt,
+    "expected cloudFinalizedAt to be set — PoP heartbeat returned terminal 410",
+  );
+
+  // Token deleted from store.
+  assert.equal(
+    loopTokenStore.getLoopToken(loopId),
+    null,
+    "expected loop token cleared after terminal PoP heartbeat",
+  );
+
+  // Schedulers torn down.
+  assert.ok(
+    teardownCalls.includes(loopId),
+    `expected schedulers.teardownLoop("${loopId}") to be called for terminal PoP case`,
+  );
+
+  // PoP heartbeat was attempted.
+  assert.ok(
+    fetchCalls.some((c) => c.url.includes(`/loops/${loopId}/heartbeat`)),
+    "expected PoP heartbeat to have been attempted before terminal finalization",
+  );
+
+  // Loop is NOT presented as active.
+  assert.equal(
+    getActiveLoopPid(loopId),
+    null,
+    "expected loop NOT to be registered as active after terminal PoP heartbeat",
+  );
+
+  service[Symbol.dispose]();
+});
+
+test("T-3.3 PLN-757: USER_CREATED loop — no PoP heartbeat attempted, terminal classification preserved", async () => {
+  const loopId = "loop-user-created-401";
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, `workdir-user-created`);
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+  await fs.writeFile(jsonlPath, "");
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-user-created-401-tokens");
+  loopTokenStore.setLoopToken(loopId, { token: "stale-jwt" });
+
+  const jobStore = createStore("boot-recovery-user-created-401");
+  const liveJob = createJob({
+    id: loopId,
+    loopId,
+    pid: process.pid,
+    status: "RUNNING",
+    claudeWorkDir,
+    jsonlPath,
+    lastObservedJsonlOffset: 0,
+  });
+  jobStore.upsert(liveJob);
+
+  // Status check returns 401, refresh also returns 401 — should go terminal
+  // with no PoP heartbeat attempted.
+  installPopRevivalFetchMock(() => {
+    // This heartbeat handler should never be called for USER_CREATED loops.
+    throw new Error("PoP heartbeat should NOT be called for USER_CREATED loops");
+  });
+
+  const { schedulers, teardownCalls } = createSchedulersWithTeardownSpy();
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    getApiKey: () => "user-api-key",
+    getApiOrigin: () => "http://127.0.0.1:4052",
+    loopTokenStore,
+    schedulers,
+    // USER_CREATED provenance — no PoP channel
+    getApiKeyProvenance: () => "USER_CREATED",
+    ...testPopDeps,
+  });
+  await service.reattachLiveJobs();
+  await sleep(100);
+
+  const persisted = jobStore.getByLoopId(loopId);
+  assert.ok(persisted, "expected job to exist in store");
+
+  // AC-005: Existing terminal classification preserved for USER_CREATED.
+  assert.ok(
+    persisted.cloudFinalizedAt,
+    "expected cloudFinalizedAt to be set — USER_CREATED 401 is always terminal",
+  );
+
+  // Token deleted from store.
+  assert.equal(
+    loopTokenStore.getLoopToken(loopId),
+    null,
+    "expected loop token cleared for terminal USER_CREATED loop",
+  );
+
+  // Schedulers torn down.
+  assert.ok(
+    teardownCalls.includes(loopId),
+    `expected schedulers.teardownLoop("${loopId}") to be called`,
+  );
+
+  // No heartbeat request should have been made (only status check and refresh).
+  assert.ok(
+    !fetchCalls.some((c) => c.url.includes(`/loops/${loopId}/heartbeat`)),
+    "expected NO PoP heartbeat for USER_CREATED provenance",
+  );
+
+  // Loop is NOT presented as active.
+  assert.equal(
+    getActiveLoopPid(loopId),
+    null,
+    "expected loop NOT to be registered as active",
+  );
+
+  service[Symbol.dispose]();
+});
+
+// ---------------------------------------------------------------------------
+// PR#256: transient PoP heartbeat must not tear down a still-running live loop,
+// and the dead-job path must never attempt PoP revival.
+//
+// T-3.4: Runner JWT 401 + PoP heartbeat returns a *transient* error (5xx, or a
+//        network/timeout failure) → live loop is NOT finalized, token retained,
+//        loop reattached conservatively, schedulers NOT torn down.
+// T-3.5: Dead-PID DESKTOP_MANAGED loop routed through finalizeDeadJobs → PoP
+//        heartbeat is NEVER attempted (revival suppressed for dead jobs) and
+//        the job is finalized as terminal/UNKNOWN.
+// ---------------------------------------------------------------------------
+
+// Table-driven over the two transient heartbeat shapes (CLAUDE.md test harness
+// convention). Each case supplies the heartbeat handler that produces the
+// transient signal; assertions are identical (conservative reattach).
+const transientPopHeartbeatCases: ReadonlyArray<{
+  key: string;
+  heartbeatHandler: () => Response;
+}> = [
+  {
+    key: "5xx",
+    // 503 → postLoopHeartbeat returns { kind: "http", status: 503 } →
+    // classifyLoopStatus(503) = transient/server_error.
+    heartbeatHandler: () => new Response("Service Unavailable", { status: 503 }),
+  },
+  {
+    key: "network",
+    // A thrown fetch → postLoopHeartbeat returns { kind: "network" } →
+    // classifyLoopStatus(null) = transient/network_error.
+    heartbeatHandler: () => {
+      throw new Error("simulated network failure");
+    },
+  },
+];
+
+for (const tc of transientPopHeartbeatCases) {
+  test(`T-3.4 PR#256: DESKTOP_MANAGED live loop reattaches conservatively on transient PoP heartbeat (${tc.key})`, async () => {
+    const loopId = `loop-pop-transient-${tc.key}`;
+    const repoDir = path.join(tempRoot, "repo");
+    const claudeWorkDir = path.join(repoDir, `workdir-pop-transient-${tc.key}`);
+    await fs.mkdir(claudeWorkDir, { recursive: true });
+    const jsonlPath = path.join(claudeWorkDir, "claude-output.jsonl");
+    await fs.writeFile(jsonlPath, "");
+
+    const loopTokenStore = createLoopTokenStore(`boot-recovery-pop-transient-${tc.key}-tokens`);
+    loopTokenStore.setLoopToken(loopId, { token: "stale-jwt" });
+
+    const jobStore = createStore(`boot-recovery-pop-transient-${tc.key}`);
+    const liveJob = createJob({
+      id: loopId,
+      loopId,
+      pid: process.pid,
+      status: "RUNNING",
+      claudeWorkDir,
+      jsonlPath,
+      lastObservedJsonlOffset: 0,
+    });
+    jobStore.upsert(liveJob);
+
+    installPopRevivalFetchMock(tc.heartbeatHandler);
+
+    const { schedulers, teardownCalls } = createSchedulersWithTeardownSpy();
+
+    const service = new BootRecoveryService({
+      jobStore,
+      telemetry: { emit: (event) => telemetryEvents.push(event) },
+      getApiKey: () => "managed-api-key",
+      getApiOrigin: () => "http://127.0.0.1:4053",
+      loopTokenStore,
+      schedulers,
+      getApiKeyProvenance: () => "DESKTOP_MANAGED",
+      ...testPopDeps,
+    });
+    await service.reattachLiveJobs();
+    await sleep(100);
+
+    const persisted = jobStore.getByLoopId(loopId);
+    assert.ok(persisted, "expected job to exist in store");
+
+    // Live loop must NOT be finalized on a transient PoP blip.
+    assert.equal(
+      persisted.cloudFinalizedAt,
+      undefined,
+      `expected cloudFinalizedAt NOT set on transient PoP heartbeat (${tc.key})`,
+    );
+    assert.notEqual(
+      persisted.status,
+      "UNKNOWN",
+      `expected status NOT UNKNOWN on transient PoP heartbeat (${tc.key})`,
+    );
+
+    // Token retained — a future heartbeat cycle can retry the revival.
+    assert.ok(
+      loopTokenStore.getLoopToken(loopId),
+      `expected loop token retained on transient PoP heartbeat (${tc.key})`,
+    );
+
+    // PoP heartbeat WAS attempted (the fetch is recorded even when the
+    // network-case handler throws inside the mock).
+    assert.ok(
+      fetchCalls.some((c) => c.url.includes(`/loops/${loopId}/heartbeat`)),
+      `expected PoP heartbeat to have been attempted (${tc.key})`,
+    );
+
+    // Conservative reattach: schedulers NOT torn down, loop registered active.
+    assert.ok(
+      !teardownCalls.includes(loopId),
+      `expected schedulers.teardownLoop NOT called on transient PoP heartbeat (${tc.key})`,
+    );
+    assert.notEqual(
+      getActiveLoopPid(loopId),
+      null,
+      `expected loop reattached (registered active) on transient PoP heartbeat (${tc.key})`,
+    );
+
+    service[Symbol.dispose]();
+  });
+}
+
+test("T-3.5 PR#256: dead-PID DESKTOP_MANAGED loop never attempts PoP revival and finalizes terminal", async () => {
+  const loopId = "loop-pop-dead-no-revival";
+  const repoDir = path.join(tempRoot, "repo");
+  const claudeWorkDir = path.join(repoDir, "workdir-pop-dead");
+  await fs.mkdir(claudeWorkDir, { recursive: true });
+  await fs.writeFile(path.join(claudeWorkDir, "plan.json"), JSON.stringify({ ok: true }));
+
+  const loopTokenStore = createLoopTokenStore("boot-recovery-pop-dead-tokens");
+  loopTokenStore.setLoopToken(loopId, { token: "stale-jwt" });
+
+  const jobStore = createStore("boot-recovery-pop-dead");
+  const deadJob = createJob({
+    id: loopId,
+    loopId,
+    status: "RUNNING",
+    pid: 9_999_999, // dead PID → routed through finalizeDeadJobs
+    claudeWorkDir,
+  });
+  jobStore.upsert(deadJob);
+
+  // Heartbeat handler throws if hit — it must never be called for a dead job
+  // because PoP revival is suppressed on the dead-finalization path (PR#256).
+  installPopRevivalFetchMock(() => {
+    throw new Error("PoP heartbeat must NOT be attempted for a dead-PID loop");
+  });
+
+  const service = new BootRecoveryService({
+    jobStore,
+    telemetry: { emit: (event) => telemetryEvents.push(event) },
+    getApiKey: () => "managed-api-key",
+    getApiOrigin: () => "http://127.0.0.1:4054",
+    loopTokenStore,
+    // DESKTOP_MANAGED + PoP deps present: revival WOULD fire if the dead path
+    // built provenance context — it must not.
+    getApiKeyProvenance: () => "DESKTOP_MANAGED",
+    ...testPopDeps,
+  });
+  await service.run([deadJob]);
+  service[Symbol.dispose]();
+
+  // PRIMARY INVARIANT (Comment 1): the heartbeat endpoint is NEVER called for a
+  // dead-PID loop — PoP revival is suppressed on the finalizeDeadJobs path, so
+  // the resurrect-then-finalize race cannot occur.
+  assert.ok(
+    !fetchCalls.some((c) => c.url.includes(`/loops/${loopId}/heartbeat`)),
+    "expected NO PoP heartbeat for a dead-PID loop",
+  );
+
+  // Supporting evidence the dead job took the terminal path (classified
+  // unauthorized → terminal without revival), not the revived-active path:
+  const persisted = jobStore.getByLoopId(loopId);
+  assert.ok(persisted, "expected job to exist in store");
+  // finalizeDeadJobs ran its finalization attempt (recoveryAttempts incremented)
+  // rather than treating the loop as revived/active.
+  assert.equal(
+    persisted.recoveryAttempts,
+    1,
+    "expected dead-job finalization to have run (recoveryAttempts incremented)",
+  );
+  // Terminal classification cleared the loop token (finalizeAsTerminal).
+  assert.equal(
+    loopTokenStore.getLoopToken(loopId),
+    null,
+    "expected loop token cleared after terminal dead-job classification",
+  );
+  // The dead loop is never registered as active — no live runner was adopted.
+  assert.equal(
+    getActiveLoopPid(loopId),
+    null,
+    "expected dead-PID loop NOT registered as active",
   );
 });

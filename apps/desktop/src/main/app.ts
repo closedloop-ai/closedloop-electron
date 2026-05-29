@@ -314,6 +314,9 @@ export class DesktopApplication {
         this.refreshTrayState();
       },
     });
+    this.agentMonitor.setSandboxBaseDirectory(
+      this.settingsStore.getSandboxBaseDirectory(),
+    );
     this.activityLog = new ActivityLogStore();
     this.jobStore = new JobStore();
     this.approvalStore = new ApprovalStore({
@@ -565,6 +568,8 @@ export class DesktopApplication {
         this.serverAgentSessionSyncSupported &&
         this.cloudStatus.state === "online",
       isChunkedSyncEnabled: () => this.settingsStore.getFlag("agentSessionChunkedSyncEnabled"),
+      getSandboxBaseDirectory: () =>
+        this.settingsStore.getSandboxBaseDirectory(),
       sendBatch: (batch) => this.cloudSocket.sendAgentSessions(batch),
       getUserDataPath: () => app.getPath("userData"),
       onBatchOutcome: (event) => {
@@ -2672,6 +2677,11 @@ export class DesktopApplication {
             normalizeScopePath(currentSettings.sandboxBaseDirectory)
         ) {
           await seedReposConfig(selectedSandbox);
+          this.agentMonitor.setSandboxBaseDirectory(selectedSandbox);
+          if (this.settingsStore.getAgentMonitorEnabled()) {
+            await this.agentMonitor.stop();
+            void this.agentMonitor.start();
+          }
         }
 
         // Notify renderer of flag changes so the Feature Flags panel can refresh.
