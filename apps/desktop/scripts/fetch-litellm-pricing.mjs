@@ -166,15 +166,42 @@ function roundTo6(n) {
   return Math.round(n * 1_000_000) / 1_000_000;
 }
 
+function isAnthropicKey(key) {
+  return typeof key === "string" && key.startsWith("claude-");
+}
+
+function isOpenAIKey(key) {
+  return (
+    typeof key === "string" &&
+    (key.startsWith("gpt-") || key.startsWith("o1-") || key.startsWith("o3-"))
+  );
+}
+
 /**
- * Transform the parsed LiteLLM JSON object into ClosedLoop's 6-tuple shape,
+ * Transform the parsed LiteLLM JSON object into ClosedLoop's 7-tuple shape,
  * sorted by model_pattern.
  *
+ * Column 7 (`cache_write_1h_per_mtok`) was added in FEA-1432 to separate the
+ * 1-hour ephemeral cache write tier from the 5-minute tier (column 6).
+ *
+ * Vendor-specific derivation:
+ * - Anthropic (`claude-*`): the 1-hour cache write is priced at input × 2.0
+ *   per Anthropic's published rate card (vs 1.25× for 5-minute). LiteLLM does
+ *   not carry a dedicated field for the 1h tier, so we derive it from the
+ *   per-row input rate. Skip the derivation when input is 0 (sentinel rows).
+ * - OpenAI (`gpt-*`, `o1-*`, `o3-*`): no cache-write surcharge for any tier;
+ *   cache writes are free. Both column 6 (5-min) and column 7 (1h) must be 0.
+ *   FEA-1432 also clamps the cache_read column to a 50% discount of input
+ *   when LiteLLM's upstream ratio falls outside the canonical [40%, 60%] band
+ *   — some entries currently carry 10% (likely an upstream data bug).
+ * - Other vendors (`gemini-*`): column 7 = 0 (Gemini's pricing model does not
+ *   match Anthropic's 5-min/1h split).
+ *
  * @param {Record<string, unknown>} pricingMap
- * @returns {Array<[string, string, number, number, number, number]>}
+ * @returns {Array<[string, string, number, number, number, number, number]>}
  */
 export function transformPricingMap(pricingMap) {
-  /** @type {Array<[string, string, number, number, number, number]>} */
+  /** @type {Array<[string, string, number, number, number, number, number]>} */
   const rows = [];
   for (const [key, entryRaw] of Object.entries(pricingMap)) {
     if (!isSupportedKey(key)) continue;
@@ -191,13 +218,50 @@ export function transformPricingMap(pricingMap) {
       entry.cache_creation_input_token_cost,
     );
 
+    const inputPerMtok = roundTo6((inputPerToken ?? 0) * 1_000_000);
+    const outputPerMtok = roundTo6((outputPerToken ?? 0) * 1_000_000);
+    let cacheReadPerMtok = roundTo6((cacheReadPerToken ?? 0) * 1_000_000);
+    let cacheWritePerMtok = roundTo6((cacheWritePerToken ?? 0) * 1_000_000);
+
+    // FEA-1432 OpenAI cache math:
+    //   1. Clamp cache_read to input × 0.5 when LiteLLM reports a positive
+    //      but clearly-wrong ratio (e.g. GPT-5 series ships at 10% instead
+    //      of the canonical 50%). A 0 cache_read means LiteLLM is signaling
+    //      "no caching available for this model" — preserve it; clamping
+    //      would invent pricing for a feature the vendor does not offer.
+    //   2. Force cache_write (5-min) to 0 — OpenAI has no cache write surcharge.
+    if (isOpenAIKey(key) && inputPerMtok > 0 && cacheReadPerMtok > 0) {
+      const ratio = cacheReadPerMtok / inputPerMtok;
+      if (ratio < 0.4 || ratio > 0.6) {
+        const clamped = roundTo6(inputPerMtok * 0.5);
+        process.stderr.write(
+          `fetch-litellm-pricing: clamping ${key} cache_read ` +
+            `${cacheReadPerMtok} → ${clamped} ` +
+            `(LiteLLM ratio ${ratio.toFixed(2)} outside [0.4, 0.6])\n`,
+        );
+        cacheReadPerMtok = clamped;
+      }
+    }
+    if (isOpenAIKey(key)) {
+      cacheWritePerMtok = 0;
+    }
+
+    // FEA-1432 cache_write_1h column:
+    //   Anthropic: derive as input × 2.0 (per published rate card).
+    //   Everyone else: 0.
+    let cacheWrite1hPerMtok = 0;
+    if (isAnthropicKey(key) && inputPerMtok > 0) {
+      cacheWrite1hPerMtok = roundTo6(inputPerMtok * 2);
+    }
+
     rows.push([
       `${key}%`,
       deriveDisplayName(key),
-      roundTo6((inputPerToken ?? 0) * 1_000_000),
-      roundTo6((outputPerToken ?? 0) * 1_000_000),
-      roundTo6((cacheReadPerToken ?? 0) * 1_000_000),
-      roundTo6((cacheWritePerToken ?? 0) * 1_000_000),
+      inputPerMtok,
+      outputPerMtok,
+      cacheReadPerMtok,
+      cacheWritePerMtok,
+      cacheWrite1hPerMtok,
     ]);
   }
   rows.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));

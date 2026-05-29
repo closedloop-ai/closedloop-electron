@@ -84,7 +84,8 @@ function createServiceTestDatabase(rootDir: string): DatabaseSync {
       input_per_mtok REAL NOT NULL DEFAULT 0,
       output_per_mtok REAL NOT NULL DEFAULT 0,
       cache_read_per_mtok REAL NOT NULL DEFAULT 0,
-      cache_write_per_mtok REAL NOT NULL DEFAULT 0
+      cache_write_per_mtok REAL NOT NULL DEFAULT 0,
+      cache_write_1h_per_mtok REAL NOT NULL DEFAULT 0
     );
   `);
   return db;
@@ -215,7 +216,8 @@ test("agent-session sync loads normalized session payloads with attribution and 
       input_per_mtok REAL NOT NULL DEFAULT 0,
       output_per_mtok REAL NOT NULL DEFAULT 0,
       cache_read_per_mtok REAL NOT NULL DEFAULT 0,
-      cache_write_per_mtok REAL NOT NULL DEFAULT 0
+      cache_write_per_mtok REAL NOT NULL DEFAULT 0,
+      cache_write_1h_per_mtok REAL NOT NULL DEFAULT 0
     );
   `);
 

@@ -320,36 +320,53 @@ const CLIENT_FULL_FILE_OVERRIDES = [
 // build-time invariants below catch real regressions. The right fix for a
 // genuine LiteLLM rate bug is to raise it upstream and document the deviation
 // inline with a TODO + ticket reference.
+// 7-tuple shape:
+//   [model_pattern, display_name,
+//    input_per_mtok, output_per_mtok,
+//    cache_read_per_mtok,
+//    cache_write_per_mtok          (Anthropic 5-min ephemeral; 0 for OpenAI),
+//    cache_write_1h_per_mtok       (Anthropic 1-hour ephemeral; 0 for OpenAI)]
+//
+// Anthropic 1-hour cache writes are 2× the input rate per Anthropic's published
+// rate card (see FEA-1432). OpenAI has no cache-write surcharge (cached input
+// reads at a 50% discount, writes are free); both write columns must be 0 for
+// all gpt-*/o1-*/o3-* rows.
 const HOST_ONLY_OVERRIDES = [
   // OpenCode-hosted free models (not in LiteLLM)
-  ["big-pickle%", "Big Pickle", 0, 0, 0, 0],
-  ["opencode/big-pickle%", "OpenCode Big Pickle", 0, 0, 0, 0],
+  ["big-pickle%", "Big Pickle", 0, 0, 0, 0, 0],
+  ["opencode/big-pickle%", "OpenCode Big Pickle", 0, 0, 0, 0, 0],
   // Fallback patterns for non-Claude harness parsers — when the model
   // field is missing from the raw data, each parser falls back to a
   // hardcoded default key (e.g. "gpt-codex", "cursor-default", etc.).
   // These entries ensure the fallback key has a reasonable pricing match
   // even if the exact model is unknown. None of these synthetic ids live
   // in LiteLLM's catalog.
-  ["gpt-codex%", "GPT Codex (fallback)", 1.25, 10, 0.125, 1.25],
-  ["cursor-default%", "Cursor default (fallback)", 3, 15, 0.3, 3],
-  ["copilot-default%", "Copilot default (fallback)", 3, 15, 0.3, 3],
-  ["opencode-default%", "OpenCode default (fallback)", 0, 0, 0, 0],
+  //
+  // FEA-1432: gpt-codex fallback inherits OpenAI cache semantics:
+  // cache_read = input × 0.5 (50% discount), no cache_write surcharge
+  // (both 5-min and 1h tiers are 0). Previous FEA-1431 row used
+  // cache_read=0.125 (10% — mirrored bad LiteLLM data) and cache_write=1.25
+  // (a surcharge that OpenAI does not charge).
+  ["gpt-codex%", "GPT Codex (fallback)", 1.25, 10, 0.625, 0, 0],
+  ["cursor-default%", "Cursor default (fallback)", 3, 15, 0.3, 3, 0],
+  ["copilot-default%", "Copilot default (fallback)", 3, 15, 0.3, 3, 0],
+  ["opencode-default%", "OpenCode default (fallback)", 0, 0, 0, 0, 0],
   // FEA-1431 deviation: LiteLLM upstream currently carries Claude Opus 4.5,
   // 4.6, and 4.7 at $5/$25/Mtok — roughly 1/3 of Anthropic's published Opus 4
   // family list price ($15 input / $75 output / $1.50 cache_read /
-  // $18.75 cache_write per Mtok). The build-time Opus floor invariant in
-  // loadHostDefaultPricing() catches this regression and would refuse to
-  // build without an explicit host override. These rows pin the rates to
-  // Anthropic's public list price until LiteLLM upstream is corrected.
-  // When the upstream fix lands, run `just desktop-refresh-pricing` and
-  // delete these overrides. Both the unversioned key and the date-suffixed
+  // $18.75 cache_write 5-min / $30 cache_write 1h per Mtok). The build-time
+  // Opus floor invariant in loadHostDefaultPricing() catches this regression
+  // and would refuse to build without an explicit host override. These rows
+  // pin the rates to Anthropic's public list price until LiteLLM upstream is
+  // corrected. When the upstream fix lands, run `just desktop-refresh-pricing`
+  // and delete these overrides. Both the unversioned key and the date-suffixed
   // snapshot key are overridden because LiteLLM carries both shapes.
-  ["claude-opus-4-7%", "Claude Opus 4.7", 15, 75, 1.5, 18.75],
-  ["claude-opus-4-7-20260416%", "Claude Opus 4.7", 15, 75, 1.5, 18.75],
-  ["claude-opus-4-6%", "Claude Opus 4.6", 15, 75, 1.5, 18.75],
-  ["claude-opus-4-6-20260205%", "Claude Opus 4.6", 15, 75, 1.5, 18.75],
-  ["claude-opus-4-5%", "Claude Opus 4.5", 15, 75, 1.5, 18.75],
-  ["claude-opus-4-5-20251101%", "Claude Opus 4.5", 15, 75, 1.5, 18.75],
+  ["claude-opus-4-7%", "Claude Opus 4.7", 15, 75, 1.5, 18.75, 30],
+  ["claude-opus-4-7-20260416%", "Claude Opus 4.7", 15, 75, 1.5, 18.75, 30],
+  ["claude-opus-4-6%", "Claude Opus 4.6", 15, 75, 1.5, 18.75, 30],
+  ["claude-opus-4-6-20260205%", "Claude Opus 4.6", 15, 75, 1.5, 18.75, 30],
+  ["claude-opus-4-5%", "Claude Opus 4.5", 15, 75, 1.5, 18.75, 30],
+  ["claude-opus-4-5-20251101%", "Claude Opus 4.5", 15, 75, 1.5, 18.75, 30],
   // FEA-1431 coverage gap: LiteLLM upstream carries only date-suffixed keys
   // for older Claude families (e.g. `claude-3-7-sonnet-20250219`) and omits
   // 3.5 Sonnet / 3.5 Haiku entirely. Customers commonly use the broader
@@ -357,40 +374,47 @@ const HOST_ONLY_OVERRIDES = [
   // `claude-3-opus-latest`, etc.); without these overrides those ids fall
   // through to the OpenCode/Cursor fallback rules and price at $0. Keep in
   // sync with Anthropic's public list price; revisit when LiteLLM ships the
-  // broader aliases upstream.
-  ["claude-3-5-sonnet%", "Claude 3.5 Sonnet", 3, 15, 0.3, 3.75],
-  ["claude-3-5-haiku%", "Claude 3.5 Haiku", 0.8, 4, 0.08, 1],
-  ["claude-3-7-sonnet%", "Claude 3.7 Sonnet", 3, 15, 0.3, 3.75],
-  ["claude-3-haiku%", "Claude 3 Haiku", 0.25, 1.25, 0.03, 0.3],
-  ["claude-3-opus%", "Claude 3 Opus", 15, 75, 1.5, 18.75],
+  // broader aliases upstream. 1h cache write = input × 2.0 per Anthropic.
+  ["claude-3-5-sonnet%", "Claude 3.5 Sonnet", 3, 15, 0.3, 3.75, 6],
+  ["claude-3-5-haiku%", "Claude 3.5 Haiku", 0.8, 4, 0.08, 1, 1.6],
+  ["claude-3-7-sonnet%", "Claude 3.7 Sonnet", 3, 15, 0.3, 3.75, 6],
+  ["claude-3-haiku%", "Claude 3 Haiku", 0.25, 1.25, 0.03, 0.3, 0.5],
+  ["claude-3-opus%", "Claude 3 Opus", 15, 75, 1.5, 18.75, 30],
   // FEA-1431 codex review: the legacy 4.2 aliases (`claude-opus-4-2`,
   // `claude-sonnet-4-2`) shipped in 0.15.93 as host-curated defaults but
   // LiteLLM does not carry them. Without these rows any session whose
   // model id is the legacy 4.2 string would fall through to the OpenCode
   // fallback ($0) on a fresh DB. Rates match Anthropic's Opus 4 / Sonnet 4
   // list prices.
-  ["claude-opus-4-2%", "Claude Opus 4", 15, 75, 1.5, 18.75],
-  ["claude-sonnet-4-2%", "Claude Sonnet 4", 3, 15, 0.3, 3.75],
+  ["claude-opus-4-2%", "Claude Opus 4", 15, 75, 1.5, 18.75, 30],
+  ["claude-sonnet-4-2%", "Claude Sonnet 4", 3, 15, 0.3, 3.75, 6],
 ];
 
 const litellmPricingPath = path.join(scriptDir, "litellm-pricing.json");
 
 /**
- * Throw if a pricing row is not a strict 6-tuple of
- * [string, string, number, number, number, number] with finite, non-negative
- * rates. This protects the generated db.js source from being rendered with
- * `undefined`, `null`, or `NaN` baked in as rate literals.
+ * Throw if a pricing row is not a strict 7-tuple of
+ * [string, string, number, number, number, number, number] with finite,
+ * non-negative rates. This protects the generated db.js source from being
+ * rendered with `undefined`, `null`, or `NaN` baked in as rate literals.
+ *
+ * The 7th column (`cache_write_1h_per_mtok`) was added in FEA-1432 to model
+ * Anthropic's 1-hour ephemeral cache writes separately from the 5-minute tier
+ * (the legacy `cache_write_per_mtok` column). LiteLLM-derived rows fill the
+ * 7th column via the transformer; HOST_ONLY_OVERRIDES must include it
+ * explicitly.
  *
  * @param {unknown} row
  * @param {string} sourceLabel
  */
 function assertWellFormedPricingRow(row, sourceLabel) {
-  if (!Array.isArray(row) || row.length !== 6) {
+  if (!Array.isArray(row) || row.length !== 7) {
     throw new Error(
       `Malformed pricing row in ${sourceLabel}: ${JSON.stringify(row)}`,
     );
   }
-  const [pattern, name, input, output, cacheRead, cacheWrite] = row;
+  const [pattern, name, input, output, cacheRead, cacheWrite, cacheWrite1h] =
+    row;
   if (typeof pattern !== "string" || pattern.length === 0) {
     throw new Error(
       `Pricing row in ${sourceLabel} has invalid pattern: ${JSON.stringify(row)}`,
@@ -406,6 +430,7 @@ function assertWellFormedPricingRow(row, sourceLabel) {
     ["output", output],
     ["cache_read", cacheRead],
     ["cache_write", cacheWrite],
+    ["cache_write_1h", cacheWrite1h],
   ]) {
     if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
       throw new Error(
@@ -440,11 +465,11 @@ export function loadHostDefaultPricing() {
   }
   if (!Array.isArray(parsed)) {
     throw new Error(
-      `Expected ${litellmPricingPath} to be a JSON array of 6-tuples, got ${typeof parsed}.`,
+      `Expected ${litellmPricingPath} to be a JSON array of 7-tuples, got ${typeof parsed}.`,
     );
   }
 
-  /** @type {Map<string, [string, string, number, number, number, number]>} */
+  /** @type {Map<string, [string, string, number, number, number, number, number]>} */
   const byPattern = new Map();
   for (const row of parsed) {
     assertWellFormedPricingRow(row, litellmPricingPath);
@@ -489,29 +514,84 @@ export function loadHostDefaultPricing() {
     );
   }
 
-  // Invariant #2: OpenAI cache_read discount sanity. OpenAI's prompt caching
-  // is currently advertised at ~50% of the input rate (cached input is
-  // discounted, never premium). LiteLLM is the upstream source of truth, so
-  // we soft-warn here rather than throw — a genuine pricing policy change
-  // upstream shouldn't block the build. FEA-1432 will fix the downstream
-  // cache math; tighten this to an assertion once that lands.
+  // Invariant #2 (FEA-1432): OpenAI cache pricing is vendor-specific.
+  // Cached input reads at a 50% discount; cache writes carry no surcharge
+  // (both 5-min and 1h columns must be 0). This is a hard build-time check —
+  // a regression in the LiteLLM transformer or HOST_ONLY_OVERRIDES that
+  // restores a write surcharge or inflates cache_read above ~55% of input
+  // means we are about to charge users for cache traffic OpenAI does not
+  // charge for.
+  /** @type {Array<{ pattern: string, problem: string }>} */
+  const openaiViolations = [];
   for (const row of merged) {
     const pattern = row[0];
     if (!pattern.startsWith("gpt-")) continue;
     const inputRate = row[2];
     const cacheReadRate = row[4];
-    if (typeof inputRate !== "number" || typeof cacheReadRate !== "number") {
-      continue;
+    const cacheWriteRate = row[5];
+    const cacheWrite1hRate = row[6];
+    if (typeof inputRate !== "number") continue;
+    if (inputRate > 0 && typeof cacheReadRate === "number") {
+      // Allow a 5% headroom over the canonical 50% to absorb upstream
+      // rounding. Stricter bounds (the 40%/60% clamp window) live in the
+      // fetch transformer; this is the floor that must hold post-merge.
+      if (cacheReadRate > inputRate * 0.55) {
+        openaiViolations.push({
+          pattern,
+          problem: `cache_read=${cacheReadRate} > 55% of input=${inputRate}`,
+        });
+      }
     }
-    if (inputRate === 0) continue;
-    if (cacheReadRate > inputRate * 0.55) {
-      // TODO(FEA-1432): promote to assertion once downstream cache math is
-      // fixed. Until then, log only so a stale upstream doesn't gate the
-      // build.
-      console.warn(
-        `[build-agent-monitor] Pricing warning: ${pattern} cache_read=${cacheReadRate} > 55% of input=${inputRate}. (TODO FEA-1432)`,
-      );
+    if (cacheWriteRate !== 0) {
+      openaiViolations.push({
+        pattern,
+        problem: `cache_write (5-min) must be 0 for OpenAI, got ${cacheWriteRate}`,
+      });
     }
+    if (cacheWrite1hRate !== 0) {
+      openaiViolations.push({
+        pattern,
+        problem: `cache_write_1h must be 0 for OpenAI, got ${cacheWrite1hRate}`,
+      });
+    }
+  }
+  if (openaiViolations.length > 0) {
+    const detail = openaiViolations
+      .map((v) => `${v.pattern}: ${v.problem}`)
+      .join("; ");
+    throw new Error(
+      `Pricing invariant violated (OpenAI cache semantics, FEA-1432): ${detail}`,
+    );
+  }
+
+  // Invariant #3 (FEA-1432): Anthropic 1-hour ephemeral cache writes are
+  // priced at input × 2.0 on Anthropic's published rate card. Apply a sanity
+  // floor of input × 1.5 to leave headroom for Anthropic re-tiering before
+  // failing the build. Skip rows with input = 0 (sentinel / free patterns).
+  /** @type {Array<{ pattern: string, input: number, cw1h: number }>} */
+  const anthropic1hUnderpriced = [];
+  for (const row of merged) {
+    const pattern = row[0];
+    if (!pattern.startsWith("claude-")) continue;
+    const inputRate = row[2];
+    const cacheWrite1hRate = row[6];
+    if (typeof inputRate !== "number" || inputRate <= 0) continue;
+    if (typeof cacheWrite1hRate !== "number") continue;
+    if (cacheWrite1hRate < inputRate * 1.5) {
+      anthropic1hUnderpriced.push({
+        pattern,
+        input: inputRate,
+        cw1h: cacheWrite1hRate,
+      });
+    }
+  }
+  if (anthropic1hUnderpriced.length > 0) {
+    const detail = anthropic1hUnderpriced
+      .map((o) => `${o.pattern} input=${o.input} cache_write_1h=${o.cw1h}`)
+      .join(", ");
+    throw new Error(
+      `Pricing invariant violated (Anthropic 1h cache floor, FEA-1432): every priced claude-* row must have cache_write_1h_per_mtok ≥ input × 1.5. Offending: ${detail}`,
+    );
   }
 
   return merged;
@@ -657,8 +737,8 @@ function renderDefaultPricingSource(rows = loadHostDefaultPricing()) {
   return [
     "const DEFAULT_PRICING = [",
     ...rows.map(
-      ([pattern, name, input, output, cacheRead, cacheWrite]) =>
-        `  [${JSON.stringify(pattern)}, ${JSON.stringify(name)}, ${input}, ${output}, ${cacheRead}, ${cacheWrite}],`,
+      ([pattern, name, input, output, cacheRead, cacheWrite, cacheWrite1h]) =>
+        `  [${JSON.stringify(pattern)}, ${JSON.stringify(name)}, ${input}, ${output}, ${cacheRead}, ${cacheWrite}, ${cacheWrite1h}],`,
     ),
     "];",
   ].join("\n");
@@ -1588,6 +1668,120 @@ function patchDbFile(file) {
     pricingBlock,
     `${renderDefaultPricingSource()}\n\n// Top-up:`,
   );
+
+  // FEA-1432: extend the model_pricing schema with a 1-hour ephemeral cache
+  // write column. The upstream CREATE TABLE block ships a 4-column rate set
+  // (input, output, cache_read, cache_write). Anthropic's published cache
+  // tiers are 5-minute and 1-hour, priced differently (1h is 2× input vs
+  // 1.25× for 5min); modeling them as one column conflates the two.
+  const pricingCreateTableNeedle = [
+    "CREATE TABLE IF NOT EXISTS model_pricing (",
+    "    model_pattern TEXT PRIMARY KEY,",
+    "    display_name TEXT NOT NULL,",
+    "    input_per_mtok REAL NOT NULL DEFAULT 0,",
+    "    output_per_mtok REAL NOT NULL DEFAULT 0,",
+    "    cache_read_per_mtok REAL NOT NULL DEFAULT 0,",
+    "    cache_write_per_mtok REAL NOT NULL DEFAULT 0,",
+    "    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+    "  );",
+  ].join("\n");
+  const pricingCreateTableReplacement = [
+    "CREATE TABLE IF NOT EXISTS model_pricing (",
+    "    model_pattern TEXT PRIMARY KEY,",
+    "    display_name TEXT NOT NULL,",
+    "    input_per_mtok REAL NOT NULL DEFAULT 0,",
+    "    output_per_mtok REAL NOT NULL DEFAULT 0,",
+    "    cache_read_per_mtok REAL NOT NULL DEFAULT 0,",
+    "    cache_write_per_mtok REAL NOT NULL DEFAULT 0,",
+    "    cache_write_1h_per_mtok REAL NOT NULL DEFAULT 0,",
+    "    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+    "  );",
+  ].join("\n");
+  if (source.includes(pricingCreateTableNeedle)) {
+    source = source.replace(
+      pricingCreateTableNeedle,
+      pricingCreateTableReplacement,
+    );
+  } else if (!source.includes("cache_write_1h_per_mtok REAL NOT NULL DEFAULT 0")) {
+    throw new Error(
+      `Unable to patch ${file}: expected the model_pricing CREATE TABLE block (FEA-1432).`,
+    );
+  }
+
+  // FEA-1432: ALTER TABLE migration for existing dashboard DBs. Mirrors the
+  // existing `harness` migration style (try a SELECT, ALTER TABLE on miss).
+  // The INSERT/addMissing patches below still pass the new column so a
+  // fresh DB and an upgraded DB converge on the same shape.
+  if (!source.includes("ADD COLUMN cache_write_1h_per_mtok")) {
+    const pricingMigrationNeedle = "addMissing(DEFAULT_PRICING);\n}\n";
+    if (!source.includes(pricingMigrationNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected addMissing(DEFAULT_PRICING); block (FEA-1432 migration).`,
+      );
+    }
+    const pricingMigrationBlock = [
+      "",
+      "// FEA-1432: ensure existing model_pricing tables carry the 1h cache",
+      "// write column. Mirrors the additive ALTER TABLE pattern used for the",
+      "// sessions.harness migration; new DBs already have the column via the",
+      "// patched CREATE TABLE above. The column defaults to 0, which is the",
+      "// correct value for OpenAI rows (no cache-write surcharge); for Claude",
+      "// rows present at the legacy 5-min-only schema, the UPDATE below",
+      "// backfills cache_write_1h to input × 2.0 (Anthropic's published 1h",
+      "// tier rate) so an upgrader's existing pricing rows are not stuck at $0",
+      "// for 1h cache writes once the parser learns the split. The UPDATE is",
+      "// narrowly conditional on cache_write_1h_per_mtok = 0 so user-edited",
+      "// rows are preserved.",
+      "try {",
+      '  db.prepare("SELECT cache_write_1h_per_mtok FROM model_pricing LIMIT 1").get();',
+      "} catch {",
+      "  db.prepare(\"ALTER TABLE model_pricing ADD COLUMN cache_write_1h_per_mtok REAL NOT NULL DEFAULT 0\").run();",
+      "  db.prepare(`",
+      "    UPDATE model_pricing",
+      "       SET cache_write_1h_per_mtok = input_per_mtok * 2.0,",
+      "           updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')",
+      "     WHERE model_pattern LIKE 'claude-%'",
+      "       AND input_per_mtok > 0",
+      "       AND cache_write_1h_per_mtok = 0",
+      "  `).run();",
+      "}",
+      "",
+    ].join("\n");
+    source = source.replace(
+      pricingMigrationNeedle,
+      `${pricingMigrationNeedle}${pricingMigrationBlock}`,
+    );
+  }
+
+  // FEA-1432: extend the seed INSERT statement to carry the new column.
+  // Upstream uses 6 placeholders (pattern, display_name, input, output,
+  // cache_read, cache_write). The row tuples passed by addMissing now carry
+  // a 7th element (cache_write_1h), so the prepared statement and column
+  // list have to grow in lockstep.
+  const seedInsertNeedle =
+    '"INSERT OR IGNORE INTO model_pricing (model_pattern, display_name, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok) VALUES (?, ?, ?, ?, ?, ?)"';
+  const seedInsertReplacement =
+    '"INSERT OR IGNORE INTO model_pricing (model_pattern, display_name, input_per_mtok, output_per_mtok, cache_read_per_mtok, cache_write_per_mtok, cache_write_1h_per_mtok) VALUES (?, ?, ?, ?, ?, ?, ?)"';
+  if (source.includes(seedInsertNeedle)) {
+    source = source.replace(seedInsertNeedle, seedInsertReplacement);
+  } else if (!source.includes("cache_write_1h_per_mtok) VALUES (?, ?, ?, ?, ?, ?, ?)")) {
+    throw new Error(
+      `Unable to patch ${file}: expected the seed INSERT statement (FEA-1432).`,
+    );
+  }
+
+  // Match the addMissing loop destructure too.
+  const seedLoopNeedle =
+    "    for (const [pattern, name, inp, out, cr, cw] of rows) {\n      if (!existing.has(pattern)) insert.run(pattern, name, inp, out, cr, cw);\n    }";
+  const seedLoopReplacement =
+    "    for (const [pattern, name, inp, out, cr, cw, cw1h] of rows) {\n      if (!existing.has(pattern)) insert.run(pattern, name, inp, out, cr, cw, cw1h);\n    }";
+  if (source.includes(seedLoopNeedle)) {
+    source = source.replace(seedLoopNeedle, seedLoopReplacement);
+  } else if (!source.includes("for (const [pattern, name, inp, out, cr, cw, cw1h] of rows)")) {
+    throw new Error(
+      `Unable to patch ${file}: expected the addMissing destructure loop (FEA-1432).`,
+    );
+  }
 
   // FEA-1431: migrate previously-seeded Claude Opus 4.5/4.6/4.7 rows that were
   // mis-priced in 0.15.93 at Sonnet rates ($5/$25/0.5/6.25). The top-up loop

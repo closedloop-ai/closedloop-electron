@@ -212,6 +212,14 @@ export function parseTokenUsage(claudeWorkDir: string): {
     }
     const inputTk = usage.input_tokens ?? 0;
     const outputTk = usage.output_tokens ?? 0;
+    // FEA-1432: Anthropic's response `usage` block carries a single
+    // `cache_creation_input_tokens` counter — it does NOT split the 5-minute
+    // and 1-hour ephemeral cache tiers. The tier is selected by the request's
+    // `cache_control.ttl` directive and is not echoed back in the response.
+    // v1 of FEA-1432 therefore treats every cache creation token as 5-min
+    // (i.e. attributes it to `cacheCreation`/`cache_write_tokens`) and leaves
+    // the 1-hour bucket at 0. Recovering the split requires correlating the
+    // assistant response with the originating request, tracked by FEA-1438.
     const cacheCreationTk = usage.cache_creation_input_tokens ?? 0;
     const cacheReadTk = usage.cache_read_input_tokens ?? 0;
     totals.inputTokens += inputTk;

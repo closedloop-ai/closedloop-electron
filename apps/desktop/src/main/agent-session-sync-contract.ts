@@ -1,4 +1,13 @@
-export const AGENT_SESSION_SYNC_SCHEMA_VERSION = 1 as const;
+// Schema version history:
+//   1: initial shape (sessions + agents + events + tokenUsageByModel)
+//   2: FEA-1432 — `tokenUsageByModel[].cacheWrite1hTokens` (1-hour Anthropic
+//      ephemeral cache tier, split out from cacheWriteTokens which now means
+//      the 5-minute tier specifically).
+//
+// Boundary translation: a relay receiver MAY accept v1 payloads (no
+// `cacheWrite1hTokens` field) and treat the missing field as 0. The cloud
+// removal ticket for the legacy-shape translation lives at FEA-1439.
+export const AGENT_SESSION_SYNC_SCHEMA_VERSION = 2 as const;
 
 export type AgentSessionSyncMode = "backfill" | "incremental";
 
@@ -51,7 +60,21 @@ export type SyncedAgentSessionTokenUsage = {
   inputTokens: number;
   outputTokens: number;
   cacheReadTokens: number;
+  /**
+   * Anthropic 5-minute ephemeral cache write tokens. For OpenAI / non-Anthropic
+   * models this is always 0 (the vendor has no cache-write surcharge).
+   *
+   * Pre-FEA-1432 (schema v1) this field carried all cache writes regardless of
+   * tier. v1 payloads on the wire should be treated as
+   * `cacheWriteTokens = <existing> + 0 (cacheWrite1hTokens missing)`.
+   */
   cacheWriteTokens: number;
+  /**
+   * Anthropic 1-hour ephemeral cache write tokens. Added in FEA-1432 (schema
+   * v2). Always 0 for non-Anthropic models. v1 payloads omit this field;
+   * downstream consumers should default it to 0 when reading a v1 batch.
+   */
+  cacheWrite1hTokens?: number | null;
   estimatedCostUsd?: number;
 };
 

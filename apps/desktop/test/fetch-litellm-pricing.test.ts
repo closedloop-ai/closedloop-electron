@@ -21,7 +21,7 @@ type ScriptModule = {
   deriveDisplayName: (key: string) => string;
   transformPricingMap: (
     map: Record<string, unknown>,
-  ) => Array<[string, string, number, number, number, number]>;
+  ) => Array<[string, string, number, number, number, number, number]>;
   fetchLiteLLMPricing: (
     url?: string,
   ) => Promise<{ rawText: string; sha: string; parsed: Record<string, unknown> }>;
@@ -135,16 +135,114 @@ test("transformPricingMap filters by vendor prefix and rounds to 6 decimals", as
   // Opus 4.7 input was 1.5e-5 $/tok → $15/Mtok
   const opus = rows.find((r) => r[0] === "claude-opus-4-7%");
   assert.ok(opus);
+  assert.equal(opus!.length, 7, "FEA-1432: rows are now 7-tuples");
   assert.equal(opus![2], 15);
   assert.equal(opus![3], 75);
   assert.equal(opus![4], 1.5);
   assert.equal(opus![5], 18.75);
+  // FEA-1432: cache_write_1h is derived as input × 2.0 for Anthropic rows.
+  assert.equal(opus![6], 30);
 
   // Gemini row with no cache fields should default to 0.
   const gemini = rows.find((r) => r[0] === "gemini-2.5-pro%");
   assert.ok(gemini);
+  assert.equal(gemini!.length, 7);
   assert.equal(gemini![4], 0);
   assert.equal(gemini![5], 0);
+  // FEA-1432: Gemini has no Anthropic-style 1h cache tier.
+  assert.equal(gemini![6], 0);
+});
+
+test("FEA-1432: Anthropic 1h cache writes are derived as input × 2.0", async () => {
+  const { transformPricingMap } = await loadScript();
+  const rows = transformPricingMap({
+    "claude-opus-derive-test": {
+      input_cost_per_token: 1.5e-5, // $15/Mtok
+      output_cost_per_token: 7.5e-5,
+      cache_read_input_token_cost: 1.5e-6,
+      cache_creation_input_token_cost: 1.875e-5,
+    },
+    "claude-sonnet-derive-test": {
+      input_cost_per_token: 3e-6, // $3/Mtok
+      output_cost_per_token: 1.5e-5,
+    },
+    // Sentinel input=0 — derivation must NOT synthesize a phantom rate
+    // (we'd be inventing pricing for a free model).
+    "claude-free-test": {
+      input_cost_per_token: 0,
+      output_cost_per_token: 0,
+    },
+  });
+  const opus = rows.find((r) => r[0] === "claude-opus-derive-test%");
+  assert.ok(opus);
+  // input × 2.0 = 30
+  assert.equal(opus![6], 30);
+
+  const sonnet = rows.find((r) => r[0] === "claude-sonnet-derive-test%");
+  assert.ok(sonnet);
+  assert.equal(sonnet![6], 6);
+
+  const free = rows.find((r) => r[0] === "claude-free-test%");
+  // input=0 rows are included (matches LiteLLM's record of a free model) but
+  // derivation must NOT invent a cache_write_1h rate from a zero input.
+  assert.ok(free, "free row should be present in transformed output");
+  assert.equal(free![6], 0, "free row must have cache_write_1h = 0");
+});
+
+test("FEA-1432: OpenAI rows always carry cache_write = 0 and cache_write_1h = 0", async () => {
+  const { transformPricingMap } = await loadScript();
+  const rows = transformPricingMap({
+    "gpt-canonical": {
+      input_cost_per_token: 2.5e-6, // $2.5/Mtok
+      output_cost_per_token: 1e-5,
+      cache_read_input_token_cost: 1.25e-6, // 50% — canonical
+      cache_creation_input_token_cost: 9.99e-6, // should be zeroed out
+    },
+    "gpt-bad-ratio": {
+      input_cost_per_token: 1.25e-6, // $1.25/Mtok
+      output_cost_per_token: 1e-5,
+      cache_read_input_token_cost: 1.25e-7, // 10% — should clamp to 50%
+      cache_creation_input_token_cost: 0,
+    },
+    "gpt-no-cache": {
+      input_cost_per_token: 1.5e-4, // $150/Mtok (e.g. o1-pro)
+      output_cost_per_token: 6e-4,
+      cache_read_input_token_cost: 0, // signals "no caching available"
+      cache_creation_input_token_cost: 0,
+    },
+    "o3-bad-ratio": {
+      input_cost_per_token: 2e-6,
+      output_cost_per_token: 8e-6,
+      cache_read_input_token_cost: 5e-7, // 25% — clamp
+      cache_creation_input_token_cost: 1.5e-6, // surcharge → must zero out
+    },
+  });
+
+  const canonical = rows.find((r) => r[0] === "gpt-canonical%");
+  assert.ok(canonical);
+  assert.equal(canonical![4], 1.25, "canonical 50% cache_read preserved");
+  assert.equal(canonical![5], 0, "OpenAI cache_write surcharge zeroed out");
+  assert.equal(canonical![6], 0, "OpenAI cache_write_1h is 0");
+
+  const badRatio = rows.find((r) => r[0] === "gpt-bad-ratio%");
+  assert.ok(badRatio);
+  // Clamped to input × 0.5 = 0.625
+  assert.equal(badRatio![4], 0.625);
+  assert.equal(badRatio![5], 0);
+  assert.equal(badRatio![6], 0);
+
+  const noCache = rows.find((r) => r[0] === "gpt-no-cache%");
+  assert.ok(noCache);
+  // Preserve 0 — vendor signals no caching, do not invent a rate.
+  assert.equal(noCache![4], 0);
+  assert.equal(noCache![5], 0);
+  assert.equal(noCache![6], 0);
+
+  const o3BadRatio = rows.find((r) => r[0] === "o3-bad-ratio%");
+  assert.ok(o3BadRatio);
+  assert.equal(o3BadRatio![4], 1); // input × 0.5
+  assert.equal(o3BadRatio![5], 0);
+  assert.equal(o3BadRatio![6], 0);
 });
 
 test("runFetchAndWrite writes pricing + meta with SHA-pinned bytes", async () => {

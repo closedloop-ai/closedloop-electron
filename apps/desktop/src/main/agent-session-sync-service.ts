@@ -94,6 +94,16 @@ type TokenUsageRow = {
   input_tokens: number;
   output_tokens: number;
   cache_read_tokens: number;
+  /**
+   * Anthropic 5-minute ephemeral cache writes (legacy meaning kept stable).
+   *
+   * FEA-1432: the agent-monitor `token_usage` table does not currently split
+   * the 5-minute and 1-hour tiers — Anthropic's response usage block does not
+   * carry the split (the tier is chosen by the request's `cache_control.ttl`
+   * directive, not echoed back in the response). v1 of FEA-1432 keeps this
+   * column unchanged and synthesizes `cache_write_1h_tokens = 0` downstream
+   * in the cost calculation. Splitting the tiers is tracked by FEA-1438.
+   */
   cache_write_tokens: number;
 };
 
@@ -102,7 +112,10 @@ type PricingRow = {
   input_per_mtok: number;
   output_per_mtok: number;
   cache_read_per_mtok: number;
+  /** $/Mtok for Anthropic 5-minute ephemeral cache writes. 0 for OpenAI. */
   cache_write_per_mtok: number;
+  /** $/Mtok for Anthropic 1-hour ephemeral cache writes (FEA-1432). 0 for OpenAI. */
+  cache_write_1h_per_mtok: number;
 };
 
 export type SessionAttributionResolverCache = {
@@ -804,7 +817,8 @@ export function loadSyncedSessions(
           input_per_mtok,
           output_per_mtok,
           cache_read_per_mtok,
-          cache_write_per_mtok
+          cache_write_per_mtok,
+          cache_write_1h_per_mtok
         FROM model_pricing
         ORDER BY LENGTH(model_pattern) DESC, model_pattern ASC
       `,
@@ -831,6 +845,12 @@ export function loadSyncedSessions(
       outputTokens: tokenRow.output_tokens,
       cacheReadTokens: tokenRow.cache_read_tokens,
       cacheWriteTokens: tokenRow.cache_write_tokens,
+      // FEA-1432: token_usage carries a single cache-write column today; the
+      // parser cannot recover the 5-min vs 1-hour split from the response
+      // usage block (tier is request-side). Always emit 0 here so v2
+      // payloads stay shape-correct and the field is plumbed end-to-end for
+      // FEA-1438. Cost compute below honors any positive value.
+      cacheWrite1hTokens: 0,
       estimatedCostUsd: estimateTokenUsageCostUsd(tokenRow, pricingRows),
     }));
 
@@ -879,7 +899,7 @@ export function loadSyncedSessions(
 }
 
 export function estimateTokenUsageCostUsd(
-  tokenUsage: TokenUsageRow,
+  tokenUsage: TokenUsageRow & { cache_write_1h_tokens?: number },
   pricingRows: PricingRow[],
 ): number {
   const pricing = pricingRows.find((row) =>
@@ -889,11 +909,20 @@ export function estimateTokenUsageCostUsd(
     return 0;
   }
 
+  // FEA-1432: cache_write_per_mtok is the 5-minute ephemeral rate;
+  // cache_write_1h_per_mtok is the 1-hour rate. token_usage today only
+  // carries a single cache_write_tokens counter (5-min meaning); the 1h
+  // counter defaults to 0 until FEA-1438 lands per-tier parsing.
+  // For non-Anthropic vendors (OpenAI/Gemini) both write rates are 0, so
+  // the additional term contributes nothing.
+  const cacheWrite1hTokens = tokenUsage.cache_write_1h_tokens ?? 0;
+  const cacheWrite1hRate = pricing.cache_write_1h_per_mtok ?? 0;
   return roundUsd(
     (tokenUsage.input_tokens * pricing.input_per_mtok +
       tokenUsage.output_tokens * pricing.output_per_mtok +
       tokenUsage.cache_read_tokens * pricing.cache_read_per_mtok +
-      tokenUsage.cache_write_tokens * pricing.cache_write_per_mtok) /
+      tokenUsage.cache_write_tokens * pricing.cache_write_per_mtok +
+      cacheWrite1hTokens * cacheWrite1hRate) /
       1_000_000,
   );
 }
