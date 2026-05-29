@@ -1,4 +1,4 @@
-import { app } from "electron";
+import { app, dialog } from "electron";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -7,6 +7,14 @@ import path from "node:path";
 import { AGENT_MONITOR_PORT } from "../shared/contracts.js";
 import { gatewayLog } from "./gateway-logger.js";
 import { resolveAgentMonitorPaths } from "./agent-monitor-path.js";
+import { isProcessAlive, signalProcess } from "./agent-monitor-process-utils.js";
+import {
+  reconcileAgentMonitorPort,
+  removeSidecarPidFile,
+  writeSidecarPidFile,
+  type PortHolder,
+  type ReconcileOutcome,
+} from "./agent-monitor-port-reconcile.js";
 
 const TAG = "agent-monitor";
 const HOST = "127.0.0.1";
@@ -104,6 +112,9 @@ export class AgentMonitorSidecar {
     this.child = null;
     this.ready = false;
     this.flushReady(false);
+    // Clean shutdown: drop the PID file so the next boot does not treat our own
+    // (now-terminated) pid as a recovered orphan.
+    removeSidecarPidFile(this.pidFilePath);
     if (!child?.pid) {
       this.restartAttempts = 0;
       this.stopping = false;
@@ -111,16 +122,54 @@ export class AgentMonitorSidecar {
     }
     const { pid } = child;
     try {
-      killGroup(pid, "SIGTERM");
+      signalProcess(pid, "SIGTERM", { group: true });
       await delay(STOP_GRACE_MS);
-      if (isRunning(pid)) {
-        killGroup(pid, "SIGKILL");
+      if (isProcessAlive(pid)) {
+        signalProcess(pid, "SIGKILL", { group: true });
       }
       gatewayLog.info(TAG, "agent monitor stopped");
     } finally {
       this.restartAttempts = 0;
       this.stopping = false;
     }
+  }
+
+  private get pidFilePath(): string {
+    return path.join(app.getPath("userData"), "agent-monitor", "sidecar.pid");
+  }
+
+  // Detect-and-reconcile preflight: identify any process already holding the
+  // fixed port and decide whether to reclaim it. Wrapped so a failure here can
+  // never block boot — we simply proceed and let the bind attempt decide.
+  private async reconcilePort(): Promise<ReconcileOutcome> {
+    try {
+      return await reconcileAgentMonitorPort({
+        port: this.port,
+        pidFilePath: this.pidFilePath,
+        selfUid: typeof process.getuid === "function" ? process.getuid() : -1,
+        confirmKillLive: (holder) => this.confirmKillLiveInstance(holder),
+      });
+    } catch (error) {
+      gatewayLog.warn(TAG, `port reconcile skipped: ${describe(error)}`);
+      return "no-holder";
+    }
+  }
+
+  // Guard 3: another *live* ClosedLoop instance owns the port. Never kill
+  // without explicit user consent. Default/cancel is the non-destructive
+  // "quit it first"; only an explicit "Kill It" click force-reclaims it.
+  private async confirmKillLiveInstance(holder: PortHolder): Promise<boolean> {
+    const result = await dialog.showMessageBox({
+      type: "warning",
+      buttons: ["Quit it first", "Kill It"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      title: "Agent dashboard port in use",
+      message: `Another ClosedLoop instance (PID ${holder.pid}) is using the dashboard port ${this.port}.`,
+      detail: `Process: ${holder.command}\n\nQuit that instance first, or force-kill it to free the dashboard port.`,
+    });
+    return result.response === 1;
   }
 
   private flushReady(ok: boolean): void {
@@ -143,6 +192,23 @@ export class AgentMonitorSidecar {
         TAG,
         `agent monitor entry not found at ${entryFile} — run \`pnpm -C apps/desktop build:agent-monitor\``,
       );
+      this.started = false;
+      this.flushReady(false);
+      return;
+    }
+
+    // Detect-and-reconcile BEFORE the bind. Clears an orphaned sidecar from a
+    // previous unclean exit so we don't burn the restart budget and degrade to
+    // a blank dashboard. A dialog (live-instance case) can take arbitrary time,
+    // so re-check our lifecycle flags after it returns.
+    const outcome = await this.reconcilePort();
+    if (!this.started || this.stopping) {
+      return;
+    }
+    if (outcome === "blocked-live") {
+      // The user chose to keep the other live instance running. Stop the
+      // supervisor so we don't hammer the port with backoff retries; the
+      // dashboard stays in "no monitor" mode until the next launch.
       this.started = false;
       this.flushReady(false);
       return;
@@ -213,8 +279,11 @@ export class AgentMonitorSidecar {
     // restart counter is safe to clear.
     if (healthy && this.isChildAliveAndCurrent(child)) {
       await delay(READY_STABILITY_WINDOW_MS);
-      if (this.isChildAliveAndCurrent(child)) {
+      if (this.isChildAliveAndCurrent(child) && child.pid) {
         this.restartAttempts = 0;
+        // Record our live pid so the next boot can recognise this exact process
+        // as our prior orphan if it survives an unclean exit (Guard 2).
+        writeSidecarPidFile(this.pidFilePath, child.pid);
         gatewayLog.info(
           TAG,
           `agent monitor ready at http://${HOST}:${this.port}`,
@@ -368,27 +437,6 @@ function pipeLines(
       }
     }
   });
-}
-
-function killGroup(pid: number, signal: NodeJS.Signals): void {
-  try {
-    // Negative pid targets the detached process group.
-    process.kill(-pid, signal);
-  } catch (error) {
-    const err = error as NodeJS.ErrnoException;
-    if (err.code !== "ESRCH") {
-      gatewayLog.warn(TAG, `kill ${signal} failed: ${describe(error)}`);
-    }
-  }
-}
-
-function isRunning(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
 }
 
 function delay(ms: number): Promise<void> {
