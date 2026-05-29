@@ -1826,6 +1826,7 @@ export function Dashboard() {
               sub={`${analyticsData?.overview.active_agents ?? stats?.active_agents ?? 0} active`}
               icon={Bot}
               color="text-emerald-400"
+              subTestid="audit-dashboard-monitor-active-agents"
             />
             <StatPill
               label="Total Tokens"

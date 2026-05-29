@@ -9,16 +9,19 @@ name: UI Numbers Audit Gate
 #               Playwright tile audits (rendered DOM == oracle).
 # Real-Electron + visual-regression suites are intentionally NOT here; they run
 # elsewhere as non-blocking (flaky-by-nature) per PLN-760.
+#
+# NO `paths:` filter on purpose. The `coverage` job is intended to be a REQUIRED
+# status check, and "required check + paths filter" is a classic deadlock: a PR
+# that doesn't touch apps/desktop/** never triggers the job, so the required
+# status sits pending forever and the PR can't merge. Triggering on every PR
+# keeps the required check from hanging. The `coverage` job is fast; only mark
+# `coverage` as required (leave `ui-audit` optional — see apps/desktop/ci/README.md).
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    paths:
-      - "apps/desktop/**"
   push:
     branches: [main]
-    paths:
-      - "apps/desktop/**"
 
 concurrency:
   group: audit-gate-${{ github.event.pull_request.number || github.ref }}

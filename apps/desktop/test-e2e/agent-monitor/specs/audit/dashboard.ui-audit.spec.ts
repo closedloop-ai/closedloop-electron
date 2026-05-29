@@ -13,7 +13,7 @@ import {
   tilesForScreen,
 } from "../../inventory/manifest-loader.mjs";
 // @ts-expect-error — .ts helper imported by Playwright's ts loader
-import { assertTileMatchesOracle } from "../../helpers/audit-tile";
+import { assertTileMatchesOracle, tileSkip } from "../../helpers/audit-tile";
 
 const manifest = loadManifest();
 const dashboardTiles = tilesForScreen(manifest, "Dashboard", "Monitor");
@@ -38,13 +38,13 @@ test.describe("Dashboard tiles · UI audit (manifest-driven)", () => {
   });
 
   for (const row of dashboardTiles) {
-    // Tiles with a filed bug (bug_ref set) are expected to fail until the bug
-    // is patched. Skip so the audit-ui suite stays green without masking the
-    // bug — the node-side audit keeps the assertion alive as a `todo` that
-    // flips to "todo passed" the moment the fix lands.
-    const testFn = row.bug_ref ? test.skip : test;
+    // Uniform skip: bug_ref tiles (until fixed) and unbound tiles (no
+    // data-testid yet) skip; only selector-bound tiles are asserted. See
+    // tileSkip in helpers/audit-tile.ts.
+    const { skip, suffix } = tileSkip(row);
+    const testFn = skip ? test.skip : test;
     testFn(
-      `UI audit · ${row.id} matches oracle "${row.oracle}"${row.bug_ref ? ` (skip — bug ${row.bug_ref})` : ""}`,
+      `UI audit · ${row.id} matches oracle "${row.oracle}"${suffix}`,
       async ({ page }) => {
         await assertTileMatchesOracle(page, row);
       },

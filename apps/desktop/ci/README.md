@@ -35,3 +35,12 @@ The workflow has two jobs:
 
 Real-Electron and visual-regression suites are intentionally excluded (they run
 elsewhere as non-blocking, flaky-by-nature per PLN-760).
+
+### Branch-protection guidance (read before marking required)
+
+Mark **only the `coverage` job** as a required status check. Leave `ui-audit`
+optional (it's heavier — builds the sidecar + Playwright — and shouldn't block on
+infra flake). The workflow has **no `paths:` filter** by design: a required check
+combined with a paths filter deadlocks any PR that doesn't touch `apps/desktop/**`
+(the job never triggers, so the required status sits pending forever). Triggering
+on every PR keeps the required `coverage` check from hanging; the job is fast.

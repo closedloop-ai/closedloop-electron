@@ -9,7 +9,7 @@ import {
   tilesForScreen,
 } from "../../inventory/manifest-loader.mjs";
 // @ts-expect-error — .ts helper imported by Playwright's ts loader
-import { assertTileMatchesOracle } from "../../helpers/audit-tile";
+import { assertTileMatchesOracle, tileSkip } from "../../helpers/audit-tile";
 
 const manifest = loadManifest();
 const sessionTiles = tilesForScreen(manifest, "Sessions");
@@ -36,9 +36,10 @@ test.describe("Sessions tiles · UI audit (manifest-driven)", () => {
   });
 
   for (const row of sessionTiles) {
-    const testFn = row.bug_ref ? test.skip : test;
+    const { skip, suffix } = tileSkip(row);
+    const testFn = skip ? test.skip : test;
     testFn(
-      `UI audit · ${row.id} matches oracle "${row.oracle}"${row.bug_ref ? ` (skip — bug ${row.bug_ref})` : ""}`,
+      `UI audit · ${row.id} matches oracle "${row.oracle}"${suffix}`,
       async ({ page }) => {
         await assertTileMatchesOracle(page, row);
       },

@@ -6,7 +6,7 @@ import { expect, test } from "@playwright/test";
 
 import { loadManifest } from "../../inventory/manifest-loader.mjs";
 // @ts-expect-error — .ts helper imported by Playwright's ts loader
-import { assertTileMatchesOracle } from "../../helpers/audit-tile";
+import { assertTileMatchesOracle, tileSkip } from "../../helpers/audit-tile";
 
 const manifest = loadManifest();
 const skillTiles = manifest.structural.filter(
@@ -25,13 +25,8 @@ test.describe("Skills tiles · UI audit (manifest-driven)", () => {
   });
 
   for (const row of skillTiles) {
-    const pending = !row.bug_ref && !row.selector?.present_in_code;
-    const testFn = row.bug_ref || pending ? test.skip : test;
-    const suffix = row.bug_ref
-      ? ` (skip — bug ${row.bug_ref})`
-      : pending
-        ? " (skip — selector pending)"
-        : "";
+    const { skip, suffix } = tileSkip(row);
+    const testFn = skip ? test.skip : test;
     testFn(
       `UI audit · ${row.id} matches oracle "${row.oracle}"${suffix}`,
       async ({ page }) => {

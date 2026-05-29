@@ -70,10 +70,10 @@
       "bug_ref": null,
       "selector": {
         "value": "[data-testid='audit-dashboard-monitor-active-agents']",
-        "present_in_code": false,
+        "present_in_code": true,
         "render_kind": "text_sub",
-        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx — 'Total Agents' StatPill SUB line ('{active_agents} active'); the pill VALUE is overview.total_agents, a different number",
-        "followup": "Add data-testid to the StatPill SUB element (subTestid), NOT the value element — the value renders total_agents, but this tile's oracle is active_agents. There is no standalone 'Active Agents' pill; active_agents only appears in the Total Agents pill's sub text."
+        "renders_at": "scripts/agent-monitor-client/Dashboard.tsx — 'Total Agents' StatPill SUB line ('{active_agents} active'), subTestid added FEA-1437 Phase 3. The pill VALUE is overview.total_agents (a different number); the audit binds the SUB element, where active_agents renders.",
+        "followup": "Done — subTestid on the Total Agents pill sub binds active_agents to its real render site (not the section heading the old label-slice coincidentally matched)."
       }
     },
     {

@@ -40,6 +40,24 @@ function escapeRegex(s: string): string {
 }
 
 /**
+ * Uniform skip decision for every screen spec. A tile is audited only when it
+ * is bound to a real selector (selector.present_in_code). Tiles with a filed
+ * bug skip until the fix lands; tiles without a bound selector skip as
+ * "selector pending" rather than silently falling back to a fragile label
+ * slice that can match a number coincidentally (PR #252 review, thadeusb). Use
+ * this in ALL specs so the five behave identically.
+ */
+export function tileSkip(row: {
+  bug_ref?: string | null;
+  selector?: { present_in_code?: boolean };
+}): { skip: boolean; suffix: string } {
+  if (row.bug_ref) return { skip: true, suffix: ` (skip — bug ${row.bug_ref})` };
+  if (!row.selector?.present_in_code)
+    return { skip: true, suffix: " (skip — selector pending)" };
+  return { skip: false, suffix: "" };
+}
+
+/**
  * Compute the tile's oracle value from the fixture DB, slice its rendered region
  * (data-testid selector when present, else label slice), and assert the rendered
  * text matches the formatted oracle. Branches on tile_kind: trend / money / count.
