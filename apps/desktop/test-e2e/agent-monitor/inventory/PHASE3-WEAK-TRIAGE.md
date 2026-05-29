@@ -4,6 +4,8 @@
 
 **Parent:** FEA-1437 / PLN-760 · **Substrate:** FEA-1415 / PLN-738 (PR #246, `2a3a371`)
 
+> **Status update (FEA-1437 Phase 6):** the 12 category-(c) detections below were reclassified to `out_of_scope` in `coverage-classifier.mjs` (new HEALTH_GAUGE / CONFIG_STATE / TIMESTAMP rules). `cross_ref_weak` is now **106** (was 118); `out_of_scope` is **41** (was 29). The remaining 106 are category (b) — chart aggregates needing the `covered_by` annotation convention.
+
 ## Categories
 
 - **(a) auto-resolve via Phase-3 selector binding** — detection maps to a manifest tile that renders as DOM text; once the tile's `data-testid` lands, the classifier graduates it `cross_ref_weak → cross_ref`. **Count: 0**

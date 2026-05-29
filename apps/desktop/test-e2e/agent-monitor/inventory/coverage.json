@@ -5,9 +5,9 @@
   "by_status": {
     "tested": 0,
     "cross_ref": 49,
-    "cross_ref_weak": 118,
+    "cross_ref_weak": 106,
     "bug_filed": 0,
-    "out_of_scope": 29,
+    "out_of_scope": 41,
     "needs_review": 0
   },
   "rows": [
@@ -160,9 +160,8 @@
       "line": 772,
       "detected_kind": "toFixed",
       "value_expr": "load",
-      "status": "cross_ref_weak",
-      "covered_by": "all-screens.api-audit.test.mjs",
-      "reason": "Dashboard has manifest coverage but this detection (`load`) did not bind to a specific tile via endpoint_field/oracle/id substring match — needs explicit annotation in Phase 3"
+      "status": "out_of_scope",
+      "reason": "server-runtime health gauge (CPU load / memory % / heap % / composite health-score index / cache-hit gauge) — computed from process state, not log-parsed data"
     },
     {
       "detection_id": "auto.dashboard.14",
@@ -181,9 +180,8 @@
       "line": 798,
       "detected_kind": "toFixed",
       "value_expr": "memUsedPct",
-      "status": "cross_ref_weak",
-      "covered_by": "all-screens.api-audit.test.mjs",
-      "reason": "Dashboard has manifest coverage but this detection (`memUsedPct`) did not bind to a specific tile via endpoint_field/oracle/id substring match — needs explicit annotation in Phase 3"
+      "status": "out_of_scope",
+      "reason": "server-runtime health gauge (CPU load / memory % / heap % / composite health-score index / cache-hit gauge) — computed from process state, not log-parsed data"
     },
     {
       "detection_id": "auto.dashboard.16",
@@ -192,9 +190,8 @@
       "line": 815,
       "detected_kind": "toFixed",
       "value_expr": "heapUsedPct",
-      "status": "cross_ref_weak",
-      "covered_by": "all-screens.api-audit.test.mjs",
-      "reason": "Dashboard has manifest coverage but this detection (`heapUsedPct`) did not bind to a specific tile via endpoint_field/oracle/id substring match — needs explicit annotation in Phase 3"
+      "status": "out_of_scope",
+      "reason": "server-runtime health gauge (CPU load / memory % / heap % / composite health-score index / cache-hit gauge) — computed from process state, not log-parsed data"
     },
     {
       "detection_id": "auto.dashboard.17",
@@ -268,9 +265,8 @@
       "line": 1003,
       "detected_kind": "toFixed",
       "value_expr": "healthScore",
-      "status": "cross_ref_weak",
-      "covered_by": "all-screens.api-audit.test.mjs",
-      "reason": "Dashboard has manifest coverage but this detection (`healthScore`) did not bind to a specific tile via endpoint_field/oracle/id substring match — needs explicit annotation in Phase 3"
+      "status": "out_of_scope",
+      "reason": "server-runtime health gauge (CPU load / memory % / heap % / composite health-score index / cache-hit gauge) — computed from process state, not log-parsed data"
     },
     {
       "detection_id": "auto.dashboard.24",
@@ -279,9 +275,8 @@
       "line": 1028,
       "detected_kind": "toFixed",
       "value_expr": "cacheHitRate",
-      "status": "cross_ref_weak",
-      "covered_by": "all-screens.api-audit.test.mjs",
-      "reason": "Dashboard has manifest coverage but this detection (`cacheHitRate`) did not bind to a specific tile via endpoint_field/oracle/id substring match — needs explicit annotation in Phase 3"
+      "status": "out_of_scope",
+      "reason": "server-runtime health gauge (CPU load / memory % / heap % / composite health-score index / cache-hit gauge) — computed from process state, not log-parsed data"
     },
     {
       "detection_id": "auto.dashboard.25",
@@ -417,9 +412,8 @@
       "line": 1317,
       "detected_kind": "data_property",
       "value_expr": "info.hooks.installed",
-      "status": "cross_ref_weak",
-      "covered_by": "all-screens.api-audit.test.mjs",
-      "reason": "Dashboard has manifest coverage but this detection (`info.hooks.installed`) did not bind to a specific tile via endpoint_field/oracle/id substring match — needs explicit annotation in Phase 3"
+      "status": "out_of_scope",
+      "reason": "local config/install state (Claude hooks install flag) — a config toggle, not a log-derived number"
     },
     {
       "detection_id": "auto.dashboard.37",
@@ -428,9 +422,8 @@
       "line": 1319,
       "detected_kind": "data_property",
       "value_expr": "info.hooks.installed",
-      "status": "cross_ref_weak",
-      "covered_by": "all-screens.api-audit.test.mjs",
-      "reason": "Dashboard has manifest coverage but this detection (`info.hooks.installed`) did not bind to a specific tile via endpoint_field/oracle/id substring match — needs explicit annotation in Phase 3"
+      "status": "out_of_scope",
+      "reason": "local config/install state (Claude hooks install flag) — a config toggle, not a log-derived number"
     },
     {
       "detection_id": "auto.dashboard.38",
@@ -1064,9 +1057,8 @@
       "line": 180,
       "detected_kind": "formatter_call",
       "value_expr": "fmt(a.last_seen_at)",
-      "status": "cross_ref_weak",
-      "covered_by": "all-screens.api-audit.test.mjs",
-      "reason": "PacksInstalled has manifest coverage but this detection (`fmt(a.last_seen_at)`) did not bind to a specific tile via endpoint_field/oracle/id substring match — needs explicit annotation in Phase 3"
+      "status": "out_of_scope",
+      "reason": "timestamp formatting (date display via fmt(...At)) — not a numeric audit target"
     },
     {
       "detection_id": "auto.skills.94",
@@ -1075,9 +1067,8 @@
       "line": 188,
       "detected_kind": "formatter_call",
       "value_expr": "fmt(inv.created_at)",
-      "status": "cross_ref_weak",
-      "covered_by": "all-screens.api-audit.test.mjs",
-      "reason": "Skills has manifest coverage but this detection (`fmt(inv.created_at)`) did not bind to a specific tile via endpoint_field/oracle/id substring match — needs explicit annotation in Phase 3"
+      "status": "out_of_scope",
+      "reason": "timestamp formatting (date display via fmt(...At)) — not a numeric audit target"
     },
     {
       "detection_id": "auto.sparkline.95",
@@ -1127,9 +1118,8 @@
       "line": 140,
       "detected_kind": "formatter_call",
       "value_expr": "fmt(d.started_at)",
-      "status": "cross_ref_weak",
-      "covered_by": "all-screens.api-audit.test.mjs",
-      "reason": "SubAgents has manifest coverage but this detection (`fmt(d.started_at)`) did not bind to a specific tile via endpoint_field/oracle/id substring match — needs explicit annotation in Phase 3"
+      "status": "out_of_scope",
+      "reason": "timestamp formatting (date display via fmt(...At)) — not a numeric audit target"
     },
     {
       "detection_id": "auto.tools.100",
@@ -1160,9 +1150,8 @@
       "line": 155,
       "detected_kind": "formatter_call",
       "value_expr": "fmt(ev.created_at)",
-      "status": "cross_ref_weak",
-      "covered_by": "all-screens.api-audit.test.mjs",
-      "reason": "Tools has manifest coverage but this detection (`fmt(ev.created_at)`) did not bind to a specific tile via endpoint_field/oracle/id substring match — needs explicit annotation in Phase 3"
+      "status": "out_of_scope",
+      "reason": "timestamp formatting (date display via fmt(...At)) — not a numeric audit target"
     },
     {
       "detection_id": "auto.plans.103",
@@ -1171,9 +1160,8 @@
       "line": 209,
       "detected_kind": "formatter_call",
       "value_expr": "fmt(v.created_at)",
-      "status": "cross_ref_weak",
-      "covered_by": "all-screens.api-audit.test.mjs",
-      "reason": "Plans has manifest coverage but this detection (`fmt(v.created_at)`) did not bind to a specific tile via endpoint_field/oracle/id substring match — needs explicit annotation in Phase 3"
+      "status": "out_of_scope",
+      "reason": "timestamp formatting (date display via fmt(...At)) — not a numeric audit target"
     },
     {
       "detection_id": "auto.activityfeed.104",
