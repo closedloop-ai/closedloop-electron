@@ -91,8 +91,8 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null,
-      "notes": "Computed in the client by fetching subagents per active main session — no single API field. Oracle replicates the same derivation.",
+      "bug_ref": "FEA-1442",
+      "notes": "Computed in the client by fetching subagents per active main session — no single API field. Oracle replicates the same derivation. FEA-1442: no Active Subagents tile is rendered today — audit test.skips until the tile (or descope) lands.",
       "selector": {
         "value": "[data-testid='audit-dashboard-monitor-active-subagents']",
         "present_in_code": false,
@@ -117,7 +117,7 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null,
+      "bug_ref": "FEA-1442",
       "selector": {
         "value": "[data-testid='audit-dashboard-monitor-active-subagents-trend-total']",
         "present_in_code": false,
@@ -141,8 +141,8 @@
       "priority": "P0",
       "owner": null,
       "status": "pending",
-      "bug_ref": null,
-      "notes": "Depends on the sidecar's interpretation of 'today' — UTC midnight vs. tz_offset. /api/stats accepts tz_offset.",
+      "bug_ref": "FEA-1443",
+      "notes": "Depends on the sidecar's interpretation of 'today' — UTC midnight vs. tz_offset. /api/stats accepts tz_offset. FEA-1443: no Events Today tile is rendered today — audit test.skips until the tile (or descope) lands.",
       "selector": {
         "value": "[data-testid='audit-dashboard-monitor-events-today']",
         "present_in_code": false,
