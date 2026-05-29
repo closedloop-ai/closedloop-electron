@@ -152,13 +152,17 @@ two sources, merged at build time by `loadHostDefaultPricing()` in
    OpenCode-hosted free models), plus any *temporary* upstream-deviation
    overrides documented inline with a TODO + ticket reference.
 
-The build runs two invariants. Failures throw with an actionable message:
+The build runs three invariants. All are hard build-time assertions —
+violation throws with an actionable message and aborts the build:
 
 - **Opus 4.x floor** — every `claude-opus-4-N` pattern (except the legacy
   `claude-opus-4-1` and `claude-opus-4-2`) must price input ≥ $10/Mtok.
-- **OpenAI cache discount sanity** — `gpt-*` cache_read should be ≤ 55% of
-  input. Soft-warn for now (FEA-1432 will tighten to a hard assertion once
-  downstream cache math is fixed).
+- **OpenAI cache discount + zero-write** — `gpt-*` / `o1-*` / `o3-*` rows
+  must have `cache_read ≤ input × 0.55` AND `cache_write = 0` AND
+  `cache_write_1h = 0`. OpenAI publishes no cache-write surcharge.
+- **Anthropic 1h cache floor** — every `claude-*` row with positive input
+  must have `cache_write_1h ≥ input × 1.5` (sanity floor for the 2×
+  documented tier).
 
 ### Refreshing pricing
 

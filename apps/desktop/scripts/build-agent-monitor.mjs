@@ -525,7 +525,17 @@ export function loadHostDefaultPricing() {
   const openaiViolations = [];
   for (const row of merged) {
     const pattern = row[0];
-    if (!pattern.startsWith("gpt-")) continue;
+    // FEA-1432 review fix: match isOpenAIKey() in fetch-litellm-pricing.mjs
+    // (gpt-, o1-, o3-). Earlier guard only covered gpt-, leaving a gap for
+    // a future HOST_ONLY_OVERRIDES row on o1-/o3- with non-zero cache_write
+    // to slip past this invariant.
+    if (
+      !pattern.startsWith("gpt-") &&
+      !pattern.startsWith("o1-") &&
+      !pattern.startsWith("o3-")
+    ) {
+      continue;
+    }
     const inputRate = row[2];
     const cacheReadRate = row[4];
     const cacheWriteRate = row[5];
