@@ -1077,11 +1077,11 @@
       "status": "pending",
       "bug_ref": null,
       "selector": {
-        "value": "[data-testid='audit-skills-list-length']",
-        "present_in_code": false,
-        "render_kind": "per_group",
-        "renders_at": "scripts/agent-monitor-packs/client/Skills.tsx:140",
-        "followup": "Add a single aggregate count element (sum across groups) with a data-testid; today only per-group counts render in per-group header ({items.length})."
+        "value": "[data-testid='audit-skill-row']",
+        "present_in_code": true,
+        "render_kind": "dom_count",
+        "renders_at": "scripts/agent-monitor-packs/client/Skills.tsx (one button per skill across pack groups; testid added FEA-1437 Phase 4)",
+        "followup": "Done — every skill row has data-testid='audit-skill-row' (across all groups); the audit asserts toHaveCount == skills_total, which equals the sum of the per-group counts."
       }
     },
     {
@@ -1211,11 +1211,11 @@
       "bug_ref": null,
       "notes": "/api/packs dedupes by pack_id (one row per distinct pack), even if agent_packs has multiple rows per pack_id (one per install_scope/harness). Oracle uses COUNT(DISTINCT pack_id) to match. The packs_installed_count oracle counts all rows — useful for a different audit if we ever audit the per-scope view.",
       "selector": {
-        "value": "[data-testid='audit-packs-installed-list-length']",
+        "value": "[data-testid='audit-pack-row']",
         "present_in_code": false,
         "render_kind": "dom_count",
-        "renders_at": "scripts/agent-monitor-packs/client/PacksInstalled.tsx:139",
-        "followup": "Either add a numeric total element with a data-testid, or test by counting rendered items under a data-testid'd .map(packs) container."
+        "renders_at": "scripts/agent-monitor-packs/client/PacksInstalled.tsx (one button per installed pack; data-testid='audit-pack-row' added FEA-1437 Phase 4)",
+        "followup": "testid + dom_count assertion ready, but UI audit is BLOCKED: in the test sidecar the installed-packs list renders 0 rows (launch-sidecar.mjs sets SKIP_CATALOG_DETECTORS=1, and /api/packs may not surface the seeded agent_packs rows without install detection). Before enabling: confirm whether /api/packs should return the fixture agent_packs in-test (possible real bug) or whether install detection is required, then flip present_in_code and re-add specs/audit/packs.ui-audit.spec.ts."
       }
     },
     {
