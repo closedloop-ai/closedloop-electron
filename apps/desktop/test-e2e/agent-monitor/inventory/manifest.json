@@ -641,7 +641,7 @@
         "present_in_code": false,
         "render_kind": "per_group",
         "renders_at": "scripts/agent-monitor-client/Dashboard.tsx:1260",
-        "followup": "Add a single aggregate count element (sum across groups) with a data-testid; today only per-group counts render in per-agent table row + computed@704."
+        "followup": "Expose the aggregate success-rate PERCENTAGE (the workflow_success_rate oracle), not a summed count, with a data-testid. The per-row item.successRate values are percentages and cannot be summed."
       }
     },
     {

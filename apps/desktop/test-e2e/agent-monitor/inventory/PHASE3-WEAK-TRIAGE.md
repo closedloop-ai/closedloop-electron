@@ -6,8 +6,8 @@
 
 ## Categories
 
-- **(a) auto-resolve via Phase-3 selector binding** — detection maps to a manifest tile that renders as DOM text; once the tile's `data-testid` lands, the classifier graduates it `cross_ref_weak → cross_ref`. **Count: 4**
-- **(b) needs explicit covered-by annotation** — detection is a chart/sparkline/breakdown series, or a list/row count, whose underlying aggregate IS oracle-backed at the API layer but does NOT render as a sliceable per-value DOM node. Selector binding can't fix it; it needs an explicit `covered_by` note (API-layer assertion stands; DOM is a chart). **Count: 102**
+- **(a) auto-resolve via Phase-3 selector binding** — detection maps to a manifest tile that renders as DOM text; once the tile's `data-testid` lands, the classifier graduates it `cross_ref_weak → cross_ref`. **Count: 0**
+- **(b) needs explicit covered-by annotation** — detection is a chart/sparkline/breakdown series, or a list/row count, whose underlying aggregate IS oracle-backed at the API layer but does NOT render as a sliceable per-value DOM node. Selector binding can't fix it; it needs an explicit `covered_by` note (API-layer assertion stands; DOM is a chart). **Count: 106**
 - **(c) actually out_of_scope** — server-runtime/health gauges, local config state, and timestamp formatting: not log-derived numeric data. Reclassify to `out_of_scope`. **Count: 12**
 
 ### The headline for the weak-count goal
@@ -15,8 +15,8 @@
 PLN-738/FEA-1437 set a target of driving `cross_ref_weak` to 0. This triage shows the path:
 
 - **12** detections should simply move to `out_of_scope` (category c) — they were never in scope; the scanner over-collected.
-- **4** will fall out automatically as Phase 3 adds selectors (category a).
-- **102** are the real work (category b): they're chart aggregates. The honest resolution is an explicit `covered_by` annotation ("aggregate of <tile>, asserted at API layer; DOM is a chart") rather than pretending a tile-region text assertion exists. This is the bulk of the weak count and it lives mostly on the Dashboard (30-day cost/token charts, heatmaps, model breakdown) and the Analytics screen (same chart family).
+- **0** will fall out automatically as Phase 3 adds selectors (category a). **This being 0 is itself the headline finding:** none of the 118 weak detections are simple tile-text values that merely lack a `data-testid`. Every weak detection is either out-of-scope (c) or a chart aggregate (b), so the selector-binding work — though essential for the manifest tiles themselves — does **not** move the weak count.
+- **106** are the real work (category b): they're chart aggregates. The honest resolution is an explicit `covered_by` annotation ("aggregate of <tile>, asserted at API layer; DOM is a chart") rather than pretending a tile-region text assertion exists. This is the bulk of the weak count and it lives mostly on the Dashboard (30-day cost/token charts, heatmaps, model breakdown) and the Analytics screen (same chart family). Note: the 4 Analytics cost detections fall here (not category a) because `coverage-classifier.mjs:178` binds candidates screen-scoped and there is no Analytics cost tile to bind to.
 
 > **Recommendation:** split the weak-count goal into "weak that should be out_of_scope" (mechanical, do now) and "weak that are chart aggregates" (needs the `covered_by` annotation convention + a classifier rule for chart-series detections). Do NOT chase a literal 0 by forcing data-testids onto chart internals.
 
@@ -37,16 +37,12 @@ PLN-738/FEA-1437 set a target of driving `cross_ref_weak` to 0. This triage show
 | Tools | formatter_call | `fmt(ev.created_at)` | `scripts/agent-monitor-packs/client/Tools.tsx:155` | timestamp formatting (date, not a numeric audit target) |
 | Plans | formatter_call | `fmt(v.created_at)` | `scripts/agent-monitor-plans/client/Plans.tsx:209` | timestamp formatting (date, not a numeric audit target) |
 
-## Category (a) — auto-resolve via selector binding — 4 detections
+## Category (a) — auto-resolve via selector binding — 0 detections
 
 | screen | detected_kind | value_expr | file:line | rationale |
 |---|---|---|---|---|
-| Analytics | formatter_call | `fmtCost(costData.total_cost)` | `upstream/Analytics.tsx:840` | == total_cost tile (FEA-1418); binds once the Total Cost pill gets a selector |
-| Analytics | formatter_call | `fmtCostFull(costData.total_cost)` | `upstream/Analytics.tsx:841` | == total_cost tile (FEA-1418); binds once the Total Cost pill gets a selector |
-| Analytics | formatter_call | `fmtCostFull(costData?.total_cost ?? 0)` | `upstream/Analytics.tsx:1082` | == total_cost tile (FEA-1418); binds once the Total Cost pill gets a selector |
-| Analytics | formatter_call | `fmtCost(costData?.total_cost ?? 0)` | `upstream/Analytics.tsx:1082` | == total_cost tile (FEA-1418); binds once the Total Cost pill gets a selector |
 
-## Category (b) — needs explicit covered-by annotation — 102 detections
+## Category (b) — needs explicit covered-by annotation — 106 detections
 
 | screen | detected_kind | value_expr | file:line | rationale |
 |---|---|---|---|---|
@@ -122,6 +118,8 @@ PLN-738/FEA-1437 set a target of driving `cross_ref_weak` to 0. This triage show
 | Analytics | formatter_call | `fmtCost(cost)` | `upstream/Analytics.tsx:414` | chart/sparkline/breakdown series aggregate of token/cost/event data that IS oracle-backed at the API layer, but renders as a chart (no sliceable per-value DOM) — needs explicit covered-by annotation, will NOT auto-resolve via selector binding |
 | Analytics | formatter_call | `fmt(totalTokens)` | `upstream/Analytics.tsx:832` | chart/sparkline/breakdown series aggregate of token/cost/event data that IS oracle-backed at the API layer, but renders as a chart (no sliceable per-value DOM) — needs explicit covered-by annotation, will NOT auto-resolve via selector binding |
 | Analytics | toLocaleString | `totalTokens` | `upstream/Analytics.tsx:833` | chart/sparkline/breakdown series aggregate of token/cost/event data that IS oracle-backed at the API layer, but renders as a chart (no sliceable per-value DOM) — needs explicit covered-by annotation, will NOT auto-resolve via selector binding |
+| Analytics | formatter_call | `fmtCost(costData.total_cost)` | `upstream/Analytics.tsx:840` | renders a cost total but there is NO Analytics cost manifest tile; coverage-classifier.mjs binds candidates screen-scoped (t.screen === row.screen), so the Dashboard Total Cost selector can't resolve it — needs an Analytics cost tile or an explicit covered-by annotation |
+| Analytics | formatter_call | `fmtCostFull(costData.total_cost)` | `upstream/Analytics.tsx:841` | renders a cost total but there is NO Analytics cost manifest tile; coverage-classifier.mjs binds candidates screen-scoped (t.screen === row.screen), so the Dashboard Total Cost selector can't resolve it — needs an Analytics cost tile or an explicit covered-by annotation |
 | Analytics | data_property | `costData.breakdown.length` | `upstream/Analytics.tsx:842` | list/row count tied to a manifest dom_count/per_group tile — bind by counting rendered items or annotate covered-by |
 | Analytics | data_property | `costData.breakdown.length` | `upstream/Analytics.tsx:842` | list/row count tied to a manifest dom_count/per_group tile — bind by counting rendered items or annotate covered-by |
 | Analytics | math | `Math.max(` | `upstream/Analytics.tsx:882` | chart/sparkline/breakdown series aggregate of token/cost/event data that IS oracle-backed at the API layer, but renders as a chart (no sliceable per-value DOM) — needs explicit covered-by annotation, will NOT auto-resolve via selector binding |
@@ -143,6 +141,8 @@ PLN-738/FEA-1437 set a target of driving `cross_ref_weak` to 0. This triage show
 | Analytics | formatter_call | `fmtCost(cents / 100)` | `upstream/Analytics.tsx:1082` | chart/sparkline/breakdown series aggregate of token/cost/event data that IS oracle-backed at the API layer, but renders as a chart (no sliceable per-value DOM) — needs explicit covered-by annotation, will NOT auto-resolve via selector binding |
 | Analytics | formatter_call | `fmtCostFull(b.cost)` | `upstream/Analytics.tsx:1082` | chart/sparkline/breakdown series aggregate of token/cost/event data that IS oracle-backed at the API layer, but renders as a chart (no sliceable per-value DOM) — needs explicit covered-by annotation, will NOT auto-resolve via selector binding |
 | Analytics | formatter_call | `fmtCost(b.cost)` | `upstream/Analytics.tsx:1082` | chart/sparkline/breakdown series aggregate of token/cost/event data that IS oracle-backed at the API layer, but renders as a chart (no sliceable per-value DOM) — needs explicit covered-by annotation, will NOT auto-resolve via selector binding |
+| Analytics | formatter_call | `fmtCostFull(costData?.total_cost ?? 0)` | `upstream/Analytics.tsx:1082` | renders a cost total but there is NO Analytics cost manifest tile; coverage-classifier.mjs binds candidates screen-scoped (t.screen === row.screen), so the Dashboard Total Cost selector can't resolve it — needs an Analytics cost tile or an explicit covered-by annotation |
+| Analytics | formatter_call | `fmtCost(costData?.total_cost ?? 0)` | `upstream/Analytics.tsx:1082` | renders a cost total but there is NO Analytics cost manifest tile; coverage-classifier.mjs binds candidates screen-scoped (t.screen === row.screen), so the Dashboard Total Cost selector can't resolve it — needs an Analytics cost tile or an explicit covered-by annotation |
 | Analytics | math | `Math.round(` | `upstream/Analytics.tsx:1082` | chart/sparkline/breakdown series aggregate of token/cost/event data that IS oracle-backed at the API layer, but renders as a chart (no sliceable per-value DOM) — needs explicit covered-by annotation, will NOT auto-resolve via selector binding |
 | Analytics | formatter_call | `fmtCostFull(totalCost30d)` | `upstream/Analytics.tsx:1123` | chart/sparkline/breakdown series aggregate of token/cost/event data that IS oracle-backed at the API layer, but renders as a chart (no sliceable per-value DOM) — needs explicit covered-by annotation, will NOT auto-resolve via selector binding |
 | Analytics | formatter_call | `fmtCost(totalCost30d)` | `upstream/Analytics.tsx:1123` | chart/sparkline/breakdown series aggregate of token/cost/event data that IS oracle-backed at the API layer, but renders as a chart (no sliceable per-value DOM) — needs explicit covered-by annotation, will NOT auto-resolve via selector binding |
