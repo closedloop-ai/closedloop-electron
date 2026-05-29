@@ -25,11 +25,19 @@ function importCopilotSession(dbModule, session) {
   // FEA-1434: GitHub Copilot is always covered by a per-seat subscription —
   // no per-token API surface exists. Stamp the mode so the UI ledger split
   // counts these as subscription-covered.
+  //
+  // FEA-1434 (round-3 review follow-up): pass the protected-mode exclusion
+  // list ('api', 'claude_max', 'claude_pro') so the importer can never
+  // demote a row that the desktop main process has deliberately marked.
+  // See the prepared-statement comment in `build-agent-monitor.mjs`.
   try {
     dbModule.stmts.setSessionBillingMode.run(
       "copilot_seat",
       session.sessionId,
       "copilot_seat",
+      "api",
+      "claude_max",
+      "claude_pro",
     );
   } catch { /* non-fatal */ }
   const reactivated = reactivateImportedSession(dbModule, session);

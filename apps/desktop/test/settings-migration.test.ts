@@ -350,3 +350,43 @@ test("setDashboardWelcomeSeen persists across new SettingsStore instances", () =
   const reopened = new SettingsStore({ cwd: tmpDir, name: storeName });
   assert.equal(reopened.getDashboardWelcomeSeen(), true);
 });
+
+// FEA-1434 (round-3 review follow-up → FEA-1445): the
+// `showSubscriptionEquivalentCost` privacy toggle was added in the FEA-1434
+// merge but never wired through the agent-monitor sidecar, so flipping it had
+// no UI effect. The toggle is deferred to FEA-1445; this regression test
+// pins the dead-field removal so a future merge cannot silently reintroduce
+// a setting that does nothing.
+test("FEA-1434: showSubscriptionEquivalentCost is NOT in DEFAULT_DESKTOP_SETTINGS (deferred to FEA-1445)", () => {
+  assert.equal(
+    "showSubscriptionEquivalentCost" in DEFAULT_DESKTOP_SETTINGS,
+    false,
+    "showSubscriptionEquivalentCost was removed from DEFAULT_DESKTOP_SETTINGS in the FEA-1434 round-3 cleanup — the feature is deferred to FEA-1445. Do not re-add this field without the sidecar plumbing required to honor it.",
+  );
+});
+
+test("FEA-1434: SettingsStore has no getter/setter for showSubscriptionEquivalentCost (deferred to FEA-1445)", () => {
+  const tmpDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "settings-show-sub-equiv-removed-"),
+  );
+  tempDirs.push(tmpDir);
+  const store = new SettingsStore({
+    cwd: tmpDir,
+    name: "test-show-sub-equiv-removed",
+  });
+
+  // The dead getter/setter were removed in the FEA-1434 round-3 cleanup.
+  // A future PR that restores the field must restore the plumbing too
+  // (see FEA-1445).
+  const candidate = store as unknown as Record<string, unknown>;
+  assert.equal(
+    typeof candidate["getShowSubscriptionEquivalentCost"],
+    "undefined",
+    "getShowSubscriptionEquivalentCost was deleted with the dead setting — restoring it requires the FEA-1445 sidecar plumbing.",
+  );
+  assert.equal(
+    typeof candidate["setShowSubscriptionEquivalentCost"],
+    "undefined",
+    "setShowSubscriptionEquivalentCost was deleted with the dead setting — restoring it requires the FEA-1445 sidecar plumbing.",
+  );
+});

@@ -699,23 +699,13 @@ export class SettingsStore {
     this.store.set("managedKeyHintLastSeenProvenance", value);
   }
 
-  // --- FEA-1434 / Subscription cost privacy ---
-
-  /**
-   * When true (default), the Sessions UI shows the token-cost equivalent for
-   * subscription-covered sessions ("Covered · $X equiv."). When false, only
-   * the "Covered ·" label is shown — useful when sharing the UI on a call.
-   */
-  getShowSubscriptionEquivalentCost(): boolean {
-    return this.store.get(
-      "showSubscriptionEquivalentCost",
-      DEFAULT_DESKTOP_SETTINGS.showSubscriptionEquivalentCost,
-    );
-  }
-
-  setShowSubscriptionEquivalentCost(value: boolean): void {
-    this.store.set("showSubscriptionEquivalentCost", value);
-  }
+  // FEA-1434 (round-3 review follow-up): the `showSubscriptionEquivalentCost`
+  // privacy toggle is deferred to FEA-1445. It was added to the contract and
+  // store before the sidecar plumbing existed to honor it, which meant the
+  // setting was dead — flipping it changed nothing in the Sessions UI. To
+  // avoid persisting a setting that has no effect we removed the field
+  // entirely. FEA-1445 restores it with the full plumbing (sidecar
+  // `/api/settings` route, client polling, conditional render).
 
   private migrateSavedConfigManagedFields(): void {
     const configs = this.getSavedConfigs();

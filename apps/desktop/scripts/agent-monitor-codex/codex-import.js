@@ -44,11 +44,21 @@ function importCodexSession(dbModule, session) {
   // a runtime signal we treat them as ChatGPT Pro subscription by default;
   // sessions backed by an explicit API key get their mode rewritten when the
   // sync service merges in the launch-metadata.billingMode value.
+  //
+  // FEA-1434 (round-3 review follow-up): pass the protected-mode exclusion
+  // list — the prepared statement is `... NOT IN (?, ?, ?, ?)` so the row
+  // is never demoted from a deliberate non-default value ('api',
+  // 'claude_max', 'claude_pro') back to 'codex_chatgpt_pro'. The new mode
+  // is repeated as the third bound parameter so the statement is still a
+  // no-op when the row already carries that value.
   try {
     dbModule.stmts.setSessionBillingMode.run(
       "codex_chatgpt_pro",
       session.sessionId,
       "codex_chatgpt_pro",
+      "api",
+      "claude_max",
+      "claude_pro",
     );
   } catch {
     /* non-fatal — column/stmt guaranteed by db.js FEA-1434 patch */

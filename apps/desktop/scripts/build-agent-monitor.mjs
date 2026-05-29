@@ -1459,6 +1459,31 @@ function patchDbFile(file) {
   // spawn sites stamp the mode via launch-metadata; the importers stamp a
   // fixed mode per harness (cursor_pro / copilot_seat / opencode). Read paths
   // need no change.
+  //
+  // FEA-1434 (round-3 review follow-up): the importer-side
+  // `setSessionBillingMode` UPDATE must NOT clobber a deliberate non-default
+  // value that the desktop writeback (or launch-metadata, or a future manual
+  // user correction) has set. Concrete race scenario from review:
+  //
+  //   1. user has OPENAI_API_KEY set; desktop spawn writes 'api'
+  //   2. agent-session-sync-service writeback persists 'api' on the row
+  //   3. sidecar restarts and codex-import.js calls
+  //      setSessionBillingMode.run("codex_chatgpt_pro", id, "codex_chatgpt_pro")
+  //   4. without this guard the COALESCE('api','') != 'codex_chatgpt_pro'
+  //      predicate is TRUE → the importer overwrites 'api' →
+  //      'codex_chatgpt_pro'. The next sync cycle restores it, but for a
+  //      ~5s window the Sessions UI mis-buckets the row.
+  //
+  // The fix: extend the WHERE clause so the importer can promote a default
+  // (`unknown` → `codex_chatgpt_pro`) but can never demote a deliberate
+  // non-default value (`api`, `claude_max`, `claude_pro`) back to a default.
+  // The exclusion list is sourced from BILLING_MODE_PROTECTED_VALUES so the
+  // SQL stays a single source of truth — adding a new "protected" mode is a
+  // one-line array edit, not a string-patch surgery.
+  //
+  // The exclusion set mirrors the read-side guard in
+  // `agent-session-sync-service.ts` writeback path and stays in sync with
+  // `src/shared/billing-mode.ts`.
   if (!source.includes("ADD COLUMN billing_mode")) {
     const setSessionHarnessNeedle =
       "  setSessionHarness: db.prepare(\"UPDATE sessions SET harness = ? WHERE id = ? AND COALESCE(harness, '') != ?\"),";
@@ -1467,9 +1492,26 @@ function patchDbFile(file) {
         `Unable to patch ${file}: expected the setSessionHarness statement (billing_mode).`,
       );
     }
+    // Modes the importer is forbidden to overwrite. These represent a
+    // deliberate signal: either the desktop main process detected an API
+    // key (`api`) or a user's OAuth credentials indicated a subscription
+    // tier (`claude_max`, `claude_pro`). The importer's job is to promote
+    // 'unknown' to a fixed-per-harness default — never to demote.
+    const protectedModes = ["api", "claude_max", "claude_pro"];
+    const protectedPlaceholders = protectedModes.map(() => "?").join(", ");
+    // Render the prepared statement with the exclusion list inline. The
+    // statement takes one extra `?` for the new value plus the protected
+    // mode placeholders. Callers must bind:
+    //   (newMode, sessionId, newMode, ...protectedModes)
+    // — the third `?` matches the existing "do nothing if row already has
+    // newMode" guard; the trailing placeholders are the exclusion set.
+    const setSessionBillingModeStmt =
+      "  setSessionBillingMode: db.prepare(\"UPDATE sessions SET billing_mode = ? WHERE id = ? AND COALESCE(billing_mode, '') NOT IN (?, " +
+      protectedPlaceholders +
+      ")\"),";
     const replacement = [
       setSessionHarnessNeedle,
-      "  setSessionBillingMode: db.prepare(\"UPDATE sessions SET billing_mode = ? WHERE id = ? AND COALESCE(billing_mode, '') != ?\"),",
+      setSessionBillingModeStmt,
     ].join("\n");
     source = source.replace(setSessionHarnessNeedle, replacement);
 

@@ -61,11 +61,19 @@ function importOpenCodeSession(dbModule, session) {
   // FEA-1434: OpenCode is hosted on a flat subscription model — no per-token
   // API cost surface. Stamp the mode so the UI ledger split counts these as
   // subscription-covered.
+  //
+  // FEA-1434 (round-3 review follow-up): pass the protected-mode exclusion
+  // list ('api', 'claude_max', 'claude_pro') so the importer can never
+  // demote a row that the desktop main process has deliberately marked.
+  // See the prepared-statement comment in `build-agent-monitor.mjs`.
   try {
     dbModule.stmts.setSessionBillingMode.run(
       "opencode",
       session.sessionId,
       "opencode",
+      "api",
+      "claude_max",
+      "claude_pro",
     );
   } catch { /* non-fatal */ }
   const reactivated = reactivateImportedSession(dbModule, session);

@@ -10,11 +10,16 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { readFileSync } from "node:fs";
 import {
   detectBillingModeForHarness,
   detectClaudeBillingMode,
   detectCodexBillingMode,
 } from "../src/main/billing-mode-detector.js";
+import {
+  SUBSCRIPTION_MODES,
+  type BillingMode,
+} from "../src/shared/billing-mode.js";
 
 function createScratchCredentialsPath(
   filename: string,
@@ -128,6 +133,53 @@ test("detector does not surface credentials file contents through return value",
   assert.ok(
     !mode.includes("DO_NOT_READ_THIS_TOKEN"),
     "billing mode return value must never contain credentials file contents",
+  );
+});
+
+// FEA-1434 (round-3 review follow-up — Finding 3): `claude_pro` is a
+// reserved-for-future-use entry in the `BillingMode` union. No detector or
+// importer produces it today — `detectClaudeBillingMode` always returns
+// `claude_max` for an OAuth-detected Claude session because the credentials
+// file on disk does not distinguish Pro from Max. We keep the variant in
+// place because:
+//   1. removing it would be a breaking change to the cloud-relay schema
+//      (the `billingMode` field on the synced agent-session payload), and
+//   2. the importer-clobber guard in `build-agent-monitor.mjs` already
+//      protects it alongside `api` and `claude_max`, so a future detector
+//      that emits it will land safely without further plumbing.
+// The tests below pin the contract so a future "dead enum entry" cleanup
+// pass cannot silently drop the variant.
+test("FEA-1434: `claude_pro` is still a valid BillingMode variant (reserved for future signal)", () => {
+  // Type-level pin: this assignment fails to compile if `claude_pro` is
+  // removed from the BillingMode union.
+  const reserved: BillingMode = "claude_pro";
+  assert.equal(reserved, "claude_pro");
+});
+
+test("FEA-1434: `claude_pro` remains in SUBSCRIPTION_MODES (subscription-covered ledger)", () => {
+  assert.ok(
+    SUBSCRIPTION_MODES.has("claude_pro"),
+    "`claude_pro` must remain in SUBSCRIPTION_MODES so a future detector emission groups it under the Covered ledger without needing a parallel UI change.",
+  );
+});
+
+test("FEA-1434: billing-mode.ts documents why `claude_pro` is currently dead", () => {
+  // The reserved-status rationale lives as a comment in the shared type
+  // file. A future cleanup that re-removes the variant should at minimum
+  // trigger this regression so the author re-reads the rationale.
+  const source = readFileSync(
+    new URL("../src/shared/billing-mode.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /claude_pro/,
+    "billing-mode.ts must still reference `claude_pro`",
+  );
+  assert.match(
+    source,
+    /reserved for a future detection signal/i,
+    "billing-mode.ts must explain that `claude_pro` is reserved for a future signal",
   );
 });
 

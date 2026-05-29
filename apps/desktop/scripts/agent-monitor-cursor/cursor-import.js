@@ -29,11 +29,19 @@ function importCursorSession(dbModule, session) {
   // FEA-1434: Cursor sessions are always covered by a Cursor Pro subscription
   // (no per-token billing surface exposed by the Cursor CLI). Stamp the mode
   // so the UI can group them under the subscription ledger.
+  //
+  // FEA-1434 (round-3 review follow-up): pass the protected-mode exclusion
+  // list ('api', 'claude_max', 'claude_pro') so the importer can never
+  // demote a row that the desktop main process has deliberately marked.
+  // See the prepared-statement comment in `build-agent-monitor.mjs`.
   try {
     dbModule.stmts.setSessionBillingMode.run(
       "cursor_pro",
       session.sessionId,
       "cursor_pro",
+      "api",
+      "claude_max",
+      "claude_pro",
     );
   } catch { /* non-fatal */ }
   const reactivated = reactivateImportedSession(dbModule, session);

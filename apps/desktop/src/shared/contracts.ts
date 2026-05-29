@@ -187,13 +187,6 @@ export interface DesktopSettings {
    * Null means the hint has never been dismissed.
    */
   managedKeyHintLastSeenProvenance: "DESKTOP_MANAGED" | "USER_CREATED" | null;
-  /**
-   * FEA-1434: when true (default), subscription-covered sessions display the
-   * token-cost equivalent in the Sessions UI ("Covered · $X equiv."). When
-   * false, the equivalent is hidden ("Covered ·" only) so the user can keep
-   * the rough out-of-pocket figure off the screen when sharing it.
-   */
-  showSubscriptionEquivalentCost: boolean;
 }
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
@@ -220,5 +213,4 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   agentSessionChunkedSyncEnabled: false,
   managedKeyHintDismissedAt: null,
   managedKeyHintLastSeenProvenance: null,
-  showSubscriptionEquivalentCost: true,
 };
