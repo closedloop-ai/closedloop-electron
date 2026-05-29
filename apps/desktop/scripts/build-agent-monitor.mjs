@@ -315,6 +315,7 @@ const clientOverlayDir = path.join(appDir, "scripts", "agent-monitor-client");
 const clientOverlayStatusBadgeSource = path.join(clientOverlayDir, "StatusBadge.tsx");
 const clientOverlaySessionsSource = path.join(clientOverlayDir, "Sessions.tsx");
 const clientOverlayDashboardSource = path.join(clientOverlayDir, "Dashboard.tsx");
+const clientOverlaySettingsSource = path.join(clientOverlayDir, "Settings.tsx");
 const CLIENT_FULL_FILE_OVERRIDES = [
   {
     from: embedAppSource,
@@ -339,6 +340,14 @@ const CLIENT_FULL_FILE_OVERRIDES = [
   {
     from: clientOverlayDashboardSource,
     to: path.join("src", "pages", "Dashboard.tsx"),
+  },
+  {
+    // CLOSEDLOOP FEA-1433: the pricing editor (PUT/DELETE /api/pricing) was
+    // removed in the genai-prices migration. This overlay replaces it with a
+    // read-only catalog stamped with the pinned engine version + a per-model
+    // priced/unpriced breakdown sourced from the canonical token-cost engine.
+    from: clientOverlaySettingsSource,
+    to: path.join("src", "pages", "Settings.tsx"),
   },
 ];
 
