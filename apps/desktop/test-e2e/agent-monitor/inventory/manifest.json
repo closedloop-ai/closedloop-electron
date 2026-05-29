@@ -471,10 +471,10 @@
       "bug_ref": null,
       "selector": {
         "value": "[data-testid='audit-pr-stats-pull-requests']",
-        "present_in_code": false,
+        "present_in_code": true,
         "render_kind": "text",
-        "renders_at": "scripts/agent-monitor-pull-requests/client/PullRequests.tsx:141",
-        "followup": "Add data-testid to the stat grid .map value element, keyed per tile."
+        "renders_at": "scripts/agent-monitor-pull-requests/client/PullRequests.tsx (summary stat grid value, testid added FEA-1437 Phase 3)",
+        "followup": "Done — data-testid added to the stat grid value element."
       }
     },
     {
@@ -494,10 +494,10 @@
       "bug_ref": null,
       "selector": {
         "value": "[data-testid='audit-pr-stats-sessions-with-pr']",
-        "present_in_code": false,
+        "present_in_code": true,
         "render_kind": "text",
-        "renders_at": "scripts/agent-monitor-pull-requests/client/PullRequests.tsx:141",
-        "followup": "Add data-testid to the stat grid .map value element, keyed per tile."
+        "renders_at": "scripts/agent-monitor-pull-requests/client/PullRequests.tsx (summary stat grid value, testid added FEA-1437 Phase 3)",
+        "followup": "Done — data-testid added to the stat grid value element."
       }
     },
     {
@@ -517,10 +517,10 @@
       "bug_ref": null,
       "selector": {
         "value": "[data-testid='audit-pr-stats-repos']",
-        "present_in_code": false,
+        "present_in_code": true,
         "render_kind": "text",
-        "renders_at": "scripts/agent-monitor-pull-requests/client/PullRequests.tsx:141",
-        "followup": "Add data-testid to the stat grid .map value element, keyed per tile."
+        "renders_at": "scripts/agent-monitor-pull-requests/client/PullRequests.tsx (summary stat grid value, testid added FEA-1437 Phase 3)",
+        "followup": "Done — data-testid added to the stat grid value element."
       }
     },
     {
