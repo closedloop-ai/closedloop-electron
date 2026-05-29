@@ -1518,6 +1518,16 @@ function similarityScore(messageA: string, messageB: string, fileA: string, file
 async function spawnClaudeReview(cwd: string, model: string): Promise<ChildProcess> {
   const allowedTools = await withMcpTools("Bash,Read,Glob,Grep,Task,TodoWrite");
   const claudeBin = (await resolveBinaryFromLoginShell("claude", getOverrideBinaryPaths()?.claude)).path;
+  const spawnEnv = await getShellEnv();
+  // FEA-1434 (codex review round 2): stamp harness + billing mode on the
+  // review's cwd so the sidecar can label the Claude-review session.
+  // Mirrors `spawnCodexReviewProcess` (which already stamps as codex) — the
+  // Claude-review variant escaped the stamp pre-round-2.
+  recordSessionSpawn({
+    worktreeDir: cwd,
+    harness: "claude",
+    billingMode: detectBillingModeForHarness("claude", spawnEnv),
+  });
   return spawn(
     claudeBin,
     [
@@ -1536,7 +1546,7 @@ async function spawnClaudeReview(cwd: string, model: string): Promise<ChildProce
       cwd,
       detached: false,
       stdio: ["pipe", "pipe", "pipe"],
-      env: await getShellEnv(),
+      env: spawnEnv,
     }
   );
 }

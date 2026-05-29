@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -1325,6 +1325,120 @@ test("FEA-1434 (codex review): writeback overwrites importer defaults but NOT ex
   );
 
   db.close();
+});
+
+test("FEA-1434 (codex review round 2): writeback UPDATE preserves a deliberate value written between schedule and flush (TOCTOU)", () => {
+  // Pre-fix bug (round 2): the UPDATE was `WHERE id = ?` with no predicate
+  // on the column itself, so if a concurrent writer (sidecar importer or
+  // manual correction) replaced the importer default with a deliberate
+  // non-default value between the read loop building `billingWritebacks`
+  // and the batched UPDATE flushing, the writeback would clobber it.
+  //
+  // Round 2 fix tightens the WHERE clause to
+  //   `WHERE id = ? AND (billing_mode IS NULL OR billing_mode IN (...))`
+  // so the writeback is a no-op if the column has moved off an importer
+  // default. This test simulates the race by wrapping db.prepare to mutate
+  // the row to 'claude_max' between prepare() and run() — the same window
+  // where a concurrent writer could land in production.
+  const rootDir = mkdtempSync(
+    path.join(tmpdir(), "billing-mode-writeback-race-"),
+  );
+  const worktreeDir = path.join(rootDir, "worktree-race");
+  mkdirSync(path.join(worktreeDir, ".closedloop-ai", "work"), {
+    recursive: true,
+  });
+  writeFileSync(
+    path.join(worktreeDir, ".closedloop-ai", "work", "launch-metadata.json"),
+    JSON.stringify({ billingMode: "api" }),
+  );
+
+  const db = createServiceTestDatabase(rootDir);
+  insertBillingModeSessionRow(db, {
+    id: "sess-race",
+    startedAt: "2026-05-20T12:00:00.000Z",
+    updatedAt: "2026-05-20T12:05:00.000Z",
+    harness: "claude",
+    cwd: worktreeDir,
+    billingMode: "unknown",
+  });
+
+  // Intercept the writeback UPDATE: when the sync service prepares the
+  // `UPDATE sessions SET billing_mode = ?` statement, simulate a concurrent
+  // writer landing a deliberate 'claude_max' value before the writeback's
+  // run() executes. In production this would be the sidecar importer
+  // updating the row after seeing a new env signal, or a manual user fix.
+  const originalPrepare = db.prepare.bind(db);
+  let raceInjected = false;
+  db.prepare = ((sql: string) => {
+    const stmt = originalPrepare(sql);
+    if (sql.includes("UPDATE sessions SET billing_mode")) {
+      const originalRun = stmt.run.bind(stmt);
+      stmt.run = ((...args: unknown[]) => {
+        if (!raceInjected) {
+          raceInjected = true;
+          // Concurrent writer lands a non-default value during the gap.
+          originalPrepare(
+            "UPDATE sessions SET billing_mode = 'claude_max' WHERE id = 'sess-race'",
+          ).run();
+        }
+        return originalRun(...(args as []));
+      }) as typeof stmt.run;
+    }
+    return stmt;
+  }) as typeof db.prepare;
+
+  loadSyncedSessions(db, ["sess-race"]);
+
+  assert.equal(
+    raceInjected,
+    true,
+    "race injector must have fired (UPDATE statement was prepared)",
+  );
+
+  // The protected WHERE clause must make the writeback a no-op — the
+  // deliberate 'claude_max' value survives even though the read loop
+  // scheduled a writeback to 'api'.
+  const refreshed = originalPrepare(
+    "SELECT billing_mode FROM sessions WHERE id = ?",
+  ).get("sess-race") as { billing_mode: string };
+  assert.equal(
+    refreshed.billing_mode,
+    "claude_max",
+    "concurrent non-default value must survive the writeback — the WHERE clause guards it at write time",
+  );
+
+  db.close();
+});
+
+test("FEA-1434 (codex review round 2): writeback UPDATE includes the importer-default predicate at write time", () => {
+  // Source-level regression guard. The fix moves the importer-default check
+  // from a JS-only schedule-time filter to a SQL WHERE-clause write-time
+  // filter so a concurrent writer cannot win the race between schedule and
+  // flush. If a future edit drops the WHERE-clause predicate, this assertion
+  // fails so reviewers catch the regression.
+  const serviceSource = readFileSync(
+    path.join(
+      import.meta.dirname,
+      "..",
+      "src",
+      "main",
+      "agent-session-sync-service.ts",
+    ),
+    "utf-8",
+  );
+  // The UPDATE statement must include the importer-default predicate.
+  assert.match(
+    serviceSource,
+    /UPDATE sessions SET billing_mode = \?[^"`']*WHERE id = \?[^"`']*billing_mode IS NULL OR billing_mode IN/,
+    "writeback UPDATE must include `billing_mode IS NULL OR billing_mode IN (...)` so a concurrent non-default value is not clobbered",
+  );
+  // The constant must exist and be reused by the UPDATE (no hardcoded list
+  // in the SQL — a single source of truth keeps read filter + write filter
+  // in lockstep).
+  assert.ok(
+    serviceSource.includes("IMPORTER_DEFAULT_BILLING_MODES"),
+    "IMPORTER_DEFAULT_BILLING_MODES constant must be defined and reused for the WHERE-clause placeholders",
+  );
 });
 
 test("FEA-1434 (codex review): sync service applies billing_mode migration on a pre-FEA-1434 DB", async () => {

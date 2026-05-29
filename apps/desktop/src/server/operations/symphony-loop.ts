@@ -894,6 +894,30 @@ function parseAgentFrontmatter(content: string): {
   };
 }
 
+/**
+ * FEA-1434 (codex review round 2): pre-write launch-metadata at every
+ * `entry.localPath` before the Bootstrap shell script spawns per-repo
+ * Claude invocations. The bootstrap script `cd ${entry.localPath}`s before
+ * each `$CLAUDE_BIN`, so the resulting sessions' `sessions.cwd` lands at
+ * `entry.localPath` — which the single upstream tagSpawnedSession call
+ * (which stamps the worktree or claudeWorkDir) does not cover.
+ *
+ * Best-effort: tagSpawnedSession swallows write failures. Exported so the
+ * unit test can fixture it without spawning the full bootstrap pipeline.
+ */
+export function tagBootstrapPerRepoLaunchMetadata(
+  runnableRepos: ReadonlyArray<{ localPath: string }>,
+  env: NodeJS.ProcessEnv | Record<string, string | undefined>,
+): void {
+  for (const entry of runnableRepos) {
+    tagSpawnedSession({
+      worktreeDir: entry.localPath,
+      harness: "claude",
+      env,
+    });
+  }
+}
+
 export function readBootstrapRepoOutputs(
   repoPath: string,
   agentsDir?: string,
@@ -7602,6 +7626,18 @@ async function handleLoopRequest(
         );
 
         const runnableRepos = manifest.filter((e) => !e.skip);
+
+        // FEA-1434 (codex review round 2): Bootstrap runs each Claude
+        // invocation after `cd ${entry.localPath}` so the resulting sessions'
+        // `sessions.cwd` lands at `entry.localPath`, not at the worktree the
+        // upstream tagSpawnedSession call covered. Pre-write launch-metadata
+        // at every `entry.localPath` so the sidecar can label every per-repo
+        // Bootstrap session with the same harness + env-detected billing
+        // mode. Best-effort — `tagSpawnedSession` swallows write failures.
+        // The bootstrap shell script doesn't have easy access to the JS
+        // helper, so we pre-write at spawn time rather than inline.
+        tagBootstrapPerRepoLaunchMetadata(runnableRepos, spawnEnv);
+
         const scriptLines: string[] = [
           "#!/bin/bash",
           `CLAUDE_BIN=${shellEscape(claudeBinary)}`,

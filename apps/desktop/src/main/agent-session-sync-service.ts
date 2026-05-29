@@ -43,13 +43,22 @@ const SYNC_INTERVAL_MS = 5_000;
  * beats "schema-default"); for v1 the hardcoded set is sufficient and
  * easier to audit.
  */
-const BILLING_MODE_IMPORTER_DEFAULTS: ReadonlySet<string> = new Set([
+/**
+ * Canonical list of importer-default billing modes. Exposed as an array so
+ * SQL WHERE-IN clauses can render `?` placeholders directly from it, and as
+ * a Set for O(1) JS-side membership checks. The two views must stay in
+ * lockstep — the Set is derived from the array.
+ */
+const IMPORTER_DEFAULT_BILLING_MODES = [
   "unknown",
   "codex_chatgpt_pro",
   "cursor_pro",
   "copilot_seat",
   "opencode",
-]);
+] as const;
+const BILLING_MODE_IMPORTER_DEFAULTS: ReadonlySet<string> = new Set(
+  IMPORTER_DEFAULT_BILLING_MODES,
+);
 const MIN_INCREMENTAL_SYNC_INTERVAL_MS = 30_000;
 // Maximum number of candidate session IDs to pull from the queue per sync cycle.
 const INCREMENTAL_SESSION_BATCH_SIZE = 10;
@@ -989,18 +998,33 @@ export function loadSyncedSessions(
     ];
   });
 
-  // FEA-1434 (codex review follow-up): persist any launch-metadata overrides
+  // FEA-1434 (codex review round 2): persist any launch-metadata overrides
   // back to the sessions table so subsequent UI reads see the same billing
   // mode as the synced payload. Best-effort: failures here must not block
   // the sync cycle — the read result is already correct, this only catches
   // up the local DB.
+  //
+  // The WHERE clause guards the write against a TOCTOU race: between the
+  // read loop deciding the row was an importer default and this UPDATE
+  // executing, a concurrent writer (a sidecar importer that just saw a new
+  // env signal, or a manual user correction) could have written a
+  // deliberate non-default value. The `billing_mode IN (...)` predicate
+  // makes the write a no-op in that case, so the protection is at write
+  // time, not just at schedule time. Idempotent — same SQL is safe to run
+  // again on the next sync cycle if launch-metadata is still newer.
   if (billingWritebacks.length > 0) {
     try {
+      const placeholders = IMPORTER_DEFAULT_BILLING_MODES.map(() => "?").join(
+        ", ",
+      );
+      // `billing_mode IS NULL` mirrors the read-side allowance for pre-
+      // migration rows where the column has no value yet. SQL's IN (...)
+      // does not match NULL, so the explicit IS NULL branch is required.
       const update = db.prepare(
-        "UPDATE sessions SET billing_mode = ? WHERE id = ?",
+        `UPDATE sessions SET billing_mode = ? WHERE id = ? AND (billing_mode IS NULL OR billing_mode IN (${placeholders}))`,
       );
       for (const { id, mode } of billingWritebacks) {
-        update.run(mode, id);
+        update.run(mode, id, ...IMPORTER_DEFAULT_BILLING_MODES);
       }
     } catch {
       // Non-fatal — the sync payload already carries the resolved mode; the

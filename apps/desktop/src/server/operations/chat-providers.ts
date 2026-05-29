@@ -149,6 +149,21 @@ export class ClaudeProvider implements ChatProvider {
     const claudeBin = (await resolveBinaryFromLoginShell("claude", getOverrideBinaryPaths()?.claude)).path;
     const streamState = createStreamState();
     let stderrBuffer = "";
+    const resolvedCwd = resolveSpawnCwd(params.cwd);
+    // FEA-1434 (codex review round 2): stamp harness + billing mode on the
+    // worktree's launch-metadata so the sidecar can label the resulting
+    // Claude-chat session. Mirrors the CodexProvider stamp at the sibling
+    // site below; pre-FEA-1434 the chat path was the only main spawn site
+    // that escaped the stamp. Only stamp when a sandbox-allowed cwd is
+    // available; without a worktree there is nowhere to write the metadata
+    // file. Best-effort — `recordSessionSpawn` swallows write failures.
+    if (resolvedCwd !== undefined) {
+      recordSessionSpawn({
+        worktreeDir: resolvedCwd,
+        harness: "claude",
+        billingMode: detectBillingModeForHarness("claude", shellEnv),
+      });
+    }
 
     return new Promise<SpawnResult>((resolve) => {
       let settled = false;
@@ -187,7 +202,7 @@ export class ClaudeProvider implements ChatProvider {
         .spawnStreaming({
           command: claudeBin,
           args,
-          cwd: resolveSpawnCwd(params.cwd),
+          cwd: resolvedCwd,
           env: shellEnv,
           input: prompt,
           onLine: (line) => {

@@ -556,6 +556,143 @@ describe("tagSpawnedSession", () => {
       `expected ≥1 tagSpawnedSession call in symphony-loop.ts, found ${tagSpawnedSessionCalls}`,
     );
   });
+
+  test("Bootstrap stamps launch-metadata at every entry.localPath (regression for codex review round 2 — finding B)", async () => {
+    // Pre-fix bug (round 2): the upstream tagSpawnedSession call in the
+    // Bootstrap branch stamped `worktreeDir ?? claudeWorkDir`. The Bootstrap
+    // shell script later `cd`s into each `entry.localPath` before invoking
+    // `$CLAUDE_BIN`, so each per-repo session's `sessions.cwd` lands at
+    // `entry.localPath` — which the upstream stamp does not cover. Pre-write
+    // launch-metadata at every `entry.localPath` so the sidecar can label
+    // every Bootstrap session.
+    const { tagBootstrapPerRepoLaunchMetadata } = await import(
+      "../src/server/operations/symphony-loop.js"
+    );
+
+    const dirA = makeTempDir();
+    const dirB = makeTempDir();
+    tagBootstrapPerRepoLaunchMetadata(
+      [{ localPath: dirA }, { localPath: dirB }],
+      { ANTHROPIC_API_KEY: "sk-test" },
+    );
+
+    const metaA = readLaunchMetadata(dirA);
+    assert.equal(metaA?.harness, "claude");
+    assert.equal(
+      metaA?.billingMode,
+      "api",
+      "entry A must be stamped with api billing mode from ANTHROPIC_API_KEY",
+    );
+
+    const metaB = readLaunchMetadata(dirB);
+    assert.equal(metaB?.harness, "claude");
+    assert.equal(
+      metaB?.billingMode,
+      "api",
+      "entry B must be stamped with api billing mode — the loop must visit every runnable repo",
+    );
+  });
+
+  test("Bootstrap branch invokes the per-repo helper after the upstream tag (regression for codex review round 2 — finding B)", () => {
+    // Source-level guard: assert that the Bootstrap branch in symphony-loop
+    // calls the per-repo helper. If a future edit drops the call, the
+    // upstream single-cwd stamp is back to being the only stamp and the
+    // per-`entry.localPath` sessions go unlabeled again.
+    const symphonyLoopSource = readFileSync(
+      path.join(
+        import.meta.dirname,
+        "..",
+        "src",
+        "server",
+        "operations",
+        "symphony-loop.ts",
+      ),
+      "utf-8",
+    );
+    assert.match(
+      symphonyLoopSource,
+      /LoopCommand\.Bootstrap[\s\S]*?tagBootstrapPerRepoLaunchMetadata\(/,
+      "the Bootstrap branch must call tagBootstrapPerRepoLaunchMetadata after building runnableRepos",
+    );
+  });
+
+  test("ClaudeProvider.spawn stamps launch-metadata (regression for codex review round 2 — finding C)", () => {
+    // Pre-fix bug (round 2): CodexProvider stamped via recordSessionSpawn
+    // but ClaudeProvider at the sibling site did not. Chat sessions spawned
+    // through the Claude provider escaped the stamp and the sidecar
+    // labelled them with the schema default. Source-level guard because
+    // the full chat-provider spawn path needs ProcessManager + a real
+    // claude binary.
+    const chatProvidersSource = readFileSync(
+      path.join(
+        import.meta.dirname,
+        "..",
+        "src",
+        "server",
+        "operations",
+        "chat-providers.ts",
+      ),
+      "utf-8",
+    );
+    // Helper is imported.
+    assert.ok(
+      chatProvidersSource.includes("recordSessionSpawn"),
+      "recordSessionSpawn must be imported into chat-providers.ts",
+    );
+    // ClaudeProvider must stamp (extract the ClaudeProvider class body and
+    // assert recordSessionSpawn appears inside it — not just somewhere in
+    // the file, since CodexProvider already calls it).
+    const claudeProviderMatch = chatProvidersSource.match(
+      /export class ClaudeProvider[\s\S]*?(?=\nexport class |\nexport (?:function|const) |\nclass |\nfunction |\nconst CODEX_SESSION_ID_REGEX)/,
+    );
+    assert.ok(
+      claudeProviderMatch,
+      "ClaudeProvider class body must be locatable in chat-providers.ts",
+    );
+    assert.ok(
+      claudeProviderMatch[0].includes("recordSessionSpawn"),
+      "ClaudeProvider.spawn must call recordSessionSpawn before delegating to processManager.spawnStreaming (mirrors CodexProvider)",
+    );
+  });
+
+  test("spawnClaudeReview stamps launch-metadata (regression for codex review round 2 — finding D)", () => {
+    // Pre-fix bug (round 2): spawnClaudeReview() spawned `claude` for the
+    // PR-review flow without stamping launch-metadata. The Claude-review
+    // session ended up labelled with the schema default while the sibling
+    // Codex-review variant (spawnCodexReviewProcess) was already stamped.
+    // Source-level guard because the review path needs a real claude
+    // binary + worktree setup.
+    const codexSource = readFileSync(
+      path.join(
+        import.meta.dirname,
+        "..",
+        "src",
+        "server",
+        "operations",
+        "codex.ts",
+      ),
+      "utf-8",
+    );
+    // Locate the spawnClaudeReview function body and assert the stamp call
+    // appears before the spawn(). A naive `.includes("recordSessionSpawn")`
+    // would pass without this fix because the file already had two stamps
+    // at other sites.
+    const spawnClaudeReviewMatch = codexSource.match(
+      /async function spawnClaudeReview\([^)]*\)[\s\S]*?\n\}/,
+    );
+    assert.ok(
+      spawnClaudeReviewMatch,
+      "spawnClaudeReview function body must be locatable in codex.ts",
+    );
+    assert.ok(
+      spawnClaudeReviewMatch[0].includes("recordSessionSpawn"),
+      "spawnClaudeReview must call recordSessionSpawn before spawn(claudeBin, ...) — mirrors spawnCodexReviewProcess",
+    );
+    assert.ok(
+      spawnClaudeReviewMatch[0].includes('harness: "claude"'),
+      "spawnClaudeReview's recordSessionSpawn must use harness: 'claude'",
+    );
+  });
 });
 
 describe("runLoopsSetupScript", () => {
