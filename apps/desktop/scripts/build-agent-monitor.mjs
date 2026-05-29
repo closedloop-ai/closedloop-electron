@@ -133,6 +133,14 @@ const IS_SESSION_IN_SANDBOX_CJS = [
 // — relative requires resolve identically in the generated tree as they did
 // in the old vendored tree.
 const codexModulesDir = path.join(appDir, "scripts", "agent-monitor-codex");
+// FEA-1444: Codex hook handler wrapper ships in-repo (mirrors the upstream
+// Claude hook-handler.js placement under generated `scripts/`). Copied at
+// materialize time and surfaced by agent-monitor-hooks.ts via the same
+// `scriptsDir` resolver as the Claude handler.
+const codexHookHandlerSource = path.join(
+  codexModulesDir,
+  "codex-hook-handler.js",
+);
 const cursorModulesDir = path.join(appDir, "scripts", "agent-monitor-cursor");
 const copilotModulesDir = path.join(appDir, "scripts", "agent-monitor-copilot");
 const opencodeModulesDir = path.join(appDir, "scripts", "agent-monitor-opencode");
@@ -459,6 +467,9 @@ function currentStamp() {
     ...MULTI_HARNESS_SPECS.flatMap(({ modulesDir, modules }) =>
       modules.map((m) => path.join(modulesDir, `${m}.js`)),
     ),
+    // FEA-1444: invalidate the cached generated tree when the Codex hook
+    // wrapper source changes.
+    codexHookHandlerSource,
     ...SHARED_MODULES.map((m) => path.join(sharedModulesDir, `${m}.js`)),
     ...CLIENT_SNIPPET_FILES.map((file) => path.join(clientSnippetDir, file)),
     ...PLAN_MODULES.map((m) => path.join(planModulesDir, `${m}.js`)),
@@ -640,11 +651,24 @@ function materializeRuntimeTree() {
   patchHooksTranscriptOutsideTx(generatedHooksRoute);
   patchHooksWriteQueueAndWatchdog(generatedHooksRoute);
   patchHooksSandboxFilter(generatedHooksRoute);
+  // FEA-1444: stamp harness='codex' inside processEventCore when the inbound
+  // hook payload was forwarded by the Codex wrapper handler. Order: must run
+  // AFTER patchHooksTranscriptOutsideTx because it relies on the
+  // `function processEventCore(hookType, data, ...)` signature that patch
+  // installs.
+  patchHooksRouteCodexHarness(generatedHooksRoute);
   patchImportRoute(generatedImportRoute);
   patchPushFile(generatedPushLib);
   patchWebSocketFile(generatedWebSocketFile);
   patchCcDiscovery(generatedCcDiscovery);
   writeFileSync(generatedUninstallHooks, UNINSTALL_HOOKS_SOURCE, "utf8");
+  // FEA-1444: copy the Codex hook wrapper into the generated scripts/ tree
+  // so the agent-monitor-hooks installer can resolve it via the same
+  // `scriptsDir` it uses for the upstream Claude hook-handler.js.
+  cpSync(
+    codexHookHandlerSource,
+    path.join(generatedRootDir, "scripts", "codex-hook-handler.js"),
+  );
 }
 
 function patchServerIndex(file) {
@@ -1731,6 +1755,54 @@ function patchHooksRoute(file) {
     );
   }
 
+  writeFileSync(file, source, "utf8");
+}
+
+// CLOSEDLOOP FEA-1444: stamp `harness='codex'` on the session row when the
+// inbound hook payload was forwarded by the in-repo `codex-hook-handler.js`
+// wrapper (which injects `__provider: "codex"`). The upstream hooks route is
+// provider-agnostic and already supports a `harness` column + setSessionHarness
+// statement (Codex Patch #4); this patch is the single place that wires the
+// hook stream to that stamp so the dashboard renders Codex-sourced hook events
+// alongside the existing rollout-tail-imported rows.
+function patchHooksRouteCodexHarness(file) {
+  let source = readFileSync(file, "utf8");
+  if (source.includes("FEA-1444 codex harness stamp")) return;
+
+  // Anchors on the processEventCore signature installed by
+  // patchHooksTranscriptOutsideTx (FEA-1363) + the immediate ensureSession
+  // call. Both must already be present; this patch runs after that one in
+  // the materialize sequence.
+  const needle = [
+    "function processEventCore(hookType, data, transcriptData) {",
+    "  const sessionId = data.session_id;",
+    "  if (!sessionId) return null;",
+    "",
+    "  const session = ensureSession(sessionId, data);",
+  ].join("\n");
+  if (!source.includes(needle)) {
+    throw new Error(
+      `Unable to patch ${file}: expected processEventCore + ensureSession anchor (FEA-1444).`,
+    );
+  }
+  source = source.replace(
+    needle,
+    [
+      needle,
+      "  // FEA-1444 codex harness stamp: the in-repo codex-hook-handler.js",
+      "  // wrapper injects `__provider: \"codex\"` into the forwarded hook",
+      "  // payload. When present, mark the session row as a Codex session so",
+      "  // the dashboard groups it with the rollout-tail-imported rows and",
+      "  // any harness-scoped UI affordances apply.",
+      "  if (session && data && data.__provider === \"codex\") {",
+      "    try {",
+      "      stmts.setSessionHarness.run(\"codex\", sessionId, \"codex\");",
+      "    } catch (_) {",
+      "      /* non-fatal: harness column/stmt guaranteed by Codex Patch #4 */",
+      "    }",
+      "  }",
+    ].join("\n"),
+  );
   writeFileSync(file, source, "utf8");
 }
 
@@ -3097,6 +3169,10 @@ function assertGeneratedTree() {
     generatedClientIndex,
     path.join(generatedRootDir, "scripts", "install-hooks.js"),
     path.join(generatedRootDir, "scripts", "hook-handler.js"),
+    // FEA-1444: Codex hook wrapper must materialize alongside the upstream
+    // Claude handler so agent-monitor-hooks.ts can resolve both from the same
+    // `scriptsDir`.
+    path.join(generatedRootDir, "scripts", "codex-hook-handler.js"),
     generatedUninstallHooks,
   ]) {
     if (!existsSync(required)) {
@@ -3320,6 +3396,15 @@ function assertGeneratedTree() {
   if (!hooksRouteSource.includes("FEA-1407 sandbox scoping")) {
     throw new Error(
       "Generated server/routes/hooks.js is missing the sandbox scoping filter (FEA-1407).",
+    );
+  }
+
+  // CLOSEDLOOP FEA-1444 hard-gates: Codex hook ingestion. A future upstream
+  // bump that drops the processEventCore anchor must fail the build rather
+  // than silently disabling Codex harness stamping on hook-sourced sessions.
+  if (!hooksRouteSource.includes("FEA-1444 codex harness stamp")) {
+    throw new Error(
+      "Generated server/routes/hooks.js is missing the Codex harness stamp (FEA-1444).",
     );
   }
   if (!importHistorySource.includes("FEA-1407 sandbox scoping")) {
