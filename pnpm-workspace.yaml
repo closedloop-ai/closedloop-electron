@@ -10,6 +10,14 @@ minimumReleaseAge: 10080
 # 7-day quarantine so we can consume new versions immediately.
 minimumReleaseAgeExclude:
   - "@closedloop-ai/loops-api"
+  # External, but exempted deliberately (PRD-414 / FEA-1431). We pin
+  # @pydantic/genai-prices to an EXACT version (no semver range) so this
+  # exemption cannot silently pull a newer, unvetted release — bumping it is
+  # an explicit code change reviewed against the changelog. Audited 2026-05-29:
+  # maintained by the Pydantic core team, no pre/post-install scripts, sole
+  # runtime sub-dependency is yargs. Needed because the current correct-pricing
+  # release (0.0.62) is younger than the 7-day quarantine window.
+  - "@pydantic/genai-prices"
 # blockExoticSubdeps: refuse non-registry specifiers (git:, github:, http(s):,
 # file:, link:) introduced via transitive deps — closes the github-ref bypass.
 blockExoticSubdeps: true

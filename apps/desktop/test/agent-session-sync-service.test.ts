@@ -20,6 +20,7 @@ import {
   SESSION_PAYLOAD_BYTE_CAP,
 } from "../src/main/agent-session-sync-service.js";
 import { DesktopAgentSessionsAckReason } from "../src/main/cloud-protocol.js";
+import { computeTokenCost } from "../src/shared/token-cost.js";
 
 function createServiceTestDatabase(rootDir: string): DatabaseSync {
   const userDataDir = path.join(rootDir, "user-data");
@@ -283,13 +284,8 @@ test("agent-session sync loads normalized session payloads with attribution and 
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run("sess-1", "gpt-4.1", 1000, 500, 250, 100, 25, 10, 5, 0);
 
-  db.prepare(`
-    INSERT INTO model_pricing (
-      model_pattern, input_per_mtok, output_per_mtok, cache_read_per_mtok,
-      cache_write_per_mtok
-    ) VALUES (?, ?, ?, ?, ?)
-  `).run("gpt-4.1%", 2, 8, 0.5, 1);
-
+  // No model_pricing INSERT: cost is now derived from @pydantic/genai-prices,
+  // not the (legacy, no-longer-read) model_pricing table.
   const sessions = loadSyncedSessions(db, ["sess-1"]);
   assert.equal(sessions.length, 1);
 
@@ -314,7 +310,22 @@ test("agent-session sync loads normalized session payloads with attribution and 
   assert.equal(session.tokenUsageByModel[0].outputTokens, 510);
   assert.equal(session.tokenUsageByModel[0].cacheReadTokens, 255);
   assert.equal(session.tokenUsageByModel[0].cacheWriteTokens, 100);
-  assert.equal(session.tokenUsageByModel[0].estimatedCostUsd, 0.006358);
+  // Cost is computed by genai-prices via the canonical engine. Assert the load
+  // path fed it the correctly baseline-summed, provider-normalized counts
+  // (gpt-4.1 is OpenAI → input passes through as the total, cache is a subset)
+  // rather than hard-coding a library-version-dependent dollar figure.
+  const expectedCost = computeTokenCost({
+    model: "gpt-4.1",
+    inputTokens: 1025,
+    outputTokens: 510,
+    cacheReadTokens: 255,
+    cacheWriteTokens: 100,
+  });
+  assert.equal(expectedCost.priced, true);
+  assert.equal(
+    session.tokenUsageByModel[0].estimatedCostUsd,
+    expectedCost.costUsd,
+  );
 
   db.close();
 });
@@ -521,20 +532,19 @@ test("agent-session sync throttles repeated incremental full-session syncs", asy
   }
 });
 
-test("agent-session sync cost estimator falls back to zero without pricing", () => {
+test("agent-session sync cost estimator returns undefined for an unpriced model", () => {
+  // An unknown model is not priced by genai-prices → undefined, so the caller
+  // omits the optional estimatedCostUsd field (renders as "—", not a silent $0).
   assert.equal(
-    estimateTokenUsageCostUsd(
-      {
-        session_id: "sess-1",
-        model: "unknown-model",
-        input_tokens: 100,
-        output_tokens: 50,
-        cache_read_tokens: 25,
-        cache_write_tokens: 10,
-      },
-      [],
-    ),
-    0,
+    estimateTokenUsageCostUsd({
+      session_id: "sess-1",
+      model: "unknown-model",
+      input_tokens: 100,
+      output_tokens: 50,
+      cache_read_tokens: 25,
+      cache_write_tokens: 10,
+    }),
+    undefined,
   );
 });
 
