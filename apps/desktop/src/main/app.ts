@@ -218,6 +218,13 @@ export class DesktopApplication {
   private dangerousAutoApprove = false;
   private cloudStatus: CloudSocketStatus = { state: "idle" };
   private cloudCommandsPaused: boolean;
+  // In-memory supervisor verdict: set once the agent-monitor sidecar gives up
+  // permanently (after MAX_RESTART_ATTEMPTS). refreshTrayState() consults this so
+  // the degraded indicator sticks across later refreshes instead of being reset
+  // to ready by the next cloud heartbeat or gateway recheck. Not persisted — a
+  // fresh boot re-attempts the sidecar, so the verdict is per-process.
+  private agentMonitorFailed = false;
+  private agentMonitorFailureReason: string | null = null;
   private cloudConnectionEnabled: boolean;
   private serverCommandSigningSupported = false;
   private serverAgentSessionSyncSupported = false;
@@ -291,7 +298,22 @@ export class DesktopApplication {
     this.gatewaySigningKeyStore = new GatewaySigningKeyStore();
     this.tray = new DesktopTray();
     this.desktopWindow = new DesktopWindow();
-    this.agentMonitor = new AgentMonitorSidecar();
+    this.agentMonitor = new AgentMonitorSidecar({
+      onTerminalFailure: (reason: string) => {
+        const notification = new Notification({
+          title: "ClosedLoop Agent Monitor",
+          body: reason,
+        });
+        notification.show();
+        // Latch the failure and route through refreshTrayState() — the single
+        // owner of tray state — so the degraded indicator survives subsequent
+        // refreshes. A direct tray.setState here would be stomped by the next
+        // refreshTrayState() call (cloud heartbeat, gateway recheck).
+        this.agentMonitorFailed = true;
+        this.agentMonitorFailureReason = reason;
+        this.refreshTrayState();
+      },
+    });
     this.agentMonitor.setSandboxBaseDirectory(
       this.settingsStore.getSandboxBaseDirectory(),
     );
@@ -2086,6 +2108,18 @@ export class DesktopApplication {
         "error",
         explicitDetails ??
           `Gateway down on port ${this.server.getActivePort()}`,
+      );
+      return;
+    }
+
+    // A permanently-failed agent monitor keeps the tray degraded even when cloud
+    // is online/connecting (gateway-down above remains the higher-severity signal).
+    if (this.agentMonitorFailed) {
+      this.tray.setState(
+        "degraded",
+        explicitDetails ??
+          this.agentMonitorFailureReason ??
+          `Serving on localhost:${this.server.getActivePort()} | agent monitor unavailable`,
       );
       return;
     }

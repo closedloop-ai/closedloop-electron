@@ -379,7 +379,7 @@ test("agent monitor defaults on; plan extraction is feature-gated and defaults o
 });
 
 test("sidecar is feature-gated and, when enabled, starts before the gateway", () => {
-  assert.match(appSource, /this\.agentMonitor = new AgentMonitorSidecar\(\)/);
+  assert.match(appSource, /this\.agentMonitor = new AgentMonitorSidecar\([\s\S]*?\)/);
   assert.match(
     appSource,
     /if \(this\.settingsStore\.getAgentMonitorEnabled\(\)\) \{[\s\S]*void this\.agentMonitor\.start\(\);[\s\S]*syncAgentMonitorHooksOnBoot\(\);[\s\S]*this\.agentSessionSync\.start\(\);/,
@@ -448,6 +448,45 @@ test("hooks are opt-in: default off, silent server auto-install never enabled", 
   assert.match(hooksSource, /renameSync/);
   assert.match(hooksSource, /function uninstallHooks/);
   assert.match(appSource, /syncAgentMonitorHooksOnBoot\(\)/);
+});
+
+test("agent monitor terminal failure sets a tracked degraded state that refreshTrayState consults", () => {
+  // The one-shot tray.setState in onTerminalFailure was being stomped by the
+  // next refreshTrayState() call (cloud heartbeat / gateway recheck), which
+  // only branched on gatewayHealthy / cloudCommandsPaused / cloudStatus. The
+  // degraded indicator must instead be backed by a tracked field so it sticks.
+  // (PR #247 review — thadeusb.)
+
+  // 1. A tracked field exists.
+  assert.match(appSource, /private agentMonitorFailed = false;/);
+
+  // 2. onTerminalFailure latches the field and routes through refreshTrayState()
+  //    rather than calling tray.setState directly (which would be transient).
+  assert.match(
+    appSource,
+    /onTerminalFailure: \(reason: string\) => \{[\s\S]*this\.agentMonitorFailed = true;[\s\S]*this\.refreshTrayState\(\);[\s\S]*\},/,
+  );
+
+  // 3. refreshTrayState() actually consults the field (degraded state is owned
+  //    by the single state owner, not set out-of-band).
+  assert.match(
+    appSource,
+    /private refreshTrayState\([\s\S]*if \(this\.agentMonitorFailed\) \{[\s\S]*this\.tray\.setState\(\s*"degraded"/,
+  );
+
+  // 4. The degraded-monitor branch outranks cloud state: it must appear before
+  //    the cloudStatus "online" branch so an online cloud cannot reset the tray
+  //    to ready while the monitor is dead.
+  const failedBranchIdx = appSource.indexOf("if (this.agentMonitorFailed)");
+  const cloudOnlineBranchIdx = appSource.indexOf(
+    'if (this.cloudStatus.state === "online")',
+  );
+  assert.ok(failedBranchIdx > 0, "agentMonitorFailed branch not found in refreshTrayState");
+  assert.ok(cloudOnlineBranchIdx > 0, "cloud online branch not found in refreshTrayState");
+  assert.ok(
+    failedBranchIdx < cloudOnlineBranchIdx,
+    "agentMonitorFailed branch must precede the cloud-online branch so the degraded indicator is not overwritten",
+  );
 });
 
 test("shutdown sequence stops the sidecar before the server", () => {
