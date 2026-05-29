@@ -1,5 +1,6 @@
 import {
   getCloudLoopStatus,
+  persistRevivalToken,
   postLoopHeartbeat,
   type CloudLoopStatus,
   type LoopHttpResult,
@@ -433,20 +434,12 @@ export class BootRecoveryService implements Disposable {
     );
 
     // T-2.2: Persist the revival token if the heartbeat revived the loop.
-    if (
-      popResult.success &&
-      popResult.revived === true &&
-      popResult.token !== undefined
-    ) {
+    // Shared with the live heartbeat path via persistRevivalToken (SSOT).
+    if (persistRevivalToken(loopTokenStore, job.loopId, popResult)) {
       gatewayLog.info(
         "boot-recovery",
         `PoP heartbeat revived loopId=${job.loopId}; adopting new runner token`,
       );
-      loopTokenStore.setLoopToken(job.loopId, {
-        token: popResult.token,
-        jti: popResult.jti,
-        expiresAt: popResult.expiresAt !== undefined ? popResult.expiresAt.getTime() : undefined,
-      });
     }
 
     return popResult;

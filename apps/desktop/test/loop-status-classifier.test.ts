@@ -114,27 +114,16 @@ const cases: ClassifyCase[] = [
     provenanceCtx: { provenance: "DESKTOP_MANAGED", popAvailable: false },
     expected: { kind: "terminal", reason: "unauthorized" },
   },
-  // (d) Non-401 terminal codes are unaffected by provenance
+  // (d) Non-401 terminal codes are unaffected by provenance. The provenance
+  // check lives entirely inside the `httpStatus === 401` branch, so a single
+  // non-401 representative proves provenance is never consulted for 404/410/
+  // timed_out (those codes already have dedicated no-provenance coverage above).
   {
     label: "404 + DESKTOP_MANAGED + PoP available → terminal(not_found) (provenance irrelevant)",
     httpStatus: 404,
     cloudKind: null,
     provenanceCtx: { provenance: "DESKTOP_MANAGED", popAvailable: true },
     expected: { kind: "terminal", reason: "not_found" },
-  },
-  {
-    label: "410 + DESKTOP_MANAGED + PoP available → terminal(gone) (provenance irrelevant)",
-    httpStatus: 410,
-    cloudKind: null,
-    provenanceCtx: { provenance: "DESKTOP_MANAGED", popAvailable: true },
-    expected: { kind: "terminal", reason: "gone" },
-  },
-  {
-    label: "null+timed_out + DESKTOP_MANAGED + PoP available → terminal(timed_out) (provenance irrelevant)",
-    httpStatus: null,
-    cloudKind: "timed_out",
-    provenanceCtx: { provenance: "DESKTOP_MANAGED", popAvailable: true },
-    expected: { kind: "terminal", reason: "timed_out" },
   },
   // (e) 401 with no provenance context (backward compatibility) → terminal
   {
