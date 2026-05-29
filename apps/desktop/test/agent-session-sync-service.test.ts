@@ -40,7 +40,8 @@ function createServiceTestDatabase(rootDir: string): DatabaseSync {
       ended_at TEXT,
       awaiting_input_since TEXT,
       metadata TEXT,
-      harness TEXT NOT NULL
+      harness TEXT NOT NULL,
+      billing_mode TEXT NOT NULL DEFAULT 'unknown'
     );
     CREATE TABLE agents (
       id TEXT PRIMARY KEY,
@@ -171,7 +172,8 @@ test("agent-session sync loads normalized session payloads with attribution and 
       ended_at TEXT,
       awaiting_input_since TEXT,
       metadata TEXT,
-      harness TEXT NOT NULL
+      harness TEXT NOT NULL,
+      billing_mode TEXT NOT NULL DEFAULT 'unknown'
     );
     CREATE TABLE agents (
       id TEXT PRIMARY KEY,
@@ -223,8 +225,8 @@ test("agent-session sync loads normalized session payloads with attribution and 
   db.prepare(`
     INSERT INTO sessions (
       id, name, status, cwd, model, started_at, updated_at, ended_at,
-      awaiting_input_since, metadata, harness
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      awaiting_input_since, metadata, harness, billing_mode
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     "sess-1",
     "Sync monitor test",
@@ -237,6 +239,7 @@ test("agent-session sync loads normalized session payloads with attribution and 
     "2026-05-20T12:04:00.000Z",
     JSON.stringify({ imported: true, source: "codex" }),
     "codex",
+    "codex_subscription",
   );
 
   db.prepare(`
@@ -292,6 +295,9 @@ test("agent-session sync loads normalized session payloads with attribution and 
   const session = sessions[0];
   assert.equal(session.externalSessionId, "sess-1");
   assert.equal(session.harness, "codex");
+  // FEA-1434: a stored, definite billing mode propagates unchanged (no
+  // re-detection from the live environment).
+  assert.equal(session.billingMode, "codex_subscription");
   assert.equal(session.awaitingInputSince, "2026-05-20T12:04:00.000Z");
   assert.deepEqual(session.metadata, { imported: true, source: "codex" });
   assert.deepEqual(session.attribution, {
@@ -326,6 +332,36 @@ test("agent-session sync loads normalized session payloads with attribution and 
     session.tokenUsageByModel[0].estimatedCostUsd,
     expectedCost.costUsd,
   );
+
+  db.close();
+});
+
+test("agent-session sync falls back to live detection for legacy unknown billing_mode", () => {
+  // A row migrated to the default 'unknown' billing_mode (legacy / unstamped)
+  // should be resolved from the live desktop environment at sync time. Control
+  // the env deterministically so the assertion does not depend on the test
+  // machine's real credentials.
+  const rootDir = mkdtempSync(path.join(tmpdir(), "agent-session-sync-bm-"));
+  const db = createServiceTestDatabase(rootDir);
+  insertSessionRow(db, {
+    id: "legacy-1",
+    startedAt: "2026-05-20T12:00:00.000Z",
+    updatedAt: "2026-05-20T12:05:00.000Z",
+    harness: "claude",
+  });
+
+  const prev = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "sk-ant-test-detection-only";
+  try {
+    const [session] = loadSyncedSessions(db, ["legacy-1"]);
+    assert.equal(session.billingMode, "api");
+  } finally {
+    if (prev === undefined) {
+      delete process.env.ANTHROPIC_API_KEY;
+    } else {
+      process.env.ANTHROPIC_API_KEY = prev;
+    }
+  }
 
   db.close();
 });

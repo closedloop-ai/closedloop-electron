@@ -23,6 +23,11 @@ import {
 } from "../server/operations/symphony-utils.js";
 import { expandHomePath } from "../shared/path-utils.js";
 import { computeTokenCost } from "../shared/token-cost.js";
+import {
+  normalizeBillingMode,
+  type BillingMode,
+} from "../shared/billing-mode.js";
+import { detectBillingMode } from "./billing-mode-detector.js";
 
 const TAG = "agent-session-sync";
 const SYNC_INTERVAL_MS = 5_000;
@@ -59,6 +64,7 @@ type SessionRow = {
   awaiting_input_since: string | null;
   metadata: string | null;
   harness: string | null;
+  billing_mode: string | null;
 };
 
 type AgentRow = {
@@ -725,7 +731,8 @@ export function loadSyncedSessions(
         ended_at,
         awaiting_input_since,
         metadata,
-        harness
+        harness,
+        billing_mode
       FROM sessions
       WHERE id IN (__IDS__)
     `,
@@ -824,6 +831,7 @@ export function loadSyncedSessions(
         name: row.name,
         status: row.status,
         harness: row.harness,
+        billingMode: resolveBillingModeForRow(row),
         cwd: row.cwd,
         model: row.model,
         startedAt: row.started_at,
@@ -881,6 +889,21 @@ export function estimateTokenUsageCostUsd(
     cacheWriteTokens: tokenUsage.cache_write_tokens,
   });
   return result.priced && result.costUsd != null ? result.costUsd : undefined;
+}
+
+/**
+ * Resolve a session's billing mode for the sync payload (CLOSEDLOOP FEA-1434).
+ * The sidecar importers and the Claude session route stamp the real mode at
+ * ingest; this fills the gap for legacy rows (migrated to the default
+ * 'unknown') by best-effort detecting from the live desktop environment. A
+ * stored, definite mode always wins over re-detection.
+ */
+export function resolveBillingModeForRow(row: SessionRow): BillingMode {
+  const stored = normalizeBillingMode(row.billing_mode);
+  if (stored !== "unknown") {
+    return stored;
+  }
+  return detectBillingMode(row.harness ?? "");
 }
 
 function selectRowsByIds<T>(

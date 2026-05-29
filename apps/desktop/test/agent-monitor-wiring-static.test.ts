@@ -537,6 +537,70 @@ test("plans route filters in SQL and avoids shell-parsed Windows open commands",
   assert.doesNotMatch(plansRouteSource, /spawn\(cmd, \["\/c", "start"/);
 });
 
+test("billing-mode two-ledger support (FEA-1434) is wired into the generated build", () => {
+  // Build script declares the billing-mode engine module + its materialization,
+  // the billing_mode column migration, and the hard-gate messages so a future
+  // upstream bump that breaks an anchor fails the build rather than silently
+  // dropping the per-session billing dimension.
+  for (const needle of [
+    "agent-monitor-billing",
+    'BILLING_MODULES = ["billing-mode"]',
+    "ADD COLUMN billing_mode",
+    "setSessionBillingMode",
+    "idx_sessions_billing_mode",
+    "column migration (FEA-1434)",
+    "billing-mode engine, FEA-1434",
+  ]) {
+    assert.ok(
+      buildScriptSource.includes(needle),
+      `build-agent-monitor.mjs missing billing-mode wiring: ${needle}`,
+    );
+  }
+
+  // The canonical engine + its CJS package scope live in-repo and are copied
+  // into the generated tree at materialize time.
+  assert.ok(
+    existsSync(
+      new URL(
+        "../scripts/agent-monitor-billing/billing-mode.js",
+        import.meta.url,
+      ),
+    ),
+    "scripts/agent-monitor-billing/billing-mode.js missing",
+  );
+  assert.ok(
+    existsSync(
+      new URL(
+        "../scripts/agent-monitor-billing/package.json",
+        import.meta.url,
+      ),
+    ),
+    "scripts/agent-monitor-billing/package.json missing",
+  );
+
+  // If a generated tree is present, the migration + statement + materialized
+  // engine must have survived patching.
+  if (generatedDbSource) {
+    assert.ok(
+      generatedDbSource.includes("ADD COLUMN billing_mode"),
+      "generated db.js missing billing_mode column migration",
+    );
+    assert.ok(
+      generatedDbSource.includes("setSessionBillingMode:"),
+      "generated db.js missing setSessionBillingMode statement",
+    );
+    assert.ok(
+      existsSync(
+        new URL(
+          "../.generated/agent-monitor/server/lib/billing-mode.js",
+          import.meta.url,
+        ),
+      ),
+      "generated server/lib/billing-mode.js missing",
+    );
+  }
+});
+
 test("Codex support (Addition #4/#5/#6) is wired into the generated build", () => {
   // The new model patches the GENERATED tree (like Patches #1/#2/#3): the
   // build script injects the harness column, the Codex watcher/import wiring,

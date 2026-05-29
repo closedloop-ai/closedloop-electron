@@ -279,6 +279,14 @@ const PR_MODULES = ["pr-parsers", "pull-request-store", "pr-extractor", "pr-back
 const costModulesDir = path.join(appDir, "scripts", "agent-monitor-cost");
 const COST_MODULES = ["cost-pricing"];
 
+// CLOSEDLOOP token cost (FEA-1434): the canonical billing-mode engine. Same
+// materialization pattern as the token-cost engine — copied into the generated
+// server/lib so the sidecar importers' require("../lib/billing-mode") resolves.
+// The desktop-main ESM twin (src/shared/billing-mode.ts) is kept byte-equal by
+// a parity test (test/billing-mode.test.ts).
+const billingModulesDir = path.join(appDir, "scripts", "agent-monitor-billing");
+const BILLING_MODULES = ["billing-mode"];
+
 // CLOSEDLOOP token cost (FEA-1433): read the pinned genai-prices version from the
 // installed package so the read-only pricing catalog stamp always matches the
 // library actually bundled. The package's exports map blocks
@@ -474,6 +482,7 @@ function currentStamp() {
     path.join(prModulesDir, "pull-requests-route.js"),
     path.join(prModulesDir, "client", "PullRequests.tsx"),
     ...COST_MODULES.map((m) => path.join(costModulesDir, `${m}.js`)),
+    ...BILLING_MODULES.map((m) => path.join(billingModulesDir, `${m}.js`)),
     embedAppSource,
     embedLayoutSource,
     embedTailwindSource,
@@ -562,6 +571,14 @@ function materializeRuntimeTree() {
   for (const m of COST_MODULES) {
     cpSync(
       path.join(costModulesDir, `${m}.js`),
+      path.join(generatedLibDir, `${m}.js`),
+    );
+  }
+  // CLOSEDLOOP token cost (FEA-1434): the canonical billing-mode engine into
+  // server/lib so the importers' require("../lib/billing-mode") resolves.
+  for (const m of BILLING_MODULES) {
+    cpSync(
+      path.join(billingModulesDir, `${m}.js`),
       path.join(generatedLibDir, `${m}.js`),
     );
   }
@@ -1473,6 +1490,49 @@ function patchDbFile(file) {
       "  setSessionHarness: db.prepare(\"UPDATE sessions SET harness = ? WHERE id = ? AND COALESCE(harness, '') != ?\"),",
     ].join("\n");
     source = source.replace(stmtsNeedle, `\n${replacement}`);
+  }
+
+  // CLOSEDLOOP FEA-1434: add a `billing_mode` dimension so the dashboard can
+  // keep two ledgers (real metered API spend vs subscription-covered
+  // hypothetical). Additive + DEFAULT 'unknown' so legacy rows and the
+  // unchanged Claude/manual insert path stay valid; the sidecar importers and
+  // the Claude session route stamp the real mode via setSessionBillingMode.
+  // Read paths need no change (routes use SELECT s.* / SELECT *); the
+  // desktop-main sync service reads the column via its own explicit SELECT.
+  // Anchored on the `harness` migration output above (patchDbFile always runs
+  // on a freshly-copied upstream tree, so the harness patch has run first).
+  if (!source.includes("ADD COLUMN billing_mode")) {
+    const harnessIndexLine =
+      'db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_harness ON sessions(harness)");';
+    if (!source.includes(harnessIndexLine)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the harness migration output (billing_mode anchor).`,
+      );
+    }
+    const billingMigration = [
+      harnessIndexLine,
+      "try {",
+      '  db.prepare("SELECT billing_mode FROM sessions LIMIT 1").get();',
+      "} catch {",
+      "  db.prepare(\"ALTER TABLE sessions ADD COLUMN billing_mode TEXT NOT NULL DEFAULT 'unknown'\").run();",
+      "}",
+      'db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_billing_mode ON sessions(billing_mode)");',
+    ].join("\n");
+    source = source.replace(harnessIndexLine, billingMigration);
+
+    const setHarnessStmtLine =
+      "  setSessionHarness: db.prepare(\"UPDATE sessions SET harness = ? WHERE id = ? AND COALESCE(harness, '') != ?\"),";
+    if (!source.includes(setHarnessStmtLine)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the setSessionHarness statement (billing_mode anchor).`,
+      );
+    }
+    const setBillingStmtLine =
+      "  setSessionBillingMode: db.prepare(\"UPDATE sessions SET billing_mode = ? WHERE id = ? AND COALESCE(billing_mode, '') != ?\"),";
+    source = source.replace(
+      setHarnessStmtLine,
+      `${setHarnessStmtLine}\n${setBillingStmtLine}`,
+    );
   }
 
   const sessionTotalsNeedle = [
@@ -3368,6 +3428,19 @@ function assertGeneratedTree() {
       "Generated server/db.js is missing the `harness` column migration (Codex Patch #4).",
     );
   }
+  // CLOSEDLOOP FEA-1434 hard-gate: the billing_mode column migration + its
+  // prepared statement must survive a future upstream bump, or the two-ledger
+  // accounting silently loses its per-session billing dimension.
+  if (!dbSource.includes("ADD COLUMN billing_mode")) {
+    throw new Error(
+      "Generated server/db.js is missing the `billing_mode` column migration (FEA-1434).",
+    );
+  }
+  if (!dbSource.includes("setSessionBillingMode:")) {
+    throw new Error(
+      "Generated server/db.js is missing the setSessionBillingMode prepared statement (FEA-1434).",
+    );
+  }
   for (const { label, watcherFn, importFn } of MULTI_HARNESS_SPECS) {
     for (const fn of [watcherFn, importFn]) {
       if (serverIndex.includes(fn)) continue;
@@ -3630,6 +3703,15 @@ function assertGeneratedTree() {
     if (!existsSync(path.join(generatedRootDir, "server", "lib", `${m}.js`))) {
       throw new Error(
         `Generated server/lib/${m}.js missing (token cost engine, FEA-1431).`,
+      );
+    }
+  }
+  // CLOSEDLOOP FEA-1434 hard-gate: the billing-mode engine must materialize, or
+  // the sidecar importers' require("../lib/billing-mode") breaks at runtime.
+  for (const m of BILLING_MODULES) {
+    if (!existsSync(path.join(generatedRootDir, "server", "lib", `${m}.js`))) {
+      throw new Error(
+        `Generated server/lib/${m}.js missing (billing-mode engine, FEA-1434).`,
       );
     }
   }
