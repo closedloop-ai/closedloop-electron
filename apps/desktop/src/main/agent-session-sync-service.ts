@@ -34,6 +34,17 @@ export const SESSION_PAYLOAD_BYTE_CAP = 262_144;
 // After this many consecutive ack timeouts on the same session, dead-letter it
 // so one oversized or slow session does not permanently block the queue.
 export const MAX_CONSECUTIVE_TIMEOUTS = 3;
+// FEA-1461: after this many consecutive `rate_limited` rejections on the same
+// session, dead-letter it. Higher than the timeout threshold because
+// rate-limits are more legitimately transient (the relay may genuinely just
+// be throttling a burst), but still bounded so a persistently-rejected
+// session cannot infinite-loop the sync queue + log spam.
+export const MAX_CONSECUTIVE_RATE_LIMITED = 5;
+// FEA-1461: after a `rate_limited` rejection, defer re-attempting the same
+// session for this long. Prevents the 5-second sync tick from re-chunking and
+// re-sending the same oversized session every cycle (the original symptom).
+// Other queued sessions continue to flow through `pickReadyCandidates`.
+export const RATE_LIMIT_BACKOFF_MS = 30_000;
 
 export function estimateSessionPayloadBytes(session: SyncedAgentSession): number {
   return Buffer.byteLength(JSON.stringify(session));
@@ -150,7 +161,18 @@ export class AgentSessionSyncService {
   };
   /** Consecutive timeout count per session ID for dead-letter detection. */
   private readonly timeoutCountById = new Map<string, number>();
-  /** Session IDs removed from the queue after exceeding MAX_CONSECUTIVE_TIMEOUTS. */
+  /**
+   * FEA-1461: consecutive `rate_limited` count per session ID. Parallel to
+   * `timeoutCountById` — kept separate so the existing timeout dead-letter
+   * threshold and the new rate-limit threshold do not contaminate each other.
+   */
+  private readonly rateLimitedCountById = new Map<string, number>();
+  /**
+   * FEA-1461: per-session deferred-retry deadline (ms since epoch). While the
+   * deadline is in the future, `pickReadyCandidates` skips the session.
+   */
+  private readonly nextRetryAfterMs = new Map<string, number>();
+  /** Session IDs removed from the queue after exceeding MAX_CONSECUTIVE_TIMEOUTS or MAX_CONSECUTIVE_RATE_LIMITED. */
   private readonly deadLetteredIds = new Set<string>();
   /** Remaining chunks for an oversized session being sent in parts. */
   private pendingChunks: {
@@ -280,16 +302,28 @@ export class AgentSessionSyncService {
               MIN_INCREMENTAL_SYNC_INTERVAL_MS
           ) {
             syncMode = "incremental";
-            candidateIds = this.incrementalQueue.slice(
-              0,
+            // FEA-1461: iterate rather than slice so a session under
+            // rate-limit backoff at the head of the queue does not
+            // head-of-line-block siblings behind it.
+            candidateIds = this.pickReadyCandidates(
+              this.incrementalQueue,
               INCREMENTAL_SESSION_BATCH_SIZE,
+              nowMs,
             );
-            this.lastIncrementalBatchAttemptedAtMs = nowMs;
+            // FEA-1461: only stamp the throttle timestamp if we actually
+            // selected at least one ready candidate. Stamping when every
+            // candidate was filtered by backoff would unnecessarily delay
+            // a session added to the queue moments later by the full
+            // MIN_INCREMENTAL_SYNC_INTERVAL_MS window.
+            if (candidateIds.length > 0) {
+              this.lastIncrementalBatchAttemptedAtMs = nowMs;
+            }
           } else if (this.backfillQueue.length > 0) {
             syncMode = "backfill";
-            candidateIds = this.backfillQueue.slice(
-              0,
+            candidateIds = this.pickReadyCandidates(
+              this.backfillQueue,
               BACKFILL_SESSION_BATCH_SIZE,
+              nowMs,
             );
           }
 
@@ -478,6 +512,31 @@ export class AgentSessionSyncService {
     this.observedIdsAtTopUpdatedAt = nextTopIds;
   }
 
+  /**
+   * FEA-1461: pick up to `limit` session IDs from `queue`, skipping any whose
+   * deferred-retry deadline (set by a prior `rate_limited` failure) is still
+   * in the future. Order is preserved for selected IDs so the queue remains
+   * stable; only the backed-off entries are skipped, not reordered.
+   */
+  private pickReadyCandidates(
+    queue: readonly string[],
+    limit: number,
+    nowMs: number,
+  ): string[] {
+    const result: string[] = [];
+    for (const id of queue) {
+      const deadline = this.nextRetryAfterMs.get(id);
+      if (deadline !== undefined && deadline > nowMs) {
+        continue;
+      }
+      result.push(id);
+      if (result.length >= limit) {
+        break;
+      }
+    }
+    return result;
+  }
+
   private handleBatchAck(
     syncMode: AgentSessionSyncMode,
     ids: string[],
@@ -494,6 +553,11 @@ export class AgentSessionSyncService {
       if (!hasMoreChunks) {
         for (const id of ids) {
           this.timeoutCountById.delete(id);
+          // FEA-1461: a successful ack resets the rate-limit counter and
+          // clears any deferred-retry deadline for this session, so a future
+          // rate-limited rejection starts the count over at 1.
+          this.rateLimitedCountById.delete(id);
+          this.nextRetryAfterMs.delete(id);
         }
         this.dequeue(syncMode, ids);
       }
@@ -512,6 +576,15 @@ export class AgentSessionSyncService {
 
     // On any failure, discard remaining chunks for this session — partial
     // chunk sequences are not useful without server-side reassembly.
+    //
+    // FEA-1461: the next retry will re-fetch + re-chunk the source session
+    // from SQLite. That re-chunk work is bounded for transient failures
+    // (rate_limited) by the per-session backoff added below — the same
+    // session is not re-attempted within RATE_LIMIT_BACKOFF_MS — and by the
+    // MAX_CONSECUTIVE_RATE_LIMITED dead-letter trip. True resume-from-chunk-N
+    // would eliminate the re-chunk work entirely but requires server-side
+    // partial-payload reassembly that does not exist today; tracked as out
+    // of scope on FEA-1461.
     if (this.pendingChunks && ids.includes(this.pendingChunks.sessionId)) {
       gatewayLog.warn(
         TAG,
@@ -540,6 +613,10 @@ export class AgentSessionSyncService {
         if (count >= MAX_CONSECUTIVE_TIMEOUTS) {
           deadLettered.push(id);
           this.timeoutCountById.delete(id);
+          // FEA-1461: also clear any orphaned rate-limit state for this
+          // session so a dead-lettered id leaves no Map entries behind.
+          this.rateLimitedCountById.delete(id);
+          this.nextRetryAfterMs.delete(id);
           this.deadLetteredIds.add(id);
         } else {
           this.timeoutCountById.set(id, count);
@@ -560,6 +637,49 @@ export class AgentSessionSyncService {
           TAG,
           `agent-session batch (${syncMode}, ~${formatBytes(payloadBytes)}) timed out waiting for server ack ` +
             `(attempt ${attempt}/${MAX_CONSECUTIVE_TIMEOUTS}); batch left queued for retry`,
+        );
+      }
+    } else if (ack.reason === DesktopAgentSessionsAckReason.RateLimited) {
+      // FEA-1461: previously fell through to the bare `else` below — debug
+      // log only, no counter, no dead-letter, no dequeue, no backoff. For an
+      // oversized session that's permanently throttled, that produced an
+      // infinite retry loop (re-chunking + log spam every 5s).
+      const deadLettered: string[] = [];
+      const deferred: string[] = [];
+      const retryDeadline = Date.now() + RATE_LIMIT_BACKOFF_MS;
+      for (const id of ids) {
+        const count = (this.rateLimitedCountById.get(id) ?? 0) + 1;
+        if (count >= MAX_CONSECUTIVE_RATE_LIMITED) {
+          deadLettered.push(id);
+          this.rateLimitedCountById.delete(id);
+          this.nextRetryAfterMs.delete(id);
+          // FEA-1461: also clear any orphaned timeout state for this
+          // session so a dead-lettered id leaves no Map entries behind.
+          this.timeoutCountById.delete(id);
+          this.deadLetteredIds.add(id);
+        } else {
+          this.rateLimitedCountById.set(id, count);
+          this.nextRetryAfterMs.set(id, retryDeadline);
+          deferred.push(id);
+        }
+      }
+      if (deadLettered.length > 0) {
+        this.dequeue(syncMode, deadLettered);
+        gatewayLog.warn(
+          TAG,
+          `dead-lettered ${deadLettered.length} agent session(s) after ${MAX_CONSECUTIVE_RATE_LIMITED} consecutive rate_limited rejections ` +
+            `(payload ~${formatBytes(payloadBytes)}); ids: ${deadLettered.join(", ")}; ` +
+            `remaining incremental=${this.incrementalQueue.length} backfill=${this.backfillQueue.length} deadLettered=${this.deadLetteredIds.size}`,
+        );
+      }
+      if (deferred.length > 0) {
+        const sampleId = deferred[0];
+        const attempt = this.rateLimitedCountById.get(sampleId) ?? 0;
+        gatewayLog.info(
+          TAG,
+          `agent-session batch (${syncMode}, ~${formatBytes(payloadBytes)}) rate_limited by server; ` +
+            `deferring ${deferred.length} session(s) for ${Math.round(RATE_LIMIT_BACKOFF_MS / 1000)}s ` +
+            `(attempt ${attempt}/${MAX_CONSECUTIVE_RATE_LIMITED}); batch left queued for retry`,
         );
       }
     } else {
