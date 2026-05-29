@@ -13,9 +13,76 @@ import {
 } from "./telemetry-file-utils.js";
 
 export const LOOP_PERF_RELATIVE_PATH = "perf.jsonl";
+const LOOP_PERF_COMMAND_MAX_BYTES = 64;
+const LOOP_PERF_PARSE_FAILURE_RAW_BYTES_MAX_BYTES = 1024;
+const LOOP_PERF_PARSE_FAILURE_ERROR_MESSAGE_MAX_BYTES = 512;
+const LOOP_PERF_PARSE_FAILURE_MAX_EVENTS_PER_CHUNK = 20;
+
+// biome-ignore lint/complexity/useRegexLiterals: Control characters (\u001b, \u009b) required for ANSI stripping
+const ANSI_RE = new RegExp(
+  String.raw`[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]`,
+  "g",
+);
+const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f-\u009f]/g;
+const CREDENTIAL_RE =
+  /(?:["']?\b(?:authorization|password|(?:[a-z0-9]+[_-])*token|(?:[a-z0-9]+[_-])*api[_-]?key|(?:[a-z0-9]+[_-])*secret)\b["']?\s*(?::|=|\s+)\s*["']?\S+|\bbearer\s+\S+|\bsk[-_][a-z0-9]+|\bgh[pousr]_[a-z0-9_]+|\bxox[abprs]-[a-z0-9-]+)/i;
 
 function getLoopPerfTelemetryFilePath(workdir: string): string {
   return path.join(workdir, LOOP_PERF_RELATIVE_PATH);
+}
+
+function truncateUtf8(input: string, maxBytes: number): string {
+  const encoded = new TextEncoder().encode(input);
+  if (encoded.length <= maxBytes) {
+    return input;
+  }
+  let end = maxBytes;
+  while (end > 0 && encoded[end] !== undefined && encoded[end] >= 0x80 && encoded[end] <= 0xbf) {
+    end -= 1;
+  }
+  return new TextDecoder().decode(encoded.subarray(0, end));
+}
+
+function stripUnsafeText(input: string): string {
+  return input.replaceAll(ANSI_RE, "").replaceAll(CONTROL_CHARS_RE, "");
+}
+
+function redactCredentialLikeText(input: string): string {
+  return CREDENTIAL_RE.test(input) ? "[redacted]" : input;
+}
+
+function sanitizeLoopPerfCommand(command: string | null | undefined): string | undefined {
+  if (command === null || command === undefined) {
+    return undefined;
+  }
+  const stripped = stripUnsafeText(command).trim();
+  if (stripped.length === 0) {
+    return undefined;
+  }
+  return truncateUtf8(
+    redactCredentialLikeText(stripped),
+    LOOP_PERF_COMMAND_MAX_BYTES,
+  );
+}
+
+function loopPerfCommandProjection(
+  command: string | null | undefined,
+): Partial<Record<"command", string>> {
+  return optional("command", sanitizeLoopPerfCommand(command));
+}
+
+function sanitizeLoopPerfRawBytes(rawBytes: string): string {
+  return truncateUtf8(
+    redactCredentialLikeText(stripUnsafeText(rawBytes)),
+    LOOP_PERF_PARSE_FAILURE_RAW_BYTES_MAX_BYTES,
+  );
+}
+
+function sanitizeLoopPerfErrorMessage(errorMessage: string): string {
+  return truncateUtf8(
+    redactCredentialLikeText(stripUnsafeText(errorMessage)),
+    LOOP_PERF_PARSE_FAILURE_ERROR_MESSAGE_MAX_BYTES,
+  );
 }
 
 /**
@@ -116,6 +183,7 @@ const iterationSchema = z.object({
   event: z.literal("iteration"),
   run_id: z.string(),
   iteration: z.number().int(),
+  command: z.string().nullish(),
   started_at: z.string(),
   ended_at: z.string(),
   duration_s: z.number(),
@@ -127,6 +195,7 @@ const pipelineStepSchema = z.object({
   event: z.literal("pipeline_step"),
   run_id: z.string(),
   iteration: z.number().int(),
+  command: z.string().nullish(),
   // The producer emits non-integer step numbers (e.g. 8.5 for
   // write_merged_patterns) to slot synthetic sub-steps between the integer
   // pipeline positions. LoopPerfPipelineStepEvent.step is already typed as
@@ -351,7 +420,7 @@ function toLoopPerfDiagnostics(
         event: "run",
         runId: raw.run_id,
         startedAt: raw.started_at,
-        ...optional("command", raw.command),
+        ...loopPerfCommandProjection(raw.command),
         ...optional("repo", raw.repo),
         ...optional("branch", raw.branch),
       };
@@ -364,7 +433,7 @@ function toLoopPerfDiagnostics(
         status: raw.status,
         startedAt: raw.started_at,
         ...optional("startSha", raw.start_sha),
-        ...optional("command", raw.command),
+        ...loopPerfCommandProjection(raw.command),
       };
     case "iteration":
       return {
@@ -375,6 +444,7 @@ function toLoopPerfDiagnostics(
         endedAt: raw.ended_at,
         durationS: raw.duration_s,
         status: raw.status,
+        ...loopPerfCommandProjection(raw.command),
         ...optional("claudeExitCode", raw.claude_exit_code),
       };
     case "pipeline_step":
@@ -388,6 +458,7 @@ function toLoopPerfDiagnostics(
         endedAt: raw.ended_at,
         durationS: raw.duration_s,
         skipped: raw.skipped,
+        ...loopPerfCommandProjection(raw.command),
         ...optional("exitCode", raw.exit_code),
       };
     case "agent":
@@ -401,7 +472,7 @@ function toLoopPerfDiagnostics(
         startedAt: raw.started_at,
         endedAt: raw.ended_at,
         durationS: raw.duration_s,
-        ...optional("command", raw.command),
+        ...loopPerfCommandProjection(raw.command),
         ...optional("model", raw.model),
         ...optional("parentSessionId", raw.parent_session_id),
         ...optional("inputTokens", raw.input_tokens),
@@ -419,7 +490,7 @@ function toLoopPerfDiagnostics(
         agentId: raw.agent_id,
         toolName: raw.tool_name,
         startedAt: raw.started_at,
-        ...optional("command", raw.command),
+        ...loopPerfCommandProjection(raw.command),
         ...optional("endedAt", raw.ended_at),
         ...optional("durationS", raw.duration_s),
         ...optional("ok", raw.ok),
@@ -437,7 +508,7 @@ function toLoopPerfDiagnostics(
         endedAt: raw.ended_at,
         durationS: raw.duration_s,
         ok: raw.ok,
-        ...optional("command", raw.command),
+        ...loopPerfCommandProjection(raw.command),
         ...optional("phase", attributedPhase),
       };
     case "spawn":
@@ -447,7 +518,7 @@ function toLoopPerfDiagnostics(
         iteration: raw.iteration,
         parentAgentId: raw.parent_agent_id,
         startedAt: raw.started_at,
-        ...optional("command", raw.command),
+        ...loopPerfCommandProjection(raw.command),
         ...optional("parentSessionId", raw.parent_session_id),
         ...optional("plannedSubagentType", raw.planned_subagent_type),
         ...optional("phase", attributedPhase),
@@ -477,6 +548,31 @@ const PERF_EVENT_CATEGORIES: Record<RawPerfEvent["event"], TelemetryCategory> = 
 
 function eventToCategory(event: RawPerfEvent["event"]): TelemetryCategory {
   return PERF_EVENT_CATEGORIES[event];
+}
+
+function emitLoopPerfParseFailure(
+  ctx: ParseChunkContext,
+  options: {
+    message: string;
+    lineNumber: number;
+    rawBytes: string;
+    errorMessage: string;
+  },
+): void {
+  ctx.telemetryEmitter.emit({
+    severity: "warn",
+    category: "loop.perf.parse_failure",
+    message: options.message,
+    trace: ctx.traceContext,
+    diagnostics: {
+      loopPerf: {
+        event: "parse_failure",
+        lineNumber: options.lineNumber,
+        rawBytes: sanitizeLoopPerfRawBytes(options.rawBytes),
+        errorMessage: sanitizeLoopPerfErrorMessage(options.errorMessage),
+      },
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -521,6 +617,8 @@ export function parseAndEmitChunk(
   const completeLines = parts.slice(0, -1);
 
   let lineNumber = ctx.lineNumberBase;
+  let parseFailureEventsEmitted = 0;
+  let parseFailuresSuppressed = 0;
 
   for (const rawLine of completeLines) {
     lineNumber += 1;
@@ -538,20 +636,17 @@ export function parseAndEmitChunk(
     try {
       parsedJson = JSON.parse(line);
     } catch (err) {
-      ctx.telemetryEmitter.emit({
-        severity: "warn",
-        category: "loop.perf.parse_failure",
-        message: "perf.jsonl: malformed JSON line",
-        trace: ctx.traceContext,
-        diagnostics: {
-          loopPerf: {
-            event: "parse_failure",
-            lineNumber,
-            rawBytes: line,
-            errorMessage: err instanceof Error ? err.message : String(err),
-          },
-        },
-      });
+      if (parseFailureEventsEmitted < LOOP_PERF_PARSE_FAILURE_MAX_EVENTS_PER_CHUNK) {
+        emitLoopPerfParseFailure(ctx, {
+          message: "perf.jsonl: malformed JSON line",
+          lineNumber,
+          rawBytes: line,
+          errorMessage: err instanceof Error ? err.message : String(err),
+        });
+        parseFailureEventsEmitted += 1;
+      } else {
+        parseFailuresSuppressed += 1;
+      }
       continue;
     }
 
@@ -574,20 +669,17 @@ export function parseAndEmitChunk(
     // --- Zod validation ---
     const parsed = perfEventSchema.safeParse(parsedJson);
     if (!parsed.success) {
-      ctx.telemetryEmitter.emit({
-        severity: "warn",
-        category: "loop.perf.parse_failure",
-        message: "perf.jsonl: Zod validation failure",
-        trace: ctx.traceContext,
-        diagnostics: {
-          loopPerf: {
-            event: "parse_failure",
-            lineNumber,
-            rawBytes: line,
-            errorMessage: parsed.error.message,
-          },
-        },
-      });
+      if (parseFailureEventsEmitted < LOOP_PERF_PARSE_FAILURE_MAX_EVENTS_PER_CHUNK) {
+        emitLoopPerfParseFailure(ctx, {
+          message: "perf.jsonl: Zod validation failure",
+          lineNumber,
+          rawBytes: line,
+          errorMessage: parsed.error.message,
+        });
+        parseFailureEventsEmitted += 1;
+      } else {
+        parseFailuresSuppressed += 1;
+      }
       continue;
     }
 
@@ -618,6 +710,15 @@ export function parseAndEmitChunk(
       diagnostics: {
         loopPerf: diagPayload,
       },
+    });
+  }
+
+  if (parseFailuresSuppressed > 0) {
+    emitLoopPerfParseFailure(ctx, {
+      message: "perf.jsonl: parse failures suppressed",
+      lineNumber,
+      rawBytes: "",
+      errorMessage: `${parseFailuresSuppressed} additional parse failure event(s) suppressed in this chunk`,
     });
   }
 
@@ -753,7 +854,9 @@ export function startLoopPerfTelemetryWatcher(
               event: "parse_failure",
               lineNumber: lineNumberBase,
               rawBytes: "",
-              errorMessage: err instanceof Error ? err.message : String(err),
+              errorMessage: sanitizeLoopPerfErrorMessage(
+                err instanceof Error ? err.message : String(err),
+              ),
             },
           },
         });
@@ -810,7 +913,9 @@ export function startLoopPerfTelemetryWatcher(
               event: "parse_failure",
               lineNumber: lineNumberBase,
               rawBytes: "",
-              errorMessage: err instanceof Error ? err.message : String(err),
+              errorMessage: sanitizeLoopPerfErrorMessage(
+                err instanceof Error ? err.message : String(err),
+              ),
             },
           },
         });
@@ -842,7 +947,9 @@ export function startLoopPerfTelemetryWatcher(
             event: "parse_failure",
             lineNumber: 0,
             rawBytes: "",
-            errorMessage: err instanceof Error ? err.message : String(err),
+            errorMessage: sanitizeLoopPerfErrorMessage(
+              err instanceof Error ? err.message : String(err),
+            ),
           },
         },
       });
@@ -1032,7 +1139,9 @@ export function reconcileLoopPerfTelemetry(
               event: "parse_failure",
               lineNumber: 0,
               rawBytes: "",
-              errorMessage: err instanceof Error ? err.message : String(err),
+              errorMessage: sanitizeLoopPerfErrorMessage(
+                err instanceof Error ? err.message : String(err),
+              ),
             },
           },
         });
@@ -1095,9 +1204,7 @@ export function reconcileLoopPerfTelemetry(
           toolName: sentinel.tool_name,
           startedAt: sentinel.started_at,
           iteration: sentinel.iteration,
-          ...(sentinel.command !== null && sentinel.command !== undefined
-            ? { command: sentinel.command }
-            : {}),
+          ...loopPerfCommandProjection(sentinel.command),
           endedAt: null,
           durationS: null,
           ok: null,
@@ -1129,7 +1236,9 @@ export function reconcileLoopPerfTelemetry(
             event: "parse_failure",
             lineNumber: 0,
             rawBytes: "",
-            errorMessage: err instanceof Error ? err.message : String(err),
+            errorMessage: sanitizeLoopPerfErrorMessage(
+              err instanceof Error ? err.message : String(err),
+            ),
           },
         },
       });

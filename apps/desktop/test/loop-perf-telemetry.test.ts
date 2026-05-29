@@ -189,6 +189,20 @@ function makeSpawnLine(overrides: Record<string, unknown> = {}): string {
   });
 }
 
+const commandVariantFixtures: ReadonlyArray<{
+  category: TelemetryEventPayload["category"];
+  makeLine: (overrides?: Record<string, unknown>) => string;
+}> = [
+  { category: "loop.perf.run", makeLine: makeRunLine },
+  { category: "loop.perf.phase", makeLine: makePhaseLine },
+  { category: "loop.perf.iteration", makeLine: makeIterationLine },
+  { category: "loop.perf.pipeline_step", makeLine: makePipelineStepLine },
+  { category: "loop.perf.agent", makeLine: makeAgentLine },
+  { category: "loop.perf.tool", makeLine: makeToolLine },
+  { category: "loop.perf.skill", makeLine: makeSkillLine },
+  { category: "loop.perf.spawn", makeLine: makeSpawnLine },
+];
+
 // ---------------------------------------------------------------------------
 // T-5.1: Zod schema validation — all 8 event types accept valid payloads
 // ---------------------------------------------------------------------------
@@ -282,6 +296,170 @@ test("T-5.1: parseAndEmitChunk emits loop.perf.pipeline_step for a valid pipelin
   assert.equal(loopPerf.stepName, "lint");
   assert.equal(loopPerf.skipped, false);
   assert.equal(loopPerf.exitCode, undefined);
+});
+
+test("PLN-750: iteration command is accepted and emitted with summary fields", () => {
+  const { emitter, events } = makeMockEmitter();
+
+  parseAndEmitChunk(
+    toChunk(
+      makeIterationLine({
+        command: "EXECUTE",
+        duration_s: 12.5,
+        status: "failed",
+        claude_exit_code: 1,
+      }) + "\n",
+    ),
+    {
+      phaseState: createRunningPhaseState(),
+      priorLineBuffer: "",
+      telemetryEmitter: emitter,
+      traceContext: TRACE,
+      lineNumberBase: 0,
+    },
+  );
+
+  assert.equal(events.length, 1);
+  const loopPerf = events[0]?.diagnostics?.loopPerf;
+  assert.ok(loopPerf && loopPerf.event === "iteration");
+  assert.equal(loopPerf.command, "EXECUTE");
+  assert.equal(loopPerf.durationS, 12.5);
+  assert.equal(loopPerf.status, "failed");
+  assert.equal(loopPerf.claudeExitCode, 1);
+});
+
+test("PLN-750: pipeline_step command is accepted and emitted with step fields", () => {
+  const { emitter, events } = makeMockEmitter();
+
+  parseAndEmitChunk(
+    toChunk(
+      makePipelineStepLine({
+        command: "PLAN",
+        step: 8.5,
+        step_name: "write_merged_patterns",
+        duration_s: 2.25,
+        exit_code: 0,
+        skipped: true,
+      }) + "\n",
+    ),
+    {
+      phaseState: createRunningPhaseState(),
+      priorLineBuffer: "",
+      telemetryEmitter: emitter,
+      traceContext: TRACE,
+      lineNumberBase: 0,
+    },
+  );
+
+  assert.equal(events.length, 1);
+  const loopPerf = events[0]?.diagnostics?.loopPerf;
+  assert.ok(loopPerf && loopPerf.event === "pipeline_step");
+  assert.equal(loopPerf.command, "PLAN");
+  assert.equal(loopPerf.step, 8.5);
+  assert.equal(loopPerf.stepName, "write_merged_patterns");
+  assert.equal(loopPerf.durationS, 2.25);
+  assert.equal(loopPerf.exitCode, 0);
+  assert.equal(loopPerf.skipped, true);
+});
+
+test("PLN-750: all command-bearing variants preserve safe unknown command strings", () => {
+  const { emitter, events } = makeMockEmitter();
+  const command = "FUTURE_UNKNOWN_COMMAND";
+  const chunk = commandVariantFixtures
+    .map(({ makeLine }) => makeLine({ command }) + "\n")
+    .join("");
+
+  parseAndEmitChunk(toChunk(chunk), {
+    phaseState: createRunningPhaseState(),
+    priorLineBuffer: "",
+    telemetryEmitter: emitter,
+    traceContext: TRACE,
+    lineNumberBase: 0,
+  });
+
+  assert.equal(events.length, commandVariantFixtures.length);
+  for (const event of events) {
+    const loopPerf = event.diagnostics?.loopPerf;
+    assert.ok(loopPerf && loopPerf.event !== "parse_failure");
+    assert.equal(loopPerf.command, command);
+  }
+});
+
+test("PLN-750: absent and null commands are omitted for every command-bearing variant", () => {
+  for (const command of [undefined, null]) {
+    const { emitter, events } = makeMockEmitter();
+    const chunk = commandVariantFixtures
+      .map(({ makeLine }) =>
+        makeLine(command === undefined ? {} : { command }) + "\n",
+      )
+      .join("");
+
+    parseAndEmitChunk(toChunk(chunk), {
+      phaseState: createRunningPhaseState(),
+      priorLineBuffer: "",
+      telemetryEmitter: emitter,
+      traceContext: TRACE,
+      lineNumberBase: 0,
+    });
+
+    assert.equal(events.length, commandVariantFixtures.length);
+    for (const event of events) {
+      const loopPerf = event.diagnostics?.loopPerf;
+      assert.ok(loopPerf && loopPerf.event !== "parse_failure");
+      assert.ok(!("command" in loopPerf), "command must be omitted, not null");
+    }
+  }
+});
+
+test("PLN-750: command sanitizer applies consistently to every command-bearing variant", () => {
+  const unsafeCases: ReadonlyArray<{
+    command: string;
+    expected?: string;
+    maxBytes?: number;
+  }> = [
+    { command: "token=secret-value", expected: "[redacted]" },
+    { command: '{"password":"hunter2"}', expected: "[redacted]" },
+    { command: '{"access_token":"secret-value"}', expected: "[redacted]" },
+    { command: '{"refresh_token":"secret-value"}', expected: "[redacted]" },
+    { command: "GITHUB_TOKEN=secret-value", expected: "[redacted]" },
+    { command: "OPENAI_API_KEY=secret-value", expected: "[redacted]" },
+    { command: "--access-token secret-value", expected: "[redacted]" },
+    { command: "API-KEY: abc123", expected: "[redacted]" },
+    { command: "Authorization: Bearer secret-token", expected: "[redacted]" },
+    { command: "\u001b[31mEXECUTE\u001b[0m", expected: "EXECUTE" },
+    { command: "\u0000\u001b[31m\u001b[0m" },
+    { command: "A".repeat(120), maxBytes: 64 },
+  ];
+
+  for (const unsafeCase of unsafeCases) {
+    const { emitter, events } = makeMockEmitter();
+    const chunk = commandVariantFixtures
+      .map(({ makeLine }) => makeLine({ command: unsafeCase.command }) + "\n")
+      .join("");
+
+    parseAndEmitChunk(toChunk(chunk), {
+      phaseState: createRunningPhaseState(),
+      priorLineBuffer: "",
+      telemetryEmitter: emitter,
+      traceContext: TRACE,
+      lineNumberBase: 0,
+    });
+
+    assert.equal(events.length, commandVariantFixtures.length);
+    for (const event of events) {
+      const loopPerf = event.diagnostics?.loopPerf;
+      assert.ok(loopPerf && loopPerf.event !== "parse_failure");
+      if (unsafeCase.expected !== undefined) {
+        assert.equal(loopPerf.command, unsafeCase.expected);
+      } else if (unsafeCase.maxBytes !== undefined) {
+        assert.ok(loopPerf.command);
+        assert.ok(Buffer.byteLength(loopPerf.command, "utf-8") <= unsafeCase.maxBytes);
+      } else {
+        assert.ok(!("command" in loopPerf), "blank sanitized command must be omitted");
+      }
+      assert.notEqual(loopPerf.command, unsafeCase.command);
+    }
+  }
 });
 
 test("T-5.1: parseAndEmitChunk emits loop.perf.agent for a valid agent event", () => {
@@ -792,6 +970,97 @@ test("T-5.6: Zod validation failure emits parse_failure and continues processing
   assert.equal(events.find((e) => e.category === "loop.perf.parse_failure")?.severity, "warn");
 });
 
+test("PLN-750: non-string command emits bounded parse_failure instead of normal loopPerf event", () => {
+  const { emitter, events } = makeMockEmitter();
+  const invalidLine = makeIterationLine({
+    command: { token: "sk_secret_value" },
+  });
+
+  parseAndEmitChunk(toChunk(invalidLine + "\n"), {
+    phaseState: createRunningPhaseState(),
+    priorLineBuffer: "",
+    telemetryEmitter: emitter,
+    traceContext: TRACE,
+    lineNumberBase: 0,
+  });
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.category, "loop.perf.parse_failure");
+  const loopPerf = events[0]?.diagnostics?.loopPerf;
+  assert.ok(loopPerf && loopPerf.event === "parse_failure");
+  assert.equal(loopPerf.rawBytes.includes("sk_secret_value"), false);
+  assert.ok(Buffer.byteLength(loopPerf.rawBytes, "utf-8") <= 1024);
+});
+
+test("PLN-750: malformed JSON parse_failure redacts echoed credential snippets in errorMessage", () => {
+  const { emitter, events } = makeMockEmitter();
+
+  parseAndEmitChunk(toChunk("ghp_secret_value_that_json_parse_echoes\n"), {
+    phaseState: createRunningPhaseState(),
+    priorLineBuffer: "",
+    telemetryEmitter: emitter,
+    traceContext: TRACE,
+    lineNumberBase: 0,
+  });
+
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.category, "loop.perf.parse_failure");
+  const loopPerf = events[0]?.diagnostics?.loopPerf;
+  assert.ok(loopPerf && loopPerf.event === "parse_failure");
+  assert.equal(loopPerf.rawBytes, "[redacted]");
+  assert.equal(loopPerf.errorMessage, "[redacted]");
+});
+
+test("PLN-750: malformed bursts are capped, redacted, and later valid command rows continue", () => {
+  const { emitter, events } = makeMockEmitter();
+  const secretLine = `{"event":"iteration","command":"token=${"x".repeat(4096)}`;
+  const malformedLines = [
+    secretLine,
+    ...Array.from({ length: 49 }, (_value, index) => `{bad json ${index}`),
+  ];
+  const validIteration = makeIterationLine({ command: "EXECUTE" });
+  const validPipelineStep = makePipelineStepLine({ command: "PLAN" });
+  const chunk = toChunk(
+    [
+      ...malformedLines,
+      validIteration,
+      validPipelineStep,
+    ].map((line) => line + "\n").join(""),
+  );
+
+  parseAndEmitChunk(chunk, {
+    phaseState: createRunningPhaseState(),
+    priorLineBuffer: "",
+    telemetryEmitter: emitter,
+    traceContext: TRACE,
+    lineNumberBase: 0,
+  });
+
+  const failureEvents = events.filter((e) => e.category === "loop.perf.parse_failure");
+  assert.equal(failureEvents.length, 21, "20 details plus one summary must emit");
+  const detailFailures = failureEvents.slice(0, 20);
+  for (const failure of detailFailures) {
+    const loopPerf = failure.diagnostics?.loopPerf;
+    assert.ok(loopPerf && loopPerf.event === "parse_failure");
+    assert.ok(Buffer.byteLength(loopPerf.rawBytes, "utf-8") <= 1024);
+    assert.equal(loopPerf.rawBytes.includes("token="), false);
+    assert.equal(loopPerf.rawBytes.includes("x".repeat(64)), false);
+  }
+  const summary = failureEvents[20]?.diagnostics?.loopPerf;
+  assert.ok(summary && summary.event === "parse_failure");
+  assert.equal(summary.rawBytes, "");
+  assert.match(summary.errorMessage, /30 additional parse failure/);
+
+  const iterationEvent = events.find((e) => e.category === "loop.perf.iteration");
+  const pipelineStepEvent = events.find(
+    (e) => e.category === "loop.perf.pipeline_step",
+  );
+  assert.ok(iterationEvent?.diagnostics?.loopPerf?.event === "iteration");
+  assert.equal(iterationEvent.diagnostics.loopPerf.command, "EXECUTE");
+  assert.ok(pipelineStepEvent?.diagnostics?.loopPerf?.event === "pipeline_step");
+  assert.equal(pipelineStepEvent.diagnostics.loopPerf.command, "PLAN");
+});
+
 // ---------------------------------------------------------------------------
 // T-5.7: Orphaned-sentinel handling
 // ---------------------------------------------------------------------------
@@ -1123,6 +1392,53 @@ test("T-5.11: reconcileLoopPerfTelemetry inherits watcher priorLineBuffer so a r
   );
 });
 
+test("PLN-750: command-bearing watcher and reconcile rows emit once with preserved commands", async () => {
+  const workdir = await fs.mkdtemp(path.join(os.tmpdir(), "loop-perf-pln750-reconcile-"));
+  tempPathsToClean.push(workdir);
+
+  const watcherRecord = makeIterationLine({ command: "EXECUTE" }) + "\n";
+  const reconcileRecord = makePipelineStepLine({ command: "PLAN" }) + "\n";
+  const perfFile = path.join(workdir, "perf.jsonl");
+  await fs.writeFile(perfFile, watcherRecord + reconcileRecord, "utf-8");
+
+  const { emitter, events } = makeMockEmitter();
+  const phaseState = createRunningPhaseState();
+  parseAndEmitChunk(toChunk(watcherRecord), {
+    phaseState,
+    priorLineBuffer: "",
+    telemetryEmitter: emitter,
+    traceContext: TRACE,
+    lineNumberBase: 0,
+  });
+
+  const mockHandle = {
+    stop: () => Promise.resolve(),
+    getHwm: () => Buffer.byteLength(watcherRecord, "utf-8"),
+    getPhaseState: () => phaseState,
+    getLineNumberBase: () => 1,
+    getPriorLineBuffer: () => "",
+    getToolCallsBaseline: () => new Set<string>(),
+  };
+
+  reconcileLoopPerfTelemetry(workdir, {
+    startOffset: 0,
+    traceContext: TRACE,
+    telemetryEmitter: emitter,
+    watcherHandle: mockHandle,
+  });
+
+  const infoEvents = events.filter((e) => e.severity === "info");
+  assert.equal(infoEvents.length, 2, "watcher plus reconcile must emit exactly two rows");
+  const iteration = infoEvents.find((e) => e.category === "loop.perf.iteration")
+    ?.diagnostics?.loopPerf;
+  const pipelineStep = infoEvents.find((e) => e.category === "loop.perf.pipeline_step")
+    ?.diagnostics?.loopPerf;
+  assert.ok(iteration && iteration.event === "iteration");
+  assert.equal(iteration.command, "EXECUTE");
+  assert.ok(pipelineStep && pipelineStep.event === "pipeline_step");
+  assert.equal(pipelineStep.command, "PLAN");
+});
+
 // ---------------------------------------------------------------------------
 // T-5.12: Final record buffered without trailing newline is flushed on reconcile
 // ---------------------------------------------------------------------------
@@ -1137,7 +1453,7 @@ test("T-5.12: reconcileLoopPerfTelemetry emits a final record buffered in the wa
   const workdir = await fs.mkdtemp(path.join(os.tmpdir(), "loop-perf-t512-"));
   tempPathsToClean.push(workdir);
 
-  const finalRecord = makeIterationLine(); // intentionally no trailing newline
+  const finalRecord = makeIterationLine({ command: "EXECUTE" }); // intentionally no trailing newline
   const perfFile = path.join(workdir, "perf.jsonl");
   await fs.writeFile(perfFile, finalRecord, "utf-8");
 
@@ -1167,12 +1483,48 @@ test("T-5.12: reconcileLoopPerfTelemetry emits a final record buffered in the wa
     1,
     "the buffered final record must be flushed by reconcile even with HWM at EOF",
   );
+  const loopPerf = iterationEvents[0]?.diagnostics?.loopPerf;
+  assert.ok(loopPerf && loopPerf.event === "iteration");
+  assert.equal(loopPerf.command, "EXECUTE");
   const failureEvents = events.filter((e) => e.category === "loop.perf.parse_failure");
   assert.equal(
     failureEvents.length,
     0,
     "no parse_failure must be emitted for a flushed final record",
   );
+});
+
+test("PLN-750: reconcileLoopPerfTelemetry emits a command-bearing final pipeline_step without a trailing newline", async () => {
+  const workdir = await fs.mkdtemp(path.join(os.tmpdir(), "loop-perf-t512-pipeline-"));
+  tempPathsToClean.push(workdir);
+
+  const finalRecord = makePipelineStepLine({ command: "PLAN" });
+  const perfFile = path.join(workdir, "perf.jsonl");
+  await fs.writeFile(perfFile, finalRecord, "utf-8");
+
+  const fileSize = Buffer.byteLength(finalRecord, "utf-8");
+  const mockHandle = {
+    stop: () => Promise.resolve(),
+    getHwm: () => fileSize,
+    getPhaseState: () => createRunningPhaseState(),
+    getLineNumberBase: () => 0,
+    getPriorLineBuffer: () => finalRecord,
+    getToolCallsBaseline: () => new Set<string>(),
+  };
+
+  const { emitter, events } = makeMockEmitter();
+  reconcileLoopPerfTelemetry(workdir, {
+    startOffset: 0,
+    traceContext: TRACE,
+    telemetryEmitter: emitter,
+    watcherHandle: mockHandle,
+  });
+
+  const pipelineStepEvents = events.filter((e) => e.category === "loop.perf.pipeline_step");
+  assert.equal(pipelineStepEvents.length, 1);
+  const loopPerf = pipelineStepEvents[0]?.diagnostics?.loopPerf;
+  assert.ok(loopPerf && loopPerf.event === "pipeline_step");
+  assert.equal(loopPerf.command, "PLAN");
 });
 
 test("T-5.12: reconcileLoopPerfTelemetry without a watcher handle still flushes a trailing record that lacks a newline", async () => {
