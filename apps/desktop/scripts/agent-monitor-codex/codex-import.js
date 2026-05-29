@@ -38,6 +38,21 @@ function importCodexSession(dbModule, session) {
   } catch {
     /* non-fatal — column/stmt guaranteed by db.js Patch #4 */
   }
+  // FEA-1434: Codex CLI sessions land here via rollout-file parsing — the
+  // desktop spawn path stamps billing_mode in launch-metadata, but most Codex
+  // sessions are user-driven (CLI invocations outside the desktop). Without
+  // a runtime signal we treat them as ChatGPT Pro subscription by default;
+  // sessions backed by an explicit API key get their mode rewritten when the
+  // sync service merges in the launch-metadata.billingMode value.
+  try {
+    dbModule.stmts.setSessionBillingMode.run(
+      "codex_chatgpt_pro",
+      session.sessionId,
+      "codex_chatgpt_pro",
+    );
+  } catch {
+    /* non-fatal — column/stmt guaranteed by db.js FEA-1434 patch */
+  }
   const reactivated = reactivateImportedSession(dbModule, session);
   return { sessionId: session.sessionId, result, reactivated };
 }

@@ -20,6 +20,7 @@ import os from "node:os";
 import path from "node:path";
 import { inspect, promisify } from "node:util";
 import { gatewayLog } from "../../main/gateway-logger.js";
+import { detectBillingModeForHarness } from "../../main/billing-mode-detector.js";
 import { expandHomePath } from "../../shared/path-utils.js";
 import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { getShellEnv } from "../shell-path.js";
@@ -591,6 +592,20 @@ export type LaunchMetadata = {
   loopId?: string;
   baseBranch?: string;
   parentTicketId?: string;
+  /**
+   * Harness identifier ("claude" / "codex" / etc.) of the process the loop is
+   * spawning. Persisted so the agent-monitor sidecar can label sessions that
+   * land in its DB via hooks/importers without knowing the spawner context.
+   * Added FEA-1434.
+   */
+  harness?: string;
+  /**
+   * Billing mode of the spawned process — distinguishes API-metered cost from
+   * subscription-covered usage. See `src/shared/billing-mode.ts` for the
+   * canonical enum. Persisted on disk via `launch-metadata.json`; the sync
+   * service surfaces it on `SyncedAgentSession.billingMode`. Added FEA-1434.
+   */
+  billingMode?: string;
 };
 
 /**
@@ -620,6 +635,9 @@ export function readLaunchMetadata(worktreeDir: string): LaunchMetadata | null {
         typeof parsed.parentTicketId === "string"
           ? parsed.parentTicketId
           : undefined,
+      harness: typeof parsed.harness === "string" ? parsed.harness : undefined,
+      billingMode:
+        typeof parsed.billingMode === "string" ? parsed.billingMode : undefined,
     };
   } catch {
     return null;
@@ -646,9 +664,43 @@ export function writeLaunchMetadata(
     loopId: meta.loopId ?? existing?.loopId,
     baseBranch: meta.baseBranch ?? existing?.baseBranch,
     parentTicketId: meta.parentTicketId ?? existing?.parentTicketId,
+    harness: meta.harness ?? existing?.harness,
+    billingMode: meta.billingMode ?? existing?.billingMode,
   };
 
   writeFileSync(metaPath, JSON.stringify(merged, null, 2));
+}
+
+/**
+ * Record that a harness process is about to be spawned in `worktreeDir`.
+ *
+ * Persists the harness identifier and detected billing mode into the
+ * worktree's `launch-metadata.json` so the agent-monitor sidecar (and the
+ * sync service that reads from it) can label the resulting session without
+ * needing to know which CLI was actually invoked.
+ *
+ * Best-effort: never throws — a malformed worktree path or write failure must
+ * not block the spawn. The launch metadata file is owned by this worktree,
+ * which is sandbox-allowed by the time any spawn reaches this point.
+ *
+ * Extracted as a shared helper per CLAUDE.md "spawn shared helper" rule —
+ * inline copies at each spawn site would drift. Added FEA-1434.
+ */
+export function recordSessionSpawn(args: {
+  worktreeDir: string;
+  harness: string;
+  billingMode: string;
+}): void {
+  try {
+    writeLaunchMetadata(args.worktreeDir, {
+      harness: args.harness,
+      billingMode: args.billingMode,
+    });
+  } catch {
+    // Non-fatal — best-effort labeling. The sync service falls back to the
+    // harness-default billing mode (or `unknown`) when launch-metadata is
+    // unreadable.
+  }
 }
 
 /**
@@ -839,6 +891,14 @@ async function runBootstrapProcess(
 ): Promise<BootstrapRunResult> {
   const claudePath = getResolvedClaudePath();
   const env = await getShellEnv();
+
+  // FEA-1434: stamp harness + billing mode for the bootstrap spawn so the
+  // sidecar can label its sessions even before the main loop spawn lands.
+  recordSessionSpawn({
+    worktreeDir,
+    harness: "claude",
+    billingMode: detectBillingModeForHarness("claude", env),
+  });
 
   return await new Promise<BootstrapRunResult>((resolve) => {
     let settled = false;

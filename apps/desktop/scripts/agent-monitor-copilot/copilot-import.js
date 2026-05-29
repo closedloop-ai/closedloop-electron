@@ -22,6 +22,16 @@ function importCopilotSession(dbModule, session) {
   try {
     dbModule.stmts.setSessionHarness.run("copilot", session.sessionId, "copilot");
   } catch { /* non-fatal */ }
+  // FEA-1434: GitHub Copilot is always covered by a per-seat subscription —
+  // no per-token API surface exists. Stamp the mode so the UI ledger split
+  // counts these as subscription-covered.
+  try {
+    dbModule.stmts.setSessionBillingMode.run(
+      "copilot_seat",
+      session.sessionId,
+      "copilot_seat",
+    );
+  } catch { /* non-fatal */ }
   const reactivated = reactivateImportedSession(dbModule, session);
   return { sessionId: session.sessionId, result, reactivated };
 }

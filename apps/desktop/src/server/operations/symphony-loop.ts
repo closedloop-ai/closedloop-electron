@@ -125,6 +125,7 @@ import {
   isProcessRunning,
   loopError,
   loopLog,
+  recordSessionSpawn,
   resolveRef,
   resolveWorktreeParentDir,
   runBootstrapIfNeeded,
@@ -132,6 +133,7 @@ import {
   SymphonyDirNotConfiguredError,
   tryAssertRepoAllowed,
 } from "./symphony-utils.js";
+import { detectBillingModeForHarness } from "../../main/billing-mode-detector.js";
 import type { BootstrapRunResult } from "./symphony-utils.js";
 export {
   readFileTail,
@@ -3281,6 +3283,15 @@ async function attemptLlmCommit(
     loopId,
     `LLM commit spawn: binary=${claudeBinary} args=["-p", "<prompt omitted>", "--allowedTools", "${allowedTools}", "--output-format", "stream-json", "--verbose"] cwd=${worktreeDir} PATH=${spawnEnv.PATH ?? "(unset)"}`,
   );
+
+  // FEA-1434: stamp harness + billing mode on the worktree's launch-metadata
+  // so the sidecar can label the resulting session as API-metered vs
+  // subscription-covered.
+  recordSessionSpawn({
+    worktreeDir,
+    harness: "claude",
+    billingMode: detectBillingModeForHarness("claude", spawnEnv),
+  });
 
   let child: ReturnType<typeof spawn>;
   try {

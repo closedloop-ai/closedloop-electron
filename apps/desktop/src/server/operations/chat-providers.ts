@@ -5,6 +5,8 @@ import { assertPathAllowed, DirectoryNotAllowedError } from "../security.js";
 import { getShellEnv, resolveBinaryFromLoginShell } from "../shell-path.js";
 import { getOverrideBinaryPaths } from "./symphony-loop.js";
 import { createStreamState, processStreamEvent } from "./stream-events.js";
+import { recordSessionSpawn } from "./symphony-utils.js";
+import { detectBillingModeForHarness } from "../../main/billing-mode-detector.js";
 
 export type ChatMessage = {
   id: string;
@@ -345,6 +347,17 @@ export class CodexProvider implements ChatProvider {
 
       let child: ChildProcess;
       try {
+        // FEA-1434: stamp harness + billing mode on the worktree's
+        // launch-metadata so the sidecar can label the resulting session.
+        // Only stamp when a sandbox-allowed cwd is available; without a
+        // worktree there is nowhere to write the metadata file.
+        if (resolvedCwd !== undefined) {
+          recordSessionSpawn({
+            worktreeDir: resolvedCwd,
+            harness: "codex",
+            billingMode: detectBillingModeForHarness("codex", shellEnv),
+          });
+        }
         child = spawn(codexBin, args, {
           cwd: resolvedCwd,
           stdio: ["ignore", "pipe", "pipe"],

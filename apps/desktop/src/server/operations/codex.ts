@@ -12,8 +12,9 @@ import { getOverrideBinaryPaths, getResolvedGitPath } from "./symphony-loop.js";
 import { loadJsonFile, saveJsonFile } from "./chat-history-store.js";
 import { ENGINEER_CHAT_TOOLS, withMcpTools } from "./chat-tools.js";
 import { type ContentBlock, createStreamState, processStreamEvent } from "./stream-events.js";
-import { assertRepoAllowed, ensureWorktreeForReview, resolveWorktreeDir, resolveWorktreeParentDir, tryAssertPathAllowed, tryAssertRepoAllowed } from "./symphony-utils.js";
+import { assertRepoAllowed, ensureWorktreeForReview, recordSessionSpawn, resolveWorktreeDir, resolveWorktreeParentDir, tryAssertPathAllowed, tryAssertRepoAllowed } from "./symphony-utils.js";
 import { json } from "./response-utils.js";
+import { detectBillingModeForHarness } from "../../main/billing-mode-detector.js";
 
 const CODEX_SESSION_ID_REGEX = /session id:\s*([0-9a-f-]{36})/i;
 const CODEX_ROLLOUT_ITEM_RECORDING_DIAGNOSTIC_REGEX = /^\d{4}-\d{2}-\d{2}T[^\s]+\s+ERROR\s+codex_core::session:\s+failed to record rollout items:\s+thread\s+[0-9a-f-]{36}\s+not found$/i;
@@ -1161,10 +1162,18 @@ export function registerCodexRoutes(
 
     try {
       const claudeBin = (await resolveBinaryFromLoginShell("claude", getOverrideBinaryPaths()?.claude)).path;
+      const spawnEnv = await getShellEnv();
+      // FEA-1434: stamp harness + billing mode for the engineer-chat session
+      // before spawning the Claude CLI.
+      recordSessionSpawn({
+        worktreeDir,
+        harness: "claude",
+        billingMode: detectBillingModeForHarness("claude", spawnEnv),
+      });
       const child = spawn(claudeBin, args, {
         cwd: worktreeDir,
         stdio: ["pipe", "pipe", "pipe"],
-        env: await getShellEnv(),
+        env: spawnEnv,
       });
 
       if (!child.pid) {
@@ -1747,11 +1756,18 @@ async function spawnCodexReviewProcess(options: {
   args.push("-c", `model=${options.model}`, "-c", `model_reasoning_effort=${options.reasoningEffort}`);
 
   const codexBin = (await resolveBinaryFromLoginShell("codex", getOverrideBinaryPaths()?.codex)).path;
+  const spawnEnv = await getShellEnv({ FORCE_COLOR: "0" });
+  // FEA-1434: stamp harness + billing mode before spawning the Codex review.
+  recordSessionSpawn({
+    worktreeDir: options.cwd,
+    harness: "codex",
+    billingMode: detectBillingModeForHarness("codex", spawnEnv),
+  });
   return spawn(codexBin, args, {
     cwd: options.cwd,
     detached: false,
     stdio: ["ignore", "pipe", "pipe"],
-    env: await getShellEnv({ FORCE_COLOR: "0" }),
+    env: spawnEnv,
   });
 }
 
@@ -1878,10 +1894,17 @@ async function streamCodexConversation(
 ): Promise<void> {
   try {
     const codexBin = (await resolveBinaryFromLoginShell("codex", getOverrideBinaryPaths()?.codex)).path;
+    const spawnEnv = await getShellEnv({ FORCE_COLOR: "0" });
+    // FEA-1434: stamp harness + billing mode before spawning the Codex conversation.
+    recordSessionSpawn({
+      worktreeDir: cwd,
+      harness: "codex",
+      billingMode: detectBillingModeForHarness("codex", spawnEnv),
+    });
     const child = spawn(codexBin, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: await getShellEnv({ FORCE_COLOR: "0" }),
+      env: spawnEnv,
     });
 
     if (!child.pid) {

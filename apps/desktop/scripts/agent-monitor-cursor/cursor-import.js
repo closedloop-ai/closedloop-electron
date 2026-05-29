@@ -26,6 +26,16 @@ function importCursorSession(dbModule, session) {
   try {
     dbModule.stmts.setSessionHarness.run("cursor", session.sessionId, "cursor");
   } catch { /* non-fatal */ }
+  // FEA-1434: Cursor sessions are always covered by a Cursor Pro subscription
+  // (no per-token billing surface exposed by the Cursor CLI). Stamp the mode
+  // so the UI can group them under the subscription ledger.
+  try {
+    dbModule.stmts.setSessionBillingMode.run(
+      "cursor_pro",
+      session.sessionId,
+      "cursor_pro",
+    );
+  } catch { /* non-fatal */ }
   const reactivated = reactivateImportedSession(dbModule, session);
   return { sessionId: session.sessionId, result, reactivated };
 }

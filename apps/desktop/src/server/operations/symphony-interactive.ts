@@ -31,6 +31,7 @@ import {
   isProcessRunning,
   readLaunchMetadata,
   readProcessPidSync,
+  recordSessionSpawn,
   releaseLaunchLock,
   resolveWorktreeDir,
   resolveWorktreeParentDir,
@@ -39,6 +40,7 @@ import {
   VALID_PROVIDERS,
   writeLaunchMetadata,
 } from "./symphony-utils.js";
+import { detectBillingModeForHarness } from "../../main/billing-mode-detector.js";
 
 const COMMIT_JSON_REGEX = /\{[\s\S]*"title"[\s\S]*"description"[\s\S]*\}/;
 
@@ -752,6 +754,14 @@ async function streamClaudeChat(options: {
   });
 
   try {
+    const spawnEnv = await getShellEnv();
+    // FEA-1434: stamp harness + billing mode so the sidecar can label the
+    // resulting session as API-metered vs subscription-covered.
+    recordSessionSpawn({
+      worktreeDir: cwd,
+      harness: "claude",
+      billingMode: detectBillingModeForHarness("claude", spawnEnv),
+    });
     const child = spawn(
       "claude",
       [
@@ -766,7 +776,7 @@ async function streamClaudeChat(options: {
       {
         cwd,
         stdio: ["pipe", "pipe", "pipe"],
-        env: await getShellEnv(),
+        env: spawnEnv,
       }
     );
 
@@ -973,6 +983,14 @@ async function generateCommitWithClaude(
 ): Promise<{ title: string; description: string }> {
   const env = await getShellEnv();
   const claudeBin = (await resolveBinaryFromLoginShell("claude", getOverrideBinaryPaths()?.claude)).path;
+  // FEA-1434: stamp harness + billing mode on the worktree's launch-metadata.
+  // Idempotent — multiple calls into the same worktree just re-write the same
+  // merged value.
+  recordSessionSpawn({
+    worktreeDir,
+    harness: "claude",
+    billingMode: detectBillingModeForHarness("claude", env),
+  });
   return retrySpawn(() => new Promise<{ title: string; description: string }>((resolve, reject) => {
     const prompt = [
       `Generate a git commit message for ticket ${ticketId}.`,

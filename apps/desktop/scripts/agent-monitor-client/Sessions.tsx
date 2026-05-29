@@ -25,6 +25,27 @@ import { formatDateTime, formatDuration, truncate, fmtCost } from "../lib/format
 import { effectiveSessionStatus, isSessionAwaitingInput } from "../lib/types";
 import type { Session, DashboardEvent } from "../lib/types";
 
+// CLOSEDLOOP FEA-1434: subscription-covered billing modes. Mirrors the
+// canonical enum in src/shared/billing-mode.ts on the desktop side. Inlined
+// here because the agent-monitor client is bundled separately from the
+// desktop main TypeScript tree.
+const SUBSCRIPTION_BILLING_MODES = new Set<string>([
+  "claude_pro",
+  "claude_max",
+  "codex_chatgpt_pro",
+  "cursor_pro",
+  "copilot_seat",
+  "opencode",
+]);
+
+function isApiMetered(billingMode: string | null | undefined): boolean {
+  return billingMode === "api";
+}
+
+function isSubscriptionCovered(billingMode: string | null | undefined): boolean {
+  return !!billingMode && SUBSCRIPTION_BILLING_MODES.has(billingMode);
+}
+
 const PAGE_SIZE = 10;
 export function Sessions() {
   const navigate = useNavigate();
@@ -169,6 +190,23 @@ export function Sessions() {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const wsConnected = useSyncExternalStore(eventBus.onConnection, () => eventBus.connected);
 
+  // CLOSEDLOOP FEA-1434: split the visible page of sessions into two ledgers.
+  // The page is paginated server-side so these totals are page-local; full
+  // workspace rollups belong on the Dashboard. Keeping the math local avoids
+  // a separate API round-trip just for the totals.
+  const ledgerTotals = sessions.reduce(
+    (acc, s) => {
+      const cost = s.cost ?? 0;
+      if (isApiMetered(s.billing_mode)) {
+        acc.api += cost;
+      } else if (isSubscriptionCovered(s.billing_mode)) {
+        acc.subscription += cost;
+      }
+      return acc;
+    },
+    { api: 0, subscription: 0 },
+  );
+
   return (
     <div className="animate-fade-in">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-8">
@@ -300,6 +338,33 @@ export function Sessions() {
         />
       ) : (
         <>
+          {/* FEA-1434: two-ledger rollup. Subscription-covered cost never
+              sums into the headline — it's surfaced as an "equivalent" for
+              transparency only. */}
+          <div className="mb-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="card px-4 py-3">
+              <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">
+                Metered API spend
+              </div>
+              <div className="mt-1 text-lg font-mono text-gray-100">
+                {fmtCost(ledgerTotals.api)}
+              </div>
+              <div className="text-[11px] text-gray-500">
+                Sessions billed per-token via API keys (this page)
+              </div>
+            </div>
+            <div className="card px-4 py-3">
+              <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider">
+                Subscription-covered
+              </div>
+              <div className="mt-1 text-lg font-mono text-gray-300">
+                {fmtCost(ledgerTotals.subscription)} equiv.
+              </div>
+              <div className="text-[11px] text-gray-500">
+                Pro / Max / per-seat — token-cost equivalent only (this page)
+              </div>
+            </div>
+          </div>
           <div className="card overflow-x-auto">
             <table className="w-full min-w-[800px]">
               <thead>
@@ -374,7 +439,28 @@ export function Sessions() {
                       {session.agent_count ?? "-"}
                     </td>
                     <td className="px-5 py-4 text-sm text-gray-400 font-mono">
-                      {session.cost != null && session.cost > 0 ? fmtCost(session.cost) : "-"}
+                      {/* FEA-1434: render API-metered cost as a dollar amount;
+                          subscription-covered cost is muted and prefixed
+                          "Covered ·" so the user can see at a glance which
+                          ledger a row contributes to. */}
+                      {(() => {
+                        const cost = session.cost;
+                        const billing = session.billing_mode;
+                        if (cost == null || cost <= 0) {
+                          return "-";
+                        }
+                        if (isApiMetered(billing)) {
+                          return fmtCost(cost);
+                        }
+                        if (isSubscriptionCovered(billing)) {
+                          return (
+                            <span className="text-gray-500">
+                              Covered · {fmtCost(cost)} equiv.
+                            </span>
+                          );
+                        }
+                        return fmtCost(cost);
+                      })()}
                     </td>
                     <td
                       className="px-5 py-4 text-[11px] text-gray-500 font-mono"

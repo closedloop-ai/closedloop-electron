@@ -179,6 +179,9 @@ describe("readLaunchMetadata", () => {
       loopId: undefined,
       parentTicketId: "AI-100",
       ticketTitle: undefined,
+      // FEA-1434: harness + billingMode default to undefined when absent.
+      harness: undefined,
+      billingMode: undefined,
     });
   });
 
@@ -208,6 +211,8 @@ describe("readLaunchMetadata", () => {
       loopId: undefined,
       parentTicketId: undefined,
       ticketTitle: undefined,
+      harness: undefined,
+      billingMode: undefined,
     });
   });
 });
@@ -249,6 +254,8 @@ describe("writeLaunchMetadata", () => {
       loopId: undefined,
       parentTicketId: "AI-50",
       ticketTitle: undefined,
+      harness: undefined,
+      billingMode: undefined,
     });
   });
 
@@ -268,6 +275,8 @@ describe("writeLaunchMetadata", () => {
       loopId: undefined,
       parentTicketId: "AI-50",
       ticketTitle: undefined,
+      harness: undefined,
+      billingMode: undefined,
     });
   });
 });

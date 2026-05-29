@@ -58,6 +58,16 @@ function importOpenCodeSession(dbModule, session) {
   try {
     dbModule.stmts.setSessionHarness.run("opencode", session.sessionId, "opencode");
   } catch { /* non-fatal */ }
+  // FEA-1434: OpenCode is hosted on a flat subscription model — no per-token
+  // API cost surface. Stamp the mode so the UI ledger split counts these as
+  // subscription-covered.
+  try {
+    dbModule.stmts.setSessionBillingMode.run(
+      "opencode",
+      session.sessionId,
+      "opencode",
+    );
+  } catch { /* non-fatal */ }
   const reactivated = reactivateImportedSession(dbModule, session);
   return { sessionId: session.sessionId, result, reactivated };
 }

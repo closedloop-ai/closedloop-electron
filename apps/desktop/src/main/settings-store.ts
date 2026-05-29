@@ -699,6 +699,24 @@ export class SettingsStore {
     this.store.set("managedKeyHintLastSeenProvenance", value);
   }
 
+  // --- FEA-1434 / Subscription cost privacy ---
+
+  /**
+   * When true (default), the Sessions UI shows the token-cost equivalent for
+   * subscription-covered sessions ("Covered · $X equiv."). When false, only
+   * the "Covered ·" label is shown — useful when sharing the UI on a call.
+   */
+  getShowSubscriptionEquivalentCost(): boolean {
+    return this.store.get(
+      "showSubscriptionEquivalentCost",
+      DEFAULT_DESKTOP_SETTINGS.showSubscriptionEquivalentCost,
+    );
+  }
+
+  setShowSubscriptionEquivalentCost(value: boolean): void {
+    this.store.set("showSubscriptionEquivalentCost", value);
+  }
+
   private migrateSavedConfigManagedFields(): void {
     const configs = this.getSavedConfigs();
     let changed = false;

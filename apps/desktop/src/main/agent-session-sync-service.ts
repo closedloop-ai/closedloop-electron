@@ -58,6 +58,9 @@ type SessionRow = {
   awaiting_input_since: string | null;
   metadata: string | null;
   harness: string | null;
+  // FEA-1434: persisted by the sidecar's importers or by desktop spawn
+  // launch-metadata. Surfaced on the synced payload as `billingMode`.
+  billing_mode: string | null;
 };
 
 type AgentRow = {
@@ -109,6 +112,10 @@ export type SessionAttributionResolverCache = {
   attributionByCwd: Map<string, SyncedAgentSessionAttribution | null>;
   launchMetadataRootByCwd: Map<string, string | null>;
   repoFullNameByPath: Map<string, string | null>;
+  /** FEA-1434: billingMode from launch-metadata, cached per cwd. `null` means
+   * "no launch-metadata billingMode for this cwd" — distinct from an absent
+   * cache entry (which means "not yet looked up"). */
+  billingModeByCwd: Map<string, string | null>;
 };
 
 export type AgentSessionSyncTelemetryEvent = {
@@ -147,6 +154,7 @@ export class AgentSessionSyncService {
     attributionByCwd: new Map(),
     launchMetadataRootByCwd: new Map(),
     repoFullNameByPath: new Map(),
+    billingModeByCwd: new Map(),
   };
   /** Consecutive timeout count per session ID for dead-letter detection. */
   private readonly timeoutCountById = new Map<string, number>();
@@ -712,6 +720,7 @@ export function loadSyncedSessions(
     attributionByCwd: new Map(),
     launchMetadataRootByCwd: new Map(),
     repoFullNameByPath: new Map(),
+    billingModeByCwd: new Map(),
   },
 ): SyncedAgentSession[] {
   if (ids.length === 0) {
@@ -732,7 +741,8 @@ export function loadSyncedSessions(
         ended_at,
         awaiting_input_since,
         metadata,
-        harness
+        harness,
+        billing_mode
       FROM sessions
       WHERE id IN (__IDS__)
     `,
@@ -823,6 +833,14 @@ export function loadSyncedSessions(
     }
 
     const attribution = resolveSessionAttribution(row.cwd, cache);
+    // FEA-1434: launch-metadata.billingMode wins over the row column when both
+    // are present (the desktop spawn has direct env access at spawn time;
+    // importers only see disk artifacts).
+    const billingMode = resolveSessionBillingMode(
+      row.cwd,
+      row.billing_mode,
+      cache,
+    );
     const tokenUsageByModel: SyncedAgentSessionTokenUsage[] = (
       tokenUsageBySessionId.get(id) ?? []
     ).map((tokenRow) => ({
@@ -840,6 +858,7 @@ export function loadSyncedSessions(
         name: row.name,
         status: row.status,
         harness: row.harness,
+        ...(billingMode !== undefined ? { billingMode } : {}),
         cwd: row.cwd,
         model: row.model,
         startedAt: row.started_at,
@@ -953,7 +972,46 @@ function resolveSessionAttribution(
     launchMetadata,
   );
   cache.attributionByCwd.set(cwd, attribution ?? null);
+  // FEA-1434: piggyback billingMode resolution on the same launch-metadata
+  // read so we never read the file twice per cwd.
+  cache.billingModeByCwd.set(cwd, launchMetadata?.billingMode ?? null);
   return attribution ?? undefined;
+}
+
+/**
+ * FEA-1434: resolve the billing mode for a session.
+ *
+ * Precedence:
+ * 1. launch-metadata.json's `billingMode` (set by desktop spawn sites with
+ *    env-detection at spawn time — the authoritative signal when present).
+ * 2. The `sessions.billing_mode` column (set by importers per-harness).
+ * 3. `undefined` — the synced payload omits `billingMode`, which the relay
+ *    treats as `unknown`.
+ *
+ * The launch-metadata lookup is cached per cwd via the same cache as
+ * `resolveSessionAttribution` so we never read the file twice per sync cycle.
+ */
+function resolveSessionBillingMode(
+  cwd: string | null,
+  rowBillingMode: string | null,
+  cache: SessionAttributionResolverCache,
+): string | undefined {
+  if (cwd) {
+    const cached = cache.billingModeByCwd.get(cwd);
+    if (cached === undefined) {
+      // Warm the cache by triggering an attribution resolve (which also
+      // populates billingModeByCwd from launch-metadata).
+      resolveSessionAttribution(cwd, cache);
+    }
+    const fromLaunch = cache.billingModeByCwd.get(cwd);
+    if (fromLaunch) {
+      return fromLaunch;
+    }
+  }
+  if (rowBillingMode) {
+    return rowBillingMode;
+  }
+  return undefined;
 }
 
 function buildAttribution(

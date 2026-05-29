@@ -39,7 +39,8 @@ function createServiceTestDatabase(rootDir: string): DatabaseSync {
       ended_at TEXT,
       awaiting_input_since TEXT,
       metadata TEXT,
-      harness TEXT NOT NULL
+      harness TEXT NOT NULL,
+      billing_mode TEXT NOT NULL DEFAULT 'unknown'
     );
     CREATE TABLE agents (
       id TEXT PRIMARY KEY,
@@ -170,7 +171,8 @@ test("agent-session sync loads normalized session payloads with attribution and 
       ended_at TEXT,
       awaiting_input_since TEXT,
       metadata TEXT,
-      harness TEXT NOT NULL
+      harness TEXT NOT NULL,
+      billing_mode TEXT NOT NULL DEFAULT 'unknown'
     );
     CREATE TABLE agents (
       id TEXT PRIMARY KEY,
@@ -1086,4 +1088,124 @@ test("sanitizeSessionForSync strips content/stdout/stderr recursively inside too
     tool_name: "Bash",
     tool_response: { interrupted: false, isImage: false },
   }, "Bash: stdout/stderr stripped, structural keys preserved");
+});
+
+// ---------------------------------------------------------------------------
+// FEA-1434: billing_mode round-trip
+// ---------------------------------------------------------------------------
+
+function insertBillingModeSessionRow(
+  db: DatabaseSync,
+  session: {
+    id: string;
+    startedAt: string;
+    updatedAt: string;
+    status?: string;
+    harness?: string;
+    cwd?: string | null;
+    billingMode?: string;
+  },
+): void {
+  db.prepare(`
+    INSERT INTO sessions (
+      id, name, status, cwd, model, started_at, updated_at, ended_at,
+      awaiting_input_since, metadata, harness, billing_mode
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    session.id,
+    session.id,
+    session.status ?? "active",
+    session.cwd ?? "/home/user/Work",
+    null,
+    session.startedAt,
+    session.updatedAt,
+    null,
+    null,
+    null,
+    session.harness ?? "claude",
+    session.billingMode ?? "unknown",
+  );
+}
+
+test("FEA-1434: billing_mode round-trips through sync from the sessions column", () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), "billing-mode-sync-"));
+  const db = createServiceTestDatabase(rootDir);
+
+  insertBillingModeSessionRow(db, {
+    id: "sess-api",
+    startedAt: "2026-05-20T12:00:00.000Z",
+    updatedAt: "2026-05-20T12:05:00.000Z",
+    harness: "claude",
+    billingMode: "api",
+  });
+  insertBillingModeSessionRow(db, {
+    id: "sess-cursor",
+    startedAt: "2026-05-20T12:00:00.000Z",
+    updatedAt: "2026-05-20T12:05:00.000Z",
+    harness: "cursor",
+    billingMode: "cursor_pro",
+  });
+  insertBillingModeSessionRow(db, {
+    id: "sess-unknown",
+    startedAt: "2026-05-20T12:00:00.000Z",
+    updatedAt: "2026-05-20T12:05:00.000Z",
+    harness: "claude",
+    // billingMode omitted — defaults to 'unknown' on the column.
+  });
+
+  const sessions = loadSyncedSessions(db, [
+    "sess-api",
+    "sess-cursor",
+    "sess-unknown",
+  ]);
+
+  const byId = new Map(sessions.map((s) => [s.externalSessionId, s]));
+  assert.equal(byId.get("sess-api")?.billingMode, "api");
+  assert.equal(byId.get("sess-cursor")?.billingMode, "cursor_pro");
+  // 'unknown' is a real persisted value (the column default) — the sync
+  // service surfaces it as-is so the relay can store it and the UI can
+  // distinguish "no signal yet" from "explicitly subscription-covered".
+  assert.equal(byId.get("sess-unknown")?.billingMode, "unknown");
+
+  db.close();
+});
+
+test("FEA-1434: launch-metadata.billingMode overrides the row column", () => {
+  const rootDir = mkdtempSync(path.join(tmpdir(), "billing-mode-launchmeta-"));
+  const worktreeDir = path.join(rootDir, "worktree-alpha");
+  mkdirSync(path.join(worktreeDir, ".closedloop-ai", "work"), {
+    recursive: true,
+  });
+  // Launch metadata says 'api' (env-detected at spawn time); the column was
+  // stamped 'codex_chatgpt_pro' by the importer (which only saw disk
+  // artifacts). The desktop signal must win.
+  writeFileSync(
+    path.join(worktreeDir, ".closedloop-ai", "work", "launch-metadata.json"),
+    JSON.stringify({
+      billingMode: "api",
+    }),
+  );
+
+  const db = createServiceTestDatabase(rootDir);
+  insertBillingModeSessionRow(db, {
+    id: "sess-override",
+    startedAt: "2026-05-20T12:00:00.000Z",
+    updatedAt: "2026-05-20T12:05:00.000Z",
+    harness: "codex",
+    cwd: worktreeDir,
+    billingMode: "codex_chatgpt_pro",
+  });
+
+  const sessions = loadSyncedSessions(db, ["sess-override"]);
+  assert.equal(sessions.length, 1);
+  assert.equal(sessions[0].billingMode, "api");
+
+  db.close();
+});
+
+test("FEA-1434: schema bump to v2 is reflected in the contract constant", async () => {
+  const { AGENT_SESSION_SYNC_SCHEMA_VERSION } = await import(
+    "../src/main/agent-session-sync-contract.js"
+  );
+  assert.equal(AGENT_SESSION_SYNC_SCHEMA_VERSION, 2);
 });

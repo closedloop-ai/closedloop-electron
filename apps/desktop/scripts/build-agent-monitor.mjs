@@ -1453,6 +1453,48 @@ function patchDbFile(file) {
     source = source.replace(stmtsNeedle, `\n${replacement}`);
   }
 
+  // CLOSEDLOOP FEA-1434: add `billing_mode` so the UI can split sessions into
+  // an API-metered ledger and a subscription-covered ledger. Additive +
+  // DEFAULT 'unknown' so existing rows keep working unchanged. The desktop
+  // spawn sites stamp the mode via launch-metadata; the importers stamp a
+  // fixed mode per harness (cursor_pro / copilot_seat / opencode). Read paths
+  // need no change.
+  if (!source.includes("ADD COLUMN billing_mode")) {
+    const setSessionHarnessNeedle =
+      "  setSessionHarness: db.prepare(\"UPDATE sessions SET harness = ? WHERE id = ? AND COALESCE(harness, '') != ?\"),";
+    if (!source.includes(setSessionHarnessNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the setSessionHarness statement (billing_mode).`,
+      );
+    }
+    const replacement = [
+      setSessionHarnessNeedle,
+      "  setSessionBillingMode: db.prepare(\"UPDATE sessions SET billing_mode = ? WHERE id = ? AND COALESCE(billing_mode, '') != ?\"),",
+    ].join("\n");
+    source = source.replace(setSessionHarnessNeedle, replacement);
+
+    // Run the migration before the `const stmts` block so the prepared
+    // statements above can rely on the column existing.
+    const stmtsNeedle = "\nconst stmts = {";
+    if (!source.includes(stmtsNeedle)) {
+      throw new Error(
+        `Unable to patch ${file}: expected the prepared-statements block (billing_mode migration).`,
+      );
+    }
+    const migration = [
+      "",
+      "try {",
+      '  db.prepare("SELECT billing_mode FROM sessions LIMIT 1").get();',
+      "} catch {",
+      "  db.prepare(\"ALTER TABLE sessions ADD COLUMN billing_mode TEXT NOT NULL DEFAULT 'unknown'\").run();",
+      "}",
+      'db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_billing_mode ON sessions(billing_mode)");',
+      "",
+      "const stmts = {",
+    ].join("\n");
+    source = source.replace(stmtsNeedle, `\n${migration}`);
+  }
+
   const sessionTotalsNeedle = [
     "  sessionTokenTotals: db.prepare(`",
     "    SELECT",
@@ -2799,6 +2841,14 @@ function patchClientSource() {
       guard: "harness?: string | null",
       find: "  cost?: number;",
       replace: "  cost?: number;\n  harness?: string | null;",
+    },
+    {
+      // FEA-1434: surface billing_mode on the Session type so the UI can
+      // split sessions into API-metered vs subscription-covered ledgers.
+      rel: "src/lib/types.ts",
+      guard: "billing_mode?: string | null",
+      find: "  harness?: string | null;",
+      replace: "  harness?: string | null;\n  billing_mode?: string | null;",
     },
     {
       rel: "src/lib/api.ts",
