@@ -49,6 +49,8 @@ jobs:
         run: pnpm -C apps/desktop audit:coverage
       - name: Coverage summary -> job summary
         if: always()
+        # Reporting only — never let a summary glitch fail the gate job.
+        continue-on-error: true
         run: |
           COV=apps/desktop/test-e2e/agent-monitor/inventory/coverage.json
           if [ -f "$COV" ]; then
@@ -57,8 +59,10 @@ jobs:
               echo ""
               echo "| status | count |"
               echo "|---|---|"
+              # Resolve to an absolute path: require() treats a bare relative
+              # string as a node_modules specifier and would throw.
               node -e '
-                const c = require(process.env.COV);
+                const c = require(require("path").resolve(process.env.COV));
                 for (const [k, v] of Object.entries(c.by_status)) console.log(`| ${k} | ${v} |`);
                 console.log(`| **total** | **${c.total_detections}** |`);
               '
